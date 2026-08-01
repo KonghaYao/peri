@@ -91,7 +91,6 @@ async fn handle_submit(
             if let Some(tx) = REWIND_ACTION_TX.get() {
                 let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
                     target_message_id: args.target_message_id,
-                    revert_files: args.revert_files,
                 });
             }
             Ok(())
@@ -137,6 +136,10 @@ async fn handle_clear_submit(
     // 否则双击 Esc 会看到已删除的候选（服务端 rewind 报 not found）。
     crate::kit::popup_overlay::close_popup();
     *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
+    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
+        crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
 

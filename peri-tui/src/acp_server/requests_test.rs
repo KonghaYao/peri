@@ -59,6 +59,14 @@ fn make_provider_config(
     }
 }
 
+/// 构造含单个 provider 的 PeriConfig（active_alias=sonnet），供 `LlmProvider::from_config` 使用。
+fn make_peri_config_with_provider(provider: ProviderConfig) -> PeriConfig {
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![provider];
+    peri_config
+}
+
 fn make_server_config(
     peri_config: PeriConfig,
     provider: LlmProvider,
@@ -123,7 +131,7 @@ async fn test_update_config_切换provider后cfg_provider更新() {
 
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport = MockTransport;
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
 
     // 构造 update_config 参数：sonnet profile 的 provider 改为 "b"
     let mut updated_config = peri_config.clone();
@@ -190,7 +198,7 @@ async fn test_update_config_空providers返回错误() {
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport = MockTransport;
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
 
     // 空 providers
     let mut bad_config = PeriConfig::default();
@@ -238,7 +246,7 @@ async fn test_update_config_不存在的provider_id返回错误() {
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport = MockTransport;
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
 
     // sonnet profile 的 provider 指向不存在的 provider
     let mut bad_config = peri_config.clone();
@@ -276,4 +284,132 @@ async fn test_update_config_不存在的provider_id返回错误() {
         "错误消息应提及 not found，实际: {}",
         err.message,
     );
+}
+
+// ── Rewind RPC 路由测试 ─────────────────────────────────────────────────────
+
+/// 注册一个含 user/ai 消息的 SessionState（字段以 mod.rs 定义为准）。
+fn register_session_with_history(
+    sessions: &mut HashMap<String, SessionState>,
+    cwd: &str,
+) -> String {
+    let history = vec![
+        peri_agent::messages::BaseMessage::human("第一轮用户问题"),
+        peri_agent::messages::BaseMessage::ai("第一轮回答"),
+        peri_agent::messages::BaseMessage::human("第二轮用户问题"),
+    ];
+    let sid = "rewind-test-session".to_string();
+    sessions.insert(
+        sid.clone(),
+        SessionState {
+            session_id: sid.clone(),
+            thread_id: "thread-1".to_string(),
+            cwd: cwd.to_string(),
+            history,
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+            workflow_middleware: None,
+            title: None,
+            tags: Vec::new(),
+        },
+    );
+    sid
+}
+
+/// session/rewind-candidates 路由到 dispatch：返回 user-only 候选。
+#[tokio::test]
+async fn test_rewind_candidates_routes_to_dispatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+
+    let result = handle_request(
+        "session/rewind-candidates",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    let value = result.unwrap();
+    let messages = value["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "只返回 user 消息");
+}
+
+/// session/rewind-preview 路由到 dispatch：返回 file_changes 数组（无工具调用 → 空）。
+#[tokio::test]
+async fn test_rewind_preview_routes_to_dispatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let target_id = sessions.get(&sid).unwrap().history[1]
+        .id()
+        .as_uuid()
+        .to_string();
+
+    let result = handle_request(
+        "session/rewind-preview",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    let value = result.unwrap();
+    let changes = value["file_changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 0, "历史无工具调用 → 空预算");
+}
+
+/// session/rewind 路由到 dispatch：执行回退（无 Write/Edit 时仅截断）。
+#[tokio::test]
+async fn test_rewind_routes_to_dispatch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    let target_id = sessions.get(&sid).unwrap().history[0]
+        .id()
+        .as_uuid()
+        .to_string();
+
+    let result = handle_request(
+        "session/rewind",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert_eq!(result.unwrap()["status"], "executed");
 }

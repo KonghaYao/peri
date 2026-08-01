@@ -78,9 +78,9 @@ use crate::{
 // 这些 helper 标 `pub(super)`（仅本模块可见）。
 #[allow(unused_imports)]
 use executor_helpers::{
-    build_and_execute_agent_v2, build_rewind_preview_payload, close_channel, collect_result,
-    intercept_immediate_command, spawn_event_pump, wait_for_pump, CollectRequest, InterceptRequest,
-    PumpHandle, SpawnPumpRequest,
+    build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
+    spawn_event_pump, wait_for_pump, CollectRequest, InterceptRequest, PumpHandle,
+    SpawnPumpRequest,
 };
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.

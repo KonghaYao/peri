@@ -265,6 +265,35 @@ pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 
 pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
+
+/// 回退目标 user 消息文本暂存——候选 Enter 时写入，RewindCompleted 到达后
+/// 消费回填输入框；任何失败/取消路径清空。
+pub static REWIND_TARGET_TEXT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 文件回退预算状态——候选 Enter 后由 rewind_consumer 写入：
+/// `Idle` = 未进入预算阶段（候选视图）；`Executing` = 预算为空自动执行或
+/// 用户确认后执行中（弹窗显示"正在回退…"）；`Files(v)` = 待用户确认的预算。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RewindBudgetState {
+    #[default]
+    Idle,
+    Executing,
+    Files(Vec<RewindFileChange>),
+}
+
+/// 单个文件回退预算条目（服务端 `session/rewind-preview` 响应元素）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RewindFileChange {
+    pub path: String,
+    pub kind: String,
+}
+
+pub static REWIND_BUDGET_STATE: AtomStatic<RewindBudgetState> =
+    AtomStatic::new(|| RewindBudgetState::Idle);
+
+/// 候选查询失败信息（Option<String> 错误文案）；None = 查询中或未查询。
+pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);
 pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| None);

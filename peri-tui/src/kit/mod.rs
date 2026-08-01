@@ -33,6 +33,7 @@ pub mod panels;
 pub mod popup_overlay;
 pub mod popups;
 pub mod rewind_action;
+pub mod rewind_candidates;
 pub mod service_snapshot;
 pub mod setup_wizard;
 pub mod slash_completion;

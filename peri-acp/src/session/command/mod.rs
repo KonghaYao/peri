@@ -8,6 +8,10 @@ pub mod clear;
 pub mod compact;
 pub mod rewind;
 
+/// Rewind 文件复原相关符号——供 dispatch 层（`session/rewind-preview` 预算）
+/// 复用 `extract_file_changes` / `FileChange`。
+pub(crate) use rewind::{extract_file_changes, FileChange, RewindCommand};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

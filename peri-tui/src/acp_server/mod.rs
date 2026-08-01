@@ -40,7 +40,7 @@ pub(crate) struct SessionState {
     session_id: String,
     thread_id: String,
     cwd: String,
-    history: Vec<BaseMessage>,
+    pub(crate) history: Vec<BaseMessage>,
     cancel_token: Option<AgentCancellationToken>,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<peri_acp::session::executor::FrozenSessionData>,
@@ -358,8 +358,7 @@ pub async fn run_acp_server(
                 } else {
                     let mut sessions = sessions.lock().await;
                     let result =
-                        handle_request(&method, &params, &cfg, &mut sessions, transport.as_ref())
-                            .await;
+                        handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
                     let _ = transport.send_response(id, result).await;
                 }
             }

@@ -96,15 +96,6 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, au: &AskUser) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_rewind_preview(state: &mut BridgeState, rp: &RewindPreview) {
-    // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据。
-    // 修复（2026-08-01）：不再自动打开 popup——preview 由服务端在每个 turn
-    // 完成后推送，弹窗只在用户双击 Esc 时由 event_handlers 打开，避免每轮
-    // 对话结束后回滚弹窗自动弹出。
-    *crate::kit::atoms::REWIND_PREVIEW.state().write() = Some(rp.clone());
-    let _ = state;
-}
-
 pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &str) {
     // H3: rewind 完成——反序列化 messages_json 为 Vec<Value>，按 role
     // 映射为 TuiRenderUnit，替换 state.committed。
@@ -172,6 +163,24 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     }
     state.phase = SessionPhase::Idle;
     super::render::push_view_models(state);
+
+    // Rewind v2：回填目标 user 消息文本到输入框（复用 TurnInterrupted 的回填通道）。
+    // 消费 REWIND_TARGET_TEXT → INPUT_RESTORE_TEXT + 心跳 → InputArea use_effect
+    // 写入编辑态并替换草稿；焦点随 close_popup（RewindCompleted 到达前弹窗已由
+    // consumer 流程关闭或停留在执行中态，此处统一关闭）。
+    if let Some(target_text) = crate::kit::atoms::REWIND_TARGET_TEXT.state().write().take() {
+        let mu =
+            crate::kit::atoms::INPUT_RESTORE_TEXT.get_or_init(|| parking_lot::Mutex::new(None));
+        *mu.lock() = Some(target_text);
+        crate::kit::atoms::RENDER_HEARTBEAT
+            .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+    }
+    // 回退完成：预算状态复位、查询错误清空；弹窗关闭（执行完成）
+    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
+        crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
+    crate::kit::popup_overlay::close_popup();
+
     super::render::push_acp_state(state);
 }
 

@@ -83,7 +83,7 @@ pub(crate) async fn handle_request(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
-    transport: &dyn peri_acp::transport::AcpTransport,
+    transport: &Arc<dyn peri_acp::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     match method {
         "initialize" => {
@@ -179,7 +179,8 @@ pub(crate) async fn handle_request(
             // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
             let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
 
-            send_available_commands_update(transport, &session_id, &skills, &peri_caps).await;
+            send_available_commands_update(transport.as_ref(), &session_id, &skills, &peri_caps)
+                .await;
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
@@ -196,7 +197,7 @@ pub(crate) async fn handle_request(
             cfg.permission_mode.store(mode);
             info!(mode_id = %mode_id, "Permission mode changed");
             let resp = SetSessionModeResponse::new();
-            send_config_option_update(transport, session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, cfg).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -272,7 +273,7 @@ pub(crate) async fn handle_request(
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = SetSessionConfigOptionResponse::new(config_options);
-            send_config_option_update(transport, session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, cfg).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -334,7 +335,9 @@ pub(crate) async fn handle_request(
                 .get(req_session_id)
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
-            let replay_sender = TuiReplaySender { transport };
+            let replay_sender = TuiReplaySender {
+                transport: transport.as_ref(),
+            };
             if let Err(e) = dispatch::replay_session_history(
                 req_session_id,
                 &history_for_replay,
@@ -348,7 +351,7 @@ pub(crate) async fn handle_request(
 
             // modes/configOptions sent both via notification AND in response body
             // (notification for async update, response body for immediate availability)
-            send_config_option_update(transport, req_session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), req_session_id, cfg).await;
 
             let modes = build_mode_state(&cfg.permission_mode);
             let config_options = {
@@ -367,7 +370,8 @@ pub(crate) async fn handle_request(
                 disable_bundled, // TUI 侧仅用于显示
             );
             let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
-            send_available_commands_update(transport, req_session_id, &skills, &caps).await;
+            send_available_commands_update(transport.as_ref(), req_session_id, &skills, &caps)
+                .await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -710,7 +714,7 @@ pub(crate) async fn handle_request(
                 let p = cfg.provider.read();
                 make_config_options(&c, &p, cfg.permission_mode.load())
             };
-            send_config_option_update(transport, session_id, cfg).await;
+            send_config_option_update(transport.as_ref(), session_id, cfg).await;
             serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -757,15 +761,23 @@ pub(crate) async fn handle_request(
             {
                 Ok(installed) => {
                     let _ = push_plugin_action_result(
-                        transport, session_id, "install", name, true, None, &caps,
+                        transport.as_ref(),
+                        session_id,
+                        "install",
+                        name,
+                        true,
+                        None,
+                        &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
+                    let _ =
+                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
+                            .await;
                     Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
                 }
                 Err(e) => {
                     let _ = push_plugin_action_result(
-                        transport,
+                        transport.as_ref(),
                         session_id,
                         "install",
                         name,
@@ -798,7 +810,7 @@ pub(crate) async fn handle_request(
             match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
                 Ok(()) => {
                     let _ = push_plugin_action_result(
-                        transport,
+                        transport.as_ref(),
                         session_id,
                         "uninstall",
                         plugin_id,
@@ -807,12 +819,14 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
+                    let _ =
+                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
+                            .await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
                     let _ = push_plugin_action_result(
-                        transport,
+                        transport.as_ref(),
                         session_id,
                         "uninstall",
                         plugin_id,
@@ -875,16 +889,24 @@ pub(crate) async fn handle_request(
                 Ok(()) => {
                     let action = if enable { "enable" } else { "disable" };
                     let _ = push_plugin_action_result(
-                        transport, session_id, action, plugin_id, true, None, &caps,
+                        transport.as_ref(),
+                        session_id,
+                        action,
+                        plugin_id,
+                        true,
+                        None,
+                        &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
+                    let _ =
+                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
+                            .await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
                     let action = if enable { "enable" } else { "disable" };
                     let _ = push_plugin_action_result(
-                        transport,
+                        transport.as_ref(),
                         session_id,
                         action,
                         plugin_id,
@@ -912,7 +934,9 @@ pub(crate) async fn handle_request(
             let results = search_marketplace_plugins(query, &cache_dir);
 
             let caps = cfg.session_manager.get_caps(session_id);
-            let _ = push_plugin_search_result(transport, session_id, query, &results, &caps).await;
+            let _ =
+                push_plugin_search_result(transport.as_ref(), session_id, query, &results, &caps)
+                    .await;
             Ok(serde_json::json!({ "results": results.iter().map(|r| {
                 serde_json::json!({
                     "name": r.name,
@@ -945,15 +969,23 @@ pub(crate) async fn handle_request(
             {
                 Ok(updated) => {
                     let _ = push_plugin_action_result(
-                        transport, session_id, "update", plugin_id, true, None, &caps,
+                        transport.as_ref(),
+                        session_id,
+                        "update",
+                        plugin_id,
+                        true,
+                        None,
+                        &caps,
                     )
                     .await;
-                    let _ = push_plugin_snapshot(transport, session_id, &claude_dir, &caps).await;
+                    let _ =
+                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
+                            .await;
                     Ok(serde_json::json!({ "success": true, "plugin": updated.id }))
                 }
                 Err(e) => {
                     let _ = push_plugin_action_result(
-                        transport,
+                        transport.as_ref(),
                         session_id,
                         "update",
                         plugin_id,
@@ -983,8 +1015,12 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Failed to rename session: {e}")))?;
 
             // 通过 session/update 通知推送新的标题给外部客户端
-            super::notify::send_session_info_update_with_title(transport, session_id, Some(title))
-                .await;
+            super::notify::send_session_info_update_with_title(
+                transport.as_ref(),
+                session_id,
+                Some(title),
+            )
+            .await;
 
             info!(session_id = %session_id, title = %title, "Session renamed");
 
@@ -992,6 +1028,77 @@ pub(crate) async fn handle_request(
                 "sessionId": session_id,
                 "title": title,
             }))
+        }
+
+        "session/rewind-candidates" => {
+            let session_id = params
+                .get("sessionId")
+                .or_else(|| params.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            let history = sessions
+                .get(session_id)
+                .map(|s| s.history.clone())
+                .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+            dispatch::rewind_candidates(&history)
+        }
+
+        "session/rewind-preview" => {
+            let session_id = params
+                .get("sessionId")
+                .or_else(|| params.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+                .to_string();
+            let history = sessions
+                .get(&session_id)
+                .map(|s| s.history.clone())
+                .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+            let event_sink: Arc<dyn peri_acp::session::event_sink::EventSink> =
+                Arc::new(peri_acp::session::event_sink::TransportEventSink::new(
+                    transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
+                    cfg.session_manager.caps_registry(),
+                ));
+            dispatch::rewind_preview(params, &history, &event_sink, &session_id).await
+        }
+
+        "session/rewind" => {
+            let session_id = params
+                .get("sessionId")
+                .or_else(|| params.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+                .to_string();
+            let (cwd, history) = {
+                let s = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+                (s.cwd.clone(), s.history.clone())
+            };
+            let event_sink: Arc<dyn peri_acp::session::event_sink::EventSink> =
+                Arc::new(peri_acp::session::event_sink::TransportEventSink::new(
+                    transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
+                    cfg.session_manager.caps_registry(),
+                ));
+            let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
+            dispatch::rewind_execute(
+                params,
+                history,
+                &cwd,
+                &peri_config_snapshot,
+                &event_sink,
+                None, // auxiliary_model：RewindCommand 不使用
+                &peri_agent::agent::AgentCancellationToken::new(),
+                Some(cfg.thread_store.clone()),
+                Some(session_id.clone()),
+                None, // bg_event_tx
+                None, // bg_registry
+                None,
+                None,
+                None,
+                None, // frozen_*：RewindCommand 不使用
+            )
+            .await
         }
 
         "marketplace/refresh" => {

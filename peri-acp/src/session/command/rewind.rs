@@ -34,7 +34,7 @@ struct RewindArgs {
 ///
 /// `Write` 变体的原 `content` 字段已删除：rewind 的文件恢复依赖 `git checkout HEAD`
 /// （见 `revert_files`），从未读取 `Write.content`。保留字段只会徒增内存 + 编译器静音。
-enum FileChange {
+pub(crate) enum FileChange {
     Write {
         path: String,
     },
@@ -156,7 +156,7 @@ impl AgentCommand for RewindCommand {
 }
 
 /// 从被移除的消息中提取所有 Write/Edit 工具调用。
-fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
+pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
     let mut changes = Vec::new();
     for msg in messages {
         if let BaseMessage::Ai {
@@ -195,7 +195,7 @@ fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
 }
 
 /// 从工具调用参数中解析文件变更。
-fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
+pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
     let path = args.get("file_path")?.as_str()?.to_string();
     match name {
         "Write" => {

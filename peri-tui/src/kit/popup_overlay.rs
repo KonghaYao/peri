@@ -105,11 +105,15 @@ pub fn close_popup() -> Option<PopupKind> {
                 *atoms::ASK_USER_PENDING.state().write() = None;
                 *atoms::ASK_USER_REQUEST_ID.state().write() = None;
             }
-            // Rewind 不清空 REWIND_PREVIEW：preview 是"当前会话消息快照"，
-            // 关闭弹窗后用户再次双击 Esc 仍应看到同一份候选列表（与消息区
-            // 同生命周期，不随弹窗开关丢失）。会话边界（/clear、thread 切换）
-            // 由 submit_consumer / thread_load_consumer 显式清空。
-            PopupKind::Rewind => {}
+            // Rewind：REWIND_PREVIEW 保留（候选跟随会话生命周期，关闭后可再开），
+            // 但预算状态 / 目标文本 / 查询错误随弹窗关闭清空（下次打开重新查询）。
+            // 会话边界（/clear、thread 切换）由 submit_consumer / thread_load_consumer
+            // 额外清空候选。
+            PopupKind::Rewind => {
+                *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Idle;
+                *atoms::REWIND_TARGET_TEXT.state().write() = None;
+                *atoms::REWIND_QUERY_ERROR.state().write() = None;
+            }
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
             PopupKind::Confirm => *atoms::CONFIRM_PAYLOAD.state().write() = None,
             PopupKind::Download => {
