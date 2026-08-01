@@ -249,10 +249,10 @@ pub async fn run_acp_server(
                                                         PredictionAction::SetTitle { title } => {
                                                             state.title = Some(title.clone());
                                                         }
-                                                        PredictionAction::AddTag { tag } => {
-                                                            if !state.tags.contains(tag) {
-                                                                state.tags.push(tag.clone());
-                                                            }
+                                                        PredictionAction::AddTag { tag }
+                                                            if !state.tags.contains(tag) =>
+                                                        {
+                                                            state.tags.push(tag.clone());
                                                         }
                                                         _ => {}
                                                     }
