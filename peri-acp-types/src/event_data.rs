@@ -52,7 +52,25 @@ pub struct SystemNotification {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Prediction {
+    /// 占位文本（兼容既有消费方；无结构化动作时的回落值）
     pub text: String,
+    /// 结构化动作列表（新通道；旧消费方忽略此字段）
+    #[serde(default)]
+    pub actions: Vec<PredictionAction>,
+}
+
+/// Prediction 结构化动作
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PredictionAction {
+    /// 输入区灰色占位文本（= 原 Prediction.text 语义）
+    Placeholder { text: String },
+    /// 改会话标题（仅模型判断话题显著转变时输出）
+    SetTitle { title: String },
+    /// 给会话加标签（持久化到 session 元数据，不展示）
+    AddTag { tag: String },
+    /// 会话摘要（展示在 loading spinner 名言位）
+    Summary { text: String },
 }
 
 /// `"file-suggestions"` — @-mention file completion candidates.

@@ -263,7 +263,10 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
             // dispatch_and_notify 仅写入 PREDICTION atom（input_area 订阅显示），不调
             // push_view_models。
             use peri_acp_types::event_data::Prediction;
-            let decoded = AcpEventData::Prediction(Prediction { text });
+            let decoded = AcpEventData::Prediction(Prediction {
+                text,
+                actions: vec![],
+            });
             let wrapped = wrap_with_session(decoded, session_id);
             if let Err(e) = bridge_tx.send(wrapped) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
