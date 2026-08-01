@@ -11,12 +11,14 @@
 //!    执行完成由 RewindCompleted 事件驱动（handle_rewind_completed），
 //!    失败路径清理 REWIND_TARGET_TEXT / REWIND_BUDGET_STATE。
 
+use fluent_bundle::FluentValue;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 use crate::kit::atoms::{
     ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR, REWIND_TARGET_TEXT,
     RewindBudgetState, RewindFileChange,
@@ -59,7 +61,7 @@ pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, Stri
     let changes = resp
         .get("file_changes")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| "rewind-preview 响应缺少 file_changes 数组".to_string())?;
+        .ok_or_else(|| i18n::tr("rewind-error-budget-missing"))?;
     changes
         .iter()
         .map(|c| {
@@ -67,7 +69,7 @@ pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, Stri
                 path: c
                     .get("path")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "预算项缺少 path".to_string())?
+                    .ok_or_else(|| i18n::tr("rewind-error-path-missing"))?
                     .to_string(),
                 kind: c
                     .get("kind")
@@ -186,7 +188,12 @@ async fn execute_rewind(
         .await
         .map_err(|e| {
             warn!(error = %e, "kit rewind_consumer: /rewind RPC failed");
-            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            // P1 i18n：错误文案本地化后经 on_action_failed 展示
+            let msg = i18n::tr_args(
+                "rewind-execute-failed",
+                &[("error".into(), FluentValue::from(e.to_string()))],
+            );
+            anyhow::anyhow!(msg)
         })?;
     Ok(())
 }

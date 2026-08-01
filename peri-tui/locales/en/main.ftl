@@ -569,6 +569,23 @@ rewind-files-to-restore = Files to restore:
 rewind-confirm-hint = Enter to confirm, Esc to cancel
 rewind-write-op = Write → Delete + Git restore
 rewind-edit-op = Edit → Restore
+# ---- Rewind v2（popup & consumer copy）----
+rewind-executing = Rewinding…
+rewind-budget-title = Rewind will revert { $count } file change(s):
+rewind-budget-more = ... and { $count } more
+rewind-budget-confirm-hint = Enter to confirm · Esc back to candidates
+rewind-query-failed = Query failed: { $error }
+rewind-loading = Loading rewind candidates…
+rewind-empty = Nothing to rewind.
+rewind-empty-hint = Complete a turn, then double-press Esc to rewind.
+rewind-title-count = Rewind to ({ $count })
+rewind-enter-hint = Enter to rewind · Esc to close
+rewind-error-no-client = ACP client not initialized, cannot query candidates
+rewind-error-no-session = No active session, cannot query candidates
+rewind-error-query-failed = Candidates query failed: { $error }
+rewind-error-budget-missing = rewind-preview response missing file_changes array
+rewind-error-path-missing = budget item missing path
+rewind-execute-failed = Rewind failed: { $error }
 
 # ---- OAuth Popup ----
 

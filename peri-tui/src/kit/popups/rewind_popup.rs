@@ -17,6 +17,7 @@
 
 #![allow(clippy::needless_update)]
 
+use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::RewindPreview;
 use peri_theme::atoms::THEME_ATOM;
 use peri_theme::theme::ThemeDefinition;
@@ -239,16 +240,24 @@ fn build_popup_lines(
 
     match budget_state {
         RewindBudgetState::Executing => {
-            lines.push(Line::from("  正在回退…").fg(semantic.text.primary));
+            lines.push(
+                Line::from(format!("  {}", i18n::tr("rewind-executing"))).fg(semantic.text.primary),
+            );
             lines.push(Line::from(""));
             lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
             return lines;
         }
         RewindBudgetState::Files(files) => {
             lines.push(
-                Line::from(format!("  回退将撤销 {} 个文件改动：", files.len()))
-                    .fg(semantic.text.primary)
-                    .bold(),
+                Line::from(format!(
+                    "  {}",
+                    i18n::tr_args(
+                        "rewind-budget-title",
+                        &[("count".into(), FluentValue::from(files.len() as i64))]
+                    )
+                ))
+                .fg(semantic.text.primary)
+                .bold(),
             );
             for (i, fc) in files.iter().enumerate().take(8) {
                 let is_selected = i == file_sel;
@@ -268,12 +277,21 @@ fn build_popup_lines(
             }
             if files.len() > 8 {
                 lines.push(
-                    Line::from(format!("    ... and {} more", files.len() - 8))
-                        .fg(semantic.text.dim),
+                    Line::from(format!(
+                        "    {}",
+                        i18n::tr_args(
+                            "rewind-budget-more",
+                            &[("count".into(), FluentValue::from((files.len() - 8) as i64))]
+                        )
+                    ))
+                    .fg(semantic.text.dim),
                 );
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter 确认回退 · Esc 返回候选").fg(semantic.text.dim));
+            lines.push(
+                Line::from(format!("  {}", i18n::tr("rewind-budget-confirm-hint")))
+                    .fg(semantic.text.dim),
+            );
             return lines;
         }
         RewindBudgetState::Idle => {}
@@ -281,14 +299,23 @@ fn build_popup_lines(
 
     // ── Candidates 视图 ──
     if let Some(err) = query_error {
-        lines.push(Line::from(format!("  查询失败: {err}")).fg(semantic.status.error));
+        lines.push(
+            Line::from(format!(
+                "  {}",
+                i18n::tr_args(
+                    "rewind-query-failed",
+                    &[("error".into(), FluentValue::from(err.as_str()))]
+                )
+            ))
+            .fg(semantic.status.error),
+        );
         lines.push(Line::from(""));
         lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         return lines;
     }
     let Some(p) = preview else {
         lines.push(
-            Line::from("  正在加载回退候选…")
+            Line::from(format!("  {}", i18n::tr("rewind-loading")))
                 .fg(semantic.text.muted)
                 .italic(),
         );
@@ -297,16 +324,23 @@ fn build_popup_lines(
         return lines;
     };
     if p.messages.is_empty() {
-        lines.push(Line::from("  无可回退的消息。").fg(semantic.text.dim));
-        lines.push(Line::from("  完成一轮对话后双击 Esc 即可回滚。").fg(semantic.text.dim));
+        lines.push(Line::from(format!("  {}", i18n::tr("rewind-empty"))).fg(semantic.text.dim));
+        lines
+            .push(Line::from(format!("  {}", i18n::tr("rewind-empty-hint"))).fg(semantic.text.dim));
         lines.push(Line::from(""));
         lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         return lines;
     }
     lines.push(
-        Line::from(format!("  回退到（{}）", p.messages.len()))
-            .fg(semantic.text.primary)
-            .bold(),
+        Line::from(format!(
+            "  {}",
+            i18n::tr_args(
+                "rewind-title-count",
+                &[("count".into(), FluentValue::from(p.messages.len() as i64))]
+            )
+        ))
+        .fg(semantic.text.primary)
+        .bold(),
     );
     for (i, msg) in p.messages.iter().enumerate().take(8) {
         let is_selected = i == msg_sel;
@@ -321,11 +355,21 @@ fn build_popup_lines(
     }
     if p.messages.len() > 8 {
         lines.push(
-            Line::from(format!("    ... and {} more", p.messages.len() - 8)).fg(semantic.text.dim),
+            Line::from(format!(
+                "    {}",
+                i18n::tr_args(
+                    "rewind-budget-more",
+                    &[(
+                        "count".into(),
+                        FluentValue::from((p.messages.len() - 8) as i64)
+                    )]
+                )
+            ))
+            .fg(semantic.text.dim),
         );
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("  Enter 回退 · Esc 关闭").fg(semantic.text.dim));
+    lines.push(Line::from(format!("  {}", i18n::tr("rewind-enter-hint"))).fg(semantic.text.dim));
     lines
 }
 

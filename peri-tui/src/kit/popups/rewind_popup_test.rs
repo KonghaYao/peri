@@ -1,7 +1,9 @@
 //! Tests
 
 use super::*;
+use crate::i18n;
 use crate::kit::atoms::{RewindBudgetState, RewindFileChange};
+use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{RewindMessage, RewindPreview};
 use serial_test::serial;
 use std::sync::Arc;
@@ -36,7 +38,14 @@ fn test_popup_lines_candidates_view() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("回退到（2）"), "候选视图显示数量");
+    // 动态期望（测试环境默认 en）——严禁写死中文
+    assert!(
+        text.contains(&i18n::tr_args(
+            "rewind-title-count",
+            &[("count".into(), FluentValue::from(2i64))]
+        )),
+        "候选视图显示数量"
+    );
     assert!(
         text.contains("第一轮问题") && text.contains("第二轮问题"),
         "渲染全部候选"
@@ -65,7 +74,7 @@ fn test_popup_lines_empty_candidates() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("无可回退"), "空候选提示");
+    assert!(text.contains(&i18n::tr("rewind-empty")), "空候选提示");
 }
 
 /// 查询失败：显示错误文案。
@@ -86,7 +95,13 @@ fn test_popup_lines_query_error() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("查询失败: RPC timeout"), "错误文案透出");
+    assert!(
+        text.contains(&i18n::tr_args(
+            "rewind-query-failed",
+            &[("error".into(), FluentValue::from("RPC timeout"))]
+        )),
+        "错误文案透出"
+    );
 }
 
 /// 候选未返回（preview=None 且无错误）：显示加载中。
@@ -100,7 +115,7 @@ fn test_popup_lines_loading() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("正在加载回退候选"), "加载中提示");
+    assert!(text.contains(&i18n::tr("rewind-loading")), "加载中提示");
 }
 
 /// 预算视图：文件列表 + 确认提示。
@@ -124,12 +139,21 @@ fn test_popup_lines_budget_view() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("2 个文件改动"), "预算数量");
+    assert!(
+        text.contains(&i18n::tr_args(
+            "rewind-budget-title",
+            &[("count".into(), FluentValue::from(2i64))]
+        )),
+        "预算数量"
+    );
     assert!(
         text.contains("[edit] src/main.rs") && text.contains("[write] new_file.txt"),
         "文件列表"
     );
-    assert!(text.contains("Enter 确认回退"), "确认提示");
+    assert!(
+        text.contains(&i18n::tr("rewind-budget-confirm-hint")),
+        "确认提示"
+    );
 }
 
 /// 执行中：显示"正在回退"。
@@ -143,7 +167,7 @@ fn test_popup_lines_executing() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("正在回退"), "执行中提示");
+    assert!(text.contains(&i18n::tr("rewind-executing")), "执行中提示");
 }
 
 #[test]

@@ -4,8 +4,10 @@
 //! `session/rewind-candidates` RPC 一次性获取，写入 `REWIND_PREVIEW` atom，
 //! 弹窗组件订阅渲染。
 
+use fluent_bundle::FluentValue;
 use serde_json::Value;
 
+use crate::i18n;
 use crate::kit::atoms::{ACP_CLIENT_HANDLE, RENDER_HEARTBEAT, REWIND_PREVIEW, REWIND_QUERY_ERROR};
 use peri_acp_types::event_data::{RewindMessage, RewindPreview};
 
@@ -65,14 +67,13 @@ pub fn apply_candidates(candidates: &[RewindCandidate]) {
 /// 失败：写 REWIND_QUERY_ERROR 错误文案（弹窗显示）。
 pub fn spawn_candidates_query() {
     let Some(client) = ACP_CLIENT_HANDLE.get().cloned() else {
-        *REWIND_QUERY_ERROR.state().write() =
-            Some("ACP client 未初始化，无法查询回退候选".to_string());
+        *REWIND_QUERY_ERROR.state().write() = Some(i18n::tr("rewind-error-no-client"));
         RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         return;
     };
     let sid = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
     if sid.is_empty() {
-        *REWIND_QUERY_ERROR.state().write() = Some("无活动会话，无法查询回退候选".to_string());
+        *REWIND_QUERY_ERROR.state().write() = Some(i18n::tr("rewind-error-no-session"));
         RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         return;
     }
@@ -109,7 +110,10 @@ pub fn spawn_candidates_query() {
                 if crate::kit::atoms::REWIND_QUERY_GEN.get() != query_gen {
                     return;
                 }
-                *REWIND_QUERY_ERROR.state().write() = Some(format!("候选查询失败: {e}"));
+                *REWIND_QUERY_ERROR.state().write() = Some(i18n::tr_args(
+                    "rewind-error-query-failed",
+                    &[("error".into(), FluentValue::from(e.to_string()))],
+                ));
                 RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
             }
         }
