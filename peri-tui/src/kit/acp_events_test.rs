@@ -533,19 +533,25 @@ fn test_rewind_completed_replaces_committed() {
     assert_eq!(preview.messages[1].role, "assistant");
 }
 
-/// 回归（2026-08-01）：handle_rewind_preview 只写 REWIND_PREVIEW atom，
-/// 不再自动打开 popup——弹窗由用户双击 Esc 触发（服务端每个 turn 完成后
-/// 推送 preview，若自动弹窗则每轮对话结束都会弹出回滚选择器）。
+/// RewindCompleted 后：目标文本回填输入框（INPUT_RESTORE_TEXT）并触发心跳。
 #[test]
 #[serial]
-fn test_rewind_preview_does_not_open_popup() {
+fn test_rewind_completed_restores_target_text_to_input() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    // 清空回填通道残留（OnceLock 全局单例，InputArea effect 的 take 在测试中不执行）
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+    // 预置 REWIND_TARGET_TEXT（候选 Enter 时暂存）
+    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = Some("需要重新编辑的问题".to_string());
+    let hb_before = *crate::kit::atoms::RENDER_HEARTBEAT.state().read();
+
     let mut state = BridgeState {
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
-        phase: SessionPhase::Idle,
+        phase: SessionPhase::PromptRunning,
         popup_kind: None,
         generation: 0,
         active_session_id: String::new(),
@@ -558,26 +564,68 @@ fn test_rewind_preview_does_not_open_popup() {
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
     };
+    let messages_json = serde_json::json!([
+        {"role": "user", "id": "msg-1", "content": "历史用户消息"},
+    ])
+    .to_string();
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
-    use peri_acp_types::event_data::{RewindMessage, RewindPreview};
-    let preview = RewindPreview {
-        files: vec![],
-        messages: vec![RewindMessage {
-            id: "m1".into(),
-            role: "user".into(),
-            preview: "hi".into(),
-        }],
+    // 回填通道被写入
+    let restore = crate::kit::atoms::INPUT_RESTORE_TEXT
+        .get()
+        .and_then(|mu| mu.lock().clone());
+    assert_eq!(restore.as_deref(), Some("需要重新编辑的问题"));
+    // 心跳递增触发 InputArea use_effect
+    assert!(
+        *crate::kit::atoms::RENDER_HEARTBEAT.state().read() > hb_before,
+        "回填必须触发 RENDER_HEARTBEAT"
+    );
+    // 消费后清空暂存
+    assert!(
+        crate::kit::atoms::REWIND_TARGET_TEXT
+            .state()
+            .read()
+            .is_none(),
+        "REWIND_TARGET_TEXT 消费后应清空"
+    );
+}
+
+/// RewindCompleted 无目标文本（如直接执行路径异常）时不写回填。
+#[test]
+#[serial]
+fn test_rewind_completed_without_target_text_no_restore() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    // 清空回填通道残留（OnceLock 全局单例）
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
     };
-    dispatch_and_notify(&mut state, &AcpEventData::RewindPreview(preview));
+    let messages_json = serde_json::json!([]).to_string();
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
-    assert!(
-        state.popup_kind.is_none(),
-        "rewind-preview 事件不应自动打开 popup"
-    );
-    assert!(
-        crate::kit::atoms::REWIND_PREVIEW.state().read().is_some(),
-        "REWIND_PREVIEW atom 应被写入"
-    );
+    let restore = crate::kit::atoms::INPUT_RESTORE_TEXT
+        .get()
+        .and_then(|mu| mu.lock().clone());
+    assert!(restore.is_none(), "无目标文本不应触发回填");
 }
 
 /// 跨 turn 场景：第一轮 reasoning 在 committed 中保留，第二轮为最后一个展开。
