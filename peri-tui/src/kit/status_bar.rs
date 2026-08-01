@@ -7,6 +7,7 @@
 
 use crate::i18n;
 use crate::kit::atoms;
+use crate::kit::mouse_router;
 use crate::kit::popup_overlay::open_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -200,9 +201,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             // 弹窗或面板激活时不响应——防止遮挡区域误触（如弹窗覆盖状态栏）
-            if atoms::POPUP_KIND.state().read().is_some()
-                || atoms::ACTIVE_PANEL.state().read().is_some()
-            {
+            if mouse_router::is_occluded() {
                 return EventResult::Ignored;
             }
             if let (Some(area), Some((line_idx, x_start, x_end))) = (row1_area, model_click)
