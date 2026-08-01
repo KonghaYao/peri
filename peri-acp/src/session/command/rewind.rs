@@ -121,7 +121,19 @@ impl AgentCommand for RewindCommand {
         let mut revert_warnings = Vec::new();
         if args.revert_files {
             let changes = extract_file_changes(removed_messages);
-            revert_files(&changes, &ctx.cwd, &mut revert_warnings);
+            // P1 修复：revert_files 内含同步 git checkout 子进程，直接调用会
+            // 阻塞 tokio worker（tokio worker_threads=4）——移出 async 上下文。
+            let cwd_owned = ctx.cwd.clone();
+            revert_warnings = tokio::task::spawn_blocking(move || {
+                let mut warnings = Vec::new();
+                revert_files(&changes, &cwd_owned, &mut warnings);
+                warnings
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("rewind: spawn_blocking join 失败: {e}");
+                Vec::new()
+            });
         }
 
         // Step 4: 验证 ToolUse/ToolResult 配对完整性
