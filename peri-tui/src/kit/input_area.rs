@@ -41,6 +41,7 @@ use crate::kit::atoms::{
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
+use crate::kit::mouse_router;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
@@ -526,9 +527,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             ratatui_kit::prelude::EventPriority::High,
             move |event| {
                 if let Event::Mouse(mouse) = event {
-                    // 弹窗激活时不处理鼠标——放行给弹窗 handler（如模型快速切换弹窗
+                    // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗
                     // 锚定在状态栏上方、覆盖输入区时，点击弹窗行必须由弹窗消费）。
-                    if POPUP_KIND.state().read().is_some() {
+                    if mouse_router::is_occluded() {
                         return EventResult::Ignored;
                     }
                     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
