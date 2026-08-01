@@ -10,10 +10,11 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, MEMORY_LIST, MemoryEntry};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -33,47 +34,88 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = hooks.use_atom(&LANG_VERSION);
     let count = entries.len();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Esc => close_panel(),
-                KeyCode::Up => {
-                    let mut s = selected.write();
-                    *s = previous_selection(*s);
-                }
-                KeyCode::Down => {
-                    let mut s = selected.write();
-                    let count = MEMORY_LIST.state().read().len();
-                    if count > 0 {
-                        *s = next_selection(*s, count);
-                    }
-                }
-                KeyCode::Enter => {
-                    let sel = *selected.read();
-                    let entries = MEMORY_LIST.state().read().clone();
-                    if let Some(entry) = entries.get(sel) {
-                        open_memory_in_editor(&entry.path);
-                    }
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
-
-    let sel = *selected.read();
-    let mut lines: Vec<Line<'_>> = Vec::new();
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
 
     // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
     // panel 高度 18 - border 2 - header 3 = 13 行；每项 1 行 → 可见 13 个。
     const VISIBLE_ITEMS: usize = 13;
-    let scroll_start = scroll_start_for_selected(sel, entries.len(), VISIBLE_ITEMS);
+    let scroll_start = scroll_start_for_selected(*selected.read(), entries.len(), VISIBLE_ITEMS);
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if let Some(area) = area
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 3,
+                                item_rows: 1,
+                                footer_rows: 0,
+                                visible_items: VISIBLE_ITEMS as u16,
+                                scroll_start,
+                                item_count: count,
+                            },
+                        )
+                    {
+                        *selected.write() = idx;
+                        let entries = MEMORY_LIST.state().read().clone();
+                        if let Some(entry) = entries.get(idx) {
+                            open_memory_in_editor(&entry.path);
+                        }
+                        return EventResult::Consumed;
+                    }
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
+                }
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+                match key.code {
+                    KeyCode::Esc => close_panel(),
+                    KeyCode::Up => {
+                        let mut s = selected.write();
+                        *s = previous_selection(*s);
+                    }
+                    KeyCode::Down => {
+                        let mut s = selected.write();
+                        let count = MEMORY_LIST.state().read().len();
+                        if count > 0 {
+                            *s = next_selection(*s, count);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let sel = *selected.read();
+                        let entries = MEMORY_LIST.state().read().clone();
+                        if let Some(entry) = entries.get(sel) {
+                            open_memory_in_editor(&entry.path);
+                        }
+                    }
+                    _ => {}
+                }
+                EventResult::Consumed
+            }
+        },
+    );
+
+    let sel = *selected.read();
+    let mut lines: Vec<Line<'_>> = Vec::new();
 
     // 头部摘要
     lines.push(Line::from(vec![Span::styled(

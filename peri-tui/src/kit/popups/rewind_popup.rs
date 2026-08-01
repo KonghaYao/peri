@@ -21,7 +21,7 @@
 #![allow(clippy::needless_update)]
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind},
+    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{style::Stylize, text::Line},
 };
@@ -29,6 +29,7 @@ use ratatui_kit::{
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, REWIND_ACTION_TX};
 use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
 use peri_theme::atoms::THEME_ATOM;
@@ -62,76 +63,152 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 闭包另持一份 preview 副本（避免与渲染端争用 move）
     let preview_for_closure = preview.clone();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-        {
-            match classify_list_nav(&key) {
-                Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
-                    let cur = *view.read();
-                    *view.write() = match cur {
-                        RewindView::Messages => RewindView::Files,
-                        RewindView::Files => RewindView::Messages,
-                    };
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::MoveUp) => {
-                    let cur = *view.read();
-                    match cur {
-                        RewindView::Messages => {
-                            let mut s = msg_sel.write();
-                            *s = previous_selection(*s);
-                        }
-                        RewindView::Files => {
-                            let mut s = file_sel.write();
-                            *s = previous_selection(*s);
-                        }
+    // 弹窗绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 行布局（固定每项 1 行；渲染 take(8)/take(6) + 超量省略行）：
+    // 内容行 0 空行、1 Messages 标题、2.. 消息项、空行、Files 标题、文件项
+    let msg_rendered = msg_count.min(8);
+    let msg_extra = usize::from(msg_count > 8);
+    let file_rendered = file_count.min(6);
+    let file_extra = usize::from(file_count > 6);
+    let lines_len = 1 + 1 + msg_rendered + msg_extra + 1 + 1 + file_rendered + file_extra;
+    let msg_layout = ListLayout {
+        header_rows: 2,
+        item_rows: 1,
+        footer_rows: lines_len.saturating_sub(2 + msg_rendered + msg_extra) as u16,
+        visible_items: msg_rendered as u16,
+        scroll_start: 0,
+        item_count: msg_count,
+    };
+    let file_start = 2 + msg_rendered + msg_extra + 1;
+    let file_layout = ListLayout {
+        header_rows: file_start as u16,
+        item_rows: 1,
+        footer_rows: lines_len.saturating_sub(file_start + 1 + file_rendered + file_extra) as u16,
+        visible_items: file_rendered as u16,
+        scroll_start: 0,
+        item_count: file_count,
+    };
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+            if let Event::Mouse(mouse) = event {
+                if let Some(area) = area {
+                    // Files 区靠后，先测（两个 layout 的 footer 区互斥，顺序无关紧要）
+                    if let Some(idx) = hit_item(&mouse, area, file_layout) {
+                        *view.write() = RewindView::Files;
+                        *file_sel.write() = idx;
+                        return EventResult::Consumed;
                     }
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::MoveDown) => {
-                    let cur = *view.read();
-                    match cur {
-                        RewindView::Messages => {
-                            let mut s = msg_sel.write();
-                            *s = next_selection(*s, msg_count);
+                    if let Some(idx) = hit_item(&mouse, area, msg_layout) {
+                        *view.write() = RewindView::Messages;
+                        *msg_sel.write() = idx;
+                        // 与键盘 Enter 一致：默认回退到选中 message + revert_files=true
+                        let target_id = match &preview_for_closure {
+                            Some(p) => p
+                                .messages
+                                .get(idx)
+                                .map(|m| m.id.clone())
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        if !target_id.is_empty()
+                            && let Some(tx) = REWIND_ACTION_TX.get()
+                        {
+                            let _ = tx.send(RewindAction::Confirm {
+                                target_message_id: target_id,
+                                revert_files: true,
+                            });
                         }
-                        RewindView::Files => {
-                            let mut s = file_sel.write();
-                            *s = next_selection(*s, file_count);
-                        }
+                        close_popup();
+                        return EventResult::Consumed;
                     }
-                    return EventResult::Consumed;
                 }
-                Some(ListNavAction::Confirm) => {
-                    let target_id = match &preview_for_closure {
-                        Some(p) => p
-                            .messages
-                            .get(*msg_sel.read())
-                            .map(|m| m.id.clone())
-                            .unwrap_or_default(),
-                        None => String::new(),
-                    };
-                    if !target_id.is_empty()
-                        && let Some(tx) = REWIND_ACTION_TX.get()
-                    {
-                        let _ = tx.send(RewindAction::Confirm {
-                            target_message_id: target_id,
-                            revert_files: true,
-                        });
-                    }
-                    close_popup();
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::Cancel) => {
-                    close_popup();
-                    return EventResult::Consumed;
-                }
-                None => {}
+                // 区域内的左键点击（未命中行）也消费，防止穿透到消息区
+                return match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                    _ => EventResult::Ignored,
+                };
             }
-        }
-        EventResult::Ignored
-    });
+            if let Event::Key(key) = event
+                && key.kind == KeyEventKind::Press
+            {
+                match classify_list_nav(&key) {
+                    Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
+                        let cur = *view.read();
+                        *view.write() = match cur {
+                            RewindView::Messages => RewindView::Files,
+                            RewindView::Files => RewindView::Messages,
+                        };
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::MoveUp) => {
+                        let cur = *view.read();
+                        match cur {
+                            RewindView::Messages => {
+                                let mut s = msg_sel.write();
+                                *s = previous_selection(*s);
+                            }
+                            RewindView::Files => {
+                                let mut s = file_sel.write();
+                                *s = previous_selection(*s);
+                            }
+                        }
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::MoveDown) => {
+                        let cur = *view.read();
+                        match cur {
+                            RewindView::Messages => {
+                                let mut s = msg_sel.write();
+                                *s = next_selection(*s, msg_count);
+                            }
+                            RewindView::Files => {
+                                let mut s = file_sel.write();
+                                *s = next_selection(*s, file_count);
+                            }
+                        }
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::Confirm) => {
+                        let target_id = match &preview_for_closure {
+                            Some(p) => p
+                                .messages
+                                .get(*msg_sel.read())
+                                .map(|m| m.id.clone())
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        if !target_id.is_empty()
+                            && let Some(tx) = REWIND_ACTION_TX.get()
+                        {
+                            let _ = tx.send(RewindAction::Confirm {
+                                target_message_id: target_id,
+                                revert_files: true,
+                            });
+                        }
+                        close_popup();
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::Cancel) => {
+                        close_popup();
+                        return EventResult::Consumed;
+                    }
+                    None => {}
+                }
+            }
+            EventResult::Ignored
+        },
+    );
 
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
