@@ -180,13 +180,10 @@ async fn test_preview_extracts_anthropic_tool_use() {
     .unwrap();
 
     let changes = result["file_changes"].as_array().unwrap();
-    // 注意：ai_from_blocks 会把 ToolUse 同步到 tool_calls 字段，因此
-    // extract_file_changes 同时遍历 tool_calls 和 content_blocks 时会
-    // 对同一变更计数两次。这是当前实现行为（与 command/rewind_test.rs
-    // 同断言），预算与执行路径共用该函数，重复条目如实反映。
-    assert_eq!(changes.len(), 2);
+    // P1 修复：ai_from_blocks 双路径（tool_calls + content_blocks）按 id 去重，
+    // 同一变更只计一次。
+    assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["path"], "docs/readme.md");
-    assert_eq!(changes[1]["path"], "docs/readme.md");
 }
 
 /// P0：dispatch 层参数缺 revert_files 时默认 true（与 command RewindArgs 双保险）。

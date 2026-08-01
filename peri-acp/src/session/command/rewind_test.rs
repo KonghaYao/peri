@@ -185,35 +185,34 @@ fn test_extract_file_changes_anthropic_write_format() {
     // Arrange: Anthropic 格式的 Write 工具调用（通过 ai_from_blocks 构造）
     // 注意：ai_from_blocks 会把 ToolUse 同步到 tool_calls 字段（见 message.rs），
     // 因此 extract_file_changes 同时遍历 tool_calls 和 content_blocks 时会
-    // 对同一变更计数两次。这是当前实现行为，本测试如实记录（未来若修复
-    // 去重，此断言需同步更新）。
+    // 遇到同一变更两次。P1 修复后按 ToolUse id 去重，只计一次。
     let msgs = vec![make_ai_write_block("a.txt", "hello")];
 
     // Act
     let changes = extract_file_changes(&msgs);
 
-    // Assert: 当前行为下同一变更被计两次
+    // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
         changes.len(),
-        2,
-        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径各计一次"
+        1,
+        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径应去重"
     );
 }
 
 #[test]
 fn test_extract_file_changes_anthropic_edit_format() {
     // Arrange: Anthropic 格式的 Edit 工具调用（通过 ai_from_blocks 构造）
-    // 同上：双路径计数，结果为 2。
+    // 同上：双路径计数，P1 修复后去重为 1。
     let msgs = vec![make_ai_edit_block("a.txt", "old", "new")];
 
     // Act
     let changes = extract_file_changes(&msgs);
 
-    // Assert: 当前行为下同一变更被计两次
+    // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
         changes.len(),
-        2,
-        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径各计一次"
+        1,
+        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径应去重"
     );
 }
 
@@ -267,6 +266,19 @@ fn test_extract_file_changes_ignores_non_write_edit_tools() {
 
     // Assert
     assert!(changes.is_empty(), "Bash 工具调用不应被提取");
+}
+
+/// P1：tool_calls 与 content_blocks 双路径对同一 id 只计一次；
+/// 不同 id 的调用仍全部计入。
+#[test]
+fn test_extract_file_changes_deduplicates_by_id() {
+    // ai_from_blocks：ToolUse 同步到 tool_calls，同 id 双路径
+    let msgs = vec![
+        make_ai_write_block("a.txt", "hello"),
+        make_ai_edit_call("b.txt", "old", "new"), // ai_with_tool_calls：仅 tool_calls 路径
+    ];
+    let changes = extract_file_changes(&msgs);
+    assert_eq!(changes.len(), 2, "两个不同 id 的调用各计一次");
 }
 
 // ── revert_files 测试：Write 分支 ──────────────────────────────────────────
@@ -469,9 +481,32 @@ fn test_revert_files_reverse_order_applied() {
     // 当前内容为 C（已应用 A→B→C）
     std::fs::write(&full, "C").expect("写入文件失败");
 
-    // 按历史顺序：先 A→B，再 B→C
-    let msg1 = make_ai_edit_call(file_path, "A", "B");
-    let msg2 = make_ai_edit_call(file_path, "B", "C");
+    // 按历史顺序：先 A→B，再 B→C（两次 Edit 必须用不同 ToolUse id，
+    // 去重后仍视为两个独立调用，逆序撤销才能生效）
+    let msg1 = BaseMessage::ai_with_tool_calls(
+        "推理中...",
+        vec![ToolCallRequest::new(
+            "call_edit_r1",
+            "Edit",
+            serde_json::json!({
+                "file_path": file_path,
+                "old_string": "A",
+                "new_string": "B",
+            }),
+        )],
+    );
+    let msg2 = BaseMessage::ai_with_tool_calls(
+        "推理中...",
+        vec![ToolCallRequest::new(
+            "call_edit_r2",
+            "Edit",
+            serde_json::json!({
+                "file_path": file_path,
+                "old_string": "B",
+                "new_string": "C",
+            }),
+        )],
+    );
     let changes = extract_file_changes(&[msg1, msg2]);
 
     // Act

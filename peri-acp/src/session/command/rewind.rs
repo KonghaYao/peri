@@ -165,6 +165,10 @@ impl AgentCommand for RewindCommand {
 /// 从被移除的消息中提取所有 Write/Edit 工具调用。
 pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
     let mut changes = Vec::new();
+    // P1 修复：BaseMessage::ai_from_blocks 会把 ContentBlock::ToolUse 同步到
+    // tool_calls 字段——同一调用在两条路径各出现一次。按 ToolUse id 去重，
+    // 不依赖消息构造路径（OpenAI 反序列化只有 tool_calls、Anthropic 双路径）。
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages {
         if let BaseMessage::Ai {
             content,
@@ -174,7 +178,8 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
         {
             // OpenAI 格式: tool_calls 字段
             for tc in tool_calls {
-                if tc.name == "Write" || tc.name == "Edit" {
+                // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
+                if (tc.name == "Write" || tc.name == "Edit") && seen_ids.insert(tc.id.clone()) {
                     if let Some(change) = parse_tool_call(&tc.name, &tc.arguments) {
                         changes.push(change);
                     }
@@ -186,10 +191,12 @@ pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> 
                 if let ContentBlock::ToolUse {
                     ref name,
                     ref input,
+                    ref id,
                     ..
                 } = block
                 {
-                    if name == "Write" || name == "Edit" {
+                    // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
+                    if (name == "Write" || name == "Edit") && seen_ids.insert(id.clone()) {
                         if let Some(change) = parse_tool_call(name, input) {
                             changes.push(change);
                         }
