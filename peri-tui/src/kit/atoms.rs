@@ -294,6 +294,11 @@ pub static REWIND_BUDGET_STATE: AtomStatic<RewindBudgetState> =
 /// 候选查询失败信息（Option<String> 错误文案）；None = 查询中或未查询。
 pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
+/// 候选查询代次——`spawn_candidates_query` 每次递增并捕获；响应到达时与
+/// 当前代次比对，不一致（已发起新查询）则丢弃，防止慢响应覆盖新数据
+/// （P1 竞态防护）。
+pub static REWIND_QUERY_GEN: AtomStatic<u64> = AtomStatic::new(|| 0);
+
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);
 pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| None);

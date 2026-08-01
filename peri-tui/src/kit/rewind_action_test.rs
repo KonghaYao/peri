@@ -139,3 +139,29 @@ fn test_build_execute_params_includes_revert_files() {
         "revert_files 缺失 = P0 静默空转"
     );
 }
+
+/// P1：执行失败后弹窗回到候选视图并展示错误（不再静默）。
+#[test]
+fn test_on_action_failed_writes_query_error() {
+    crate::kit::atoms::init_atoms();
+    *REWIND_TARGET_TEXT.state().write() = Some("target".to_string());
+    *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
+    *REWIND_QUERY_ERROR.state().write() = None;
+
+    on_action_failed("RPC timeout");
+
+    assert!(
+        REWIND_TARGET_TEXT.state().read().is_none(),
+        "目标文本应清空"
+    );
+    assert_eq!(
+        *REWIND_BUDGET_STATE.state().read(),
+        RewindBudgetState::Idle,
+        "预算状态应复位（回候选视图）"
+    );
+    assert_eq!(
+        REWIND_QUERY_ERROR.state().read().as_deref(),
+        Some("RPC timeout"),
+        "错误应写入 REWIND_QUERY_ERROR 供弹窗展示"
+    );
+}

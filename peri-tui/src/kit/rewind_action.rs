@@ -18,7 +18,8 @@ use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{
-    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_TARGET_TEXT, RewindBudgetState, RewindFileChange,
+    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR, REWIND_TARGET_TEXT,
+    RewindBudgetState, RewindFileChange,
 };
 
 /// Rewind 用户操作——由 RewindPopup 通过 REWIND_ACTION_TX 发送。
@@ -78,6 +79,16 @@ pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, Stri
         .collect()
 }
 
+/// 执行失败恢复（纯函数，测试友好）：清目标文本与预算状态，回候选视图
+/// 并写 REWIND_QUERY_ERROR——弹窗 Candidates 视图据此展示错误，不再静默。
+pub fn on_action_failed(error: &str) {
+    *REWIND_TARGET_TEXT.state().write() = None;
+    *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+    *REWIND_QUERY_ERROR.state().write() = Some(error.to_string());
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+}
+
 /// 启动 rewind 指令消费者后台任务。
 pub fn spawn_rewind_consumer(
     acp_client: AcpTuiClient,
@@ -101,12 +112,8 @@ pub fn spawn_rewind_consumer(
                         Some(action) => {
                             if let Err(e) = handle_action(&acp_client, action).await {
                                 error!(error = %e, "kit rewind_consumer: rewind RPC failed");
-                                // 失败清理：目标文本与预算状态不留残
-                                *REWIND_TARGET_TEXT.state().write() = None;
-                                *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
-                                crate::kit::atoms::RENDER_HEARTBEAT.set(
-                                    crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1),
-                                );
+                                // P1：失败不再静默——回候选视图并展示错误
+                                on_action_failed(&e.to_string());
                             }
                         }
                     }

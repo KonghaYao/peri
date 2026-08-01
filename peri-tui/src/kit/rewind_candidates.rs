@@ -77,6 +77,10 @@ pub fn spawn_candidates_query() {
         return;
     }
 
+    // P1 竞态防护：捕获代次，响应到达时比对——过期响应丢弃。
+    let query_gen = crate::kit::atoms::REWIND_QUERY_GEN.get().wrapping_add(1);
+    crate::kit::atoms::REWIND_QUERY_GEN.set(query_gen);
+
     tokio::spawn(async move {
         let resp = client
             .send_raw_request(
@@ -87,15 +91,24 @@ pub fn spawn_candidates_query() {
         match resp {
             Ok(value) => match parse_candidates_response(&value) {
                 Ok(candidates) => {
+                    if crate::kit::atoms::REWIND_QUERY_GEN.get() != query_gen {
+                        return; // 已有新查询，丢弃过期响应
+                    }
                     *REWIND_QUERY_ERROR.state().write() = None;
                     apply_candidates(&candidates);
                 }
                 Err(e) => {
+                    if crate::kit::atoms::REWIND_QUERY_GEN.get() != query_gen {
+                        return;
+                    }
                     *REWIND_QUERY_ERROR.state().write() = Some(e);
                     RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
                 }
             },
             Err(e) => {
+                if crate::kit::atoms::REWIND_QUERY_GEN.get() != query_gen {
+                    return;
+                }
                 *REWIND_QUERY_ERROR.state().write() = Some(format!("候选查询失败: {e}"));
                 RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
             }
