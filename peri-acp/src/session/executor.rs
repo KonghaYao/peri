@@ -967,14 +967,16 @@ pub enum PredictionError {
 /// > 禁止在 TUI 层直接构建 Agent。
 ///
 /// 构建一个 1 轮、无工具、无中间件的最小 LLM 调用，注入 `history`（应已过滤 System
-/// 消息并限制条数），30 秒超时后返回文本或 [`PredictionError`]。
+/// 消息并限制条数），30 秒超时后返回结构化动作列表或 [`PredictionError`]。
+/// 模型输出经 [`parse_prediction_actions`] 解析为 `<peri:xxx>` 标记动作；
+/// 无标记时回落为单个 `Placeholder` 动作（现有 placeholder 行为）。
 ///
 /// 调用方负责发送 `peri/prediction_ready` 通知（保留在 TUI 层以便复用 transport）。
 pub async fn execute_prediction(
     provider: crate::provider::LlmProvider,
     history: Vec<BaseMessage>,
     cwd: &str,
-) -> Result<String, PredictionError> {
+) -> Result<Vec<PredictionAction>, PredictionError> {
     debug!(
         msg_count = history.len(),
         cwd, "Prediction facade: starting"
@@ -1021,10 +1023,11 @@ pub async fn execute_prediction(
                 .unwrap_or_default();
             if text.is_empty() {
                 debug!("Prediction facade: LLM returned empty text");
+                Ok(Vec::new())
             } else {
                 debug!(%text, "Prediction facade: ready");
+                Ok(parse_prediction_actions(&text))
             }
-            Ok(text)
         }
         Ok(Err(e)) => {
             debug!(error = %e, "Prediction facade: LLM failed");

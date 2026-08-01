@@ -22,6 +22,7 @@ use peri_agent::{agent::AgentCancellationToken, interaction::ChannelState, messa
 use peri_middlewares::prelude::*;
 
 use crate::{app::agent::LlmProvider, config::PeriConfig};
+use peri_acp_types::event_data::PredictionAction;
 
 mod notify;
 mod prompt;
@@ -228,30 +229,48 @@ pub async fn run_acp_server(
                                 .await;
 
                                 match result {
-                                    Ok(text) => {
-                                        if !text.is_empty() {
-                                            let caps = pred_caps_registry
-                                                .get(&pred_session_id)
-                                                .map(|r| r.clone())
+                                    Ok(actions) => {
+                                        if actions.is_empty() {
+                                            tracing::debug!("Prediction: empty actions");
+                                            return;
+                                        }
+                                        let caps = pred_caps_registry
+                                            .get(&pred_session_id)
+                                            .map(|r| r.clone())
+                                            .unwrap_or_default();
+                                        if caps.prediction {
+                                            // text 字段取首个 Placeholder（兼容旧消费方）
+                                            let text = actions
+                                                .iter()
+                                                .find_map(|a| match a {
+                                                    PredictionAction::Placeholder { text } => {
+                                                        Some(text.clone())
+                                                    }
+                                                    _ => None,
+                                                })
                                                 .unwrap_or_default();
-                                            if caps.prediction {
-                                                tracing::debug!(%text, "Prediction ready, sending notification");
-                                                let _ = pred_transport
-                                                    .send_notification(
-                                                        "peri/prediction_ready",
-                                                        serde_json::json!({
-                                                            "sessionId": pred_session_id,
-                                                            "text": text,
-                                                        }),
-                                                    )
-                                                    .await;
-                                            } else {
-                                                tracing::debug!(
-                                                    "Prediction ready but cap not declared, suppressing notification"
-                                                );
-                                            }
+                                            let actions_json: Vec<serde_json::Value> = actions
+                                                .iter()
+                                                .filter_map(|a| serde_json::to_value(a).ok())
+                                                .collect();
+                                            tracing::debug!(
+                                                count = actions.len(),
+                                                "Prediction ready, sending notification"
+                                            );
+                                            let _ = pred_transport
+                                                .send_notification(
+                                                    "peri/prediction_ready",
+                                                    serde_json::json!({
+                                                        "sessionId": pred_session_id,
+                                                        "text": text,
+                                                        "actions": actions_json,
+                                                    }),
+                                                )
+                                                .await;
                                         } else {
-                                            tracing::debug!("Prediction: LLM returned empty text");
+                                            tracing::debug!(
+                                                "Prediction ready but cap not declared, suppressing notification"
+                                            );
                                         }
                                     }
                                     Err(peri_acp::session::executor::PredictionError::Failed(
