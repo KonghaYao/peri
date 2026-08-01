@@ -43,6 +43,8 @@ impl App {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        // 工具卡片头行路径精简用（进程生命周期内不变）
+        crate::truncate::set_display_cwd(cwd.clone());
 
         // 优先从 ~/.peri/settings.json 加载配置，失败时 fallback 到环境变量
         let peri_config = crate::config::load().ok();
