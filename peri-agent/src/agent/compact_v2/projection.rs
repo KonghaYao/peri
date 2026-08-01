@@ -309,6 +309,14 @@ pub(crate) fn estimate_projection_chars(
                     continue;
                 };
 
+                // fields 空 = 整条压缩兜底：按整条 arguments 序列化长度估算
+                if fields.is_empty() {
+                    let json = serde_json::to_string(arguments).unwrap_or_default();
+                    before += json.chars().count() as u64;
+                    after += 0;
+                    continue;
+                }
+
                 let mut seen_fields = HashSet::new();
                 for field in fields {
                     if !seen_fields.insert(field) {
@@ -717,6 +725,20 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
             let Some(arguments) = tc.arguments.as_object() else {
                 return tc.clone();
             };
+            // fields 空 = 整条压缩兜底：替换为 minimal 占位（旧版 preserve_shape 语义）。
+            // 由 planner 在无超长字段时生成，保证普通工具调用也会被压缩。
+            if fields.is_empty() {
+                let mut minimal = serde_json::Map::new();
+                minimal.insert(
+                    "_compact_note".to_string(),
+                    serde_json::Value::String("tool input compacted".to_string()),
+                );
+                return ToolCallRequest {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: serde_json::Value::Object(minimal),
+                };
+            }
             let mut projected_arguments = arguments.clone();
             let mut changed = false;
 
