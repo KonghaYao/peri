@@ -180,7 +180,7 @@ pub struct AppConfig {
 }
 
 fn default_show_cache_warning() -> bool {
-    true
+    false
 }
 
 impl AppConfig {
@@ -252,7 +252,7 @@ impl Default for AppConfig {
             tone: None,
             proactiveness: None,
             claude_md_excludes: None,
-            show_cache_warning: true,
+            show_cache_warning: false,
             betas: BetasConfig::default(),
             extra: serde_json::Map::new(),
         }

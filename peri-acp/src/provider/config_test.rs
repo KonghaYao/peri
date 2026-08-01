@@ -103,9 +103,9 @@ fn test_merge_json_workspace_overrides_single_field() {
     let workspace: AppConfig = serde_json::from_str(json).unwrap();
     global.merge_overrides(workspace);
     assert_eq!(global.active_alias, "haiku");
-    // show_cache_warning defaults to true in both global and workspace,
-    // so merge retains true (no unintended override from default deserialization)
-    assert!(global.show_cache_warning);
+    // show_cache_warning defaults to false in both global and workspace,
+    // so merge retains false (no unintended override from default deserialization)
+    assert!(!global.show_cache_warning);
     // Other fields preserved from global
     assert_eq!(global.providers.len(), 1);
     assert_eq!(global.profiles.sonnet.effort, "medium");
