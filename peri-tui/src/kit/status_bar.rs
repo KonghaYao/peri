@@ -313,10 +313,12 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )
 }
 
+/// 通知行：固定高度 1，位于状态栏第 3 行（原视觉缓冲空行位置）。
+/// 平时渲染空行，有通知时显示消息文本。高度恒定 → 通知出现/消失不引起
+/// 任何行高变化，无行抖动；不再作为 StatusBar 顶部的动态插入行。
 #[component]
-pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let _lang = hooks.use_atom(&atoms::LANG_VERSION);
-    // 通知条：渲染前检查过期——不写 atom，过期自动忽略。
+fn NotifRow(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // 渲染前检查过期——不写 atom，过期自动忽略。
     // 下次事件处理器写 NOTIFICATION 会用新值覆盖旧 Some。
     let notif_store = hooks.use_atom(&atoms::NOTIFICATION);
     let show_notif = notif_store
@@ -334,29 +336,31 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     let statusbar_tokens = statusbar();
-    let notif_line = if show_notif && !notif_text.is_empty() {
-        element!(
-            View(
-                flex_direction: Direction::Horizontal,
-                width: Constraint::Fill(1),
-                height: Constraint::Length(1),
-            ) {
-                Text(text: Paragraph::new(
-                    Line::from(Span::styled(notif_text, Style::default().fg(statusbar_tokens.text).add_modifier(Modifier::BOLD)))
-                ))
-            }
-        )
+    let text = if show_notif && !notif_text.is_empty() {
+        Line::from(Span::styled(
+            notif_text,
+            Style::default()
+                .fg(statusbar_tokens.text)
+                .add_modifier(Modifier::BOLD),
+        ))
     } else {
-        element!(
-            View(
-                flex_direction: Direction::Horizontal,
-                width: Constraint::Fill(1),
-                height: Constraint::Length(0),
-            ) {
-                Text(text: Paragraph::new(Line::from("")))
-            }
-        )
+        Line::from("")
     };
+
+    element!(
+        View(
+            flex_direction: Direction::Horizontal,
+            width: Constraint::Fill(1),
+            height: Constraint::Length(1),
+        ) {
+            Text(text: Paragraph::new(text))
+        }
+    )
+}
+
+#[component]
+pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let _lang = hooks.use_atom(&atoms::LANG_VERSION);
 
     element!(
         View(
@@ -364,9 +368,9 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Fill(1),
             height: Constraint::Length(4),
         ) {
-            { notif_line }
             StatusBarRow1()
             StatusBarRow2()
+            NotifRow()
             // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
             Text(text: Paragraph::new(Line::from("")))
         }
