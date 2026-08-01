@@ -971,11 +971,15 @@ pub enum PredictionError {
 /// 模型输出经 [`parse_prediction_actions`] 解析为 `<peri:xxx>` 标记动作；
 /// 无标记时回落为单个 `Placeholder` 动作（现有 placeholder 行为）。
 ///
+/// `current_title` 为会话当前标题（`None` 表示无标题），注入指令后模型才能
+/// 判断标题是否需要更新。
+///
 /// 调用方负责发送 `peri/prediction_ready` 通知（保留在 TUI 层以便复用 transport）。
 pub async fn execute_prediction(
     provider: crate::provider::LlmProvider,
     history: Vec<BaseMessage>,
     cwd: &str,
+    current_title: Option<&str>,
 ) -> Result<Vec<PredictionAction>, PredictionError> {
     debug!(
         msg_count = history.len(),
@@ -989,7 +993,7 @@ pub async fn execute_prediction(
     // execute_prediction 是 1-turn 无工具无中间件的最小 LLM 调用，
     // 不需要构造完整 v2 stages。直接构造 messages 调
     // ReactLLM::generate_reasoning 一次。
-    let directive = peri_middlewares::subagent::build_prediction_directive();
+    let directive = peri_middlewares::subagent::build_prediction_directive(current_title);
     let mut messages: Vec<BaseMessage> = Vec::with_capacity(history.len() + 2);
     messages.push(BaseMessage::system(directive));
     for msg in &history {

@@ -190,14 +190,17 @@ pub async fn run_acp_server(
                             let pred_session_id = prompt_session_id.clone();
                             let pred_provider = provider.clone();
                             let pred_sessions = sessions.clone();
+                            let pred_thread_store = thread_store.clone();
 
                             tokio::spawn(async move {
                                 tracing::debug!("Prediction task started");
-                                // 从 session 获取最新历史
-                                let (history, cwd) = {
+                                // 从 session 获取最新历史与当前标题
+                                let (history, cwd, current_title) = {
                                     let sessions = pred_sessions.lock().await;
                                     match sessions.get(&pred_session_id) {
-                                        Some(s) => (s.history.clone(), s.cwd.clone()),
+                                        Some(s) => {
+                                            (s.history.clone(), s.cwd.clone(), s.title.clone())
+                                        }
                                         None => {
                                             tracing::debug!("Prediction: session not found");
                                             return;
@@ -231,6 +234,7 @@ pub async fn run_acp_server(
                                     llm_provider,
                                     recent,
                                     &cwd,
+                                    current_title.as_deref(),
                                 )
                                 .await;
 
@@ -240,7 +244,8 @@ pub async fn run_acp_server(
                                             tracing::debug!("Prediction: empty actions");
                                             return;
                                         }
-                                        // 元数据动作写入 session 状态（MVP 仅存储）
+                                        // 元数据动作写入 session 状态；标题变更待持久化并推送
+                                        let mut applied_title: Option<String> = None;
                                         {
                                             let mut sessions = pred_sessions.lock().await;
                                             if let Some(state) = sessions.get_mut(&pred_session_id)
@@ -248,7 +253,13 @@ pub async fn run_acp_server(
                                                 for action in &actions {
                                                     match action {
                                                         PredictionAction::SetTitle { title } => {
-                                                            state.title = Some(title.clone());
+                                                            let title = title.trim();
+                                                            if !title.is_empty() {
+                                                                state.title =
+                                                                    Some(title.to_string());
+                                                                applied_title =
+                                                                    Some(title.to_string());
+                                                            }
                                                         }
                                                         PredictionAction::AddTag { tag }
                                                             if !state.tags.contains(tag) =>
@@ -259,6 +270,26 @@ pub async fn run_acp_server(
                                                     }
                                                 }
                                             }
+                                        }
+                                        // 标题变更：持久化到 thread store，并推送 session/update
+                                        // 供标题栏与外部客户端刷新（与 session/rename 行为一致）
+                                        if let Some(title) = applied_title {
+                                            if let Err(e) = pred_thread_store
+                                                .update_title(&pred_session_id, &title)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    session_id = %pred_session_id,
+                                                    error = %e,
+                                                    "Prediction: failed to persist title"
+                                                );
+                                            }
+                                            notify::send_session_info_update_with_title(
+                                                pred_transport.as_ref(),
+                                                &pred_session_id,
+                                                Some(&title),
+                                            )
+                                            .await;
                                         }
                                         let caps = pred_caps_registry
                                             .get(&pred_session_id)

@@ -186,7 +186,7 @@ pub(crate) async fn send_session_info_update(
 }
 
 /// Push a `SessionInfoUpdate` notification with an optional title override.
-/// Called from the `session/rename` handler.
+/// Called from the `session/rename` handler and the prediction SetTitle flow.
 pub(crate) async fn send_session_info_update_with_title(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,
