@@ -2,6 +2,7 @@
 
 use super::*;
 use peri_acp::event::AcpEvent;
+use peri_acp_types::event_data::PredictionAction;
 use serde_json::json;
 use serial_test::serial;
 
@@ -425,12 +426,22 @@ async fn test_prediction_ready_forwards_prediction_event() {
         .send(AcpNotification::PredictionReady {
             session_id: "s1".into(),
             text: "next word".into(),
+            actions: vec![PredictionAction::Summary {
+                text: "修了 typo".into(),
+            }],
         })
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 Prediction");
     match bridge_event.event {
-        AcpEventData::Prediction(p) => assert_eq!(p.text, "next word"),
+        AcpEventData::Prediction(p) => {
+            assert_eq!(p.text, "next word");
+            assert_eq!(p.actions.len(), 1);
+            assert!(matches!(
+                &p.actions[0],
+                PredictionAction::Summary { text } if text == "修了 typo"
+            ));
+        }
         other => panic!("expected Prediction, got {other:?}"),
     }
 
