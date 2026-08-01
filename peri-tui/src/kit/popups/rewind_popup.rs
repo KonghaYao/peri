@@ -108,7 +108,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Budget 视图处理 Enter（确认）/ Esc（返回）；Esc 在 Candidates 关闭弹窗。
     hooks.use_event_handler_with_options(
         EventScope::Current,
-        EventPriority::Normal,
+        EventPriority::High, // P1：根层 Esc 为 Normal（event_handlers.rs:149），
+        // 同优先级下根层先注册先消费——弹窗内 Esc 分支变死代码。
+        // 改 High 后弹窗自管理 Esc（关闭/返回候选）。
         EventOptions { hit_test: true },
         move |event| {
             // 鼠标：候选区左键点击 = 选中 + 发送 Preview（与键盘 Enter 一致）
@@ -185,9 +187,17 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     },
                     Some(ListNavAction::Cancel) => match view {
-                        RewindView::Budget | RewindView::Executing => {
-                            // 预算/执行中态：Esc 回候选并清理（执行中态 Esc 视为取消等待，
-                            // RewindCompleted 仍会到达刷新消息区）
+                        RewindView::Executing => {
+                            // P1：执行中态 Esc——RPC 已发出、服务端正在回退，
+                            // RewindCompleted 必达。保留 REWIND_TARGET_TEXT 等待
+                            // 回填；仅回候选视图。若 RPC 失败，rewind_consumer
+                            // 失败路径会清目标文本并显示错误。
+                            *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+                            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+                            return EventResult::Consumed;
+                        }
+                        RewindView::Budget => {
+                            // 预算确认前 Esc：尚未执行，目标文本不再需要
                             *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
                             *REWIND_TARGET_TEXT.state().write() = None;
                             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));

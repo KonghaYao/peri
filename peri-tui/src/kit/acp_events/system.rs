@@ -185,7 +185,11 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
         crate::kit::atoms::RewindBudgetState::Idle;
     *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
-    crate::kit::popup_overlay::close_popup();
+    // P1：仅当 rewind 弹窗仍在显示时关闭——执行期间用户可能已 Esc 关闭弹窗
+    // 或打开了其他弹窗（HITL/OAuth 事件），无条件 close 会误关。
+    if *crate::kit::atoms::POPUP_KIND.state().read() == Some(crate::kit::atoms::PopupKind::Rewind) {
+        crate::kit::popup_overlay::close_popup();
+    }
 
     super::render::push_acp_state(state);
 }
