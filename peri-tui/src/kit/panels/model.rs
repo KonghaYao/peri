@@ -13,11 +13,12 @@ use crate::kit::atoms::{
     PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -69,74 +70,123 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snapshot; // StoreState 是 Copy，无需显式 drop
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
+    // 左侧 profile 列表的滚动状态——鼠标点击行号反推需要滚动偏移（外部受控，
+    // 否则列表滚动后点击命中错位）。`hooks.use_state` 顺序稳定，位于条件渲染之前。
+    let left_scroll = hooks.use_state(ScrollViewState::default);
+    // 面板绘制区域（上一帧）——鼠标点击行号反推（值拷贝模式，见 panel_mouse.rs）
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
     let rv = render_version;
     // 事件闭包 move 捕获；渲染部分仍使用 active_alias，故此处克隆一份给闭包
     let handler_alias = active_alias.clone();
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
+    let left_scroll_for_handler = left_scroll;
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击左侧 profile 卡片行 = 选中并切换（click as enter）。
+                // 左侧栏 = 主区宽 45%（panel_shell 左右边框各 1 列）；ScrollView 滚动条
+                // 占其最右 1 列，点击该列排除（不触发切换）。
+                if let Event::Mouse(mouse) = event {
+                    if let Some(area) = area {
+                        let left_w = (area.width.saturating_sub(2)) * 45 / 100;
+                        let left_max_col = area.x.saturating_add(1).saturating_add(left_w);
+                        if mouse.column < left_max_col.saturating_sub(1)
+                            && let Some(idx) = hit_item(
+                                &mouse,
+                                area,
+                                ListLayout {
+                                    header_rows: 2, // 标题行 + 空行
+                                    item_rows: 3,   // 每档卡片 3 行（主行/模型行/摘要行）
+                                    footer_rows: 1, // 底部导航提示
+                                    visible_items: PROFILE_KEYS.len() as u16,
+                                    scroll_start: left_scroll_for_handler.read().offset().y
+                                        as usize,
+                                    item_count: PROFILE_KEYS.len(),
+                                },
+                            )
+                        {
+                            *cursor.write() = idx;
+                            switch_active_alias(idx);
+                            return EventResult::Consumed;
+                        }
+                    }
+                    // 面板区域内未命中行/右侧 K/V 区：消费防穿透（与其它面板一致）
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
+                }
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        if *right_focus.read() {
+                            // 退出右侧编辑焦点
+                            *right_focus.write() = false;
+                        } else {
+                            // 全局 Esc 由 panel_overlay 处理；此处返回 Ignored 让其关闭面板
+                            return EventResult::Ignored;
+                        }
+                    }
+                    KeyCode::Up => {
+                        if *right_focus.read() {
+                            let mut c = right_cursor.write();
+                            *c = previous_selection(*c);
+                        } else {
+                            let mut c = cursor.write();
+                            *c = previous_selection(*c);
+                            switch_active_alias(*c);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if *right_focus.read() {
+                            let mut c = right_cursor.write();
+                            *c = next_selection(*c, FIELD_COUNT);
+                        } else {
+                            let mut c = cursor.write();
+                            *c = next_selection(*c, PROFILE_KEYS.len());
+                            switch_active_alias(*c);
+                        }
+                    }
+                    KeyCode::Tab => {
+                        // 左右焦点切换：左侧 → 右侧，右侧 → 左侧
+                        let rf = *right_focus.read();
+                        *right_focus.write() = !rf;
+                    }
+                    KeyCode::Right => {
+                        if *right_focus.read() {
+                            edit_field(handler_alias.clone(), *right_cursor.read(), true);
+                            *rv.write() += 1;
+                        } else {
+                            // 进入右侧编辑焦点
+                            *right_focus.write() = true;
+                        }
+                    }
+                    KeyCode::Left => {
+                        if *right_focus.read() {
+                            edit_field(handler_alias.clone(), *right_cursor.read(), false);
+                            *rv.write() += 1;
+                        } else {
+                            *right_focus.write() = false;
+                        }
+                    }
+                    _ => {}
+                }
+                EventResult::Consumed
             }
-            match key.code {
-                KeyCode::Esc => {
-                    if *right_focus.read() {
-                        // 退出右侧编辑焦点
-                        *right_focus.write() = false;
-                    } else {
-                        // 全局 Esc 由 panel_overlay 处理；此处返回 Ignored 让其关闭面板
-                        return EventResult::Ignored;
-                    }
-                }
-                KeyCode::Up => {
-                    if *right_focus.read() {
-                        let mut c = right_cursor.write();
-                        *c = previous_selection(*c);
-                    } else {
-                        let mut c = cursor.write();
-                        *c = previous_selection(*c);
-                        switch_active_alias(*c);
-                    }
-                }
-                KeyCode::Down => {
-                    if *right_focus.read() {
-                        let mut c = right_cursor.write();
-                        *c = next_selection(*c, FIELD_COUNT);
-                    } else {
-                        let mut c = cursor.write();
-                        *c = next_selection(*c, PROFILE_KEYS.len());
-                        switch_active_alias(*c);
-                    }
-                }
-                KeyCode::Tab => {
-                    // 左右焦点切换：左侧 → 右侧，右侧 → 左侧
-                    let rf = *right_focus.read();
-                    *right_focus.write() = !rf;
-                }
-                KeyCode::Right => {
-                    if *right_focus.read() {
-                        edit_field(handler_alias.clone(), *right_cursor.read(), true);
-                        *rv.write() += 1;
-                    } else {
-                        // 进入右侧编辑焦点
-                        *right_focus.write() = true;
-                    }
-                }
-                KeyCode::Left => {
-                    if *right_focus.read() {
-                        edit_field(handler_alias.clone(), *right_cursor.read(), false);
-                        *rv.write() += 1;
-                    } else {
-                        *right_focus.write() = false;
-                    }
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
+        },
+    );
 
     let theme = theme_def.read();
 
@@ -330,6 +380,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(width: Constraint::Percentage(45), height: Constraint::Fill(1)) {
                 ScrollView(
                     scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    state: Some(left_scroll),
                     width: Constraint::Fill(1),
                     height: Constraint::Fill(1),
                 ) {
