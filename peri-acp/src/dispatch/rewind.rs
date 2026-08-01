@@ -24,6 +24,13 @@ use crate::{
 #[derive(serde::Deserialize)]
 pub struct RewindArgs {
     pub target_message_id: String,
+    /// 与 command/rewind.rs::RewindArgs 保持同一默认语义（P0 双保险）。
+    #[serde(default = "default_true")]
+    pub revert_files: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 计算文件回退预算（只读，不修改任何状态）。
@@ -108,6 +115,12 @@ pub async fn rewind_execute(
     frozen_skill_summary: Option<Arc<String>>,
     frozen_system_prompt: Option<Arc<String>>,
 ) -> Result<Value, AcpError> {
+    // P0 修复：参数预验证。RewindCommand 内部解析失败只发 CompactError 事件
+    // 且本函数仍返回成功——这里前置解析，参数错误直接以 RPC 错误形式返回，
+    // TUI 才能感知并展示失败。
+    let _args: RewindArgs = serde_json::from_value(params.clone())
+        .map_err(|e| AcpError::new(-32602, format!("rewind 参数解析失败: {e}")))?;
+
     let session_id = params
         .get("sessionId")
         .or_else(|| params.get("session_id"))

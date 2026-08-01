@@ -27,7 +27,14 @@ impl RewindCommand {
 #[derive(serde::Deserialize)]
 struct RewindArgs {
     target_message_id: String,
+    /// P0 修复：默认回退文件。TUI 早期版本/第三方客户端可能只传
+    /// target_message_id——缺失时不得进入解析失败静默路径。
+    #[serde(default = "default_true")]
     revert_files: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 提取到的文件变更操作。

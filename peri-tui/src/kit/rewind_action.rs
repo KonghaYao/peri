@@ -42,10 +42,14 @@ pub fn build_preview_params(sid: &str, target_message_id: &str) -> Value {
 }
 
 /// 构造执行参数。
+///
+/// P0 修复：显式携带 `revert_files: true`。服务端虽已有 `#[serde(default)]`
+/// 兜底，但客户端显式声明意图，双保险避免旧路径静默失败。
 pub fn build_execute_params(sid: &str, target_message_id: &str) -> Value {
     json!({
         "sessionId": sid,
         "target_message_id": target_message_id,
+        "revert_files": true,
     })
 }
 

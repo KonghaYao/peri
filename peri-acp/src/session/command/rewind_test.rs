@@ -934,3 +934,36 @@ async fn test_execute_with_orphan_tool_pairing_in_retained_does_not_panic() {
     assert_eq!(result.messages[0].id(), m1.id());
     assert_eq!(result.messages[1].id(), m2.id());
 }
+
+/// P0：参数缺 revert_files 时（TUI 旧版本/第三方客户端）应默认回退文件，
+/// 而不是进入解析失败静默路径。
+#[tokio::test]
+async fn test_execute_missing_revert_files_defaults_true() {
+    let sink = Arc::new(MockEventSink::new());
+    let history = vec![
+        BaseMessage::human("第一轮问题"),
+        BaseMessage::ai("第一轮回答"),
+        BaseMessage::human("第二轮问题"),
+    ];
+    let target_id = history[0].id().as_uuid().to_string();
+    let ctx = make_ctx(
+        sink.clone(),
+        history.clone(),
+        std::env::temp_dir().to_string_lossy().to_string(),
+        // 只传 target_message_id，缺 revert_files
+        serde_json::json!({ "target_message_id": target_id }).to_string(),
+    );
+
+    let result = RewindCommand.execute(ctx).await;
+
+    let events = sink.events();
+    assert!(
+        !events.iter().any(|(_, json)| json.contains("参数解析失败")),
+        "缺 revert_files 不应进入解析失败路径"
+    );
+    assert_eq!(
+        result.messages.len(),
+        0,
+        "回退到第一条 → 保留 0 条（截断已执行）"
+    );
+}

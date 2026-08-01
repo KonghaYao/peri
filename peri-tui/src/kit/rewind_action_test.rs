@@ -126,3 +126,16 @@ fn test_rewind_action_variants() {
         RewindAction::Preview { .. } => panic!("expected Confirm"),
     }
 }
+
+/// P0：执行参数必须携带 revert_files=true——缺失会导致服务端解析失败
+/// （虽有服务端默认值兜底，TUI 侧仍应显式声明回退文件语义）。
+#[test]
+fn test_build_execute_params_includes_revert_files() {
+    let params = build_execute_params("sid-1", "msg-1");
+    assert_eq!(params["sessionId"], "sid-1");
+    assert_eq!(params["target_message_id"], "msg-1");
+    assert_eq!(
+        params["revert_files"], true,
+        "revert_files 缺失 = P0 静默空转"
+    );
+}

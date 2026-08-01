@@ -188,3 +188,21 @@ async fn test_preview_extracts_anthropic_tool_use() {
     assert_eq!(changes[0]["path"], "docs/readme.md");
     assert_eq!(changes[1]["path"], "docs/readme.md");
 }
+
+/// P0：dispatch 层参数缺 revert_files 时默认 true（与 command RewindArgs 双保险）。
+#[test]
+fn test_execute_args_missing_revert_files_defaults_true() {
+    let args: super::RewindArgs = serde_json::from_value(serde_json::json!({
+        "target_message_id": "msg-1",
+    }))
+    .unwrap();
+    assert!(args.revert_files, "缺省应回退文件");
+    assert_eq!(args.target_message_id, "msg-1");
+}
+
+/// P0：target_message_id 也缺失时返回参数错误（不再静默成功）。
+#[test]
+fn test_execute_args_missing_target_id_fails() {
+    let result = serde_json::from_value::<super::RewindArgs>(serde_json::json!({}));
+    assert!(result.is_err(), "缺 target_message_id 应解析失败");
+}
