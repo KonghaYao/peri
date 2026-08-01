@@ -104,7 +104,7 @@ frozen_system_prompt 构建完成。
 │        拼接后合并：format!("{system_prompt}\n\n{contributions}")
 │        如：CLAUDE.md 摘要、Skills 摘要、Git Co-Authored-By 行等
 │        不同 Agent（主 Agent vs SubAgent）的切面集合不同，贡献也不同
-│        合并结果通过 BaseModelReactLLM::with_system() 传入 LLM
+│        合并结果通过 AgentModelBridge::with_system() 传入 LLM
 ```
 
 ### 2.3 PromptFeatures

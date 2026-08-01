@@ -8,7 +8,7 @@
 2. **传输无关**：同一套 JSON-RPC 2.0 方法分发逻辑同时服务于内存通道（MpscTransport，TUI）和标准输入输出（StdioTransport，IDE）。传输层只做帧编解码，不参与业务。
 3. **事件五路分路**：Agent 产出的 ExecutorEvent 分为五条路——标准 ACP 流式事件（IDE 消费）、HITL 审批（预留）、TUI 专用事件（面板更新）、观测层（预留）、以及 unstable-event（peri/unstable-event）。一条 event pipeline，五个消费方向。
 4. **命令即契约**：Slash Command 通过 `AgentCommand` trait 统一注册。三种 CommandKind（Immediate / Passthrough / Transform）决定命令在 Agent 循环中的执行位置。
-5. **Provider 配置独立**：LLM Provider 的构建（API Key、模型别名、Base URL）由 ACP 层负责，peri-agent 只接收已构建好的 `BaseModel` trait object。
+5. **Provider 配置独立**：LLM Provider 的构建（API Key、模型别名、Base URL）由 ACP 层负责，peri-agent 只接收已构建好的 `Model` trait object。
 
 ---
 
@@ -157,7 +157,7 @@ v2 ReAct 循环产出三层事件（`RenderEvent`/`StateEvent`/`ObserveEvent`）
 - **从 PeriConfig 构建**：`settings.json` 中的 providers 列表 + active_alias 决定模型
 - **模型别名解析**：`sonnet` / `haiku` / `opus` → 对应实际模型名
 - **Thinking 配置**：extended thinking budget + effort 透传
-- **into_model()**：LlmpProvider → `Box<dyn BaseModel>`，peri-agent 不接触 API Key
+- **into_model()**：LlmpProvider → `Box<dyn Model>`，peri-agent 不接触 API Key
 
 Provider 快照：`session/new` 时捕获当前 Provider 配置——会话内不随用户切换模型而变化。
 
@@ -247,5 +247,5 @@ v2 通过 `AsyncRouter`（`session/async_router.rs`）统一路由后台异步�
 | **Session** | v2 中 ACP 层持有 `AcpSession` 句柄并管理 session 级共享状态（`active_agents`、`goal_state`、`v2_message_queue`、`session_inbox`、`background_registry`、`permission_mode`、`thinking` 等），核心 agent 状态（transcript、frozen）委托给 `peri_agent::session::Session` |
 | **Transport** | `MpscEventSink` / `StdioEventSink` 将 ExecutorEvent 转换为协议帧后推送给客户端 |
 | **Middleware** | 中间件链在 `build_agent()` 中构建，ACP 传入配置但不过问中间件内部 |
-| **LLM** | Provider 配置由 ACP 层管理，构建 `dyn BaseModel` 后注入 agent |
+| **LLM** | Provider 配置由 ACP 层管理，构建 `dyn Model` 后注入 agent |
 | **System Prompt** | `session/new` 时 ACP 调用 `build_system_prompt()`，产出 frozen_prompt |

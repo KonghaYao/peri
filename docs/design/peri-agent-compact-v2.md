@@ -8,7 +8,7 @@
 2. **Compact 重建 Transcript**：Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。正常 ReAct 循环中消息仅尾部追加，Compact 是唯一重建 Transcript 的场景。重建后角色类型、顺序不变。Micro 数量不变，Full 追加摘要，Smart 筛选保留并追加 system-reminder。
 3. **阈值驱动**：Compact 非每轮必行。由 ContextBudget 决定是否自动触发——低于阈值时跳过，逼近阈值时启动对应策略。此外支持**手动触发**——用户通过 Slash Command 主动请求 Full Compact，不论当前阈值。
 4. **渐进式压缩**：三级策略——Micro（轻量截断，零 LLM 调用）→ Full（LLM 结构化摘要）→ Smart（LLM 筛选保留消息）。**Micro 优先执行，执行后根据压缩量判定是否升级为 Full**——压缩量不足时说明 Micro 已无法有效回收 token，系统直接升级为 Full Compact（truncated 标记无需清理——Full 的 excluded 会覆盖同一批旧消息）。
-5. **走标准 LLM 链路**：Full Compact 通过 `BaseModel::invoke` 发出摘要请求，`compact_llm` 为独立 `BaseModel` 实例（由 ACP 层通过 `auxiliary_model` 注入），不与 Reason 阶段共用 LLM 实例。强制非流式——摘要无需实时推流。
+5. **走标准 LLM 链路**：Full Compact 通过 `Model::complete` 发出摘要请求，`compact_llm` 为独立 `Model` 实例（由 ACP 层通过 `auxiliary_model` 注入），不与 Reason 阶段共用 LLM 实例。强制非流式——摘要无需实时推流。
 6. **不中断循环**：Compact 是 ReAct 循环内的条件性步骤。压缩后循环自然继续，不改变控制流、不要求外部干预。
 7. **降级优先**：Compact 自身可能失败——摘要 LLM 出错、连续失败后跳过。保证 Compact 失败不影响 Agent 正常工作——大不了上下文满，LLM 仍可运行。
 
@@ -68,7 +68,7 @@ graph TB
     subgraph REASON["Reason 阶段<br/>LLM 推理"]
     end
 
-    FULL -..->|"走标准 LLM 链路"| LLM_PATH["compact_llm (auxiliary_model) → BaseModel::invoke → Provider"]
+    FULL -..->|"走标准 LLM 链路"| LLM_PATH["compact_llm (auxiliary_model) → Model::complete → Provider"]
 ```
 
 ### 2.1 ContextBudget 与 TokenTracker
@@ -128,7 +128,7 @@ TokenTracker 随每轮 LLM 调用更新，追踪三个维度决定 Compact 是�
 
 - **分组压缩**：对话按轮次分组，每轮保留 tool_call 名称和 tool_result 关键片段，丢弃完整参数和输出
 - **关键信息覆盖**：结构化摘要保留用户意图、技术决策、文件变更、错误修复、未完成事项等关键信息。去重冗余，保留判断依据
-- **走标准 LLM 链路**：通过 `BaseModel::invoke` 发出摘要请求，`compact_llm` 为 ACP 层通过 `auxiliary_model` 注入的独立 `BaseModel` 实例，不与 Reason 阶段共用 LLM。强制非流式——摘要无需实时推流
+- **走标准 LLM 链路**：通过 `Model::complete` 发出摘要请求，`compact_llm` 为 ACP 层通过 `auxiliary_model` 注入的独立 `Model` 实例，不与 Reason 阶段共用 LLM。强制非流式——摘要无需实时推流
 - **重建方式**：新 Transcript = 摘要作为 Human 消息（带 `CONTINUATION_HINT`，新 id）+ 旧消息标 `excluded`。非 System 消息——保证不被 hoist 污染 FrozenContext
 
 ### 2.4 Smart Compact ⚡未实现
@@ -167,12 +167,12 @@ Compact 自身非关键路径——失败不阻止 Agent 继续工作。
 | 模块 | 关系 |
 |------|------|
 | **Session** | Compact 不触碰 FrozenContext（System Prompt / CLAUDE.md / Skills 摘要）。摘要以 Human 消息注入，不被 hoist |
-| **LLM 适配器** | Full Compact 通过 `BaseModel::invoke` 发出摘要请求，`compact_llm` 为 ACP 层通过 `auxiliary_model` 注入的独立 `BaseModel` 实例（`stages/mod.rs:96`），不与 Reason 阶段共用 LLM。Micro Compact 零 LLM 调用 |
+| **LLM 适配器** | Full Compact 通过 `Model::complete` 发出摘要请求，`compact_llm` 为 ACP 层通过 `auxiliary_model` 注入的独立 `Model` 实例（`stages/mod.rs:96`），不与 Reason 阶段共用 LLM。Micro Compact 零 LLM 调用 |
 | **ReAct 循环** | Compact 位于 Receive 之前。Receive 阶段排空 MessageQueue 之前先检查并执行 Compact——保证 LLM 看到的是压缩后上下文 + 最新用户输入。上下文低于阈值时跳过 |
 | **MessageTranscript** | Compact 读取 Transcript 后重建新 Transcript——Micro 标 truncated、Full 追加摘要并标 excluded、Smart 未选中标 excluded 并追加 Human 消息（带 system-reminder 标签）。下一轮 LLM 请求基于新 Transcript 构造 |
 | **Hook 系统** | 中间件层：`before_compact` / `after_compact` 两个钩子，外部可监听压缩进行中和完成事件。插件层：`PreCompact` / `PostCompact` 回调（`StageContext.compact_pre_hook` / `compact_post_hook`），由 ACP 层注入，在 Compact 阶段首尾触发 |
 | **事件流** | Compact 产生 `CompactStarted` + `MessagesCompacted` 两个成对事件（Start→End 成对原则，修复 Langfuse compact_span 断裂），TUI 可据此刷新上下文条指示 |
-| **Compact LLM 注入** | `compact_llm` 由 ACP 层通过 `auxiliary_model` 注入（`builder_v2.rs:79-84`），优先取 `cfg.auxiliary_model`，否则回落到 `cached_llm.auxiliary_model`。是独立的 `BaseModel` 实例，不与 Reason 阶段共用 |
+| **Compact LLM 注入** | `compact_llm` 由 ACP 层通过 `auxiliary_model` 注入（`builder_v2.rs:79-84`），优先取 `cfg.auxiliary_model`，否则回落到 `cached_llm.auxiliary_model`。是独立的 `Model` 实例，不与 Reason 阶段共用 |
 
 Compact 跨 turn 持久——压缩后的 Transcript 跨 turn 保留，后续 turn 的 LLM 看到的是压缩后上下文。
 

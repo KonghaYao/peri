@@ -70,7 +70,7 @@
 
 **收集路径**：`MiddlewareChain::collect_prompt_contributions()`（`chain.rs:312`）按注册顺序收集所有中间件的贡献，拼接为单个 String。
 
-**合并点**：`peri-acp/src/agent/builder.rs:655` 在链构造完成后、构造 `BaseModelReactLLM` 前，将贡献拼接到 frozen system prompt 之后（`format!("{system_prompt}\n\n{contributions}")`）。
+**合并点**：`peri-acp/src/agent/builder.rs:655` 在链构造完成后、构造 `AgentModelBridge` 前，将贡献拼接到 frozen system prompt 之后（`format!("{system_prompt}\n\n{contributions}")`）。
 
 **设计意图**：保持 prompt cache 前缀稳定（不再通过 `prepend_message` 注入）。贡献中间件包括 AgentsMd / Skills / GitAttribution / ToolSearch 等。
 
