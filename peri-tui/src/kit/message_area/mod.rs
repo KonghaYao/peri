@@ -325,10 +325,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     } else {
         0
     };
+    // [Padding] 追加 2 行空白滚动空间，减少流式输出期间因新行到达导致的视口抖动。
+    // 这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length / auto-follow 阈值。
     let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
         if is_loading { 1 } else { 0 }
     } else {
-        (core_total_visual_rows + footer_visual_rows).min(u16::MAX as usize) as u16
+        (core_total_visual_rows + footer_visual_rows)
+            .saturating_add(2)
+            .min(u16::MAX as usize) as u16
     };
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
