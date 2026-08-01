@@ -49,6 +49,11 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: peri_acp::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+    // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
+    /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
+    pub(crate) title: Option<String>,
+    /// 预测生成的会话标签（未来按标签检索使用）。
+    pub(crate) tags: Vec<String>,
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -233,6 +238,26 @@ pub async fn run_acp_server(
                                         if actions.is_empty() {
                                             tracing::debug!("Prediction: empty actions");
                                             return;
+                                        }
+                                        // 元数据动作写入 session 状态（MVP 仅存储）
+                                        {
+                                            let mut sessions = pred_sessions.lock().await;
+                                            if let Some(state) = sessions.get_mut(&pred_session_id)
+                                            {
+                                                for action in &actions {
+                                                    match action {
+                                                        PredictionAction::SetTitle { title } => {
+                                                            state.title = Some(title.clone());
+                                                        }
+                                                        PredictionAction::AddTag { tag } => {
+                                                            if !state.tags.contains(tag) {
+                                                                state.tags.push(tag.clone());
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
                                         }
                                         let caps = pred_caps_registry
                                             .get(&pred_session_id)

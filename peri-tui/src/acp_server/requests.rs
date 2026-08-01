@@ -150,6 +150,8 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                     workflow_middleware,
+                    title: None,
+                    tags: Vec::new(),
                 },
             );
 
@@ -318,6 +320,8 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                         workflow_middleware,
+                        title: None,
+                        tags: Vec::new(),
                     },
                 );
             }
@@ -561,6 +565,8 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                         workflow_middleware,
+                        title: None,
+                        tags: Vec::new(),
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
@@ -629,6 +635,8 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                     workflow_middleware,
+                    title: None,
+                    tags: Vec::new(),
                 },
             );
 
