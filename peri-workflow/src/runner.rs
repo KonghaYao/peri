@@ -15,9 +15,22 @@ use crate::progress::WorkflowProgressStore;
 use crate::protocol::*;
 use crate::rpc::{IncomingMessage, RpcChannel};
 
+/// 本地固定安装的 workflow engine 版本（与 npm 发布版本保持一致）。
+const WORKFLOW_NPM_VERSION: &str = "0.1.1";
+
+/// 串行化本地安装（避免并发 workflow 同时触发安装）。
+static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// 返回 workflow 触发命令：(binary, args)。
-/// 统一使用 npx，通过 @peri-code/workflow v0.1.1+ 的 waitDrain() 确保 stdout backpressure 安全。
-fn workflow_cmd() -> Result<(&'static str, &'static [&'static str]), WorkflowError> {
+///
+/// 优先使用本地固定安装 `~/.peri/workflow/<version>/`——完全离线、秒启，
+/// 不依赖 npm registry；未安装时回退 `npx -y`（联网兜底，行为同旧版）。
+/// 通过 @peri-code/workflow v0.1.1+ 的 waitDrain() 确保 stdout backpressure 安全。
+fn workflow_cmd() -> Result<(String, Vec<String>), WorkflowError> {
+    if let Some(dist) = workflow_local_dist() {
+        return Ok(("node".to_string(), vec![dist]));
+    }
     // 检查 npx 是否可用
     if std::process::Command::new("npx")
         .arg("--version")
@@ -26,12 +39,76 @@ fn workflow_cmd() -> Result<(&'static str, &'static [&'static str]), WorkflowErr
         .status()
         .is_ok()
     {
-        return Ok(("npx", &["-y", "@peri-code/workflow"]));
+        return Ok((
+            "npx".to_string(),
+            vec!["-y".to_string(), "@peri-code/workflow".to_string()],
+        ));
     }
     Err(WorkflowError::SpawnFailed(
         "npx is not available. Install Node.js (https://nodejs.org/) to enable workflow support."
             .to_string(),
     ))
+}
+
+/// 本地固定安装的 engine 入口（`<base>/node_modules/@peri-code/workflow/dist/peri-workflow.js`）。
+fn workflow_local_dist_in(base: &std::path::Path) -> Option<String> {
+    let dist = base
+        .join("node_modules")
+        .join("@peri-code")
+        .join("workflow")
+        .join("dist")
+        .join("peri-workflow.js");
+    dist.is_file().then(|| dist.to_string_lossy().into_owned())
+}
+
+/// 基于 `~/.peri/workflow/<version>/` 的本地 engine 入口。
+fn workflow_local_dist() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let base = std::path::PathBuf::from(&home)
+        .join(".peri")
+        .join("workflow")
+        .join(WORKFLOW_NPM_VERSION);
+    workflow_local_dist_in(&base)
+}
+
+/// 首次运行时自动安装本地固定副本（之后完全离线，不再访问 registry）。
+/// 安装失败仅告警，调用方回退 npx。
+async fn ensure_workflow_install() {
+    if workflow_local_dist().is_some() {
+        return;
+    }
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let prefix = std::path::PathBuf::from(&home)
+        .join(".peri")
+        .join("workflow")
+        .join(WORKFLOW_NPM_VERSION);
+    let _guard = INSTALL_LOCK.lock().await;
+    // 双检：等待锁期间其他调用方可能已完成安装
+    if workflow_local_dist().is_some() {
+        return;
+    }
+    let pkg = format!("@peri-code/workflow@{WORKFLOW_NPM_VERSION}");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        Command::new("npm")
+            .args(["install", "--prefix"])
+            .arg(&prefix)
+            .arg(&pkg)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await
+    {
+        Ok(Ok(status)) if status.success() => {
+            info!(target: "workflow", prefix = %prefix.display(), "installed local workflow engine ({pkg})");
+        }
+        other => {
+            warn!(target: "workflow", prefix = %prefix.display(), "local workflow install failed ({pkg}), falling back to npx: {other:?}");
+        }
+    }
 }
 
 // ─── Agent 回调 trait ─────────────────────────────────────────
@@ -169,7 +246,8 @@ impl WorkflowRunner {
             None
         };
 
-        // 3. Spawn workflow runner（bun 环境用 bunx，否则 npx）
+        // 3. Spawn workflow runner（本地固定安装优先，未安装时自动预热一次，回退 npx）
+        ensure_workflow_install().await;
         let (cmd_bin, cmd_args) = match workflow_cmd() {
             Ok(c) => c,
             Err(e) => {
@@ -177,8 +255,8 @@ impl WorkflowRunner {
                 return Err(e);
             }
         };
-        let mut child = match Command::new(cmd_bin)
-            .args(cmd_args)
+        let mut child = match Command::new(&cmd_bin)
+            .args(&cmd_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
