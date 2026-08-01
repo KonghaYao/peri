@@ -27,7 +27,6 @@ pub mod goal;
 pub mod group;
 pub mod hitl;
 pub mod interaction;
-pub mod llm;
 pub mod messages;
 pub mod metrics;
 pub mod middleware;
@@ -53,7 +52,6 @@ pub mod prelude {
         error::{AgentError, AgentResult},
         group::AgentGroup,
         hitl::{BatchItem, HitlDecision},
-        llm::{BaseModel, BaseModelReactLLM, ChatAnthropic, ChatOpenAI, MockLLM},
         messages::{
             BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
         },

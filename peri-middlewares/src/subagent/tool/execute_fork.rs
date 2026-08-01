@@ -86,7 +86,7 @@ impl super::SubAgentTool {
 
         // 6. LLM（fork 用默认 provider，无 model alias）
         let mut llm = (self.llm_factory)(None);
-        // 注入 event_handler，使 SubAgent 内 RetryableLLM 的重试事件能被父级 Langfuse 追踪
+        // 注入 event_handler，使 SubAgent 内 LLM 的重试事件能被父级 Langfuse 追踪
         llm.inject_event_handler(self.event_handler.clone());
 
         // 7. 注册到 active_agents（register_runtime）

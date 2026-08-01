@@ -27,7 +27,7 @@ pub(crate) enum CancelPolicy {
 
 /// v2-ready SubAgent 装配产物
 pub(crate) struct AgentBuildResult {
-    /// SubAgent LLM（RetryableLLM 包装）
+    /// SubAgent LLM（ReactLLM 实现/装饰器）
     pub llm: Box<dyn ReactLLM + Send + Sync>,
     /// 已组装的中间件（含 frozen CLAUDE.md / Skills / TodoMiddleware）
     pub middlewares: Vec<Box<dyn Middleware>>,

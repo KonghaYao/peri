@@ -7,8 +7,9 @@ pub mod config;
 pub mod store;
 
 pub use config::{AppConfig, PeriConfig, ProviderConfig, ProviderModels, ThinkingConfig};
-use peri_agent::llm::{BaseModel, ChatAnthropic, ChatOpenAI};
+use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
 pub use store::{config_path, load, load_from, save, save_to, workspace_config_path};
+use url::Url;
 
 #[derive(Clone)]
 pub enum LlmProvider {
@@ -208,9 +209,13 @@ impl LlmProvider {
         clone
     }
 
-    /// 获取模型的上下文窗口大小（不消费 self）
+    /// 获取模型的上下文窗口大小（不消费 self）。
+    ///
+    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
+    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
+    /// 此处保持配置级常量语义（1M 窗口由 builder 侧 `context_1m` 标志覆盖）。
     pub fn context_window(&self) -> u32 {
-        self.clone().into_model().context_window()
+        200_000
     }
 
     /// 返回 thinking 配置的稳定标识，用于 fingerprint。
@@ -229,7 +234,7 @@ impl LlmProvider {
         }
     }
 
-    pub fn into_model(self) -> Box<dyn BaseModel> {
+    pub fn into_model(self) -> Box<dyn peri_model::Model> {
         match self {
             Self::OpenAi {
                 api_key,
@@ -237,16 +242,18 @@ impl LlmProvider {
                 model,
                 thinking,
             } => {
-                let mut m = ChatOpenAI::new(api_key, model).with_base_url(base_url);
+                let endpoint =
+                    parse_endpoint(&base_url, "https://api.openai.com/v1", "openai base_url");
+                let mut config = OpenAiConfig::new(endpoint, api_key, model);
                 if let Some(ref t) = thinking {
-                    m = m.with_reasoning_effort(t.openai_effort());
+                    config = config.with_reasoning_effort(t.openai_effort());
                     if t.enabled {
-                        m = m.with_thinking_enabled();
+                        config = config.with_thinking_enabled(true);
                     }
                 }
                 let max_tokens = thinking.as_ref().map_or(32000, |t| t.max_tokens);
-                m = m.with_max_tokens(max_tokens);
-                Box::new(m)
+                config = config.with_max_tokens(max_tokens);
+                Box::new(OpenAiModel::new(config))
             }
             Self::Anthropic {
                 api_key,
@@ -254,17 +261,40 @@ impl LlmProvider {
                 base_url,
                 thinking,
             } => {
-                let mut m = ChatAnthropic::new(api_key, model);
-                if let Some(url) = base_url {
-                    m = m.with_base_url(url);
-                }
+                let endpoint = match base_url {
+                    Some(url) => {
+                        parse_endpoint(&url, "https://api.anthropic.com", "anthropic base_url")
+                    }
+                    None => Url::parse("https://api.anthropic.com").expect("静态默认 endpoint"),
+                };
+                let mut config = AnthropicConfig::new(endpoint, api_key, model);
                 if let Some(ref t) = thinking {
-                    m = m.with_extended_thinking(t.budget_tokens, &t.effort);
+                    config = config.with_extended_thinking(t.budget_tokens, &t.effort);
                 }
                 let max_tokens = thinking.as_ref().map_or(32000, |t| t.max_tokens);
-                m = m.with_max_tokens(max_tokens);
-                Box::new(m)
+                config = config.with_max_tokens(max_tokens);
+                Box::new(AnthropicModel::new(config))
             }
         }
     }
 }
+
+/// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，
+/// 保持 provider 构造期不失败（fail-soft）的语义。
+/// 真正无效的 endpoint 会在 prepare/stream 时由 `peri-model` 返回
+/// `InvalidEndpoint` 错误（fail closed）。
+fn parse_endpoint(raw: &str, fallback: &str, label: &str) -> Url {
+    Url::parse(raw).unwrap_or_else(|error| {
+        tracing::warn!(
+            %error,
+            %label,
+            raw,
+            "provider endpoint 非法，回落到默认 endpoint"
+        );
+        Url::parse(fallback).expect("默认 endpoint 必须可解析")
+    })
+}
+
+#[cfg(test)]
+#[path = "provider_test.rs"]
+mod tests;

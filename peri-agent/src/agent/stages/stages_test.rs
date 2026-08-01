@@ -101,7 +101,7 @@ fn test_stage_context_builder_default() {
 
 // ── e2e 集成测试（验证完整 v2 ReAct 循环）──
 
-/// MockLLM：首轮返回 final_answer，无 tool_calls
+/// Mock LLM：首轮返回 final_answer，无 tool_calls
 struct FinalAnswerLLM {
     answer: &'static str,
 }
@@ -111,7 +111,7 @@ impl ReactLLM for FinalAnswerLLM {
         &self,
         _messages: &[BaseMessage],
         _tools: &[&dyn crate::tools::BaseTool],
-        _streaming: Option<crate::llm::types::StreamingContext>,
+        _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
         Ok(crate::agent::react::Reasoning::with_answer(
             "thinking",
@@ -229,7 +229,7 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn crate::tools::BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
+            _streaming: Option<crate::agent::react::StreamingContext>,
         ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
             match self.0.fetch_add(1, Ordering::SeqCst) {
                 0 => Ok(crate::agent::react::Reasoning::with_tools(
@@ -366,7 +366,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn crate::tools::BaseTool],
-            _streaming: Option<crate::llm::types::StreamingContext>,
+            _streaming: Option<crate::agent::react::StreamingContext>,
         ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(crate::agent::react::Reasoning::with_answer("", "done"))

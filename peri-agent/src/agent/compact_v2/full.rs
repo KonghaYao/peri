@@ -10,14 +10,16 @@
 
 use std::path::Path;
 
+use peri_model::{ModelMessage, ModelRequest};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::agent::{
     compact_v2::{config::CompactConfig, CompactOutcome},
     events::{CompactFileInfo, CompactStrategy},
+    model_bridge::map_model_error,
 };
 use crate::error::AgentResult;
-use crate::llm::{types::LlmRequest, BaseModel};
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::{MessageFlags, MessageTranscript};
 use crate::thread::CompactionLifecycle;
@@ -43,7 +45,7 @@ const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt
 /// 6. Re-inject 关键文件（如果 cwd 提供）
 pub(super) async fn full_compact_inner(
     transcript: &mut MessageTranscript,
-    llm: Option<&dyn BaseModel>,
+    llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
     cwd: &str,
 ) -> AgentResult<super::CompactResult> {
@@ -100,13 +102,18 @@ pub(super) async fn full_compact_inner(
         conversation_text, SUMMARY_USER_PROMPT
     );
 
-    let request = LlmRequest::new(vec![BaseMessage::human(user_content)])
-        .with_system(SUMMARY_SYSTEM_PROMPT.to_string())
-        .with_max_tokens(config.summary_max_tokens);
+    let request = ModelRequest::new(vec![
+        ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT),
+        ModelMessage::user_text(user_content),
+    ])
+    .with_max_tokens(config.summary_max_tokens);
 
     // 3. 调用 LLM（走标准链路）
-    let response = llm.invoke(request).await?;
-    let raw_summary = response.message.content();
+    let response = llm
+        .complete(request, CancellationToken::new())
+        .await
+        .map_err(map_model_error)?;
+    let raw_summary = response.assistant_text().unwrap_or_default();
 
     if raw_summary.trim().is_empty() {
         return Err(crate::error::AgentError::CompactEmptyResponse);

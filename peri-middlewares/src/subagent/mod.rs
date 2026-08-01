@@ -128,7 +128,7 @@ impl SubAgentMiddlewareConfig {
 ///     Box::new(ReadFileTool::new(cwd)),
 /// ];
 /// let llm_factory = Arc::new(move |_: Option<&str>| {
-///     Box::new(BaseModelReactLLM::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
+///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
 /// });
 /// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
 /// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str| {

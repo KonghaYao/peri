@@ -2,10 +2,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use peri_agent::{
-    error::{AgentError, AgentResult},
-    llm::types::{LlmResponse, StopReason},
+use peri_model::{
+    Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, ProtocolErrorKind, StopReason,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
@@ -34,24 +35,40 @@ impl MockClassifyModel {
 }
 
 #[async_trait]
-impl BaseModel for MockClassifyModel {
-    async fn invoke(&self, _request: LlmRequest) -> AgentResult<LlmResponse> {
+impl Model for MockClassifyModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        // 分类路径只走 complete()，stream() 不应被调用
+        Err(ModelError::cancelled())
+    }
+
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
         if *self.should_fail.lock().unwrap() {
-            return Err(AgentError::LlmError("mock failure".into()));
+            return Err(ModelError::protocol(ProtocolErrorKind::Provider));
         }
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        Ok(LlmResponse {
-            message: BaseMessage::ai(self.response.lock().unwrap().clone()),
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            request_id: None,
-        })
-    }
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-    fn model_id(&self) -> &str {
-        "mock-classifier"
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text(self.response.lock().unwrap().clone()),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
     }
 }
 
@@ -84,7 +101,7 @@ fn test_cache_key_different_input() {
 #[tokio::test]
 async fn test_classify_allow() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -96,7 +113,7 @@ async fn test_classify_allow() {
 #[tokio::test]
 async fn test_classify_deny() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("DENY")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("DENY")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -108,7 +125,7 @@ async fn test_classify_deny() {
 #[tokio::test]
 async fn test_classify_unsure() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("UNSURE")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("UNSURE")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -120,7 +137,7 @@ async fn test_classify_unsure() {
 #[tokio::test]
 async fn test_classify_garbage_response() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("xyz123")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("xyz123")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -133,7 +150,7 @@ async fn test_classify_garbage_response() {
 async fn test_classify_llm_failure() {
     let mock = MockClassifyModel::new("ALLOW");
     mock.set_should_fail(true);
-    let model = Arc::new(AsyncMutex::new(Box::new(mock) as Box<dyn BaseModel>));
+    let model = Arc::new(AsyncMutex::new(Box::new(mock) as Box<dyn peri_model::Model>));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
         .classify("Bash", &serde_json::json!({"cmd": "ls"}))
@@ -144,7 +161,7 @@ async fn test_classify_llm_failure() {
 #[tokio::test]
 async fn test_cache_hit() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let input = serde_json::json!({"cmd": "ls"});
@@ -157,7 +174,7 @@ async fn test_cache_hit() {
 #[tokio::test]
 async fn test_cache_expiry() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::with_cache_ttl(model, Duration::from_millis(50));
     let input = serde_json::json!({"cmd": "ls"});
@@ -173,7 +190,7 @@ async fn test_cache_expiry() {
 #[tokio::test]
 async fn test_not_allow_should_not_match() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("NOT ALLOW")) as Box<dyn BaseModel>,
+        Box::new(MockClassifyModel::new("NOT ALLOW")) as Box<dyn peri_model::Model>,
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -186,7 +203,7 @@ async fn test_not_allow_should_not_match() {
 #[tokio::test]
 async fn test_disallow_should_not_match() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("DISALLOW")) as Box<dyn BaseModel>,
+        Box::new(MockClassifyModel::new("DISALLOW")) as Box<dyn peri_model::Model>,
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -203,7 +220,7 @@ async fn test_disallow_should_not_match() {
 #[tokio::test]
 async fn test_allow_as_standalone_word() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn BaseModel>
+        Box::new(MockClassifyModel::new("ALLOW")) as Box<dyn peri_model::Model>
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -215,7 +232,7 @@ async fn test_allow_as_standalone_word() {
 #[tokio::test]
 async fn test_i_allow_this() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("I ALLOW THIS")) as Box<dyn BaseModel>,
+        Box::new(MockClassifyModel::new("I ALLOW THIS")) as Box<dyn peri_model::Model>,
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier
@@ -227,7 +244,7 @@ async fn test_i_allow_this() {
 #[tokio::test]
 async fn test_i_deny_this() {
     let model = Arc::new(AsyncMutex::new(
-        Box::new(MockClassifyModel::new("I DENY THIS")) as Box<dyn BaseModel>,
+        Box::new(MockClassifyModel::new("I DENY THIS")) as Box<dyn peri_model::Model>,
     ));
     let classifier = LlmAutoClassifier::new(model);
     let result = classifier

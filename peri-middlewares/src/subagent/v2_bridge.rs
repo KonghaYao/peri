@@ -16,7 +16,6 @@ use peri_agent::{
     },
     error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
     group::pipeline::AgentId,
-    llm::BaseModel,
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     session::{FrozenContext, MessageQueue, Session as V2Session},
@@ -37,7 +36,7 @@ pub struct V2SubagentContext {
 /// 构造 SubAgent v2 上下文（不经过 AcpAgentConfig / build_agent）
 ///
 /// 参数：
-/// - `llm`：SubAgent LLM（RetryableLLM 包装或裸 LLM）
+/// - `llm`：SubAgent LLM（ReactLLM 实现或裸 LLM）
 /// - `chain`：已组装的中间件链
 /// - `tools`：工具列表（Arc<Vec<Arc<dyn BaseTool>>>，可来自 parent_tools）
 /// - `cwd`：工作目录
@@ -62,7 +61,7 @@ pub fn build_v2_subagent_context(
     shared_tools: Option<SharedToolMap>,
     compact_config: Option<CompactConfig>,
     context_budget: Option<ContextBudget>,
-    compact_llm: Option<Arc<dyn BaseModel>>,
+    compact_llm: Option<Arc<dyn peri_model::Model>>,
     error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
     tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 ) -> V2SubagentContext {
@@ -92,7 +91,7 @@ pub fn build_v2_subagent_context(
     //
     // 注意：这是 session 起始身份构建（在 run_react_loop 调用前注入），不是中途纠正，
     // 用 BaseMessage::System 合法（CLAUDE.md TRAP 仅禁止中途纠正用 System）。
-    // 调用 invoke.rs 时 Provider 会把 System hoist 到请求顶层与 LlmRequest.system 合并。
+    // 模型桥接时 Provider 会把 System hoist 到请求顶层，与请求的 system 字段合并。
     if let Some(sp) = system_prompt {
         let mut tx = transcript.write();
         tx.append(BaseMessage::system(sp));

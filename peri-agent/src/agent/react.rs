@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use peri_model::{StopReason, TokenUsage};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    messages::{BaseMessage, MessageContent},
+    agent::events::AgentEventHandler,
+    messages::{BaseMessage, MessageContent, MessageId},
     tools::BaseTool,
 };
 
@@ -136,13 +141,15 @@ pub struct Reasoning {
     /// 原始 LLM 响应消息（含 Reasoning/Text blocks），优先用于存 state
     pub source_message: Option<BaseMessage>,
     /// Token 使用量（来自 LLM 响应，用于 Langfuse Generation 追踪）
-    pub usage: Option<crate::llm::types::TokenUsage>,
+    pub usage: Option<TokenUsage>,
+    /// API 提供商返回的请求 ID。
+    pub request_id: Option<String>,
     /// 生成此推理的模型名称
     pub model: String,
     /// 标记是否已通过事件流式发射过文本（由流式 LLM 适配器设为 true）
     pub streamed: bool,
     /// LLM 响应的停止原因（end_turn / tool_use / max_tokens）
-    pub stop_reason: crate::llm::types::StopReason,
+    pub stop_reason: StopReason,
 }
 
 impl Reasoning {
@@ -153,9 +160,10 @@ impl Reasoning {
             final_answer: None,
             source_message: None,
             usage: None,
+            request_id: None,
             model: String::new(),
             streamed: false,
-            stop_reason: crate::llm::types::StopReason::ToolUse,
+            stop_reason: StopReason::ToolUse,
         }
     }
 
@@ -166,15 +174,26 @@ impl Reasoning {
             final_answer: Some(answer.into()),
             source_message: None,
             usage: None,
+            request_id: None,
             model: String::new(),
             streamed: false,
-            stop_reason: crate::llm::types::StopReason::EndTurn,
+            stop_reason: StopReason::EndTurn,
         }
     }
 
     pub fn needs_tool_call(&self) -> bool {
         !self.tool_calls.is_empty()
     }
+}
+
+/// 流式输出上下文，由 Reason 阶段注入到 ReactLLM。
+#[derive(Clone)]
+pub struct StreamingContext {
+    pub event_handler: Arc<dyn AgentEventHandler>,
+    /// 预生成的 AI 消息 ID，所有增量 TextChunk 关联到此 ID。
+    pub message_id: MessageId,
+    /// 取消令牌：bridge 将其传入底层 Model stream。
+    pub cancel: CancellationToken,
 }
 
 /// ReAct LLM trait
@@ -184,7 +203,7 @@ pub trait ReactLLM: Send + Sync {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
-        streaming: Option<crate::llm::types::StreamingContext>,
+        streaming: Option<StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning>;
 
     /// 返回当前模型名称（用于 Langfuse Generation 追踪）
@@ -197,23 +216,26 @@ pub trait ReactLLM: Send + Sync {
         200_000
     }
 
-    /// 注入事件处理器（用于 RetryableLLM 等装饰器转发 LlmRetrying 等事件）。
-    /// 默认空实现——非 RetryableLLM 的 LLM 无需此能力。
+    /// 注入事件处理器（用于 LlmRetrying 等事件转发到 AgentEventHandler）。
+    /// 默认空实现——大多数 LLM 实现无需此能力。
     fn inject_event_handler(
         &mut self,
         _handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
     ) {
     }
 
-    /// 构造 Provider 实际请求体（raw body），用于 Langfuse Generation input 上传。
+    /// 返回由安全 `PreparedModelRequest` 投影出的 Provider 请求体，用于受控观测。
     ///
-    /// 默认返回 None，Langfuse tracer fallback 到 messages+tools 抽象序列化。
-    /// Provider 适配器包装（[`crate::llm::BaseModelReactLLM`]）override 本方法，
-    /// 委托给 `BaseModel::build_request_body`，返回 Provider-native 完整请求体
-    /// （含正确工具格式和 system 位置）。
-    ///
-    /// `messages` / `tools` 与 `generate_reasoning` 同源——caller 在 reason stage
-    /// 同时调用两者，确保 raw body 与实际 invoke 请求体完全一致。
+    /// 此方法绝不返回 headers 或认证信息。默认实现返回 None。
+    fn observed_provider_request_body(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// 构造 Provider 实际请求体（raw body）。
     fn build_provider_request_body(
         &self,
         _messages: &[BaseMessage],
@@ -236,7 +258,7 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
-        streaming: Option<crate::llm::types::StreamingContext>,
+        streaming: Option<StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning> {
         (**self)
             .generate_reasoning(messages, tools, streaming)
@@ -256,6 +278,14 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
         handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
     ) {
         (**self).inject_event_handler(handler);
+    }
+
+    fn observed_provider_request_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> Option<serde_json::Value> {
+        (**self).observed_provider_request_body(messages, tools)
     }
 
     fn build_provider_request_body(

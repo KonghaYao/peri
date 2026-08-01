@@ -290,7 +290,7 @@ struct TurnConfig<'a> {
     permission_mode: &'a Arc<peri_middlewares::prelude::SharedPermissionMode>,
     broker: &'a Arc<dyn UserInteractionBroker>,
     session_start_source: Option<String>,
-    auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     effective_context_window: u32,
 }
 
@@ -414,7 +414,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             None
         }
     };
-    let auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
+    let auxiliary_model: Option<Arc<dyn peri_model::Model>> = if disable_compact {
         None
     } else {
         cached_llm
@@ -958,7 +958,7 @@ pub enum PredictionError {
 /// Facade：基于现有对话历史预测用户下一步输入。
 ///
 /// 此函数封装了 TUI 之前在 `acp_server/mod.rs` 内联的 Prediction 构造逻辑
-/// （`BaseModelReactLLM::new` + `RetryableLLM::new`，直接调 `generate_reasoning`），
+/// （`AgentModelBridge::new` + `ReactLLM::generate_reasoning` 一次调用），
 /// 避免违反 CLAUDE.md [TRAP]：
 ///
 /// > Agent 构建和执行统一通过 `peri_acp::session::executor::run_session_loop()`。
@@ -979,8 +979,8 @@ pub async fn execute_prediction(
     );
 
     // 直接复用已构建的 LlmProvider（绕过 from_config）
-    let base_llm = peri_agent::llm::BaseModelReactLLM::new(provider.into_model());
-    let llm = peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default());
+    let llm =
+        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(provider.into_model()));
 
     // execute_prediction 是 1-turn 无工具无中间件的最小 LLM 调用，
     // 不需要构造完整 v2 stages。直接构造 messages 调

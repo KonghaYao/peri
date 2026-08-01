@@ -1,4 +1,4 @@
-use crate::llm::types::TokenUsage;
+use peri_model::TokenUsage;
 
 /// 会话级 token 用量追踪器
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -15,8 +15,6 @@ pub struct TokenTracker {
     pub last_usage: Option<TokenUsage>,
     /// 已完成的 LLM 调用次数
     pub llm_call_count: u32,
-    /// 最近一次 LLM 响应的 API request ID
-    pub last_request_id: Option<String>,
     /// 每次 LLM 请求的 token 用量历史（仅内存，不持久化）
     #[serde(skip)]
     pub request_history: Vec<RequestRecord>,
@@ -51,7 +49,6 @@ impl TokenTracker {
             self.last_usage = Some(usage.clone());
         }
         self.llm_call_count += 1;
-        self.last_request_id = usage.request_id.clone();
         // 工具结果 token 已被本轮 input_tokens 包含（作为 tool_result 消息），清零避免双计
         self.estimated_tool_tokens_since_last_llm = 0;
     }

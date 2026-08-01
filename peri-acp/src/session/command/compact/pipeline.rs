@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use peri_agent::{
     agent::{compact_v2, compact_v2::CompactConfig, AgentCancellationToken},
-    llm::BaseModel,
     messages::BaseMessage,
     session::transcript::MessageTranscript,
 };
@@ -89,7 +88,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let compact_config = load_compact_config(&peri_config);
 
     // 阶段 3: 解析 auxiliary model
-    let auxiliary_model: Arc<dyn BaseModel> = match auxiliary_model {
+    let auxiliary_model: Arc<dyn peri_model::Model> = match auxiliary_model {
         Some(m) => m,
         None => {
             warn!("compact: 无可用模型");
@@ -276,7 +275,7 @@ enum CancelOrError {
 #[allow(clippy::too_many_arguments)]
 async fn run_v2_compact_with_cancel(
     transcript: &mut MessageTranscript,
-    model: &dyn BaseModel,
+    model: &dyn peri_model::Model,
     config: &CompactConfig,
     cwd: &str,
     cancel_token: &AgentCancellationToken,

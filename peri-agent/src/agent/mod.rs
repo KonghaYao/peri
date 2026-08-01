@@ -9,6 +9,7 @@ pub mod events_v2;
 pub mod events_v2_mapper;
 #[doc(hidden)]
 pub mod langfuse_bridge;
+pub mod model_bridge;
 pub mod react;
 pub mod session;
 pub mod stages;

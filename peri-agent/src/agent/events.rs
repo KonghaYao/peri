@@ -272,9 +272,11 @@ pub enum ExecutorEvent {
         step: usize,
         model: String,
         output: String,
-        usage: Option<crate::llm::types::TokenUsage>,
+        usage: Option<peri_model::TokenUsage>,
         /// LLM 响应停止原因（None 表示 LLM 调用失败/异常）
-        stop_reason: Option<crate::llm::types::StopReason>,
+        stop_reason: Option<peri_model::StopReason>,
+        /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
+        request_id: Option<String>,
     },
     /// 上下文窗口使用警告（阈值触发时发出）
     ContextWarning {

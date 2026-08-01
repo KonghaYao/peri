@@ -82,7 +82,7 @@ fn test_invalidate_clears_subagent_cache() {
     // 模拟 subagent_llm_cache 中有数据
     pool.subagent_llm_cache.insert(
         "OpenAI:gpt-4o".to_string(),
-        Arc::new(mock_base_model("gpt-4o")),
+        Arc::new(mock_model("gpt-4o")) as Arc<dyn peri_model::Model>,
     );
     assert!(!pool.subagent_llm_cache.is_empty());
 
@@ -98,20 +98,22 @@ fn test_subagent_cache_miss_creates_new() {
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     // 首次查询 → 缓存未命中 → 创建新实例
     let model = AgentPool::get_or_create_subagent_llm(&pool, "OpenAI:gpt-4o", || {
-        Box::new(mock_base_model("gpt-4o"))
+        Box::new(mock_model("gpt-4o"))
     });
-    assert_eq!(model.model_id(), "gpt-4o");
-    assert_eq!(model.provider_name(), "Mock");
+    let prepared = model
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("mock prepare_request 可成功");
+    assert_eq!(prepared.model_id(), "gpt-4o");
 }
 
 #[test]
 fn test_subagent_cache_hit_returns_same() {
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let m1 = AgentPool::get_or_create_subagent_llm(&pool, "OpenAI:gpt-4o", || {
-        Box::new(mock_base_model("gpt-4o"))
+        Box::new(mock_model("gpt-4o"))
     });
     let m2 = AgentPool::get_or_create_subagent_llm(&pool, "OpenAI:gpt-4o", || {
-        Box::new(mock_base_model("gpt-4o"))
+        Box::new(mock_model("gpt-4o"))
     });
     // 相同 fingerprint → 返回同一个 Arc（ptr_eq）
     assert!(Arc::ptr_eq(&m1, &m2));
@@ -121,12 +123,22 @@ fn test_subagent_cache_hit_returns_same() {
 fn test_subagent_cache_different_fingerprint_isolation() {
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let m1 = AgentPool::get_or_create_subagent_llm(&pool, "OpenAI:gpt-4o", || {
-        Box::new(mock_base_model("gpt-4o"))
+        Box::new(mock_model("gpt-4o"))
     });
     let m2 = AgentPool::get_or_create_subagent_llm(&pool, "OpenAI:gpt-4o-mini", || {
-        Box::new(mock_base_model("gpt-4o-mini"))
+        Box::new(mock_model("gpt-4o-mini"))
     });
-    assert_ne!(m1.model_id(), m2.model_id());
+    let id1 = m1
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("mock prepare_request 可成功")
+        .model_id()
+        .to_string();
+    let id2 = m2
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("mock prepare_request 可成功")
+        .model_id()
+        .to_string();
+    assert_ne!(id1, id2);
     assert!(!Arc::ptr_eq(&m1, &m2));
 }
 
@@ -234,38 +246,62 @@ fn test_fingerprint_thinking_disabled_equals_none() {
     assert_eq!(fingerprint(&none), fingerprint(&disabled));
 }
 
-// 简单的 mock BaseModel 用于测试
-fn mock_base_model(name: &str) -> impl BaseModel {
+// 简单的 mock Model 用于测试
+fn mock_model(name: &str) -> impl peri_model::Model {
     use async_trait::async_trait;
-    use peri_agent::{
-        llm::{LlmRequest, LlmResponse, StopReason},
-        messages::BaseMessage,
+    use peri_model::{
+        ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+        ModelStream, PreparedModelRequest, ProviderProtocol, StopReason,
     };
+    use tokio_util::sync::CancellationToken;
 
     struct MockModel {
         name: String,
     }
 
     #[async_trait]
-    impl BaseModel for MockModel {
-        async fn invoke(
+    impl peri_model::Model for MockModel {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                supports_tools: false,
+                supports_reasoning: false,
+                supports_vision: false,
+                supports_streaming: true,
+            }
+        }
+
+        fn prepare_request(&self, _request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+            PreparedModelRequest::observe(
+                ProviderProtocol::Other {
+                    value: "mock".to_string(),
+                },
+                self.name.clone(),
+                url::Url::parse("https://mock.example/v1").expect("静态 URL"),
+                serde_json::json!({}),
+                std::collections::BTreeMap::new(),
+            )
+        }
+
+        async fn stream(
             &self,
-            _request: LlmRequest,
-        ) -> peri_agent::error::AgentResult<LlmResponse> {
-            Ok(LlmResponse {
-                message: BaseMessage::ai("mock response"),
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-                request_id: None,
-            })
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelResult<ModelStream> {
+            // 缓存身份测试只走 prepare_request，stream() 不应被调用
+            Err(ModelError::cancelled())
         }
 
-        fn model_id(&self) -> &str {
-            &self.name
-        }
-
-        fn provider_name(&self) -> &str {
-            "Mock"
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelResult<ModelResponse> {
+            Ok(ModelResponse::new(
+                ModelMessage::assistant_text("mock response"),
+                StopReason::EndTurn,
+                None,
+                None,
+            )?)
         }
     }
 

@@ -10,7 +10,6 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 dirs-next.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -23,10 +22,11 @@ tracing-appender.workspace = true
 tokio-util.workspace = true
 sqlx = { workspace = true }
 parking_lot.workspace = true
+peri-model = { path = "../peri-model" }
 sysinfo.workspace = true
-rand = "0.10"
 fuzzy-matcher = "0.3"
 
 [dev-dependencies]
 libc = "0.2"
 tempfile.workspace = true
+url.workspace = true

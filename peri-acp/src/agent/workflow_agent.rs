@@ -15,11 +15,11 @@ use peri_agent::{
     agent::{
         compact_v2::CompactConfig,
         events::{AgentEventHandler, ExecutorEvent, FnEventHandler},
+        model_bridge::AgentModelBridge,
         token::ContextBudget,
         AgentCancellationToken,
     },
     interaction::UserInteractionBroker,
-    llm::{BaseModel, BaseModelReactLLM, RetryConfig, RetryableLLM},
 };
 use peri_middlewares::middleware::TodoMiddleware;
 use peri_middlewares::{
@@ -71,7 +71,7 @@ pub struct WorkflowAgentContext {
     pub frozen_language: Option<String>,
 
     // GAP-13: AgentPool LLM 缓存（复用 reqwest::Client，~1-2 MB/实例）。
-    // None = 每次创建新 BaseModel（当前行为，向后兼容）。
+    // None = 每次创建新 Model（当前行为，向后兼容）。
     pub agent_pool: Option<Arc<parking_lot::Mutex<AgentPool>>>,
 
     /// PeriConfig（用于 model alias 解析，如 haiku/sonnet/opus → 真实模型名）。
@@ -300,25 +300,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .with_auto_compact_threshold(cc.auto_compact_threshold)
                 .with_warning_threshold(cc.micro_compact_threshold)
         });
-        let compact_llm: Option<Arc<dyn BaseModel>> = if compact_config.is_some() {
+        let compact_llm: Option<Arc<dyn peri_model::Model>> = if compact_config.is_some() {
             Some(Arc::from(effective_provider.clone().into_model()))
         } else {
             None
         };
 
-        let base_model: Arc<dyn peri_agent::llm::BaseModel> =
-            if let Some(ref pool) = self.ctx.agent_pool {
-                let fp = format!(
-                    "{}:{}",
-                    effective_provider.display_name(),
-                    effective_provider.model_name()
-                );
-                AgentPool::get_or_create_subagent_llm(pool, &fp, || {
-                    effective_provider.clone().into_model()
-                })
-            } else {
-                Arc::from(effective_provider.into_model())
-            };
+        let base_model: Arc<dyn peri_model::Model> = if let Some(ref pool) = self.ctx.agent_pool {
+            let fp = format!(
+                "{}:{}",
+                effective_provider.display_name(),
+                effective_provider.model_name()
+            );
+            AgentPool::get_or_create_subagent_llm(pool, &fp, || {
+                effective_provider.clone().into_model()
+            })
+        } else {
+            Arc::from(effective_provider.into_model())
+        };
 
         // 2. 注册工具
         let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
@@ -440,17 +439,13 @@ impl AgentExecutor for WorkflowAgentExecutor {
             format!("{system_prompt}\n\n{contributions}")
         };
 
-        // 构造 BaseModelReactLLM（现在 system_prompt 已就绪）
+        // 构造 AgentModelBridge（现在 system_prompt 已就绪）
         let mut base_llm =
-            BaseModelReactLLM::from_arc(base_model).with_system(system_prompt.clone());
+            AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
         if let Some(ref sid) = self.ctx.session_id {
             base_llm = base_llm.with_session_id(sid);
         }
-        let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(
-            RetryableLLM::new(base_llm, RetryConfig::default())
-                .with_event_handler(Arc::clone(&event_handler))
-                .with_cancel_token(cancel_token.clone()),
-        );
+        let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
 
         // error_suggest wiring（与 SubAgentBuilder.with_error_suggest() 等价）
         let all_tool_names: Vec<String> = tools_arc.iter().map(|t| t.name().to_string()).collect();

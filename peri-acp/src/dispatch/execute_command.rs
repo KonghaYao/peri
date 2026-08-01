@@ -38,7 +38,7 @@ pub async fn execute_command(
     cwd: &str,
     peri_config: &std::sync::Arc<crate::provider::PeriConfig>,
     event_sink: &std::sync::Arc<dyn crate::session::event_sink::EventSink>,
-    auxiliary_model: Option<std::sync::Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: Option<std::sync::Arc<dyn peri_model::Model>>,
     cancel_token: &peri_agent::agent::AgentCancellationToken,
     thread_store: Option<std::sync::Arc<dyn peri_agent::thread::ThreadStore>>,
     thread_id: Option<String>,

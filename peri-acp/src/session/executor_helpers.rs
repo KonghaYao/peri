@@ -40,7 +40,6 @@ use peri_agent::{
     },
     error::AgentError,
     goal::GoalController,
-    llm::BaseModel,
     messages::{BaseMessage, MessageContent},
 };
 use peri_middlewares::{agent_define::AgentOverrides, subagent::BackgroundTaskRegistry};
@@ -72,7 +71,7 @@ pub(super) struct InterceptRequest<'a> {
     // ── 运行时服务 ──
     pub(super) peri_config: &'a Arc<crate::provider::PeriConfig>,
     pub(super) event_sink: &'a Arc<dyn EventSink>,
-    pub(super) auxiliary_model: &'a Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    pub(super) auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub(super) bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     pub(super) bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
@@ -357,7 +356,7 @@ pub(super) async fn build_and_execute_agent_v2(
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
     child_handler_factory: Option<crate::agent::builder::ChildHandlerFactory>,
-    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: crate::agent::builder::ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
     background_registry: Option<Arc<BackgroundTaskRegistry>>,

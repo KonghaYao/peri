@@ -268,7 +268,11 @@ fn test_observe_llm_call_end_maps_with_usage() {
     };
     match observe_event_to_executor(o).unwrap() {
         ExecutorEvent::LlmCallEnd {
-            usage, model, step, ..
+            usage,
+            model,
+            step,
+            request_id,
+            ..
         } => {
             let u = usage.expect("应有 usage");
             assert_eq!(u.input_tokens, 500);
@@ -283,9 +287,13 @@ fn test_observe_llm_call_end_maps_with_usage() {
                 Some(400),
                 "cache_read 必须从 v2 透传到 v1（v2 重做回归）"
             );
-            assert_eq!(u.request_id.as_deref(), Some("req-abc"));
             assert_eq!(model, "claude-sonnet-4");
             assert_eq!(step, 7, "step 字段应从 v2 透传到 v1（非 0）");
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-abc"),
+                "request_id 必须从 v2 透传到 v1，不得随 usage 迁移丢失"
+            );
         }
         _ => panic!("应为 LlmCallEnd"),
     }

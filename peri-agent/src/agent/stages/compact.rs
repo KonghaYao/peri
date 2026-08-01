@@ -106,11 +106,11 @@ pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<Compa
         tracing::trace!(step, budget_pct = %pct, action = ?compact_action, "Compact 预算检查");
 
         // 调用 compact_v2：取出 transcript 所有权，运行后放回（避免跨 await 持锁）
-        let compact_llm_ref: Option<&dyn crate::llm::BaseModel> = ctx
+        let compact_llm_ref: Option<&dyn peri_model::Model> = ctx
             .compact
             .compact_llm
             .as_ref()
-            .map(|arc| arc.as_ref() as &dyn crate::llm::BaseModel);
+            .map(|arc| arc.as_ref() as &dyn peri_model::Model);
 
         let mut transcript_owned = {
             let mut guard = ctx.session.transcript.write();

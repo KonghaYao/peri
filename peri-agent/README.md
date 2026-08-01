@@ -23,7 +23,7 @@ run_react_loop（peri-agent::agent::stages）
 
 ```rust,ignore
 use peri_agent::prelude::*;
-use peri_agent::agent::stages::{run_react_loop, StageContext};
+use peri_agent::agent::stages::{run_react_loop, StageContext, NullReactLLM};
 use std::sync::Arc;
 use parking_lot::RwLock;
 
@@ -31,10 +31,8 @@ use parking_lot::RwLock;
 async fn main() -> anyhow::Result<()> {
     let _guard = peri_agent::telemetry::init_tracing("my-agent");
 
-    // 1. 构造 LLM（BaseModel → ReactLLM 适配）
-    let llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(BaseModelReactLLM::new(
-        Box::new(MockLLM::always_answer("任务完成")),
-    ));
+    // 1. 构造 LLM（实现 ReactLLM trait，示例用 NullReactLLM 占位）
+    let llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(NullReactLLM);
 
     // 2. 构造 middleware chain（示例：仅 LoggingMiddleware）
     let mut chain = MiddlewareChain::new();

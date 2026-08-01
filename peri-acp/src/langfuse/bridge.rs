@@ -14,9 +14,9 @@ use peri_agent::agent::events::{
     CompactStrategy, CompactTrigger, ExecutorEvent, MiddlewareHook, Stage, StageStatus,
 };
 use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
-use peri_agent::llm::types::TokenUsage;
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
+use peri_model::TokenUsage;
 use tracing;
 
 use crate::langfuse::tracer::stages::StageHandle;
@@ -390,7 +390,6 @@ impl UnifiedLangfuseEvent {
                 output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
-                request_id,
                 ..
             } => {
                 let usage = TokenUsage {
@@ -406,8 +405,6 @@ impl UnifiedLangfuseEvent {
                     } else {
                         None
                     },
-                    request_id,
-                    first_token_time: None,
                 };
                 Some(UnifiedLangfuseEvent::LlmCallEnd {
                     step,

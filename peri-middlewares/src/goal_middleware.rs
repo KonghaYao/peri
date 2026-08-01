@@ -24,7 +24,7 @@ use crate::goal::GoalTool;
 pub struct GoalMiddleware {
     controller: Arc<dyn peri_agent::goal::GoalController>,
     /// 辅助 LLM（complete 验证用），None 时跳过验证
-    auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     /// 连续 after_agent 注入次数（递增紧迫感用）
     pending_rounds: AtomicUsize,
 }
@@ -32,7 +32,7 @@ pub struct GoalMiddleware {
 impl GoalMiddleware {
     pub fn new(
         controller: Arc<dyn peri_agent::goal::GoalController>,
-        auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+        auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     ) -> Self {
         Self {
             controller,

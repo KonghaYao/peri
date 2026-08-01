@@ -1,6 +1,6 @@
 use peri_agent::{
     agent::{
-        react::{ReactLLM, Reasoning},
+        react::{ReactLLM, Reasoning, StreamingContext},
         state::AgentState,
     },
     messages::BaseMessage,
@@ -18,7 +18,7 @@ impl ReactLLM for EchoLLM {
         &self,
         messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
-        _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        _streaming: Option<StreamingContext>,
     ) -> peri_agent::error::AgentResult<Reasoning> {
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
         Ok(Reasoning::with_answer("", format!("echo: {}", last)))

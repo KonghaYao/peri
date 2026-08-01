@@ -98,7 +98,7 @@ async fn test_reason_with_null_llm_returns_interrupted() {
 
 #[tokio::test]
 async fn test_reason_captures_message_snapshot() {
-    // 使用自定义 MockLLM 测试 snapshot
+    // 使用自定义 Mock LLM 测试 snapshot
     let ctx = make_context();
     ctx.session
         .transcript

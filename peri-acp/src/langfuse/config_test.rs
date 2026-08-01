@@ -27,6 +27,7 @@ fn test_default_config() {
 }
 
 #[test]
+#[serial]
 fn test_load_with_settings_defaults() {
     clear_langfuse_env();
     let cfg = LangfuseConfig::load_with_settings(&serde_json::json!({}));
