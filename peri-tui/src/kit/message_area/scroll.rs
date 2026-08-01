@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::atoms::TUI_CONFIG_HANDLE;
+use crate::kit::atoms::{POPUP_KIND, TUI_CONFIG_HANDLE};
 use crate::kit::focus_router;
 use crate::kit::text_selection::TextSelection;
 use ratatui_kit::components::ScrollViewState;
@@ -245,6 +245,11 @@ pub(super) fn handle_event(
     }
 
     if let Event::Mouse(mouse) = &event {
+        // 弹窗激活时不处理鼠标——放行给弹窗 handler（如模型快速切换弹窗覆盖
+        // 消息区时，点击行必须由弹窗消费，否则这里会先 Consumed 吃掉事件）。
+        if POPUP_KIND.state().read().is_some() {
+            return EventResult::Ignored;
+        }
         // 光标移动无操作——提前返回，不触发任何 state 写入或渲染
         if matches!(mouse.kind, MouseEventKind::Moved) {
             return EventResult::Ignored;

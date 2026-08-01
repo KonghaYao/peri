@@ -38,6 +38,8 @@ pub enum PopupKind {
     Confirm,
     /// 下载进度弹窗（主题下载）
     Download,
+    /// 状态栏模型段点击弹出的 alias 快速切换弹窗
+    ModelQuickSwitch,
 }
 
 pub type Handle<T> = AtomState<T>;
@@ -73,6 +75,8 @@ pub struct ServiceSnapshot {
     pub provider_name: String,
     pub model_alias: String,
     pub model_name: String,
+    /// 当前 active profile 的推理力度（low/medium/high/xhigh/max）
+    pub effort: String,
     pub permission_mode: String,
     pub memory_mb: u64,
     pub cpu_percent: f32,
@@ -237,6 +241,10 @@ pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
 pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 模型快速切换弹窗锚点（屏幕坐标：状态栏模型段起点 (x, y)）。
+/// StatusBarRow1 在 open_popup(ModelQuickSwitch) 前写入，弹窗组件读取后
+/// 自定位到锚点上方（非居中大弹窗）。
+pub static MODEL_SWITCH_ANCHOR: AtomStatic<Option<(u16, u16)>> = AtomStatic::new(|| None);
 
 pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);

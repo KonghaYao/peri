@@ -37,5 +37,6 @@ pub mod ask_user_popup;
 pub mod confirm_popup;
 pub mod download_progress;
 pub mod hitl_popup;
+pub mod model_quick_switch;
 pub mod oauth_popup;
 pub mod rewind_popup;

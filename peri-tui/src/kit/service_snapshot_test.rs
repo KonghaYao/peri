@@ -112,11 +112,13 @@ async fn test_derive_provider_and_model_default() {
     let peri_config = Arc::new(parking_lot::RwLock::new(
         crate::config::PeriConfig::default(),
     ));
-    let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
     // 默认 AppConfig:
     assert!(provider.is_empty());
     assert!(alias.is_empty());
     assert!(model_name.is_empty());
+    // 无 active profile 时 effort 回退默认档位
+    assert_eq!(effort, "xhigh");
 }
 
 #[tokio::test]
@@ -129,6 +131,7 @@ async fn test_derive_provider_and_model_set() {
             profiles: {
                 let mut profiles = crate::config::Profiles::default();
                 profiles.get_mut("sonnet").unwrap().provider = "p1".into();
+                profiles.get_mut("sonnet").unwrap().effort = "high".into();
                 profiles
             },
             providers: vec![ProviderConfig {
@@ -146,10 +149,12 @@ async fn test_derive_provider_and_model_set() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "sonnet");
     assert_eq!(model_name, "claude-sonnet-4-20250514");
+    // sonnet profile 显式设置 effort = high
+    assert_eq!(effort, "high");
 }
 
 #[tokio::test]
@@ -178,11 +183,12 @@ async fn test_derive_provider_and_model_set_empty_model() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "haiku");
     // Some("") 应被 filter 掉，回退到 active_alias
     assert_eq!(model_name, "haiku");
+    assert_eq!(effort, "xhigh");
 }
 
 #[tokio::test]
@@ -207,11 +213,12 @@ async fn test_derive_provider_and_model_no_models_fallback() {
         ..Default::default()
     };
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
-    let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
+    let (provider, alias, model_name, effort) = derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
     assert_eq!(alias, "haiku");
     // 无模型映射时回退到 active_alias
     assert_eq!(model_name, "haiku");
+    assert_eq!(effort, "xhigh");
 }
 
 #[test]

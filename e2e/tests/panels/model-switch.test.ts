@@ -6,7 +6,7 @@
  * - 右侧：当前 profile 的 K/V 编辑行，→ 进入右侧焦点，←/→ 切换字段值并立即写入；
  * - Model / Effort 字段切换后值必须真的变化（确定性断言，回归保护）；
  * - Esc 退出右侧焦点后再次 Esc 关闭面板；
- * - 状态栏中的 provider/model 随 active profile 更新。
+ * - 状态栏中的 alias/model/effort 随 active profile 更新。
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
@@ -140,12 +140,12 @@ describe("panels: model switch", () => {
       expect(effortAfter).not.toBeNull();
       expect(effortAfter).not.toBe(effortBefore);
 
-      // LLM judge: 关闭后状态栏验证（正向断言：状态栏反映切换后的 provider/model）
+      // LLM judge: 关闭后状态栏验证（正向断言：状态栏反映切换后的 alias/model/effort）
       const doneResult = await judge({
         ansiRaw: capture.raw,
         criteria: [
-          "屏幕底部状态栏应显示 provider/model 信息（如 'openai/xxx' 或 'anthropic/xxx' 格式）",
-          "状态栏的 model 部分应与切换后的 active profile 一致，不应仍是默认值",
+          "屏幕底部状态栏应显示 'alias model effort' 三段式信息（如 'opus xxx high' 或 'sonnet xxx medium' 格式，alias 为 fable/opus/sonnet/haiku 之一）",
+          "状态栏的 alias 部分应与切换后的 active profile 一致，不应仍是默认值",
         ],
       });
       console.log("Judge (done):", JSON.stringify(doneResult, null, 2));

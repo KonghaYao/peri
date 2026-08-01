@@ -127,7 +127,8 @@ async fn tick_once(
     };
 
     // ── 2. provider/model 从 peri_config 派生 ──────────────────────────
-    let (provider_name, model_alias, model_name) = derive_provider_and_model(&src.peri_config);
+    let (provider_name, model_alias, model_name, effort) =
+        derive_provider_and_model(&src.peri_config);
 
     // ── 3. permission_mode ─────────────────────────────────────────────
     let permission_mode = permission_mode_label(src.permission_mode.load());
@@ -222,6 +223,7 @@ async fn tick_once(
         provider_name,
         model_alias,
         model_name,
+        effort,
         permission_mode: permission_mode.to_string(),
         memory_mb,
         cpu_percent: cpu_percent.round(),
@@ -395,7 +397,12 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
 /// 从 PeriConfig 派生 (provider_type, active_alias, model_name)。
 /// model_name 优先取 Profile.model；其次 provider.models.get_model(alias)；
 /// 若都为空，回退到 active_alias。
-fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String) {
+/// 从 peri_config 派生 (provider_type, active_alias, model_name, effort)。
+///
+/// 全部取自 active Profile：provider 类型（Profile.provider 指向的 provider，
+/// 空则回退第一个 provider）、alias、模型名（Profile.model > ProviderModels 映射
+/// > alias 本身）、effort（Profile.effort，缺省 "xhigh"）。
+fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String, String) {
     let cfg = peri_config.read();
     let active_alias = cfg.config.active_alias.clone();
     let profile = cfg.config.profiles.get(&active_alias);
@@ -429,7 +436,12 @@ fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String,
             .unwrap_or_else(|| active_alias.clone())
     };
 
-    (provider_type, active_alias, model_name)
+    let effort = profile
+        .map(|pf| pf.effort.clone())
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "xhigh".to_string());
+
+    (provider_type, active_alias, model_name, effort)
 }
 
 /// 从 peri_config 动态派生 provider 列表——PROVIDER_LIST atom 的数据源。

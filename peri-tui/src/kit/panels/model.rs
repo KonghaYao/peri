@@ -34,7 +34,8 @@ use unicode_width::UnicodeWidthStr;
 // ---------------------------------------------------------------------------
 
 /// 固定四档（顺序即显示顺序：fable → opus → sonnet → haiku）
-const PROFILE_KEYS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+/// pub(crate)：状态栏模型快速切换弹窗（model_quick_switch.rs）复用同一顺序。
+pub(crate) const PROFILE_KEYS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
 /// Effort 五级
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -344,7 +345,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 }
 
 /// 切换左侧光标指向的档位为 active profile（立即写入 + 持久化 + 推送 ACP）。
-fn switch_active_alias(idx: usize) {
+/// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
+pub(crate) fn switch_active_alias(idx: usize) {
     let Some(key) = PROFILE_KEYS.get(idx) else {
         return;
     };
@@ -364,6 +366,12 @@ fn switch_active_alias(idx: usize) {
     let mut svc_snap = s_handle.read().clone();
     svc_snap.model_alias = key.to_string();
     svc_snap.model_name = resolved_name;
+    svc_snap.effort = snap
+        .config
+        .profiles
+        .get(key)
+        .map(|p| p.effort.clone())
+        .unwrap_or_else(|| "xhigh".to_string());
     *s_handle.write() = svc_snap;
     *MODEL_HIGHLIGHT_UNTIL.state().write() = Some(Instant::now() + Duration::from_secs(2));
     // 推送配置到 ACP 服务端，使 alias 切换立即生效
@@ -521,6 +529,12 @@ fn edit_field(alias: String, field: usize, forward: bool) {
     let mut svc = s_handle.read().clone();
     if alias == snap.config.active_alias {
         svc.model_name = resolved;
+        svc.effort = snap
+            .config
+            .profiles
+            .get(&alias)
+            .map(|p| p.effort.clone())
+            .unwrap_or_else(|| "xhigh".to_string());
         let provider_type = snap
             .config
             .profiles

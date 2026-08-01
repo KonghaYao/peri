@@ -23,7 +23,7 @@
 use crate::kit::atoms::{self, DownloadProgressPayload, PopupKind};
 use crate::kit::popups::{
     confirm_popup::ConfirmPopup, download_progress::DownloadProgressPopup, hitl_popup::HitlPopup,
-    oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
+    model_quick_switch::ModelQuickSwitchPopup, oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
 };
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
@@ -46,6 +46,9 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(PopupKind::Download) => {
             render_popup(element!(DownloadProgressPopup()).into(), term_w, term_h)
         }
+        // 小弹出层：组件内部按 MODEL_SWITCH_ANCHOR 自定位（锚定在状态栏模型段上方），
+        // 不走居中 render_popup。
+        Some(PopupKind::ModelQuickSwitch) => element!(ModelQuickSwitchPopup()).into(),
         None => render_empty(),
     }
 }
@@ -108,6 +111,8 @@ pub fn close_popup() -> Option<PopupKind> {
             PopupKind::Download => {
                 *atoms::DOWNLOAD_PROGRESS.state().write() = DownloadProgressPayload::default()
             }
+            // ModelQuickSwitch 无 payload atom（数据即读自 PERI_CONFIG_HANDLE）
+            PopupKind::ModelQuickSwitch => {}
         }
     }
     prev

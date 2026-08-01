@@ -526,6 +526,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             ratatui_kit::prelude::EventPriority::High,
             move |event| {
                 if let Event::Mouse(mouse) = event {
+                    // 弹窗激活时不处理鼠标——放行给弹窗 handler（如模型快速切换弹窗
+                    // 锚定在状态栏上方、覆盖输入区时，点击弹窗行必须由弹窗消费）。
+                    if POPUP_KIND.state().read().is_some() {
+                        return EventResult::Ignored;
+                    }
                     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                         return EventResult::Ignored;
                     }

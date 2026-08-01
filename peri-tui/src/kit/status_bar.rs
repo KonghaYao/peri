@@ -7,12 +7,14 @@
 
 use crate::i18n;
 use crate::kit::atoms;
+use crate::kit::popup_overlay::open_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
+    crossterm::event::{Event, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::{Alignment, Constraint, Direction, Flex},
+        layout::{Alignment, Constraint, Direction, Flex, Rect},
         style::{Modifier, Style, Stylize},
         text::{Line, Span},
         widgets::{Paragraph, Wrap},
@@ -33,8 +35,9 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let snap = snap.read().clone();
     let now = Instant::now();
-    let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now);
-    let provider_highlighted = provider_hl.read().as_ref().is_some_and(|t| *t > now);
+    // provider 不单独显示；provider 或 model 任一变化都让模型段闪烁提醒
+    let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now)
+        || provider_hl.read().as_ref().is_some_and(|t| *t > now);
     let mode_highlighted = mode_hl.read().as_ref().is_some_and(|t| *t > now);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -57,29 +60,35 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Style::default().fg(statusbar().muted),
     ));
 
-    // 3. provider/model —— 整体统一样式
-    let model_display = if !snap.model_name.is_empty() {
-        &snap.model_name
-    } else if !snap.model_alias.is_empty() {
-        &snap.model_alias
-    } else {
-        ""
-    };
-
-    if !snap.provider_name.is_empty() && !model_display.is_empty() {
+    // 3. alias model effort —— 档位名 + 模型名 + 推理力度
+    // 由 model_segment_parts 做去重：alias 与模型名相同时只显示一次；
+    // 模型名尾部已含 effort 后缀（如 "gpt-5.6-luna high"）时不重复追加。
+    // model_start/model_end 记录模型段在 spans 中的索引范围，供鼠标点击区域计算。
+    let model_parts = model_segment_parts(&snap.model_alias, &snap.model_name, &snap.effort);
+    let mut model_start = None;
+    let mut model_end = 0usize;
+    if !model_parts.is_empty() {
+        model_start = Some(spans.len());
         spans.push(separator());
-        let mut style = Style::default().fg(THEME_ATOM.state().read().semantic.accent);
-        if provider_highlighted && model_highlighted {
-            style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
-        } else if provider_highlighted {
-            style = style.add_modifier(Modifier::BOLD);
-        } else if model_highlighted {
-            style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
+        let theme = THEME_ATOM.state().read().semantic;
+        // 末段是 effort 时拆分为独立 span，但样式与模型名一致（model_info 色，不另用 effort 色）
+        let (head, effort_part) =
+            if model_parts.len() >= 2 && model_parts.last().is_some_and(|p| p == &snap.effort) {
+                let mut h = model_parts.clone();
+                let e = h.pop().unwrap();
+                (h, Some(e))
+            } else {
+                (model_parts, None)
+            };
+        let mut model_style = Style::default().fg(theme.model_info);
+        if model_highlighted {
+            model_style = model_style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         }
-        spans.push(Span::styled(
-            format!(" {}/{}", snap.provider_name, model_display),
-            style,
-        ));
+        spans.push(Span::styled(head.join(" "), model_style));
+        if let Some(e) = effort_part {
+            spans.push(Span::styled(format!(" {e}"), model_style));
+        }
+        model_end = spans.len();
     }
 
     // 4. CPU%（仅在超过 50% 时显示）
@@ -150,6 +159,66 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 首帧 use_previous_size 返回 width=0，退守单行；后续帧宽度超过才启用双行折行
     let needs_wrap = prev_size.width > 0 && total_width > prev_size.width;
     let row_height: u16 = if needs_wrap { 2 } else { 1 };
+
+    // ── 模型段点击区域：鼠标左键点击 alias/model 文本 → 打开快速切换弹窗 ──
+    // AreaTracker 值拷贝模式（仿 input_area.rs）：每帧从 hook 取出 rect 副本，
+    // 闭包按值捕获，避免 Arc 重建导致 handler 读到 None。
+    let row1_area;
+    {
+        let tracker = hooks.use_hook(|| AreaTracker { rect: None });
+        row1_area = tracker.rect;
+    }
+    // 模拟 Wrap 折行（span 粒度近似）计算模型段所在行号与 x 范围。
+    // Wrap { trim: false } 按区域宽度折行；此处以 span 为最小单元逼近，
+    // 单个 span 跨行时点击区域可能偏差 1-2 列，可接受。
+    let mut model_click: Option<(u16, u16, u16)> = None;
+    if let (Some(start), Some(area)) = (model_start, row1_area) {
+        let area_w = area.width as usize;
+        let mut line_idx = 0u16;
+        let mut line_x = 0usize;
+        let mut click_start = 0usize;
+        let mut click_end = 0usize;
+        for (i, s) in spans.iter().enumerate() {
+            let w = s.width();
+            if line_x + w > area_w && line_idx < row_height - 1 {
+                line_idx += 1;
+                line_x = 0;
+            }
+            if i == start {
+                click_start = line_x;
+            }
+            if i + 1 == model_end {
+                click_end = line_x + w;
+            }
+            line_x += w;
+        }
+        model_click = Some((line_idx, click_start as u16, click_end as u16));
+    }
+    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+        if let Event::Mouse(mouse) = event {
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return EventResult::Ignored;
+            }
+            // 弹窗或面板激活时不响应——防止遮挡区域误触（如弹窗覆盖状态栏）
+            if atoms::POPUP_KIND.state().read().is_some()
+                || atoms::ACTIVE_PANEL.state().read().is_some()
+            {
+                return EventResult::Ignored;
+            }
+            if let (Some(area), Some((line_idx, x_start, x_end))) = (row1_area, model_click)
+                && mouse.row == area.y.saturating_add(line_idx)
+                && mouse.column >= area.x.saturating_add(x_start)
+                && mouse.column < area.x.saturating_add(x_end)
+            {
+                // 锚点 = 模型段起点屏幕坐标——小弹窗定位在该点上方
+                *atoms::MODEL_SWITCH_ANCHOR.state().write() =
+                    Some((area.x.saturating_add(x_start), mouse.row));
+                open_popup(atoms::PopupKind::ModelQuickSwitch);
+                return EventResult::Consumed;
+            }
+        }
+        EventResult::Ignored
+    });
 
     element!(
         View(
@@ -306,6 +375,19 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
+/// 追踪 Row1 组件区域，供鼠标点击→打开 alias 快速切换弹窗使用。
+/// 仿 input_area.rs AreaTracker：rect 是值类型（Copy），每帧 pre_component_draw
+/// 更新后在 handler 注册前取出副本传给闭包。
+struct AreaTracker {
+    rect: Option<Rect>,
+}
+
+impl Hook for AreaTracker {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        self.rect = Some(drawer.area);
+    }
+}
+
 fn statusbar() -> peri_theme::component::StatusBarTokens {
     THEME_ATOM.state().read().component.statusbar
 }
@@ -362,6 +444,34 @@ fn memory_color(mem_mb: u64) -> ratatui::style::Color {
     } else {
         statusbar().resource_good
     }
+}
+
+/// 状态栏模型段三段式 `alias model effort` 的组成部分。
+///
+/// 去重规则：
+/// - alias 与模型名相同时（配置回退到 alias）只显示一次；
+/// - 模型名尾部已含 effort 后缀（如 `gpt-5.6-luna high`）时不重复追加，
+///   避免出现 `high high`。
+fn model_segment_parts(alias: &str, model_name: &str, effort: &str) -> Vec<String> {
+    let model = if !model_name.is_empty() {
+        model_name
+    } else {
+        alias
+    };
+    let mut parts = Vec::new();
+    if !alias.is_empty() && alias != model {
+        parts.push(alias.to_string());
+    }
+    if !model.is_empty() {
+        parts.push(model.to_string());
+    }
+    if !effort.is_empty()
+        && !model.is_empty()
+        && !model.to_lowercase().ends_with(&format!(" {effort}"))
+    {
+        parts.push(effort.to_string());
+    }
+    parts
 }
 
 #[cfg(test)]
