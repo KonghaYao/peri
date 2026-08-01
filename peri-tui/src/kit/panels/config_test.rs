@@ -28,15 +28,26 @@ fn test_apply_toggle_row_cache_warn_flips() {
 
 #[test]
 fn test_apply_toggle_row_1m_context_handles_none_initial() {
-    // 默认 context_1m = None（unwrap_or(false) → false → toggle 为 true）
+    // 默认 context_1m = false（unwrap_or(false) → false → toggle 为 true）
     let mut cfg = PeriConfig::default();
-    assert_eq!(cfg.config.context_1m, None);
+    cfg.config.active_alias = "opus".into();
+    let alias = cfg.config.active_alias.clone();
+    assert_eq!(
+        cfg.config.profiles.get(&alias).map(|p| p.context_1m),
+        Some(false)
+    );
     let new = apply_toggle_row(&mut cfg, ROW_1M_CONTEXT);
     assert_eq!(new, Some(true));
-    assert_eq!(cfg.config.context_1m, Some(true));
+    assert_eq!(
+        cfg.config.profiles.get(&alias).map(|p| p.context_1m),
+        Some(true)
+    );
     let new = apply_toggle_row(&mut cfg, ROW_1M_CONTEXT);
     assert_eq!(new, Some(false));
-    assert_eq!(cfg.config.context_1m, Some(false));
+    assert_eq!(
+        cfg.config.profiles.get(&alias).map(|p| p.context_1m),
+        Some(false)
+    );
 }
 
 #[test]
@@ -62,9 +73,9 @@ fn test_apply_cycle_row_streaming_forward_wraps() {
 #[test]
 fn test_apply_cycle_row_alias_backward() {
     let mut cfg = PeriConfig::default();
-    cfg.config.active_alias = "opus".into(); // idx=0
+    cfg.config.active_alias = "fable".into(); // idx=0
     let prev = apply_cycle_row(&mut cfg, ROW_ACTIVE_ALIAS, false);
-    assert_eq!(prev, Some(2)); // wrap to haiku
+    assert_eq!(prev, Some(3)); // wrap to haiku
     assert_eq!(cfg.config.active_alias, "haiku");
 }
 

@@ -443,7 +443,7 @@ model-effort-medium = 中
 model-effort-high = 高
 model-effort-xhigh = 超高
 model-effort-max = 最大
-panel-model-nav-hint =   ↑/↓::导航  Enter/←/→::编辑  Esc::关闭
+panel-model-nav-hint =   ↑/↓::切换  Tab::左右  →/←::改值  Esc::退出/关闭
 panel-model-inline-toggle-hint =   Enter 切换
 
 # ---- 状态面板 ----

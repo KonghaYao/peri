@@ -427,7 +427,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 
     // Context window (前置计算，供 bg event pump 和 compact 使用)
     let context_window = ctx.provider.context_window();
-    let context_1m = ctx.peri_config.config.context_1m.unwrap_or(false);
+    let context_1m = ctx.provider.context_1m();
     let effective_context_window = if context_1m {
         1_000_000
     } else {

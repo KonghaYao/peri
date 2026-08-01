@@ -34,10 +34,7 @@ use tokio_util::sync::CancellationToken;
 use peri_acp_types::PeriCaps;
 
 use crate::{
-    provider::{
-        config::{PeriConfig, ThinkingConfig},
-        LlmProvider,
-    },
+    provider::{config::PeriConfig, LlmProvider},
     session::agent_runtime::{AgentRuntime, CancelPolicy},
 };
 
@@ -54,8 +51,6 @@ pub struct AcpSession {
     pub model_alias: String,
     /// 每会话独立的权限模式
     pub permission_mode: Arc<SharedPermissionMode>,
-    /// 每会话独立的 thinking 配置
-    pub thinking: Option<ThinkingConfig>,
     /// 运行时 agent 实例（根 agent + 子 agent）
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
@@ -154,13 +149,12 @@ impl SessionManager {
         Ok((session_id, thread_id))
     }
 
-    /// 创建新会话并继承指定的 provider_id、model_alias 和 thinking 设置
+    /// 创建新会话并继承指定的 provider_id、model_alias
     pub async fn new_session_with_settings(
         &self,
         cwd: &str,
         provider_id: String,
         model_alias: String,
-        thinking: Option<ThinkingConfig>,
     ) -> anyhow::Result<(String, ThreadId)> {
         let meta = ThreadMeta::new(cwd);
         let thread_id = self.inner.thread_store.create_thread(meta).await?;
@@ -179,7 +173,6 @@ impl SessionManager {
             provider_id,
             model_alias,
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            thinking,
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
@@ -205,10 +198,16 @@ impl SessionManager {
             cancel_token: CancellationToken::new(),
             state_messages: Vec::new(),
             created_at: Utc::now(),
-            provider_id: self.inner.peri_config.config.active_provider_id.clone(),
+            provider_id: self
+                .inner
+                .peri_config
+                .config
+                .profiles
+                .get(&self.inner.peri_config.config.active_alias)
+                .map(|p| p.provider.clone())
+                .unwrap_or_default(),
             model_alias: self.inner.peri_config.config.active_alias.clone(),
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            thinking: self.inner.peri_config.config.thinking.clone(),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),

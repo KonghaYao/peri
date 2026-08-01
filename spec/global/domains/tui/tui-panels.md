@@ -39,28 +39,41 @@
 
 ### 6.1 Model Panel
 
+Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable → opus → sonnet → haiku`，active 高亮），右侧为当前选中 Profile 的单行 K/V 编辑。
 
 ```text
-────────────────────────────────────────────────────────────────────────
-  Model
-  Model Alias Selection
-  Provider: anthropic
+──────────────────────────────── Model ────────────────────────────────────────
+  Profiles                         fable · anthropic
+  ─────────────────────────        ─────────────────────────────────────────
+  ❯ fable · anthropic              Provider                        anthropic
+    claude-opus-4-6                Model                       claude-opus-4-6
+    xhigh · 200k                   Effort                              xhigh
+                                    Max tokens                          32000
+    opus · anthropic               1m enable                              off
+    claude-opus-4-6
+    xhigh · 200k
 
-  ❯ Opus       claude-opus-4-20250514
-    Sonnet   ✔ claude-sonnet-4-20250514
-    Haiku      claude-3-5-haiku-20241022
+    sonnet · openai                ←/→ change value     esc close
+    gpt-5.6-luna
+    xhigh · 1m
 
-  Active: Sonnet
-  Model ID: claude-sonnet-4-20250514
-  Effort: high
-  Max Tokens: 64000
-  1M Context: OFF
+    haiku · anthropic
+    claude-haiku-4-5
+    medium · 200k
 
-  ↑/↓::navigate Enter::select · Esc::close
+  ↑/↓::switch profile Tab/→::edit · Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：选择 active model alias，并同步 ACP service snapshot 与状态栏。数据来源：ACP service snapshot / config snapshot；变更通过统一 config action 返回 snapshot。
+- 左侧：`↑/↓` 切换选中 Profile 并写 `active_alias` 持久化；`Tab`/`→` 进入右侧编辑焦点。
+- 右侧：`↑/↓` 在字段间移动焦点；`←/→` 切换当前字段值，**切换即写入内存并持久化**（无需 Enter/Save）；`Tab` 切回左侧；`Esc` 退出右侧焦点，再 `Esc` 关闭面板。
+- 字段固定：`Provider` / `Model` / `Effort` / `Max tokens` / `1m enable`，单行 `key` 左对齐、`value` 右对齐，无包围符号。
+- `Provider` 切换联动：优先选择目标 provider 下同档位 Model；无同档位时选择该 provider 默认 Model。
+- `Model` 允许选择该 provider 下任意模型（不做档位过滤与能力兼容性检查）。
+- `Effort` 五档循环：`low → medium → high → xhigh → max`；`Max tokens` 五档预设循环：`4096/8192/16000/32000/64000`。
+- 显示规则：模型名内 `high`（如 `gpt-5.6-luna high`）使用 model accent 色；摘要中 effort 值使用独立 effort 色，二者颜色语义不同。
+
+能力：选择 active profile，编辑该 profile 独立的 `provider/model/effort/max_tokens/context_1m`；Profile 是请求参数唯一事实源。数据来源：ACP service snapshot / config snapshot；变更通过统一 config action 返回 snapshot。
 
 ### 6.2 Login Panel
 

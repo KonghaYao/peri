@@ -393,34 +393,57 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
 }
 
 /// 从 PeriConfig 派生 (provider_type, active_alias, model_name)。
-/// model_name 优先从 provider.models.get_model(alias) 查询；
-/// 若 provider 未配置 models 或 alias 非标准名，回退到 active_alias。
+/// model_name 优先取 Profile.model；其次 provider.models.get_model(alias)；
+/// 若都为空，回退到 active_alias。
 fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String) {
     let cfg = peri_config.read();
-    let active_id = cfg.config.active_provider_id.clone();
     let active_alias = cfg.config.active_alias.clone();
+    let profile = cfg.config.profiles.get(&active_alias);
 
-    let provider = cfg.config.providers.iter().find(|p| p.id == active_id);
+    let provider = profile.and_then(|pf| {
+        if pf.provider.is_empty() {
+            cfg.config.providers.first()
+        } else {
+            cfg.config.providers.iter().find(|p| p.id == pf.provider)
+        }
+    });
 
     let provider_type = provider
         .map(|p| p.provider_type.clone())
-        .unwrap_or(active_id.clone());
+        .unwrap_or_else(|| {
+            profile
+                .map(|pf| pf.provider.clone())
+                .unwrap_or_else(|| active_alias.clone())
+        });
 
-    let model_name = provider
-        .and_then(|p| p.models.get_model(&active_alias))
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| active_alias.clone());
+    let model_name = if let Some(m) = profile
+        .and_then(|pf| pf.model.as_ref())
+        .filter(|m| !m.is_empty())
+    {
+        m.clone()
+    } else {
+        provider
+            .and_then(|p| p.models.get_model(&active_alias))
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| active_alias.clone())
+    };
 
     (provider_type, active_alias, model_name)
 }
 
 /// 从 peri_config 动态派生 provider 列表——PROVIDER_LIST atom 的数据源。
 ///
-/// 每次 tick 重新读取 active_provider_id，确保 is_active 标记反映最新状态。
+/// 每次 tick 重新读取 active profile 的 provider，确保 is_active 标记反映最新状态。
 /// 之前使用 SnapshotSource.providers（启动时静态快照），导致 is_active 永不过期。
 fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
     let cfg = peri_config.read();
+    let active_profile_provider = cfg
+        .config
+        .profiles
+        .get(&cfg.config.active_alias)
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
     cfg.config
         .providers
         .iter()
@@ -435,7 +458,7 @@ fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
             ProviderSummary {
                 id: p.id.clone(),
                 provider_type: p.provider_type.clone(),
-                is_active: p.id == cfg.config.active_provider_id,
+                is_active: p.id == active_profile_provider,
                 has_api_key,
                 base_url,
             }

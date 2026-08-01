@@ -1,84 +1,72 @@
 use super::*;
 
-// ── ThinkingConfig::openai_effort ─────────────────────────────────────────
+// ── ProfileConfig 默认值 ───────────────────────────────────────────────────
 
 #[test]
-fn test_thinking_effort_direct() {
-    let c = ThinkingConfig {
-        enabled: true,
-        budget_tokens: 0,
-        effort: "low".to_string(),
-        max_tokens: 32000,
-    };
-    assert_eq!(c.openai_effort(), "low");
+fn test_profile_config_defaults() {
+    let p = ProfileConfig::default();
+    assert!(p.provider.is_empty());
+    assert!(p.model.is_none());
+    assert_eq!(p.effort, "xhigh");
+    assert_eq!(p.max_tokens, 32000);
+    assert!(!p.context_1m);
 }
 
-// next_effort / prev_effort removed — TUI-only dead code// ── ThinkingConfig 序列化 / 反序列化 ─────────────────────────────────────
+// ── Profiles 固定四档 ──────────────────────────────────────────────────────
 
 #[test]
-fn test_thinking_config_serde_roundtrip() {
-    let cfg = ThinkingConfig {
-        enabled: true,
-        budget_tokens: 5000,
-        effort: "medium".to_string(),
-        max_tokens: 32000,
-    };
-    let json = serde_json::to_string(&cfg).unwrap();
-    let back: ThinkingConfig = serde_json::from_str(&json).unwrap();
-    assert!(back.enabled);
-    assert_eq!(back.budget_tokens, 5000);
-    assert_eq!(back.effort, "medium");
-    assert_eq!(back.max_tokens, 32000);
+fn test_profiles_get_all_four_tiers() {
+    let profiles = Profiles::default();
+    assert_eq!(Profiles::ALL, ["fable", "opus", "sonnet", "haiku"]);
+    assert!(profiles.get("fable").is_some());
+    assert!(profiles.get("opus").is_some());
+    assert!(profiles.get("sonnet").is_some());
+    assert!(profiles.get("haiku").is_some());
+    assert!(profiles.get("turbo").is_none());
 }
 
 #[test]
-fn test_thinking_config_default_budget() {
-    // 不传 budget_tokens 时应默认 8000，effort 默认 medium
-    let json = r#"{"enabled": false}"#;
-    let cfg: ThinkingConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(cfg.budget_tokens, 8000);
-    assert_eq!(cfg.max_tokens, 32000);
+fn test_profiles_serde_roundtrip_four_tiers() {
+    let mut profiles = Profiles::default();
+    if let Some(p) = profiles.get_mut("opus") {
+        p.effort = "max".to_string();
+        p.max_tokens = 64000;
+        p.context_1m = true;
+    }
+    let json = serde_json::to_string(&profiles).unwrap();
+    let back: Profiles = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.opus.effort, "max");
+    assert_eq!(back.opus.max_tokens, 64000);
+    assert!(back.opus.context_1m);
+    // 未序列化的档位字段保留默认（serde default）
+    assert_eq!(back.sonnet.effort, "xhigh");
 }
 
+// ── 旧字段迁移：thinking / active_provider_id 被 extra 吸收 ────────────────
+
 #[test]
-fn test_app_config_thinking_optional() {
-    // thinking 字段缺失时应为 None（使用新格式字段）
-    let json = r#"{"active_alias": "opus", "active_provider_id": "", "providers": []}"#;
+fn test_app_config_old_thinking_absorbed_into_extra() {
+    // 旧 thinking 字段缺失时为 None 语义：不 panic，且不产生 thinking 字段
+    let json = r#"{"active_alias": "opus", "providers": []}"#;
     let cfg: AppConfig = serde_json::from_str(json).unwrap();
-    assert!(cfg.thinking.is_none());
+    assert!(!cfg.extra.contains_key("thinking"));
 }
 
 #[test]
-fn test_app_config_thinking_roundtrip() {
+fn test_app_config_thinking_roundtrip_absorbed() {
     let json = r#"{
             "active_alias": "opus",
             "providers": [],
             "thinking": {"enabled": true, "budget_tokens": 8000}
         }"#;
     let cfg: AppConfig = serde_json::from_str(json).unwrap();
-    let t = cfg.thinking.as_ref().unwrap();
-    assert!(t.enabled);
-    assert_eq!(t.budget_tokens, 8000);
+    // 旧 thinking 键被 extra 捕获，不回写
+    assert!(cfg.extra.contains_key("thinking"));
 
-    // 序列化后 thinking 字段存在
+    // 序列化后不再含顶层 thinking 字段（extra 由 flatten 保留原始键）
     let out = serde_json::to_string(&cfg).unwrap();
-    assert!(out.contains("\"thinking\""));
-    // active_alias 字段正确序列化
     assert!(out.contains("\"active_alias\""));
 }
-
-#[test]
-fn test_app_config_thinking_skip_when_none() {
-    let cfg = AppConfig::default(); // thinking = None
-    let out = serde_json::to_string(&cfg).unwrap();
-    // skip_serializing_if = "Option::is_none"，所以 thinking 字段不应出现
-    assert!(
-        !out.contains("thinking"),
-        "thinking should be absent when None"
-    );
-}
-
-// ── ModelPanel thinking 缓冲逻辑（已迁移至 model_panel.rs）─────────────────
 
 // ── ProviderModels 测试 ───────────────────────────────────────────────────
 
@@ -88,10 +76,30 @@ fn test_provider_models_get_model_known_aliases() {
         opus: "o".to_string(),
         sonnet: "s".to_string(),
         haiku: "h".to_string(),
+        fable: String::new(),
     };
     assert_eq!(models.get_model("opus"), Some("o"));
     assert_eq!(models.get_model("sonnet"), Some("s"));
     assert_eq!(models.get_model("haiku"), Some("h"));
+}
+
+#[test]
+fn test_provider_models_fable_falls_back_to_opus() {
+    let models = ProviderModels {
+        opus: "o".to_string(),
+        sonnet: "s".to_string(),
+        haiku: "h".to_string(),
+        fable: String::new(),
+    };
+    // fable 空 → 回退 opus
+    assert_eq!(models.get_model("fable"), Some("o"));
+    let models2 = ProviderModels {
+        opus: "o".to_string(),
+        sonnet: "s".to_string(),
+        haiku: "h".to_string(),
+        fable: "f".to_string(),
+    };
+    assert_eq!(models2.get_model("fable"), Some("f"));
 }
 
 #[test]
@@ -100,6 +108,7 @@ fn test_provider_models_get_model_case_insensitive() {
         opus: "o".to_string(),
         sonnet: "s".to_string(),
         haiku: "h".to_string(),
+        fable: String::new(),
     };
     assert_eq!(models.get_model("Opus"), Some("o"));
     assert_eq!(models.get_model("SONNET"), Some("s"));
@@ -112,6 +121,7 @@ fn test_provider_models_get_model_unknown_returns_none() {
         opus: "o".to_string(),
         sonnet: "s".to_string(),
         haiku: "h".to_string(),
+        fable: String::new(),
     };
     assert_eq!(models.get_model("turbo"), None);
 }
@@ -122,6 +132,7 @@ fn test_provider_models_default() {
     assert!(models.opus.is_empty());
     assert!(models.sonnet.is_empty());
     assert!(models.haiku.is_empty());
+    assert!(models.fable.is_empty());
 }
 
 #[test]
@@ -136,8 +147,8 @@ fn test_provider_config_models_serde_roundtrip() {
             opus: "claude-opus-4-7".to_string(),
             sonnet: "claude-sonnet-4-6".to_string(),
             haiku: "claude-haiku-4-5".to_string(),
+            fable: String::new(),
         },
-        thinking: None,
         extra: Default::default(),
     };
     let json = serde_json::to_string(&p).unwrap();
@@ -148,18 +159,24 @@ fn test_provider_config_models_serde_roundtrip() {
 }
 
 #[test]
-fn test_app_config_active_provider_id_serde() {
+fn test_app_config_active_provider_id_serde_absorbed() {
+    // 旧 active_provider_id 键被 extra 吸收（不再作为字段）
     let json = r#"{"active_alias": "opus", "active_provider_id": "anthropic", "providers": []}"#;
     let cfg: AppConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(cfg.active_provider_id, "anthropic");
+    assert_eq!(
+        cfg.extra.get("active_provider_id").and_then(|v| v.as_str()),
+        Some("anthropic")
+    );
 }
 
 #[test]
 fn test_app_config_old_fields_ignored() {
     let json = r#"{"provider_id": "old", "model_id": "old-model", "model_aliases": {"opus": {"provider_id": "x", "model_id": "y"}}, "providers": []}"#;
     let cfg: AppConfig = serde_json::from_str(json).unwrap();
-    // 旧字段被 extra 吸收，active_provider_id 为默认空字符串
-    assert_eq!(cfg.active_provider_id, "");
+    // 旧字段被 extra 吸收
+    assert!(cfg.extra.contains_key("provider_id"));
+    assert!(cfg.extra.contains_key("model_id"));
+    assert!(cfg.extra.contains_key("model_aliases"));
 }
 
 // ── AppConfig env 字段测试 ─────────────────────────────────────────────────

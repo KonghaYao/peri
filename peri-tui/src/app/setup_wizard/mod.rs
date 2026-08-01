@@ -372,6 +372,8 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
                 opus: mp.aliases[0].clone(),
                 sonnet: mp.aliases[1].clone(),
                 haiku: mp.aliases[2].clone(),
+                // fable 无独立向导字段：留空回退 opus（ProviderModels.get_model 语义）
+                fable: String::new(),
             },
             ..Default::default()
         };
@@ -383,7 +385,9 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
 
     if !first_id.is_empty() {
         cfg.config.active_alias = "opus".to_string();
-        cfg.config.active_provider_id = first_id;
+        if let Some(profile) = cfg.config.profiles.get_mut("opus") {
+            profile.provider = first_id;
+        }
     }
 
     cfg.config.language = Some(state.language.clone());
@@ -407,9 +411,17 @@ pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::Per
         }
     }
 
-    if !wizard_cfg.config.active_provider_id.is_empty() {
+    let wizard_first_id = wizard_cfg
+        .config
+        .profiles
+        .get("opus")
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
+    if !wizard_first_id.is_empty() {
         merged.config.active_alias = wizard_cfg.config.active_alias;
-        merged.config.active_provider_id = wizard_cfg.config.active_provider_id;
+        if let Some(profile) = merged.config.profiles.get_mut(&merged.config.active_alias) {
+            profile.provider = wizard_first_id;
+        }
     }
 
     if let Some(lang) = wizard_cfg.config.language {

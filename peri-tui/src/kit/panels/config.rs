@@ -52,7 +52,7 @@ const ROW_SCROLL_FPS: usize = 7;
 
 const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
 const LANGUAGE_OPTS: &[&str] = &["en", "zh-CN"];
-const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
+const ALIAS_OPTS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
 const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
 const FPS_OPTS: &[&str] = &["60", "30", "20"];
 
@@ -249,7 +249,14 @@ fn read_toggle(row: usize) -> bool {
             .unwrap_or(false),
         ROW_1M_CONTEXT => PERI_CONFIG_HANDLE
             .get()
-            .map(|h| h.read().config.context_1m.unwrap_or(false))
+            .map(|h| {
+                let c = h.read();
+                c.config
+                    .profiles
+                    .get(&c.config.active_alias)
+                    .map(|p| p.context_1m)
+                    .unwrap_or(false)
+            })
             .unwrap_or(false),
         _ => false,
     }
@@ -359,8 +366,10 @@ fn activate_row(row: usize, forward: bool) {
                 }
                 ROW_CACHE_WARN => cfg.config.show_cache_warning = !cfg.config.show_cache_warning,
                 ROW_1M_CONTEXT => {
-                    let cur = cfg.config.context_1m.unwrap_or(false);
-                    cfg.config.context_1m = Some(!cur);
+                    let alias = cfg.config.active_alias.clone();
+                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                        profile.context_1m = !profile.context_1m;
+                    }
                 }
                 _ => {}
             }
@@ -575,9 +584,15 @@ fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<b
             cfg.config.show_cache_warning
         }
         ROW_1M_CONTEXT => {
-            let cur = cfg.config.context_1m.unwrap_or(false);
-            cfg.config.context_1m = Some(!cur);
-            !cur
+            let alias = cfg.config.active_alias.clone();
+            cfg.config
+                .profiles
+                .get_mut(&alias)
+                .map(|p| {
+                    p.context_1m = !p.context_1m;
+                    p.context_1m
+                })
+                .unwrap_or(false)
         }
         _ => return None,
     };

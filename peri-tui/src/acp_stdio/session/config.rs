@@ -7,7 +7,7 @@ use agent_client_protocol::{
         SetSessionModeRequest, SetSessionModeResponse,
     },
 };
-use peri_acp::session::state_builders::{apply_thinking_effort, parse_permission_mode};
+use peri_acp::session::state_builders::{apply_profile_effort, parse_permission_mode};
 use peri_tui::app::agent::LlmProvider;
 
 use super::super::{context::StdioContext, model, notification};
@@ -49,7 +49,7 @@ pub(crate) async fn handle_set_config_option(
                     let _ = model::switch_model(ctx, req.session_id.0.as_ref(), v);
                 }
                 "thinking_effort" => {
-                    apply_thinking_effort(&ctx.peri_config, v);
+                    apply_profile_effort(&ctx.peri_config, v);
                     // 同步更新 LlmProvider（thinking 变更需要重建 provider）
                     let new_provider = {
                         let c = ctx.peri_config.read();
@@ -69,7 +69,13 @@ pub(crate) async fn handle_set_config_option(
                 }
                 "context_1m" => {
                     let enabled = v == "true" || v == "1";
-                    ctx.peri_config.write().config.context_1m = Some(enabled);
+                    {
+                        let mut c = ctx.peri_config.write();
+                        let alias = c.config.active_alias.clone();
+                        if let Some(profile) = c.config.profiles.get_mut(&alias) {
+                            profile.context_1m = enabled;
+                        }
+                    }
                     tracing::info!(enabled = %enabled, "Context 1M changed via configOption");
                 }
                 _ => {
@@ -118,11 +124,18 @@ pub(crate) async fn handle_update_config(
     if new_cfg.config.providers.is_empty() {
         return Err(Error::invalid_request().data("providers cannot be empty"));
     }
-    let active_pid = new_cfg.config.active_provider_id.as_str();
-    if !active_pid.is_empty() && !new_cfg.config.providers.iter().any(|p| p.id == active_pid) {
-        return Err(
-            Error::invalid_request().data(format!("active_provider_id '{active_pid}' not found"))
-        );
+    // Profile 是唯一事实源：各 profile 引用的 provider 必须存在于 providers
+    for alias in peri_tui::config::Profiles::ALL {
+        let pid = new_cfg
+            .config
+            .profiles
+            .get(alias)
+            .map(|p| p.provider.as_str())
+            .unwrap_or("");
+        if !pid.is_empty() && !new_cfg.config.providers.iter().any(|p| p.id == pid) {
+            return Err(Error::invalid_request()
+                .data(format!("profile {alias}: provider '{pid}' not found")));
+        }
     }
 
     *ctx.peri_config.write() = new_cfg.clone();

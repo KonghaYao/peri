@@ -126,7 +126,11 @@ async fn test_derive_provider_and_model_set() {
     let cfg = crate::config::PeriConfig {
         config: AppConfig {
             active_alias: "sonnet".into(),
-            active_provider_id: "p1".into(),
+            profiles: {
+                let mut profiles = crate::config::Profiles::default();
+                profiles.get_mut("sonnet").unwrap().provider = "p1".into();
+                profiles
+            },
             providers: vec![ProviderConfig {
                 id: "p1".into(),
                 provider_type: "anthropic".into(),
@@ -155,7 +159,11 @@ async fn test_derive_provider_and_model_set_empty_model() {
     let cfg = crate::config::PeriConfig {
         config: AppConfig {
             active_alias: "haiku".into(),
-            active_provider_id: "p1".into(),
+            profiles: {
+                let mut profiles = crate::config::Profiles::default();
+                profiles.get_mut("haiku").unwrap().provider = "p1".into();
+                profiles
+            },
             providers: vec![ProviderConfig {
                 id: "p1".into(),
                 provider_type: "anthropic".into(),
@@ -183,8 +191,12 @@ async fn test_derive_provider_and_model_no_models_fallback() {
 
     let cfg = crate::config::PeriConfig {
         config: AppConfig {
-            active_alias: "custom-alias".into(),
-            active_provider_id: "p1".into(),
+            active_alias: "haiku".into(),
+            profiles: {
+                let mut profiles = crate::config::Profiles::default();
+                profiles.get_mut("haiku").unwrap().provider = "p1".into();
+                profiles
+            },
             providers: vec![ProviderConfig {
                 id: "p1".into(),
                 provider_type: "anthropic".into(),
@@ -197,8 +209,9 @@ async fn test_derive_provider_and_model_no_models_fallback() {
     let peri_config = Arc::new(parking_lot::RwLock::new(cfg));
     let (provider, alias, model_name) = derive_provider_and_model(&peri_config);
     assert_eq!(provider, "anthropic");
-    assert_eq!(alias, "custom-alias");
-    assert_eq!(model_name, "custom-alias");
+    assert_eq!(alias, "haiku");
+    // 无模型映射时回退到 active_alias
+    assert_eq!(model_name, "haiku");
 }
 
 #[test]

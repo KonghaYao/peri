@@ -1,9 +1,10 @@
 //! ratatui-kit ModelPanel component.
 //!
-//! S6c：alias 列表沿用静态元数据（Opus/Sonnet/Haiku），但**当前激活 alias**
-//! 从 `SERVICE_SNAPSHOT` atom 读取——这样面板和 status bar 始终一致。
-//! Enter/←→ 操作目前只更新本地 selected_tab state，**真实切换 provider/model**
-//! 需要 S11 解耦后通过 AcpClient 触发（暂留 TODO）。
+//! 左右分栏 Profile 编辑器：
+//! - 左侧：4 个固定档位卡片（fable / opus / sonnet / haiku），↑/↓ 选择即切换 active profile；
+//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）。
+//!
+//! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -14,123 +15,61 @@ use crate::kit::atoms::{
 use crate::kit::list_nav::{next_selection, previous_selection};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
-// 静态 alias 元数据（与 active 状态无关）
+// 静态常量
 // ---------------------------------------------------------------------------
 
-struct ModelAliasEntry {
-    name: &'static str,
-    key: &'static str,
-    model_id: &'static str,
-}
+/// 固定四档（顺序即显示顺序：fable → opus → sonnet → haiku）
+const PROFILE_KEYS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
-const MODEL_ALIASES: &[ModelAliasEntry] = &[
-    ModelAliasEntry {
-        name: "Opus",
-        key: "opus",
-        model_id: "claude-opus-4-20250514",
-    },
-    ModelAliasEntry {
-        name: "Sonnet",
-        key: "sonnet",
-        model_id: "claude-sonnet-4-20250514",
-    },
-    ModelAliasEntry {
-        name: "Haiku",
-        key: "haiku",
-        model_id: "claude-3-5-haiku-20241022",
-    },
-];
-
-/// 光标导航：alias 行 + 3 个 detail 行
-const ALIAS_COUNT: usize = 3;
-const IDX_EFFORT: usize = ALIAS_COUNT;
-const IDX_MAX_TOKENS: usize = ALIAS_COUNT + 1;
-const IDX_CONTEXT_1M: usize = ALIAS_COUNT + 2;
-const TOTAL_ITEMS: usize = ALIAS_COUNT + 3;
-
+/// Effort 五级
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
+
+/// 右侧字段索引
+const FIELD_PROVIDER: usize = 0;
+const FIELD_MODEL: usize = 1;
+const FIELD_EFFORT: usize = 2;
+const FIELD_MAX_TOKENS: usize = 3;
+const FIELD_CONTEXT_1M: usize = 4;
+const FIELD_COUNT: usize = 5;
+
+/// 右侧 K/V 值右边缘列——所有行的值右对齐到该列（key 宽度不同也能对齐）
+const VALUE_ALIGN_COL: usize = 40;
 
 #[component]
 pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
-    let cursor = hooks.use_state(|| 0usize);
-    // selected_tab stores the index of the selected alias
-    let selected_tab = hooks.use_state(|| 1usize); // default Sonnet
-    // 渲染版本计数器——cycle_effort/cycle_max_tokens/toggle_context_1m 修改
-    // PERI_CONFIG_HANDLE 后递增此计数，触发 ModelPanel 重渲染以显示最新值。
+    let cursor = hooks.use_state(|| 0usize); // 左侧 profile 光标
+    let right_cursor = hooks.use_state(|| 0usize); // 右侧字段光标
+    let right_focus = hooks.use_state(|| false); // 是否在右侧编辑焦点
+    // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
+    // 递增此计数，触发 ModelPanel 重渲染以显示最新值。
     let render_version = hooks.use_state(|| 0u64);
-
     // S6c: 订阅 SERVICE_SNAPSHOT——active alias 来自 atom，确保面板和 status bar 一致
     let snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
     let active_alias = snapshot.read().model_alias.clone();
-    let active_provider = snapshot.read().provider_name.clone();
-    let active_model_name = snapshot.read().model_name.clone();
     let _ = snapshot; // StoreState 是 Copy，无需显式 drop
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
-    // 从 PERI_CONFIG_HANDLE 解析每个 alias 对应的真实模型名
-    let alias_names: std::collections::HashMap<&str, String> = {
-        PERI_CONFIG_HANDLE
-            .get()
-            .map(|handle| {
-                let cfg = handle.read();
-                let active_prov = cfg
-                    .config
-                    .providers
-                    .iter()
-                    .find(|p| p.id == cfg.config.active_provider_id);
-                MODEL_ALIASES
-                    .iter()
-                    .map(|entry| {
-                        let name = active_prov
-                            .and_then(|p| p.models.get_model(entry.key))
-                            .map(|s| s.to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| entry.model_id.to_string());
-                        (entry.key, name)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    // 从 PERI_CONFIG_HANDLE 读取 thinking 和 context_1m 实际值
-    let (current_effort, current_max_tokens, current_context_1m) = PERI_CONFIG_HANDLE
-        .get()
-        .map(|handle| {
-            let cfg = handle.read();
-            let thinking =
-                cfg.config
-                    .thinking
-                    .clone()
-                    .unwrap_or_else(|| crate::config::ThinkingConfig {
-                        enabled: true,
-                        budget_tokens: 8000,
-                        effort: "medium".to_string(),
-                        max_tokens: 32000,
-                    });
-            let effort = thinking.effort;
-            let max_tokens = thinking.max_tokens;
-            let ctx = cfg.config.context_1m.unwrap_or(false);
-            (effort, max_tokens, ctx)
-        })
-        .unwrap_or_else(|| ("medium".to_string(), 32000, false));
-
     let rv = render_version;
+    // 事件闭包 move 捕获；渲染部分仍使用 active_alias，故此处克隆一份给闭包
+    let handler_alias = active_alias.clone();
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         move |event| {
             let Event::Key(key) = event else {
@@ -140,49 +79,55 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
             match key.code {
-                KeyCode::Esc => {}
+                KeyCode::Esc => {
+                    if *right_focus.read() {
+                        // 退出右侧编辑焦点
+                        *right_focus.write() = false;
+                    } else {
+                        // 全局 Esc 由 panel_overlay 处理；此处返回 Ignored 让其关闭面板
+                        return EventResult::Ignored;
+                    }
+                }
                 KeyCode::Up => {
-                    let mut c = cursor.write();
-                    *c = previous_selection(*c);
+                    if *right_focus.read() {
+                        let mut c = right_cursor.write();
+                        *c = previous_selection(*c);
+                    } else {
+                        let mut c = cursor.write();
+                        *c = previous_selection(*c);
+                        switch_active_alias(*c);
+                    }
                 }
                 KeyCode::Down => {
-                    let mut c = cursor.write();
-                    *c = next_selection(*c, TOTAL_ITEMS);
+                    if *right_focus.read() {
+                        let mut c = right_cursor.write();
+                        *c = next_selection(*c, FIELD_COUNT);
+                    } else {
+                        let mut c = cursor.write();
+                        *c = next_selection(*c, PROFILE_KEYS.len());
+                        switch_active_alias(*c);
+                    }
                 }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Left => {
-                    let sel = *cursor.read();
-                    match sel {
-                        0..=2 => {
-                            if key.code == KeyCode::Enter {
-                                let new_alias = MODEL_ALIASES[sel].key.to_string();
-                                *selected_tab.write() = sel;
-                                switch_alias(&new_alias);
-                                crate::kit::panel_registry::close_active_panel();
-                            } else {
-                                let direction = key.code == KeyCode::Right;
-                                let mut s = selected_tab.write();
-                                *s = if direction {
-                                    next_selection(*s, ALIAS_COUNT)
-                                } else {
-                                    previous_selection(*s)
-                                };
-                                *cursor.write() = *s;
-                            }
-                        }
-                        IDX_EFFORT => {
-                            cycle_effort();
-                            *rv.write() += 1;
-                        }
-                        IDX_MAX_TOKENS => {
-                            let forward = key.code == KeyCode::Right || key.code == KeyCode::Enter;
-                            cycle_max_tokens(forward);
-                            *rv.write() += 1;
-                        }
-                        IDX_CONTEXT_1M => {
-                            toggle_context_1m();
-                            *rv.write() += 1;
-                        }
-                        _ => {}
+                KeyCode::Tab => {
+                    // 左右焦点切换：左侧 → 右侧，右侧 → 左侧
+                    let rf = *right_focus.read();
+                    *right_focus.write() = !rf;
+                }
+                KeyCode::Right => {
+                    if *right_focus.read() {
+                        edit_field(handler_alias.clone(), *right_cursor.read(), true);
+                        *rv.write() += 1;
+                    } else {
+                        // 进入右侧编辑焦点
+                        *right_focus.write() = true;
+                    }
+                }
+                KeyCode::Left => {
+                    if *right_focus.read() {
+                        edit_field(handler_alias.clone(), *right_cursor.read(), false);
+                        *rv.write() += 1;
+                    } else {
+                        *right_focus.write() = false;
                     }
                 }
                 _ => {}
@@ -191,253 +136,233 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let sel = *cursor.read();
-    let local_selected = *selected_tab.read();
+    let theme = theme_def.read();
 
-    // active alias 优先取 atom；atom 为空时回退到本地 selected_tab
-    let active_idx = MODEL_ALIASES
-        .iter()
-        .position(|e| e.key.eq_ignore_ascii_case(&active_alias))
-        .unwrap_or(local_selected);
-    let active_entry = &MODEL_ALIASES[active_idx];
-    let provider_label = if active_provider.is_empty() {
-        i18n::tr("app-not-configured")
-    } else {
-        active_provider.clone()
-    };
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // Header
-    lines.push(Line::from(vec![Span::styled(
+    // ── 标题 ──
+    let title_line = Line::from(vec![Span::styled(
         i18n::tr("model-panel-title"),
-        Style::new()
-            .fg(theme_def.read().semantic.text.primary)
-            .bold(),
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "  Provider: ",
-            Style::new().fg(theme_def.read().semantic.text.muted),
-        ),
-        Span::styled(
-            provider_label,
-            Style::new()
-                .fg(theme_def.read().semantic.border.active)
-                .bold(),
-        ),
-    ]));
-    lines.push(Line::from(""));
+        Style::new().fg(theme.semantic.text.primary).bold(),
+    )]);
 
-    // Alias rows
-    for (i, entry) in MODEL_ALIASES.iter().enumerate() {
-        let is_selected = i == active_idx;
-        let is_cursor = i == sel && sel < ALIAS_COUNT;
-        let cursor_mark = if is_cursor { "\u{276f}" } else { " " };
-        let check = if is_selected { "\u{2714}" } else { " " };
-
-        let name_style = if is_selected {
-            Style::new()
-                .fg(theme_def.read().semantic.status.success)
-                .bold()
-        } else if is_cursor {
-            Style::new()
-                .fg(theme_def.read().component.panel.title)
-                .bold()
+    // ── 左侧：Profile 卡片 ──
+    let active_idx = PROFILE_KEYS
+        .iter()
+        .position(|k| *k == active_alias)
+        .unwrap_or(1);
+    let mut left_lines: Vec<Line<'static>> = Vec::new();
+    for (i, key) in PROFILE_KEYS.iter().enumerate() {
+        let cfg = PERI_CONFIG_HANDLE.get().map(|h| h.read().clone());
+        let (provider_label, model_label, effort_label, window_label) = if let Some(cfg) = &cfg {
+            let profile = cfg.config.profiles.get(key).unwrap();
+            let prov = if profile.provider.is_empty() {
+                cfg.config.providers.first()
+            } else {
+                cfg.config
+                    .providers
+                    .iter()
+                    .find(|p| p.id == profile.provider)
+            };
+            let model = profile
+                .model
+                .clone()
+                .filter(|m| !m.is_empty())
+                .or_else(|| {
+                    prov.and_then(|p| p.models.get_model(key))
+                        .map(str::to_string)
+                })
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| key.to_string());
+            let window = if profile.context_1m { "1m" } else { "200k" };
+            (
+                prov.map(|p| p.display_name().to_string())
+                    .unwrap_or_else(|| profile.provider.clone()),
+                model,
+                profile.effort.clone(),
+                window.to_string(),
+            )
         } else {
-            Style::new().fg(theme_def.read().semantic.text.primary)
+            (
+                String::new(),
+                key.to_string(),
+                "xhigh".to_string(),
+                "200k".to_string(),
+            )
         };
+        let is_active = i == active_idx;
+        let mark = if is_active { "●" } else { "○" };
+        left_lines.push(Line::from(vec![Span::styled(
+            format!(" {} {} · {}", mark, key, provider_label),
+            if is_active {
+                Style::new().fg(theme.semantic.status.success).bold()
+            } else {
+                Style::new().fg(theme.semantic.text.primary)
+            },
+        )]));
+        // 模型名行：含 effort 后缀（如 "gpt-5.6-luna high"）时后缀用 model accent 色
+        let mut model_spans = vec![Span::raw("    ")];
+        model_spans.extend(styled_model_name(&model_label, &theme));
+        left_lines.push(Line::from(model_spans));
+        // 摘要行：effort 用 effort 色，窗口标识用 token_context 色
+        left_lines.push(Line::from(vec![
+            Span::styled("    ", Style::new()),
+            Span::styled(effort_label, Style::new().fg(theme.semantic.effort).bold()),
+            Span::styled(" · ", Style::new().fg(theme.semantic.text.muted)),
+            Span::styled(window_label, Style::new().fg(theme.semantic.token_context)),
+        ]));
+    }
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", cursor_mark),
-                Style::new().fg(theme_def.read().component.panel.title),
-            ),
-            Span::styled(format!("{:<10}", entry.name), name_style),
-            Span::styled(
-                format!(" {}", check),
-                if is_selected {
-                    Style::new().fg(theme_def.read().semantic.status.success)
+    // ── 右侧：当前 profile 的 K/V 编辑行 ──
+    let mut right_lines: Vec<Line<'static>> = Vec::new();
+    let (current_effort, current_max_tokens, current_ctx) = PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| {
+            let c = h.read();
+            let profile = c.config.profiles.get(&active_alias);
+            (
+                profile
+                    .map(|p| p.effort.clone())
+                    .unwrap_or_else(|| "xhigh".to_string()),
+                profile.map(|p| p.max_tokens).unwrap_or(32000),
+                profile.map(|p| p.context_1m).unwrap_or(false),
+            )
+        })
+        .unwrap_or_else(|| ("xhigh".to_string(), 32000, false));
+
+    let (provider_label, model_label) = PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| {
+            let c = h.read();
+            let profile = c.config.profiles.get(&active_alias);
+            let prov = profile.and_then(|pf| {
+                if pf.provider.is_empty() {
+                    c.config.providers.first()
                 } else {
-                    Style::new().fg(theme_def.read().semantic.text.muted)
+                    c.config.providers.iter().find(|p| p.id == pf.provider)
+                }
+            });
+            let model = profile
+                .and_then(|pf| pf.model.clone().filter(|m| !m.is_empty()))
+                .or_else(|| {
+                    prov.and_then(|p| p.models.get_model(&active_alias))
+                        .map(str::to_string)
+                })
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| active_alias.clone());
+            (
+                prov.map(|p| p.display_name().to_string())
+                    .unwrap_or_else(|| profile.map(|pf| pf.provider.clone()).unwrap_or_default()),
+                model,
+            )
+        })
+        .unwrap_or_else(|| (String::new(), active_alias.clone()));
+
+    let rows: Vec<(&str, String)> = vec![
+        ("Provider", provider_label),
+        ("Model", model_label),
+        ("Effort", current_effort),
+        ("Max tokens", current_max_tokens.to_string()),
+        (
+            "1m enable",
+            if current_ctx { "on" } else { "off" }.to_string(),
+        ),
+    ];
+    for (fi, (k, v)) in rows.iter().enumerate() {
+        let is_focus = *right_focus.read() && fi == *right_cursor.read();
+        let mark = if is_focus { "❯" } else { " " };
+        let key_span = format!(" {} {} ", mark, k);
+        let key_len = UnicodeWidthStr::width(key_span.as_str());
+        let value_len = UnicodeWidthStr::width(v.as_str());
+        // key 宽度 + 填充 + 值宽度 = VALUE_ALIGN_COL，值右边缘对齐到同一列
+        let pad = VALUE_ALIGN_COL.saturating_sub(key_len + value_len);
+        right_lines.push(Line::from(vec![
+            Span::styled(
+                key_span,
+                if is_focus {
+                    Style::new().fg(theme.component.panel.title).bold()
+                } else {
+                    Style::new().fg(theme.semantic.text.muted)
                 },
             ),
             Span::styled(
-                format!(
-                    "  {}",
-                    alias_names
-                        .get(entry.key)
-                        .map(|s| s.as_str())
-                        .unwrap_or(entry.model_id)
-                ),
-                Style::new().fg(theme_def.read().semantic.text.muted),
+                format!("{}{}", " ".repeat(pad), v),
+                Style::new().fg(theme.semantic.text.primary),
             ),
         ]));
     }
 
-    lines.push(Line::from(""));
+    // ── 中间分隔线 ──
+    let divider_style = Style::new().fg(theme.semantic.border.default);
+    let divider_lines: Vec<Line<'_>> = (0..30_usize)
+        .map(|_| Line::from(Span::styled("│", divider_style)))
+        .collect();
 
-    // Current selection info
-    lines.push(Line::from(vec![Span::styled(
-        format!(
-            "  Active: {} → {}",
-            active_entry.name, active_entry.model_id
-        ),
-        Style::new()
-            .fg(theme_def.read().semantic.border.active)
-            .bold(),
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "  Model:  ",
-            Style::new().fg(theme_def.read().semantic.text.muted),
-        ),
-        Span::styled(
-            active_model_name,
-            Style::new().fg(theme_def.read().semantic.text.primary),
-        ),
-    ]));
-    lines.push(Line::from(""));
+    // ── 底部导航提示 ──
+    let hint_line = Line::from(i18n::tr("panel-model-nav-hint")).fg(theme.semantic.text.dim);
 
-    // ── 可编辑 Detail 行 ──
-    let sel = *cursor.read();
+    let left_para = Paragraph::new(ratatui::text::Text::from(left_lines));
+    let right_para = Paragraph::new(ratatui::text::Text::from(right_lines));
+    let divider_para = Paragraph::new(ratatui::text::Text::from(divider_lines));
 
-    // Effort
-    let is_effort_cursor = sel == IDX_EFFORT;
-    lines.push(Line::from(vec![
-        Span::styled(
-            if is_effort_cursor { "❯ " } else { "  " },
-            Style::new().fg(theme_def.read().component.panel.title),
-        ),
-        Span::styled(
-            i18n::tr("model-field-effort"),
-            if is_effort_cursor {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
-            },
-        ),
-        Span::styled(
-            format!("  {}", current_effort),
-            Style::new()
-                .fg(theme_def.read().semantic.status.warning)
-                .bold(),
-        ),
-        if is_effort_cursor {
-            Span::styled(
-                "  ← → cycle",
-                Style::new().fg(theme_def.read().semantic.text.dim).italic(),
-            )
-        } else {
-            Span::styled("", Style::new())
-        },
-    ]));
+    drop(theme);
 
-    // Max tokens
-    let is_max_cursor = sel == IDX_MAX_TOKENS;
-    lines.push(Line::from(vec![
-        Span::styled(
-            if is_max_cursor { "❯ " } else { "  " },
-            Style::new().fg(theme_def.read().component.panel.title),
-        ),
-        Span::styled(
-            i18n::tr("model-field-max-token"),
-            if is_max_cursor {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
-            },
-        ),
-        Span::styled(
-            current_max_tokens.to_string(),
-            Style::new().fg(theme_def.read().semantic.text.primary),
-        ),
-        if is_max_cursor {
-            Span::styled(
-                "  ← → cycle",
-                Style::new().fg(theme_def.read().semantic.text.dim).italic(),
-            )
-        } else {
-            Span::styled("", Style::new())
-        },
-    ]));
-
-    // Context 1M
-    let is_ctx_cursor = sel == IDX_CONTEXT_1M;
-    let ctx_on = current_context_1m;
-    lines.push(Line::from(vec![
-        Span::styled(
-            if is_ctx_cursor { "❯ " } else { "  " },
-            Style::new().fg(theme_def.read().component.panel.title),
-        ),
-        Span::styled(
-            i18n::tr("model-field-1m-context"),
-            if is_ctx_cursor {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
-            },
-        ),
-        Span::styled(
-            if ctx_on {
-                i18n::tr("config-value-on")
-            } else {
-                i18n::tr("config-value-off")
-            },
-            if ctx_on {
-                Style::new().fg(theme_def.read().semantic.status.success)
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
-            },
-        ),
-        if is_ctx_cursor {
-            Span::styled(
-                i18n::tr("panel-model-inline-toggle-hint"),
-                Style::new().fg(theme_def.read().semantic.text.dim).italic(),
-            )
-        } else {
-            Span::styled("", Style::new())
-        },
-    ]));
-
-    // Footer
-    lines.push(Line::from(""));
-    lines.push(Line::from(i18n::tr("panel-model-nav-hint")).fg(theme_def.read().semantic.text.dim));
-
-    let content = Paragraph::new(ratatui::text::Text::from(lines));
     panel_shell!(PanelKind::Model, {
-        ScrollView(
-            scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+        View(height: Constraint::Length(1)) {
+            Text(text: title_line)
+        }
+        View(height: Constraint::Length(1)) {}
+        View(
+            flex_direction: Direction::Horizontal,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: content)
+            View(width: Constraint::Percentage(45), height: Constraint::Fill(1)) {
+                ScrollView(
+                    scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    Text(text: left_para)
+                }
+            }
+            View(width: Constraint::Length(1), height: Constraint::Fill(1)) {
+                Text(text: divider_para)
+            }
+            View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                ScrollView(
+                    scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    Text(text: right_para)
+                }
+            }
+        }
+        View(height: Constraint::Length(1)) {
+            Text(text: hint_line)
         }
     })
 }
 
-fn switch_alias(new_alias: &str) {
+/// 切换左侧光标指向的档位为 active profile（立即写入 + 持久化 + 推送 ACP）。
+fn switch_active_alias(idx: usize) {
+    let Some(key) = PROFILE_KEYS.get(idx) else {
+        return;
+    };
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
     let mut cfg = handle.write();
-    if cfg.config.active_alias != new_alias {
-        cfg.config.active_alias = new_alias.to_string();
-        tracing::info!(alias = new_alias, "ModelPanel: active_alias switched");
+    if cfg.config.active_alias != *key {
+        cfg.config.active_alias = key.to_string();
+        tracing::info!(alias = key, "ModelPanel: active_alias switched");
     }
     let snap = cfg.clone();
     drop(cfg);
     notify_save_result(crate::config::save(&snap));
-    let resolved_name = resolve_model_name(&snap.config, new_alias);
+    let resolved_name = resolve_model_name_for_alias(&snap.config, key);
     let s_handle = SERVICE_SNAPSHOT.state();
     let mut svc_snap = s_handle.read().clone();
-    svc_snap.model_alias = new_alias.to_string();
+    svc_snap.model_alias = key.to_string();
     svc_snap.model_name = resolved_name;
     *s_handle.write() = svc_snap;
     *MODEL_HIGHLIGHT_UNTIL.state().write() = Some(Instant::now() + Duration::from_secs(2));
@@ -451,82 +376,216 @@ fn switch_alias(new_alias: &str) {
     });
 }
 
-fn cycle_effort() {
+/// 编辑右侧字段（forward=true 前进 / false 后退）。立即写入 + 持久化 + 推送 ACP。
+fn edit_field(alias: String, field: usize, forward: bool) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
     let mut cfg = handle.write();
-    let thinking = cfg
+
+    // 先读取当前值（不可变，纯 clone），避免跨 guard 的字段级借用冲突
+    let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
+    let profile_provider = cfg
         .config
-        .thinking
-        .get_or_insert_with(|| crate::config::ThinkingConfig {
-            enabled: true,
-            budget_tokens: 8000,
-            effort: "medium".to_string(),
-            max_tokens: 32000,
-        });
-    thinking.enabled = true;
-    let cur_idx = EFFORT_LEVELS
-        .iter()
-        .position(|e| e == &thinking.effort)
-        .unwrap_or(0);
-    thinking.effort = EFFORT_LEVELS[(cur_idx + 1) % EFFORT_LEVELS.len()].to_string();
-    let snap = cfg.clone();
-    drop(cfg);
-    notify_save_result(crate::config::save(&snap));
-}
-
-fn cycle_max_tokens(forward: bool) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let mut cfg = handle.write();
-    let thinking = cfg
+        .profiles
+        .get(&alias)
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
+    let current_model = cfg
         .config
-        .thinking
-        .get_or_insert_with(|| crate::config::ThinkingConfig {
-            enabled: true,
-            budget_tokens: 8000,
-            effort: "medium".to_string(),
-            max_tokens: 32000,
-        });
-    let cur = MAX_TOKEN_PRESETS
-        .iter()
-        .position(|&v| v == thinking.max_tokens)
-        .unwrap_or(0);
-    let next = if forward {
-        (cur + 1) % MAX_TOKEN_PRESETS.len()
-    } else {
-        (cur + MAX_TOKEN_PRESETS.len() - 1) % MAX_TOKEN_PRESETS.len()
-    };
-    thinking.max_tokens = MAX_TOKEN_PRESETS[next];
+        .profiles
+        .get(&alias)
+        .and_then(|p| p.model.clone())
+        .unwrap_or_default();
+    let current_effort = cfg
+        .config
+        .profiles
+        .get(&alias)
+        .map(|p| p.effort.clone())
+        .unwrap_or_else(|| "xhigh".to_string());
+    let current_max = cfg
+        .config
+        .profiles
+        .get(&alias)
+        .map(|p| p.max_tokens)
+        .unwrap_or(32000);
+    let current_ctx = cfg
+        .config
+        .profiles
+        .get(&alias)
+        .map(|p| p.context_1m)
+        .unwrap_or(false);
+
+    match field {
+        FIELD_PROVIDER => {
+            if provider_ids.is_empty() {
+                return;
+            }
+            let idx = provider_ids
+                .iter()
+                .position(|i| *i == profile_provider)
+                .unwrap_or(0);
+            let next = provider_ids
+                [(idx + if forward { 1 } else { provider_ids.len() - 1 }) % provider_ids.len()]
+            .clone();
+            // 联动：目标 provider 同档位映射 → 覆盖 profile.model；无映射 → None 触发回退
+            let mapped = cfg
+                .config
+                .providers
+                .iter()
+                .find(|p| p.id == next)
+                .and_then(|p| p.models.get_model(&alias))
+                .map(str::to_string)
+                .filter(|m| !m.is_empty());
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.provider = next;
+                profile.model = mapped;
+            }
+        }
+        FIELD_MODEL => {
+            let provider = cfg
+                .config
+                .providers
+                .iter()
+                .find(|p| p.id == profile_provider);
+            let Some(provider) = provider else {
+                return;
+            };
+            // 候选 = provider 四个档位的全部模型名（去空、去重）+ 当前手动模型保底；
+            // 直接读字段而非 get_model，避免 fable 空回退 opus 造成重复
+            let mut models: Vec<String> = Vec::new();
+            for tier_model in [
+                &provider.models.opus,
+                &provider.models.sonnet,
+                &provider.models.haiku,
+                &provider.models.fable,
+            ] {
+                if !tier_model.is_empty() && !models.contains(tier_model) {
+                    models.push(tier_model.clone());
+                }
+            }
+            if !models.contains(&current_model) && !current_model.is_empty() {
+                models.insert(0, current_model.clone());
+            }
+            if models.is_empty() {
+                return;
+            }
+            let idx = models.iter().position(|m| *m == current_model).unwrap_or(0);
+            let next =
+                models[(idx + if forward { 1 } else { models.len() - 1 }) % models.len()].clone();
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.model = Some(next);
+            }
+        }
+        FIELD_EFFORT => {
+            let cur = EFFORT_LEVELS
+                .iter()
+                .position(|e| *e == current_effort)
+                .unwrap_or(0);
+            let next = EFFORT_LEVELS
+                [(cur + if forward { 1 } else { EFFORT_LEVELS.len() - 1 }) % EFFORT_LEVELS.len()]
+            .to_string();
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.effort = next;
+            }
+        }
+        FIELD_MAX_TOKENS => {
+            let cur = MAX_TOKEN_PRESETS
+                .iter()
+                .position(|v| *v == current_max)
+                .unwrap_or(0);
+            let next = MAX_TOKEN_PRESETS[(cur
+                + if forward {
+                    1
+                } else {
+                    MAX_TOKEN_PRESETS.len() - 1
+                })
+                % MAX_TOKEN_PRESETS.len()];
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.max_tokens = next;
+            }
+        }
+        FIELD_CONTEXT_1M => {
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.context_1m = !current_ctx;
+            }
+        }
+        _ => return,
+    }
     let snap = cfg.clone();
     drop(cfg);
     notify_save_result(crate::config::save(&snap));
+    // 推送 ACP 服务端 + 刷新 SERVICE_SNAPSHOT（模型名可能变化）
+    let resolved = resolve_model_name_for_alias(&snap.config, &alias);
+    let s_handle = SERVICE_SNAPSHOT.state();
+    let mut svc = s_handle.read().clone();
+    if alias == snap.config.active_alias {
+        svc.model_name = resolved;
+        let provider_type = snap
+            .config
+            .profiles
+            .get(&alias)
+            .and_then(|pf| snap.config.providers.iter().find(|p| p.id == pf.provider))
+            .map(|p| p.provider_type.clone())
+            .unwrap_or_default();
+        if !provider_type.is_empty() {
+            svc.provider_name = provider_type;
+        }
+    }
+    *s_handle.write() = svc;
+    tokio::spawn(async move {
+        if let Some(client) = ACP_CLIENT_HANDLE.get()
+            && let Err(e) = client.update_config(&snap).await
+        {
+            tracing::warn!(error = %e, "ModelPanel: update_config push failed");
+        }
+    });
 }
 
-fn toggle_context_1m() {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let mut cfg = handle.write();
-    let cur = cfg.config.context_1m.unwrap_or(false);
-    cfg.config.context_1m = Some(!cur);
-    let snap = cfg.clone();
-    drop(cfg);
-    notify_save_result(crate::config::save(&snap));
-}
-
-fn resolve_model_name(app_config: &crate::config::AppConfig, alias: &str) -> String {
-    let active_provider = app_config
-        .providers
-        .iter()
-        .find(|p| p.id == app_config.active_provider_id);
-    active_provider
-        .and_then(|p| p.models.get_model(alias))
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
+/// 解析档位实际模型名：Profile.model > ProviderModels 映射 > alias label。
+fn resolve_model_name_for_alias(app_config: &crate::config::AppConfig, alias: &str) -> String {
+    let profile = app_config.profiles.get(alias);
+    let provider = profile.and_then(|pf| {
+        if pf.provider.is_empty() {
+            app_config.providers.first()
+        } else {
+            app_config.providers.iter().find(|p| p.id == pf.provider)
+        }
+    });
+    profile
+        .and_then(|pf| pf.model.clone().filter(|m| !m.is_empty()))
+        .or_else(|| {
+            provider
+                .and_then(|p| p.models.get_model(alias))
+                .map(str::to_string)
+        })
+        .filter(|m| !m.is_empty())
         .unwrap_or_else(|| alias.to_string())
+}
+
+/// 模型名内嵌 effort 后缀（如 "gpt-5.6-luna high"）：主色用 model_info，后缀用 model accent 色高亮。
+fn styled_model_name(model: &str, theme: &ThemeDefinition) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let lower = model.to_lowercase();
+    for level in [" low", " medium", " high", " xhigh", " max"] {
+        if let Some(pos) = lower.rfind(level) {
+            let (head, tail) = model.split_at(pos + 1);
+            spans.push(Span::styled(
+                head.to_string(),
+                Style::new().fg(theme.semantic.model_info),
+            ));
+            spans.push(Span::styled(
+                tail.to_string(),
+                Style::new().fg(theme.semantic.model_accent).bold(),
+            ));
+            return spans;
+        }
+    }
+    spans.push(Span::styled(
+        model.to_string(),
+        Style::new().fg(theme.semantic.model_info),
+    ));
+    spans
 }
 
 fn notify_save_result(result: Result<(), anyhow::Error>) {

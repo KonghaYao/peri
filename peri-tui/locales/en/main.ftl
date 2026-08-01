@@ -444,7 +444,7 @@ model-effort-medium = Medium
 model-effort-high = High
 model-effort-xhigh = XHigh
 model-effort-max = Max
-panel-model-nav-hint =   ↑/↓::navigate  Enter/←/→::edit  Esc::close
+panel-model-nav-hint =   ↑/↓::switch  Tab::side  →/←::value  Esc::exit/close
 panel-model-inline-toggle-hint =   Enter toggle
 
 # ---- Status Panel ----

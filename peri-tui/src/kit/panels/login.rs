@@ -267,7 +267,12 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // 同步写 PERI_CONFIG_HANDLE + 更新 PROVIDER_LIST.is_active
                             if let Some(handle) = PERI_CONFIG_HANDLE.get() {
                                 let mut cfg = handle.write();
-                                cfg.config.active_provider_id = provider_id.clone();
+                                let alias = cfg.config.active_alias.clone();
+                                if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                                    profile.provider = provider_id.clone();
+                                    // 联动 model：清空手动 model 以回退 ProviderModels 映射
+                                    profile.model = None;
+                                }
                                 // 即时推送 SERVICE_SNAPSHOT——同时更新 provider_name 和
                                 // model_name（不同 provider 的 alias→model 映射可能不同）
                                 let snap = cfg.clone();
@@ -886,11 +891,17 @@ fn save_login_edit(es: &LoginEditState) {
                     opus: es.opus_model.clone(),
                     sonnet: es.sonnet_model.clone(),
                     haiku: es.haiku_model.clone(),
+                    // fable 无编辑字段：留空回退 opus（ProviderModels.get_model 语义）
+                    fable: String::new(),
                 },
                 ..Default::default()
             };
             cfg.config.providers.push(new_config);
-            cfg.config.active_provider_id = es.provider_id.clone();
+            // 激活：写入 active profile 的 provider
+            let alias = cfg.config.active_alias.clone();
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.provider = es.provider_id.clone();
+            }
         } else {
             // Edit 路径：查找并更新已有 provider
             if let Some(provider) = cfg
@@ -907,11 +918,20 @@ fn save_login_edit(es: &LoginEditState) {
                 provider.models.sonnet = es.sonnet_model.clone();
                 provider.models.haiku = es.haiku_model.clone();
 
-                // 如果 id 变化且该 provider 是当前激活的，同步更新 active_provider_id
-                if cfg.config.active_provider_id == es.original_provider_id
+                // 如果 id 变化且该 provider 是当前激活的，同步更新 active profile 的 provider
+                let active_profile_provider = cfg
+                    .config
+                    .profiles
+                    .get(&cfg.config.active_alias)
+                    .map(|p| p.provider.clone())
+                    .unwrap_or_default();
+                if active_profile_provider == es.original_provider_id
                     && es.provider_id != es.original_provider_id
                 {
-                    cfg.config.active_provider_id = es.provider_id.clone();
+                    let alias = cfg.config.active_alias.clone();
+                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                        profile.provider = es.provider_id.clone();
+                    }
                 }
             }
         }
@@ -954,6 +974,12 @@ fn refresh_provider_list() {
         return;
     };
     let cfg = handle.read();
+    let active_profile_provider = cfg
+        .config
+        .profiles
+        .get(&cfg.config.active_alias)
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
     let updated_providers: Vec<ProviderSummary> = cfg
         .config
         .providers
@@ -969,7 +995,7 @@ fn refresh_provider_list() {
             ProviderSummary {
                 id: p.id.clone(),
                 provider_type: p.provider_type.clone(),
-                is_active: p.id == cfg.config.active_provider_id,
+                is_active: p.id == active_profile_provider,
                 has_api_key,
                 base_url,
             }

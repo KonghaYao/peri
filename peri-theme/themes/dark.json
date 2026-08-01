@@ -78,7 +78,10 @@
     "thinking": "#A2A9E4",
     "model_info": "#A0825F",
     "bash_border": "#FD5DB1",
-    "selected_fg": "#B2B9F9"
+    "selected_fg": "#B2B9F9",
+    "model_accent": "#A2A9E4",
+    "effort": "#E5A46B",
+    "token_context": "#7FB5D9"
   },
   "component": {
     "message": {

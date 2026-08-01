@@ -122,7 +122,7 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
         "{}:{}{}",
         provider.display_name(),
         provider.model_name(),
-        provider.thinking_key()
+        provider.effort_key()
     )
 }
 

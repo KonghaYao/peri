@@ -269,6 +269,17 @@ fn build_theme_from_flat(
             .map_err(|e| ThemeLoadError::InvalidColor(format!("invalid u16 for {key}: {e}")))
     };
 
+    // 可选色：旧版用户主题可能缺 Model Panel 新语义键，缺失时回退默认值
+    let get_color_opt = |key: &str| -> Result<Option<Color>, ThemeLoadError> {
+        match flat.get(key) {
+            Some(val) => parse_hex_color(val).map(Some),
+            None => Ok(None),
+        }
+    };
+    let model_accent_default = Color::Rgb(162, 169, 228); // #A2A9E4
+    let effort_default = Color::Rgb(229, 164, 107); // #E5A46B
+    let token_context_default = Color::Rgb(127, 181, 217); // #7FB5D9
+
     let palette = Palette {
         base: BasePalette {
             bg: get_color("palette.base.bg")?,
@@ -346,6 +357,9 @@ fn build_theme_from_flat(
         loading: get_color("semantic.loading")?,
         thinking: get_color("semantic.thinking")?,
         model_info: get_color("semantic.model_info")?,
+        model_accent: get_color_opt("semantic.model_accent")?.unwrap_or(model_accent_default),
+        effort: get_color_opt("semantic.effort")?.unwrap_or(effort_default),
+        token_context: get_color_opt("semantic.token_context")?.unwrap_or(token_context_default),
         bash_border: get_color("semantic.bash_border")?,
         selected_fg: get_color("semantic.selected_fg")?,
     };

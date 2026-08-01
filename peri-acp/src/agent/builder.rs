@@ -436,7 +436,7 @@ pub(crate) fn build_agent(
 
     // 上下文预算
     let mut context_window = context_window_raw;
-    let context_1m = peri_config.config.context_1m.unwrap_or(false);
+    let context_1m = ctx.provider.context_1m();
     if context_1m {
         context_window = 1_000_000;
     }

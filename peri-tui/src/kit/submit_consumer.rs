@@ -200,22 +200,21 @@ async fn handle_agent_text_submit(
 fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd: &str) {
     match action {
         ViewActionRequest::CycleProvider => {
+            // 语义改为循环 active_alias 四档（fable → opus → sonnet → haiku）
             if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
                 let cfg = cfg_handle.read();
-                let provider_ids: Vec<String> =
-                    cfg.config.providers.iter().map(|p| p.id.clone()).collect();
-                if !provider_ids.is_empty() {
-                    let current = &cfg.config.active_provider_id;
-                    let idx = provider_ids.iter().position(|p| p == current).unwrap_or(0);
-                    let next = provider_ids[(idx + 1) % provider_ids.len()].clone();
-                    let client = acp_client.clone();
-                    let cfg_handle = cfg_handle.clone();
-                    tokio::spawn(async move {
-                        let mut new_cfg = cfg_handle.read().clone();
-                        new_cfg.config.active_provider_id = next;
-                        let _ = client.update_config(&new_cfg).await;
-                    });
-                }
+                let aliases = ["fable", "opus", "sonnet", "haiku"];
+                let current = &cfg.config.active_alias;
+                let idx = aliases.iter().position(|a| *a == current).unwrap_or(0);
+                let next = aliases[(idx + 1) % aliases.len()].to_string();
+                drop(cfg);
+                let client = acp_client.clone();
+                let cfg_handle = cfg_handle.clone();
+                tokio::spawn(async move {
+                    let mut new_cfg = cfg_handle.read().clone();
+                    new_cfg.config.active_alias = next;
+                    let _ = client.update_config(&new_cfg).await;
+                });
             }
         }
         ViewActionRequest::CyclePermissionMode => {

@@ -78,13 +78,17 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    // 从 PERI_CONFIG_HANDLE 派生 provider_id 和 active alias
+    // 从 PERI_CONFIG_HANDLE 派生 provider_id（active profile 携带）和 active alias
     let (active_provider_id, active_alias) = PERI_CONFIG_HANDLE
         .get()
         .map(|h| {
             let cfg = h.read();
             (
-                cfg.config.active_provider_id.clone(),
+                cfg.config
+                    .profiles
+                    .get(&cfg.config.active_alias)
+                    .map(|p| p.provider.clone())
+                    .unwrap_or_default(),
                 cfg.config.active_alias.clone(),
             )
         })

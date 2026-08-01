@@ -32,6 +32,10 @@ fn test_dark_theme_fields() {
     assert_eq!(theme.semantic.loading, Color::Rgb(147, 165, 255));
     assert_eq!(theme.semantic.thinking, Color::Rgb(162, 169, 228));
     assert_eq!(theme.semantic.model_info, Color::Rgb(160, 130, 95));
+    // Model Panel 档位语义色（dark）
+    assert_eq!(theme.semantic.model_accent, Color::Rgb(162, 169, 228));
+    assert_eq!(theme.semantic.effort, Color::Rgb(229, 164, 107));
+    assert_eq!(theme.semantic.token_context, Color::Rgb(127, 181, 217));
     assert_eq!(theme.semantic.bash_border, Color::Rgb(253, 93, 177));
 
     // Component 完整性
@@ -64,6 +68,10 @@ fn test_light_theme_fields() {
     assert_eq!(theme.semantic.text.primary, Color::Rgb(46, 46, 42));
     assert_eq!(theme.semantic.surface.default, Color::Rgb(245, 245, 248));
     assert_eq!(theme.component.message.user_bg, Color::Rgb(230, 230, 235));
+    // Model Panel 档位语义色（light 可读性变体）
+    assert_eq!(theme.semantic.model_accent, Color::Rgb(107, 114, 201));
+    assert_eq!(theme.semantic.effort, Color::Rgb(176, 111, 46));
+    assert_eq!(theme.semantic.token_context, Color::Rgb(62, 138, 184));
 }
 
 #[test]

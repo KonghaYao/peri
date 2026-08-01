@@ -44,6 +44,15 @@ const TOOL_NAME: Color = SAGE;
 const MODEL_INFO: Color = Color::Rgb(160, 130, 95); // #A0825F
 const BASH_BORDER: Color = Color::Rgb(253, 93, 177); // #FD5DB1
 
+// ── Model Panel 档位语义 ─────────────────────────────────────────────────────
+const MODEL_ACCENT: Color = Color::Rgb(162, 169, 228); // #A2A9E4 模型名内嵌 effort 后缀
+const EFFORT: Color = Color::Rgb(229, 164, 107); // #E5A46B effort 档位值
+const TOKEN_CONTEXT: Color = Color::Rgb(127, 181, 217); // #7FB5D9 200k/1m 标识
+// light 主题可读性变体
+const LIGHT_MODEL_ACCENT: Color = Color::Rgb(107, 114, 201); // #6B72C9
+const LIGHT_EFFORT: Color = Color::Rgb(176, 111, 46); // #B06F2E
+const LIGHT_TOKEN_CONTEXT: Color = Color::Rgb(62, 138, 184); // #3E8AB8
+
 /// 构建 peri-dark 完整主题定义。
 pub fn dark_theme() -> ThemeDefinition {
     ThemeDefinition {
@@ -113,6 +122,9 @@ pub fn dark_theme() -> ThemeDefinition {
             thinking: THINKING,
             accent: ACCENT,
             model_info: MODEL_INFO,
+            model_accent: MODEL_ACCENT,
+            effort: EFFORT,
+            token_context: TOKEN_CONTEXT,
             bash_border: BASH_BORDER,
             selected_fg: SELECTED_FG,
         },
@@ -254,6 +266,9 @@ pub fn light_theme() -> ThemeDefinition {
             thinking: THINKING,
             accent: ACCENT,
             model_info: MODEL_INFO,
+            model_accent: LIGHT_MODEL_ACCENT,
+            effort: LIGHT_EFFORT,
+            token_context: LIGHT_TOKEN_CONTEXT,
             bash_border: BASH_BORDER,
             selected_fg: SELECTED_FG,
         },

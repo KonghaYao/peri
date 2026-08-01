@@ -21,7 +21,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::{
-    AcpServerConfig, SessionState, apply_thinking_effort, build_mode_state,
+    AcpServerConfig, SessionState, apply_profile_effort, build_mode_state,
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
     parse_permission_mode,
 };
@@ -234,7 +234,7 @@ pub(crate) async fn handle_request(
                     persist_config(cfg);
                 }
                 "thinking_effort" => {
-                    apply_thinking_effort(&cfg.peri_config, value);
+                    apply_profile_effort(&cfg.peri_config, value);
                     // 同步更新 LlmProvider（thinking 变更需要重建 provider）
                     let new_provider = {
                         let c = cfg.peri_config.read();
@@ -254,7 +254,10 @@ pub(crate) async fn handle_request(
                     let enabled = value == "true" || value == "1";
                     {
                         let mut c = cfg.peri_config.write();
-                        c.config.context_1m = Some(enabled);
+                        let alias = c.config.active_alias.clone();
+                        if let Some(profile) = c.config.profiles.get_mut(&alias) {
+                            profile.context_1m = enabled;
+                        }
                     }
                     persist_config(cfg);
                     info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
@@ -655,14 +658,20 @@ pub(crate) async fn handle_request(
             if new_cfg.config.providers.is_empty() {
                 return Err(AcpError::new(-32602, "providers cannot be empty"));
             }
-            let active_pid = new_cfg.config.active_provider_id.as_str();
-            if !active_pid.is_empty()
-                && !new_cfg.config.providers.iter().any(|p| p.id == active_pid)
-            {
-                return Err(AcpError::new(
-                    -32602,
-                    format!("active_provider_id '{active_pid}' not found"),
-                ));
+            // Profile 是唯一事实源：各 profile 引用的 provider 必须存在于 providers
+            for alias in crate::config::Profiles::ALL {
+                let pid = new_cfg
+                    .config
+                    .profiles
+                    .get(alias)
+                    .map(|p| p.provider.as_str())
+                    .unwrap_or("");
+                if !pid.is_empty() && !new_cfg.config.providers.iter().any(|p| p.id == pid) {
+                    return Err(AcpError::new(
+                        -32602,
+                        format!("profile {alias}: provider '{pid}' not found"),
+                    ));
+                }
             }
 
             *cfg.peri_config.write() = new_cfg.clone();
@@ -675,8 +684,14 @@ pub(crate) async fn handle_request(
                 );
                 *cfg.provider.write() = p;
             } else {
+                let active_profile_provider = new_cfg
+                    .config
+                    .profiles
+                    .get(&new_cfg.config.active_alias)
+                    .map(|p| p.provider.as_str())
+                    .unwrap_or("");
                 tracing::warn!(
-                    active_provider = %new_cfg.config.active_provider_id,
+                    active_provider = %active_profile_provider,
                     active_alias = %new_cfg.config.active_alias,
                     providers = new_cfg.config.providers.len(),
                     "update_config: LlmProvider::from_config returned None, provider NOT updated"

@@ -97,16 +97,21 @@ fn make_server_config(
 
 // ── 测试 ──────────────────────────────────────────────────────────────────────
 
-/// 验证 session/update_config 切换 active_provider_id 后 cfg.provider 正确更新
+/// 验证 session/update_config 切换 active profile 的 provider 后 cfg.provider 正确更新
 #[tokio::test]
 async fn test_update_config_切换provider后cfg_provider更新() {
-    // Arrange: 构造两个 provider（a=openai, b=anthropic），初始 active_provider_id = "a"
+    // Arrange: 构造两个 provider（a=openai, b=anthropic），初始 sonnet profile 绑定 "a"
     let tmp = tempfile::TempDir::new().unwrap();
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
     let provider_b = make_provider_config("b", "anthropic", "sk-ant-test", "claude-sonnet-4-6");
 
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_provider_id = "a".to_string();
+    peri_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .unwrap()
+        .provider = "a".to_string();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![provider_a.clone(), provider_b.clone()];
 
@@ -120,9 +125,14 @@ async fn test_update_config_切换provider后cfg_provider更新() {
     let mut sessions = HashMap::new();
     let transport = MockTransport;
 
-    // 构造 update_config 参数：active_provider_id 改为 "b"
+    // 构造 update_config 参数：sonnet profile 的 provider 改为 "b"
     let mut updated_config = peri_config.clone();
-    updated_config.config.active_provider_id = "b".to_string();
+    updated_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .unwrap()
+        .provider = "b".to_string();
 
     let params = json!({
         "sessionId": "test-session",
@@ -168,7 +178,13 @@ async fn test_update_config_空providers返回错误() {
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
 
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_provider_id = "a".to_string();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .unwrap()
+        .provider = "a".to_string();
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
@@ -210,7 +226,13 @@ async fn test_update_config_不存在的provider_id返回错误() {
     let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
 
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_provider_id = "a".to_string();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .unwrap()
+        .provider = "a".to_string();
     peri_config.config.providers = vec![provider_a];
 
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
@@ -218,9 +240,14 @@ async fn test_update_config_不存在的provider_id返回错误() {
     let mut sessions = HashMap::new();
     let transport = MockTransport;
 
-    // active_provider_id 指向不存在的 provider
+    // sonnet profile 的 provider 指向不存在的 provider
     let mut bad_config = peri_config.clone();
-    bad_config.config.active_provider_id = "nonexistent".to_string();
+    bad_config
+        .config
+        .profiles
+        .get_mut("sonnet")
+        .unwrap()
+        .provider = "nonexistent".to_string();
     bad_config.config.providers = vec![make_provider_config(
         "a",
         "openai",

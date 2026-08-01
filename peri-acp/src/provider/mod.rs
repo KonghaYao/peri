@@ -6,7 +6,7 @@
 pub mod config;
 pub mod store;
 
-pub use config::{AppConfig, PeriConfig, ProviderConfig, ProviderModels, ThinkingConfig};
+pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
 use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
 pub use store::{config_path, load, load_from, save, save_to, workspace_config_path};
 use url::Url;
@@ -18,13 +18,18 @@ pub enum LlmProvider {
         api_key: String,
         base_url: String,
         model: String,
-        thinking: Option<ThinkingConfig>,
+        /// 思考强度 "low".."max"；None 表示不启用 extended thinking
+        effort: Option<String>,
+        max_tokens: u32,
+        context_1m: bool,
     },
     Anthropic {
         api_key: String,
         model: String,
         base_url: Option<String>,
-        thinking: Option<ThinkingConfig>,
+        effort: Option<String>,
+        max_tokens: u32,
+        context_1m: bool,
     },
 }
 
@@ -42,7 +47,9 @@ impl LlmProvider {
                     api_key,
                     model,
                     base_url,
-                    thinking: None,
+                    effort: None,
+                    max_tokens: 32000,
+                    context_1m: false,
                 })
             }
             "openai" | "" => {
@@ -55,7 +62,9 @@ impl LlmProvider {
                             api_key,
                             model,
                             base_url,
-                            thinking: None,
+                            effort: None,
+                            max_tokens: 32000,
+                            context_1m: false,
                         });
                     }
                 }
@@ -68,7 +77,9 @@ impl LlmProvider {
                     api_key,
                     base_url,
                     model,
-                    thinking: None,
+                    effort: None,
+                    max_tokens: 32000,
+                    context_1m: false,
                 })
             }
             _ => {
@@ -81,85 +92,34 @@ impl LlmProvider {
                     api_key,
                     base_url,
                     model,
-                    thinking: None,
+                    effort: None,
+                    max_tokens: 32000,
+                    context_1m: false,
                 })
             }
         }
     }
 
-    /// 从 PeriConfig 构造 LlmProvider（按 active_provider_id 查找 Provider，再按 active_alias 取模型名）
+    /// 从 PeriConfig 按 active_alias 对应的 Profile 构造 LlmProvider
     pub fn from_config(cfg: &config::PeriConfig) -> Option<Self> {
-        let app = &cfg.config;
-        let provider = app
-            .providers
-            .iter()
-            .find(|p| p.id == app.active_provider_id)?;
-
-        if provider.api_key.is_empty() {
-            return None;
-        }
-
-        let alias = app.active_alias.as_str();
-        let model = provider
-            .models
-            .get_model(alias)
-            .filter(|m| !m.is_empty())
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| match provider.provider_type.as_str() {
-                "anthropic" => "claude-sonnet-4-6".to_string(),
-                _ => "gpt-4o".to_string(),
-            });
-
-        let thinking = app.thinking.clone().filter(|t| t.enabled);
-
-        match provider.provider_type.as_str() {
-            "anthropic" => Some(Self::Anthropic {
-                api_key: provider.api_key.clone(),
-                model,
-                base_url: if provider.base_url.is_empty() {
-                    None
-                } else {
-                    Some(provider.base_url.clone())
-                },
-                thinking,
-            }),
-            _ => Some(Self::OpenAi {
-                api_key: provider.api_key.clone(),
-                base_url: if provider.base_url.is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    provider.base_url.clone()
-                },
-                model,
-                thinking,
-            }),
-        }
+        Self::from_config_for_alias(cfg, &cfg.config.active_alias)
     }
 
-    /// 从 PeriConfig 按指定 alias（如 "haiku"/"sonnet"/"opus"）构造 LlmProvider
-    /// 大小写不敏感；未知 alias fallback 到默认模型
+    /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
+    /// Profile 是唯一事实源：provider/model/effort/max_tokens/context_1m 全部取自
+    /// `profiles[alias]`，model 空时回退 provider.models 同档位映射（fable 空回退 opus）。
     pub fn from_config_for_alias(cfg: &config::PeriConfig, alias: &str) -> Option<Self> {
         let app = &cfg.config;
-        let provider = app
-            .providers
-            .iter()
-            .find(|p| p.id == app.active_provider_id)?;
+        let (provider, profile) = resolve_profile(app, alias)?;
 
         if provider.api_key.is_empty() {
             return None;
         }
 
-        let model = provider
-            .models
-            .get_model(alias)
-            .filter(|m| !m.is_empty())
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| match provider.provider_type.as_str() {
-                "anthropic" => "claude-sonnet-4-6".to_string(),
-                _ => "gpt-4o".to_string(),
-            });
-
-        let thinking = app.thinking.clone().filter(|t| t.enabled);
+        let model = resolve_model_name(provider, alias, profile);
+        let effort = Some(profile.effort.clone());
+        let max_tokens = profile.max_tokens;
+        let context_1m = profile.context_1m;
 
         match provider.provider_type.as_str() {
             "anthropic" => Some(Self::Anthropic {
@@ -170,7 +130,9 @@ impl LlmProvider {
                 } else {
                     Some(provider.base_url.clone())
                 },
-                thinking,
+                effort,
+                max_tokens,
+                context_1m,
             }),
             _ => Some(Self::OpenAi {
                 api_key: provider.api_key.clone(),
@@ -180,7 +142,9 @@ impl LlmProvider {
                     provider.base_url.clone()
                 },
                 model,
-                thinking,
+                effort,
+                max_tokens,
+                context_1m,
             }),
         }
     }
@@ -199,6 +163,22 @@ impl LlmProvider {
         }
     }
 
+    pub fn context_1m(&self) -> bool {
+        match self {
+            Self::OpenAi { context_1m, .. } | Self::Anthropic { context_1m, .. } => *context_1m,
+        }
+    }
+
+    /// 思考强度稳定标识，用于 fingerprint；None 时返回空字符串
+    pub fn effort_key(&self) -> String {
+        match self {
+            Self::OpenAi { effort, .. } | Self::Anthropic { effort, .. } => effort
+                .as_ref()
+                .map(|e| format!(":effort={e}"))
+                .unwrap_or_default(),
+        }
+    }
+
     /// 替换模型名，保持其他配置不变
     pub fn with_model_name(&self, model: String) -> Self {
         let mut clone = self.clone();
@@ -213,25 +193,9 @@ impl LlmProvider {
     ///
     /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
     /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
-    /// 此处保持配置级常量语义（1M 窗口由 builder 侧 `context_1m` 标志覆盖）。
+    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
     pub fn context_window(&self) -> u32 {
         200_000
-    }
-
-    /// 返回 thinking 配置的稳定标识，用于 fingerprint。
-    ///
-    /// 格式：`:think=<effort>:<budget_tokens>`，无 thinking 时返回空字符串。
-    /// 不包含 max_tokens（max_tokens 由 into_model() 统一从 thinking.as_ref().map_or(32000, |t| t.max_tokens) 读取，
-    /// 且 32000 硬编码不会成为区分因子）。
-    pub fn thinking_key(&self) -> String {
-        let thinking = match self {
-            Self::OpenAi { thinking, .. } => thinking,
-            Self::Anthropic { thinking, .. } => thinking,
-        };
-        match thinking {
-            Some(ref t) if t.enabled => format!(":think={}:{}", t.effort, t.budget_tokens),
-            _ => String::new(),
-        }
     }
 
     pub fn into_model(self) -> Box<dyn peri_model::Model> {
@@ -240,18 +204,17 @@ impl LlmProvider {
                 api_key,
                 base_url,
                 model,
-                thinking,
+                effort,
+                max_tokens,
+                ..
             } => {
                 let endpoint =
                     parse_endpoint(&base_url, "https://api.openai.com/v1", "openai base_url");
                 let mut config = OpenAiConfig::new(endpoint, api_key, model);
-                if let Some(ref t) = thinking {
-                    config = config.with_reasoning_effort(t.openai_effort());
-                    if t.enabled {
-                        config = config.with_thinking_enabled(true);
-                    }
+                if let Some(e) = effort.as_ref() {
+                    config = config.with_reasoning_effort(e);
+                    config = config.with_thinking_enabled(true);
                 }
-                let max_tokens = thinking.as_ref().map_or(32000, |t| t.max_tokens);
                 config = config.with_max_tokens(max_tokens);
                 Box::new(OpenAiModel::new(config))
             }
@@ -259,7 +222,9 @@ impl LlmProvider {
                 api_key,
                 model,
                 base_url,
-                thinking,
+                effort,
+                max_tokens,
+                ..
             } => {
                 let endpoint = match base_url {
                     Some(url) => {
@@ -268,15 +233,50 @@ impl LlmProvider {
                     None => Url::parse("https://api.anthropic.com").expect("静态默认 endpoint"),
                 };
                 let mut config = AnthropicConfig::new(endpoint, api_key, model);
-                if let Some(ref t) = thinking {
-                    config = config.with_extended_thinking(t.budget_tokens, &t.effort);
+                if let Some(e) = effort.as_ref() {
+                    // budget_tokens = max_tokens（Profile 唯一事实源，不新增字段）
+                    config = config.with_extended_thinking(max_tokens, e);
                 }
-                let max_tokens = thinking.as_ref().map_or(32000, |t| t.max_tokens);
                 config = config.with_max_tokens(max_tokens);
                 Box::new(AnthropicModel::new(config))
             }
         }
     }
+}
+
+/// 解析 active profile → (provider, profile)。
+/// profile.provider 为空时回退第一个可用 provider；provider 找不到返回 None。
+fn resolve_profile<'a>(
+    app: &'a config::AppConfig,
+    alias: &str,
+) -> Option<(&'a ProviderConfig, &'a config::ProfileConfig)> {
+    let profile = app.profiles.get(alias)?;
+    let provider = if profile.provider.is_empty() {
+        app.providers.first()
+    } else {
+        app.providers.iter().find(|p| p.id == profile.provider)
+    }?;
+    Some((provider, profile))
+}
+
+/// 解析最终 model 名：Profile.model > ProviderModels 同档位（fable 空回退 opus）> 厂商默认
+fn resolve_model_name(
+    provider: &ProviderConfig,
+    alias: &str,
+    profile: &config::ProfileConfig,
+) -> String {
+    if let Some(m) = profile.model.as_ref().filter(|m| !m.is_empty()) {
+        return m.clone();
+    }
+    provider
+        .models
+        .get_model(alias)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| match provider.provider_type.as_str() {
+            "anthropic" => "claude-sonnet-4-6".to_string(),
+            _ => "gpt-4o".to_string(),
+        })
 }
 
 /// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，

@@ -5,14 +5,15 @@
 //! （`from_env` / `from_config`），`peri-model` 不解析任何环境变量。
 
 use super::*;
-use crate::provider::ThinkingConfig;
 
 fn openai_provider(model: &str) -> LlmProvider {
     LlmProvider::OpenAi {
         api_key: "test-key".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         model: model.to_string(),
-        thinking: None,
+        effort: None,
+        max_tokens: 32000,
+        context_1m: false,
     }
 }
 
@@ -21,16 +22,9 @@ fn anthropic_provider(model: &str) -> LlmProvider {
         api_key: "test-key".to_string(),
         model: model.to_string(),
         base_url: None,
-        thinking: None,
-    }
-}
-
-fn think(enabled: bool, budget_tokens: u32, effort: &str, max_tokens: u32) -> ThinkingConfig {
-    ThinkingConfig {
-        enabled,
-        budget_tokens,
-        effort: effort.to_string(),
-        max_tokens,
+        effort: None,
+        max_tokens: 32000,
+        context_1m: false,
     }
 }
 
@@ -69,7 +63,7 @@ fn into_model_anthropic_produces_anthropic_protocol() {
 
 #[test]
 fn into_model_thinking_config_applies_max_tokens() {
-    // max_tokens 语义：into_model 统一从 thinking.max_tokens 读取（无 thinking 时 32000）。
+    // max_tokens 语义：into_model 从 provider 的 max_tokens 读取（默认 32000）。
     let model = openai_provider("gpt-4o")
         .with_model_name("gpt-4o".to_string())
         .into_model();
@@ -85,7 +79,9 @@ fn into_model_thinking_config_applies_max_tokens() {
         api_key: "test-key".to_string(),
         base_url: "https://api.example.com/v1".to_string(),
         model: "gpt-4o".to_string(),
-        thinking: Some(think(true, 8000, "medium", 16384)),
+        effort: Some("medium".to_string()),
+        max_tokens: 16384,
+        context_1m: false,
     };
     let body = provider_with_think
         .into_model()
@@ -95,7 +91,7 @@ fn into_model_thinking_config_applies_max_tokens() {
         .as_value()
         .clone();
     assert_eq!(body["max_tokens"], serde_json::json!(16384));
-    // thinking 配置透传：reasoning_effort + thinking.enabled
+    // effort 配置透传：reasoning_effort + thinking.enabled
     assert_eq!(body["reasoning_effort"], serde_json::json!("medium"));
     assert_eq!(body["thinking"], serde_json::json!({ "type": "enabled" }));
 }
@@ -106,7 +102,9 @@ fn into_model_anthropic_extended_thinking_applied() {
         api_key: "test-key".to_string(),
         model: "claude-sonnet-4-6".to_string(),
         base_url: None,
-        thinking: Some(think(true, 16000, "high", 64000)),
+        effort: Some("high".to_string()),
+        max_tokens: 64000,
+        context_1m: false,
     };
     let body = provider
         .into_model()
@@ -115,9 +113,10 @@ fn into_model_anthropic_extended_thinking_applied() {
         .body()
         .as_value()
         .clone();
+    // budget_tokens = max_tokens（Profile 唯一事实源）
     assert_eq!(
         body["thinking"],
-        serde_json::json!({ "type": "enabled", "budget_tokens": 16000 })
+        serde_json::json!({ "type": "enabled", "budget_tokens": 64000 })
     );
     assert_eq!(
         body["output_config"],
@@ -134,7 +133,9 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
         api_key: "test-key".to_string(),
         base_url: "not a url".to_string(),
         model: "gpt-4o".to_string(),
-        thinking: None,
+        effort: None,
+        max_tokens: 32000,
+        context_1m: false,
     };
     let model = provider.into_model();
     let prepared = model
@@ -152,4 +153,82 @@ fn context_window_is_200k_for_both_providers() {
         anthropic_provider("claude-sonnet-4-6").context_window(),
         200_000
     );
+}
+
+#[test]
+fn from_config_reads_active_profile() {
+    let cfg = PeriConfig {
+        config: AppConfig {
+            active_alias: "opus".into(),
+            profiles: Profiles {
+                opus: ProfileConfig {
+                    provider: "p1".into(),
+                    effort: "max".into(),
+                    max_tokens: 64000,
+                    context_1m: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            providers: vec![ProviderConfig {
+                id: "p1".into(),
+                provider_type: "openai".into(),
+                api_key: "k".into(),
+                models: ProviderModels {
+                    opus: "gpt-x".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let p = LlmProvider::from_config(&cfg).unwrap();
+    assert_eq!(p.model_name(), "gpt-x");
+    assert!(p.context_1m());
+    assert_eq!(p.effort_key(), ":effort=max");
+    let body = p
+        .into_model()
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功")
+        .body()
+        .as_value()
+        .clone();
+    assert_eq!(body["max_tokens"], serde_json::json!(64000));
+    assert_eq!(body["reasoning_effort"], serde_json::json!("max"));
+}
+
+#[test]
+fn from_config_for_alias_fable_falls_back_to_opus_model() {
+    let cfg = PeriConfig {
+        config: AppConfig {
+            active_alias: "fable".into(),
+            profiles: Profiles {
+                fable: ProfileConfig {
+                    provider: "p1".into(),
+                    effort: "xhigh".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            providers: vec![ProviderConfig {
+                id: "p1".into(),
+                provider_type: "anthropic".into(),
+                api_key: "k".into(),
+                models: ProviderModels {
+                    opus: "claude-opus-4-6".into(),
+                    fable: String::new(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let p = LlmProvider::from_config(&cfg).unwrap();
+    // fable 档位 model 空 → 回退 opus
+    assert_eq!(p.model_name(), "claude-opus-4-6");
+    let _ = p;
 }
