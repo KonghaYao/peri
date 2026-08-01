@@ -148,6 +148,12 @@ fn flatten_json_obj(prefix: &str, value: &serde_json::Value, flat: &mut HashMap<
                 flatten_json_obj(&key, v, flat);
             }
         }
+        serde_json::Value::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                let key = format!("{prefix}.{i}");
+                flatten_json_obj(&key, v, flat);
+            }
+        }
         serde_json::Value::String(s) => {
             flat.insert(prefix.to_string(), s.clone());
         }
@@ -242,6 +248,26 @@ fn resolve_ref_value(
     } else {
         Ok(target)
     }
+}
+
+/// 解析会话标题底色板。逐项读取 `component.input.session_title_palette.{i}`，
+/// 缺省或非法时回退到内置 dark 主题的默认色板——保证旧版用户主题
+/// （无该字段）也能加载，且缺失项不阻断整个主题。
+fn build_session_title_palette(
+    flat: &HashMap<String, String>,
+) -> Result<[Color; 8], ThemeLoadError> {
+    let defaults = crate::builtin::dark_theme()
+        .component
+        .input
+        .session_title_palette;
+    let mut palette = [Color::Rgb(0, 0, 0); 8];
+    for i in 0..8 {
+        palette[i] = match flat.get(&format!("component.input.session_title_palette.{i}")) {
+            Some(val) => parse_hex_color(val).unwrap_or(defaults[i]),
+            None => defaults[i],
+        };
+    }
+    Ok(palette)
 }
 
 /// 从展开的扁平 map 构建 ThemeDefinition。
@@ -380,6 +406,7 @@ fn build_theme_from_flat(
             prompt_loading: get_color("component.input.prompt_loading")?,
             continuation: get_color("component.input.continuation")?,
             placeholder: get_color("component.input.placeholder")?,
+            session_title_palette: build_session_title_palette(flat)?,
         },
         panel: PanelTokens {
             border: get_color("component.panel.border")?,

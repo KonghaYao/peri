@@ -31,9 +31,10 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, Handle, HookSummary, MCP_SERVERS, MEMORY_LIST,
-    McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST,
-    PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
+    ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
+    Handle, HookSummary, MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary,
+    McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
+    SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -99,6 +100,10 @@ struct SlowSnapshotRefresh {
     files: Vec<String>,
     threads: Vec<ThreadSummary>,
     memory_entries: Vec<MemoryEntry>,
+    /// 当前会话标题派生缓存：上次查询的 session id + 结果 + 下次刷新时刻。
+    current_title_session_id: String,
+    current_title: String,
+    next_title_refresh: Instant,
 }
 
 impl Default for SlowSnapshotRefresh {
@@ -110,6 +115,10 @@ impl Default for SlowSnapshotRefresh {
             files: Vec::new(),
             threads: Vec::new(),
             memory_entries: Vec::new(),
+            current_title_session_id: String::new(),
+            current_title: String::new(),
+            // 首 tick 立即查询（Instant::now() 已过期）
+            next_title_refresh: Instant::now(),
         }
     }
 }
@@ -216,6 +225,26 @@ async fn tick_once(
         slow.next_memory_scan = now + Duration::from_secs(30);
     }
     let memory_entries = slow.memory_entries.clone();
+
+    // ── 6e. 当前会话标题：从 thread_store 派生（节流查询） ───────────────
+    // session id 变化立即查询；同 id 每 10s 刷新一次（覆盖标题中途被
+    // 自动生成 / rename 的情况）。load_meta 是主键查询，开销极低。
+    let session_id = ACTIVE_SESSION_ID.state().read().clone();
+    let session_changed = session_id != slow.current_title_session_id;
+    if (session_changed || now >= slow.next_title_refresh) && !session_id.is_empty() {
+        match src.thread_store.load_meta(&session_id).await {
+            Ok(meta) => {
+                slow.current_title = meta.title.unwrap_or_default();
+                slow.current_title_session_id = session_id;
+            }
+            Err(e) => {
+                warn!(error = %e, sid = %session_id, "service_snapshot: load_meta for session title failed");
+            }
+        }
+        slow.next_title_refresh = now + Duration::from_secs(10);
+    }
+    let current_title = slow.current_title.clone();
+    write_if_changed(&CURRENT_SESSION_TITLE.state(), current_title);
 
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {

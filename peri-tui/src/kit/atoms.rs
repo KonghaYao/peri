@@ -340,6 +340,11 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
 pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(String::new);
 
+/// 当前活跃 session 的标题。由 service_snapshot 周期性从 thread_store 派生
+/// （load_meta(ACTIVE_SESSION_ID)），InputArea 上边栏右侧以 hash 稳定底色展示。
+/// 空字符串表示尚无标题（新会话 / 未加载），此时不渲染。
+pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::new);
+
 /// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
 /// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM
 /// 残留污染新 session 的消息区。

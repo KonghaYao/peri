@@ -45,6 +45,11 @@ fn test_dark_theme_fields() {
     assert_eq!(theme.component.popup.modal_max_width, 90);
     assert_eq!(theme.component.popup.modal_max_height, 28);
     assert_eq!(theme.component.popup.inline_height, 10);
+    // 会话标题底色板：8 色，深色系（配白字）
+    let dark_palette = theme.component.input.session_title_palette;
+    assert_eq!(dark_palette.len(), 8);
+    assert_eq!(dark_palette[0], Color::Rgb(18, 52, 26));
+    assert!(dark_palette.iter().all(|c| matches!(c, Color::Rgb(..))));
     assert_eq!(
         theme.component.statusbar.resource_good,
         Color::Rgb(78, 186, 101)
@@ -68,6 +73,10 @@ fn test_light_theme_fields() {
     assert_eq!(theme.semantic.text.primary, Color::Rgb(46, 46, 42));
     assert_eq!(theme.semantic.surface.default, Color::Rgb(245, 245, 248));
     assert_eq!(theme.component.message.user_bg, Color::Rgb(230, 230, 235));
+    // 会话标题底色板：浅色系（配黑字）
+    let light_palette = theme.component.input.session_title_palette;
+    assert_eq!(light_palette.len(), 8);
+    assert_eq!(light_palette[0], Color::Rgb(210, 230, 215));
     // Model Panel 档位语义色（light 可读性变体）
     assert_eq!(theme.semantic.model_accent, Color::Rgb(107, 114, 201));
     assert_eq!(theme.semantic.effort, Color::Rgb(176, 111, 46));

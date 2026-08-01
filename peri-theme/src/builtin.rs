@@ -144,6 +144,17 @@ pub fn dark_theme() -> ThemeDefinition {
                 prompt_loading: MUTED,
                 continuation: DIM,
                 placeholder: MUTED,
+                // 深色底色板：配白色前景（可读性由 readable_fg 按亮度决定）
+                session_title_palette: [
+                    Color::Rgb(18, 52, 26),  // 深绿
+                    Color::Rgb(55, 20, 18),  // 深红
+                    Color::Rgb(26, 78, 36),  // 草绿
+                    Color::Rgb(78, 28, 22),  // 砖红
+                    Color::Rgb(38, 79, 120), // 深蓝
+                    Color::Rgb(80, 60, 30),  // 深橙棕
+                    Color::Rgb(60, 40, 80),  // 深紫
+                    Color::Rgb(30, 60, 80),  // 深青
+                ],
             },
             panel: PanelTokens {
                 border: BORDER_ACTIVE,
@@ -288,6 +299,17 @@ pub fn light_theme() -> ThemeDefinition {
                 prompt_loading: light_muted,
                 continuation: light_dim,
                 placeholder: light_muted,
+                // 浅色底色板：配黑色前景（可读性由 readable_fg 按亮度决定）
+                session_title_palette: [
+                    Color::Rgb(210, 230, 215), // 浅绿
+                    Color::Rgb(235, 210, 210), // 浅红
+                    Color::Rgb(200, 230, 210), // 嫩绿
+                    Color::Rgb(240, 215, 205), // 浅橙
+                    Color::Rgb(205, 220, 240), // 浅蓝
+                    Color::Rgb(235, 220, 200), // 浅黄
+                    Color::Rgb(220, 205, 235), // 浅紫
+                    Color::Rgb(200, 225, 235), // 浅青
+                ],
             },
             panel: PanelTokens {
                 border: ACCENT,

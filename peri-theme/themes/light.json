@@ -98,7 +98,8 @@
       "prompt": "#787878",
       "prompt_loading": "#787878",
       "continuation": "#C8C8C8",
-      "placeholder": "#787878"
+      "placeholder": "#787878",
+      "session_title_palette": ["#D2E6D7", "#EBD2D2", "#C8E6D2", "#F0D7CD", "#CDDCF0", "#EBDCC8", "#DCCDEB", "#C8E1EB"]
     },
     "panel": {
       "border": "#D77757",

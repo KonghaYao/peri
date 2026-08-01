@@ -33,8 +33,8 @@ use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST,
-    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
+    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CURRENT_SESSION_TITLE,
+    FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
     MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
     SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
@@ -694,10 +694,13 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     let composer_lines = build_composer_lines(lines, loading);
 
+    // 当前会话标题：service_snapshot 周期性派生；空标题时上边栏不渲染标签。
+    let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
+
     // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
     // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
     let composer_paragraph = Paragraph::new(composer_lines)
-        .block(build_composer_block(loading))
+        .block(build_composer_block(loading, &session_title))
         .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
 
     element!(
@@ -781,7 +784,7 @@ fn input_tokens() -> peri_theme::component::InputTokens {
     THEME_ATOM.state().read().component.input
 }
 
-fn build_composer_block(loading: bool) -> Block<'static> {
+fn build_composer_block(loading: bool, session_title: &str) -> Block<'static> {
     let tokens = input_tokens();
     let border_color = if loading {
         tokens.border_loading
@@ -789,9 +792,76 @@ fn build_composer_block(loading: bool) -> Block<'static> {
         tokens.border
     };
 
-    Block::default()
+    let mut block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(border_color))
+        .border_style(Style::default().fg(border_color));
+    if !session_title.is_empty() {
+        // ratatui 0.30：title 直接用 Line，`right_aligned()` 对齐到上边框右侧
+        block = block.title_top(build_session_title_line(session_title).right_aligned());
+    }
+    block
+}
+
+/// 会话标题标签：hash 稳定底色 + 按亮度反色前景 + BOLD。
+///
+/// 同一标题经确定性 hash 后始终命中同一底色，不同标题大概率不同色；
+/// 底色来自主题 `input.session_title_palette`，遵循"主题不硬编码颜色"约束。
+fn build_session_title_line(title: &str) -> Line<'static> {
+    let palette = input_tokens().session_title_palette;
+    let bg = palette[stable_hash(title) as usize % palette.len()];
+    Line::from(Span::styled(
+        format!(" {} ", truncate_title_to_width(title, 32)),
+        Style::default()
+            .bg(bg)
+            .fg(readable_fg(bg))
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// FNV-1a 64 位确定性 hash——不依赖 `std` DefaultHasher 的随机 seed，
+/// 保证同一标题在跨进程 / 跨会话场景下颜色稳定。
+fn stable_hash(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），超长补省略号。
+fn truncate_title_to_width(s: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut out = String::new();
+    let mut truncated = false;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if width + w > max_width {
+            truncated = true;
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+/// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。
+fn readable_fg(bg: Color) -> Color {
+    match bg {
+        Color::Rgb(r, g, b) => {
+            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
+            if luminance > 140.0 {
+                Color::Black
+            } else {
+                Color::White
+            }
+        }
+        _ => Color::White,
+    }
 }
 
 fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<Line<'static>> {

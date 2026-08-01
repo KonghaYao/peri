@@ -108,6 +108,87 @@ async fn test_cron_tasks_collected() {
 }
 
 #[tokio::test]
+#[serial]
+async fn test_tick_once_derives_current_session_title() {
+    use peri_agent::thread::ThreadMeta;
+
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::ACTIVE_SESSION_ID.set(String::new());
+
+    let store = make_sqlite_store().await;
+    let src = make_minimal_source(store.clone());
+
+    // 建一个带标题的 thread，并设为当前会话
+    let mut meta = ThreadMeta::new(".".to_string());
+    meta.title = Some("测试会话".to_string());
+    let id = src.thread_store.create_thread(meta).await.unwrap();
+    crate::kit::atoms::ACTIVE_SESSION_ID.set(id.clone());
+
+    let mut slow = SlowSnapshotRefresh::default();
+    let result = tick_once(&src, &mut slow).await;
+    assert!(result.is_ok());
+
+    assert_eq!(
+        crate::kit::atoms::CURRENT_SESSION_TITLE
+            .state()
+            .read()
+            .as_str(),
+        "测试会话"
+    );
+
+    // 空标题 thread：tick 后应清空 CURRENT_SESSION_TITLE（会话切到无标题 thread）
+    let meta2 = ThreadMeta::new(".".to_string());
+    let id2 = src.thread_store.create_thread(meta2).await.unwrap();
+    crate::kit::atoms::ACTIVE_SESSION_ID.set(id2);
+    let result = tick_once(&src, &mut slow).await;
+    assert!(result.is_ok());
+    assert!(
+        crate::kit::atoms::CURRENT_SESSION_TITLE
+            .state()
+            .read()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tick_once_missing_thread_keeps_previous_title() {
+    use peri_agent::thread::ThreadMeta;
+
+    crate::kit::atoms::init_atoms();
+
+    let store = make_sqlite_store().await;
+    let src = make_minimal_source(store.clone());
+
+    // 先派生一个真实标题
+    let mut meta = ThreadMeta::new(".".to_string());
+    meta.title = Some("真实标题".to_string());
+    let id = src.thread_store.create_thread(meta).await.unwrap();
+    crate::kit::atoms::ACTIVE_SESSION_ID.set(id.clone());
+    let mut slow = SlowSnapshotRefresh::default();
+    let _ = tick_once(&src, &mut slow).await;
+    assert_eq!(
+        crate::kit::atoms::CURRENT_SESSION_TITLE
+            .state()
+            .read()
+            .as_str(),
+        "真实标题"
+    );
+
+    // 切到不存在的 thread id：load_meta 失败 → 保留上一个标题（不 panic）
+    crate::kit::atoms::ACTIVE_SESSION_ID.set("nonexistent-id".to_string());
+    let result = tick_once(&src, &mut slow).await;
+    assert!(result.is_ok());
+    assert_eq!(
+        crate::kit::atoms::CURRENT_SESSION_TITLE
+            .state()
+            .read()
+            .as_str(),
+        "真实标题"
+    );
+}
+
+#[tokio::test]
 async fn test_derive_provider_and_model_default() {
     let peri_config = Arc::new(parking_lot::RwLock::new(
         crate::config::PeriConfig::default(),
