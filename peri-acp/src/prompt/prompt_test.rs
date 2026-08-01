@@ -114,10 +114,6 @@ fn test_features_none_excludes_all_gated_sections() {
         !result.contains("SubAgent Delegation"),
         "全关闭时不应包含 SubAgent 段落"
     );
-    assert!(
-        !result.contains("Scheduled Tasks"),
-        "全关闭时不应包含 Cron 段落"
-    );
     // 13_skills.md 以 "# Skills\n" 开头，检查标题
     assert!(
         !result.contains("\n# Skills\n") && !result.starts_with("# Skills\n"),
@@ -156,19 +152,6 @@ fn test_subagent_enabled_includes_subagent_section() {
 }
 
 #[test]
-fn test_cron_enabled_includes_cron_section() {
-    let features = PromptFeatures {
-        cron_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
-    assert!(
-        result.contains("Scheduled Tasks"),
-        "cron_enabled 时应包含 Cron 段落"
-    );
-}
-
-#[test]
 fn test_skills_enabled_includes_skills_section() {
     let features = PromptFeatures {
         skills_enabled: true,
@@ -186,7 +169,6 @@ fn test_all_features_enabled_includes_all() {
     let features = PromptFeatures {
         hitl_enabled: true,
         subagent_enabled: true,
-        cron_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
     };
@@ -196,7 +178,6 @@ fn test_all_features_enabled_includes_all() {
         result.contains("SubAgent Delegation"),
         "应包含 SubAgent 段落"
     );
-    assert!(result.contains("Scheduled Tasks"), "应包含 Cron 段落");
     assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
     assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
 }
@@ -207,7 +188,6 @@ fn test_detect_default_values() {
     // 默认环境下 hitl_enabled 取决于 permission_mode
     // 注意：Bypass 模式下 hitl_enabled 为 false
     assert!(features.subagent_enabled);
-    assert!(features.cron_enabled);
     assert!(features.skills_enabled);
     assert!(features.channel_enabled);
 }
@@ -244,7 +224,6 @@ fn test_boundary_marker_with_all_features() {
     let features = PromptFeatures {
         hitl_enabled: true,
         subagent_enabled: true,
-        cron_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
     };
