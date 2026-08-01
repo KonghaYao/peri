@@ -54,6 +54,8 @@ use peri_agent::{
 };
 use tracing::debug;
 
+use peri_acp_types::event_data::PredictionAction;
+
 use crate::{
     agent::builder::{self},
     langfuse::{LangfuseSession, LangfuseTracer},
@@ -1056,6 +1058,109 @@ pub fn extract_prediction_text(messages: &[BaseMessage]) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+/// 动作内容最大长度（字符数）
+const MAX_ACTION_LEN: usize = 200;
+
+/// 解析模型输出为结构化动作列表。
+///
+/// - 匹配 `<peri:(\w+)>(.*?)</peri:\1>` 标记（非贪婪，取第一个闭合）
+/// - 未知标签忽略，其内容并入占位文本流
+/// - 标记之间的纯文本片段（trim 后非空）收集为单个 Placeholder
+/// - 同名动作后者覆盖前者
+/// - 每个动作内容：剥离控制字符（含换行）、trim、截断 200 字符；空内容跳过
+/// - 无任何标记/解析失败：整段回落为 Placeholder（现有行为）
+pub fn parse_prediction_actions(text: &str) -> Vec<PredictionAction> {
+    let mut actions: Vec<PredictionAction> = Vec::new();
+    let mut plain_parts: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(rel_open) = text[cursor..].find("<peri:") {
+        let open = cursor + rel_open;
+        let Some(rel_gt) = text[open..].find('>') else {
+            break;
+        };
+        let tag_end = open + rel_gt;
+        let tag = &text[open + "<peri:".len()..tag_end];
+        if !tag_is_valid(tag) {
+            cursor = open + 1;
+            continue;
+        }
+        let closing = format!("</peri:{tag}>");
+        let content_start = tag_end + 1;
+        let Some(rel_close) = text[content_start..].find(&closing) else {
+            break; // 未闭合：剩余全部按纯文本
+        };
+        let content_end = content_start + rel_close;
+        let whole_tag_end = content_end + closing.len();
+
+        if open > cursor {
+            plain_parts.push(text[cursor..open].to_string());
+        }
+        // 未知标签：标记剥除，仅内容并入占位文本
+        if !matches!(tag, "title" | "tag" | "summary") {
+            plain_parts.push(text[content_start..content_end].to_string());
+            cursor = whole_tag_end;
+            continue;
+        }
+        let action = match tag {
+            "title" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::SetTitle { title: content }),
+            "tag" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::AddTag { tag: content }),
+            "summary" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::Summary { text: content }),
+            _ => unreachable!("已知标签已在上面过滤"),
+        };
+        if let Some(action) = action {
+            push_replace_action(&mut actions, action);
+        }
+        cursor = whole_tag_end;
+    }
+    if cursor < text.len() {
+        plain_parts.push(text[cursor..].to_string());
+    }
+
+    let placeholder = plain_parts
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !placeholder.is_empty() {
+        actions.insert(0, PredictionAction::Placeholder { text: placeholder });
+    }
+    actions
+}
+
+/// 标签名仅允许 ASCII 字母数字，防止任意闭合注入
+fn tag_is_valid(tag: &str) -> bool {
+    !tag.is_empty() && tag.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 剥离控制字符（含换行）、trim、截断；空内容返回 None（跳过动作）
+fn sanitize_action_content(s: &str) -> Option<String> {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(MAX_ACTION_LEN).collect())
+    }
+}
+
+/// 同名（同变体）动作后者覆盖前者
+fn push_replace_action(actions: &mut Vec<PredictionAction>, action: PredictionAction) {
+    let disc = std::mem::discriminant(&action);
+    if let Some(pos) = actions
+        .iter()
+        .position(|a| std::mem::discriminant(a) == disc)
+    {
+        actions[pos] = action;
+    } else {
+        actions.push(action);
+    }
 }
 
 #[cfg(test)]
