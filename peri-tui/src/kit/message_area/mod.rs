@@ -19,6 +19,7 @@ use crate::kit::atoms::{
 use crate::kit::mouse_router;
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::text_selection::TextSelection;
+use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::{
@@ -43,8 +44,8 @@ use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines_cached;
 use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
 use selection::{
-    WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
-    viewport_logical_range, visual_to_logical,
+    WrappedLineInfo, build_wrap_map, concat_wrap_maps, copy_to_clipboard,
+    highlight_line_in_selection, mark_copy_message, viewport_logical_range, visual_to_logical,
 };
 
 /// keepgoing 按钮点击防抖时长（连续点击冷却）。
@@ -108,6 +109,8 @@ struct VmCacheSlot {
     width: u16,
     /// 上次渲染时的 palette 关键字段哈希。主题切换时 hash 变化 → 强制重建所有 VM 的 markdown 渲染。
     palette_key: u64,
+    /// 上次渲染时的 LANG_VERSION。语言切换时递增 → 强制重建（md 复制按钮文本依赖 i18n）。
+    lang_key: u64,
     /// 该 VM 解析后的所有 Line（markdown + reasoning + tool card 渲染结果）。
     lines: Arc<Vec<Line<'static>>>,
     /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
@@ -117,6 +120,25 @@ struct VmCacheSlot {
     /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
     /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
     markdown_cache: crate::kit::markdown::MarkdownRenderCache,
+    /// md 复制按钮布局（slot 内逻辑索引 + 列范围）。None = 该 VM 无按钮
+    /// （非 AssistantBubble / 空文本 / 宽度不足）。rebuild 时随 lines 重建。
+    copy_button: Option<render::CopyButtonInfo>,
+}
+
+/// md 复制按钮的屏幕点击区域（每帧由渲染 body 构建，点击 handler 实时读取）。
+/// [Why] 与 keepgoing 按钮同模式：事件在上帧渲染完成后分发，读取最近一帧的位置；
+/// 存屏幕绝对坐标（含 scroll_y / area 偏移换算），handler 无需再查 wrap_map。
+struct CopyButtonHit {
+    /// 按钮所在屏幕行（绝对坐标）。
+    row: u16,
+    /// 按钮文本列范围（屏幕绝对坐标，[x_start, x_end)）。
+    x_start: u16,
+    x_end: u16,
+    /// 所属 VM 在 VIEW_MODELS.items 中的索引——点击时读取其 text 复制。
+    slot_index: usize,
+    /// 渲染时该 VM 的 content_hash——点击时校验索引仍指向同一 VM
+    /// （Rewind / Reset 可能增删 items 导致索引错位）。
+    vm_hash: u64,
 }
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
@@ -175,6 +197,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // keepgoing 按钮屏幕点击区域 (y, x_start, width)，每帧更新，点击 handler 实时读取
     // （handler 闭包捕获的是 State 句柄而非帧快照，滚动后坐标仍正确）
     let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
+    // md 复制按钮屏幕点击区域（每帧更新，点击 handler 实时读取——同上）
+    let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
     let brewed_lines = if empty && !footer_lines.is_empty() {
@@ -237,6 +261,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 if slot.content_hash != *hash
                     || slot.width != vis_width
                     || slot.palette_key != current_palette_key
+                    || slot.lang_key != LANG_VERSION.get()
                 {
                     Some(i)
                 } else {
@@ -276,19 +301,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             let vm = &snapshot2.items[*i];
             let vm_hash = vm.content_hash();
             let slot = &mut caches[*i];
-            let lines = Arc::new(vm_to_lines_cached(
-                vm,
-                vis_width as usize,
-                &mut slot.markdown_cache,
-            ));
+            let (lines, copy_button) =
+                vm_to_lines_cached(vm, vis_width as usize, &mut slot.markdown_cache, true);
+            let lines = Arc::new(lines);
             let (_, wm) = build_wrap_map(&lines, vis_width);
             let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0) as u16;
             slot.content_hash = vm_hash;
             slot.width = vis_width;
             slot.palette_key = current_palette_key;
+            slot.lang_key = LANG_VERSION.get();
             slot.lines = lines;
             slot.wrap_map = Arc::new(wm);
             slot.visual_rows = visual_rows;
+            slot.copy_button = copy_button;
         }
     }
     // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
@@ -309,10 +334,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let mut total_logical_lines: usize = 0;
     let mut slot_arcs: Vec<Arc<Vec<Line<'static>>>> = Vec::new();
     let mut slot_offsets: Vec<usize> = Vec::new();
+    // 每个 slot 在拼接后的全量视觉行中的起始偏移（供 md 复制按钮换算屏幕坐标）。
+    let mut slot_visual_starts: Vec<usize> = Vec::new();
     let concat_wrap_map: Vec<WrappedLineInfo> = {
         let caches_read = vm_caches.read();
         slot_arcs.reserve(caches_read.len());
         slot_offsets.reserve(caches_read.len());
+        slot_visual_starts.reserve(caches_read.len());
         let mut slots: Vec<(&[WrappedLineInfo], usize, usize)> =
             Vec::with_capacity(caches_read.len());
         for (slot_index, slot) in caches_read.iter().enumerate() {
@@ -321,6 +349,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             total_logical_lines += slot.lines.len();
             slot_arcs.push(Arc::clone(&slot.lines));
             slots.push((&slot.wrap_map, lines_start, slot_index));
+            slot_visual_starts.push(core_total_visual_rows);
             core_total_visual_rows += slot.visual_rows as usize;
         }
         concat_wrap_maps(&slots)
@@ -414,6 +443,58 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         });
     }
 
+    // ── md 复制按钮点击（复制整条 AI 回复的原始 markdown）──
+    // [Why] 注册顺序与 keepgoing 相同：必须在 scroll handler 之前——scroll::handle_event
+    // 对消息区内 Down(Left) 一律 Consumed（文本选中起点），在其后注册收不到点击。
+    // 命中 → Consumed（滚动/选区逻辑不处理该点击，不会误设选区起点）；
+    // 未命中 → Ignored（滚动/选区逻辑照常）。
+    // [Why 每次渲染重建] ratatui-kit 的 use_event_handler 闭包每帧重新注册（当帧值），
+    // copy_buttons State 由渲染 body 后部 write_no_update 更新——事件分发时读到的
+    // 是最近一帧的按钮位置（与 keepgoing 一致）。
+    {
+        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+            let Event::Mouse(mouse) = event else {
+                return EventResult::Ignored;
+            };
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return EventResult::Ignored;
+            }
+            // 弹窗/面板遮挡时不响应（与 status_bar / scroll handler 一致）
+            if mouse_router::is_occluded() {
+                return EventResult::Ignored;
+            }
+            let (x, y) = (mouse.column, mouse.row);
+            let hits = copy_buttons.read();
+            let Some(hit) = hits
+                .iter()
+                .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
+            else {
+                return EventResult::Ignored;
+            };
+            // 读取最新 VM 文本：校验 content_hash 防 Rewind/Reset 后索引错位
+            let snapshot = view_models.read();
+            let matched = snapshot
+                .items
+                .get(hit.slot_index)
+                .is_some_and(|vm| vm.content_hash() == hit.vm_hash);
+            let text = if matched {
+                match &snapshot.items[hit.slot_index] {
+                    TuiRenderUnit::TuiAssistantBubble(d) => Some(d.text.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            drop(snapshot);
+            if let Some(text) = text {
+                copy_to_clipboard(text.clone());
+                mark_copy_message(text.chars().count());
+            }
+            // 命中按钮（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
+            EventResult::Consumed
+        });
+    }
+
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
@@ -486,6 +567,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     if empty {
         // 重置滚动条字段，避免 Welcome 页面残留旧会话的滚动条
         *scrollbar_fields.write_no_update() = ScrollbarFields::default();
+        // 清空 md 复制按钮映射——Welcome 页面无消息，防止点击残留按钮复制已消失内容
+        *copy_buttons.write_no_update() = Arc::new(Vec::new());
         if let Some(lines) = brewed_lines {
             return element!(
                 View(
@@ -572,6 +655,43 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             scroll_y,
             vis_height,
         );
+    }
+
+    // ── md 复制按钮屏幕位置（每帧更新）──
+    // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
+    // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。
+    // 视口外的按钮不进入映射（点不到），避免列表随会话增长。
+    {
+        let mut hits: Vec<CopyButtonHit> = Vec::new();
+        if let Some(area) = area_rect {
+            let vp_end = area.y.saturating_add(vis_height);
+            let caches_read = vm_caches.read();
+            for (slot_index, slot) in caches_read.iter().enumerate() {
+                let Some(btn) = &slot.copy_button else {
+                    continue;
+                };
+                let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
+                    continue;
+                };
+                let vis_row = slot_visual_starts
+                    .get(slot_index)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(entry.visual_start);
+                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                if row < area.y as i64 || row >= vp_end as i64 {
+                    continue;
+                }
+                hits.push(CopyButtonHit {
+                    row: row as u16,
+                    x_start: area.x.saturating_add(btn.x_start),
+                    x_end: area.x.saturating_add(btn.x_end),
+                    slot_index,
+                    vm_hash: slot.content_hash,
+                });
+            }
+        }
+        *copy_buttons.write_no_update() = Arc::new(hits);
     }
 
     // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。

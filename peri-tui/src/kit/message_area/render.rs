@@ -105,17 +105,61 @@ pub(super) fn truncate_str(s: &str, max_chars: usize) -> String {
 
 // ── vm_to_lines：TuiRenderUnit → Vec<Line<'static>> ───────────────────────
 
+/// md 复制按钮信息：按钮行在 VM lines 内的逻辑索引 + 行内列范围（相对消息区）。
+/// 由 [`vm_to_lines_cached`] 在渲染按钮行时返回，供 MessageArea 构建屏幕点击区域。
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CopyButtonInfo {
+    /// 按钮行在 VM lines 中的逻辑索引。
+    pub(super) logical_idx: usize,
+    /// 按钮文本起始列（行内，相对消息区 x=0）。
+    pub(super) x_start: u16,
+    /// 按钮文本结束列（不含）。
+    pub(super) x_end: u16,
+}
+
+/// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
+/// `mark_copy_message` 同一计数方式）。短消息直接选中复制即可，不渲染按钮，
+/// 避免每条消息都出现一行按钮造成视觉噪音。
+const MD_COPY_MIN_CHARS: usize = 400;
+
+/// 生成 md 复制按钮行（AssistantBubble 内容末尾）。
+///
+/// 布局：` Copy `——整个反色块（含左右 1 空格）即按钮视觉；点击区域
+/// 与反色块完全重合（[x_start, x_end) = 整行）。宽度不足（按钮行会被
+/// 折行）时返回 None——调用方不渲染按钮行，避免点击区域与实际渲染
+/// 位置错位（同 footer keepgoing 的 m4 fix）。
+fn copy_button_line(width: usize) -> Option<(Line<'static>, u16, u16)> {
+    let semantic = THEME_ATOM.state().read().semantic;
+    let btn_text = i18n::tr("msg-copy-md");
+    let line = Line::from(vec![Span::styled(
+        format!(" {btn_text} "),
+        // 反色：accent 前景 + REVERSED → 终端交换为 accent 背景 + 默认前景。
+        // 空格也在 span 内，一并反色——反色块即按钮。
+        Style::default()
+            .fg(semantic.accent)
+            .add_modifier(Modifier::REVERSED),
+    )]);
+    if line.width() > width {
+        return None;
+    }
+    let x_start = 0;
+    let x_end = x_start + line.width() as u16;
+    Some((line, x_start, x_end))
+}
+
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
 /// 使用 kit::markdown 进行 markdown 解析（无缓存，每次全量）。
 ///
-/// 用于不需要增量缓存的场景（如 SubAgentGroup 内部递归）。
+/// 用于不需要增量缓存的场景（如 SubAgentGroup 内部递归）——不渲染 md 复制按钮。
 /// 顶层 AssistantBubble / UserBubble 渲染应使用 [`vm_to_lines_cached`]。
 pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>> {
     vm_to_lines_cached(
         vm,
         width,
         &mut crate::kit::markdown::MarkdownRenderCache::default(),
+        false,
     )
+    .0
 }
 
 /// 与 [`vm_to_lines`] 同逻辑，但接受 markdown 渲染缓存以支持增量续跑。
@@ -123,11 +167,16 @@ pub(super) fn vm_to_lines(vm: &TuiRenderUnit, width: usize) -> Vec<Line<'static>
 /// [Phase 2] 流式期间 text 末尾追加 token 时，前缀 blocks（已闭合的 paragraph /
 /// list item / code block）完全不变——cache 通过文本前缀比较复用上次处理到
 /// stable_state 的累积状态，仅处理新增 block。
+///
+/// `render_copy_button` 为 true 时（顶层 MessageArea），在 AssistantBubble 的
+/// markdown 内容末尾追加一行 md 复制按钮，并返回按钮的布局信息（供点击检测）。
+/// 嵌套渲染（SubAgentGroup 递归）传 false：嵌套消息无屏幕坐标映射，不渲染按钮。
 pub(super) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     width: usize,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
-) -> Vec<Line<'static>> {
+    render_copy_button: bool,
+) -> (Vec<Line<'static>>, Option<CopyButtonInfo>) {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -175,11 +224,32 @@ pub(super) fn vm_to_lines_cached(
                 }
             }
 
-            lines
+            // md 复制按钮：独立于 markdown 渲染，追加在内容末尾。
+            // 仅当内容超过 MD_COPY_MIN_CHARS 字符（chars().count() 口径）才渲染，
+            // 短消息直接选中复制即可，避免每条消息都出现按钮行。
+            let copy_button = if render_copy_button && data.text.chars().count() > MD_COPY_MIN_CHARS
+            {
+                if let Some((btn_line, x_start, x_end)) = copy_button_line(width) {
+                    // 不插空行：按钮紧贴内容末行，视觉上更紧凑
+                    let logical_idx = lines.len();
+                    lines.push(btn_line);
+                    Some(CopyButtonInfo {
+                        logical_idx,
+                        x_start,
+                        x_end,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (lines, copy_button)
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
-                return render_reminder_condensed(info);
+                return (render_reminder_condensed(info), None);
             }
 
             let semantic = THEME_ATOM.state().read().semantic;
@@ -260,14 +330,14 @@ pub(super) fn vm_to_lines_cached(
                     }
                 }
             }
-            lines
+            (lines, None)
         }
-        TuiRenderUnit::TuiToolCard(data) => render_tool_card_lines(data, width),
-        TuiRenderUnit::TuiSystemNote(data) => render_system_note_lines(data),
-        TuiRenderUnit::TuiSubAgentGroup(data) => render_subagent_group_lines(data, width),
-        TuiRenderUnit::TuiCollapsedGroup(data) => render_collapsed_group_lines(data),
-        TuiRenderUnit::TuiDivider(data) => render_divider_lines(data),
-        TuiRenderUnit::TuiAskUserBlock(data) => render_ask_user_block_lines(data),
+        TuiRenderUnit::TuiToolCard(data) => (render_tool_card_lines(data, width), None),
+        TuiRenderUnit::TuiSystemNote(data) => (render_system_note_lines(data), None),
+        TuiRenderUnit::TuiSubAgentGroup(data) => (render_subagent_group_lines(data, width), None),
+        TuiRenderUnit::TuiCollapsedGroup(data) => (render_collapsed_group_lines(data), None),
+        TuiRenderUnit::TuiDivider(data) => (render_divider_lines(data), None),
+        TuiRenderUnit::TuiAskUserBlock(data) => (render_ask_user_block_lines(data), None),
     }
 }
 

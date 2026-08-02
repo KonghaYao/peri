@@ -462,3 +462,124 @@ fn nested_semantic_cards_respect_extreme_narrow_widths() {
         }
     }
 }
+
+// ── md 复制按钮 ────────────────────────────────────────────────────────────
+
+fn assistant_bubble_with_text(text: &str, hash: u64) -> TuiRenderUnit {
+    TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        text: text.to_string(),
+        reasoning: None,
+        content_hash: hash,
+    })
+}
+
+/// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
+/// AssistantBubble 末尾追加复制按钮行，并返回按钮布局信息（逻辑索引 = 末行，
+/// 列范围 = 按钮文本）。
+#[test]
+fn test_assistant_bubble_renders_copy_button() {
+    crate::i18n::init(Some("en"));
+    // 401 字符 > 400 阈值
+    let vm = assistant_bubble_with_text(&"x".repeat(401), 1);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, btn) = super::vm_to_lines_cached(&vm, 80, &mut cache, true);
+
+    let btn_line = lines.last().unwrap();
+    let text: String = btn_line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, " Copy ", "按钮行 = 左右各 1 空格 + i18n 按钮文本");
+
+    let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
+    assert_eq!(btn.logical_idx, lines.len() - 1, "按钮行是最后一逻辑行");
+    assert_eq!(btn.x_start, 0, "点击区域覆盖整个反色块（含两侧空格）");
+    assert_eq!(
+        btn.x_end,
+        2 + crate::i18n::tr("msg-copy-md").width() as u16,
+        "x_end = 左空格 + 文本 + 右空格"
+    );
+}
+
+/// 宽度不足时按钮行会折行 → 不渲染按钮（也不返回布局），避免点击区域错位。
+#[test]
+fn test_copy_button_hidden_when_narrow() {
+    crate::i18n::init(Some("en"));
+    // 文本超过阈值（401 字符），但视宽 3 容纳不下按钮行（" Copy " 6 列）
+    let vm = assistant_bubble_with_text(&"x".repeat(401), 2);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, btn) = super::vm_to_lines_cached(&vm, 3, &mut cache, true);
+
+    assert!(btn.is_none(), "宽度不足时不应返回按钮布局");
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(!text.contains("Copy"), "宽度不足时不应渲染按钮行");
+}
+
+/// 空文本不渲染按钮（没有可复制的内容）。
+#[test]
+fn test_copy_button_hidden_for_empty_text() {
+    let vm = assistant_bubble_with_text("", 3);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, btn) = super::vm_to_lines_cached(&vm, 80, &mut cache, true);
+
+    assert!(lines.is_empty());
+    assert!(btn.is_none());
+}
+
+/// UserBubble 不渲染复制按钮（仅 AI 回复）。
+#[test]
+fn test_copy_button_hidden_for_user_bubble() {
+    let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble {
+        text: "my input".to_string(),
+        content_hash: 4,
+        reminder: None,
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, btn) = super::vm_to_lines_cached(&vm, 80, &mut cache, true);
+
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(!text.contains("Copy"), "UserBubble 不应包含复制按钮文本");
+    assert!(btn.is_none());
+}
+
+/// 嵌套渲染（vm_to_lines，render_copy_button=false，SubAgentGroup 递归路径）
+/// 不渲染复制按钮——嵌套消息无屏幕坐标映射，避免"看起来可点但点了没反应"。
+#[test]
+fn test_copy_button_hidden_in_nested_render() {
+    crate::i18n::init(Some("en"));
+    // 文本超过阈值，但 render_copy_button=false → 仍不渲染
+    let vm = assistant_bubble_with_text(&"x".repeat(401), 5);
+    let lines = super::vm_to_lines(&vm, 80);
+
+    let text: String = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(!text.contains("Copy"), "嵌套渲染不应包含复制按钮行");
+}
+
+/// 短文本（≤400 字符，含恰好 400 的边界）不渲染复制按钮——避免每条消息
+/// 都出现按钮行造成视觉噪音（短消息直接选中复制即可）。
+#[test]
+fn test_copy_button_hidden_for_short_text() {
+    crate::i18n::init(Some("en"));
+    for text in ["hello world".to_string(), "x".repeat(400)] {
+        let vm = assistant_bubble_with_text(&text, 6);
+        let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+        let (lines, btn) = super::vm_to_lines_cached(&vm, 80, &mut cache, true);
+
+        assert!(btn.is_none(), "≤200 字符不应返回按钮布局");
+        let rendered: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!rendered.contains("Copy"), "≤200 字符不应渲染按钮行");
+    }
+}
