@@ -223,8 +223,12 @@ pub enum ExecutorEvent {
     /// TUI 据此调用 `MessagePipeline::commit_iteration(messages)` 同步规范状态，
     /// 避免 Render 事件流自洽重建 transcript 时多迭代文本/工具顺序错乱。
     TurnCommitted {
-        /// 当前 transcript 的可见消息全量快照（owned，便于跨进程传递）
-        messages: Vec<crate::messages::BaseMessage>,
+        /// 当前 transcript 的可见消息全量快照。
+        ///
+        /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），
+        /// 避免事件管道多级转发时的全量深拷贝（与 `LlmCallStart.messages`
+        /// 同一模式）。serde 序列化结果与 `Vec<BaseMessage>` 完全一致。
+        messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
         /// 当前 ReAct 步数
         steps: usize,
     },

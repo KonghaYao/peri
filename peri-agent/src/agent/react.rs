@@ -235,6 +235,23 @@ pub trait ReactLLM: Send + Sync {
         None
     }
 
+    /// 生成推理，并同时返回该次 LLM 调用实际请求体的受控观测值。
+    ///
+    /// 默认实现 = `generate_reasoning` + `observed_provider_request_body`（两次独立
+    /// 构建 request）。生产实现（`AgentModelBridge`）应覆盖本方法，让观测复用
+    /// `generate_reasoning` 内部已构建的同一份 request，消除每轮 LLM 调用的
+    /// 双构建。
+    async fn generate_reasoning_with_observed_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+        streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<(Reasoning, Option<serde_json::Value>)> {
+        let reasoning = self.generate_reasoning(messages, tools, streaming).await?;
+        let body = self.observed_provider_request_body(messages, tools);
+        Ok((reasoning, body))
+    }
+
     /// 构造 Provider 实际请求体（raw body）。
     fn build_provider_request_body(
         &self,
@@ -286,6 +303,17 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
         tools: &[&dyn BaseTool],
     ) -> Option<serde_json::Value> {
         (**self).observed_provider_request_body(messages, tools)
+    }
+
+    async fn generate_reasoning_with_observed_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+        streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<(Reasoning, Option<serde_json::Value>)> {
+        (**self)
+            .generate_reasoning_with_observed_body(messages, tools, streaming)
+            .await
     }
 
     fn build_provider_request_body(

@@ -49,7 +49,7 @@ fn test_reason_input_output_contract() {
     let reasoning = crate::agent::react::Reasoning::with_answer("thinking", "answer");
     let output = ReasonOutput {
         reasoning,
-        messages_snapshot: vec![],
+        messages_snapshot: std::sync::Arc::new(vec![]),
     };
     assert!(!output.reasoning.needs_tool_call());
     assert!(output.messages_snapshot.is_empty());

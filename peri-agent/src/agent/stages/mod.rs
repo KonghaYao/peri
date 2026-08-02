@@ -428,8 +428,8 @@ pub struct ReasonInput {
 pub struct ReasonOutput {
     /// LLM 推理结果（含 tool_calls 或 final_answer）
     pub reasoning: crate::agent::react::Reasoning,
-    /// LLM 请求使用的消息快照（用于调试/追踪）
-    pub messages_snapshot: Vec<BaseMessage>,
+    /// LLM 请求使用的消息快照（用于调试/追踪；Arc 共享，避免传递时再拷贝）
+    pub messages_snapshot: std::sync::Arc<Vec<BaseMessage>>,
 }
 
 // ─── Act 阶段类型 ────────────────────────────────────────────────────────────
@@ -502,6 +502,44 @@ struct LoopState {
     before_agent_has_run: bool,
 }
 
+/// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
+///
+/// Receive/Compact/Reason/Act 四阶段共享同一「事件观测 + 错误传播」样板，
+/// 阶段函数通过闭包传入（需捕获 `context.clone()` 或上游输出）。
+/// 返回 `Err(LoopResult)` 时调用方直接 `return e` 即可退出循环。
+async fn run_stage<F, Fut, T>(context: &StageContext, stage: Stage, run: F) -> Result<T, LoopResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = crate::error::AgentResult<T>>,
+{
+    let start = std::time::Instant::now();
+    context
+        .runtime
+        .event_bus
+        .emit_observe(ObserveEvent::StageStarted {
+            turn_id: context.turn_id(),
+            agent_id: context.session.agent_id,
+            stage,
+        });
+    let out = match run().await {
+        Ok(out) => {
+            context
+                .runtime
+                .event_bus
+                .emit_observe(ObserveEvent::StageEnded {
+                    turn_id: context.turn_id(),
+                    agent_id: context.session.agent_id,
+                    stage,
+                    status: StageStatus::Done,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            out
+        }
+        Err(e) => return Err(LoopResult::Error(e)),
+    };
+    Ok(out)
+}
+
 /// 运行 ReAct v2 四阶段循环（RCRA）
 ///
 /// 控制流：Receive → Compact → Reason → Act → (回 Receive)。
@@ -522,34 +560,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         context.session.turn.advance_step();
 
         // ── Receive（循环入口，也是退出判断点）──
-        let receive_start = std::time::Instant::now();
-        context
-            .runtime
-            .event_bus
-            .emit_observe(ObserveEvent::StageStarted {
-                turn_id: context.turn_id(),
-                agent_id: context.session.agent_id,
-                stage: Stage::Receive,
-            });
-        let receive_out = match receive::run_receive(ReceiveInput {
-            context: context.clone(),
+        let receive_out = match run_stage(&context, Stage::Receive, || async {
+            receive::run_receive(ReceiveInput {
+                context: context.clone(),
+            })
+            .await
         })
         .await
         {
-            Ok(out) => {
-                context
-                    .runtime
-                    .event_bus
-                    .emit_observe(ObserveEvent::StageEnded {
-                        turn_id: context.turn_id(),
-                        agent_id: context.session.agent_id,
-                        stage: Stage::Receive,
-                        status: StageStatus::Done,
-                        duration_ms: receive_start.elapsed().as_millis() as u64,
-                    });
-                out
-            }
-            Err(e) => return LoopResult::Error(e),
+            Ok(out) => out,
+            Err(e) => return e,
         };
 
         // 退出判断：队列为空且上一轮无工具调用 → 检查是否该退出。
@@ -619,99 +639,46 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         }
 
         // ── Compact ──
-        let compact_start = std::time::Instant::now();
-        context
-            .runtime
-            .event_bus
-            .emit_observe(ObserveEvent::StageStarted {
-                turn_id: context.turn_id(),
-                agent_id: context.session.agent_id,
-                stage: Stage::Compact,
-            });
-        let _compact_out = match compact::run_compact(CompactInput {
-            context: context.clone(),
-            has_tool_calls: loop_state.has_tool_calls,
+        // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
+        // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
+        if let Err(e) = run_stage(&context, Stage::Compact, || async {
+            compact::run_compact(CompactInput {
+                context: context.clone(),
+                has_tool_calls: loop_state.has_tool_calls,
+            })
+            .await
         })
         .await
         {
-            Ok(out) => {
-                context
-                    .runtime
-                    .event_bus
-                    .emit_observe(ObserveEvent::StageEnded {
-                        turn_id: context.turn_id(),
-                        agent_id: context.session.agent_id,
-                        stage: Stage::Compact,
-                        status: StageStatus::Done,
-                        duration_ms: compact_start.elapsed().as_millis() as u64,
-                    });
-                out
-            }
-            Err(e) => return LoopResult::Error(e),
-        };
+            return e;
+        }
 
         // ── Reason ──
-        let reason_start = std::time::Instant::now();
-        context
-            .runtime
-            .event_bus
-            .emit_observe(ObserveEvent::StageStarted {
-                turn_id: context.turn_id(),
-                agent_id: context.session.agent_id,
-                stage: Stage::Reason,
-            });
-        let reason_out = match reason::run_reason(ReasonInput {
-            context: context.clone(),
-            has_tool_calls: loop_state.has_tool_calls,
+        let reason_out = match run_stage(&context, Stage::Reason, || async {
+            reason::run_reason(ReasonInput {
+                context: context.clone(),
+                has_tool_calls: loop_state.has_tool_calls,
+            })
+            .await
         })
         .await
         {
-            Ok(out) => {
-                context
-                    .runtime
-                    .event_bus
-                    .emit_observe(ObserveEvent::StageEnded {
-                        turn_id: context.turn_id(),
-                        agent_id: context.session.agent_id,
-                        stage: Stage::Reason,
-                        status: StageStatus::Done,
-                        duration_ms: reason_start.elapsed().as_millis() as u64,
-                    });
-                out
-            }
-            Err(e) => return LoopResult::Error(e),
+            Ok(out) => out,
+            Err(e) => return e,
         };
 
         // ── Act ──
-        let act_start = std::time::Instant::now();
-        context
-            .runtime
-            .event_bus
-            .emit_observe(ObserveEvent::StageStarted {
-                turn_id: context.turn_id(),
-                agent_id: context.session.agent_id,
-                stage: Stage::Act,
-            });
-        let act_out = match act::run_act(ActInput {
-            context: context.clone(),
-            reasoning: reason_out.reasoning,
+        let act_out = match run_stage(&context, Stage::Act, || async {
+            act::run_act(ActInput {
+                context: context.clone(),
+                reasoning: reason_out.reasoning,
+            })
+            .await
         })
         .await
         {
-            Ok(out) => {
-                context
-                    .runtime
-                    .event_bus
-                    .emit_observe(ObserveEvent::StageEnded {
-                        turn_id: context.turn_id(),
-                        agent_id: context.session.agent_id,
-                        stage: Stage::Act,
-                        status: StageStatus::Done,
-                        duration_ms: act_start.elapsed().as_millis() as u64,
-                    });
-                out
-            }
-            Err(e) => return LoopResult::Error(e),
+            Ok(out) => out,
+            Err(e) => return e,
         };
 
         loop_state.has_tool_calls = act_out.has_tool_calls;
