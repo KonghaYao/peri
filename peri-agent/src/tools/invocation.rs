@@ -86,7 +86,7 @@ impl ToolInvocationResolver for DirectToolInvocationResolver {
             policy_call: ToolCall::new(
                 raw_call.id.clone(),
                 target.name().to_string(),
-                normalize_params(raw_call.input.clone()),
+                normalize_params(raw_call.input.clone(), Some(target.as_ref())),
             ),
             target,
             wrapper_name: None,
@@ -95,12 +95,28 @@ impl ToolInvocationResolver for DirectToolInvocationResolver {
 }
 
 /// 将 LLM 常见的参数别名归一化为工具 schema 使用的名称。
-pub fn normalize_params(input: serde_json::Value) -> serde_json::Value {
+///
+/// 仅当目标工具 schema 声明了 `file_path` 参数时才将 `path` 重命名为
+/// `file_path`（Read/Write/Edit 等）。Grep/Glob 的 schema 参数名就是 `path`，
+/// 无条件重命名会使其 `path` 参数丢失、静默回退全仓库搜索。
+pub fn normalize_params(
+    input: serde_json::Value,
+    target: Option<&dyn BaseTool>,
+) -> serde_json::Value {
     let mut obj = match input {
         serde_json::Value::Object(map) => map,
         _ => return input,
     };
-    if obj.contains_key("path") && !obj.contains_key("file_path") {
+    let accepts_file_path = target
+        .map(|t| {
+            t.parameters()
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|props| props.contains_key("file_path"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if accepts_file_path && obj.contains_key("path") && !obj.contains_key("file_path") {
         if let Some(value) = obj.remove("path") {
             obj.insert("file_path".to_string(), value);
         }

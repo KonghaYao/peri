@@ -172,7 +172,10 @@ async fn test_direct_and_dispatch_wrapper_share_canonical_target_and_input() {
             ""
         }
         fn parameters(&self) -> Value {
-            json!({})
+            json!({
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}}
+            })
         }
         fn aliases(&self) -> &[&str] {
             &["Save"]
