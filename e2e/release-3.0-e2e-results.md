@@ -43,6 +43,13 @@
 
 **最终统计：31/31 全部通过 ✅**
 
+## SubAgent 测试简化（2026-08-01 第二次优化）
+
+- `multi-subagent-toolcards`：两个 thorough explorer 搜索 → 两个 echo 任务；sleep(20s/15s/30s) → 轮询等待工具卡片出现 + `waitForStableScreen`。耗时 **127.9s → 59.5s**。
+- `internal-toolcards-visibility`：explorer thorough 搜索 → echo 任务；sleep(10s) → 轮询等待工具卡片出现。耗时 **45.8s → 42.2s**。
+- criterion 工具名示例统一为 ● Bash / ● Shell / ● Grep。
+- `sync-agents` 保留：其 subagent 内 sleep 10s 是观测 running→done 状态切换的刻意设计，非多 agent 样式测试。
+
 ## 首轮失败与修复记录
 
 ### 2. scenarios/ask-user-question.test.ts — 首轮失败 → 通过

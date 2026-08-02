@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import { readFileSync } from "node:fs";
 import type { TmuxTester } from "tui-tester";
@@ -45,33 +45,40 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
 
   it(
     "同一 turn 内主 agent 两次调用 Agent 工具，两个 SubAgent 的内部工具条目都应可见",
-    { timeout: 360_000 },
+    { timeout: 240_000 },
     async () => {
       // ── Prepare: 记录测试前 NOT ROUTED 计数 ──
       const notRoutedBefore = countNotRoutedInLog();
 
       tester = await launchPeri();
 
-      // 使用 explorer subagent 是因为它会自然触发工具调用（Grep/Read/Glob）
-      // 分两步触发是为了确保有两个独立的 SubAgent 启动
+      // 记录提交前的屏幕（用于 waitForStableScreen 基准）
+      const base = await tester.getScreenText();
+
+      // 使用 echo 让 subagent 瞬间完成任务——本测试观测的是两个 Agent 卡片的
+      // 工具条目渲染（非空壳回归），不需要耗时搜索；分两步触发两个独立 SubAgent。
       await sendPrompt(
         tester,
-        "请分两步完成以下任务，每一步都必须使用 Agent 工具（不可直接调用 Read/Grep等）：" +
-        "第一步：使用 [explorer, thorough] subagent 在 peri-tui/src/kit 目录搜索所有" +
-        "包含 'SubAgent' 字符串的 Rust 文件，列出文件名和匹配行数。" +
-        "第二步：完成第一步并发回结果后，再用 [explorer, thorough] subagent 在" +
-        "peri-acp/src/session 目录搜索所有包含 'EventSink' 字符串的 Rust 文件，" +
-        "列出文件名和匹配行数。" +
+        "请分两步完成以下任务，每一步都必须使用 Agent 工具（不可直接执行 shell）：" +
+        "第一步：使用同步 subagent 执行 shell 命令 echo hello-agent-1。" +
+        "第二步：完成第一步并发回结果后，再使用同步 subagent 执行 shell 命令 echo hello-agent-2。" +
         "\n\n关键：每一步都必须调用 Agent 工具，不能合并。",
       );
 
-      // ── Phase 1: 等第一个 SubAgent 开始运行 ──
+      // ── Phase 1: 等第一个 SubAgent 的工具卡片出现 ──
       await tester.waitForText("Agent", {
         timeout: 60_000,
         interval: 1000,
       });
-      // 确保第一个 SubAgent 已经开始（卡内有工具）
-      await tester.sleep(20000);
+      // 等第一个 SubAgent 执行工具（● Bash/● Shell 条目出现，echo 瞬间完成）
+      await tester.waitFor(
+        (screen) => /● (?:Bash|Shell)/.test(screen),
+        {
+          timeout: 60_000,
+          interval: 1000,
+          message: "等待第一个 SubAgent 的工具卡片出现超时",
+        },
+      );
 
       const capture1 = await takePeriSnapshot(
         tester,
@@ -84,7 +91,7 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         ansiRaw: capture1.raw,
         criteria: [
           "消息区应出现第一个 Agent 卡片（标题包含 'Agent'），其内部（缩进或子行）包含至少一个工具调用卡片",
-          "工具调用卡片应显示具体工具名（如 ● Grep / ● Glob / ● Read），不是空白或只有容器边框",
+          "工具调用卡片应显示具体工具名（如 ● Bash / ● Shell / ● Grep），不是空白或只有容器边框",
         ],
       });
       console.log("Judge (phase1):", JSON.stringify(r, null, 2));
@@ -104,8 +111,15 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         await tester.sleep(2000);
       }
       expect(secondAgentSeen).toBe(true);
-      // 第二个 SubAgent 已出现，等待其执行工具（Grep/Read）
-      await tester.sleep(15000);
+      // 等第二个 SubAgent 的工具条目也出现（● Bash/● Shell 共 ≥2 个）
+      await tester.waitFor(
+        (screen) => (screen.match(/● (?:Bash|Shell)/g) || []).length >= 2,
+        {
+          timeout: 60_000,
+          interval: 1000,
+          message: "等待第二个 SubAgent 的工具卡片出现超时",
+        },
+      );
 
       const capture2 = await takePeriSnapshot(
         tester,
@@ -118,7 +132,7 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         ansiRaw: capture2.raw,
         criteria: [
           // 核心: 第二个 Agent 卡片内也要有工具调用条目
-          "消息区中应出现第二个 Agent 工具调用卡片，且其内部应有具体工具调用卡片（如 ● Grep 或 ● Glob）",
+          "消息区中应出现第二个 Agent 工具调用卡片，且其内部应有具体工具调用卡片（如 ● Bash 或 ● Shell 或 ● Grep）",
           // 防御: 不应出现空的外壳——Agent 卡片的标签行下方应有实质内容
           "如果 Agent 卡片显示 'running' 或 'Finished' 状态，其内部区域不应为空——至少有一个工具条目或工具计数说明",
           // 防混淆
@@ -128,8 +142,8 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       console.log("Judge (phase2):", JSON.stringify(r2, null, 2));
       expect(r2.pass).toBe(true);
 
-      // ── Phase 3: 等全部完成 ──
-      await tester.sleep(30000);
+      // ── Phase 3: 等全部完成（屏幕稳定）──
+      await waitForStableScreen(tester, 120_000, base);
       const capture3 = await takePeriSnapshot(
         tester,
         "multi-subagent-phase3-both-done",
