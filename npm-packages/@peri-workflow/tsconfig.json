@@ -5,9 +5,8 @@
     "moduleResolution": "bundler",
     "strict": true,
     "skipLibCheck": true,
-    "types": ["node"],
-    "outDir": "dist",
-    "rootDir": "."
+    "types": ["node", "bun-types"],
+    "noEmit": true
   },
-  "include": ["runner.ts"]
+  "include": ["src", "test"]
 }

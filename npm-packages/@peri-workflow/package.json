@@ -1,21 +1,31 @@
 {
   "name": "@peri-code/workflow",
   "version": "0.1.1",
-  "description": "Workflow runner for the Perihelion agent — JSON-RPC 2.0 stdio bridge. Host-language-agnostic: any language that can spawn a Node child process and speak JSON-RPC over stdin/stdout can integrate.",
+  "description": "Workflow runner for the Perihelion agent — JSON-RPC 2.0 stdio bridge. Host-language-agnostic: any language that can spawn a Node child process and speak JSON-RPC over stdin/stdout can integrate. Built-in CLI subcommands (read/list) for inspecting run results.",
   "bin": {
     "peri-workflow": "dist/peri-workflow.js"
   },
   "type": "module",
   "main": "dist/peri-workflow.js",
-  "types": "runner.ts",
+  "types": "src/index.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "DESIGN.md"
+  ],
   "scripts": {
-    "build": "bun build runner.ts --outfile=dist/peri-workflow.js --target=node --format=esm --banner:js='#!/usr/bin/env node'",
-    "prepublishOnly": "npm run build"
+    "build": "bun build src/index.ts --outfile=dist/peri-workflow.js --target=node --format=esm --banner:js='#!/usr/bin/env node'",
+    "test": "bun test",
+    "test:coverage": "bun scripts/check-coverage.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run test:coverage"
   },
   "dependencies": {},
   "devDependencies": {
     "@claude-code-best/workflow-engine": "^0.1.0",
     "@types/node": "^26.0.0",
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "typescript": "^5.6.0"
   }
 }
