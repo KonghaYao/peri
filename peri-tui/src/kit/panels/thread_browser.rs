@@ -11,9 +11,10 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -35,46 +36,92 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = threads_store;
     let item_count = threads.len();
 
-    // ── 键盘处理 ──
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Up => {
-                    let mut c = cursor.write();
-                    *c = previous_selection(*c);
-                }
-                KeyCode::Down => {
-                    let mut c = cursor.write();
-                    *c = next_selection(*c, item_count);
-                }
-                KeyCode::Enter => {
-                    let sel = *cursor.read();
-                    let threads_snap = THREAD_LIST.state().read().clone();
-                    if let Some(entry) = threads_snap.get(sel) {
-                        if let Some(tx) = THREAD_LOAD_TX.get() {
-                            let _ = tx.send(entry.id.clone());
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    // panel 高度 18 - border 2 - header 3 = 12 行；每项 3 行 → 可见 4 个。
+    const VISIBLE_ITEMS: usize = 4;
+    let scroll_start = scroll_start_for_selected(*cursor.read(), item_count, VISIBLE_ITEMS);
+
+    // ── 键盘 + 鼠标处理 ──
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if let Some(area) = area
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 3,
+                                item_rows: 3,
+                                footer_rows: 1,
+                                visible_items: VISIBLE_ITEMS as u16,
+                                scroll_start,
+                                item_count,
+                            },
+                        )
+                    {
+                        *cursor.write() = idx;
+                        let threads_snap = THREAD_LIST.state().read().clone();
+                        if let Some(entry) = threads_snap.get(idx) {
+                            if let Some(tx) = THREAD_LOAD_TX.get() {
+                                let _ = tx.send(entry.id.clone());
+                            }
+                            crate::kit::panel_registry::close_active_panel();
                         }
-                        crate::kit::panel_registry::close_active_panel();
+                        return EventResult::Consumed;
                     }
+                    // 区域内的左键点击（未命中行）也消费，防止穿透到消息区选区
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
                 }
-                _ => {}
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+                match key.code {
+                    KeyCode::Up => {
+                        let mut c = cursor.write();
+                        *c = previous_selection(*c);
+                    }
+                    KeyCode::Down => {
+                        let mut c = cursor.write();
+                        *c = next_selection(*c, item_count);
+                    }
+                    KeyCode::Enter => {
+                        let sel = *cursor.read();
+                        let threads_snap = THREAD_LIST.state().read().clone();
+                        if let Some(entry) = threads_snap.get(sel) {
+                            if let Some(tx) = THREAD_LOAD_TX.get() {
+                                let _ = tx.send(entry.id.clone());
+                            }
+                            crate::kit::panel_registry::close_active_panel();
+                        }
+                    }
+                    _ => {}
+                }
+                EventResult::Consumed
             }
-            EventResult::Consumed
-        }
-    });
+        },
+    );
 
     // ── 构建行列表（仿 Login 面板）──
     let sel = *cursor.read();
-    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
-    // panel 高度 18 - border 2 - header 3 - footer 1 = 12 行；每项 3 行 → 可见 4 个。
-    const VISIBLE_ITEMS: usize = 4;
-    let scroll_start = scroll_start_for_selected(sel, item_count, VISIBLE_ITEMS);
     let guard = theme_def.read();
     let semantic = &guard.semantic;
     let header_style = Style::new().fg(semantic.text.primary).bold();

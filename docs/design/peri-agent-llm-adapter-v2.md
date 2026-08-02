@@ -22,27 +22,27 @@ graph TB
     end
 
     MSG -->|"messages + tools"| BRIDGE
-    COMPACT -->|"独立 LlmRequest"| BRIDGE
+    COMPACT -->|"独立 ModelRequest"| BRIDGE
 
     subgraph BRIDGE["ReactLLM 桥接层"]
-        RETRY["RetryableLLM<br/>装饰器：指数退避重试"]
-        ADAPTER["BaseModelReactLLM<br/>LlmRequest → invoke → Reasoning"]
+        RETRY["ModelRuntimeConfig<br/>内建：指数退避重试"]
+        ADAPTER["AgentModelBridge<br/>ModelRequest → stream → Reasoning"]
     end
 
     RETRY --> ADAPTER
 
     subgraph PROVIDER["Provider 适配层"]
         direction LR
-        BASE["BaseModel trait<br/>统一调用接口"]
-        ANTH["ChatAnthropic"]
-        OPEN["ChatOpenAI"]
+        BASE["Model trait<br/>统一调用接口"]
+        ANTH["AnthropicModel"]
+        OPEN["OpenAiModel"]
     end
 
     ADAPTER --> BASE
     BASE --> ANTH
     BASE --> OPEN
 
-    ANTH & OPEN -->|"LlmResponse"| ADAPTER
+    ANTH & OPEN -->|"ModelResponse"| ADAPTER
 
     subgraph SSE["流式输出"]
         CTX["StreamingContext<br/>cancel · event_handler"]
@@ -54,13 +54,13 @@ graph TB
     ADAPTER -->|"Reasoning"| REACT
 ```
 
-### 2.1 BaseModel trait
+### 2.1 Model trait
 
-Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通过 `ReactLLM` trait 发出推理请求，`ReactLLM` 的实现再委托给 `BaseModel`。
+Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通过 `ReactLLM` trait 发出推理请求，`ReactLLM` 的实现再委托给 `Model`。
 
 核心职责：
-- **请求规范化为 LlmRequest**：将 MessageTranscript 的全量消息、ToolDefinition 列表、System Prompt 打包为统一的请求结构。所有 Provider 接受相同格式的输入。
-- **响应规范化为 LlmResponse**：将不同 Provider 的响应格式统一为 `StopReason`（结束原因）、`TokenUsage`（输入/输出/缓存 token 统计）。上层消费统一语义，不解析 Provider 特有字段。
+- **请求规范化为 ModelRequest**：将 MessageTranscript 的全量消息、ToolDefinition 列表、System Prompt 打包为统一的请求结构。所有 Provider 接受相同格式的输入。
+- **响应规范化为 ModelResponse**：将不同 Provider 的响应格式统一为 `StopReason`（结束原因）、`TokenUsage`（输入/输出/缓存 token 统计）。上层消费统一语义，不解析 Provider 特有字段。
 - **能力查询**：Provider 通过 trait 方法声明自身能力，上层据此自适应行为：
 
   | 能力 | 方法 | 说明 |
@@ -69,15 +69,15 @@ Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通�
   | 流式支持 | `supports_streaming()` | Reason 阶段据此选择流式或非流式路径，默认 false |
 
   其余 Provider 差异行为（扩展思考、Prompt 缓存、System 传递方式等）由各 Provider 构造器字段决定，不作为 trait 能力查询暴露：
-  - **扩展思考**：`ChatAnthropic.extended_thinking` + `thinking_budget` + `thinking_effort`；`ChatOpenAI.reasoning_effort`（o1/o3 系列）+ `thinking_enabled`（deepseek-v4-pro）
-  - **Prompt 缓存**：`ChatAnthropic.enable_cache`
-  - **Thinking Content**：`ChatOpenAI.supports_thinking_content`（自动检测，目前始终 false）
+  - **扩展思考**：`AnthropicModel.extended_thinking` + `thinking_budget` + `thinking_effort`；`OpenAiModel.reasoning_effort`（o1/o3 系列）+ `thinking_enabled`（deepseek-v4-pro）
+  - **Prompt 缓存**：`AnthropicModel.enable_cache`
+  - **Thinking Content**：`OpenAiModel.supports_thinking_content`（自动检测，目前始终 false）
 
 ### 2.2 ReactLLM 桥接
 
-`BaseModelReactLLM` 是 LLM 调用的统一入口。Reason 阶段的推理请求和 Compact 阶段的摘要请求均走此桥接——前者传入 MessageTranscript 全量消息和工具定义，后者传入独立摘要请求。统一链路保证重试、流式、缓存等策略对两种调用者一致生效。
+`AgentModelBridge` 是 LLM 调用的统一入口。Reason 阶段的推理请求和 Compact 阶段的摘要请求均走此桥接——前者传入 MessageTranscript 全量消息和工具定义，后者传入独立摘要请求。统一链路保证重试、流式、缓存等策略对两种调用者一致生效。
 
-- **输入**：LlmRequest（含消息列表和可选的工具定义）。Reason 传入 MessageTranscript 全量 + 工具定义；Compact 传入独立摘要请求，不含工具定义。`LlmRequest` 还携带 `session_id`（会话级 ID，用于 LiteLLM 等代理按 session 聚合多次请求——Anthropic 透传为 `x-session-id` 请求头，OpenAI 透传为 `metadata.session_id` 请求体字段）。
+- **输入**：ModelRequest（含消息列表和可选的工具定义）。Reason 传入 MessageTranscript 全量 + 工具定义；Compact 传入独立摘要请求，不含工具定义。`ModelRequest` 还携带 `session_id`（会话级 ID，用于 LiteLLM 等代理按 session 聚合多次请求——Anthropic 透传为 `x-session-id` 请求头，OpenAI 透传为 `metadata.session_id` 请求体字段）。
 - **输出**：`Reasoning` 结构，各字段按用途分组：
 
   | 字段 | 用途 |
@@ -102,7 +102,7 @@ Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通�
 
 **防御处理**：部分 Provider（如 DeepSeek）可能返回 `stop_reason` 与实际内容不一致——内容含 tool_use 但标记为 end_turn。桥接层强制执行一致性检查，避免产生孤儿 tool_use。
 
-**Langfuse 请求体构建**：`BaseModelReactLLM` 通过 `build_full_llm_request` 共享同源逻辑，确保 Langfuse Generation input 与实际 invoke 请求体完全一致。`ReactLLM::build_provider_request_body` 和 `BaseModel::build_request_body` 两条路径共享同一份 `LlmRequest` 构造——避免分叉导致 raw body 与实际请求体不一致（validate agent 风险点 #3）。Provider 适配器（ChatOpenAI / ChatAnthropic）均 override `build_request_body`，返回 Provider-native 完整请求体（含正确工具格式和 system 位置）。
+**Langfuse 请求体构建**：`AgentModelBridge` 通过 `observed_provider_request_body` 共享同源逻辑，确保 Langfuse Generation input 与实际 invoke 请求体完全一致。`ReactLLM::build_provider_request_body` 和 `Model::prepare_request` 两条路径共享同一份 `ModelRequest` 构造——避免分叉导致 raw body 与实际请求体不一致（validate agent 风险点 #3）。Provider 适配器（`OpenAiModel` / `AnthropicModel`）均返回 Provider-native 完整请求体（含正确工具格式和 system 位置）。
 
 ### 2.3 ContentBlock → Provider 格式
 
@@ -135,7 +135,7 @@ Anthropic 适配器在 `messages_to_anthropic` 中处理 `__SYSTEM_PROMPT_DYNAMI
 
 ### 2.4 重试与容错
 
-`RetryableLLM` 装饰任意 `ReactLLM` 实现，提供透明重试。
+重试已由 `ModelRuntimeConfig`（`peri_model::ModelRuntimeConfig`）内建——调用 `Model::stream` 时传入 `ModelRuntimeConfig` 配置 retry 参数，不在 Agent 侧通过装饰器包装重试逻辑。
 
 - **指数退避 + 随机抖动**：base_delay × 2^(attempt+1)，上限封顶（默认 32000ms），附加 25% 抖动避免雷群效应。attempt 从 0 开始，首次重试（attempt=0）使用 base_delay × 2（默认 500 × 2 = 1000ms）
 - **错误分类**：可重试（429 限流、5xx 服务端错误、连接超时）→ 自动重试；不可重试（401/403 认证权限错误）→ 直接返回失败
@@ -168,11 +168,11 @@ Anthropic 的 extended thinking 产出 `ContentBlock::Reasoning`，含模型内�
 
 ## 附录：新增 Provider 检查清单
 
-1. 实现 `BaseModel` trait
+1. 实现 `Model` trait
 2. 实现 ContentBlock → Provider JSON 转换
 3. 实现 System hoist（system 消息 → 顶层字段）
 4. StopReason 映射（Provider 特定字符串 → 统一枚举）
 5. TokenUsage 规范化（Provider 特定字段 → 统一字段）
 6. 可选：SSE 流式解析
 7. 可选：Prompt Cache 标记注入
-8. 注册到 `LlmProvider`：在 `peri-acp/src/provider/mod.rs` 的 `LlmProvider` enum 添加新变体，在 `from_config` / `from_config_for_alias` 中添加匹配分支，在 `into_model` 中构造对应 `BaseModel` 实例。当前 `from_config` 对非 `"anthropic"` 类型走 `_` 通配符（全部落入 OpenAI 路径），新增 Provider 需在此通配符前添加专属分支。
+8. 注册到 `LlmProvider`：在 `peri-acp/src/provider/mod.rs` 的 `LlmProvider` enum 添加新变体，在 `from_config` / `from_config_for_alias` 中添加匹配分支，在 `into_model` 中构造对应 `Model` 实例。当前 `from_config` 对非 `"anthropic"` 类型走 `_` 通配符（全部落入 OpenAI 路径），新增 Provider 需在此通配符前添加专属分支。

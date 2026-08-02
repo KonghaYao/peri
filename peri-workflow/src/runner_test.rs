@@ -1,6 +1,6 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
-use super::{AgentExecutor, WorkflowInput, WorkflowRunner};
+use super::{workflow_local_dist_in, AgentExecutor, WorkflowInput, WorkflowRunner};
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
@@ -23,6 +23,28 @@ impl AgentExecutor for MockAgentExecutor {
             duration_ms: None,
         }
     }
+}
+
+#[test]
+fn test_workflow_local_dist_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    assert!(workflow_local_dist_in(tmp.path()).is_none());
+}
+
+#[test]
+fn test_workflow_local_dist_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dist = tmp
+        .path()
+        .join("node_modules")
+        .join("@peri-code")
+        .join("workflow")
+        .join("dist")
+        .join("peri-workflow.js");
+    std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
+    std::fs::write(&dist, "#!/usr/bin/env node\n").unwrap();
+    let got = workflow_local_dist_in(tmp.path()).unwrap();
+    assert_eq!(got, dist.to_string_lossy());
 }
 
 #[tokio::test]

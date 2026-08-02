@@ -6,9 +6,8 @@
 use super::middleware_runner::{run_after_model, run_before_model, run_on_error};
 use super::{ReasonInput, ReasonOutput};
 use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
-use crate::agent::react::Reasoning;
+use crate::agent::react::{Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
-use crate::llm::types::StreamingContext;
 use crate::messages::MessageId;
 
 /// SSE 流式事件 → EventBus 桥接器。
@@ -204,16 +203,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             tools: start_tools,
         });
 
-    // emit LlmRequestPayload（Provider 实际请求体，紧随 LlmCallStart 之后）
-    //
-    // Langfuse Generation input 用：raw_body 携带 Provider-native 完整请求体
-    // （含正确工具格式与 system 位置），让 Langfuse UI 显示与 Provider 实际收到的一致。
-    // 时序约束：LlmCallStart 必须先到（on_llm_start 建 generation_data 缓存），
-    // LlmRequestPayload 紧随其后写 raw_body 字段。
+    // emit LlmRequestPayload（仅发送 Model 的安全 observation body）
     if let Some(body) = ctx
         .runtime
         .llm
-        .build_provider_request_body(&messages_snapshot, &tool_refs)
+        .observed_provider_request_body(&messages_snapshot, &tool_refs)
     {
         ctx.runtime
             .event_bus
@@ -294,7 +288,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // emit LlmCallEnd（带 usage 完整字段：input/output + cache_creation/cache_read + request_id）
     // [TRAP] cache_read_input_tokens 必须透传，否则 TUI 命中率始终 0%（v2 重做回归）
-    let (in_tok, out_tok, cache_create, cache_read, req_id) = reasoning
+    let (in_tok, out_tok, cache_create, cache_read) = reasoning
         .usage
         .as_ref()
         .map(|u| {
@@ -303,10 +297,12 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 u.output_tokens as u64,
                 u.cache_creation_input_tokens.unwrap_or(0) as u64,
                 u.cache_read_input_tokens.unwrap_or(0) as u64,
-                u.request_id.clone(),
             )
         })
-        .unwrap_or((0, 0, 0, 0, None));
+        .unwrap_or((0, 0, 0, 0));
+    // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
+    // 不得随 usage 的 unwrap_or 默认值一起丢弃
+    let req_id = reasoning.request_id.clone();
     // output 改为结构化 JSON：包含 text、thinking、tool_calls、stop_reason
     // 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought 作为 text
     let llm_output = {
@@ -332,7 +328,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 "name": tc.name,
                 "input": tc.input,
             })).collect::<Vec<_>>(),
-            "stop_reason": reasoning.stop_reason.to_string(),
+            "stop_reason": crate::agent::model_bridge::stop_reason_display(&reasoning.stop_reason),
         });
         serde_json::to_string(&output_value).unwrap_or_else(|_| {
             // fallback: 保留纯文本行为

@@ -50,10 +50,34 @@ fn test_system_notification_roundtrip() {
 fn test_prediction_roundtrip() {
     let p = Prediction {
         text: "fix typo".into(),
+        actions: vec![
+            PredictionAction::Placeholder {
+                text: "fix typo".into(),
+            },
+            PredictionAction::SetTitle {
+                title: "修复 typo".into(),
+            },
+            PredictionAction::AddTag {
+                tag: "bugfix".into(),
+            },
+            PredictionAction::Summary {
+                text: "修复了一个 typo".into(),
+            },
+        ],
     };
     let json = serde_json::to_string(&p).unwrap();
     let back: Prediction = serde_json::from_str(&json).unwrap();
     assert_eq!(back.text, "fix typo");
+    assert_eq!(back.actions.len(), 4);
+    assert!(matches!(back.actions[1], PredictionAction::SetTitle { .. }));
+}
+
+/// 旧格式 `{"text": "..."}` 反序列化时 actions 缺省为空（向后兼容）
+#[test]
+fn test_prediction_actions_default_empty() {
+    let back: Prediction = serde_json::from_str(r#"{"text":"hello"}"#).unwrap();
+    assert!(back.actions.is_empty());
+    assert_eq!(back.text, "hello");
 }
 
 #[test]

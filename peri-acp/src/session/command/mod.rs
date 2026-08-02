@@ -8,11 +8,15 @@ pub mod clear;
 pub mod compact;
 pub mod rewind;
 
+/// Rewind 文件复原相关符号——供 dispatch 层（`session/rewind-preview` 预算）
+/// 复用 `extract_file_changes` / `FileChange`。
+pub(crate) use rewind::{extract_file_changes, FileChange, RewindCommand};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::agent::AgentCancellationToken;
-use peri_agent::{llm::BaseModel, messages::BaseMessage};
+use peri_agent::messages::BaseMessage;
 
 use crate::{
     provider::PeriConfig,
@@ -37,7 +41,7 @@ pub struct CommandContext {
     pub cwd: String,
     pub peri_config: Arc<PeriConfig>,
     /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。由 executor 从 provider 构造后传入。
-    pub auxiliary_model: Option<Arc<dyn BaseModel>>,
+    pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     pub event_sink: Arc<dyn EventSink>,
     /// 命令参数（命令名之后的文本）。
     pub args: String,

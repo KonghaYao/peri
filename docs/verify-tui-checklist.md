@@ -158,10 +158,13 @@
 
 ## 6. StatusBar
 
-- [ ] 状态栏第一行显示 `provider/model_name` 格式（如 `anthropic/claude-sonnet-4-20250514`），而非短别名
-- [ ] provider/model 显示为整体统一样式
+- [ ] 状态栏第一行显示 `alias model effort` 三段格式（如 `opus claude-sonnet-4-20250514 high`），而非 provider 前缀
+- [ ] 模型段中 effort 使用独立 effort 色，模型名使用 model_info 色
 - [ ] SetupWizard 页面的 provider 信息也显示完整模型名
 - [ ] 模型切换时（Ctrl+T / /model 面板）状态栏实时更新
+- [ ] 点击状态栏模型段弹出**小弹出层**（锚定在模型段上方，非居中大弹窗）
+- [ ] 小弹窗 hover 行高亮、点击行即切换并关闭；↑/↓ 选择 + Enter 切换 + Esc 关闭（键盘全程可用）
+- [ ] 弹窗内切换 alias 后状态栏实时更新且模型段闪烁
 
 ## 7. 输入历史
 

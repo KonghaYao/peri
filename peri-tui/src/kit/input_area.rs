@@ -33,14 +33,15 @@ use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, FILE_LIST,
-    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
+    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CURRENT_SESSION_TITLE,
+    FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
     MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
     SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
+use crate::kit::mouse_router;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
@@ -526,6 +527,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             ratatui_kit::prelude::EventPriority::High,
             move |event| {
                 if let Event::Mouse(mouse) = event {
+                    // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗
+                    // 锚定在状态栏上方、覆盖输入区时，点击弹窗行必须由弹窗消费）。
+                    if mouse_router::is_occluded() {
+                        return EventResult::Ignored;
+                    }
                     if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                         return EventResult::Ignored;
                     }
@@ -533,7 +539,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         let ov_h = *overlay_height_cl.lock();
                         let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
                         let text_x = outer.x.saturating_add(3);
-                        if mouse.row >= composer_top && mouse.column >= text_x {
+                        // [FIX] 必须加上界：composer 下方是状态栏/通知行，行号同样 >= composer_top。
+                        // 长文本（wrap > 10 行，editor_rows clamp 到 10）时 composer_height 不再
+                        // 随文本增长，click_visual_row 可能落入 total_visual_rows 范围 → 误把
+                        // 状态栏点击当作 composer 点击消费，status_bar 模型切换弹窗收不到事件。
+                        if mouse.row >= composer_top
+                            && mouse.row < outer.y.saturating_add(outer.height)
+                            && mouse.column >= text_x
+                        {
                             let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
                             let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();
@@ -689,10 +702,13 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     let composer_lines = build_composer_lines(lines, loading);
 
+    // 当前会话标题：service_snapshot 周期性派生；空标题时上边栏不渲染标签。
+    let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
+
     // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
     // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
     let composer_paragraph = Paragraph::new(composer_lines)
-        .block(build_composer_block(loading))
+        .block(build_composer_block(loading, &session_title))
         .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
 
     element!(
@@ -776,7 +792,7 @@ fn input_tokens() -> peri_theme::component::InputTokens {
     THEME_ATOM.state().read().component.input
 }
 
-fn build_composer_block(loading: bool) -> Block<'static> {
+fn build_composer_block(loading: bool, session_title: &str) -> Block<'static> {
     let tokens = input_tokens();
     let border_color = if loading {
         tokens.border_loading
@@ -784,9 +800,76 @@ fn build_composer_block(loading: bool) -> Block<'static> {
         tokens.border
     };
 
-    Block::default()
+    let mut block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(border_color))
+        .border_style(Style::default().fg(border_color));
+    if !session_title.is_empty() {
+        // ratatui 0.30：title 直接用 Line，`right_aligned()` 对齐到上边框右侧
+        block = block.title_top(build_session_title_line(session_title).right_aligned());
+    }
+    block
+}
+
+/// 会话标题标签：hash 稳定底色 + 按亮度反色前景 + BOLD。
+///
+/// 同一标题经确定性 hash 后始终命中同一底色，不同标题大概率不同色；
+/// 底色来自主题 `input.session_title_palette`，遵循"主题不硬编码颜色"约束。
+fn build_session_title_line(title: &str) -> Line<'static> {
+    let palette = input_tokens().session_title_palette;
+    let bg = palette[stable_hash(title) as usize % palette.len()];
+    Line::from(Span::styled(
+        format!(" {} ", truncate_title_to_width(title, 32)),
+        Style::default()
+            .bg(bg)
+            .fg(readable_fg(bg))
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// FNV-1a 64 位确定性 hash——不依赖 `std` DefaultHasher 的随机 seed，
+/// 保证同一标题在跨进程 / 跨会话场景下颜色稳定。
+fn stable_hash(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），超长补省略号。
+fn truncate_title_to_width(s: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut out = String::new();
+    let mut truncated = false;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if width + w > max_width {
+            truncated = true;
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+/// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。
+fn readable_fg(bg: Color) -> Color {
+    match bg {
+        Color::Rgb(r, g, b) => {
+            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
+            if luminance > 140.0 {
+                Color::Black
+            } else {
+                Color::White
+            }
+        }
+        _ => Color::White,
+    }
 }
 
 fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<Line<'static>> {

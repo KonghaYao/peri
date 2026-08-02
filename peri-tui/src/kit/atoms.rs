@@ -38,6 +38,8 @@ pub enum PopupKind {
     Confirm,
     /// 下载进度弹窗（主题下载）
     Download,
+    /// 状态栏模型段点击弹出的 alias 快速切换弹窗
+    ModelQuickSwitch,
 }
 
 pub type Handle<T> = AtomState<T>;
@@ -73,6 +75,8 @@ pub struct ServiceSnapshot {
     pub provider_name: String,
     pub model_alias: String,
     pub model_name: String,
+    /// 当前 active profile 的推理力度（low/medium/high/xhigh/max）
+    pub effort: String,
     pub permission_mode: String,
     pub memory_mb: u64,
     pub cpu_percent: f32,
@@ -185,6 +189,8 @@ pub struct MemoryEntry {
 #[derive(Debug, Clone, Default)]
 pub struct PredictionState {
     pub text: String,
+    /// 最近一次预测的会话摘要（spinner 名言位优先显示）
+    pub summary: Option<String>,
     pub received_at: Option<Instant>,
 }
 
@@ -235,6 +241,10 @@ pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
 pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 模型快速切换弹窗锚点（屏幕坐标：状态栏模型段起点 (x, y)）。
+/// StatusBarRow1 在 open_popup(ModelQuickSwitch) 前写入，弹窗组件读取后
+/// 自定位到锚点上方（非居中大弹窗）。
+pub static MODEL_SWITCH_ANCHOR: AtomStatic<Option<(u16, u16)>> = AtomStatic::new(|| None);
 
 pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
@@ -255,6 +265,40 @@ pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 
 pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
+
+/// 回退目标 user 消息文本暂存——候选 Enter 时写入，RewindCompleted 到达后
+/// 消费回填输入框；任何失败/取消路径清空。
+pub static REWIND_TARGET_TEXT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 文件回退预算状态——候选 Enter 后由 rewind_consumer 写入：
+/// `Idle` = 未进入预算阶段（候选视图）；`Executing` = 预算为空自动执行或
+/// 用户确认后执行中（弹窗显示"正在回退…"）；`Files(v)` = 待用户确认的预算。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RewindBudgetState {
+    #[default]
+    Idle,
+    Executing,
+    Files(Vec<RewindFileChange>),
+}
+
+/// 单个文件回退预算条目（服务端 `session/rewind-preview` 响应元素）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RewindFileChange {
+    pub path: String,
+    pub kind: String,
+}
+
+pub static REWIND_BUDGET_STATE: AtomStatic<RewindBudgetState> =
+    AtomStatic::new(|| RewindBudgetState::Idle);
+
+/// 候选查询失败信息（Option<String> 错误文案）；None = 查询中或未查询。
+pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// 候选查询代次——`spawn_candidates_query` 每次递增并捕获；响应到达时与
+/// 当前代次比对，不一致（已发起新查询）则丢弃，防止慢响应覆盖新数据
+/// （P1 竞态防护）。
+pub static REWIND_QUERY_GEN: AtomStatic<u64> = AtomStatic::new(|| 0);
+
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
 pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);
 pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| None);
@@ -329,6 +373,11 @@ pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 当前活跃 session 的 ID。由 submit_consumer/thread_load_consumer 在 session 变更时设置。
 /// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。
 pub static ACTIVE_SESSION_ID: AtomStatic<String> = AtomStatic::new(String::new);
+
+/// 当前活跃 session 的标题。由 service_snapshot 周期性从 thread_store 派生
+/// （load_meta(ACTIVE_SESSION_ID)），InputArea 上边栏右侧以 hash 稳定底色展示。
+/// 空字符串表示尚无标题（新会话 / 未加载），此时不渲染。
+pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::new);
 
 /// Bridge 重置计数器——/clear 或 thread 切换时 +1，acp_bridge 检测到变更时
 /// 清空 committed / has_view_commit / current_turn，防止旧 session 的 VM

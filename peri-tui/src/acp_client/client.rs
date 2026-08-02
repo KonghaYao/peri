@@ -11,6 +11,7 @@ use peri_acp::transport::{
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
 };
+use peri_acp_types::event_data::PredictionAction;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -33,8 +34,12 @@ pub enum AcpNotification {
         session_id: String,
         stop_reason: String,
     },
-    /// Prediction fork 完成后的建议文本。
-    PredictionReady { session_id: String, text: String },
+    /// Prediction fork 完成后的建议文本与结构化动作。
+    PredictionReady {
+        session_id: String,
+        text: String,
+        actions: Vec<PredictionAction>,
+    },
     /// A `notifications/peri/*` custom notification (SubAgent, Compact, LSP, etc.)
     Peri {
         session_id: String,
@@ -253,13 +258,22 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let actions = params
+                            .get("actions")
+                            .and_then(|v| {
+                                serde_json::from_value::<Vec<PredictionAction>>(v.clone()).ok()
+                            })
+                            .unwrap_or_default();
                         if !Self::is_current_session(&current_session_id, &session_id) {
                             debug!(session_id = %session_id, "ACP client pump: dropping stale prediction_ready");
                             continue;
                         }
-                        if !text.is_empty() {
-                            let _ = notification_tx
-                                .send(AcpNotification::PredictionReady { session_id, text });
+                        if !actions.is_empty() || !text.is_empty() {
+                            let _ = notification_tx.send(AcpNotification::PredictionReady {
+                                session_id,
+                                text,
+                                actions,
+                            });
                         }
                     } else if method.starts_with("notifications/peri/") {
                         let session_id = params

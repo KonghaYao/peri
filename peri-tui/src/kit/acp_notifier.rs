@@ -22,8 +22,8 @@ use crate::acp_client::AcpNotification;
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
-    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, SKILL_NAMES,
-    SPINNER_TOKEN_COUNT,
+    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, PERI_CONFIG_HANDLE,
+    SKILL_NAMES, SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::truncate::summarize_input;
@@ -167,6 +167,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             messages_json,
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
+        AcpEvent::RewindError { message } => Some(AcpEventData::RewindError { message }),
         // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
         AcpEvent::StateSnapshotMeta {
             context_total_tokens,
@@ -258,12 +259,16 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
                 }
             }
         }
-        AcpNotification::PredictionReady { session_id, text } => {
+        AcpNotification::PredictionReady {
+            session_id,
+            text,
+            actions,
+        } => {
             // M4: PredictionReady 不再被丢弃，转换为 AcpEventData::Prediction 推入 bridge channel。
             // dispatch_and_notify 仅写入 PREDICTION atom（input_area 订阅显示），不调
             // push_view_models。
             use peri_acp_types::event_data::Prediction;
-            let decoded = AcpEventData::Prediction(Prediction { text });
+            let decoded = AcpEventData::Prediction(Prediction { text, actions });
             let wrapped = wrap_with_session(decoded, session_id);
             if let Err(e) = bridge_tx.send(wrapped) {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping prediction");
@@ -513,12 +518,20 @@ fn handle_session_update(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             *SPINNER_TOKEN_COUNT.state().write() = (input + output) as usize;
-            // 缓存命中率：低于 80% 时直接 push SystemNotification 到消息流
+            // 缓存命中率：低于 80% 时直接 push SystemNotification 到消息流。
+            // 受 AppConfig.show_cache_warning 控制（config 面板开关，默认关闭）。
             let cache_read = meta_obj
                 .and_then(|m| m.get("cacheReadTokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if cache_read > 0 && input > 0 {
+                let show_warning = PERI_CONFIG_HANDLE
+                    .get()
+                    .map(|h| h.read().config.show_cache_warning.unwrap_or(false))
+                    .unwrap_or(false);
+                if !show_warning {
+                    return None;
+                }
                 let hit_rate = cache_read as f64 / input as f64;
                 if hit_rate < 0.8 {
                     let req_id = meta_obj

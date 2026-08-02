@@ -145,7 +145,7 @@ TurnGroup #2:
 | OpenAI | 无签名机制 | reasoning 可以局部截断 |
 | Anthropic | reasoning 块带签名 | 带签名的 reasoning 必须整体保留或整体移除，不能局部截断 |
 
-`ProviderCapabilities` 通过 `BaseModel` trait 获取。Anthropic 实例返回 `signed_reasoning_must_be_whole = true`，OpenAI 返回 `false`。`render_llm_view()` 据此决定 reasoning 块的处理方式。
+`ProviderCapabilities` 通过 `AgentModelBridge`（即 `peri_model::Model` trait）获取。Anthropic 实例返回 `signed_reasoning_must_be_whole = true`，OpenAI 返回 `false`。`render_llm_view()` 据此决定 reasoning 块的处理方式。
 
 ### 4.5 投影流程
 

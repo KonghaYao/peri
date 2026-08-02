@@ -21,7 +21,7 @@
 //! 其他 popup（AskUser/Rewind/OAuth）仍用 Normal，依赖 root handler 关闭。
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{style::Stylize, text::Line},
 };
@@ -29,6 +29,7 @@ use ratatui_kit::{
 use crate::i18n;
 use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX, LANG_VERSION};
 use crate::kit::hitl_response::HitlResponseAction;
+use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::popup_overlay::close_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -40,44 +41,72 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending = pending_store.read().clone();
     let _ = pending_store;
 
+    // 弹窗绘制区域（上一帧）——鼠标整窗点击 = 审批通过
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 审批动作：Enter 与鼠标左键点击共用（click as enter）
+    let approve = move || {
+        // 读取 HITL_REQUEST_ID 并通过 channel 发送 Approve。
+        // 先读取 id_str，再 close_popup（close 会清空 HITL_REQUEST_ID）。
+        if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+            && let Some(tx) = HITL_RESPONSE_TX.get()
+        {
+            let _ = tx.send(HitlResponseAction::Approve {
+                request_id_str: id_str,
+            });
+        }
+        close_popup();
+    };
+    let reject = move || {
+        // Esc 同 Enter 路径——先读取 id_str 发送 Reject，再 close_popup。
+        if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+            && let Some(tx) = HITL_RESPONSE_TX.get()
+        {
+            let _ = tx.send(HitlResponseAction::Reject {
+                request_id_str: id_str,
+            });
+        }
+        close_popup();
+    };
+
     // High 优先级：先于 register_root_handlers 的 Normal Esc handler 执行，
     // 避免 root close_popup 后 Consumed 截断本 handler（详见模块注释「事件优先级」）。
-    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
-        let Event::Key(key) = event else {
-            return EventResult::Ignored;
-        };
-        if key.kind != KeyEventKind::Press {
-            return EventResult::Ignored;
-        }
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                // 读取 HITL_REQUEST_ID 并通过 channel 发送 Approve。
-                // 先读取 id_str，再 close_popup（close 会清空 HITL_REQUEST_ID）。
-                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
-                    && let Some(tx) = HITL_RESPONSE_TX.get()
-                {
-                    let _ = tx.send(HitlResponseAction::Approve {
-                        request_id_str: id_str,
-                    });
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::High,
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：区域内左键点击 = 执行审批动作（click as enter）
+            if let Event::Mouse(mouse) = event {
+                if area.is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    approve();
+                    return EventResult::Consumed;
                 }
-                close_popup();
-                EventResult::Consumed
+                return EventResult::Ignored;
             }
-            (KeyModifiers::NONE, KeyCode::Esc) => {
-                // Esc 同 Enter 路径——先读取 id_str 发送 Reject，再 close_popup。
-                if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
-                    && let Some(tx) = HITL_RESPONSE_TX.get()
-                {
-                    let _ = tx.send(HitlResponseAction::Reject {
-                        request_id_str: id_str,
-                    });
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    approve();
+                    EventResult::Consumed
                 }
-                close_popup();
-                EventResult::Consumed
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    reject();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
             }
-            _ => EventResult::Ignored,
-        }
-    });
+        },
+    );
 
     let _ = hooks.use_atom(&LANG_VERSION);
 

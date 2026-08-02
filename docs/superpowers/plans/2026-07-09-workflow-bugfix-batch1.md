@@ -358,7 +358,7 @@ pub fn build_v2_subagent_context(
     shared_tools: Option<SharedToolMap>,
     compact_config: Option<CompactConfig>,
     context_budget: Option<ContextBudget>,
-    compact_llm: Option<Arc<dyn BaseModel>>,
+    compact_llm: Option<Arc<dyn Model>>,
     error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
     tool_registry_snapshot: Option<ToolRegistrySnapshot>,
 ) -> V2SubagentContext {
@@ -523,9 +523,9 @@ Expected: 编译会报错，提示其他调用 `build_v2_subagent_context` 的�
                 cc.full_compact_threshold,
             )
         });
-        // compact_llm：workflow agent 没有 auxiliary_model，但可以复用主 provider 的 BaseModel
-        // 创建新的 BaseModel 实例用于 compact 摘要（与主 agent 的 compact_llm 独立）
-        let compact_llm: Option<Arc<dyn peri_agent::llm::BaseModel>> =
+        // compact_llm：workflow agent 没有 auxiliary_model，但可以复用主 provider 的 Model
+        // 创建新的 Model 实例用于 compact 摘要（与主 agent 的 compact_llm 独立）
+        let compact_llm: Option<Arc<dyn peri_model::Model>> =
             if compact_config.is_some() {
                 Some(Arc::from(effective_provider.clone().into_model()))
             } else {
@@ -565,7 +565,7 @@ Expected: 编译通过。`ContextBudget` 类型来自 `peri_agent::agent::token:
 ```rust
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::agent::compact::config::CompactConfig;
-use peri_agent::llm::BaseModel;
+use peri_model::Model;
 ```
 
 ---
@@ -623,7 +623,7 @@ Expected: 无新增 warning。
 
 3. **类型一致性：**  
    - `ContextBudget::new(micro, full)` 签名与 `builder_v2.rs:240` 一致  
-   - `compact_llm: Option<Arc<dyn BaseModel>>` 与 `StageContext.compact_llm` 类型一致  
+   - `compact_llm: Option<Arc<dyn Model>>` 与 `StageContext.compact_llm` 类型一致
    - `build_v2_subagent_context` 新参数顺序：`shared_tools, compact_config, context_budget, compact_llm, error_suggest_registry, tool_registry_snapshot`
 
 ---

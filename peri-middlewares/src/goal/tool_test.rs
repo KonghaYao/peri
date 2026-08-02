@@ -1,10 +1,12 @@
 use super::*;
 use async_trait::async_trait;
-use peri_agent::error::AgentError;
 use peri_agent::goal::{GoalController, GoalStatus, GoalViewSnapshot};
-use peri_agent::llm::types::StopReason;
-use peri_agent::llm::{BaseModel, LlmRequest, LlmResponse};
 use peri_agent::tools::ToolContext;
+use peri_model::{
+    Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, ProtocolErrorKind, StopReason,
+};
+use tokio_util::sync::CancellationToken;
 
 struct MockController {
     has_goal: parking_lot::Mutex<bool>,
@@ -140,17 +142,17 @@ async fn test_goal_complete_no_model_skips_verification() {
     assert!(result.contains("verification skipped"));
 }
 
-// ===== MockBaseModel：用于 LLM 验证路径测试 =====
+// ===== MockModel：用于 LLM 验证路径测试 =====
 
-/// 可配置响应的 BaseModel mock
-struct MockBaseModel {
-    /// invoke 返回的 message 文本
+/// 可配置响应的模型 mock（实现 peri_model::Model）
+struct MockModel {
+    /// complete 返回的 assistant 文本
     response_text: String,
-    /// 若为 true，invoke 返回 Err（模拟 LLM 调用失败）
+    /// 若为 true，complete 返回 Err（模拟 LLM 调用失败）
     should_error: bool,
 }
 
-impl MockBaseModel {
+impl MockModel {
     fn with_response(text: impl Into<String>) -> Self {
         Self {
             response_text: text.into(),
@@ -167,41 +169,55 @@ impl MockBaseModel {
 }
 
 #[async_trait]
-impl BaseModel for MockBaseModel {
-    async fn invoke(&self, _request: LlmRequest) -> peri_agent::error::AgentResult<LlmResponse> {
-        if self.should_error {
-            return Err(AgentError::LlmError("模拟 LLM 调用失败".to_string()));
+impl Model for MockModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
         }
-        Ok(LlmResponse {
-            message: BaseMessage::ai(self.response_text.clone()),
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            request_id: None,
-        })
     }
 
-    fn provider_name(&self) -> &str {
-        "mock"
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        // 验证路径只走 complete()，stream() 不应被调用
+        Err(ModelError::cancelled())
     }
 
-    fn model_id(&self) -> &str {
-        "mock-verifier"
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        if self.should_error {
+            return Err(ModelError::protocol(ProtocolErrorKind::Provider));
+        }
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text(self.response_text.clone()),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
     }
 }
 
 /// 辅助：构造带 auxiliary_model 的 GoalTool + 预先 create 目标
-fn make_tool_with_model(model: MockBaseModel) -> (GoalTool, Arc<dyn GoalController>) {
+fn make_tool_with_model(model: MockModel) -> (GoalTool, Arc<dyn GoalController>) {
     let controller = Arc::new(MockController::new()) as Arc<dyn GoalController>;
     let tool = GoalTool::new(
         Arc::clone(&controller),
-        Some(Arc::new(model) as Arc<dyn BaseModel>),
+        Some(Arc::new(model) as Arc<dyn peri_model::Model>),
     );
     (tool, controller)
 }
 
 #[tokio::test]
 async fn test_goal_complete_with_model_验证通过() {
-    let (tool, _controller) = make_tool_with_model(MockBaseModel::with_response(
+    let (tool, _controller) = make_tool_with_model(MockModel::with_response(
         r#"{"achieved": true, "evidence": "所有测试通过"}"#,
     ));
 
@@ -228,7 +244,7 @@ async fn test_goal_complete_with_model_验证通过() {
 
 #[tokio::test]
 async fn test_goal_complete_with_model_验证失败() {
-    let (tool, _controller) = make_tool_with_model(MockBaseModel::with_response(
+    let (tool, _controller) = make_tool_with_model(MockModel::with_response(
         r#"{"achieved": false, "missing": "缺少边界测试"}"#,
     ));
 
@@ -258,7 +274,7 @@ async fn test_goal_complete_with_model_验证失败() {
 async fn test_goal_complete_model_返回非法_json_默认未达成() {
     // LLM 返回纯文本（无 JSON），parse_verdict 宽松解析失败 → 默认 achieved=false
     let (tool, _controller) =
-        make_tool_with_model(MockBaseModel::with_response("目标看起来还没完成。"));
+        make_tool_with_model(MockModel::with_response("目标看起来还没完成。"));
 
     tool.invoke(
         json!({"action": "create", "objective": "完成重构"}),
@@ -283,7 +299,7 @@ async fn test_goal_complete_model_返回非法_json_默认未达成() {
 
 #[tokio::test]
 async fn test_goal_complete_model_调用失败_传播错误() {
-    let (tool, _controller) = make_tool_with_model(MockBaseModel::failing());
+    let (tool, _controller) = make_tool_with_model(MockModel::failing());
 
     tool.invoke(
         json!({"action": "create", "objective": "完成重构"}),
@@ -292,13 +308,13 @@ async fn test_goal_complete_model_调用失败_传播错误() {
     .await
     .unwrap();
 
-    // LLM invoke 抛错 → handle_complete 通过 ? 传播为 ToolExecutionFailed（is_error=true）
+    // LLM complete 抛错 → handle_complete 通过 ? 传播为 ToolExecutionFailed（is_error=true）
     let err = tool
         .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
         .await
         .expect_err("LLM 调用失败应返回 error");
     assert!(
-        err.to_string().contains("模拟 LLM 调用失败"),
+        err.to_string().contains("model protocol error"),
         "错误应包含原始 LLM 错误信息，实际：{err}"
     );
 }

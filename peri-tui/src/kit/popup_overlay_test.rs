@@ -106,10 +106,20 @@ fn test_close_popup_clears_payload_atoms() {
     );
 
     open_popup(PopupKind::Rewind);
+    // 预置预算/目标/错误（close_popup 应清空）
+    *atoms::REWIND_TARGET_TEXT.state().write() = Some("t".to_string());
+    *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Executing;
+    *atoms::REWIND_QUERY_ERROR.state().write() = Some("e".to_string());
     close_popup();
     assert!(
-        atoms::REWIND_PREVIEW.state().read().is_none(),
-        "REWIND_PREVIEW should be cleared after close_popup"
+        atoms::REWIND_PREVIEW.state().read().is_some(),
+        "REWIND_PREVIEW should NOT be cleared after close_popup — 候选跟随会话生命周期"
+    );
+    assert!(
+        atoms::REWIND_TARGET_TEXT.state().read().is_none()
+            && *atoms::REWIND_BUDGET_STATE.state().read() == atoms::RewindBudgetState::Idle
+            && atoms::REWIND_QUERY_ERROR.state().read().is_none(),
+        "close_popup 应清空预算/目标/查询错误"
     );
 
     open_popup(PopupKind::OAuth);

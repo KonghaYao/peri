@@ -3,10 +3,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_model::{
+    Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, StopReason,
+};
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::llm::{BaseModel, LlmRequest, LlmResponse, StopReason};
 use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore};
@@ -33,22 +37,36 @@ fn make_ai_with_read_tool(file_path: &str) -> BaseMessage {
 struct FullLifecycleModel;
 
 #[async_trait]
-impl BaseModel for FullLifecycleModel {
-    async fn invoke(&self, _request: LlmRequest) -> crate::error::AgentResult<LlmResponse> {
-        Ok(LlmResponse {
-            message: BaseMessage::ai("<summary>FULL_SUMMARY_MARKER</summary>"),
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            request_id: None,
-        })
+impl Model for FullLifecycleModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
     }
 
-    fn provider_name(&self) -> &str {
-        "full-lifecycle-test"
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        // compact 路径只走 complete()，stream() 不应被调用
+        Err(ModelError::cancelled())
     }
 
-    fn model_id(&self) -> &str {
-        "full-lifecycle-test-model"
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text("<summary>FULL_SUMMARY_MARKER</summary>"),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
     }
 }
 

@@ -1,19 +1,58 @@
 #!/usr/bin/env bun
 /**
- * 单 trace 逐轮消息组成 + 新增/变更消息 diff
+ * 单 trace 逐轮消息组成 + 新增/变更消息 diff（支持从过滤结果中选 trace）
  *
- * 用法: bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId> [--detail]
+ * 用法:
+ *   bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>
+ *   bun .claude/skills/langfuse/scripts/trace-messages.ts --index <N> [过滤选项]
  */
-import { api, fetchObservations, fmt } from "./lib.ts";
+import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, genTokens, fmt } from "./lib.ts";
 
 const args = process.argv.slice(2);
-const traceId = args.find((a) => !a.startsWith("--"));
-const showDetail = args.includes("--detail");
 
-if (!traceId) {
-  console.error("Usage: bun trace-messages.ts <traceId> [--detail]");
-  process.exit(1);
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`用法: bun trace-messages.ts <traceId>
+       bun trace-messages.ts --index <N> [过滤选项]
+
+过滤选项: --from <ISO> --to <ISO> --days <N> --tag <t> --user <id> --session <id> --name <s> --limit <N>`);
+  process.exit(0);
 }
+
+// Find trace to analyze
+let traceId: string | undefined;
+const indexIdx = args.indexOf("--index");
+
+for (const a of args) {
+  if (!a.startsWith("--") && a !== args[indexIdx + 1] &&
+      a !== args[args.indexOf("--from") + 1] && a !== args[args.indexOf("--to") + 1] &&
+      a !== args[args.indexOf("--days") + 1] && a !== args[args.indexOf("--tag") + 1] &&
+      a !== args[args.indexOf("--user") + 1] && a !== args[args.indexOf("--session") + 1] &&
+      a !== args[args.indexOf("--name") + 1] && a !== args[args.indexOf("--limit") + 1]) {
+    traceId = a;
+    break;
+  }
+}
+
+if (!traceId && indexIdx !== -1) {
+  const index = parseInt(args[indexIdx + 1]) || 1;
+  const filter = parseFilterArgs(args);
+  console.error(`Fetching filtered traces (limit ${filter.limit})...`);
+  const { traces } = await fetchTracesFiltered({
+    limit: filter.limit,
+    fromTimestamp: filter.time.from,
+    toTimestamp: filter.time.to,
+    tags: filter.tag ? [filter.tag] : undefined,
+    userId: filter.userId,
+    sessionId: filter.sessionId,
+    name: filter.name,
+  });
+  if (traces.length === 0) { console.log("No traces found."); process.exit(0); }
+  if (index > traces.length) { console.log(`Index ${index} out of range (max ${traces.length}).`); process.exit(1); }
+  traceId = traces[index - 1].id;
+  console.error(`Using trace #${index}: ${traceId}`);
+}
+
+if (!traceId) { console.error("Usage: bun trace-messages.ts <traceId>  or  --index <N>"); process.exit(1); }
 
 interface MsgSummary {
   role: string;
@@ -113,24 +152,4 @@ for (let i = 1; i < rounds.length; i++) {
 }
 if (!sysUnstable) {
   console.log("\n  ✅ System prompt stable across all rounds.");
-}
-
-// --- Detail mode ---
-if (showDetail) {
-  console.log("\n### Per-Round Message Detail\n");
-  for (const r of rounds) {
-    if (r.newIdx.length === 0 && r.changedIdx.length === 0) continue;
-
-    console.log(`\n#### Round ${r.idx + 1} (${r.messages.length} msgs, ${r.newIdx.length + r.changedIdx.length} changed)`);
-    for (const idx of [...r.changedIdx, ...r.newIdx]) {
-      const m = r.messages[idx];
-      const tag = r.changedIdx.includes(idx) ? "CHANGED" : "NEW";
-      console.log(`  [${tag}] [${m.role}] (${fmt(m.chars)} chars)`);
-      console.log(`    ${m.preview}`);
-    }
-
-    const out = r.gen.output;
-    const outText = (typeof out === "string" ? out : JSON.stringify(out ?? "")).replace(/\n/g, " ").slice(0, 150);
-    console.log(`  → Output: ${outText}`);
-  }
 }

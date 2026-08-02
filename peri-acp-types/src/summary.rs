@@ -57,7 +57,7 @@ pub struct WorkflowProgressDto {
     pub message: Option<String>,
 }
 
-/// Token 使用量（DTO，替代 `peri_agent::llm::types::TokenUsage`）
+/// Token 使用量（DTO，对应 `peri_model::TokenUsage`）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TokenUsageDto {
     /// 总输入 token（含缓存 token）
@@ -74,7 +74,7 @@ pub struct TokenUsageDto {
     pub request_id: Option<String>,
 }
 
-/// LLM 响应停止原因（DTO，替代 `peri_agent::llm::types::StopReason`）
+/// LLM 响应停止原因（DTO，对应 `peri_model::StopReason`）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StopReasonDto {

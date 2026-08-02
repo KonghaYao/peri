@@ -38,9 +38,9 @@ use langfuse_client::{GenerationBody, IngestionEvent, ObservationBody, Observati
 use peri_agent::agent::events::{
     CompactStrategy, CompactTrigger, MiddlewareHook, Stage, StageStatus,
 };
-use peri_agent::llm::types::TokenUsage;
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
+use peri_model::TokenUsage;
 
 pub struct LangfuseTracer {
     pub(crate) session: std::sync::Arc<dyn LangfuseSessionLike>,
@@ -403,6 +403,7 @@ impl LangfuseTracer {
         _provider: &str,
         output: &str,
         usage: Option<&TokenUsage>,
+        request_id: Option<&str>,
     ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -484,22 +485,18 @@ impl LangfuseTracer {
                     "total_tokens".to_string(),
                     serde_json::json!(u.input_tokens + u.output_tokens),
                 );
-                // 计算首 token 延迟（仅在流式调用且 first_token_time 存在时）
-                if let Some(ref ft_time) = u.first_token_time {
-                    if let Ok(ft) = chrono::DateTime::parse_from_rfc3339(ft_time) {
-                        if let Ok(st) = chrono::DateTime::parse_from_rfc3339(&gen_end.start_time) {
-                            let ttfb_ms =
-                                ft.signed_duration_since(st).num_milliseconds().max(0) as u64;
-                            obj.insert(
-                                "time_to_first_token_ms".to_string(),
-                                serde_json::json!(ttfb_ms),
-                            );
-                        }
-                    }
-                }
+                // 历史 TokenUsage 曾携带 first_token_time（TTFB 指标），
+                // 但 v2 路径（ObserveEvent::LlmCallEnd）迁移前就恒为 None；peri_model::TokenUsage
+                // 不包含该字段。TTFB 随旧 LLM facade 一并退役，此处不再计算。
             }
         } else if let Some(obj) = meta_obj {
             obj.insert("model".to_string(), serde_json::json!(model));
+        }
+        // provider request_id 无条件写入 metadata（与 usage 独立，用于关联 provider 侧日志）
+        if let Some(req_id) = request_id {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("request_id".to_string(), serde_json::json!(req_id));
+            }
         }
 
         let gen_body = GenerationBody {
@@ -516,7 +513,7 @@ impl LangfuseTracer {
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
-            completion_start_time: usage.and_then(|u| u.first_token_time.clone()),
+            completion_start_time: None,
             model: Some(model.to_string()),
             model_parameters: None,
             usage_details,

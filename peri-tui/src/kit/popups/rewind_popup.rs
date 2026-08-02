@@ -1,43 +1,48 @@
 //! ratatui-kit RewindPopup component.
 //!
-//! 回退变更弹窗：从 REWIND_PREVIEW atom 读取真实数据（files + messages），
-//! 支持列表选择、Tab 切换视图、Enter 确认（默认回退到选中 message + revert_files=true）、
-//! Esc 取消。
+//! 回退弹窗（Rewind v2）三态：
+//! - Candidates：候选列表（`REWIND_PREVIEW.messages`，只 user 消息）——
+//!   Up/Down 选择、Enter 发送 `RewindAction::Preview`（暂存目标文本 + 预算查询）
+//! - Budget：文件回退预算（`REWIND_BUDGET_STATE = Files(v)`）——
+//!   Enter 发送 `RewindAction::Confirm` 执行回退、Esc 返回候选视图
+//! - Executing：正在回退（`REWIND_BUDGET_STATE = Executing`）——
+//!   等待 RewindCompleted 事件关闭
 //!
 //! ## 数据源
 //!
-//! 由 `kit/acp_events.rs::dispatch_and_notify` 在收到 `RewindPreview` 事件时
-//! 写入 `REWIND_PREVIEW` atom。用户双击 Esc 触发 popup 时若 atom 为 None，
-//! 显示"无可回退"占位（不发 RPC）。
-//!
-//! ## 用户路径
-//!
-//! - **Up/Down**：在当前视图（messages 或 files）中选择条目
-//! - **Tab/BackTab**：在 messages ↔ files 间切换
-//! - **Enter**：发送 `RewindAction::Confirm { target_message_id, revert_files: true }`
-//!   到 REWIND_ACTION_TX，然后 close_popup
-//! - **Esc**：由 event_handlers 全局链关闭 popup（不发 Cancel RPC——避免冗余）
+//! 候选由 `kit/rewind_candidates.rs::spawn_candidates_query` 在双击 Esc 时
+//! 实时查询 `session/rewind-candidates` 写入 `REWIND_PREVIEW` atom；
+//! 预算/执行中状态由 `kit/rewind_action.rs` consumer 写入
+//! `REWIND_BUDGET_STATE`；查询失败写 `REWIND_QUERY_ERROR`。
 
 #![allow(clippy::needless_update)]
 
+use fluent_bundle::FluentValue;
+use peri_acp_types::event_data::RewindPreview;
+use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind},
+    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{style::Stylize, text::Line},
 };
 
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, REWIND_ACTION_TX};
+use crate::kit::atoms::{
+    LANG_VERSION, RENDER_HEARTBEAT, REWIND_ACTION_TX, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR,
+    REWIND_TARGET_TEXT, RewindBudgetState,
+};
 use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
 use crate::kit::popup_overlay::close_popup;
 use crate::kit::rewind_action::RewindAction;
-use peri_theme::atoms::THEME_ATOM;
 
-/// 视图切换——messages ↔ files。
+/// 弹窗视图——由 `REWIND_BUDGET_STATE` 推导，非用户可切换状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RewindView {
-    Messages,
-    Files,
+    Candidates,
+    Budget,
+    Executing,
 }
 
 #[component]
@@ -45,204 +50,329 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let preview_store = hooks.use_atom(&crate::kit::atoms::REWIND_PREVIEW);
     let preview = preview_store.read().clone();
-    let _ = preview_store;
+    let budget_store = hooks.use_atom(&crate::kit::atoms::REWIND_BUDGET_STATE);
+    let budget_state = budget_store.read().clone();
+    let query_error = hooks
+        .use_atom(&crate::kit::atoms::REWIND_QUERY_ERROR)
+        .read()
+        .clone();
 
     hooks.use_atom(&LANG_VERSION);
 
-    // 当前视图（messages 默认；用户可 Tab 切到 files）
-    let view = hooks.use_state(|| RewindView::Messages);
-    // messages 视图选中索引（默认最新一条 = 回退一步）
+    // 视图推导：预算 Files 非空 → Budget；Executing → Executing；否则 Candidates
+    let view = match &budget_state {
+        RewindBudgetState::Files(v) if !v.is_empty() => RewindView::Budget,
+        RewindBudgetState::Executing => RewindView::Executing,
+        _ => RewindView::Candidates,
+    };
+    // 候选选中索引（最新一条 = 回退一步）
     let msg_sel = hooks.use_state(|| 0usize);
-    // files 视图选中索引
+    // 预算视图选中索引（默认最新变更 = 第一条）
     let file_sel = hooks.use_state(|| 0usize);
 
     let msg_count = preview.as_ref().map(|p| p.messages.len()).unwrap_or(0);
-    let file_count = preview.as_ref().map(|p| p.files.len()).unwrap_or(0);
+
+    // 弹窗绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 行布局（候选视图：空行、标题、消息项（take(8)）、超量省略行、空行、提示行）
+    let msg_rendered = msg_count.min(8);
+    let msg_extra = usize::from(msg_count > 8);
+    let lines_len = 1 + 1 + msg_rendered + msg_extra + 1 + 1;
+    let msg_layout = ListLayout {
+        header_rows: 2,
+        item_rows: 1,
+        footer_rows: lines_len.saturating_sub(2 + msg_rendered + msg_extra) as u16,
+        visible_items: msg_rendered as u16,
+        scroll_start: 0,
+        item_count: msg_count,
+    };
 
     // 闭包另持一份 preview 副本（避免与渲染端争用 move）
     let preview_for_closure = preview.clone();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-        {
-            match classify_list_nav(&key) {
-                Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
-                    let cur = *view.read();
-                    *view.write() = match cur {
-                        RewindView::Messages => RewindView::Files,
-                        RewindView::Files => RewindView::Messages,
-                    };
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::MoveUp) => {
-                    let cur = *view.read();
-                    match cur {
-                        RewindView::Messages => {
-                            let mut s = msg_sel.write();
-                            *s = previous_selection(*s);
-                        }
-                        RewindView::Files => {
-                            let mut s = file_sel.write();
-                            *s = previous_selection(*s);
-                        }
-                    }
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::MoveDown) => {
-                    let cur = *view.read();
-                    match cur {
-                        RewindView::Messages => {
-                            let mut s = msg_sel.write();
-                            *s = next_selection(*s, msg_count);
-                        }
-                        RewindView::Files => {
-                            let mut s = file_sel.write();
-                            *s = next_selection(*s, file_count);
-                        }
-                    }
-                    return EventResult::Consumed;
-                }
-                Some(ListNavAction::Confirm) => {
-                    let target_id = match &preview_for_closure {
-                        Some(p) => p
-                            .messages
-                            .get(*msg_sel.read())
-                            .map(|m| m.id.clone())
-                            .unwrap_or_default(),
-                        None => String::new(),
-                    };
-                    if !target_id.is_empty()
+    // 渲染行构造（纯函数，测试友好）
+    let lines: Vec<Line<'static>> = build_popup_lines(
+        &preview,
+        &budget_state,
+        &query_error,
+        *msg_sel.read(),
+        *file_sel.read(),
+        &theme_def.read(),
+    );
+
+    // 事件处理：Candidates 视图处理 Up/Down/Enter + 鼠标点击；
+    // Budget 视图处理 Enter（确认）/ Esc（返回）；Esc 在 Candidates 关闭弹窗。
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::High, // P1：根层 Esc 为 Normal（event_handlers.rs:149），
+        // 同优先级下根层先注册先消费——弹窗内 Esc 分支变死代码。
+        // 改 High 后弹窗自管理 Esc（关闭/返回候选）。
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：候选区左键点击 = 选中 + 发送 Preview（与键盘 Enter 一致）
+            if let Event::Mouse(mouse) = event {
+                if let (Some(area), true) = (area, view == RewindView::Candidates)
+                    && let Some(idx) = hit_item(&mouse, area, msg_layout)
+                {
+                    *msg_sel.write() = idx;
+                    let target = preview_for_closure
+                        .as_ref()
+                        .and_then(|p| p.messages.get(idx));
+                    if let Some(m) = target
                         && let Some(tx) = REWIND_ACTION_TX.get()
                     {
-                        let _ = tx.send(RewindAction::Confirm {
-                            target_message_id: target_id,
-                            revert_files: true,
+                        let _ = tx.send(RewindAction::Preview {
+                            target_message_id: m.id.clone(),
+                            target_text: m.preview.clone(),
                         });
                     }
-                    close_popup();
                     return EventResult::Consumed;
                 }
-                Some(ListNavAction::Cancel) => {
-                    close_popup();
-                    return EventResult::Consumed;
-                }
-                None => {}
+                // 区域内的左键点击（未命中行）也消费，防止穿透到消息区
+                return match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                    _ => EventResult::Ignored,
+                };
             }
-        }
-        EventResult::Ignored
-    });
+            if let Event::Key(key) = event
+                && key.kind == KeyEventKind::Press
+            {
+                match classify_list_nav(&key) {
+                    Some(ListNavAction::MoveUp) if view == RewindView::Candidates => {
+                        let mut s = msg_sel.write();
+                        *s = previous_selection(*s);
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::MoveDown) if view == RewindView::Candidates => {
+                        let mut s = msg_sel.write();
+                        // 钳制到渲染窗口（take(8)）——否则选中可移出可视区，
+                        // Enter 会对屏幕外目标发送 Preview
+                        *s = next_selection(*s, msg_rendered);
+                        return EventResult::Consumed;
+                    }
+                    Some(ListNavAction::Confirm) => match view {
+                        RewindView::Candidates => {
+                            let target = preview_for_closure
+                                .as_ref()
+                                .and_then(|p| p.messages.get(*msg_sel.read()));
+                            if let Some(m) = target
+                                && let Some(tx) = REWIND_ACTION_TX.get()
+                            {
+                                let _ = tx.send(RewindAction::Preview {
+                                    target_message_id: m.id.clone(),
+                                    target_text: m.preview.clone(),
+                                });
+                            }
+                            // 弹窗保持打开：等待预算/执行结果
+                            return EventResult::Consumed;
+                        }
+                        RewindView::Budget => {
+                            let target = preview_for_closure
+                                .as_ref()
+                                .and_then(|p| p.messages.get(*msg_sel.read()));
+                            if let Some(m) = target
+                                && let Some(tx) = REWIND_ACTION_TX.get()
+                            {
+                                let _ = tx.send(RewindAction::Confirm {
+                                    target_message_id: m.id.clone(),
+                                });
+                            }
+                            // 保持打开：等待执行完成
+                            return EventResult::Consumed;
+                        }
+                        RewindView::Executing => {
+                            return EventResult::Consumed;
+                        }
+                    },
+                    Some(ListNavAction::Cancel) => match view {
+                        RewindView::Executing => {
+                            // P1：执行中态 Esc——RPC 已发出、服务端正在回退，
+                            // RewindCompleted 必达。保留 REWIND_TARGET_TEXT 等待
+                            // 回填；仅回候选视图。若 RPC 失败，rewind_consumer
+                            // 失败路径会清目标文本并显示错误。
+                            *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+                            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+                            return EventResult::Consumed;
+                        }
+                        RewindView::Budget => {
+                            // 预算确认前 Esc：尚未执行，目标文本不再需要
+                            *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+                            *REWIND_TARGET_TEXT.state().write() = None;
+                            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+                            return EventResult::Consumed;
+                        }
+                        RewindView::Candidates => {
+                            close_popup();
+                            *REWIND_TARGET_TEXT.state().write() = None;
+                            *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+                            *REWIND_QUERY_ERROR.state().write() = None;
+                            return EventResult::Consumed;
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            EventResult::Ignored
+        },
+    );
 
-    let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
     let semantic = &guard.semantic;
-    let cur_view = *view.read();
-    let cur_msg_sel = *msg_sel.read();
-    let cur_file_sel = *file_sel.read();
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    match &preview {
-        None => {
-            // 无预览数据——双击 Esc 触发的空 popup
-            lines.push(Line::from(""));
-            lines.push(
-                Line::from("  No rewind preview available.")
-                    .fg(semantic.text.muted)
-                    .italic(),
-            );
-            lines.push(Line::from(""));
-            lines
-                .push(Line::from("  Rewind 通常由 Agent 在工具调用前触发；").fg(semantic.text.dim));
-            lines.push(Line::from("  或由历史面板右键选择消息后回退。").fg(semantic.text.dim));
-            lines.push(Line::from(""));
-            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
-        }
-        Some(p) => {
-            lines.push(Line::from(""));
-
-            // ── Messages 视图 ──
-            let msg_marker = if cur_view == RewindView::Messages {
-                "▶"
-            } else {
-                " "
-            };
-            lines.push(
-                Line::from(format!("{} Messages ({})", msg_marker, p.messages.len()))
-                    .fg(semantic.text.primary)
-                    .bold(),
-            );
-
-            if p.messages.is_empty() {
-                lines.push(Line::from("    (no messages to rewind)").fg(semantic.text.dim));
-            } else {
-                for (i, msg) in p.messages.iter().enumerate().take(8) {
-                    let is_selected = cur_view == RewindView::Messages && i == cur_msg_sel;
-                    let prefix = if is_selected { "  > " } else { "    " };
-                    let preview_text = truncate_str(&msg.preview, 40);
-                    let role_label = role_display(&msg.role);
-                    let line_text = format!("{}[{}] {}", prefix, role_label, preview_text);
-                    if is_selected {
-                        lines.push(Line::from(line_text).fg(popup_tokens.selected_fg).bold());
-                    } else {
-                        lines.push(Line::from(line_text).fg(semantic.text.primary));
-                    }
-                }
-                if p.messages.len() > 8 {
-                    lines.push(
-                        Line::from(format!("    ... and {} more", p.messages.len() - 8))
-                            .fg(semantic.text.dim),
-                    );
-                }
-            }
-
-            lines.push(Line::from(""));
-
-            // ── Files 视图 ──
-            let file_marker = if cur_view == RewindView::Files {
-                "▶"
-            } else {
-                " "
-            };
-            lines.push(
-                Line::from(format!("{} Files ({})", file_marker, p.files.len()))
-                    .fg(semantic.text.primary)
-                    .bold(),
-            );
-
-            if p.files.is_empty() {
-                lines.push(Line::from("    (no file changes)").fg(semantic.text.dim));
-            } else {
-                for (i, fc) in p.files.iter().enumerate().take(6) {
-                    let is_selected = cur_view == RewindView::Files && i == cur_file_sel;
-                    let prefix = if is_selected { "  > " } else { "    " };
-                    let status_color = match fc.change_type.as_str() {
-                        "added" => semantic.status.success,
-                        "deleted" => semantic.status.error,
-                        _ => semantic.status.warning,
-                    };
-                    let path_text = truncate_str(&fc.path, 42);
-                    let line_text = format!("{}{} ({})", prefix, path_text, fc.change_type);
-                    if is_selected {
-                        lines.push(Line::from(line_text).fg(popup_tokens.selected_fg).bold());
-                    } else {
-                        lines.push(Line::from(line_text).fg(status_color));
-                    }
-                }
-                if p.files.len() > 6 {
-                    lines.push(
-                        Line::from(format!("    ... and {} more", p.files.len() - 6))
-                            .fg(semantic.text.dim),
-                    );
-                }
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(i18n::tr("rewind-confirm-hint")).fg(semantic.text.dim));
-        }
-    }
 
     popup_text_shell!(i18n::tr("rewind-title"), semantic.status.warning, lines)
+}
+
+/// 构造弹窗内容行（纯函数，测试友好）。
+fn build_popup_lines(
+    preview: &Option<RewindPreview>,
+    budget_state: &RewindBudgetState,
+    query_error: &Option<String>,
+    msg_sel: usize,
+    file_sel: usize,
+    theme: &ThemeDefinition,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(""));
+    let semantic = &theme.semantic;
+
+    match budget_state {
+        RewindBudgetState::Executing => {
+            lines.push(
+                Line::from(format!("  {}", i18n::tr("rewind-executing"))).fg(semantic.text.primary),
+            );
+            lines.push(Line::from(""));
+            lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
+            return lines;
+        }
+        RewindBudgetState::Files(files) => {
+            lines.push(
+                Line::from(format!(
+                    "  {}",
+                    i18n::tr_args(
+                        "rewind-budget-title",
+                        &[("count".into(), FluentValue::from(files.len() as i64))]
+                    )
+                ))
+                .fg(semantic.text.primary)
+                .bold(),
+            );
+            for (i, fc) in files.iter().enumerate().take(8) {
+                let is_selected = i == file_sel;
+                let prefix = if is_selected { "  > " } else { "    " };
+                let kind_label = if fc.kind == "write" { "write" } else { "edit" };
+                lines.push(
+                    Line::from(format!(
+                        "{prefix}[{kind_label}] {}",
+                        truncate_str(&fc.path, 40)
+                    ))
+                    .fg(if is_selected {
+                        theme.component.popup.selected_fg
+                    } else {
+                        semantic.text.primary
+                    }),
+                );
+            }
+            if files.len() > 8 {
+                lines.push(
+                    Line::from(format!(
+                        "    {}",
+                        i18n::tr_args(
+                            "rewind-budget-more",
+                            &[("count".into(), FluentValue::from((files.len() - 8) as i64))]
+                        )
+                    ))
+                    .fg(semantic.text.dim),
+                );
+            }
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(format!("  {}", i18n::tr("rewind-budget-confirm-hint")))
+                    .fg(semantic.text.dim),
+            );
+            return lines;
+        }
+        RewindBudgetState::Idle => {}
+    }
+
+    // ── Candidates 视图 ──
+    if let Some(err) = query_error {
+        lines.push(
+            Line::from(format!(
+                "  {}",
+                i18n::tr_args(
+                    "rewind-query-failed",
+                    &[("error".into(), FluentValue::from(err.as_str()))]
+                )
+            ))
+            .fg(semantic.status.error),
+        );
+        lines.push(Line::from(""));
+        lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
+        return lines;
+    }
+    let Some(p) = preview else {
+        lines.push(
+            Line::from(format!("  {}", i18n::tr("rewind-loading")))
+                .fg(semantic.text.muted)
+                .italic(),
+        );
+        lines.push(Line::from(""));
+        lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
+        return lines;
+    };
+    if p.messages.is_empty() {
+        lines.push(Line::from(format!("  {}", i18n::tr("rewind-empty"))).fg(semantic.text.dim));
+        lines
+            .push(Line::from(format!("  {}", i18n::tr("rewind-empty-hint"))).fg(semantic.text.dim));
+        lines.push(Line::from(""));
+        lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
+        return lines;
+    }
+    lines.push(
+        Line::from(format!(
+            "  {}",
+            i18n::tr_args(
+                "rewind-title-count",
+                &[("count".into(), FluentValue::from(p.messages.len() as i64))]
+            )
+        ))
+        .fg(semantic.text.primary)
+        .bold(),
+    );
+    for (i, msg) in p.messages.iter().enumerate().take(8) {
+        let is_selected = i == msg_sel;
+        let prefix = if is_selected { "  > " } else { "    " };
+        lines.push(
+            Line::from(format!("{prefix}{}", truncate_str(&msg.preview, 40))).fg(if is_selected {
+                theme.component.popup.selected_fg
+            } else {
+                semantic.text.primary
+            }),
+        );
+    }
+    if p.messages.len() > 8 {
+        lines.push(
+            Line::from(format!(
+                "    {}",
+                i18n::tr_args(
+                    "rewind-budget-more",
+                    &[(
+                        "count".into(),
+                        FluentValue::from((p.messages.len() - 8) as i64)
+                    )]
+                )
+            ))
+            .fg(semantic.text.dim),
+        );
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!("  {}", i18n::tr("rewind-enter-hint"))).fg(semantic.text.dim));
+    lines
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
@@ -254,17 +384,6 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{}…", truncated)
-    }
-}
-
-/// role 字符串映射为显示标签。
-fn role_display(role: &str) -> &str {
-    match role {
-        "user" => "U",
-        "assistant" => "A",
-        "system" => "S",
-        "tool" => "T",
-        _ => "?",
     }
 }
 

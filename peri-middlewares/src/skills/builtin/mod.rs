@@ -33,6 +33,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         name: "ultracode",
         content: include_str!("skills/ultracode/SKILL.md"),
     },
+    BuiltinSkill {
+        name: "cron",
+        content: include_str!("skills/cron/SKILL.md"),
+    },
 ];
 
 /// 从 SKILL.md 全文解析 frontmatter，返回 `(name, description)`。

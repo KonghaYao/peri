@@ -54,6 +54,14 @@ async fn test_inject_single_skill() {
         matches!(&state.messages()[1], BaseMessage::Tool { .. }),
         "第二条应为 Tool"
     );
+    // ToolUse 应为 fake Skill 工具调用，input 与 Skill 工具参数格式一致
+    let tc = &state.messages()[0].tool_calls()[0];
+    assert_eq!(tc.name, "Skill", "注入的 ToolUse 应名为 Skill");
+    assert_eq!(
+        tc.arguments["skill"].as_str(),
+        Some("api-guide"),
+        "ToolUse input 应携带 skill 名称"
+    );
 }
 
 #[tokio::test]
@@ -239,7 +247,7 @@ async fn test_auto_detect_skill_from_human_message() {
     );
     assert!(
         matches!(&state.messages()[1], BaseMessage::Ai { .. }),
-        "第二条应为 Ai（fake Read）"
+        "第二条应为 Ai（fake Skill）"
     );
     assert!(
         matches!(&state.messages()[2], BaseMessage::Tool { .. }),

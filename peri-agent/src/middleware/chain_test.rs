@@ -468,9 +468,10 @@ async fn test_after_model_sequential_order() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
 
@@ -542,9 +543,10 @@ async fn test_after_model_error_short_circuits() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     let result = chain.run_after_model(&mut state, &reasoning).await;
 
@@ -569,9 +571,10 @@ async fn test_after_model_empty_chain_ok() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     assert!(chain.run_after_model(&mut state, &reasoning).await.is_ok());
 }
@@ -591,9 +594,10 @@ async fn test_new_hooks_default_noop() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
 }
@@ -692,9 +696,10 @@ async fn test_mixed_before_and_after_model_in_same_chain() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
     assert_eq!(
@@ -763,9 +768,10 @@ async fn test_state_mutation_visible_across_hooks() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
 }
@@ -815,9 +821,10 @@ async fn test_after_model_with_tool_calls() {
         ],
         source_message: None,
         usage: None,
+        request_id: None,
         model: "test-model".into(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::ToolUse,
+        stop_reason: peri_model::StopReason::ToolUse,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
 
@@ -847,9 +854,10 @@ async fn test_unrelated_middleware_ignores_new_hooks() {
         tool_calls: vec![],
         source_message: None,
         usage: None,
+        request_id: None,
         model: String::new(),
         streamed: false,
-        stop_reason: crate::llm::types::StopReason::EndTurn,
+        stop_reason: peri_model::StopReason::EndTurn,
     };
     chain.run_after_model(&mut state, &reasoning).await.unwrap();
 

@@ -272,9 +272,11 @@ pub enum ExecutorEvent {
         step: usize,
         model: String,
         output: String,
-        usage: Option<crate::llm::types::TokenUsage>,
+        usage: Option<peri_model::TokenUsage>,
         /// LLM 响应停止原因（None 表示 LLM 调用失败/异常）
-        stop_reason: Option<crate::llm::types::StopReason>,
+        stop_reason: Option<peri_model::StopReason>,
+        /// Provider 请求 ID（迁移后从 TokenUsage 提升为事件字段，避免随 usage 丢失）
+        request_id: Option<String>,
     },
     /// 上下文窗口使用警告（阈值触发时发出）
     ContextWarning {
@@ -374,6 +376,13 @@ pub enum ExecutorEvent {
         summary: String,
         /// 回退后的新消息列表（目标消息之前，不含目标本身）
         messages: Vec<crate::messages::BaseMessage>,
+    },
+    /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
+    ///
+    /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
+    /// 复用 CompactError 会让 TUI 渲染压缩语境、langfuse 误报压缩失败。
+    RewindError {
+        message: String,
     },
     /// 上下文压缩失败
     CompactError {

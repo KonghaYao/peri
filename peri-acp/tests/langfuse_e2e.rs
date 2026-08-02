@@ -36,7 +36,7 @@ mod tests {
         tracer.on_stage_start(Stage::Receive, "turn_e2e");
         tracer.on_stage_start(Stage::Reason, "turn_e2e");
         tracer.on_llm_start(0, &[], &[]);
-        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "hello world", None);
+        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "hello world", None, None);
         let _handle = tracer.on_turn_end(None);
 
         tokio::task::yield_now().await;
@@ -104,7 +104,14 @@ mod tests {
         // 子 agent 内部执行（fork 模式：在同一进程中同步运行）
         tracer.on_stage_start(Stage::Reason, "turn_fork");
         tracer.on_llm_start(0, &[], &[]);
-        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "我来读取文件", None);
+        tracer.on_llm_end(
+            0,
+            "claude-sonnet-4",
+            "anthropic",
+            "我来读取文件",
+            None,
+            None,
+        );
 
         tracer.on_stage_start(Stage::Act, "turn_fork");
         // 子 agent 调用 Read 工具
@@ -208,6 +215,7 @@ mod tests {
             "anthropic",
             "搜索完成，发现 3 个结果",
             None,
+            None,
         );
 
         // Turn 结束——应清理 bg 子 agent 残留栈
@@ -280,7 +288,7 @@ mod tests {
         // 内部执行
         tracer.on_stage_start(Stage::Reason, "turn_parent");
         tracer.on_llm_start(0, &[], &[]);
-        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "完成", None);
+        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "完成", None, None);
         tracer.on_stage_start(Stage::Act, "turn_parent");
         let tool_input = serde_json::json!({"command": "ls"});
         tracer.on_tool_start("sub_bash", "Bash", &tool_input);

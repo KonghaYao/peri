@@ -43,28 +43,6 @@ pub enum AgentError {
 pub type AgentResult<T> = Result<T, AgentError>;
 
 impl AgentError {
-    /// 判断错误是否可重试（用于 LLM 调用重试机制）
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::LlmHttpError { status, .. } => {
-                matches!(status, 408 | 429 | 500..=599)
-            }
-            Self::LlmError(msg) => {
-                let msg_lower = msg.to_lowercase();
-                msg_lower.contains("connection refused")
-                    || msg_lower.contains("connection reset")
-                    || msg_lower.contains("connection aborted")
-                    || msg_lower.contains("connection timed out")
-                    || msg_lower.contains("broken pipe")
-                    || msg_lower.contains("timeout")
-                    || msg_lower.contains("dns")
-                    || msg_lower.contains("rate limit")
-                    || msg_lower.contains("overloaded")
-            }
-            _ => false,
-        }
-    }
-
     /// 返回用户可见的错误描述（脱敏后的消息）
     /// 对 Other/LlmError/LlmHttpError/SerializationError 返回通用描述
     pub fn user_facing_message(&self) -> String {
@@ -81,7 +59,3 @@ impl AgentError {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "error_test.rs"]
-mod tests;

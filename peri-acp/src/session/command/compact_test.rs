@@ -20,11 +20,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_agent::{
     agent::events::ExecutorEvent,
-    error::AgentResult,
-    llm::{
-        types::{LlmRequest, LlmResponse, StopReason},
-        BaseModel,
-    },
     messages::{BaseMessage, ContentBlock},
     thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore},
 };
@@ -102,7 +97,7 @@ async fn make_ctx_with_model(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
     history: Vec<BaseMessage>,
     cwd: String,
-    model: Arc<dyn BaseModel>,
+    model: Arc<dyn peri_model::Model>,
 ) -> super::super::CommandContext {
     let store: Arc<dyn ThreadStore> = Arc::new(
         SqliteThreadStore::new(std::path::Path::new(&cwd).join("compact-test.db"))
@@ -120,7 +115,7 @@ fn make_ctx_with_model_and_thread(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
     history: Vec<BaseMessage>,
     cwd: String,
-    model: Arc<dyn BaseModel>,
+    model: Arc<dyn peri_model::Model>,
     thread_store: Option<Arc<dyn ThreadStore>>,
     thread_id: Option<String>,
 ) -> super::super::CommandContext {
@@ -402,7 +397,7 @@ async fn test_compact_command_does_not_call_push_done_itself() {
 // 这些测试是 Contract Test：固定 mock 输入与 mock 模型，
 // 断言 CompactCommand.execute 的输出结构契约（而非内部行为细节）。
 
-/// 返回固定摘要的 mock BaseModel（contract test 用）
+/// 返回固定摘要的 mock Model（contract test 用）
 struct MockSummaryModel {
     summary: String,
 }
@@ -416,20 +411,36 @@ impl MockSummaryModel {
 }
 
 #[async_trait]
-impl BaseModel for MockSummaryModel {
-    async fn invoke(&self, _request: LlmRequest) -> AgentResult<LlmResponse> {
-        Ok(LlmResponse {
-            message: BaseMessage::ai(self.summary.clone()),
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            request_id: None,
-        })
+impl peri_model::Model for MockSummaryModel {
+    fn capabilities(&self) -> peri_model::ModelCapabilities {
+        peri_model::ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
     }
-    fn provider_name(&self) -> &str {
-        "mock-summary"
+
+    async fn stream(
+        &self,
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> peri_model::ModelResult<peri_model::ModelStream> {
+        // compact 路径只走 complete()，stream() 不应被调用
+        Err(peri_model::ModelError::cancelled())
     }
-    fn model_id(&self) -> &str {
-        "mock-summary-model"
+
+    async fn complete(
+        &self,
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> peri_model::ModelResult<peri_model::ModelResponse> {
+        Ok(peri_model::ModelResponse::new(
+            peri_model::ModelMessage::assistant_text(self.summary.clone()),
+            peri_model::StopReason::EndTurn,
+            None,
+            None,
+        )?)
     }
 }
 

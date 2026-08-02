@@ -14,11 +14,12 @@ use crate::kit::atoms::{
     ProviderSummary, SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_acp::provider::config::{ProviderConfig, ProviderModels};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -173,167 +174,262 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = store;
     let count = providers.len();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            // 粘贴事件：仅编辑模式下处理
-            if let Event::Paste(paste_text) = &event {
-                if *mode.read() == LoginPanelMode::Edit
-                    && *edit_focus.read() != LoginEditField::ProviderType
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // Browse 列表视口常量（与渲染共用）
+    const VISIBLE_ITEMS: usize = 3;
+
+    // Browse 激活动作：Enter 与鼠标左键点击共用（click as enter）
+    let providers_for_closure = providers.clone();
+    let activate_provider_row = move || {
+        let sel = *cursor.read();
+        let latest_providers = PROVIDER_LIST.state().read().clone();
+        if let Some(p) = latest_providers.get(sel) {
+            let provider_id = p.id.clone();
+            let provider_type = p.provider_type.clone();
+            // 同步写 PERI_CONFIG_HANDLE + 更新 PROVIDER_LIST.is_active
+            if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+                let mut cfg = handle.write();
+                let alias = cfg.config.active_alias.clone();
+                if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                    profile.provider = provider_id.clone();
+                    // 联动 model：清空手动 model 以回退 ProviderModels 映射
+                    profile.model = None;
+                }
+                // 即时推送 SERVICE_SNAPSHOT——同时更新 provider_name 和
+                // model_name（不同 provider 的 alias→model 映射可能不同）
+                let snap = cfg.clone();
+                drop(cfg);
+                let resolved_name = {
+                    let active_prov = snap.config.providers.iter().find(|p| p.id == provider_id);
+                    active_prov
+                        .and_then(|p| p.models.get_model(&snap.config.active_alias))
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| snap.config.active_alias.clone())
+                };
+                let s_handle = SERVICE_SNAPSHOT.state();
+                let mut svc_snap = s_handle.read().clone();
+                svc_snap.provider_name = provider_type;
+                svc_snap.model_name = resolved_name;
+                *s_handle.write() = svc_snap;
+            }
+            // 更新 PROVIDER_LIST 的 is_active 标记
+            let updated_providers: Vec<ProviderSummary> = latest_providers
+                .iter()
+                .map(|pr| ProviderSummary {
+                    is_active: pr.id == provider_id,
+                    ..pr.clone()
+                })
+                .collect();
+            *PROVIDER_LIST.state().write() = updated_providers;
+            // 异步持久化 + 推送配置到 ACP 服务端（使切换立即生效）
+            tokio::spawn(async move {
+                activate_provider(&provider_id);
+                if let Some(client) = ACP_CLIENT_HANDLE.get()
+                    && let Some(handle) = PERI_CONFIG_HANDLE.get()
                 {
-                    let mut es_guard = edit_state.write();
-                    let mut ec_guard = edit_cursor.write();
-                    if let Some(ref mut es) = *es_guard {
-                        handle_login_paste(&mut ec_guard, es, *edit_focus.read(), paste_text);
+                    let snap = handle.read().clone();
+                    if let Err(e) = client.update_config(&snap).await {
+                        tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+                    }
+                }
+            });
+        }
+        // 关闭面板
+        close_panel();
+    };
+
+    // ConfirmDelete 确认动作：Enter 与鼠标左键点击共用
+    let confirm_delete = move || {
+        delete_provider(*cursor.read());
+        *mode.write() = LoginPanelMode::Browse;
+    };
+
+    // Browse 行命中：每项 3 或 4 行（base_url 存在时 4），线性累加反推
+    fn hit_browse_item(
+        mouse: &ratatui_kit::crossterm::event::MouseEvent,
+        area: ratatui_kit::ratatui::layout::Rect,
+        providers: &[ProviderSummary],
+        scroll_start: usize,
+    ) -> Option<usize> {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        let row = mouse.row;
+        // 顶部/底部边框行不命中
+        if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
+            return None;
+        }
+        let visual = row - area.y - 1;
+        let content_height = area.height.saturating_sub(2);
+        if visual >= content_height {
+            return None;
+        }
+        // header 2 行（标题 + 空行）
+        if visual < 2 {
+            return None;
+        }
+        let mut cur = 2u16;
+        for (i, p) in providers
+            .iter()
+            .enumerate()
+            .skip(scroll_start)
+            .take(VISIBLE_ITEMS)
+        {
+            let item_h = if p.base_url.is_some() { 4u16 } else { 3u16 };
+            if visual >= cur && visual < cur + item_h {
+                return Some(i);
+            }
+            cur += item_h;
+        }
+        None
+    }
+    let browse_scroll_start = scroll_start_for_selected(*cursor.read(), count, VISIBLE_ITEMS);
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击 = 执行对应模式的 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        return EventResult::Ignored;
+                    }
+                    let Some(area) = area else {
+                        return EventResult::Ignored;
+                    };
+                    if *mode.read() == LoginPanelMode::ConfirmDelete {
+                        confirm_delete();
+                        return EventResult::Consumed;
+                    }
+                    if *mode.read() == LoginPanelMode::Browse
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_browse_item(
+                            &mouse,
+                            area,
+                            &providers_for_closure,
+                            browse_scroll_start,
+                        )
+                    {
+                        *cursor.write() = idx;
+                        activate_provider_row();
+                        return EventResult::Consumed;
+                    }
+                    // 区域内点击（未命中行 / Edit 模式）也消费，防止穿透
+                    return EventResult::Consumed;
+                }
+                // 粘贴事件：仅编辑模式下处理
+                if let Event::Paste(paste_text) = &event {
+                    if *mode.read() == LoginPanelMode::Edit
+                        && *edit_focus.read() != LoginEditField::ProviderType
+                    {
+                        let mut es_guard = edit_state.write();
+                        let mut ec_guard = edit_cursor.write();
+                        if let Some(ref mut es) = *es_guard {
+                            handle_login_paste(&mut ec_guard, es, *edit_focus.read(), paste_text);
+                        }
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+
+                // ConfirmDelete 模式：优先处理（不依赖 mode match）
+                if *mode.read() == LoginPanelMode::ConfirmDelete {
+                    match key.code {
+                        KeyCode::Enter => confirm_delete(),
+                        _ => {
+                            // Esc 或任意其他键：取消删除
+                            *mode.write() = LoginPanelMode::Browse;
+                        }
                     }
                     return EventResult::Consumed;
                 }
-                return EventResult::Ignored;
-            }
 
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
+                let current_mode = *mode.read();
 
-            // ConfirmDelete 模式：优先处理（不依赖 mode match）
-            if *mode.read() == LoginPanelMode::ConfirmDelete {
-                match key.code {
-                    KeyCode::Enter => {
-                        delete_provider(*cursor.read());
-                        *mode.write() = LoginPanelMode::Browse;
-                    }
-                    _ => {
-                        // Esc 或任意其他键：取消删除
-                        *mode.write() = LoginPanelMode::Browse;
-                    }
-                }
-                return EventResult::Consumed;
-            }
-
-            let current_mode = *mode.read();
-
-            match current_mode {
-                LoginPanelMode::Browse => match key.code {
-                    KeyCode::Esc => close_panel(),
-                    KeyCode::Up => {
-                        let mut c = cursor.write();
-                        *c = previous_selection(*c);
-                    }
-                    KeyCode::Down => {
-                        let latest = PROVIDER_LIST.state().read().len();
-                        let mut c = cursor.write();
-                        if latest > 0 {
-                            *c = next_selection(*c, latest);
+                match current_mode {
+                    LoginPanelMode::Browse => match key.code {
+                        KeyCode::Esc => close_panel(),
+                        KeyCode::Up => {
+                            let mut c = cursor.write();
+                            *c = previous_selection(*c);
                         }
-                    }
-                    // Ctrl+N：新建 provider（进入编辑模式，空表单）
-                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        *edit_state.write() = Some(LoginEditState::default_empty());
-                        *edit_focus.write() = LoginEditField::ProviderType;
-                        *edit_cursor.write() = 0;
-                        *mode.write() = LoginPanelMode::Edit;
-                    }
-                    // Ctrl+D：删除当前选中的 provider（进入确认模式）
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if count > 0 {
-                            *mode.write() = LoginPanelMode::ConfirmDelete;
+                        KeyCode::Down => {
+                            let latest = PROVIDER_LIST.state().read().len();
+                            let mut c = cursor.write();
+                            if latest > 0 {
+                                *c = next_selection(*c, latest);
+                            }
                         }
-                    }
-                    // E 或 Ctrl+E：进入编辑模式
-                    KeyCode::Char('e') | KeyCode::Char('E') => {
-                        let sel = *cursor.read();
-                        let provider_state = PROVIDER_LIST.state();
-                        let store_read = provider_state.read();
-                        if sel < store_read.len() {
-                            let provider_id = store_read[sel].id.clone();
-                            drop(store_read);
-                            enter_login_edit_mode(
-                                &mut edit_state.write(),
-                                &mut edit_focus.write(),
-                                &mut edit_cursor.write(),
-                                &provider_id,
-                            );
+                        // Ctrl+N：新建 provider（进入编辑模式，空表单）
+                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            *edit_state.write() = Some(LoginEditState::default_empty());
+                            *edit_focus.write() = LoginEditField::ProviderType;
+                            *edit_cursor.write() = 0;
                             *mode.write() = LoginPanelMode::Edit;
                         }
-                    }
-                    KeyCode::Enter => {
-                        let sel = *cursor.read();
-                        let latest_providers = PROVIDER_LIST.state().read().clone();
-                        if let Some(p) = latest_providers.get(sel) {
-                            let provider_id = p.id.clone();
-                            let provider_type = p.provider_type.clone();
-                            // 同步写 PERI_CONFIG_HANDLE + 更新 PROVIDER_LIST.is_active
-                            if let Some(handle) = PERI_CONFIG_HANDLE.get() {
-                                let mut cfg = handle.write();
-                                cfg.config.active_provider_id = provider_id.clone();
-                                // 即时推送 SERVICE_SNAPSHOT——同时更新 provider_name 和
-                                // model_name（不同 provider 的 alias→model 映射可能不同）
-                                let snap = cfg.clone();
-                                drop(cfg);
-                                let resolved_name = {
-                                    let active_prov =
-                                        snap.config.providers.iter().find(|p| p.id == provider_id);
-                                    active_prov
-                                        .and_then(|p| p.models.get_model(&snap.config.active_alias))
-                                        .map(|s| s.to_string())
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or_else(|| snap.config.active_alias.clone())
-                                };
-                                let s_handle = SERVICE_SNAPSHOT.state();
-                                let mut svc_snap = s_handle.read().clone();
-                                svc_snap.provider_name = provider_type;
-                                svc_snap.model_name = resolved_name;
-                                *s_handle.write() = svc_snap;
+                        // Ctrl+D：删除当前选中的 provider（进入确认模式）
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if count > 0 {
+                                *mode.write() = LoginPanelMode::ConfirmDelete;
                             }
-                            // 更新 PROVIDER_LIST 的 is_active 标记
-                            let updated_providers: Vec<ProviderSummary> = latest_providers
-                                .iter()
-                                .map(|pr| ProviderSummary {
-                                    is_active: pr.id == provider_id,
-                                    ..pr.clone()
-                                })
-                                .collect();
-                            *PROVIDER_LIST.state().write() = updated_providers;
-                            // 异步持久化 + 推送配置到 ACP 服务端（使切换立即生效）
-                            tokio::spawn(async move {
-                                activate_provider(&provider_id);
-                                if let Some(client) = ACP_CLIENT_HANDLE.get()
-                                    && let Some(handle) = PERI_CONFIG_HANDLE.get()
-                                {
-                                    let snap = handle.read().clone();
-                                    if let Err(e) = client.update_config(&snap).await {
-                                        tracing::warn!(error = %e, "LoginPanel: update_config push failed");
-                                    }
-                                }
-                            });
                         }
-                        // 关闭面板
-                        close_panel();
+                        // E 或 Ctrl+E：进入编辑模式
+                        KeyCode::Char('e') | KeyCode::Char('E') => {
+                            let sel = *cursor.read();
+                            let provider_state = PROVIDER_LIST.state();
+                            let store_read = provider_state.read();
+                            if sel < store_read.len() {
+                                let provider_id = store_read[sel].id.clone();
+                                drop(store_read);
+                                enter_login_edit_mode(
+                                    &mut edit_state.write(),
+                                    &mut edit_focus.write(),
+                                    &mut edit_cursor.write(),
+                                    &provider_id,
+                                );
+                                *mode.write() = LoginPanelMode::Edit;
+                            }
+                        }
+                        KeyCode::Enter => activate_provider_row(),
+                        _ => {}
+                    },
+                    LoginPanelMode::Edit => {
+                        let mut m_guard = mode.write();
+                        let mut es_guard = edit_state.write();
+                        let mut ef_guard = edit_focus.write();
+                        let mut ec_guard = edit_cursor.write();
+                        handle_login_edit_keys(
+                            &mut m_guard,
+                            &mut es_guard,
+                            &mut ef_guard,
+                            &mut ec_guard,
+                            &key,
+                        );
                     }
-                    _ => {}
-                },
-                LoginPanelMode::Edit => {
-                    let mut m_guard = mode.write();
-                    let mut es_guard = edit_state.write();
-                    let mut ef_guard = edit_focus.write();
-                    let mut ec_guard = edit_cursor.write();
-                    handle_login_edit_keys(
-                        &mut m_guard,
-                        &mut es_guard,
-                        &mut ef_guard,
-                        &mut ec_guard,
-                        &key,
-                    );
+                    LoginPanelMode::ConfirmDelete => {
+                        // 在 match 之前已处理并 return；编译器需要匹配臂以保持穷尽性
+                    }
                 }
-                LoginPanelMode::ConfirmDelete => {
-                    // 在 match 之前已处理并 return；编译器需要匹配臂以保持穷尽性
-                }
+                EventResult::Consumed
             }
-            EventResult::Consumed
-        }
-    });
+        },
+    );
 
     let sel = *cursor.read();
     let semantic = theme_def.read().semantic;
@@ -362,7 +458,6 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 )]));
             } else {
                 // 视口跟随
-                const VISIBLE_ITEMS: usize = 3;
                 let scroll_start = scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
                 for (i, p) in providers
                     .iter()
@@ -886,11 +981,17 @@ fn save_login_edit(es: &LoginEditState) {
                     opus: es.opus_model.clone(),
                     sonnet: es.sonnet_model.clone(),
                     haiku: es.haiku_model.clone(),
+                    // fable 无编辑字段：留空回退 opus（ProviderModels.get_model 语义）
+                    fable: String::new(),
                 },
                 ..Default::default()
             };
             cfg.config.providers.push(new_config);
-            cfg.config.active_provider_id = es.provider_id.clone();
+            // 激活：写入 active profile 的 provider
+            let alias = cfg.config.active_alias.clone();
+            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                profile.provider = es.provider_id.clone();
+            }
         } else {
             // Edit 路径：查找并更新已有 provider
             if let Some(provider) = cfg
@@ -907,11 +1008,20 @@ fn save_login_edit(es: &LoginEditState) {
                 provider.models.sonnet = es.sonnet_model.clone();
                 provider.models.haiku = es.haiku_model.clone();
 
-                // 如果 id 变化且该 provider 是当前激活的，同步更新 active_provider_id
-                if cfg.config.active_provider_id == es.original_provider_id
+                // 如果 id 变化且该 provider 是当前激活的，同步更新 active profile 的 provider
+                let active_profile_provider = cfg
+                    .config
+                    .profiles
+                    .get(&cfg.config.active_alias)
+                    .map(|p| p.provider.clone())
+                    .unwrap_or_default();
+                if active_profile_provider == es.original_provider_id
                     && es.provider_id != es.original_provider_id
                 {
-                    cfg.config.active_provider_id = es.provider_id.clone();
+                    let alias = cfg.config.active_alias.clone();
+                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                        profile.provider = es.provider_id.clone();
+                    }
                 }
             }
         }
@@ -954,6 +1064,12 @@ fn refresh_provider_list() {
         return;
     };
     let cfg = handle.read();
+    let active_profile_provider = cfg
+        .config
+        .profiles
+        .get(&cfg.config.active_alias)
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
     let updated_providers: Vec<ProviderSummary> = cfg
         .config
         .providers
@@ -969,7 +1085,7 @@ fn refresh_provider_list() {
             ProviderSummary {
                 id: p.id.clone(),
                 provider_type: p.provider_type.clone(),
-                is_active: p.id == cfg.config.active_provider_id,
+                is_active: p.id == active_profile_provider,
                 has_api_key,
                 base_url,
             }

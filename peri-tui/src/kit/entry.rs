@@ -457,6 +457,12 @@ fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
     // H1f: 从 peri_config 派生 providers
     let providers: Vec<ProviderSummary> = {
         let cfg = s.peri_config.read();
+        let active_profile_provider = cfg
+            .config
+            .profiles
+            .get(&cfg.config.active_alias)
+            .map(|p| p.provider.clone())
+            .unwrap_or_default();
         cfg.config
             .providers
             .iter()
@@ -471,7 +477,7 @@ fn build_snapshot_source(app: &crate::app::App) -> SnapshotSource {
                 ProviderSummary {
                     id: p.id.clone(),
                     provider_type: p.provider_type.clone(),
-                    is_active: p.id == cfg.config.active_provider_id,
+                    is_active: p.id == active_profile_provider,
                     has_api_key,
                     base_url,
                 }

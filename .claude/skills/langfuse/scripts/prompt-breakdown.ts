@@ -1,16 +1,63 @@
 #!/usr/bin/env bun
 /**
- * 单 trace 的 system prompt 段落拆解
+ * 单 trace 的 system prompt 段落拆解（支持从过滤结果中选 trace）
  *
- * 用法: bun .claude/skills/langfuse/scripts/prompt-breakdown.ts <traceId>
+ * 用法:
+ *   bun .claude/skills/langfuse/scripts/prompt-breakdown.ts <traceId>
+ *   bun .claude/skills/langfuse/scripts/prompt-breakdown.ts --index <N> [过滤选项]
  */
-import { api, fetchObservations, fmt, pct } from "./lib.ts";
+import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, fmt, pct } from "./lib.ts";
 
-const traceId = process.argv[2];
-if (!traceId) {
-  console.error("Usage: bun prompt-breakdown.ts <traceId>");
-  process.exit(1);
+const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`用法: bun prompt-breakdown.ts <traceId>
+       bun prompt-breakdown.ts --index <N> [过滤选项]
+
+过滤选项: --from <ISO> --to <ISO> --days <N> --tag <t> --user <id> --session <id> --name <s> --limit <N>`);
+  process.exit(0);
 }
+
+// Find trace to analyze
+let traceId: string | undefined;
+const indexIdx = args.indexOf("--index");
+
+for (const a of args) {
+  if (!a.startsWith("--") && a !== args[indexIdx + 1] &&
+      a !== args[args.indexOf("--from") + 1] && a !== args[args.indexOf("--to") + 1] &&
+      a !== args[args.indexOf("--days") + 1] && a !== args[args.indexOf("--tag") + 1] &&
+      a !== args[args.indexOf("--user") + 1] && a !== args[args.indexOf("--session") + 1] &&
+      a !== args[args.indexOf("--name") + 1] && a !== args[args.indexOf("--limit") + 1]) {
+    traceId = a;
+    break;
+  }
+}
+
+if (!traceId && indexIdx !== -1) {
+  const rawIndex = Number(args[indexIdx + 1]);
+  if (!Number.isInteger(rawIndex) || rawIndex < 1) {
+    console.error("Usage: bun prompt-breakdown.ts --index <N>  (N must be a positive integer)");
+    process.exit(1);
+  }
+  const index = rawIndex;
+  const filter = parseFilterArgs(args);
+  console.error(`Fetching filtered traces (limit ${filter.limit})...`);
+  const { traces } = await fetchTracesFiltered({
+    limit: filter.limit,
+    fromTimestamp: filter.time.from,
+    toTimestamp: filter.time.to,
+    tags: filter.tag ? [filter.tag] : undefined,
+    userId: filter.userId,
+    sessionId: filter.sessionId,
+    name: filter.name,
+  });
+  if (traces.length === 0) { console.log("No traces found."); process.exit(0); }
+  if (index > traces.length) { console.log(`Index ${index} out of range (max ${traces.length}).`); process.exit(1); }
+  traceId = traces[index - 1].id;
+  console.error(`Using trace #${index}: ${traceId}`);
+}
+
+if (!traceId) { console.error("Usage: bun prompt-breakdown.ts <traceId>  or  --index <N>"); process.exit(1); }
 
 const [trace, observations] = await Promise.all([
   api(`/api/public/traces/${traceId}`),

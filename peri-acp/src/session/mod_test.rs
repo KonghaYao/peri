@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
+use crate::provider::{
+    LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
+};
 use crate::session::SessionManager;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
@@ -29,9 +31,15 @@ fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
 fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
     let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
     let mut peri_config = PeriConfig::default();
-    peri_config.config.active_provider_id = "a".to_string();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     SessionManager::new(
         thread_store,

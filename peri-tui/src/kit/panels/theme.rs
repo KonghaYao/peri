@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ratatui_kit::prelude::Atom as AtomStatic;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -32,6 +32,7 @@ use crate::kit::atoms::{
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::markdown::{self, MarkdownSegment};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use crate::kit::popup_overlay::open_popup;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::{PALETTE_ATOM, PERI_COLORS_ATOM, THEME_ATOM};
@@ -505,74 +506,140 @@ pub fn ThemePanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let orig = original_theme.read().clone();
 
-    // ── 键盘处理 ──
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let count = themes_for_closure.len();
-        move |event| {
-            if let Event::Key(key) = event
-                && (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
-            {
-                match key.code {
-                    KeyCode::Tab => {
-                        // 切换 dark/light tab
-                        let next = if *tab.read() == 0 { 1u8 } else { 0u8 };
-                        *tab.write() = next;
-                        return EventResult::Consumed;
-                    }
-                    KeyCode::Up => {
-                        if count > 0 {
-                            let idx = previous_selection(*selected.read());
-                            *selected.write() = idx;
-                            if let Some(name) = themes_for_closure.get(idx) {
-                                switch_theme_atoms(name);
-                            }
-                        }
-                        return EventResult::Consumed;
-                    }
-                    KeyCode::Down => {
-                        if count > 0 {
-                            let idx = next_selection(*selected.read(), count);
-                            *selected.write() = idx;
-                            if let Some(name) = themes_for_closure.get(idx) {
-                                switch_theme_atoms(name);
-                            }
-                        }
-                        return EventResult::Consumed;
-                    }
-                    KeyCode::Enter => {
-                        if count > 0 {
-                            let idx = *selected.read();
-                            if let Some(name) = themes_for_closure.get(idx) {
-                                switch_theme_atoms(name);
-                                // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
-                                let owned = name.to_string();
-                                std::thread::spawn(move || persist_theme(&owned));
-                            }
-                        }
-                        return EventResult::Consumed;
-                    }
-                    KeyCode::Esc => {
-                        switch_theme_atoms(&orig);
-                        return EventResult::Ignored;
-                    }
-                    _ if key.modifiers == KeyModifiers::CONTROL => match key.code {
-                        KeyCode::Char('t') | KeyCode::Char('T') => {
-                            // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
-                            std::thread::spawn(toggle_daily_color);
-                            return EventResult::Consumed;
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            trigger_download_themes();
-                            return EventResult::Consumed;
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
-            EventResult::Ignored
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 行布局：header = tab 1 + hint 1 + 空行 1 + 预览 N + 分隔线 1；每主题 1 行；footer 1。
+    // 预览行数动态（随选中主题变化），用本帧值构造 ListLayout。
+    let sel_now = *selected.read();
+    let preview_len = {
+        let sel_name = themes.get(sel_now).cloned().unwrap_or_default();
+        let cache = preview_cache.read();
+        if let Some(cached) = cache.get(&sel_name) {
+            cached.len()
+        } else {
+            drop(cache);
+            let lines = build_preview(&sel_name);
+            let len = lines.len();
+            preview_cache.write().insert(sel_name, lines);
+            len
         }
-    });
+    };
+    let list_header_rows = (3 + preview_len + 1) as u16; // tab+hint+空行 + 预览 + 分隔线
+    let list_scroll_start = if count == 0 {
+        0
+    } else {
+        scroll_start_for_selected(sel_now, count, VISIBLE_ITEMS)
+    };
+
+    // ── 键盘 + 鼠标处理 ──
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            let count = themes_for_closure.len();
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if let Some(area) = area
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: list_header_rows,
+                                item_rows: 1,
+                                footer_rows: 1,
+                                visible_items: VISIBLE_ITEMS as u16,
+                                scroll_start: list_scroll_start,
+                                item_count: count,
+                            },
+                        )
+                    {
+                        *selected.write() = idx;
+                        if let Some(name) = themes_for_closure.get(idx) {
+                            switch_theme_atoms(name);
+                            // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
+                            let owned = name.to_string();
+                            std::thread::spawn(move || persist_theme(&owned));
+                        }
+                        return EventResult::Consumed;
+                    }
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
+                }
+                if let Event::Key(key) = event
+                    && (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
+                {
+                    match key.code {
+                        KeyCode::Tab => {
+                            // 切换 dark/light tab
+                            let next = if *tab.read() == 0 { 1u8 } else { 0u8 };
+                            *tab.write() = next;
+                            return EventResult::Consumed;
+                        }
+                        KeyCode::Up => {
+                            if count > 0 {
+                                let idx = previous_selection(*selected.read());
+                                *selected.write() = idx;
+                                if let Some(name) = themes_for_closure.get(idx) {
+                                    switch_theme_atoms(name);
+                                }
+                            }
+                            return EventResult::Consumed;
+                        }
+                        KeyCode::Down => {
+                            if count > 0 {
+                                let idx = next_selection(*selected.read(), count);
+                                *selected.write() = idx;
+                                if let Some(name) = themes_for_closure.get(idx) {
+                                    switch_theme_atoms(name);
+                                }
+                            }
+                            return EventResult::Consumed;
+                        }
+                        KeyCode::Enter => {
+                            if count > 0 {
+                                let idx = *selected.read();
+                                if let Some(name) = themes_for_closure.get(idx) {
+                                    switch_theme_atoms(name);
+                                    // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
+                                    let owned = name.to_string();
+                                    std::thread::spawn(move || persist_theme(&owned));
+                                }
+                            }
+                            return EventResult::Consumed;
+                        }
+                        KeyCode::Esc => {
+                            switch_theme_atoms(&orig);
+                            return EventResult::Ignored;
+                        }
+                        _ if key.modifiers == KeyModifiers::CONTROL => match key.code {
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                // 将同步写盘移到独立线程，避免阻塞 TUI 主事件循环
+                                std::thread::spawn(toggle_daily_color);
+                                return EventResult::Consumed;
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                trigger_download_themes();
+                                return EventResult::Consumed;
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                EventResult::Ignored
+            }
+        },
+    );
 
     let sel = *selected.read();
     let guard = theme_def.read();

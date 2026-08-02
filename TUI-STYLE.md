@@ -308,33 +308,46 @@ Spinner 下方附加 Tip 行：`⎿  Tip: ...`（MUTED 色）。
 
 ### /model 面板样式
 
+左右分栏 Profile 编辑器：左侧 4 个固定档位卡片（fable / opus / sonnet / haiku），右侧当前 Profile 的 K/V 编辑行。
+
 ```
-───────────── Select model ──────────────────
-  Switch between models. Applies to this session.
-
-  ❯ 1. Opus  ✔   claude-opus-4-7
-    2. Sonnet      claude-sonnet-4-6
-    3. Haiku       claude-haiku-4-5
-
-    ● High effort ← → to adjust
-
-  Enter to confirm · Esc to exit
-──────────────────────────────────────────────
+┌─ Model ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│   Profiles                         Provider                         openai    │
+│  ─────────────────────             Model                    gpt-5.6-luna    │
+│  ● fable · openai                  Effort                              high    │
+│    gpt-5.6-luna high               Max tokens                        32000    │
+│    high · 1m                       1m enable                            off    │
+│                                                                              │
+│  ○ opus · anthropic                                                        │
+│    claude-opus-4-6                                                          │
+│    max · 200k                                                               │
+│                                                                              │
+│  ○ sonnet · openai                                                          │
+│    gpt-5.6-luna xhigh                                                       │
+│    xhigh · 1m                                                               │
+│                                                                              │
+│  ○ haiku · anthropic                                                        │
+│    claude-haiku-4-5                                                         │
+│    medium · 200k                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | 元素 | 颜色 |
 |------|------|
 | 边框 | BORDER (`#505050`) |
-| 标题 "Select model" | THINKING + BOLD |
-| 描述文字 | MUTED |
-| 光标箭头 `❯` | THINKING |
-| 选中项标签（✔ 所在行） | SAGE + BOLD |
-| 光标行标签（非选中项） | THINKING + BOLD |
-| 普通行标签 | TEXT + BOLD |
-| 对勾 `✔` | SAGE |
-| 模型名称（右侧） | MUTED |
-| Effort 圆点 `●` | ACCENT |
-| Effort 文字 | MUTED + BOLD |
+| 标题 "Model" | THINKING + BOLD |
+| 左侧 active profile（`●` + 标题行） | SAGE + BOLD |
+| 左侧普通 profile（`○`） | TEXT |
+| 模型名主色 | MODEL_INFO |
+| 模型名内嵌 effort 后缀 | model_accent + BOLD |
+| 摘要 effort 值 | effort + BOLD |
+| `200k`/`1m` 窗口标识 | token_context |
+| 摘要间隔 `·` | MUTED |
+| 右侧 K/V key（焦点行） | THINKING + BOLD |
+| 右侧 K/V key（普通行） | MUTED |
+| 右侧 K/V value | TEXT |
+| 底部导航提示 | DIM |
 
 ### /memory 面板
 

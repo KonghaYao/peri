@@ -3,7 +3,7 @@
 //! `spawn_background_fork()` 提取自 `SubAgentTool::invoke_background_fork`，
 //! 供 ACP 层（/bg 斜杠命令）和工具路径共同使用。
 //!
-//! **P5.1 重构**：从 v1 `RetryableLLM + AgentState` 改为 v2 stages，
+//! **P5.1 重构**：从 v1 ReactLLM 实现改为 v2 stages，
 //! 内部通过 `build_v2_subagent_context` 构造 StageContext，`tokio::spawn`
 //! 内运行 `run_react_loop`。
 

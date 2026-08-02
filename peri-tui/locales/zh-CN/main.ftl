@@ -443,7 +443,7 @@ model-effort-medium = 中
 model-effort-high = 高
 model-effort-xhigh = 超高
 model-effort-max = 最大
-panel-model-nav-hint =   ↑/↓::导航  Enter/←/→::编辑  Esc::关闭
+panel-model-nav-hint =   ↑/↓::切换  Tab::左右  →/←::改值  Esc::退出/关闭
 panel-model-inline-toggle-hint =   Enter 切换
 
 # ---- 状态面板 ----
@@ -568,6 +568,23 @@ rewind-files-to-restore = 将恢复的文件:
 rewind-confirm-hint = Enter 确认, Esc 取消
 rewind-write-op = Write → 删除+Git restore
 rewind-edit-op = Edit → 恢复
+# ---- Rewind v2（弹窗与消费者文案）----
+rewind-executing = 正在回退…
+rewind-budget-title = 回退将撤销 { $count } 个文件改动：
+rewind-budget-more = ... 还有 { $count } 项
+rewind-budget-confirm-hint = Enter 确认回退 · Esc 返回候选
+rewind-query-failed = 查询失败: { $error }
+rewind-loading = 正在加载回退候选…
+rewind-empty = 无可回退的消息。
+rewind-empty-hint = 完成一轮对话后双击 Esc 即可回滚。
+rewind-title-count = 回退到（{ $count }）
+rewind-enter-hint = Enter 回退 · Esc 关闭
+rewind-error-no-client = ACP client 未初始化，无法查询回退候选
+rewind-error-no-session = 无活动会话，无法查询回退候选
+rewind-error-query-failed = 候选查询失败: { $error }
+rewind-error-budget-missing = rewind-preview 响应缺少 file_changes 数组
+rewind-error-path-missing = 预算项缺少 path
+rewind-execute-failed = 回退执行失败: { $error }
 
 # ---- OAuth 弹窗 ----
 
@@ -1007,6 +1024,7 @@ app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractio
 app-note-compact-completed = { $type }完成{ $detail }
 app-note-compact-completed-summary = { $type }完成{ $detail } —— { $summary }
 app-note-compact-error = 上下文压缩失败: { $message }
+app-note-rewind-error = 回退失败: { $message }
 app-note-compact-type-full = 完整压缩
 app-note-compact-type-micro = 微压缩
 app-note-compact-type-smart = 智能压缩

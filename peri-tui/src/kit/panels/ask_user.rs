@@ -10,7 +10,7 @@ use crate::components::textarea::{TextAreaState, wrap_text as textarea_wrap};
 use crate::i18n;
 use peri_acp_types::event_data::AskUser;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -27,6 +27,7 @@ use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
 };
+use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
 use crate::kit::panel_registry;
 use peri_theme::atoms::THEME_ATOM;
 use serde_json::json;
@@ -80,342 +81,466 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let pending_for_closure = pending.clone();
 
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
     // ── 事件处理 ────────────────────────────────────────────────────────────
-    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
-        let Event::Key(key) = event else {
-            return EventResult::Ignored;
-        };
-        if key.kind != KeyEventKind::Press {
-            return EventResult::Ignored;
-        }
-
-        // 如果当前有 popup 打开（如确认弹窗），让 popup 的 handler 处理事件
-        if crate::kit::atoms::POPUP_KIND.state().read().is_some() {
-            return EventResult::Ignored;
-        }
-
-        // ── Typing 模式：委托给 TextAreaState ──
-        if *is_typing.read() {
-            let mut st = typing_state.write();
-            let consumed = match key.code {
-                // Enter → 确认输入
-                KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                    let text = st.text.trim().to_string();
-                    if !text.is_empty() {
-                        let q_idx = *focused.read();
-                        let mut ca = custom_answers.write();
-                        if q_idx >= ca.len() {
-                            ca.resize(q_idx + 1, None);
-                        }
-                        ca[q_idx] = Some(text);
-                    }
-                    *is_typing.write() = false;
-                    true
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::High,
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：区域内左键点击 = 激活对应行（选项=选中，自定义输入=进入 typing）。
+            // 选项区行高动态（wrap 折行），与渲染同构计算行分布。
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                    return EventResult::Ignored;
                 }
-                // ESC → 取消输入
-                KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
-                    *is_typing.write() = false;
-                    true
+                let Some(area) = area else {
+                    return EventResult::Ignored;
+                };
+                // 如果当前有 popup 打开（如确认弹窗），让 popup 的 handler 处理事件
+                if crate::kit::atoms::POPUP_KIND.state().read().is_some() {
+                    return EventResult::Ignored;
                 }
-                // Backspace
-                KeyCode::Backspace if key.modifiers == KeyModifiers::NONE => {
-                    st.backspace();
-                    true
+                // 顶部/底部边框行与滚动条列不命中
+                let row = mouse.row;
+                if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
+                    return EventResult::Consumed;
                 }
-                // Delete
-                KeyCode::Delete if key.modifiers == KeyModifiers::NONE => {
-                    st.delete_forward();
-                    true
+                if is_scrollbar_column(&mouse, area) {
+                    return EventResult::Consumed;
                 }
-                // Ctrl+W → 删词
-                KeyCode::Char('w' | 'W') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.delete_word_backward();
-                    true
+                // Typing 模式：点击仅消费（光标定位不在本次范围）
+                if *is_typing.read() {
+                    return EventResult::Consumed;
                 }
-                // Ctrl+U → 清空行
-                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.clear();
-                    true
-                }
-                // Ctrl+A → 行首
-                KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.cursor_line_home();
-                    true
-                }
-                // Ctrl+E → 行尾
-                KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.cursor_line_end();
-                    true
-                }
-                // 左箭头
-                KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
-                    st.cursor_left();
-                    true
-                }
-                KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => {
-                    st.cursor_word_left();
-                    true
-                }
-                // 右箭头
-                KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
-                    st.cursor_right();
-                    true
-                }
-                KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
-                    st.cursor_word_right();
-                    true
-                }
-                // 上/下箭头：视觉行移动；到顶时回到选项列表
-                KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
-                    let moved = st.cursor_visual_up(wrap_width);
-                    if !moved {
-                        // 已在最顶：退出 typing，回到预设选项
-                        *is_typing.write() = false;
-                        let q = pending_for_closure
-                            .as_ref()
-                            .and_then(|au| au.questions.get(*focused.read()));
-                        if let Some(q) = q {
-                            *focused_option.write() = q.options.len().saturating_sub(1);
-                        }
-                    }
-                    true
-                }
-                KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
-                    let _ = st.cursor_visual_down(wrap_width);
-                    true
-                }
-                // Ctrl+Z → undo
-                KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.undo();
-                    true
-                }
-                // Ctrl+Shift+Z / Ctrl+Y → redo
-                KeyCode::Char('Z') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.redo();
-                    true
-                }
-                KeyCode::Char('y') if key.modifiers == KeyModifiers::CONTROL => {
-                    st.redo();
-                    true
-                }
-                // 可见字符插入
-                KeyCode::Char(c)
-                    if key.modifiers == KeyModifiers::NONE
-                        || key.modifiers == KeyModifiers::SHIFT =>
+                let visual = row - area.y - 1;
+                if let Some(au) = pending_for_closure.as_ref()
+                    && !au.questions.is_empty()
+                    && let Some(q) = au
+                        .questions
+                        .get((*focused.read()).min(au.questions.len() - 1))
                 {
-                    st.insert_char(c);
-                    true
-                }
-                _ => false,
-            };
-            if consumed {
-                return EventResult::Consumed;
-            }
-        }
-
-        // ── 非 Typing 模式：选项导航 ──
-
-        // Space：选中/取消当前高亮的选项（或手动进入 typing）
-        if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
-            let q_idx = *focused.read();
-            let opt_idx = *focused_option.read();
-            // 自定义输入选项：手动进入 Typing 模式
-            if let Some(au) = pending_for_closure.as_ref()
-                && let Some(q) = au.questions.get(q_idx)
-                && opt_idx == q.options.len()
-            {
-                let existing = custom_answers
-                    .read()
-                    .get(q_idx)
-                    .cloned()
-                    .flatten()
-                    .unwrap_or_default();
-                let mut ts = typing_state.write();
-                ts.replace_all_no_undo(existing);
-                ts.clear_undo_history();
-                *is_typing.write() = true;
-                return EventResult::Consumed;
-            }
-            if let Some(au) = pending_for_closure.as_ref()
-                && let Some(q) = au.questions.get(q_idx)
-                && opt_idx < q.options.len()
-            {
-                let mut a = answers.write();
-                if q_idx >= a.len() {
-                    a.resize(q_idx + 1, vec![]);
-                }
-                if q.multi_select {
-                    if let Some(pos) = a[q_idx].iter().position(|&x| x == opt_idx) {
-                        a[q_idx].remove(pos);
+                    let q_idx = (*focused.read()).min(au.questions.len() - 1);
+                    // 行分布：0 空行 / 1 Tab / 2 分隔线 / 3 空行 / 问题 wrap 行 / 空行 / 选项区 / 自定义输入区
+                    let mut cur = 4u16;
+                    let question_text = if q.question.is_empty() {
+                        q.header.clone()
                     } else {
-                        a[q_idx].push(opt_idx);
-                    }
-                } else {
-                    a[q_idx] = if a[q_idx].first() == Some(&opt_idx) {
-                        vec![]
-                    } else {
-                        vec![opt_idx]
+                        format!("  {}", q.question)
                     };
-                }
-            }
-            return EventResult::Consumed;
-        }
+                    cur += wrap_text(&question_text, wrap_width).len() as u16;
+                    cur += 1; // 问题与选项间的空行
 
-        match classify_list_nav(&key) {
-            Some(ListNavAction::MoveUp) => {
-                if *is_typing.read() {
-                    return EventResult::Consumed;
-                }
-                let mut fo = focused_option.write();
-                *fo = previous_selection(*fo);
-                EventResult::Consumed
-            }
-            Some(ListNavAction::MoveDown) => {
-                if *is_typing.read() {
-                    return EventResult::Consumed;
-                }
-                let limit = pending_for_closure
-                    .as_ref()
-                    .and_then(|au| au.questions.get(*focused.read()))
-                    .map(|q| q.options.len() + 1)
-                    .unwrap_or(0);
-                if limit > 0 {
-                    let mut fo = focused_option.write();
-                    *fo = next_selection(*fo, limit);
-                    // 到达自定义输入位置时自动激活 typing
-                    if *fo == limit.saturating_sub(1) {
-                        let q_idx = *focused.read();
-                        let existing = pending_for_closure
-                            .as_ref()
-                            .and_then(|au| au.questions.get(q_idx))
-                            .map(|_q| {
-                                custom_answers
-                                    .read()
-                                    .get(q_idx)
-                                    .cloned()
-                                    .flatten()
-                                    .unwrap_or_default()
-                            })
+                    for (opt_i, opt) in q.options.iter().enumerate() {
+                        let label_rows =
+                            wrap_text(&format!("  ○ {}", opt.label), wrap_width).len() as u16;
+                        let desc_rows = if opt.description.is_empty() {
+                            0
+                        } else {
+                            wrap_text(&format!("    {}", opt.description), wrap_width).len() as u16
+                        };
+                        if visual >= cur && visual < cur + label_rows + desc_rows {
+                            // Space 语义：选中/取消该选项
+                            let mut a = answers.write();
+                            if q_idx >= a.len() {
+                                a.resize(q_idx + 1, vec![]);
+                            }
+                            if q.multi_select {
+                                if let Some(pos) = a[q_idx].iter().position(|&x| x == opt_i) {
+                                    a[q_idx].remove(pos);
+                                } else {
+                                    a[q_idx].push(opt_i);
+                                }
+                            } else {
+                                a[q_idx] = if a[q_idx].first() == Some(&opt_i) {
+                                    vec![]
+                                } else {
+                                    vec![opt_i]
+                                };
+                            }
+                            return EventResult::Consumed;
+                        }
+                        cur += label_rows + desc_rows;
+                    }
+
+                    // 自定义输入区
+                    let custom_rows = {
+                        let has_custom = custom_answers
+                            .read()
+                            .get(q_idx)
+                            .map(|ca| ca.is_some())
+                            .unwrap_or(false);
+                        if has_custom {
+                            let existing = custom_answers
+                                .read()
+                                .get(q_idx)
+                                .cloned()
+                                .flatten()
+                                .unwrap_or_default();
+                            wrap_text(&existing, wrap_width.saturating_sub(4)).len() as u16
+                        } else {
+                            1
+                        }
+                    };
+                    if visual >= cur && visual < cur + custom_rows {
+                        // Space 在自定义选项的语义：进入 typing
+                        let existing = custom_answers
+                            .read()
+                            .get(q_idx)
+                            .cloned()
+                            .flatten()
                             .unwrap_or_default();
                         let mut ts = typing_state.write();
                         ts.replace_all_no_undo(existing);
                         ts.clear_undo_history();
                         *is_typing.write() = true;
+                        return EventResult::Consumed;
                     }
                 }
-                EventResult::Consumed
+                // 区域内点击（未命中行）也消费，防止穿透
+                return EventResult::Consumed;
+            }
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
             }
 
-            Some(ListNavAction::CycleForward) if question_count > 0 => {
-                if *is_typing.read() {
+            // 如果当前有 popup 打开（如确认弹窗），让 popup 的 handler 处理事件
+            if crate::kit::atoms::POPUP_KIND.state().read().is_some() {
+                return EventResult::Ignored;
+            }
+
+            // ── Typing 模式：委托给 TextAreaState ──
+            if *is_typing.read() {
+                let mut st = typing_state.write();
+                let consumed = match key.code {
+                    // Enter → 确认输入
+                    KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                        let text = st.text.trim().to_string();
+                        if !text.is_empty() {
+                            let q_idx = *focused.read();
+                            let mut ca = custom_answers.write();
+                            if q_idx >= ca.len() {
+                                ca.resize(q_idx + 1, None);
+                            }
+                            ca[q_idx] = Some(text);
+                        }
+                        *is_typing.write() = false;
+                        true
+                    }
+                    // ESC → 取消输入
+                    KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
+                        *is_typing.write() = false;
+                        true
+                    }
+                    // Backspace
+                    KeyCode::Backspace if key.modifiers == KeyModifiers::NONE => {
+                        st.backspace();
+                        true
+                    }
+                    // Delete
+                    KeyCode::Delete if key.modifiers == KeyModifiers::NONE => {
+                        st.delete_forward();
+                        true
+                    }
+                    // Ctrl+W → 删词
+                    KeyCode::Char('w' | 'W') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.delete_word_backward();
+                        true
+                    }
+                    // Ctrl+U → 清空行
+                    KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.clear();
+                        true
+                    }
+                    // Ctrl+A → 行首
+                    KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.cursor_line_home();
+                        true
+                    }
+                    // Ctrl+E → 行尾
+                    KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.cursor_line_end();
+                        true
+                    }
+                    // 左箭头
+                    KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
+                        st.cursor_left();
+                        true
+                    }
+                    KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => {
+                        st.cursor_word_left();
+                        true
+                    }
+                    // 右箭头
+                    KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
+                        st.cursor_right();
+                        true
+                    }
+                    KeyCode::Right if key.modifiers == KeyModifiers::CONTROL => {
+                        st.cursor_word_right();
+                        true
+                    }
+                    // 上/下箭头：视觉行移动；到顶时回到选项列表
+                    KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
+                        let moved = st.cursor_visual_up(wrap_width);
+                        if !moved {
+                            // 已在最顶：退出 typing，回到预设选项
+                            *is_typing.write() = false;
+                            let q = pending_for_closure
+                                .as_ref()
+                                .and_then(|au| au.questions.get(*focused.read()));
+                            if let Some(q) = q {
+                                *focused_option.write() = q.options.len().saturating_sub(1);
+                            }
+                        }
+                        true
+                    }
+                    KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                        let _ = st.cursor_visual_down(wrap_width);
+                        true
+                    }
+                    // Ctrl+Z → undo
+                    KeyCode::Char('z') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.undo();
+                        true
+                    }
+                    // Ctrl+Shift+Z / Ctrl+Y → redo
+                    KeyCode::Char('Z') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.redo();
+                        true
+                    }
+                    KeyCode::Char('y') if key.modifiers == KeyModifiers::CONTROL => {
+                        st.redo();
+                        true
+                    }
+                    // 可见字符插入
+                    KeyCode::Char(c)
+                        if key.modifiers == KeyModifiers::NONE
+                            || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        st.insert_char(c);
+                        true
+                    }
+                    _ => false,
+                };
+                if consumed {
                     return EventResult::Consumed;
                 }
-                let mut f = focused.write();
-                *f = cycle_next(*f, question_count);
-                let mut fo = focused_option.write();
-                *fo = answers
-                    .read()
-                    .get(*f)
-                    .and_then(|v| v.first().copied())
-                    .unwrap_or(0);
-                EventResult::Consumed
             }
-            Some(ListNavAction::CycleBackward) if question_count > 0 => {
-                if *is_typing.read() {
-                    return EventResult::Consumed;
-                }
-                let mut f = focused.write();
-                *f = cycle_previous(*f, question_count);
-                let mut fo = focused_option.write();
-                *fo = answers
-                    .read()
-                    .get(*f)
-                    .and_then(|v| v.first().copied())
-                    .unwrap_or(0);
-                EventResult::Consumed
-            }
-            Some(ListNavAction::Confirm) => {
+
+            // ── 非 Typing 模式：选项导航 ──
+
+            // Space：选中/取消当前高亮的选项（或手动进入 typing）
+            if (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' ')) {
                 let q_idx = *focused.read();
-                let all_answered = answers.read().iter().enumerate().all(|(i, a)| {
-                    !a.is_empty()
-                        || custom_answers
-                            .read()
-                            .get(i)
-                            .map(|ca| ca.is_some())
-                            .unwrap_or(false)
-                        || pending_for_closure
-                            .as_ref()
-                            .and_then(|au| au.questions.get(i))
-                            .map(|q| q.options.is_empty())
-                            .unwrap_or(true)
-                });
-                if !all_answered {
-                    let qc = question_count;
-                    let mut next = (q_idx + 1) % qc;
-                    loop {
-                        let is_answered = answers
-                            .read()
-                            .get(next)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false)
+                let opt_idx = *focused_option.read();
+                // 自定义输入选项：手动进入 Typing 模式
+                if let Some(au) = pending_for_closure.as_ref()
+                    && let Some(q) = au.questions.get(q_idx)
+                    && opt_idx == q.options.len()
+                {
+                    let existing = custom_answers
+                        .read()
+                        .get(q_idx)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_default();
+                    let mut ts = typing_state.write();
+                    ts.replace_all_no_undo(existing);
+                    ts.clear_undo_history();
+                    *is_typing.write() = true;
+                    return EventResult::Consumed;
+                }
+                if let Some(au) = pending_for_closure.as_ref()
+                    && let Some(q) = au.questions.get(q_idx)
+                    && opt_idx < q.options.len()
+                {
+                    let mut a = answers.write();
+                    if q_idx >= a.len() {
+                        a.resize(q_idx + 1, vec![]);
+                    }
+                    if q.multi_select {
+                        if let Some(pos) = a[q_idx].iter().position(|&x| x == opt_idx) {
+                            a[q_idx].remove(pos);
+                        } else {
+                            a[q_idx].push(opt_idx);
+                        }
+                    } else {
+                        a[q_idx] = if a[q_idx].first() == Some(&opt_idx) {
+                            vec![]
+                        } else {
+                            vec![opt_idx]
+                        };
+                    }
+                }
+                return EventResult::Consumed;
+            }
+
+            match classify_list_nav(&key) {
+                Some(ListNavAction::MoveUp) => {
+                    if *is_typing.read() {
+                        return EventResult::Consumed;
+                    }
+                    let mut fo = focused_option.write();
+                    *fo = previous_selection(*fo);
+                    EventResult::Consumed
+                }
+                Some(ListNavAction::MoveDown) => {
+                    if *is_typing.read() {
+                        return EventResult::Consumed;
+                    }
+                    let limit = pending_for_closure
+                        .as_ref()
+                        .and_then(|au| au.questions.get(*focused.read()))
+                        .map(|q| q.options.len() + 1)
+                        .unwrap_or(0);
+                    if limit > 0 {
+                        let mut fo = focused_option.write();
+                        *fo = next_selection(*fo, limit);
+                        // 到达自定义输入位置时自动激活 typing
+                        if *fo == limit.saturating_sub(1) {
+                            let q_idx = *focused.read();
+                            let existing = pending_for_closure
+                                .as_ref()
+                                .and_then(|au| au.questions.get(q_idx))
+                                .map(|_q| {
+                                    custom_answers
+                                        .read()
+                                        .get(q_idx)
+                                        .cloned()
+                                        .flatten()
+                                        .unwrap_or_default()
+                                })
+                                .unwrap_or_default();
+                            let mut ts = typing_state.write();
+                            ts.replace_all_no_undo(existing);
+                            ts.clear_undo_history();
+                            *is_typing.write() = true;
+                        }
+                    }
+                    EventResult::Consumed
+                }
+
+                Some(ListNavAction::CycleForward) if question_count > 0 => {
+                    if *is_typing.read() {
+                        return EventResult::Consumed;
+                    }
+                    let mut f = focused.write();
+                    *f = cycle_next(*f, question_count);
+                    let mut fo = focused_option.write();
+                    *fo = answers
+                        .read()
+                        .get(*f)
+                        .and_then(|v| v.first().copied())
+                        .unwrap_or(0);
+                    EventResult::Consumed
+                }
+                Some(ListNavAction::CycleBackward) if question_count > 0 => {
+                    if *is_typing.read() {
+                        return EventResult::Consumed;
+                    }
+                    let mut f = focused.write();
+                    *f = cycle_previous(*f, question_count);
+                    let mut fo = focused_option.write();
+                    *fo = answers
+                        .read()
+                        .get(*f)
+                        .and_then(|v| v.first().copied())
+                        .unwrap_or(0);
+                    EventResult::Consumed
+                }
+                Some(ListNavAction::Confirm) => {
+                    let q_idx = *focused.read();
+                    let all_answered = answers.read().iter().enumerate().all(|(i, a)| {
+                        !a.is_empty()
                             || custom_answers
                                 .read()
-                                .get(next)
+                                .get(i)
                                 .map(|ca| ca.is_some())
-                                .unwrap_or(false);
-                        let has_no_options = pending_for_closure
-                            .as_ref()
-                            .and_then(|au| au.questions.get(next))
-                            .map(|q| q.options.is_empty())
-                            .unwrap_or(true);
-                        if !is_answered && !has_no_options {
-                            break;
+                                .unwrap_or(false)
+                            || pending_for_closure
+                                .as_ref()
+                                .and_then(|au| au.questions.get(i))
+                                .map(|q| q.options.is_empty())
+                                .unwrap_or(true)
+                    });
+                    if !all_answered {
+                        let qc = question_count;
+                        let mut next = (q_idx + 1) % qc;
+                        loop {
+                            let is_answered = answers
+                                .read()
+                                .get(next)
+                                .map(|v| !v.is_empty())
+                                .unwrap_or(false)
+                                || custom_answers
+                                    .read()
+                                    .get(next)
+                                    .map(|ca| ca.is_some())
+                                    .unwrap_or(false);
+                            let has_no_options = pending_for_closure
+                                .as_ref()
+                                .and_then(|au| au.questions.get(next))
+                                .map(|q| q.options.is_empty())
+                                .unwrap_or(true);
+                            if !is_answered && !has_no_options {
+                                break;
+                            }
+                            next = (next + 1) % qc;
+                            if next == q_idx {
+                                break;
+                            }
                         }
-                        next = (next + 1) % qc;
-                        if next == q_idx {
-                            break;
+                        *focused.write() = next;
+                        *focused_option.write() = 0;
+                        EventResult::Consumed
+                    } else {
+                        let answers_snapshot = answers.read().clone();
+                        let custom_snapshot = custom_answers.read().clone();
+                        let answers_map = build_answers_map(
+                            pending_for_closure.as_ref(),
+                            &answers_snapshot,
+                            &custom_snapshot,
+                        );
+                        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                            && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                        {
+                            let _ = tx.send(AskUserResponseAction::Submit {
+                                request_id_str: id_str,
+                                answers: answers_map,
+                            });
                         }
+                        panel_registry::close_panel(PanelKind::AskUser);
+                        *ASK_USER_PENDING.state().write() = None;
+                        *ASK_USER_REQUEST_ID.state().write() = None;
+                        EventResult::Consumed
                     }
-                    *focused.write() = next;
-                    *focused_option.write() = 0;
-                    EventResult::Consumed
-                } else {
-                    let answers_snapshot = answers.read().clone();
-                    let custom_snapshot = custom_answers.read().clone();
-                    let answers_map = build_answers_map(
-                        pending_for_closure.as_ref(),
-                        &answers_snapshot,
-                        &custom_snapshot,
-                    );
-                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
-                        && let Some(tx) = ASK_USER_RESPONSE_TX.get()
-                    {
-                        let _ = tx.send(AskUserResponseAction::Submit {
-                            request_id_str: id_str,
-                            answers: answers_map,
-                        });
-                    }
-                    panel_registry::close_panel(PanelKind::AskUser);
-                    *ASK_USER_PENDING.state().write() = None;
-                    *ASK_USER_REQUEST_ID.state().write() = None;
+                }
+                Some(ListNavAction::Cancel) => {
+                    // ESC → 打开确认弹窗而非直接取消
+                    let payload = crate::kit::atoms::ConfirmPayload {
+                        title: i18n::tr("popup-confirm-reject-title"),
+                        message: i18n::tr("popup-confirm-reject-message"),
+                        details: vec![],
+                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
+                    };
+                    *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
+                    crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);
                     EventResult::Consumed
                 }
+                _ => EventResult::Ignored,
             }
-            Some(ListNavAction::Cancel) => {
-                // ESC → 打开确认弹窗而非直接取消
-                let payload = crate::kit::atoms::ConfirmPayload {
-                    title: i18n::tr("popup-confirm-reject-title"),
-                    message: i18n::tr("popup-confirm-reject-message"),
-                    details: vec![],
-                    pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
-                };
-                *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
-                crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);
-                EventResult::Consumed
-            }
-            _ => EventResult::Ignored,
-        }
-    });
+        },
+    );
 
     // ── 渲染 ────────────────────────────────────────────────────────────────
     let popup_tokens = &theme_def.read().component.popup;

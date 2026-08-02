@@ -58,6 +58,55 @@ fn test_summarize_input_non_object_fallback() {
 }
 
 #[test]
+fn test_shorten_path_for_display_strips_cwd_prefix() {
+    let cwd = "/Users/konghayao/code/ai/perihelion";
+    assert_eq!(
+        shorten_path_for_display(
+            "/Users/konghayao/code/ai/perihelion/peri-model/src/protocol/mod.rs",
+            cwd,
+        ),
+        "peri-model/src/protocol/mod.rs"
+    );
+}
+
+#[test]
+fn test_shorten_path_for_display_cwd_with_trailing_separator() {
+    assert_eq!(
+        shorten_path_for_display("/proj/src/main.rs", "/proj/"),
+        "src/main.rs"
+    );
+}
+
+#[test]
+fn test_shorten_path_for_display_keeps_non_cwd_paths() {
+    let cwd = "/Users/konghayao/code/ai/perihelion";
+    // 非 cwd 前缀的绝对路径保持原样
+    assert_eq!(shorten_path_for_display("/tmp/foo.rs", cwd), "/tmp/foo.rs");
+    // 相对路径保持原样
+    assert_eq!(shorten_path_for_display("src/main.rs", cwd), "src/main.rs");
+}
+
+#[test]
+fn test_shorten_path_for_display_edge_cases() {
+    // 空 cwd → 原样
+    assert_eq!(shorten_path_for_display("/a/b.rs", ""), "/a/b.rs");
+    // 根目录 cwd → 原样（避免所有绝对路径被裁剪）
+    assert_eq!(shorten_path_for_display("/a/b.rs", "/"), "/a/b.rs");
+    // path == cwd → 原样（避免空串）
+    assert_eq!(shorten_path_for_display("/proj", "/proj"), "/proj");
+    // 前缀边界：/project 不是 /proj 的前缀路径
+    assert_eq!(
+        shorten_path_for_display("/project/x.rs", "/proj"),
+        "/project/x.rs"
+    );
+    // Windows 分隔符
+    assert_eq!(
+        shorten_path_for_display("C:\\proj\\src\\main.rs", "C:\\proj"),
+        "src\\main.rs"
+    );
+}
+
+#[test]
 fn test_summarize_output_empty() {
     assert_eq!(summarize_output("Bash", ""), "");
     assert_eq!(summarize_output("Bash", "   "), "");

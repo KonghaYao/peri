@@ -18,6 +18,12 @@ pub struct SemanticTokens {
     pub loading: Color,
     pub thinking: Color,
     pub model_info: Color,
+    /// 模型名内嵌 effort 后缀色（如 "gpt-5.6-luna high" 的 "high"）
+    pub model_accent: Color,
+    /// effort 档位值色（low/medium/high/xhigh/max）
+    pub effort: Color,
+    /// 上下文窗口标识色（200k / 1m）
+    pub token_context: Color,
     pub bash_border: Color,
     pub selected_fg: Color,
 }

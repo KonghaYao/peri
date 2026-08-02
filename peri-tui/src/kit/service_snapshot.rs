@@ -31,9 +31,10 @@ use tracing::{debug, warn};
 
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    CRON_JOBS, CronJobSummary, FILE_LIST, HOOK_LIST, Handle, HookSummary, MCP_SERVERS, MEMORY_LIST,
-    McpInitPhase, McpServerSummary, McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST,
-    PluginSummary, ProviderSummary, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
+    ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, CronJobSummary, FILE_LIST, HOOK_LIST,
+    Handle, HookSummary, MCP_SERVERS, MEMORY_LIST, McpInitPhase, McpServerSummary,
+    McpStatusSnapshot, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
+    SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadSummary,
 };
 use crate::thread::ThreadStore;
 
@@ -99,6 +100,10 @@ struct SlowSnapshotRefresh {
     files: Vec<String>,
     threads: Vec<ThreadSummary>,
     memory_entries: Vec<MemoryEntry>,
+    /// 当前会话标题派生缓存：上次查询的 session id + 结果 + 下次刷新时刻。
+    current_title_session_id: String,
+    current_title: String,
+    next_title_refresh: Instant,
 }
 
 impl Default for SlowSnapshotRefresh {
@@ -110,6 +115,10 @@ impl Default for SlowSnapshotRefresh {
             files: Vec::new(),
             threads: Vec::new(),
             memory_entries: Vec::new(),
+            current_title_session_id: String::new(),
+            current_title: String::new(),
+            // 首 tick 立即查询（Instant::now() 已过期）
+            next_title_refresh: Instant::now(),
         }
     }
 }
@@ -127,7 +136,8 @@ async fn tick_once(
     };
 
     // ── 2. provider/model 从 peri_config 派生 ──────────────────────────
-    let (provider_name, model_alias, model_name) = derive_provider_and_model(&src.peri_config);
+    let (provider_name, model_alias, model_name, effort) =
+        derive_provider_and_model(&src.peri_config);
 
     // ── 3. permission_mode ─────────────────────────────────────────────
     let permission_mode = permission_mode_label(src.permission_mode.load());
@@ -216,12 +226,38 @@ async fn tick_once(
     }
     let memory_entries = slow.memory_entries.clone();
 
+    // ── 6e. 当前会话标题：从 thread_store 派生（节流查询） ───────────────
+    // session id 变化立即查询；同 id 每 10s 刷新一次（覆盖标题中途被
+    // 自动生成 / rename 的情况）。load_meta 是主键查询，开销极低。
+    let session_id = ACTIVE_SESSION_ID.state().read().clone();
+    let session_changed = session_id != slow.current_title_session_id;
+    if session_changed && session_id.is_empty() {
+        // 会话已关闭（id 清空）：清空标题缓存，避免旧会话标题残留到状态栏
+        slow.current_title.clear();
+        slow.current_title_session_id.clear();
+        slow.next_title_refresh = now + Duration::from_secs(10);
+    } else if (session_changed || now >= slow.next_title_refresh) && !session_id.is_empty() {
+        match src.thread_store.load_meta(&session_id).await {
+            Ok(meta) => {
+                slow.current_title = meta.title.unwrap_or_default();
+                slow.current_title_session_id = session_id;
+            }
+            Err(e) => {
+                warn!(error = %e, sid = %session_id, "service_snapshot: load_meta for session title failed");
+            }
+        }
+        slow.next_title_refresh = now + Duration::from_secs(10);
+    }
+    let current_title = slow.current_title.clone();
+    write_if_changed(&CURRENT_SESSION_TITLE.state(), current_title);
+
     // ── 7. 写入 atoms ───────────────────────────────────────────────────
     let snap = ServiceSnapshot {
         cwd: src.cwd.clone(),
         provider_name,
         model_alias,
         model_name,
+        effort,
         permission_mode: permission_mode.to_string(),
         memory_mb,
         cpu_percent: cpu_percent.round(),
@@ -393,34 +429,67 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
 }
 
 /// 从 PeriConfig 派生 (provider_type, active_alias, model_name)。
-/// model_name 优先从 provider.models.get_model(alias) 查询；
-/// 若 provider 未配置 models 或 alias 非标准名，回退到 active_alias。
-fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String) {
+/// model_name 优先取 Profile.model；其次 provider.models.get_model(alias)；
+/// 若都为空，回退到 active_alias。
+/// 从 peri_config 派生 (provider_type, active_alias, model_name, effort)。
+///
+/// 全部取自 active Profile：provider 类型（Profile.provider 指向的 provider，
+/// 空则回退第一个 provider）、alias、模型名（Profile.model > ProviderModels 映射
+/// > alias 本身）、effort（Profile.effort，缺省 "xhigh"）。
+fn derive_provider_and_model(peri_config: &SharedPeriConfig) -> (String, String, String, String) {
     let cfg = peri_config.read();
-    let active_id = cfg.config.active_provider_id.clone();
     let active_alias = cfg.config.active_alias.clone();
+    let profile = cfg.config.profiles.get(&active_alias);
 
-    let provider = cfg.config.providers.iter().find(|p| p.id == active_id);
+    let provider = profile.and_then(|pf| {
+        if pf.provider.is_empty() {
+            cfg.config.providers.first()
+        } else {
+            cfg.config.providers.iter().find(|p| p.id == pf.provider)
+        }
+    });
 
     let provider_type = provider
         .map(|p| p.provider_type.clone())
-        .unwrap_or(active_id.clone());
+        .unwrap_or_else(|| {
+            profile
+                .map(|pf| pf.provider.clone())
+                .unwrap_or_else(|| active_alias.clone())
+        });
 
-    let model_name = provider
-        .and_then(|p| p.models.get_model(&active_alias))
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| active_alias.clone());
+    let model_name = if let Some(m) = profile
+        .and_then(|pf| pf.model.as_ref())
+        .filter(|m| !m.is_empty())
+    {
+        m.clone()
+    } else {
+        provider
+            .and_then(|p| p.models.get_model(&active_alias))
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| active_alias.clone())
+    };
 
-    (provider_type, active_alias, model_name)
+    let effort = profile
+        .map(|pf| pf.effort.clone())
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "xhigh".to_string());
+
+    (provider_type, active_alias, model_name, effort)
 }
 
 /// 从 peri_config 动态派生 provider 列表——PROVIDER_LIST atom 的数据源。
 ///
-/// 每次 tick 重新读取 active_provider_id，确保 is_active 标记反映最新状态。
+/// 每次 tick 重新读取 active profile 的 provider，确保 is_active 标记反映最新状态。
 /// 之前使用 SnapshotSource.providers（启动时静态快照），导致 is_active 永不过期。
 fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
     let cfg = peri_config.read();
+    let active_profile_provider = cfg
+        .config
+        .profiles
+        .get(&cfg.config.active_alias)
+        .map(|p| p.provider.clone())
+        .unwrap_or_default();
     cfg.config
         .providers
         .iter()
@@ -435,7 +504,7 @@ fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
             ProviderSummary {
                 id: p.id.clone(),
                 provider_type: p.provider_type.clone(),
-                is_active: p.id == cfg.config.active_provider_id,
+                is_active: p.id == active_profile_provider,
                 has_api_key,
                 base_url,
             }

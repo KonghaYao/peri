@@ -135,7 +135,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             step,
             model,
             output,
-            usage: Some(crate::llm::types::TokenUsage {
+            usage: Some(peri_model::TokenUsage {
                 input_tokens: input_tokens as u32,
                 output_tokens: output_tokens as u32,
                 // 0 表示 Provider 不支持 caching；保留 Option 让下游区分"不支持" vs "未命中"
@@ -149,10 +149,9 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
                 } else {
                     None
                 },
-                request_id,
-                first_token_time: None,
             }),
             stop_reason: None,
+            request_id,
         }),
         ObserveEvent::CompactStarted {
             turn_id,

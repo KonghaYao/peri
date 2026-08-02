@@ -9,7 +9,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind},
+    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -24,6 +24,7 @@ use crate::kit::atoms::MENTION_SELECTED_INDEX;
 use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -66,46 +67,94 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
     let on_select = Arc::clone(&props.on_select);
     let on_cancel = Arc::clone(&props.on_cancel);
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
-        let Event::Key(key) = event else {
-            return EventResult::Ignored;
-        };
-        if key.kind != KeyEventKind::Press {
-            return EventResult::Ignored;
-        }
-        match classify_inline_nav(&key) {
-            Some(InlineNavAction::MoveUp) => {
-                let mut s = selection.write();
-                *s = previous_selection(*s);
-                EventResult::Consumed
-            }
-            Some(InlineNavAction::MoveDown) => {
-                let mut s = selection.write();
-                *s = next_selection(*s, item_count);
-                EventResult::Consumed
-            }
-            Some(InlineNavAction::Confirm) => {
-                let selected = {
-                    let sel_idx = clamp_selection(*selection.read(), item_count);
-                    filtered_for_handler.get(sel_idx).cloned()
+    // 弹窗绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+            if let Event::Mouse(mouse) = event {
+                if let Some(area) = area
+                    && let Some(idx) = hit_item(
+                        &mouse,
+                        area,
+                        ListLayout {
+                            header_rows: 0,
+                            item_rows: 1,
+                            footer_rows: 0,
+                            visible_items: item_count as u16,
+                            scroll_start: 0,
+                            item_count,
+                        },
+                    )
+                {
+                    *selection.write() = idx;
+                    if let Some(item) = filtered_for_handler.get(idx).cloned() {
+                        let mut on_select =
+                            on_select.lock().expect("MentionPopup on_select poisoned");
+                        (*on_select)(item);
+                    } else {
+                        let mut on_cancel =
+                            on_cancel.lock().expect("MentionPopup on_cancel poisoned");
+                        (*on_cancel)(());
+                    }
+                    return EventResult::Consumed;
+                }
+                // 区域内的左键点击（未命中行）也消费，防止穿透到输入区
+                return match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                    _ => EventResult::Ignored,
                 };
-                if let Some(item) = selected {
-                    let mut on_select = on_select.lock().expect("MentionPopup on_select poisoned");
-                    (*on_select)(item);
-                } else {
+            }
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match classify_inline_nav(&key) {
+                Some(InlineNavAction::MoveUp) => {
+                    let mut s = selection.write();
+                    *s = previous_selection(*s);
+                    EventResult::Consumed
+                }
+                Some(InlineNavAction::MoveDown) => {
+                    let mut s = selection.write();
+                    *s = next_selection(*s, item_count);
+                    EventResult::Consumed
+                }
+                Some(InlineNavAction::Confirm) => {
+                    let selected = {
+                        let sel_idx = clamp_selection(*selection.read(), item_count);
+                        filtered_for_handler.get(sel_idx).cloned()
+                    };
+                    if let Some(item) = selected {
+                        let mut on_select =
+                            on_select.lock().expect("MentionPopup on_select poisoned");
+                        (*on_select)(item);
+                    } else {
+                        let mut on_cancel =
+                            on_cancel.lock().expect("MentionPopup on_cancel poisoned");
+                        (*on_cancel)(());
+                    }
+                    EventResult::Consumed
+                }
+                Some(InlineNavAction::Cancel) => {
                     let mut on_cancel = on_cancel.lock().expect("MentionPopup on_cancel poisoned");
                     (*on_cancel)(());
+                    EventResult::Consumed
                 }
-                EventResult::Consumed
+                None => EventResult::Ignored,
             }
-            Some(InlineNavAction::Cancel) => {
-                let mut on_cancel = on_cancel.lock().expect("MentionPopup on_cancel poisoned");
-                (*on_cancel)(());
-                EventResult::Consumed
-            }
-            None => EventResult::Ignored,
-        }
-    });
+        },
+    );
 
     let state = THEME_ATOM.state();
     let guard = state.read();

@@ -104,7 +104,7 @@ describe("panels: plugin", () => {
       const closedResult = await judge({
         ansiRaw: panelClosedCapture.raw,
         criteria: [
-          "Plugin 面板应已关闭，不再显示 已安装/探索/市场/错误 等 Tab 标签",
+          "Plugin 面板应已关闭：屏幕中不应再出现 已安装/探索/市场/错误 等 Tab 标签或插件面板布局，界面应已回到普通主聊天界面（欢迎页/输入框）",
         ],
       });
       console.log("Judge (closed):", JSON.stringify(closedResult, null, 2));

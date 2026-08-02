@@ -27,14 +27,21 @@ impl RewindCommand {
 #[derive(serde::Deserialize)]
 struct RewindArgs {
     target_message_id: String,
+    /// P0 修复：默认回退文件。TUI 早期版本/第三方客户端可能只传
+    /// target_message_id——缺失时不得进入解析失败静默路径。
+    #[serde(default = "default_true")]
     revert_files: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 提取到的文件变更操作。
 ///
 /// `Write` 变体的原 `content` 字段已删除：rewind 的文件恢复依赖 `git checkout HEAD`
 /// （见 `revert_files`），从未读取 `Write.content`。保留字段只会徒增内存 + 编译器静音。
-enum FileChange {
+pub(crate) enum FileChange {
     Write {
         path: String,
     },
@@ -114,7 +121,19 @@ impl AgentCommand for RewindCommand {
         let mut revert_warnings = Vec::new();
         if args.revert_files {
             let changes = extract_file_changes(removed_messages);
-            revert_files(&changes, &ctx.cwd, &mut revert_warnings);
+            // P1 修复：revert_files 内含同步 git checkout 子进程，直接调用会
+            // 阻塞 tokio worker（tokio worker_threads=4）——移出 async 上下文。
+            let cwd_owned = ctx.cwd.clone();
+            revert_warnings = tokio::task::spawn_blocking(move || {
+                let mut warnings = Vec::new();
+                revert_files(&changes, &cwd_owned, &mut warnings);
+                warnings
+            })
+            .await
+            .unwrap_or_else(|e| {
+                warn!("rewind: spawn_blocking join 失败: {e}");
+                Vec::new()
+            });
         }
 
         // Step 4: 验证 ToolUse/ToolResult 配对完整性
@@ -156,8 +175,12 @@ impl AgentCommand for RewindCommand {
 }
 
 /// 从被移除的消息中提取所有 Write/Edit 工具调用。
-fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
+pub(crate) fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
     let mut changes = Vec::new();
+    // P1 修复：BaseMessage::ai_from_blocks 会把 ContentBlock::ToolUse 同步到
+    // tool_calls 字段——同一调用在两条路径各出现一次。按 ToolUse id 去重，
+    // 不依赖消息构造路径（OpenAI 反序列化只有 tool_calls、Anthropic 双路径）。
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages {
         if let BaseMessage::Ai {
             content,
@@ -167,7 +190,8 @@ fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
         {
             // OpenAI 格式: tool_calls 字段
             for tc in tool_calls {
-                if tc.name == "Write" || tc.name == "Edit" {
+                // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
+                if (tc.name == "Write" || tc.name == "Edit") && seen_ids.insert(tc.id.clone()) {
                     if let Some(change) = parse_tool_call(&tc.name, &tc.arguments) {
                         changes.push(change);
                     }
@@ -179,10 +203,12 @@ fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
                 if let ContentBlock::ToolUse {
                     ref name,
                     ref input,
+                    ref id,
                     ..
                 } = block
                 {
-                    if name == "Write" || name == "Edit" {
+                    // 短路求值：仅 Write/Edit 才插入 id（副作用只在首次出现时发生）
+                    if (name == "Write" || name == "Edit") && seen_ids.insert(id.clone()) {
                         if let Some(change) = parse_tool_call(name, input) {
                             changes.push(change);
                         }
@@ -195,7 +221,7 @@ fn extract_file_changes(messages: &[BaseMessage]) -> Vec<FileChange> {
 }
 
 /// 从工具调用参数中解析文件变更。
-fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
+pub(crate) fn parse_tool_call(name: &str, args: &serde_json::Value) -> Option<FileChange> {
     let path = args.get("file_path")?.as_str()?.to_string();
     match name {
         "Write" => {

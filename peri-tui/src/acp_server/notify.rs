@@ -45,8 +45,14 @@ pub(crate) fn handle_notification(
                         return;
                     }
                 };
+                let active_profile_provider = new_cfg
+                    .config
+                    .profiles
+                    .get(&new_cfg.config.active_alias)
+                    .map(|p| p.provider.as_str())
+                    .unwrap_or("");
                 tracing::info!(
-                    active_provider = %new_cfg.config.active_provider_id,
+                    active_provider = %active_profile_provider,
                     provider_count = new_cfg.config.providers.len(),
                     "config_update notification: full config replace"
                 );
@@ -180,7 +186,7 @@ pub(crate) async fn send_session_info_update(
 }
 
 /// Push a `SessionInfoUpdate` notification with an optional title override.
-/// Called from the `session/rename` handler.
+/// Called from the `session/rename` handler and the prediction SetTitle flow.
 pub(crate) async fn send_session_info_update_with_title(
     transport: &dyn peri_acp::transport::AcpTransport,
     session_id: &str,

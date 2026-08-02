@@ -185,35 +185,34 @@ fn test_extract_file_changes_anthropic_write_format() {
     // Arrange: Anthropic 格式的 Write 工具调用（通过 ai_from_blocks 构造）
     // 注意：ai_from_blocks 会把 ToolUse 同步到 tool_calls 字段（见 message.rs），
     // 因此 extract_file_changes 同时遍历 tool_calls 和 content_blocks 时会
-    // 对同一变更计数两次。这是当前实现行为，本测试如实记录（未来若修复
-    // 去重，此断言需同步更新）。
+    // 遇到同一变更两次。P1 修复后按 ToolUse id 去重，只计一次。
     let msgs = vec![make_ai_write_block("a.txt", "hello")];
 
     // Act
     let changes = extract_file_changes(&msgs);
 
-    // Assert: 当前行为下同一变更被计两次
+    // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
         changes.len(),
-        2,
-        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径各计一次"
+        1,
+        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径应去重"
     );
 }
 
 #[test]
 fn test_extract_file_changes_anthropic_edit_format() {
     // Arrange: Anthropic 格式的 Edit 工具调用（通过 ai_from_blocks 构造）
-    // 同上：双路径计数，结果为 2。
+    // 同上：双路径计数，P1 修复后去重为 1。
     let msgs = vec![make_ai_edit_block("a.txt", "old", "new")];
 
     // Act
     let changes = extract_file_changes(&msgs);
 
-    // Assert: 当前行为下同一变更被计两次
+    // Assert: 修复后同一变更只计一次（按 ToolUse id 去重）
     assert_eq!(
         changes.len(),
-        2,
-        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径各计一次"
+        1,
+        "ai_from_blocks 构造的消息在 tool_calls + content_blocks 双路径应去重"
     );
 }
 
@@ -267,6 +266,19 @@ fn test_extract_file_changes_ignores_non_write_edit_tools() {
 
     // Assert
     assert!(changes.is_empty(), "Bash 工具调用不应被提取");
+}
+
+/// P1：tool_calls 与 content_blocks 双路径对同一 id 只计一次；
+/// 不同 id 的调用仍全部计入。
+#[test]
+fn test_extract_file_changes_deduplicates_by_id() {
+    // ai_from_blocks：ToolUse 同步到 tool_calls，同 id 双路径
+    let msgs = vec![
+        make_ai_write_block("a.txt", "hello"),
+        make_ai_edit_call("b.txt", "old", "new"), // ai_with_tool_calls：仅 tool_calls 路径
+    ];
+    let changes = extract_file_changes(&msgs);
+    assert_eq!(changes.len(), 2, "两个不同 id 的调用各计一次");
 }
 
 // ── revert_files 测试：Write 分支 ──────────────────────────────────────────
@@ -469,9 +481,32 @@ fn test_revert_files_reverse_order_applied() {
     // 当前内容为 C（已应用 A→B→C）
     std::fs::write(&full, "C").expect("写入文件失败");
 
-    // 按历史顺序：先 A→B，再 B→C
-    let msg1 = make_ai_edit_call(file_path, "A", "B");
-    let msg2 = make_ai_edit_call(file_path, "B", "C");
+    // 按历史顺序：先 A→B，再 B→C（两次 Edit 必须用不同 ToolUse id，
+    // 去重后仍视为两个独立调用，逆序撤销才能生效）
+    let msg1 = BaseMessage::ai_with_tool_calls(
+        "推理中...",
+        vec![ToolCallRequest::new(
+            "call_edit_r1",
+            "Edit",
+            serde_json::json!({
+                "file_path": file_path,
+                "old_string": "A",
+                "new_string": "B",
+            }),
+        )],
+    );
+    let msg2 = BaseMessage::ai_with_tool_calls(
+        "推理中...",
+        vec![ToolCallRequest::new(
+            "call_edit_r2",
+            "Edit",
+            serde_json::json!({
+                "file_path": file_path,
+                "old_string": "B",
+                "new_string": "C",
+            }),
+        )],
+    );
     let changes = extract_file_changes(&[msg1, msg2]);
 
     // Act
@@ -578,7 +613,7 @@ fn test_validate_tool_pairing_mixed_message_types_no_panic() {
 // ── execute 测试 ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_execute_invalid_args_emits_compact_error() {
+async fn test_execute_invalid_args_emits_rewind_error() {
     // Arrange: 无效 JSON 参数
     let sink = Arc::new(MockEventSink::new());
     let history = vec![BaseMessage::human("你好")];
@@ -597,18 +632,18 @@ async fn test_execute_invalid_args_emits_compact_error() {
     assert_eq!(result.messages.len(), 1, "参数错误应返回原始 history");
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 CompactError 事件
+    // 应推送 RewindError 事件（rewind 失败与压缩无关，不复用 CompactError）
     let events = sink.events();
     assert_eq!(events.len(), 1, "应推送 1 个事件");
     assert!(
-        events[0].1.contains("compact_error"),
-        "应推送 compact_error 事件，实际: {}",
+        events[0].1.contains("rewind_error"),
+        "应推送 rewind_error 事件，实际: {}",
         events[0].1
     );
 }
 
 #[tokio::test]
-async fn test_execute_target_not_found_emits_compact_error() {
+async fn test_execute_target_not_found_emits_rewind_error() {
     // Arrange: 目标 message_id 不在 history 中
     let sink = Arc::new(MockEventSink::new());
     let history = vec![
@@ -635,8 +670,8 @@ async fn test_execute_target_not_found_emits_compact_error() {
     let events = sink.events();
     assert_eq!(events.len(), 1);
     assert!(
-        events[0].1.contains("compact_error"),
-        "应推送 compact_error，实际: {}",
+        events[0].1.contains("rewind_error"),
+        "应推送 rewind_error，实际: {}",
         events[0].1
     );
     assert!(
@@ -933,4 +968,37 @@ async fn test_execute_with_orphan_tool_pairing_in_retained_does_not_panic() {
     assert_eq!(result.messages.len(), 2);
     assert_eq!(result.messages[0].id(), m1.id());
     assert_eq!(result.messages[1].id(), m2.id());
+}
+
+/// P0：参数缺 revert_files 时（TUI 旧版本/第三方客户端）应默认回退文件，
+/// 而不是进入解析失败静默路径。
+#[tokio::test]
+async fn test_execute_missing_revert_files_defaults_true() {
+    let sink = Arc::new(MockEventSink::new());
+    let history = vec![
+        BaseMessage::human("第一轮问题"),
+        BaseMessage::ai("第一轮回答"),
+        BaseMessage::human("第二轮问题"),
+    ];
+    let target_id = history[0].id().as_uuid().to_string();
+    let ctx = make_ctx(
+        sink.clone(),
+        history.clone(),
+        std::env::temp_dir().to_string_lossy().to_string(),
+        // 只传 target_message_id，缺 revert_files
+        serde_json::json!({ "target_message_id": target_id }).to_string(),
+    );
+
+    let result = RewindCommand.execute(ctx).await;
+
+    let events = sink.events();
+    assert!(
+        !events.iter().any(|(_, json)| json.contains("参数解析失败")),
+        "缺 revert_files 不应进入解析失败路径"
+    );
+    assert_eq!(
+        result.messages.len(),
+        0,
+        "回退到第一条 → 保留 0 条（截断已执行）"
+    );
 }

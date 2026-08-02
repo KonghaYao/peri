@@ -141,6 +141,14 @@ async fn handle_load(
     // TODO_ITEMS，无数据丢失。本 handle_load 仅在 bg-task 拦截分支（弹 Confirm
     // 后 continue）之后才执行，不会误关用户刚看到的 Confirm 弹窗。
     crate::kit::popup_overlay::close_popup();
+    // REWIND_PREVIEW 跟随会话生命周期：切换 thread 后旧 thread 的消息 id 已
+    // 失效，必须清空，否则双击 Esc 会看到旧 thread 的候选（服务端 rewind 报
+    // not found）。新 thread 的首个 turn 完成后服务端会推送新的 preview。
+    *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
+    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
+        crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
     // 4. 最后加载 session。replay notification 到达时 active session 已就绪，不会被误丢。

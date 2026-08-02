@@ -25,7 +25,7 @@ describe("workflow: panel columns", () => {
 
   it(
     "workflow 完成后 panel 中 agent 列值可见",
-    { timeout: 300_000 },
+    { timeout: 480_000 },
     async () => {
       tester = await launchPeri();
 
@@ -35,16 +35,11 @@ describe("workflow: panel columns", () => {
         "/ultracode 请派发一个简单的 workflow，用两个并行 agent 分别执行 echo hello workflow columns test",
       );
 
-      // 等 workflow 开始（状态栏出现计数）
-      await tester.waitForText("workflow", {
-        timeout: 30_000,
-        interval: 2000,
-      });
-      await tester.sleep(3000);
-
-      // 等待 workflow 完成
-      await tester.waitForText("已完成", {
-        timeout: 120_000,
+      // 等待 workflow 真正完成：消息区出现完成通知
+      // "Workflow '<name>' completed. (<duration>ms, ...)"（async_router.rs 生成，不会被翻译）
+      // 注意：不能等 "workflow" 字样——prompt 回显里就有，会立即匹配（e2e/CLAUDE.md 稳定不变量）
+      await tester.waitForText("completed. (", {
+        timeout: 300_000,
         interval: 3000,
       });
       await tester.sleep(3000);

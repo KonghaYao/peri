@@ -39,6 +39,9 @@ pub struct InputTokens {
     pub prompt_loading: Color,
     pub continuation: Color,
     pub placeholder: Color,
+    /// 会话标题标签的 hash 稳定底色板（InputArea 上边栏右侧）。
+    /// 同一标题经确定性 hash 后始终命中同一底色，不同标题大概率不同色。
+    pub session_title_palette: [Color; 8],
 }
 
 /// 面板样式（含布局数值）。

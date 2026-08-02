@@ -21,7 +21,7 @@ use peri_middlewares::hitl::PermissionMode;
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
     MODE_HIGHLIGHT_UNTIL, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, PERMISSION_MODE_HANDLE,
-    PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, REWIND_PREVIEW, SERVICE_SNAPSHOT,
+    PROVIDER_HIGHLIGHT_UNTIL, QUIT_PENDING_SINCE, SERVICE_SNAPSHOT,
 };
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -216,7 +216,9 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                     *LAST_ESC_TIME.state().write() = Some(now);
 
                     if is_double_esc {
-                        let _ = REWIND_PREVIEW.state();
+                        // Rewind v2：打开面板 + 实时查询候选（查询响应写 REWIND_PREVIEW atom，
+                        // 弹窗订阅渲染；查询失败写 REWIND_QUERY_ERROR）。
+                        crate::kit::rewind_candidates::spawn_candidates_query();
                         open_popup(PopupKind::Rewind);
                         return EventResult::Consumed;
                     }

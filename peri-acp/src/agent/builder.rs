@@ -17,7 +17,6 @@ use peri_agent::{
         token::ContextBudget,
     },
     error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
-    llm::BaseModel,
     middleware::chain::MiddlewareChain,
     tools::BaseTool,
 };
@@ -38,8 +37,8 @@ pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,
 >;
 use peri_agent::{
+    agent::model_bridge::AgentModelBridge,
     interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
-    llm::BaseModelReactLLM,
 };
 use peri_middlewares::{
     prelude::*,
@@ -97,8 +96,8 @@ pub(crate) struct AcpAgentOutput {
 /// `build_agent` 直接组装 `MiddlewareChain` + LLM + system prompt 等字段产出本结构，
 /// `build_stage_context` 消费它构造 v2 `StageContext`。
 pub struct AgentComponents {
-    /// 主 LLM（已包装 RetryableLLM）
-    pub llm: peri_agent::llm::RetryableLLM<BaseModelReactLLM>,
+    /// 主 LLM（已通过 `AgentModelBridge` 适配为标准 ReAct 抽象）
+    pub llm: Arc<dyn ReactLLM + Send + Sync>,
     /// 中间件链（v2 StageContext 直接复用）
     pub chain: MiddlewareChain,
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
@@ -123,7 +122,7 @@ pub struct AgentComponents {
 /// 避免每轮重建 reqwest::Client（~1-2 MB/实例）。首次调用传 `None`，
 /// 后续调用传上一次返回的 `Some(CachedLlmInstances)`。
 ///
-/// `pool` 提供 SubAgent LLM 缓存，跨 SubAgent 调用复用 `Arc<dyn BaseModel>`
+/// `pool` 提供 SubAgent LLM 缓存，跨 SubAgent 调用复用 `Arc<dyn peri_model::Model>`
 /// （含共享的 `reqwest::Client`）。首次同模型 SubAgent 调用时创建新实例并插入缓存，
 /// 后续调用直接命中缓存，避免每 SubAgent 分配 ~1-2 MB 的 HTTP client。
 #[allow(clippy::too_many_arguments)] // 过渡：AAC 字段已拆分为独立参数
@@ -135,7 +134,7 @@ pub(crate) fn build_agent(
     agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
     preload_skills: Vec<String>,
     child_handler_factory: Option<ChildHandlerFactory>,
-    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
@@ -181,6 +180,12 @@ pub(crate) fn build_agent(
     let mw_auxiliary_model = auxiliary_model;
     let pool = &ctx.pool;
 
+    // Retry observer 转发器（session 级，挂 AgentPool）：本 turn 的 event_handler
+    // 在构造模型前覆盖式 set，池化模型烘焙转发器引用，发射时读取当前 turn 的
+    // 最新 handler——跨 turn 不陈旧。
+    let retry_events = ctx.pool.lock().retry_events.clone();
+    retry_events.set(Some(Arc::clone(&event_handler)));
+
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
     let system_prompt_for_sub = system_prompt.clone();
 
@@ -199,20 +204,27 @@ pub(crate) fn build_agent(
     let model_name = provider.model_name().to_string();
     let provider_name = provider.display_name().to_string();
 
-    // 提前提取 BaseModel（chain 构建完成后才组装 RetryableLLM，
+    // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
     // 以便收集中间件 prompt_contribution 合并到 system prompt）。
-    let base_model: Box<dyn BaseModel> = provider.into_model();
-    let context_window_raw = base_model.context_window();
+    let context_window_raw = ctx.provider.context_window();
+    let base_model: Arc<dyn peri_model::Model> = Arc::from(
+        provider
+            .with_retry_observer(Some(retry_events.as_retry_observer()))
+            .into_model(),
+    );
 
     // Todo channel
     let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
 
     // HITL middleware — reuse auto_classifier model from cache when available
-    let auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn BaseModel>>> = cached_llm
+    let auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> = cached_llm
         .map(|c| c.auto_classifier_model.clone())
         .unwrap_or_else(|| {
             Arc::new(tokio::sync::Mutex::new(
-                provider_for_factory.clone().into_model(),
+                provider_for_factory
+                    .clone()
+                    .with_retry_observer(Some(retry_events.as_retry_observer()))
+                    .into_model(),
             ))
         });
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(
@@ -269,7 +281,6 @@ pub(crate) fn build_agent(
     let config_for_factory = peri_config.clone();
     let session_id_for_factory = session_id.clone();
     let pool_for_subagent = Arc::clone(pool);
-    let llm_factory_cancel = cancel.clone();
     #[allow(clippy::type_complexity)]
     let llm_factory: Arc<
         dyn Fn(Option<&str>) -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
@@ -295,24 +306,27 @@ pub(crate) fn build_agent(
         };
 
         // 尝试 SubAgent 缓存
-        let model: Arc<dyn BaseModel> =
+        let model: Arc<dyn peri_model::Model> =
             crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
                 &pool_for_subagent,
                 &fp,
                 || match &p {
-                    Some(provider) => provider.clone().into_model(),
-                    None => provider_clone.clone().into_model(),
+                    Some(provider) => provider
+                        .clone()
+                        .with_retry_observer(Some(retry_events.as_retry_observer()))
+                        .into_model(),
+                    None => provider_clone
+                        .clone()
+                        .with_retry_observer(Some(retry_events.as_retry_observer()))
+                        .into_model(),
                 },
             );
 
-        let mut llm = BaseModelReactLLM::from_arc(model);
+        let mut llm = AgentModelBridge::from_arc(model);
         if let Some(s) = sid {
             llm = llm.with_session_id(s);
         }
-        Box::new(
-            peri_agent::llm::RetryableLLM::new(llm, peri_agent::llm::RetryConfig::default())
-                .with_cancel_token(llm_factory_cancel.clone()),
-        )
+        Box::new(llm)
     });
 
     // 系统提示构建器
@@ -441,7 +455,7 @@ pub(crate) fn build_agent(
 
     // 上下文预算
     let mut context_window = context_window_raw;
-    let context_1m = peri_config.config.context_1m.unwrap_or(false);
+    let context_1m = ctx.provider.context_1m();
     if context_1m {
         context_window = 1_000_000;
     }
@@ -625,7 +639,7 @@ pub(crate) fn build_agent(
     // [v2] CompactMiddleware 已移除——自动 compact 由 v2 stages/compact.rs 接管
     // （run_react_loop 在每轮开头调用 compact_v2::run_compact）。
     // 详见 CLAUDE.md「v2 单路径架构」+ stages/compact.rs。
-    let auxiliary_model_for_cache: Option<Arc<dyn BaseModel>> = mw_auxiliary_model.clone();
+    let auxiliary_model_for_cache: Option<Arc<dyn peri_model::Model>> = mw_auxiliary_model.clone();
 
     // GoalMiddleware（链最后）
     // goal active 时注入递增紧迫感 steering + 设 block_continue 让 agent 自驱续跑
@@ -646,16 +660,12 @@ pub(crate) fn build_agent(
         format!("{system_prompt}\n\n{contributions}")
     };
 
-    // 构造 BaseModelReactLLM（带系统提示词）
-    let mut base_llm =
-        peri_agent::llm::BaseModelReactLLM::new(base_model).with_system(merged_system_prompt);
+    // 构造 AgentModelBridge（带系统提示词）
+    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
     if let Some(ref sid) = session_id {
         base_llm = base_llm.with_session_id(sid);
     }
-    let model =
-        peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default())
-            .with_event_handler(Arc::clone(&event_handler))
-            .with_cancel_token(cancel.clone());
+    let model: Arc<dyn ReactLLM + Send + Sync> = Arc::new(base_llm);
 
     // 构建 CachedLlmInstances 供跨 prompt 复用
     let new_cache = auxiliary_model_for_cache.map(|model| CachedLlmInstances {
@@ -764,7 +774,7 @@ pub(crate) fn build_stage_context(
     agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
     preload_skills: Vec<String>,
     child_handler_factory: Option<ChildHandlerFactory>,
-    auxiliary_model: Option<Arc<dyn BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
     background_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
@@ -943,8 +953,8 @@ pub(crate) fn build_stage_context(
         map
     }));
 
-    // 复用 build_agent 产出的 LLM
-    let react_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::new(llm);
+    // 复用 build_agent 产出的 LLM（已适配为 ReactLLM）
+    let react_llm = llm;
 
     // 构造 StageContext
     let mut builder = install_tool_invocation_resolver(

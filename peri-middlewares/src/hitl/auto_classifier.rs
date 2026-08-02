@@ -7,11 +7,9 @@ use std::{
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_agent::{
-    llm::{types::LlmRequest, BaseModel},
-    messages::BaseMessage,
-};
+use peri_model::{ModelMessage, ModelRequest};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
 /// 分类结果枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,17 +40,17 @@ struct CacheEntry {
 
 /// 基于 LLM 的自动分类器实现
 ///
-/// 持有 `Arc<AsyncMutex<Box<dyn BaseModel>>>` 调用 LLM 做分类，
+/// 持有 `Arc<AsyncMutex<Box<dyn peri_model::Model>>>` 调用 LLM 做分类，
 /// 内置基于 `(tool_name, input_hash)` 的缓存，有效期 5 分钟。
 pub struct LlmAutoClassifier {
-    model: Arc<AsyncMutex<Box<dyn BaseModel>>>,
+    model: Arc<AsyncMutex<Box<dyn peri_model::Model>>>,
     cache: Mutex<HashMap<(String, u64), CacheEntry>>,
     cache_ttl: Duration,
 }
 
 impl LlmAutoClassifier {
     /// 创建新的 LLM 分类器
-    pub fn new(model: Arc<AsyncMutex<Box<dyn BaseModel>>>) -> Self {
+    pub fn new(model: Arc<AsyncMutex<Box<dyn peri_model::Model>>>) -> Self {
         Self {
             model,
             cache: Mutex::new(HashMap::new()),
@@ -61,7 +59,10 @@ impl LlmAutoClassifier {
     }
 
     /// 使用自定义缓存 TTL 创建分类器
-    pub fn with_cache_ttl(model: Arc<AsyncMutex<Box<dyn BaseModel>>>, cache_ttl: Duration) -> Self {
+    pub fn with_cache_ttl(
+        model: Arc<AsyncMutex<Box<dyn peri_model::Model>>>,
+        cache_ttl: Duration,
+    ) -> Self {
         Self {
             model,
             cache: Mutex::new(HashMap::new()),
@@ -111,18 +112,26 @@ impl LlmAutoClassifier {
             serde_json::to_string(tool_input).unwrap_or_default(),
         );
 
-        let request = LlmRequest::new(vec![BaseMessage::human(prompt)])
-            .with_system("You are a tool call safety classifier. Respond with exactly one word: ALLOW, DENY, or UNSURE.")
-            .with_max_tokens(32);
+        let request = ModelRequest::new(vec![
+            ModelMessage::system_text(
+                "You are a tool call safety classifier. Respond with exactly one word: ALLOW, DENY, or UNSURE.",
+            ),
+            ModelMessage::user_text(prompt),
+        ])
+        .with_max_tokens(32);
 
         let response = {
             let model = self.model.lock().await;
-            model.invoke(request).await
+            model.complete(request, CancellationToken::new()).await
         };
 
         match response {
             Ok(resp) => {
-                let text = resp.message.content().trim().to_uppercase();
+                let text = resp
+                    .assistant_text()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_uppercase();
                 // 提取所有纯字母单词
                 let words: Vec<&str> = text
                     .split(|c: char| !c.is_alphabetic())

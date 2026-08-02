@@ -44,6 +44,15 @@ const TOOL_NAME: Color = SAGE;
 const MODEL_INFO: Color = Color::Rgb(160, 130, 95); // #A0825F
 const BASH_BORDER: Color = Color::Rgb(253, 93, 177); // #FD5DB1
 
+// ── Model Panel 档位语义 ─────────────────────────────────────────────────────
+const MODEL_ACCENT: Color = Color::Rgb(162, 169, 228); // #A2A9E4 模型名内嵌 effort 后缀
+const EFFORT: Color = Color::Rgb(229, 164, 107); // #E5A46B effort 档位值
+const TOKEN_CONTEXT: Color = Color::Rgb(127, 181, 217); // #7FB5D9 200k/1m 标识
+// light 主题可读性变体
+const LIGHT_MODEL_ACCENT: Color = Color::Rgb(107, 114, 201); // #6B72C9
+const LIGHT_EFFORT: Color = Color::Rgb(176, 111, 46); // #B06F2E
+const LIGHT_TOKEN_CONTEXT: Color = Color::Rgb(62, 138, 184); // #3E8AB8
+
 /// 构建 peri-dark 完整主题定义。
 pub fn dark_theme() -> ThemeDefinition {
     ThemeDefinition {
@@ -113,6 +122,9 @@ pub fn dark_theme() -> ThemeDefinition {
             thinking: THINKING,
             accent: ACCENT,
             model_info: MODEL_INFO,
+            model_accent: MODEL_ACCENT,
+            effort: EFFORT,
+            token_context: TOKEN_CONTEXT,
             bash_border: BASH_BORDER,
             selected_fg: SELECTED_FG,
         },
@@ -132,6 +144,17 @@ pub fn dark_theme() -> ThemeDefinition {
                 prompt_loading: MUTED,
                 continuation: DIM,
                 placeholder: MUTED,
+                // 深色底色板：配白色前景（可读性由 readable_fg 按亮度决定）
+                session_title_palette: [
+                    Color::Rgb(18, 52, 26),  // 深绿
+                    Color::Rgb(55, 20, 18),  // 深红
+                    Color::Rgb(26, 78, 36),  // 草绿
+                    Color::Rgb(78, 28, 22),  // 砖红
+                    Color::Rgb(38, 79, 120), // 深蓝
+                    Color::Rgb(80, 60, 30),  // 深橙棕
+                    Color::Rgb(60, 40, 80),  // 深紫
+                    Color::Rgb(30, 60, 80),  // 深青
+                ],
             },
             panel: PanelTokens {
                 border: BORDER_ACTIVE,
@@ -254,6 +277,9 @@ pub fn light_theme() -> ThemeDefinition {
             thinking: THINKING,
             accent: ACCENT,
             model_info: MODEL_INFO,
+            model_accent: LIGHT_MODEL_ACCENT,
+            effort: LIGHT_EFFORT,
+            token_context: LIGHT_TOKEN_CONTEXT,
             bash_border: BASH_BORDER,
             selected_fg: SELECTED_FG,
         },
@@ -273,6 +299,17 @@ pub fn light_theme() -> ThemeDefinition {
                 prompt_loading: light_muted,
                 continuation: light_dim,
                 placeholder: light_muted,
+                // 浅色底色板：配黑色前景（可读性由 readable_fg 按亮度决定）
+                session_title_palette: [
+                    Color::Rgb(210, 230, 215), // 浅绿
+                    Color::Rgb(235, 210, 210), // 浅红
+                    Color::Rgb(200, 230, 210), // 嫩绿
+                    Color::Rgb(240, 215, 205), // 浅橙
+                    Color::Rgb(205, 220, 240), // 浅蓝
+                    Color::Rgb(235, 220, 200), // 浅黄
+                    Color::Rgb(220, 205, 235), // 浅紫
+                    Color::Rgb(200, 225, 235), // 浅青
+                ],
             },
             panel: PanelTokens {
                 border: ACCENT,

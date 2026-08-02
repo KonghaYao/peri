@@ -153,6 +153,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             usage: Some(u),
             model,
             stop_reason,
+            request_id,
             ..
         } => {
             let update = UsageUpdate::new(
@@ -170,12 +171,12 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 if let Some(v) = u.cache_read_input_tokens {
                     meta.insert("cacheReadTokens".into(), serde_json::json!(v));
                 }
-                if let Some(ref rid) = u.request_id {
+                if let Some(ref rid) = request_id {
                     meta.insert("requestId".into(), serde_json::json!(rid));
                 }
                 meta.insert("model".into(), serde_json::json!(model));
                 if let Some(ref sr) = stop_reason {
-                    meta.insert("stopReason".into(), serde_json::json!(sr.to_string()));
+                    meta.insert("stopReason".into(), serde_json::json!(stop_reason_wire(sr)));
                 }
                 update.meta(meta)
             } else {
@@ -213,6 +214,19 @@ fn infer_tool_kind(name: &str) -> ToolKind {
         "Grep" | "Glob" => ToolKind::Search,
         "WebFetch" | "WebSearch" => ToolKind::Fetch,
         _ => ToolKind::Other,
+    }
+}
+
+/// `stop_reason` 的 legacy wire format 字符串（与历史 StopReason Display 及
+/// JSON 字段值一致，如 "end_turn"）。`peri_model::StopReason` 无 `Display`，
+/// 此处显式映射；不能退化为 `{:?}` 的变体名，否则 ACP `_meta.stopReason`
+/// 会输出 "EndTurn"。
+fn stop_reason_wire(reason: &peri_model::StopReason) -> String {
+    match reason {
+        peri_model::StopReason::EndTurn => "end_turn".into(),
+        peri_model::StopReason::ToolUse => "tool_use".into(),
+        peri_model::StopReason::MaxTokens => "max_tokens".into(),
+        peri_model::StopReason::Other { value } => value.clone(),
     }
 }
 

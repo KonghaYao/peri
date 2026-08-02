@@ -233,3 +233,19 @@ fn test_compact_error_serde_roundtrip() {
         panic!("Deserialized to wrong variant");
     }
 }
+
+#[test]
+fn test_rewind_error_serde_roundtrip() {
+    let ev = ExecutorEvent::RewindError {
+        message: "rewind: 未找到目标消息 abc".to_string(),
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains(r#""type":"rewind_error""#));
+    assert!(json.contains(r#""message":"rewind: 未找到目标消息 abc""#));
+    let deserialized: ExecutorEvent = serde_json::from_str(&json).unwrap();
+    if let ExecutorEvent::RewindError { message } = deserialized {
+        assert_eq!(message, "rewind: 未找到目标消息 abc");
+    } else {
+        panic!("Deserialized to wrong variant");
+    }
+}

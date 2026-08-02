@@ -57,8 +57,8 @@ impl AgentCommand for BgCommand {
         // 构造 LLM 实例（从 peri_config 构建）
         let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
             match LlmProvider::from_config(&ctx.peri_config) {
-                Some(provider) => Box::new(peri_agent::llm::BaseModelReactLLM::new(
-                    provider.into_model(),
+                Some(provider) => Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+                    Arc::from(provider.into_model()),
                 )),
                 None => {
                     events::emit_bg_llm_error(&ctx.event_sink, &ctx.session_id).await;

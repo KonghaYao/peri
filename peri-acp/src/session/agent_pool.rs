@@ -8,13 +8,12 @@
 //! | Cache | Key | Entry | Lifetime |
 //! |-------|-----|-------|----------|
 //! | `cached_llm` | `"provider:model:think=effort:budget"` fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
-//! | `subagent_llm_cache` | `"provider:model:think=effort:budget"` fingerprint | `Arc<dyn BaseModel>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
+//! | `subagent_llm_cache` | `"provider:model:think=effort:budget"` fingerprint | `Arc<dyn Model>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
 use std::{collections::HashMap, sync::Arc};
 
-use peri_agent::llm::BaseModel;
-
 use crate::provider::LlmProvider;
+use crate::session::retry_events::RetryEventForwarder;
 
 /// Session-scoped cached LLM instances.
 ///
@@ -24,10 +23,10 @@ use crate::provider::LlmProvider;
 pub struct CachedLlmInstances {
     /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。
     /// Contains reqwest Client with connection pool.
-    pub auxiliary_model: Arc<dyn BaseModel>,
+    pub auxiliary_model: Arc<dyn peri_model::Model>,
     /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
     /// Contains a second reqwest Client.
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn BaseModel>>>,
+    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
     /// Provider fingerprint at time of creation (`"provider_name:model_name:think=effort:budget"`).
     pub fingerprint: String,
 }
@@ -42,9 +41,15 @@ pub struct AgentPool {
     /// Provider fingerprint for invalidation detection.
     fingerprint: String,
     /// SubAgent LLM cache: keyed by `"provider_name:model_name"` fingerprint.
-    /// Each entry holds an `Arc<dyn BaseModel>` with a shared `reqwest::Client`.
+    /// Each entry holds an `Arc<dyn Model>` with a shared `reqwest::Client`.
     /// Avoids creating a new HTTP client per SubAgent invocation.
-    pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn BaseModel>>,
+    pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn peri_model::Model>>,
+    /// Session 级 retry 事件转发器（值字段，非 Arc）。
+    ///
+    /// 池化模型（subagent_llm_cache / cached_llm）跨 turn 存活时烘焙本转发器
+    /// 的 observer；每 turn `build_agent` 覆盖式 `set` 当前 handler。
+    /// `invalidate()` 不重置——转发器与 provider 缓存无关，跨 turn 观测状态应保留。
+    pub(crate) retry_events: RetryEventForwarder,
 }
 
 impl Default for AgentPool {
@@ -59,6 +64,7 @@ impl AgentPool {
             cached_llm: None,
             fingerprint: String::new(),
             subagent_llm_cache: HashMap::new(),
+            retry_events: RetryEventForwarder::new(),
         }
     }
 
@@ -99,17 +105,17 @@ impl AgentPool {
     pub(crate) fn get_or_create_subagent_llm(
         pool: &Arc<parking_lot::Mutex<AgentPool>>,
         fingerprint: &str,
-        create: impl FnOnce() -> Box<dyn BaseModel>,
-    ) -> Arc<dyn BaseModel> {
+        create: impl FnOnce() -> Box<dyn peri_model::Model>,
+    ) -> Arc<dyn peri_model::Model> {
         // Fast path: query cache under lock
         {
             let guard = pool.lock();
             if let Some(cached) = guard.subagent_llm_cache.get(fingerprint) {
-                return Arc::clone(cached);
+                return cached.clone();
             }
         }
         // Slow path: create outside lock
-        let new_model: Arc<dyn BaseModel> = Arc::from(create());
+        let new_model: Arc<dyn peri_model::Model> = Arc::from(create());
         // Write back under lock (or_insert handles concurrent insert race)
         pool.lock()
             .subagent_llm_cache
@@ -124,7 +130,7 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
         "{}:{}{}",
         provider.display_name(),
         provider.model_name(),
-        provider.thinking_key()
+        provider.effort_key()
     )
 }
 

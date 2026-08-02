@@ -165,7 +165,7 @@ max(0,
 
 ### 2.3 Provider 能力与协议验证
 
-在 `peri-agent/src/llm/mod.rs` 和 `peri-agent/src/agent/react.rs` 增加最小 `ProviderCapabilities` 查询，并由 `BaseModelReactLLM` 转发。能力至少表达：OpenAI-compatible、Anthropic、Generic 三种消息协议，以及“带签名 reasoning 是否必须整体保留”的规则。所有 wrapper（含 `Box<dyn ReactLLM>`、retry/decorator 实现）必须完整透传该方法；Mock 使用安全的 Generic 默认值。
+在 `peri-agent/src/llm/mod.rs` 和 `peri-agent/src/agent/react.rs` 增加最小 `ProviderCapabilities` 查询，并由 `AgentModelBridge` 转发。能力至少表达：OpenAI-compatible、Anthropic、Generic 三种消息协议，以及“带签名 reasoning 是否必须整体保留”的规则。所有 wrapper（含 `Box<dyn ReactLLM>`、retry/decorator 实现）必须完整透传该方法；Mock 使用安全的 Generic 默认值。
 
 `projection.rs` 在返回请求视图前执行 `validate_projected_view`：
 
@@ -221,14 +221,14 @@ cargo test -p peri-agent --lib -- stages::reason_test
 - Modify: `peri-agent/src/agent/react.rs`
 - Modify: `peri-agent/src/llm/mod.rs`
 - Modify: `peri-agent/src/llm/react_adapter.rs`
-- Modify: 每个实现/包装 `ReactLLM`、`BaseModel`、`BaseTool` 的 wrapper（以编译器和 `impl BaseTool for` 搜索结果为准）
+- Modify: 每个实现/包装 `ReactLLM`、`Model`、`BaseTool` 的 wrapper（以编译器和 `impl BaseTool for` 搜索结果为准）
 - Modify: `peri-agent/src/agent/compact_v2/{projection,planner}_test.rs`
 
 - [ ] 在 `projection.rs` 定义 `ProjectionTarget`、`ProjectionAction`、`ProjectionActionEntry`、`MessageProjectionDirective` 和 `ProviderCapabilities`。所有 directive 仅引用 `MessageId`、block index 或 `tool_call_id`，禁止嵌入 `BaseMessage`、Base64 或完整工具输出。
 - [ ] 在 `planner.rs` 定义 `ContextPressure`、`CompactPolicy`、`MicroCompactPlan`、`ApplyReport` 和 `FullEscalationReason`。`MicroCompactPlan.actions` 必须按 transcript 位置稳定排序；`estimated_tokens_saved` 以饱和减法计算。
 - [ ] 扩展 `MessageFlags`，增加带 `#[serde(default)]` 的 projection directive；保持旧 `truncated`/`excluded` JSON 可反序列化。将 `PersistOp` 预留为能承载一个 compaction batch 的富操作，而不是只能逐条 `UpdateFlags`。
 - [ ] 在 `BaseTool` 添加 `context_retention() -> ContextRetention`；默认返回 `Preserve`，确保尚未标注的工具绝不会因新增 trait 被意外压缩。定义 `Preserve`、`StateBearing`、`SideEffectReceipt`、`Recomputable` 四个枚举值。
-- [ ] 在 `BaseModel` 和 `ReactLLM` 添加默认安全的 provider-capability 方法；`BaseModelReactLLM`、`Box<dyn ReactLLM>`、retry/wrapper 全部转发。Provider-specific 实现明确返回 OpenAI 或 Anthropic 能力，Generic 默认为保守保留 signed reasoning。
+- [ ] 在 `Model` 和 `ReactLLM` 添加默认安全的 provider-capability 方法；`AgentModelBridge`、`Box<dyn ReactLLM>`、retry/wrapper 全部转发。Provider-specific 实现明确返回 OpenAI 或 Anthropic 能力，Generic 默认为保守保留 signed reasoning。
 - [ ] 把当前 `micro_excluded_tools` 读取为兼容 fallback，而非新策略的唯一事实来源；新 `CompactPolicy` 优先使用 `ContextRetention`。在第一轮只为 `AskUserQuestion`、`goal`、`TodoWrite` 标注 `StateBearing`，其余尚未审计工具维持 `Preserve`。
 - [ ] 在 `CompactConfig` 新增可 serde-default 的目标 headroom、shadow 和 cache-aware 配置入口；保留旧阈值和 `micro_min_affected` 的反序列化。新字段初始以 shadow/显式 opt-in 保护，避免仅因升级配置结构就改变线上行为。
 

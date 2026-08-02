@@ -67,6 +67,50 @@ fn test_resource_color_by_load() {
 }
 
 #[test]
+fn test_model_segment_parts_full() {
+    // alias + model + effort 三段
+    assert_eq!(
+        model_segment_parts("opus", "claude-opus-4-20250514", "high"),
+        vec!["opus", "claude-opus-4-20250514", "high"]
+    );
+}
+
+#[test]
+fn test_model_segment_parts_no_effort() {
+    assert_eq!(
+        model_segment_parts("opus", "claude-opus-4-20250514", ""),
+        vec!["opus", "claude-opus-4-20250514"]
+    );
+}
+
+#[test]
+fn test_model_segment_parts_model_has_effort_suffix() {
+    // 模型名尾部已含 effort 后缀 → 不重复追加
+    assert_eq!(
+        model_segment_parts("opus", "gpt-5.6-luna high", "high"),
+        vec!["opus", "gpt-5.6-luna high"]
+    );
+}
+
+#[test]
+fn test_model_segment_parts_alias_equals_model() {
+    // 配置回退到 alias（model_name 为空或等于 alias）→ 只显示一次
+    assert_eq!(
+        model_segment_parts("haiku", "haiku", "medium"),
+        vec!["haiku", "medium"]
+    );
+    assert_eq!(
+        model_segment_parts("haiku", "", "medium"),
+        vec!["haiku", "medium"]
+    );
+}
+
+#[test]
+fn test_model_segment_parts_empty_all() {
+    assert!(model_segment_parts("", "", "").is_empty());
+}
+
+#[test]
 #[serial]
 fn test_status_bar_row_renders_without_panic() {
     crate::kit::atoms::init_atoms();
@@ -76,6 +120,7 @@ fn test_status_bar_row_renders_without_panic() {
         provider_name: "anthropic".into(),
         model_alias: "sonnet".into(),
         model_name: "claude-sonnet-4-20250514".into(),
+        effort: "high".into(),
         permission_mode: "accept-edit".into(),
         memory_mb: 256,
         cpu_percent: 12.5,
@@ -88,6 +133,11 @@ fn test_status_bar_row_renders_without_panic() {
     assert_eq!(
         permission_mode_display(&snap.permission_mode),
         "Accept Edit"
+    );
+    // 模型段三段式：alias + model + effort
+    assert_eq!(
+        model_segment_parts(&snap.model_alias, &snap.model_name, &snap.effort),
+        vec!["sonnet", "claude-sonnet-4-20250514", "high"]
     );
 }
 

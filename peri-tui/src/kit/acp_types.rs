@@ -807,6 +807,10 @@ pub enum AcpEventData {
     /// dispatch_and_notify 反序列化后替换 state.committed。
     RewindCompleted { messages_json: String },
 
+    /// `"rewind-error"` — 回退失败（目标消息不存在 / 参数解析失败）。
+    /// 由 AcpEvent::RewindError（peri/agent_event）转换而来。
+    RewindError { message: String },
+
     /// `"oauth-needed"` -- MCP server authorization required.
     OauthNeeded(OauthNeeded),
 

@@ -8,9 +8,10 @@
 use crate::app::setup_wizard::*;
 use crate::i18n;
 use crate::kit::atoms::{self, LANG_VERSION, SETUP_WIZARD};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, hit_row, is_scrollbar_column};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -191,12 +192,41 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         SetupStep::Done => render_done_step(&state, dim, accent, cursor_color, text_color),
     };
 
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
     // 事件处理器
     {
         let state = state.clone();
-        hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
-            handle_wizard_event(event, state.clone())
-        });
+        hooks.use_event_handler_with_options(
+            EventScope::Current,
+            EventPriority::High,
+            EventOptions { hit_test: true },
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        return EventResult::Ignored;
+                    }
+                    let Some(area) = area else {
+                        return EventResult::Ignored;
+                    };
+                    // 命中后移动光标，再复用各 step 的 Enter 分支（构造 Enter KeyEvent）
+                    let mut st = SETUP_WIZARD.state().read().clone();
+                    if !is_scrollbar_column(&mouse, area) && wizard_click(&mouse, area, &mut st) {
+                        *SETUP_WIZARD.state().write() = st;
+                        return EventResult::Consumed;
+                    }
+                    // 区域内点击（未命中行）也消费，防止穿透
+                    return EventResult::Consumed;
+                }
+                handle_wizard_event(event, state.clone())
+            },
+        );
     }
 
     let title_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
@@ -747,6 +777,149 @@ fn render_done_step(
 
 // ── 事件处理 ──────────────────────────────────────────────────────────────────
 
+/// 鼠标左键点击 → 执行该行对应的 Enter 动作（click as enter）。
+///
+/// 命中后先把光标移到对应项，再复用各 step 的 Enter 分支（构造 Enter KeyEvent），
+/// 保证与键盘行为完全一致。行号反推与各 step 渲染布局一一对应（无滚动）。
+fn wizard_click(
+    mouse: &ratatui_kit::crossterm::event::MouseEvent,
+    area: ratatui_kit::ratatui::layout::Rect,
+    state: &mut SetupWizardState,
+) -> bool {
+    let enter = ratatui_kit::crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let visual = mouse.row.saturating_sub(area.y).saturating_sub(1);
+    match state.step {
+        SetupStep::Language => {
+            // 布局：空行 + prompt + 空行（header 3），每语言项 2 行（label + 空行）
+            if let Some(idx) = hit_item(
+                mouse,
+                area,
+                ListLayout {
+                    header_rows: 3,
+                    item_rows: 2,
+                    footer_rows: 0,
+                    visible_items: LANGUAGE_OPTIONS.len() as u16,
+                    scroll_start: 0,
+                    item_count: LANGUAGE_OPTIONS.len(),
+                },
+            ) {
+                state.language_cursor = idx;
+                handle_language_keys(state, enter);
+                return true;
+            }
+        }
+        SetupStep::Choose => {
+            // 布局：空行 + prompt + 空行（header 3），每项 3 行（label + desc + 空行）
+            if let Some(idx) = hit_item(
+                mouse,
+                area,
+                ListLayout {
+                    header_rows: 3,
+                    item_rows: 3,
+                    footer_rows: 0,
+                    visible_items: SetupSource::ALL.len() as u16,
+                    scroll_start: 0,
+                    item_count: SetupSource::ALL.len(),
+                },
+            ) {
+                state.choose_cursor = idx;
+                state.source = SetupSource::ALL[idx];
+                handle_choose_keys(state, enter);
+                return true;
+            }
+        }
+        SetupStep::Form => match state.form_mode {
+            FormMode::Browse => {
+                // 布局：空行 + 每 provider 6 行（base_url 非空时 7 行）+ submit 行（无滚动）
+                // 与 render_browse 对齐：provider 行 + (url 行) + 空行 + 3 别名行 + 空行
+                let mut cur = 1u16;
+                if state.providers.is_empty() {
+                    cur += 2; // "no providers" + 空行
+                }
+                for (i, mp) in state.providers.iter().enumerate() {
+                    let item_h = if mp.base_url.is_empty() { 6u16 } else { 7u16 };
+                    if visual >= cur && visual < cur + item_h {
+                        state.browse_cursor = i;
+                        handle_browse_keys(state, enter);
+                        return true;
+                    }
+                    cur += item_h;
+                }
+                // submit 行（submit_error 存在时多 2 行）
+                if state.submit_error.is_some() {
+                    cur += 2;
+                }
+                if visual == cur {
+                    state.browse_cursor = state.providers.len();
+                    handle_browse_keys(state, enter);
+                    return true;
+                }
+            }
+            FormMode::Edit => {
+                // 布局：空行（header 1）+ ProviderType..ApiKey 各 1 行；
+                // 空行 + model 标题（header 8）+ OpusModel..Confirm 各 1 行
+                const FIELDS1: [FormField; 5] = [
+                    FormField::ProviderType,
+                    FormField::ProviderId,
+                    FormField::BaseUrl,
+                    FormField::TestConnectivity,
+                    FormField::ApiKey,
+                ];
+                if let Some(idx) = hit_row(
+                    mouse.row,
+                    area,
+                    ListLayout {
+                        header_rows: 1,
+                        item_rows: 1,
+                        footer_rows: 0,
+                        visible_items: FIELDS1.len() as u16,
+                        scroll_start: 0,
+                        item_count: FIELDS1.len(),
+                    },
+                ) {
+                    state.form_focus = FIELDS1[idx];
+                    state.edit_cursor_pos = get_raw_field_value(state).chars().count();
+                    handle_edit_keys(state, enter);
+                    return true;
+                }
+                const FIELDS2: [FormField; 4] = [
+                    FormField::OpusModel,
+                    FormField::SonnetModel,
+                    FormField::HaikuModel,
+                    FormField::Confirm,
+                ];
+                if let Some(idx) = hit_row(
+                    mouse.row,
+                    area,
+                    ListLayout {
+                        header_rows: 8,
+                        item_rows: 1,
+                        footer_rows: 0,
+                        visible_items: FIELDS2.len() as u16,
+                        scroll_start: 0,
+                        item_count: FIELDS2.len(),
+                    },
+                ) {
+                    state.form_focus = FIELDS2[idx];
+                    state.edit_cursor_pos = get_raw_field_value(state).chars().count();
+                    handle_edit_keys(state, enter);
+                    return true;
+                }
+            }
+        },
+        SetupStep::Done => {
+            // 布局：空行 + 标题 + 空行（header 3）+ 每 provider 7 行 + 空行 + Enter 提示行
+            let selected_count = state.providers.iter().filter(|p| p.selected).count();
+            let enter_row = (4 + 7 * selected_count) as u16;
+            if visual == enter_row {
+                handle_done_keys(state, enter);
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn handle_wizard_event(event: Event, mut state: SetupWizardState) -> EventResult {
     // 处理粘贴事件（仅 Form 编辑模式下且当前字段为文本输入时）
     if let Event::Paste(paste_text) = &event {
@@ -1104,4 +1277,64 @@ fn handle_paste_to_text_input(state: &mut SetupWizardState, paste_text: &str) {
     val = format!("{}{}{}", prefix, truncated, suffix);
     state.edit_cursor_pos = pos + paste_len;
     state.set_active_field_value(val);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui_kit::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui_kit::ratatui::layout::Rect;
+
+    /// 内容区 visual_row 处的左键点击（area 顶部边框行不可点，故 row = area.y + 1 + visual_row）。
+    fn click(area: Rect, visual_row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y + 1 + visual_row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn browse_state(providers: Vec<MigratedProvider>) -> SetupWizardState {
+        SetupWizardState {
+            step: SetupStep::Form,
+            form_mode: FormMode::Browse,
+            providers,
+            ..Default::default()
+        }
+    }
+
+    /// Browse 无 base_url：每 provider 6 行（provider 行 + 空行 + 3 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 7，点击应命中第二个并进入 Edit。
+    #[test]
+    fn browse_click_without_base_url_hits_second_provider() {
+        let mut p1 = MigratedProvider::new(ProviderType::Anthropic);
+        p1.base_url = String::new();
+        let mut p2 = MigratedProvider::new(ProviderType::OpenAiCompatible);
+        p2.base_url = String::new();
+        let mut state = browse_state(vec![p1, p2]);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(
+            wizard_click(&click(area, 7), area, &mut state),
+            "visual 7 = 第二个 provider 的 provider 行"
+        );
+        assert_eq!(state.active_provider, 1, "命中第二个 provider");
+        assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");
+    }
+
+    /// Browse 带 base_url：每 provider 7 行（provider 行 + url 行 + 空行 + 3 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 8。
+    #[test]
+    fn browse_click_with_base_url_hits_second_provider() {
+        let p1 = MigratedProvider::new(ProviderType::Anthropic);
+        let p2 = MigratedProvider::new(ProviderType::OpenAiCompatible);
+        let mut state = browse_state(vec![p1, p2]);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(
+            wizard_click(&click(area, 8), area, &mut state),
+            "visual 8 = 第二个 provider 的 provider 行"
+        );
+        assert_eq!(state.active_provider, 1, "命中第二个 provider");
+        assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");
+    }
 }

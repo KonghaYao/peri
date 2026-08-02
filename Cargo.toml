@@ -4,6 +4,7 @@ members = [
     "peri-acp-types",
     "peri-agent",
     "peri-middlewares",
+    "peri-model",
     "peri-tui",
     "langfuse-client",
     "peri-lsp",

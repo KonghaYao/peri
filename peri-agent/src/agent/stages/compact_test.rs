@@ -5,10 +5,10 @@ use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events_v2::{EventBus, EventBusConfig, EventHandles, ObserveEvent};
 use crate::agent::stages::StageContext;
 use crate::agent::token::ContextBudget;
-use crate::llm::types::TokenUsage;
 use crate::messages::{BaseMessage, MessageContent, ToolCallRequest};
 use crate::session::store::FrozenContext;
 use crate::session::Session;
+use peri_model::TokenUsage;
 use std::sync::Arc;
 
 fn make_context() -> StageContext {
@@ -83,8 +83,6 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
@@ -140,8 +138,6 @@ async fn test_compact_stage_smart_applied_then_full_failure_is_compacted_without
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
     let token_tracker = ctx.compact.token_tracker.clone();
 
@@ -196,8 +192,6 @@ async fn test_compact_stage_micro_shadow_mode_is_not_compacted() {
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
 
     let output = run_compact(CompactInput {
@@ -247,8 +241,6 @@ async fn test_compact_stage_smart_shadow_mode_is_not_compacted() {
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
 
     let output = run_compact(CompactInput {
@@ -278,8 +270,6 @@ async fn test_compact_stage_shadow_mode_emits_no_messages_compacted() {
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
 
     let output = run_compact(CompactInput {
@@ -325,8 +315,6 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
 
     let output = run_compact(CompactInput {
@@ -370,8 +358,6 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
     });
 
     let output = run_compact(CompactInput {

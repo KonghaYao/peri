@@ -11,13 +11,12 @@
 //!
 //! 与 v1 的区别：v2 基于 `MessageTranscript` 标记 API，不修改消息本体，
 //! 旧消息标 `excluded` 后 `visible_messages()` 自动过滤。
-//! Full Compact 通过 `BaseModel::invoke` 标准链路请求摘要。
+//! Full Compact 通过 `peri_model::Model` 标准链路请求摘要。
 //! 所有注入消息使用 `BaseMessage::human()` —— 禁止 System，防止 hoist 污染 FrozenContext。
 
 use tracing::{debug, info, warn};
 
 use crate::agent::events::CompactStrategy;
-use crate::llm::BaseModel;
 use crate::session::transcript::MessageTranscript;
 
 pub mod config;
@@ -169,7 +168,7 @@ pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactA
 /// - Smart：规则驱动保留关键消息，逻辑同 Micro
 pub async fn run_compact(
     transcript: &mut MessageTranscript,
-    llm: Option<&dyn BaseModel>,
+    llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
     pressure: &ContextPressure,
     force: bool,
@@ -608,7 +607,7 @@ pub async fn run_compact(
 /// 运行 Full Compact（含失败降级逻辑）
 async fn run_full_or_degrade(
     transcript: &mut MessageTranscript,
-    llm: Option<&dyn BaseModel>,
+    llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
     before_visible_len: usize,
     consecutive_failures: &mut u32,

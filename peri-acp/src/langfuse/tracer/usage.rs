@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use peri_agent::llm::types::TokenUsage;
+use peri_model::TokenUsage;
 
 /// 将 TokenUsage 转换为 Langfuse usage_details HashMap。
 ///

@@ -12,11 +12,12 @@ use crate::kit::atoms::{
     TUI_CONFIG_HANDLE,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_middlewares::prelude::PermissionMode;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -52,7 +53,7 @@ const ROW_SCROLL_FPS: usize = 7;
 
 const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
 const LANGUAGE_OPTS: &[&str] = &["en", "zh-CN"];
-const ALIAS_OPTS: &[&str] = &["opus", "sonnet", "haiku"];
+const ALIAS_OPTS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
 const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
 const FPS_OPTS: &[&str] = &["60", "30", "20"];
 
@@ -79,45 +80,83 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bump = hooks.use_state(|| 0u32);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        let row_count = CONFIG_ROWS.len();
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+    let row_count = CONFIG_ROWS.len();
 
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            let sel = *cursor.read();
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    if let Some(area) = area
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 2,
+                                item_rows: 1,
+                                footer_rows: 2,
+                                visible_items: row_count as u16,
+                                scroll_start: 0,
+                                item_count: row_count,
+                            },
+                        )
+                    {
+                        *cursor.write() = idx;
+                        activate_row(idx, true);
+                        *bump.write() += 1;
+                        return EventResult::Consumed;
+                    }
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
+                }
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+                let sel = *cursor.read();
 
-            match key.code {
-                KeyCode::Esc => {
-                    close_panel();
+                match key.code {
+                    KeyCode::Esc => {
+                        close_panel();
+                    }
+                    KeyCode::Up => {
+                        *cursor.write() = previous_selection(sel);
+                    }
+                    KeyCode::Down => {
+                        *cursor.write() = next_selection(sel, row_count);
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        activate_row(sel, true);
+                        *bump.write() += 1;
+                    }
+                    KeyCode::Left => {
+                        activate_row(sel, false);
+                        *bump.write() += 1;
+                    }
+                    KeyCode::Right => {
+                        activate_row(sel, true);
+                        *bump.write() += 1;
+                    }
+                    _ => {}
                 }
-                KeyCode::Up => {
-                    *cursor.write() = previous_selection(sel);
-                }
-                KeyCode::Down => {
-                    *cursor.write() = next_selection(sel, row_count);
-                }
-                KeyCode::Char(' ') | KeyCode::Enter => {
-                    activate_row(sel, true);
-                    *bump.write() += 1;
-                }
-                KeyCode::Left => {
-                    activate_row(sel, false);
-                    *bump.write() += 1;
-                }
-                KeyCode::Right => {
-                    activate_row(sel, true);
-                    *bump.write() += 1;
-                }
-                _ => {}
+                EventResult::Consumed
             }
-            EventResult::Consumed
-        }
-    });
+        },
+    );
 
     // 读取 bump 强制 ratatui-kit 把这个值当作依赖（无此 read 调用则不会重渲染）
     let _ = *bump.read();
@@ -245,11 +284,18 @@ fn read_toggle(row: usize) -> bool {
             .unwrap_or(false),
         ROW_CACHE_WARN => PERI_CONFIG_HANDLE
             .get()
-            .map(|h| h.read().config.show_cache_warning)
+            .map(|h| h.read().config.show_cache_warning.unwrap_or(false))
             .unwrap_or(false),
         ROW_1M_CONTEXT => PERI_CONFIG_HANDLE
             .get()
-            .map(|h| h.read().config.context_1m.unwrap_or(false))
+            .map(|h| {
+                let c = h.read();
+                c.config
+                    .profiles
+                    .get(&c.config.active_alias)
+                    .map(|p| p.context_1m)
+                    .unwrap_or(false)
+            })
             .unwrap_or(false),
         _ => false,
     }
@@ -279,10 +325,15 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
                 .get()
                 .map(|h| h.read().config.active_alias.clone())
                 .unwrap_or_default();
+            // default sonnet：按名称查找索引，避免 ALIAS_OPTS 顺序变化导致硬编码漂移
+            let default_idx = options.iter().position(|o| *o == "sonnet").unwrap_or(0);
             if cur.is_empty() {
-                1 // default sonnet
+                default_idx
             } else {
-                options.iter().position(|o| *o == cur.as_str()).unwrap_or(1)
+                options
+                    .iter()
+                    .position(|o| *o == cur.as_str())
+                    .unwrap_or(default_idx)
             }
         }
         ROW_PERMISSION_MODE => {
@@ -357,10 +408,15 @@ fn activate_row(row: usize, forward: bool) {
                     }
                     return;
                 }
-                ROW_CACHE_WARN => cfg.config.show_cache_warning = !cfg.config.show_cache_warning,
+                ROW_CACHE_WARN => {
+                    let cur = cfg.config.show_cache_warning.unwrap_or(false);
+                    cfg.config.show_cache_warning = Some(!cur);
+                }
                 ROW_1M_CONTEXT => {
-                    let cur = cfg.config.context_1m.unwrap_or(false);
-                    cfg.config.context_1m = Some(!cur);
+                    let alias = cfg.config.active_alias.clone();
+                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+                        profile.context_1m = !profile.context_1m;
+                    }
                 }
                 _ => {}
             }
@@ -571,13 +627,20 @@ fn permission_mode_label(m: PermissionMode) -> &'static str {
 fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<bool> {
     let new_val = match row {
         ROW_CACHE_WARN => {
-            cfg.config.show_cache_warning = !cfg.config.show_cache_warning;
-            cfg.config.show_cache_warning
+            let cur = cfg.config.show_cache_warning.unwrap_or(false);
+            cfg.config.show_cache_warning = Some(!cur);
+            !cur
         }
         ROW_1M_CONTEXT => {
-            let cur = cfg.config.context_1m.unwrap_or(false);
-            cfg.config.context_1m = Some(!cur);
-            !cur
+            let alias = cfg.config.active_alias.clone();
+            cfg.config
+                .profiles
+                .get_mut(&alias)
+                .map(|p| {
+                    p.context_1m = !p.context_1m;
+                    p.context_1m
+                })
+                .unwrap_or(false)
         }
         _ => return None,
     };

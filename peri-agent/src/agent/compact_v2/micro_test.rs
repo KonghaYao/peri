@@ -421,6 +421,49 @@ fn test_protected_by_retention_map_not_selected() {
     assert_eq!(affected, 0, "retention_map 中 Preserve 工具不应被截断");
 }
 
+#[test]
+fn test_micro_compact_short_param_tool_call_still_compacts() {
+    // 回归验证：普通短参数工具调用（<500 字符）在 stale 窗口外也必须触发压缩。
+    // field-level 实现初期只压缩超长字段，导致短参数工具调用永不产生 action，
+    // plan 空 → Skip → Micro Compact 在常规对话中静默失效。
+    let mut t = MessageTranscript::new();
+    for i in 0..7 {
+        t.append(make_human(&format!("q {}", i)));
+        let ai = BaseMessage::ai_with_tool_calls(
+            MessageContent::text(format!("thinking {}", i)),
+            vec![crate::messages::ToolCallRequest::new(
+                format!("sc_{}", i),
+                "Read",
+                serde_json::json!({"path": "/tmp/short.txt"}),
+            )],
+        );
+        t.append(ai);
+        t.append(BaseMessage::tool_result(
+            format!("sc_{}", i),
+            MessageContent::text("short result"),
+        ));
+    }
+
+    let config = CompactConfig::default();
+    let affected = micro_compact(&mut t, &config);
+    assert!(
+        affected > 0,
+        "短参数工具调用应通过整条兜底压缩触发（affected={affected}）"
+    );
+
+    // 整条兜底：stale 窗口外 Ai 消息被标记 truncated（ToolResult 短，保留原样）
+    let flagged_ai = t
+        .entries()
+        .iter()
+        .filter(|e| matches!(&e.message, BaseMessage::Ai { .. }))
+        .filter(|e| t.flags(e.message.id()).truncated)
+        .count();
+    assert!(
+        flagged_ai > 0,
+        "stale 窗口外的 Ai（tool_use）消息应被标记 truncated"
+    );
+}
+
 // ── 工厂函数：供后续测试复用 ──────────────────────────────────────────────
 
 #[allow(dead_code)]

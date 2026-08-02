@@ -1,16 +1,44 @@
 #!/usr/bin/env bun
 /**
- * 列出最近 N 条 trace 的 token 汇总
+ * 列出 Trace 的 token 汇总（支持过滤）
  *
- * 用法: bun .claude/skills/langfuse/scripts/traces-list.ts [N]
+ * 用法: bun .claude/skills/langfuse/scripts/traces-list.ts [N] [选项]
+ *
+ * 过滤:
+ *   --from <ISO>   起始时间
+ *   --to <ISO>     结束时间
+ *   --days <N>     最近 N 天
+ *   --tag <tag>    按 tag 过滤
+ *   --user <id>    按用户过滤
+ *   --session <id> 按 session 过滤
+ *   --name <str>   按 name 过滤
+ *   --limit <N>    条数限制
  */
-import { fetchTraces, fetchObservations, fmt, pct, genTokens } from "./lib.ts";
+import { fetchTracesFiltered, fetchObservations, parseFilterArgs, summarizeTokens, genTokens, fmt, pct, ms, isoToLocal } from "./lib.ts";
 
-const limit = parseInt(process.argv[2]) || 10;
+const args = process.argv.slice(2);
+const filter = parseFilterArgs(args);
 
-console.log(`Fetching latest ${limit} traces...\n`);
+if (filter.time.from) {
+  console.error(`Time range: ${filter.time.from} → ${filter.time.to || "now"}`);
+}
 
-const traces = await fetchTraces(limit);
+console.error(`Fetching latest ${filter.limit} traces...`);
+
+const { traces } = await fetchTracesFiltered({
+  limit: filter.limit,
+  fromTimestamp: filter.time.from,
+  toTimestamp: filter.time.to,
+  tags: filter.tag ? [filter.tag] : undefined,
+  userId: filter.userId,
+  sessionId: filter.sessionId,
+  name: filter.name,
+});
+
+if (traces.length === 0) {
+  console.log("No traces found.");
+  process.exit(0);
+}
 
 interface TraceSummary {
   id: string;
@@ -23,6 +51,7 @@ interface TraceSummary {
   effective: number;
   cachePct: number;
   latency: number;
+  timestamp: string;
 }
 
 const summaries: TraceSummary[] = [];
@@ -55,6 +84,7 @@ for (let i = 0; i < traces.length; i += 5) {
       effective: totalInput - totalCache,
       cachePct: totalInput > 0 ? (totalCache / totalInput) * 100 : 0,
       latency: t.latency || 0,
+      timestamp: t.timestamp || "",
     });
   }
 }
@@ -66,7 +96,7 @@ for (let i = 0; i < summaries.length; i++) {
   const s = summaries[i];
   const label = s.input.replace(/\|/g, "\\|");
   console.log(
-    `| ${i + 1} | ${label} | ${s.llmCalls} | ${s.toolCalls} | ${fmt(s.totalInput)} | ${fmt(s.totalOutput)} | ${s.cachePct.toFixed(1)}% | ${fmt(s.effective)} | ${s.latency.toFixed(1)}s |`
+    `| ${i + 1} | ${label} | ${s.llmCalls} | ${s.toolCalls} | ${fmt(s.totalInput)} | ${fmt(s.totalOutput)} | ${s.cachePct.toFixed(1)}% | ${fmt(s.effective)} | ${ms(s.latency)} |`
   );
 }
 

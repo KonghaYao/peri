@@ -90,3 +90,48 @@ fn test_footer_loading_steady_state_has_no_control_state_transition() {
         "loading 稳态不应写 was_loading/load_start，否则会触发持续重渲染"
     );
 }
+
+/// verb_override 提供摘要时，spinner 渲染优先使用摘要而非随机名言
+#[test]
+fn test_render_to_lines_verb_override_优先于名言() {
+    let spinner = crate::components::spinner::SpinnerState::new(
+        crate::components::spinner::SpinnerMode::Thinking,
+    );
+    let lines = spinner.render_to_lines(
+        ratatui::style::Color::White,
+        ratatui::style::Color::DarkGray,
+        false,
+        false,
+        0,
+        Some("修复了认证问题"),
+    );
+    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        rendered.contains("修复了认证问题"),
+        "有摘要时应显示摘要而非名言，实际: {rendered}"
+    );
+}
+
+/// 无 verb_override 时保持随机名言
+#[test]
+fn test_render_to_lines_无_override_显示名言() {
+    let spinner = crate::components::spinner::SpinnerState::new(
+        crate::components::spinner::SpinnerMode::Thinking,
+    );
+    let lines = spinner.render_to_lines(
+        ratatui::style::Color::White,
+        ratatui::style::Color::DarkGray,
+        false,
+        false,
+        0,
+        None,
+    );
+    let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(!rendered.contains("修复了认证问题"));
+    assert!(
+        crate::components::spinner::verb::DEFAULT_VERBS
+            .iter()
+            .any(|v| rendered.contains(v)),
+        "无 override 时应显示随机名言，实际: {rendered}"
+    );
+}

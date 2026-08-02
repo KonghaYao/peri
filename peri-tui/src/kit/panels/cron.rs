@@ -5,7 +5,7 @@
 //! 通过 AcpClient 触发（暂留 TODO）。
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::Constraint,
@@ -19,6 +19,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{CRON_JOBS, CronJobSummary, LANG_VERSION};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -34,83 +35,131 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = jobs_store; // StoreState 是 Copy，无需显式 drop
     let _ = hooks.use_atom(&LANG_VERSION);
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-
-            // Confirm-delete mode: Enter confirms, Esc cancels, others cancel
-            if *confirm_delete.read() {
-                match key.code {
-                    KeyCode::Enter => {
-                        let sel = *selected.read();
-                        let jobs = CRON_JOBS.state().read().clone();
-                        if let Some(job) = jobs.get(sel) {
-                            cron_remove(&job.id);
-                        }
-                        *confirm_delete.write() = false;
-                    }
-                    KeyCode::Esc => {
-                        *confirm_delete.write() = false;
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return EventResult::Ignored;
-                    }
-                    _ => {
-                        *confirm_delete.write() = false;
-                    }
-                }
-                return EventResult::Consumed;
-            }
-
-            match key.code {
-                KeyCode::Esc => {
-                    close_panel();
-                }
-                KeyCode::Up => {
-                    let mut s = selected.write();
-                    *s = previous_selection(*s);
-                }
-                KeyCode::Down => {
-                    let mut s = selected.write();
-                    let count = CRON_JOBS.state().read().len();
-                    if count > 0 {
-                        *s = next_selection(*s, count);
-                    }
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    let sel = *selected.read();
-                    let jobs = CRON_JOBS.state().read().clone();
-                    if let Some(job) = jobs.get(sel) {
-                        cron_toggle(&job.id);
-                    }
-                }
-                KeyCode::Char('d') if !CRON_JOBS.state().read().is_empty() => {
-                    *confirm_delete.write() = true;
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return EventResult::Ignored;
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
-
-    let sel = *selected.read();
-    let is_confirming = *confirm_delete.read();
-    let enabled_count = jobs.iter().filter(|e| e.enabled).count();
-    let mut lines: Vec<Line<'_>> = Vec::new();
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
 
     // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
     // panel 高度 18 - border 2 - header 3 = 13 行；每项 3 行 → 可见 4 个。
     // next_fire 缺失时占位空行，保证每项固定 3 行（视口计算依赖）。
     const VISIBLE_ITEMS: usize = 4;
-    let scroll_start = scroll_start_for_selected(sel, jobs.len(), VISIBLE_ITEMS);
+    let scroll_start = scroll_start_for_selected(*selected.read(), jobs.len(), VISIBLE_ITEMS);
+    let is_confirming = *confirm_delete.read();
+    // 闭包捕获用副本（jobs 渲染部分仍需要）
+    let jobs_len = jobs.len();
+    let jobs_empty = jobs.is_empty();
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
+            move |event| {
+                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                if let Event::Mouse(mouse) = event {
+                    // 确认删除模式：点击不触发 toggle（防止误删），仅消费事件
+                    if !is_confirming
+                        && let Some(area) = area
+                        && !is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                // jobs 为空时 stats 行不渲染，header 少 1 行
+                                header_rows: if jobs_empty { 2 } else { 3 },
+                                item_rows: 3,
+                                footer_rows: 0,
+                                visible_items: VISIBLE_ITEMS as u16,
+                                scroll_start,
+                                item_count: jobs_len,
+                            },
+                        )
+                    {
+                        *selected.write() = idx;
+                        let jobs = CRON_JOBS.state().read().clone();
+                        if let Some(job) = jobs.get(idx) {
+                            cron_toggle(&job.id);
+                        }
+                        return EventResult::Consumed;
+                    }
+                    return match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                        _ => EventResult::Ignored,
+                    };
+                }
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press {
+                    return EventResult::Ignored;
+                }
+
+                // Confirm-delete mode: Enter confirms, Esc cancels, others cancel
+                if *confirm_delete.read() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let sel = *selected.read();
+                            let jobs = CRON_JOBS.state().read().clone();
+                            if let Some(job) = jobs.get(sel) {
+                                cron_remove(&job.id);
+                            }
+                            *confirm_delete.write() = false;
+                        }
+                        KeyCode::Esc => {
+                            *confirm_delete.write() = false;
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return EventResult::Ignored;
+                        }
+                        _ => {
+                            *confirm_delete.write() = false;
+                        }
+                    }
+                    return EventResult::Consumed;
+                }
+
+                match key.code {
+                    KeyCode::Esc => {
+                        close_panel();
+                    }
+                    KeyCode::Up => {
+                        let mut s = selected.write();
+                        *s = previous_selection(*s);
+                    }
+                    KeyCode::Down => {
+                        let mut s = selected.write();
+                        let count = CRON_JOBS.state().read().len();
+                        if count > 0 {
+                            *s = next_selection(*s, count);
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        let sel = *selected.read();
+                        let jobs = CRON_JOBS.state().read().clone();
+                        if let Some(job) = jobs.get(sel) {
+                            cron_toggle(&job.id);
+                        }
+                    }
+                    KeyCode::Char('d') if !CRON_JOBS.state().read().is_empty() => {
+                        *confirm_delete.write() = true;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return EventResult::Ignored;
+                    }
+                    _ => {}
+                }
+                EventResult::Consumed
+            }
+        },
+    );
+
+    let sel = *selected.read();
+    let is_confirming = *confirm_delete.read();
+    let enabled_count = jobs.iter().filter(|e| e.enabled).count();
+    let mut lines: Vec<Line<'_>> = Vec::new();
 
     // Stats line
     if !jobs.is_empty() {

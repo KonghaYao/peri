@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_agent::{
     agent::{
-        react::{ReactLLM, Reasoning},
+        react::{ReactLLM, Reasoning, StreamingContext},
         AgentCancellationToken,
     },
     messages::BaseMessage,
@@ -23,7 +23,7 @@ impl ReactLLM for EchoLLM {
         &self,
         messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
-        _streaming: Option<peri_agent::llm::types::StreamingContext>,
+        _streaming: Option<StreamingContext>,
     ) -> peri_agent::error::AgentResult<Reasoning> {
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
         Ok(Reasoning::with_answer("", format!("echo: {}", last)))
@@ -483,7 +483,7 @@ async fn test_system_builder_injects_system_message() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             // Find system message and return its content
             let system_content = messages
@@ -560,7 +560,7 @@ async fn test_skill_preload_registered() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             assert!(
                 messages
@@ -691,7 +691,7 @@ async fn test_cancel_token_interrupts_subagent() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             if messages
                 .iter()
@@ -762,7 +762,7 @@ async fn test_fork_inherits_parent_messages() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.msg_count.lock().unwrap() = messages.len();
             Ok(Reasoning::with_answer("", "fork-done"))
@@ -824,7 +824,7 @@ async fn test_fork_registers_all_tools_including_agent() {
             &self,
             _messages: &[BaseMessage],
             tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
             Ok(Reasoning::with_answer("", "tools-check"))
@@ -908,7 +908,7 @@ async fn test_fork_system_prompt_consistent() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             let sys = messages
                 .iter()
@@ -969,7 +969,7 @@ async fn test_fork_directive_includes_rules() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             *self.last.lock().unwrap() = last;
@@ -1196,7 +1196,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = messages.to_vec();
             Ok(Reasoning::with_answer("", "fork integration done"))
@@ -1317,7 +1317,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             Ok(Reasoning::with_answer("", "ctx-preferred"))
@@ -1385,7 +1385,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             Ok(Reasoning::with_answer("", "fallback-used"))
@@ -1455,7 +1455,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
             Ok(Reasoning::with_answer("", "tool-call-dropped"))
@@ -1533,7 +1533,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Reasoning::with_answer("", "bg done independent"))
@@ -1705,7 +1705,7 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Reasoning::with_tools(
@@ -1801,7 +1801,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(
@@ -1909,7 +1909,7 @@ async fn test_integration_fork_plus_background_priority() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
-            _streaming: Option<peri_agent::llm::types::StreamingContext>,
+            _streaming: Option<StreamingContext>,
         ) -> peri_agent::error::AgentResult<Reasoning> {
             // 找到最后一条 Human 消息（fork directive 在 prompt queue 里）
             if let Some(last_human) = messages

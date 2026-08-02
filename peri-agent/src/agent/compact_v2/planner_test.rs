@@ -594,7 +594,16 @@ fn test_plan_micro_enforces_input_threshold_boundary() {
         &config,
     );
 
-    assert!(exact_limit.actions.is_empty());
+    assert!(
+        matches!(
+            &exact_limit.actions[..],
+            [ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
+            }] if fields.is_empty()
+        ),
+        "恰好阈值的字段不触发字段级压缩，但应生成整条兜底压缩 action"
+    );
     assert!(matches!(
         &over_limit.actions[..],
         [ProjectionActionEntry {
@@ -622,7 +631,16 @@ fn test_plan_micro_ignores_nested_and_array_input_values() {
         &config,
     );
 
-    assert!(plan.actions.is_empty());
+    assert!(
+        matches!(
+            &plan.actions[..],
+            [ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
+            }] if fields.is_empty()
+        ),
+        "嵌套/数组值不参与字段级压缩，但应生成整条兜底压缩 action"
+    );
 
     let array_root_plan = plan_for_tool_call(
         "Read",
@@ -654,10 +672,15 @@ fn test_plan_micro_ignores_non_string_top_level_input_values() {
     );
 
     assert!(
-        plan.actions
-            .iter()
-            .all(|entry| !matches!(&entry.action, ProjectionAction::CompactToolInput { .. })),
-        "顶层非字符串字段不应生成 CompactToolInput"
+        plan.actions.iter().all(
+            |entry| !matches!(&entry.action, ProjectionAction::CompactToolInput { fields, .. } if !fields.is_empty())
+        ),
+        "顶层非字符串字段不应生成字段级 CompactToolInput"
+    );
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "非字符串字段场景应仅生成整条兜底压缩 action"
     );
 }
 
@@ -747,14 +770,32 @@ fn test_plan_micro_compacts_multi_block_result_by_total_text_length() {
         &config,
     );
 
-    assert!(matches!(
-        &over_limit.actions[..],
-        [ProjectionActionEntry {
-            action: ProjectionAction::CompactToolResult { .. },
-            ..
-        }]
-    ));
-    assert!(at_limit.actions.is_empty());
+    assert!(
+        matches!(
+            &over_limit.actions[..],
+            [
+                ProjectionActionEntry {
+                    action: ProjectionAction::CompactToolInput { fields, .. },
+                    ..
+                },
+                ProjectionActionEntry {
+                    action: ProjectionAction::CompactToolResult { .. },
+                    ..
+                }
+            ] if fields.is_empty()
+        ),
+        "超阈值结果：整条兜底压缩 tool_use + 压缩 tool result"
+    );
+    assert!(
+        matches!(
+            &at_limit.actions[..],
+            [ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
+            }] if fields.is_empty()
+        ),
+        "恰好阈值的结果不压缩，但 tool_use 仍有整条兜底 action"
+    );
 }
 
 #[test]
@@ -778,17 +819,32 @@ fn test_plan_micro_compacts_only_successful_results_over_threshold() {
         &config,
     );
 
-    assert!(exact_limit.actions.is_empty());
+    assert!(
+        matches!(
+            &exact_limit.actions[..],
+            [ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
+            }] if fields.is_empty()
+        ),
+        "恰好阈值的结果不压缩，但 tool_use 仍有整条兜底 action"
+    );
     assert!(matches!(
         &over_limit.actions[..],
-        [ProjectionActionEntry {
-            action: ProjectionAction::CompactToolResult {
-                keep_head: 350,
-                keep_tail: 100,
-                preserve_recovery_handle: true,
+        [
+            ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
             },
-            ..
-        }]
+            ProjectionActionEntry {
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 350,
+                    keep_tail: 100,
+                    preserve_recovery_handle: true,
+                },
+                ..
+            }
+        ] if fields.is_empty()
     ));
 }
 
@@ -807,7 +863,16 @@ fn test_plan_micro_never_compacts_error_results() {
         &config,
     );
 
-    assert!(plan.actions.is_empty());
+    assert!(
+        matches!(
+            &plan.actions[..],
+            [ProjectionActionEntry {
+                action: ProjectionAction::CompactToolInput { fields, .. },
+                ..
+            }] if fields.is_empty()
+        ),
+        "错误 result 不被压缩，但 tool_use 仍有整条兜底 action"
+    );
 }
 
 #[test]

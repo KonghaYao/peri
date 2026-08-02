@@ -309,6 +309,18 @@ pub(crate) fn estimate_projection_chars(
                     continue;
                 };
 
+                // fields 空 = 整条压缩兜底：按整条 arguments 序列化长度估算，
+                // after 计入占位 JSON 的实际渲染长度（与 project_tool_input 共用同一占位）
+                if fields.is_empty() {
+                    let json = serde_json::to_string(arguments).unwrap_or_default();
+                    before += json.chars().count() as u64;
+                    after += serde_json::to_string(&compact_note_placeholder())
+                        .unwrap_or_default()
+                        .chars()
+                        .count() as u64;
+                    continue;
+                }
+
                 let mut seen_fields = HashSet::new();
                 for field in fields {
                     if !seen_fields.insert(field) {
@@ -706,6 +718,18 @@ fn project_block(
 
 // ─── project_tool_input ───────────────────────────────────────────────────────
 
+/// 空 fields 整条压缩兜底的占位 arguments（`{"_compact_note":"tool input compacted"}`）。
+///
+/// 估算（`estimate_projection_chars`）与渲染共用此构造，保证占位长度与内容不漂移。
+fn compact_note_placeholder() -> serde_json::Value {
+    let mut minimal = serde_json::Map::new();
+    minimal.insert(
+        "_compact_note".to_string(),
+        serde_json::Value::String("tool input compacted".to_string()),
+    );
+    serde_json::Value::Object(minimal)
+}
+
 /// 投影 tool input
 fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> ToolCallRequest {
     match &action.action {
@@ -717,6 +741,15 @@ fn project_tool_input(tc: &ToolCallRequest, action: &ProjectionActionEntry) -> T
             let Some(arguments) = tc.arguments.as_object() else {
                 return tc.clone();
             };
+            // fields 空 = 整条压缩兜底：替换为 minimal 占位（旧版 preserve_shape 语义）。
+            // 由 planner 在无超长字段时生成，保证普通工具调用也会被压缩。
+            if fields.is_empty() {
+                return ToolCallRequest {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: compact_note_placeholder(),
+                };
+            }
             let mut projected_arguments = arguments.clone();
             let mut changed = false;
 

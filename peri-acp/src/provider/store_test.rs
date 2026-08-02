@@ -63,8 +63,10 @@ fn test_merge_global_and_workspace_via_load_from() {
 
     // 验证工作区字段覆盖
     assert_eq!(global.config.active_alias, "haiku");
-    // 全局字段保留
-    assert_eq!(global.config.active_provider_id, "openai-1");
+    // 全局字段保留（旧 active_provider_id 被 extra 吸收，不回写）
+    assert!(global.config.extra.contains_key("active_provider_id"));
     assert_eq!(global.config.providers.len(), 1);
     assert_eq!(global.config.providers[0].api_key, "sk-global");
+    // profiles 未被工作区定义 → 保留全局默认
+    assert_eq!(global.config.profiles.sonnet.effort, "xhigh");
 }

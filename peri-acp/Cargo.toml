@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
 peri-agent = { path = "../peri-agent" }
+peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 peri-workflow = { path = "../peri-workflow" }
@@ -30,6 +31,7 @@ chrono.workspace = true
 dashmap = "6"
 tokio-util.workspace = true
 dirs-next.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

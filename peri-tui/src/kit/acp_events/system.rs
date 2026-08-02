@@ -15,7 +15,7 @@ use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
     AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSearchResult,
-    PluginSnapshot, Prediction, RewindPreview, SystemNotification,
+    PluginSnapshot, Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -60,10 +60,26 @@ pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNot
 }
 
 pub(super) fn handle_prediction(p: &Prediction) {
-    *PREDICTION.state().write() = crate::kit::atoms::PredictionState {
-        text: p.text.clone(),
+    let mut summary = None;
+    let mut text = p.text.clone();
+    for action in &p.actions {
+        match action {
+            PredictionAction::Placeholder { text: t } => text = t.clone(),
+            PredictionAction::Summary { text: t } => summary = Some(t.clone()),
+            _ => {} // SetTitle / AddTag 由 acp_server 执行写入，此处仅展示
+        }
+    }
+    let mut state = crate::kit::atoms::PredictionState {
+        text,
+        summary,
         received_at: Some(Instant::now()),
     };
+    if state.text.is_empty() {
+        // 仅元数据动作（SetTitle/AddTag）的 prediction 不带占位文本——
+        // 保留输入区现有占位，避免空文本覆盖已有预测内容。
+        state.text = PREDICTION.state().read().text.clone();
+    }
+    *PREDICTION.state().write() = state;
 }
 
 pub(super) fn handle_file_suggestions() {}
@@ -83,15 +99,6 @@ pub(super) fn handle_ask_user(state: &mut BridgeState, au: &AskUser) {
     *ASK_USER_PENDING.state().write() = Some(au.clone());
     crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::AskUser);
     state.variant = 2;
-    super::render::push_acp_state(state);
-}
-
-pub(super) fn handle_rewind_preview(state: &mut BridgeState, rp: &RewindPreview) {
-    // S10：保存 payload 到 REWIND_PREVIEW atom，供 RewindPopup 读取真实数据
-    *crate::kit::atoms::REWIND_PREVIEW.state().write() = Some(rp.clone());
-    state.popup_kind = Some(crate::kit::atoms::PopupKind::Rewind);
-    state.variant = 2;
-    super::render::push_popup_kind(state);
     super::render::push_acp_state(state);
 }
 
@@ -126,6 +133,37 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                     _ => {}
                 }
             }
+            // 同步重建 REWIND_PREVIEW：rewind 后消息列表已变，旧 preview 中的
+            // 消息 id 已从服务端 history 删除——不重建会导致连续第二次回滚
+            // 时 target 找不到（服务端 emit_rewind_not_found）。从回滚后的
+            // 消息 JSON 直接提取 id/role/preview，保证候选列表与消息区一致。
+            // P1：只保留 user 消息且排除系统注入（与 rewind-candidates 口径
+            // 一致），并逆序（最新在前）——弹窗第一条 = 回退一步。
+            let preview = RewindPreview {
+                files: vec![],
+                messages: msgs
+                    .iter()
+                    .rev()
+                    .filter_map(|msg| {
+                        let id = msg.get("id").and_then(|v| v.as_str())?.to_string();
+                        let role = msg
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let text = super::extract_message_text(msg);
+                        if role != "user" || text.contains("<system-reminder>") {
+                            return None;
+                        }
+                        Some(RewindMessage {
+                            id,
+                            role,
+                            preview: text.chars().take(200).collect(),
+                        })
+                    })
+                    .collect(),
+            };
+            *crate::kit::atoms::REWIND_PREVIEW.state().write() = Some(preview);
         }
         Err(e) => {
             tracing::warn!(
@@ -137,6 +175,41 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     }
     state.phase = SessionPhase::Idle;
     super::render::push_view_models(state);
+
+    // Rewind v2：回填目标 user 消息文本到输入框（复用 TurnInterrupted 的回填通道）。
+    // 消费 REWIND_TARGET_TEXT → INPUT_RESTORE_TEXT + 心跳 → InputArea use_effect
+    // 写入编辑态并替换草稿；焦点随 close_popup（RewindCompleted 到达前弹窗已由
+    // consumer 流程关闭或停留在执行中态，此处统一关闭）。
+    if let Some(target_text) = crate::kit::atoms::REWIND_TARGET_TEXT.state().write().take() {
+        let mu =
+            crate::kit::atoms::INPUT_RESTORE_TEXT.get_or_init(|| parking_lot::Mutex::new(None));
+        *mu.lock() = Some(target_text);
+        crate::kit::atoms::RENDER_HEARTBEAT
+            .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+    }
+    // 回退完成：预算状态复位、查询错误清空；弹窗关闭（执行完成）
+    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
+        crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
+    // P1：仅当 rewind 弹窗仍在显示时关闭——执行期间用户可能已 Esc 关闭弹窗
+    // 或打开了其他弹窗（HITL/OAuth 事件），无条件 close 会误关。
+    if *crate::kit::atoms::POPUP_KIND.state().read() == Some(crate::kit::atoms::PopupKind::Rewind) {
+        crate::kit::popup_overlay::close_popup();
+    }
+
+    super::render::push_acp_state(state);
+}
+
+pub(super) fn handle_rewind_error(state: &mut BridgeState, message: &str) {
+    // rewind 失败（目标消息不存在 / 参数解析失败）——与上下文压缩无关，
+    // 单独渲染 rewind 语境提示，避免复用 CompactError 时的"压缩失败"误导。
+    tracing::warn!(message, "bridge: RewindError");
+    let text = i18n::tr_args(
+        "app-note-rewind-error",
+        &[("message".into(), FluentValue::from(message))],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Warning);
+    state.phase = SessionPhase::Idle;
     super::render::push_acp_state(state);
 }
 

@@ -6,11 +6,15 @@ use crate::agent::compact_v2::{
     determine_compact_action, run_compact, CompactAction, CompactOutcome,
 };
 use crate::agent::events::CompactStrategy;
-use crate::llm::{BaseModel, LlmRequest, LlmResponse, StopReason};
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::thread::{FilesystemThreadStore, ThreadMeta, ThreadStore};
+use peri_model::{
+    Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, StopReason,
+};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -37,22 +41,36 @@ fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
 struct MockSummaryModel;
 
 #[async_trait::async_trait]
-impl BaseModel for MockSummaryModel {
-    async fn invoke(&self, _request: LlmRequest) -> crate::error::AgentResult<LlmResponse> {
-        Ok(LlmResponse {
-            message: BaseMessage::ai("<summary>compact summary</summary>"),
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            request_id: None,
-        })
+impl Model for MockSummaryModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
     }
 
-    fn provider_name(&self) -> &str {
-        "mock"
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        // compact 路径只走 complete()，stream() 不应被调用
+        Err(ModelError::cancelled())
     }
 
-    fn model_id(&self) -> &str {
-        "mock-summary"
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text("<summary>compact summary</summary>"),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
     }
 }
 

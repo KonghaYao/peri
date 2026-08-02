@@ -13,7 +13,6 @@ use peri_middlewares::{AgentOverrides, PermissionMode};
 pub struct PromptFeatures {
     pub hitl_enabled: bool,
     pub subagent_enabled: bool,
-    pub cron_enabled: bool,
     pub skills_enabled: bool,
     pub channel_enabled: bool,
 }
@@ -24,7 +23,6 @@ impl PromptFeatures {
         Self {
             hitl_enabled: permission_mode != PermissionMode::Bypass,
             subagent_enabled: true,
-            cron_enabled: true,
             skills_enabled: true,
             channel_enabled: true,
         }
@@ -36,7 +34,6 @@ impl PromptFeatures {
         Self {
             hitl_enabled: false,
             subagent_enabled: false,
-            cron_enabled: false,
             skills_enabled: false,
             channel_enabled: false,
         }
@@ -87,7 +84,6 @@ impl PromptEnv {
 enum FeatureGate {
     Hitl,
     Subagent,
-    Cron,
     Skills,
     Channel,
 }
@@ -97,7 +93,6 @@ impl FeatureGate {
         match self {
             Self::Hitl => f.hitl_enabled,
             Self::Subagent => f.subagent_enabled,
-            Self::Cron => f.cron_enabled,
             Self::Skills => f.skills_enabled,
             Self::Channel => f.channel_enabled,
         }
@@ -148,8 +143,8 @@ const ALWAYS_DYNAMIC_SECTIONS: [&str; 2] = [
     )),
 ];
 
-/// 功能门控动态段 + 对应门控标识（按 section 号顺序：10→11→12→13→15）
-const GATED_SECTIONS: [(&str, FeatureGate); 5] = [
+/// 功能门控动态段 + 对应门控标识（按 section 号顺序：10→11→13→15）
+const GATED_SECTIONS: [(&str, FeatureGate); 4] = [
     (
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -163,13 +158,6 @@ const GATED_SECTIONS: [(&str, FeatureGate); 5] = [
             "/prompts/sections/11_subagent.md"
         )),
         FeatureGate::Subagent,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/12_cron.md"
-        )),
-        FeatureGate::Cron,
     ),
     (
         include_str!(concat!(

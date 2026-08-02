@@ -78,7 +78,10 @@
     "thinking": "#A2A9E4",
     "model_info": "#A0825F",
     "bash_border": "#FD5DB1",
-    "selected_fg": "#B2B9F9"
+    "selected_fg": "#B2B9F9",
+    "model_accent": "#6B72C9",
+    "effort": "#B06F2E",
+    "token_context": "#3E8AB8"
   },
   "component": {
     "message": {
@@ -95,7 +98,8 @@
       "prompt": "#787878",
       "prompt_loading": "#787878",
       "continuation": "#C8C8C8",
-      "placeholder": "#787878"
+      "placeholder": "#787878",
+      "session_title_palette": ["#D2E6D7", "#EBD2D2", "#C8E6D2", "#F0D7CD", "#CDDCF0", "#EBDCC8", "#DCCDEB", "#C8E1EB"]
     },
     "panel": {
       "border": "#D77757",

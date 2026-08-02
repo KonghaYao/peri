@@ -91,7 +91,6 @@ async fn handle_submit(
             if let Some(tx) = REWIND_ACTION_TX.get() {
                 let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
                     target_message_id: args.target_message_id,
-                    revert_files: args.revert_files,
                 });
             }
             Ok(())
@@ -133,7 +132,14 @@ async fn handle_clear_submit(
     // 防止旧 session 残留阻塞新会话。close_popup 在无弹窗时是 no-op，安全；
     // TODO_ITEMS 会在新 session 的 SessionUpdate::Plan 事件到来时重新填充；
     // reset_history_cursor 仅清浏览指针与草稿，INPUT_HISTORY 栈保留。
+    // REWIND_PREVIEW 跟随会话生命周期：clear 后旧消息 id 已失效，必须清空，
+    // 否则双击 Esc 会看到已删除的候选（服务端 rewind 报 not found）。
     crate::kit::popup_overlay::close_popup();
+    *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
+    *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
+        crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
 
@@ -200,22 +206,21 @@ async fn handle_agent_text_submit(
 fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd: &str) {
     match action {
         ViewActionRequest::CycleProvider => {
+            // 语义改为循环 active_alias 四档（fable → opus → sonnet → haiku）
             if let Some(cfg_handle) = PERI_CONFIG_HANDLE.get() {
                 let cfg = cfg_handle.read();
-                let provider_ids: Vec<String> =
-                    cfg.config.providers.iter().map(|p| p.id.clone()).collect();
-                if !provider_ids.is_empty() {
-                    let current = &cfg.config.active_provider_id;
-                    let idx = provider_ids.iter().position(|p| p == current).unwrap_or(0);
-                    let next = provider_ids[(idx + 1) % provider_ids.len()].clone();
-                    let client = acp_client.clone();
-                    let cfg_handle = cfg_handle.clone();
-                    tokio::spawn(async move {
-                        let mut new_cfg = cfg_handle.read().clone();
-                        new_cfg.config.active_provider_id = next;
-                        let _ = client.update_config(&new_cfg).await;
-                    });
-                }
+                let aliases = ["fable", "opus", "sonnet", "haiku"];
+                let current = &cfg.config.active_alias;
+                let idx = aliases.iter().position(|a| *a == current).unwrap_or(0);
+                let next = aliases[(idx + 1) % aliases.len()].to_string();
+                drop(cfg);
+                let client = acp_client.clone();
+                let cfg_handle = cfg_handle.clone();
+                tokio::spawn(async move {
+                    let mut new_cfg = cfg_handle.read().clone();
+                    new_cfg.config.active_alias = next;
+                    let _ = client.update_config(&new_cfg).await;
+                });
             }
         }
         ViewActionRequest::CyclePermissionMode => {

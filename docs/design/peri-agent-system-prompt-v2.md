@@ -18,7 +18,7 @@
 graph TB
     subgraph SESSION_NEW["session/new 一次性构建"]
         FEATURES["PromptFeatures<br/>运行时功能开关"]
-        SECTIONS["prompts/sections/<br/>14 个段落文件"]
+        SECTIONS["prompts/sections/<br/>13 个段落文件"]
         OVERRIDES["AgentOverrides<br/>SubAgent persona/tone"]
         ENV["PromptEnv<br/>cwd/date/platform"]
 
@@ -40,7 +40,7 @@ graph TB
 
 ### 2.1 段落文件组织
 
-14 个 Markdown 段落文件位于 `peri-acp/prompts/sections/`，通过 `include_str!` 编译期嵌入。编号即拼接顺序：
+13 个 Markdown 段落文件位于 `peri-acp/prompts/sections/`，通过 `include_str!` 编译期嵌入。编号即拼接顺序：
 
 | 编号 | 文件 | 区域 | 内容 | Feature Gate |
 |------|------|------|------|-------------|
@@ -56,7 +56,6 @@ graph TB
 | 14 | `14_system_reminder.md` | 动态 | System Reminder 协议 | — |
 | 10 | `10_hitl.md` | 动态 | HITL 审批模式 | `hitl_enabled` |
 | 11 | `11_subagent.md` | 动态 | SubAgent 委派 | `subagent_enabled` |
-| 12 | `12_cron.md` | 动态 | 定时任务 | `cron_enabled` |
 | 13 | `13_skills.md` | 动态 | Skills 系统 | `skills_enabled` |
 | 15 | `15_channel.md` | 动态 | 频道消息 | `channel_enabled` |
 | — | — | 动态 | Language 指示 | `language` 参数 |
@@ -65,6 +64,7 @@ graph TB
 - 静态段落（01-06, 16）跨会话、跨项目、跨日期完全稳定，始终参与 Prompt Cache
 - 动态段落（07-15）包含环境占位符（`{{cwd}}`、`{{date}}` 等）或 feature-gated 内容，不参与缓存
 - 段落文件只增不减——删除段落会改变静态区域导致全量缓存失效。废弃段落保留空文件即可
+- **定时任务（原 `12_cron.md`）已迁移为 builtin skill `cron`**（见 `peri-middlewares/src/skills/builtin/skills/cron/SKILL.md`）：指导内容按需加载（SkillTool），不再常驻系统提示词；`cron_register/list/remove` 工具与 HITL 审批不变
 
 ### 2.2 构建流程
 
@@ -85,7 +85,7 @@ build_system_prompt(overrides, cwd, features, extra_agent_dirs, frozen_date, lan
 ├─ 5. 按序拼接动态段落
 │     ├─ 07_env（始终包含）
 │     ├─ 14_system_reminder（始终包含）
-│     └─ feature-gated：10/11/12/13/15（按 PromptFeatures 开关）
+│     └─ feature-gated：10/11/13/15（按 PromptFeatures 开关）
 │
 ├─ 6. 注入 Language 指示（动态区域尾部）
 │
@@ -104,18 +104,17 @@ frozen_system_prompt 构建完成。
 │        拼接后合并：format!("{system_prompt}\n\n{contributions}")
 │        如：CLAUDE.md 摘要、Skills 摘要、Git Co-Authored-By 行等
 │        不同 Agent（主 Agent vs SubAgent）的切面集合不同，贡献也不同
-│        合并结果通过 BaseModelReactLLM::with_system() 传入 LLM
+│        合并结果通过 AgentModelBridge::with_system() 传入 LLM
 ```
 
 ### 2.3 PromptFeatures
 
-控制 feature-gated 段落的注入，5 个布尔开关：
+控制 feature-gated 段落的注入，4 个布尔开关：
 
 ```rust
 pub struct PromptFeatures {
     pub hitl_enabled: bool,      // YOLO_MODE="false" 时启用（非 YOLO 模式）
     pub subagent_enabled: bool,  // 始终 true
-    pub cron_enabled: bool,      // 始终 true
     pub skills_enabled: bool,    // 始终 true
     pub channel_enabled: bool,   // 始终 true
 }

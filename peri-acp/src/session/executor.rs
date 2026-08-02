@@ -54,6 +54,8 @@ use peri_agent::{
 };
 use tracing::debug;
 
+use peri_acp_types::event_data::PredictionAction;
+
 use crate::{
     agent::builder::{self},
     langfuse::{LangfuseSession, LangfuseTracer},
@@ -290,7 +292,7 @@ struct TurnConfig<'a> {
     permission_mode: &'a Arc<peri_middlewares::prelude::SharedPermissionMode>,
     broker: &'a Arc<dyn UserInteractionBroker>,
     session_start_source: Option<String>,
-    auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>>,
+    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     effective_context_window: u32,
 }
 
@@ -414,18 +416,26 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             None
         }
     };
-    let auxiliary_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
+    let auxiliary_model: Option<Arc<dyn peri_model::Model>> = if disable_compact {
         None
     } else {
         cached_llm
             .as_ref()
             .map(|c| c.auxiliary_model.clone())
-            .or_else(|| Some(ctx.provider.clone().into_model().into()))
+            .or_else(|| {
+                // 转发器从 session 级 AgentPool 取：fresh 模型烘焙的 observer 会随
+                // CachedLlmInstances 跨 turn 复用，必须指向 session 级转发器。
+                let provider = ctx
+                    .provider
+                    .clone()
+                    .with_retry_observer(Some(ctx.pool.lock().retry_events.as_retry_observer()));
+                Some(provider.into_model().into())
+            })
     };
 
     // Context window (前置计算，供 bg event pump 和 compact 使用)
     let context_window = ctx.provider.context_window();
-    let context_1m = ctx.peri_config.config.context_1m.unwrap_or(false);
+    let context_1m = ctx.provider.context_1m();
     let effective_context_window = if context_1m {
         1_000_000
     } else {
@@ -651,6 +661,11 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         exec_outcome,
     })
     .await;
+
+    // turn 收尾：转发器是 session 级（挂 AgentPool），turn 间不清理、不重建，
+    // 靠下一 turn `build_agent` 覆盖式 `set` 当前 handler。残留 handler 指向
+    // 已 close 的 event_tx 时，`FnEventHandler` 消费端检查 `tx.lock().as_ref()`
+    // 为空则无害丢弃（已核实 executor 与 builder 两侧的 handler 消费路径）。
 
     result
 }
@@ -958,34 +973,40 @@ pub enum PredictionError {
 /// Facade：基于现有对话历史预测用户下一步输入。
 ///
 /// 此函数封装了 TUI 之前在 `acp_server/mod.rs` 内联的 Prediction 构造逻辑
-/// （`BaseModelReactLLM::new` + `RetryableLLM::new`，直接调 `generate_reasoning`），
+/// （`AgentModelBridge::new` + `ReactLLM::generate_reasoning` 一次调用），
 /// 避免违反 CLAUDE.md [TRAP]：
 ///
 /// > Agent 构建和执行统一通过 `peri_acp::session::executor::run_session_loop()`。
 /// > 禁止在 TUI 层直接构建 Agent。
 ///
 /// 构建一个 1 轮、无工具、无中间件的最小 LLM 调用，注入 `history`（应已过滤 System
-/// 消息并限制条数），30 秒超时后返回文本或 [`PredictionError`]。
+/// 消息并限制条数），30 秒超时后返回结构化动作列表或 [`PredictionError`]。
+/// 模型输出经 [`parse_prediction_actions`] 解析为 `<peri:xxx>` 标记动作；
+/// 无标记时回落为单个 `Placeholder` 动作（现有 placeholder 行为）。
+///
+/// `current_title` 为会话当前标题（`None` 表示无标题），注入指令后模型才能
+/// 判断标题是否需要更新。
 ///
 /// 调用方负责发送 `peri/prediction_ready` 通知（保留在 TUI 层以便复用 transport）。
 pub async fn execute_prediction(
     provider: crate::provider::LlmProvider,
     history: Vec<BaseMessage>,
     cwd: &str,
-) -> Result<String, PredictionError> {
+    current_title: Option<&str>,
+) -> Result<Vec<PredictionAction>, PredictionError> {
     debug!(
         msg_count = history.len(),
         cwd, "Prediction facade: starting"
     );
 
     // 直接复用已构建的 LlmProvider（绕过 from_config）
-    let base_llm = peri_agent::llm::BaseModelReactLLM::new(provider.into_model());
-    let llm = peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default());
+    let llm =
+        peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(provider.into_model()));
 
     // execute_prediction 是 1-turn 无工具无中间件的最小 LLM 调用，
     // 不需要构造完整 v2 stages。直接构造 messages 调
     // ReactLLM::generate_reasoning 一次。
-    let directive = peri_middlewares::subagent::build_prediction_directive();
+    let directive = peri_middlewares::subagent::build_prediction_directive(current_title);
     let mut messages: Vec<BaseMessage> = Vec::with_capacity(history.len() + 2);
     messages.push(BaseMessage::system(directive));
     for msg in &history {
@@ -1019,10 +1040,11 @@ pub async fn execute_prediction(
                 .unwrap_or_default();
             if text.is_empty() {
                 debug!("Prediction facade: LLM returned empty text");
+                Ok(Vec::new())
             } else {
                 debug!(%text, "Prediction facade: ready");
+                Ok(parse_prediction_actions(&text))
             }
-            Ok(text)
         }
         Ok(Err(e)) => {
             debug!(error = %e, "Prediction facade: LLM failed");
@@ -1056,6 +1078,109 @@ pub fn extract_prediction_text(messages: &[BaseMessage]) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+/// 动作内容最大长度（字符数）
+const MAX_ACTION_LEN: usize = 200;
+
+/// 解析模型输出为结构化动作列表。
+///
+/// - 匹配 `<peri:(\w+)>(.*?)</peri:\1>` 标记（非贪婪，取第一个闭合）
+/// - 未知标签忽略，其内容并入占位文本流
+/// - 标记之间的纯文本片段（trim 后非空）收集为单个 Placeholder
+/// - 同名动作后者覆盖前者
+/// - 每个动作内容：剥离控制字符（含换行）、trim、截断 200 字符；空内容跳过
+/// - 无任何标记/解析失败：整段回落为 Placeholder（现有行为）
+pub fn parse_prediction_actions(text: &str) -> Vec<PredictionAction> {
+    let mut actions: Vec<PredictionAction> = Vec::new();
+    let mut plain_parts: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(rel_open) = text[cursor..].find("<peri:") {
+        let open = cursor + rel_open;
+        let Some(rel_gt) = text[open..].find('>') else {
+            break;
+        };
+        let tag_end = open + rel_gt;
+        let tag = &text[open + "<peri:".len()..tag_end];
+        if !tag_is_valid(tag) {
+            cursor = open + 1;
+            continue;
+        }
+        let closing = format!("</peri:{tag}>");
+        let content_start = tag_end + 1;
+        let Some(rel_close) = text[content_start..].find(&closing) else {
+            break; // 未闭合：剩余全部按纯文本
+        };
+        let content_end = content_start + rel_close;
+        let whole_tag_end = content_end + closing.len();
+
+        if open > cursor {
+            plain_parts.push(text[cursor..open].to_string());
+        }
+        // 未知标签：标记剥除，仅内容并入占位文本
+        if !matches!(tag, "title" | "tag" | "summary") {
+            plain_parts.push(text[content_start..content_end].to_string());
+            cursor = whole_tag_end;
+            continue;
+        }
+        let action = match tag {
+            "title" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::SetTitle { title: content }),
+            "tag" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::AddTag { tag: content }),
+            "summary" => sanitize_action_content(&text[content_start..content_end])
+                .map(|content| PredictionAction::Summary { text: content }),
+            _ => unreachable!("已知标签已在上面过滤"),
+        };
+        if let Some(action) = action {
+            push_replace_action(&mut actions, action);
+        }
+        cursor = whole_tag_end;
+    }
+    if cursor < text.len() {
+        plain_parts.push(text[cursor..].to_string());
+    }
+
+    let placeholder = plain_parts
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !placeholder.is_empty() {
+        actions.insert(0, PredictionAction::Placeholder { text: placeholder });
+    }
+    actions
+}
+
+/// 标签名仅允许 ASCII 字母数字，防止任意闭合注入
+fn tag_is_valid(tag: &str) -> bool {
+    !tag.is_empty() && tag.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 剥离控制字符（含换行）、trim、截断；空内容返回 None（跳过动作）
+fn sanitize_action_content(s: &str) -> Option<String> {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(MAX_ACTION_LEN).collect())
+    }
+}
+
+/// 同名（同变体）动作后者覆盖前者
+fn push_replace_action(actions: &mut Vec<PredictionAction>, action: PredictionAction) {
+    let disc = std::mem::discriminant(&action);
+    if let Some(pos) = actions
+        .iter()
+        .position(|a| std::mem::discriminant(a) == disc)
+    {
+        actions[pos] = action;
+    } else {
+        actions.push(action);
+    }
 }
 
 #[cfg(test)]

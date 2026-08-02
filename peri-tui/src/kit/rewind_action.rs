@@ -1,52 +1,97 @@
 //! Rewind 指令消费者——REWIND_ACTION_TX channel → acp_client RPC。
 //!
-//! 这是 S10 的核心：RewindPopup 写入 channel 的 Confirm/Cancel 在此被取出。
-//! Confirm 调用 `session/execute-command` JSON-RPC（command="/rewind"），
-//! 服务端执行 `RewindCommand::execute` 截断 history + 逆向恢复文件。
+//! 两段式流程（Rewind v2）：
 //!
-//! ## 协议
-//!
-//! ```json
-//! {
-//!   "sessionId": "<sid>",
-//!   "command": "/rewind",
-//!   "args": {
-//!     "target_message_id": "<id>",
-//!     "revert_files": true
-//!   }
-//! }
-//! ```
-//!
-//! ## 设计
-//!
-//! 与 `submit_consumer` 同模式——单消费者，独立 tokio task，shutdown 信号优雅退出。
-//! Cancel 当前不发起任何 RPC（仅清空 popup 状态由 close_popup 完成）。
+//! 1. `Preview { target_message_id, target_text }`（候选列表 Enter）：
+//!    暂存目标文本到 REWIND_TARGET_TEXT → 查询 `session/rewind-preview` 预算
+//!    → 预算空：立即执行 `session/rewind`（写 REWIND_BUDGET_STATE=Executing）
+//!    → 预算非空：写 REWIND_BUDGET_STATE=Files(预算)，弹窗切预算视图
+//! 2. `Confirm { target_message_id }`（预算确认 Enter）：
+//!    执行 `session/rewind`（REWIND_BUDGET_STATE=Executing）
+//!    执行完成由 RewindCompleted 事件驱动（handle_rewind_completed），
+//!    失败路径清理 REWIND_TARGET_TEXT / REWIND_BUDGET_STATE。
 
+use fluent_bundle::FluentValue;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
+use crate::kit::atoms::{
+    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR, REWIND_TARGET_TEXT,
+    RewindBudgetState, RewindFileChange,
+};
 
-/// Rewind 用户操作——由 RewindPopup 在 Enter/Esc 时通过 REWIND_ACTION_TX 发送。
+/// Rewind 用户操作——由 RewindPopup 通过 REWIND_ACTION_TX 发送。
 #[derive(Debug, Clone)]
 pub enum RewindAction {
-    /// 确认回退到 `target_message_id`；`revert_files` 控制是否同时回退文件改动。
-    Confirm {
+    /// 候选列表 Enter：触发预算查询。
+    Preview {
         target_message_id: String,
-        revert_files: bool,
+        target_text: String,
     },
-    /// 用户取消（Esc）——仅记录日志，不发起 RPC。
-    Cancel,
+    /// 预算确认 Enter：执行回退（恒 revert_files=true）。
+    Confirm { target_message_id: String },
+}
+
+/// 构造预算查询参数。
+pub fn build_preview_params(sid: &str, target_message_id: &str) -> Value {
+    json!({
+        "sessionId": sid,
+        "target_message_id": target_message_id,
+    })
+}
+
+/// 构造执行参数。
+///
+/// P0 修复：显式携带 `revert_files: true`。服务端虽已有 `#[serde(default)]`
+/// 兜底，但客户端显式声明意图，双保险避免旧路径静默失败。
+pub fn build_execute_params(sid: &str, target_message_id: &str) -> Value {
+    json!({
+        "sessionId": sid,
+        "target_message_id": target_message_id,
+        "revert_files": true,
+    })
+}
+
+/// 解析预算响应为文件改动列表。
+pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, String> {
+    let changes = resp
+        .get("file_changes")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| i18n::tr("rewind-error-budget-missing"))?;
+    changes
+        .iter()
+        .map(|c| {
+            Ok(RewindFileChange {
+                path: c
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| i18n::tr("rewind-error-path-missing"))?
+                    .to_string(),
+                kind: c
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 执行失败恢复（纯函数，测试友好）：清目标文本与预算状态，回候选视图
+/// 并写 REWIND_QUERY_ERROR——弹窗 Candidates 视图据此展示错误，不再静默。
+pub fn on_action_failed(error: &str) {
+    *REWIND_TARGET_TEXT.state().write() = None;
+    *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
+    *REWIND_QUERY_ERROR.state().write() = Some(error.to_string());
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 /// 启动 rewind 指令消费者后台任务。
-///
-/// 参数：
-/// - `acp_client`：克隆自 build_app_and_acp 返回的 AcpTuiClient（Clone + Arc 内部）
-/// - `rx`：REWIND_ACTION_TX 的接收端
-/// - `shutdown`：与 notifier / bridge / submit_consumer 共享的同一 CancellationToken
 pub fn spawn_rewind_consumer(
     acp_client: AcpTuiClient,
     mut rx: mpsc::UnboundedReceiver<RewindAction>,
@@ -66,12 +111,11 @@ pub fn spawn_rewind_consumer(
                             info!("kit rewind_consumer: REWIND_ACTION_TX dropped, exiting");
                             break;
                         }
-                        Some(RewindAction::Cancel) => {
-                            info!("kit rewind_consumer: rewind cancelled by user");
-                        }
-                        Some(RewindAction::Confirm { target_message_id, revert_files }) => {
-                            if let Err(e) = handle_confirm(&acp_client, target_message_id, revert_files).await {
+                        Some(action) => {
+                            if let Err(e) = handle_action(&acp_client, action).await {
                                 error!(error = %e, "kit rewind_consumer: rewind RPC failed");
+                                // P1：失败不再静默——回候选视图并展示错误
+                                on_action_failed(&e.to_string());
                             }
                         }
                     }
@@ -81,40 +125,75 @@ pub fn spawn_rewind_consumer(
     })
 }
 
-/// 处理确认：发送 `session/execute-command` RPC。
-///
-/// 服务端 RewindCommand 完成后会通过 ExecutorEvent::RewindCompleted 推送，
-/// 由 acp_notifier → acp_bridge 转化为 ViewCommit/CompactCompleted 等事件，
-/// 让 VIEW_MODELS atom 自动刷新。
-async fn handle_confirm(
+async fn handle_action(
     acp_client: &AcpTuiClient,
-    target_message_id: String,
-    revert_files: bool,
+    action: RewindAction,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !acp_client.has_session() {
         warn!("kit rewind_consumer: no active session, skipping rewind");
         return Ok(());
     }
+    let sid = ACTIVE_SESSION_ID.state().read().clone();
 
-    let params: Value = json!({
-        "command": "/rewind",
-        "args": {
-            "target_message_id": target_message_id,
-            "revert_files": revert_files,
+    match action {
+        RewindAction::Preview {
+            target_message_id,
+            target_text,
+        } => {
+            *REWIND_TARGET_TEXT.state().write() = Some(target_text);
+            info!(
+                target_message_id = %target_message_id,
+                "kit rewind_consumer: querying rewind budget"
+            );
+            let resp = acp_client
+                .send_raw_request(
+                    "session/rewind-preview",
+                    build_preview_params(&sid, &target_message_id),
+                )
+                .await?;
+            let changes = parse_budget_response(&resp)?;
+            if changes.is_empty() {
+                // 无文件改动 → 直接执行
+                *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
+                crate::kit::atoms::RENDER_HEARTBEAT
+                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+                execute_rewind(acp_client, &sid, &target_message_id).await?;
+            } else {
+                *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Files(changes);
+                crate::kit::atoms::RENDER_HEARTBEAT
+                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+            }
         }
-    });
+        RewindAction::Confirm { target_message_id } => {
+            *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
+            crate::kit::atoms::RENDER_HEARTBEAT
+                .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+            execute_rewind(acp_client, &sid, &target_message_id).await?;
+        }
+    }
+    Ok(())
+}
 
-    info!(
-        target_message_id = %target_message_id,
-        revert_files, "kit rewind_consumer: sending /rewind RPC"
-    );
-
+async fn execute_rewind(
+    acp_client: &AcpTuiClient,
+    sid: &str,
+    target_message_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!(target_message_id = %target_message_id, "kit rewind_consumer: executing /rewind");
     acp_client
-        .send_raw_request("session/execute-command", params)
+        .send_raw_request(
+            "session/rewind",
+            build_execute_params(sid, target_message_id),
+        )
         .await
         .map_err(|e| {
             warn!(error = %e, "kit rewind_consumer: /rewind RPC failed");
-            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+            // P1 i18n：错误文案本地化后经 on_action_failed 展示
+            let msg = i18n::tr_args(
+                "rewind-execute-failed",
+                &[("error".into(), FluentValue::from(e.to_string()))],
+            );
+            anyhow::anyhow!(msg)
         })?;
     Ok(())
 }

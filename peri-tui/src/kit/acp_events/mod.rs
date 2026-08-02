@@ -312,8 +312,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.5 Interaction events ──
         HitlPending(hp) => system::handle_hitl_pending(state, hp),
         AskUser(au) => system::handle_ask_user(state, au),
-        RewindPreview(rp) => system::handle_rewind_preview(state, rp),
+        // Rewind v2：rewind-preview 推送已退役（候选改由打开面板时实时查询），
+        // 变体保留以向后兼容旧服务端。
+        RewindPreview(_) => {}
         RewindCompleted { messages_json } => system::handle_rewind_completed(state, messages_json),
+        RewindError { message } => system::handle_rewind_error(state, message),
         OauthNeeded(on) => system::handle_oauth_needed(state, on),
 
         // ── §4.6 Structure events ──

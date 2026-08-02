@@ -349,3 +349,57 @@ fn test_paste_does_not_trigger_slash_or_mention_popup() {
     assert!(!*AT_MENTION_ACTIVE.state().read());
     assert!(!*SLASH_HINT_ACTIVE.state().read());
 }
+
+// ── 会话标题标签 ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_stable_hash_is_deterministic() {
+    // 同一标题跨调用 hash 稳定（跨进程稳定的前提）
+    assert_eq!(stable_hash("修复登录"), stable_hash("修复登录"));
+    // 不同标题大概率不同色（hash 不同）
+    assert_ne!(stable_hash("修复登录"), stable_hash("重构状态机"));
+    // 与直接实现比对，锁定算法不漂移（FNV-1a 64）
+    assert_eq!(stable_hash("hello"), 0xa430_d846_80aa_bd0b_u64);
+}
+
+#[test]
+fn test_truncate_title_to_width_handles_cjk() {
+    // 32 个半角字符预算
+    let s = "a".repeat(40);
+    let t = truncate_title_to_width(&s, 32);
+    assert!(t.ends_with('…'));
+    assert_eq!(t.chars().count(), 33); // 32 + 省略号
+
+    // CJK 双宽字符：16 个汉字 = 32 列，不截断
+    let cjk = "字".repeat(16);
+    assert_eq!(truncate_title_to_width(&cjk, 32), cjk);
+
+    // 17 个汉字 = 34 列 → 截断到 32 列（16 字 + 省略号）
+    let t = truncate_title_to_width(&"字".repeat(17), 32);
+    assert!(t.ends_with('…'));
+}
+
+#[test]
+fn test_readable_fg_contrast() {
+    use ratatui::style::Color;
+    // 深底 → 白字；浅底 → 黑字
+    assert_eq!(readable_fg(Color::Rgb(18, 52, 26)), Color::White);
+    assert_eq!(readable_fg(Color::Rgb(240, 215, 205)), Color::Black);
+    // 非 RGB（如 Reset）fallback 白字
+    assert_eq!(readable_fg(Color::Reset), Color::White);
+}
+
+#[test]
+fn test_build_session_title_line_has_palette_bg() {
+    crate::kit::atoms::init_atoms();
+    let line = build_session_title_line("修复登录");
+    let span = &line.spans[0];
+    let style = span.style;
+    // 底色来自主题 palette（非 Reset），前景与底色对比
+    assert_ne!(style.bg, Some(ratatui::style::Color::Reset));
+    assert_ne!(style.fg, Some(ratatui::style::Color::Reset));
+    assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+    // 文本带两侧空格（标签内边距）
+    assert!(span.content.starts_with(' '));
+    assert!(span.content.ends_with(' '));
+}

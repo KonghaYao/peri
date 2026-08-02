@@ -26,7 +26,6 @@ use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::group::pipeline::AgentId;
-use crate::llm::BaseModel;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::turn::TurnContext;
@@ -83,7 +82,7 @@ pub struct RuntimeServices {
 pub struct CompactContext {
     pub context_budget: Option<ContextBudget>,
     pub compact_config: Option<CompactConfig>,
-    pub compact_llm: Option<Arc<dyn BaseModel>>,
+    pub compact_llm: Option<Arc<dyn peri_model::Model>>,
     pub compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
     /// 会话级 Token 追踪器（Compact 写 reset/estimated_tokens，Act 读用于 StateSnapshot）
@@ -257,7 +256,7 @@ impl ReactLLM for NullReactLLM {
         &self,
         _messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
-        _streaming: Option<crate::llm::types::StreamingContext>,
+        _streaming: Option<crate::agent::react::StreamingContext>,
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
         Err(crate::error::AgentError::Interrupted)
     }
@@ -323,7 +322,7 @@ impl StageContextBuilder {
         self
     }
 
-    pub fn with_compact_llm(mut self, llm: Arc<dyn BaseModel>) -> Self {
+    pub fn with_compact_llm(mut self, llm: Arc<dyn peri_model::Model>) -> Self {
         self.compact.compact_llm = Some(llm);
         self
     }

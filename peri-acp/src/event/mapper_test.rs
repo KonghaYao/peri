@@ -3,9 +3,9 @@ use peri_agent::agent::events::{
     BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
     TodoEntry, TodoStatus,
 };
-use peri_agent::llm::types::{StopReason, TokenUsage};
 use peri_agent::messages::{BaseMessage, MessageId};
 use peri_agent::tools::ToolDefinition;
+use peri_model::{StopReason, TokenUsage};
 
 use super::*;
 
@@ -20,10 +20,9 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
             output_tokens: 50,
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: Some(200),
-            request_id: Some("req-123".to_string()),
-            first_token_time: None,
         }),
         stop_reason: Some(StopReason::EndTurn),
+        request_id: Some("req-123".to_string()),
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -49,6 +48,11 @@ fn test_llm_call_end_maps_to_enriched_usage_update() {
                 Some("claude-sonnet-4-20250514")
             );
             assert_eq!(meta.get("stopReason").unwrap().as_str(), Some("end_turn"));
+            assert_eq!(
+                meta.get("requestId").unwrap().as_str(),
+                Some("req-123"),
+                "requestId 必须从 LlmCallEnd.request_id 透传到 meta，不得随 usage 迁移丢失"
+            );
         }
         other => panic!("预期 UsageUpdate，实际: {:?}", other),
     }
@@ -66,10 +70,9 @@ fn test_llm_call_end_no_optional_fields() {
             output_tokens: 30,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
-            request_id: None,
-            first_token_time: None,
         }),
         stop_reason: None,
+        request_id: None,
     };
     let caps = PeriCaps {
         token_stats: true,
@@ -98,6 +101,7 @@ fn test_llm_call_end_no_usage_filtered() {
         output: "ERROR".to_string(),
         usage: None,
         stop_reason: None,
+        request_id: None,
     };
     let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert!(
@@ -171,16 +175,21 @@ fn test_tool_end_carries_title() {
 }
 
 #[test]
-fn test_stop_reason_display_roundtrip() {
+fn test_stop_reason_wire_format() {
+    // legacy wire format：与历史 StopReason Display 一致。
+    // peri_model::StopReason 无 Display，经 mapper 本地 helper 显式映射。
     for (reason, expected) in [
         (StopReason::EndTurn, "end_turn"),
         (StopReason::ToolUse, "tool_use"),
         (StopReason::MaxTokens, "max_tokens"),
-        (StopReason::Other("custom".to_string()), "custom"),
+        (
+            StopReason::Other {
+                value: "custom".to_string(),
+            },
+            "custom",
+        ),
     ] {
-        let s = reason.to_string();
-        assert_eq!(&s, expected, "Display 不匹配");
-        assert_eq!(StopReason::from_display(&s), reason, "from_display 不匹配");
+        assert_eq!(stop_reason_wire(&reason), expected, "wire format 不匹配");
     }
 }
 
@@ -495,6 +504,16 @@ fn test_compact_error_no_session_update() {
             message: "compact failed".to_string(),
         },
         "CompactError",
+    );
+}
+
+#[test]
+fn test_rewind_error_no_session_update() {
+    assert_no_session_update(
+        &ExecutorEvent::RewindError {
+            message: "rewind: 未找到目标消息 abc".to_string(),
+        },
+        "RewindError",
     );
 }
 

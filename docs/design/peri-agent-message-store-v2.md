@@ -138,7 +138,7 @@ Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。�
 | 模块 | 关系 |
 |------|------|
 | **Session** | Transcript 是 Session 核心实体之一。Session 创建时 Transcript 为空，销毁时丢弃。Session 可选持有 AsyncOwners（`SessionInbox` + `CronOwner` + `ChannelOwner`），使 cron/channel 事件直接桥接到 inbox 唤醒 executor，绕过 TUI 轮询 |
-| **LLM 适配器** | Reason 阶段从 Transcript 读取全量消息构造 LlmRequest。Token 计数在 LLM adapter 层完成，不属于 MessageTranscript 职责 |
+| **LLM 适配器** | Reason 阶段从 Transcript 读取全量消息构造 ModelRequest。Token 计数在 LLM adapter 层完成，不属于 MessageTranscript 职责 |
 | **ReAct 循环** | Receive 将 Queue 消息写入 Transcript。Act 将工具结果写入 Transcript |
 | **AgentGroup** | Fork Agent 创建时 Transcript 全量 Copy |
 | **Hook 系统** | Hook 不能直接写 Transcript——通过 MessageQueue 注入 |

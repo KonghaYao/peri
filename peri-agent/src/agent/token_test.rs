@@ -5,14 +5,12 @@ fn make_usage(
     output: u32,
     cache_creation: Option<u32>,
     cache_read: Option<u32>,
-) -> TokenUsage {
-    TokenUsage {
+) -> peri_model::TokenUsage {
+    peri_model::TokenUsage {
         input_tokens: input,
         output_tokens: output,
         cache_creation_input_tokens: cache_creation,
         cache_read_input_tokens: cache_read,
-        request_id: None,
-        first_token_time: None,
     }
 }
 
@@ -319,84 +317,12 @@ fn test_context_usage_percent_zero_window() {
 }
 
 #[test]
-fn test_accumulate_records_request_id() {
-    let mut tracker = TokenTracker::default();
-    let usage = TokenUsage {
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-        request_id: Some("req_01ABC".to_string()),
-        first_token_time: None,
-    };
-    tracker.accumulate(&usage);
-    assert_eq!(tracker.last_request_id.as_deref(), Some("req_01ABC"));
-}
-
-#[test]
-fn test_accumulate_overwrites_request_id() {
-    let mut tracker = TokenTracker::default();
-    let usage1 = TokenUsage {
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-        request_id: Some("req_01ABC".to_string()),
-        first_token_time: None,
-    };
-    tracker.accumulate(&usage1);
-    let usage2 = TokenUsage {
-        input_tokens: 200,
-        output_tokens: 80,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-        request_id: Some("req_02DEF".to_string()),
-        first_token_time: None,
-    };
-    tracker.accumulate(&usage2);
-    assert_eq!(tracker.last_request_id.as_deref(), Some("req_02DEF"));
-}
-
-#[test]
-fn test_accumulate_none_request_id() {
-    let mut tracker = TokenTracker::default();
-    let usage = TokenUsage {
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-        request_id: None,
-        first_token_time: None,
-    };
-    tracker.accumulate(&usage);
-    assert!(tracker.last_request_id.is_none());
-}
-
-#[test]
-fn test_reset_clears_request_id() {
-    let mut tracker = TokenTracker::default();
-    let usage = TokenUsage {
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-        request_id: Some("req_01ABC".to_string()),
-        first_token_time: None,
-    };
-    tracker.accumulate(&usage);
-    tracker.reset();
-    assert!(tracker.last_request_id.is_none());
-}
-
-#[test]
 fn test_request_record_from_usage() {
-    let usage = TokenUsage {
+    let usage = peri_model::TokenUsage {
         input_tokens: 8500,
         output_tokens: 200,
         cache_creation_input_tokens: Some(8000),
         cache_read_input_tokens: Some(0),
-        request_id: Some("req_01".to_string()),
-        first_token_time: None,
     };
     let record = RequestRecord::from_usage(&usage);
     assert_eq!(record.input_tokens, 8500);

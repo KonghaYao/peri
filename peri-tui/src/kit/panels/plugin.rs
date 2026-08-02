@@ -14,10 +14,11 @@ use crate::kit::atoms::{
     PluginViewTab, RENDER_HEARTBEAT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, hit_row, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         style::{Color, Style, Stylize},
@@ -218,9 +219,155 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let _hb = hooks.use_atom(&RENDER_HEARTBEAT);
     }
 
+    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
     // High priority — 搜索框文本输入（仅 Discover tab 生效，先于 Normal handler）
-    hooks.use_event_handler(EventScope::Current, EventPriority::High, {
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::High,
+        EventOptions { hit_test: true },
+        {
         move |event| {
+            // 鼠标：add_marketplace 输入与 Discover tab（click as enter）
+            if let Event::Mouse(mouse) = event {
+                // 详情/confirm 模式由 Normal handler 负责命中
+                if detail_plugin_idx.read().is_some()
+                    || discover_detail_idx.read().is_some()
+                    || marketplace_detail.read().is_some()
+                    || confirm_action.read().is_some()
+                {
+                    return EventResult::Ignored;
+                }
+                if let Some(area) = area
+                    && !is_scrollbar_column(&mouse, area)
+                {
+                    // add_marketplace 输入模式：点击仅消费（文本输入，无动作）
+                    if *add_marketplace_active.read() {
+                        return match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                            _ => EventResult::Ignored,
+                        };
+                    }
+                    if *active_tab.read() == PluginViewTab::Discover {
+                        // 搜索框聚焦：点击搜索框行 = 触发远程搜索（Enter @L351）
+                        if *search_focus.read() {
+                            if matches!(*search_state.read(), SearchState::Idle)
+                                && hit_item(
+                                    &mouse,
+                                    area,
+                                    ListLayout {
+                                        header_rows: 3,
+                                        item_rows: 1,
+                                        footer_rows: 0,
+                                        visible_items: 1,
+                                        scroll_start: 0,
+                                        item_count: 1,
+                                    },
+                                )
+                                .is_some()
+                            {
+                                let q = search_text.read().text.clone();
+                                if !q.is_empty() {
+                                    *search_state.write() = SearchState::Loading;
+                                    PLUGIN_SEARCH_RESULTS.state().write().clear();
+                                    let query = q.clone();
+                                    if let Some(client_handle) = ACP_CLIENT_HANDLE.get() {
+                                        let client = client_handle.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        tokio::spawn(async move {
+                                            let params = serde_json::json!({
+                                                "query": query,
+                                                "sessionId": sid,
+                                            });
+                                            if let Err(e) = client.send_raw_request("plugin/search", params).await {
+                                                tracing::warn!(error = %e, "plugin search RPC failed");
+                                            }
+                                        });
+                                    } else {
+                                        tracing::warn!(target: "plugin-panel", "ACP_CLIENT_HANDLE not set, search skipped");
+                                        *search_state.write() = SearchState::Error("ACP client not available".into());
+                                    }
+                                }
+                            }
+                            return match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                                _ => EventResult::Ignored,
+                            };
+                        }
+                        // 列表（未聚焦）：Loading/Error 时列表未渲染，仅消费
+                        if !matches!(*search_state.read(), SearchState::Idle) {
+                            return match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                                _ => EventResult::Ignored,
+                            };
+                        }
+                        // 复刻渲染的可见列表 → 原始 cache 索引映射（Enter @L428）
+                        let query = search_text.read().text.to_lowercase();
+                        let has_remote = !PLUGIN_SEARCH_RESULTS.state().read().is_empty();
+                        let items = get_discover_cache();
+                        let orig_indices: Vec<usize> = if !query.is_empty() && has_remote {
+                            // 远程结果展示：无本地 cache 索引映射，仅消费
+                            Vec::new()
+                        } else if query.is_empty() {
+                            (0..items.len()).collect()
+                        } else {
+                            let filtered_indices = discover_filtered.read().clone();
+                            if filtered_indices.is_empty() {
+                                items
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, item)| {
+                                        item.name.to_lowercase().contains(&query)
+                                            || item.description.to_lowercase().contains(&query)
+                                            || item.marketplace.to_lowercase().contains(&query)
+                                    })
+                                    .map(|(i, _)| i)
+                                    .collect()
+                            } else {
+                                filtered_indices
+                                    .iter()
+                                    .copied()
+                                    .filter(|&i| i < items.len())
+                                    .collect()
+                            }
+                        };
+                        let disc_scroll = scroll_start_for_selected(
+                            *discover_cursor.read(),
+                            orig_indices.len(),
+                            VISIBLE_ITEMS,
+                        );
+                        if let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 5,
+                                item_rows: 3,
+                                footer_rows: 0,
+                                visible_items: VISIBLE_ITEMS as u16,
+                                scroll_start: disc_scroll,
+                                item_count: orig_indices.len(),
+                            },
+                        ) {
+                            *discover_cursor.write() = idx;
+                            if let Some(&orig) = orig_indices.get(idx) {
+                                *discover_detail_idx.write() = Some(orig);
+                                *discover_detail_action.write() = 0;
+                            }
+                            return EventResult::Consumed;
+                        }
+                        return match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                            _ => EventResult::Ignored,
+                        };
+                    }
+                }
+                return EventResult::Ignored;
+            }
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
             };
@@ -445,8 +592,362 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     // ── 键盘 ──
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        {
         move |event| {
+            // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+            if let Event::Mouse(mouse) = event {
+                if let Some(area) = area
+                    && !is_scrollbar_column(&mouse, area)
+                {
+                    // ── 确认模式（uninstall / delete_marketplace）：点击 = 确认（Enter @L625）──
+                    if let Some(action) = confirm_action.read().clone()
+                        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    {
+                        let saved_loading = operation_loading.read().clone();
+                        match action.as_str() {
+                            "uninstall" => {
+                                let idx = detail_plugin_idx.read().unwrap_or(0);
+                                if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
+                                    let plugin_id = if p.marketplace.is_empty() {
+                                        p.name.clone()
+                                    } else {
+                                        format!("{}@{}", p.name, p.marketplace)
+                                    };
+                                    if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                        let client = cl.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        tokio::spawn(async move {
+                                            let _ = client.send_raw_request("plugin/uninstall", serde_json::json!({
+                                                "pluginId": plugin_id,
+                                                "sessionId": sid,
+                                            })).await;
+                                        });
+                                    }
+                                }
+                                *detail_plugin_idx.write() = None;
+                                // 关闭确认弹窗（独立线程避免 RwLock 重入）
+                                std::thread::spawn(move || {
+                                    *confirm_action.write() = None;
+                                    *operation_loading.write() = None;
+                                });
+                            }
+                            "delete_marketplace" => {
+                                let name = saved_loading.unwrap_or_default();
+                                std::thread::spawn(move || {
+                                    let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
+                                    let filtered: Vec<_> = marketplaces.into_iter()
+                                        .filter(|km| peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) != name)
+                                        .collect();
+                                    let _ = peri_middlewares::plugin::save_known_marketplaces(&filtered, None);
+                                    refresh_discover_cache();
+                                    refresh_marketplace_cache();
+                                    *confirm_action.write() = None;
+                                    *operation_loading.write() = None;
+                                });
+                            }
+                            _ => {
+                                // 未知确认动作：安全起见也从独立线程写 state
+                                std::thread::spawn(move || {
+                                    *confirm_action.write() = None;
+                                    *operation_loading.write() = None;
+                                });
+                            }
+                        }
+                        return EventResult::Consumed;
+                    }
+                    // ── Discover 详情：点击 action 行 = 执行（Enter @L487）──
+                    if discover_detail_idx.read().is_some()
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 10,
+                                item_rows: 1,
+                                footer_rows: 0,
+                                visible_items: 3,
+                                scroll_start: 0,
+                                item_count: 3,
+                            },
+                        )
+                    {
+                        *discover_detail_action.write() = idx;
+                        let disc_idx = discover_detail_idx.read().unwrap_or(0);
+                        match DiscoverDetailAction::ALL.get(idx).copied() {
+                            Some(DiscoverDetailAction::InstallUser) => {
+                                let items = get_discover_cache();
+                                if let Some(dp) = items.get(disc_idx) {
+                                    let name = dp.name.clone();
+                                    let marketplace = dp.marketplace.clone();
+                                    *operation_loading.write() = Some("install".into());
+                                    if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                        let client = cl.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        tokio::spawn(async move {
+                                            let _ = client.send_raw_request("plugin/install", serde_json::json!({
+                                                "name": name,
+                                                "marketplace": marketplace,
+                                                "scope": "user",
+                                                "sessionId": sid,
+                                            })).await;
+                                        });
+                                    }
+                                }
+                                *discover_detail_idx.write() = None;
+                                *discover_detail_action.write() = 0;
+                            }
+                            Some(DiscoverDetailAction::InstallProject) => {
+                                let items = get_discover_cache();
+                                if let Some(dp) = items.get(disc_idx) {
+                                    let name = dp.name.clone();
+                                    let marketplace = dp.marketplace.clone();
+                                    *operation_loading.write() = Some("install".into());
+                                    if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                        let client = cl.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        tokio::spawn(async move {
+                                            let _ = client.send_raw_request("plugin/install", serde_json::json!({
+                                                "name": name,
+                                                "marketplace": marketplace,
+                                                "scope": "project",
+                                                "sessionId": sid,
+                                            })).await;
+                                        });
+                                    }
+                                }
+                                *discover_detail_idx.write() = None;
+                                *discover_detail_action.write() = 0;
+                            }
+                            Some(DiscoverDetailAction::BackToList) => {
+                                *discover_detail_idx.write() = None;
+                                *discover_detail_action.write() = 0;
+                            }
+                            None => {}
+                        }
+                        return EventResult::Consumed;
+                    }
+                    // ── Marketplace 详情：点击 action 行 = 执行（Enter @L577）──
+                    if marketplace_detail.read().is_some()
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                header_rows: 7,
+                                item_rows: 1,
+                                footer_rows: 0,
+                                visible_items: 2,
+                                scroll_start: 0,
+                                item_count: 2,
+                            },
+                        )
+                    {
+                        *marketplace_detail_action.write() = idx;
+                        let s = marketplace_detail.read().unwrap_or(0);
+                        let entries = get_marketplace_cache(); // 非阻塞缓存读取
+                        if let Some(entry) = entries.get(s.saturating_sub(1)) {
+                            match idx {
+                                0 => {
+                                    // Refresh
+                                    let name = entry.source_label.clone();
+                                    *marketplace_refreshing.write() = true;
+                                    if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                        let client = cl.clone();
+                                        let sid = client.current_session_id().unwrap_or_default();
+                                        let name_for_refresh = name.clone();
+                                        tokio::spawn(async move {
+                                            let _ = client.send_raw_request("marketplace/refresh", serde_json::json!({
+                                                "name": name_for_refresh,
+                                                "sessionId": sid,
+                                            })).await;
+                                        });
+                                    }
+                                    // 将缓存刷新（同步 I/O）移到 blocking thread
+                                    tokio::task::spawn_blocking(|| {
+                                        refresh_discover_cache();
+                                        refresh_marketplace_cache();
+                                    });
+                                }
+                                _ => {
+                                    // Delete
+                                    *confirm_action.write() = Some("delete_marketplace".into());
+                                    *operation_loading.write() = Some(entry.name.clone());
+                                }
+                            }
+                        }
+                        *marketplace_detail.write() = None;
+                        *marketplace_detail_action.write() = 0;
+                        return EventResult::Consumed;
+                    }
+                    // ── Installed 详情：点击 action 行 = 执行（Enter @L738）──
+                    if let Some(detail) = *detail_plugin_idx.read()
+                        && let Some(detail_p) = PLUGIN_LIST.state().read().get(detail).cloned()
+                        && let Some(idx) = hit_item(
+                            &mouse,
+                            area,
+                            ListLayout {
+                                // 标题 + 空行 + 状态 + 空行 + 4 字段 + 空行 + 4 capabilities
+                                // + [可选 error 2 行] + 空行 + actions 标题 + 空行
+                                header_rows: if detail_p.load_error.is_some() { 18 } else { 16 },
+                                item_rows: 1,
+                                footer_rows: 0,
+                                visible_items: 4,
+                                scroll_start: 0,
+                                item_count: 4,
+                            },
+                        )
+                    {
+                        *action_index.write() = idx;
+                        let actions = action_list(detail_p.enabled);
+                        if let Some(action) = actions.get(idx) {
+                            match *action {
+                                "uninstall" => {
+                                    *confirm_action.write() = Some("uninstall".into());
+                                }
+                                "back" => {
+                                    *detail_plugin_idx.write() = None;
+                                }
+                                "enable" | "disable" => {
+                                    *operation_loading.write() = Some(action.to_string());
+                                    let detail = detail_plugin_idx.read().unwrap_or(0);
+                                    let plugin_info = PLUGIN_LIST.state().read().get(detail).cloned();
+                                    if let Some(p) = plugin_info {
+                                        let plugin_id = if p.marketplace.is_empty() {
+                                            p.name.clone()
+                                        } else {
+                                            format!("{}@{}", p.name, p.marketplace)
+                                        };
+                                        let plugin_id_for_persist = plugin_id.clone();
+                                        let enable = *action == "enable";
+                                        let scope = p.install_scope.clone();
+                                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                            let client = cl.clone();
+                                            let sid = client.current_session_id().unwrap_or_default();
+                                            tokio::spawn(async move {
+                                                let _ = client.send_raw_request("plugin/toggle", serde_json::json!({
+                                                    "pluginId": plugin_id,
+                                                    "enable": enable,
+                                                    "scope": scope,
+                                                    "sessionId": sid,
+                                                })).await;
+                                            });
+                                        }
+                                        // 将同步写盘移到 blocking thread，避免阻塞 TUI 主事件循环
+                                        tokio::task::spawn_blocking(move || {
+                                            let _ = peri_middlewares::plugin::save_claude_settings_enabled_plugins(
+                                                &[(plugin_id_for_persist, enable)],
+                                                None,
+                                            );
+                                        });
+                                    }
+                                    *detail_plugin_idx.write() = None;
+                                }
+                                "update" => {
+                                    *operation_loading.write() = Some("update".into());
+                                    let detail = detail_plugin_idx.read().unwrap_or(0);
+                                    let p = PLUGIN_LIST.state().read().get(detail).cloned();
+                                    if let Some(p) = p {
+                                        let plugin_id = if p.marketplace.is_empty() {
+                                            p.name.clone()
+                                        } else {
+                                            format!("{}@{}", p.name, p.marketplace)
+                                        };
+                                        if let Some(cl) = ACP_CLIENT_HANDLE.get() {
+                                            let client = cl.clone();
+                                            let sid = client.current_session_id().unwrap_or_default();
+                                            tokio::spawn(async move {
+                                                let _ = client.send_raw_request("plugin/update", serde_json::json!({
+                                                    "pluginId": plugin_id,
+                                                    "sessionId": sid,
+                                                })).await;
+                                            });
+                                        }
+                                    }
+                                    *detail_plugin_idx.write() = None;
+                                }
+                                other => {
+                                    tracing::info!(target: "plugin-panel", "unknown action {} on {}", other, detail_p.name);
+                                }
+                            }
+                        }
+                        return EventResult::Consumed;
+                    }
+                    // ── 列表模式 ──
+                    match *active_tab.read() {
+                        PluginViewTab::Installed => {
+                            let count = PLUGIN_LIST.state().read().len();
+                            let scroll_start =
+                                scroll_start_for_selected(*selected.read(), count, VISIBLE_ITEMS);
+                            if let Some(idx) = hit_item(
+                                &mouse,
+                                area,
+                                ListLayout {
+                                    header_rows: 3,
+                                    item_rows: 4,
+                                    footer_rows: 0,
+                                    visible_items: VISIBLE_ITEMS as u16,
+                                    scroll_start,
+                                    item_count: count,
+                                },
+                            ) {
+                                *selected.write() = idx;
+                                *detail_plugin_idx.write() = Some(idx);
+                                *action_index.write() = 0;
+                                return EventResult::Consumed;
+                            }
+                        }
+                        PluginViewTab::Marketplaces => {
+                            let entries_len = get_marketplace_cache().len();
+                            // Add 行（内容行 3）单独命中：激活 add 输入（Enter @L722）
+                            if hit_row(
+                                mouse.row,
+                                area,
+                                ListLayout {
+                                    header_rows: 3,
+                                    item_rows: 1,
+                                    footer_rows: 0,
+                                    visible_items: 1,
+                                    scroll_start: 0,
+                                    item_count: 1,
+                                },
+                            )
+                            .is_some()
+                            {
+                                *selected.write() = 0;
+                                *add_marketplace_active.write() = true;
+                                *add_marketplace_input.write() = TextAreaState::default();
+                                return EventResult::Consumed;
+                            }
+                            // 条目（内容行 5 起，每项 3 行）：点击 = 进详情（Enter @L726）
+                            if let Some(idx) = hit_item(
+                                &mouse,
+                                area,
+                                ListLayout {
+                                    header_rows: 5,
+                                    item_rows: 3,
+                                    footer_rows: 0,
+                                    visible_items: entries_len as u16,
+                                    scroll_start: 0,
+                                    item_count: entries_len,
+                                },
+                            ) {
+                                let s = idx + 1;
+                                *selected.write() = s;
+                                *marketplace_detail.write() = Some(s);
+                                *marketplace_detail_action.write() = 0;
+                                return EventResult::Consumed;
+                            }
+                        }
+                        PluginViewTab::Discover | PluginViewTab::Errors => {}
+                    }
+                }
+                return match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+                    _ => EventResult::Ignored,
+                };
+            }
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
             };

@@ -15,13 +15,15 @@ use std::{
 };
 
 pub use peri_acp::session::state_builders::{
-    apply_thinking_effort, build_config_options, build_mode_state, parse_permission_mode,
+    apply_profile_effort, apply_thinking_effort, build_config_options, build_mode_state,
+    parse_permission_mode,
 };
 use peri_acp::transport::types::IncomingMessage;
 use peri_agent::{agent::AgentCancellationToken, interaction::ChannelState, messages::BaseMessage};
 use peri_middlewares::prelude::*;
 
 use crate::{app::agent::LlmProvider, config::PeriConfig};
+use peri_acp_types::event_data::PredictionAction;
 
 mod notify;
 mod prompt;
@@ -38,7 +40,7 @@ pub(crate) struct SessionState {
     session_id: String,
     thread_id: String,
     cwd: String,
-    history: Vec<BaseMessage>,
+    pub(crate) history: Vec<BaseMessage>,
     cancel_token: Option<AgentCancellationToken>,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<peri_acp::session::executor::FrozenSessionData>,
@@ -48,6 +50,11 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: peri_acp::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+    // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
+    /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
+    pub(crate) title: Option<String>,
+    /// 预测生成的会话标签（未来按标签检索使用）。
+    pub(crate) tags: Vec<String>,
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -183,14 +190,17 @@ pub async fn run_acp_server(
                             let pred_session_id = prompt_session_id.clone();
                             let pred_provider = provider.clone();
                             let pred_sessions = sessions.clone();
+                            let pred_thread_store = thread_store.clone();
 
                             tokio::spawn(async move {
                                 tracing::debug!("Prediction task started");
-                                // 从 session 获取最新历史
-                                let (history, cwd) = {
+                                // 从 session 获取最新历史与当前标题
+                                let (history, cwd, current_title) = {
                                     let sessions = pred_sessions.lock().await;
                                     match sessions.get(&pred_session_id) {
-                                        Some(s) => (s.history.clone(), s.cwd.clone()),
+                                        Some(s) => {
+                                            (s.history.clone(), s.cwd.clone(), s.title.clone())
+                                        }
                                         None => {
                                             tracing::debug!("Prediction: session not found");
                                             return;
@@ -224,34 +234,100 @@ pub async fn run_acp_server(
                                     llm_provider,
                                     recent,
                                     &cwd,
+                                    current_title.as_deref(),
                                 )
                                 .await;
 
                                 match result {
-                                    Ok(text) => {
-                                        if !text.is_empty() {
-                                            let caps = pred_caps_registry
-                                                .get(&pred_session_id)
-                                                .map(|r| r.clone())
-                                                .unwrap_or_default();
-                                            if caps.prediction {
-                                                tracing::debug!(%text, "Prediction ready, sending notification");
-                                                let _ = pred_transport
-                                                    .send_notification(
-                                                        "peri/prediction_ready",
-                                                        serde_json::json!({
-                                                            "sessionId": pred_session_id,
-                                                            "text": text,
-                                                        }),
-                                                    )
-                                                    .await;
-                                            } else {
-                                                tracing::debug!(
-                                                    "Prediction ready but cap not declared, suppressing notification"
+                                    Ok(actions) => {
+                                        if actions.is_empty() {
+                                            tracing::debug!("Prediction: empty actions");
+                                            return;
+                                        }
+                                        // 元数据动作写入 session 状态；标题变更待持久化并推送
+                                        let mut applied_title: Option<String> = None;
+                                        {
+                                            let mut sessions = pred_sessions.lock().await;
+                                            if let Some(state) = sessions.get_mut(&pred_session_id)
+                                            {
+                                                for action in &actions {
+                                                    match action {
+                                                        PredictionAction::SetTitle { title } => {
+                                                            let title = title.trim();
+                                                            if !title.is_empty() {
+                                                                state.title =
+                                                                    Some(title.to_string());
+                                                                applied_title =
+                                                                    Some(title.to_string());
+                                                            }
+                                                        }
+                                                        PredictionAction::AddTag { tag }
+                                                            if !state.tags.contains(tag) =>
+                                                        {
+                                                            state.tags.push(tag.clone());
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // 标题变更：持久化到 thread store，并推送 session/update
+                                        // 供标题栏与外部客户端刷新（与 session/rename 行为一致）
+                                        if let Some(title) = applied_title {
+                                            if let Err(e) = pred_thread_store
+                                                .update_title(&pred_session_id, &title)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    session_id = %pred_session_id,
+                                                    error = %e,
+                                                    "Prediction: failed to persist title"
                                                 );
                                             }
+                                            notify::send_session_info_update_with_title(
+                                                pred_transport.as_ref(),
+                                                &pred_session_id,
+                                                Some(&title),
+                                            )
+                                            .await;
+                                        }
+                                        let caps = pred_caps_registry
+                                            .get(&pred_session_id)
+                                            .map(|r| r.clone())
+                                            .unwrap_or_default();
+                                        if caps.prediction {
+                                            // text 字段取首个 Placeholder（兼容旧消费方）
+                                            let text = actions
+                                                .iter()
+                                                .find_map(|a| match a {
+                                                    PredictionAction::Placeholder { text } => {
+                                                        Some(text.clone())
+                                                    }
+                                                    _ => None,
+                                                })
+                                                .unwrap_or_default();
+                                            let actions_json: Vec<serde_json::Value> = actions
+                                                .iter()
+                                                .filter_map(|a| serde_json::to_value(a).ok())
+                                                .collect();
+                                            tracing::debug!(
+                                                count = actions.len(),
+                                                "Prediction ready, sending notification"
+                                            );
+                                            let _ = pred_transport
+                                                .send_notification(
+                                                    "peri/prediction_ready",
+                                                    serde_json::json!({
+                                                        "sessionId": pred_session_id,
+                                                        "text": text,
+                                                        "actions": actions_json,
+                                                    }),
+                                                )
+                                                .await;
                                         } else {
-                                            tracing::debug!("Prediction: LLM returned empty text");
+                                            tracing::debug!(
+                                                "Prediction ready but cap not declared, suppressing notification"
+                                            );
                                         }
                                     }
                                     Err(peri_acp::session::executor::PredictionError::Failed(
@@ -282,8 +358,7 @@ pub async fn run_acp_server(
                 } else {
                     let mut sessions = sessions.lock().await;
                     let result =
-                        handle_request(&method, &params, &cfg, &mut sessions, transport.as_ref())
-                            .await;
+                        handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
                     let _ = transport.send_response(id, result).await;
                 }
             }

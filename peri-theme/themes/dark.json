@@ -78,7 +78,10 @@
     "thinking": "#A2A9E4",
     "model_info": "#A0825F",
     "bash_border": "#FD5DB1",
-    "selected_fg": "#B2B9F9"
+    "selected_fg": "#B2B9F9",
+    "model_accent": "#A2A9E4",
+    "effort": "#E5A46B",
+    "token_context": "#7FB5D9"
   },
   "component": {
     "message": {
@@ -95,7 +98,8 @@
       "prompt": "$semantic.text.muted",
       "prompt_loading": "$semantic.text.muted",
       "continuation": "$semantic.text.dim",
-      "placeholder": "$semantic.text.muted"
+      "placeholder": "$semantic.text.muted",
+      "session_title_palette": ["#12341A", "#371412", "#1A4E24", "#4E1C16", "#264F78", "#503C1E", "#3C2850", "#1E3C50"]
     },
     "panel": {
       "border": "$semantic.accent",

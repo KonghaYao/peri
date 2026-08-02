@@ -23,7 +23,7 @@
 use crate::kit::atoms::{self, DownloadProgressPayload, PopupKind};
 use crate::kit::popups::{
     confirm_popup::ConfirmPopup, download_progress::DownloadProgressPopup, hitl_popup::HitlPopup,
-    oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
+    model_quick_switch::ModelQuickSwitchPopup, oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
 };
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
@@ -46,6 +46,9 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(PopupKind::Download) => {
             render_popup(element!(DownloadProgressPopup()).into(), term_w, term_h)
         }
+        // 小弹出层：组件内部按 MODEL_SWITCH_ANCHOR 自定位（锚定在状态栏模型段上方），
+        // 不走居中 render_popup。
+        Some(PopupKind::ModelQuickSwitch) => element!(ModelQuickSwitchPopup()).into(),
         None => render_empty(),
     }
 }
@@ -102,12 +105,22 @@ pub fn close_popup() -> Option<PopupKind> {
                 *atoms::ASK_USER_PENDING.state().write() = None;
                 *atoms::ASK_USER_REQUEST_ID.state().write() = None;
             }
-            PopupKind::Rewind => *atoms::REWIND_PREVIEW.state().write() = None,
+            // Rewind：REWIND_PREVIEW 保留（候选跟随会话生命周期，关闭后可再开），
+            // 但预算状态 / 目标文本 / 查询错误随弹窗关闭清空（下次打开重新查询）。
+            // 会话边界（/clear、thread 切换）由 submit_consumer / thread_load_consumer
+            // 额外清空候选。
+            PopupKind::Rewind => {
+                *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Idle;
+                *atoms::REWIND_TARGET_TEXT.state().write() = None;
+                *atoms::REWIND_QUERY_ERROR.state().write() = None;
+            }
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
             PopupKind::Confirm => *atoms::CONFIRM_PAYLOAD.state().write() = None,
             PopupKind::Download => {
                 *atoms::DOWNLOAD_PROGRESS.state().write() = DownloadProgressPayload::default()
             }
+            // ModelQuickSwitch 无 payload atom（数据即读自 PERI_CONFIG_HANDLE）
+            PopupKind::ModelQuickSwitch => {}
         }
     }
     prev

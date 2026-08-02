@@ -13,7 +13,7 @@ pub use agent_client_protocol_schema::v1::{
 use parking_lot::RwLock;
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
-use crate::provider::{LlmProvider, PeriConfig, ThinkingConfig};
+use crate::provider::{LlmProvider, PeriConfig, Profiles};
 
 /// Parse a mode ID string into a `PermissionMode`.
 pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
@@ -25,17 +25,18 @@ pub fn parse_permission_mode(mode_id: &str) -> PermissionMode {
     }
 }
 
-/// Apply a thinking effort level to `PeriConfig` (writes through `RwLock`).
-pub fn apply_thinking_effort(peri_config: &RwLock<PeriConfig>, effort: &str) {
+/// Apply a thinking effort level to the active profile (Profile 唯一事实源)。
+pub fn apply_profile_effort(peri_config: &RwLock<PeriConfig>, effort: &str) {
     let mut cfg = peri_config.write();
-    let thinking = cfg.config.thinking.get_or_insert_with(|| ThinkingConfig {
-        enabled: true,
-        budget_tokens: 8000,
-        effort: "medium".to_string(),
-        max_tokens: 32000,
-    });
-    thinking.enabled = true;
-    thinking.effort = effort.to_string();
+    let alias = cfg.config.active_alias.clone();
+    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
+        profile.effort = effort.to_string();
+    }
+}
+
+/// 兼容 ACP 旧协议消息的薄包装（新代码请用 `apply_profile_effort`）
+pub fn apply_thinking_effort(peri_config: &RwLock<PeriConfig>, effort: &str) {
+    apply_profile_effort(peri_config, effort);
 }
 
 /// Build ACP `SessionModeState` from the current permission mode.
@@ -65,7 +66,7 @@ pub fn build_mode_state(pm: &SharedPermissionMode) -> SessionModeState {
 /// Returns mode, model, and thinking_effort in priority order (higher priority first).
 pub fn build_config_options(
     peri_config: &PeriConfig,
-    provider: &LlmProvider,
+    _provider: &LlmProvider,
     current_mode: PermissionMode,
 ) -> Vec<SessionConfigOption> {
     let mut options = Vec::with_capacity(3);
@@ -95,27 +96,26 @@ pub fn build_config_options(
 
     // ── Model (category: model) ──
     let active_alias = peri_config.config.active_alias.clone();
-    let active_provider = peri_config.config.providers.iter().find(|prov| {
-        prov.id == peri_config.config.active_provider_id
-            || peri_config.config.active_provider_id.is_empty()
-    });
     let mut model_options = Vec::new();
-    if let Some(prov) = active_provider {
-        for alias in ["opus", "sonnet", "haiku"] {
-            if let Some(model_name) = prov.models.get_model(alias) {
-                if !model_name.is_empty() {
-                    model_options.push(SessionConfigSelectOption::new(
-                        SessionConfigValueId::new(alias.to_string()),
-                        format!("{} ({})", alias, model_name),
-                    ));
-                }
-            }
-        }
-    }
-    if model_options.is_empty() {
+    for alias in Profiles::ALL {
+        let profile = peri_config.config.profiles.get(alias);
+        let model_name = profile
+            .and_then(|p| p.model.clone())
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                let provider = peri_config.config.providers.iter().find(|prov| {
+                    let want = profile.map(|pf| pf.provider.as_str()).unwrap_or("");
+                    want.is_empty() || prov.id == want
+                });
+                provider
+                    .and_then(|p| p.models.get_model(alias))
+                    .map(str::to_string)
+                    .filter(|m| !m.is_empty())
+            })
+            .unwrap_or_else(|| alias.to_string());
         model_options.push(SessionConfigSelectOption::new(
-            SessionConfigValueId::new("current".to_string()),
-            provider.model_name().to_string(),
+            SessionConfigValueId::new(alias.to_string()),
+            format!("{alias} ({model_name})"),
         ));
     }
     options.push(
@@ -131,10 +131,10 @@ pub fn build_config_options(
     // ── Thinking effort (category: thought_level) ──
     let effort = peri_config
         .config
-        .thinking
-        .as_ref()
-        .map(|t| t.effort.as_str())
-        .unwrap_or("medium");
+        .profiles
+        .get(&peri_config.config.active_alias)
+        .map(|p| p.effort.as_str())
+        .unwrap_or("xhigh");
     let thinking_options = vec![
         SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low".to_string()),
         SessionConfigSelectOption::new(SessionConfigValueId::new("medium"), "Medium".to_string()),

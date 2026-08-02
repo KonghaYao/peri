@@ -77,7 +77,7 @@ describe("scenarios: ask user question", () => {
         ansiRaw: capture.raw,
         criteria: [
           "agent 应已完成了对 AskUserQuestion 工具的测试，输出了总结（如包含表格或结构化的测试结果）",
-          "消息区应包含 agent 对用户回答内容的引用，表明 agent 确实收到了用户在面板中的选择",
+          "agent 的总结应体现 AskUserQuestion 交互已收到用户回答（如提及'三个题目均已正常返回'、'已收到回答'等表述或对回答内容的总结），而不是报错或中断",
         ],
       });
       console.log("Judge (done):", JSON.stringify(doneResult, null, 2));

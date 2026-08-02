@@ -4,7 +4,7 @@
 //! Enter 执行确认，Esc 取消关闭。
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{style::Stylize, text::Line},
 };
@@ -16,6 +16,7 @@ use crate::kit::atoms::{
     self, ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD,
     ConfirmAction, LANG_VERSION,
 };
+use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::panel_registry::close_panel;
 use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
@@ -27,53 +28,78 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let payload = payload_store.read().clone();
     let _ = payload_store;
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::High, move |event| {
-        let Event::Key(key) = event else {
-            return EventResult::Ignored;
-        };
-        if key.kind != KeyEventKind::Press {
-            return EventResult::Ignored;
-        }
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                // 执行确认逻辑
-                if let Some(ref p) = *CONFIRM_PAYLOAD.state().read() {
-                    match &p.pending_action {
-                        ConfirmAction::ThreadSwitch(target_id) => {
-                            if let Some(tx) = atoms::THREAD_LOAD_TX.get() {
-                                let _ = tx.send(target_id.clone());
-                            }
-                        }
-                        ConfirmAction::RejectAskUser => {
-                            // 读取 request_id（必须在 close_panel 之前，因为 close_panel 可能清掉 atom）
-                            if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
-                                && let Some(tx) = ASK_USER_RESPONSE_TX.get()
-                            {
-                                let _ = tx.send(AskUserResponseAction::Reject {
-                                    request_id_str: id_str,
-                                });
-                            }
-                            // 关闭面板并清空状态
-                            close_panel(PanelKind::AskUser);
-                            *ASK_USER_PENDING.state().write() = None;
-                            *ASK_USER_REQUEST_ID.state().write() = None;
-                        }
+    // 弹窗绘制区域（上一帧）——鼠标整窗点击 = 确认
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
+    }
+
+    // 确认动作：Enter 与鼠标左键点击共用（click as enter）
+    let confirm = move || {
+        // 执行确认逻辑
+        if let Some(ref p) = *CONFIRM_PAYLOAD.state().read() {
+            match &p.pending_action {
+                ConfirmAction::ThreadSwitch(target_id) => {
+                    if let Some(tx) = atoms::THREAD_LOAD_TX.get() {
+                        let _ = tx.send(target_id.clone());
                     }
                 }
-                // 清空确认弹窗 payload 并关闭弹窗
-                *CONFIRM_PAYLOAD.state().write() = None;
-                close_popup();
-                EventResult::Consumed
+                ConfirmAction::RejectAskUser => {
+                    // 读取 request_id（必须在 close_panel 之前，因为 close_panel 可能清掉 atom）
+                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                        && let Some(tx) = ASK_USER_RESPONSE_TX.get()
+                    {
+                        let _ = tx.send(AskUserResponseAction::Reject {
+                            request_id_str: id_str,
+                        });
+                    }
+                    // 关闭面板并清空状态
+                    close_panel(PanelKind::AskUser);
+                    *ASK_USER_PENDING.state().write() = None;
+                    *ASK_USER_REQUEST_ID.state().write() = None;
+                }
             }
-            (KeyModifiers::NONE, KeyCode::Esc) => {
-                // 用户选择返回继续作答
-                *CONFIRM_PAYLOAD.state().write() = None;
-                close_popup();
-                EventResult::Consumed
-            }
-            _ => EventResult::Ignored,
         }
-    });
+        // 清空确认弹窗 payload 并关闭弹窗
+        *CONFIRM_PAYLOAD.state().write() = None;
+        close_popup();
+    };
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::High,
+        EventOptions { hit_test: true },
+        move |event| {
+            // 鼠标：区域内左键点击 = 执行确认动作（click as enter）
+            if let Event::Mouse(mouse) = event {
+                if area.is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    confirm();
+                    return EventResult::Consumed;
+                }
+                return EventResult::Ignored;
+            }
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Enter) => {
+                    confirm();
+                    EventResult::Consumed
+                }
+                (KeyModifiers::NONE, KeyCode::Esc) => {
+                    // 用户选择返回继续作答
+                    *CONFIRM_PAYLOAD.state().write() = None;
+                    close_popup();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            }
+        },
+    );
     let _ = hooks.use_atom(&LANG_VERSION);
 
     let popup_tokens = &theme_def.read().component.popup;

@@ -51,7 +51,7 @@ async fn test_smoke_complete_turn_sequence() {
     // Stage: Reason + LLM
     t.on_stage_start(Stage::Reason, "turn_1");
     t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "claude-4.7", "anthropic", "hello", None);
+    t.on_llm_end(0, "claude-4.7", "anthropic", "hello", None, None);
     let reason_handle = t.stages.on_stage_start(
         Stage::Reason,
         &t.trace_id,
@@ -75,7 +75,7 @@ async fn test_sampling_rate_0_emits_nothing() {
     t.on_turn_start("turn_1");
     t.on_stage_start(Stage::Reason, "turn_1");
     t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "m", "p", "o", None);
+    t.on_llm_end(0, "m", "p", "o", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -138,7 +138,7 @@ async fn test_llm_generation_emits_events() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "gpt-4", "openai", "response", None);
+    t.on_llm_end(0, "gpt-4", "openai", "response", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -157,7 +157,7 @@ async fn test_llm_retry_accumulates_metadata() {
     t.on_llm_start(0, &[], &[]);
     t.on_llm_retrying(1, 3, 500, "timeout");
     t.on_llm_retrying(2, 3, 1000, "timeout");
-    t.on_llm_end(0, "gpt-4", "openai", "response", None);
+    t.on_llm_end(0, "gpt-4", "openai", "response", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();

@@ -114,7 +114,7 @@ impl super::SubAgentTool {
             .collect();
 
         // 构造 v2 StageContext（非 fork 路径不注入 parent_messages）
-        // 注入 event_handler，使 SubAgent 内 RetryableLLM 的重试事件能被父级 Langfuse 追踪
+        // 注入 event_handler，使 SubAgent 内 LLM 的重试事件能被父级 Langfuse 追踪
         let mut llm = build_result.llm;
         llm.inject_event_handler(self.event_handler.clone());
         let v2_ctx = build_v2_subagent_context(
