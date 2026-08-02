@@ -10,9 +10,10 @@ use crate::kit::tui_render_unit::{TuiRenderUnit, reasoning_collapse_target};
 /// `current_turn.view_models()`（O(log n)，与 current_turn 增量缓存共享元素，
 /// 不再逐条深拷贝），构成扁平单层列表。generation 每次调用递增+1。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
-    // [Diagnostic] 追踪 VIEW_MODELS 写入时机——配合 scroll diag 分析 submit/history 滚动问题
+    // [Diagnostic] 追踪 VIEW_MODELS 写入时机——配合 scroll diag 分析 submit/history 滚动问题。
+    // trace 级别：每 token 调用一次，默认 info filter 下不落盘。
     let is_loading = state.phase == SessionPhase::PromptRunning;
-    tracing::info!(
+    tracing::trace!(
         target: "msg_scroll_diag",
         committed = state.committed.len(),
         current_turn = state.current_turn.view_models().len(),
