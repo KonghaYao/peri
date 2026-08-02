@@ -10,9 +10,14 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
+use crate::kit::atoms::{
+    BRIDGE_RESET_COUNTER, KEEPGONG_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT,
+    SUBMIT_TX, VIEW_MODELS,
+};
+use crate::kit::mouse_router;
+use crate::kit::submit_request::SubmitRequest;
 use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
@@ -31,8 +36,8 @@ mod props;
 mod render;
 mod scroll;
 mod selection;
+use footer::{KeepGoingLayout, build_footer_lines, hash_todo_items};
 pub use footer::{TodoItem, TodoStatus};
-use footer::{build_footer_lines, hash_todo_items};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines_cached;
@@ -144,7 +149,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
-    let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
+    // keepgoing 防抖：KEEPGONG_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
+    let keepgoing_blocked = crate::kit::atoms::KEEPGONG_BLOCKED_UNTIL
+        .state()
+        .read()
+        .is_some_and(|until| Instant::now() < until);
+    let (footer_lines, keepgoing_layout) =
+        build_footer_lines(&mut hooks, is_loading, &todo_items, keepgoing_blocked);
+    // keepgoing 按钮屏幕点击区域 (y, x_start, width)，每帧更新，点击 handler 实时读取
+    // （handler 闭包捕获的是 State 句柄而非帧快照，滚动后坐标仍正确）
+    let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
     let brewed_lines = if empty && !footer_lines.is_empty() {
@@ -335,6 +349,61 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .min(u16::MAX as usize) as u16
     };
 
+    // ── keepgoing 按钮点击（footer summary 行右侧）──
+    // [Why] 必须注册在 scroll handler 之前：两者同 Global+High，同优先级按注册序分发，
+    // scroll::handle_event 对消息区内 Down(Left) 一律 Consumed（文本选中起点）——
+    // 若在其后注册，按钮点击会被 scroll handler 截断、永远收不到。
+    // 命中 → Consumed（scroll handler 不处理该点击，不会误设选区起点）；
+    // 未命中 → Ignored（滚动/选区逻辑照常）。
+    // [TRAP] 闭包捕获 State 句柄（keepgoing_rect）而非帧快照——每帧 write_no_update
+    // 更新 rect，滚动/布局变化后坐标仍准确；事件在上帧渲染完成后分发，读取的
+    // 是最近一帧的按钮位置。
+    {
+        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+            let Event::Mouse(mouse) = event else {
+                return EventResult::Ignored;
+            };
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return EventResult::Ignored;
+            }
+            // 弹窗/面板遮挡时不响应（与 status_bar / scroll handler 一致）
+            if mouse_router::is_occluded() {
+                return EventResult::Ignored;
+            }
+            // 防抖：防抖期内按钮渲染为禁用样式，点击忽略
+            let now = Instant::now();
+            let blocked = KEEPGONG_BLOCKED_UNTIL
+                .state()
+                .read()
+                .is_some_and(|until| now < until);
+            if blocked {
+                return EventResult::Ignored;
+            }
+            // 命中检测：点击坐标落在按钮屏幕区域内 (y, x_start, width)
+            let Some((by, bx, bw)) = *keepgoing_rect.read() else {
+                return EventResult::Ignored;
+            };
+            let (x, y) = (mouse.column, mouse.row);
+            if y != by || x < bx || x >= bx.saturating_add(bw) {
+                return EventResult::Ignored;
+            }
+            // 触发 keepgoing 提交：发送空白 user prompt（服务端不插入 user 消息，仅继续 loop）
+            if let Some(tx) = SUBMIT_TX.get() {
+                let _ = tx.send(SubmitRequest::KeepGoing);
+            }
+            // 防抖：1.5s 内按钮禁用（渲染为 muted 样式，见 build_footer_lines）
+            *KEEPGONG_BLOCKED_UNTIL.state().write() =
+                Some(Instant::now() + Duration::from_millis(1500));
+            // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                *KEEPGONG_BLOCKED_UNTIL.state().write() = None;
+                RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+            });
+            EventResult::Consumed
+        });
+    }
+
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
@@ -481,6 +550,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let vp_height = vis_height as usize;
 
+    // ── keepgoing 按钮屏幕位置（每帧更新）──
+    // 必须在 scroll_y 计算之后、handler 使用之前；write_no_update 避免自激重渲染。
+    {
+        let mut k_rect = keepgoing_rect.write_no_update();
+        *k_rect = compute_keepgoing_rect(
+            empty,
+            area_rect,
+            keepgoing_layout,
+            core_total_visual_rows,
+            scroll_y,
+            vis_height,
+        );
+    }
+
     // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
 
     // 选区范围（字符级）：(first_logical, last_logical, sr, sc, er, ec)
@@ -607,6 +690,41 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     )
     .into_any()
+}
+
+/// 计算 keepgoing 按钮的屏幕点击区域 `(y, x_start, width)`。
+///
+/// 渲染布局：core 行（`core_total_visual_rows` 行）→ footer_lines（`line_index` 行）
+/// → padding 行。footer_lines[line_index] 的屏幕 y = area.y + core_total_visual_rows
+/// + line_index - scroll_y（i64 数学避免 u16 下溢）。
+///
+/// 返回 None 的情形：
+/// - empty：Welcome 布局（footer 渲染在 Welcome 之下，行位置模型不同）——按钮可见但不可点击
+/// - 按钮被滚出视口（y 不在 [area.y, area.y + vis_height) 内）
+fn compute_keepgoing_rect(
+    empty: bool,
+    area_rect: Option<ratatui_kit::ratatui::layout::Rect>,
+    layout: Option<KeepGoingLayout>,
+    core_total_visual_rows: usize,
+    scroll_y: usize,
+    vis_height: u16,
+) -> Option<(u16, u16, u16)> {
+    let area = area_rect?;
+    let layout = layout?;
+    if empty {
+        return None;
+    }
+    let row =
+        area.y as i64 + core_total_visual_rows as i64 + layout.line_index as i64 - scroll_y as i64;
+    let vp_end = area.y as i64 + vis_height as i64;
+    if row < area.y as i64 || row >= vp_end {
+        return None;
+    }
+    Some((
+        row as u16,
+        area.x.saturating_add(layout.start_col),
+        layout.width,
+    ))
 }
 
 #[cfg(test)]

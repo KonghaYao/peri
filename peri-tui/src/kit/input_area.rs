@@ -951,7 +951,9 @@ where
                 send_request(SubmitRequest::AgentText(text));
             }
         }
-        request @ (SubmitRequest::SessionControl(_) | SubmitRequest::ViewAction(_)) => {
+        request @ (SubmitRequest::SessionControl(_)
+        | SubmitRequest::ViewAction(_)
+        | SubmitRequest::KeepGoing) => {
             if is_loading {
                 show_submit_blocked_notification(&request);
             } else {

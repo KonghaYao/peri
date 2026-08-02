@@ -498,6 +498,22 @@ fn test_append_messages_prompt_kept_as_is() {
 }
 
 #[test]
+fn test_append_messages_empty_prompt_skipped() {
+    // keepgoing：空 Prompt 驱动 loop 继续但不写入 transcript
+    let ctx = make_stage_context();
+    let msgs = vec![QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(MessageContent::text("   ")),
+    )];
+    {
+        let mut transcript = ctx.session.transcript.write();
+        append_messages_to_transcript(&mut transcript, msgs);
+    }
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(transcript.len(), 0, "空 Prompt 不应写入 transcript");
+}
+
+#[test]
 fn test_append_messages_info_wrapped_in_reminder() {
     // Info 消息应用 <system-reminder> 包裹
     let ctx = make_stage_context();

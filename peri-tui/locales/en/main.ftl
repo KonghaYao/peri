@@ -661,6 +661,7 @@ render-agent-header = Agent
 
 msg-spinner-tokens = · ↓ { $count } tokens
 msg-spinner-brewed =   ✻  Brewed for { $duration }
+msg-keepgoing = [Keep Going]
 msg-tip-prefix =   ⎿  Tip: 
 msg-todo-available =  (available)
 

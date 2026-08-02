@@ -341,6 +341,18 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         langfuse_session,
     } = turn;
 
+    // keepgoing：空白 user prompt 是 TUI keepgoing 按钮发起的"继续跑 loop"指令。
+    // 语义：不插入 user prompt（stages/append_messages_to_transcript 跳过空 Prompt），
+    // 仅让 Receive 消费计数 >0 从而驱动 ReAct loop 继续。此时不注入 recall——
+    // 否则 recall 会拼进 user 消息使其非空，破坏"不插入"语义。
+    let is_keepgoing = content.text_content().trim().is_empty();
+    let incoming_recalls = if is_keepgoing {
+        tracing::debug!("keepgoing: empty user prompt, skipping recall injection");
+        Vec::new()
+    } else {
+        incoming_recalls
+    };
+
     // Compact config — computed early for command interception and agent building.
     let mut compact_config = ctx.peri_config.config.compact.clone().unwrap_or_default();
     compact_config.apply_env_overrides();

@@ -83,6 +83,7 @@ async fn handle_submit(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match request {
         SubmitRequest::AgentText(text) => handle_agent_text_submit(acp_client, cwd, text).await,
+        SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd).await,
         SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
             handle_clear_submit(acp_client, cwd).await
         }
@@ -199,6 +200,50 @@ async fn handle_agent_text_submit(
         warn!(error = %e, "kit submit_consumer: prompt RPC failed");
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
+    Ok(())
+}
+
+/// keepgoing 提交：向 ACP 发送空白 user prompt。
+///
+/// 与 `handle_agent_text_submit` 的差异：
+/// - 不 trim/丢弃空文本——空白 prompt 是 keepgoing 的协议语义（服务端不插入
+///   user 消息但继续运行 agent loop，见 `run_session_loop` 的 keepgoing 分支）
+/// - 不发送 LocalUserBubble——TUI 不应显示空气泡
+/// - 不进输入历史
+async fn handle_keepgoing_submit(
+    acp_client: &AcpTuiClient,
+    _cwd: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !acp_client.has_session() {
+        // 无会话（或无可继续的轮次）时 no-op——按钮仅在有 summary 时显示，此为防御分支
+        info!("kit submit_consumer: keepgoing ignored (no active session)");
+        return Ok(());
+    }
+
+    // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
+    // 由 bridge 统一管理 phase/variant/is_loading 状态。
+    if let Some(tx) = LOCAL_EVENT_TX.get() {
+        let _ = tx.send(AcpEventWithEpoch {
+            event: AcpEventData::PromptSubmitted,
+            active_session_id: String::new(),
+        });
+    } else {
+        warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
+    }
+    // 递增 loading epoch：message_area 据此检测新一轮 loading 会话（同 handle_agent_text_submit）
+    *LOADING_EPOCH.state().write() += 1;
+    tracing::info!(
+        target: "msg_scroll_diag",
+        "submit_consumer: keepgoing prompt submitted, LOADING_EPOCH incremented",
+    );
+
+    acp_client
+        .prompt(&MessageContent::text(""))
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "kit submit_consumer: keepgoing prompt RPC failed");
+            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+        })?;
     Ok(())
 }
 

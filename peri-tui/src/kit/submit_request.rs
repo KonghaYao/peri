@@ -3,6 +3,9 @@ use crate::app::panel_types::PanelKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitRequest {
     AgentText(String),
+    /// keepgoing：发送空白 user prompt，服务端不插入 user 消息但继续运行 agent loop。
+    /// 由消息区 footer 的 keepgoing 按钮触发，不产生本地 user bubble。
+    KeepGoing,
     OpenPanel(PanelKind),
     SessionControl(SessionControlRequest),
     ViewAction(ViewActionRequest),
