@@ -499,7 +499,27 @@ fn test_append_messages_prompt_kept_as_is() {
 
 #[test]
 fn test_append_messages_empty_prompt_skipped() {
-    // keepgoing：空 Prompt 驱动 loop 继续但不写入 transcript
+    // keepgoing：空 Prompt（真实 payload 为 `MessageContent::text("")`，见
+    // peri-tui submit_consumer handle_keepgoing_submit）驱动 loop 继续但不写入
+    // transcript——用户没有输入新内容，历史中不应出现空 user 消息。
+    let ctx = make_stage_context();
+    let msgs = vec![QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(MessageContent::text("")),
+    )];
+    {
+        let mut transcript = ctx.session.transcript.write();
+        append_messages_to_transcript(&mut transcript, msgs);
+    }
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(transcript.len(), 0, "空 Prompt 不应写入 transcript");
+}
+
+#[test]
+fn test_append_messages_whitespace_prompt_kept() {
+    // 空白文本不算空——与 peri-acp `is_keepgoing` 的 content-block 判空一致：
+    // 按 content block 判空（`Blocks([Image])` 等纯附件消息不应被误判为空），
+    // 而非按 text trim 判空；用户输入空格应正常写入。
     let ctx = make_stage_context();
     let msgs = vec![QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -510,7 +530,7 @@ fn test_append_messages_empty_prompt_skipped() {
         append_messages_to_transcript(&mut transcript, msgs);
     }
     let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 0, "空 Prompt 不应写入 transcript");
+    assert_eq!(transcript.len(), 1, "空白 Prompt 应正常写入 transcript");
 }
 
 #[test]
