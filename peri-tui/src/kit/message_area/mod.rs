@@ -1,7 +1,7 @@
 //! MessageArea：直接读取 VIEW_MODELS，通过 vm_to_lines 将 TuiRenderUnit
 //! 转换为 Vec<Line>，按视口裁剪后渲染。
 //!
-//! - 滚动：由 ScrollViewState 处理键盘/鼠标事件（offset 管理）
+//! - 滚动：由自持 ScrollPos（usize 偏移）处理键盘/鼠标事件（offset 管理）
 //! - 渲染：视口裁剪——只 clone + highlight + 渲染视口内 ~60 行，避免 O(N×W) per render
 //! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
 //! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
@@ -17,7 +17,7 @@ use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::{
-    components::ScrollViewState,
+    crossterm::event::{Event, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -153,7 +153,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         None
     };
 
-    let scroll_state = hooks.use_state(ScrollViewState::default);
+    let scroll_state = hooks.use_state(scroll::ScrollPos::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
@@ -161,7 +161,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 文本选区 ──
     let text_sel = hooks.use_state(TextSelection::default);
-    let selection_down_pos = hooks.use_state(|| Option::<(u16, u16)>::None);
+    let selection_down_pos = hooks.use_state(|| Option::<(usize, u16)>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
 
     // ── 消息区位置追踪 ──
@@ -365,6 +365,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 吸底自动跟随 ──
     let last_scrolled_at = hooks.use_state(|| 0u16);
     let prev_total_visual_rows = hooks.use_state(|| 0u16);
+    // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
+    // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
+    let prev_vis_height = hooks.use_state(|| 0u16);
     // [Fix] Submit 强制滚底 / History 切换强制滚底：订阅 atom 重新渲染
     let _loading_epoch_atom = hooks.use_atom(&LOADING_EPOCH);
     let _reset_counter_atom = hooks.use_atom(&BRIDGE_RESET_COUNTER);
@@ -384,6 +387,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     items_len,
                     is_loading,
                     prev_total_visual_rows,
+                    prev_vis_height,
                     loading_epoch,
                     prev_loading_epoch,
                     bridge_reset_counter,
@@ -391,7 +395,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 })
             }
         },
-        (items_len, vm_generation, is_loading, total_visual_rows),
+        (
+            items_len,
+            vm_generation,
+            is_loading,
+            total_visual_rows,
+            vis_height,
+        ),
     );
 
     if empty {
@@ -441,22 +451,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
     let max_scroll = (total_visual_rows as usize).saturating_sub(vis_height as usize);
-    let scroll_y_raw = scroll_state.read().offset().y as usize;
+    let scroll_y_raw = scroll_state.read().offset();
     let scroll_y = scroll_y_raw.min(max_scroll);
 
-    // [Fix] 每帧钳制 scroll_state.offset.y 到 [0, max_scroll]。
+    // [Fix] 每帧钳制 scroll_state.offset 到 [0, max_scroll]。
     // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直
     // 往下滚直到 offset 远超 max_scroll。虽然 scroll_y = raw.min(max_scroll) 让
     // 渲染正确，但 scroll_state 内部 offset 不被重置，往上滚时需要把多余 offset
     // 消耗完（如 offset=100, max_scroll=40 → 需滚 60 次才恢复）。
     // write_no_update 不触发 re-render，避免自激回路。
     if scroll_y_raw > max_scroll {
-        scroll_state
-            .write_no_update()
-            .set_offset(ratatui_kit::ratatui::layout::Position::new(
-                0,
-                max_scroll as u16,
-            ));
+        scroll_state.write_no_update().set_offset(max_scroll);
     }
 
     // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
@@ -483,13 +488,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Why] 字符级高亮——旧版只存 (first_logical, last_logical) 整逻辑行范围，
     // 导致整行背景色覆盖；与字符级复制提取不一致。现在保留完整 (sr, sc, er, ec)，
     // highlight_line_in_selection 用 wrap_byte_starts 算 byte 范围，拆分 spans。
-    let sel_bounds: Option<(usize, usize, u16, u16, u16, u16)> = if !no_highlight {
+    // sr/er 为视觉行（usize，内容可超 65535 视觉行），sc/ec 为视觉列（u16）。
+    let sel_bounds: Option<(usize, usize, usize, u16, usize, u16)> = if !no_highlight {
         let sel = text_sel.read();
         if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
             // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
             let max_visual = concat_wrap_map_arc
                 .last()
-                .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+                .map(|e| e.visual_end.saturating_sub(1))
                 .unwrap_or(0);
             let sr_c = sr.min(max_visual);
             let er_c = er.min(max_visual);
