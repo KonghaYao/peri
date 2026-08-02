@@ -206,12 +206,19 @@ pub(crate) fn build_agent(
 
     // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
     // 以便收集中间件 prompt_contribution 合并到 system prompt）。
+    // 与 SubAgent 模型共享 session 级 AgentPool 缓存（同一 fingerprint）：
+    // 跨 turn / 跨 agent 实例复用 reqwest::Client（连接池 + TLS session cache），
+    // 避免每轮重建 ~1-2 MB HTTP client。烘焙的 observer 是 session 级转发器
+    // （每 turn 覆盖式 set 当前 handler），跨 turn 不陈旧。
     let context_window_raw = ctx.provider.context_window();
-    let base_model: Arc<dyn peri_model::Model> = Arc::from(
-        provider
-            .with_retry_observer(Some(retry_events.as_retry_observer()))
-            .into_model(),
-    );
+    let fp = fingerprint(&provider);
+    let base_model: Arc<dyn peri_model::Model> =
+        crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(pool, &fp, || {
+            provider
+                .clone()
+                .with_retry_observer(Some(retry_events.as_retry_observer()))
+                .into_model()
+        });
 
     // Todo channel
     let (todo_tx, todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
