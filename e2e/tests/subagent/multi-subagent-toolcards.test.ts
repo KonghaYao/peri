@@ -91,15 +91,21 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       expect(r.pass).toBe(true);
 
       // ── Phase 2: 等第二个 SubAgent 开始运行 ──
-      // 第一个 SubAgent 会在 ~30s 内完成，第二个会在完成后启动
-      await tester.sleep(40000);
-
-      // 等待第二个 Agent 卡片（可能已经是 'Agent Finished' 状态）
-      await tester.waitForText("Agent", {
-        timeout: 60_000,
-        interval: 1000,
-      });
-      await tester.sleep(20000);
+      // 注意：不能用 waitForText("Agent")——第一个 Agent 卡片仍在屏幕上会立即匹配。
+      // 轮询屏幕直到 "Agent" 出现 ≥2 次（第二个 Agent 卡片已出现）。
+      let secondAgentSeen = false;
+      for (let i = 0; i < 60; i++) {
+        const screen = await tester.getScreenText();
+        const agentCount = (screen.match(/Agent/g) || []).length;
+        if (agentCount >= 2) {
+          secondAgentSeen = true;
+          break;
+        }
+        await tester.sleep(2000);
+      }
+      expect(secondAgentSeen).toBe(true);
+      // 第二个 SubAgent 已出现，等待其执行工具（Grep/Read）
+      await tester.sleep(15000);
 
       const capture2 = await takePeriSnapshot(
         tester,
