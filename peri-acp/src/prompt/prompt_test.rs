@@ -14,7 +14,7 @@ fn test_no_overrides_contains_all_sections() {
         "应包含 03_doing_tasks Ask Before Diving 段落"
     );
     assert!(
-        result.contains("must prefer AskUserQuestion over continuing to guess"),
+        result.contains("prefer AskUserQuestion over continuing to guess"),
         "应包含 05_using_tools AskUserQuestion 推测优先提问规则"
     );
     assert!(result.contains("<env>"), "应包含 07_env 段落");
