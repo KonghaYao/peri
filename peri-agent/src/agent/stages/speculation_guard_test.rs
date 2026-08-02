@@ -291,7 +291,7 @@ fn test_window_all_hit_requires_full_window() {
 
 #[tokio::test]
 async fn test_l1_l2_escalation_with_speculative_thought() {
-    // 推测词命中 → N1=4 → L1@4、L2@8；工具成功（errors 窗口不参与）
+    // 推测词命中只影响措辞不影响阈值 → N1=6 → L1@6、L2@10；工具成功（errors 窗口不参与）
     let (_session, ctx) = make_main_agent_context();
     ctx.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -320,13 +320,13 @@ async fn test_l1_l2_escalation_with_speculative_thought() {
         text
     );
     assert!(
-        text.contains("必须 AskUserQuestion 或向用户汇报现状"),
+        text.contains("应停止静态追查"),
         "应出现 L2 提醒, got: {}",
         text
     );
     assert!(
-        text.contains("已连续 4 轮推测深挖"),
-        "L1 应带实际轮数 4, got: {}",
+        text.contains("已连续 6 轮推测深挖"),
+        "L1 应带实际轮数 6, got: {}",
         text
     );
 }
@@ -361,6 +361,11 @@ async fn test_no_trigger_without_main_agent_signal() {
     );
     assert!(
         !text.contains("必须 AskUserQuestion"),
+        "SubAgent（无 session_id）不应触发 L2, got: {}",
+        text
+    );
+    assert!(
+        !text.contains("应停止静态追查"),
         "SubAgent（无 session_id）不应触发 L2, got: {}",
         text
     );
@@ -440,12 +445,23 @@ async fn test_no_trigger_after_ask_user_question() {
         "AskUserQuestion 后不应出现 L2, got: {}",
         text
     );
+    assert!(
+        !text.contains("应停止静态追查"),
+        "AskUserQuestion 后不应出现 L2, got: {}",
+        text
+    );
 }
 
 #[tokio::test]
 async fn test_reset_on_user_prompt_interjection() {
     // 用户中途插入 Prompt → 计数清零重新累计：L1 触发 2 次（reset 前后各 1），
-    // 且无 L2（若无 reset，轮数会持续累计到 N1+4 触发 L2）
+    // 且无 L2（若无 reset，轮数会持续累计到 N1+4 触发 L2）。
+    // 注意：make_tools 的 AskUserQuestion stub 与 probe_tool 同名会触发
+    // ambiguous 解析失败（连续失败提醒中断 observe 计数），此处用 probe-only 表。
+    let tools = Arc::new(RwLock::new(std::collections::BTreeMap::from([(
+        "probe_tool".to_string(),
+        Arc::new(ProbeTool { fail: false }) as Arc<dyn crate::tools::BaseTool>,
+    )])));
     let (_session, ctx) = make_main_agent_context();
     ctx.session.queue.push(QueuedMessage::prompt(
         MessageSource::UserInput,
@@ -456,20 +472,20 @@ async fn test_reset_on_user_prompt_interjection() {
     let ctx = StageContext {
         runtime: RuntimeServices {
             llm: Arc::new(PromptInjectLLM {
-                inject_at: 4, // 第 5 次 LLM 调用（iter5）注入用户 Prompt
+                inject_at: 7, // 第 8 次 LLM 调用（iter8）注入用户 Prompt；iter2-7 触发首次 L1
                 queue,
                 calls: Arc::clone(&calls),
             }),
-            tools: make_tools(),
+            tools,
             ..ctx.runtime
         },
         ..ctx
     };
 
-    let result = run_react_loop(ctx.clone(), 12).await;
+    let result = run_react_loop(ctx.clone(), 16).await;
     assert!(matches!(
         result,
-        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(12))
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(16))
     ));
 
     let text = combined_text(&ctx);
@@ -480,7 +496,7 @@ async fn test_reset_on_user_prompt_interjection() {
         text
     );
     assert!(
-        !text.contains("必须 AskUserQuestion 或向用户汇报现状"),
+        !text.contains("应停止静态追查"),
         "reset 后轮数不足以触发 L2, got: {}",
         text
     );
@@ -512,12 +528,12 @@ async fn test_l1_at_default_threshold_on_tool_errors() {
 
     let text = combined_text(&ctx);
     assert!(
-        text.contains("已连续 6 轮推测深挖"),
+        text.contains("已连续 6 轮工具调用无进展"),
         "工具错误路径应在默认阈值 6 触发 L1, got: {}",
         text
     );
     assert!(
-        text.contains("必须 AskUserQuestion 或向用户汇报现状"),
+        text.contains("应停止静态追查"),
         "应出现 L2 提醒, got: {}",
         text
     );

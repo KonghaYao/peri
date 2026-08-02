@@ -9,6 +9,14 @@ fn test_no_overrides_contains_all_sections() {
         "应包含 02_system 段落"
     );
     assert!(result.contains("Doing tasks"), "应包含 03_doing_tasks 段落");
+    assert!(
+        result.contains("Ask Before Diving"),
+        "应包含 03_doing_tasks Ask Before Diving 段落"
+    );
+    assert!(
+        result.contains("must prefer AskUserQuestion over continuing to guess"),
+        "应包含 05_using_tools AskUserQuestion 推测优先提问规则"
+    );
     assert!(result.contains("<env>"), "应包含 07_env 段落");
     assert!(
         result.contains("Working directory"),

@@ -57,3 +57,5 @@ prompt 硬规则（frozen prompt 层）：
   - **P2（after_tool 触发式同 repo 测试进程检测）**：**跳过**。`tool_dispatch.rs` 不在本 issue 允许修改范围（边界内仅 mod.rs / 新文件 / 测试）；且语义模糊——"疑似同 repo 测试进程"难以区分 agent 自己启动的测试与用户启动的测试，误报风险高于收益。P0 的 prompt 规则 2 已在提示层覆盖该场景
 - **涉及 commit**：未提交（用户未要求，将统一提交）
 - **验证状态**：已验证（peri-acp prompt 41/41、peri-agent stages 67/67 全过，workspace 构建成功，我的改动文件 fmt 干净 + clippy 零警告。注：验证期间另一 agent 正在改 `peri-agent/src/agent/events.rs` 及其连锁文件，workspace 级 `cargo fmt --check` 被其未格式化中间状态污染，与本次改动无关）
+
+> **修订说明（2026-08-02，考究后）**：初版 prompt 含"6-8 次工具调用内必须提问"与推测词清单，经考究判定过火——工具调用次数非进度度量（打断正常深度工作流）、推测词表会被模型规避（Goodhart）。改为：prompt 原则化（去数字、去词表，保留运行时场景锚点与判断原则）；哨兵阈值统一 N1=6（删除推测词降阈值逻辑），推测词仅影响 L1 提醒措辞（推测措辞 vs 工具错误措辞），L2 措辞同步软化为"应停止静态追查"。`prompt_test.rs` 断言不变（标题保留）。

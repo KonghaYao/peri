@@ -5,11 +5,13 @@
 //! 长时间静态追查而不向用户提问（issue: 2026-08-02-agent-asks-user-too-late-in-ambiguous-env）。
 //!
 //! 触发条件（全部满足才提醒）：
-//! - A. 自本 turn 首个用户 Prompt 以来连续无输入工具轮数 ≥ N1（默认 6；
-//!   最近 2 轮 thought 命中推测词时降为 4）
+//! - A. 自本 turn 首个用户 Prompt 以来连续无输入工具轮数 ≥ N1（默认 6）
 //! - B. 当前轮无用户输入（consumed_count==0 且 has_tool_calls——由调用点保证）
 //! - C. 最近 K=2 轮 thought 命中推测词，或最近 M=2 轮工具结果含错误
 //! - D. 本 turn 尚未调用过 AskUserQuestion
+//!
+//! 推测词不改变触发阈值（Goodhart 风险：词表会被规避），只影响提醒措辞：
+//! 命中推测词时措辞点明"推测"；未命中（纯工具错误）时措辞点明"连续出错"。
 //!
 //! 分级提醒（L1 温和 / L2 强制），注入方式与 tool_dispatch::handle_consecutive_failures
 //! 完全同款：`QueuedMessage::info` push 到 v2 queue，下一轮 Receive 消费
@@ -38,10 +40,8 @@ const SPECULATION_WORDS: [&str; 8] = [
 const SPECULATION_WINDOW: usize = 2;
 /// 最近 M 轮工具错误窗口
 const ERROR_WINDOW: usize = 2;
-/// 默认连续工具轮阈值 N1（最近 2 轮 thought 均命中推测词时降为 HIT_THRESHOLD）
+/// 连续无输入工具轮阈值 N1（推测词只影响措辞，不影响此阈值）
 const DEFAULT_THRESHOLD: u32 = 6;
-/// 推测词命中时的降级阈值
-const HIT_THRESHOLD: u32 = 4;
 /// L2 强制提醒相对 N1 的偏移
 const L2_OFFSET: u32 = 4;
 
@@ -104,12 +104,8 @@ pub(super) fn observe_tool_round(
         return;
     }
 
-    // A 条件：连续工具轮数 ≥ N1（thought 连续推测时降级）
-    let n1 = if speculation_hit {
-        HIT_THRESHOLD
-    } else {
-        DEFAULT_THRESHOLD
-    };
+    // A 条件：连续工具轮数 ≥ N1（推测词不降阈值，仅影响措辞）
+    let n1 = DEFAULT_THRESHOLD;
 
     // D 条件：本 turn 尚未 AskUserQuestion（由调用点维护 state.asked_user）
     if state.asked_user {
@@ -117,14 +113,21 @@ pub(super) fn observe_tool_round(
     }
 
     if state.warned_level < 1 && state.speculation_rounds >= n1 {
-        let text = format!(
-            "已连续 {} 轮推测深挖无新证据；若症状来自运行时环境（剪贴板/权限/外部进程），立即 AskUserQuestion",
-            state.speculation_rounds
-        );
+        let text = if speculation_hit {
+            format!(
+                "已连续 {} 轮推测深挖无新证据；若症状来自运行时环境（剪贴板/权限/外部进程），应立即 AskUserQuestion",
+                state.speculation_rounds
+            )
+        } else {
+            format!(
+                "已连续 {} 轮工具调用无进展（结果出错）；应切换路径：AskUserQuestion 或换实证方法",
+                state.speculation_rounds
+            )
+        };
         inject_reminder(ctx, text);
         state.warned_level = 1;
     } else if state.warned_level < 2 && state.speculation_rounds >= n1 + L2_OFFSET {
-        let text = "必须 AskUserQuestion 或向用户汇报现状，禁止继续静态追查";
+        let text = "应停止静态追查：AskUserQuestion 获取运行时信息，或向用户汇报现状";
         inject_reminder(ctx, text.to_string());
         state.warned_level = 2;
     }

@@ -32,3 +32,11 @@ Transform tasks into verifiable goals. For multi-step tasks, state a brief plan:
 ```
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+## Ask Before Diving
+
+**Don't tunnel. When symptoms are ambiguous, ask.**
+
+Runtime questions cannot be answered by static analysis. If a symptom involves a runtime aspect (clipboard state, system permissions, external processes, concurrent user actions, tmux/terminal state), the user is the only source of truth — asking is cheaper than digging, and AskUserQuestion is a normal tool, not a last resort.
+
+When a conclusion is already supported by evidence, stop re-confirming it. When your reasoning keeps speculating without new evidence, change tactics — ask the user or run the code — instead of continuing the same static path.
