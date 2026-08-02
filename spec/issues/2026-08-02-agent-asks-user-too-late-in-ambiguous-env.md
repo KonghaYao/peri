@@ -59,3 +59,5 @@ prompt 硬规则（frozen prompt 层）：
 - **验证状态**：已验证（peri-acp prompt 41/41、peri-agent stages 67/67 全过，workspace 构建成功，我的改动文件 fmt 干净 + clippy 零警告。注：验证期间另一 agent 正在改 `peri-agent/src/agent/events.rs` 及其连锁文件，workspace 级 `cargo fmt --check` 被其未格式化中间状态污染，与本次改动无关）
 
 > **修订说明（2026-08-02，考究后）**：初版 prompt 含"6-8 次工具调用内必须提问"与推测词清单，经考究判定过火——工具调用次数非进度度量（打断正常深度工作流）、推测词表会被模型规避（Goodhart）。改为：prompt 原则化（去数字、去词表，保留运行时场景锚点与判断原则）；哨兵阈值统一 N1=6（删除推测词降阈值逻辑），推测词仅影响 L1 提醒措辞（推测措辞 vs 工具错误措辞），L2 措辞同步软化为"应停止静态追查"。`prompt_test.rs` 断言不变（标题保留）。
+>
+> **修订说明 2（2026-08-02）**：05 的环境共享信号 if-then 规则（ps/tmux 见测试进程 → 视为用户在场）整条删除——该映射误报空间大（agent 自己启动的测试/子代理后台任务同样出现在 ps 输出），且是 019fbdbe 单例的过度泛化；AskUserQuestion 条目追加句去 must（"you must prefer" → "prefer"）软化。
