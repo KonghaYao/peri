@@ -214,3 +214,4 @@ skills-lock.json
 .agents
 !.peri/theme/
 e2e/results
+__pycache__

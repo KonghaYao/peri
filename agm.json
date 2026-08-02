@@ -8,8 +8,7 @@
     "claude"
   ],
   "skills": {
-    "@git/mattpocock/skills": "694fa30311e02c2639942308513555e61ee84a6f",
-    "@git/obra/superpowers": "6fd4507659784c351abbd2bc264c7162cfd386dc"
+    "@git/mattpocock/skills": "694fa30311e02c2639942308513555e61ee84a6f"
   },
   "agents": {},
   "mcp": {},
