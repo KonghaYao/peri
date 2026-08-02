@@ -314,4 +314,36 @@ describe('CLI 子命令模式', () => {
     expect(r.code).toBe(0)
     expect(r.stdout).toContain('用法（CLI 子命令）')
   })
+
+  test('validate 合法脚本：exit 0 + ✓ 输出', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'workflow-validate-'))
+    const good = join(base, 'good.mjs')
+    writeFileSync(
+      good,
+      `export const meta = { name: 'e2e-ok', description: 'ok' }\nconst r = await agent('hi')\nreturn r`
+    )
+    const r = await runCli(['validate', good])
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain('✓')
+    expect(r.stdout).toContain('e2e-ok')
+  })
+
+  test('validate 坏脚本（workflow.agent 旧式调用）：exit 1 + 修复指引', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'workflow-validate-'))
+    const bad = join(base, 'bad.mjs')
+    writeFileSync(
+      bad,
+      `export const meta = { name: 'e2e-bad', description: 'ok' }\nconst r = await workflow.agent('hi')\nreturn r`
+    )
+    const r = await runCli(['validate', bad])
+    expect(r.code).toBe(1)
+    expect(r.stdout).toContain('✗')
+    expect(r.stdout).toContain('workflow.agent(')
+  })
+
+  test('validate 文件不存在：exit 1 + 提示', async () => {
+    const r = await runCli(['validate', '/no/such/file.mjs'])
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain('无法读取文件')
+  })
 })

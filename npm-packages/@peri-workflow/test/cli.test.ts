@@ -59,6 +59,15 @@ beforeAll(() => {
       result: { kind: 'ok', output: 'agent 输出', usage: { outputTokens: 42 }, durationMs: 1500 },
     }) + '\n'
   )
+  // validate 子命令的 fixture 脚本
+  writeFileSync(
+    join(base, 'good.mjs'),
+    `export const meta = { name: 'demo', description: 'ok' }\nconst r = await agent('hi')\nreturn r`
+  )
+  writeFileSync(
+    join(base, 'bad.mjs'),
+    `export const meta = { name: 'demo', description: 'ok' }\nconst r = await workflow.agent('hi')\nreturn r`
+  )
   process.chdir(base)
 })
 
@@ -72,9 +81,10 @@ afterAll(() => {
 // ─── isCliCommand ──────────────────────────────────────────
 
 describe('isCliCommand', () => {
-  test('read/list/help 变体都是 CLI 命令', () => {
+  test('read/list/validate/help 变体都是 CLI 命令', () => {
     expect(isCliCommand('read')).toBe(true)
     expect(isCliCommand('list')).toBe(true)
+    expect(isCliCommand('validate')).toBe(true)
     expect(isCliCommand('--help')).toBe(true)
     expect(isCliCommand('-h')).toBe(true)
     expect(isCliCommand('help')).toBe(true)
@@ -142,6 +152,55 @@ describe('cliMain read', () => {
     errs = []
     expect(() => cliMain(['read', 'no-such-run'])).toThrow('process.exit(1)')
     expect(errs.join('\n')).toContain('未找到运行 no-such-run')
+  })
+})
+
+// ─── cliMain validate ───────────────────────────────────────
+
+describe('cliMain validate', () => {
+  test('合法脚本 --json：ok + meta + exit 0', () => {
+    logs = []
+    cliMain(['validate', 'good.mjs', '--json'])
+    const r = JSON.parse(logs.join('\n'))
+    expect(r.ok).toBe(true)
+    expect(r.meta.name).toBe('demo')
+    expect(r.errors).toEqual([])
+  })
+
+  test('坏脚本 --json：errors 含 workflow. 旧式调用提示', () => {
+    logs = []
+    expect(() => cliMain(['validate', 'bad.mjs', '--json'])).toThrow('process.exit(1)')
+    const r = JSON.parse(logs.join('\n'))
+    expect(r.ok).toBe(false)
+    expect(r.errors[0]).toContain('workflow.agent(')
+  })
+
+  test('合法脚本文本模式：✓ 校验通过', () => {
+    logs = []
+    cliMain(['validate', 'good.mjs'])
+    expect(logs.join('\n')).toContain('✓ good.mjs 校验通过 (demo)')
+  })
+
+  test('坏脚本文本模式：✗ 校验失败列出错误', () => {
+    logs = []
+    expect(() => cliMain(['validate', 'bad.mjs'])).toThrow('process.exit(1)')
+    const out = logs.join('\n')
+    expect(out).toContain('✗ bad.mjs 校验失败（1 个错误）')
+    expect(out).toContain('workflow.agent(')
+  })
+
+  test('无文件参数：报用法并退出', () => {
+    logs = []
+    errs = []
+    expect(() => cliMain(['validate'])).toThrow('process.exit(1)')
+    expect(errs.join('\n')).toContain('用法：peri-workflow validate <script.mjs>')
+  })
+
+  test('文件不存在：exit 1 + 提示', () => {
+    logs = []
+    errs = []
+    expect(() => cliMain(['validate', 'no-such.mjs'])).toThrow('process.exit(1)')
+    expect(errs.join('\n')).toContain('无法读取文件: no-such.mjs')
   })
 })
 

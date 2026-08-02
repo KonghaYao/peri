@@ -165,6 +165,8 @@ peri-workflow read <runId> --short # 仅状态与 agent 统计表
 peri-workflow read <runId> --json  # 结构化 JSON（stdout 只输出 JSON，供脚本消费）
 peri-workflow list                 # 列出所有 run（按结束时间倒序）
 peri-workflow list --json          # 同上，JSON 形式
+peri-workflow validate <script.mjs> # 校验 workflow 脚本语法（exit 0/1）
+peri-workflow validate <script.mjs> --json # 结构化校验结果
 peri-workflow --help               # 用法帮助
 ```
 
@@ -173,7 +175,40 @@ peri-workflow --help               # 用法帮助
 ```bash
 npx -y @peri-code/workflow list
 npx -y @peri-code/workflow read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
+npx -y @peri-code/workflow validate my-workflow.mjs
 ```
+
+### validate：agent 写脚本前的语法校验
+
+workflow 脚本由引擎执行，但引擎的 `parseScript` 只查语法 / export / import；**常见的运行时错误**（`workflow.agent(...)` 旧式调用、缺 `export const meta`、无顶层 `return`）要等执行时才炸。`validate` 在引擎检查之外补了这些静态检查，agent 写完脚本先跑一遍再执行：
+
+```bash
+peri-workflow validate my-workflow.mjs
+# ✓ my-workflow.mjs 校验通过 (demo-workflow)
+# ✗ my-workflow.mjs 校验失败（2 个错误）：
+#   ✗ 检测到旧式调用 workflow.agent(...)：引擎注入的是顶层自由函数，请改为直接调用 agent(...)（无需 workflow. 前缀）。
+#   ✗ workflow 脚本必须包含 export const meta = { name, description }（宿主依赖 meta.name 标识 workflow）。请补上 meta 声明。
+```
+
+检查项：
+
+| 级别 | 检查 | 来源 |
+|------|------|------|
+| error | 语法错误 / 多余 export（含 `export default`）/ `import` / meta 非字面量或缺字段 | 引擎 `parseScript` |
+| error | `workflow.agent(...)` 等旧式调用（含修复指引） | 静态检查 |
+| error | 缺 `export const meta = { name, description }` | 静态检查 |
+| warning | 无 `return` 语句（脚本将返回 undefined） | 静态检查 |
+
+```bash
+# 结构化输出（供脚本 / agent 消费）
+peri-workflow validate my-workflow.mjs --json
+# { "file": "...", "ok": false, "meta": {...}, "errors": [...], "warnings": [...] }
+```
+
+> **旧格式脚本说明**：早期遗留的 workflow 脚本可能没有 `export const meta`（或使用
+> `workflow.agent(...)` 旧式调用），validate 会将其标为 error。这是**预期行为**——按当前
+> 引擎与宿主协议，新脚本必须带 `export const meta = { name, description }`；旧脚本
+> 执行前建议先用 validate 检查并按提示修正（错误信息自带修复指引）。
 
 ## 构建与测试（参与开发）
 
