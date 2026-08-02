@@ -24,6 +24,49 @@ const ERROR_PARAM = /missing field|invalid|parse error|out of range|timeout|参�
 const ERROR_MATCH = /not found|not unique|does not exist|ENOENT|no such/i;
 const ERROR_SYSTEM = /interrupted|tool.*not found|subagent.*error|cancel|truncated/i;
 
+// 伪工具名：tool_result 找不到配对 tool_use 时以 tool_call_id（call_00_*）兜底。
+// 这些不是真实工具，计入统计会制造噪音（如"工具种类数 3,350"）。
+const UNPAIRED_TOOL_RESULT = "<unpaired tool_result>";
+
+// 场景级错误分类——比三分类（参数/匹配/系统）更接近根因，直接定位可行动项。
+// 顺序敏感：先匹配更具体的场景，最后落到宽泛三分类。
+const ERROR_SCENARIOS: { key: string; re: RegExp }[] = [
+  // 注意：错误文本是 "old_string not found"（found 而非 find），
+  // `not.*find` 会漏掉全部 "not found" 错误——必须用 (found|unique)。
+  { key: "Edit: old_string 未找到/不唯一", re: /Edit.*old_string.*not.*(?:found|unique)/i },
+  { key: "Edit: 参数缺失/非法", re: /Edit.*file_path.*required|Edit.*parameter/i },
+  { key: "Bash: 命令超时", re: /Bash.*timed out|Command timed out/i },
+  { key: "Bash: 参数缺失", re: /Bash.*command.*required|Bash.*Missing command parameter/i },
+  // 用户手动 Ctrl-C 中断——非缺陷，单列避免污染"系统错误"口径
+  { key: "Bash: 用户中断", re: /Bash.*interrupted by user/i },
+  { key: "Read: 文件不存在", re: /Read.*(File not found|ENOENT|no such file)/i },
+  { key: "Read: offset 越界", re: /Read.*offset/i },
+  { key: "Read: 参数错误", re: /Read.*file_path.*required/i },
+  { key: "Agent: sub-agent 执行失败", re: /Agent.*(Sub-agent|subagent).*(failed|error)|Agent.*Failed to/i },
+  { key: "Agent: 中断/取消", re: /Agent.*(interrupted|cancel)/i },
+  { key: "Agent: 参数缺失", re: /Agent.*(missing required parameter|subagent_type parameter)/i },
+  { key: "Agent: 定义不存在", re: /Agent.*cannot find agent definition/i },
+  { key: "WebFetch: API 额度限制", re: /WebFetch.*(USAGE_EXCEEDED|usage limit|432|deactivated)/i },
+  { key: "WebFetch: 抓取失败", re: /WebFetch.*(Failed to fetch|Extract failed|404|400)/i },
+  { key: "WebSearch: 失败", re: /WebSearch.*(interrupted|error)/i },
+  { key: "ExecuteExtraTool: 失败", re: /ExecuteExtraTool/i },
+  // ask_user 是 AskUserQuestion 的旧工具名（历史会话遗留）
+  { key: "AskUserQuestion: 失败", re: /(AskUserQuestion|ask_user)/i },
+  { key: "TodoWrite: 失败", re: /TodoWrite/i },
+  { key: "Grep: 正则/参数错误", re: /Grep.*error/i },
+  { key: "folder_operations: 失败", re: /folder_operations/i },
+  { key: "Write: 失败", re: /Write.*(failed|error)/i },
+  { key: "Write: 参数缺失", re: /Write.*file_path.*required/i },
+  { key: "Workflow: 失败", re: /Workflow/i },
+];
+
+function classifyError(content: string): string {
+  for (const s of ERROR_SCENARIOS) {
+    if (s.re.test(content)) return s.key;
+  }
+  return "其他";
+}
+
 // ── Local Types ──
 
 interface ToolEvent {
@@ -97,7 +140,8 @@ function collectThreadData(
       } else if (parsed.role === "tool") {
         const tc = parsed as ToolContent;
         const tuMeta = toolUseMap.get(tc.tool_call_id);
-        const toolName = tuMeta?.name ?? tc.tool_call_id ?? "unknown";
+        // 未配对 tool_result（compact/rewind 残留）用统一占位名，避免 call_00_* 伪工具名噪音
+        const toolName = tuMeta?.name ?? (tc.tool_call_id?.startsWith("call_") ? UNPAIRED_TOOL_RESULT : tc.tool_call_id ?? "unknown");
         const errorContent =
           typeof tc.content === "string" ? tc.content : JSON.stringify(tc.content);
         const event: ToolEvent = {
@@ -223,6 +267,25 @@ function analyzeErrorDistribution(data: ThreadToolData[]): void {
   ]);
   printTable(["错误类型", "数量", "占比"], rows);
   printMetric("错误总计", total);
+
+  // 场景级明细：定位具体根因（Edit old_string 未找到 / Bash 超时等）
+  const sceneCounts = new Map<string, number>();
+  for (const td of data) {
+    for (const ev of td.toolEvents) {
+      if (!ev.isError || !ev.errorContent) continue;
+      const key = classifyError(ev.errorContent);
+      sceneCounts.set(key, (sceneCounts.get(key) ?? 0) + 1);
+    }
+  }
+  const sceneRows = [...sceneCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([key, n]) => [key, String(n), pct(n, total)]);
+  if (sceneRows.length > 0) {
+    printSeparator();
+    printSection("2b. 错误场景 Top（根因定位）");
+    printTable(["场景", "数量", "占比"], sceneRows);
+  }
 }
 
 // ── Metric 3: 连续失败序列 ──
