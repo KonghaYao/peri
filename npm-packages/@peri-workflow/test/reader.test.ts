@@ -3,6 +3,14 @@
  *
  * 纯函数测试为主：IO 函数通过显式传参（runDir / startDir）驱动，
  * 不依赖 process.cwd() 的隐式状态。
+ *
+ * ⚠ 跨侧契约：本文件构造的 journal.jsonl / outputs fixture 与 Rust 侧
+ * `peri-workflow/src/journal.rs` 输出逐字段对齐（依据：DESIGN.md「运行结果落盘格式」节）：
+ * - journal.jsonl：JournalEntry{ key, seq, result }；result 的 camelCase wire 字段
+ *   （kind/output/usage.outputTokens/tokenCount/durationMs/reason）与 Rust
+ *   `AgentRunResult` 序列化一致
+ * - outputs/*.txt label：Rust `extract_long_texts` 的字段路径规则
+ *   （对象点路径 a.b、数组下标 a[0]），reader 用完整匹配 `${label}` 替换回原文
  */
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'

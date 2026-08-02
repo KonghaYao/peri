@@ -212,8 +212,8 @@ peri-workflow validate my-workflow.mjs --json
 
 ## 构建与测试（参与开发）
 
-源码按职责拆分为 `src/` 下的模块（types / rpc / adapter / server / reader / cli / index），
-构建时由 `bun build` 打包为单文件；测试用 `bun test`（`test/` 目录：各模块单测 +
+源码按职责拆分为 `src/` 下的多个模块（types / rpc / adapter / server / jsonrpc / reader / cli / index，
+其中 jsonrpc.ts 承担 readline 主循环），构建时由 `bun build src/index.ts` 打包为单文件；测试用 `bun test`（`test/` 目录：各模块单测 +
 `test/e2e.test.ts` 黑盒模拟宿主通过 JSON-RPC 驱动真实二进制全链路）。
 
 ```bash
@@ -289,7 +289,7 @@ npm publish
 
 ## 技术栈
 
-- **TypeScript**（`src/` 多模块：types / rpc / adapter / server / reader / cli / index）→ `bun build` → 单文件 JS
+- **TypeScript**（`src/` 多模块：types / rpc / adapter / server / jsonrpc / reader / cli / index 等）→ `bun build` → 单文件 JS
 - **测试**：`bun test`（`test/` 目录，模块单测 + e2e 黑盒模拟；行覆盖率 ≥ 80% 门禁）
 - **类型检查**：`tsc --noEmit`（严格模式）
 - **运行时**：Node.js ≥ 18

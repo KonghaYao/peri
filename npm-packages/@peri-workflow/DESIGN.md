@@ -232,19 +232,76 @@ workflow 执行完毕（不管成功/失败/中止）。
 
 ---
 
+## 运行结果落盘格式
+
+宿主（Rust 侧 `peri-workflow` crate）在每次运行时把结果落到 `.claude/workflow-runs/<runId>/` 目录，npm 侧 `src/reader.ts`（`read` / `list` 子命令）读取同一格式。**本节是跨侧契约的单一事实源**：Rust 侧写入（`peri-workflow/src/journal.rs`，宿主仓库）↔ npm 侧读取（`src/reader.ts`）双向对齐，任何字段变更必须两侧同步修改。
+
+```
+.claude/workflow-runs/<runId>/
+├── script.js       # workflow 脚本源码副本（宿主 init_run 写入；reader 不消费）
+├── state.json      # 最终状态快照（run_done 时原子写入：先写 .tmp 再 rename）
+├── journal.jsonl   # append-only，每行一个 JSON 对象（一个 agent() 调用结果）
+└── outputs/        # 超长文本提取文件（可选；return_value 无长文本时不存在）
+    └── <label>.txt
+```
+
+### state.json 字段
+
+snake_case 命名（`serde` 未做 rename，Rust `RunState` 直出）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `run_id` | string | 运行 UUID（与目录名一致） |
+| `workflow_name` | string | 脚本 `meta.name` |
+| `status` | string | `"completed"` \| `"failed"` \| `"killed"` |
+| `return_value` | unknown | 脚本顶层 return（超长字符串已外置为占位符，见下） |
+| `script` | string | 脚本源码副本 |
+| `started_at` | string | 运行启动 ISO 时间戳 |
+| `finished_at` | string \| 省略 | 完成时间戳 |
+| `error` | string \| 省略 | 失败原因（非失败时省略） |
+
+### journal.jsonl 字段
+
+每行一条 `JournalEntry`（`key` / `seq` / `result` 为 snake_case 平铺字段）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `key` | string | agent 参数摘要（SHA256 哈希，用于 resume cache-hit） |
+| `seq` | number | agent() 调用顺序号（跨子 workflow 单调递增；reader 按它升序） |
+| `result` | object | `AgentRunResult`（camelCase wire 命名，见下） |
+
+`result` 为 `kind` 判别联合：
+
+- `{ "kind": "ok", "output": string\|object, "usage": { "outputTokens": number }, "model"?, "toolCount"?, "tokenCount"?, "phase"?, "durationMs"? }`
+- `{ "kind": "skipped" }`
+- `{ "kind": "dead", "reason"?, "detail"? }`
+
+其中 `toolCount` / `tokenCount` / `durationMs` / `phase` / `model` / `reason` / `detail` 均为可选，宿主未提供时省略；reader 读取时 `tokens` 取 `tokenCount`，缺失时回退 `usage.outputTokens`。
+
+### outputs/*.txt 与 `${label}` 占位符
+
+`return_value` 中超过阈值（200 字符）的字符串由宿主 `extract_long_texts`（`journal.rs`）递归提取：
+
+- **label 规则**：字符串在 JSON 中的字段路径即文件名——对象字段按点路径拼接（`a.b` → `outputs/a.b.txt`），数组元素按下标 `[i]`（`items[0]` → `outputs/items[0].txt`）；label 含路径遍历字符时回退为 `unnamed`
+- 原位置替换为 `${label}` 占位符（如 `"${a.b}"`）；reader 用 `/^\$\{([^}]+)\}$/` **精确匹配整个字符串**，命中且存在对应文件则替换回原文，未命中（无对应文件 / 非整串占位符）时原样保留
+
+---
+
 ## 部署模型
 
 ### 构建
 
+构建入口为 `src/index.ts`（与 package.json 的 `build` script 一致）：
+
 ```bash
-bun build runner.ts \
+bun build src/index.ts \
   --outfile=dist/peri-workflow.js \
   --target=node \
   --format=esm \
   --banner:js='#!/usr/bin/env node'
 ```
 
-产出：`dist/peri-workflow.js`（单文件，零外部依赖，~25KB）
+产出：`dist/peri-workflow.js`（单文件，零外部依赖，~35KB）
 
 ### 安装
 
@@ -311,15 +368,19 @@ Command::new(cmd_bin)
 
 ## 协议版本
 
+发布版本以 package.json 的 `version` 字段为准（本表只记录影响 RPC wire 的变更）。
+
 | 版本 | 变更 |
 |------|------|
 | 0.1.0 | 初始版本，完整的 JSON-RPC 2.0 协议 |
+| 0.2.0 | 新增 CLI 子命令 read/list/validate 与运行结果落盘格式（见上节）；CLI 子命令不参与 JSON-RPC 协议面，**不影响 RPC 兼容性** |
 
 **向前兼容承诺**：
 - 新增 RPC 方法不会破坏现有宿主
 - 现有方法的参数新增可选字段不会破坏现有宿主
 - 通知的新类型不会破坏现有宿主
 - 破坏性变更（删除方法、改变参数语义）会触发主版本号升级
+- CLI 子命令（read/list/validate）为独立 argv 入口，不改变任何 RPC 方法、参数或错误码
 
 ---
 

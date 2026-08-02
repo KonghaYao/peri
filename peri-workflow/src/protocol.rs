@@ -2,6 +2,10 @@
 //!
 //! 帧格式：newline-delimited JSON（每行一条消息，`\n` 分隔）。
 //! stdout 传 JSON-RPC，stderr 留给 Node console.error。
+//!
+//! ⚠ 跨侧契约：本文件的 wire 字段（WorkflowStartParams / AgentRunParams 等）
+//! 与 npm 侧 `npm-packages/@peri-workflow/src/types.ts` 保持同步，变更须两侧一致
+//! （npm 侧文件顶部有对应注释）。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
