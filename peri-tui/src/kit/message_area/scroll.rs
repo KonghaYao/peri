@@ -7,15 +7,66 @@ use crate::kit::atoms::TUI_CONFIG_HANDLE;
 use crate::kit::focus_router;
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
-use ratatui_kit::components::ScrollViewState;
-use ratatui_kit::crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind};
+use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::layout::{Position, Rect};
+use ratatui_kit::ratatui::layout::Rect;
 
 use super::props::{ScrollbarFields, mouse_in_area};
 use super::selection::{
     WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message,
 };
+
+// ── 滚动状态 ──────────────────────────────────────────────────────────────
+
+/// 消息区滚动状态——替代 ratatui-kit 的 `ScrollViewState`。
+///
+/// [Why] `ScrollViewState.offset` 是 ratatui `Position`（u16），`total_visual_rows`
+/// 超过 65535 视觉行（100 列终端约 650 万字符，如长代码文件输出/大 diff 累积）时
+/// 滚动上限被截断，真实底部（footer/spinner）不可达、scrollbar thumb 到底但内容没到底。
+/// 自持 `usize` 偏移彻底解除上限。
+///
+/// [Why bottom] `scroll_to_bottom()` 设置最大偏移，渲染每帧 clamp 到当帧的
+/// `max_scroll`——与旧 `ScrollViewState::scroll_to_bottom`（size 为 None 时设
+/// `u16::MAX`）行为一致，但 usize 下无上限。
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ScrollPos {
+    offset_y: usize,
+}
+
+impl ScrollPos {
+    pub(super) fn offset(&self) -> usize {
+        self.offset_y
+    }
+
+    pub(super) fn set_offset(&mut self, y: usize) {
+        self.offset_y = y;
+    }
+
+    pub(super) fn scroll_up(&mut self) {
+        self.offset_y = self.offset_y.saturating_sub(1);
+    }
+
+    pub(super) fn scroll_down(&mut self) {
+        self.offset_y = self.offset_y.saturating_add(1);
+    }
+
+    pub(super) fn scroll_page_up(&mut self, page: usize) {
+        self.offset_y = self.offset_y.saturating_add(1).saturating_sub(page);
+    }
+
+    pub(super) fn scroll_page_down(&mut self, page: usize) {
+        self.offset_y = self.offset_y.saturating_add(page).saturating_sub(1);
+    }
+
+    pub(super) fn scroll_to_top(&mut self) {
+        self.offset_y = 0;
+    }
+
+    /// 滚动到底——偏移设为最大，渲染 clamp 到当帧 `max_scroll`。
+    pub(super) fn scroll_to_bottom(&mut self) {
+        self.offset_y = usize::MAX;
+    }
+}
 
 // ── 滚动速度控制 ──────────────────────────────────────────────────────────
 
@@ -193,7 +244,7 @@ fn position_to_scroll_y(position: usize, max_position: usize, max_scroll: usize)
 fn apply_scroll(
     delta: i32,
     scroll_throttle: &State<ScrollThrottle>,
-    scroll_state: &State<ScrollViewState>,
+    scroll_state: &State<ScrollPos>,
 ) {
     let mut st = scroll_throttle.write_no_update();
     st.pending_delta += delta;
@@ -228,10 +279,10 @@ pub(super) fn handle_event(
     event: &Event,
     area_rect: Option<Rect>,
     vis_width: u16,
-    scroll_state: &State<ScrollViewState>,
+    scroll_state: &State<ScrollPos>,
     scroll_throttle: &State<ScrollThrottle>,
     text_sel: &State<TextSelection>,
-    selection_down_pos: &State<Option<(u16, u16)>>,
+    selection_down_pos: &State<Option<(usize, u16)>>,
     drag_throttle: &State<DragThrottle>,
     // 拼接后的全量 wrap_map（按 visual_start 升序）。mod.rs 渲染前已拼接好。
     wrap_map: &Arc<Vec<WrappedLineInfo>>,
@@ -285,10 +336,7 @@ pub(super) fn handle_event(
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
                             // ▲ 端点（area 顶行）—— 直接跳到顶部
                             if mouse.row == area.y {
-                                let cur = scroll_state.read().offset();
-                                scroll_state
-                                    .write_no_update()
-                                    .set_offset(Position::new(cur.x, 0));
+                                scroll_state.write_no_update().set_offset(0);
                                 return EventResult::Consumed;
                             }
                             // ▼ 端点（area 底行）—— 直接跳到底部
@@ -296,10 +344,7 @@ pub(super) fn handle_event(
                             if mouse.row == bottom_row {
                                 let max_scroll =
                                     fields.content_length.saturating_sub(fields.viewport_length);
-                                let cur = scroll_state.read().offset();
-                                scroll_state
-                                    .write_no_update()
-                                    .set_offset(Position::new(cur.x, max_scroll as u16));
+                                scroll_state.write_no_update().set_offset(max_scroll);
                                 return EventResult::Consumed;
                             }
                             // thumb / track
@@ -328,10 +373,7 @@ pub(super) fn handle_event(
                                     fields.content_length.saturating_sub(fields.viewport_length);
                                 let target =
                                     position_to_scroll_y(position, geo.max_position, max_scroll);
-                                let cur = scroll_state.read().offset();
-                                scroll_state
-                                    .write_no_update()
-                                    .set_offset(Position::new(cur.x, target as u16));
+                                scroll_state.write_no_update().set_offset(target);
                             }
                             // 记录拖拽状态——render 不依赖 active，用 write_no_update
                             {
@@ -367,10 +409,7 @@ pub(super) fn handle_event(
                                 fields.content_length.saturating_sub(fields.viewport_length);
                             let target =
                                 position_to_scroll_y(position, geo.max_position, max_scroll);
-                            let cur = scroll_state.read().offset();
-                            scroll_state
-                                .write_no_update()
-                                .set_offset(Position::new(cur.x, target as u16));
+                            scroll_state.write_no_update().set_offset(target);
                             return EventResult::Consumed;
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
@@ -412,8 +451,10 @@ pub(super) fn handle_event(
                         // [TRAP] selection_down_pos 只在事件处理器内读写，render
                         // 不依赖它——用 write_no_update 避免 wake 噪音（render 不需要
                         // 因为这个状态变化而重渲染，后续 Drag 才是真正的渲染触发点）。
-                        let scroll_y = scroll_state.read().offset().y;
-                        let visual_row = mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
+                        let scroll_y = scroll_state.read().offset();
+                        // [usize 视觉行] 滚动偏移 usize 化后，视觉行直接相加——
+                        // 超长内容（>65535 视觉行）下选中中间行不再被 u16 clamp 截断错位。
+                        let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
                         // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
                         let visual_col = mouse.column.saturating_sub(area.x);
                         *selection_down_pos.write_no_update() = Some((visual_row, visual_col));
@@ -430,8 +471,9 @@ pub(super) fn handle_event(
                         }
                         drag_throttle.write_no_update().last_flush = now;
 
-                        let scroll_y = scroll_state.read().offset().y;
-                        let visual_row = mouse.row.saturating_sub(area.y).saturating_add(scroll_y);
+                        let scroll_y = scroll_state.read().offset();
+                        // [usize 视觉行] 同 Down 分支：不做 u16 clamp，超长内容选区不错位。
+                        let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
                         let visual_col = mouse.column.saturating_sub(area.x);
 
                         // 单次 write guard，drop 时只 wake 一次（不是两次）
@@ -525,11 +567,25 @@ pub(super) fn handle_event(
         return EventResult::Consumed;
     }
 
+    // 键盘滚动（替代 ScrollViewState::handle_event——消息区不使用 ScrollView，
+    // 其 page_size 永远为 None；自持 ScrollPos 直接按当前视口高度翻页）。
+    // focus_router::message_accepts_key 仅放行 Ctrl+Up/Down/Home/End。
     if let Event::Key(key) = &event
         && key.kind == KeyEventKind::Press
         && focus_router::message_accepts_key(key)
     {
-        scroll_state.write().handle_event(event);
+        let mut st = scroll_state.write();
+        // 翻页大小 = 当前视口高度（area_rect 由 MsgAreaTracker 每帧记录）
+        let page = area_rect.map_or(1usize, |r| r.height as usize);
+        match key.code {
+            KeyCode::Up => st.scroll_up(),
+            KeyCode::Down => st.scroll_down(),
+            KeyCode::PageUp => st.scroll_page_up(page),
+            KeyCode::PageDown => st.scroll_page_down(page),
+            KeyCode::Home => st.scroll_to_top(),
+            KeyCode::End => st.scroll_to_bottom(),
+            _ => return EventResult::Ignored,
+        }
         return EventResult::Consumed;
     }
     EventResult::Ignored
@@ -537,18 +593,38 @@ pub(super) fn handle_event(
 
 // ── 吸底自动跟随 ─────────────────────────────────────────────────────────
 
+/// resize（vis_height 变化）后是否应跟随到底：resize 前视口在底部附近
+/// （offset 距旧 max_scroll ≤ 旧 threshold）。resize 前用户在上滚浏览时不打扰。
+pub(super) fn should_follow_after_resize(
+    total_visual_rows: u16,
+    prev_vis_height: u16,
+    offset_y: usize,
+) -> bool {
+    if total_visual_rows == 0 || prev_vis_height == 0 {
+        return false;
+    }
+    // resize 前的 max_scroll：同一帧内 total_visual_rows 未变，用旧 vis_height 反推。
+    let old_max_scroll = total_visual_rows.saturating_sub(prev_vis_height) as usize;
+    let old_distance = old_max_scroll.saturating_sub(offset_y);
+    let old_threshold = ((prev_vis_height / 4).max(5)) as usize;
+    old_distance <= old_threshold
+}
+
 /// `use_effect` 闭包提取的上下文结构体。
 /// 所有 `State<T>` 字段在 mod.rs 闭包外构造时用 `.clone()`（State 是 Arc，clone 是廉价引用拷贝）。
 pub(super) struct AutoFollowCtx {
     pub total_visual_rows: u16,
     pub vis_height: u16,
-    pub scroll_state: State<ScrollViewState>,
+    pub scroll_state: State<ScrollPos>,
     pub prev_items_len: State<usize>,
     pub last_scrolled_at: State<u16>,
     pub items_len: usize,
     pub is_loading: bool,
     /// 用于检测 resize：total_visual_rows 变化后钳制 scroll_state.offset 到有效范围。
     pub prev_total_visual_rows: State<u16>,
+    /// 用于检测 resize：vis_height 变化（终端高度变化）后，若 resize 前在底部附近则
+    /// 跟随到底。use_effect 依赖不含 vis_height，此哨兵负责补上这个缺口。
+    pub prev_vis_height: State<u16>,
     /// 用于检测 submit（用户主动发送 prompt）→ 强制滚底，不经过 proximity guard。
     pub loading_epoch: u64,
     pub prev_loading_epoch: State<u64>,
@@ -568,7 +644,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         total_rows = ctx.total_visual_rows,
         vis_h = ctx.vis_height,
         is_loading = ctx.is_loading,
-        scroll_y = ctx.scroll_state.read().offset().y,
+        scroll_y = ctx.scroll_state.read().offset(),
         prev_lsa = *ctx.last_scrolled_at.read(),
         prev_items = *ctx.prev_items_len.read(),
         "auto_follow: entry",
@@ -578,13 +654,38 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_total = *ctx.prev_total_visual_rows.read();
     *ctx.prev_total_visual_rows.write() = ctx.total_visual_rows;
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
-        let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-        let current_y = ctx.scroll_state.read().offset().y;
+        let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height) as usize;
+        let current_y = ctx.scroll_state.read().offset();
         if current_y > max_scroll {
-            ctx.scroll_state
-                .write()
-                .set_offset(ratatui_kit::ratatui::layout::Position::new(0, max_scroll));
+            ctx.scroll_state.write().set_offset(max_scroll);
         }
+    }
+
+    // [Fix] resize 高度变化（vis_height 变）后跟随底部。
+    // [Why] use_effect 依赖（items_len, vm_generation, is_loading, total_visual_rows）不含
+    // vis_height，终端高度变化时 effect 不触发；而渲染侧 clamp 只在 offset > max_scroll
+    // 时钳制上限——resize 缩小视口后 max_scroll 变大，offset 停在旧底部不再到底，底部的
+    // footer（2 空行 + spinner）被挤出视口；且之后流式增长时 distance 恒定 > threshold，
+    // proximity guard 永久拦截，直到用户手动滚动才恢复。
+    // 检测 vis_height 变化，若 resize 前视口在底部附近（distance ≤ threshold）则跟随到底；
+    // resize 前用户在上滚浏览（distance 大）时不打扰。
+    let prev_vis = *ctx.prev_vis_height.read();
+    *ctx.prev_vis_height.write() = ctx.vis_height;
+    if prev_vis != ctx.vis_height
+        && should_follow_after_resize(
+            ctx.total_visual_rows,
+            prev_vis,
+            ctx.scroll_state.read().offset(),
+        )
+    {
+        tracing::info!(
+            target: "msg_scroll_diag",
+            prev_vis,
+            new_vis = ctx.vis_height,
+            "auto_follow: resize (vis_height changed) → follow bottom",
+        );
+        ctx.scroll_state.write().scroll_to_bottom();
+        *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
     }
 
     // ── [Fix #1] Submit 强制滚底：用户主动发送 prompt 时 LOADING_EPOCH 递增 ──
@@ -656,11 +757,11 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         // [TRAP] read+write 同 state 同线程 = parking_lot 死锁——先 copy 出来
         let prev_lsa = *ctx.last_scrolled_at.read();
         if ctx.total_visual_rows > prev_lsa {
-            let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-            let scroll_y = ctx.scroll_state.read().offset().y;
+            let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height) as usize;
+            let scroll_y = ctx.scroll_state.read().offset();
             let distance = max_scroll.saturating_sub(scroll_y);
             // 仅在用户当前接近底部时跟随——用户主动上滚浏览历史时不应被吸回。
-            let threshold = (ctx.vis_height / 4).max(5);
+            let threshold = (ctx.vis_height / 4).max(5) as usize;
             if distance <= threshold {
                 tracing::info!(target: "msg_scroll_diag", distance, threshold, "auto_follow: loading → scroll_to_bottom");
                 ctx.scroll_state.write().scroll_to_bottom();
@@ -681,14 +782,14 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         return;
     }
 
-    let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height);
-    let scroll_y = ctx.scroll_state.read().offset().y;
+    let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height) as usize;
+    let scroll_y = ctx.scroll_state.read().offset();
     if scroll_y >= max_scroll {
         tracing::info!(target: "msg_scroll_diag", scroll_y, max_scroll, "auto_follow: non-loading → skip (already at bottom)");
         return;
     }
     let distance = max_scroll.saturating_sub(scroll_y);
-    let threshold = (ctx.vis_height / 4).max(5);
+    let threshold = (ctx.vis_height / 4).max(5) as usize;
     if distance > threshold {
         tracing::info!(target: "msg_scroll_diag", distance, threshold, scroll_y, max_scroll, "auto_follow: non-loading → skip (distance > threshold)");
         return;

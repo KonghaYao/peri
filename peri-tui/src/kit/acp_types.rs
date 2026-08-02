@@ -12,7 +12,10 @@
 
 use crate::kit::stream_data::*;
 use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
-use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit, TuiToolPresentation};
+use crate::kit::tui_render_unit::{
+    TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiToolCard, TuiToolPresentation,
+    tui_hash_combine, tui_hash_roll_update, tui_hash_str,
+};
 use peri_acp_types::event_data::*;
 use serde_json::Value;
 use std::time::Instant;
@@ -34,7 +37,7 @@ use std::time::Instant;
 /// `segments` records this chronological order so that `build_view_models` can
 /// create separate `TuiAssistantBubble` entries for text before and after each
 /// tool/sub-agent boundary, instead of merging everything into one fat bubble.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CurrentTurn {
     /// Accumulated assistant text for the current turn.
     pub text: String,
@@ -55,7 +58,7 @@ pub struct CurrentTurn {
     pub subagents: Vec<SubAgentAccumulator>,
 
     /// Chronological order of text flushes, tool starts, and sub-agent starts
-    /// within this turn. Drive `build_view_models` to produce interleaved output.
+    /// within this turn. Drive `sync_cache` to produce interleaved output.
     segments: Vec<TurnSegment>,
 
     /// Byte offset in `self.text` that the last `AssistantText` segment covered.
@@ -64,7 +67,7 @@ pub struct CurrentTurn {
 
     /// Byte offset in `self.reasoning` that the last `AssistantText` segment covered.
     /// Parallel to `last_text_flush` — each content flush records both text and
-    /// reasoning boundaries so `build_view_models` can assign the correct reasoning
+    /// reasoning boundaries so `sync_cache` can assign the correct reasoning
     /// slice to each assistant bubble.
     last_reasoning_flush: usize,
 
@@ -72,11 +75,54 @@ pub struct CurrentTurn {
     /// a new assistant message starts (message_id change → flush pending text).
     last_message_id: Option<String>,
 
-    /// Cached ViewModels built from streaming data (populated by `build_view_models`).
+    /// 当前未冻结（trailing）文本区域的滚动哈希——`append_text` 时增量维护。
+    /// 与 `TuiAssistantBubble::compute_hash` 的文本部分共用同一公式。
+    open_text_hash: u64,
+
+    /// 当前未冻结（trailing）推理区域的滚动哈希——`append_reasoning` 时增量维护。
+    open_reasoning_hash: u64,
+
+    /// 增量 VM 缓存：索引 i 对应 `segments[i]` 的 VM，末尾元素为 trailing bubble。
     ///
-    /// Cleared whenever new streaming data arrives (text/reasoning/tool events),
-    /// and rebuilt on the next call to `view_models()`.
-    cached_view_models: Vec<TuiRenderUnit>,
+    /// 使用 `im::Vector` 的原因：
+    /// - 子 turn（SubAgentAccumulator）的缓存可 O(1) 克隆共享给 `TuiSubAgentGroup`，
+    ///   避免每 token 深拷贝全部 child VM；
+    /// - `push_view_models` 可用 `append`（O(log n) 共享元素）把缓存并入快照，
+    ///   避免逐条深拷贝。
+    ///
+    /// 缓存内容由 `sync_cache` 增量维护——冻结段只构建一次，只有变化的部分被替换。
+    cached_view_models: im::Vector<TuiRenderUnit>,
+
+    /// 缓存与 segments/内容失同步标记：`invalidate_cache` 置位，`view_models()`
+    /// 时调用 `sync_cache` 重同步。流式变更走 eager sync（不置位）。
+    cache_dirty: bool,
+
+    /// 折叠策略：true = 缓存内保持"仅最后一个 reasoning 展开"（顶层 turn，
+    /// 与 `push_view_models` 的折叠 pass 稳态一致，使该 pass 对 current_turn
+    /// 部分零翻转）；false = 全部展开（subagent 子 turn，保持历史渲染行为）。
+    collapse_non_last_reasoning: bool,
+}
+
+impl Default for CurrentTurn {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            reasoning: String::new(),
+            tool_cards: Vec::new(),
+            committed: false,
+            active: false,
+            subagents: Vec::new(),
+            segments: Vec::new(),
+            last_text_flush: 0,
+            last_reasoning_flush: 0,
+            last_message_id: None,
+            open_text_hash: 0,
+            open_reasoning_hash: 0,
+            cached_view_models: im::Vector::new(),
+            cache_dirty: false,
+            collapse_non_last_reasoning: true,
+        }
+    }
 }
 
 /// A single entry in the chronological ordering of a turn's streaming events.
@@ -85,9 +131,13 @@ enum TurnSegment {
     /// Text and reasoning belonging to one assistant bubble.
     /// `text_end_byte`: end (exclusive) of the text slice in `CurrentTurn.text`.
     /// `reasoning_end_byte`: end (exclusive) of the reasoning slice in `CurrentTurn.reasoning`.
+    /// `text_hash` / `reasoning_hash`: 该段文本/推理区域的滚动哈希——flush 时冻结，
+    /// 供缓存重建时 O(1) 取用，避免对已冻结段重新哈希。
     AssistantText {
         text_end_byte: usize,
         reasoning_end_byte: usize,
+        text_hash: u64,
+        reasoning_hash: u64,
     },
     /// Tool card reference to `CurrentTurn.tool_cards[tool_idx]`.
     Tool { tool_idx: usize },
@@ -110,6 +160,9 @@ impl CurrentTurn {
 
     /// If text has grown since the last `AssistantText` segment, push a new
     /// segment capturing the delta (both text and reasoning boundaries).
+    ///
+    /// 冻结时把当前 open 区域的滚动哈希存入段记录——此后该段内容不再变化，
+    /// 缓存重建可直接 O(1) 取用，无需对冻结段重新哈希。
     fn flush_text_segment(&mut self) {
         let current_text = self.text.len();
         let current_reasoning = self.reasoning.len();
@@ -117,15 +170,23 @@ impl CurrentTurn {
             self.segments.push(TurnSegment::AssistantText {
                 text_end_byte: current_text,
                 reasoning_end_byte: current_reasoning,
+                text_hash: self.open_text_hash,
+                reasoning_hash: self.open_reasoning_hash,
             });
             self.last_text_flush = current_text;
             self.last_reasoning_flush = current_reasoning;
+            self.open_text_hash = 0;
+            self.open_reasoning_hash = 0;
         }
     }
 
-    /// Invalidate the cached ViewModels (call after any streaming data mutation).
+    /// Mark the cached ViewModels dirty（下次 `view_models()` 时增量重同步）。
+    ///
+    /// 语义与旧版一致：调用后 `view_models()` 必然反映最新状态；实现上不再
+    /// 清空缓存，而是由 `sync_cache` 只修补变化的部分。acp_bridge 的 1s tick
+    /// 依赖此入口刷新运行中工具卡片的时长。
     pub(crate) fn invalidate_cache(&mut self) {
-        self.cached_view_models.clear();
+        self.cache_dirty = true;
     }
 
     /// Append a text chunk from `"text-chunk"`.
@@ -142,8 +203,9 @@ impl CurrentTurn {
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
+        self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
         self.active = true;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// Append a reasoning chunk from `"reasoning-chunk"`.
@@ -160,8 +222,9 @@ impl CurrentTurn {
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
+        self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
         self.active = true;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// Begin a new tool card from `"tool-started"`.
@@ -183,7 +246,7 @@ impl CurrentTurn {
         self.segments.push(TurnSegment::Tool { tool_idx: idx });
         self.tool_cards.push(tool);
         self.active = true;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// Finalise an existing running tool card from `"tool-ended"`.
@@ -200,7 +263,7 @@ impl CurrentTurn {
         };
         t.output_summary = Some(output);
         t.is_error = is_error;
-        self.invalidate_cache();
+        self.sync_cache();
         true
     }
 
@@ -233,6 +296,9 @@ impl CurrentTurn {
             self.tool_cards[tool_idx].claimed_by_subagent = true;
             self.segments
                 .insert(seg_pos, TurnSegment::SubAgent { subagent_idx: idx });
+            // 段列表中部插入会破坏 segment↔cache 的索引对齐——清空缓存整体重建。
+            // 该操作低频（每 subagent 一次），O(total) 成本可接受。
+            self.cached_view_models = im::Vector::new();
         } else {
             self.segments
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
@@ -241,7 +307,7 @@ impl CurrentTurn {
         self.subagents
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// 在 current_turn 内部时序位置注入一条 SystemNote（如 cache 命中率警告）。
@@ -257,7 +323,7 @@ impl CurrentTurn {
             content_hash,
         });
         self.active = true;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
@@ -270,7 +336,7 @@ impl CurrentTurn {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.is_running = false;
             s.cached_view_model.replace(None);
-            self.invalidate_cache();
+            self.sync_cache();
         }
     }
 
@@ -279,7 +345,7 @@ impl CurrentTurn {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.append_text(text);
             self.active = true;
-            self.invalidate_cache();
+            self.sync_cache();
             true
         } else {
             false
@@ -291,7 +357,7 @@ impl CurrentTurn {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.append_reasoning(text);
             self.active = true;
-            self.invalidate_cache();
+            self.sync_cache();
             true
         } else {
             false
@@ -303,7 +369,7 @@ impl CurrentTurn {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.start_tool(tool);
             self.active = true;
-            self.invalidate_cache();
+            self.sync_cache();
             true
         } else {
             // [诊断] 路由失败时记录所有已注册的 agent_id
@@ -330,7 +396,7 @@ impl CurrentTurn {
             let ended = s.end_tool(tool_id, output, is_error);
             if ended {
                 self.active = true;
-                self.invalidate_cache();
+                self.sync_cache();
             }
             ended
         } else {
@@ -341,7 +407,7 @@ impl CurrentTurn {
     /// Mark the turn as no longer active (e.g. on `"turn-interrupted"`).
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.invalidate_cache();
+        self.sync_cache();
     }
 
     /// Mark current turn as committed by a canonical ViewCommit snapshot.
@@ -354,7 +420,10 @@ impl CurrentTurn {
         self.last_text_flush = 0;
         self.last_reasoning_flush = 0;
         self.last_message_id = None;
-        self.cached_view_models.clear();
+        self.open_text_hash = 0;
+        self.open_reasoning_hash = 0;
+        self.cached_view_models = im::Vector::new();
+        self.cache_dirty = false;
         self.active = false;
         self.committed = true;
     }
@@ -373,113 +442,124 @@ impl CurrentTurn {
             && self.cached_view_models.is_empty()
     }
 
-    /// Accessor: returns cached ViewModels, building them on first call.
+    /// Accessor: returns cached ViewModels.
     ///
-    /// The cache is invalidated whenever streaming data changes (text/reasoning/
-    /// tool events), so this always reflects the current turn state.
-    pub fn view_models(&mut self) -> &[TuiRenderUnit] {
-        if self.cached_view_models.is_empty()
-            && (self.active
-                || !self.text.is_empty()
-                || !self.reasoning.is_empty()
-                || !self.tool_cards.is_empty()
-                || !self.subagents.is_empty())
-        {
-            self.build_view_models();
+    /// 缓存由 `sync_cache` 增量维护：流式变更在 mutation 时 eager sync，
+    /// `invalidate_cache`（如 acp_bridge 1s tick 刷新工具时长）置位后在下次
+    /// 调用时重同步。返回的 `im::Vector` 可 O(1) 克隆共享。
+    pub fn view_models(&mut self) -> &im::Vector<TuiRenderUnit> {
+        if self.cache_dirty {
+            self.sync_cache();
         }
         &self.cached_view_models
     }
 
-    /// Build incremental ViewModels from accumulated streaming data into cache.
+    /// 构造 reasoning 块 + 内容哈希。
     ///
-    /// Walks through `self.segments` in chronological order, creating separate
-    /// `TuiAssistantBubble` entries for text before and after each tool/sub-agent
-    /// boundary. Each bubble gets its own reasoning slice from `self.reasoning`,
-    /// bounded by `reasoning_end_byte` in the current segment.
-    /// Any trailing content past the last segment is rendered as a final bubble.
-    fn build_view_models(&mut self) {
-        use crate::kit::tui_render_unit::{
-            TuiAssistantBubble, TuiReasoningBlock, TuiSystemNote, TuiToolCard, tui_hash_str,
+    /// `text_hash`/`reasoning_hash` 是文本/推理区域的滚动哈希（增量维护的 open
+    /// 值或冻结段存储值），组合公式与 [`TuiAssistantBubble::compute_hash`] 完全
+    /// 一致——保证增量路径与从零重建（recompute_hash）产出相同的 hash。
+    fn build_bubble_parts(
+        reasoning: &str,
+        text_hash: u64,
+        reasoning_hash: u64,
+    ) -> (Option<TuiReasoningBlock>, u64) {
+        let block = if reasoning.is_empty() {
+            None
+        } else {
+            Some(TuiReasoningBlock {
+                text: reasoning.to_string(),
+                collapsed: false,
+            })
         };
+        let content_hash = match block.as_ref() {
+            Some(r) => tui_hash_combine(
+                tui_hash_combine(text_hash, reasoning_hash),
+                u64::from(r.collapsed),
+            ),
+            None => text_hash,
+        };
+        (block, content_hash)
+    }
 
-        let mut vms: Vec<TuiRenderUnit> = Vec::new();
+    /// 将 `cached_view_models` 与 `segments`/内容增量对齐——只重建/替换变化的
+    /// 部分（trailing bubble、运行中或刚结束的工具卡、内容变化的 subagent 组），
+    /// 冻结的 AssistantText 段与未变化的元素直接复用缓存。
+    ///
+    /// 每 token 成本 O(变化量 + 段数扫描)，取代旧版每 token 全量重建（O(总内容)
+    /// 文本拷贝 + 全量 format!/hash 的 O(N²) 累积）。
+    fn sync_cache(&mut self) {
+        use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiSystemNote};
+
         let mut prev_text_end: usize = 0;
         let mut prev_reasoning_end: usize = 0;
 
-        // build_reasoning 构造初始 reasoning block（collapsed=false），hash 由
-        // TuiAssistantBubble::compute_hash 计算——保证公式与 recompute_hash 一致，
-        // 后续 push_view_models 修改 collapsed 时重算结果可控。
-        let build_reasoning = |text: &str, reasoning: &str| -> (Option<TuiReasoningBlock>, u64) {
-            let block = if reasoning.is_empty() {
-                None
-            } else {
-                Some(TuiReasoningBlock {
-                    text: reasoning.to_string(),
-                    collapsed: false,
-                })
-            };
-            let content_hash = TuiAssistantBubble::compute_hash(text, block.as_ref());
-            (block, content_hash)
-        };
-
-        for segment in &self.segments {
+        for (i, segment) in self.segments.iter().enumerate() {
             match segment {
                 TurnSegment::AssistantText {
                     text_end_byte,
                     reasoning_end_byte,
+                    text_hash,
+                    reasoning_hash,
                 } => {
                     let text_end = (*text_end_byte).min(self.text.len());
                     let reason_end = (*reasoning_end_byte).min(self.reasoning.len());
-                    if text_end > prev_text_end || reason_end > prev_reasoning_end {
+                    // 冻结段只构建一次，此后直接复用缓存（内容不再变化）。
+                    if self.cached_view_models.len() <= i {
                         let text_slice = &self.text[prev_text_end..text_end];
                         let reasoning_slice = &self.reasoning[prev_reasoning_end..reason_end];
                         let (reasoning, content_hash) =
-                            build_reasoning(text_slice, reasoning_slice);
-                        vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                            text: text_slice.to_string(),
-                            reasoning,
-                            content_hash,
-                        }));
-                        prev_text_end = text_end;
-                        prev_reasoning_end = reason_end;
+                            Self::build_bubble_parts(reasoning_slice, *text_hash, *reasoning_hash);
+                        self.cached_view_models
+                            .push_back(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+                                text: text_slice.to_string(),
+                                reasoning,
+                                content_hash,
+                            }));
                     }
+                    prev_text_end = text_end;
+                    prev_reasoning_end = reason_end;
                 }
                 TurnSegment::Tool { tool_idx } => {
                     if let Some(t) = self.tool_cards.get(*tool_idx) {
-                        let is_running = t.output_summary.is_none();
-                        let running_duration_ms =
-                            is_running.then(|| t.started_at.elapsed().as_millis() as u64);
-                        // duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致
-                        // 分片渲染缓存频繁失效；同时保证 duration 文本每秒刷新。
-                        let duration_secs = running_duration_ms.map(|ms| ms / 1000);
-                        vms.push(TuiRenderUnit::TuiToolCard(TuiToolCard {
-                            tool_id: t.tool_id.clone(),
-                            tool_name: t.tool_name.clone(),
-                            input_summary: t.input_summary.clone(),
-                            output_summary: t.output_summary.clone().unwrap_or_default(),
-                            is_error: t.is_error,
-                            is_running,
-                            running_duration_ms,
-                            diff: None,
-                            presentation: t.presentation.clone(),
-                            tool_calls_count: 0,
-                            content_hash: tui_hash_str(&format!(
-                                "{}|{}|{}|{}|{}|{}|{:?}|{:?}",
-                                t.tool_id,
-                                t.tool_name,
-                                t.input_summary,
-                                t.output_summary.as_deref().unwrap_or(""),
-                                t.is_error,
-                                is_running,
-                                duration_secs,
-                                t.presentation,
-                            )),
-                        }));
+                        // 运行中卡片每 sync 重建（刷新 duration，hash 按秒变化）；
+                        // 已结束卡片仅在 output 变化时重建一次。
+                        let needs_rebuild = match self.cached_view_models.get(i) {
+                            Some(TuiRenderUnit::TuiToolCard(c)) => {
+                                c.is_running
+                                    || Some(c.output_summary.as_str())
+                                        != t.output_summary.as_deref()
+                            }
+                            _ => true,
+                        };
+                        if needs_rebuild {
+                            let card = build_tool_card(t);
+                            if self.cached_view_models.len() <= i {
+                                self.cached_view_models
+                                    .push_back(TuiRenderUnit::TuiToolCard(card));
+                            } else {
+                                self.cached_view_models
+                                    .set(i, TuiRenderUnit::TuiToolCard(card));
+                            }
+                        }
                     }
                 }
                 TurnSegment::SubAgent { subagent_idx } => {
                     if let Some(s) = self.subagents.get(*subagent_idx) {
-                        vms.push(s.view_model());
+                        let group_vm = s.view_model();
+                        // O(1) hash 比较——未变化的 subagent 直接跳过 set()，
+                        // 已变化的替换为新组（im::Vector set 走 COW，共享未变子节点）。
+                        let changed = self
+                            .cached_view_models
+                            .get(i)
+                            .is_none_or(|old| old.content_hash() != group_vm.content_hash());
+                        if changed {
+                            if self.cached_view_models.len() <= i {
+                                self.cached_view_models.push_back(group_vm);
+                            } else {
+                                self.cached_view_models.set(i, group_vm);
+                            }
+                        }
                     }
                 }
                 TurnSegment::SystemNote {
@@ -487,34 +567,115 @@ impl CurrentTurn {
                     level,
                     content_hash,
                 } => {
-                    vms.push(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
-                        text: text.clone(),
-                        level: level.clone(),
-                        content_hash: *content_hash,
-                    }));
+                    if self.cached_view_models.len() <= i {
+                        self.cached_view_models
+                            .push_back(TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                                text: text.clone(),
+                                level: level.clone(),
+                                content_hash: *content_hash,
+                            }));
+                    }
                 }
             }
         }
 
-        // Flush remaining content (after last segment, or if no segments exist)
-        if prev_text_end < self.text.len() || prev_reasoning_end < self.reasoning.len() {
-            let text_slice = &self.text[prev_text_end..];
-            let reasoning_slice = &self.reasoning[prev_reasoning_end..];
-            let (reasoning, content_hash) = build_reasoning(text_slice, reasoning_slice);
-            vms.push(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                text: text_slice.to_string(),
-                reasoning,
-                content_hash,
-            }));
+        // Trailing bubble（最后一个段之后仍未冻结的内容）——文本/推理增长时重建。
+        // 长度比对是 O(1) 的变化检测：该区域 append-only，长度变 ⟺ 内容变。
+        let has_trailing = self.text.len() > self.last_text_flush
+            || self.reasoning.len() > self.last_reasoning_flush;
+        if has_trailing {
+            let trailing_idx = self.segments.len();
+            let trailing_len_changed = match self.cached_view_models.get(trailing_idx) {
+                Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
+                    b.text.len() != self.text.len() - self.last_text_flush
+                        || b.reasoning.as_ref().map(|r| r.text.len()).unwrap_or(0)
+                            != self.reasoning.len() - self.last_reasoning_flush
+                }
+                _ => true,
+            };
+            if trailing_len_changed {
+                let text_slice = &self.text[self.last_text_flush..];
+                let reasoning_slice = &self.reasoning[self.last_reasoning_flush..];
+                let (reasoning, content_hash) = Self::build_bubble_parts(
+                    reasoning_slice,
+                    self.open_text_hash,
+                    self.open_reasoning_hash,
+                );
+                let bubble = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+                    text: text_slice.to_string(),
+                    reasoning,
+                    content_hash,
+                });
+                if self.cached_view_models.len() <= trailing_idx {
+                    self.cached_view_models.push_back(bubble);
+                } else {
+                    self.cached_view_models.set(trailing_idx, bubble);
+                }
+            }
+        }
+
+        // 折叠归一化：顶层 turn 保持"仅最后一个 reasoning 展开"——与
+        // push_view_models 的折叠 pass 稳态一致，使该 pass 对 current_turn
+        // 部分零翻转（每次翻转是一次 COW 元素克隆，避免每 token 重复发生）。
+        if self.collapse_non_last_reasoning {
+            self.normalize_collapsed();
         }
 
         // 后处理：将 Agent 工具卡片的 tool_calls_count 与紧随的 SubAgent 组配对。
         // 匹配逻辑：TuiToolCard(tool_name="Agent") 紧接着 TuiSubAgentGroup。
-        for i in 0..vms.len().saturating_sub(1) {
+        self.pair_agent_tool_cards();
+
+        self.cache_dirty = false;
+    }
+
+    /// 折叠归一化：缓存中非最后一个 reasoning bubble 折叠（collapsed=true 并重算 hash）。
+    fn normalize_collapsed(&mut self) {
+        let mut last_reasoning: Option<usize> = None;
+        for (i, vm) in self.cached_view_models.iter().enumerate() {
+            if let TuiRenderUnit::TuiAssistantBubble(b) = vm
+                && b.reasoning.is_some()
+            {
+                last_reasoning = Some(i);
+            }
+        }
+        let Some(last_idx) = last_reasoning else {
+            return;
+        };
+
+        // 先收集再应用（避免迭代中修改）。
+        let mut flips: Vec<usize> = Vec::new();
+        for (i, vm) in self.cached_view_models.iter().enumerate() {
+            if i == last_idx {
+                continue;
+            }
+            if let TuiRenderUnit::TuiAssistantBubble(b) = vm
+                && let Some(r) = &b.reasoning
+                && !r.collapsed
+            {
+                flips.push(i);
+            }
+        }
+        for i in flips {
+            let vm = &self.cached_view_models[i];
+            if let TuiRenderUnit::TuiAssistantBubble(b) = vm {
+                let mut updated = b.clone();
+                updated.reasoning.as_mut().unwrap().collapsed = true;
+                updated.recompute_hash();
+                self.cached_view_models
+                    .set(i, TuiRenderUnit::TuiAssistantBubble(updated));
+            }
+        }
+    }
+
+    /// Agent 工具卡片与紧随的 SubAgent 组配对（tool_calls_count）。
+    fn pair_agent_tool_cards(&mut self) {
+        let mut updates: Vec<(usize, usize)> = Vec::new(); // (index, tool_count)
+        let n = self.cached_view_models.len();
+        for i in 0..n.saturating_sub(1) {
             if let (
                 TuiRenderUnit::TuiToolCard(agent_card),
                 TuiRenderUnit::TuiSubAgentGroup(subagent_group),
-            ) = (&vms[i], &vms[i + 1])
+            ) = (&self.cached_view_models[i], &self.cached_view_models[i + 1])
                 && agent_card.tool_name == "Agent"
                 && agent_card.is_running
             {
@@ -523,15 +684,19 @@ impl CurrentTurn {
                     .iter()
                     .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
                     .count();
-                if tool_count > 0 {
-                    let mut updated_card = agent_card.clone();
-                    updated_card.tool_calls_count = tool_count;
-                    vms[i] = TuiRenderUnit::TuiToolCard(updated_card);
+                if tool_count > 0 && agent_card.tool_calls_count != tool_count {
+                    updates.push((i, tool_count));
                 }
             }
         }
-
-        self.cached_view_models = vms;
+        for (i, tool_count) in updates {
+            if let TuiRenderUnit::TuiToolCard(card) = &self.cached_view_models[i] {
+                let mut updated = card.clone();
+                updated.tool_calls_count = tool_count;
+                self.cached_view_models
+                    .set(i, TuiRenderUnit::TuiToolCard(updated));
+            }
+        }
     }
 
     pub fn has_running_bash_tool(&self) -> bool {
@@ -542,6 +707,40 @@ impl CurrentTurn {
                 .subagents
                 .iter()
                 .any(|s| s.child_turn.has_running_bash_tool())
+    }
+}
+
+/// 从 `ToolCardAccumulator` 派生 `TuiToolCard`（含按秒取整的 duration hash）。
+///
+/// duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致分片渲染缓存频繁
+/// 失效；同时保证 duration 文本每秒刷新。卡片字段均为短摘要，全量 format!/hash
+/// 成本可忽略，无需增量。
+fn build_tool_card(t: &ToolCardAccumulator) -> TuiToolCard {
+    let is_running = t.output_summary.is_none();
+    let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+    let duration_secs = running_duration_ms.map(|ms| ms / 1000);
+    TuiToolCard {
+        tool_id: t.tool_id.clone(),
+        tool_name: t.tool_name.clone(),
+        input_summary: t.input_summary.clone(),
+        output_summary: t.output_summary.clone().unwrap_or_default(),
+        is_error: t.is_error,
+        is_running,
+        running_duration_ms,
+        diff: None,
+        presentation: t.presentation.clone(),
+        tool_calls_count: 0,
+        content_hash: tui_hash_str(&format!(
+            "{}|{}|{}|{}|{}|{}|{:?}|{:?}",
+            t.tool_id,
+            t.tool_name,
+            t.input_summary,
+            t.output_summary.as_deref().unwrap_or(""),
+            t.is_error,
+            is_running,
+            duration_secs,
+            t.presentation,
+        )),
     }
 }
 
@@ -611,11 +810,15 @@ pub struct SubAgentAccumulator {
 
 impl SubAgentAccumulator {
     pub fn new(agent_id: String, agent_name: String) -> Self {
+        let mut child_turn = CurrentTurn::new();
+        // 子 turn 的 reasoning 折叠保持全部展开（与历史渲染行为一致）——
+        // push_view_models 的折叠归一化只作用于顶层 items，不进入组内。
+        child_turn.collapse_non_last_reasoning = false;
         Self {
             agent_id,
             agent_name,
             is_running: true,
-            child_turn: CurrentTurn::new(),
+            child_turn,
             cached_view_model: std::cell::RefCell::new(None),
         }
     }
@@ -644,35 +847,35 @@ impl SubAgentAccumulator {
     }
 
     pub(crate) fn view_model(&self) -> TuiRenderUnit {
-        // 缓存命中——直接返回，避免 child_turn.clone() + view_models() 全量重建
+        // 缓存命中——直接返回。子 turn 的 VM 缓存由 mutation 时 eager sync 维护，
+        // 这里不再需要 child_turn.clone() + view_models() 全量重建。
         if let Some(vm) = self.cached_view_model.borrow().as_ref() {
             return vm.clone();
         }
 
-        let mut child_turn = self.child_turn.clone();
-        let child_vms = child_turn.view_models();
-        // M1: content_hash 累加每个 child VM 的 content_hash，确保 child 文本
-        // 变化时（即使 child_vms.len() 不变）也能触发 render_bridge 增量重建。
-        let child_content_hash: String = child_vms
-            .iter()
-            .map(|vm| vm.content_hash().to_string())
-            .collect::<Vec<_>>()
-            .join("|");
+        // 直接 O(1) 共享子 turn 的增量缓存（im::Vector 持久结构）——
+        // 不再把全部 child VM 深拷贝进 im::Vector。
+        let child_vms = &self.child_turn.cached_view_models;
+        // M1: 用 u64 组合累加每个 child VM 的 content_hash，确保 child 文本
+        // 变化时（即使 child_vms.len() 不变）也能触发按 hash 分片的渲染缓存重建。
+        // 不再拼 String 再 format——直接对 u64 做确定性组合。
+        let mut child_hash_total: u64 = 0;
+        for vm in child_vms.iter() {
+            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
+        }
+        let mut h = tui_hash_combine(0, tui_hash_str(&self.agent_id));
+        h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
+        h = tui_hash_combine(h, child_vms.len() as u64);
+        h = tui_hash_combine(h, 0); // collapsed 恒为 false
+        h = tui_hash_combine(h, u64::from(self.is_running));
+        h = tui_hash_combine(h, child_hash_total);
         let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
-            view_models: child_vms.iter().cloned().collect::<im::Vector<_>>(),
+            view_models: child_vms.clone(),
             collapsed: false,
             is_running: self.is_running,
-            content_hash: crate::kit::tui_render_unit::tui_hash_str(&format!(
-                "{}|{}|{}|{}|{}|{}",
-                self.agent_id,
-                self.agent_name,
-                child_vms.len(),
-                false,
-                self.is_running,
-                child_content_hash,
-            )),
+            content_hash: h,
         });
         self.cached_view_model.replace(Some(vm.clone()));
         vm

@@ -1,7 +1,7 @@
 //! MessageArea：直接读取 VIEW_MODELS，通过 vm_to_lines 将 TuiRenderUnit
 //! 转换为 Vec<Line>，按视口裁剪后渲染。
 //!
-//! - 滚动：由 ScrollViewState 处理键盘/鼠标事件（offset 管理）
+//! - 滚动：由自持 ScrollPos（usize 偏移）处理键盘/鼠标事件（offset 管理）
 //! - 渲染：视口裁剪——只 clone + highlight + 渲染视口内 ~60 行，避免 O(N×W) per render
 //! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
 //! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
@@ -10,14 +10,19 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::kit::atoms::{BRIDGE_RESET_COUNTER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS};
+use crate::kit::atoms::{
+    BRIDGE_RESET_COUNTER, KEEPGOING_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT,
+    SUBMIT_TX, VIEW_MODELS,
+};
+use crate::kit::mouse_router;
+use crate::kit::submit_request::SubmitRequest;
 use crate::kit::text_selection::TextSelection;
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::{
-    components::ScrollViewState,
+    crossterm::event::{Event, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -31,8 +36,8 @@ mod props;
 mod render;
 mod scroll;
 mod selection;
+use footer::{KeepGoingLayout, build_footer_lines, hash_todo_items};
 pub use footer::{TodoItem, TodoStatus};
-use footer::{build_footer_lines, hash_todo_items};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines_cached;
@@ -41,6 +46,9 @@ use selection::{
     WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
     viewport_logical_range, visual_to_logical,
 };
+
+/// keepgoing 按钮点击防抖时长（连续点击冷却）。
+const KEEPGOING_DEBOUNCE: Duration = Duration::from_millis(1500);
 
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
@@ -144,7 +152,29 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
-    let footer_lines = build_footer_lines(&mut hooks, is_loading, &todo_items);
+    // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
+    let keepgoing_blocked = crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL
+        .state()
+        .read()
+        .is_some_and(|until| Instant::now() < until);
+    // 消息区位置追踪 + 视宽：build_footer_lines 需要 vis_width 判断按钮是否
+    // 超宽换行（m4：换行后点击区域与实际渲染位置错位，超宽时跳过按钮渲染）。
+    let area_hook = hooks.use_hook(MsgAreaTracker::new);
+    let area_rect = area_hook.rect;
+    let vis_width = area_rect
+        .map(|r| r.width.saturating_sub(1))
+        .unwrap_or(props.width as u16)
+        .max(1);
+    let (footer_lines, keepgoing_layout) = build_footer_lines(
+        &mut hooks,
+        is_loading,
+        &todo_items,
+        keepgoing_blocked,
+        vis_width,
+    );
+    // keepgoing 按钮屏幕点击区域 (y, x_start, width)，每帧更新，点击 handler 实时读取
+    // （handler 闭包捕获的是 State 句柄而非帧快照，滚动后坐标仍正确）
+    let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
     let brewed_lines = if empty && !footer_lines.is_empty() {
@@ -153,7 +183,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         None
     };
 
-    let scroll_state = hooks.use_state(ScrollViewState::default);
+    let scroll_state = hooks.use_state(scroll::ScrollPos::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
@@ -161,12 +191,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // ── 文本选区 ──
     let text_sel = hooks.use_state(TextSelection::default);
-    let selection_down_pos = hooks.use_state(|| Option::<(u16, u16)>::None);
+    let selection_down_pos = hooks.use_state(|| Option::<(usize, u16)>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
 
-    // ── 消息区位置追踪 ──
-    let area_hook = hooks.use_hook(MsgAreaTracker::new);
-    let area_rect = area_hook.rect;
     // 滚动条 fields state（hook 通过引用读取，避免 borrow 冲突）
     let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
     hooks.use_hook(move || ScrollbarHook {
@@ -175,10 +202,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 滚动条 thumb 拖拽状态（点击/拖拽事件处理器读写）
     let scrollbar_drag = hooks.use_state(ScrollbarDragState::default);
 
-    let vis_width = area_rect
-        .map(|r| r.width.saturating_sub(1))
-        .unwrap_or(props.width as u16)
-        .max(1);
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
     // ── 遍历每个 VM，按 (content_hash, vis_width) 命中判断 ──
@@ -335,6 +358,62 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .min(u16::MAX as usize) as u16
     };
 
+    // ── keepgoing 按钮点击（footer summary 行右侧）──
+    // [Why] 必须注册在 scroll handler 之前：两者同 Global+High，同优先级按注册序分发，
+    // scroll::handle_event 对消息区内 Down(Left) 一律 Consumed（文本选中起点）——
+    // 若在其后注册，按钮点击会被 scroll handler 截断、永远收不到。
+    // 命中 → Consumed（scroll handler 不处理该点击，不会误设选区起点）；
+    // 未命中 → Ignored（滚动/选区逻辑照常）。
+    // [TRAP] 闭包捕获 State 句柄（keepgoing_rect）而非帧快照——每帧 write_no_update
+    // 更新 rect，滚动/布局变化后坐标仍准确；事件在上帧渲染完成后分发，读取的
+    // 是最近一帧的按钮位置。
+    {
+        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+            let Event::Mouse(mouse) = event else {
+                return EventResult::Ignored;
+            };
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return EventResult::Ignored;
+            }
+            // 弹窗/面板遮挡时不响应（与 status_bar / scroll handler 一致）
+            if mouse_router::is_occluded() {
+                return EventResult::Ignored;
+            }
+            // 命中检测：点击坐标落在按钮屏幕区域内 (y, x_start, width)
+            // [Why 先于防抖] 防抖期内点击禁用按钮也应 Consumed——否则事件落到
+            // scroll handler 的文本选区逻辑（消息区内 Down(Left) 设置选区锚点）。
+            let Some((by, bx, bw)) = *keepgoing_rect.read() else {
+                return EventResult::Ignored;
+            };
+            let (x, y) = (mouse.column, mouse.row);
+            if y != by || x < bx || x >= bx.saturating_add(bw) {
+                return EventResult::Ignored;
+            }
+            // 防抖：防抖期内按钮渲染为禁用样式，点击被吞掉但不触发提交
+            let now = Instant::now();
+            let blocked = KEEPGOING_BLOCKED_UNTIL
+                .state()
+                .read()
+                .is_some_and(|until| now < until);
+            if blocked {
+                return EventResult::Consumed;
+            }
+            // 触发 keepgoing 提交：发送空白 user prompt（服务端不插入 user 消息，仅继续 loop）
+            if let Some(tx) = SUBMIT_TX.get() {
+                let _ = tx.send(SubmitRequest::KeepGoing);
+            }
+            // 防抖：冷却期内按钮禁用（渲染为 muted 样式，见 build_footer_lines）
+            *KEEPGOING_BLOCKED_UNTIL.state().write() = Some(now + KEEPGOING_DEBOUNCE);
+            // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
+            tokio::spawn(async move {
+                tokio::time::sleep(KEEPGOING_DEBOUNCE).await;
+                *KEEPGOING_BLOCKED_UNTIL.state().write() = None;
+                RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+            });
+            EventResult::Consumed
+        });
+    }
+
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
@@ -365,6 +444,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 吸底自动跟随 ──
     let last_scrolled_at = hooks.use_state(|| 0u16);
     let prev_total_visual_rows = hooks.use_state(|| 0u16);
+    // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
+    // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
+    let prev_vis_height = hooks.use_state(|| 0u16);
     // [Fix] Submit 强制滚底 / History 切换强制滚底：订阅 atom 重新渲染
     let _loading_epoch_atom = hooks.use_atom(&LOADING_EPOCH);
     let _reset_counter_atom = hooks.use_atom(&BRIDGE_RESET_COUNTER);
@@ -384,6 +466,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     items_len,
                     is_loading,
                     prev_total_visual_rows,
+                    prev_vis_height,
                     loading_epoch,
                     prev_loading_epoch,
                     bridge_reset_counter,
@@ -391,7 +474,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 })
             }
         },
-        (items_len, vm_generation, is_loading, total_visual_rows),
+        (
+            items_len,
+            vm_generation,
+            is_loading,
+            total_visual_rows,
+            vis_height,
+        ),
     );
 
     if empty {
@@ -441,22 +530,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
     let max_scroll = (total_visual_rows as usize).saturating_sub(vis_height as usize);
-    let scroll_y_raw = scroll_state.read().offset().y as usize;
+    let scroll_y_raw = scroll_state.read().offset();
     let scroll_y = scroll_y_raw.min(max_scroll);
 
-    // [Fix] 每帧钳制 scroll_state.offset.y 到 [0, max_scroll]。
+    // [Fix] 每帧钳制 scroll_state.offset 到 [0, max_scroll]。
     // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直
     // 往下滚直到 offset 远超 max_scroll。虽然 scroll_y = raw.min(max_scroll) 让
     // 渲染正确，但 scroll_state 内部 offset 不被重置，往上滚时需要把多余 offset
     // 消耗完（如 offset=100, max_scroll=40 → 需滚 60 次才恢复）。
     // write_no_update 不触发 re-render，避免自激回路。
     if scroll_y_raw > max_scroll {
-        scroll_state
-            .write_no_update()
-            .set_offset(ratatui_kit::ratatui::layout::Position::new(
-                0,
-                max_scroll as u16,
-            ));
+        scroll_state.write_no_update().set_offset(max_scroll);
     }
 
     // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
@@ -476,6 +560,20 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let vp_height = vis_height as usize;
 
+    // ── keepgoing 按钮屏幕位置（每帧更新）──
+    // 必须在 scroll_y 计算之后、handler 使用之前；write_no_update 避免自激重渲染。
+    {
+        let mut k_rect = keepgoing_rect.write_no_update();
+        *k_rect = compute_keepgoing_rect(
+            empty,
+            area_rect,
+            keepgoing_layout,
+            core_total_visual_rows,
+            scroll_y,
+            vis_height,
+        );
+    }
+
     // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
 
     // 选区范围（字符级）：(first_logical, last_logical, sr, sc, er, ec)
@@ -483,13 +581,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Why] 字符级高亮——旧版只存 (first_logical, last_logical) 整逻辑行范围，
     // 导致整行背景色覆盖；与字符级复制提取不一致。现在保留完整 (sr, sc, er, ec)，
     // highlight_line_in_selection 用 wrap_byte_starts 算 byte 范围，拆分 spans。
-    let sel_bounds: Option<(usize, usize, u16, u16, u16, u16)> = if !no_highlight {
+    // sr/er 为视觉行（usize，内容可超 65535 视觉行），sc/ec 为视觉列（u16）。
+    let sel_bounds: Option<(usize, usize, usize, u16, usize, u16)> = if !no_highlight {
         let sel = text_sel.read();
         if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
             // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
             let max_visual = concat_wrap_map_arc
                 .last()
-                .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+                .map(|e| e.visual_end.saturating_sub(1))
                 .unwrap_or(0);
             let sr_c = sr.min(max_visual);
             let er_c = er.min(max_visual);
@@ -601,6 +700,41 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     )
     .into_any()
+}
+
+/// 计算 keepgoing 按钮的屏幕点击区域 `(y, x_start, width)`。
+///
+/// 渲染布局：core 行（`core_total_visual_rows` 行）→ footer_lines（`line_index` 行）
+/// → padding 行。footer_lines[line_index] 的屏幕 y = area.y + core_total_visual_rows
+/// + line_index - scroll_y（i64 数学避免 u16 下溢）。
+///
+/// 返回 None 的情形：
+/// - empty：Welcome 布局（footer 渲染在 Welcome 之下，行位置模型不同）——按钮可见但不可点击
+/// - 按钮被滚出视口（y 不在 [area.y, area.y + vis_height) 内）
+fn compute_keepgoing_rect(
+    empty: bool,
+    area_rect: Option<ratatui_kit::ratatui::layout::Rect>,
+    layout: Option<KeepGoingLayout>,
+    core_total_visual_rows: usize,
+    scroll_y: usize,
+    vis_height: u16,
+) -> Option<(u16, u16, u16)> {
+    let area = area_rect?;
+    let layout = layout?;
+    if empty {
+        return None;
+    }
+    let row =
+        area.y as i64 + core_total_visual_rows as i64 + layout.line_index as i64 - scroll_y as i64;
+    let vp_end = area.y as i64 + vis_height as i64;
+    if row < area.y as i64 || row >= vp_end {
+        return None;
+    }
+    Some((
+        row as u16,
+        area.x.saturating_add(layout.start_col),
+        layout.width,
+    ))
 }
 
 #[cfg(test)]

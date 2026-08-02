@@ -8,6 +8,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -198,20 +199,37 @@ pub async fn run_kit_fullscreen(
         });
     }
 
-    // 3c. Spinner 高频 tick——仅在 loading 态以 50ms 间隔写入 RENDER_HEARTBEAT，
-    //     驱动 spinner 组件重渲染。spinner 帧由壁钟计算，频率越高越流畅。
+    // 3c. Spinner 动画 tick——仅在 loading 态驱动 RENDER_HEARTBEAT，触发 spinner 组件重渲染。
+    //     spinner 帧由壁钟计算（elapsed_ms / 50 / 2，原生帧率 10Hz），tick 周期取 100ms
+    //     与帧边界对齐：每次采样 `elapsed_ms / 100` 必前进 ≥1 帧，动画零损失；
+    //     且仅当帧序号实际变化时才写 heartbeat——原 50ms 超采样中一半渲染为重复帧
+    //     （帧未变仍整树 update+draw），条件写消除这部分 20Hz 固定重绘下限。
     //     非 loading 态不写 heartbeat，避免不必要的 CPU 唤醒。
     {
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
+            // 首次观察到 is_loading=true 的时刻。与 footer SpinnerState 的 start_time
+            // 存在数 ms 相位差——100ms 采样间隔下 frame = elapsed/100 每次 tick 必前进，
+            // 相位差不影响"帧是否变化"的判断，故帧序号可直接以本基准计算。
+            let mut loading_since: Option<Instant> = None;
+            // 上次写 heartbeat 时对应的 spinner 帧序号（elapsed_ms / 100）。
+            let mut last_frame: Option<u64> = None;
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                         if atoms::ACP_STATE.state().read().is_loading {
-                            atoms::RENDER_HEARTBEAT.set(
-                                atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
-                            );
+                            let since = *loading_since.get_or_insert_with(Instant::now);
+                            let frame = since.elapsed().as_millis() as u64 / 100;
+                            if last_frame != Some(frame) {
+                                last_frame = Some(frame);
+                                atoms::RENDER_HEARTBEAT.set(
+                                    atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
+                                );
+                            }
+                        } else {
+                            loading_since = None;
+                            last_frame = None;
                         }
                     }
                 }

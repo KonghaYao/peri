@@ -8,10 +8,11 @@ use ratatui::text::{Line, Span};
 /// 文本选区状态（消息区用）
 #[derive(Debug, Clone)]
 pub struct TextSelection {
-    /// 选区起始视觉坐标（相对于消息内容左上角，已含 scroll offset）
-    pub start: Option<(u16, u16)>, // (visual_row, visual_col)
+    /// 选区起始视觉坐标（相对于消息内容左上角，已含 scroll offset）。
+    /// 视觉行用 usize（内容可超 65535 视觉行），列保持 u16（≤ 终端宽度）。
+    pub start: Option<(usize, u16)>, // (visual_row, visual_col)
     /// 选区结束视觉坐标
-    pub end: Option<(u16, u16)>,
+    pub end: Option<(usize, u16)>,
     /// 是否正在拖拽中
     pub dragging: bool,
     /// 选区对应的纯文本内容（松开鼠标后计算）
@@ -35,7 +36,7 @@ impl TextSelection {
     }
 
     /// 开始拖拽：记录起始坐标，清除旧选区
-    pub fn start_drag(&mut self, row: u16, col: u16) {
+    pub fn start_drag(&mut self, row: usize, col: u16) {
         self.start = Some((row, col));
         self.end = Some((row, col));
         self.dragging = true;
@@ -43,7 +44,7 @@ impl TextSelection {
     }
 
     /// 更新拖拽：更新结束坐标
-    pub fn update_drag(&mut self, row: u16, col: u16) {
+    pub fn update_drag(&mut self, row: usize, col: u16) {
         if self.dragging {
             self.end = Some((row, col));
         }
@@ -73,7 +74,7 @@ impl TextSelection {
     }
 
     /// 返回规范化的选区范围（start ≤ end）
-    pub fn normalized_bounds(&self) -> Option<((u16, u16), (u16, u16))> {
+    pub fn normalized_bounds(&self) -> Option<((usize, u16), (usize, u16))> {
         let start = self.start?;
         let end = self.end?;
         if start <= end {
@@ -129,8 +130,8 @@ pub fn visual_col_to_byte_offset(text: &str, target_col: u16) -> usize {
 /// start/end 为内容空间坐标 (visual_row, visual_col)，直接索引 lines。
 /// 自动处理 start > end（swap）。首行从 start_col 截取，末行到 end_col 截取，中间行整行。
 pub fn extract_selected_text(
-    start: (u16, u16),
-    end: (u16, u16),
+    start: (usize, u16),
+    end: (usize, u16),
     lines: &[Line<'static>],
 ) -> Option<String> {
     let ((sr, sc), (er, ec)) = if start <= end {
@@ -138,9 +139,6 @@ pub fn extract_selected_text(
     } else {
         (end, start)
     };
-
-    let sr = sr as usize;
-    let er = er as usize;
 
     if sr >= lines.len() {
         return None;

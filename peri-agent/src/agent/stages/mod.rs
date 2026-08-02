@@ -466,7 +466,16 @@ pub fn append_messages_to_transcript(
     use crate::session::MessageKind;
     for msg in messages {
         let content = match msg.kind {
-            MessageKind::Prompt => msg.message,
+            MessageKind::Prompt => {
+                // keepgoing：空 Prompt 仅驱动 ReAct loop 继续（Receive consumed_count>0），
+                // 不写入 transcript——用户没有输入新内容，历史中不应出现空 user 消息。
+                // [判空] 必须与 peri-acp `is_keepgoing` 同一语义（按 content block 判空）：
+                // `Blocks([Image])` 等纯附件消息不应被误判为空。
+                if msg.message.message_content().is_empty() {
+                    continue;
+                }
+                msg.message
+            }
             MessageKind::Info | MessageKind::Defer => {
                 let text = msg.message.content().to_string();
                 BaseMessage::human(MessageContent::text(format!(

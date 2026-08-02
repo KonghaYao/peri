@@ -14,6 +14,37 @@ pub fn tui_hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+/// 滚动哈希的乘法因子（奇数，保证乘法可逆，避免信息丢失）。
+const HASH_ROLL_MUL: u64 = 0x9E37_79B9_7F4A_7C15;
+/// 组合哈希的乘法因子——与滚动因子区分，降低结构相关性。
+const HASH_COMBINE_MUL: u64 = 0xC2B2_AE3D_27D4_EB4F;
+
+/// 对文本按字节做滚动哈希。
+///
+/// 分块无关：`tui_hash_roll("ab") == tui_hash_roll_update(tui_hash_roll_update(0, "a"), "b")`，
+/// 因此流式追加时增量维护与一次性全量计算产出相同值——相同内容必然产生相同 hash，
+/// 且增量路径不需要保留 chunk 边界历史。
+pub fn tui_hash_roll(text: &str) -> u64 {
+    let mut h: u64 = 0;
+    for &b in text.as_bytes() {
+        h = h.wrapping_mul(HASH_ROLL_MUL).wrapping_add(u64::from(b));
+    }
+    h
+}
+
+/// 滚动哈希的增量更新：在已有滚动值 `h` 上追加 `chunk` 的字节。
+pub fn tui_hash_roll_update(mut h: u64, chunk: &str) -> u64 {
+    for &b in chunk.as_bytes() {
+        h = h.wrapping_mul(HASH_ROLL_MUL).wrapping_add(u64::from(b));
+    }
+    h
+}
+
+/// 将两个 u64 哈希值确定性地组合为一个（内容敏感）。
+pub fn tui_hash_combine(h: u64, x: u64) -> u64 {
+    h.wrapping_mul(HASH_COMBINE_MUL).wrapping_add(x)
+}
+
 // ---------------------------------------------------------------------------
 // PartialEq 辅助宏——跳过 content_hash 字段
 // ---------------------------------------------------------------------------
@@ -163,12 +194,18 @@ pub struct TuiAssistantBubble {
 
 impl TuiAssistantBubble {
     /// 计算包含 text + reasoning.text + reasoning.collapsed 的 hash。
-    /// build_view_models 和 push_view_models 都用同一公式，保证修改 collapsed 后 hash 一致。
+    /// sync_cache 的增量路径、折叠归一化与 push_view_models 的折叠 pass
+    /// 都用同一公式，保证修改 collapsed 后 hash 一致。
+    ///
+    /// 文本部分使用滚动哈希（[`tui_hash_roll`]）——流式追加时可由增量维护的
+    /// 滚动值直接组合，避免每 token 对全量文本 format! + 哈希。
     pub fn compute_hash(text: &str, reasoning: Option<&TuiReasoningBlock>) -> u64 {
-        match reasoning {
-            Some(r) => tui_hash_str(&format!("{}|{}|{}", text, r.text, r.collapsed)),
-            None => tui_hash_str(text),
+        let mut h = tui_hash_roll(text);
+        if let Some(r) = reasoning {
+            h = tui_hash_combine(h, tui_hash_roll(&r.text));
+            h = tui_hash_combine(h, u64::from(r.collapsed));
         }
+        h
     }
 
     /// 根据 text + reasoning 当前值重算 content_hash。

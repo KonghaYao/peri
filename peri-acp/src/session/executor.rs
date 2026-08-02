@@ -108,6 +108,23 @@ pub struct PromptResult {
     pub recall_items: Vec<String>,
 }
 
+/// keepgoing 判定：内容按 block 判空（`MessageContent::is_empty`）。
+///
+/// 这是 TUI keepgoing 按钮 ↔ ACP ↔ agent stages 的**跨层共享判定**：
+/// - 此处：空 prompt → 跳过 recall 注入（`run_session_loop`）
+/// - `peri-agent` stages：空 Prompt → 不写入 transcript（`append_messages_to_transcript`）
+///
+/// 必须与 stages 层保持同一语义。用 `is_empty()`（按 content block 判空）而非
+/// `text_content().trim()`——后者会把 `Blocks([Image])` 这类纯附件消息误判为
+/// keepgoing（图片接入后即触发），且畸形请求经 `extract_prompt_params` 默认值
+/// （空文本）落入 keepgoing 路径时行为一致。
+///
+/// 协议约定（见 docs/standards/architecture-contracts.md "keepgoing 空白 prompt"）：
+/// 空白 user prompt = "继续跑 loop"，唯一生产者为 TUI keepgoing 按钮。
+pub fn is_keepgoing(content: &peri_agent::messages::MessageContent) -> bool {
+    content.is_empty()
+}
+
 /// Session-scoped frozen data that locks system prompt stability.
 ///
 /// Populated at session creation time by `session/new`, passed through to
@@ -340,6 +357,33 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         bg_results,
         langfuse_session,
     } = turn;
+
+    // keepgoing：空白 user prompt 是 TUI keepgoing 按钮发起的"继续跑 loop"指令。
+    // 语义：不插入 user prompt（stages/append_messages_to_transcript 跳过空 Prompt），
+    // 仅让 Receive 消费计数 >0 从而驱动 ReAct loop 继续。此时不注入 recall——
+    // 否则 recall 会拼进 user 消息使其非空，破坏"不插入"语义。
+    // 判定与 stages 层共用同一语义：按 content block 判空（见 is_keepgoing 注释）。
+    let is_keepgoing = is_keepgoing(&content);
+    let incoming_recalls = if is_keepgoing {
+        tracing::debug!("keepgoing: empty user prompt, skipping recall injection");
+        Vec::new()
+    } else {
+        incoming_recalls
+    };
+
+    // 空历史 + 空 prompt：无内容可继续——直接短路返回，避免跑一轮无意义 LLM 调用。
+    // （TUI 侧 handle_keepgoing_submit 已有 has_session 防御；此处防御 stdio 等
+    // 其他 transport 对全新 session 发空 prompt 的场景。）
+    if is_keepgoing && history.is_empty() {
+        tracing::debug!("keepgoing: empty history, short-circuiting (nothing to continue)");
+        return PromptResult {
+            messages: history,
+            ok: true,
+            stop_reason: PromptStopReason::EndTurn,
+            history_replaced_by_compaction: false,
+            recall_items: Vec::new(),
+        };
+    }
 
     // Compact config — computed early for command interception and agent building.
     let mut compact_config = ctx.peri_config.config.compact.clone().unwrap_or_default();

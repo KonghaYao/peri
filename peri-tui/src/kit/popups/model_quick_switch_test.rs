@@ -149,3 +149,22 @@ fn test_row_index_at_misses() {
     assert_eq!(row_index_at(a.y + 3, a.x - 1, &a), None);
     assert_eq!(row_index_at(a.y + 3, a.x + a.width, &a), None);
 }
+
+// ── 点击弹窗外关闭（dismiss-on-outside-click） ─────────────────────────────
+
+#[test]
+fn test_click_inside_popup() {
+    let a = area();
+    // 矩形内（含内容行与全边框）→ true：border 属于弹窗视觉范围，不触发 dismiss
+    assert!(click_inside_popup(a.y + 1, a.x + 5, &a)); // 第一行内容
+    assert!(click_inside_popup(a.y + ROW_COUNT as u16, a.x + 5, &a)); // 最后一行内容
+    assert!(click_inside_popup(a.y, a.x + 5, &a)); // top border
+    assert!(click_inside_popup(a.y + a.height - 1, a.x + 5, &a)); // bottom border
+    assert!(click_inside_popup(a.y + 3, a.x, &a)); // 左缘
+    assert!(click_inside_popup(a.y + 3, a.x + a.width - 1, &a)); // 右缘
+    // 矩形外 → false（四方向均触发 dismiss）
+    assert!(!click_inside_popup(a.y - 1, a.x + 5, &a)); // 上方
+    assert!(!click_inside_popup(a.y + a.height, a.x + 5, &a)); // 下方
+    assert!(!click_inside_popup(a.y + 3, a.x - 1, &a)); // 左侧
+    assert!(!click_inside_popup(a.y + 3, a.x + a.width, &a)); // 右侧
+}

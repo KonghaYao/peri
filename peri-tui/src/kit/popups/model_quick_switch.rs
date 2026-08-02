@@ -5,6 +5,7 @@
 //! - ↑/↓ 选择，Enter 切换并关闭（键盘全程可用，无需鼠标）；
 //! - 鼠标 hover 行高亮（选中跟随悬停）；
 //! - 鼠标点击行直接切换并关闭；
+//! - 鼠标点击弹窗矩形之外关闭（dismiss-on-outside-click）；
 //! - Esc 关闭（本组件消费，全局链兜底）。
 //!
 //! ## 定位
@@ -133,6 +134,17 @@ fn row_index_at(row: u16, col: u16, area: &Rect) -> Option<usize> {
     }
 }
 
+/// 点击位置是否在弹窗矩形内（含全边框）。
+///
+/// 与 `row_index_at` 的区别：内容行判定对 top/bottom border 返回 None，
+/// 而 border 属于弹窗视觉范围——点击 border 不关闭弹窗，仅矩形外触发 dismiss。
+fn click_inside_popup(row: u16, col: u16, area: &Rect) -> bool {
+    row >= area.y
+        && row < area.y.saturating_add(area.height)
+        && col >= area.x
+        && col < area.x.saturating_add(area.width)
+}
+
 #[component]
 pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -230,6 +242,13 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                         close_popup();
                         return EventResult::Consumed;
                     }
+                    // 点击弹窗矩形（含边框）之外 → 关闭弹窗（dismiss-on-outside-click）。
+                    // 矩形内非内容行（边框/padding）点击不关闭也不切换，Consumed 防止
+                    // 事件穿透到背景组件。
+                    if !click_inside_popup(mouse.row, mouse.column, &area) {
+                        close_popup();
+                    }
+                    return EventResult::Consumed;
                 }
                 _ => {}
             }

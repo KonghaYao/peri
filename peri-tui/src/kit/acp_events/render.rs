@@ -6,8 +6,9 @@ use crate::kit::tui_render_unit::TuiRenderUnit;
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
-/// 从 `state.committed`（im::Vector）clone（O(1)引用计数）后逐条 push_back
-/// `current_turn.view_models()`，构成扁平单层列表。generation 每次调用递增+1。
+/// 从 `state.committed`（im::Vector）clone（O(1)引用计数）后 `append`
+/// `current_turn.view_models()`（O(log n)，与 current_turn 增量缓存共享元素，
+/// 不再逐条深拷贝），构成扁平单层列表。generation 每次调用递增+1。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     // [Diagnostic] 追踪 VIEW_MODELS 写入时机——配合 scroll diag 分析 submit/history 滚动问题
     let is_loading = state.phase == SessionPhase::PromptRunning;
@@ -21,28 +22,35 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         "push_view_models: writing VIEW_MODELS atom",
     );
     let mut items = state.committed.clone();
-    for vm in state.current_turn.view_models() {
-        items.push_back(vm.clone());
-    }
+    items.append(state.current_turn.view_models().clone());
 
     // 只展开最后一个含 reasoning 的 assistant bubble，其余折叠。
     // [Bug 2 修复] 仅在 collapsed 实际改变时同步重算 content_hash——
     // reasoning.collapsed 已纳入 hash 公式（见 TuiAssistantBubble::compute_hash），
     // 不重算会导致按 hash 分片的渲染缓存命中旧值、折叠/展开后 UI 不刷新。
-    // 仅在变化时重算避免每次 token 到达都遍历 hash。
+    // [共享安全] items 通过 append 与 current_turn 缓存共享元素——先收集翻转
+    // 目标，再用 im::Vector::set（内部 COW）应用，避免就地修改共享节点。
+    let mut flips: Vec<(usize, bool)> = Vec::new();
     let mut found_last = false;
     for i in (0..items.len()).rev() {
-        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &mut items[i]
-            && let Some(ref mut reasoning) = bubble.reasoning
+        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &items[i]
+            && let Some(ref reasoning) = bubble.reasoning
         {
             let target_collapsed = found_last;
             if reasoning.collapsed != target_collapsed {
-                reasoning.collapsed = target_collapsed;
-                bubble.recompute_hash();
+                flips.push((i, target_collapsed));
             }
             if !found_last {
                 found_last = true;
             }
+        }
+    }
+    for (i, target_collapsed) in flips {
+        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &items[i] {
+            let mut updated = bubble.clone();
+            updated.reasoning.as_mut().unwrap().collapsed = target_collapsed;
+            updated.recompute_hash();
+            items.set(i, TuiRenderUnit::TuiAssistantBubble(updated));
         }
     }
 

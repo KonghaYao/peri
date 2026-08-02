@@ -1,6 +1,56 @@
 //! Tests
 use super::*;
 
+// ── ScrollPos（usize 滚动状态）测试 ───────────────────────────────────
+
+#[test]
+fn test_scroll_pos_exceeds_u16_max() {
+    // 核心回归：滚动位置必须能超过 65535（旧 ScrollViewState 的 u16 Position 上限）
+    let mut pos = ScrollPos::default();
+    for _ in 0..70_000 {
+        pos.scroll_down();
+    }
+    assert_eq!(pos.offset(), 70_000);
+    assert!(pos.offset() > u16::MAX as usize);
+    // 渲染侧 clamp 到 max_scroll（如 70_000 - 40）后仍可达真实底部
+    let max_scroll = 70_000usize.saturating_sub(40);
+    assert_eq!(pos.offset().min(max_scroll), max_scroll);
+}
+
+#[test]
+fn test_scroll_pos_scroll_up_never_underflows() {
+    let mut pos = ScrollPos::default();
+    pos.set_offset(10);
+    pos.scroll_up();
+    assert_eq!(pos.offset(), 9);
+    for _ in 0..20 {
+        pos.scroll_up();
+    }
+    assert_eq!(pos.offset(), 0);
+}
+
+#[test]
+fn test_scroll_pos_page_scroll() {
+    let mut pos = ScrollPos::default();
+    pos.set_offset(100);
+    pos.scroll_page_down(40);
+    assert_eq!(pos.offset(), 139); // 100 + 40 - 1（与 ratatui 翻页重叠 1 行语义一致）
+    pos.scroll_page_up(40);
+    assert_eq!(pos.offset(), 100);
+    // 页大小超过当前偏移 → 回到顶部
+    pos.scroll_page_up(40);
+    assert_eq!(pos.offset(), 61);
+}
+
+#[test]
+fn test_scroll_pos_scroll_to_bottom_uses_max() {
+    let mut pos = ScrollPos::default();
+    pos.scroll_to_bottom();
+    assert_eq!(pos.offset(), usize::MAX);
+    pos.scroll_to_top();
+    assert_eq!(pos.offset(), 0);
+}
+
 fn proximity_check(total: u16, scroll_y: u16, vis_height: u16) -> bool {
     if total == 0 {
         return false;
@@ -66,6 +116,53 @@ fn test_proximity_content_smaller_than_viewport_at_bottom() {
     let total = 10;
     let vis_height = 30;
     assert!(!proximity_check(total, 0, vis_height));
+}
+
+// ── resize 跟随判断测试 ─────────────────────────────────────────────
+
+#[test]
+fn test_resize_follow_when_at_bottom_before_resize() {
+    // 内容 100 行，resize 前视口 20 行，用户停在底部（offset = 旧 max_scroll = 80）
+    let total = 100;
+    let prev_vis = 20;
+    let offset = total - prev_vis;
+    assert!(should_follow_after_resize(total, prev_vis, offset as usize));
+}
+
+#[test]
+fn test_resize_follow_when_near_bottom_before_resize() {
+    // resize 前距底部 4 行（threshold = max(20/4, 5) = 5）→ 跟随
+    let total = 100;
+    let prev_vis = 20;
+    let offset = total - prev_vis - 4;
+    assert!(should_follow_after_resize(total, prev_vis, offset as usize));
+}
+
+#[test]
+fn test_resize_no_follow_when_scrolled_up_before_resize() {
+    // resize 前用户上滚浏览（距底部 20 行 > threshold 5）→ 不打扰
+    let total = 100;
+    let prev_vis = 20;
+    let offset = total - prev_vis - 20;
+    assert!(!should_follow_after_resize(
+        total,
+        prev_vis,
+        offset as usize
+    ));
+}
+
+#[test]
+fn test_resize_no_follow_on_first_frame() {
+    // prev_vis_height = 0（首帧哨兵未初始化）→ 不跟随
+    assert!(!should_follow_after_resize(100, 0, 0));
+    // 空内容 → 不跟随
+    assert!(!should_follow_after_resize(0, 20, 0));
+}
+
+#[test]
+fn test_resize_no_follow_when_content_smaller_than_old_viewport() {
+    // 内容 10 行 < 旧视口 30 行：旧 max_scroll = 0，offset 0 距底 0 → 跟随（无害，滚到底 = 0）
+    assert!(should_follow_after_resize(10, 30, 0));
 }
 
 // ── 滚动条几何 / 反推公式测试 ────────────────────────────────────────

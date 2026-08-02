@@ -70,8 +70,8 @@ pub(super) fn concat_wrap_maps(
 }
 
 /// 二分查找：视觉行 → 逻辑行索引。
-pub(super) fn visual_to_logical(visual_row: u16, wrap_map: &[WrappedLineInfo]) -> Option<usize> {
-    let vr = visual_row as usize;
+pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo]) -> Option<usize> {
+    let vr = visual_row;
     match wrap_map.binary_search_by(|entry| {
         if vr < entry.visual_start {
             Ordering::Greater
@@ -235,12 +235,13 @@ fn row_end_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
 ///
 /// [Why] 旧实现是整逻辑行高亮（粗粒度），与字符级复制提取不一致——用户看到的高亮
 /// 范围比实际复制内容大。改为字符级后高亮范围 = 复制范围，与终端鼠标拖拽选择一致。
+/// sel_sr/sel_er 为视觉行（usize，内容可超 65535 视觉行），sel_sc/sel_ec 为视觉列（u16）。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn highlight_line_in_selection(
     line: &Line<'static>,
     entry: &WrappedLineInfo,
-    sel_sr: u16,
-    sel_er: u16,
+    sel_sr: usize,
+    sel_er: usize,
     sel_sc: u16,
     sel_ec: u16,
     width: u16,
@@ -250,18 +251,12 @@ pub(super) fn highlight_line_in_selection(
     let row_starts = wrap_byte_starts(line, &plain, width);
     let row_max = row_starts.len().saturating_sub(1);
 
-    let sr_in_line =
-        (sel_sr as usize) >= entry.visual_start && (sel_sr as usize) < entry.visual_end;
-    let er_in_line =
-        (sel_er as usize) >= entry.visual_start && (sel_er as usize) < entry.visual_end;
+    let sr_in_line = sel_sr >= entry.visual_start && sel_sr < entry.visual_end;
+    let er_in_line = sel_er >= entry.visual_start && sel_er < entry.visual_end;
 
     // sr_off / er_off 是选区起点/终点视觉行相对该逻辑行 visual_start 的偏移
-    let sr_off = (sel_sr as usize)
-        .saturating_sub(entry.visual_start)
-        .min(row_max);
-    let er_off = (sel_er as usize)
-        .saturating_sub(entry.visual_start)
-        .min(row_max);
+    let sr_off = sel_sr.saturating_sub(entry.visual_start).min(row_max);
+    let er_off = sel_er.saturating_sub(entry.visual_start).min(row_max);
 
     let (b_start, b_end) = if sr_in_line && er_in_line {
         // 同一行：byte 范围 = [sr_off 行内 sc, er_off 行内 ec]
@@ -368,12 +363,13 @@ pub(super) fn mark_copy_message(char_count: usize) {
 /// [TRAP] 选区可能超出 core 范围（footer 区域无 wrap_map）——clamp 到 wrap_map
 /// 末尾，确保 footer 行的 visual_to_logical 不返回 None 导致整个提取失败。
 /// [Scheme D] 通过 slot_arcs + slot_offsets 按需从 slot 中解析行，不再依赖全量 lines 切片。
+/// vis_start/vis_end 为视觉坐标：行 usize（内容可超 65535 视觉行）、列 u16。
 pub(super) fn extract_visual_range(
     slots: &[Arc<Vec<Line<'static>>>],
     slot_offsets: &[usize],
     wrap_map: &[WrappedLineInfo],
-    vis_start: (u16, u16),
-    vis_end: (u16, u16),
+    vis_start: (usize, u16),
+    vis_end: (usize, u16),
     width: u16,
 ) -> Option<String> {
     let ((sr, sc), (er, ec)) = if vis_start <= vis_end {
@@ -384,7 +380,7 @@ pub(super) fn extract_visual_range(
     // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map，避免 None）
     let max_visual = wrap_map
         .last()
-        .map(|e| (e.visual_end.saturating_sub(1)) as u16)
+        .map(|e| e.visual_end.saturating_sub(1))
         .unwrap_or(0);
     let sr = sr.min(max_visual);
     let er = er.min(max_visual);
@@ -403,12 +399,8 @@ pub(super) fn extract_visual_range(
         let row_starts = wrap_byte_starts(line, &plain, width);
         // 把视觉行号 clamp 到 row_starts 索引范围内（防御：footer 区域等异常 sr/er）
         let row_max = row_starts.len().saturating_sub(1);
-        let sr_off = (sr as usize)
-            .saturating_sub(entry.visual_start)
-            .min(row_max);
-        let er_off = (er as usize)
-            .saturating_sub(entry.visual_start)
-            .min(row_max);
+        let sr_off = sr.saturating_sub(entry.visual_start).min(row_max);
+        let er_off = er.saturating_sub(entry.visual_start).min(row_max);
 
         if first == last {
             // 同一逻辑行：起点行 sr_off 内的列 sc → 终点行 er_off 内的列 ec

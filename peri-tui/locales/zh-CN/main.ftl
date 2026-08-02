@@ -660,6 +660,7 @@ render-agent-header = Agent
 
 msg-spinner-tokens = · ↓ { $count } tokens
 msg-spinner-brewed =   ✻  处理耗时 { $duration }
+msg-keepgoing = [继续]
 msg-tip-prefix =   ⎿  提示: 
 msg-todo-available =  (可开始)
 

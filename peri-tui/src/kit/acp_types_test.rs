@@ -166,7 +166,7 @@ fn test_current_turn_subagent_streaming_builds_nested_group() {
     ));
     assert!(ct.end_subagent_tool("agent-1", "tc-1", "10 lines".into(), false));
 
-    let vms = ct.view_models().to_vec();
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
     assert_eq!(vms.len(), 1);
     match &vms[0] {
         TuiRenderUnit::TuiSubAgentGroup(group) => {
@@ -354,7 +354,7 @@ fn test_build_view_models_interleaves_text_and_tools() {
     ));
     ct.end_tool("tc-2", "hi".into(), false);
 
-    let vms: Vec<_> = ct.view_models().to_vec();
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
     assert_eq!(vms.len(), 4, "应为 4 项：Text→Tool→Text→Tool");
     assert!(
         matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)),
@@ -396,7 +396,7 @@ fn test_same_message_id_keeps_text_contiguous() {
         "f: x.rs".into(),
     ));
 
-    let vms: Vec<_> = ct.view_models().to_vec();
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
     assert_eq!(vms.len(), 2, "1 个 Text bubble + 1 个 Tool card");
     match &vms[0] {
         TuiRenderUnit::TuiAssistantBubble(b) => {
@@ -419,7 +419,7 @@ fn test_no_message_id_uses_tool_boundaries() {
     ct.end_tool("tc-1", "ok".into(), false);
     ct.append_text("b", None);
 
-    let vms: Vec<_> = ct.view_models().to_vec();
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
     assert_eq!(vms.len(), 3, "Text→Tool→Text");
     assert!(matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)));
     assert!(matches!(&vms[1], TuiRenderUnit::TuiToolCard(_)));
@@ -483,7 +483,7 @@ fn test_first_tool_in_batch_is_running_false_after_end() {
     // 第二个工具结束
     ct.end_tool("tc-shell-2", "commit e5239171...".into(), false);
 
-    let vms: Vec<_> = ct.view_models().to_vec();
+    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
 
     // 期望：2 个 reasoning bubble + 2 个 tool card = 4 个 VM
     assert_eq!(vms.len(), 4, "应为 2 个 AssistantBubble + 2 个 ToolCard");
