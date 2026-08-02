@@ -319,11 +319,12 @@ fn test_cached_parse_reuses_prefix_on_append() {
         segments_to_text(&full2),
         "续跑输出应与全量一致"
     );
-    // stable_text 不应扩展（t2 不以 \n 结尾）
+    // [新契约] 任意输入都可持久化（persist 前回滚尾部不稳定块保证正确性）：
+    // stable_text 扩展为整个 t2，下次续跑可命中更多前缀。
     assert_eq!(
         cache.stable_text_len(),
-        t1.len(),
-        "t2 不以 \\n 结尾，stable_text 不应扩展"
+        t2.len(),
+        "t2 持久化后 stable_text 应扩展为整个文本"
     );
 }
 
@@ -449,8 +450,9 @@ fn test_cached_parse_multiple_progressive_appends() {
 
 #[test]
 fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
-    // [回归测试] text 以未闭合 code block 结尾（不以 \n\n 结尾），cache 不应持久化
-    // 错误的 stable_text，但仍应输出正确结果
+    // [回归测试] text 以未闭合 code block 结尾（fence 数为奇数，sanitized 补闭合）。
+    // [新契约] 任意输入都可持久化；但补全的闭合 fence 会破坏下次追加的前缀匹配
+    // （追加行进入代码块 → sanitized 与 stable_text 前缀不一致）→ 全量重跑，输出仍正确。
     let mut cache = MarkdownRenderCache::default();
 
     // 第一次：未闭合 code block（末尾不是 \n）
@@ -462,14 +464,31 @@ fn test_cached_parse_unclosed_code_block_not_persisted_but_still_correct() {
         segments_to_text(&full1),
         "未闭合 code block 输出应正确"
     );
-    // ensure_closed_code_fences 补了 \n``` → sanitized 以 ``` 结尾，不以 \n 结尾
-    // → stable_text 不持久化
-    // 注意：sanitized = "```rust\nlet x = 1;\n```"，不以 \n 结尾
-    // 所以 stable_text 应为空
+    // sanitized = "```rust\nlet x = 1;\n```"，持久化为整个 sanitized
     assert_eq!(
         cache.stable_text_len(),
-        0,
-        "未闭合 code block 不应持久化 stable_text"
+        "```rust\nlet x = 1;\n```".len(),
+        "未闭合 code block 的 sanitized（补闭合后）应持久化"
+    );
+
+    // 第二次：代码块内追加一行 → 前缀不匹配 → 全量重跑，输出与全量一致
+    let t2 = "```rust\nlet x = 1;\nlet y = 2;";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r2),
+        segments_to_text(&full2),
+        "代码块内追加行后输出应与全量一致"
+    );
+
+    // 第三次：代码块闭合 + 追加文本 → 命中续跑，输出仍一致
+    let t3 = "```rust\nlet x = 1;\nlet y = 2;\n```\n\nafter";
+    let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r3),
+        segments_to_text(&full3),
+        "闭合代码块后追加文本输出应与全量一致"
     );
 }
 
@@ -483,8 +502,8 @@ fn test_cached_parse_empty_input_no_cache_pollution() {
 
 #[test]
 fn test_cached_parse_does_not_persist_unstable_suffix() {
-    // [回归测试] 流式期间 text 末尾是不稳定（非 \n 结尾），cache 不应扩展 stable_text，
-    // 但应保留上次 \n\n 闭合时的 stable_text。下次相同前缀追加仍能命中。
+    // [回归测试] 流式期间 text 末尾是不稳定（非 \n 结尾），cache 仍持久化
+    // （persist 前回滚尾部不稳定块），下次相同前缀追加仍能命中且输出正确。
     let mut cache = MarkdownRenderCache::default();
 
     // Step 1：闭合 paragraph
@@ -493,16 +512,22 @@ fn test_cached_parse_does_not_persist_unstable_suffix() {
     let stable_len_after_t1 = cache.stable_text_len();
     assert!(stable_len_after_t1 > 0);
 
-    // Step 2：追加半个 paragraph（不以 \n 结尾）
+    // Step 2：追加半个 paragraph（不以 \n 结尾）——[新契约] 同样持久化并扩展
     let t2 = "para1\n\npara2 half";
-    let _r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     assert_eq!(
         cache.stable_text_len(),
-        stable_len_after_t1,
-        "追加非闭合内容不应扩展 stable_text"
+        t2.len(),
+        "追加非闭合内容后 stable_text 应扩展为整个文本"
+    );
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r2),
+        segments_to_text(&full2),
+        "追加半个 paragraph 输出应与全量一致"
     );
 
-    // Step 3：继续追加（仍以 t1 为前缀）
+    // Step 3：继续追加（仍以 t2 为前缀）
     let t3 = "para1\n\npara2 half continued";
     let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
     let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
@@ -510,6 +535,249 @@ fn test_cached_parse_does_not_persist_unstable_suffix() {
         segments_to_text(&r3),
         segments_to_text(&full3),
         "多次追加后仍应正确"
+    );
+}
+
+// ── 新契约回归测试：尾部不稳定块回滚（流式散文 / lazy continuation 等）─────
+
+/// [综合回归测试] 逐 token 流式追加：把一段含段落/列表/代码块/表格的混合文本
+/// 按 token 边界逐步追加（模拟 agent 流式输出），**每一帧**都断言缓存续跑输出
+/// 与全量解析一致。覆盖尾部块回滚、表头翻转失效、表格增长失效、列表哨兵移位
+/// 等全部增量路径的组合。
+#[test]
+fn test_cached_streaming_every_frame_matches_full_parse() {
+    let mut cache = MarkdownRenderCache::default();
+    let tokens: Vec<&str> = vec![
+        "Let me ",
+        "explain ",
+        "the plan:\n\n",
+        "- first ",
+        "step\n",
+        "- second ",
+        "step\n",
+        "- third\n\n",
+        "```rust\n",
+        "let x = 1;\n",
+        "```\n\n",
+        "| A | B |\n",
+        "|---|---|\n",
+        "| 1 | 2 |\n",
+        "| 3 | 4 |\n\n",
+        "done",
+        " ...",
+        " ... more\n\n",
+        "## Summary\n",
+        "**bold** and `code`.",
+    ];
+    let mut text = String::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        text.push_str(tok);
+        let cached = parse_markdown_cached(&text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(&text, 80, Palette::default(), TEST_BASE_FG);
+        assert_eq!(
+            segments_to_text(&cached),
+            segments_to_text(&full),
+            "token {i} ('{tok}') 帧输出应与全量一致\n文本: {text:?}"
+        );
+        assert_eq!(
+            cached
+                .iter()
+                .filter(|s| matches!(s, MarkdownSegment::Table(_)))
+                .count(),
+            full.iter()
+                .filter(|s| matches!(s, MarkdownSegment::Table(_)))
+                .count(),
+            "token {i} Table segment 数应与全量一致"
+        );
+    }
+}
+
+// ── 表格渲染测试 ─────────────────────────────────────────────────
+
+/// [回归测试] 流式散文最坏情形：单段文本逐 token 同行增长。
+/// 旧契约下（仅 \n 结尾持久化）此场景 stable_text 恒空 → 每 token 全量 convert。
+/// 新契约：尾部 Paragraph 回滚，续跑重渲最后段落，输出始终与全量一致。
+#[test]
+fn test_cached_prose_single_paragraph_grows() {
+    let mut cache = MarkdownRenderCache::default();
+    let steps = [
+        "text",
+        "text more",
+        "text more words",
+        "text more words and",
+        "text more words and more",
+    ];
+    let mut prev_stable_len = 0usize;
+    for (i, text) in steps.iter().enumerate() {
+        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        assert_eq!(
+            segments_to_text(&cached),
+            segments_to_text(&full),
+            "step {i} 单段散文增长输出应与全量一致"
+        );
+        // stable_text 应单调扩展（任意输入都持久化）
+        assert!(
+            cache.stable_text_len() >= prev_stable_len,
+            "step {i} stable_text 应单调扩展"
+        );
+        prev_stable_len = cache.stable_text_len();
+    }
+}
+
+/// [回归测试] 流式散文跨行增长：单 \n 是 soft-break（合并为同一段落一行）。
+/// `para\n` → `para\nmore` 是同一 Paragraph 内容增长（渲染为 "para more"），
+/// 续跑必须重渲而非跳过。
+#[test]
+fn test_cached_paragraph_soft_break_grows() {
+    let mut cache = MarkdownRenderCache::default();
+    for (i, text) in ["para\n", "para\nmore", "para\nmore words"]
+        .iter()
+        .enumerate()
+    {
+        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        assert_eq!(
+            segments_to_text(&cached),
+            segments_to_text(&full),
+            "step {i} soft-break 段落增长输出应与全量一致"
+        );
+    }
+}
+
+/// [回归测试] 列表项 lazy continuation：`- A\n` 追加无缩进文本行时，
+/// 内容并入最后一个列表项（`- A\nmore` → "• A more"）。旧缓存若跳过
+/// 最后列表项会永久显示旧内容。
+#[test]
+fn test_cached_list_lazy_continuation_grows() {
+    let mut cache = MarkdownRenderCache::default();
+    let t1 = "- A\n- B\n";
+    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    assert!(segments_to_text(&r1).contains("B"), "t1 应含 B");
+
+    // lazy continuation：追加无缩进行，内容并入最后列表项
+    let t2 = "- A\n- B\ncontinued";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    let text2 = segments_to_text(&r2);
+    assert!(
+        text2.contains("continued"),
+        "lazy continuation 内容应可见，实际: {text2:?}"
+    );
+    assert_eq!(text2, segments_to_text(&full2), "续跑输出应与全量一致");
+}
+
+/// [回归测试] 标题同行增长：`# h` → `# h x` 是同一 Heading block 内容变化。
+#[test]
+fn test_cached_heading_same_line_growth() {
+    let mut cache = MarkdownRenderCache::default();
+    for (i, text) in ["# h", "# h x", "# h xy"].iter().enumerate() {
+        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        assert_eq!(
+            segments_to_text(&cached),
+            segments_to_text(&full),
+            "step {i} 标题同行增长输出应与全量一致"
+        );
+    }
+}
+
+/// [回归测试] 缩进代码块增长：`    a` → `    a\n    b` 是同一 CodeBlock 行数变化
+/// （渲染从单行 inline 变为多行 │ 前缀），续跑必须重渲。
+#[test]
+fn test_cached_indented_code_block_grows() {
+    let mut cache = MarkdownRenderCache::default();
+    for (i, text) in ["    a", "    a\n    b", "    a\n    b\n    c"]
+        .iter()
+        .enumerate()
+    {
+        let cached = parse_markdown_cached(text, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+        let full = parse_markdown(text, 80, Palette::default(), TEST_BASE_FG);
+        assert_eq!(
+            segments_to_text(&cached),
+            segments_to_text(&full),
+            "step {i} 缩进代码块增长输出应与全量一致"
+        );
+    }
+}
+
+/// [回归测试] 规则线类型翻转：`---` 追加字符后不再是 Rule 而是 Paragraph。
+/// 旧缓存若持久化 Rule（processed=1）并跳过，会永远显示分割线。
+#[test]
+fn test_cached_rule_flips_to_paragraph() {
+    let mut cache = MarkdownRenderCache::default();
+    // Step 1：Rule
+    let t1 = "---";
+    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r1),
+        segments_to_text(&full1),
+        "Rule 输出应与全量一致"
+    );
+    // Step 2：同行追加 → 翻转为 Paragraph
+    let t2 = "---x";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r2),
+        segments_to_text(&full2),
+        "Rule 翻转后输出应与全量一致"
+    );
+    // Step 3：追加完整行 → Rule + 段落
+    let t3 = "---x\n\npara";
+    let r3 = parse_markdown_cached(t3, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full3 = parse_markdown(t3, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r3),
+        segments_to_text(&full3),
+        "追加段落输出应与全量一致"
+    );
+}
+
+/// [回归测试] 已闭合代码块 + 同行追加：`\`\`\`\ncode\n\`\`\``（无尾换行）追加文本
+/// 会并入代码块内容（fence 破坏），必须重渲而非跳过旧 CodeBlock。
+#[test]
+fn test_cached_closed_code_block_same_line_append() {
+    let mut cache = MarkdownRenderCache::default();
+    let t1 = "```rust\ncode\n```";
+    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r1),
+        segments_to_text(&full1),
+        "闭合代码块输出应与全量一致"
+    );
+    let t2 = "```rust\ncode\n```more";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r2),
+        segments_to_text(&full2),
+        "闭合代码块同行追加后输出应与全量一致"
+    );
+}
+
+/// [回归测试] 已闭合代码块是稳定中间块：代码块后追加文本（换行分隔），
+/// 代码块内容不变，续跑只处理新段落。
+#[test]
+fn test_cached_closed_code_block_then_text_appended() {
+    let mut cache = MarkdownRenderCache::default();
+    let t1 = "```rust\ncode\n```\n\npara1";
+    let r1 = parse_markdown_cached(t1, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full1 = parse_markdown(t1, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r1),
+        segments_to_text(&full1),
+        "首次输出应与全量一致"
+    );
+    let t2 = "```rust\ncode\n```\n\npara1 continued";
+    let r2 = parse_markdown_cached(t2, 80, Palette::default(), TEST_BASE_FG, &mut cache);
+    let full2 = parse_markdown(t2, 80, Palette::default(), TEST_BASE_FG);
+    assert_eq!(
+        segments_to_text(&r2),
+        segments_to_text(&full2),
+        "代码块后段落增长输出应与全量一致"
     );
 }
 

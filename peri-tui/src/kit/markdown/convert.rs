@@ -21,8 +21,8 @@ use super::types::{MarkdownSegment, TableData};
 ///
 /// [续跑契约] 调用方必须保证：传入的 `state.processed_block_count` 对应到
 /// 当前 `blocks` 前 N 个，且这 N 个 block 的内容与上次缓存时一致。
-/// 这通过 `text.starts_with(cache.stable_text)` + `cache.stable_text` 以
-/// 换行符结尾（保证最后一个 block 已闭合）来保证。
+/// 这通过 `text.starts_with(cache.stable_text)` + 持久化前回滚「尾部不稳定块」
+/// （见 [`rollback_trailing_unstable`]）来保证。
 ///
 /// [current_text 不 flush] 续跑时 state.current_text 保留累积状态——下一个
 /// block 的 spacing 决策基于 "current_text 是否为空 / 末尾是否空行 / prev_was_list_item"，
@@ -37,6 +37,10 @@ pub(crate) struct ConvertState {
     pub current_text: Vec<Line<'static>>,
     /// 已 flush 的 segments（包含 Table + 已闭合的 Text）。
     pub segments: Vec<MarkdownSegment>,
+    /// 每个已处理 block 处理完时 current_text 的行数边界。
+    /// `block_line_ends[i]` = 处理完 blocks[i] 后 current_text.len()，长度恒等于
+    /// processed_block_count。回滚尾部不稳定块时用于截断 current_text。
+    pub block_line_ends: Vec<usize>,
     /// 已处理的 block 中是否包含 Table——用于缓存失效检查。
     /// Table 是动态块：后续追加行（数据行）会改变同一个 block 的内容，
     /// 而其他块（Paragraph/CodeBlock/ListItem）在闭合后内容不变。
@@ -46,6 +50,51 @@ pub(crate) struct ConvertState {
     /// 分隔符到达后同一前缀翻转为 Table。此时缓存必须失效，否则原始 pipe 格式
     /// 会永远停留在输出中。
     pub has_potential_table_header: bool,
+}
+
+/// 持久化前回滚「尾部不稳定块」，使续跑契约成立。
+///
+/// 流式追加只发生在文本末尾，因此**只有尾部块可能变化**；更早的块由空行/块级
+/// 边界保证稳定（表头翻转由 `has_potential_table_header` 单独失效，表格增长由
+/// `has_table_in_processed_blocks` 单独失效）。回滚两个部分：
+///
+/// 1. **尾部连续空段落**（列表前后插入的哨兵，追加后移位/消失，如
+///    `[Empty, LI, Empty]` → `[Empty, LI, LI, Empty]`）——一律回滚。
+/// 2. **最后一个非空块**：当 sanitized 不以空行（`\n\n`）结尾时，它可能随追加
+///    而改变内容，必须回滚让续跑重渲：
+///    - Paragraph：同行/soft-break 增长（`para` → `para more`）
+///    - ListItem：lazy continuation（`- A\n` → `- A\nmore`）
+///    - Heading：同行增长（`# h` → `# h x`）
+///    - CodeBlock：缩进代码块/未闭合 fence 行数增长（`    a` → `    a\n    b`）
+///    - Rule：类型翻转（`---` → `---x`）
+///
+/// 以 `\n\n` 结尾时最后一个非空块已被空行闭合：追加内容只能产生新块，旧块内容
+/// 不变（已验证：`para\n\n` + `more` → `[P(para), P(more)]`）。
+pub(crate) fn rollback_trailing_unstable(
+    blocks: &[ParsedBlock],
+    state: &mut ConvertState,
+    text_ends_with_blank_line: bool,
+) {
+    let mut n = state.processed_block_count;
+    // 1. 尾部连续空段落（列表哨兵）全部回滚
+    while n > 0 && matches!(&blocks[n - 1], ParsedBlock::Paragraph(lines) if lines.is_empty()) {
+        n -= 1;
+    }
+    // 2. 未闭合的最后一个非空块回滚
+    if n > 0 && !text_ends_with_blank_line {
+        n -= 1;
+    }
+    if n < state.processed_block_count {
+        let keep = if n == 0 {
+            0
+        } else {
+            state.block_line_ends[n - 1]
+        };
+        state.current_text.truncate(keep);
+        state.processed_block_count = n;
+        state.prev_was_list_item = n > 0 && matches!(&blocks[n - 1], ParsedBlock::ListItem(_));
+        state.block_line_ends.truncate(n);
+    }
 }
 
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
@@ -93,6 +142,7 @@ pub(crate) fn convert_to_segments_with_state(
         if matches!(block, ParsedBlock::Paragraph(lines) if lines.is_empty()) {
             state.prev_was_list_item = false;
             state.processed_block_count = i + 1;
+            state.block_line_ends.push(state.current_text.len());
             continue;
         }
 
@@ -167,6 +217,7 @@ pub(crate) fn convert_to_segments_with_state(
 
         state.prev_was_list_item = is_list_item;
         state.processed_block_count = i + 1;
+        state.block_line_ends.push(state.current_text.len());
     }
 
     // 末尾 flush：clone state 并 flush current_text（state.current_text 不变）
