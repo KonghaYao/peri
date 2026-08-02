@@ -119,7 +119,7 @@ pub struct PromptResult {
 /// keepgoing（图片接入后即触发），且畸形请求经 `extract_prompt_params` 默认值
 /// （空文本）落入 keepgoing 路径时行为一致。
 ///
-/// 协议约定（见 docs/standards/architecture-contracts.md "keepgoing 空白 prompt"）：
+/// 协议约定（见 docs/standards/architecture-contracts.md ARC-KEEPGOING-001）：
 /// 空白 user prompt = "继续跑 loop"，唯一生产者为 TUI keepgoing 按钮。
 pub fn is_keepgoing(content: &peri_agent::messages::MessageContent) -> bool {
     content.is_empty()
@@ -376,6 +376,11 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 其他 transport 对全新 session 发空 prompt 的场景。）
     if is_keepgoing && history.is_empty() {
         tracing::debug!("keepgoing: empty history, short-circuiting (nothing to continue)");
+        // [TRAP] 短路路径绕过 agent event pump（spawn_event_pump 的 push_done
+        // 不会执行），必须手动发送终止通知（ARC-EVENT-001），否则 TUI 依赖
+        // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
+        // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
+        event_sink.push_done(&ctx.session_id, "end_turn").await;
         return PromptResult {
             messages: history,
             ok: true,

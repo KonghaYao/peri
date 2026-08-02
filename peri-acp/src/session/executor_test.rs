@@ -11,11 +11,22 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_agent::{
     agent::{events::ExecutorEvent, AgentCancellationToken},
-    messages::{BaseMessage, MessageContent},
+    interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
+    messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
 };
 
-use super::{intercept_immediate_command, InterceptRequest};
-use crate::{provider::PeriConfig, session::event_sink::EventSink};
+use super::{
+    intercept_immediate_command, is_keepgoing, run_session_loop, InterceptRequest,
+    PromptStopReason, SessionContext, TurnInput,
+};
+use crate::{
+    provider::{LlmProvider, PeriConfig},
+    session::{agent_pool::AgentPool, event_sink::EventSink},
+};
+use peri_middlewares::{
+    prelude::{PermissionMode, SharedPermissionMode},
+    tool_search::ToolSearchIndex,
+};
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -47,6 +58,16 @@ impl EventSink for MockEventSink {
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
         *self.push_done_count.lock().unwrap() += 1;
+    }
+}
+
+/// 空操作 broker：短路路径不会触发任何交互，仅满足 SessionContext 构造。
+struct NoopBroker;
+
+#[async_trait]
+impl UserInteractionBroker for NoopBroker {
+    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        InteractionResponse::Rejected
     }
 }
 
@@ -91,6 +112,46 @@ fn make_bg_infra() -> (
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new());
     (tx, registry)
+}
+
+/// 构造最小 SessionContext（keepgoing 短路路径只用到 session_id，其余字段给默认值）。
+fn make_session_context(session_id: &str) -> SessionContext {
+    SessionContext {
+        provider: LlmProvider::OpenAi {
+            api_key: "test-key".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            effort: None,
+            max_tokens: 32000,
+            context_1m: false,
+            retry_observer: None,
+        },
+        peri_config: Arc::new(Default::default()),
+        cwd: "/tmp".to_string(),
+        session_id: session_id.to_string(),
+        cancel: AgentCancellationToken::new(),
+        broker: Arc::new(NoopBroker),
+        permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+        session_manager: None,
+        pool: Arc::new(parking_lot::Mutex::new(AgentPool::new())),
+        thread_store: None,
+        thread_id: None,
+        plugin_skill_roots: vec![],
+        plugin_agent_dirs: vec![],
+        plugin_loaded: vec![],
+        hook_groups: vec![],
+        cron_scheduler: None,
+        mcp_pool: None,
+        channel_state: None,
+        tool_search_index: Arc::new(ToolSearchIndex::default()),
+        shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
+        lsp_servers: vec![],
+        workflow_executor: None,
+        workflow_middleware: None,
+        session_start_source: None,
+        allow_await_wake: false,
+        v2_event_tx: None,
+    }
 }
 
 // ── intercept_immediate_command: 路径分支测试 ─────────────────────────────
@@ -450,5 +511,77 @@ async fn test_intercept_immediate_ok_always_true() {
     assert!(
         prompt_result.ok,
         "Immediate 命令拦截后 ok 必须为 true（命令成功 = agent 不构建）"
+    );
+}
+
+// ── is_keepgoing: 跨层判空契约测试 ───────────────────────────────────────
+//
+// 与 peri-agent stages_test 的
+// `test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`
+// 成对，双侧锁定 ARC-KEEPGOING-001 的判空语义（`MessageContent::is_empty()`）。
+
+/// 空文本 → keepgoing（TUI keepgoing 按钮的真实 payload 是 `text("")`）
+#[test]
+fn test_is_keepgoing_empty_text() {
+    assert!(is_keepgoing(&MessageContent::text("")));
+}
+
+/// 纯空白文本不算空 content block → 非 keepgoing（用户输入空格应正常跑 loop）
+#[test]
+fn test_is_keepgoing_whitespace_text_not_keepgoing() {
+    assert!(!is_keepgoing(&MessageContent::text("   ")));
+}
+
+/// 纯附件消息（Blocks([Image])）不是空 → 非 keepgoing（trim 判空会把图片误判）
+#[test]
+fn test_is_keepgoing_image_block_not_keepgoing() {
+    let content = MessageContent::blocks(vec![ContentBlock::Image {
+        source: ImageSource::Base64 {
+            media_type: "image/png".to_string(),
+            data: "fake".to_string(),
+        },
+    }]);
+    assert!(!is_keepgoing(&content));
+}
+
+// ── run_session_loop: keepgoing 短路路径 TRAP 验证 ────────────────────────
+
+/// [TRAP] keepgoing 短路路径（空历史 + 空 prompt）必须调用 `push_done`，
+/// 否则 TUI 依赖 AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在
+/// loading（ARC-EVENT-001 / ARC-KEEPGOING-001）。
+#[tokio::test]
+async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
+    // Arrange
+    let mock_sink = Arc::new(MockEventSink::new());
+    let ctx = make_session_context("test-session");
+    let turn = TurnInput {
+        event_sink: Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        frozen: None,
+        history: vec![],
+        // keepgoing 语义：不注入 recall（否则 recall 拼进 user 消息使其非空）
+        incoming_recalls: vec!["should-be-skipped".to_string()],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert
+    assert!(result.ok);
+    assert_eq!(
+        result.stop_reason,
+        PromptStopReason::EndTurn,
+        "短路返回的 stop_reason 必须为 EndTurn"
+    );
+    assert!(
+        result.recall_items.is_empty(),
+        "keepgoing 短路不应产生 recall items"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
     );
 }
