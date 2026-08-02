@@ -613,7 +613,7 @@ fn test_validate_tool_pairing_mixed_message_types_no_panic() {
 // ── execute 测试 ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_execute_invalid_args_emits_compact_error() {
+async fn test_execute_invalid_args_emits_rewind_error() {
     // Arrange: 无效 JSON 参数
     let sink = Arc::new(MockEventSink::new());
     let history = vec![BaseMessage::human("你好")];
@@ -632,18 +632,18 @@ async fn test_execute_invalid_args_emits_compact_error() {
     assert_eq!(result.messages.len(), 1, "参数错误应返回原始 history");
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 CompactError 事件
+    // 应推送 RewindError 事件（rewind 失败与压缩无关，不复用 CompactError）
     let events = sink.events();
     assert_eq!(events.len(), 1, "应推送 1 个事件");
     assert!(
-        events[0].1.contains("compact_error"),
-        "应推送 compact_error 事件，实际: {}",
+        events[0].1.contains("rewind_error"),
+        "应推送 rewind_error 事件，实际: {}",
         events[0].1
     );
 }
 
 #[tokio::test]
-async fn test_execute_target_not_found_emits_compact_error() {
+async fn test_execute_target_not_found_emits_rewind_error() {
     // Arrange: 目标 message_id 不在 history 中
     let sink = Arc::new(MockEventSink::new());
     let history = vec![
@@ -670,8 +670,8 @@ async fn test_execute_target_not_found_emits_compact_error() {
     let events = sink.events();
     assert_eq!(events.len(), 1);
     assert!(
-        events[0].1.contains("compact_error"),
-        "应推送 compact_error，实际: {}",
+        events[0].1.contains("rewind_error"),
+        "应推送 rewind_error，实际: {}",
         events[0].1
     );
     assert!(

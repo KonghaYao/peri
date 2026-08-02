@@ -830,13 +830,14 @@ fn wizard_click(
         }
         SetupStep::Form => match state.form_mode {
             FormMode::Browse => {
-                // 布局：空行 + 每 provider 5 行（base_url 非空时 6 行）+ submit 行（无滚动）
+                // 布局：空行 + 每 provider 6 行（base_url 非空时 7 行）+ submit 行（无滚动）
+                // 与 render_browse 对齐：provider 行 + (url 行) + 空行 + 3 别名行 + 空行
                 let mut cur = 1u16;
                 if state.providers.is_empty() {
                     cur += 2; // "no providers" + 空行
                 }
                 for (i, mp) in state.providers.iter().enumerate() {
-                    let item_h = if mp.base_url.is_empty() { 5u16 } else { 6u16 };
+                    let item_h = if mp.base_url.is_empty() { 6u16 } else { 7u16 };
                     if visual >= cur && visual < cur + item_h {
                         state.browse_cursor = i;
                         handle_browse_keys(state, enter);
@@ -1276,4 +1277,64 @@ fn handle_paste_to_text_input(state: &mut SetupWizardState, paste_text: &str) {
     val = format!("{}{}{}", prefix, truncated, suffix);
     state.edit_cursor_pos = pos + paste_len;
     state.set_active_field_value(val);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui_kit::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui_kit::ratatui::layout::Rect;
+
+    /// 内容区 visual_row 处的左键点击（area 顶部边框行不可点，故 row = area.y + 1 + visual_row）。
+    fn click(area: Rect, visual_row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y + 1 + visual_row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn browse_state(providers: Vec<MigratedProvider>) -> SetupWizardState {
+        SetupWizardState {
+            step: SetupStep::Form,
+            form_mode: FormMode::Browse,
+            providers,
+            ..Default::default()
+        }
+    }
+
+    /// Browse 无 base_url：每 provider 6 行（provider 行 + 空行 + 3 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 7，点击应命中第二个并进入 Edit。
+    #[test]
+    fn browse_click_without_base_url_hits_second_provider() {
+        let mut p1 = MigratedProvider::new(ProviderType::Anthropic);
+        p1.base_url = String::new();
+        let mut p2 = MigratedProvider::new(ProviderType::OpenAiCompatible);
+        p2.base_url = String::new();
+        let mut state = browse_state(vec![p1, p2]);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(
+            wizard_click(&click(area, 7), area, &mut state),
+            "visual 7 = 第二个 provider 的 provider 行"
+        );
+        assert_eq!(state.active_provider, 1, "命中第二个 provider");
+        assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");
+    }
+
+    /// Browse 带 base_url：每 provider 7 行（provider 行 + url 行 + 空行 + 3 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 8。
+    #[test]
+    fn browse_click_with_base_url_hits_second_provider() {
+        let p1 = MigratedProvider::new(ProviderType::Anthropic);
+        let p2 = MigratedProvider::new(ProviderType::OpenAiCompatible);
+        let mut state = browse_state(vec![p1, p2]);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(
+            wizard_click(&click(area, 8), area, &mut state),
+            "visual 8 = 第二个 provider 的 provider 行"
+        );
+        assert_eq!(state.active_provider, 1, "命中第二个 provider");
+        assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");
+    }
 }

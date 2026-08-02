@@ -150,7 +150,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     Some(ListNavAction::MoveDown) if view == RewindView::Candidates => {
                         let mut s = msg_sel.write();
-                        *s = next_selection(*s, msg_count);
+                        // 钳制到渲染窗口（take(8)）——否则选中可移出可视区，
+                        // Enter 会对屏幕外目标发送 Preview
+                        *s = next_selection(*s, msg_rendered);
                         return EventResult::Consumed;
                     }
                     Some(ListNavAction::Confirm) => match view {

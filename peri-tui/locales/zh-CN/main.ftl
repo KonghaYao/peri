@@ -1024,6 +1024,7 @@ app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractio
 app-note-compact-completed = { $type }完成{ $detail }
 app-note-compact-completed-summary = { $type }完成{ $detail } —— { $summary }
 app-note-compact-error = 上下文压缩失败: { $message }
+app-note-rewind-error = 回退失败: { $message }
 app-note-compact-type-full = 完整压缩
 app-note-compact-type-micro = 微压缩
 app-note-compact-type-smart = 智能压缩

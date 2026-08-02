@@ -506,6 +506,16 @@ async function main() {
       case "--tools": mode = "tools"; break;
       case "--growth": mode = "growth"; break;
       case "--report": mode = "report"; break;
+      case "--limit": {
+        const n = parseInt(args[++i]);
+        if (!isNaN(n) && n > 0) limit = n;
+        break;
+      }
+      case "--days": case "--from": case "--to":
+      case "--tag": case "--user": case "--session":
+      case "--name": case "--model":
+        i++; // 跳过选项值，避免 --days 7 之类的数字被误当作 limit
+        break;
       default: {
         const n = parseInt(args[i]);
         if (!isNaN(n) && n > 0) limit = n;

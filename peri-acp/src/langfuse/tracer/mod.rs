@@ -403,6 +403,7 @@ impl LangfuseTracer {
         _provider: &str,
         output: &str,
         usage: Option<&TokenUsage>,
+        request_id: Option<&str>,
     ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -490,6 +491,12 @@ impl LangfuseTracer {
             }
         } else if let Some(obj) = meta_obj {
             obj.insert("model".to_string(), serde_json::json!(model));
+        }
+        // provider request_id 无条件写入 metadata（与 usage 独立，用于关联 provider 侧日志）
+        if let Some(req_id) = request_id {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("request_id".to_string(), serde_json::json!(req_id));
+            }
         }
 
         let gen_body = GenerationBody {

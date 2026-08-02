@@ -137,6 +137,17 @@ pub(crate) async fn handle_update_config(
                 .data(format!("profile {alias}: provider '{pid}' not found")));
         }
     }
+    // active_alias 必须是固定档位键（大小写不敏感，与 Profiles::get 行为一致），
+    // 否则后续依赖 active_alias 的处理会静默 no-op
+    if !peri_tui::config::Profiles::ALL
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(&new_cfg.config.active_alias))
+    {
+        return Err(Error::invalid_request().data(format!(
+            "active_alias '{}' not in Profiles::ALL",
+            new_cfg.config.active_alias
+        )));
+    }
 
     *ctx.peri_config.write() = new_cfg.clone();
 

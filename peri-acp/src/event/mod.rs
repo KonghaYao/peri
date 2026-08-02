@@ -100,6 +100,8 @@ pub enum AcpEvent {
         /// JSON-serialized `Vec<BaseMessage>` (messages after rewind)
         messages_json: String,
     },
+    /// Rewind failed (target message not found / argument parse error)
+    RewindError { message: String },
     /// Background agent task completed
     BackgroundTaskCompleted {
         task_id: String,

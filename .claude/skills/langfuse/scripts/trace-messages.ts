@@ -3,16 +3,16 @@
  * 单 trace 逐轮消息组成 + 新增/变更消息 diff（支持从过滤结果中选 trace）
  *
  * 用法:
- *   bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId> [--detail]
- *   bun .claude/skills/langfuse/scripts/trace-messages.ts --index <N> [过滤选项] [--detail]
+ *   bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>
+ *   bun .claude/skills/langfuse/scripts/trace-messages.ts --index <N> [过滤选项]
  */
 import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, genTokens, fmt } from "./lib.ts";
 
 const args = process.argv.slice(2);
 
 if (args.includes("--help") || args.includes("-h")) {
-  console.log(`用法: bun trace-messages.ts <traceId> [--detail]
-       bun trace-messages.ts --index <N> [过滤选项] [--detail]
+  console.log(`用法: bun trace-messages.ts <traceId>
+       bun trace-messages.ts --index <N> [过滤选项]
 
 过滤选项: --from <ISO> --to <ISO> --days <N> --tag <t> --user <id> --session <id> --name <s> --limit <N>`);
   process.exit(0);
@@ -53,8 +53,6 @@ if (!traceId && indexIdx !== -1) {
 }
 
 if (!traceId) { console.error("Usage: bun trace-messages.ts <traceId>  or  --index <N>"); process.exit(1); }
-
-const showDetail = args.includes("--detail");
 
 interface MsgSummary {
   role: string;

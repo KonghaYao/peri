@@ -1025,6 +1025,7 @@ app-note-budget-warning = Context usage { NUMBER($pct, maximumFractionDigits: 0)
 app-note-compact-completed = { $type } completed{ $detail }
 app-note-compact-completed-summary = { $type } completed{ $detail } — { $summary }
 app-note-compact-error = Context compaction failed: { $message }
+app-note-rewind-error = Rewind failed: { $message }
 app-note-compact-type-full = Full compaction
 app-note-compact-type-micro = Micro compaction
 app-note-compact-type-smart = Smart compaction

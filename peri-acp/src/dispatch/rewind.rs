@@ -58,7 +58,7 @@ pub async fn rewind_preview(
             event_sink
                 .push_event(
                     session_id,
-                    &peri_agent::agent::events::ExecutorEvent::CompactError {
+                    &peri_agent::agent::events::ExecutorEvent::RewindError {
                         message: msg.clone(),
                     },
                     0,
@@ -115,7 +115,7 @@ pub async fn rewind_execute(
     frozen_skill_summary: Option<Arc<String>>,
     frozen_system_prompt: Option<Arc<String>>,
 ) -> Result<Value, AcpError> {
-    // P0 修复：参数预验证。RewindCommand 内部解析失败只发 CompactError 事件
+    // P0 修复：参数预验证。RewindCommand 内部解析失败只发 RewindError 事件
     // 且本函数仍返回成功——这里前置解析，参数错误直接以 RPC 错误形式返回，
     // TUI 才能感知并展示失败。
     let _args: RewindArgs = serde_json::from_value(params.clone())

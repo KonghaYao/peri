@@ -253,15 +253,21 @@ pub(crate) async fn handle_request(
                 }
                 "context_1m" => {
                     let enabled = value == "true" || value == "1";
+                    let mut updated = false;
                     {
                         let mut c = cfg.peri_config.write();
                         let alias = c.config.active_alias.clone();
                         if let Some(profile) = c.config.profiles.get_mut(&alias) {
                             profile.context_1m = enabled;
+                            updated = true;
                         }
                     }
-                    persist_config(cfg);
-                    info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
+                    if updated {
+                        persist_config(cfg);
+                        info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
+                    } else {
+                        warn!(enabled = %enabled, "Context 1M configOption skipped: active profile not found");
+                    }
                 }
                 _ => {
                     debug!(config_id = %config_id, "Unknown config option");

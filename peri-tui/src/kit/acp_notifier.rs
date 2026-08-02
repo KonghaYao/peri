@@ -167,6 +167,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             messages_json,
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
+        AcpEvent::RewindError { message } => Some(AcpEventData::RewindError { message }),
         // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
         AcpEvent::StateSnapshotMeta {
             context_total_tokens,

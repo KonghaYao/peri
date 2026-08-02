@@ -414,8 +414,16 @@ pub fn plan_micro(
 
     // 估算投影前后 token 数量
     let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
+    // 整条压缩兜底（fields 空）会把短参数替换为 `{"_compact_note": ...}` 占位，
+    // 估算如实反映该占位长度，短输入下 after 可大于 before（设计权衡：宁可放大也不静默 no-op）。
+    let has_placeholder_fallback = actions.iter().any(|a| {
+        matches!(
+            &a.action,
+            ProjectionAction::CompactToolInput { fields, .. } if fields.is_empty()
+        )
+    });
     debug_assert!(
-        after_chars <= before_chars,
+        after_chars <= before_chars || has_placeholder_fallback,
         "投影后字符数不应大于投影前: after={after_chars} > before={before_chars}"
     );
     let before = before_chars / 4;

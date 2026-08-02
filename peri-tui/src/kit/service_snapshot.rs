@@ -231,7 +231,12 @@ async fn tick_once(
     // 自动生成 / rename 的情况）。load_meta 是主键查询，开销极低。
     let session_id = ACTIVE_SESSION_ID.state().read().clone();
     let session_changed = session_id != slow.current_title_session_id;
-    if (session_changed || now >= slow.next_title_refresh) && !session_id.is_empty() {
+    if session_changed && session_id.is_empty() {
+        // 会话已关闭（id 清空）：清空标题缓存，避免旧会话标题残留到状态栏
+        slow.current_title.clear();
+        slow.current_title_session_id.clear();
+        slow.next_title_refresh = now + Duration::from_secs(10);
+    } else if (session_changed || now >= slow.next_title_refresh) && !session_id.is_empty() {
         match src.thread_store.load_meta(&session_id).await {
             Ok(meta) => {
                 slow.current_title = meta.title.unwrap_or_default();

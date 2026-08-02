@@ -253,6 +253,9 @@ impl EventSink for TransportEventSink {
                         messages_json,
                     })
                 }
+                ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
+                    message: message.clone(),
+                }),
                 _ => None,
             };
             if let Some(acp_event) = acp_event {

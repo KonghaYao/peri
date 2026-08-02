@@ -86,14 +86,20 @@ pub(super) fn decode_assistant_message(
                         .get("name")
                         .and_then(Value::as_str)
                         .ok_or_else(provider_protocol_error)?;
+                    // 缺失或空白（trim 后为空）的 arguments 等价于空对象：
+                    // 部分 OpenAI-compatible 端点对无参工具返回 `"arguments": ""`。
                     let arguments = function
                         .get("arguments")
                         .and_then(Value::as_str)
-                        .ok_or_else(provider_protocol_error)?;
-                    let arguments = serde_json::from_str(arguments)
-                        .ok()
-                        .and_then(|arguments| JsonObject::from_value(arguments).ok())
-                        .ok_or_else(provider_protocol_error)?;
+                        .map(str::trim)
+                        .filter(|arguments| !arguments.is_empty());
+                    let arguments = match arguments {
+                        Some(arguments) => serde_json::from_str(arguments)
+                            .ok()
+                            .and_then(|arguments| JsonObject::from_value(arguments).ok())
+                            .ok_or_else(provider_protocol_error)?,
+                        None => JsonObject::default(),
+                    };
                     Ok(ToolCall::new(id, name, arguments))
                 })
                 .collect::<ModelResult<Vec<_>>>()

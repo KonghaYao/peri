@@ -47,6 +47,8 @@ pub enum UnifiedLangfuseEvent {
         model: String,
         output: String,
         usage: Option<TokenUsage>,
+        /// Provider 请求 ID（用于关联 provider 侧日志/遥测；None 表示 Provider 未返回）
+        request_id: Option<String>,
     },
     /// LLM 重试中
     LlmRetrying {
@@ -171,12 +173,14 @@ impl UnifiedLangfuseEvent {
                 model,
                 output,
                 usage,
+                request_id,
                 ..
             } => Some(UnifiedLangfuseEvent::LlmCallEnd {
                 step,
                 model,
                 output,
                 usage,
+                request_id,
             }),
             ExecutorEvent::LlmRetrying {
                 attempt,
@@ -320,7 +324,8 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::LspDiagnostics { .. }
             | ExecutorEvent::BgToolStep { .. }
             | ExecutorEvent::WorkflowProgress(_)
-            | ExecutorEvent::AgentExecutionFailed { .. } => None,
+            | ExecutorEvent::AgentExecutionFailed { .. }
+            | ExecutorEvent::RewindError { .. } => None,
         }
     }
 
@@ -390,6 +395,7 @@ impl UnifiedLangfuseEvent {
                 output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
+                request_id,
                 ..
             } => {
                 let usage = TokenUsage {
@@ -411,6 +417,7 @@ impl UnifiedLangfuseEvent {
                     model,
                     output,
                     usage: Some(usage),
+                    request_id,
                 })
             }
             ObserveEvent::LlmRequestPayload { step, body, .. } => {
@@ -529,6 +536,7 @@ impl LangfuseBridge {
                 model,
                 output,
                 usage,
+                request_id,
             } => {
                 t.on_llm_end(
                     *step,
@@ -536,6 +544,7 @@ impl LangfuseBridge {
                     &self.provider_display_name,
                     output,
                     usage.as_ref(),
+                    request_id.as_deref(),
                 );
             }
             UnifiedLangfuseEvent::LlmRetrying {

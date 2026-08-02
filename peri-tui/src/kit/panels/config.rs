@@ -325,10 +325,15 @@ fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
                 .get()
                 .map(|h| h.read().config.active_alias.clone())
                 .unwrap_or_default();
+            // default sonnet：按名称查找索引，避免 ALIAS_OPTS 顺序变化导致硬编码漂移
+            let default_idx = options.iter().position(|o| *o == "sonnet").unwrap_or(0);
             if cur.is_empty() {
-                1 // default sonnet
+                default_idx
             } else {
-                options.iter().position(|o| *o == cur.as_str()).unwrap_or(1)
+                options
+                    .iter()
+                    .position(|o| *o == cur.as_str())
+                    .unwrap_or(default_idx)
             }
         }
         ROW_PERMISSION_MODE => {

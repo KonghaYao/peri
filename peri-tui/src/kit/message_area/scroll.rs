@@ -248,7 +248,20 @@ pub(super) fn handle_event(
     if let Event::Mouse(mouse) = &event {
         // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗覆盖
         // 消息区时，点击行必须由弹窗消费，否则这里会先 Consumed 吃掉事件）。
+        // [Why] 但拖拽残留状态必须在此清理：遮挡时下方 Up 分支（scrollbar_drag /
+        // selection_down_pos / text_sel 复位）永远不会执行，拖拽中途弹窗打开会
+        // 残留 dragging 状态，弹窗关闭后下一次点击被误判为拖拽（误复制/点击错乱）。
         if mouse_router::is_occluded() {
+            // render 不依赖 active / selection_down_pos，用 write_no_update 避免 wake 噪音
+            scrollbar_drag.write_no_update().active = false;
+            *selection_down_pos.write_no_update() = None;
+            // [TRAP] 先 copy 出 dragging 再 write——parking_lot 同 thread read+write
+            // 冲突会 panic（与下方 Up 分支同一模式）。
+            if text_sel.read().dragging {
+                // 与正常 Up 分支一致（复制后 clear() 全清 start/end/dragging）；
+                // 用 write() 触发 wake，渲染清除高亮，避免弹窗关闭后选区残留。
+                text_sel.write().clear();
+            }
             return EventResult::Ignored;
         }
         // 光标移动无操作——提前返回，不触发任何 state 写入或渲染

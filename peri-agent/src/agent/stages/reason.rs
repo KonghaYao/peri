@@ -288,7 +288,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // emit LlmCallEnd（带 usage 完整字段：input/output + cache_creation/cache_read + request_id）
     // [TRAP] cache_read_input_tokens 必须透传，否则 TUI 命中率始终 0%（v2 重做回归）
-    let (in_tok, out_tok, cache_create, cache_read, req_id) = reasoning
+    let (in_tok, out_tok, cache_create, cache_read) = reasoning
         .usage
         .as_ref()
         .map(|u| {
@@ -297,10 +297,12 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 u.output_tokens as u64,
                 u.cache_creation_input_tokens.unwrap_or(0) as u64,
                 u.cache_read_input_tokens.unwrap_or(0) as u64,
-                reasoning.request_id.clone(),
             )
         })
-        .unwrap_or((0, 0, 0, 0, None));
+        .unwrap_or((0, 0, 0, 0));
+    // request_id 与 usage 来源独立（provider 可能不返回 usage 但返回 request_id），
+    // 不得随 usage 的 unwrap_or 默认值一起丢弃
+    let req_id = reasoning.request_id.clone();
     // output 改为结构化 JSON：包含 text、thinking、tool_calls、stop_reason
     // 与 v1 llm_step.rs:92-93 对齐：优先 final_answer，否则回退到 thought 作为 text
     let llm_output = {

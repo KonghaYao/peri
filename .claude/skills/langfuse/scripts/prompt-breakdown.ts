@@ -34,7 +34,12 @@ for (const a of args) {
 }
 
 if (!traceId && indexIdx !== -1) {
-  const index = parseInt(args[indexIdx + 1]) || 1;
+  const rawIndex = Number(args[indexIdx + 1]);
+  if (!Number.isInteger(rawIndex) || rawIndex < 1) {
+    console.error("Usage: bun prompt-breakdown.ts --index <N>  (N must be a positive integer)");
+    process.exit(1);
+  }
+  const index = rawIndex;
   const filter = parseFilterArgs(args);
   console.error(`Fetching filtered traces (limit ${filter.limit})...`);
   const { traces } = await fetchTracesFiltered({

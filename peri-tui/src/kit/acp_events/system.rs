@@ -69,11 +69,17 @@ pub(super) fn handle_prediction(p: &Prediction) {
             _ => {} // SetTitle / AddTag 由 acp_server 执行写入，此处仅展示
         }
     }
-    *PREDICTION.state().write() = crate::kit::atoms::PredictionState {
+    let mut state = crate::kit::atoms::PredictionState {
         text,
         summary,
         received_at: Some(Instant::now()),
     };
+    if state.text.is_empty() {
+        // 仅元数据动作（SetTitle/AddTag）的 prediction 不带占位文本——
+        // 保留输入区现有占位，避免空文本覆盖已有预测内容。
+        state.text = PREDICTION.state().read().text.clone();
+    }
+    *PREDICTION.state().write() = state;
 }
 
 pub(super) fn handle_file_suggestions() {}
@@ -191,6 +197,19 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
         crate::kit::popup_overlay::close_popup();
     }
 
+    super::render::push_acp_state(state);
+}
+
+pub(super) fn handle_rewind_error(state: &mut BridgeState, message: &str) {
+    // rewind 失败（目标消息不存在 / 参数解析失败）——与上下文压缩无关，
+    // 单独渲染 rewind 语境提示，避免复用 CompactError 时的"压缩失败"误导。
+    tracing::warn!(message, "bridge: RewindError");
+    let text = i18n::tr_args(
+        "app-note-rewind-error",
+        &[("message".into(), FluentValue::from(message))],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Warning);
+    state.phase = SessionPhase::Idle;
     super::render::push_acp_state(state);
 }
 

@@ -508,6 +508,16 @@ fn test_compact_error_no_session_update() {
 }
 
 #[test]
+fn test_rewind_error_no_session_update() {
+    assert_no_session_update(
+        &ExecutorEvent::RewindError {
+            message: "rewind: 未找到目标消息 abc".to_string(),
+        },
+        "RewindError",
+    );
+}
+
+#[test]
 fn test_background_task_completed_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::BackgroundTaskCompleted(BackgroundTaskResult {

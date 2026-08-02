@@ -103,9 +103,16 @@ describe("scenarios: rewind v2 回退链路", () => {
         await tester.sleep(1500);
         await tester.sendKey("Enter");
       } else {
-        console.log(
-          "NOTE: budget empty — LLM 未调用 Write，文件回退断言跳过",
-        );
+        // 硬前置：预算为空说明 LLM 未调用 Write（或写入文件不在会话内）。
+        // 空转通过会让该用例失去回归价值（file-revert 断言全部落空），
+        // 这里直接 FAIL，并 dump 该轮工具调用记录（屏幕消息区）便于定位。
+        console.error("=== FAIL: rewind 预算为空，未检测到 Write 工具调用 ===");
+        console.error("该轮屏幕内容（含工具调用记录）:");
+        console.error(screenAfterEnter);
+        expect(
+          screenAfterEnter,
+          "预算为空：LLM 未调用 Write 工具，文件回退断言失去目标（工具调用记录见上方）",
+        ).toMatch(/回退将撤销|Rewind will revert/);
       }
 
       // ── 等待执行完成：弹窗关闭（候选标题消失）──
@@ -129,6 +136,14 @@ describe("scenarios: rewind v2 回退链路", () => {
             interval: 500,
             message: "rewind 后 Write 创建的文件应被删除",
           },
+        );
+      } else {
+        // 显式标记（不静默）：走到这里预算必非空（上面硬前置已保证 Write 调用
+        // 存在），目标文件缺失说明 LLM 写入了其他文件名或文件未生成——该轮
+        // 删除校验被跳过，输出成因说明供人工判断，不再无声通过。
+        console.error(
+          `WARN: 目标文件 ${targetFile} 不存在，删除校验被跳过——` +
+            "该轮 Write 未写入目标文件（实际写入路径见上方工具调用记录）",
         );
       }
 

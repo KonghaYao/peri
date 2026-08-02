@@ -316,6 +316,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // 变体保留以向后兼容旧服务端。
         RewindPreview(_) => {}
         RewindCompleted { messages_json } => system::handle_rewind_completed(state, messages_json),
+        RewindError { message } => system::handle_rewind_error(state, message),
         OauthNeeded(on) => system::handle_oauth_needed(state, on),
 
         // ── §4.6 Structure events ──

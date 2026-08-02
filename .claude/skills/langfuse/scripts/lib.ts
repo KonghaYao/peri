@@ -285,7 +285,8 @@ const MODEL_PRICES: Record<string, { input: number; output: number; cacheRead: n
 export function estimateCost(model: string, t: TokenSummary): number {
   const key = Object.keys(MODEL_PRICES).find((k) => model.toLowerCase().includes(k));
   const price = key ? MODEL_PRICES[key] : { input: 2, output: 10, cacheRead: 0.5 };
-  const inputCost = ((t.input - t.cacheRead) / 1_000_000) * price.input;
+  // Anthropic 类 provider 将 cache_read 单独计费（input 不含 cache），差值可能为负，钳制到 0
+  const inputCost = (Math.max(0, t.input - t.cacheRead) / 1_000_000) * price.input;
   const cacheCost = (t.cacheRead / 1_000_000) * price.cacheRead;
   const outputCost = (t.output / 1_000_000) * price.output;
   return inputCost + cacheCost + outputCost;
