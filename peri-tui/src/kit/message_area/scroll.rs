@@ -50,14 +50,6 @@ impl ScrollPos {
         self.offset_y = self.offset_y.saturating_add(1);
     }
 
-    pub(super) fn scroll_page_up(&mut self, page: usize) {
-        self.offset_y = self.offset_y.saturating_add(1).saturating_sub(page);
-    }
-
-    pub(super) fn scroll_page_down(&mut self, page: usize) {
-        self.offset_y = self.offset_y.saturating_add(page).saturating_sub(1);
-    }
-
     pub(super) fn scroll_to_top(&mut self) {
         self.offset_y = 0;
     }
@@ -568,20 +560,21 @@ pub(super) fn handle_event(
     }
 
     // 键盘滚动（替代 ScrollViewState::handle_event——消息区不使用 ScrollView，
-    // 其 page_size 永远为 None；自持 ScrollPos 直接按当前视口高度翻页）。
+    // 其 page_size 永远为 None；自持 ScrollPos 直接滚动）。
     // focus_router::message_accepts_key 仅放行 Ctrl+Up/Down/Home/End。
+    // [Why 无翻页分支] 项目约束禁止 PageUp/PageDown 作快捷键
+    // （spec/global/domains/tui/tui-index.md：部分终端模拟器将其绑定到终端自身
+    // 滚动缓冲、不送达应用，且本消息区 Global/High handler 一旦放行会先于
+    // InputArea 消费，破坏输入区行为）。若未来改用 Ctrl+U/Ctrl+D 等组合键实现
+    // 翻页，需同时更新 focus_router::message_accepts_key 与 input_accepts_key。
     if let Event::Key(key) = &event
         && key.kind == KeyEventKind::Press
         && focus_router::message_accepts_key(key)
     {
         let mut st = scroll_state.write();
-        // 翻页大小 = 当前视口高度（area_rect 由 MsgAreaTracker 每帧记录）
-        let page = area_rect.map_or(1usize, |r| r.height as usize);
         match key.code {
             KeyCode::Up => st.scroll_up(),
             KeyCode::Down => st.scroll_down(),
-            KeyCode::PageUp => st.scroll_page_up(page),
-            KeyCode::PageDown => st.scroll_page_down(page),
             KeyCode::Home => st.scroll_to_top(),
             KeyCode::End => st.scroll_to_bottom(),
             _ => return EventResult::Ignored,

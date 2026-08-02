@@ -187,11 +187,13 @@ const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(38, 79, 1
 /// 为选区内的行做字符级高亮——首/末行仅 highlight 被选中的列范围，中间行全行。
 ///
 /// 返回新的 `Vec<Line>`，对每个字符 span 按选区位置决定是否追加背景色。
+/// 行坐标用 usize（与 `TextSelection` 的视觉行类型一致，内容可超 65535 视觉行），
+/// 列保持 u16（≤ 终端宽度）。当前无生产调用者，仅保持同模块类型对齐。
 pub fn highlight_selected_lines(
     lines: &[Line<'static>],
-    start_row: u16,
+    start_row: usize,
     start_col: u16,
-    end_row: u16,
+    end_row: usize,
     end_col: u16,
 ) -> Vec<Line<'static>> {
     let ((sr, sc), (er, ec)) = if (start_row, start_col) <= (end_row, end_col) {
@@ -200,8 +202,7 @@ pub fn highlight_selected_lines(
         ((end_row, end_col), (start_row, start_col))
     };
 
-    let sr = sr as usize;
-    let er = (er as usize).min(lines.len().saturating_sub(1));
+    let er = er.min(lines.len().saturating_sub(1));
 
     lines
         .iter()
