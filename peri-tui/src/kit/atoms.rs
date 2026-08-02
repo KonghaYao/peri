@@ -367,7 +367,7 @@ pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| 
 
 /// keepgoing 按钮防抖截止时间——点击后短时间内禁用按钮，避免连续误触
 /// 触发多轮空跑。超过此刻后恢复可点击。
-pub static KEEPGONG_BLOCKED_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+pub static KEEPGOING_BLOCKED_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 
 /// 渲染心跳计数器——后台任务每 5 秒 +1，确保 render loop 周期性唤醒。
 /// 即使终端无输入、atom 无变化，也能防止 `futures::select` 在 EventStream 阻塞时

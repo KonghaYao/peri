@@ -84,6 +84,7 @@ pub(super) fn build_footer_lines(
     is_loading: bool,
     todo_items: &[TodoItem],
     keepgoing_blocked: bool,
+    vis_width: u16,
 ) -> (Vec<Line<'static>>, Option<KeepGoingLayout>) {
     let semantic = THEME_ATOM.state().read().semantic;
 
@@ -183,14 +184,28 @@ pub(super) fn build_footer_lines(
         );
         let btn_width = btn_span.width() as u16;
         let start_col = summary_line.width() as u16;
-        keepgoing_layout = Some(KeepGoingLayout {
-            line_index: lines.len(),
-            start_col,
-            width: btn_width,
-        });
-        let mut line = summary_line;
-        line.spans.push(btn_span);
-        lines.push(line);
+        // [Fix m4] 窄终端下 summary + 按钮超宽时 WordWrapper 会把按钮换到下一
+        // 视觉行，而 compute_keepgoing_rect 按"每 footer 行占 1 视觉行"假设计算
+        // 点击区域——换行后按钮实际位置与 rect 错位、点击失效。超宽时跳过按钮
+        // 渲染（布局保持单行，rect 不产生）。
+        if start_col.saturating_add(btn_width) <= vis_width {
+            keepgoing_layout = Some(KeepGoingLayout {
+                line_index: lines.len(),
+                start_col,
+                width: btn_width,
+            });
+            let mut line = summary_line;
+            line.spans.push(btn_span);
+            lines.push(line);
+        } else {
+            tracing::debug!(
+                start_col,
+                btn_width,
+                vis_width,
+                "keepgoing: footer line exceeds vis_width, button hidden"
+            );
+            lines.push(summary_line);
+        }
     }
     if !todo_items.is_empty() {
         lines.extend(render_todo_lines(todo_items));

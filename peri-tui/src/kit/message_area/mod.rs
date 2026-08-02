@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{
-    BRIDGE_RESET_COUNTER, KEEPGONG_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT,
+    BRIDGE_RESET_COUNTER, KEEPGOING_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT,
     SUBMIT_TX, VIEW_MODELS,
 };
 use crate::kit::mouse_router;
@@ -46,6 +46,9 @@ use selection::{
     WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
     viewport_logical_range, visual_to_logical,
 };
+
+/// keepgoing 按钮点击防抖时长（连续点击冷却）。
+const KEEPGOING_DEBOUNCE: Duration = Duration::from_millis(1500);
 
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
@@ -149,13 +152,26 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
-    // keepgoing 防抖：KEEPGONG_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
-    let keepgoing_blocked = crate::kit::atoms::KEEPGONG_BLOCKED_UNTIL
+    // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
+    let keepgoing_blocked = crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL
         .state()
         .read()
         .is_some_and(|until| Instant::now() < until);
-    let (footer_lines, keepgoing_layout) =
-        build_footer_lines(&mut hooks, is_loading, &todo_items, keepgoing_blocked);
+    // 消息区位置追踪 + 视宽：build_footer_lines 需要 vis_width 判断按钮是否
+    // 超宽换行（m4：换行后点击区域与实际渲染位置错位，超宽时跳过按钮渲染）。
+    let area_hook = hooks.use_hook(MsgAreaTracker::new);
+    let area_rect = area_hook.rect;
+    let vis_width = area_rect
+        .map(|r| r.width.saturating_sub(1))
+        .unwrap_or(props.width as u16)
+        .max(1);
+    let (footer_lines, keepgoing_layout) = build_footer_lines(
+        &mut hooks,
+        is_loading,
+        &todo_items,
+        keepgoing_blocked,
+        vis_width,
+    );
     // keepgoing 按钮屏幕点击区域 (y, x_start, width)，每帧更新，点击 handler 实时读取
     // （handler 闭包捕获的是 State 句柄而非帧快照，滚动后坐标仍正确）
     let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
@@ -178,9 +194,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let selection_down_pos = hooks.use_state(|| Option::<(usize, u16)>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
 
-    // ── 消息区位置追踪 ──
-    let area_hook = hooks.use_hook(MsgAreaTracker::new);
-    let area_rect = area_hook.rect;
     // 滚动条 fields state（hook 通过引用读取，避免 borrow 冲突）
     let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
     hooks.use_hook(move || ScrollbarHook {
@@ -189,10 +202,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 滚动条 thumb 拖拽状态（点击/拖拽事件处理器读写）
     let scrollbar_drag = hooks.use_state(ScrollbarDragState::default);
 
-    let vis_width = area_rect
-        .map(|r| r.width.saturating_sub(1))
-        .unwrap_or(props.width as u16)
-        .max(1);
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
     // ── 遍历每个 VM，按 (content_hash, vis_width) 命中判断 ──
@@ -370,16 +379,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             if mouse_router::is_occluded() {
                 return EventResult::Ignored;
             }
-            // 防抖：防抖期内按钮渲染为禁用样式，点击忽略
-            let now = Instant::now();
-            let blocked = KEEPGONG_BLOCKED_UNTIL
-                .state()
-                .read()
-                .is_some_and(|until| now < until);
-            if blocked {
-                return EventResult::Ignored;
-            }
             // 命中检测：点击坐标落在按钮屏幕区域内 (y, x_start, width)
+            // [Why 先于防抖] 防抖期内点击禁用按钮也应 Consumed——否则事件落到
+            // scroll handler 的文本选区逻辑（消息区内 Down(Left) 设置选区锚点）。
             let Some((by, bx, bw)) = *keepgoing_rect.read() else {
                 return EventResult::Ignored;
             };
@@ -387,17 +389,25 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             if y != by || x < bx || x >= bx.saturating_add(bw) {
                 return EventResult::Ignored;
             }
+            // 防抖：防抖期内按钮渲染为禁用样式，点击被吞掉但不触发提交
+            let now = Instant::now();
+            let blocked = KEEPGOING_BLOCKED_UNTIL
+                .state()
+                .read()
+                .is_some_and(|until| now < until);
+            if blocked {
+                return EventResult::Consumed;
+            }
             // 触发 keepgoing 提交：发送空白 user prompt（服务端不插入 user 消息，仅继续 loop）
             if let Some(tx) = SUBMIT_TX.get() {
                 let _ = tx.send(SubmitRequest::KeepGoing);
             }
-            // 防抖：1.5s 内按钮禁用（渲染为 muted 样式，见 build_footer_lines）
-            *KEEPGONG_BLOCKED_UNTIL.state().write() =
-                Some(Instant::now() + Duration::from_millis(1500));
+            // 防抖：冷却期内按钮禁用（渲染为 muted 样式，见 build_footer_lines）
+            *KEEPGOING_BLOCKED_UNTIL.state().write() = Some(now + KEEPGOING_DEBOUNCE);
             // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                *KEEPGONG_BLOCKED_UNTIL.state().write() = None;
+                tokio::time::sleep(KEEPGOING_DEBOUNCE).await;
+                *KEEPGOING_BLOCKED_UNTIL.state().write() = None;
                 RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
             });
             EventResult::Consumed
