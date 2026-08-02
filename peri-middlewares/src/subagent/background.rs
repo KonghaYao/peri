@@ -299,11 +299,8 @@ impl BackgroundTaskRegistry {
                             "bg task cancel: pid is 0 (spawn likely failed), skipping kill"
                         );
                     } else {
-                        // 通过 kill 命令发送 SIGTERM（跨平台 Unix）
-                        let _ = std::process::Command::new("kill")
-                            .arg("-TERM")
-                            .arg(pid.to_string())
-                            .spawn();
+                        // 杀整个进程组（bash 为组长），避免子进程孤儿存活
+                        crate::process::kill_process_group(pid, "TERM");
                     }
                 }
             }

@@ -62,6 +62,7 @@ impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
             tool_calls_count: 0,
             duration_ms,
             child_thread_id: None,
+            timed_out: false,
         };
         self.complete(task_id, result);
     }

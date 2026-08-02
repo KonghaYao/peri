@@ -8,6 +8,9 @@ pub struct BackgroundTaskResult {
     pub output: String,
     pub tool_calls_count: usize,
     pub duration_ms: u64,
+    /// 后台任务是否因超时被终止（进程组已终止，逃逸子进程可能存活）
+    #[serde(default)]
+    pub timed_out: bool,
     /// SQLite child thread ID（uuid7），用于 TUI 聚焦时 load_messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<String>,
@@ -21,6 +24,11 @@ impl BackgroundTaskResult {
             format!(
                 "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
                 short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
+            )
+        } else if self.timed_out {
+            format!(
+                "[后台任务 {} 超时被终止]（进程组已终止，逃逸子进程可能存活） Agent: {}\n错误:\n{}",
+                short_id, self.agent_name, self.output,
             )
         } else {
             format!(

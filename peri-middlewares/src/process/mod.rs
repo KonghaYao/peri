@@ -6,6 +6,44 @@
 // [TRAP] 所有子进程 spawn 必须通过 shell_command() 统一 wrapper
 // 新增 spawn 时必须复用，禁止直接用 std::process::Command 裸调。
 
+/// 向进程组发送信号（fire-and-forget，不等待结果）。
+///
+/// - **Unix**：执行 `kill -<SIG> -- -<pid>`——负号 PID 表示进程组，`--` 防止
+///   PID 被解析为选项（macOS BSD kill 与 Linux GNU kill 均支持）。
+///   前提：调用方 spawn 时已设置 `process_group(0)` 使 bash 成为进程组组长，
+///   这样 TERM/KILL 会波及 shell 的全部子进程，避免孤儿进程存活。
+/// - **Windows**：无 POSIX 信号/进程组，回退 `taskkill /T /F` 尽力杀进程树。
+///
+/// 用法示例：`kill_process_group(pid, "TERM")`。
+pub fn kill_process_group(pid: u32, signal: &str) {
+    if pid == 0 {
+        // 防御性守卫：kill 0 会波及当前进程组
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg("--")
+            .arg(format!("-{pid}"))
+            // 静默：进程组可能已自然退出（kill 失败属预期），避免噪音日志
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .arg("/F")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 /// Escape an argument for PowerShell single-quoted literal string.
 ///
 /// In PowerShell, single-quoted strings treat all characters literally except

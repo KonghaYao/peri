@@ -922,6 +922,7 @@ async fn build_and_execute_agent(
                                 tool_calls_count: task_result.tool_calls_count,
                                 duration_ms: task_result.duration_ms,
                                 child_thread_id: None,
+                                timed_out: false,
                             };
                             // 在 Defer 入队后递减 active_count，消除 tool.rs 通知 task 中的竞态窗口：
                             // 原实现在 registry.complete() broadcast 后立即调用 bg.complete_workflow()，

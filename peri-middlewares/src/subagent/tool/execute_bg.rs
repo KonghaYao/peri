@@ -253,6 +253,7 @@ impl super::SubAgentTool {
                         tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
                         duration_ms: started_at.elapsed().as_millis() as u64,
                         child_thread_id: Some(child_thread_id_clone.clone()),
+                        timed_out: false,
                     };
                     // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
                     if let Some(ref on_complete) = on_bg_complete {
@@ -315,6 +316,7 @@ impl super::SubAgentTool {
                 tool_calls_count: crate::subagent::count_tool_calls_from_session(&session),
                 duration_ms: started_at.elapsed().as_millis() as u64,
                 child_thread_id: Some(child_thread_id_clone.clone()),
+                timed_out: false,
             };
             if let Some(ref sender) = bg_event_sender {
                 let _ = sender.send(ExecutorEvent::BackgroundTaskCompleted(result.clone()));
