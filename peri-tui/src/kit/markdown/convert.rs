@@ -70,6 +70,14 @@ pub(crate) struct ConvertState {
 ///
 /// 以 `\n\n` 结尾时最后一个非空块已被空行闭合：追加内容只能产生新块，旧块内容
 /// 不变（已验证：`para\n\n` + `more` → `[P(para), P(more)]`）。
+///
+/// [代价权衡] 对「已闭合但未以空行（`\n\n`）结尾的块」——闭合代码块（```` ```\n ````）、
+/// 列表项、段落等——本函数每次追加都会回滚其进度，续跑时重新处理该块：该场景的
+/// convert 成本与旧实现最坏情况持平（旧实现本就不持久化该输入，或按 `\n` 结尾
+/// 持久化后仍需 O(delta) 重处理）。这是正确性优先的取舍而非缺陷——散文（段落内
+/// 追加、无闭合块）与以空行闭合的块仍命中增量续跑（O(delta)），正确性由
+/// `mod_test.rs` 的回归测试保障。若未来要优化该场景，需先证明块在追加下不变
+/// （如 fenced code block 以 `\n` 结尾时行可增长，不能仅按块类型判定稳定）。
 pub(crate) fn rollback_trailing_unstable(
     blocks: &[ParsedBlock],
     state: &mut ConvertState,

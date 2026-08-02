@@ -6,8 +6,8 @@
 
 1. **单一数据源**：`VIEW_MODELS` atom（`ViewModelsSnapshot { items: im::Vector<TuiRenderUnit>, generation: u64 }`）是消息流唯一数据源。`BridgeState` 在中间持有 `committed`（已归档历史）与 `current_turn`（当前轮次增量），通过 `push_view_models()` 统一写入 atom。视图组件直接读 atom 渲染，不存在第二份消息副本。
 2. **追加归档语义**：轮次结束（`TurnDone`/`TurnInterrupted`/`TurnSuspended`）时将 `current_turn.view_models()` **逐条追加**到 `committed`，然后 `reset()` current_turn。追加而非全量替换——因为 committed 内部已包含历史归档，只需追加本轮增量。
-3. **视图派生是方法**：`CurrentTurn::build_view_models()` 从内部 `segments` 派生 `Vec<TuiRenderUnit>`，`push_view_models()` 将 `committed + current_turn.view_models()` 拼接写入 atom。不存在独立的纯函数或 transcript 切片。
-4. **段交叉时序保证**：`CurrentTurn.segments`（`Vec<TurnSegment>`）记录文本/工具/SubAgent 的时序交叉，`build_view_models()` 遍历 segments 产生正确时序的 VM 序列。单 turn 内多迭代的内容通过 segments 自然排序。
+3. **视图派生是方法**：`CurrentTurn::view_models()` 从内部 `segments` 派生 `im::Vector<TuiRenderUnit>`（`sync_cache` 增量修补——冻结段只构建一次，仅变化部分重建），`push_view_models()` 将 `committed + current_turn.view_models()` 拼接写入 atom。不存在独立的纯函数或 transcript 切片。
+4. **段交叉时序保证**：`CurrentTurn.segments`（`Vec<TurnSegment>`）记录文本/工具/SubAgent 的时序交叉，`sync_cache()` 遍历 segments 产生正确时序的 VM 序列。单 turn 内多迭代的内容通过 segments 自然排序。
 5. **SubAgent 状态内聚**：SubAgent 的流式状态由 `SubAgentAccumulator` 在 `CurrentTurn.subagents` 内管理，事件按 `agent_id` 路由。TurnCommitted 在 TUI 层统一处理不区分 SubAgent。
 6. **渲染性能按 VM 分片缓存**：`VmCacheSlot` 按 `content_hash + width + palette_key` 缓存每个 VM 的 lines/wrap_map/visual_rows/markdown_cache。流式期间仅最后一个气泡的 hash 变化触发重建，其余 `Arc::clone` 复用，单次成本从 O(N×W) 降至 O(W)。
 
@@ -74,11 +74,11 @@ graph TB
 | `tool_cards` | `Vec<ToolCardAccumulator>`：工具卡片列表，`output_summary.is_none()` 表示 pending |
 | `subagents` | `Vec<SubAgentAccumulator>`：SubAgent 卡片列表 |
 | `segments` | `Vec<TurnSegment>`：段交叉时序记录（AssistantText/Tool/SubAgent 三种变体） |
-| `cached_view_models` | 缓存的 VM 列表，流式数据变化时清除，下次 `view_models()` 重建 |
+| `cached_view_models` | 增量 VM 缓存（`im::Vector`），由 `sync_cache` 增量修补：冻结段只构建一次，仅变化部分（trailing 气泡、运行中工具卡、内容变化的 subagent 组）重建；`invalidate_cache` 置位后下次 `view_models()` 重同步 |
 | `last_text_flush` / `last_reasoning_flush` | 文本/推理的字节偏移追踪，用于检测新文本是否需要新 segment |
 | `last_message_id` | 最近 TextChunk 的 messageId，变化时 flush pending 文本为新 segment |
 
-`segments` 是时序核心——Agent 文本、工具调用、SubAgent 启动在协议层交错到达，`build_view_models()` 遍历 segments 产生正确交叉时序的 `TuiRenderUnit` 序列。
+`segments` 是时序核心——Agent 文本、工具调用、SubAgent 启动在协议层交错到达，`sync_cache()` 遍历 segments 产生正确交叉时序的 `TuiRenderUnit` 序列。
 
 ### 2.3 追加归档语义
 
@@ -119,13 +119,15 @@ TurnCommitted 在 TUI 层仅做刷新检查点——在 goal 自驱场景下 Tur
 
 ## 4. 视图派生
 
-### 4.1 CurrentTurn::build_view_models()
+### 4.1 CurrentTurn::view_models() — 增量 VM 缓存
 
-`build_view_models()` 是 `CurrentTurn` 的方法（非独立纯函数），从内部 segments/text/reasoning/tool_cards/subagents 构建 `Vec<TuiRenderUnit>`：
+`view_models()` 是 `CurrentTurn` 的统一 VM 入口（`&mut self`）：`cache_dirty` 时调用 `sync_cache()` 增量修补缓存，然后返回 `cached_view_models`。`sync_cache()` 从内部 segments/text/reasoning/tool_cards/subagents 对齐 `im::Vector<TuiRenderUnit>`：
 
-1. **遍历 segments**：按时序产生 `TuiAssistantBubble`（文本）、`TuiToolCard`（工具）、`TuiSubAgentGroup`（SubAgent）
-2. **Flush 剩余文本**：segments 之后的残余文本/推理生成最终气泡
-3. **后处理**：Agent 工具卡片的 `tool_calls_count` 与紧随的 SubAgent 组配对
+1. **遍历 segments**：按时序产生 `TuiAssistantBubble`（文本）、`TuiToolCard`（工具）、`TuiSubAgentGroup`（SubAgent）；冻结的 AssistantText 段只构建一次，未变化的元素直接复用缓存
+2. **Trailing 补丁**：segments 之后的残余文本/推理生成最终气泡（长度比对做 O(1) 变化检测）
+3. **后处理**：Agent 工具卡片的 `tool_calls_count` 与紧随的 SubAgent 组配对；顶层 turn 额外做折叠归一化（仅最后一个 reasoning 展开，与 push_view_models 折叠 pass 稳态一致，使该 pass 对 current_turn 部分零翻转）
+
+缓存语义为**增量修补**而非清除式重建：流式变更在 mutation 时 eager sync（不置 dirty），每 token 成本 O(变化量 + 段数扫描)；`invalidate_cache`（如 acp_bridge 1s tick 刷新工具时长）置位后在下次调用时重同步。`im::Vector` 持久结构使 `cached_view_models` 可 O(1) 克隆共享（SubAgent 组、push_view_models 快照）。
 
 ### 4.2 push_view_models() — 统一 atom 写入
 
@@ -157,9 +159,9 @@ committed.clone() + current_turn.view_models() → 扁平 im::Vector<TuiRenderUn
 
 ### 4.4 时序正确性
 
-`segments` 保证时序：每个流式事件（文本 flush / ToolStarted / SubagentStarted）追加一个 TurnSegment，`build_view_models()` 遍历 segments 产生交叉时序的 VM 序列。
+`segments` 保证时序：每个流式事件（文本 flush / ToolStarted / SubagentStarted）追加一个 TurnSegment，`sync_cache()` 遍历 segments 产生交叉时序的 VM 序列。
 
-v1 的 bug 根因：v1 用独立的跨迭代累积字段（所有文本在一起、所有工具在一起），无法区分迭代边界。v2 通过 segments 记录每段事件的精确时序，build_view_models 直接按 segments 顺序输出。
+v1 的 bug 根因：v1 用独立的跨迭代累积字段（所有文本在一起、所有工具在一起），无法区分迭代边界。v2 通过 segments 记录每段事件的精确时序，sync_cache 直接按 segments 顺序输出。
 
 ---
 
@@ -272,7 +274,7 @@ MessageArea 只 clone + highlight + 渲染视口内约 60 行，通过 `wrap_map
 
 1. `BridgeState` 持有 `committed: im::Vector<TuiRenderUnit>` + `current_turn: CurrentTurn`
 2. `CurrentTurn.segments`（`Vec<TurnSegment>`）记录文本/工具/SubAgent 的时序交叉
-3. `CurrentTurn::build_view_models()` 从 segments 派生 `Vec<TuiRenderUnit>`
+3. `CurrentTurn::view_models()` 从 segments 增量派生 `im::Vector<TuiRenderUnit>`（sync_cache 增量修补）
 4. `push_view_models()` 统一将 committed + current_turn.view_models() 写入 VIEW_MODELS atom
 5. TurnDone/TurnInterrupted/TurnSuspended 三路归档，各自不同策略
 6. `VmCacheSlot` 按 content_hash + width + palette_key 分片缓存，流式单次 O(W)

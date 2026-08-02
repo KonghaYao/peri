@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::kit::submit_request::SubmitRequest;
-use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::{TuiRenderUnit, reasoning_collapse_target};
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
@@ -30,27 +30,27 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 不重算会导致按 hash 分片的渲染缓存命中旧值、折叠/展开后 UI 不刷新。
     // [共享安全] items 通过 append 与 current_turn 缓存共享元素——先收集翻转
     // 目标，再用 im::Vector::set（内部 COW）应用，避免就地修改共享节点。
-    let mut flips: Vec<(usize, bool)> = Vec::new();
-    let mut found_last = false;
-    for i in (0..items.len()).rev() {
-        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &items[i]
-            && let Some(ref reasoning) = bubble.reasoning
-        {
-            let target_collapsed = found_last;
-            if reasoning.collapsed != target_collapsed {
-                flips.push((i, target_collapsed));
-            }
-            if !found_last {
-                found_last = true;
+    // 目标选择与 acp_types.rs 的 normalize_collapsed 共用 reasoning_collapse_target
+    // 单点定义（策略变更只改 tui_render_unit.rs 一处）。
+    if let Some(last_idx) = reasoning_collapse_target(&items) {
+        let mut flips: Vec<(usize, bool)> = Vec::new();
+        for (i, vm) in items.iter().enumerate() {
+            if let TuiRenderUnit::TuiAssistantBubble(bubble) = vm
+                && let Some(ref reasoning) = bubble.reasoning
+            {
+                let target_collapsed = i != last_idx;
+                if reasoning.collapsed != target_collapsed {
+                    flips.push((i, target_collapsed));
+                }
             }
         }
-    }
-    for (i, target_collapsed) in flips {
-        if let TuiRenderUnit::TuiAssistantBubble(bubble) = &items[i] {
-            let mut updated = bubble.clone();
-            updated.reasoning.as_mut().unwrap().collapsed = target_collapsed;
-            updated.recompute_hash();
-            items.set(i, TuiRenderUnit::TuiAssistantBubble(updated));
+        for (i, target_collapsed) in flips {
+            if let TuiRenderUnit::TuiAssistantBubble(bubble) = &items[i] {
+                let mut updated = bubble.clone();
+                updated.reasoning.as_mut().unwrap().collapsed = target_collapsed;
+                updated.recompute_hash();
+                items.set(i, TuiRenderUnit::TuiAssistantBubble(updated));
+            }
         }
     }
 

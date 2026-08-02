@@ -14,7 +14,7 @@ use crate::kit::stream_data::*;
 use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
 use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiToolCard, TuiToolPresentation,
-    tui_hash_combine, tui_hash_roll_update, tui_hash_str,
+    reasoning_collapse_target, tui_hash_combine, tui_hash_roll_update, tui_hash_str,
 };
 use peri_acp_types::event_data::*;
 use serde_json::Value;
@@ -34,7 +34,7 @@ use std::time::Instant;
 ///
 /// Agent text, tool calls, and sub-agent starts are interleaved at the protocol
 /// level: the model says a few words, then calls a tool, then continues speaking.
-/// `segments` records this chronological order so that `build_view_models` can
+/// `segments` records this chronological order so that `sync_cache` can
 /// create separate `TuiAssistantBubble` entries for text before and after each
 /// tool/sub-agent boundary, instead of merging everything into one fat bubble.
 #[derive(Debug, Clone)]
@@ -545,7 +545,7 @@ impl CurrentTurn {
                     }
                 }
                 TurnSegment::SubAgent { subagent_idx } => {
-                    if let Some(s) = self.subagents.get(*subagent_idx) {
+                    if let Some(s) = self.subagents.get_mut(*subagent_idx) {
                         let group_vm = s.view_model();
                         // O(1) hash 比较——未变化的 subagent 直接跳过 set()，
                         // 已变化的替换为新组（im::Vector set 走 COW，共享未变子节点）。
@@ -629,16 +629,12 @@ impl CurrentTurn {
     }
 
     /// 折叠归一化：缓存中非最后一个 reasoning bubble 折叠（collapsed=true 并重算 hash）。
+    ///
+    /// 目标选择与 `acp_events/render.rs` 的折叠 pass 共用
+    /// [`reasoning_collapse_target`] 单点定义——策略变更只改那一处，防止两处
+    /// 实现分叉破坏渲染缓存一致性。
     fn normalize_collapsed(&mut self) {
-        let mut last_reasoning: Option<usize> = None;
-        for (i, vm) in self.cached_view_models.iter().enumerate() {
-            if let TuiRenderUnit::TuiAssistantBubble(b) = vm
-                && b.reasoning.is_some()
-            {
-                last_reasoning = Some(i);
-            }
-        }
-        let Some(last_idx) = last_reasoning else {
+        let Some(last_idx) = reasoning_collapse_target(&self.cached_view_models) else {
             return;
         };
 
@@ -846,16 +842,20 @@ impl SubAgentAccumulator {
         ended
     }
 
-    pub(crate) fn view_model(&self) -> TuiRenderUnit {
+    pub(crate) fn view_model(&mut self) -> TuiRenderUnit {
         // 缓存命中——直接返回。子 turn 的 VM 缓存由 mutation 时 eager sync 维护，
         // 这里不再需要 child_turn.clone() + view_models() 全量重建。
         if let Some(vm) = self.cached_view_model.borrow().as_ref() {
             return vm.clone();
         }
 
-        // 直接 O(1) 共享子 turn 的增量缓存（im::Vector 持久结构）——
-        // 不再把全部 child VM 深拷贝进 im::Vector。
-        let child_vms = &self.child_turn.cached_view_models;
+        // 统一走 child_turn 的统一入口（走 cache_dirty 检查，dirty 时先 sync_cache）
+        // 而非直读 cached_view_models 私有字段。当前生产路径 child_turn.cache_dirty
+        // 恒为 false（mutation 全部 eager sync，invalidate_cache 只作用于顶层
+        // current_turn），此时该入口是 O(1) 直读，与直接访问字段成本相同；一旦未来
+        // 对 child_turn 增加 invalidate 调用（如子工具时长刷新），这里会自动重同步，
+        // 不会静默渲染陈旧内容。
+        let child_vms = self.child_turn.view_models();
         // M1: 用 u64 组合累加每个 child VM 的 content_hash，确保 child 文本
         // 变化时（即使 child_vms.len() 不变）也能触发按 hash 分片的渲染缓存重建。
         // 不再拼 String 再 format——直接对 u64 做确定性组合。
