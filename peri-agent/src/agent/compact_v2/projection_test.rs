@@ -372,7 +372,6 @@ fn test_tool_input_projection_short_or_invalid_selected_fields_are_noops() {
         serde_json::json!({"other": "x".repeat(600)}),
         serde_json::json!(["x".repeat(600)]),
     ];
-
     for input in cases {
         let transcript = transcript_with_tool_exchange("tc_1", input.clone(), "ok", false);
         let ai_msg_id = transcript.visible_messages()[0].id();
@@ -403,6 +402,56 @@ fn test_tool_input_projection_short_or_invalid_selected_fields_are_noops() {
         };
         assert_eq!(tool_calls[0].arguments, input);
     }
+}
+
+#[test]
+fn regression_glob_short_pattern_projection_contains_no_compact_note() {
+    // 回归验证：短参数工具调用投影后不含 _compact_note 占位
+    // 原始报错：{"_compact_note":"tool input compacted"} → The 'pattern' parameter is required
+    let transcript = transcript_with_tool_exchange(
+        "tc_1",
+        serde_json::json!({"pattern": "**/*.rs"}),
+        "ok",
+        false,
+    );
+    let ai_msg_id = transcript.visible_messages()[0].id();
+    let plan = MicroCompactPlan {
+        policy_version: PROJECTION_POLICY_VERSION,
+        target_reclaim_tokens: 0,
+        actions: vec![ProjectionActionEntry {
+            message_id: ai_msg_id,
+            target: ProjectionTarget::ToolCall {
+                tool_call_id: "tc_1".into(),
+            },
+            action: ProjectionAction::CompactToolInput {
+                fields: vec![],
+                keep_head: 350,
+                keep_tail: 100,
+            },
+        }],
+        estimated_before_tokens: 0,
+        estimated_after_tokens: 0,
+        estimated_tokens_saved: 0,
+        ..Default::default()
+    };
+
+    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+        .expect("render_llm_view 应成功");
+    let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
+        panic!("第一条消息应为 Ai 消息");
+    };
+    assert_eq!(
+        tool_calls[0].arguments,
+        serde_json::json!({"pattern": "**/*.rs"}),
+        "短参数投影应为 no-op，保持原样"
+    );
+    assert!(
+        !tool_calls[0]
+            .arguments
+            .to_string()
+            .contains("_compact_note"),
+        "投影视图不应出现 _compact_note 占位"
+    );
 }
 
 #[test]
@@ -965,7 +1014,8 @@ fn test_plan_from_persisted_directives_stale_config_still_renders() {
                     tool_call_id: tool_call_id.to_string(),
                 },
                 action: ProjectionAction::CompactToolInput {
-                    fields: vec![],
+                    // 真实 directive 不再使用空 fields（短参数不再被占位压缩）
+                    fields: vec!["cmd".into()],
                     keep_head: 350,
                     keep_tail: 100,
                 },
@@ -1123,6 +1173,23 @@ fn test_render_llm_view_from_persisted_directives() {
     let caps = ProviderCapabilities::default();
     let projected =
         render_llm_view(&t, &plan_result.unwrap(), &caps).expect("render_llm_view 应成功");
+
+    // 验证 ToolUse arguments 保持原样（fields 空 = no-op，不再替换为 _compact_note 占位）
+    let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
+        panic!("第一条消息应为 Ai 消息");
+    };
+    assert_eq!(
+        tool_calls[0].arguments,
+        serde_json::json!({"cmd": "ls -la"}),
+        "fields 空 action 应为 no-op，arguments 保持原样"
+    );
+    assert!(
+        !tool_calls[0]
+            .arguments
+            .to_string()
+            .contains("_compact_note"),
+        "投影视图不应出现 _compact_note 占位"
+    );
 
     // 验证 ToolResult 被截断
     let tr_projected = &projected[1];
