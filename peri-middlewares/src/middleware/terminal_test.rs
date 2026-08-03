@@ -269,10 +269,12 @@ fn test_truncate_output_persists_full_content_on_byte_truncation() {
 // ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
 
 /// parse_timeout 纯函数语义：
-/// - 后台：未传 → None（不超时）；显式 0 → None；显式 >0 → 原样（clamp 范围内）
-/// - 同步：未传 → Some(15000)；显式 0 → None；显式 >0 → clamp 上限 600000
+/// - 后台：未传 → None（不超时）；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
+/// - 同步：未传 → Some(15000)；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
+/// - min：Unix 为 1；Windows 为 5000（进程创建/终止开销大，过短超时不可靠）
 #[test]
 fn test_parse_timeout_semantics() {
+    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
     // 后台
     assert_eq!(parse_timeout(&serde_json::json!({}), true), None);
     assert_eq!(
@@ -281,7 +283,7 @@ fn test_parse_timeout_semantics() {
     );
     assert_eq!(
         parse_timeout(&serde_json::json!({"timeout": 2000}), true),
-        Some(2000)
+        Some(2000.max(min))
     );
     // 同步
     assert_eq!(parse_timeout(&serde_json::json!({}), false), Some(15_000));
