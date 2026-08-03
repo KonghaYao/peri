@@ -256,6 +256,12 @@ impl EventSink for TransportEventSink {
                 ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
                     message: message.clone(),
                 }),
+                // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
+                // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
+                // 丢弃 messages_json），Langfuse bridge 亦不读取（bridge.rs:319）。
+                // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
+                // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
+                ExecutorEvent::TurnCommitted { .. } => None,
                 _ => None,
             };
             if let Some(acp_event) = acp_event {

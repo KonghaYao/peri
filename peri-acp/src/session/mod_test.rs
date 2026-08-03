@@ -104,7 +104,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp);
 
-    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[]);
+    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[], true);
     assert!(
         !frozen.system_prompt().is_empty(),
         "frozen system_prompt 不应为空"
@@ -114,6 +114,34 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     assert_eq!(date_chars.len(), 10, "日期长度应为 10");
     assert_eq!(date_chars[4], '-', "第 5 个字符应为连字符");
     assert_eq!(date_chars[7], '-', "第 8 个字符应为连字符");
+}
+
+/// [回归测试] last_notified_permission_mode 初始化为"未通知过"哨兵。
+///
+/// 历史背景（D2 / P3-2026-08-02）：10_hitl 不含 mode snapshot、Bypass 时
+/// 10_hitl 不渲染，初始 mode 从不向模型公开。旧实现把 last_notified 初始化为
+/// session 创建时的全局 mode，使首轮不产生通知——初始 mode 因此永久不可见。
+/// 修复后初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵：首个模型可见
+/// turn 公开初始 mode 一次，入队记账后不再重复；真实 mode 值（0..=4）
+/// 不会与哨兵碰撞。
+#[tokio::test]
+async fn test_last_notified_permission_mode_initialized_to_never_notified() {
+    use std::sync::atomic::Ordering;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp); // make_session_manager 全局 mode = Bypass
+    let session_id = "test-last-notified-init";
+
+    mgr.ensure_session(session_id, "/tmp");
+    let last = mgr
+        .get_session(session_id)
+        .map(|s| s.last_notified_permission_mode.load(Ordering::Relaxed))
+        .expect("ensure_session 后应存在 AcpSession");
+    assert_eq!(
+        last,
+        super::executor::PERMISSION_MODE_NEVER_NOTIFIED,
+        "last_notified 应初始化为'未通知过'哨兵（首个模型可见 turn 公开初始 mode）"
+    );
 }
 
 /// 验证 cancel_cascade_children_for 在 session 不存在时不 panic

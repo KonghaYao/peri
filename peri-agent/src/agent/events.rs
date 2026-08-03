@@ -8,6 +8,9 @@ pub struct BackgroundTaskResult {
     pub output: String,
     pub tool_calls_count: usize,
     pub duration_ms: u64,
+    /// 后台任务是否因超时被终止（进程组已终止，逃逸子进程可能存活）
+    #[serde(default)]
+    pub timed_out: bool,
     /// SQLite child thread ID（uuid7），用于 TUI 聚焦时 load_messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<String>,
@@ -21,6 +24,11 @@ impl BackgroundTaskResult {
             format!(
                 "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
                 short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
+            )
+        } else if self.timed_out {
+            format!(
+                "[后台任务 {} 超时被终止]（进程组已终止，逃逸子进程可能存活） Agent: {}\n错误:\n{}",
+                short_id, self.agent_name, self.output,
             )
         } else {
             format!(
@@ -223,8 +231,12 @@ pub enum ExecutorEvent {
     /// TUI 据此调用 `MessagePipeline::commit_iteration(messages)` 同步规范状态，
     /// 避免 Render 事件流自洽重建 transcript 时多迭代文本/工具顺序错乱。
     TurnCommitted {
-        /// 当前 transcript 的可见消息全量快照（owned，便于跨进程传递）
-        messages: Vec<crate::messages::BaseMessage>,
+        /// 当前 transcript 的可见消息全量快照。
+        ///
+        /// Arc 共享引用——Clone ExecutorEvent 时为浅拷贝（引用计数 +1），
+        /// 避免事件管道多级转发时的全量深拷贝（与 `LlmCallStart.messages`
+        /// 同一模式）。serde 序列化结果与 `Vec<BaseMessage>` 完全一致。
+        messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
         /// 当前 ReAct 步数
         steps: usize,
     },

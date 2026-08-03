@@ -13,6 +13,10 @@ pub(super) fn build(
     ctx: &StdioContext,
     cwd: &str,
 ) -> peri_acp::session::executor::FrozenSessionData {
-    ctx.session_manager
-        .build_frozen_data(cwd, &ctx.plugin_skill_roots, &ctx.plugin_agent_dirs)
+    ctx.session_manager.build_frozen_data(
+        cwd,
+        &ctx.plugin_skill_roots,
+        &ctx.plugin_agent_dirs,
+        true,
+    ) // workflow_enabled：stdio prompt 路径无条件创建 executor
 }

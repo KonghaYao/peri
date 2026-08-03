@@ -34,15 +34,16 @@ pub fn extract_skill_names_from_text(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// SkillPreloadMiddleware - 将指定 skill 全文以 fake Skill 工具调用注入到 agent state
+/// SkillPreloadMiddleware - 将指定 skill 全文以 fake SkillTool 调用注入到 agent state
 ///
 /// 在 `before_agent` 时，根据 `skill_names` 列表找到对应 SKILL.md 文件，
-/// 将其内容以 Ai[ToolUse{Skill}] → Tool[ToolResult] 消息序列追加到用户消息之后（executor
+/// 将其内容以 Ai[ToolUse{SkillTool}] → Tool[ToolResult] 消息序列追加到用户消息之后（executor
 /// 在 `before_agent` 之前已将用户消息 `add_message` 到 state），使 LLM 从第一轮推理
 /// 就能看到完整 skill 内容。
 ///
-/// 注入的 ToolUse 名为 `Skill`（与会话中真实注册的 Skill 工具一致），input 为
-/// `{"skill": <名称>}`，与 Skill 工具的调用参数格式对齐。
+/// 注入的 ToolUse 名为 `SkillTool`（与会话中真实注册的统一 skill 加载协议一致，
+/// 见 D3：`Skill(skill, args)` 已移除，模型可见协议只剩 `SkillTool(skill_name)` +
+/// `DiscoverSkillsTool`），input 为 `{"skill_name": <名称>}`。
 ///
 /// 使用 `add_message` 而非 `prepend_message`，确保工具调用出现在用户消息之后，
 /// 不影响 Anthropic messages 数组的 prompt cache（cache_control 在第一条 user 消息上）。
@@ -51,7 +52,7 @@ pub fn extract_skill_names_from_text(text: &str) -> Vec<String> {
 ///
 /// ```text
 /// [Human "用户消息"]  ← 已由 executor 添加
-/// [Ai]    [ToolUse{Skill, call_{hex}}, ToolUse{Skill, call_{hex}}, ...]
+/// [Ai]    [ToolUse{SkillTool, call_{hex}}, ToolUse{SkillTool, call_{hex}}, ...]
 /// [Tool]  ToolResult{call_{hex}, skill_0_content}
 /// [Tool]  ToolResult{call_{hex}, skill_1_content}
 /// ...
@@ -163,12 +164,16 @@ impl Middleware for SkillPreloadMiddleware {
             .map(|_| format!("call_{}", uuid::Uuid::new_v4().simple()))
             .collect();
 
-        // 构造 Ai 消息的 ToolUse ContentBlock 列表（fake Skill 工具调用）
+        // 构造 Ai 消息的 ToolUse ContentBlock 列表（fake SkillTool 工具调用）
         let tool_use_blocks: Vec<ContentBlock> = skill_contents
             .iter()
             .zip(call_ids.iter())
             .map(|((name, _), id)| {
-                ContentBlock::tool_use(id.clone(), "Skill", serde_json::json!({ "skill": name }))
+                ContentBlock::tool_use(
+                    id.clone(),
+                    "SkillTool",
+                    serde_json::json!({ "skill_name": name }),
+                )
             })
             .collect();
 

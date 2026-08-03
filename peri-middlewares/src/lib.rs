@@ -81,8 +81,6 @@ pub use tool_search::{
     EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD,
     SEARCH_EXTRA_TOOLS_NAME,
 };
-pub use tools::skill::SkillTool;
-pub use tools::skill::SkillToolMiddleware;
 pub use tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper};
 
 /// Prelude - 常用类型一次性导入
@@ -115,7 +113,6 @@ pub mod prelude {
         },
         skills::{SkillMetadata, SkillsMiddleware},
         subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},
-        tools::skill::{SkillTool, SkillToolMiddleware},
         tools::{
             ArcToolWrapper, AskUserTool, BoxToolWrapper, EditFileTool, FolderOperationsTool,
             GlobFilesTool, GrepTool, ReadFileTool, TodoItem, TodoStatus, TodoWriteTool,

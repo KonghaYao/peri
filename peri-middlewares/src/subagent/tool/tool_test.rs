@@ -951,6 +951,79 @@ async fn test_fork_system_prompt_consistent() {
     );
 }
 
+/// [回归测试] SubAgent fork 复用父冻结 system prompt，不回退 system_builder。
+///
+/// 历史背景（ARC-FROZEN-001 / 审计 prompt-sections-audit.md 条目 7）：fork
+/// 生产路径继承父**冻结** system prompt（execute_fork.rs frozen_system_prompt
+/// 优先），与主 agent 前缀保持一致；若改为无条件走 system_builder 或每轮
+/// 重渲染，会破坏会话内前缀一致性。本测试固定两个输入（frozen 与 builder），
+/// 断言 frozen 优先——即"同一 FrozenSessionData 输入下主 agent 与 subagent
+/// 复用稳定 prompt"的外部结果。
+#[tokio::test]
+async fn test_fork_prefers_frozen_system_prompt_over_builder() {
+    let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
+
+    let sys_capture: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let sys_capture_clone = Arc::clone(&sys_capture);
+
+    struct FrozenCheckLLM {
+        captured: Arc<std::sync::Mutex<String>>,
+    }
+    #[async_trait::async_trait]
+    impl ReactLLM for FrozenCheckLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let sys = messages
+                .iter()
+                .find(|m| matches!(m, BaseMessage::System { .. }))
+                .map(|m| m.content())
+                .unwrap_or_default();
+            *self.captured.lock().unwrap() = sys;
+            Ok(Reasoning::with_answer("", "frozen-check"))
+        }
+    }
+
+    let t = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            Box::new(FrozenCheckLLM {
+                captured: Arc::clone(&sys_capture_clone),
+            }) as Box<dyn ReactLLM + Send + Sync>
+        }),
+        "/tmp".to_string(),
+    )
+    .with_parent_messages(parent_messages)
+    .with_frozen_system_prompt(Arc::new("FROZEN-PARENT-SYSTEM-PROMPT".to_string()))
+    .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string()));
+
+    t.invoke(
+        serde_json::json!({
+            "fork": true,
+            "prompt": "check frozen prefix"
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    let captured = sys_capture.lock().unwrap();
+    assert!(
+        captured.contains("FROZEN-PARENT-SYSTEM-PROMPT"),
+        "Fork 应复用父冻结 system prompt, got: {}",
+        *captured
+    );
+    assert!(
+        !captured.contains("BUILDER-SYSTEM-PROMPT"),
+        "frozen 存在时不应回退 system_builder, got: {}",
+        *captured
+    );
+}
+
 /// Fork directive includes RULES
 #[tokio::test]
 async fn test_fork_directive_includes_rules() {

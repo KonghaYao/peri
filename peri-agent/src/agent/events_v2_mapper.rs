@@ -76,7 +76,8 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             steps,
             ..
         } => Some(ExecutorEvent::TurnCommitted {
-            messages: (*finalized_messages).clone(),
+            // Arc 直接透传（浅拷贝），消除每迭代的全量消息深拷贝
+            messages: finalized_messages,
             steps,
         }),
     }

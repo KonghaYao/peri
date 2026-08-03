@@ -19,7 +19,10 @@ pub mod state_builders;
 
 pub use retry_events::RetryEventForwarder;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicU8, Arc},
+};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -35,6 +38,8 @@ use peri_middlewares::{
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::PeriCaps;
+
+use executor::PERMISSION_MODE_NEVER_NOTIFIED;
 
 use crate::{
     provider::{config::PeriConfig, LlmProvider},
@@ -54,6 +59,14 @@ pub struct AcpSession {
     pub model_alias: String,
     /// 每会话独立的权限模式
     pub permission_mode: Arc<SharedPermissionMode>,
+    /// 最近一次已通知模型的 PermissionMode（跨 turn 持久）。
+    ///
+    /// D2：mode 会话内切换后，executor 在下一可消费 turn 以受控 runtime
+    /// event 通知模型，不重建 frozen system prompt。此原子值记录"上次已随
+    /// 消息入队通知的 mode"；初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
+    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode（10_hitl 不含 mode
+    /// snapshot、Bypass 时不渲染 10_hitl），随后 mode 切换各通知一次。
+    pub last_notified_permission_mode: Arc<AtomicU8>,
     /// 运行时 agent 实例（根 agent + 子 agent）
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
@@ -176,6 +189,9 @@ impl SessionManager {
             provider_id,
             model_alias,
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
+            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
+            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
+            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
@@ -211,6 +227,9 @@ impl SessionManager {
                 .unwrap_or_default(),
             model_alias: self.inner.peri_config.config.active_alias.clone(),
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
+            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
+            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
+            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
@@ -357,12 +376,17 @@ impl SessionManager {
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
+    /// `workflow_enabled`：会话创建时 Workflow executor 是否可用。
+    /// TUI/stdio 正常路径恒为 true（prompt 执行时无条件创建 executor）；
+    /// print mode 不经过此入口（直接调 `FrozenSessionData::build` 传 false）。
+    ///
     /// 直接委托给 [`FrozenSessionData::build`]（Immutable Value Object 的唯一构造入口）。
     pub fn build_frozen_data(
         &self,
         cwd: &str,
         plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
+        workflow_enabled: bool,
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
@@ -374,6 +398,7 @@ impl SessionManager {
             plugin_agent_dirs,
             &frozen_date,
             pm,
+            workflow_enabled,
         )
     }
 

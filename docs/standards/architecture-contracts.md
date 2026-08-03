@@ -26,6 +26,12 @@
 - **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。
 - **Verify**：`cargo test -p peri-middlewares --lib core_tools`；检查 `peri-agent/src/tools/mod.rs`、`peri-middlewares/src/tool_search/` 与包装工具实现。
 
+### ARC-KEEPGOING-001
+
+- **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
+- **Rule**：空白 user prompt（按 content block 判空，必须用 `MessageContent::is_empty()`，禁止用 `text_content().trim()` 替代）是「继续跑 loop」指令（keepgoing），唯一生产者是 TUI keepgoing 按钮；keepgoing turn 不注入 recall；空历史 + 空白 prompt 时 ACP executor 短路返回，且必须发送终止通知（`push_done`）使客户端退出 loading；畸形请求（`message.content` 反序列化失败）静默落入 keepgoing 路径是防御性设计，各 transport 行为一致。
+- **Verify**：`cargo test -p peri-acp --lib executor_test`（`is_keepgoing` 判空三例 + keepgoing 短路 push_done）；`cargo test -p peri-agent --lib stages`（`test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`）；人工检查 `peri-acp/src/session/executor.rs` 短路分支与 `peri-tui/src/kit/submit_consumer.rs` 的 keepgoing 提交路径。
+
 ### ARC-SERIAL-001
 
 - **Scope**：跨请求复用的 Prompt、工具注册与 provider payload。

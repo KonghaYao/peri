@@ -111,11 +111,15 @@ pub struct OpenAiModel {
 
 impl OpenAiModel {
     /// 从显式、强类型配置创建模型。
+    ///
+    /// transport 与 native request path 共享同一个 `reqwest::Client`（clone 仅
+    /// 增加引用计数，连接池 / TLS session cache 复用），不再创建双 client。
     pub fn new(config: OpenAiConfig) -> Self {
+        let client = reqwest::Client::new();
         Self {
             config,
-            transport: Arc::new(ReqwestTransport::new(reqwest::Client::new())),
-            client: reqwest::Client::new(),
+            transport: Arc::new(ReqwestTransport::new(client.clone())),
+            client,
         }
     }
 

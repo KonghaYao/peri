@@ -36,7 +36,8 @@ fn resolve_extra_tool_target(
             reason,
         })?;
     let target = DirectToolInvocationResolver.resolve_target(&target_name, tools)?;
-    Ok((target, peri_agent::tools::normalize_params(params)))
+    let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
+    Ok((target, normalized))
 }
 
 impl ToolInvocationResolver for ExecuteExtraToolResolver {
@@ -56,7 +57,7 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
             policy_call: ToolCall::new(
                 raw_call.id.clone(),
                 target.name().to_string(),
-                peri_agent::tools::normalize_params(params),
+                peri_agent::tools::normalize_params(params, Some(target.as_ref())),
             ),
             target,
             wrapper_name: Some(outer.target.name().to_string()),

@@ -9,15 +9,15 @@ Usage:
   - Read files: Use Read (NOT cat/head/tail)
   - Edit files: Use Edit (NOT sed/awk)
   - Write files: Use Write (NOT echo/cat with redirect)
-- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default is 15000ms (15 seconds). The short default encourages efficient commands — for long-running tasks (builds, installs), set a higher timeout or use run_in_background
+- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Foreground commands default to 15000ms (15 seconds) to encourage efficient commands; background tasks (run_in_background: true) run until completion unless timeout is explicitly set. Set `timeout: 0` to disable the timeout entirely
 - When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other
-- For long running commands, consider using a timeout to avoid waiting indefinitely
+- For long-running commands, consider setting an explicit timeout or using run_in_background: true
 
 Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
 - Unix/macOS: uses bash -c to execute commands
-- On Unix, child processes run in their own process group; timeout kills the entire process tree
-- On Windows, timeout only terminates the PowerShell wrapper; child processes (including peri) are NOT killed
+- On Unix, child processes run in their own process group; timeout/cancel kills the entire process group (shell and all descendants), so no orphaned children survive
+- On Windows, timeout only terminates the PowerShell wrapper process tree via taskkill; the process group semantics of Unix do not apply
 
 Output handling:
 - Output exceeding 2000 lines is truncated (head + tail preserved)

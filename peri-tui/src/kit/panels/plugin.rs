@@ -483,9 +483,12 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
 
             // Discover tab: search focus mode 或 filter 模式
+            // guard arm 中的临时 guard 会存活到整个 arm 体，arm 内对
+            // search_focus 的 write() 会死锁——先提取为 bool。
+            let search_active = *search_focus.read();
             match key.code {
                 // 搜索框已激活 → 进入搜索输入模式
-                _ if *search_focus.read() => match key.code {
+                _ if search_active => match key.code {
                     KeyCode::Char(c) => {
                         let mut t = search_text.write();
                         t.insert_char(c);
@@ -660,7 +663,10 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         return EventResult::Consumed;
                     }
                     // ── Discover 详情：点击 action 行 = 执行（Enter @L487）──
-                    if discover_detail_idx.read().is_some()
+                    // if-let scrutinee 中的临时 guard 会存活到整个块结束，
+                    // 块内对同一 atom 的 write() 会死锁——先提取为 bool。
+                    let in_discover_detail = discover_detail_idx.read().is_some();
+                    if in_discover_detail
                         && let Some(idx) = hit_item(
                             &mouse,
                             area,
@@ -730,7 +736,9 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         return EventResult::Consumed;
                     }
                     // ── Marketplace 详情：点击 action 行 = 执行（Enter @L577）──
-                    if marketplace_detail.read().is_some()
+                    // 同上：提取为 bool，避免 if-let scrutinee guard 存活到块内
+                    let in_marketplace_detail = marketplace_detail.read().is_some();
+                    if in_marketplace_detail
                         && let Some(idx) = hit_item(
                             &mouse,
                             area,
@@ -782,7 +790,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         return EventResult::Consumed;
                     }
                     // ── Installed 详情：点击 action 行 = 执行（Enter @L738）──
-                    if let Some(detail) = *detail_plugin_idx.read()
+                    // 提取 detail_plugin_idx 的 guard：if-let scrutinee 临时 guard
+                    // 存活到块结束，块内多次 write detail_plugin_idx 会死锁。
+                    let detail_plugin_opt = *detail_plugin_idx.read();
+                    if detail_plugin_opt.is_some()
+                        && let Some(detail) = detail_plugin_opt
                         && let Some(detail_p) = PLUGIN_LIST.state().read().get(detail).cloned()
                         && let Some(idx) = hit_item(
                             &mouse,
@@ -1121,7 +1133,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
             }
 
-            match (in_detail, confirm_action.read().is_some(), key.code) {
+            // 必须先提取为局部变量再 match：match scrutinee 中的临时
+            // RwLockReadGuard 会存活到整个 match 表达式结束，分支内对同一
+            // atom 执行 write() 会触发同线程 read→write 重入死锁（[bug] 卸载卡死）。
+            let confirm_active = confirm_action.read().is_some();
+            match (in_detail, confirm_active, key.code) {
                 // ── 确认模式优先 ──
                 (_, true, KeyCode::Enter) => {
                     let action = confirm_action.read().clone().unwrap_or_default();

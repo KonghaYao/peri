@@ -36,6 +36,9 @@ pub(crate) struct ConvertState {
     /// 累积缓冲区（多个 block 合并到一个 Text segment）。续跑时**不 flush**。
     pub current_text: Vec<Line<'static>>,
     /// 已 flush 的 segments（包含 Table + 已闭合的 Text）。
+    /// 返回时被 `mem::take` 清空，不跨调用保留：无 Table 时恒为空（文本全部
+    /// 累积在 current_text）；有 Table 时 `has_table_in_processed_blocks` 使
+    /// 缓存失效、每次全量重跑。续跑循环从不读取本字段。
     pub segments: Vec<MarkdownSegment>,
     /// 每个已处理 block 处理完时 current_text 的行数边界。
     /// `block_line_ends[i]` = 处理完 blocks[i] 后 current_text.len()，长度恒等于
@@ -70,6 +73,14 @@ pub(crate) struct ConvertState {
 ///
 /// 以 `\n\n` 结尾时最后一个非空块已被空行闭合：追加内容只能产生新块，旧块内容
 /// 不变（已验证：`para\n\n` + `more` → `[P(para), P(more)]`）。
+///
+/// [代价权衡] 对「已闭合但未以空行（`\n\n`）结尾的块」——闭合代码块（```` ```\n ````）、
+/// 列表项、段落等——本函数每次追加都会回滚其进度，续跑时重新处理该块：该场景的
+/// convert 成本与旧实现最坏情况持平（旧实现本就不持久化该输入，或按 `\n` 结尾
+/// 持久化后仍需 O(delta) 重处理）。这是正确性优先的取舍而非缺陷——散文（段落内
+/// 追加、无闭合块）与以空行闭合的块仍命中增量续跑（O(delta)），正确性由
+/// `mod_test.rs` 的回归测试保障。若未来要优化该场景，需先证明块在追加下不变
+/// （如 fenced code block 以 `\n` 结尾时行可增长，不能仅按块类型判定稳定）。
 pub(crate) fn rollback_trailing_unstable(
     blocks: &[ParsedBlock],
     state: &mut ConvertState,
@@ -121,7 +132,7 @@ pub(crate) fn convert_to_segments(
 /// [行为]
 /// - 跳过 blocks[..state.processed_block_count]
 /// - 处理 blocks[state.processed_block_count..]，更新 state
-/// - 返回的 segments = state.segments clone + state.current_text flush
+/// - 返回的 segments = state.segments（mem::take 移出） + state.current_text flush
 /// - **state.current_text 不 flush**（保留供下次续跑）
 ///
 /// 调用方应在 sanitized text 以换行结尾时（最后一个 block 已闭合）把
@@ -220,8 +231,12 @@ pub(crate) fn convert_to_segments_with_state(
         state.block_line_ends.push(state.current_text.len());
     }
 
-    // 末尾 flush：clone state 并 flush current_text（state.current_text 不变）
-    let mut final_segments = state.segments.clone();
+    // 末尾 flush：segments 用 mem::take 移出（零拷贝）——续跑路径下 segments
+    // 恒为空（无 Table 时全部文本都累积在 current_text；有 Table 时
+    // has_table_in_processed_blocks 令缓存失效、state 每次从 default 重建），
+    // 因此不会丢失跨调用段。current_text 必须 clone：其内容同时服务
+    // 返回全量输出与续跑 spacing 决策（保留在 state 中，见 struct doc）。
+    let mut final_segments = std::mem::take(&mut state.segments);
     let mut final_text = state.current_text.clone();
     trim_trailing_blanks(&mut final_text);
     if !final_text.is_empty() {

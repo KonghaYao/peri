@@ -231,6 +231,19 @@ return { r1, r2 }`
 // CLI 子命令模式 — 真实文件系统 + 进程调用
 // ═══════════════════════════════════════════════════════════
 
+/**
+ * CLI 子命令模式的测试 fixture — 构造真实落盘目录结构。
+ *
+ * ⚠ 跨侧契约：以下字段与 Rust 侧 `peri-workflow/src/journal.rs` 输出逐字段对齐
+ * （依据：DESIGN.md「运行结果落盘格式」节，单一事实源）：
+ * - state.json：RunState 直出（snake_case）— run_id/workflow_name/status/
+ *   return_value/script/started_at/finished_at（error 可选省略）
+ * - journal.jsonl：每行 JournalEntry{ key, seq, result }；result 为 camelCase wire
+ *   的 AgentRunResult（ok 变体：kind/output/usage.outputTokens，toolCount 等可选省略）
+ * - outputs/<label>.txt + `${label}` 占位符：extract_long_texts 的提取形态
+ *   （顶层字段路径 label，原位替换为 `${label}`）
+ * Rust 侧改动落盘格式时，须同步本 fixture 与 reader.ts。
+ */
 function makeRunsRoot(): string {
   const base = mkdtempSync(join(tmpdir(), 'workflow-e2e-'))
   const root = join(base, '.claude', 'workflow-runs')

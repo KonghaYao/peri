@@ -171,19 +171,22 @@ pub(super) fn build_footer_lines(
         ));
         let btn_text = i18n::tr("msg-keepgoing");
         // keepgoing 按钮：仅 agent 空闲（spinner 不转）时追加到 summary 行右侧。
-        // 防抖期间以 muted 样式渲染（不可点击）。
+        // 样式与 md 复制按钮统一：左右各 1 空格 + 反色（REVERSED）。
+        // 防抖期间以 muted 色渲染（不可点击）。
         let btn_span = Span::styled(
-            format!(" {btn_text}"),
+            format!(" {btn_text} "),
             Style::default()
                 .fg(if keepgoing_blocked {
                     semantic.text.muted
                 } else {
                     semantic.accent
                 })
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(Modifier::REVERSED),
         );
         let btn_width = btn_span.width() as u16;
-        let start_col = summary_line.width() as u16;
+        // 按钮与 summary 文本之间空 1 个普通空格（不反色）表示间距，
+        // 按钮点击区域从该空格之后算起。
+        let start_col = summary_line.width() as u16 + 1;
         // [Fix m4] 窄终端下 summary + 按钮超宽时 WordWrapper 会把按钮换到下一
         // 视觉行，而 compute_keepgoing_rect 按"每 footer 行占 1 视觉行"假设计算
         // 点击区域——换行后按钮实际位置与 rect 错位、点击失效。超宽时跳过按钮
@@ -195,6 +198,7 @@ pub(super) fn build_footer_lines(
                 width: btn_width,
             });
             let mut line = summary_line;
+            line.spans.push(Span::raw(" "));
             line.spans.push(btn_span);
             lines.push(line);
         } else {

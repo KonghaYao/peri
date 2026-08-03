@@ -29,6 +29,7 @@ struct RecordingTool {
     name: &'static str,
     aliases: &'static [&'static str],
     calls: Arc<Mutex<Vec<Value>>>,
+    schema: Value,
 }
 
 #[async_trait]
@@ -42,7 +43,7 @@ impl BaseTool for RecordingTool {
     }
 
     fn parameters(&self) -> Value {
-        json!({})
+        self.schema.clone()
     }
 
     fn aliases(&self) -> &[&str] {
@@ -102,6 +103,10 @@ async fn wrapper_policy_is_canonical_while_event_and_transcript_stay_raw() {
         name: "Write",
         aliases: &["Save"],
         calls: Arc::clone(&invoked),
+        schema: json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}}
+        }),
     });
     let shared = Arc::new(RwLock::new(BTreeMap::from([(
         "Write".to_string(),
@@ -148,6 +153,82 @@ async fn wrapper_policy_is_canonical_while_event_and_transcript_stay_raw() {
 }
 
 #[tokio::test]
+async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
+    // 回归：Grep/Glob 的 schema 参数名就是 path，归一化不得将其重命名为
+    // file_path（曾导致 path 丢失、搜索静默回退全仓库）。
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let policy = Arc::new(Mutex::new(Vec::new()));
+    let grep: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "Grep",
+        aliases: &[],
+        calls: Arc::clone(&invoked),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "required": ["pattern"]
+        }),
+    });
+    let shared = Arc::new(RwLock::new(BTreeMap::from([(
+        "Grep".to_string(),
+        Arc::clone(&grep),
+    )])));
+    let wrapper: Arc<dyn BaseTool> = Arc::new(
+        peri_middlewares::tool_search::ExecuteExtraTool::new(Arc::clone(&shared)),
+    );
+    let mut tools = shared.read().clone();
+    tools.insert(EXECUTE_EXTRA_TOOL_NAME.to_string(), wrapper);
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
+    let (context, _) = make_context(tools, chain);
+
+    // 1) ExecuteExtraTool wrapper 路径
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new(
+            "call-grep-1",
+            EXECUTE_EXTRA_TOOL_NAME,
+            json!({"tool_name": "Grep", "params": {"pattern": "tokio|serde", "path": "/tmp/a"}}),
+        )],
+    );
+    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!outcome.results[0].1.is_error);
+
+    // 2) 直接调用路径（tool_dispatch 本地归一化）
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new(
+            "call-grep-2",
+            "Grep",
+            json!({"pattern": "tokio", "path": "/tmp/a"}),
+        )],
+    );
+    let outcome = dispatch_tools(&context, &reasoning, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!outcome.results[0].1.is_error);
+
+    // policy 与执行 input 都保留 path，不重命名为 file_path
+    let expected = vec![
+        json!({"pattern": "tokio|serde", "path": "/tmp/a"}),
+        json!({"pattern": "tokio", "path": "/tmp/a"}),
+    ];
+    let policy_calls = policy.lock();
+    assert_eq!(
+        policy_calls
+            .iter()
+            .map(|c| c.input.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(*invoked.lock(), expected);
+}
+
+#[tokio::test]
 async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invoke_side_effects() {
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let policy = Arc::new(Mutex::new(Vec::new()));
@@ -155,11 +236,13 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
         name: "Bash",
         aliases: &["Shell"],
         calls: Arc::clone(&invoked),
+        schema: json!({}),
     });
     let conflicting: Arc<dyn BaseTool> = Arc::new(RecordingTool {
         name: "OtherBash",
         aliases: &["Shell"],
         calls: Arc::clone(&invoked),
+        schema: json!({}),
     });
     let shared = Arc::new(RwLock::new(BTreeMap::from([
         ("Bash".to_string(), target),
@@ -208,6 +291,7 @@ async fn hook_receives_canonical_alias_identity() {
         name: "Bash",
         aliases: &["Shell"],
         calls: Arc::clone(&invoked),
+        schema: json!({}),
     });
     let hook = RegisteredHook {
         hook: serde_json::from_value::<HookType>(json!({
@@ -268,6 +352,7 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
                 name,
                 aliases,
                 calls: Arc::clone(&calls),
+                schema: json!({}),
             }) as Arc<dyn BaseTool>,
         );
     }

@@ -1,7 +1,8 @@
 Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
 
 Fork mode (fork: true):
-- Inherits the parent agent's full conversation history, system prompt, and tool set
+- Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
+- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
 - The prompt is treated as a directive within the existing context, not a standalone briefing
 - Do NOT re-explain background that is already in the conversation history
 - Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)
@@ -11,6 +12,7 @@ Usage:
 - Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
 - **subagent_type is REQUIRED** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent
 - The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
+- **Authorization boundary**: approving the `Agent` tool grants the sub-agent the right to execute its inherited tools. Sub-agents do NOT run per-tool HITL approval — internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
 - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
 - The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
 

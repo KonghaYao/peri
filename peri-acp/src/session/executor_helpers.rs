@@ -53,7 +53,10 @@ use crate::{
 
 // 共享类型从 executor 模块（super）显式引入——这些类型在 executor.rs 中
 // 是 `struct`（默认 private）但子模块对父模块所有项可见。
-use super::{ExecOutcome, FrozenSessionData, PromptResult, PromptStopReason};
+use super::{
+    mark_permission_mode_notified, ExecOutcome, FrozenSessionData, ModeNoticeBooking, PromptResult,
+    PromptStopReason,
+};
 
 // ── Intercept Request parameter object ─────────────────────────────────────
 
@@ -133,7 +136,9 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
         frozen_system_prompt: req
             .frozen
             .as_ref()
-            .map(|f| Arc::new(f.system_prompt().to_string())),
+            // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本
+            //（P2-2026-08-02）：fork 链不注册 WorkflowTool。
+            .map(|f| Arc::new(f.subagent_system_prompt().to_string())),
     };
     let result = tokio::select! {
         r = cmd.execute(ctx) => r,
@@ -351,6 +356,12 @@ pub(super) async fn build_and_execute_agent_v2(
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     // ── AAC-only ──
     system_prompt: String,
+    // 子 agent / fork 复用的冻结 prompt（无 16_workflow，P2-2026-08-02）。
+    // None = 调用方未提供（防御性回退到 system_prompt）。
+    subagent_system_prompt: Option<String>,
+    // D2：mode 通知的入队记账委托（None = 无通知或无需记账）。
+    // 仅在 Phase 6 把消息推入模型可见 v2 MessageQueue 时记账。
+    mode_notice_booking: Option<ModeNoticeBooking>,
     frozen: crate::agent::builder::FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
@@ -373,6 +384,7 @@ pub(super) async fn build_and_execute_agent_v2(
         ctx,
         cached_llm,
         system_prompt,
+        subagent_system_prompt,
         frozen,
         event_handler,
         agent_overrides,
@@ -503,11 +515,18 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
+    // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
+    // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
+    // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
+    // 消费进 transcript，不会重复注入也不会丢失。
     v2_out.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
         V2MessageSource::UserInput,
         BaseMessage::human(agent_input.content),
     ));
+    if let Some(booking) = &mode_notice_booking {
+        mark_permission_mode_notified(&booking.last_notified, booking.mode);
+    }
 
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
     // run_react_loop 消费后仍可访问累积的 recall。

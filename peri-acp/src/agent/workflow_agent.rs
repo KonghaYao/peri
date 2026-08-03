@@ -347,6 +347,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
         tools.extend(WebMiddleware::build_tools());
         // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
         // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
+        // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
+        // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
         let project_skills_root = std::path::PathBuf::from(&self.ctx.cwd)
             .join(".claude")
             .join("skills");
@@ -362,7 +364,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
         } else {
             Some(skills)
         }));
-        tools.push(Box::new(peri_middlewares::SkillTool::new(cached)));
+        tools.push(Box::new(peri_middlewares::skills::tools::SkillTool::new(
+            Arc::clone(&cached),
+        )));
+        tools.push(Box::new(
+            peri_middlewares::skills::tools::DiscoverSkillsTool::new(cached),
+        ));
 
         // 3. allowedTools 过滤
         if let Some(ref allowed) = params.allowed_tools {
@@ -373,7 +380,11 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 4. GAP-05: 使用标准 system prompt（复用 frozen 或运行时构建）
         let system_prompt = self.ctx.system_prompt.clone().unwrap_or_else(|| {
-            let features = crate::prompt::PromptFeatures::detect(
+            // workflow agent 链不注册 WorkflowTool（无嵌套 workflow），
+            // fallback 渲染关闭 workflow section，与工具注册一致。
+            // detect_without_workflow：子 agent / fork / workflow agent 共用
+            // 的 capability 快照（P2-2026-08-02）。
+            let features = crate::prompt::PromptFeatures::detect_without_workflow(
                 peri_middlewares::prelude::PermissionMode::Bypass,
             );
             let template = crate::prompt::PromptTemplate::new();

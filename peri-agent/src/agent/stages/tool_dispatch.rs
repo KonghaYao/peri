@@ -34,13 +34,27 @@ const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
 const PARAM_ALIASES: &[(&str, &str)] = &[("path", "file_path")];
 
 /// 将 LLM 有时会误用的参数名归一化为标准名。
-fn normalize_params(input: serde_json::Value) -> serde_json::Value {
+/// 仅当目标工具 schema 声明 real 参数时执行别名替换——Grep/Glob 的
+/// `path` 是其标准参数名而非 `file_path` 的别名，不能替换。
+fn normalize_params(input: serde_json::Value, target: Option<&dyn BaseTool>) -> serde_json::Value {
     let mut obj = match input {
         serde_json::Value::Object(map) => map,
         _ => return input,
     };
+    let declared_params: Vec<String> = target
+        .map(|t| {
+            t.parameters()
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|props| props.keys().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     for (alias, real) in PARAM_ALIASES {
-        if obj.contains_key(*alias) && !obj.contains_key(*real) {
+        if declared_params.iter().any(|p| p == real)
+            && obj.contains_key(*alias)
+            && !obj.contains_key(*real)
+        {
             let value = obj.remove(*alias).unwrap();
             obj.insert(real.to_string(), value);
             tracing::warn!(
@@ -450,8 +464,11 @@ async fn dispatch_concurrent(
                 .get(&call.id)
                 .cloned()
                 .unwrap_or_else(|| call.clone());
-            let input = normalize_params(call.input.clone());
             let tool = all_tools.get(&call.id).cloned();
+            let input = match &tool {
+                Some(t) => normalize_params(call.input.clone(), Some(t.as_ref())),
+                None => call.input.clone(),
+            };
             let cancel = cancel.clone();
             let messages = Arc::clone(&messages_snapshot);
             let cwd = cwd_snapshot.clone();

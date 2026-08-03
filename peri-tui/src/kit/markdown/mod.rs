@@ -113,8 +113,8 @@ pub struct MarkdownRenderCache {
     /// 上次处理 stable_text 时的 palette。
     stable_palette: Palette,
     /// 上次处理 stable_text 后的累积状态（processed_block_count / current_text /
-    /// segments / prev_was_list_item / block_line_ends）。current_text 未 flush，
-    /// 保留累积状态供续跑。
+    /// prev_was_list_item / block_line_ends）。current_text 未 flush，
+    /// 保留累积状态供续跑；segments 返回时被 take 清空，不在此常驻。
     stable_state: convert::ConvertState,
 }
 

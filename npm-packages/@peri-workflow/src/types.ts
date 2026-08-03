@@ -2,12 +2,16 @@
  * 共享类型 — JSON-RPC 2.0 wire types 与 CLI 读取器类型。
  *
  * JSON-RPC 2.0 协议对齐 spec 第 3 节：newline-delimited JSON（每行一条消息）。
- * 引擎相关类型（AgentRunParams 等）直接复用 @claude-code-best/workflow-engine。
+ *
+ * ⚠ 跨侧契约：本文件的 wire 字段（WorkflowStartParams / AgentRunRequestParams 等）
+ * 与 Rust 侧 `peri-workflow/src/protocol.rs` 保持同步，变更须两侧一致
+ * （Rust 侧文件顶部有对应注释）。
+ * CLI 领域类型（RunState / AgentResult）与宿主落盘格式对齐，见 DESIGN.md
+ * 「运行结果落盘格式」节（Rust `journal.rs` 写入 ↔ `reader.ts` 读取，双向对齐）。
+ *
+ * 引擎相关类型（JournalEntry 等）复用 @claude-code-best/workflow-engine。
  */
-import type {
-  AgentRunParams,
-  JournalEntry,
-} from '@claude-code-best/workflow-engine'
+import type { JournalEntry } from '@claude-code-best/workflow-engine'
 
 // ─── JSON-RPC wire types ───────────────────────────────────
 
@@ -48,10 +52,25 @@ export type WorkflowStartParams = {
   maxConcurrency?: number
 }
 
-/** runner → host: execute one agent call */
-export type AgentRunRequestParams = AgentRunParams & {
+/**
+ * runner → host: 执行一次 agent 调用的请求参数（wire 字段）。
+ *
+ * 显式声明而非透传引擎 `AgentRunParams`：字段与 Rust 侧
+ * `protocol.rs::AgentRunParams` 逐字段对齐（camelCase wire 命名），
+ * 避免引擎类型升级导致两侧静默分叉。
+ */
+export type AgentRunRequestParams = {
   runId: string
   agentId: number
+  prompt: string
+  schema?: object
+  model?: string
+  maxTokens?: number
+  agentType?: string
+  isolation?: 'worktree'
+  allowedTools?: string[]
+  label?: string
+  phase?: string
 }
 
 // ─── CLI 读取器类型 ────────────────────────────────────────

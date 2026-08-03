@@ -529,6 +529,7 @@ fn test_background_task_completed_no_session_update() {
             tool_calls_count: 3,
             duration_ms: 5000,
             child_thread_id: None,
+            timed_out: false,
         }),
         "BackgroundTaskCompleted",
     );

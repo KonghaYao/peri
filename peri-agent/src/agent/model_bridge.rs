@@ -195,17 +195,17 @@ impl AgentModelBridge {
         reasoning.streamed = streamed;
         Ok(reasoning)
     }
-}
 
-#[async_trait]
-impl ReactLLM for AgentModelBridge {
-    async fn generate_reasoning(
+    /// 消费已构建的 request，驱动 Model 流式响应直至完成。
+    ///
+    /// 从 `generate_reasoning` 提取（2026-08 重构）：让观测路径
+    /// （`generate_reasoning_with_observed_body`）与普通路径共享同一份
+    /// 已构建的 request，消除每轮 LLM 调用的 request 双构建。
+    async fn generate_from_request(
         &self,
-        messages: &[BaseMessage],
-        tools: &[&dyn BaseTool],
+        request: ModelRequest,
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
-        let request = self.build_request(messages, tools)?;
         let model_name = self.model_name();
         let cancellation = streaming
             .as_ref()
@@ -266,6 +266,36 @@ impl ReactLLM for AgentModelBridge {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl ReactLLM for AgentModelBridge {
+    async fn generate_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        let request = self.build_request(messages, tools)?;
+        self.generate_from_request(request, streaming).await
+    }
+
+    async fn generate_reasoning_with_observed_body(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<(Reasoning, Option<serde_json::Value>)> {
+        // 覆盖默认实现：只构建一次 request，观测体复用同一份（消除每轮双构建）
+        let request = self.build_request(messages, tools)?;
+        let observed_body = self
+            .model
+            .prepare_request(&request)
+            .ok()
+            .map(|prepared| prepared.body().as_value().clone());
+        let reasoning = self.generate_from_request(request, streaming).await?;
+        Ok((reasoning, observed_body))
     }
 
     fn model_name(&self) -> String {

@@ -10,7 +10,9 @@
     "edit-quality": "bun run src/metrics/edit_quality.ts",
     "subagent-collab": "bun run src/metrics/subagent_collab.ts",
     "search-hygiene": "bun run src/metrics/search_hygiene.ts",
-    "llm-efficiency": "bun run src/metrics/llm_efficiency.ts"
+    "web-fetch-errors": "bun run src/metrics/web_fetch_errors.ts",
+    "data-health": "bun run src/metrics/data_health.ts",
+    "all": "bun run src/metrics/tool_reliability.ts && bun run src/metrics/session_efficiency.ts && bun run src/metrics/resource_consumption.ts && bun run src/metrics/feature_adoption.ts && bun run src/metrics/edit_quality.ts && bun run src/metrics/subagent_collab.ts && bun run src/metrics/search_hygiene.ts && bun run src/metrics/web_fetch_errors.ts && bun run src/metrics/data_health.ts"
   },
   "dependencies": {
     "chalk": "^5.3.0"

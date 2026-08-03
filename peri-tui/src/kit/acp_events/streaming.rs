@@ -67,7 +67,9 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         state
             .current_turn
             .append_reasoning(&rc.text, rc.message_id.as_deref());
-        tracing::info!(
+        // [Diagnostic] 每 token 调用一次，仅排查流式推理累积问题时需要——
+        // trace 级别避免默认 info filter 下同步写滚动文件。
+        tracing::trace!(
             len = state.current_turn.reasoning.len(),
             "bridge: reasoning appended"
         );

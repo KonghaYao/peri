@@ -66,108 +66,113 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // before_model middleware（goal_middleware / compact_middleware 等在此注入）
     run_before_model(ctx).await?;
 
-    // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）
-    let messages_snapshot: Vec<crate::messages::BaseMessage> = {
-        let guard = ctx.session.transcript.read();
-        let visible: Vec<crate::messages::BaseMessage> =
-            guard.visible_messages().into_iter().cloned().collect();
+    // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
+    // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
+    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = std::sync::Arc::new(
+        {
+            let guard = ctx.session.transcript.read();
+            let visible: Vec<crate::messages::BaseMessage> =
+                guard.visible_messages().into_iter().cloned().collect();
 
-        // 如果有 compact config，生成 plan 并渲染投影视图
-        if let Some(ref config) = ctx.compact.compact_config {
-            let caps = ctx.runtime.llm.provider_capabilities();
-            // 优先使用持久化 directive，避免每 turn 重新规划
-            match crate::agent::compact_v2::projection::plan_from_persisted_directives(
-                &guard,
-                crate::agent::compact_v2::PROJECTION_POLICY_VERSION,
-            ) {
-                Ok(plan) => {
-                    // 持久化 directive 有效 → 直接渲染
-                    match crate::agent::compact_v2::projection::render_llm_view(
-                        &guard, &plan, &caps,
-                    ) {
-                        Ok(view) => {
-                            tracing::debug!(
-                                action_count = plan.actions.len(),
-                                messages_before = visible.len(),
-                                messages_after = view.len(),
-                                "render_llm_view (persisted directives): 投影后消息数"
-                            );
-                            view
+            // 如果有 compact config，生成 plan 并渲染投影视图
+            if let Some(ref config) = ctx.compact.compact_config {
+                let caps = ctx.runtime.llm.provider_capabilities();
+                // 优先使用持久化 directive，避免每 turn 重新规划
+                match crate::agent::compact_v2::projection::plan_from_persisted_directives(
+                    &guard,
+                    crate::agent::compact_v2::PROJECTION_POLICY_VERSION,
+                ) {
+                    Ok(plan) => {
+                        // 持久化 directive 有效 → 直接渲染
+                        match crate::agent::compact_v2::projection::render_llm_view(
+                            &guard, &plan, &caps,
+                        ) {
+                            Ok(view) => {
+                                tracing::debug!(
+                                    action_count = plan.actions.len(),
+                                    messages_before = visible.len(),
+                                    messages_after = view.len(),
+                                    "render_llm_view (persisted directives): 投影后消息数"
+                                );
+                                view
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "render_llm_view (persisted) 失败，fallback 到原始可见消息"
+                                );
+                                visible
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        if err_msg.contains(
+                            crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH,
+                        ) {
+                            // 版本不匹配 → 重新规划为 v2 directive（skip=false 纳入旧 truncated 消息）
+                            // 新 plan 在下次 Compact 阶段持久化后覆盖旧 directive
+                            tracing::info!(
                                 error = %e,
-                                "render_llm_view (persisted) 失败，fallback 到原始可见消息"
+                                "持久化 directive 版本不匹配，重新规划为 v2"
                             );
-                            visible
+                            let plan = crate::agent::compact_v2::planner::plan_micro(
+                                &guard, config, false,
+                            );
+                            if plan.has_changes() {
+                                match crate::agent::compact_v2::projection::render_llm_view(
+                                    &guard, &plan, &caps,
+                                ) {
+                                    Ok(view) => view,
+                                    Err(render_err) => {
+                                        tracing::warn!(
+                                            error = %render_err,
+                                            "render_llm_view (v2 re-plan) 失败，fallback 原始消息"
+                                        );
+                                        visible
+                                    }
+                                }
+                            } else {
+                                visible
+                            }
+                        } else {
+                            // 无持久化 directive → fallback 到 planner
+                            tracing::debug!("无持久化 directive，fallback 到 plan_micro");
+                            let plan = crate::agent::compact_v2::planner::plan_micro(
+                                &guard, config, false,
+                            );
+                            if plan.has_changes() {
+                                match crate::agent::compact_v2::projection::render_llm_view(
+                                    &guard, &plan, &caps,
+                                ) {
+                                    Ok(view) => {
+                                        tracing::debug!(
+                                            action_count = plan.actions.len(),
+                                            messages_before = visible.len(),
+                                            messages_after = view.len(),
+                                            "render_llm_view (planner): 投影后消息数"
+                                        );
+                                        view
+                                    }
+                                    Err(render_err) => {
+                                        tracing::warn!(
+                                            error = %render_err,
+                                            "render_llm_view (planner) 失败，fallback 到原始可见消息"
+                                        );
+                                        visible
+                                    }
+                                }
+                            } else {
+                                visible
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    if err_msg
-                        .contains(crate::agent::compact_v2::projection::DIRECTIVE_VERSION_MISMATCH)
-                    {
-                        // 版本不匹配 → 重新规划为 v2 directive（skip=false 纳入旧 truncated 消息）
-                        // 新 plan 在下次 Compact 阶段持久化后覆盖旧 directive
-                        tracing::info!(
-                            error = %e,
-                            "持久化 directive 版本不匹配，重新规划为 v2"
-                        );
-                        let plan =
-                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
-                        if plan.has_changes() {
-                            match crate::agent::compact_v2::projection::render_llm_view(
-                                &guard, &plan, &caps,
-                            ) {
-                                Ok(view) => view,
-                                Err(render_err) => {
-                                    tracing::warn!(
-                                        error = %render_err,
-                                        "render_llm_view (v2 re-plan) 失败，fallback 原始消息"
-                                    );
-                                    visible
-                                }
-                            }
-                        } else {
-                            visible
-                        }
-                    } else {
-                        // 无持久化 directive → fallback 到 planner
-                        tracing::debug!("无持久化 directive，fallback 到 plan_micro");
-                        let plan =
-                            crate::agent::compact_v2::planner::plan_micro(&guard, config, false);
-                        if plan.has_changes() {
-                            match crate::agent::compact_v2::projection::render_llm_view(
-                                &guard, &plan, &caps,
-                            ) {
-                                Ok(view) => {
-                                    tracing::debug!(
-                                        action_count = plan.actions.len(),
-                                        messages_before = visible.len(),
-                                        messages_after = view.len(),
-                                        "render_llm_view (planner): 投影后消息数"
-                                    );
-                                    view
-                                }
-                                Err(render_err) => {
-                                    tracing::warn!(
-                                        error = %render_err,
-                                        "render_llm_view (planner) 失败，fallback 到原始可见消息"
-                                    );
-                                    visible
-                                }
-                            }
-                        } else {
-                            visible
-                        }
-                    }
-                }
+            } else {
+                visible
             }
-        } else {
-            visible
-        }
-    };
+        },
+    );
 
     // 取出 tools 的 Arc clone（避免跨 await 持有 RwLockReadGuard）
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = {
@@ -179,8 +184,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .filter(|t| t.is_direct())
         .map(|t| t.as_ref())
         .collect();
-    // 调试日志：确认工具数量与名称（排查 v2 工具丢失问题）
-    tracing::info!(
+    // 工具数量与名称追踪（调试用；默认 filter 下不写盘）
+    tracing::debug!(
         step,
         tool_count = tool_refs.len(),
         tool_names = ?tool_refs.iter().map(|t| t.name()).collect::<Vec<_>>(),
@@ -189,8 +194,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     );
 
     // emit LlmCallStart（携带 messages + tools 快照，对齐 v1 Langfuse Generation input）
-    let start_messages: std::sync::Arc<Vec<crate::messages::BaseMessage>> =
-        std::sync::Arc::new(messages_snapshot.clone());
+    // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照
     let start_tools: Vec<crate::tools::ToolDefinition> =
         tool_refs.iter().map(|t| t.definition()).collect();
     ctx.runtime
@@ -199,25 +203,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             turn_id,
             agent_id,
             step,
-            messages: start_messages,
+            messages: messages_snapshot.clone(),
             tools: start_tools,
         });
-
-    // emit LlmRequestPayload（仅发送 Model 的安全 observation body）
-    if let Some(body) = ctx
-        .runtime
-        .llm
-        .observed_provider_request_body(&messages_snapshot, &tool_refs)
-    {
-        ctx.runtime
-            .event_bus
-            .emit_observe(ObserveEvent::LlmRequestPayload {
-                turn_id,
-                agent_id,
-                step,
-                body: std::sync::Arc::new(body),
-            });
-    }
 
     // 构造 StreamingContext（桥接 v1 ExecutorEvent → v2 RenderEvent）
     // LLM 适配器在 SSE 解析过程中通过 event_handler 发射 ExecutorEvent，
@@ -236,15 +224,22 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
     });
 
-    // LLM 调用（与 cancel 竞争）
-    let reasoning: Reasoning = tokio::select! {
+    // LLM 调用（与 cancel 竞争）。
+    // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
+    // request（消除每轮 request 双构建），LlmRequestPayload 在成功后、LlmCallEnd
+    // 之前 emit——Langfuse 按 step 缓存 raw_body，时序兼容（on_llm_end 前到达即可）。
+    let (reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = tokio::select! {
         biased;
         _ = ctx.session.turn.cancel_token.cancelled() => {
             return Err(AgentError::Interrupted);
         }
-        result = ctx.runtime.llm.generate_reasoning(&messages_snapshot, &tool_refs, streaming) => {
+        result = ctx.runtime.llm.generate_reasoning_with_observed_body(
+            &messages_snapshot,
+            &tool_refs,
+            streaming,
+        ) => {
             match result {
-                Ok(r) => r,
+                Ok((r, body)) => (r, body),
                 Err(e) => {
                     tracing::error!(
                         step,
@@ -285,6 +280,19 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             }
         }
     };
+
+    // emit LlmRequestPayload（仅发送 Model 的安全 observation body；复用本次
+    // LLM 调用已构建的 request，见 generate_reasoning_with_observed_body）
+    if let Some(body) = observed_body {
+        ctx.runtime
+            .event_bus
+            .emit_observe(ObserveEvent::LlmRequestPayload {
+                turn_id,
+                agent_id,
+                step,
+                body: std::sync::Arc::new(body),
+            });
+    }
 
     // emit LlmCallEnd（带 usage 完整字段：input/output + cache_creation/cache_read + request_id）
     // [TRAP] cache_read_input_tokens 必须透传，否则 TUI 命中率始终 0%（v2 重做回归）

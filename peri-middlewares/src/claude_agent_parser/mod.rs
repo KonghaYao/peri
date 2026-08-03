@@ -60,7 +60,9 @@ pub struct ClaudeAgentFrontmatter {
     /// 是否始终在后台运行
     #[serde(default)]
     pub background: bool,
-    /// prompt 模式："extend"（默认）或 "full"
+    /// prompt 模式："extend"（默认）或 "full"。
+    /// `full` 仅替换 persona/domain instructions 层，安全与授权、
+    /// 工程行为、能力契约与运行时边界层不会被移除。
     #[serde(default)]
     pub prompt_mode: Option<String>,
     /// Git worktree 隔离模式

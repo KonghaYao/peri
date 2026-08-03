@@ -10,10 +10,63 @@ use crate::session::turn::TurnContext;
 
 // ── normalize_params ──
 
+/// 可配置 schema 的测试工具：归一化是否生效取决于 schema 是否声明 file_path
+struct SchemaToolStub {
+    name: &'static str,
+    schema: serde_json::Value,
+}
+
+#[async_trait::async_trait]
+impl BaseTool for SchemaToolStub {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        ""
+    }
+    fn parameters(&self) -> serde_json::Value {
+        self.schema.clone()
+    }
+    fn aliases(&self) -> &[&str] {
+        &[]
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("ok".to_string())
+    }
+}
+
+fn read_schema_tool() -> SchemaToolStub {
+    SchemaToolStub {
+        name: "Read",
+        schema: json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}}
+        }),
+    }
+}
+
+fn grep_schema_tool() -> SchemaToolStub {
+    SchemaToolStub {
+        name: "Grep",
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"}
+            }
+        }),
+    }
+}
+
 #[test]
 fn test_normalize_params_path_alias_to_file_path() {
     let input = json!({"path": "/tmp/foo.rs"});
-    let out = normalize_params(input);
+    // Read 等工具 schema 声明 file_path → path 别名仍归一化
+    let out = normalize_params(input, Some(&read_schema_tool()));
     assert!(out.get("file_path").is_some());
     assert!(out.get("path").is_none());
 }
@@ -22,23 +75,33 @@ fn test_normalize_params_path_alias_to_file_path() {
 fn test_normalize_params_keep_file_path_when_present() {
     // 当 file_path 已存在时，path 别名不覆盖
     let input = json!({"path": "/a", "file_path": "/b"});
-    let out = normalize_params(input);
+    let out = normalize_params(input, Some(&read_schema_tool()));
     assert_eq!(out.get("file_path").unwrap(), &json!("/b"));
     // path 仍然保留（未触发别名替换）
     assert!(out.get("path").is_some());
 }
 
 #[test]
+fn test_normalize_params_does_not_rename_path_for_path_schema_tools() {
+    // 回归：Grep/Glob 的 schema 参数名就是 path，不得重命名为 file_path
+    // （曾导致 path 丢失、搜索静默回退全仓库）
+    let input = json!({"pattern": "tokio|serde", "path": "/tmp/a"});
+    let out = normalize_params(input, Some(&grep_schema_tool()));
+    assert_eq!(out.get("path").unwrap(), &json!("/tmp/a"));
+    assert!(out.get("file_path").is_none());
+}
+
+#[test]
 fn test_normalize_params_passthrough_non_object() {
     let input = json!("string");
-    let out = normalize_params(input.clone());
+    let out = normalize_params(input.clone(), None);
     assert_eq!(out, input);
 }
 
 #[test]
 fn test_normalize_params_keep_unrelated_keys() {
     let input = json!({"query": "hello", "limit": 10});
-    let out = normalize_params(input);
+    let out = normalize_params(input, None);
     assert_eq!(out.get("query").unwrap(), &json!("hello"));
     assert_eq!(out.get("limit").unwrap(), &json!(10));
 }
@@ -197,7 +260,9 @@ fn test_canonical_resolver_normalizes_alias_and_params() {
 
     use crate::tools::{DirectToolInvocationResolver, ToolInvocationResolver};
 
-    struct AliasTool;
+    struct AliasTool {
+        schema: serde_json::Value,
+    }
     #[async_trait::async_trait]
     impl BaseTool for AliasTool {
         fn name(&self) -> &str {
@@ -207,7 +272,7 @@ fn test_canonical_resolver_normalizes_alias_and_params() {
             ""
         }
         fn parameters(&self) -> serde_json::Value {
-            json!({})
+            self.schema.clone()
         }
         fn aliases(&self) -> &[&str] {
             &["Shell"]
@@ -221,8 +286,14 @@ fn test_canonical_resolver_normalizes_alias_and_params() {
         }
     }
 
+    // Bash 真实 schema 无 file_path → path 是无关参数，不归一化
     let mut tools: BTreeMap<String, Arc<dyn BaseTool>> = BTreeMap::new();
-    tools.insert("Bash".to_string(), Arc::new(AliasTool));
+    tools.insert(
+        "Bash".to_string(),
+        Arc::new(AliasTool {
+            schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
+        }),
+    );
 
     let invocation = DirectToolInvocationResolver
         .resolve(
@@ -233,7 +304,26 @@ fn test_canonical_resolver_normalizes_alias_and_params() {
 
     assert_eq!(invocation.raw_call.name, "SHELL");
     assert_eq!(invocation.policy_call.name, "Bash");
-    assert_eq!(invocation.policy_call.input, json!({"file_path": "/tmp/x"}));
+    assert_eq!(invocation.policy_call.input, json!({"path": "/tmp/x"}));
+
+    // 声明 file_path 的工具（如 Write）→ path 别名仍归一化
+    let mut file_tools: BTreeMap<String, Arc<dyn BaseTool>> = BTreeMap::new();
+    file_tools.insert(
+        "Bash".to_string(),
+        Arc::new(AliasTool {
+            schema: json!({
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}}
+            }),
+        }),
+    );
+    let invocation = DirectToolInvocationResolver
+        .resolve(
+            &ToolCall::new("call_2", "SHELL", json!({"path": "/tmp/y"})),
+            &file_tools,
+        )
+        .expect("alias should resolve");
+    assert_eq!(invocation.policy_call.input, json!({"file_path": "/tmp/y"}));
 }
 
 #[tokio::test]

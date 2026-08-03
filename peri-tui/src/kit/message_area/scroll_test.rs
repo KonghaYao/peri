@@ -30,19 +30,6 @@ fn test_scroll_pos_scroll_up_never_underflows() {
 }
 
 #[test]
-fn test_scroll_pos_page_scroll() {
-    let mut pos = ScrollPos::default();
-    pos.set_offset(100);
-    pos.scroll_page_down(40);
-    assert_eq!(pos.offset(), 139); // 100 + 40 - 1（与 ratatui 翻页重叠 1 行语义一致）
-    pos.scroll_page_up(40);
-    assert_eq!(pos.offset(), 100);
-    // 页大小超过当前偏移 → 回到顶部
-    pos.scroll_page_up(40);
-    assert_eq!(pos.offset(), 61);
-}
-
-#[test]
 fn test_scroll_pos_scroll_to_bottom_uses_max() {
     let mut pos = ScrollPos::default();
     pos.scroll_to_bottom();

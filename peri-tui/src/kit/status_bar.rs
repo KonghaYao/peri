@@ -369,6 +369,13 @@ pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
+/// [升级护栏] 本函数是对 ratatui-widgets 内部 reflow 算法（`WordWrapper`）的
+/// 复刻模拟——与 message_area 的"真实渲染复刻"方案形成两套 wrap 语义认知。
+/// 升级 ratatui-widgets 依赖（即使 patch 版本）时，必须运行
+/// `cargo test -p peri-tui --lib status_bar_test` 的 ground-truth 差分测试
+/// （TestBackend 真实渲染逐位对比 + 随机差分），并重新评估下方列出的已知差异。
+/// Cargo.toml 中 ratatui 依赖处有同步标注。
+///
 /// 模拟 WordWrapper 词级折行（对齐 ratatui-widgets 0.3.2 reflow.rs `Wrap{trim:false}`
 /// 语义，经 TestBackend ground-truth 渲染逐位验证），返回模型段内每个**词**的
 /// 点击区域 `(line_idx, x_start, x_end)`（相对 Row1 区域）。

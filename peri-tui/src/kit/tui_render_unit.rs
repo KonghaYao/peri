@@ -95,6 +95,25 @@ impl TuiRenderUnit {
     }
 }
 
+/// 折叠策略单点定义：「仅最后一个含 reasoning 的 assistant bubble 展开」。
+///
+/// 返回最后一个含 reasoning 的 bubble 索引；列表中没有 reasoning 时返回 `None`。
+///
+/// [`CurrentTurn::normalize_collapsed`](crate::kit::acp_types::CurrentTurn) 与
+/// `acp_events/render.rs` 的折叠 pass 共用此目标选择——策略变更（如改为
+/// "最后两个展开"）只改这里，防止两处实现分叉破坏渲染缓存一致性。
+pub(crate) fn reasoning_collapse_target(vms: &im::Vector<TuiRenderUnit>) -> Option<usize> {
+    let mut last: Option<usize> = None;
+    for (i, vm) in vms.iter().enumerate() {
+        if let TuiRenderUnit::TuiAssistantBubble(b) = vm
+            && b.reasoning.is_some()
+        {
+            last = Some(i);
+        }
+    }
+    last
+}
+
 // ---------------------------------------------------------------------------
 // Leaf data structures
 // ---------------------------------------------------------------------------
@@ -295,7 +314,7 @@ pub struct TuiToolCard {
     pub presentation: TuiToolPresentation,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
-    /// Agent 工具专用的子工具调用计数（由 build_view_models 后处理配对填充）。
+    /// Agent 工具专用的子工具调用计数（由 sync_cache 后处理 pair_agent_tool_cards 配对填充）。
     pub tool_calls_count: usize,
 }
 
