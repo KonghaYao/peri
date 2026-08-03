@@ -20,6 +20,8 @@ pub fn kill_process_group(pid: u32, signal: &str) {
         // 防御性守卫：kill 0 会波及当前进程组
         return;
     }
+    #[cfg(windows)]
+    let _ = signal; // Windows 回退 taskkill /T /F，不使用信号参数
     #[cfg(unix)]
     {
         let _ = std::process::Command::new("kill")
