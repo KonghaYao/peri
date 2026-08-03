@@ -6,7 +6,11 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 {{available_agents}}
 
-Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, inherit=follows parent) and `[access]` (readonly=can safely run in parallel, writes=modifies files — sequence after readonly agents).
+Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, inherit=follows parent) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
+
+## Authorization boundary
+
+Approving the `Agent` tool grants the sub-agent the right to execute its inherited tools: sub-agents do **not** run per-tool HITL approval. Once you approve launching a sub-agent, its internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. This transfer is **single-level**: sub-agents never inherit the `Agent` tool itself, so they cannot recursively launch further sub-agents. Whether approval flows are propagated into sub-agents in the future is a separate product decision — do not assume per-tool approval inside a sub-agent.
 
 ## When to use sub-agents
 
@@ -31,7 +35,7 @@ Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, 
 - **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
 - **Web**: `web-researcher`
 
-**Parallelization**: `[readonly]` agents (explorer, plan, code-reviewer) run concurrently. `[writes]` agents (coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent.
+**Parallelization**: follow the `[access]` tags above — `[readonly]` agents run concurrently (e.g. explorer, plan), `[writes]` agents (e.g. coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.
 
 ## Writing the prompt
 
@@ -44,7 +48,8 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 
 ## Fork mode (fork: true)
 
-- Inherits full conversation history, system prompt, and tool set from parent
+- Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
+- Does NOT inherit the `Agent` tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
 - The `prompt` is a directive within existing context, not a standalone briefing
 - Output format: **Scope**, **Result**, **Key files**, **Files changed**
 - `fork` is a boolean parameter, NOT an agent type name. Use `Agent(fork: true, prompt: "...")`. Do NOT set `subagent_type: "fork"` — wrong. `subagent_type` and `fork` are mutually exclusive.

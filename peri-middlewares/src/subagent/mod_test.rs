@@ -346,3 +346,94 @@ fn make_session() -> std::sync::Arc<session::Session> {
     let frozen = session::FrozenContext::builder().build();
     session::Session::new(cwd, frozen, None)
 }
+
+// ─── D5: infer_agent_capability 保守 readonly/writes 推断测试 ────────────────
+
+/// 从 YAML frontmatter 构造 agent 并推断能力画像（走真实 parse_agent_file 路径）
+fn capability_from_yaml(yaml: &str) -> AgentCapability {
+    let content = format!("---\n{}\n---\n\nbody", yaml);
+    let agent = parse_agent_file(&content).expect("agent frontmatter 应能解析");
+    infer_agent_capability(&agent.frontmatter)
+}
+
+/// [回归测试] D5：omitted tools（继承父工具）+ 仅 disallow Write/Edit，
+/// 仍继承含 Bash 的父工具集 → 必须标 writes。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-8 修正后判定）：旧推断在
+/// 未同时 disallow Write/Edit 时标 writes，但漏洞场景是 `disallowedTools:
+/// [Write, Edit]` + 省略 tools——Bash 仍继承，可 echo > file / rm / git
+/// commit，却被标 readonly。修复后含 Bash 一律 writes。
+#[test]
+fn test_capability_omitted_tools_with_disallowed_write_edit_is_writes() {
+    let cap =
+        capability_from_yaml("name: a\ndescription: d\ndisallowedTools:\n  - Write\n  - Edit\n");
+    assert!(
+        cap.can_mutate,
+        "继承父工具（含 Bash）且未 disallow Bash 的 agent 不得标 readonly"
+    );
+}
+
+/// omitted tools + 显式 disallow 全部核心写能力工具（含 Bash / folder_operations
+/// / cron_register）→ 可证明无项目写能力 → readonly。
+#[test]
+fn test_capability_omitted_tools_fully_disallowed_is_readonly() {
+    let cap = capability_from_yaml(
+        "name: a\ndescription: d\ndisallowedTools:\n  - Bash\n  - Write\n  - Edit\n  - folder_operations\n  - cron_register\n",
+    );
+    assert!(
+        !cap.can_mutate,
+        "完全 disallow 核心写能力工具后应标 readonly"
+    );
+}
+
+/// 显式 `tools: []`（NoTools）= 零工具 → readonly。
+///
+/// 历史背景：旧推断用 `to_vec().is_empty()` 把 NoTools 折叠为"继承父工具"，
+/// 零工具 agent 被误判为 writes。修复后 Empty/NoTools 语义分离。
+#[test]
+fn test_capability_explicit_no_tools_is_readonly() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: []\n");
+    assert!(
+        !cap.can_mutate,
+        "显式 tools: [] 是零工具边界，应标 readonly"
+    );
+}
+
+/// 只读白名单 `[Read, Glob, Grep]` → readonly（filter_tools 在注册层真裁剪）。
+#[test]
+fn test_capability_readonly_whitelist_is_readonly() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: Read, Glob, Grep\n");
+    assert!(!cap.can_mutate, "只读白名单应标 readonly");
+}
+
+/// 白名单含 Bash → writes（Bash 是写能力工具）。
+#[test]
+fn test_capability_whitelist_with_bash_is_writes() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: Read, Glob, Grep, Bash\n");
+    assert!(cap.can_mutate, "白名单含 Bash 应标 writes");
+}
+
+/// wildcard `tools: "*"` 等价继承全部 → writes。
+#[test]
+fn test_capability_wildcard_is_writes() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: '*'\n");
+    assert!(cap.can_mutate, "wildcard 继承全部工具应标 writes");
+}
+
+/// 白名单含 Write 但被 disallowed 覆盖 → 最终工具集无 Write → readonly。
+#[test]
+fn test_capability_whitelist_write_disallowed_is_readonly() {
+    let cap =
+        capability_from_yaml("name: a\ndescription: d\ntools: [Write]\ndisallowedTools: [Write]\n");
+    assert!(
+        !cap.can_mutate,
+        "白名单中的 Write 被 disallowed 覆盖后应标 readonly"
+    );
+}
+
+/// mcp__* 前缀工具无法静态证明只读 → 白名单含 mcp__ 工具按 writes 保守处理。
+#[test]
+fn test_capability_whitelist_mcp_prefix_is_writes() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
+    assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
+}

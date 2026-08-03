@@ -122,6 +122,9 @@ pub fn build_bg_fork_directive(prompt: &str) -> String {
 /// Extract [`AgentOverrides`] from already-parsed agent definition fields.
 ///
 /// Returns `None` when all fields are empty (no overrides needed).
+///
+/// `mode: "full"` 在下游 `PromptTemplate::with_overrides` 中只替换
+/// PersonaDomain 层；不可替换层（安全/工程/能力/运行时边界）始终渲染。
 pub fn overrides_from_agent_def(
     system_prompt: &str,
     tone: &Option<String>,

@@ -6,6 +6,8 @@ disallowedTools:
   - Write
   - Edit
   - Bash
+  - folder_operations
+  - cron_register
 allowedWriteDirs:
   - ".peri/plans/"
 model: inherit

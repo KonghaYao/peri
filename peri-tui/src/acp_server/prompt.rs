@@ -134,7 +134,11 @@ pub(crate) async fn run_prompt(
                 Some(cc)
             },
             cancel: Some(cancel.clone()),
-            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
+            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
+            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
+            system_prompt: frozen
+                .as_ref()
+                .map(|f| f.subagent_system_prompt().to_string()),
             broker: None,
             permission_mode: None,
             frozen_date: frozen.as_ref().map(|f| f.date().to_string()),

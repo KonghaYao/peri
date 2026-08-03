@@ -206,6 +206,10 @@ fn find_and_load_skill(
 }
 
 /// 根据 skill 的 source 类型读取完整 SKILL.md 内容
+///
+/// 错误语义（frozen catalog 与磁盘中途变化的边界，见 13_skills.md）：
+/// - 磁盘读取失败说明该 skill 在**当前扫描缓存**中存在但文件不可读——通常是
+///   会话期间被删除/移动，属可恢复错误，可重新 `DiscoverSkillsTool` 确认。
 fn load_skill_content(
     skill: &SkillMetadata,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -218,8 +222,13 @@ fn load_skill_content(
                 format!("Builtin skill '{}' not found in BUILTIN_SKILLS", skill.name).into()
             })
     } else {
-        std::fs::read_to_string(&skill.path).map_err(|e| {
-            format!("Failed to read skill file '{}': {e}", skill.path.display()).into()
+        std::fs::read_to_string(&skill.path).map_err(|_e| {
+            format!(
+                "Skill '{}' is in the session catalog but its file cannot be read ({}). It may have been moved or deleted mid-session — run DiscoverSkillsTool to see the current set.",
+                skill.name,
+                skill.path.display()
+            )
+            .into()
         })
     }
 }

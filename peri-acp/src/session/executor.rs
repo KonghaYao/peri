@@ -36,7 +36,10 @@
 //!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 use tokio::sync::oneshot as exec_oneshot;
 
@@ -55,6 +58,7 @@ use peri_agent::{
 use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
+use peri_middlewares::prelude::PermissionMode;
 
 use crate::{
     agent::builder::{self},
@@ -143,11 +147,22 @@ pub struct FrozenSessionData {
     /// Frozen content of CLAUDE.local.md, None if no file.
     /// v2 FrozenContext 未包含 local_md，保留此处。
     claude_local_md: Option<Arc<str>>,
+    /// 子 agent / fork / workflow agent 复用的冻结 system prompt
+    /// （不含 16_workflow section，见 [`FrozenSessionData::subagent_system_prompt`]）。
+    ///
+    /// 仅当 `workflow_enabled`（主链可用）时额外渲染并存 Some；workflow 关闭时
+    /// 两版字节相同，存 None 回退到 `system_prompt()`，避免重复占用。
+    subagent_system_prompt: Option<Arc<str>>,
 }
 
 impl FrozenSessionData {
     /// 唯一构造入口：在 `session/new` 时调用，捕获 cwd/language/CLAUDE.md/
     /// skills/system_prompt/date。
+    ///
+    /// `workflow_enabled` 是 capability snapshot 的输入：会话创建时 Workflow
+    /// executor 是否可用（生产路径为 `workflow_executor.is_some()`，print mode
+    /// 为 false）。它与 builder 的条件注册、ToolSearch 发现共用同一条件源，
+    /// 决定 16_workflow section 是否渲染。
     ///
     /// v2：构造 `peri_agent::session::FrozenContext` 作为内部委托，
     /// 同时保留 v1 兼容字段。
@@ -158,6 +173,7 @@ impl FrozenSessionData {
         plugin_agent_dirs: &[std::path::PathBuf],
         frozen_date: &str,
         permission_mode: peri_middlewares::prelude::PermissionMode,
+        workflow_enabled: bool,
     ) -> Self {
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
@@ -171,10 +187,28 @@ impl FrozenSessionData {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect(permission_mode);
+        let features = crate::prompt::PromptFeatures::detect(permission_mode, workflow_enabled);
         let template = crate::prompt::PromptTemplate::new();
         let env = crate::prompt::PromptEnv::with_frozen_date(cwd, frozen_date);
         let system_prompt = template.render(&env, &features, plugin_agent_dirs, language);
+
+        // 子 agent / fork / workflow agent 复用的冻结 prompt（P2-2026-08-02）：
+        // 这些链不注册 WorkflowTool（shared_tools: None），主链冻结 prompt 中
+        // 的 16_workflow section 不得被 fork 继承或 workflow agent 复用。
+        // 仅在 workflow_enabled 时多渲染一次（session 创建时一次性，不违反
+        // ARC-FROZEN-001 的每 turn 重建禁令）；workflow 关闭时两版相同。
+        let subagent_system_prompt = if workflow_enabled {
+            let sub_features =
+                crate::prompt::PromptFeatures::detect_without_workflow(permission_mode);
+            Some(Arc::from(template.render(
+                &env,
+                &sub_features,
+                plugin_agent_dirs,
+                language,
+            )))
+        } else {
+            None
+        };
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
@@ -188,6 +222,7 @@ impl FrozenSessionData {
         Self {
             v2_frozen,
             claude_local_md: claude_local_md.map(Arc::from),
+            subagent_system_prompt,
         }
     }
 
@@ -199,6 +234,17 @@ impl FrozenSessionData {
     /// 会话内冻结的完整 system prompt 字符串。
     pub fn system_prompt(&self) -> &str {
         &self.v2_frozen.system_prompt
+    }
+
+    /// 子 agent / fork / workflow agent 复用的冻结 system prompt（无 16_workflow）。
+    ///
+    /// 与 `system_prompt()` 同源、同冻结时机（session 创建），仅能力声明不同：
+    /// 这些链不注册 WorkflowTool，不得宣称 workflow 可用（P2-2026-08-02）。
+    /// workflow_enabled=false（print mode）时与 `system_prompt()` 字节相同。
+    pub fn subagent_system_prompt(&self) -> &str {
+        self.subagent_system_prompt
+            .as_deref()
+            .unwrap_or(&self.v2_frozen.system_prompt)
     }
 
     /// 冻结的 CLAUDE.md 内容（已解析 `@import`），无文件时为 None。
@@ -332,6 +378,95 @@ pub struct TurnInput {
     pub bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
     /// Langfuse 会话级句柄（None 表示禁用遥测）。
     pub langfuse_session: Option<Arc<LangfuseSession>>,
+}
+
+/// 各 PermissionMode 的模型可见语义说明（与 10_hitl.md 的机制描述一致）。
+fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => {
+            "Sensitive tool calls (Bash, Write, Edit, WebFetch, WebSearch, mcp__*, cron_register, ...) require explicit user approval."
+        }
+        PermissionMode::AcceptEdit => {
+            "Write, Edit and folder_operations are auto-approved; other sensitive tools still require explicit approval."
+        }
+        PermissionMode::AutoMode => {
+            "An LLM classifier decides each sensitive tool call; approval falls back to the user when the classifier is unsure."
+        }
+        PermissionMode::Bypass => "All tool calls are allowed without approval.",
+    }
+}
+
+/// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
+fn permission_mode_name(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "Default",
+        PermissionMode::AcceptEdit => "Accept Edit",
+        PermissionMode::AutoMode => "Auto Mode",
+        PermissionMode::Bypass => "Bypass",
+    }
+}
+
+/// 未通知过的哨兵值：session 创建后首个模型可见 turn 需向模型公开初始
+/// PermissionMode（10_hitl 不含 mode snapshot、Bypass 时 10_hitl 不渲染）。
+/// 真实 mode 值为 0..=4（见 `PermissionMode` repr），不会碰撞。
+pub(crate) const PERMISSION_MODE_NEVER_NOTIFIED: u8 = u8::MAX;
+
+/// 检测 PermissionMode 是否变化；变化时返回受控通知文本（**纯检测，不记账**）。
+///
+/// D2：mode 会话内切换后，于下一可消费 turn 以受控 runtime event 通知模型，
+/// 不重建 frozen system prompt，也不改变正在执行 batch 的 mode snapshot。
+/// `last_notified` 记录"上次已随消息入队通知的 mode"：初始化为
+/// [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵，首轮返回"当前模式"初始说明；
+/// 之后返回"模式切换"说明。返回值不含保留 tag（由调用方包裹
+/// `<system-reminder>`），语义文本与 10_hitl.md 的机制说明一致。
+///
+/// 记账由 [`mark_permission_mode_notified`] 在通知文本**随消息推入模型可见
+/// v2 MessageQueue 后**执行（executor_helpers Phase 6 入队点）：本 turn 在
+/// 入队前失败/取消时不记账，下一 turn 重新检测仍会生成通知（可重试，不丢失）。
+pub(crate) fn permission_mode_notice_if_changed(
+    current: PermissionMode,
+    last_notified: &AtomicU8,
+) -> Option<String> {
+    let cur = current as u8;
+    let last = last_notified.load(Ordering::Relaxed);
+    if last == cur {
+        return None;
+    }
+    if last == PERMISSION_MODE_NEVER_NOTIFIED {
+        Some(format!(
+            "Current permission mode: {}: {}",
+            permission_mode_name(current),
+            permission_mode_semantics(current)
+        ))
+    } else {
+        Some(format!(
+            "Permission mode changed to {}: {}",
+            permission_mode_name(current),
+            permission_mode_semantics(current)
+        ))
+    }
+}
+
+/// 通知已随消息入队（模型可消费）后记账：记录"已通知该 mode"。
+///
+/// 只在 [`permission_mode_notice_if_changed`] 判定有通知、且该通知已随
+/// agent_input 推入 v2 MessageQueue 时调用（见 `ModeNoticeBooking`）。
+pub(crate) fn mark_permission_mode_notified(last_notified: &AtomicU8, mode: PermissionMode) {
+    last_notified.store(mode as u8, Ordering::Relaxed);
+}
+
+/// D2：mode 通知的"检测"与"记账"分离载体。
+///
+/// `text` 已随 agent_input 生成（run_session_loop）；`last_notified` / `mode`
+/// 供 executor_helpers 在 Phase 6 入队点调用 [`mark_permission_mode_notified`]。
+/// 不直接持有闭包，保持类型简单可测。
+pub(crate) struct ModeNoticeBooking {
+    /// 已生成的受控通知文本（与 agent_input 一起入队）。
+    pub(crate) text: String,
+    /// session 级 last-notified 原子值。
+    pub(crate) last_notified: Arc<AtomicU8>,
+    /// 本次记账的 mode。
+    pub(crate) mode: PermissionMode,
 }
 
 /// Shared agent execution pipeline with auto-compact support.
@@ -618,12 +753,45 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     }
 
     let trace_input = content.text_content();
-    let agent_input = if incoming_recalls.is_empty() {
+    // D2：PermissionMode 会话内切换后，于下一可消费 turn 以受控 runtime event
+    // 通知模型（不重建 frozen system prompt）。last-notified 值存于 session 级
+    // AcpSession（跨 turn 持久）；print mode 等无 SessionManager 场景不注入。
+    // 与 incoming_recalls 共用 `<system-reminder>` 受控容器，但不属于 recall
+    // 语义（keepgoing 清空 recall 时通知仍注入）。
+    //
+    // [P3] 此处只做纯检测生成文本，**不记账**：`ModeNoticeBooking` 随 agent_input
+    // 下传，executor_helpers 在 Phase 6 把消息推入模型可见 v2 MessageQueue 时
+    // 才调用 `mark_permission_mode_notified`。本 turn 在入队前失败/取消不会
+    // 丢失通知——下一 turn 重新检测仍会生成（可重复重试，恰好可见一次）。
+    // 初始 mode（哨兵状态）同样经此路径在首个模型可见 turn 公开一次。
+    let mode_notice_booking: Option<ModeNoticeBooking> = ctx
+        .session_manager
+        .as_ref()
+        .and_then(|sm| sm.get_session(&ctx.session_id))
+        .map(|s| s.last_notified_permission_mode.clone())
+        .and_then(|last| {
+            permission_mode_notice_if_changed(ctx.permission_mode.load(), &last).map(|text| {
+                ModeNoticeBooking {
+                    text,
+                    last_notified: last,
+                    mode: ctx.permission_mode.load(),
+                }
+            })
+        });
+    let mode_notice = mode_notice_booking.as_ref().map(|b| b.text.clone());
+    let agent_input = if incoming_recalls.is_empty() && mode_notice.is_none() {
         peri_agent::agent::react::AgentInput::blocks(content)
     } else {
+        let mut reminder_parts: Vec<String> = Vec::new();
+        if !incoming_recalls.is_empty() {
+            reminder_parts.push(incoming_recalls.join("\n"));
+        }
+        if let Some(notice) = mode_notice {
+            reminder_parts.push(notice);
+        }
         let reminder_text = format!(
             "<system-reminder>\n{}\n</system-reminder>",
-            incoming_recalls.join("\n")
+            reminder_parts.join("\n\n")
         );
         let mut blocks = content.content_blocks();
         blocks.push(ContentBlock::text(reminder_text));
@@ -697,6 +865,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         async_router.clone(),
         langfuse_tracer,
         bg_registry_for_cmd,
+        mode_notice_booking,
     )
     .await;
 
@@ -749,9 +918,11 @@ async fn build_and_execute_agent(
     async_router: Option<AsyncRouter>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    mode_notice_booking: Option<ModeNoticeBooking>,
 ) -> ExecOutcome {
     let (
         system_prompt,
+        subagent_system_prompt,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
@@ -760,6 +931,7 @@ async fn build_and_execute_agent(
         // 使用 session 创建时冻结的数据，跳过重建
         (
             f.system_prompt().to_string(),
+            Some(f.subagent_system_prompt().to_string()),
             f.claude_md().map(|s| s.to_string()),
             f.claude_local_md().map(|s| s.to_string()),
             f.skill_summary().map(|s| s.to_string()),
@@ -776,9 +948,11 @@ async fn build_and_execute_agent(
             &ctx.plugin_agent_dirs,
             &Local::now().format("%Y-%m-%d").to_string(),
             peri_middlewares::prelude::PermissionMode::AutoMode,
+            ctx.workflow_executor.is_some(),
         );
         (
             frozen_data.system_prompt().to_string(),
+            Some(frozen_data.subagent_system_prompt().to_string()),
             frozen_data.claude_md().map(|s| s.to_string()),
             frozen_data.claude_local_md().map(|s| s.to_string()),
             frozen_data.skill_summary().map(|s| s.to_string()),
@@ -989,6 +1163,8 @@ async fn build_and_execute_agent(
         langfuse_tracer,
         // ── AAC-only ──
         system_prompt,
+        subagent_system_prompt,
+        mode_notice_booking,
         builder::FrozenData {
             claude_md: frozen_claude_md,
             claude_local_md: frozen_claude_local_md,

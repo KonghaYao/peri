@@ -282,9 +282,10 @@ fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
         "frozen summary 应含 builtin use-artifacts，实际: {}",
         summary
     );
+    // D4：catalog 用 [builtin] 来源标签（不再暴露虚拟路径/description）
     assert!(
-        summary.contains("<builtin>/use-artifacts"),
-        "frozen summary 应含虚拟路径 <builtin>/use-artifacts，实际: {}",
+        summary.contains("- **use-artifacts** [builtin]"),
+        "frozen summary 应以 [builtin] 来源标签列出 use-artifacts，实际: {}",
         summary
     );
 }
@@ -292,14 +293,89 @@ fn test_e2e_frozen_summary_contains_builtin_use_artifacts() {
 #[test]
 fn test_e2e_frozen_summary_excludes_builtin_when_disabled() {
     // 验证：disable_bundled=true 时 Builtin root 不被追加，
-    // frozen summary 不含 <builtin>/use-artifacts
+    // frozen summary 不含 builtin use-artifacts
     let summary = SkillsMiddleware::build_frozen_summary("/tmp", vec![], true);
     // 可能返回 None（无任何 skill）或 Some（仅含磁盘 skill）
     if let Some(s) = summary {
         assert!(
-            !s.contains("<builtin>/use-artifacts"),
+            !s.contains("use-artifacts"),
             "disable_bundled=true 时不应含 Builtin use-artifacts，实际: {}",
             s
         );
     }
+}
+
+/// [回归测试] D3：模型可见 skill 协议唯一——SkillTool(skill_name) +
+/// DiscoverSkillsTool，旧 Skill(skill, args) 已移除。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-6）：主 agent 链曾同时注册
+/// `SkillTool`（skills/tools.rs）与 `Skill`（tools/skill.rs，参数 skill+args），
+/// 模型面对一对"同名职责、参数冲突"的工具。D3 收敛后 SkillsMiddleware 是
+/// 主链与 subagent 链共用的 skill 工具源，collect_tools 必须恰好返回两个
+/// 工具且不含 "Skill"。
+#[test]
+fn test_collect_tools_exposes_only_unified_skill_protocol() {
+    let mw = SkillsMiddleware::new();
+    let tools = mw.collect_tools("/tmp");
+    let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["DiscoverSkillsTool", "SkillTool"],
+        "模型可见 skill 协议必须唯一，不得残留 Skill(skill, args)"
+    );
+    // 参数契约：SkillTool 接收 skill_name（非 skill/args）
+    let skill_tool = tools.iter().find(|t| t.name() == "SkillTool").unwrap();
+    let params = skill_tool.parameters();
+    assert!(
+        params["properties"]["skill_name"].is_object(),
+        "SkillTool 参数必须是 skill_name，实际: {}",
+        params
+    );
+    assert!(
+        params["properties"].get("skill").is_none() && params["properties"].get("args").is_none(),
+        "SkillTool 不得再暴露旧 skill/args 参数"
+    );
+}
+
+/// [回归测试] D3：SkillTool 对"catalog 有但磁盘已删除"的 skill 返回可恢复错误，
+/// 不破坏 frozen prefix（冻结摘要不变，错误只发生在加载时刻）。
+#[tokio::test]
+async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills").join("gone-skill");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: 'gone-skill'\ndescription: 'd'\n---\n\nbody",
+    )
+    .unwrap();
+
+    let mw = SkillsMiddleware::new();
+    let cache = mw.skills_cache();
+    // 模拟 before_agent 已扫描（缓存含 gone-skill）
+    let roots = vec![SkillRoot {
+        path: dir.path().join(".claude").join("skills"),
+        source: SkillSource::Project,
+        plugin_name: None,
+    }];
+    let skills = scan_skill_roots(&roots);
+    *cache.write().unwrap() = Some(skills);
+
+    // 会话中途删除磁盘文件
+    std::fs::remove_dir_all(&skills_dir).unwrap();
+
+    let tool = tools::SkillTool::new(cache);
+    let result = tool
+        .invoke(
+            serde_json::json!({"skill_name": "gone-skill"}),
+            peri_agent::tools::ToolContext::new(&[], "/tmp"),
+        )
+        .await;
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("session catalog") && msg.contains("DiscoverSkillsTool"),
+        "错误应说明 catalog/磁盘边界并提供可恢复路径，实际: {msg}"
+    );
 }

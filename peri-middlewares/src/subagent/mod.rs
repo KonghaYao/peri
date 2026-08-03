@@ -15,8 +15,8 @@ use peri_agent::{
 };
 
 use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter, parse_agent_file,
-    tools::BoxToolWrapper,
+    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
+    claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
 };
 
 mod agent_result;
@@ -571,19 +571,70 @@ pub fn scan_agents_with_extra_dirs(
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
 ///
 /// 主 Agent 在 Prompt 中看到此信息后可以判断：
-/// - 能否并行执行（只读 agent 可安全并发）
+/// - 能否并行执行（readonly agent 可安全并发）
 /// - 质量/成本/延迟预期（模型级别）
+///
+/// `can_mutate` 是**保守调度提示**，不是代码级锁或安全边界：
+/// 实际能力由 `filter_tools` 在工具注册层真裁剪，标签仅间接影响主模型
+/// 的并行决策（见审计 prompt-sections-audit.md P1-8 修正后判定）。
 #[derive(Debug, Clone)]
 pub struct AgentCapability {
     /// 模型级别：`haiku` / `sonnet` / `opus` / `inherit`
     pub model_tier: String,
-    /// 该 agent 是否会修改项目代码（有 Write/Edit 权限 = true）。
-    /// 注意：`allowedWriteDirs` 声明的 WriteSandbox 工具不计入 can_mutate，
+    /// 该 agent 是否会修改项目代码（保守推断，D5）。
+    /// 只有能根据最终注册工具集合证明无项目写能力时才为 false：
+    /// - omitted tools（继承父工具）含 Bash / folder_operations 等 → true，
+    ///   除非显式 disallow 全部核心写能力工具；
+    /// - 显式 `tools: []` → false（零工具）；
+    /// - 白名单含任一写能力工具（Bash / Write / Edit / folder_operations /
+    ///   cron_register / mcp__*）→ true。
+    ///
+    /// `allowedWriteDirs` 声明的 WriteSandbox 不计入 can_mutate，
     /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
     pub can_mutate: bool,
 }
 
-/// 从 Agent frontmatter 推断运行时能力画像。
+/// 工具名是否为项目写能力（保守集合，D5）。
+///
+/// - 显式工具名：`Bash`（echo > file / rm / git commit）、`Write`、`Edit`、
+///   `folder_operations`（含 create/delete/move 操作）、`cron_register`
+///   （可定时触发任意 prompt，等价委派执行权）；
+/// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
+///
+/// 匹配大小写不敏感（与 `filter_tools` 一致）。
+fn is_mutation_tool(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "bash" | "write" | "edit" | "folder_operations" | "cron_register"
+    ) || lower.starts_with("mcp__")
+}
+
+/// 核心写能力工具是否被 disallowed 全部覆盖（Empty / wildcard 继承场景）。
+///
+/// `mcp__*` 无法用精确 disallowed 排除（`filter_tools` 为精确匹配），
+/// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
+/// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
+fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
+    const MUTATION_CORE: [&str; 5] = [
+        "bash",
+        "write",
+        "edit",
+        "folder_operations",
+        "cron_register",
+    ];
+    let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
+    MUTATION_CORE
+        .iter()
+        .all(|t| dis_lower.iter().any(|d| d == t))
+}
+
+/// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
+///
+/// 区分三种 tools 语义（`claude_agent_parser::ToolsValue`）：
+/// - `Empty`（字段省略）= 继承父工具（含 Bash）→ 默认 writes；
+/// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
+/// - `List` = 白名单，含 `*` 等价继承全部。
 pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
     let model_tier = fm
         .model
@@ -592,15 +643,19 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
         .unwrap_or("inherit")
         .to_string();
 
-    let disallowed: Vec<String> = fm.disallowed_tools.to_vec();
-    let can_mutate = if fm.tools.to_vec().is_empty() {
-        // tools 为空 = 继承父工具，除非 Write/Edit 在 disallowed 中
-        // 简化：disallowed 含 Write/Edit 则不可变
-        !(disallowed.contains(&"Write".to_string()) && disallowed.contains(&"Edit".to_string()))
-    } else {
-        // 白名单模式：是否含有 Write 或 Edit
-        let tools = fm.tools.to_vec();
-        tools.contains(&"Write".to_string()) || tools.contains(&"Edit".to_string())
+    let disallowed = fm.disallowed_tools.to_vec();
+    let can_mutate = match &fm.tools {
+        ToolsValue::Empty => !core_mutation_tools_fully_disallowed(&disallowed),
+        ToolsValue::NoTools => false,
+        ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => {
+            !core_mutation_tools_fully_disallowed(&disallowed)
+        }
+        ToolsValue::List(tools) => {
+            let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
+            tools
+                .iter()
+                .any(|t| is_mutation_tool(t) && !dis_lower.iter().any(|d| d == &t.to_lowercase()))
+        }
     };
 
     AgentCapability {

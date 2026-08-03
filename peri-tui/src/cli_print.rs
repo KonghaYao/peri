@@ -209,6 +209,7 @@ pub async fn run_print(
         &plugin_agent_dirs,
         &frozen_date,
         permission_mode,
+        false, // print 模式无 workflow executor：16_workflow section 不渲染
     );
 
     // run_session_loop 是 async 函数（返回 PromptResult）

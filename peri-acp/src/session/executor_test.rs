@@ -16,8 +16,9 @@ use peri_agent::{
 };
 
 use super::{
-    intercept_immediate_command, is_keepgoing, run_session_loop, InterceptRequest,
-    PromptStopReason, SessionContext, TurnInput,
+    intercept_immediate_command, is_keepgoing, mark_permission_mode_notified,
+    permission_mode_notice_if_changed, run_session_loop, FrozenSessionData, InterceptRequest,
+    PromptStopReason, SessionContext, TurnInput, PERMISSION_MODE_NEVER_NOTIFIED,
 };
 use crate::{
     provider::{LlmProvider, PeriConfig},
@@ -583,5 +584,354 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
         mock_sink.push_done_count(),
         1,
         "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
+    );
+}
+
+// ── FrozenSessionData 前缀稳定性测试 ───────────────────────────────────────
+
+/// [回归测试] 同一 frozen 输入必须产生字节相同的 system prompt。
+///
+/// 历史背景（ARC-FROZEN-001）：system prompt 在 session/new 时一次性冻结；
+/// 相同会话输入（cwd/language/skill roots/date/permission mode）若因调用方
+/// 上下文差异产生不同前缀，会破坏 Anthropic 前缀缓存，并使主 agent 与
+/// subagent 看到不一致的策略。本测试固定全部输入，验证
+/// `FrozenSessionData::build` 是确定性的。
+#[test]
+fn test_frozen_session_data_build_is_deterministic() {
+    let cwd = "/tmp";
+    let frozen_date = "2026-01-01";
+    let a = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        true,
+    );
+    let b = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        true,
+    );
+    assert_eq!(
+        a.system_prompt(),
+        b.system_prompt(),
+        "相同 frozen 输入两次 build 应产生相同 system prompt"
+    );
+    assert_eq!(
+        a.skill_summary(),
+        b.skill_summary(),
+        "相同 frozen 输入两次 build 应产生相同 skill 摘要"
+    );
+}
+
+/// [回归测试] 已冻结的 system prompt 与 skill 摘要不受会话中途磁盘变化影响。
+///
+/// 历史背景（ARC-FROZEN-001 / 审计 prompt-sections-audit.md P2-11）：skill
+/// 摘要与 system prompt 在 session/new 冻结；会话内磁盘 skill 增删不得改变
+/// 已冻结产物（冻结是前缀缓存稳定性的有意权衡，不能按需重扫）。
+#[test]
+fn test_frozen_system_prompt_immune_to_disk_changes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+
+    // 冻结前：cwd 含 skill-a
+    let skills_dir_a = tmp.path().join(".claude").join("skills").join("skill-a");
+    std::fs::create_dir_all(&skills_dir_a).unwrap();
+    std::fs::write(
+        skills_dir_a.join("SKILL.md"),
+        "---\nname: 'skill-a'\ndescription: 'A test skill'\n---\n\nbody",
+    )
+    .unwrap();
+
+    let frozen = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        "2026-01-01",
+        PermissionMode::Bypass,
+        true,
+    );
+    let frozen_prompt = frozen.system_prompt().to_string();
+    let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
+    assert!(
+        frozen_summary.as_deref().unwrap_or("").contains("skill-a"),
+        "冻结摘要应包含冻结时的 skill-a"
+    );
+
+    // 会话中途：删除 skill-a，新增 skill-b 与 CLAUDE.md
+    std::fs::remove_dir_all(&skills_dir_a).unwrap();
+    let skills_dir_b = tmp.path().join(".claude").join("skills").join("skill-b");
+    std::fs::create_dir_all(&skills_dir_b).unwrap();
+    std::fs::write(
+        skills_dir_b.join("SKILL.md"),
+        "---\nname: 'skill-b'\ndescription: 'B test skill'\n---\n\nbody",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("CLAUDE.md"), "# New CLAUDE.md").unwrap();
+
+    // 已冻结产物不变（不按需重读磁盘）
+    assert_eq!(
+        frozen.system_prompt(),
+        frozen_prompt,
+        "已冻结 system prompt 不应受会话中途磁盘变化影响"
+    );
+    assert_eq!(
+        frozen.skill_summary().map(|s| s.to_string()),
+        frozen_summary,
+        "已冻结 skill 摘要不应随磁盘重扫"
+    );
+}
+
+/// [回归测试] workflow capability 在 session 冻结时决定 16_workflow section。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-5 / 阶段 3 完成判据）：
+/// `workflow_executor: None`（-p print mode）时 prompt 不得声明 Workflow；
+/// `Some` 时声明存在。`FrozenSessionData::build` 的 workflow_enabled 输入
+/// 来自同一条件源（`workflow_executor.is_some()`），与 builder 注册、
+/// ToolSearch 发现三面一致。
+#[test]
+fn test_frozen_prompt_workflow_section_gated_by_workflow_enabled() {
+    let cwd = "/tmp";
+    let frozen_date = "2026-01-01";
+
+    let enabled = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        true,
+    );
+    assert!(
+        enabled.system_prompt().contains("Workflow Orchestration"),
+        "workflow_enabled=true 时 16_workflow section 应渲染"
+    );
+
+    let disabled = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        false,
+    );
+    assert!(
+        !disabled.system_prompt().contains("Workflow Orchestration"),
+        "workflow_enabled=false（print mode）时 16_workflow section 不应渲染"
+    );
+}
+
+/// [回归测试] 子 agent / fork / workflow agent 复用的冻结 prompt 不宣称 workflow。
+///
+/// 历史背景（P2-2026-08-02 pre-commit review）：`features_for_sub` 与 fork
+/// 继承的 parent frozen prompt 会把 16_workflow section 保留为可用，但
+/// subagent / fork / workflow agent 三条路径均传 `shared_tools: None`、无
+/// WorkflowTool；agent.md 又准确说明不继承 Workflow extension tools，造成
+/// prompt 与能力矛盾（system prompt / 工具注册 / SearchExtraTools 三面不一致）。
+///
+/// 修复后 `FrozenSessionData` 同时冻结主 prompt（workflow 声明，主 ACP/stdio
+/// 链真实注册 WorkflowTool）与子面向 prompt（无 16_workflow section）：
+/// subagent 的 system_builder、fork/bg-fork 继承、workflow agent 复用的
+/// 都是后者；workflow_enabled=false（print mode）时两版字节相同。
+#[test]
+fn test_frozen_subagent_prompt_never_claims_workflow() {
+    let cwd = "/tmp";
+    let frozen_date = "2026-01-01";
+
+    // 主链 workflow 可用：主 prompt 声明，子面向 prompt 不声明
+    let enabled = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        true,
+    );
+    assert!(
+        enabled.system_prompt().contains("Workflow Orchestration"),
+        "主链 workflow 可用时主 prompt 应声明（主 ACP/stdio 仍可用）"
+    );
+    assert!(
+        !enabled
+            .subagent_system_prompt()
+            .contains("Workflow Orchestration"),
+        "子 agent / fork / workflow agent 复用的冻结 prompt 不得声明 Workflow"
+    );
+
+    // print mode（workflow 不可用）：主 prompt 无 workflow，两版一致
+    let disabled = FrozenSessionData::build(
+        cwd,
+        None,
+        &[],
+        &[],
+        frozen_date,
+        PermissionMode::Bypass,
+        false,
+    );
+    assert!(
+        !disabled.system_prompt().contains("Workflow Orchestration"),
+        "print mode 主 prompt 不应声明 Workflow"
+    );
+    assert_eq!(
+        disabled.subagent_system_prompt(),
+        disabled.system_prompt(),
+        "workflow 关闭时子面向 prompt 与主 prompt 应字节相同"
+    );
+}
+
+// ── PermissionMode 切换通知（D2）────────────────────────────────────────────
+
+/// [回归测试] mode 未变化时不产生通知，且不记账。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-3）：frozen prompt 呈现初始
+/// mode，会话内切换后若不通知模型会产生"prompt 说明陈旧"漂移。D2 采用
+/// 下一可消费 turn 的受控 runtime event；检测与记账分离（记账在消息入队时，
+/// 见 `mark_permission_mode_notified`），未变化时两者都不发生。
+#[test]
+fn test_permission_mode_notice_skipped_when_unchanged() {
+    let last = std::sync::atomic::AtomicU8::new(PermissionMode::Default as u8);
+    let notice = permission_mode_notice_if_changed(PermissionMode::Default, &last);
+    assert!(notice.is_none(), "mode 未变化不应产生通知");
+    assert_eq!(
+        last.load(std::sync::atomic::Ordering::Relaxed),
+        PermissionMode::Default as u8,
+        "未变化时 last-notified 不应被修改"
+    );
+}
+
+/// [回归测试] mode 变化时产生受控通知（纯检测，不记账）。
+///
+/// 通知文本必须包含 mode 名与语义（与 10_hitl.md 的机制说明一致），
+/// 且不含保留 tag（由调用方包裹 `<system-reminder>`）。
+#[test]
+fn test_permission_mode_notice_emitted_on_change() {
+    let last = std::sync::atomic::AtomicU8::new(PermissionMode::Default as u8);
+    let notice = permission_mode_notice_if_changed(PermissionMode::Bypass, &last);
+    let notice = notice.expect("mode 变化应产生通知");
+    assert!(notice.contains("Bypass"), "通知应包含 mode 名: {notice}");
+    assert!(
+        notice.contains("without approval"),
+        "通知应包含 mode 语义: {notice}"
+    );
+    assert!(
+        !notice.contains("<system-reminder>"),
+        "通知本身不应含保留 tag（由调用方包裹）"
+    );
+    assert!(
+        !notice.contains("Current permission mode"),
+        "非首轮变化应使用 'changed to' 措辞，而非初始说明"
+    );
+    // 纯检测不记账：last-notified 保持原值，直到消息入队（executor_helpers Phase 6）
+    assert_eq!(
+        last.load(std::sync::atomic::Ordering::Relaxed),
+        PermissionMode::Default as u8,
+        "检测本身不应更新 last-notified（记账发生在入队点）"
+    );
+}
+
+/// [回归测试] 记账后不再重复通知：已随消息入队的 mode 变化恰好通知一次。
+///
+/// 历史背景：通知必须在下一可消费 turn 注入一次；若 CAS 语义错误（每次都
+/// 注入），每个后续 turn 都会重复推送陈旧通知，与"切换后通知一次"冲突。
+#[test]
+fn test_permission_mode_notice_emitted_only_once() {
+    let last = std::sync::atomic::AtomicU8::new(PermissionMode::Default as u8);
+    // 检测（模拟 run_session_loop 生成文本）→ 入队记账（模拟 Phase 6）
+    assert!(permission_mode_notice_if_changed(PermissionMode::AutoMode, &last).is_some());
+    mark_permission_mode_notified(&last, PermissionMode::AutoMode);
+    assert!(
+        permission_mode_notice_if_changed(PermissionMode::AutoMode, &last).is_none(),
+        "已记账的 mode 不应重复通知"
+    );
+    // 再次切换（AutoMode → AcceptEdit → 回到 AutoMode）仍各通知一次
+    assert!(permission_mode_notice_if_changed(PermissionMode::AcceptEdit, &last).is_some());
+    mark_permission_mode_notified(&last, PermissionMode::AcceptEdit);
+    assert!(permission_mode_notice_if_changed(PermissionMode::AutoMode, &last).is_some());
+    mark_permission_mode_notified(&last, PermissionMode::AutoMode);
+    assert!(
+        permission_mode_notice_if_changed(PermissionMode::AutoMode, &last).is_none(),
+        "回到 AutoMode 且已记账后不应再次通知"
+    );
+}
+
+/// [回归测试] 未入队前失败/取消不记账，通知可重复重试（不丢失）。
+///
+/// 历史背景（P3-2026-08-02 pre-commit review）：旧实现"一生成即写
+/// last_notified"，若本 turn 在通知被模型消费前失败或取消，下一 turn 因
+/// last-notified 已更新而不再生成通知——通知丢失。修复后检测与记账分离：
+/// 只有消息推入模型可见 v2 MessageQueue（executor_helpers Phase 6 入队点）
+/// 才记账；入队前失败/取消时，下一 turn 重新检测仍会生成相同通知。
+#[test]
+fn test_permission_mode_notice_retries_until_enqueued() {
+    let last = std::sync::atomic::AtomicU8::new(PermissionMode::Default as u8);
+
+    // turn 1：检测到变化（生成文本），但 turn 在入队前失败/取消 → 不记账
+    let n1 = permission_mode_notice_if_changed(PermissionMode::Bypass, &last);
+    assert!(n1.is_some(), "turn 1 应检测到 mode 变化");
+    assert_eq!(
+        last.load(std::sync::atomic::Ordering::Relaxed),
+        PermissionMode::Default as u8,
+        "入队前失败不应记账"
+    );
+
+    // turn 2（重试）：仍能检测到同一变化，通知未丢失
+    let n2 = permission_mode_notice_if_changed(PermissionMode::Bypass, &last);
+    assert!(n2.is_some(), "重试 turn 应再次生成通知（不丢失）");
+    assert_eq!(n1, n2, "重试通知文本应与首次一致");
+
+    // turn 2 消息成功入队 → 记账；turn 3 不再重复
+    mark_permission_mode_notified(&last, PermissionMode::Bypass);
+    assert!(
+        permission_mode_notice_if_changed(PermissionMode::Bypass, &last).is_none(),
+        "入队记账后不应再通知"
+    );
+}
+
+/// [回归测试] 初始 mode 在首个模型可见 turn 恰好公开一次。
+///
+/// 历史背景（P3-2026-08-02 pre-commit review）：10_hitl 不含 mode snapshot、
+/// Bypass 时 10_hitl 不渲染，初始 mode 从不向模型公开。修复后
+/// `last_notified_permission_mode` 初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
+/// 哨兵：首个模型可见 turn 生成"当前模式"初始说明，入队记账后不再重复；
+/// 之后仅对真实 mode 切换生成"changed to"说明。
+#[test]
+fn test_permission_mode_initial_notice_disclosed_once() {
+    let last = std::sync::atomic::AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED);
+
+    // 首轮：初始说明（即使 mode 未"切换"，也要公开初始 mode）
+    let notice = permission_mode_notice_if_changed(PermissionMode::Default, &last);
+    let notice = notice.expect("首轮应公开初始 mode");
+    assert!(
+        notice.contains("Current permission mode") && notice.contains("Default"),
+        "首轮应使用'当前模式'初始说明: {notice}"
+    );
+    assert!(
+        !notice.contains("changed to"),
+        "首轮不应使用'changed to'措辞"
+    );
+
+    // 入队记账后：同一 mode 不再重复通知
+    mark_permission_mode_notified(&last, PermissionMode::Default);
+    assert!(
+        permission_mode_notice_if_changed(PermissionMode::Default, &last).is_none(),
+        "初始说明恰好公开一次"
+    );
+
+    // 后续真实切换走 "changed to" 措辞
+    let change = permission_mode_notice_if_changed(PermissionMode::Bypass, &last);
+    let change = change.expect("切换应产生通知");
+    assert!(
+        change.contains("changed to") && change.contains("Bypass"),
+        "切换应使用 'changed to' 措辞: {change}"
     );
 }

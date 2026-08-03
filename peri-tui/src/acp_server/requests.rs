@@ -55,7 +55,9 @@ fn create_session_workflow_middleware(
             session_id: Some(session_id.to_string()),
             compact_config: Some(compact_config),
             cancel: None,
-            system_prompt: Some(frozen_data.system_prompt().to_string()),
+            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
+            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
+            system_prompt: Some(frozen_data.subagent_system_prompt().to_string()),
             broker: None,
             permission_mode: None,
             frozen_date: Some(frozen_data.date().to_string()),
@@ -132,6 +134,7 @@ pub(crate) async fn handle_request(
                 &cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
+                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
 
             // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
@@ -302,6 +305,7 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
+                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
@@ -561,6 +565,7 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
+                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
@@ -632,6 +637,7 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
+                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);

@@ -19,7 +19,9 @@ pub struct AgentOverrides {
     pub tone: Option<String>,
     /// 主动性（替换 `{{proactiveness}}`）
     pub proactiveness: Option<String>,
-    /// agent.md frontmatter 中 prompt_mode 的值："extend"|"full"，默认 extend
+    /// agent.md frontmatter 中 prompt_mode 的值："extend"|"full"，默认 extend。
+    /// `full` 只替换 PersonaDomain 层（persona/domain instructions）；
+    /// 安全与授权、工程行为、能力契约与运行时边界层始终保留，不会被移除。
     pub mode: Option<String>,
 }
 

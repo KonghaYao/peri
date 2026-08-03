@@ -357,6 +357,45 @@ async fn test_process_batch_accept_edits_mixed() {
     assert!(results[2].is_ok(), "read_file 应放行");
 }
 
+/// [回归测试] cron_register 在四模式下的行为与 10_hitl.md 机制说明一致。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-3）：10_hitl.md 固定清单漏列
+/// `cron_register`，但运行时 `default_requires_approval` 已含该项（可定时
+/// 触发任意 prompt，等价代理执行权）。重写后的机制说明补齐该项；本测试
+/// 锁定实际决策：Default 走审批（broker），Bypass 直接放行，AcceptEdit 下
+/// 不属于编辑工具仍需审批。
+#[tokio::test]
+async fn test_cron_register_requires_approval_in_default_mode() {
+    let mw = make_mw_with_mode(PermissionMode::Default, None);
+    let mut state = AgentState::new("/tmp");
+    let tc = make_tool_call("cron_register");
+    // AutoApproveBroker → 审批通过（说明确实进入了审批路径；Read 等非敏感
+    // 工具根本不经过 broker）
+    let result = mw.before_tool(&mut state, &tc).await.unwrap();
+    assert_eq!(result.name, "cron_register");
+}
+
+#[tokio::test]
+async fn test_cron_register_allowed_in_bypass_mode() {
+    let mw = make_mw_with_mode(PermissionMode::Bypass, None);
+    let mut state = AgentState::new("/tmp");
+    let tc = make_tool_call("cron_register");
+    let result = mw.before_tool(&mut state, &tc).await.unwrap();
+    assert_eq!(result.name, "cron_register");
+}
+
+#[tokio::test]
+async fn test_cron_register_not_edit_tool_in_accept_edit_mode() {
+    // AcceptEdit 只自动放行 Write/Edit/folder_operations；
+    // cron_register 仍走审批（AutoApproveBroker 通过）
+    assert!(!is_edit_tool("cron_register"));
+    let mw = make_mw_with_mode(PermissionMode::AcceptEdit, None);
+    let mut state = AgentState::new("/tmp");
+    let tc = make_tool_call("cron_register");
+    let result = mw.before_tool(&mut state, &tc).await.unwrap();
+    assert_eq!(result.name, "cron_register");
+}
+
 /// Broker 挂起时 before_tool 会无限等待，文档化当前的同步阻塞缺陷。
 /// broker.request 会无限等待用户响应。
 /// 真实场景中如果用户长时间不操作，before_tool 将永久阻塞。

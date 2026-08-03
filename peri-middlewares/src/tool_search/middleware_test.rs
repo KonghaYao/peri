@@ -120,3 +120,53 @@ async fn test_second_before_agent_caches_same_contribution() {
         "第二轮缓存的贡献应与首轮完全一致"
     );
 }
+
+/// [回归测试] WorkflowTool 搜索面与注册/prompt gate 共用同一条件源（阶段 3）。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-5）：模型按 16_workflow 的指引
+/// 先 SearchExtraTools 发现，若索引与注册不一致会出现"声明可用但搜不到"。
+/// 修复后 workflow 注册（WorkflowMiddlewareAdaptor::collect_tools）、
+/// deferred 搜索（本测试）与 prompt section（peri-acp Workflow gate）三面
+/// 均由 `workflow_executor.is_some()` 同一条件源驱动。
+#[tokio::test]
+async fn test_deferred_workflow_tool_discoverable_after_before_agent() {
+    // 模拟 workflow_executor=Some 时 builder 装配后的 shared_tools：
+    // WorkflowTool 以 deferred 形式注册（不直接进 LLM tools）。
+    let index = Arc::new(ToolSearchIndex::new());
+    let mut shared = BTreeMap::new();
+    shared.insert(
+        "Workflow".to_string(),
+        Arc::new(MockTool::new("Workflow", "Orchestrate multiple agents")) as Arc<dyn BaseTool>,
+    );
+    let shared = Arc::new(RwLock::new(shared));
+    let mw = ToolSearchMiddleware::new(index.clone(), shared);
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    let results = index.search("select:Workflow", 10);
+    assert_eq!(
+        results.len(),
+        1,
+        "已注册的 Workflow 应能被 SearchExtraTools 发现"
+    );
+    assert_eq!(results[0].name, "Workflow");
+}
+
+/// [回归测试] workflow_executor=None（print mode）时 Workflow 不可发现。
+///
+/// 历史背景：16_workflow 曾无条件渲染，即使 WorkflowTool 未注册。修复后
+/// None 场景下 prompt section 不渲染、WorkflowTool 不注册、索引不可发现
+/// ——三面同时关闭。此用例锁定搜索面（索引不含 Workflow）。
+#[tokio::test]
+async fn test_workflow_not_discoverable_when_not_registered() {
+    let (index, shared) = build_test_components(); // 不含 Workflow
+    let mw = ToolSearchMiddleware::new(index.clone(), shared);
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    let results = index.search("select:Workflow", 10);
+    assert!(
+        results.is_empty(),
+        "未注册的 Workflow 不应被 SearchExtraTools 发现（print mode 语义）"
+    );
+}

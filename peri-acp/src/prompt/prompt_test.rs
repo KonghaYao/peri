@@ -173,12 +173,66 @@ fn test_skills_enabled_includes_skills_section() {
 }
 
 #[test]
+fn test_workflow_enabled_includes_workflow_section() {
+    let features = PromptFeatures {
+        workflow_enabled: true,
+        ..PromptFeatures::none()
+    };
+    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    assert!(
+        result.contains("Workflow Orchestration"),
+        "workflow_enabled 时应包含 16_workflow 段落"
+    );
+}
+
+#[test]
+fn test_workflow_disabled_excludes_workflow_section() {
+    let features = PromptFeatures {
+        workflow_enabled: false,
+        ..PromptFeatures::none()
+    };
+    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    assert!(
+        !result.contains("Workflow Orchestration"),
+        "workflow_enabled=false 时不应包含 16_workflow 段落（print mode 等无 executor 场景）"
+    );
+}
+
+/// [回归测试] workflow 声明与注册共用同一条件源（阶段 3 capability 契约）。
+///
+/// 历史背景（审计 prompt-sections-audit.md P1-5）：16_workflow 原编入无条件
+/// static sections，而 WorkflowTool 注册严格依赖 `workflow_executor.is_some()`
+/// ——prompt 宣称与真实注册脱节。修复后 `workflow_enabled` 由同一条件源
+/// 导出：prompt section、WorkflowMiddlewareAdaptor::collect_tools、ToolSearch
+/// 索引发现三面一致；此测试锁定 prompt 面，注册/发现面分别由
+/// workflow/mod.rs 与 tool_search/middleware_test.rs 的用例覆盖。
+#[test]
+fn test_workflow_gate_marks_capability_contract_layer() {
+    // 16_workflow 必须归 CapabilityContract 层（可被 feature 门控，但不得被
+    // persona override 移除——它不在 IMMUTABLE_SECTIONS 也不在 PersonaDomain）。
+    let (_, gate, layer) = GATED_SECTIONS
+        .iter()
+        .find(|(s, _, _)| s.contains("Workflow Orchestration"))
+        .expect("16_workflow 应位于 GATED_SECTIONS");
+    assert_eq!(*gate, FeatureGate::Workflow);
+    assert_eq!(*layer, PromptLayer::CapabilityContract);
+    // 不可替换层不再包含 workflow 段
+    assert!(
+        !IMMUTABLE_SECTIONS
+            .iter()
+            .any(|(s, _)| s.contains("Workflow Orchestration")),
+        "16_workflow 不应再位于 IMMUTABLE_SECTIONS"
+    );
+}
+
+#[test]
 fn test_all_features_enabled_includes_all() {
     let features = PromptFeatures {
         hitl_enabled: true,
         subagent_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
+        workflow_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &[], None, None);
     assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
@@ -188,16 +242,66 @@ fn test_all_features_enabled_includes_all() {
     );
     assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
     assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
+    assert!(
+        result.contains("Workflow Orchestration"),
+        "应包含 Workflow 段落"
+    );
 }
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect(PermissionMode::Bypass);
+    let features = PromptFeatures::detect(PermissionMode::Bypass, true);
     // 默认环境下 hitl_enabled 取决于 permission_mode
     // 注意：Bypass 模式下 hitl_enabled 为 false
     assert!(features.subagent_enabled);
     assert!(features.skills_enabled);
-    assert!(features.channel_enabled);
+    // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02）
+    assert!(
+        !features.channel_enabled,
+        "detect() 不得把未装配的 channel 宣称为可用能力"
+    );
+    // workflow_enabled 来自调用方（workflow_executor.is_some()）
+    assert!(features.workflow_enabled);
+    assert!(!PromptFeatures::detect(PermissionMode::Bypass, false).workflow_enabled);
+}
+
+/// [回归测试] 子 agent / fork / workflow agent 的 prompt features 恒不宣称
+/// workflow；未装配的 channel 不作为运行时能力（P2/P3-2026-08-02）。
+///
+/// 历史背景（P2 pre-commit review）：subagent / fork / workflow agent 三条
+/// 路径均传 `shared_tools: None`、无 WorkflowTool，但旧 `features_for_sub`
+/// 沿用 `workflow_executor.is_some()`，prompt 仍渲染 16_workflow——与能力
+/// 矛盾。`detect_without_workflow` 锁定子面向 prompt 的 workflow 恒关闭；
+/// 主 agent 的 workflow 声明仍由调用方显式传入（`detect(mode, true)`）。
+///
+/// channel 部分（P3）：`ChannelOwner` 未在生产路径装配，旧 `detect()` 硬编码
+/// `channel_enabled: true` 使 15_channel 被错误呈现为可用能力；现恒为 false。
+/// D6（tag 转义）保持未修复，本测试不宣称其已修复。
+#[test]
+fn test_detect_without_workflow_and_channel_gates() {
+    // 即使主链 workflow 可用，子面向 features 也不得宣称 workflow
+    let sub = PromptFeatures::detect_without_workflow(PermissionMode::Default);
+    assert!(
+        !sub.workflow_enabled,
+        "子 agent / fork / workflow agent 的 features 恒不得宣称 workflow"
+    );
+    assert!(
+        !sub.channel_enabled,
+        "未装配 ChannelOwner 时 channel 恒不启用"
+    );
+    // 主 agent 侧（detect 显式传 workflow 可用性）不受影响
+    let main = PromptFeatures::detect(PermissionMode::Default, true);
+    assert!(main.workflow_enabled, "主 agent 的 workflow 声明保持可用");
+    // 渲染面：子面向 features 渲染不出现 16_workflow / 15_channel
+    let result = build_system_prompt(None, "/tmp", sub, &[], None, None);
+    assert!(
+        !result.contains("Workflow Orchestration"),
+        "子面向 prompt 不得包含 16_workflow"
+    );
+    assert!(
+        !result.contains("Channel 频道消息"),
+        "未装配 channel 时 prompt 不得包含 15_channel"
+    );
 }
 
 // ─── boundary marker tests ──────────────────────────────────────────────
@@ -234,6 +338,7 @@ fn test_boundary_marker_with_all_features() {
         subagent_enabled: true,
         skills_enabled: true,
         channel_enabled: true,
+        workflow_enabled: true,
     };
     let result = build_system_prompt(None, "/tmp", features, &[], None, None);
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
@@ -307,9 +412,15 @@ fn test_available_agents_placeholder_replaced() {
         ..PromptFeatures::none()
     };
     let result = build_system_prompt(None, dir.to_str().unwrap(), features, &[], None, None);
+    // D4：catalog 只含 agent_id / tier / access，不注入自由 description
     assert!(
-        result.contains("- tester [inherit] [writes]: A test agent"),
+        result.contains("- tester [inherit] [writes]"),
         "Should contain formatted agent entry, got: {}",
+        result
+    );
+    assert!(
+        !result.contains("A test agent"),
+        "D4: description 不应注入 system prompt，got: {}",
         result
     );
     assert!(
@@ -329,7 +440,7 @@ fn test_available_agents_placeholder_empty_dir() {
     };
     let result = build_system_prompt(None, dir.to_str().unwrap(), features, &[], None, None);
     assert!(
-        result.contains("- explorer [haiku] [readonly]:"),
+        result.contains("- explorer [haiku] [readonly]"),
         "Should contain built-in agents even without .claude/agents/ directory"
     );
     assert!(
@@ -368,17 +479,22 @@ fn test_format_available_agents_with_agents() {
     .unwrap();
 
     let result = format_available_agents(dir.to_str().unwrap(), &[]);
+    // D4：不注入 description
     assert!(
-        result.contains("- reviewer [inherit] [writes]: Reviews code"),
+        result.contains("- reviewer [inherit] [writes]"),
         "Should contain reviewer entry"
     );
     assert!(
-        result.contains("- analyst [inherit] [writes]: Analyzes data"),
+        result.contains("- analyst [inherit] [writes]"),
         "Should contain analyst entry"
+    );
+    assert!(
+        !result.contains("Reviews code") && !result.contains("Analyzes data"),
+        "D4: agent description 不应出现在 catalog"
     );
     // Should also contain built-in agents (coder, explorer, general-purpose, plan, verification, web-researcher)
     assert!(
-        result.contains("- explorer [haiku] [readonly]:"),
+        result.contains("- explorer [haiku] [readonly]"),
         "Should contain built-in explorer agent"
     );
     // Verify project agents + built-in agents
@@ -396,7 +512,7 @@ fn test_format_available_agents_empty_dir() {
     let result = format_available_agents("/nonexistent/path/that/does/not/exist", &[]);
     // Built-in agents are always available
     assert!(
-        result.contains("- explorer [haiku] [readonly]:"),
+        result.contains("- explorer [haiku] [readonly]"),
         "Should contain built-in agents even without .claude/agents/ directory"
     );
     assert!(
@@ -520,7 +636,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             f.skills_enabled = true;
             f
         },
-        PromptFeatures::detect(PermissionMode::Bypass),
+        PromptFeatures::detect(PermissionMode::Bypass, true),
     ];
 
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
@@ -601,7 +717,7 @@ fn test_template_boundary_position_identical() {
     let old = build_system_prompt(
         None,
         "/tmp",
-        PromptFeatures::detect(PermissionMode::Bypass),
+        PromptFeatures::detect(PermissionMode::Bypass, true),
         &[],
         None,
         None,
@@ -609,7 +725,7 @@ fn test_template_boundary_position_identical() {
     let env = PromptEnv::detect("/tmp");
     let new = PromptTemplate::new().render(
         &env,
-        &PromptFeatures::detect(PermissionMode::Bypass),
+        &PromptFeatures::detect(PermissionMode::Bypass, true),
         &[],
         None,
     );
@@ -624,9 +740,14 @@ fn test_template_boundary_position_identical() {
 
 // ─── prompt_mode full / extend tests ─────────────────────────────────────
 
-/// 验证 full 模式下跳过静态段（01-06, 16），不包含静态段中的特征文本
+/// [回归测试] full 模式不再跳过不可替换层。
+///
+/// 历史背景：`prompt_mode: full` 曾跳过全部 STATIC_SECTIONS（01-06, 16），
+/// 使 subagent 定义可移除防御性安全、secret 规则、Git guardrails 与基础工具纪律
+/// （审计 docs/design/prompt-sections-audit.md P0-1）。分层重构后 full 只替换
+/// PersonaDomain 层，不可替换层必须保留。
 #[test]
-fn test_render_full_mode_skips_static() {
+fn test_render_full_mode_preserves_immutable_layers() {
     let overrides = AgentOverrides {
         persona: Some("You are a custom full-mode agent.".into()),
         tone: None,
@@ -641,19 +762,185 @@ fn test_render_full_mode_skips_static() {
         Some("2026-01-01"),
         None,
     );
-    // 静态段中的特征文本不应出现
+    // 不可替换层保留（SafetyAuthorization / EngineeringBehavior / CapabilityContract）
     assert!(
-        !result.contains("Following conventions"),
-        "full 模式不应包含 02_system 的 'Following conventions' 段落"
+        result.contains("Following conventions"),
+        "full 模式不应移除 02_system 段落"
     );
     assert!(
-        !result.contains("Doing tasks"),
-        "full 模式不应包含 03_doing_tasks 的 'Doing tasks' 段落"
+        result.contains("Doing tasks"),
+        "full 模式不应移除 03_doing_tasks 段落"
     );
-    // full_body 内容应出现
+    assert!(
+        result.contains("Simplicity"),
+        "full 模式不应移除 04_actions 段落"
+    );
+    // persona 替换生效（PersonaDomain 层被 full body 替换）
     assert!(
         result.contains("You are a custom full-mode agent."),
-        "full 模式应包含 persona 作为 prompt 主体"
+        "full 模式应包含 persona 作为 PersonaDomain 层"
+    );
+}
+
+/// [回归测试] full 模式必须保留 secret 处理规则。
+///
+/// 历史背景：`full` 曾跳过 02_system.md 的 secret 防泄漏规则
+/// （审计 docs/design/prompt-sections-audit.md P0-1）。
+#[test]
+fn test_render_full_mode_preserves_secret_policy() {
+    let overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        Some(&overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    assert!(
+        result.contains("Treat secrets"),
+        "full 模式不得移除 secret 处理规则（02_system）"
+    );
+}
+
+/// [回归测试] full 模式必须保留 Git 安全协议。
+///
+/// 历史背景：`full` 曾跳过 04_actions.md 的 Git Safety Protocol
+/// （审计 docs/design/prompt-sections-audit.md P0-1）。
+#[test]
+fn test_render_full_mode_preserves_git_guardrails() {
+    let overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        Some(&overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    assert!(
+        result.contains("NEVER force-push to main/master"),
+        "full 模式不得移除 Git 安全协议（04_actions）"
+    );
+}
+
+/// [回归测试] full 模式必须保留基础工具纪律。
+///
+/// 历史背景：`full` 曾跳过 05_using_tools.md 的工具调用纪律
+/// （审计 docs/design/prompt-sections-audit.md P0-1）。
+#[test]
+fn test_render_full_mode_preserves_tool_discipline() {
+    let overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        Some(&overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    assert!(
+        result.contains("Tool usage policy"),
+        "full 模式不得移除工具纪律段落（05_using_tools）"
+    );
+    assert!(
+        result.contains("## Bash discipline"),
+        "full 模式不得移除 Bash 纪律段落（05_using_tools）"
+    );
+}
+
+/// full 模式的 boundary 前缀偏移必须与 extend 模式完全一致。
+///
+/// 分层后 full 模式同样渲染不可替换层，边界标记前字节与非 full 相同，
+/// 恢复 Anthropic 前缀缓存命中区域的一致性。
+#[test]
+fn test_render_full_mode_boundary_aligned_with_extend() {
+    let full_overrides = AgentOverrides {
+        persona: Some("You are a custom full-mode agent.".into()),
+        tone: None,
+        proactiveness: None,
+        mode: Some("full".into()),
+    };
+    let full = build_system_prompt(
+        Some(&full_overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    let extend = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    let full_boundary = full.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    let extend_boundary = extend.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    assert_eq!(
+        full_boundary, extend_boundary,
+        "full/extend 的 boundary 偏移应一致"
+    );
+    assert_eq!(
+        &full[..full_boundary],
+        &extend[..extend_boundary],
+        "boundary 之前的不可替换层字节应一致"
+    );
+}
+
+/// 验证固定层顺序：SafetyAuthorization → EngineeringBehavior → BOUNDARY →
+/// PersonaDomain → RuntimeStateBoundary → gated sections（含 capability 契约）。
+///
+/// 16_workflow 属 CapabilityContract 层，但作为 gated section 渲染在
+/// boundary 之后（FeatureGate::Workflow 控制可见性，见阶段 3 capability 契约）。
+#[test]
+fn test_render_immutable_layer_order() {
+    // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
+    let features = PromptFeatures {
+        hitl_enabled: true,
+        subagent_enabled: true,
+        skills_enabled: true,
+        channel_enabled: true,
+        workflow_enabled: true,
+    };
+    let result = build_system_prompt(None, "/tmp", features, &[], Some("2026-01-01"), None);
+    let safety_pos = result.find("Treat secrets").unwrap(); // 02_system（SafetyAuthorization）
+    let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
+    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    let runtime_pos = result.find("<env>").unwrap(); // 07_env（RuntimeStateBoundary）
+    let capability_pos = result.find("Workflow Orchestration").unwrap(); // 16_workflow（CapabilityContract）
+    assert!(
+        safety_pos < engineering_pos,
+        "SafetyAuthorization 层应位于 EngineeringBehavior 层之前"
+    );
+    assert!(
+        engineering_pos < boundary_pos,
+        "不可替换层（工程行为）应位于边界标记之前"
+    );
+    assert!(
+        boundary_pos < runtime_pos,
+        "RuntimeStateBoundary 层应位于边界标记之后"
+    );
+    assert!(
+        boundary_pos < capability_pos,
+        "gated capability 段（16_workflow）应位于边界标记之后（feature 门控）"
     );
 }
 
@@ -726,4 +1013,61 @@ fn test_render_extend_mode_unchanged() {
         result_none.contains("Following conventions"),
         "extend 模式应包含静态段"
     );
+}
+
+// ─── P2: Git 仓库上溯探测测试 ─────────────────────────────────────────────
+
+/// [回归测试] P2-12：Git 探测向上查找，仓库子目录不再误判为非仓库。
+///
+/// 历史背景（审计 prompt-sections-audit.md P2-12）：旧判定只检查
+/// `cwd/.git`，在 monorepo 子目录（packages/foo）启动会话会被误标为非仓库，
+/// 与 `git` 命令的上溯发现语义不一致。
+#[test]
+fn test_detect_is_git_repo_in_subdirectory() {
+    let dir = tmp_dir("prompt_test_git_subdir");
+    // 仓库根在 dir，子目录 dir/packages/foo
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let sub = dir.join("packages").join("foo");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    assert!(
+        detect_is_git_repo(dir.to_str().unwrap()),
+        "仓库根应判定为 Git"
+    );
+    assert!(
+        detect_is_git_repo(sub.to_str().unwrap()),
+        "仓库子目录应向上查找到 .git"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// [回归测试] P2-12：`.git` 为文件（worktree / submodule）时同样判定为仓库。
+#[test]
+fn test_detect_is_git_repo_with_git_file_worktree() {
+    let dir = tmp_dir("prompt_test_git_file");
+    std::fs::write(dir.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+
+    assert!(
+        detect_is_git_repo(dir.to_str().unwrap()),
+        ".git 文件（worktree/submodule）也应判定为 Git 仓库"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 非仓库目录（含嵌套目录）判定为非仓库。
+#[test]
+fn test_detect_is_git_repo_non_repo() {
+    let dir = tmp_dir("prompt_test_git_nonrepo");
+    let nested = dir.join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert!(
+        !detect_is_git_repo(dir.to_str().unwrap()),
+        "无 .git 的目录不应判定为仓库"
+    );
+    assert!(
+        !detect_is_git_repo(nested.to_str().unwrap()),
+        "无 .git 的嵌套目录不应判定为仓库"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

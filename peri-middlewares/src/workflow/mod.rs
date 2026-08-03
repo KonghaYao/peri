@@ -391,3 +391,57 @@ impl Middleware for WorkflowMiddlewareAdaptor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+
+    struct MockAgentExecutor;
+
+    #[async_trait]
+    impl AgentExecutor for MockAgentExecutor {
+        async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+            AgentRunResult::Ok {
+                output: "mock".into(),
+                usage: Usage { output_tokens: 0 },
+                model: None,
+                tool_count: None,
+                token_count: None,
+                phase: None,
+                duration_ms: None,
+            }
+        }
+    }
+
+    fn make_middleware() -> Arc<WorkflowMiddleware> {
+        let executor: Arc<dyn AgentExecutor> = Arc::new(MockAgentExecutor);
+        let (notification_tx, _) = tokio::sync::broadcast::channel(32);
+        Arc::new(WorkflowMiddleware::new(
+            executor,
+            "/tmp",
+            notification_tx,
+            None,
+        ))
+    }
+
+    /// [回归测试] WorkflowTool 注册面与 prompt gate 共用同一条件源（阶段 3）。
+    ///
+    /// 历史背景（审计 prompt-sections-audit.md P1-5）：16_workflow 原无条件
+    /// 渲染，而 WorkflowTool 注册严格依赖 `workflow_executor.is_some()`。
+    /// 此测试锁定注册面：Adaptor 装配后 collect_tools 必须产出 WorkflowTool
+    ///（deferred）；prompt 面由 peri-acp prompt_test 的 Workflow gate 覆盖，
+    /// 搜索面由 tool_search/middleware_test 的用例覆盖。
+    #[test]
+    fn test_adaptor_collect_tools_returns_workflow_tool() {
+        let mw = make_middleware();
+        let adaptor = WorkflowMiddlewareAdaptor::new(mw);
+        let tools = adaptor.collect_tools("/tmp");
+        assert_eq!(tools.len(), 1, "Adaptor 恰好提供 WorkflowTool");
+        assert_eq!(tools[0].name(), "Workflow");
+        assert!(
+            !tools[0].is_direct(),
+            "WorkflowTool 是 deferred tool，不得直接进入 LLM tools"
+        );
+    }
+}

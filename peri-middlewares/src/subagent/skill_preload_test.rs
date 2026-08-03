@@ -54,13 +54,18 @@ async fn test_inject_single_skill() {
         matches!(&state.messages()[1], BaseMessage::Tool { .. }),
         "第二条应为 Tool"
     );
-    // ToolUse 应为 fake Skill 工具调用，input 与 Skill 工具参数格式一致
+    // D3：注入的 ToolUse 与统一模型可见协议一致（SkillTool(skill_name)，
+    // 旧 Skill(skill, args) 已移除）
     let tc = &state.messages()[0].tool_calls()[0];
-    assert_eq!(tc.name, "Skill", "注入的 ToolUse 应名为 Skill");
+    assert_eq!(tc.name, "SkillTool", "注入的 ToolUse 应名为 SkillTool");
     assert_eq!(
-        tc.arguments["skill"].as_str(),
+        tc.arguments["skill_name"].as_str(),
         Some("api-guide"),
-        "ToolUse input 应携带 skill 名称"
+        "ToolUse input 应携带 skill_name"
+    );
+    assert!(
+        tc.arguments.get("skill").is_none(),
+        "不应再使用旧参数名 skill"
     );
 }
 

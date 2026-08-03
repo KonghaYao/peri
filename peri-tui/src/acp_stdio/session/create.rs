@@ -61,7 +61,9 @@ pub(crate) async fn handle_new(
                 session_id: Some(sid.clone()),
                 compact_config: Some(compact_config),
                 cancel: None,
-                system_prompt: Some(frozen_data.system_prompt().to_string()),
+                // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
+                // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
+                system_prompt: Some(frozen_data.subagent_system_prompt().to_string()),
                 broker: None,
                 permission_mode: None,
                 frozen_date: Some(frozen_data.date().to_string()),

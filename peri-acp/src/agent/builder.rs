@@ -129,6 +129,7 @@ pub struct AgentComponents {
 pub(crate) fn build_agent(
     ctx: &crate::session::executor::SessionContext,
     system_prompt: String,
+    subagent_system_prompt: Option<String>,
     frozen: FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
@@ -187,13 +188,23 @@ pub(crate) fn build_agent(
     retry_events.set(Some(Arc::clone(&event_handler)));
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
-    let system_prompt_for_sub = system_prompt.clone();
+    // [P2-2026-08-02] fork / subagent 复用的冻结 prompt 必须是"无 16_workflow"
+    // 版本（`FrozenSessionData::subagent_system_prompt`）：fork 链不注册
+    // WorkflowTool（shared_tools: None），继承带 workflow 声明的 parent frozen
+    // prompt 会造成 prompt 与能力矛盾。调用方未提供时回退到主 prompt（防御）。
+    let system_prompt_for_sub = subagent_system_prompt.unwrap_or_else(|| system_prompt.clone());
 
     // 应用 agent overrides 到系统提示词
     let system_prompt = agent_overrides.as_ref().map_or_else(
         || system_prompt.clone(),
         |ov| {
-            let features = crate::prompt::PromptFeatures::detect(permission_mode.load());
+            // workflow_enabled 与下方 WorkflowMiddlewareAdaptor 条件注册共用
+            // 同一条件源（workflow_executor.is_some()），保证 prompt 声明与
+            // 工具注册一致（阶段 3 capability 契约）。
+            let features = crate::prompt::PromptFeatures::detect(
+                permission_mode.load(),
+                workflow_executor.is_some(),
+            );
             let template = crate::prompt::PromptTemplate::with_overrides(ov);
             let env = crate::prompt::PromptEnv::detect(&cwd);
             template.render(&env, &features, &plugin_agent_dirs, None)
@@ -339,9 +350,13 @@ pub(crate) fn build_agent(
     // 系统提示构建器
     let frozen_language_for_sub = peri_config.config.language.clone();
     let frozen_date_for_sub = frozen_date.clone();
-    // PromptFeatures is detected at build-time, based on permission mode
-    // which does not change during agent operation.
-    let features_for_sub = crate::prompt::PromptFeatures::detect(permission_mode.load());
+    // PromptFeatures is detected at build-time: hitl 来自 permission mode，
+    // workflow 对子 agent / fork 恒为 false（detect_without_workflow）——
+    // 这些链不注册 WorkflowTool、shared_tools 为 None，不得宣称 workflow
+    // 可用（P2-2026-08-02）；主 agent 的 workflow 声明由
+    // `workflow_executor.is_some()` 独立控制（builder.rs 条件注册同源）。
+    let features_for_sub =
+        crate::prompt::PromptFeatures::detect_without_workflow(permission_mode.load());
     let template_for_sub = crate::prompt::PromptTemplate::new();
     let system_builder: SystemPromptBuilder = Arc::new(move |overrides, cwd_dir| {
         let t = overrides.map_or_else(
@@ -495,22 +510,18 @@ pub(crate) fn build_agent(
     chain.add(Box::new(peri_middlewares::PluginMiddleware::new(
         plugin_loaded,
     )));
-    // 构造 SkillsMiddleware 并提取 skills 缓存 Arc，供 SkillToolMiddleware 共享
+    // 构造 SkillsMiddleware：collect_tools 提供统一 skill 协议
+    // （SkillTool(skill_name) + DiscoverSkillsTool）；旧 Skill(skill, args)
+    // 双协议已按 D3 移除，不再单独注册 SkillToolMiddleware。
     let mut skills_mw = SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
     if let Some(summary) = frozen_skill_summary {
         skills_mw = skills_mw.with_frozen_summary(summary);
     }
-    let skills_cache = skills_mw.skills_cache();
     chain.add(Box::new(skills_mw));
     chain.add(Box::new(
         SkillPreloadMiddleware::new(preload_skills, &cwd)
             .with_plugin_roots(plugin_skill_roots.clone()),
     ));
-    chain.add(Box::new({
-        peri_middlewares::SkillToolMiddleware::new()
-            // 共享 SkillsMiddleware 的 skills 缓存，避免工具调用时重复磁盘扫描
-            .with_cached_skills(skills_cache)
-    }));
     chain.add(Box::new(peri_middlewares::AtMentionMiddleware::new(
         cwd.clone().into(),
     )));
@@ -776,6 +787,7 @@ pub(crate) fn build_stage_context(
     ctx: &crate::session::executor::SessionContext,
     cached_llm: Option<&CachedLlmInstances>,
     system_prompt: String,
+    subagent_system_prompt: Option<String>,
     frozen: FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
@@ -835,6 +847,7 @@ pub(crate) fn build_stage_context(
     let (agent_output, new_cached) = build_agent(
         ctx,
         system_prompt,
+        subagent_system_prompt,
         frozen,
         event_handler,
         agent_overrides,
