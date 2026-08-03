@@ -240,11 +240,12 @@ impl LlmProvider {
                     config = config.with_thinking_enabled(true);
                 }
                 config = config.with_max_tokens(max_tokens);
-                if let Some(observer) = retry_observer {
-                    config = config.with_runtime(
-                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
-                    );
-                }
+                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
+                config = config.with_runtime(match retry_observer {
+                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
+                        .with_retry_observer(observer),
+                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
+                });
                 Box::new(OpenAiModel::new(config))
             }
             Self::Anthropic {
@@ -268,11 +269,12 @@ impl LlmProvider {
                     config = config.with_extended_thinking(max_tokens, e);
                 }
                 config = config.with_max_tokens(max_tokens);
-                if let Some(observer) = retry_observer {
-                    config = config.with_runtime(
-                        peri_model::ModelRuntimeConfig::default().with_retry_observer(observer),
-                    );
-                }
+                // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
+                config = config.with_runtime(match retry_observer {
+                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
+                        .with_retry_observer(observer),
+                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
+                });
                 Box::new(AnthropicModel::new(config))
             }
         }
