@@ -42,7 +42,9 @@ pub(crate) struct GenerationEnd {
 }
 
 pub(crate) struct GenerationTracker {
-    generation_data: HashMap<usize, GenerationCached>,
+    /// key = (agent_id, step)。并行 subagent 各自拥有独立 step 计数器，
+    /// 若不区分 agent，step-N 缓存会互相覆盖导致 generation 错配。
+    generation_data: HashMap<(String, usize), GenerationCached>,
     active_step: Option<usize>,
     retry_attempts: Vec<RetryAttempt>,
 }
@@ -58,6 +60,7 @@ impl GenerationTracker {
 
     pub(crate) fn on_llm_start(
         &mut self,
+        agent_id: &str,
         step: usize,
         messages: Vec<BaseMessage>,
         tools: Vec<ToolDefinition>,
@@ -73,13 +76,19 @@ impl GenerationTracker {
             tools_json: serde_json::to_value(&tools).unwrap_or_default(),
             raw_body: None,
         };
-        self.generation_data.insert(step, cached);
+        self.generation_data
+            .insert((agent_id.to_string(), step), cached);
         self.active_step = Some(step);
         GenerationStart { gen_id, start_time }
     }
 
-    pub(crate) fn on_llm_request_payload(&mut self, step: usize, body: Arc<serde_json::Value>) {
-        if let Some(cached) = self.generation_data.get_mut(&step) {
+    pub(crate) fn on_llm_request_payload(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        body: Arc<serde_json::Value>,
+    ) {
+        if let Some(cached) = self.generation_data.get_mut(&(agent_id.to_string(), step)) {
             cached.raw_body = Some(body);
         }
         // 未找到时静默 no-op（保留现有行为）
@@ -100,8 +109,8 @@ impl GenerationTracker {
         });
     }
 
-    pub(crate) fn on_llm_end(&mut self, step: usize) -> Option<GenerationEnd> {
-        let cached = self.generation_data.remove(&step)?;
+    pub(crate) fn on_llm_end(&mut self, agent_id: &str, step: usize) -> Option<GenerationEnd> {
+        let cached = self.generation_data.remove(&(agent_id.to_string(), step))?;
         self.active_step = None;
 
         let retry_metadata = if self.retry_attempts.is_empty() {

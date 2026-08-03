@@ -55,7 +55,9 @@ pub fn spawn_eventbus_forwarder<F>(
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let mut active_stage: Option<StageHandle> = None;
+        // key = 事件 agent_id（主 agent 路径下只有主 agent 的事件，单 entry）
+        let mut active_stage: std::collections::HashMap<String, StageHandle> =
+            std::collections::HashMap::new();
         loop {
             // biased + render 优先：保证 Render 通道（含 TurnCompleted）先于 State 通道
             // 被消费，否则 partial 污染（详见模块顶部不变量注释）。

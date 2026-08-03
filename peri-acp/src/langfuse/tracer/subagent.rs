@@ -14,6 +14,11 @@ pub(crate) struct SubAgentContext {
     pub agent_id: String,
     pub start_time: String,
     pub input: serde_json::Value,
+    /// subagent AGENT observation 的父节点（begin 时捕获的活跃 stage span，
+    /// 通常是主 agent 的 act span）。结束创建 AGENT observation 时使用——
+    /// 不能用"结束时刻的活跃 stage"（并行 subagent 场景下可能指向自身
+    /// 子树内的 stage span，形成循环引用导致 Langfuse UI 树渲染错乱）。
+    pub parent_observation_id: String,
     pub tool_batch: ToolBatch,
     /// 子 agent 是否已实际启动（接收过至少一个 subagent 事件，如 StageStarted / LLMStarted）
     pub has_started: bool,
@@ -27,6 +32,7 @@ pub(crate) struct SubagentEnd {
     pub agent_id: String,
     pub start_time: String,
     pub input: serde_json::Value,
+    pub parent_observation_id: String,
     /// bg subagent 场景下暂存的 agent tool output，供 on_turn_end 清理时使用
     pub deferred_output: Option<String>,
 }
@@ -90,7 +96,11 @@ impl SubagentStack {
             .any(|c| c.tool_batch.is_agent_tool(tool_call_id))
     }
 
-    pub(crate) fn begin_subagent(&mut self, input: &serde_json::Value) {
+    pub(crate) fn begin_subagent(
+        &mut self,
+        input: &serde_json::Value,
+        parent_observation_id: &str,
+    ) {
         let observation_id = format!("obs_{}", uuid::Uuid::now_v7());
         let agent_id = format!("agent_{}", uuid::Uuid::now_v7());
         let start_time = chrono::Utc::now().to_rfc3339();
@@ -99,6 +109,7 @@ impl SubagentStack {
             agent_id,
             start_time,
             input: input.clone(),
+            parent_observation_id: parent_observation_id.to_string(),
             tool_batch: ToolBatch::new(),
             has_started: false,
             deferred_output: None,
@@ -112,6 +123,7 @@ impl SubagentStack {
             agent_id: c.agent_id,
             start_time: c.start_time,
             input: c.input,
+            parent_observation_id: c.parent_observation_id,
             deferred_output: c.deferred_output,
         })
     }
