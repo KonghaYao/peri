@@ -74,6 +74,10 @@ pub struct LangfuseTracer {
     pub(crate) agent_start_time: Option<String>,
     /// agent-run observation 的输入（推迟到 on_turn_end 创建时设置）
     pub(crate) agent_input: Option<String>,
+    /// 最近一次 TurnError 的完整错误消息（on_turn_error 捕获，on_turn_end 写入 ErrorTurn span）。
+    /// LLM 失败时 reason.rs 以 `TurnError { message }` 携带 provider 错误详情，
+    /// 用于弥补 TurnEnded 只带 error_kind 枚举名的信息缺口。
+    pub(crate) last_turn_error: Option<String>,
 }
 
 impl LangfuseTracer {
@@ -103,6 +107,7 @@ impl LangfuseTracer {
             compact_work_done: false,
             agent_start_time: None,
             agent_input: None,
+            last_turn_error: None,
         }
     }
 
@@ -120,6 +125,15 @@ impl LangfuseTracer {
     }
 
     // ── Turn 生命周期 ──────────────────────────────────────────────────────
+
+    /// TurnError 事件：捕获完整错误消息，供 on_turn_end 的 ErrorTurn span 使用。
+    ///
+    /// LLM 失败时 reason.rs emit `TurnError { message }`（`e.to_string()` 全文），
+    /// 而 TurnEnded 只携带 error_kind 枚举名——此处补上丢失的错误详情。
+    /// 不依赖采样：错误信息始终记录，on_turn_end 消费后清空。
+    pub fn on_turn_error(&mut self, message: &str) {
+        self.last_turn_error = Some(message.to_string());
+    }
 
     /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
     /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
@@ -249,6 +263,13 @@ impl LangfuseTracer {
         if is_error && self.config.error_span_always {
             let error_msg = error_output.unwrap_or("unknown error").to_string();
             let turn_id = self.trace_id.clone();
+            // 完整错误消息来自 TurnError 事件（reason.rs），弥补 TurnEnded 仅带枚举名的缺口。
+            // on_turn_error 与 on_turn_end 分属不同 forwarder task，可能尚未到达（竞态）——
+            // 取不到时只输出枚举名，不劣于修复前行为。
+            let mut error_out = serde_json::json!({"error": &error_msg});
+            if let Some(m) = self.last_turn_error.take() {
+                error_out["message"] = serde_json::json!(m);
+            }
 
             if !sampled {
                 // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
@@ -257,7 +278,7 @@ impl LangfuseTracer {
                     name: Some(format!("turn {}", turn_id)),
                     user_id: self.user_id.clone(),
                     input: None,
-                    output: Some(serde_json::json!({"error": &error_msg})),
+                    output: Some(error_out.clone()),
                     session_id: Some(self.session_id.clone()),
                     release: None,
                     version: Some(VERSION.to_string()),
@@ -290,7 +311,7 @@ impl LangfuseTracer {
                 start_time: Some(now_rfc3339()),
                 end_time: Some(now_rfc3339()),
                 input: None,
-                output: Some(serde_json::json!({"error": &error_msg})),
+                output: Some(error_out),
                 metadata: Some(serde_json::json!({
                     "is_synthetic": !sampled,
                     "was_sampled": sampled,
@@ -509,6 +530,14 @@ impl LangfuseTracer {
             }
         }
 
+        // LLM 失败路径（reason.rs 以 "ERROR: " 前缀标记 output）：
+        // generation 标记为 Error 级并写入完整错误详情（Langfuse UI 可筛选/查看 statusMessage）。
+        let (level, status_message) = if output.starts_with("ERROR: ") {
+            (Some(ObservationLevel::Error), Some(output.to_string()))
+        } else {
+            (None, None)
+        };
+
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
             trace_id: Some(self.trace_id.clone()),
@@ -518,8 +547,8 @@ impl LangfuseTracer {
             input: Some(gen_end.input_json),
             output: Some(parse_output(output)),
             metadata: Some(meta),
-            level: None,
-            status_message: None,
+            level,
+            status_message,
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,

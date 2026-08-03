@@ -153,6 +153,72 @@ async fn test_llm_generation_emits_events() {
 }
 
 #[tokio::test]
+async fn test_llm_error_marks_generation_error() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end(
+        "main",
+        0,
+        "gpt-4",
+        "openai",
+        "ERROR: provider returned 503 Service Unavailable",
+        None,
+        None,
+    );
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let gen = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let gen = gen.expect("应有 GenerationCreate 事件");
+    assert_eq!(
+        gen.level,
+        Some(langfuse_client::types::ObservationLevel::Error),
+        "LLM 失败时 generation 应标记 Error 级"
+    );
+    assert_eq!(
+        gen.status_message.as_deref(),
+        Some("ERROR: provider returned 503 Service Unavailable"),
+        "generation statusMessage 应包含完整错误"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_error_message_in_error_span() {
+    let (mut t, session) = make_tracer(0.0);
+    t.on_turn_start("turn_1");
+    t.on_turn_error("provider returned 503 Service Unavailable");
+    let _handle = t.on_turn_end(Some("LlmFailure"));
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let span_out = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            if body.name.as_deref() == Some("ErrorTurn") {
+                return body.output.clone();
+            }
+        }
+        None
+    });
+    let span_out = span_out.expect("应有 ErrorTurn span");
+    assert_eq!(
+        span_out["error"], "LlmFailure",
+        "ErrorTurn output 应保留错误枚举名"
+    );
+    assert_eq!(
+        span_out["message"], "provider returned 503 Service Unavailable",
+        "ErrorTurn output 应包含 TurnError 的完整错误消息"
+    );
+}
+
+#[tokio::test]
 async fn test_llm_retry_accumulates_metadata() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");

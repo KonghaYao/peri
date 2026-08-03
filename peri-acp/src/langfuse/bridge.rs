@@ -130,6 +130,10 @@ pub enum UnifiedLangfuseEvent {
     },
     /// AI 推理内容块（v2 only）
     AiReasoningChunk { text: String },
+    /// Turn 错误（v2 only）：LLM 失败时携带完整错误消息
+    /// （reason.rs `TurnError { message }` = `e.to_string()`）。
+    /// 用于弥补 TurnEnded 只带 error_kind 枚举名的信息缺口。
+    TurnError { message: String },
     /// 会话开始（v1 only）
     SessionStarted { frozen_summary: serde_json::Value },
     /// 中间件开始（v1 only）
@@ -532,10 +536,11 @@ impl UnifiedLangfuseEvent {
             ObserveEvent::AiReasoningChunk { text, .. } => {
                 Some(UnifiedLangfuseEvent::AiReasoningChunk { text })
             }
+            ObserveEvent::TurnError { message, .. } => {
+                Some(UnifiedLangfuseEvent::TurnError { message })
+            }
             // 无 Langfuse 映射的事件
-            ObserveEvent::TurnError { .. }
-            | ObserveEvent::SubagentStart { .. }
-            | ObserveEvent::SubagentStop { .. } => None,
+            ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. } => None,
         }
     }
 }
@@ -742,6 +747,9 @@ impl LangfuseBridge {
             }
             UnifiedLangfuseEvent::AiReasoningChunk { text } => {
                 t.on_ai_reasoning_chunk(text);
+            }
+            UnifiedLangfuseEvent::TurnError { message } => {
+                t.on_turn_error(message);
             }
             UnifiedLangfuseEvent::SessionStarted { frozen_summary } => {
                 t.on_session_start(frozen_summary);
