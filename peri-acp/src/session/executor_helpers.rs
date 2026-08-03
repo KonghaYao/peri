@@ -519,14 +519,14 @@ pub(super) async fn build_and_execute_agent_v2(
     // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
     // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
     // 消费进 transcript，不会重复注入也不会丢失。
-    if let Some(booking) = &mode_notice_booking {
-        mark_permission_mode_notified(&booking.last_notified, booking.mode);
-    }
     v2_out.context.session.queue.push(QueuedMessage::new(
         MessageKind::Prompt,
         V2MessageSource::UserInput,
         BaseMessage::human(agent_input.content),
     ));
+    if let Some(booking) = &mode_notice_booking {
+        mark_permission_mode_notified(&booking.last_notified, booking.mode);
+    }
 
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
     // run_react_loop 消费后仍可访问累积的 recall。
