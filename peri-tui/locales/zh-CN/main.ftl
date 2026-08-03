@@ -156,6 +156,7 @@ setup-field-base-url = 基础URL
 setup-field-test-connectivity = 测试连通性
 setup-hint-base-url-v1 = OpenAI Base URL 需要 /v1 后缀
 setup-field-api-key = API密钥
+setup-field-fable = Fable
 setup-field-opus = Opus
 setup-field-sonnet = Sonnet
 setup-field-haiku = Haiku
@@ -233,12 +234,13 @@ login-no-model = （未设置）
 login-empty-hint =   （无 provider，按 Ctrl+N 新建）
 login-confirm-delete-label =  确认删除
 login-confirm-delete-question =  ？
-login-key-activate = :激活
 login-key-new = :新建
 login-key-delete = :删除
 login-key-paste = :粘贴
 login-confirm-delete = :确认删除
 login-confirm-delete-warning =   此操作不可撤销。
+login-confirm = 确认
+login-model-label = 模型
 
 # ---- HITL Popup ----
 
@@ -296,13 +298,12 @@ app-bg-continuation = 正在回顾 { $count } 个后台 Agent 结果...
 
 # Login panel
 hint-login-browse = :导航
-hint-login-activate = :激活
 hint-login-edit = :编辑
 hint-login-new = :新建
 hint-login-delete = :删除
 hint-login-close = :关闭
 hint-login-field = :字段
-hint-login-save = :保存
+hint-login-confirm = :确认
 hint-login-paste = :粘贴
 hint-login-toggle = :切换
 hint-login-back = :返回
@@ -599,6 +600,7 @@ login-field-name = 名称
 login-field-type = 类型
 login-field-base-url = 基础 URL
 login-field-api-key = API 密钥
+login-field-fable-model = Fable 模型
 login-field-opus-model = Opus 模型
 login-field-sonnet-model = Sonnet 模型
 login-field-haiku-model = Haiku 模型

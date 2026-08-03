@@ -86,9 +86,10 @@ fn get_raw_field_value(state: &SetupWizardState) -> String {
         FormField::ProviderId => mp.provider_id.clone(),
         FormField::BaseUrl => mp.base_url.clone(),
         FormField::ApiKey => mp.api_key.clone(),
-        FormField::OpusModel => mp.aliases[0].clone(),
-        FormField::SonnetModel => mp.aliases[1].clone(),
-        FormField::HaikuModel => mp.aliases[2].clone(),
+        FormField::FableModel => mp.aliases[0].clone(),
+        FormField::OpusModel => mp.aliases[1].clone(),
+        FormField::SonnetModel => mp.aliases[2].clone(),
+        FormField::HaikuModel => mp.aliases[3].clone(),
         _ => String::new(),
     }
 }
@@ -447,6 +448,7 @@ fn render_browse(
         // 显示模型别名（与上方 Provider 信息间空一行）
         lines.push(Line::from(""));
         let alias_labels = [
+            i18n::tr("setup-field-fable"),
             i18n::tr("setup-field-opus"),
             i18n::tr("setup-field-sonnet"),
             i18n::tr("setup-field-haiku"),
@@ -650,8 +652,9 @@ fn render_edit(
         Style::default().fg(dim).add_modifier(Modifier::BOLD),
     )));
 
-    // Opus / Sonnet / Haiku 模型名
+    // Fable / Opus / Sonnet / Haiku 模型名
     for (i, field) in [
+        FormField::FableModel,
         FormField::OpusModel,
         FormField::SonnetModel,
         FormField::HaikuModel,
@@ -746,6 +749,7 @@ fn render_done_step(
         ]));
         lines.push(Line::from(""));
         let alias_labels = [
+            i18n::tr("setup-field-fable"),
             i18n::tr("setup-field-opus"),
             i18n::tr("setup-field-sonnet"),
             i18n::tr("setup-field-haiku"),
@@ -830,14 +834,14 @@ fn wizard_click(
         }
         SetupStep::Form => match state.form_mode {
             FormMode::Browse => {
-                // 布局：空行 + 每 provider 6 行（base_url 非空时 7 行）+ submit 行（无滚动）
-                // 与 render_browse 对齐：provider 行 + (url 行) + 空行 + 3 别名行 + 空行
+                // 布局：空行 + 每 provider 7 行（base_url 非空时 8 行）+ submit 行（无滚动）
+                // 与 render_browse 对齐：provider 行 + (url 行) + 空行 + 4 别名行 + 空行
                 let mut cur = 1u16;
                 if state.providers.is_empty() {
                     cur += 2; // "no providers" + 空行
                 }
                 for (i, mp) in state.providers.iter().enumerate() {
-                    let item_h = if mp.base_url.is_empty() { 6u16 } else { 7u16 };
+                    let item_h = if mp.base_url.is_empty() { 7u16 } else { 8u16 };
                     if visual >= cur && visual < cur + item_h {
                         state.browse_cursor = i;
                         handle_browse_keys(state, enter);
@@ -857,7 +861,7 @@ fn wizard_click(
             }
             FormMode::Edit => {
                 // 布局：空行（header 1）+ ProviderType..ApiKey 各 1 行；
-                // 空行 + model 标题（header 8）+ OpusModel..Confirm 各 1 行
+                // 空行 + model 标题（header 8）+ FableModel..Confirm 各 1 行
                 const FIELDS1: [FormField; 5] = [
                     FormField::ProviderType,
                     FormField::ProviderId,
@@ -882,7 +886,8 @@ fn wizard_click(
                     handle_edit_keys(state, enter);
                     return true;
                 }
-                const FIELDS2: [FormField; 4] = [
+                const FIELDS2: [FormField; 5] = [
+                    FormField::FableModel,
                     FormField::OpusModel,
                     FormField::SonnetModel,
                     FormField::HaikuModel,
@@ -908,9 +913,9 @@ fn wizard_click(
             }
         },
         SetupStep::Done => {
-            // 布局：空行 + 标题 + 空行（header 3）+ 每 provider 7 行 + 空行 + Enter 提示行
+            // 布局：空行 + 标题 + 空行（header 3）+ 每 provider 8 行 + 空行 + Enter 提示行
             let selected_count = state.providers.iter().filter(|p| p.selected).count();
-            let enter_row = (4 + 7 * selected_count) as u16;
+            let enter_row = (4 + 8 * selected_count) as u16;
             if visual == enter_row {
                 handle_done_keys(state, enter);
                 return true;
@@ -1304,8 +1309,8 @@ mod tests {
         }
     }
 
-    /// Browse 无 base_url：每 provider 6 行（provider 行 + 空行 + 3 别名 + 空行）。
-    /// 第二个 provider 的 provider 行在 visual 7，点击应命中第二个并进入 Edit。
+    /// Browse 无 base_url：每 provider 7 行（provider 行 + 空行 + 4 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 8，点击应命中第二个并进入 Edit。
     #[test]
     fn browse_click_without_base_url_hits_second_provider() {
         let mut p1 = MigratedProvider::new(ProviderType::Anthropic);
@@ -1315,15 +1320,15 @@ mod tests {
         let mut state = browse_state(vec![p1, p2]);
         let area = Rect::new(0, 0, 80, 30);
         assert!(
-            wizard_click(&click(area, 7), area, &mut state),
-            "visual 7 = 第二个 provider 的 provider 行"
+            wizard_click(&click(area, 8), area, &mut state),
+            "visual 8 = 第二个 provider 的 provider 行"
         );
         assert_eq!(state.active_provider, 1, "命中第二个 provider");
         assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");
     }
 
-    /// Browse 带 base_url：每 provider 7 行（provider 行 + url 行 + 空行 + 3 别名 + 空行）。
-    /// 第二个 provider 的 provider 行在 visual 8。
+    /// Browse 带 base_url：每 provider 8 行（provider 行 + url 行 + 空行 + 4 别名 + 空行）。
+    /// 第二个 provider 的 provider 行在 visual 9。
     #[test]
     fn browse_click_with_base_url_hits_second_provider() {
         let p1 = MigratedProvider::new(ProviderType::Anthropic);
@@ -1331,8 +1336,8 @@ mod tests {
         let mut state = browse_state(vec![p1, p2]);
         let area = Rect::new(0, 0, 80, 30);
         assert!(
-            wizard_click(&click(area, 8), area, &mut state),
-            "visual 8 = 第二个 provider 的 provider 行"
+            wizard_click(&click(area, 9), area, &mut state),
+            "visual 9 = 第二个 provider 的 provider 行"
         );
         assert_eq!(state.active_provider, 1, "命中第二个 provider");
         assert_eq!(state.form_mode, FormMode::Edit, "Enter 进入编辑模式");

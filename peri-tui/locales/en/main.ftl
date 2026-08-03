@@ -157,6 +157,7 @@ setup-field-base-url = Base URL
 setup-field-test-connectivity = Test connectivity
 setup-hint-base-url-v1 = OpenAI base URL needs /v1 suffix
 setup-field-api-key = API Key
+setup-field-fable = Fable
 setup-field-opus = Opus
 setup-field-sonnet = Sonnet
 setup-field-haiku = Haiku
@@ -234,12 +235,13 @@ login-no-model = (not set)
 login-empty-hint =   (no provider, press Ctrl+N to create)
 login-confirm-delete-label =  Confirm delete
 login-confirm-delete-question =  ?
-login-key-activate = :Activate
 login-key-new = :New
 login-key-delete = :Delete
 login-key-paste = :Paste
 login-confirm-delete = :Confirm delete
 login-confirm-delete-warning =   This action cannot be undone.
+login-confirm = Confirm
+login-model-label = Model
 
 # ---- HITL Popup ----
 
@@ -297,13 +299,12 @@ app-bg-continuation = Reviewing { $count } background agent result(s)...
 
 # Login panel
 hint-login-browse = :Navigate
-hint-login-activate = :Activate
 hint-login-edit = :Edit
 hint-login-new = :New
 hint-login-delete = :Delete
 hint-login-close = :Close
 hint-login-field = :Field
-hint-login-save = :Save
+hint-login-confirm = :Confirm
 hint-login-paste = :Paste
 hint-login-toggle = :Toggle
 hint-login-back = :Back
@@ -600,6 +601,7 @@ login-field-name = Name
 login-field-type = Type
 login-field-base-url = Base URL
 login-field-api-key = API Key
+login-field-fable-model = Fable Model
 login-field-opus-model = Opus Model
 login-field-sonnet-model = Sonnet Model
 login-field-haiku-model = Haiku Model

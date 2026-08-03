@@ -92,14 +92,16 @@ impl ProviderType {
         }
     }
 
-    pub fn default_model_ids(&self) -> [&'static str; 3] {
+    pub fn default_model_ids(&self) -> [&'static str; 4] {
         match self {
+            // 顺序：fable → opus → sonnet → haiku（fable 复用 opus 档模型）
             Self::Anthropic => [
+                "claude-opus-4-6",
                 "claude-opus-4-6",
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5-20251001",
             ],
-            Self::OpenAiCompatible => ["gpt-5.5", "gpt-4o", "gpt-4o-mini"],
+            Self::OpenAiCompatible => ["gpt-5.5", "gpt-5.5", "gpt-4o", "gpt-4o-mini"],
         }
     }
 }
@@ -112,7 +114,7 @@ pub struct MigratedProvider {
     pub provider_id: String,
     pub base_url: String,
     pub api_key: String,
-    pub aliases: [String; 3],
+    pub aliases: [String; 4],
     pub selected: bool,
 }
 
@@ -161,6 +163,7 @@ pub enum FormField {
     BaseUrl,
     TestConnectivity,
     ApiKey,
+    FableModel,
     OpusModel,
     SonnetModel,
     HaikuModel,
@@ -174,7 +177,8 @@ impl FormField {
             Self::ProviderId => Self::BaseUrl,
             Self::BaseUrl => Self::TestConnectivity,
             Self::TestConnectivity => Self::ApiKey,
-            Self::ApiKey => Self::OpusModel,
+            Self::ApiKey => Self::FableModel,
+            Self::FableModel => Self::OpusModel,
             Self::OpusModel => Self::SonnetModel,
             Self::SonnetModel => Self::HaikuModel,
             Self::HaikuModel => Self::Confirm,
@@ -189,7 +193,8 @@ impl FormField {
             Self::BaseUrl => Self::ProviderId,
             Self::TestConnectivity => Self::BaseUrl,
             Self::ApiKey => Self::TestConnectivity,
-            Self::OpusModel => Self::ApiKey,
+            Self::FableModel => Self::ApiKey,
+            Self::OpusModel => Self::FableModel,
             Self::SonnetModel => Self::OpusModel,
             Self::HaikuModel => Self::SonnetModel,
             Self::Confirm => Self::HaikuModel,
@@ -202,6 +207,7 @@ impl FormField {
             Self::ProviderId
                 | Self::BaseUrl
                 | Self::ApiKey
+                | Self::FableModel
                 | Self::OpusModel
                 | Self::SonnetModel
                 | Self::HaikuModel
@@ -215,6 +221,7 @@ impl FormField {
             Self::BaseUrl => "setup-field-base-url",
             Self::ApiKey => "setup-field-api-key",
             Self::TestConnectivity => "setup-field-test-connectivity",
+            Self::FableModel => "setup-field-fable",
             Self::OpusModel => "setup-field-opus",
             Self::SonnetModel => "setup-field-sonnet",
             Self::HaikuModel => "setup-field-haiku",
@@ -283,9 +290,10 @@ impl SetupWizardState {
             FormField::ProviderId => mp.provider_id.clone(),
             FormField::BaseUrl => mp.base_url.clone(),
             FormField::ApiKey => mp.api_key.clone(),
-            FormField::OpusModel => mp.aliases[0].clone(),
-            FormField::SonnetModel => mp.aliases[1].clone(),
-            FormField::HaikuModel => mp.aliases[2].clone(),
+            FormField::FableModel => mp.aliases[0].clone(),
+            FormField::OpusModel => mp.aliases[1].clone(),
+            FormField::SonnetModel => mp.aliases[2].clone(),
+            FormField::HaikuModel => mp.aliases[3].clone(),
             _ => return None,
         })
     }
@@ -298,9 +306,10 @@ impl SetupWizardState {
                 FormField::ProviderId => mp.provider_id = value,
                 FormField::BaseUrl => mp.base_url = value,
                 FormField::ApiKey => mp.api_key = value,
-                FormField::OpusModel => mp.aliases[0] = value,
-                FormField::SonnetModel => mp.aliases[1] = value,
-                FormField::HaikuModel => mp.aliases[2] = value,
+                FormField::FableModel => mp.aliases[0] = value,
+                FormField::OpusModel => mp.aliases[1] = value,
+                FormField::SonnetModel => mp.aliases[2] = value,
+                FormField::HaikuModel => mp.aliases[3] = value,
                 _ => {}
             }
         }
@@ -369,11 +378,10 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
             api_key: mp.api_key.clone(),
             base_url: mp.base_url.clone(),
             models: crate::config::ProviderModels {
-                opus: mp.aliases[0].clone(),
-                sonnet: mp.aliases[1].clone(),
-                haiku: mp.aliases[2].clone(),
-                // fable 无独立向导字段：留空回退 opus（ProviderModels.get_model 语义）
-                fable: String::new(),
+                fable: mp.aliases[0].clone(),
+                opus: mp.aliases[1].clone(),
+                sonnet: mp.aliases[2].clone(),
+                haiku: mp.aliases[3].clone(),
             },
             ..Default::default()
         };
@@ -498,6 +506,7 @@ pub fn migrate_from_claude_code(
             .find(|v| !v.is_empty())
             .unwrap_or_default();
         let base_url = get_env_string(env, &format!("{}_BASE_URL", prefix));
+        let fable = get_env_string(env, &format!("{}_DEFAULT_FABLE_MODEL", prefix));
         let opus = get_env_string(env, &format!("{}_DEFAULT_OPUS_MODEL", prefix));
         let sonnet = get_env_string(env, &format!("{}_DEFAULT_SONNET_MODEL", prefix));
         let haiku = get_env_string(env, &format!("{}_DEFAULT_HAIKU_MODEL", prefix));
@@ -519,14 +528,17 @@ pub fn migrate_from_claude_code(
             mp.base_url = base_url;
         }
 
+        if !fable.is_empty() {
+            mp.aliases[0] = fable;
+        }
         if !opus.is_empty() {
-            mp.aliases[0] = opus;
+            mp.aliases[1] = opus;
         }
         if !sonnet.is_empty() {
-            mp.aliases[1] = sonnet;
+            mp.aliases[2] = sonnet;
         }
         if !haiku.is_empty() {
-            mp.aliases[2] = haiku;
+            mp.aliases[3] = haiku;
         }
 
         detected.push(mp);
