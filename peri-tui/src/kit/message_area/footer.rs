@@ -7,7 +7,7 @@ use crate::i18n;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::style::{Modifier, Style};
+use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 
 use crate::kit::atoms::LOADING_EPOCH;
@@ -63,6 +63,19 @@ pub(super) fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
 }
 
 // ── footer 行构建 ─────────────────────────────────────────────────────────
+
+/// idle 态静止图标行：固定第一帧（不参与动画），muted 色。
+///
+/// spinner 组件常驻——active 时动画转动，inactive 时以此占位，永不 hidden。
+/// [Why 固定帧] render_to_lines 的帧由壁钟纯计算（Idle 态也会转），
+/// inactive 应静止，故单独输出 `tick_to_frame(0)` 而非复用动画路径。
+pub(super) fn render_idle_spinner_line(color: Color) -> Line<'static> {
+    let frame = crate::components::spinner::animation::tick_to_frame(0);
+    Line::from(vec![Span::styled(
+        format!("{frame} "),
+        Style::default().fg(color),
+    )])
+}
 
 /// keepgoing 按钮在 footer 行内的布局信息（供 MessageArea 计算屏幕点击区域）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,17 +149,14 @@ pub(super) fn build_footer_lines(
     }
 
     let has_summary = *summary_elapsed_ms.read() > 0;
-    if !is_loading && todo_items.is_empty() && !has_summary {
-        return (Vec::new(), None);
-    }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut keepgoing_layout: Option<KeepGoingLayout> = None;
-    let has_footer_content = is_loading || has_summary || !todo_items.is_empty();
-    if has_footer_content {
-        lines.push(Line::from(""));
-        lines.push(Line::from(""));
-    }
+    // footer 常驻：spinner 组件永远渲染在消息区下方（active 动画 / summary / idle 静止图标）。
+    // [Why] 无早退——恢复历史（rewind/session new）会清零 summary，若此时 idle 且无 todo，
+    // 旧实现提前返回空导致 spinner 组件整体消失（hidden），违背 active/inactive 二态约定。
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
     if is_loading {
         let token_count = crate::kit::atoms::SPINNER_TOKEN_COUNT.get();
         let summary = crate::kit::atoms::PREDICTION.state().read().summary.clone();
@@ -213,10 +223,11 @@ pub(super) fn build_footer_lines(
     }
     if !todo_items.is_empty() {
         lines.extend(render_todo_lines(todo_items));
+    } else if !is_loading && !has_summary {
+        // idle：静止图标占位（inactive 态）。todo/summary 存在时本身即为占位内容。
+        lines.push(render_idle_spinner_line(semantic.text.muted));
     }
-    if has_footer_content {
-        lines.push(Line::from(""));
-    }
+    lines.push(Line::from(""));
     (lines, keepgoing_layout)
 }
 
