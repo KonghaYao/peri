@@ -155,6 +155,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 "workflow" => i18n::tr("panel-tasks-kind-wf"),
                 _ => i18n::tr("panel-tasks-kind-unknown"),
             };
+            // shell 任务的 summary 是脚本本身，无展示意义 → 只显示 pid
+            let is_shell = task.kind.as_str() == "shell";
             let pid_str = task
                 .pid
                 .map(|p| {
@@ -164,6 +166,16 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     )
                 })
                 .unwrap_or_default();
+            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+            let detail = if is_shell {
+                pid_str
+            } else {
+                format!(
+                    "{}{}",
+                    crate::truncate::truncate_by_width(&task.summary, 60),
+                    pid_str
+                )
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
@@ -175,11 +187,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 Span::styled(format!(" {} ", task.task_id), name_style),
                 Span::styled(
-                    format!(
-                        "{}{}",
-                        task.summary.chars().take(60).collect::<String>(),
-                        pid_str
-                    ),
+                    detail,
                     Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
@@ -219,7 +227,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .map(|t| t.format("%H:%M:%S").to_string())
                 .unwrap_or_else(|| i18n::tr("common-na"));
 
-            let prompt_preview: String = job.prompt.chars().take(50).collect();
+            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+            let prompt_preview: String = crate::truncate::truncate_by_width(&job.prompt, 50);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),

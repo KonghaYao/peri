@@ -20,6 +20,8 @@
 //! 非 cwd 前缀的路径保持原样。cwd 由 `set_display_cwd` 在启动时设置一次。
 
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// TUI 启动时的工作目录（进程生命周期内不变），用于路径显示精简。
 static DISPLAY_CWD: OnceLock<String> = OnceLock::new();
@@ -67,6 +69,31 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
         let truncated: String = s.chars().take(max_chars).collect();
         format!("{}...", truncated)
     }
+}
+
+/// Truncate text by **terminal display width**（CJK 双宽字符按 2 列计），超长补省略号。
+///
+/// 与 `truncate_text`（按码点数截断）的区别：按码点截断在混合 CJK / ASCII 文本中
+/// 实际显示宽度不可控（60 个汉字占 120 列），且可能切断 emoji 组合序列；本函数按
+/// `unicode-width` 的显示宽度截断，保证输出宽度 ≤ `max_width` 列，并按 grapheme
+/// cluster 迭代（emoji ZWJ 序列 / 组合字符不会被从中间切开）。
+pub fn truncate_by_width(s: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut out = String::new();
+    let mut truncated = false;
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if width + w > max_width {
+            truncated = true;
+            break;
+        }
+        out.push_str(g);
+        width += w;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
 }
 
 /// Produce a one-line summary of a tool's JSON input.
