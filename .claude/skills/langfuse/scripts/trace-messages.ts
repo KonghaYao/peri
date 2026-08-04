@@ -6,7 +6,7 @@
  *   bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>
  *   bun .claude/skills/langfuse/scripts/trace-messages.ts --index <N> [过滤选项]
  */
-import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, genTokens, fmt } from "./lib.ts";
+import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt } from "./lib.ts";
 
 const args = process.argv.slice(2);
 
@@ -18,23 +18,13 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
-// Find trace to analyze
+// Find trace to analyze: 第一个非选项参数是 traceId，--index <N> 从过滤结果中选
 let traceId: string | undefined;
-const indexIdx = args.indexOf("--index");
+const { traceId: parsedTraceId, index: parsedIndex } = parseTraceArg(args);
+traceId = parsedTraceId;
 
-for (const a of args) {
-  if (!a.startsWith("--") && a !== args[indexIdx + 1] &&
-      a !== args[args.indexOf("--from") + 1] && a !== args[args.indexOf("--to") + 1] &&
-      a !== args[args.indexOf("--days") + 1] && a !== args[args.indexOf("--tag") + 1] &&
-      a !== args[args.indexOf("--user") + 1] && a !== args[args.indexOf("--session") + 1] &&
-      a !== args[args.indexOf("--name") + 1] && a !== args[args.indexOf("--limit") + 1]) {
-    traceId = a;
-    break;
-  }
-}
-
-if (!traceId && indexIdx !== -1) {
-  const index = parseInt(args[indexIdx + 1]) || 1;
+if (!traceId && parsedIndex !== undefined) {
+  const index = parsedIndex;
   const filter = parseFilterArgs(args);
   console.error(`Fetching filtered traces (limit ${filter.limit})...`);
   const { traces } = await fetchTracesFiltered({
@@ -105,7 +95,12 @@ const [trace, observations] = await Promise.all([
 const generations = observations.filter((o: any) => o.type === "GENERATION");
 if (!generations.length) { console.log("No LLM generations found."); process.exit(0); }
 
-console.log(`## Trace: "${(trace.input as string)?.slice(0, 60)}"`);
+// trace.input 是任意 JSON（chat 类为 string，其他可能为对象/数组），安全字符串化
+const traceLabel =
+  trace.name ||
+  (typeof trace.input === "string" ? trace.input : JSON.stringify(trace.input)) ||
+  trace.id;
+console.log(`## Trace: "${traceLabel.slice(0, 60)}"`);
 console.log(`   Generations: ${generations.length}\n`);
 
 // --- Message composition table ---

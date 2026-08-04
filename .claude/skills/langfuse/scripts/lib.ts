@@ -119,6 +119,37 @@ export function isoSpan(fromISO: string, days: number) {
   return d.toISOString();
 }
 
+/**
+ * 单 trace 脚本的位置参数解析：第一个非选项、非选项值参数是 traceId，--index <N> 是索引。
+ *
+ * 修复：原实现 `args[args.indexOf("--index") + 1]` 在选项缺失时 indexOf 返回 -1，
+ * 会把 args[0]（即 traceId 本身）当作选项值跳过，导致 `bun trace-tokens.ts <traceId>`
+ * 永远报 Usage 错误；若同时存在其它数值选项（如 --days 7），"7" 反而会被误判为 traceId。
+ */
+export function parseTraceArg(args: string[]): { traceId?: string; index?: number } {
+  const valueFlags = ["--index", "--from", "--to", "--days", "--tag", "--user", "--session", "--name", "--limit"];
+  const valuePositions = new Set<number>();
+  for (const flag of valueFlags) {
+    const idx = args.indexOf(flag);
+    if (idx !== -1 && args[idx + 1] !== undefined) valuePositions.add(idx + 1);
+  }
+
+  let traceId: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--") || valuePositions.has(i)) continue;
+    if (!traceId) traceId = a;
+  }
+
+  const indexIdx = args.indexOf("--index");
+  let index: number | undefined;
+  if (indexIdx !== -1 && args[indexIdx + 1] !== undefined) {
+    const n = Number(args[indexIdx + 1]);
+    if (Number.isInteger(n) && n > 0) index = n;
+  }
+  return { traceId, index };
+}
+
 /** 从命令行解析时间窗: --days N / --from ISO --to ISO */
 export function parseTimeWindow(args: string[]): { from?: string; to?: string } {
   let from: string | undefined;
@@ -165,16 +196,21 @@ export function parseFilterArgs(args: string[]): {
     if (!isNaN(n) && n > 0) limit = n;
   }
 
+  // 收集所有带值选项的值位置，避免选项值被误判为位置数字
+  // 修复：--from/--to 的 ISO 时间戳（如 "2026-08-03T13:40:00Z"）此前未被跳过，
+  // parseInt 得到 2026 被当作 limit，超过 API 上限 100 导致 400 错误
+  const valueFlags = ["--from", "--to", "--days", "--tag", "--user", "--session", "--name", "--model", "--limit"];
+  const valuePositions = new Set<number>();
+  for (const flag of valueFlags) {
+    const idx = args.indexOf(flag);
+    if (idx !== -1 && args[idx + 1] !== undefined) valuePositions.add(idx + 1);
+  }
+
   // Find positional number arg (backward compat)
-  for (const a of args) {
-    if (/^\d+$/.test(a) && !args.includes(a)) continue;
-    const n = parseInt(a);
-    if (!isNaN(n) && n > 0 && a !== args[tagIdx + 1] && a !== args[userIdx + 1] &&
-        a !== args[sessIdx + 1] && a !== args[nameIdx + 1] && a !== args[modelIdx + 1] &&
-        a !== args[limitIdx + 1]) {
-      // Check if this is a days arg
-      const daysIdx2 = args.indexOf("--days");
-      if (daysIdx2 !== -1 && args[daysIdx2 + 1] === a) continue;
+  for (let i = 0; i < args.length; i++) {
+    if (valuePositions.has(i)) continue;
+    const n = parseInt(args[i]);
+    if (!isNaN(n) && n > 0) {
       limit = n;
       break;
     }
