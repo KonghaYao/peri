@@ -91,14 +91,16 @@ pub(super) struct KeepGoingLayout {
 /// 构建 footer 行 + keepgoing 按钮布局信息。
 ///
 /// `keepgoing_blocked` 为 true 时按钮以禁用样式渲染（防抖中，不可点击）。
-/// 返回 `(lines, Some(layout))`：layout 仅在按钮实际渲染时存在。
+/// 返回 `(lines, layout, has_content)`：layout 仅在按钮实际渲染时存在；
+/// `has_content` 表示 footer 是否有实质内容（loading / summary / todo），
+/// 供调用方区分"footer 常驻占位"与"真实内容"（如 Welcome 空态判定）。
 pub(super) fn build_footer_lines(
     hooks: &mut Hooks,
     is_loading: bool,
     todo_items: &[TodoItem],
     keepgoing_blocked: bool,
     vis_width: u16,
-) -> (Vec<Line<'static>>, Option<KeepGoingLayout>) {
+) -> (Vec<Line<'static>>, Option<KeepGoingLayout>, bool) {
     let semantic = THEME_ATOM.state().read().semantic;
 
     let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
@@ -149,6 +151,7 @@ pub(super) fn build_footer_lines(
     }
 
     let has_summary = *summary_elapsed_ms.read() > 0;
+    let has_content = is_loading || has_summary || !todo_items.is_empty();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut keepgoing_layout: Option<KeepGoingLayout> = None;
@@ -228,7 +231,7 @@ pub(super) fn build_footer_lines(
         lines.push(render_idle_spinner_line(semantic.text.muted));
     }
     lines.push(Line::from(""));
-    (lines, keepgoing_layout)
+    (lines, keepgoing_layout, has_content)
 }
 
 #[cfg(test)]

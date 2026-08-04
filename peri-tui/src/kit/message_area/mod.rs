@@ -187,7 +187,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .map(|r| r.width.saturating_sub(1))
         .unwrap_or(props.width as u16)
         .max(1);
-    let (footer_lines, keepgoing_layout) = build_footer_lines(
+    let (footer_lines, keepgoing_layout, footer_has_content) = build_footer_lines(
         &mut hooks,
         is_loading,
         &todo_items,
@@ -201,7 +201,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
-    let brewed_lines = if empty && !footer_lines.is_empty() {
+    // [Why has_content 而非 !footer_lines.is_empty()] footer 常驻渲染后恒非空
+    // （idle 态含静止 spinner 占位行），空态若据此判定会让 Welcome 页面被
+    // footer 占位行污染；仅当有实质内容（summary/todo）时才在 Welcome 下展示。
+    let brewed_lines = if empty && footer_has_content {
         Some(footer_lines.clone())
     } else {
         None
