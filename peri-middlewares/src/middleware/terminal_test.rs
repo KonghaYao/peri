@@ -348,6 +348,57 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let _ = std::fs::remove_file(&marker);
 }
 
+/// run_in_background 任务应在**启动时**注册（BgTaskStarted 立即推送），
+/// 运行期间 registry 可见（TUI 展示栏依赖此事件在运行期间显示任务）；
+/// 完成后 registry 归零。
+///
+/// 回归：此前 bg shell 只在完成时 register_with_kind（Started 与 Completed
+/// 同时发出），任务运行期间 TUI 的 status 下方展示栏没有条目。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_registered_while_running() {
+    let registry = Arc::new(BackgroundTaskRegistry::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_registry(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sleep 1.2",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let task_id = result
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("应返回 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 运行期间（sleep 1.2 尚未结束）：任务必须已注册且可查询
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(registry.active_count(), 1, "运行期间任务应已注册");
+    let tasks = registry.list_tasks();
+    assert_eq!(tasks.len(), 1, "运行期间应可列出任务");
+    assert_eq!(tasks[0].0, task_id, "注册的任务 id 应与返回的 task_id 一致");
+
+    // 完成后：回调收到成功结果，registry 清空
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success, "sleep 1.2 应成功退出");
+    assert_eq!(notif.task_id, task_id);
+    assert_eq!(registry.active_count(), 0, "完成后任务应已清理");
+}
+
 /// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
 /// 完成回调收到 success=true 含 "done"，active_count 归零。
 #[cfg(unix)]
