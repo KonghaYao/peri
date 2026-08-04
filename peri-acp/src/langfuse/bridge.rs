@@ -561,6 +561,12 @@ pub struct LangfuseBridge {
     /// StageEnded 精确配对到发起 agent 的 handle。
     /// 仅在 spawn_eventbus_forwarder 或 SubAgent forwarder 的 render/observe 分支中使用。
     active_stage: Arc<Mutex<HashMap<String, StageHandle>>>,
+    /// 各 agent 最近一次 LlmCallStart 的 step（key = agent_id）。
+    /// v1 `ExecutorEvent::LlmRetrying` 不携带 agent_id/step，而 v1 路径的 LLM
+    /// 事件固定归属 MAIN_AGENT_KEY（见 from_executor_event），故 retry 查询
+    /// 主 agent 自己的 step 记录；v2 ObserveEvent 路径无 LlmRetrying 变体，
+    /// subagent 的 start 记录在其自身 key 下，不会覆盖主 agent 的 step。
+    llm_start_steps: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl LangfuseBridge {
@@ -570,6 +576,7 @@ impl LangfuseBridge {
             tracer,
             provider_display_name,
             active_stage: Arc::new(Mutex::new(HashMap::new())),
+            llm_start_steps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -590,6 +597,7 @@ impl LangfuseBridge {
                 messages,
                 tools,
             } => {
+                self.llm_start_steps.lock().insert(agent_id.clone(), *step);
                 t.on_llm_start(agent_id, *step, messages, tools);
             }
             UnifiedLangfuseEvent::LlmRequestPayload {
@@ -624,7 +632,22 @@ impl LangfuseBridge {
                 delay_ms,
                 error,
             } => {
-                t.on_llm_retrying(*attempt, *max_attempts, *delay_ms, error);
+                // v1 retry 事件无 agent_id/step：LLM 事件在 v1 路径固定归
+                // MAIN_AGENT_KEY，step 取该 agent 最近一次 LlmCallStart 的记录。
+                let step = self
+                    .llm_start_steps
+                    .lock()
+                    .get(MAIN_AGENT_KEY)
+                    .copied()
+                    .unwrap_or(0);
+                t.on_llm_retrying(
+                    MAIN_AGENT_KEY,
+                    step,
+                    *attempt,
+                    *max_attempts,
+                    *delay_ms,
+                    error,
+                );
             }
             UnifiedLangfuseEvent::TextChunk { chunk } => {
                 t.on_text_chunk(chunk);

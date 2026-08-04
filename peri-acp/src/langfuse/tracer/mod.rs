@@ -582,9 +582,12 @@ impl LangfuseTracer {
         }
     }
 
-    /// LLM 重试：记录重试信息，最终在 on_llm_end 时写入 Generation metadata
+    /// LLM 重试：记录重试信息，最终在 on_llm_end 时写入 Generation metadata。
+    /// `agent_id`/`step` 标识所属 generation（v1 路径由 bridge 推断归属）。
     pub fn on_llm_retrying(
         &mut self,
+        agent_id: &str,
+        step: usize,
         attempt: usize,
         max_attempts: usize,
         delay_ms: u64,
@@ -594,7 +597,7 @@ impl LangfuseTracer {
             return;
         }
         self.generation
-            .on_llm_retrying(attempt, max_attempts, delay_ms, error);
+            .on_llm_retrying(agent_id, step, attempt, max_attempts, delay_ms, error);
     }
 
     /// 缓存命中率过低时创建 Warning Event

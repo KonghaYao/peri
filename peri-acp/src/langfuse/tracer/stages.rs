@@ -154,21 +154,18 @@ impl StageSpans {
         workflow_id: &str,
         _plan: &str,
     ) -> WorkflowStartRecord {
-        // Workflow 是 v1 主 agent 概念，无 agent_id 事件来源。在主 agent 的
-        // Act stage slot（任意 Act slot，并行 subagent 也在 Act 时可能存错——
-        // workflow span parent 硬编码为主 agent_observation_id，影响仅限嵌套层级）。
-        let span_id = match self
-            .active
-            .iter_mut()
-            .find(|(_, a)| a.handle.stage == Stage::Act)
-        {
-            Some((_, a)) => {
+        // Workflow 是 v1 主 agent 概念，无 agent_id 事件来源。固定使用
+        // MAIN_AGENT_KEY slot：并行 subagent 的 Act stage 与主 agent 同时
+        // 活跃时，workflow span 不再可能挂到任意 Act slot（此前可能存错或
+        // 在 on_workflow_end 时因选到 subagent 的 slot 而无法关闭）。
+        let span_id = match self.active.get_mut(MAIN_AGENT_KEY) {
+            Some(a) if a.handle.stage == Stage::Act => {
                 let span_id = format!("span_{}", uuid::Uuid::now_v7());
                 a.workflow_spans
                     .insert(workflow_id.to_string(), span_id.clone());
                 span_id
             }
-            None => String::new(),
+            _ => String::new(),
         };
         WorkflowStartRecord { span_id }
     }
@@ -179,10 +176,10 @@ impl StageSpans {
         agents_spawned: usize,
         tool_calls: usize,
     ) -> Option<WorkflowEndRecord> {
-        let (_, a) = self
-            .active
-            .iter_mut()
-            .find(|(_, a)| a.handle.stage == Stage::Act)?;
+        let a = self.active.get_mut(MAIN_AGENT_KEY)?;
+        if a.handle.stage != Stage::Act {
+            return None;
+        }
         let span_id = a.workflow_spans.get(workflow_id)?.clone();
         Some(WorkflowEndRecord {
             span_id,

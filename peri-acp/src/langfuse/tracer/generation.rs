@@ -46,7 +46,10 @@ pub(crate) struct GenerationTracker {
     /// 若不区分 agent，step-N 缓存会互相覆盖导致 generation 错配。
     generation_data: HashMap<(String, usize), GenerationCached>,
     active_step: Option<usize>,
-    retry_attempts: Vec<RetryAttempt>,
+    /// key = (agent_id, step)。retry 记录按 generation 隔离：
+    /// 并行 agent 交错时，on_llm_end 只消费自己 generation 的重试历史，
+    /// 不再出现"后 start 清掉先 start 的 retry / end 挂错 retry"。
+    retry_attempts: HashMap<(String, usize), Vec<RetryAttempt>>,
 }
 
 impl GenerationTracker {
@@ -54,7 +57,7 @@ impl GenerationTracker {
         Self {
             generation_data: HashMap::new(),
             active_step: None,
-            retry_attempts: Vec::new(),
+            retry_attempts: HashMap::new(),
         }
     }
 
@@ -65,8 +68,7 @@ impl GenerationTracker {
         messages: Vec<BaseMessage>,
         tools: Vec<ToolDefinition>,
     ) -> GenerationStart {
-        // 清空 retry_attempts（新 step 开始）
-        self.retry_attempts.clear();
+        // 新 generation 的 retry 记录按 key 隔离，天然为空，无需清空全局 vec
         let gen_id = format!("gen_{}", uuid::Uuid::now_v7());
         let start_time = chrono::Utc::now().to_rfc3339();
         let cached = GenerationCached {
@@ -96,29 +98,32 @@ impl GenerationTracker {
 
     pub(crate) fn on_llm_retrying(
         &mut self,
+        agent_id: &str,
+        step: usize,
         attempt: usize,
         max_attempts: usize,
         delay_ms: u64,
         error: &str,
     ) {
-        self.retry_attempts.push(RetryAttempt {
-            attempt,
-            max_attempts,
-            delay_ms,
-            error: error.to_string(),
-        });
+        self.retry_attempts
+            .entry((agent_id.to_string(), step))
+            .or_default()
+            .push(RetryAttempt {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error: error.to_string(),
+            });
     }
 
     pub(crate) fn on_llm_end(&mut self, agent_id: &str, step: usize) -> Option<GenerationEnd> {
         let cached = self.generation_data.remove(&(agent_id.to_string(), step))?;
         self.active_step = None;
 
-        let retry_metadata = if self.retry_attempts.is_empty() {
-            None
-        } else {
-            Some(build_retry_metadata(&self.retry_attempts))
-        };
-        self.retry_attempts.clear();
+        let retries = self.retry_attempts.remove(&(agent_id.to_string(), step));
+        let retry_metadata = retries
+            .filter(|r| !r.is_empty())
+            .map(|r| build_retry_metadata(&r));
 
         let input_json = cached
             .raw_body

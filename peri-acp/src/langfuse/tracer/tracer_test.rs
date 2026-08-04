@@ -223,8 +223,8 @@ async fn test_llm_retry_accumulates_metadata() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_llm_start("main", 0, &[], &[]);
-    t.on_llm_retrying(1, 3, 500, "timeout");
-    t.on_llm_retrying(2, 3, 1000, "timeout");
+    t.on_llm_retrying("main", 0, 1, 3, 500, "timeout");
+    t.on_llm_retrying("main", 0, 2, 3, 1000, "timeout");
     t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;

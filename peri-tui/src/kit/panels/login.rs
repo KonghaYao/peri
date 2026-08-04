@@ -902,8 +902,9 @@ fn handle_login_paste(
     *edit_cursor = pos + paste_len;
 }
 
-/// 保存编辑结果：写 PERI_CONFIG_HANDLE + 持久化 + 刷新 PROVIDER_LIST + 推送 ACP。
-/// 返回 `true` 表示保存成功；`false` 表示校验失败或配置句柄缺失（不退出编辑）。
+/// 保存编辑结果：先持久化到磁盘，成功后才发布到 PERI_CONFIG_HANDLE /
+/// PROVIDER_LIST / ACP。返回 `true` 表示保存成功；`false` 表示校验失败、
+/// 配置句柄缺失或持久化失败（不退出编辑，防止"假保存成功"）。
 fn save_login_edit(es: &LoginEditState) -> bool {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return false;
@@ -911,8 +912,9 @@ fn save_login_edit(es: &LoginEditState) -> bool {
 
     let is_new = es.original_provider_id.is_empty();
 
-    {
-        let mut cfg = handle.write();
+    // 构建 detached 配置快照（在副本上修改，落盘成功前不动全局 handle）
+    let snap = {
+        let mut cfg = handle.write().clone();
 
         if is_new {
             // New 路径：校验 provider_id 非空后 push 新 ProviderConfig，自动激活
@@ -977,24 +979,40 @@ fn save_login_edit(es: &LoginEditState) -> bool {
             }
         }
 
-        let snap = cfg.clone();
-        drop(cfg);
+        cfg
+    };
 
-        // 刷新 PROVIDER_LIST（去重提取）
-        refresh_provider_list();
-
-        // 持久化
-        persist_and_notify(&snap);
-
-        // 推送 ACP（使变更立即生效）
-        if let Some(client) = ACP_CLIENT_HANDLE.get() {
-            tokio::spawn(async move {
-                if let Err(e) = client.update_config(&snap).await {
-                    tracing::warn!(error = %e, "LoginPanel: update_config push failed");
-                }
-            });
-        }
+    // 先持久化：失败则不发布任何变更（handle / PROVIDER_LIST / ACP 均不动）
+    if let Err(e) = crate::config::save(&snap) {
+        *NOTIFICATION.state().write() = Some(Notification {
+            message: i18n::tr_args(
+                "config-save-failed",
+                &[(
+                    "error".to_string(),
+                    FluentValue::from(e.to_string().as_str()),
+                )],
+            ),
+            until: Instant::now() + Duration::from_secs(2),
+        });
+        return false;
     }
+
+    // 持久化成功后：发布到全局 handle + 刷新 PROVIDER_LIST + 推送 ACP
+    *handle.write() = snap.clone();
+    refresh_provider_list();
+
+    if let Some(client) = ACP_CLIENT_HANDLE.get() {
+        tokio::spawn(async move {
+            if let Err(e) = client.update_config(&snap).await {
+                tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+            }
+        });
+    }
+
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: i18n::tr("config-saved").to_string(),
+        until: Instant::now() + Duration::from_secs(1),
+    });
 
     if is_new {
         tracing::info!(
