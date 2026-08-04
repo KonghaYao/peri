@@ -371,8 +371,13 @@ pub(super) async fn build_and_execute_agent_v2(
     thread_persistence: crate::agent::builder::ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
     background_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: Option<
+        Arc<dyn Fn(&BackgroundTaskResult, peri_middlewares::subagent::BgTaskKind) + Send + Sync>,
+    >,
     effective_context_window: u32,
+    // 内部异步续跑：不 push 空 user Prompt（AsyncContinuation 只消费已 route
+    // 的 Defer/Info 消息），mode 通知记账同样跳过（下一 turn 重新检测）。
+    continuation: bool,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{
@@ -515,17 +520,23 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
+    // [AsyncContinuation] continuation 内部续跑不 push 空 user prompt——
+    // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
+    // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
+    // Defer/Info 消息（bg 结果、workflow 完成等）。
     // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
     // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
     // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
     // 消费进 transcript，不会重复注入也不会丢失。
-    v2_out.context.session.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        V2MessageSource::UserInput,
-        BaseMessage::human(agent_input.content),
-    ));
-    if let Some(booking) = &mode_notice_booking {
-        mark_permission_mode_notified(&booking.last_notified, booking.mode);
+    if !continuation {
+        v2_out.context.session.queue.push(QueuedMessage::new(
+            MessageKind::Prompt,
+            V2MessageSource::UserInput,
+            BaseMessage::human(agent_input.content),
+        ));
+        if let Some(booking) = &mode_notice_booking {
+            mark_permission_mode_notified(&booking.last_notified, booking.mode);
+        }
     }
 
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被

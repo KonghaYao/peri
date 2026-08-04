@@ -185,9 +185,14 @@ pub struct SubAgentMiddleware {
     frozen_skill_summary: Option<Arc<String>>,
     /// Frozen system prompt（session/new 时捕获，fork 路径复用以避免重建）。
     frozen_system_prompt: Option<Arc<String>>,
-    /// bg 完成时的同步回调
-    on_bg_complete:
-        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    /// bg 完成时的同步回调（第二参为任务 kind，供 continuation scheduler 过滤）
+    on_bg_complete: Option<
+        Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
+    >,
     /// Langfuse bridge（from peri-acp，用于 SubAgent 完整 trace）
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
 }
@@ -292,7 +297,11 @@ impl SubAgentMiddleware {
     /// 在 registry.complete() 之前调用，用于同步推入 Defer 到 MQ。
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self

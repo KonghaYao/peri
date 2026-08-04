@@ -95,6 +95,7 @@ pub enum BgRegistryEvent {
     },
     Completed {
         task_id: String,
+        kind: Option<BgTaskKind>,
         success: bool,
         output_preview: String,
         duration_ms: u64,
@@ -226,6 +227,7 @@ impl BackgroundTaskRegistry {
 
         // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
+        let kind = tasks.get(task_id).map(|task| task.kind);
         if let Some(task) = tasks.get_mut(task_id) {
             task.status = if result.success {
                 BackgroundTaskStatus::Completed
@@ -240,6 +242,7 @@ impl BackgroundTaskRegistry {
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
             task_id: task_id.to_string(),
+            kind,
             success,
             output_preview,
             duration_ms,

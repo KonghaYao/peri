@@ -29,9 +29,12 @@ pub(crate) type RegisterRuntimeFn =
     Arc<dyn Fn(String, peri_agent::agent::AgentCancellationToken, String) + Send + Sync>;
 /// Deregister callback: &str (thread_id) → ()
 pub(crate) type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;
-/// 后台任务完成回调类型
-pub(crate) type OnBgCompleteFn =
-    Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>;
+/// 后台任务完成回调类型（第二参为任务 kind，供 continuation scheduler 过滤）
+pub(crate) type OnBgCompleteFn = Arc<
+    dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, peri_middlewares::subagent::BgTaskKind)
+        + Send
+        + Sync,
+>;
 /// System prompt 构建器类型
 pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,

@@ -113,3 +113,45 @@ fn test_strip_leaked_prepends_无leaked时正常返回() {
     assert_eq!(cleaned.len(), 3, "无leaked时应正常返回所有消息");
     assert_eq!(cleaned[0].id(), history[0].id());
 }
+
+/// [AsyncContinuation] 续跑不吞 recall：clone 而非 mem::take，保留在
+/// SessionState 给后续用户 prompt；续跑结束也不覆盖（不改变保留值）。
+#[test]
+fn test_continuation_recall_not_consumed_or_overwritten() {
+    let prior_recall = vec!["上一轮留给用户 prompt 的 recall".to_string()];
+
+    // 续跑读取：clone（不 take），SessionState 值保持不变
+    let mut state_recall = prior_recall.clone();
+    let incoming = take_recall_for_turn(&mut state_recall, true);
+    assert_eq!(
+        incoming, prior_recall,
+        "续跑注入侧取到 clone（供 executor 判定后丢弃，不注入）"
+    );
+    assert_eq!(
+        state_recall, prior_recall,
+        "续跑不得 take recall——必须保留给后续用户 prompt"
+    );
+
+    // 续跑结束：不回写（result recall 不覆盖保留值）
+    let continuation_result_recall = vec!["续跑产生的 recall".to_string()];
+    if recall_overwrite_allowed(true) {
+        state_recall = continuation_result_recall.clone();
+    }
+    assert_eq!(
+        state_recall, prior_recall,
+        "续跑结束不得改变 SessionState.recall_items"
+    );
+
+    // 对照：用户 prompt 正常 take + 回写
+    let mut user_state_recall = prior_recall.clone();
+    let user_incoming = take_recall_for_turn(&mut user_state_recall, false);
+    assert_eq!(user_incoming, prior_recall);
+    assert!(
+        user_state_recall.is_empty(),
+        "用户 prompt 应 take 掉 recall"
+    );
+    if recall_overwrite_allowed(false) {
+        user_state_recall = vec!["本轮新 recall".to_string()];
+    }
+    assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
+}

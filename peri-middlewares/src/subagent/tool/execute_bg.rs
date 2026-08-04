@@ -257,7 +257,7 @@ impl super::SubAgentTool {
                     };
                     // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
                     if let Some(ref on_complete) = on_bg_complete {
-                        on_complete(&result);
+                        on_complete(&result, BgTaskKind::Agent);
                     }
                     registry_spawn.complete(&task_id_clone, result);
                     if let Some(deregister) = &deregister_runtime {
@@ -329,7 +329,7 @@ impl super::SubAgentTool {
             // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
             // 确保 active_count 归零时 Defer 已在 MQ 中
             if let Some(ref on_complete) = on_bg_complete {
-                on_complete(&result);
+                on_complete(&result, BgTaskKind::Agent);
             }
             registry_spawn.complete(&task_id_clone, result);
 

@@ -76,9 +76,15 @@ pub struct SubAgentTool {
     pub(crate) frozen_skill_summary: Option<Arc<String>>,
     /// Frozen system prompt（session/new 时捕获，fork 路径复用以避免重建）。
     pub(crate) frozen_system_prompt: Option<Arc<String>>,
-    /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行
-    pub(crate) on_bg_complete:
-        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行。
+    /// 第二参为任务 kind（Agent/Shell/Workflow），供 continuation scheduler 过滤。
+    pub(crate) on_bg_complete: Option<
+        Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
+    >,
     /// Langfuse bridge for subagent trace（None 表示遥测禁用）
     pub(crate) langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
 }
@@ -211,7 +217,11 @@ impl SubAgentTool {
     /// 在 invoke_background 路径调用 registry.complete() 之前执行。
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self

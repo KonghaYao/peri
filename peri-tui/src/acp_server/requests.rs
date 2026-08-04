@@ -155,6 +155,9 @@ pub(crate) async fn handle_request(
                     workflow_middleware,
                     title: None,
                     tags: Vec::new(),
+                    continuation_armed: false,
+                    continuation_epoch: 0,
+                    continuation_in_flight: false,
                 },
             );
 
@@ -336,6 +339,9 @@ pub(crate) async fn handle_request(
                         workflow_middleware,
                         title: None,
                         tags: Vec::new(),
+                        continuation_armed: false,
+                        continuation_epoch: 0,
+                        continuation_in_flight: false,
                     },
                 );
             }
@@ -585,6 +591,9 @@ pub(crate) async fn handle_request(
                         workflow_middleware,
                         title: None,
                         tags: Vec::new(),
+                        continuation_armed: false,
+                        continuation_epoch: 0,
+                        continuation_in_flight: false,
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
@@ -656,6 +665,9 @@ pub(crate) async fn handle_request(
                     workflow_middleware,
                     title: None,
                     tags: Vec::new(),
+                    continuation_armed: false,
+                    continuation_epoch: 0,
+                    continuation_in_flight: false,
                 },
             );
 

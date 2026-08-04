@@ -5,8 +5,9 @@
 //! properly triggered when the agent is idle.
 //!
 //! Two routing targets:
-//! - **Background SubAgent results** (`route_bg_result`): completion notifications
-//!   from `/bg` fork agents, pushed as `Defer` + `MessageSource::SubAgentComplete`.
+//! - **Background task results** (`route_bg_result`): completion notifications
+//!   from independent agents or background shells, pushed as `Defer` with a
+//!   source derived from [`BgTaskKind`].
 //! - **Workflow events** (`route_workflow_event`): completion notifications from
 //!   the workflow middleware subscriber, pushed as `Defer` + `MessageSource::WorkflowComplete`.
 //!
@@ -17,6 +18,7 @@ use peri_agent::agent::events::BackgroundTaskResult;
 use peri_agent::agent::session::inbox::InboxHandle;
 use peri_agent::messages::{BaseMessage, MessageContent};
 use peri_agent::session::MessageSource;
+use peri_middlewares::subagent::BgTaskKind;
 use peri_workflow::progress::PhaseSummary;
 use tracing::debug;
 
@@ -39,16 +41,18 @@ impl AsyncRouter {
         Self { inbox }
     }
 
-    /// Route a background SubAgent result into the session inbox.
+    /// Route a background task result into the session inbox.
     ///
     /// Converts the [`BackgroundTaskResult`] into a notification string via
     /// [`BackgroundTaskResult::to_notification`] and pushes it as a `Defer`
-    /// message with `MessageSource::SubAgentComplete`.
+    /// message. Independent agents use `MessageSource::SubAgentComplete`; shells
+    /// use `MessageSource::ShellComplete`; workflow results retain their existing
+    /// `MessageSource::WorkflowComplete` source.
     ///
     /// This replaces the executor's direct `v2_message_queue.push(QueuedMessage::new(
-    /// Defer, SubAgentComplete, human(result.to_notification())))` — the only
-    /// difference is that this path also triggers the inbox wake `Notify`.
-    pub fn route_bg_result(&self, result: &BackgroundTaskResult) {
+    /// Defer, ..., human(result.to_notification())))` — the only difference is
+    /// that this path also triggers the inbox wake `Notify`.
+    pub fn route_bg_result(&self, result: &BackgroundTaskResult, kind: BgTaskKind) {
         tracing::info!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -57,7 +61,12 @@ impl AsyncRouter {
             "[bg-diag] route_bg_result: calling push_defer"
         );
         let msg = BaseMessage::human(MessageContent::text(result.to_notification()));
-        self.inbox.push_defer(MessageSource::SubAgentComplete, msg);
+        let source = match kind {
+            BgTaskKind::Agent => MessageSource::SubAgentComplete,
+            BgTaskKind::Shell => MessageSource::ShellComplete,
+            BgTaskKind::Workflow => MessageSource::WorkflowComplete,
+        };
+        self.inbox.push_defer(source, msg);
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,

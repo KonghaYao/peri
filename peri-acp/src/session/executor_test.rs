@@ -13,6 +13,7 @@ use peri_agent::{
     agent::{events::ExecutorEvent, AgentCancellationToken},
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
+    thread::{FilesystemThreadStore, ThreadStore},
 };
 
 use super::{
@@ -152,6 +153,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         session_start_source: None,
         allow_await_wake: false,
         v2_event_tx: None,
+        continuation_notify: None,
     }
 }
 
@@ -558,6 +560,7 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
     let turn = TurnInput {
         event_sink: Arc::clone(&mock_sink) as Arc<dyn EventSink>,
         content: MessageContent::text(""),
+        continuation: false,
         frozen: None,
         history: vec![],
         // keepgoing 语义：不注入 recall（否则 recall 拼进 user 消息使其非空）
@@ -584,6 +587,148 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
         mock_sink.push_done_count(),
         1,
         "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
+    );
+}
+
+// ── run_session_loop: AsyncContinuation 内部续跑（非 keepgoing）─────────────
+
+/// 构造带 SessionManager + 已登记 session 的 SessionContext（可观察 v2 MessageQueue）。
+async fn make_session_context_with_manager(
+    session_id: &str,
+    tmp: &tempfile::TempDir,
+) -> (SessionContext, crate::session::SessionManager) {
+    let mut ctx = make_session_context(session_id);
+    let thread_store =
+        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads"))) as Arc<dyn ThreadStore>;
+    let mut peri_config = crate::provider::PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![crate::provider::ProviderConfig {
+        id: "a".to_string(),
+        provider_type: "openai".to_string(),
+        api_key: "sk-test".to_string(),
+        models: crate::provider::ProviderModels {
+            sonnet: "gpt-4o".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+    peri_config.config.profiles = crate::provider::Profiles {
+        sonnet: crate::provider::ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let sm = crate::session::SessionManager::new(
+        thread_store,
+        LlmProvider::from_config(&peri_config).unwrap(),
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None,
+    );
+    sm.new_session_with_id(session_id, "/tmp")
+        .await
+        .expect("session 登记失败");
+    ctx.session_manager = Some(sm.clone());
+    (ctx, sm)
+}
+
+/// [AsyncContinuation] 内部续跑（continuation=true）不把空 user prompt 当
+/// keepgoing：空历史 + 空 prompt 仍进入 agent 管线（绕过 keepgoing 空历史
+/// short-circuit——后者会直接返回 ok=true/EndTurn）。
+#[tokio::test]
+async fn test_continuation_bypasses_keepgoing_short_circuit() {
+    // Arrange：预取消 token，保证进入管线后快速中断（不触发真实 LLM 调用）
+    let ctx = make_session_context("test-continuation");
+    ctx.cancel.cancel();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let turn = TurnInput {
+        event_sink: Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        continuation: true,
+        frozen: None,
+        history: vec![],
+        incoming_recalls: vec![],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert：未走 keepgoing 短路（短路会返回 ok=true/EndTurn 且不构建 agent），
+    // 而是进入管线后被预取消 token 中断（ok=false/Cancelled）。
+    assert!(!result.ok, "continuation 不得走 keepgoing 空历史短路");
+    assert_eq!(
+        result.stop_reason,
+        PromptStopReason::Cancelled,
+        "进入管线后被预取消 token 中断"
+    );
+}
+
+/// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，
+/// v2 MessageQueue 不出现消息；对比 keepgoing（非空历史）会 push 一条空 Prompt。
+#[tokio::test]
+async fn test_continuation_skips_empty_prompt_push() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let session_id = "test-continuation-queue";
+    let (ctx, sm) = make_session_context_with_manager(session_id, &tmp).await;
+    ctx.cancel.cancel();
+    let history = vec![BaseMessage::human("prior turn")];
+
+    // Act 1：continuation=true（空 content + 非空历史）
+    let turn = TurnInput {
+        event_sink: Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        continuation: true,
+        frozen: None,
+        history: history.clone(),
+        incoming_recalls: vec![],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+    let _ = run_session_loop(ctx, turn).await;
+
+    // Assert 1：队列无任何消息（未写空 human）
+    let queue = sm
+        .get_session(session_id)
+        .expect("session 应存在")
+        .v2_message_queue
+        .clone();
+    assert!(
+        queue.drain_all().is_empty(),
+        "continuation 不得向 v2 queue 写入空 human prompt"
+    );
+
+    // Act 2：keepgoing（continuation=false，同为空 content）——对比组
+    let mut ctx2 = make_session_context(session_id);
+    ctx2.session_manager = Some(sm.clone());
+    ctx2.cancel.cancel();
+    let turn2 = TurnInput {
+        event_sink: Arc::new(MockEventSink::new()) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        continuation: false,
+        frozen: None,
+        history,
+        incoming_recalls: vec![],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+    let _ = run_session_loop(ctx2, turn2).await;
+
+    // Assert 2：keepgoing 会 push 一条 Prompt（空 human 由 stages 跳过转录）
+    let drained = sm
+        .get_session(session_id)
+        .expect("session 应存在")
+        .v2_message_queue
+        .clone()
+        .drain_all();
+    assert_eq!(drained.len(), 1, "keepgoing 应 push 一条空 Prompt 消息");
+    assert_eq!(
+        drained[0].kind,
+        peri_agent::session::queue::MessageKind::Prompt,
+        "keepgoing push 的消息应为 Prompt kind"
     );
 }
 

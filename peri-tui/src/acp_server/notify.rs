@@ -5,31 +5,75 @@ use std::collections::HashMap;
 
 use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
 use peri_acp::dispatch::config_update;
+use peri_acp::session::executor::ContinuationRequest;
 use peri_acp_types::PeriCaps;
+use peri_agent::session::MessageSource;
 use peri_middlewares::skills::SkillMetadata;
+use peri_middlewares::subagent::BgTaskKind;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::{AcpServerConfig, SessionState};
+use super::{
+    AcpServerConfig, SessionState, continuation::cancel_arms_continuation,
+    continuation::cancel_should_schedule_continuation,
+};
 use crate::app::agent::LlmProvider;
 
 // ── Notification dispatch ────────────────────────────────────────────────────
 
+/// 返回 `Some(ContinuationRequest)` 表示调用方需在 **sessions 锁外** 补发一次
+/// continuation 通知（`session/cancel` race 兜底），其余通知返回 `None`。
 pub(crate) fn handle_notification(
     method: &str,
     params: &Value,
-    sessions: &HashMap<String, SessionState>,
+    sessions: &mut HashMap<String, SessionState>,
     cfg: &AcpServerConfig,
-) {
+) -> Option<ContinuationRequest> {
     match method {
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
-            if let Some(state) = sessions.get(session_id)
+            if let Some(state) = sessions.get_mut(session_id)
                 && let Some(ref token) = state.cancel_token
             {
                 token.cancel();
+                // 置位内部续跑标记（只影响当前被取消的 prompt）：被取消 prompt
+                // 的独立 bg agent 结果完成时，continuation scheduler 原子 take
+                // 后运行一次 AsyncContinuation，使父 agent 消费 deferred callback。
+                // 仅在确有 prompt 在跑时置位（cancel_token 存在），避免无关的
+                // bg 完成误触发；用户显式新 prompt 会清除未运行的标记。
+                //
+                // 取消**正在执行的 continuation** 时不置位（in_flight）：否则
+                // 会形成"取消续跑 → 再次续跑"的自动链式续跑。被取消续跑遗留的
+                // Defer 保留在队列，由后续用户 prompt 消费。
+                let cancel_arms = cancel_arms_continuation(state);
+                if cancel_arms {
+                    state.continuation_armed = true;
+                }
                 info!(session_id = %session_id, "Cancel requested");
+
+                // Race 兜底：bg callback 可能已经 route 为 Defer/SubAgentComplete，
+                // 且其 continuation 通知恰在 cancel 置位前被 scheduler 跳过
+                // （armed=false）。此时若不补发，Defer 已入队却永远不会被消费。
+                // 仅在队列确有 pending SubAgentComplete Defer 时补发，且 kind
+                // 恒为 Agent——Shell/Workflow 虽可经 route_bg_result 入队，但使用
+                // 各自独立的 MessageSource，不会产生 SubAgentComplete Defer，天然
+                // 不会误触发。
+                let has_pending = cfg
+                    .session_manager
+                    .get_session(session_id)
+                    .map(|s| {
+                        s.v2_message_queue
+                            .has_pending_defer(&MessageSource::SubAgentComplete)
+                    })
+                    .unwrap_or(false);
+                if cancel_should_schedule_continuation(state, has_pending) {
+                    return Some(ContinuationRequest {
+                        session_id: session_id.to_string(),
+                        kind: BgTaskKind::Agent,
+                    });
+                }
             }
+            None
         }
         "session/config_update" => {
             // Two formats:
@@ -42,7 +86,7 @@ pub(crate) fn handle_notification(
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!(error = %e, "config_update notification: invalid config");
-                        return;
+                        return None;
                     }
                 };
                 let active_profile_provider = new_cfg
@@ -86,9 +130,11 @@ pub(crate) fn handle_notification(
                 tracing::debug!("config_update notification: missing config/configId");
             }
             // No sessions to invalidate — pool will be built fresh on next session/new
+            None
         }
         _ => {
             debug!(method = %method, "Unhandled notification");
+            None
         }
     }
 }

@@ -1044,6 +1044,7 @@ pub enum AcpEventData {
     /// `"bg-task-completed"` -- a background task has finished.
     BgTaskCompleted {
         task_id: String,
+        kind: Option<String>,
         success: bool,
         duration_ms: u64,
     },
@@ -1175,6 +1176,7 @@ impl AcpEventData {
             "bg-task-completed" => decode_or_unknown(event, data, |d: BgTaskCompletedData| {
                 AcpEventData::BgTaskCompleted {
                     task_id: d.task_id,
+                    kind: d.kind,
                     success: d.success,
                     duration_ms: d.duration_ms,
                 }
@@ -1233,6 +1235,8 @@ pub struct BgTaskEntry {
 #[derive(Debug, serde::Deserialize)]
 struct BgTaskCompletedData {
     task_id: String,
+    #[serde(default)]
+    kind: Option<String>,
     success: bool,
     duration_ms: u64,
 }

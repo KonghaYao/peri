@@ -91,3 +91,67 @@ fn test_push_batch_no_op_on_empty() {
     q.push_batch(vec![]);
     assert!(q.is_empty());
 }
+
+#[test]
+fn test_has_pending_defer_matches_source_and_kind() {
+    let q = MessageQueue::new();
+    assert!(
+        !q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "空队列无 pending Defer"
+    );
+
+    // SubAgentComplete Defer → 命中
+    q.push(QueuedMessage::defer(
+        MessageSource::SubAgentComplete,
+        make_msg("d1"),
+    ));
+    assert!(q.has_pending_defer(&MessageSource::SubAgentComplete));
+    // 其他来源不命中（shell/workflow 等不得被当作 bg agent 续跑依据）
+    assert!(!q.has_pending_defer(&MessageSource::ShellComplete));
+    assert!(!q.has_pending_defer(&MessageSource::WorkflowComplete));
+    assert!(!q.has_pending_defer(&MessageSource::CronTrigger));
+
+    // 非 Defer 消息不命中：仅 Info（同来源）
+    q.push(QueuedMessage::info(
+        MessageSource::SubAgentComplete,
+        make_msg("i1"),
+    ));
+    assert!(
+        q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "先前 Defer 仍在，依然命中"
+    );
+    q.drain_all();
+    q.push(QueuedMessage::defer(
+        MessageSource::ShellComplete,
+        make_msg("shell done"),
+    ));
+    assert!(q.has_pending_defer(&MessageSource::ShellComplete));
+    assert!(
+        !q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "shell completion must not qualify as a subagent completion"
+    );
+
+    q.drain_all();
+    q.push(QueuedMessage::info(
+        MessageSource::SubAgentComplete,
+        make_msg("i2"),
+    ));
+    assert!(
+        !q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "仅 Info 不命中（Info 不 wake 新 turn）"
+    );
+
+    // Prompt（同来源）不命中
+    q.push(QueuedMessage::prompt(
+        MessageSource::SubAgentComplete,
+        make_msg("p1"),
+    ));
+    assert!(
+        !q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "Prompt 不命中（仅 Defer kind）"
+    );
+
+    // drain 后清空
+    q.drain_all();
+    assert!(!q.has_pending_defer(&MessageSource::SubAgentComplete));
+}

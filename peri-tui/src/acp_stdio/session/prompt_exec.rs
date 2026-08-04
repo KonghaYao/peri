@@ -148,10 +148,12 @@ pub(crate) async fn run(params: PromptExecParams) {
         session_start_source,
         allow_await_wake: false,
         v2_event_tx: None,
+        continuation_notify: None, // stdio 无 continuation scheduler
     };
     let turn = executor::TurnInput {
         event_sink,
         content,
+        continuation: false,
         frozen,
         history,
         incoming_recalls: vec![],

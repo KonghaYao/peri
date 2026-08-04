@@ -240,10 +240,12 @@ pub async fn run_print(
         session_start_source: Some("startup".to_string()),
         allow_await_wake: false,
         v2_event_tx: None,
+        continuation_notify: None, // print 模式无 continuation scheduler
     };
     let turn = peri_acp::session::executor::TurnInput {
         event_sink,
         content: peri_agent::messages::MessageContent::text(prompt_text),
+        continuation: false,
         frozen: Some(frozen_data),
         history: vec![],
         incoming_recalls: vec![],

@@ -312,7 +312,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry)
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 
@@ -361,7 +361,7 @@ async fn test_bg_shell_registered_while_running() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry.clone())
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 
@@ -408,7 +408,7 @@ async fn test_sync_timeout_promotes_to_background() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry.clone())
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 

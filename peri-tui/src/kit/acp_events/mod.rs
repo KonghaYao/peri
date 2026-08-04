@@ -385,8 +385,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot(tasks) => system::handle_bg_task_snapshot(state, tasks),
         BgTaskStarted(entry) => system::handle_bg_task_started(state, entry),
+        // kind payload 保留（bg task UI 展示 / 未来扩展）；内部续跑由 ACP
+        // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。
         BgTaskCompleted {
             task_id,
+            kind: _,
             success,
             duration_ms,
         } => system::handle_bg_task_completed(task_id, *success, *duration_ms),

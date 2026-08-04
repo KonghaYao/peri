@@ -314,6 +314,9 @@ fn register_session_with_history(
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
         },
     );
     sid

@@ -24,8 +24,9 @@ pub struct BashTool {
     pub cwd: String,
     /// 后台任务注册表（用于 run_in_background 模式）
     pub bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）
-    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）。
+    /// 第二参为任务 kind（bg shell 恒为 Shell，供 continuation scheduler 过滤）。
+    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
 }
 
 impl BashTool {
@@ -44,7 +45,7 @@ impl BashTool {
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self
@@ -211,7 +212,7 @@ async fn drain_pipe(mut reader: impl tokio::io::AsyncRead + Unpin, buf: Arc<Mute
 #[allow(clippy::too_many_arguments)]
 fn finalize_bg_shell(
     registry: &BackgroundTaskRegistry,
-    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
     task_id: String,
     prompt_summary: String,
     success: bool,
@@ -241,7 +242,7 @@ fn finalize_bg_shell(
     };
     // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
     if let Some(ref cb) = on_bg_complete {
-        cb(&result);
+        cb(&result, crate::BgTaskKind::Shell);
     }
     // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
     // complete() 在 task 未注册时也能安全处理（仅 push_event）。
@@ -352,7 +353,7 @@ impl BaseTool for BashTool {
                             };
                             // 回调通知 Agent inbox（在 registry 操作之前）
                             if let Some(ref cb) = on_bg_complete_cb {
-                                cb(&result);
+                                cb(&result, crate::BgTaskKind::Shell);
                             }
                             // 注册 + 立即完成
                             let bg_task = BackgroundTask {
@@ -409,7 +410,7 @@ impl BaseTool for BashTool {
                             timed_out: false,
                         };
                         if let Some(ref cb) = on_bg_complete_cb {
-                            cb(&result);
+                            cb(&result, crate::BgTaskKind::Shell);
                         }
                         registry.complete(&result.task_id.clone(), result);
                         return;
@@ -451,7 +452,7 @@ impl BaseTool for BashTool {
                                     };
                                     // 回调通知 Agent inbox（在 registry 操作之前）
                                     if let Some(ref cb) = on_bg_complete_cb {
-                                        cb(&result);
+                                        cb(&result, crate::BgTaskKind::Shell);
                                     }
                                     // 任务在启动时已注册，此处只收尾推送 Completed
                                     let complete_task_id = result.task_id.clone();
@@ -725,7 +726,7 @@ impl BaseTool for BashTool {
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
 pub struct TerminalMiddleware {
     bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
 }
 
 impl TerminalMiddleware {
@@ -743,7 +744,7 @@ impl TerminalMiddleware {
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self

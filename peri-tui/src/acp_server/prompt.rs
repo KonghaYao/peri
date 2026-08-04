@@ -43,6 +43,14 @@ pub(crate) async fn run_prompt(
     langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<peri_acp::session::agent_pool::AgentPool>>,
     session_manager: peri_acp::session::SessionManager,
+    // 内部 continuation 通知通道（注入 SessionContext，供 on_bg_complete
+    // 闭包通知 server 的 continuation scheduler）。stdio 等无 scheduler 场景为 None。
+    cont_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<peri_acp::session::executor::ContinuationRequest>,
+    >,
+    // 内部 AsyncContinuation（bg 完成唤醒被取消的 turn）：不 push 空 user
+    // prompt、不触发 keepgoing 语义。仅由 continuation scheduler 调用。
+    continuation: bool,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -88,7 +96,10 @@ pub(crate) async fn run_prompt(
             state.history.is_empty(),
             state.thread_id.clone(),
             state.frozen.clone(),
-            std::mem::take(&mut state.recall_items),
+            // [AsyncContinuation] 续跑不 take recall：上一轮留给用户 prompt 的
+            // recall 必须保留在 SessionState（后续用户 prompt 注入），续跑自身
+            // 也不注入（见 executor::run_session_loop 的 continuation 分支）。
+            take_recall_for_turn(&mut state.recall_items, continuation),
             state.workflow_middleware.clone(),
         )
     };
@@ -180,17 +191,19 @@ pub(crate) async fn run_prompt(
         session_manager: Some(session_manager),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
-        session_start_source: if is_empty {
+        session_start_source: if !continuation && is_empty {
             Some("startup".to_string())
         } else {
             None
         },
         allow_await_wake: true,
         v2_event_tx: crate::kit::atoms::V2_EVENT_TX.get().cloned(),
+        continuation_notify: cont_tx,
     };
     let turn = executor::TurnInput {
         event_sink,
         content,
+        continuation,
         frozen,
         history,
         incoming_recalls,
@@ -290,7 +303,12 @@ pub(crate) async fn run_prompt(
                 state.history.truncate(history_len);
                 info!(session_id = %session_id, history_len, "Agent execution failed/cancelled, rolled back history");
             }
-            state.recall_items = result.recall_items;
+            // [AsyncContinuation] 续跑结束不回写 recall：保留续跑开始前
+            // SessionState 中的 recall（上一轮留给用户 prompt 的），续跑自身
+            // 产生的 recall 不覆盖它；用户 prompt 正常回写。
+            if recall_overwrite_allowed(continuation) {
+                state.recall_items = result.recall_items;
+            }
             state.cancel_token = None;
         }
     }
@@ -302,6 +320,29 @@ pub(crate) async fn run_prompt(
     };
     let resp = PromptResponse::new(acp_stop_reason);
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
+
+/// [AsyncContinuation] 读取本轮 recall 的策略：
+///
+/// - 用户 prompt：`mem::take`（消费上一轮 recall 注入本轮的 system-reminder，
+///   结束时由 `recall_overwrite_allowed` 回写新 recall）；
+/// - 内部续跑：**clone 而非 take**——上一轮留给用户 prompt 的 recall 必须
+///   保留在 `SessionState`（续跑自身也不注入，见 executor 的 continuation
+///   分支），避免续跑"吞掉"用户 prompt 应得的 recall。
+fn take_recall_for_turn(recall_items: &mut Vec<String>, continuation: bool) -> Vec<String> {
+    if continuation {
+        recall_items.clone()
+    } else {
+        std::mem::take(recall_items)
+    }
+}
+
+/// 本轮结束时是否允许用 `result.recall_items` 覆盖 `SessionState.recall_items`。
+///
+/// 续跑结束时**不改变** SessionState 中的 recall（保留续跑开始前的值给后续
+/// 用户 prompt）；用户 prompt 正常回写本轮产生的 recall。
+fn recall_overwrite_allowed(continuation: bool) -> bool {
+    !continuation
 }
 
 /// Returns `None` when a partial result omits existing history. A committed Full Compact
