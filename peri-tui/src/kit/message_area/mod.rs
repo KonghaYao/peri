@@ -498,7 +498,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
+    // ── 吸底自动跟随 ──
+    let last_scrolled_at = hooks.use_state(|| 0u16);
+    // 粘性吸底开关：默认跟随；用户向上滚动即退出（浏览模式），滚回底部才恢复。
+    let follow_bottom = hooks.use_state(|| true);
+
     // 闭包持 clone，原值继续在 render body 内用。
+    // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染
+    // 以相同相对顺序调用——use_event_handler 只是占顺序槽，位置调整无状态错位。
     {
         let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
         let slot_arcs_for_closure = Arc::clone(&slot_arcs_arc);
@@ -518,12 +525,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &slot_offsets_for_closure,
                 &scrollbar_fields,
                 &scrollbar_drag,
+                &follow_bottom,
             )
         });
     }
 
-    // ── 吸底自动跟随 ──
-    let last_scrolled_at = hooks.use_state(|| 0u16);
     let prev_total_visual_rows = hooks.use_state(|| 0u16);
     // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
     // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
@@ -546,6 +552,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     last_scrolled_at,
                     items_len,
                     is_loading,
+                    follow_bottom,
                     prev_total_visual_rows,
                     prev_vis_height,
                     loading_epoch,
