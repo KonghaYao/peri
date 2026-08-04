@@ -1,6 +1,6 @@
 # Cron 触发在 turn 结束后丢失（CronOwner bridge 生命周期绑定在 turn 级 V2Session 上）
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-08-04
 
@@ -85,3 +85,4 @@ retry 期间 cron 触发成功入队（bridge 活）→ retry 耗尽 `run_reason
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-08-04 | — | Open | agent | 创建（用户报告 retry 失败后 cron 无法注入；静态分析定位根因） |
+| 2026-08-04 | Open | Fixed | agent | 修复合入 commit `a22a3820`：SessionCronBridge 提升到 session 级（`SessionManager::cron_bridge_for` lazy-init）；修复方向 1、3 完成，方向 2（idle 立即开新 turn）明确 out of scope 留作后续增强；回归测试 2 条 + retain 测试；独立 code review APPROVED（0 critical / 0 major，3 minor 非阻塞） |
