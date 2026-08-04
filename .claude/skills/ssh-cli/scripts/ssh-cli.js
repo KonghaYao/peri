@@ -12,6 +12,13 @@
  *   node ssh-cli.js push <local_path> <host> <remote_path> [--recursive]   # 上传（scp）
  *   node ssh-cli.js pull <host> <remote_path> <local_path> [--recursive]   # 下载（scp）
  *   node ssh-cli.js test <host>
+ *   node ssh-cli.js <host>                     # 交互模式：进入主机上下文，逐行执行子命令
+ *
+ * 交互模式示例:
+ *   $ ssh-cli.js dev-server
+ *   dev-server> exec "npm test"
+ *   dev-server> read /etc/hosts
+ *   dev-server> exit
  *
  * 全局选项（任意子命令后）:
  *   --hosts <list>     主机白名单（逗号分隔，'*' 放行所有）。不传默认放行
@@ -34,6 +41,7 @@ const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const readline = require('readline');
 
 const VERSION = '1.0.0';
 
@@ -98,6 +106,7 @@ function printHelp() {
   ssh-cli push <local_path> <host> <remote_path> [--recursive]  # 上传（scp）
   ssh-cli pull <host> <remote_path> <local_path> [--recursive]  # 下载（scp）
   ssh-cli test <host>
+  ssh-cli <host>                       # 交互模式（主机上下文，逐行执行子命令）
 
 全局选项:
   --hosts <list>     主机白名单（'*' 放行所有；不传默认放行）
@@ -150,6 +159,19 @@ function isBinary(buf) {
   return buf.includes(0);
 }
 
+/** FNV-1a 32bit hash → 8 位 hex。用于 ControlPath 文件名：
+ *  ssh 的 %C 展开为 40+ 字符 hash，加上 macOS 长 tmpdir 路径会超过
+ *  ControlPath 104 字节上限；自算短 hash（含 user/port/key，避免跨会话复用）。 */
+function controlHash(host, port, key) {
+  const s = `${host}:${port || 22}:${key || ''}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
 /** 构建基础 ssh 参数：连接复用 + 超时 + known_hosts 策略 */
 function baseSshArgs(cfg, host) {
   const args = [
@@ -158,7 +180,7 @@ function baseSshArgs(cfg, host) {
     '-o', 'ServerAliveCountMax=3',
     '-o', `StrictHostKeyChecking=${cfg.strict}`,
     '-o', 'ControlMaster=auto',
-    '-o', `ControlPath=${cfg.controlPath}/control-%C`,
+    '-o', `ControlPath=${cfg.controlPath}/control-${controlHash(host, cfg.port, cfg.key)}`,
     '-o', 'ControlPersist=600',
     '-o', 'BatchMode=yes',
   ];
@@ -223,7 +245,7 @@ function scpRemote(cfg, host, scpArgs, { timeoutMs } = {}) {
     '-o', 'ServerAliveCountMax=3',
     '-o', `StrictHostKeyChecking=${cfg.strict}`,
     '-o', 'ControlMaster=auto',
-    '-o', `ControlPath=${cfg.controlPath}/control-%C`,
+    '-o', `ControlPath=${cfg.controlPath}/control-${controlHash(host, cfg.port, cfg.key)}`,
     '-o', 'ControlPersist=600',
     '-o', 'BatchMode=yes',
     ...(cfg.port ? ['-P', String(cfg.port)] : []),
@@ -469,6 +491,70 @@ function countMatches(s, sub) {
   return n;
 }
 
+// ─────────────────────────── 交互式 REPL ───────────────────────────
+
+const REPL_SUBS = ['exec', 'read', 'write', 'edit', 'ls', 'push', 'pull', 'test'];
+
+function printReplHelp() {
+  process.stderr.write(`交互模式（主机 ${'<host>'} 已固定，无需重复输入）:
+  exec <command>                  执行远程命令（剩余参数用空格连接）
+  read <file_path> [--offset N] [--limit N]   读文件
+  write <file_path> <content> [--append]      写文件（--stdin 从 stdin 读）
+  edit <file_path> <old> <new> [--all]        精确替换
+  ls <dir>                        目录列表
+  push <local> <remote> [--recursive]         上传
+  pull <remote> <local> [--recursive]         下载
+  test                            连接诊断
+  help / exit                     帮助 / 退出（Ctrl-D 亦可）
+`);
+}
+
+/**
+ * 交互式 REPL：进入主机上下文后逐行执行子命令。
+ * 每行 spawn 子进程调用自身 CLI（复用全部逻辑与全局配置），薄壳无状态。
+ */
+function cmdRepl(cfg, host) {
+  checkHost(cfg, host);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const prompt = () => {
+    if (process.stdin.isTTY) rl.setPrompt(`${host}> `), rl.prompt();
+  };
+  // 子进程全局配置透传
+  const globalArgs = [
+    '--hosts', cfg.hosts || '*',
+    '--timeout', String(cfg.timeoutMs),
+    ...(cfg.auditLog ? ['--audit-log', cfg.auditLog] : []),
+    ...(cfg.port ? ['--port', String(cfg.port)] : []),
+    ...(cfg.key ? ['--key', cfg.key] : []),
+    ...(cfg.strict !== 'accept-new' ? ['--strict', cfg.strict] : []),
+  ];
+  process.stderr.write(`[ssh-cli] 交互模式: ${host}（help 查看命令，exit 退出）\n`);
+  prompt();
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return prompt();
+    if (['exit', 'quit', 'q'].includes(trimmed)) return rl.close();
+    if (trimmed === 'help') { printReplHelp(); return prompt(); }
+    const parts = trimmed.split(/\s+/);
+    const sub = parts.shift();
+    if (!REPL_SUBS.includes(sub)) {
+      process.stderr.write(`[ssh-cli] 未知子命令: ${sub}（help 查看支持列表）\n`);
+      return prompt();
+    }
+    // push/pull 省略 host：push <local> <remote> → 子进程 push <local> <host> <remote>
+    const subArgs = sub === 'push' || sub === 'pull'
+      ? [sub, parts[0], host, ...parts.slice(1)]
+      : [sub, host, ...parts];
+    const r = spawnSync(process.execPath, [__filename, ...globalArgs, ...subArgs], { stdio: 'inherit' });
+    if (r.error) process.stderr.write(`[ssh-cli] 子命令执行失败: ${r.error.message}\n`);
+    prompt();
+  });
+  rl.on('close', () => {
+    process.stderr.write('[ssh-cli] 已退出\n');
+    process.exit(0);
+  });
+}
+
 // ─────────────────────────── 入口 ───────────────────────────
 
 async function main() {
@@ -481,7 +567,11 @@ async function main() {
     exec: cmdExec, read: cmdRead, write: cmdWrite, edit: cmdEdit, ls: cmdLs,
     push: cmdPush, pull: cmdPull, test: cmdTest,
   };
-  if (!subcommands[sub]) fail(`未知子命令: ${sub}（支持 exec/read/write/edit/ls/push/pull/test）`);
+  if (!subcommands[sub]) {
+    // 单个位置参数且非已知子命令 → 视为主机，进入交互 REPL（host 上下文）
+    if (args.length === 0 && !REPL_SUBS.includes(sub)) return cmdRepl(cfg, sub);
+    fail(`未知子命令: ${sub}（支持 exec/read/write/edit/ls/push/pull/test）`);
+  }
   try {
     await subcommands[sub](cfg, args);
   } catch (e) {

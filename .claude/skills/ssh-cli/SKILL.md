@@ -24,6 +24,21 @@ node .claude/skills/ssh-cli/scripts/ssh-cli.js <子命令> ...
 | `pull` | 远程下载本地（scp） | `pull dev-server /var/log/app.log ./app.log` |
 | `test` | 连接诊断（主机名/系统/连通性） | `test dev-server` |
 
+## 交互模式（推荐）
+
+连续操作同一台主机时，直接 `ssh-cli <host>` 进入主机上下文，之后只敲子命令（host 自动带入），`exit` 或 Ctrl-D 退出：
+
+```bash
+node .claude/skills/ssh-cli/scripts/ssh-cli.js dev-server
+# dev-server> exec "cd /app && npm test"
+# dev-server> read /etc/hosts --limit 10
+# dev-server> push ./dist /srv/app/dist --recursive
+# dev-server> pull /var/log/app.log ./app.log
+# dev-server> exit
+```
+
+交互模式下 `push`/`pull` 省略 host：`push <local> <remote>`、`pull <remote> <local>`；其余子命令参数与单次调用一致。所有命令照常受白名单/审计约束。
+
 ## 参数约定
 
 - `host`：`user@host` 或 `~/.ssh/config` 别名；凭据全部走系统 ssh（config/agent/key），命令行不传密码
