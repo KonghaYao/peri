@@ -214,6 +214,7 @@ pub async fn build_app_and_acp(
                 session_manager_peri_config_snapshot,
                 app.services.permission_mode.clone(),
                 None,
+                Some(app.services.cron.scheduler.clone()),
             );
 
             // (I17-D) app.services.acp_session_manager 字段已退役——

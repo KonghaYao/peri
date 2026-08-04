@@ -32,6 +32,9 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = snapshot_store;
 
     let active_run = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv_phase = hooks.use_state(ScrollViewState::default);
+    let sv_agent = hooks.use_state(ScrollViewState::default);
     let focus_left = hooks.use_state(|| true);
     let phase_sel = hooks.use_state(|| 0usize);
     let agent_sel = hooks.use_state(|| 0usize);
@@ -349,6 +352,23 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     drop(theme);
 
+    // 面板滚轮仲裁注册（双栏：按 40% 切分左右区域，divider 列并入右侧）
+    let (phase_area, agent_area) =
+        crate::kit::panel_scroll::split_vertical(hooks.use_previous_size(), 40);
+    crate::kit::panel_scroll::register_panel_scrolls(
+        PanelKind::Workflow,
+        vec![
+            crate::kit::panel_scroll::PanelScrollSlot {
+                area: phase_area,
+                state: sv_phase,
+            },
+            crate::kit::panel_scroll::PanelScrollSlot {
+                area: agent_area,
+                state: sv_agent,
+            },
+        ],
+    );
+
     // ── Footer ───────────────────────────────────────────────────────────
     let footer =
         Line::from(i18n::tr("workflow-footer-shortcuts")).fg(theme_def.read().semantic.text.dim);
@@ -366,6 +386,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(width: Constraint::Percentage(40), height: Constraint::Fill(1)) {
                 ScrollView(
                     scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    state: Some(sv_phase),
                     width: Constraint::Fill(1),
                     height: Constraint::Fill(1),
                 ) {
@@ -378,6 +399,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
                 ScrollView(
                     scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    state: Some(sv_agent),
                     width: Constraint::Fill(1),
                     height: Constraint::Fill(1),
                 ) {

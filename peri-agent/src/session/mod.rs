@@ -19,6 +19,9 @@
 //! 这些 owner 在 `peri-acp` 层通过 `set_async_owners` 注入。持有 owner 后，
 //! cron/channel 事件直接通过 inbox 唤醒 executor，无需 TUI 轮询。
 //! 不设置 owner 时，TUI 轮询路径仍然有效（向后兼容）。
+//!
+//! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
+//! `set_async_owners` 仅 print fallback 使用。
 
 pub mod config;
 pub mod queue;

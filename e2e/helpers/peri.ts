@@ -75,6 +75,11 @@ export async function sendPrompt(
   tester: TmuxTester,
   text: string,
 ): Promise<void> {
+  // 清空输入框可能残留的内容（keepgoing 按钮预填/未提交文本），
+  // 避免逐字符追加导致 prompt 被污染（C-u = readline 清行）。
+  await tester.sendKey("u", { ctrl: true });
+  await tester.sleep(100);
+
   // 逐字符发送文本
   for (const char of text) {
     await tester.sendText(char);

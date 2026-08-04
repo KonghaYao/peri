@@ -91,6 +91,27 @@ fn test_footer_loading_steady_state_has_no_control_state_transition() {
     );
 }
 
+/// idle 态渲染静止图标占位：固定第一帧（不参与动画），无 verb/elapsed
+#[test]
+fn test_render_idle_spinner_line_static_fixed_frame() {
+    let line = render_idle_spinner_line(ratatui::style::Color::DarkGray);
+    let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let frame0 = crate::components::spinner::animation::tick_to_frame(0);
+    assert!(
+        rendered.contains(frame0),
+        "idle 应渲染静止图标（固定第一帧），实际: {rendered}"
+    );
+    // 静止语义：连续两次渲染内容一致（不随壁钟推进换帧）
+    let again = render_idle_spinner_line(ratatui::style::Color::DarkGray);
+    let rendered2: String = again.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(rendered, rendered2, "idle 行不应随时间变化");
+    // 不包含 verb/elapsed 后缀
+    assert!(
+        !rendered.contains('s') || !rendered.contains("token"),
+        "idle 行不应带 elapsed/token 后缀，实际: {rendered}"
+    );
+}
+
 /// verb_override 提供摘要时，spinner 渲染优先使用摘要而非随机名言
 #[test]
 fn test_render_to_lines_verb_override_优先于名言() {

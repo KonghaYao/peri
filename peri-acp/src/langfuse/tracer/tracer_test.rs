@@ -41,24 +41,26 @@ async fn test_smoke_complete_turn_sequence() {
     // Stage: Receive
     t.on_stage_start(Stage::Receive, "turn_1");
     let recv_handle = t.stages.on_stage_start(
+        "main",
         Stage::Receive,
         &t.trace_id,
         "turn_1",
         &t.agent_observation_id,
     );
-    t.on_stage_end(&recv_handle, StageStatus::Done);
+    t.on_stage_end("main", &recv_handle, StageStatus::Done);
 
     // Stage: Reason + LLM
     t.on_stage_start(Stage::Reason, "turn_1");
-    t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "claude-4.7", "anthropic", "hello", None, None);
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "claude-4.7", "anthropic", "hello", None, None);
     let reason_handle = t.stages.on_stage_start(
+        "main",
         Stage::Reason,
         &t.trace_id,
         "turn_1",
         &t.agent_observation_id,
     );
-    t.on_stage_end(&reason_handle, StageStatus::Done);
+    t.on_stage_end("main", &reason_handle, StageStatus::Done);
 
     let _handle = t.on_turn_end(None);
     // 等待 flush async 任务完成（FakeLangfuseSession 的 flush 是同步的，但 spawn 需要运行）
@@ -74,8 +76,8 @@ async fn test_sampling_rate_0_emits_nothing() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
     t.on_stage_start(Stage::Reason, "turn_1");
-    t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "m", "p", "o", None, None);
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "m", "p", "o", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -137,8 +139,8 @@ fn test_on_text_chunk_accumulates() {
 async fn test_llm_generation_emits_events() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
-    t.on_llm_start(0, &[], &[]);
-    t.on_llm_end(0, "gpt-4", "openai", "response", None, None);
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -151,13 +153,79 @@ async fn test_llm_generation_emits_events() {
 }
 
 #[tokio::test]
+async fn test_llm_error_marks_generation_error() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end(
+        "main",
+        0,
+        "gpt-4",
+        "openai",
+        "ERROR: provider returned 503 Service Unavailable",
+        None,
+        None,
+    );
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let gen = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+            Some(body)
+        } else {
+            None
+        }
+    });
+    let gen = gen.expect("应有 GenerationCreate 事件");
+    assert_eq!(
+        gen.level,
+        Some(langfuse_client::types::ObservationLevel::Error),
+        "LLM 失败时 generation 应标记 Error 级"
+    );
+    assert_eq!(
+        gen.status_message.as_deref(),
+        Some("ERROR: provider returned 503 Service Unavailable"),
+        "generation statusMessage 应包含完整错误"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_error_message_in_error_span() {
+    let (mut t, session) = make_tracer(0.0);
+    t.on_turn_start("turn_1");
+    t.on_turn_error("provider returned 503 Service Unavailable");
+    let _handle = t.on_turn_end(Some("LlmFailure"));
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let span_out = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            if body.name.as_deref() == Some("ErrorTurn") {
+                return body.output.clone();
+            }
+        }
+        None
+    });
+    let span_out = span_out.expect("应有 ErrorTurn span");
+    assert_eq!(
+        span_out["error"], "LlmFailure",
+        "ErrorTurn output 应保留错误枚举名"
+    );
+    assert_eq!(
+        span_out["message"], "provider returned 503 Service Unavailable",
+        "ErrorTurn output 应包含 TurnError 的完整错误消息"
+    );
+}
+
+#[tokio::test]
 async fn test_llm_retry_accumulates_metadata() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
-    t.on_llm_start(0, &[], &[]);
-    t.on_llm_retrying(1, 3, 500, "timeout");
-    t.on_llm_retrying(2, 3, 1000, "timeout");
-    t.on_llm_end(0, "gpt-4", "openai", "response", None, None);
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_retrying("main", 0, 1, 3, 500, "timeout");
+    t.on_llm_retrying("main", 0, 2, 3, 1000, "timeout");
+    t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -261,7 +329,11 @@ fn test_on_tool_start_fallback_to_subagent_when_stage_not_started() {
     t.on_turn_start("turn_fallback_test");
 
     // 手动压入 subagent 上下文（模拟 SubAgent 已启动但 StageStarted 尚未到达）
-    t.begin_subagent(&serde_json::json!({"agent": "explore", "description": "test"}));
+    let agent_obs_id = t.agent_observation_id.clone();
+    t.begin_subagent(
+        &serde_json::json!({"agent": "explore", "description": "test"}),
+        &agent_obs_id,
+    );
 
     // 确认 subagent 栈非空
     assert_eq!(t.subagent.depth(), 1, "subagent 栈应有 1 层");
@@ -276,11 +348,12 @@ fn test_on_tool_start_fallback_to_subagent_when_stage_not_started() {
     // 在没有 stage 的情况下调用 on_tool_start（active_handle() 返回 None）
     // parent_id 应 fallback 到 subagent 的 observation_id
     t.on_tool_start(
+        "main",
         "tc_fallback",
         "Read",
         &serde_json::json!({"path": "test.txt"}),
     );
-    t.on_tool_end("tc_fallback", "file content", false);
+    t.on_tool_end("main", "tc_fallback", "file content", false);
 
     // BUG 3: 工具已路由到 subagent 的 tool_batch，需从中 flush
     let flushes = t.subagent.flush_all_subagent_tool_batches();
@@ -307,6 +380,7 @@ fn test_bg_subagent_deferred_pop_preserves_stack() {
 
     // 模拟 Agent 工具调用开始（压入 subagent 栈，has_started=false）
     t.on_tool_start(
+        "main",
         "tc_bg",
         "Agent",
         &serde_json::json!({"subagent_name": "bg_agent"}),
@@ -320,7 +394,7 @@ fn test_bg_subagent_deferred_pop_preserves_stack() {
     );
 
     // Agent 工具结束：因为 has_started=false（bg 场景），不应弹栈
-    t.on_tool_end("tc_bg", "bg agent spawned, will run later", false);
+    t.on_tool_end("main", "tc_bg", "bg agent spawned, will run later", false);
     assert_eq!(
         t.subagent.depth(),
         1,
@@ -337,6 +411,7 @@ fn test_fork_subagent_pops_on_tool_end() {
 
     // 模拟 fork Agent 工具调用开始
     t.on_tool_start(
+        "main",
         "tc_fork",
         "Agent",
         &serde_json::json!({"subagent_name": "fork_agent"}),
@@ -351,7 +426,7 @@ fn test_fork_subagent_pops_on_tool_end() {
     );
 
     // Agent 工具结束：has_started=true，应正常弹栈
-    t.on_tool_end("tc_fork", "fork agent completed", false);
+    t.on_tool_end("main", "tc_fork", "fork agent completed", false);
     assert_eq!(
         t.subagent.depth(),
         0,
@@ -368,6 +443,7 @@ fn test_bg_subagent_stage_started_marks_started() {
 
     // 1. 创建 bg subagent（压栈，has_started=false）
     t.on_tool_start(
+        "main",
         "tc_bg",
         "Agent",
         &serde_json::json!({"subagent_name": "bg_agent"}),
@@ -376,7 +452,7 @@ fn test_bg_subagent_stage_started_marks_started() {
     assert!(!t.subagent.top_has_started());
 
     // 2. bg subagent 的 on_tool_end 到达（不弹栈）
-    t.on_tool_end("tc_bg", "spawned", false);
+    t.on_tool_end("main", "tc_bg", "spawned", false);
     assert_eq!(t.subagent.depth(), 1, "bg 场景不应弹栈");
 
     // 3. bg subagent 的 StageStarted 到达 → mark_started
@@ -400,6 +476,7 @@ fn test_subagent_tool_routed_to_subagent_tool_batch() {
 
     // 1. Agent 工具启动：先写入主 batch，再压入 subagent 栈
     t.on_tool_start(
+        "main",
         "tc_agent",
         "Agent",
         &serde_json::json!({"subagent_name": "explore"}),
@@ -407,7 +484,7 @@ fn test_subagent_tool_routed_to_subagent_tool_batch() {
     assert_eq!(t.subagent.depth(), 1);
 
     // 1b. 结束 Agent 工具：Fix B 路由到主 batch，top_has_started=false → bg 路径不弹栈
-    t.on_tool_end("tc_agent", "subagent dispatched", false);
+    t.on_tool_end("main", "tc_agent", "subagent dispatched", false);
     assert_eq!(
         t.subagent.depth(),
         1,
@@ -424,8 +501,13 @@ fn test_subagent_tool_routed_to_subagent_tool_batch() {
     assert_eq!(main_flush.tools[0].name, "Agent");
 
     // 3. subagent 内的普通工具：应写入 subagent 的 tool_batch（栈非空时路由到 Sub）
-    t.on_tool_start("tc_read", "Read", &serde_json::json!({"path": "test.txt"}));
-    t.on_tool_end("tc_read", "file content", false);
+    t.on_tool_start(
+        "main",
+        "tc_read",
+        "Read",
+        &serde_json::json!({"path": "test.txt"}),
+    );
+    t.on_tool_end("main", "tc_read", "file content", false);
 
     // 4. 主 agent 的 tool_batch 只有 Agent 工具（已 flush），不应有 subagent 工具
     //    验证后 subagent 仍活跃（未 flush sub batch）
@@ -444,8 +526,13 @@ fn test_main_agent_tool_not_routed_to_subagent_batch() {
     t.on_turn_start("turn_main_only");
 
     // 栈空时，工具应写入主 agent 的 tool_batch
-    t.on_tool_start("tc_read", "Read", &serde_json::json!({"path": "test.txt"}));
-    t.on_tool_end("tc_read", "file content", false);
+    t.on_tool_start(
+        "main",
+        "tc_read",
+        "Read",
+        &serde_json::json!({"path": "test.txt"}),
+    );
+    t.on_tool_end("main", "tc_read", "file content", false);
 
     // 主 agent 的 tool_batch 应有该工具
     let main_flush = t.tool_batch.flush();
@@ -466,6 +553,7 @@ fn test_fork_subagent_flushes_tool_batch_before_pop() {
 
     // 1. Agent 工具启动 → 写入主 batch + 压栈
     t.on_tool_start(
+        "main",
         "tc_agent",
         "Agent",
         &serde_json::json!({"subagent_name": "fork"}),
@@ -477,7 +565,7 @@ fn test_fork_subagent_flushes_tool_batch_before_pop() {
     assert!(t.subagent.top_has_started());
 
     // 3. Agent 工具结束：flush sub batch → 弹栈
-    t.on_tool_end("tc_agent", "fork completed", false);
+    t.on_tool_end("main", "tc_agent", "fork completed", false);
     assert_eq!(t.subagent.depth(), 0, "fork 场景应弹栈");
 
     // 4. 弹栈后主 tool_batch 包含 Agent 工具（已完成，尚未 flush）
@@ -495,6 +583,7 @@ fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
 
     // 1. 创建 bg subagent（Agent 工具写入主 batch）
     t.on_tool_start(
+        "main",
         "tc_bg",
         "Agent",
         &serde_json::json!({"subagent_name": "bg"}),
@@ -502,12 +591,12 @@ fn test_bg_subagent_tool_batch_flushed_on_turn_end() {
     assert_eq!(t.subagent.depth(), 1);
 
     // 2. bg subagent 内工具（写入 sub batch）
-    t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
-    t.on_tool_end("tc_bash", "file list", false);
+    t.on_tool_start("main", "tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
+    t.on_tool_end("main", "tc_bash", "file list", false);
 
     // 3. bg subagent 未启动，Agent 工具结束时不应弹栈
     assert!(!t.subagent.top_has_started());
-    t.on_tool_end("tc_bg", "spawned", false);
+    t.on_tool_end("main", "tc_bg", "spawned", false);
     assert_eq!(t.subagent.depth(), 1, "bg 场景不应弹栈");
 
     // 4. turn_end：flush_all_subagent_tool_batches 应工作
@@ -536,6 +625,7 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
 
     // Start main agent's Act stage (for active_handle to return main span)
     let main_act = t.stages.on_stage_start(
+        "main",
         Stage::Act,
         &t.trace_id,
         "turn_parent_fix",
@@ -545,6 +635,7 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
 
     // Agent tool start → main batch + begin_subagent
     t.on_tool_start(
+        "main",
         "tc_agent",
         "Agent",
         &serde_json::json!({"subagent_name": "test"}),
@@ -553,6 +644,7 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
 
     // Simulate subagent Act stage start (changes active_handle to subagent's span)
     let sub_act = t.stages.on_stage_start(
+        "main",
         Stage::Act,
         &t.trace_id,
         "turn_parent_fix",
@@ -562,8 +654,13 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
     t.subagent.mark_top_started();
 
     // Subagent tool → routes to sub batch with sub act span as parent
-    t.on_tool_start("tc_grep", "Grep", &serde_json::json!({"pattern": "test"}));
-    t.on_tool_end("tc_grep", "found matches", false);
+    t.on_tool_start(
+        "main",
+        "tc_grep",
+        "Grep",
+        &serde_json::json!({"pattern": "test"}),
+    );
+    t.on_tool_end("main", "tc_grep", "found matches", false);
 
     // Flush subagent batch and verify parent
     let sub_flushes = t.subagent.flush_all_subagent_tool_batches();
@@ -587,7 +684,7 @@ fn test_subagent_tool_batch_parent_is_subagent_act_span() {
 
     // End Agent tool (moves to completed_tools for flush visibility)
     // top_has_started() is true → fork path: flushes sub batch (already flushed, no-op) + pops stack
-    t.on_tool_end("tc_agent", "subagent done", false);
+    t.on_tool_end("main", "tc_agent", "subagent done", false);
 
     // Main batch contains Agent tool
     let main_flush = t.tool_batch.flush();
@@ -607,6 +704,7 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
     t.on_turn_start("turn_stage_flush");
 
     let _main_act = t.stages.on_stage_start(
+        "main",
         Stage::Act,
         &t.trace_id,
         "turn_stage_flush",
@@ -615,6 +713,7 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
 
     // Agent → push subagent
     t.on_tool_start(
+        "main",
         "tc_agent",
         "Agent",
         &serde_json::json!({"subagent_name": "test"}),
@@ -622,6 +721,7 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
 
     // Mock subagent Act stage (mark_started is done via on_stage_start in real flow)
     let sub_act = t.stages.on_stage_start(
+        "main",
         Stage::Act,
         &t.trace_id,
         "turn_stage_flush",
@@ -630,11 +730,11 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
     t.subagent.mark_top_started();
 
     // Subagent tool
-    t.on_tool_start("tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
-    t.on_tool_end("tc_bash", "ok", false);
+    t.on_tool_start("main", "tc_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
+    t.on_tool_end("main", "tc_bash", "ok", false);
 
     // Act stage end: 只 flush 主 batch（但有活跃子 agent，跳过）
-    t.on_stage_end(&sub_act, StageStatus::Done);
+    t.on_stage_end("main", &sub_act, StageStatus::Done);
 
     // 子 batch 应仍包含 tools（Bash 在子 batch，未被 on_stage_end 影响）
     let sub_flushes = t.subagent.flush_all_subagent_tool_batches();
@@ -643,7 +743,7 @@ fn test_on_stage_end_act_does_not_flush_subagent_batch() {
     assert_eq!(sub_flushes[0].tools[0].name, "Bash");
 
     // End Agent tool（Fix B 路由到主 batch）
-    t.on_tool_end("tc_agent", "subagent done", false);
+    t.on_tool_end("main", "tc_agent", "subagent done", false);
 
     // 子 batch 已空（Agent tool 的 fork 路径 flush 了子 batch）
     let sub_flushes2 = t.subagent.flush_all_subagent_tool_batches();
@@ -674,7 +774,7 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     t.on_stage_start(Stage::Receive, "turn_mq");
 
     // 2. 模拟 MQ 排空：1 条 prompt + 2 条 defer + 0 条 info = 共 3 条
-    t.on_mq_drained(1, 2, 0);
+    t.on_mq_drained("main", 1, 2, 0);
 
     // 3. 确保 stage 持续 ≥ 2ms，避免 duration_ms==0 导致 span 被条件跳过
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -682,12 +782,12 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     // 4. 获取 active handle（on_stage_start 返回的是忽略的，从 stages 拿实际 handle）
     let handle = t
         .stages
-        .active_handle()
+        .active_handle("main")
         .expect("Receive stage 应为 active")
         .clone();
 
     // 5. 结束 Receive 阶段
-    t.on_stage_end(&handle, StageStatus::Done);
+    t.on_stage_end("main", &handle, StageStatus::Done);
 
     // 6. 验证：发出的 SpanCreate 事件中 input 应包含 mq_counts
     let events = session.events_snapshot();
@@ -739,10 +839,10 @@ fn test_non_receive_stage_span_input_is_none() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     let handle = t
         .stages
-        .active_handle()
+        .active_handle("main")
         .expect("Reason stage 应为 active")
         .clone();
-    t.on_stage_end(&handle, StageStatus::Done);
+    t.on_stage_end("main", &handle, StageStatus::Done);
 
     let events = session.events_snapshot();
     let reason_spans: Vec<_> = events

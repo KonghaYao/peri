@@ -6,7 +6,7 @@
 
 ## 5. PanelOverlay 面板容器
 
-`PanelOverlay` 是 `SessionColumn` 内部组件，不是 AppShell 根级浮层。它固定插在 `MessageArea` 和 `InputArea` 之间；当任意 panel 打开时，`InputArea(hidden: true)`，避免输入区抢焦点。Panel 与 InputArea 统一为上下边框样式：只有 top/bottom border，没有 left/right border。
+`PanelOverlay` 是 `SessionColumn` 内部组件（`peri-tui/src/kit/layout.rs`），不是 AppShell 根级浮层。它固定插在 `MessageArea` 和 `InputArea` 之间；当任意 panel 打开时，`InputArea(hidden: true)`（layout.rs 将 `panel_open` 传入 `hidden` prop），避免输入区抢焦点。Panel 与 InputArea 统一为上下边框样式：只有 top/bottom border，没有 left/right border（`panels/mod.rs` 的 `panel_shell!` 宏统一提供）。
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -27,19 +27,50 @@
 
 能力：
 
-- Panel 宽度全铺满终端：外层 View 和内层 View 均使用 `Constraint::Fill(1)`，不再使用固定 60 列约束（`panel_registry::panel_constraint(layout.width)` 已废弃宽度维度的固定尺寸）。
+- Panel 宽度全铺满终端：外层 View 与内层 View 均使用 `Constraint::Fill(1)`（`panel_overlay.rs::render_panel`），不随面板注册的 `PanelLayout` 固定尺寸缩放；高度自适应：`height = theme.component.panel.max_height.min(term_h - MESSAGE_RESERVE)`，并夹在 `min_height` 与 `max_height` 之间（`MESSAGE_RESERVE = 4`，为 MessageArea 预留最小行数）。
 - Panel 与 InputArea 同样只有上下边框；禁止左右边框。
 - 面板打开时隐藏 InputArea。
-- 互斥组：Settings、Agent、Tools、Info、Thread；同组只保留一个。
+- 互斥组：Settings、Agent、Tools、Info、Thread、AskUser；同组只保留一个。`open_panel(kind)` 打开新面板前先关闭同组其他面板（`panel_registry.rs`），`OPEN_PANELS` 栈 + `ACTIVE_PANEL` 原子驱动渲染。
 
+### 5.1 面板注册表（panel_registry.rs）
 
-## 6. 15 个 Panel 页面设计
+`PANELS: &[PanelMeta]` 是 16 个面板的单点注册：标题、slash command、互斥组、scope、尺寸元数据、render 函数。`PanelKind` 枚举在 `peri-tui/src/app/panel_types.rs`。
+
+| PanelKind | 标题 | slash 命令 | 互斥组 | scope | 注册尺寸 |
+|-----------|------|-----------|--------|-------|---------|
+| Model | Model | /model | Settings | Session | 60×18 |
+| Login | Login | /login | Settings | Session | 60×18 |
+| Agent | Agent | /agent | Agent | Session | 60×18 |
+| Hooks | Hooks | /hooks | Agent | Session | 60×18 |
+| Config | Config | /config | Settings | Session | 60×18 |
+| ThreadBrowser | Threads | /threads | Thread | Session | 60×18 |
+| Mcp | MCP | /mcp | Tools | Global | 60×18 |
+| Plugin | Plugin | /plugin | Tools | Global | 80×24 |
+| Cron | Cron | /cron | Tools | Global | 60×18 |
+| Status | Status | /status | Info | Global | 60×18 |
+| Memory | Memory | /memory | Info | Global | 60×18 |
+| Tasks | Tasks | /tasks | Tools | Global | 60×18 |
+| Betas | Betas | /betas | Info | Global | 60×18 |
+| Workflow | Workflow | /workflows | Tools | Global | 90×14 |
+| AskUser | Ask User | （自动打开） | AskUser | Session | 60×18 |
+| Theme | Theme | /theme | Settings | Global | 50×24 |
+
+打开路径约定：
+
+- 面板统一通过 slash command 打开（SlashCompletion 的 `SlashActionKind::Panel`，或 command/skill 映射到面板）；`/history`、`/resume`、`/his` 是 `/threads` 的别名（`panel_for_slash_command`，ACP server 将 history/resume 作为远程 command 下发时映射为打开 ThreadBrowser）。
+- AskUser 面板由 AskUserQuestion 事件自动打开（`acp_events/system.rs` 收到 AskUser 事件后 `open_panel(PanelKind::AskUser)`），无 slash 命令、无快捷键。
+- `shortcut_letter`（Ctrl+字母，如 Ctrl+M）仅存在于注册表元数据并有唯一性测试（`panel_registry_test.rs`），**生产事件链不消费**；不占全局快捷键。全局保留键：Ctrl+C（中断/退出）、Ctrl+O（diff）、Ctrl+T / Ctrl+Shift+T（模型/provider 循环）、Shift+Tab（权限模式循环）、双击 Esc（Rewind）。
+- 关闭：`Esc` 走 `event_handlers::register_root_handlers` 的关闭优先级链（popup → @mention/slash → panel → input）；AskUser 面板在 Esc 时先发 `AskUserResponseAction::Cancel` 防止 agent 挂起（含防御性 guard）。
+
+---
+
+## 6. 16 个 Panel 页面设计
 
 统一约束：所有 Panel 只使用上下边框，不使用左右边框；所有 Panel 的数据来源必须可追溯到 ACP standard、`session/query` snapshot 或 `peri/unstable-event` custom event。
 
 ### 6.1 Model Panel
 
-Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable → opus → sonnet → haiku`，active 高亮），右侧为当前选中 Profile 的单行 K/V 编辑。
+Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable → opus → sonnet → haiku`，active 高亮），右侧为当前选中 Profile 的单行 K/V 编辑。数据来自 `PERI_CONFIG_HANDLE`（Profile 是请求参数唯一事实源）。
 
 ```text
 ──────────────────────────────── Model ────────────────────────────────────────
@@ -70,13 +101,14 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
 - 字段固定：`Provider` / `Model` / `Effort` / `Max tokens` / `1m enable`，单行 `key` 左对齐、`value` 右对齐，无包围符号。
 - `Provider` 切换联动：优先选择目标 provider 下同档位 Model；无同档位时选择该 provider 默认 Model。
 - `Model` 允许选择该 provider 下任意模型（不做档位过滤与能力兼容性检查）。
-- `Effort` 五档循环：`low → medium → high → xhigh → max`；`Max tokens` 五档预设循环：`4096/8192/16000/32000/64000`。
+- `Effort` 五档循环：`low → medium → high → xhigh → max`；`Max tokens` 五档预设循环：`4096/8192/16000/32000/64000`；`1m enable` 切换 1m/200k 上下文窗口。
 - 显示规则：模型名内 `high`（如 `gpt-5.6-luna high`）使用 model accent 色；摘要中 effort 值使用独立 effort 色，二者颜色语义不同。
 
-能力：选择 active profile，编辑该 profile 独立的 `provider/model/effort/max_tokens/context_1m`；Profile 是请求参数唯一事实源。数据来源：ACP service snapshot / config snapshot；变更通过统一 config action 返回 snapshot。
+能力：选择 active profile，编辑该 profile 独立的 `provider/model/effort/max_tokens/context_1m`。数据来源：`PERI_CONFIG_HANDLE`；变更通过统一 config action 返回 snapshot。
 
 ### 6.2 Login Panel
 
+Login 面板为 Browse / Edit / DeleteConfirm 三模式（`peri-tui/src/kit/panels/login.rs`），provider 列表来自 `PROVIDER_LIST` atom（由 service_snapshot 从 `peri_config.providers` 派生）。
 
 ```text
 ──────────────────────────────── Login ────────────────────────────────
@@ -91,14 +123,18 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
       api key: missing
       base url: https://...
 
-  ↑/↓::navigate Enter::activate · Esc::close
+  ↑/↓::navigate Enter::edit Ctrl+N::new Ctrl+D::delete · Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：展示 provider 列表、API key 配置状态，Enter 激活 provider。数据来源：ACP service snapshot / config snapshot；敏感值只显示 configured/missing，不展示 secret。
+- **Browse 模式**：只读列表 + `↑/↓` 导航；`Enter`/鼠标点击进入 Edit 模式；`Ctrl+N` 新建 provider，`Ctrl+D` 进入删除确认。
+- **Edit 模式**：原地编辑 provider 字段（provider_type / provider_id / api_key / base_url / 四档模型 fable/opus/sonnet/haiku，样式与 setup_wizard 表单统一）；`Enter` 保存并持久化，`Esc` 放弃，`Ctrl+S` 快捷保存。
+- **DeleteConfirm 模式**：`Enter` 确认删除，`Esc` 取消。
+- 敏感值只显示 configured/missing，不展示 secret。
+
+能力：provider 增删改查与激活；变更通过 `PERI_CONFIG_HANDLE` 写 PeriConfig 并持久化。数据来源：ACP service snapshot / config snapshot。
 
 ### 6.3 Agent Panel
-
 
 ```text
 ──────────────────────────────── Agent ────────────────────────────────
@@ -120,10 +156,9 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：只读展示当前会话元信息和从 ACP view models 派生的 SubAgent 状态。数据来源：ACP session state、message pipeline 和 subagent event/view models。
+能力：只读展示当前会话元信息和从 ACP view models 派生的 SubAgent 状态。数据来源：`SERVICE_SNAPSHOT`（provider/model/permission_mode/cwd）+ `VIEW_MODELS`（消息计数、`TuiSubAgentGroup` 变体扫描）；切换 provider/model 在 Login/Model 面板，permission_mode 在 Config 面板。
 
 ### 6.4 Hooks Panel
-
 
 ```text
 ──────────────────────────────── Hooks ────────────────────────────────
@@ -142,10 +177,9 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：只读展示插件声明的 hooks、事件说明、来源和匹配器。数据来源：`session/query` hooks summary 或 `peri/unstable-event` 的 `hooks-snapshot`。
+能力：只读展示插件声明的 hooks、事件说明、来源和匹配器。数据来源：`HOOK_LIST` atom（service_snapshot 从 plugin_data.all_hooks 派生，2s 刷新）；hooks 在插件 `hooks/<event>.json` 中声明，UI 不修改。
 
 ### 6.5 Config Panel
-
 
 ```text
 ──────────────────────────────── Config ───────────────────────────────
@@ -155,18 +189,18 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
     Cache Warning      [ON]
     Streaming Mode     streaming      < block | none >
     1M Context         [OFF]
-    Language           zh             < en | zh >
-    Active Alias       sonnet         < opus | sonnet | haiku >
-    Permission Mode    auto-mode      < default | accept-edit | ... >
+    Language           zh             < en | zh-CN >
+    Active Alias       sonnet         < fable | opus | sonnet | haiku >
+    Permission Mode    auto-mode      < default | accept-edit | auto-mode | bypass >
+    Scroll FPS         60             < 60 | 30 | 20 >
 
   ↑/↓::navigate Space/Enter::toggle · ←/→::cycle · Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：编辑核心 PeriConfig 字段；permission mode 写运行时共享状态，其余配置持久化到 `~/.peri/settings.json`。数据来源：ACP config snapshot；变更通过 config action 后返回新 snapshot，UI 不直接读写配置文件。
+能力：编辑核心 PeriConfig 字段；`Toggle` 行（Show Diff / Cache Warning / 1M Context）用 `Space`/`Enter` 切换，`Cycle` 行（Streaming / Language / Active Alias / Permission Mode / Scroll FPS）用 `←/→` 循环；permission mode 写运行时共享状态（`PERMISSION_MODE_HANDLE`，不持久化），其余配置持久化到 `~/.peri/settings.json`。数据来源：`PERI_CONFIG_HANDLE` + `PERMISSION_MODE_HANDLE`；变更通过 config action 后返回新 snapshot，UI 不直接读写配置文件。
 
 ### 6.6 Thread Browser Panel
-
 
 ```text
 ─────────────────────────────── Threads ───────────────────────────────
@@ -186,43 +220,30 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：浏览历史 thread，选择后切换当前会话上下文。数据来源：ACP session list / thread summary query；切换通过 `SwitchSession` effect 与 ACP session open。
+能力：浏览历史 thread，选择后切换当前会话上下文。数据来源：`THREAD_LIST` atom（service_snapshot 周期性从 thread_store 派生）；切换通过 `THREAD_LOAD_TX` → AcpClient 触发。
 
 技术实现：ThreadBrowser 采用手动渲染模式（仿 Login 面板），不再使用 VirtualList。VirtualList 在 `panel_shell!` 的 `border` 内 `Fill(1)` 会被 ratatui 解析为 0，导致不可见。当前实现：`Vec<Line>` → `Paragraph` → `ScrollView(Text)`，手动处理 ↑/↓/Enter 键盘事件，条目间有空行分隔，选中行使用 `>` 标记 + bold 高亮。
 
 ### 6.7 MCP Panel
 
-
 ```text
 ───────────────────────────── MCP Servers ─────────────────────────────
   Project: /Users/.../perihelion
 
-  > ✓ filesystem        stdio   tools 8    resources 2
+  > ✓ filesystem        stdio   tools 8
     △ langfuse          http    tools 12   oauth needed
     ✗ slack             sse     tools 0    reconnect failed
     ◯ browser           http    disabled
 
-  Detail: langfuse
-    transport: http
-    source:    project
-    tools:     trace-list, trace-get, score-create, ...
-    resources: prompts, datasets
-
-  Actions
-    > View tools/resources
-      Re-authenticate OAuth
-      Clear OAuth credentials
-      Reconnect
-      Disable server
-
-  ↑/↓::navigate · Enter::detail/execute · Esc::back/close
+  ↑/↓::navigate Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：MCP Panel 是深度操作面板，不是只读摘要。旧版本包含 ServerList / ServerDetail 两层：列表按 project/user/plugin 来源分组，详情展示 status、transport、source、tools、resources，并提供 ViewTools、ReAuthenticate、ClearAuth、Reconnect、Disable/Enable 等操作。v2 需要保留这些深度操作，但迁移到 ratatui-kit component，并通过 ACP-only data flow 获取 `mcp-snapshot` 与操作结果事件。
+能力：**只读摘要面板**——展示 MCP server 列表（status/transport/tools 数）与初始化阶段摘要（`SERVICE_SNAPSHOT.mcp`：Pending/Initializing/Ready/Failed）。数据来源：`MCP_SERVERS` atom（service_snapshot 从 mcp_pool.all_server_infos 派生，2s 刷新）；MCP 配置通过 `~/.claude/settings.json` 管理，面板不做 ViewTools/ReAuthenticate/Reconnect 等深度操作。
 
 ### 6.8 Plugin Panel
 
+Plugin Panel 已实现 **v2 Phase 2**：4-tab 多视图 + list/detail 双模式状态机（`peri-tui/src/kit/panels/plugin.rs`）。←/→ 切换视图（Installed / Discover / Marketplaces / Errors），↑/↓ 导航，Enter 进详情/执行操作，Esc 返回列表；无 ScrollView（避免其内置 handler 与自定义 ↑/↓ 冲突）。
 
 ```text
 ─────────────────────────────── Plugins ───────────────────────────────
@@ -237,209 +258,42 @@ Model Panel 采用左右分栏：左侧为 Profile 列表（固定顺序 `fable 
     marketplace: claude-plugins-official
     author:      Anthropic
     path:        ~/.claude/plugins/...
-    skills:      frontend-design
-    commands:    -
-    agents:      -
-    mcp:         -
+    skills:      1     commands: 0    agents: 0    mcp: 0
+    scope:       user
 
   Actions
     > Disable plugin
       Uninstall
       Back to plugin list
 
-  Tab::next-view · Shift+Tab::prev-view · ↑/↓::navigate · Enter::detail/execute · Space::toggle · Esc::back/close
+  ←/→::view · ↑/↓::navigate · Enter::detail/execute · Esc::back/close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-Discover 视图：
+- **Installed**：已安装插件列表（名称/来源 scope/版本/技能与命令计数/加载错误/禁用态）；详情视图展示 marketplace、author、path、skills/commands/agents/mcp 计数、install scope，操作菜单含 Disable/Uninstall。
+- **Discover**：搜索（`PLUGIN_SEARCH_RESULTS` atom，`plugin-search-result` 事件写入）+ 结果列表；详情动作 Install user scope / Install project scope / Back（`DiscoverDetailAction`）。Discover 数据有磁盘缓存（`DISCOVER_CACHE` OnceLock，锁外 I/O）。
+- **Marketplaces**：marketplace 列表，数据同样走磁盘缓存（`MARKETPLACE_CACHE`）。
+- **Errors**：仅展示 `load_error != None` 的插件。
+- 数据模型：`PluginSummary`（`atoms.rs`）：name/version/enabled/root/description/marketplace/author/skills_count/commands_count/agents_count/mcp_count/install_scope/load_error（计数型字段而非 Vec，无 install_count）。
 
-```text
-─────────────────────────────── Plugins ───────────────────────────────
-  Installed  [Discover]  Marketplaces  Errors
+能力：查看已安装插件、搜索 Discover 并安装到 user/project scope、管理 marketplace、查看加载错误。数据来源：`PLUGIN_LIST` atom（启动时从 `PluginLoadResult.plugins` 派生为 `SnapshotSource.plugins`，service_snapshot 每 tick 写入；`PLUGIN_SEARCH_RESULTS` 由 `plugin-search-result` 事件写入）。
 
-  Search: frontend_
+相关文件索引：
 
-  > frontend-design      official   v1.0.0   installs 662k
-    ui-polish            community  v0.3.2   installs 8k
-
-  Detail actions: Install user scope / Install project scope / Back
-────────────────────────────────────────────────────────────────────────
-```
-
-#### 当前实现状态（H1c · Iteration 14）
-
-当前代码为**极简只读列表**，与 v2 设计差距较大：
-
-```
-实际渲染结构 (peri-tui/src/kit/panels/plugin.rs:25, 60×18 固定尺寸):
-┌─ [ Plugin ] ────────────────────────────────────────┐
-│ N 个插件已加载                                       │
-│ (只读 — 通过 config.json)                            │
-│ > frontend-design v1.0.0                            │
-│     Create production-grade frontend interfaces     │
-│     ~/.claude/plugins/...                           │
-│ supergoal v0.6.1                                    │
-│     Plan and autonomously build tasks               │
-│     ~/.claude/plugins/...                           │
-│ ↑/↓ navigate Enter open Esc close                   │
-└──────────────────────────────────────────────────────┘
-```
-
-关键现状：
-- **无 Tabs**：仅单一 Installed 列表视图，Discover/Marketplaces/Errors 未实现
-- **无操作**：仅 ↑↓ 导航 + Esc/Enter 关闭面板，安装/卸载/启用/禁用/搜索均未实现
-- **静态数据**：`PLUGIN_LIST` atom 从启动时 `launch.rs` 派生一次（`PluginLoadResult.plugins → SnapshotSource.plugins → PLUGIN_LIST`），`service_snapshot` 2s tick 不刷新此字段
-- **数据模型**：`PluginSummary { name, version, enabled, root, description }` (atoms.rs:124)，enabled 字段已定义但面板未使用
-- **视口**：每插件固定 4 行（名称+描述+路径+空行），可见 3 个插件（18 - 6 行开销 = 12 行 ÷ 4），选中项保持在上 1/3
-
-#### 能力总述
-
-Plugin Panel 目标为深度操作面板，不是只读插件列表。包含 Installed / Discover / Marketplaces / Errors 四个 view，支持安装、卸载、启用/禁用、查看详情、搜索 discover、添加 marketplace、删除 marketplace、安装到 user/project scope、展示 load error。v2 顶部使用 tabs 切换 view；详情和操作菜单在面板内部完成，不跳出根布局。数据来源走 ACP-only：`session/query` 获取 plugin summary，动态变化通过 `peri/unstable-event` 的 `plugin-snapshot` / `plugin-action-result` 推入。
-
-#### v2 实现方案（分 3 阶段）
-
-**Phase 1 — 面板结构升级（≈ 200 行 insert）**
-
-目标：把只读单视图升级为 4 Tab 多视图骨架。面板尺寸从 60×18 扩大为 80×24。
-
-实现要点：
-
-1. **Tab 栏**：使用 `peri-widgets` 的 Tabs 组件渲染 `Installed | Discover | Marketplaces | Errors` 四个 tab。Tab 切换用 `Ctrl+Tab` / `Ctrl+Shift+Tab`。
-
-2. **PluginSummary 扩展**：为支持详情视图和操作菜单，需扩展 atom 数据模型（`atoms.rs:124`）：
-
-   ```rust
-   struct PluginSummary {
-       // 现有字段
-       name: String, version: String, enabled: bool, root: String, description: String,
-       // v2 新增
-       marketplace: String,       // marketplace 来源名
-       author: Option<String>,    // 插件作者
-       skills: Vec<String>,       // 注册的 skill 列表
-       commands: Vec<String>,     // 注册的命令列表
-       agents: Vec<String>,       // 注册的 agent 列表
-       mcp_servers: Vec<String>,  // 注册的 MCP server 列表
-       install_scope: String,     // "user" | "project"
-       load_error: Option<String>,// 加载失败时的错误信息
-       install_count: Option<u64>,// Discover 视图中的安装数
-   }
-   ```
-
-3. **子视图状态机**：用 `use_state` 管理 `selected_view: TabKind` + `selected_index: usize` + `detail_open: bool` + `action_menu_open: bool`。
-
-4. **render 分支**：
-
-   ```
-   PluginPanel render body:
-     ├── Tab 栏 (positioned)
-     ├── match selected_view:
-     │   ├── Installed → render_installed_list()    // 复用现有逻辑，扩展行高到 5 行
-     │   ├── Discover  → render_discover()          // 搜索框 + 列表
-     │   ├── Marketplaces → render_marketplaces()   // marketplace 列表 + 增删
-     │   └── Errors    → render_errors()            // 仅展示 load_error != None 的插件
-     ├── if detail_open → render_detail_pane()      // Detail + Actions 右/下半区
-     └── nav-hint (统一 footer)
-   ```
-
-5. **文件变更清单**（Phase 1 仅结构，无后端交互）：
-
-   | 文件 | 变更 |
-   |------|------|
-   | `peri-tui/src/kit/panels/plugin.rs` | 主体重写：Tab 栏、子视图 render、状态机 |
-   | `peri-tui/src/kit/atoms.rs` | `PluginSummary` 扩展字段，`TabKind` 枚举 |
-   | `peri-tui/src/kit/panel_registry.rs` | 面板尺寸 60×18 → 80×24 |
-   | `peri-tui/locales/en/main.ftl` | 新增 tab/discover/marketplace/errors 翻译 key |
-   | `peri-tui/locales/zh-CN/main.ftl` | 同上 |
-   | `peri-tui/src/launch.rs` | 派生更多 `PluginSummary` 字段（从 `LoadedPlugin` 中取） |
-
-**Phase 2 — 操作交互打通（≈ 400 行 insert）**
-
-目标：实现安装/卸载/启用/禁用/搜索 discover。交互通过 ACP `session/query` + `peri/unstable-event` 通道与中间件通信。
-
-1. **ACP 自定义事件 schema**（新增 `peri-acp-types/src/event_data.rs` 中的数据结构）：
-
-   ```rust
-   // plugin-snapshot: 插件列表变更后全量推送
-   struct PluginSnapshotData {
-       plugins: Vec<PluginSummary>,  // 全量快照
-   }
-
-   // plugin-action-result: 操作结果通知
-   struct PluginActionResultData {
-       action: String,            // "install" | "uninstall" | "toggle"
-       plugin_id: String,
-       success: bool,
-       error: Option<String>,
-   }
-
-   // plugin-search-result: Discover 搜索返回
-   struct PluginSearchResultData {
-       query: String,
-       results: Vec<PluginSummary>,
-       from_cache: bool,
-   }
-   ```
-
-2. **操作命令映射**（用户按键 → ACP command → 中间件 → 事件回传）：
-
-   | 用户操作 | 快捷键 | ACP 通道 | 事件回传 |
-   |---------|--------|----------|---------|
-   | 安装插件 (user) | Enter (Discover) | `session/query` + agm install | `plugin-action-result` + `plugin-snapshot` |
-   | 安装插件 (project) | Ctrl+Enter | 同上 | 同上 |
-   | 卸载插件 | `Ctrl+D` (Installed) | agm uninstall | 同上 |
-   | 启用/禁用 | `Space` (Installed) | 修改 config.json | `plugin-snapshot` |
-   | 搜索 marketplace | 输入键入 | debounce → `session/query` | `plugin-search-result` |
-   | 添加 marketplace | `Ctrl+A` (Marketplaces) | `session/query` | `plugin-snapshot` |
-   | 删除 marketplace | `Ctrl+D` (Marketplaces) | `session/query` | `plugin-snapshot` |
-   | 查看详情 | `Enter` (Installed) | 无（本地已有数据） | — |
-   | 返回列表 | `Esc` | — | — |
-
-3. **Atom 动态刷新**：Phase 2 中 `PLUGIN_LIST` 从静态改为可刷新。`service_snapshot.rs` 的 `tick_once()` 需为 plugins 字段增加真正的重检逻辑（监听 `plugin-snapshot` 事件 → 更新 atom）。或者直接让 Plugin Panel 的 `use_effect` 订阅 `PLUGIN_LIST` 变更。
-
-4. **操作确认弹窗**：卸载和删除 marketplace 需二次确认（仿 Cron Panel 的 `Confirm delete` 模式，`Enter` 确认 `Esc` 取消）。
-
-**Phase 3 — 错误展示与持久化优化（≈ 100 行 insert）**
-
-目标：展示插件加载错误、缓存 Discover 搜索结果、marketplace 状态指示。
-
-1. **Errors 视图**：从 `PluginSummary.load_error` 字段筛选，单插件展示错误原因（仿 MCP 的 `✗` + 错误摘要）。
-2. **Discover 搜索 debounce**：用 `use_state` + `tokio::time::sleep(300ms)` 实现防抖。
-3. **marketplace 可达性**：在 Marketplaces tab 中对每个 marketplace 标注 `● 在线` / `○ 离线`。
-
-#### 与 MCP Panel 的设计对齐
-
-Plugin 和 MCP 同属 `MutexGroup::Tools`，应该在下列方面保持一致：
-
-| 维度 | MCP Panel | Plugin Panel（目标） |
-|------|-----------|---------------------|
-| 面板尺寸 | 70×22 | 80×24 |
-| 列表 → 详情交互 | Enter 进入详情 | Enter 进入详情 |
-| 操作菜单 | 列表下 Action sheet | 详情下 Action sheet |
-| 数据刷新 | `mcp-snapshot` unstable-event | `plugin-snapshot` unstable-event |
-| 状态指示 | ✓/△/✗/◯ | ✓/✗/◯（load error 同 ✗） |
-| 空态引导 | 显示配置帮助 | 显示 `agm install` 帮助 |
-| 确认删除 | 显式 Confirm | 显式 Confirm |
-
-#### 关键文件速查
-
-| 关注点 | 文件:行号 |
-|--------|----------|
-| 面板组件 | `peri-tui/src/kit/panels/plugin.rs:25` |
-| PluginSummary 定义 | `peri-tui/src/kit/atoms.rs:124-130` |
-| PLUGIN_LIST atom | `peri-tui/src/kit/atoms.rs:201` |
-| service_snapshot 写入 | `peri-tui/src/kit/service_snapshot.rs:242` |
-| 面板注册元数据 | `peri-tui/src/kit/panel_registry.rs:252-263` |
-| Plugin 加载入口 | `peri-tui/src/launch.rs:128` |
+| 内容 | 位置 |
+|------|------|
+| PluginPanel v2 实现 | `peri-tui/src/kit/panels/plugin.rs` |
+| 面板注册元数据 | `peri-tui/src/kit/panel_registry.rs`（Plugin 条目） |
+| PluginSummary / PLUGIN_LIST atom | `peri-tui/src/kit/atoms.rs` |
+| Plugin 加载入口 | `peri-tui/src/launch.rs`（load_enabled_plugins_aggregated） |
 | 中间件 PluginLoadResult | `peri-middlewares/src/plugin/loader.rs` |
+| 插件类型定义 | `peri-middlewares/src/plugin/types.rs` |
 | Installer（安装/卸载） | `peri-middlewares/src/plugin/installer/` |
 | Marketplace 搜索 | `peri-middlewares/src/plugin/marketplace/` |
-| ACP DTO（plugin_types） | `peri-acp-types/src/plugin_types.rs` |
-| ACP DTO（summary PluginDto） | `peri-acp-types/src/summary.rs:183-206` |
-| i18n en | `peri-tui/locales/en/main.ftl:732,750,804-809` |
-| i18n zh-CN | `peri-tui/locales/zh-CN/main.ftl:731,749,803-808` |
+| ACP DTO（plugin-snapshot / plugin-action-result / plugin-search-result） | `peri-acp-types/src/event_data.rs` |
+| i18n en / zh-CN | `peri-tui/locales/en/main.ftl`、`peri-tui/locales/zh-CN/main.ftl` |
 
 ### 6.9 Cron Panel
-
 
 ```text
 ──────────────────────────────── Cron ─────────────────────────────────
@@ -460,37 +314,39 @@ Plugin 和 MCP 同属 `MutexGroup::Tools`，应该在下列方面保持一致：
       Delete task
       Confirm delete: Enter::confirm · Esc::cancel
 
-  ↑/↓::navigate · Enter/Space::toggle · Ctrl+D::delete · Esc::close
+  ↑/↓::navigate Enter/Space::toggle · d::delete · Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：Cron Panel 是深度操作面板，不是只读任务列表。旧版本支持任务列表、启用/禁用切换、删除确认、删除后刷新、空列表引导和鼠标选择。v2 保留这些操作：`Enter/Space` toggle enabled，`Ctrl+D` 进入删除确认，确认后通过 ACP/cron action 更新列表；任务状态仅用 emoji + theme token 显示，避免英文状态噪音。数据来源走 ACP-only：`session/query` 获取 `CronSummary`，变更通过 `peri/unstable-event` 的 `cron-snapshot` / `cron-action-result` 推入。
+能力：Cron Panel 是操作面板——`Enter`/`Space` toggle enabled，`d` 进入删除确认（`Enter` 确认 / `Esc` 取消 / `Ctrl+C` 退出确认），空列表引导和鼠标选择。toggle/delete 直接调用 `CRON_SCHEDULER_HANDLE`（共享 CronScheduler 句柄，非 ACP RPC），service_snapshot 2s tick 自动派生新列表。数据来源：`CRON_JOBS` atom（service_snapshot 从 cron_scheduler 派生）。
 
 ### 6.10 Status Panel
 
+Status Panel 为**双 Tab（Service / Context）**：
 
 ```text
 ─────────────────────────────── Status ────────────────────────────────
-  Runtime Snapshot
+  Service │ Context
 
   > Provider          anthropic
     Model Alias       sonnet
     Permission Mode   auto-mode
     CWD               /Users/.../perihelion
-    Git Repo          yes
-    MCP               ready 3/4
-    Plugins           8 loaded
     CPU               12%
     Memory            430MB
+    MCP               ready 3/4
+    Cron              2 / 5 enabled
 
-  ↑/↓::navigate Esc::close
+  Tab::switch · ↑/↓::navigate Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：集中展示 ACP service snapshot 的环境、运行时和资源状态。数据来源：ACP service snapshot；不直接读取 runtime/global state。
+- **Service Tab**：直接读 `SERVICE_SNAPSHOT` atom（CPU/MEM/provider/model/permission_mode/cron 统计），无需 mock。
+- **Context Tab**：从 `VIEW_MODELS` 派生消息计数（committed + current_turn 的 TuiRenderUnit 分类统计），反映当前会话上下文状态。
+
+数据来源：ACP service snapshot + VIEW_MODELS；不直接读取 runtime/global state。
 
 ### 6.11 Memory Panel
-
 
 ```text
 ─────────────────────────────── Memory ────────────────────────────────
@@ -506,10 +362,9 @@ Plugin 和 MCP 同属 `MutexGroup::Tools`，应该在下列方面保持一致：
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：展示 memory 文件、大小和更新时间；Enter 使用 `$EDITOR` 打开。数据来源：`session/query` memory summary 或 `peri/unstable-event` 的 `memory-snapshot`；编辑动作通过明确 effect 触发。
+能力：展示 memory 文件、大小和更新时间；Enter 使用 `$EDITOR`（fallback `vi`）打开——通过 spawn_blocking + Detach 执行，避免阻塞渲染线程。数据来源：`MEMORY_LIST` atom（service_snapshot 扫描 `~/.claude/memory/*.md`，2s 刷新）。
 
 ### 6.12 Tasks Panel
-
 
 ```text
 ──────────────────────────────── Tasks ────────────────────────────────
@@ -527,39 +382,38 @@ Plugin 和 MCP 同属 `MutexGroup::Tools`，应该在下列方面保持一致：
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：查看后台 Agent 任务状态、任务描述、执行者和结果可用性。数据来源：ACP task/background agent events 或 `peri/unstable-event` 的 `task-snapshot`。
+能力：跨调度源的任务总览——聚合 **Cron 任务**（`CRON_JOBS` atom）与 **SubAgent 运行时**（`VIEW_MODELS` 扫描 `TuiSubAgentGroup`）。只读面板：Cron 的 enable/disable/delete 在 Cron 面板，SubAgent 详情在 Agent 面板。
 
 ### 6.13 Betas Panel
-
 
 ```text
 ──────────────────────────────── Betas ────────────────────────────────
   Feature Flags
+  (read-only)
 
-  > ratatui-kit-ui       ✓
+  > ratatui-kit-ui       on
       New kit-based TUI rendering path
 
-    workflow-panel       ✓
+    workflow-panel       on
       Workflow visibility panel
 
-    theme-system         ○
+    theme-system         off
       Experimental theme loader
 
   ↑/↓::navigate Esc::close
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：展示实验功能开关与说明，用于理解当前 TUI 能力边界。数据来源：ACP service/config snapshot 或 `peri/unstable-event` 的 `feature-flags-snapshot`。
+能力：实验功能开关列表（只读，on/off 状态展示，`↑/↓` 导航、`Esc`/`Enter` 关闭）。**当前为 Mock 数据**（`betas.rs` 内 `BETA_ENTRIES` 常量，Phase 8 计划通过 Atom/props 注入真实 feature 列表），尚未接入 ACP feature-flags 数据源。
 
 ### 6.14 Workflow Panel
-
 
 ```text
 ────────────────────────────── Workflow ───────────────────────────────
   [● run_01JZ]  ✓ run_01JY  ✗ run_01JX
 ────────────────────────────────────────────────────────────────────────
   Phases                       │  Agents
-  ─────────────────────────────│────────────────────────────────────────
+  ─────────────                 ─────────────
   > ✓ Design               [1] │  ● coder-2            128k tok   14
     ● Build                [2] │  ✓ coder-1             42k tok    8
     ○ Verify                   │  ○ reviewer             0 tok     0
@@ -569,7 +423,60 @@ Plugin 和 MCP 同属 `MutexGroup::Tools`，应该在下列方面保持一致：
 ────────────────────────────────────────────────────────────────────────
 ```
 
-能力：展示多个 workflow run 的可切换工作台。顶部 tabs 切换不同 workflow run，状态 emoji 放在文本之前。主体左右分栏，左侧 Phase 列（40%宽），右侧 Agents 列（60%宽），`│` 分隔线；Workflow Panel 不显示 `Selected Phase` / `Selected Agent` 详情区，避免重复信息。选中某个 Phase 后右侧 Agents 自动过滤为该 Phase 下的 agent，agent 行不再重复显示 phase 标签。Agents 列展示 agent 名称、token 用量、工具调用数。所有状态必须以 emoji + theme status token 同时区分，列表中只显示 `✓`、`●`、`○`、`✗`，不要重复显示英文状态。每列独立 ScrollView，选中项离开视口时自动跟随滚动（scroll_start_for_selected）。数据源必须来自 ACP-only flow：JSON-RPC notification method 为 `peri/unstable-event`，其中 `event` 为 `workflow-snapshot`；payload 在 `WorkflowRunListDto` 基础上扩展 phase/agent 运行态。
+能力：展示多个 workflow run 的可切换工作台。顶部 tabs 切换不同 workflow run（`Tab`/`Shift+Tab`），状态 emoji 放在文本之前。主体左右分栏，左侧 Phase 列（40%宽），右侧 Agents 列（60%宽），`│` 分隔线；`←/→` 切换 pane，`↑/↓` 导航；`Enter` 为 MVP no-op（不显示 Selected Phase / Selected Agent 详情区）。选中某个 Phase 后右侧 Agents 自动过滤为该 Phase 下的 agent，agent 行不再重复显示 phase 标签。Agents 列展示 agent 名称、token 用量、工具调用数。所有状态以 emoji + theme status token 同时区分（`✓`/`●`/`○`/`✗`），不重复显示英文状态。每列独立 ScrollView，选中项离开视口时自动跟随滚动（`scroll_start_for_selected`）。数据来源：`WORKFLOW_SNAPSHOT` atom（`peri/unstable-event` 的 `workflow-snapshot` 事件写入）。
+
+### 6.15 Theme Panel
+
+```text
+──────────────────────────────── Theme ────────────────────────────────
+  [Dark]  Light                       Preview
+  ─────────────────────────           ──────────────────────────────────
+  > peri-dark                         # Heading
+    synthwave-84                      **bold** · *italic* · ~strike~
+    monokai-classic                   `code` and plain text
+                                      > blockquote sample
+
+  ↑/↓::navigate Enter::apply Ctrl+T::daily-color Ctrl+D::download · Esc::close
+────────────────────────────────────────────────────────────────────────
+```
+
+能力：列出可用主题（builtin + `~/.peri/themes/`），顶部为选中主题的 markdown 预览（SAMPLE_MD 覆盖标题/粗体/斜体/删除线/行内代码/引用，预览宽度 46 列）。交互模式：
+
+- `Tab` 切换 Dark/Light 主题分组；`↑/↓` 导航 → 实时切换全局颜色（实时预览）。
+- `Enter` → 持久化到 `~/.peri/settings.json`（TUI_CONFIG_HANDLE + PERI_CONFIG_HANDLE 同步 extra 字段；写盘在独立线程，不阻塞 TUI 事件循环）。
+- `Esc` → 恢复打开面板前的原始主题色并关闭。
+- `Ctrl+T` → 切换 daily color；`Ctrl+D` → 触发主题下载（打开 `DownloadProgressPopup`，见 tui-popups.md §7.6），下载成功后重新扫描主题目录。
+
+数据来源：peri-theme loader + 主题目录扫描；持久化走统一 config save。
+
+### 6.16 AskUser Panel
+
+AskUser 面板是用户问答面板——当 agent 调用 AskUserQuestion 工具时，`acp_events/system.rs` 收到 AskUser 事件后**自动作为 Panel 打开**（`open_panel(PanelKind::AskUser)`），内联渲染在 MessageArea 和 InputArea 之间（`MutexGroup::AskUser`，仅 AskUser 自身）。面板逻辑复用原 ask_user_popup 的 Tab 交互模型，但通过 `panel_shell!` 渲染（`peri-tui/src/kit/panels/ask_user.rs`）。
+
+```text
+──────────────────────────── Ask User ────────────────────────────
+  [布局方案]  启用能力  备注
+──────────────────────────────────────────────────────────────────
+  请选择布局方案
+
+  ○ 单列聊天优先
+    适合窄屏和默认工作流
+
+  ● 抽屉面板
+    面板插入消息流底部，输入区隐藏
+
+  ○ 双栏监控
+    适合长期运行任务
+
+  Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+──────────────────────────────────────────────────────────────────
+```
+
+- 支持 1-4 个问题批量接收；顶部 tabs 展示所有问题（`Tab`/`Shift+Tab` 切换），已回答项旁显示 ✓。
+- 每个问题可为单选（●/○）或多选（☑/☐），`Space` 选中/取消；支持自定义文本输入（TextAreaState，视口上限 3 行）。
+- `Enter` 跳到下一个未确认问题或全部答完后提交；`Esc` 不直接取消——先弹 Confirm 确认弹窗（`RejectAskUser`，见 tui-popups.md §7.5），确认后经 `ASK_USER_RESPONSE_TX` 发送 `AskUserResponseAction::Reject` 并关闭面板（防止 agent 永久挂起；`event_handlers.rs` 另有一份防御性 guard 兜底发 `Cancel`，正常流程不触发）。
+- 面板打开时隐藏 InputArea，与其他 Panel 行为一致。
+- 响应链路：`AskUserResponseAction`（Submit/Cancel/Reject）→ `ask_user_action.rs` 消费者 task → `AcpTuiClient::send_response`（`ElicitationAction` 内部标签：`{"action": "accept", "content": {q_id: label}}` / `cancel`）。
 
 ---
 

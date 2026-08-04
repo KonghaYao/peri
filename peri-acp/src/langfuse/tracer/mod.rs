@@ -31,6 +31,7 @@ mod usage;
 
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
+use crate::langfuse::tracer::stages::MAIN_AGENT_KEY;
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
@@ -73,6 +74,10 @@ pub struct LangfuseTracer {
     pub(crate) agent_start_time: Option<String>,
     /// agent-run observation 的输入（推迟到 on_turn_end 创建时设置）
     pub(crate) agent_input: Option<String>,
+    /// 最近一次 TurnError 的完整错误消息（on_turn_error 捕获，on_turn_end 写入 ErrorTurn span）。
+    /// LLM 失败时 reason.rs 以 `TurnError { message }` 携带 provider 错误详情，
+    /// 用于弥补 TurnEnded 只带 error_kind 枚举名的信息缺口。
+    pub(crate) last_turn_error: Option<String>,
 }
 
 impl LangfuseTracer {
@@ -102,6 +107,7 @@ impl LangfuseTracer {
             compact_work_done: false,
             agent_start_time: None,
             agent_input: None,
+            last_turn_error: None,
         }
     }
 
@@ -119,6 +125,15 @@ impl LangfuseTracer {
     }
 
     // ── Turn 生命周期 ──────────────────────────────────────────────────────
+
+    /// TurnError 事件：捕获完整错误消息，供 on_turn_end 的 ErrorTurn span 使用。
+    ///
+    /// LLM 失败时 reason.rs emit `TurnError { message }`（`e.to_string()` 全文），
+    /// 而 TurnEnded 只携带 error_kind 枚举名——此处补上丢失的错误详情。
+    /// 不依赖采样：错误信息始终记录，on_turn_end 消费后清空。
+    pub fn on_turn_error(&mut self, message: &str) {
+        self.last_turn_error = Some(message.to_string());
+    }
 
     /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
     /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
@@ -214,7 +229,7 @@ impl LangfuseTracer {
                 start_time: Some(end.start_time),
                 end_time: Some(now_rfc3339()),
                 completion_start_time: None,
-                parent_observation_id: Some(self.agent_observation_id.clone()),
+                parent_observation_id: Some(end.parent_observation_id),
                 input: Some(end.input),
                 output: Some(serde_json::json!(strip_child_thread_id(&output_str))),
                 metadata: None,
@@ -248,6 +263,13 @@ impl LangfuseTracer {
         if is_error && self.config.error_span_always {
             let error_msg = error_output.unwrap_or("unknown error").to_string();
             let turn_id = self.trace_id.clone();
+            // 完整错误消息来自 TurnError 事件（reason.rs），弥补 TurnEnded 仅带枚举名的缺口。
+            // on_turn_error 与 on_turn_end 分属不同 forwarder task，可能尚未到达（竞态）——
+            // 取不到时只输出枚举名，不劣于修复前行为。
+            let mut error_out = serde_json::json!({"error": &error_msg});
+            if let Some(m) = self.last_turn_error.take() {
+                error_out["message"] = serde_json::json!(m);
+            }
 
             if !sampled {
                 // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
@@ -256,7 +278,7 @@ impl LangfuseTracer {
                     name: Some(format!("turn {}", turn_id)),
                     user_id: self.user_id.clone(),
                     input: None,
-                    output: Some(serde_json::json!({"error": &error_msg})),
+                    output: Some(error_out.clone()),
                     session_id: Some(self.session_id.clone()),
                     release: None,
                     version: Some(VERSION.to_string()),
@@ -289,7 +311,7 @@ impl LangfuseTracer {
                 start_time: Some(now_rfc3339()),
                 end_time: Some(now_rfc3339()),
                 input: None,
-                output: Some(serde_json::json!({"error": &error_msg})),
+                output: Some(error_out),
                 metadata: Some(serde_json::json!({
                     "is_synthetic": !sampled,
                     "was_sampled": sampled,
@@ -373,6 +395,7 @@ impl LangfuseTracer {
     /// LLM 调用开始
     pub fn on_llm_start(
         &mut self,
+        agent_id: &str,
         step: usize,
         messages: &[BaseMessage],
         tools: &[ToolDefinition],
@@ -384,20 +407,27 @@ impl LangfuseTracer {
         // （bg subagent：LLM 调用也是 subagent 启动信号）
         self.subagent.mark_top_started();
         self.generation
-            .on_llm_start(step, messages.to_vec(), tools.to_vec());
+            .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
     }
 
     /// LLM 请求体接收：紧随 on_llm_start 之后，缓存 Provider 实际请求体
-    pub fn on_llm_request_payload(&mut self, step: usize, body: std::sync::Arc<serde_json::Value>) {
+    pub fn on_llm_request_payload(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        body: std::sync::Arc<serde_json::Value>,
+    ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.generation.on_llm_request_payload(step, body);
+        self.generation.on_llm_request_payload(agent_id, step, body);
     }
 
     /// LLM 调用结束：同步创建 Generation 事件
+    #[allow(clippy::too_many_arguments)] // agent_id 隔离并行 subagent，语义清晰不拆结构体
     pub fn on_llm_end(
         &mut self,
+        agent_id: &str,
         step: usize,
         model: &str,
         _provider: &str,
@@ -409,7 +439,7 @@ impl LangfuseTracer {
             return;
         }
 
-        let gen_end = match self.generation.on_llm_end(step) {
+        let gen_end = match self.generation.on_llm_end(agent_id, step) {
             Some(g) => g,
             None => return,
         };
@@ -443,11 +473,12 @@ impl LangfuseTracer {
                 map
             });
 
-        // 优先使用当前活跃 stage span 作为父 observation
+        // 优先使用当前活跃 stage span 作为父 observation（按 agent 隔离：
+        // 并行 subagent 各自持有自己的 stage slot，不会取到其他 agent 的 span）
         // Reason stage → Generation 挂在 stage-reason 下
         let parent_id = self
             .stages
-            .active_handle()
+            .active_handle(agent_id)
             .map(|h| h.span_id.clone())
             .or_else(|| {
                 // fallback: subagent stack 非空但 stage 尚未创建（竞态/时序问题）
@@ -499,6 +530,14 @@ impl LangfuseTracer {
             }
         }
 
+        // LLM 失败路径（reason.rs 以 "ERROR: " 前缀标记 output）：
+        // generation 标记为 Error 级并写入完整错误详情（Langfuse UI 可筛选/查看 statusMessage）。
+        let (level, status_message) = if output.starts_with("ERROR: ") {
+            (Some(ObservationLevel::Error), Some(output.to_string()))
+        } else {
+            (None, None)
+        };
+
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
             trace_id: Some(self.trace_id.clone()),
@@ -508,8 +547,8 @@ impl LangfuseTracer {
             input: Some(gen_end.input_json),
             output: Some(parse_output(output)),
             metadata: Some(meta),
-            level: None,
-            status_message: None,
+            level,
+            status_message,
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
@@ -543,9 +582,12 @@ impl LangfuseTracer {
         }
     }
 
-    /// LLM 重试：记录重试信息，最终在 on_llm_end 时写入 Generation metadata
+    /// LLM 重试：记录重试信息，最终在 on_llm_end 时写入 Generation metadata。
+    /// `agent_id`/`step` 标识所属 generation（v1 路径由 bridge 推断归属）。
     pub fn on_llm_retrying(
         &mut self,
+        agent_id: &str,
+        step: usize,
         attempt: usize,
         max_attempts: usize,
         delay_ms: u64,
@@ -555,7 +597,7 @@ impl LangfuseTracer {
             return;
         }
         self.generation
-            .on_llm_retrying(attempt, max_attempts, delay_ms, error);
+            .on_llm_retrying(agent_id, step, attempt, max_attempts, delay_ms, error);
     }
 
     /// 缓存命中率过低时创建 Warning Event
@@ -620,15 +662,23 @@ impl LangfuseTracer {
     }
 
     /// 工具调用开始
-    pub fn on_tool_start(&mut self, tool_call_id: &str, name: &str, input: &serde_json::Value) {
+    pub fn on_tool_start(
+        &mut self,
+        agent_id: &str,
+        tool_call_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+    ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
         // 捕获当前活跃 stage span_id 作为 tool-batch 的父节点
-        // （必须在 on_tool_start 时获取，因为 emit_tools_flush 可能在 stage 结束后才调用）
+        // （必须在 on_tool_start 时获取，因为 emit_tools_flush 可能在 stage 结束后才调用）。
+        // 按事件 agent_id 隔离：并行 subagent 的工具事件取各自的 stage slot，
+        // 不会误取其他 agent 的 span。
         let parent_id = self
             .stages
-            .active_handle()
+            .active_handle(agent_id)
             .map(|h| h.span_id.clone())
             .or_else(|| {
                 // fallback: subagent stack 非空但 stage 尚未创建（竞态/时序问题）
@@ -646,10 +696,12 @@ impl LangfuseTracer {
         let is_agent_tool = name == "Agent" || name == "Task";
         if is_agent_tool {
             // Fix A: Write Agent/Task tool to MAIN's ToolBatch BEFORE begin_subagent.
+            // parent_id 捕获后传入 subagent context：AGENT observation 结束时
+            // 用此父节点（而非结束时刻的活跃 stage），避免并行场景循环引用。
             let _record =
                 self.tool_batch
                     .on_tool_start(tool_call_id, name, input.clone(), &parent_id);
-            self.subagent.begin_subagent(input);
+            self.subagent.begin_subagent(input, &parent_id);
         } else {
             // 非 Agent 工具：路由到正确的 ToolBatch（subagent 栈非空时写入 subagent 的）
             let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
@@ -658,7 +710,16 @@ impl LangfuseTracer {
     }
 
     /// 工具调用结束：同步创建 tool observation
-    pub fn on_tool_end(&mut self, tool_call_id: &str, output: &str, is_error: bool) {
+    ///
+    /// `agent_id` 用于保持签名与 on_tool_start 对齐（v2 RenderEvent 携带），
+    /// 当前路由逻辑由 subagent 栈决定，暂不使用。
+    pub fn on_tool_end(
+        &mut self,
+        _agent_id: &str,
+        tool_call_id: &str,
+        output: &str,
+        is_error: bool,
+    ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -689,6 +750,10 @@ impl LangfuseTracer {
                 self.emit_tools_flush(sub_flush);
                 if let Some(end) = self.subagent.end_subagent() {
                     // SubAgent ended: emit ObservationCreate for the subagent
+                    // parent 用 begin 时捕获的父节点（主 agent act span 等），
+                    // 而不是结束时刻的活跃 stage——并行 subagent 场景下活跃 stage
+                    // 可能是 subagent 自身的 span，会造成 AGENT observation 与
+                    // 自身子树循环引用（Langfuse UI 树渲染错乱）。
                     let body = ObservationBody {
                         id: Some(end.observation_id),
                         trace_id: Some(self.trace_id.clone()),
@@ -697,12 +762,7 @@ impl LangfuseTracer {
                         start_time: Some(end.start_time),
                         end_time: Some(now_rfc3339()),
                         completion_start_time: None,
-                        parent_observation_id: Some(
-                            self.stages
-                                .active_handle()
-                                .map(|h| h.span_id.clone())
-                                .unwrap_or_else(|| self.agent_observation_id.clone()),
-                        ),
+                        parent_observation_id: Some(end.parent_observation_id),
                         input: Some(end.input),
                         output: Some(serde_json::json!(strip_child_thread_id(output))),
                         metadata: None,
@@ -825,6 +885,9 @@ impl LangfuseTracer {
 
     /// Stage 开始：注册 stage span（SpanCreate 延迟到 on_stage_end 发送，
     /// 仅在 duration > 0 时上报，实现 v2 条件上报语义）
+    ///
+    /// v1 直调路径（无 agent_id 事件来源）：使用固定 `MAIN_AGENT_KEY` slot，
+    /// 与 v2 ObserveEvent 路径（按事件 agent_id 隔离）互不干扰。
     pub fn on_stage_start(&mut self, stage: Stage, turn_id: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -832,9 +895,13 @@ impl LangfuseTracer {
         // SubAgent 栈非空时，标记栈顶 subagent 已启动
         // （bg subagent：StageStarted 是第一个 subagent 事件，标志着真正开始）
         self.subagent.mark_top_started();
-        let _handle =
-            self.stages
-                .on_stage_start(stage, &self.trace_id, turn_id, &self.agent_observation_id);
+        let _handle = self.stages.on_stage_start(
+            MAIN_AGENT_KEY,
+            stage,
+            &self.trace_id,
+            turn_id,
+            &self.agent_observation_id,
+        );
         // SpanCreate 延迟到 on_stage_end：仅在 duration > 0 时发送
     }
 
@@ -842,6 +909,7 @@ impl LangfuseTracer {
     /// 实现 v2 spec §1.2 条件上报：0ms stage span 不上报。
     pub(crate) fn on_stage_end(
         &mut self,
+        agent_id: &str,
         handle: &crate::langfuse::tracer::stages::StageHandle,
         status: StageStatus,
     ) {
@@ -851,21 +919,23 @@ impl LangfuseTracer {
         // 在 on_stage_end 清空 active 前捕获 Receive 阶段的 mq_counts，
         // 否则 span body 构造时 active 已为 None，排空计数全部丢失。
         let receive_input = if handle.stage == Stage::Receive {
-            self.stages.mq_counts().map(|(prompt, defer, info)| {
-                serde_json::json!({
-                    "messages_drained": {
-                        "prompt": prompt,
-                        "defer": defer,
-                        "info": info,
-                        "total": prompt + defer + info,
-                    }
+            self.stages
+                .mq_counts(agent_id)
+                .map(|(prompt, defer, info)| {
+                    serde_json::json!({
+                        "messages_drained": {
+                            "prompt": prompt,
+                            "defer": defer,
+                            "info": info,
+                            "total": prompt + defer + info,
+                        }
+                    })
                 })
-            })
         } else {
             None
         };
 
-        self.stages.on_stage_end(handle, status);
+        self.stages.on_stage_end(agent_id, handle, status);
 
         // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
         // 而非全部堆在第一个 act 中）。仅当子 agent 栈为空时 flush——子 agent Act 结束
@@ -926,11 +996,11 @@ impl LangfuseTracer {
     }
 
     /// 消息队列排空（Receive 阶段）
-    pub fn on_mq_drained(&mut self, prompt: usize, defer: usize, info: usize) {
+    pub fn on_mq_drained(&mut self, agent_id: &str, prompt: usize, defer: usize, info: usize) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.stages.on_mq_drained(prompt, defer, info);
+        self.stages.on_mq_drained(agent_id, prompt, defer, info);
     }
 
     /// Workflow 开始（Act 阶段）
@@ -1171,8 +1241,12 @@ impl LangfuseTracer {
     }
 
     /// 创建 SubAgent 上下文并压入 subagent 栈
-    pub(crate) fn begin_subagent(&mut self, input: &serde_json::Value) {
-        self.subagent.begin_subagent(input);
+    pub(crate) fn begin_subagent(
+        &mut self,
+        input: &serde_json::Value,
+        parent_observation_id: &str,
+    ) {
+        self.subagent.begin_subagent(input, parent_observation_id);
     }
 
     /// 完成当前 SubAgent Observation：先发 ObservationCreate，再弹出栈
@@ -1191,7 +1265,7 @@ impl LangfuseTracer {
                 start_time: Some(end.start_time),
                 end_time: Some(now_rfc3339()),
                 completion_start_time: None,
-                parent_observation_id: Some(self.agent_observation_id.clone()),
+                parent_observation_id: Some(end.parent_observation_id),
                 input: Some(end.input),
                 output: Some(serde_json::json!(strip_child_thread_id(result))),
                 metadata: None,

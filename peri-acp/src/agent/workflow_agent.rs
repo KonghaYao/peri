@@ -282,7 +282,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                             event.clone(),
                         )
                     {
-                        let mut dummy_stage = None;
+                        // workflow agent 路径不维护 stage 生命周期（v1 无 Stage 事件），
+                        // 传入一次性局部 HashMap 即可
+                        let mut dummy_stage = std::collections::HashMap::new();
                         bridge.process_event(&u, &mut dummy_stage);
                     }
                 }

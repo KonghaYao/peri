@@ -157,6 +157,17 @@ impl CronScheduler {
         }
     }
 
+    /// 将任务的下次触发时间强制设为过去，使下一次 `tick` 必然触发。
+    /// 测试/调试辅助（`sched.tasks` 为私有，跨 crate 测试无法直接操作）。
+    #[doc(hidden)]
+    pub fn force_next_fire_to_past(&mut self, task_id: &str) -> bool {
+        let Some(task) = self.tasks.get_mut(task_id) else {
+            return false;
+        };
+        task.next_fire = Some(Utc::now() - chrono::Duration::seconds(10));
+        true
+    }
+
     /// 获取所有任务（按下次触发时间排序，无触发时间的排最后）
     pub fn list_tasks(&self) -> Vec<&CronTask> {
         let mut tasks: Vec<&CronTask> = self.tasks.values().collect();

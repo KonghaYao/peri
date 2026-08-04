@@ -133,22 +133,22 @@
 
 能力：
 
-- 统一渲染 TUI 内部类型（`TuiRenderUnit` 8 变体），包括文本、工具、SubAgent、系统事件等。
-- 使用 bubbles 组件族（UserBubble/AssistantBubble/ToolCard/SystemNote/SubAgentGroup/CollapsedGroup/ReasoningBlock）进行渲染。
-- ratatui-kit-markdown 做 Markdown 解析 + 代码高亮（通过 PaletteProvider 接入 Theme System）。
-- Vec<Line> 缓存（`LinesCache` generation 增量检测）+ 单 Paragraph 渲染，消除每帧 N 个 widget 树开销。
-- 支持 diff 可见性切换，diff 内容自动使用增删行语义色。
+- 统一渲染 TUI 内部类型 `TuiRenderUnit` 8 变体（`tui_render_unit.rs`）：TuiUserBubble / TuiAssistantBubble / TuiToolCard / TuiSystemNote / TuiSubAgentGroup / TuiCollapsedGroup / TuiDivider / TuiAskUserBlock。
+- 各变体渲染函数位于 `message_area/render.rs`（`vm_to_lines_cached` + 各变体渲染辅助函数）。
+- ratatui-kit-markdown 做 Markdown 解析 + 代码高亮（通过 PaletteProvider 接入 Theme System）；`kit/markdown/` 自行实现 `ParsedBlock → Line` 转换与流式增量缓存（稳定前缀持久化 + 尾部不稳定块回滚）。
+- 渲染缓存按 VM `content_hash` 分片（`VmCacheSlot`，`message_area/mod.rs`）：仅正在流式的 VM 重新解析 markdown + 重建 wrap_map，其余 VM 直接 `Arc::clone` 复用，流式单次成本从 O(N×W) 降至 O(W)；单 Paragraph 渲染，消除每帧 N 个 widget 树开销。
+- 支持 diff 可见性切换（Ctrl+O），diff 内容自动使用增删行语义色。
 - 鼠标滚轮滚动消息区；键盘 Up/Down 保留给输入区。
 
 ### 2.3 Loading Spinner + Todo
 
-TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `SpinnerMode` / `SpinnerWidget`。禁止在 MessageArea 中手写独立 loading 文案或自造 spinner。
+TUI loading 统一使用 `peri-tui/src/components/spinner`（`SpinnerState` / `SpinnerMode` / 动画帧 `animation.rs`），spinner 行渲染在 `message_area/footer.rs`。禁止在 MessageArea 中手写独立 loading 文案或自造 spinner。
 
-**架构（v2.1）**：LoadingFooter 作为 MessageArea 的固定子区域，位于 ScrollView 之外、消息流底部。不随消息区滚动，空态时显示灰色 Brewed 总结行（不复位为 0 高度）。数据流：`ACP_STATE.is_loading` + `TODO_ITEMS` atom → 每轮渲染按壁钟时间补偿步进（once 门控防 tight loop）。
+**架构（v2.1）**：LoadingFooter 作为 MessageArea 的固定子区域，位于可滚动内容之外、消息流底部。不随消息区滚动，空态时显示灰色 Brewed 总结行（不复位为 0 高度）。数据流：`ACP_STATE.is_loading` + `TODO_ITEMS` atom → 每轮渲染按壁钟时间补偿步进（once 门控防 tight loop）。
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ MessageArea（ScrollView 可滚动）                                              │
+│ MessageArea（可滚动内容区）                                                    │
 │                                                                              │
 │ ● 我会先梳理当前 TUI 页面结构，然后更新设计文档。                              │
 │                                                                              │
@@ -161,7 +161,7 @@ TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `S
 │   ◼ 进行中  更新 Workflow Panel 设计                                          │
 │   ◻ 待处理  补充 spinner + todo 设计图                                        │
 │   ◻ 待处理  复核快捷键与边框规则                                              │
-│   ✔ 已完成  阅读 peri-widgets spinner                                        │
+│   ✔ 已完成  阅读 spinner 组件                                                │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -176,7 +176,7 @@ TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `S
 - Todo 列表显示在 Spinner 下方，不嵌入 Spinner 主行。
 - Todo 样式沿用 ACP `SessionUpdate::Plan` / IDE plan 组件语义，但不显示额外标题或分隔线；Spinner 下方直接渲染 todo list。
 - Todo 列表与 TodoWrite 工具状态挂钩：`in_progress` 显示 `◼ 进行中`，`pending` 显示 `◻ 待处理`，`completed` 显示 `✔ 已完成`。
-- Todo 文本优先显示每项的 `activeForm`；若缺失再显示 `content` 的短文本。
+- Todo 文本渲染 `TodoItem.content` 字段（`footer.rs`：`TodoItem { status, content }`，无其他文本字段）。
 - Todo 列表最多展示当前 in-progress、接下来的 2-3 个 pending、最近 1 个 completed；超出数量用 `+N more` 折叠。
 - Todo 数据来自 ACP-only data flow：TodoWrite 工具结果映射为标准 `SessionUpdate::Plan`；若标准通道不足，再通过 `peri/unstable-event` 推入 TUI store。
 
@@ -258,7 +258,7 @@ TUI loading 统一使用 `peri-widgets/src/spinner`，包括 `SpinnerState` / `S
 | 底色 | 整行 `user_bg` |
 | 首行 | `❯ ` + 内容 |
 | 续行 | `  `（两个空格缩进）+ 内容 |
-| system_reminder | 仅渲染 `📋 Context compacted`（`dim` 色，*ITALIC*，无前缀/无底色） |
+| system_reminder | 缩略渲染（`render_reminder_condensed`）：`ReminderType` 标签（10 类分类，`tui_render_unit.rs`，`dim` 色 *ITALIC*）+ 可选摘要行（`⎿` 前缀 + `muted` 内容）；无前缀/无底色 |
 | 前空行 | 1 行 |
 | 后空行 | 1 行 |
 
@@ -271,7 +271,7 @@ AI 回复的 Markdown 内容段落，由 Markdown 渲染器处理。————
 代码块自动语法高亮：
   code example here
 
-▍ 这是引用块内容，前缀 ▍ 可嵌套多级
+> 引用块文本并入普通段落渲染（无专用前缀符号）
 ```
 
 | 元素 | 规格 |
@@ -283,7 +283,7 @@ AI 回复的 Markdown 内容段落，由 Markdown 渲染器处理。————
 | **多行代码块** | `text` 色，syntect 语法高亮，前后各 1 空行 |
 | **单行代码块** | `thinking` 色，简洁态 |
 | **链接** | `success` 色，*UNDERLINED*，OSC-8 包裹 |
-| **引用块** | `▍ ` 前缀（`muted` 色），嵌套 `quote_depth` 次，前后各 1 空行 |
+| **引用块** | 引用块文本并入普通段落渲染（ratatui-kit-markdown `ParsedBlock` 无 BlockQuote 变体，无 `▍` 前缀） |
 | **列表** | `•` / `1.` 前缀，`text` 色，嵌套 `"  "` 缩进 |
 | **加粗** | 继承颜色，**BOLD** |
 | **斜体** | 继承颜色，*ITALIC* |
@@ -296,7 +296,8 @@ AI 回复的 Markdown 内容段落，由 Markdown 渲染器处理。————
 - 使用 `ratatui_kit_markdown` 的 `parse_markdown` + `ParsedBlock` 公开 API
 - 替代旧 `peri_widgets::markdown` 自研引擎（删除 13 文件 ~1531 行）
 - 通过 `PaletteProvider` trait 接入 Theme System，支持代码语法高亮
-- `LinesCache`（generation 增量检测）+ 单 `Paragraph` 渲染，消除每帧 N 个 widget 树开销
+- 渲染缓存按 VM `content_hash` 分片（`VmCacheSlot`）——仅流式 VM 重新解析 markdown + 重建 wrap_map，其余 `Arc::clone` 复用；`kit/markdown/` 另有字节级前缀增量缓存（稳定前缀持久化 + 尾部不稳定块回滚）
+- 单 `Paragraph` 渲染，消除每帧 N 个 widget 树开销
 - 增量渲染 3.13µs/帧（旧引擎 12.93ms/帧，4131x 加速）
 
 ##### 推理块（CoT Thinking）
@@ -310,9 +311,9 @@ Thought for 1234 chars
 | 属性 | 规格 |
 |------|------|
 | 首行 | `"Thought for N chars"`，`dim` 色 |
-| 预览行 | `" ⎿ "` 前缀（`dim`）+ 尾部内容（`dim`），最多 3 行 |
-| 折叠逻辑 | 默认折叠，仅显示首行和预览行 |
-| message_id 透传 | reasoning chunk 携带 `message_id`，按段分配切片 |
+| 预览行 | 展开态（`collapsed = false`）显示：`" ⎿ "` 前缀（`dim`）+ 尾部内容（`dim`），最多 3 行，不折行直接按视觉宽度截断 |
+| 折叠逻辑 | 默认折叠，仅显示首行（折叠策略单点定义于 `tui_render_unit.rs`：「仅最后一个含 reasoning 的 assistant bubble 展开」） |
+| message_id 透传 | `TuiReasoningBlock` 仅 `text + collapsed`（无 message_id 字段）；按段分配在 acp_events 层完成 |
 | 空行 | 首尾各加一个空行，保证与相邻消息块的间距 |
 
 ##### 工具调用 `ToolBlock`
@@ -324,62 +325,57 @@ Thought for 1234 chars
 
 | 状态 | 指示器 | 颜色 | 动画 |
 |------|--------|------|------|
-| Running | `●` | `success` | 800ms 切换（`●` ↔ 空格），1600ms 完整周期 |
+| Running | `●` | `running` 色 | 固定（当前无闪烁动画） |
 | Completed | `●` | `success` | 固定 |
-| Failed | `✗` | `error` | 固定 |
+| Failed | `●` | `error` | 固定 |
+
+> 注：Skill 表现形态（`TuiToolPresentation::Skill`）完成/失败用 `✓`/`✗`；Generic 形态一律 `●` + 语义色。
 
 | 属性 | 规格 |
 |------|------|
 | 工具名 | `text` 色，**BOLD**，经过 `format_tool_name()` 映射显示名 |
 | 参数摘要 | `" (summary)"`，`dim` 色，截断 400 Unicode 字符 |
-| 结果前缀 | `"  ⎿ "`，正常态 `dim` 色，错误展开态 `error` 色 |
-| 结果内容 | 正常 `muted`，错误 `error` |
-| 错误摘要（折叠时） | `"  ⎿ "`（`dim`）+ 错误内容（`error`），截断 400 字符 |
-| 折叠/展开 | 默认折叠只读工具（Read/Glob/Grep/AskUserQuestion） |
-| Write/Edit | 完成后**强制展开** |
-| Diff 视图 | 内嵌 diff 行，默认关闭，Ctrl+O 切换 |
+| 结果前缀 | `"  ⎿ "`（`dim` 色）+ 内容（正常 `muted`，错误 `error`） |
+| 折叠态摘要 | `"  ⎿ "`（`dim`）+ 1 行摘要（`muted`），截断 400 字符 |
+| 展开态输出 | 最多 4 行（TodoWrite 不限），单行 400 字符截断 |
+| 折叠/展开 | 默认折叠 `COLLAPSED_BY_DEFAULT` 列表（Bash/Read/Edit/Write/Glob/Grep/AskUserQuestion，`render.rs`）；错误与运行中强制展开 |
+| Diff 视图 | 内嵌 diff 行 + 变更统计行（`⎿ +N −M`），默认关闭，Ctrl+O 切换 |
 | 前空行 | 1 行 |
 | 后空行 | 1 行 |
 
-**工具显示名映射表** (`format_tool_name`)：
+**工具显示名映射表** (`format_tool_name`，`kit/tool_display.rs`)：
 
 | 工具 | 显示名 |
 |------|--------|
-| Bash | Shell |
-| Read | Read |
-| Write | Write |
-| Edit | Edit |
-| Glob | Glob |
-| Grep | Grep |
-| folder_operations | Folder |
-| TodoWrite | Todo |
-| AskUserQuestion | Ask |
-| Agent | Agent | Agent ToolCard 同时显示 tool calls count + running duration |
-| LSP | LSP |
-| artifact | ArtUp |
-| WebSearch | Research |
-| WebFetch | Browse |
-| AgentResult | SubAgent | 后台 agent 结果，自动展开 |
-| 其他 | PascalCase 转换 |
+| Bash | Shell（i18n `tool-name-shell`） |
+| folder_operations | Folder（i18n `tool-name-folder`） |
+| 其他 | 原样显示（不转换） |
 
-**工具参数摘要规则** (`format_tool_args`)：
+> 注：ToolCard 显示名由 `format_tool_name` 单点映射；Agent ToolCard 额外显示 tool calls count + running duration（`SubAgentGroup` 主行）。
+
+**工具参数摘要规则** (`format_tool_args`，`kit/tool_display.rs`)：
 
 | 工具 | 提取字段 | 截断 |
 |------|---------|------|
 | Bash | `command` | 400 字符 |
 | Read/Write/Edit | `file_path`（相对化） | 不截断 |
 | Glob/Grep | `pattern`（相对化） | 200 字符 |
-| folder_operations | `operation path` | 不截断 |
-| WebSearch/WebFetch | `query` / `url` | 60 字符 |
+| folder_operations | `operation` + `folder_path` | 不截断 |
+| WebSearch | `query` | 60 字符 |
+| WebFetch | `url` | 不截断 |
 | ExecuteExtraTool/SearchExtraTools | `tool_name` / `query` | 40 字符 |
 | AgentResult | `task_id` | 12 字符 |
 | artifact | `file_path`（相对化） | 不截断 |
 | LSP | `operation` | 40 字符 |
 
-**自动展开规则** (`should_auto_expand_tool`)：
-- `AgentResult`（后台 agent 结果）：自动展开
-- `ExecuteExtraTool`（deferred 工具包装）：自动展开
-- 错误结果不自动展开
+> 注：ACP 路径的 `input_summary` 由 view_mapper 预摘要；v2 直连路径经 `truncate.rs::summarize_input`（与 view_mapper 同风格）。
+
+**折叠/展开规则**（`message_area/render.rs` 常量 + `render_generic_tool_card_lines`）：
+- `COLLAPSED_BY_DEFAULT`：Bash / Read / Edit / Write / Glob / Grep / AskUserQuestion —— 默认折叠（折叠态显示 1 行摘要，`⎿` + 400 字符截断）
+- `AUTO_EXPAND`：AgentResult / ExecuteExtraTool / SearchExtraTools —— 自动展开
+- `FORCE_EXPAND_ON_COMPLETE`：空列表 —— 无强制展开工具
+- 错误结果**强制展开**（`is_error → collapsed = false`）；运行中同样展开
+- 展开态输出最多 4 行（`TodoWrite` 不限行数），单行 400 字符截断
 
 ##### 只读工具聚合组 `ToolCallGroup`
 
@@ -398,42 +394,28 @@ Thought for 1234 chars
 
 ##### SubAgent 消息 `SubAgentGroup`
 
-**主 Agent 工具卡片（Agent ToolCard）**：
+**Agent 工具卡片**（Generic ToolCard 形态，`render_generic_tool_card_lines`）：
 ```
-● Agent(agent_id) 任务预览内容…————————————————
-  N tool calls, running Xmin Xs
-```
-
-**折叠态**：
-```
-  嵌套消息首行内容——————————————————————————————
+● Agent (任务预览摘要…)————————————————————————
+  ⎿ N tool calls, running Xmin Xs
 ```
 
-**展开态**：
+**折叠态**（SubAgentGroup 内嵌套消息）：
 ```
+  ▶ N collapsed tools——————————————————————————
   嵌套消息首行内容——————————————————————————————
-  嵌套消息续行内容——————————————————————————————
-    ⎿ 最终结果内容—————————————————————
 ```
 
 | 属性 | 规格 |
 |------|------|
-| 工具调用指示器 | `●`，`success` 色，动画同 ToolBlock 规则（Running 态 800ms 闪烁） |
-| 主行 | `Agent(agent_id)`（正常 `success`，错误 `error`，后台运行 `warning`）+ 任务预览（`muted`，截断 50 字符） |
-| 工具计数+耗时 | 第二行 `"  N tool calls, running Xmin Xs"`（`muted`），与 SubAgent 组的 child 数量配对 |
-| 后台 Agent 短 hash | `#hash`（后台 agent），`muted` 色 |
-| ~~❯ Agent header~~ | **已移除**。Agent 工具使用统一的 `●` 前缀（与 ToolBlock/聚合组一致） |
-| 嵌套消息缩进 | 每行前 `"  "`（2 空格缩进） |
-| 最终结果行 | `"  ⎿ "`（`dim`）+ 第一行内容（`muted`），截断 80 字符 |
+| 工具调用指示器 | `●` + 语义色（running/success/error），与 ToolBlock 规则一致 |
+| 头行 | `● ` + 工具名（`text`，**BOLD**）+ ` (输入摘要)`（`dim`，截断 400 字符），`format_tool_name` 映射 |
+| 运行中第二行 | `"  ⎿ N tool calls, running Xmin Xs"`（`dim` 前缀 + `muted` 内容），`tool_calls_count` > 0 时显示（`render.rs`） |
+| 折叠摘要 | 嵌套工具 > 5 个时显示 `▶ N collapsed tools`（`dim` + `muted`）；`collapsed` 时仅显示摘要行 |
+| 嵌套消息缩进 | 每行前 `"  "`（2 空格缩进），去除首尾空行 |
+| ~~批次汇总 batch_agents~~ | **已移除**：`batch_agents` 字段与「N agents finished」汇总行不再存在（`TuiSubAgentGroup` 现为 `agent_id/agent_name/view_models/collapsed/is_running`，`tui_render_unit.rs`） |
 | 前空行 | 1 行 |
 | 后空行 | 1 行 |
-
-**批次汇总** (`batch_agents` 非空)：
-
-| 汇总行 | `● N agents finished`（`success`）/ `failed`（`error`）/ mixed |
-|--------|------|
-| 折叠态子行 | `├─`/`└─` 树形连接符（`dim`）+ task_preview（`text`）+ `· N tool uses`（`dim`）+ `· Done/Failed` |
-| 展开态追加 | `"     ⎿ "` + final_result（`muted`） |
 
 ##### 系统消息 `SystemNote`
 
@@ -448,7 +430,7 @@ Thought for 1234 chars
 |------|------|
 | `✻` 开头行 | `dim` 色，无额外前缀 |
 | `⎿` 开头行 | `muted` 色，无额外前缀 |
-| 其余行 | `· ` 前缀（`dim`）+ 内容：自动检测 `❌`/失败/错误 → `error`，`⚠`/已中断 → `warning`，其他 → `muted` |
+| 其余行 | `· ` 前缀（`dim`）+ 内容，颜色按 `TuiNoteLevel` 枚举（`render_system_note_lines`，`message_area/render.rs`）：Info → `muted`，Warning → `warning`，Error → `error` |
 
 ##### 缓存警告 `CacheWarning`
 
@@ -498,7 +480,7 @@ Thought for 1234 chars
 - 二进制文件：`"  Binary file path - cannot display diff"`（`dim`）
 - 超长 diff：`"  Diff too large for path - changes not displayed"`（`dim`）
 - 公共缩进裁剪：自动检测并移除所有内容行的公共前导空格
-- 渲染缓存：LRU 容量 64，key = (old_hash, new_hash, flags, width)
+- Diff 行数据来自 `TuiToolCard.hunks`（`TuiHunkLineKind::Add/Del`，`tui_render_unit.rs`），渲染时直接生成，无独立 LRU 缓存
 
 ---
 
@@ -506,10 +488,11 @@ Thought for 1234 chars
 
 | 属性 | 规格 |
 |------|------|
-| 消息区宽度 | `inner.width - 1`（右侧 1 列留给滚动条） |
-| 视口裁剪 | 二分查找 `wrap_map` 定位可见行，只克隆视口内数据 |
-| 滚动跟随 | 默认跟随底部，用户手动滚离时取消（`scroll_follow = false`）。吸底自动跟随阈值 `max(5, vis_height/4)`。history load 时 entries_len 从 0→N 强制 scroll_to_bottom()。 |
-| 缩放去抖 | 记录 `last_resize_width`，防止 N 次/秒 resize 重渲染 |
+| 消息区宽度 | `vis_width = inner.width - 1`（右侧 1 列留给滚动条） |
+| 视口裁剪 | 二分查找 `wrap_map`（visual_to_logical）定位可见行，只 clone + 渲染视口内行（~60 行），避免 O(N×W) per render |
+| 滚动上限 | 自持 `ScrollPos`（usize 偏移，`message_area/scroll.rs`），替代 ratatui-kit `ScrollViewState`（u16 上限 65535 视觉行） |
+| 滚动跟随 | `follow_bottom` 粘性语义（`run_auto_follow`）：默认跟随底部；用户上滚即进入浏览态（follow=false），内容增长不再吸回；结构性事件强制滚底并恢复跟随——提交（`LOADING_EPOCH` 递增）、history 切换 // /clear（`BRIDGE_RESET_COUNTER` 递增 → `prev==0` 哨兵批量强制滚底）、resize 缩视口（vis_height 变化） |
+| Resize 处理 | total_visual_rows 变化时 clamp offset 到有效范围；vis_height 变化时跟随态滚底（`prev_vis_height` 哨兵），浏览态不打扰 |
 
 **滚动条**（右侧 1 列）：
 
@@ -519,13 +502,10 @@ Thought for 1234 chars
 | 滚动到底 ▼ | offset < max_scroll 时显示，`muted` + **BOLD** |
 | 滚动到顶 ▲ | offset > 0 时显示，`muted` + **BOLD** |
 
-**Sticky Header**（仅 `max_scroll > 0` 时渲染）：
-- 显示最后一条用户消息的摘要
-- 前缀 `❯`（`accent`，**BOLD**）+ 底色 `user_bg`
-- 自动换行 + 截断
+**Sticky Header**：~~最后一条用户消息摘要吸顶~~ **已移除**（crashes-and-rendering 修复时 `show_sticky = false` 后未恢复，当前无 sticky header 渲染代码）。
 
 **选区高亮**：
-- 字符级高亮，背景色 `selection_bg` `#264F78`
+- 字符级高亮，背景色取主题 `semantic.selection`（设计参考值 `#264F78` 暗蓝）
 - Unicode-safe（`char_indices()` 切割）
 - 跨多 span 时拆分片段
 
@@ -541,10 +521,8 @@ Thought for 1234 chars
 
 - 缩进 2 空格（`"  ◼"` / `"  ✔"` / `"  ◻"`）
 - Todo 列表在 Spinner 下方不显示额外标题或分隔线
-- 仅使用 `item.content` 字段渲染文本
-- Pending 项可选附加 `(可开始)` 提示
-- Spinner 下方可选显示 `"  ⎿  Tip: "` 提示行
-- Todo 列表结束后插入 3 行空行
+- 仅使用 `TodoItem.content` 字段渲染文本（`footer.rs`），Pending 项附加 i18n `msg-todo-available`（`(可开始)`）
+- Todo 列表结束后插入 1 行空行
 
 ---
 
@@ -555,17 +533,16 @@ Thought for 1234 chars
 | `❯` | 用户消息头 | UserBubble 首行 |
 | `●` | 工具调用头 / 聚合组头 / Agent 工具头 | ToolBlock / ToolCallGroup / Agent ToolCard 首行 |
 | `◼` | Todo 进行中 | Todo InProgress |
-| `✗` | 工具失败 | ToolBlock 首行 |
+| `✗` | 失败（Skill 形态） | Skill ToolCard 完成/失败标记 |
 | `✔` | Todo 完成 | Todo Completed |
 | `◻` | Todo 待处理 | Todo Pending |
 | `·` | 系统消息 | SystemNote 普通行 |
-| `⎿` | 结果/续行 | 工具结果行、错误摘要行、子 Agent 结果、SystemNote 续行 |
-| `▍` | 引用块 | Markdown 引用前缀 |
-| `├─` / `└─` | 树形连接 | SubAgent 批次汇总 |
+| `⎿` | 结果/续行 | 工具结果行、错误摘要行、子 Agent 运行行、SystemNote 续行 |
+| `▶` | 折叠 | SubAgentGroup 折叠摘要（`▶ N collapsed tools`） |
 | `✳` | Spinner | Loading 动画 16 帧之一 |
-| `▲` / `▼` | 滚动 | 滚动条顶部/底部按钮 |
+| `▲` / `▼` | 滚动 | 滚动条顶部/底部按钮（ratatui Scrollbar begin/end symbol） |
 
-> 注：`▸`/`▾` 折叠/展开箭头在 `peri-widgets` 组件库中存在，但 TUI 消息渲染路径未使用。
+> 注：`▸`/`▾` 折叠/展开箭头在 ratatui-kit 组件库中存在，但 TUI 消息渲染路径未使用。
 
 ---
 
@@ -595,7 +572,7 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 ---
 
-## 4. StatusBar 区域组件
+## 3. StatusBar 区域组件
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -617,9 +594,9 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 ---
 
-## 5b. BgTaskArea 后台任务区域
+## 4. BgTaskArea 后台任务区域
 
-`BgTaskArea` 是 `AppShell` 根层组件，位于 StatusBar 下方（屏幕最底部）。数据来自 `BG_DISPLAY` atom，由 `dispatch_and_notify` 在 bg 任务事件时写入。
+`BgTaskArea` 是 `AppShell` 根层组件（`kit/bg_task_area.rs`），位于 StatusBar 下方（屏幕最底部）。数据来自 `BG_DISPLAY` atom，由 `dispatch_and_notify`（`acp_events/system.rs` 快照/BgTask 事件 + `acp_events/tool.rs` bg 工具事件）写入。每行展示一个活跃的 bg subagent / bg shell / workflow 任务。
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -645,8 +622,8 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 | 属性 | 规格 |
 |------|------|
 | 每行格式 | `状态符号 + agent_type + desc + 右侧耗时`，一行一个 agent |
-| 状态符号 | `●`（running），`✓`（completed），`✗`（failed） |
-| 状态色 | running → white，completed → green，failed → red |
+| 状态符号 | `●`（running，有当前工具）、`◎`（idle，运行中无当前工具）、`✔`（completed）、`✗`（failed） |
+| 状态色 | running → white，idle → yellow，completed → green，failed → red |
 | agent_type | dim 灰色 |
 | desc | 终端宽减去固定开销后 CJK 安全截断，超长尾部加 `…` |
 | 耗时 | 右对齐，dim 灰色。格式 `Xs` / `XmXs` / `XhXm`；已完成显示总运行时长 |
@@ -662,6 +639,284 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 - bg agent 完成/失败时通过 `BgTaskCompleted` / `BgTaskCancelled` 更新条目状态。
 - `duration_since()` 使用 `safe_elapsed()` 安全包装，避免时钟倒流 panic。
 - 空态不占用布局空间。
+
+
+---
+
+## 5. 相关 Issue 经验
+
+> 本条目录自 `spec/archive-issues/` 归档（渲染相关：scroll/render/viewport/SystemNote/Markdown/copy/spinner），
+> 供 `spec/global/problems.md` 关键词索引锚点跳转。归档原文见各归档文件。
+
+### issue_2026-07-03-tui-double-slash-cpu-spike
+**摘要:** TUI 输入区输入 // 导致 CPU 持续高负载
+**状态:** Verified
+**归档日期:** 2026-07-06
+**关键词:** slash popup, render body 写 atom, SLASH_SELECTED_INDEX, 级联重渲染
+**问题本质:** `SlashCompletion` 组件 render body 中写入 `SLASH_SELECTED_INDEX` atom；`slash_active` 从 true→false 过渡（输入 `//` 触发）时与组件卸载生命周期交互，引发级联重渲染导致 CPU 100%。
+**通用模式:** render body 不得写 atom——事件处理器已用 `saturating_sub`/`min` 保持边界安全，渲染期只用只读 `clamp_selection` 裁剪显示，无需回写。
+**涉及文件:** peri-tui/src/kit/slash_completion.rs, peri-tui/src/kit/input_area.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-04-message-area-scrollview-steals-input
+**摘要:** 主输入框无法输入——MessageArea ScrollView 事件处理器消费所有键盘事件
+**状态:** Fixed
+**归档日期:** 2026-07-10
+**关键词:** ScrollView, EventScope Global/High, 事件消费, active=false
+**问题本质:** MessageArea 注册 `EventScope::Global, EventPriority::High` 处理器消费所有键盘/鼠标事件；`ratatui-kit` ScrollView 内置 handler（Current/Normal 优先级）继续消费 `↑/↓/j/k/h/l/PageUp/PageDown/Home/End`，InputArea 收不到任何按键。
+**通用模式:** 引入第三方滚动组件时须关闭其内置键盘 handler（`active: false`），滚动由显式按键匹配（仅 `Ctrl+↑↓HomeEnd`）接管；修复事件拦截要覆盖全部优先级层（Global/High + Current/Normal）。
+**涉及文件:** peri-tui/src/kit/message_area/（原 message_area.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-05-message-area-crashes-and-rendering
+**摘要:** 消息区多场景崩溃/白屏/滚动异常
+**状态:** Fixed
+**归档日期:** 2026-07-06
+**关键词:** u16 overflow, saturating_add, 双重滚动冲突, arboard 独立线程
+**问题本质:** 视口裁剪与鼠标坐标换算多处 u16 加法溢出 panic（`scroll_y + vis_height` 等）；`Paragraph.scroll` 与 ScrollView 双重滚动冲突导致内容白屏；剪贴板写入阻塞 UI 线程导致复制崩溃。
+**通用模式:** 终端坐标运算统一 saturating 语义；滚动只保留单一来源；剪贴板等 IO 调用移出 UI 线程（`std::thread::spawn`）。
+**涉及文件:** peri-tui/src/kit/message_area/（原 message_area.rs，已目录化）, peri-tui/src/kit/text_selection.rs, peri-tui/src/kit/layout.rs（render_bridge.rs 已删除）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-05-mouse-move-cpu-spike
+**摘要:** 鼠标晃动导致 CPU 暴涨
+**状态:** Fixed
+**归档日期:** 2026-07-06
+**关键词:** MouseMove, 高频事件, 提前忽略
+**问题本质:** 消息区 Global 事件处理器消费所有 `Event::Mouse`（含 `MouseMove`），鼠标高频移动触发 `scroll_state` 写锁获取与 `auto_scroll.set(false)` state 写入。
+**通用模式:** 高频无状态事件（鼠标移动）应在 handler 入口提前忽略（返回 `Ignored`），不走 state 读写/锁获取。
+**涉及文件:** peri-tui/src/kit/message_area/（原 message_area.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-05-scroll-performance-lag
+**摘要:** 长数据高速滚动时刷新卡顿/掉帧（现象 2：tmux 环境任意数据量滚动卡顿）
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 滚动节流, write_no_update, ScrollThrottle, 渲染风暴, tmux PTY
+**问题本质:** 每个滚轮事件 handler 内多次 `scroll_state.write()` 产生多次原子通知 → 每个滚轮事件 4 次 `terminal.draw()`；tmux 下每次 draw 经 PTY 序列化开销被 4 倍放大。
+**通用模式:** 高频滚动合并为单次 `write_no_update()` + 帧间隔节流（`ScrollThrottle` 16ms），由 loop 强制 render 读最新 atom 值；涉及 PTY 的终端环境（tmux）对每帧 draw 开销极其敏感。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/message_area/mod.rs（原 message_area.rs；render_bridge.rs 已删除）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-06-enter-hello-cpu-spike
+**摘要:** TUI 输入 hello 并 Enter 后 CPU 100%
+**状态:** Verified
+**归档日期:** 2026-07-06
+**关键词:** footer spinner 自激, render 写 state, AgentDone→TurnDone
+**问题本质:** `build_footer_lines` 在 loading 稳态下每次 render 都写 hook state（`was_loading`/`load_start`/`spinner_state`），形成 render→state write→render 自激循环；`AgentDone` 通知未转 `TurnDone` 导致输出结束后 spinner 残留。
+**通用模式:** loading 态 footer 的状态写入只在状态跃迁（loading 变化/delta>0）时进行；结束边界事件（AgentDone）必须映射为 TurnDone 才能清 loading。
+**涉及文件:** peri-tui/src/kit/message_area/footer.rs（原 message_area.rs，已目录化）, peri-tui/src/kit/acp_notifier.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-06-message-area-copy-complex-content-crash
+**摘要:** Message Area 复制操作导致 TUI 崩溃/卡死
+**状态:** Fixed
+**归档日期:** 2026-07-10
+**关键词:** render body 写 atom, 自激回路, status_bar, COPY_MESSAGE_UNTIL
+**问题本质:** `status_bar.rs` 在 render body 中写 `COPY_MESSAGE_UNTIL` atom（复制提示 2s 过期时置 None），触发 wake→render→write 自激回路——复制后滚动 1348 次无异常，恰好卡死在 2s 过期点；arboard 调用同时阻塞 tokio worker。
+**通用模式:** 渲染层对超时提示只能只读判断（`now < until`），过期清理放到事件/effect 边界；外部库调用（剪贴板）必须 spawn 独立线程。同 issue_2026-07-03-tui-double-slash-cpu-spike（render body 写 atom 铁律）。
+**涉及文件:** peri-tui/src/kit/status_bar.rs, peri-tui/src/kit/message_area/selection.rs（原 message_area.rs，已目录化）, peri-tui/src/kit/text_selection.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-06-panels-selection-no-scroll-follow
+**摘要:** 面板选中项超出可见行后看不到（缺 scroll 跟随）
+**状态:** Fixed
+**归档日期:** 2026-07-10
+**关键词:** 面板列表, 选中跟随, scroll_start_for_selected
+**问题本质:** 各面板列表（Mcp/Plugin/Hooks/Tasks/Cron/Memory/Betas/ThreadBrowser）用 `use_state(0)` + `>` cursor 渲染，选中项离开视口时无滚动跟随。
+**通用模式:** 面板列表的选中项跟随滚动（`scroll_start_for_selected`）是通用需求，应在共享层收敛，避免各面板各自实现。
+**涉及文件:** peri-tui/src/kit/panels/{mcp,plugin,hooks,tasks,cron,memory,betas,thread_browser}.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-07-message-area-scroll-proximity-follow
+**摘要:** 消息区自动吸底应基于滚动位置就近判断，而非二元开关
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** auto_scroll 二元开关, 就近判断, 吸底
+**问题本质:** `auto_scroll: bool` 二元开关下，用户任何滚动/点击/快捷键都置 false，整轮不再自动跟随；滚回底部也不恢复（曾提出 threshold = max(vis_height/2, 5) 就近判断，后续演进为 `follow_bottom` 粘性语义）。
+**通用模式:** 吸底语义应从「用户操作开关」演进为「滚动位置状态」——视口在底部附近即跟随，离开即停止，滚回即恢复；结构性事件（提交/切换/resize）强制恢复。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/message_area/mod.rs（原 message_area.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-09-history-session-switch-loading-freeze
+**摘要:** History 面板切换 session 后 loading 永久卡死，界面完全无响应
+**状态:** Fixed
+**归档日期:** 2026-07-10
+**关键词:** _meta serde rename, is_session_replay, replay loading 卡死
+**问题本质:** ACP SDK v1.4.0 的 `meta` 字段序列化为 `_meta`（含下划线），`acp_notifier` 的 `is_session_replay` 只用 `"meta"`/`"content.meta"` 提取，永远找不到 `periReplay=true` 标记 → replay 的 ToolStarted/TextChunk 设 `phase=PromptRunning`，全程无 TurnDone → loading 永久卡 true。
+**通用模式:** 协议字段名以序列化 key 为准（serde rename 后的形态），解析方与序列化方必须使用同一 key；session replay 事件的 loading 生命周期必须显式终止。
+**涉及文件:** peri-tui/src/kit/acp_notifier.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）, peri-acp/src/dispatch/session_replay.rs, peri-tui/src/kit/thread_load_consumer.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-09-message-area-periodic-white-flash-streaming
+**摘要:** 消息区在 agent 流式回复中周期性闪白（每 2-5 秒）
+**状态:** Fixed
+**归档日期:** 2026-07-10
+**关键词:** 吸底 use_effect, render↔effect 紧耦合, 增量门控
+**问题本质:** 流式期间吸底 `use_effect` 每帧 `scroll_to_bottom()` 写入 ScrollViewState atom，形成 render↔effect 紧耦合环路导致闪烁；poll tick 全量重建为误判，已回退。
+**通用模式:** effect 内的高频写入需要增量门控（`last_scrolled_at`）+ 底部 guard，避免每帧都写 atom。
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs（原 message_area.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-10-bg-subagent-tool-count-always-zero
+**摘要:** 后台 subagent 完成通知中的"工具调用"计数始终为 0
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** BackgroundTaskResult, tool_calls_count 硬编码, bg/fork 路径
+**问题本质:** 4 处构造 `BackgroundTaskResult` 的路径（`execute_bg.rs` 错误/成功、`spawner.rs` 错误/成功）硬编码 `tool_calls_count: 0`，未统计真实工具调用数。
+**通用模式:** 结果统计字段必须在所有构造路径（bg/fork × 成功/失败）一致填充；硬编码 0 是最隐蔽的错误形态。
+**涉及文件:** peri-agent/src/agent/events.rs, peri-middlewares/src/subagent/tool/execute_bg.rs, peri-middlewares/src/subagent/spawner.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-10-brewed-summary-missing-in-empty-state
+**摘要:** MessageArea 空态时不显示「✻ Brewed for Xm Xs」总结行
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Brewed 总结, 空态早退分支, has_summary 时序
+**问题本质:** `has_summary` 检查在 mutation block 之前读到旧值（单帧延迟）；空态 Welcome 早退分支跳过 footer 渲染路径；`brewed_lines` 未判空（首次启动 footer 为空仍进入 Brewed 分支）。
+**通用模式:** 空态分支提前 return 前必须完成所有共享状态更新——footer 行预计算必须在 empty 分支之前（hook 顺序稳定）；footer 数据与欢迎态解耦。
+**涉及文件:** peri-tui/src/kit/message_area/footer.rs, peri-tui/src/kit/message_area/mod.rs（原 message_area.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-history-replay-scroll-too-early
+**摘要:** History 恢复会话时 scroll_to_bottom 过早，布局未就绪导致滚动位置停在中间
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** history replay, 批量滚底, prev==0 哨兵
+**问题本质:** history 恢复批次到达时布局尚未就绪即执行 `scroll_to_bottom()`，滚动位置停在中间；旧 `prev==0 && len>0` 分支已删除，proximity 检测阻止大距离吸底。
+**通用模式:** 批量事件（replay）的滚底需要跨批次保持触发（`prev==0` 哨兵不消费，直到 generation 停止增长）；`BRIDGE_RESET_COUNTER` 作为会话切换的语义哨兵。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/thread_load_consumer.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-11-message-area-mouse-selection-regression
+**摘要:** 消息区鼠标拖拽选中复制功能因重构回归 + 鼠标拖拽 CPU 暴涨
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 重构回归, text_selection 死代码, RENDER_CACHE 依赖
+**问题本质:** commit `3bfb9fff` 删除 render_bridge（含 `RENDER_CACHE.entries: Vec<Line>` + `wrap_map`）后，text_selection 的文本提取/选区渲染失去数据源依赖被 `#[allow(dead_code)]` 禁用，选区复制功能静默丢失。
+**通用模式:** 删除渲染管线前必须确认数据结构的全部消费者（含文本选区/复制）已迁移；标注"后续独立补回"的已知风险要显式跟踪，不能停留在迁移计划备注里。
+**涉及文件:** peri-tui/src/kit/message_area/selection.rs, peri-tui/src/kit/message_area/mod.rs（原 message_area.rs，已目录化）, peri-tui/src/kit/atoms.rs, peri-tui/src/kit/status_bar.rs（render_bridge.rs 已删除）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-12-message-area-copy-unicode-misalignment
+**摘要:** 消息区拖拽复制时 Unicode 字符后段错位（越往后偏移越大）
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** Unicode 宽度, visual_col_to_byte_offset, 视觉坐标换算
+**问题本质:** 视觉坐标转字节偏移按「宽度×k」乘法假设换算，CJK 字符上累积偏移；`wrap_byte_starts` 用 `unicode_width` 模拟 `Paragraph::wrap` 得到每视觉行起始字节偏移。
+**通用模式:** 终端视觉坐标与逻辑偏移的换算必须用 `unicode_width` 按字符宽度逐步模拟，禁止「宽度×k」乘法假设。
+**涉及文件:** peri-tui/src/kit/message_area/selection.rs（原 message_area.rs，已目录化）, peri-tui/src/kit/text_selection.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-12-message-area-scrollbar-not-reaching-bottom
+**摘要:** 消息区滚动不到最末尾（内容+滚动条均未到底）+ 宽度变化后滚动失效
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** vis_width 对齐, 滚动条 thumb, resize clamp
+**问题本质:** `line_count(vis_width)` 用 `area.width-1` 估算 `total_visual_rows`，但主渲染分支用 `Constraint::Fill(1)` 占满 `area.width`，估算偏大 → thumb 永远在底部之上；resize 后 offset 超范围导致滚动失效。
+**通用模式:** 滚动条估算宽度必须与实际渲染 wrap 宽度一致（`Constraint::Max(vis_width)`）；resize 后必须 clamp offset 到新 `max_scroll`。
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/message_area/scroll.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-clear-scrollbar-persists-at-welcome
+**摘要:** /clear 后回到 Welcome 页面，滚动条仍然可见
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** ScrollbarFields 未重置, 空态早退, 僵尸滚动条
+**问题本质:** empty 分支提前 return Welcome 前未重置 `scrollbar_fields`，`ScrollbarHook::post_component_draw` 用旧会话的 `content_length > viewport_length` 渲染僵尸滚动条。
+**通用模式:** 提前 return 分支必须重置所有在 return 后仍被 hook 消费的状态（hook 注册在分支之前，draw 回调每帧执行）。
+**涉及文件:** peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/message_area/props.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-main-agent-done-loading-persists-bg-still-running
+**摘要:** 主 agent 完成回复后 loading 不退，因后台 agent 仍在运行
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** TurnSuspended, SubagentStopped 覆盖, idle_should_wait
+**问题本质:** bg agent 运行时 `idle_should_wait` probe 为 true，End 阶段产出 `TurnSuspended`（清 loading）；随后 `SubagentStopped` 事件无条件设 `phase=PromptRunning` 重新置 loading。
+**通用模式:** 终止语义的时序（TurnSuspended→SubagentStopped）必须被事件处理器整体理解，不能单事件各自为政；loading 状态以「当前 turn 是否有活跃产出」为准。
+**涉及文件:** peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）, peri-agent/src/agent/stages/mod.rs, peri-acp/src/session/executor.rs, peri-middlewares/src/subagent/spawner.rs, peri-middlewares/src/subagent/background.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-statusbar-context-cache-display-regression
+**摘要:** 状态栏上下文消耗显示 + 消息流缓存命中率警告，ratatui-kit 迁移后全部丢失
+**状态:** Done
+**归档日期:** 2026-07-18
+**关键词:** CONTEXT_USAGE, CACHE_HIT_INFO, 迁移回归
+**问题本质:** 迁移后状态栏上下文消耗与缓存命中率警告链路未恢复：`CONTEXT_USAGE`/`CACHE_HIT_INFO` atom、`inject_cache_warning`、`StateSnapshotMeta` 写入缺失。
+**通用模式:** 跨架构迁移的功能核对要以 atom/事件链路为单位（写入方→atom→消费组件），不能只看组件 UI 是否渲染。
+**涉及文件:** peri-tui/src/kit/status_bar.rs, peri-tui/src/kit/atoms.rs, peri-tui/src/kit/acp_notifier.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）, peri-tui/src/kit/acp_bridge.rs, peri-agent/src/agent/agent_context.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-13-submit-no-scroll-to-bottom
+**摘要:** 用户发送 prompt 后消息区不自动跳转到最底部
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** LOADING_EPOCH, 提交强制滚底
+**问题本质:** `run_auto_follow` 的 `is_loading` 分支依赖 proximity 检测，无「用户主动提交」的强制滚底信号；提交瞬间 `VIEW_MODELS` 尚未包含 UserBubble（prompt RPC 飞行中），proximity guard 生效。
+**通用模式:** 结构性用户动作（提交）需要独立于内容增长的强制滚底信号——`LOADING_EPOCH` 递增在 user bubble 到达前先定位到底部，后续流式自然跟随。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs, peri-tui/src/kit/message_area/mod.rs, peri-tui/src/kit/submit_consumer.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-14-inline-code-no-color
+**摘要:** Markdown 行内代码无颜色渲染
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** 行内代码, Modifier::DIM 哨兵, 上游 parser 行为
+**问题本质:** `span_style.rs` 用 `Modifier::DIM` 哨兵检测行内代码，但上游 `ratatui-kit-markdown 0.3.0` 不设置该修饰符。
+**通用模式:** 基于第三方库内部修饰符的状态检测会随上游行为漂移；依赖公开 API 或显式数据（segment 类型），并用测试固化预期行为。
+**涉及文件:** peri-tui/src/kit/markdown/span_style.rs, peri-tui/src/kit/markdown/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-15-markdown-table-raw-text-streaming
+**摘要:** Markdown 表格流式输出时显示为原始 pipe 格式
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 流式表格, has_potential_table_header, 缓存失效
+**问题本质:** 流式期间表格 header 行（`| 原文 | 改为 |`）先到达，pulldown-cmark 因缺分隔符解析为 `Paragraph`；分隔符到达后 block 结构翻转为 `Table`，增量缓存 `can_reuse` 只比 block 数量未比类型 → 旧 Paragraph 的原始 pipe 文本永久残留。
+**通用模式:** 增量解析缓存的 `can_reuse` 判定必须包含 block 结构稳定性检查（如以 `|` 开头的段落标记为潜在表头 `has_potential_table_header`，缓存失效），不能只比较数量。
+**涉及文件:** peri-tui/src/kit/markdown/convert.rs（ConvertState）, peri-tui/src/kit/markdown/mod.rs（parse_markdown_cached）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-15-terminal-rapid-shrink-width-crash
+**摘要:** 快速缩小终端宽度到极小值时程序直接退出崩溃
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** 表格 buffer 越界, 列宽 redistribution, 极窄终端
+**问题本质:** `compute_table_col_widths` 在 `available == 0` 返回每列最小 1 宽，但 `table_data_to_lines` 的 buffer 宽度被 `max_width` 钳制、列宽 `wa` 未同步缩减 → 按原始列宽写入 buffer 越界 panic（`index outside of buffer`）。
+**通用模式:** 渲染 buffer 分配与列宽计算必须共享同一套钳制语义；极窄宽度（resize 竞态）是 buffer 越界的高发场景，需加回归测试。
+**涉及文件:** peri-tui/src/kit/markdown/table.rs, peri-tui/src/kit/message_area/render_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-16-system-note-cache-warning-position-wrong
+**摘要:** Cache 命中率警告 SystemNote 在消息流中位置错位——被积压到上一个 user/AI message 后面
+**状态:** Fixed
+**归档日期:** 2026-07-17
+**关键词:** SystemNote 时序, committed vs current_turn, 事件排序
+**问题本质:** `SystemNotification`/`BudgetWarning` 直接 push 到 `state.committed`（持久化队列），绕过 `current_turn` 的 `TurnSegment` 分段；`push_view_models` 按 `committed + current_turn.view_models()` 拼接 → SystemNote 永远排在所有 AI 内容之前，丢失时序位置。
+**通用模式:** 渲染顺序由 committed + current_turn 的拼接语义决定，任何「插入到流中间」的消息必须进入 current_turn 分段而非持久化队列。
+**涉及文件:** peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）, peri-tui/src/kit/acp_notifier.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-spinner-tick-decouple-from-acp-bridge
+**摘要:** Spinner 帧推进绑定 acp_bridge 1s tick，应改为 TUI 独立 tick
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** spinner tick, RENDER_HEARTBEAT, 独立渲染循环
+**问题本质:** spinner 帧推进绑定 acp_bridge 的 1s `tick_interval`（`acp_bridge.rs`），事件稀少时动画按 1s 粒度跳变；渲染心跳与业务事件流未解耦。
+**通用模式:** 动画/计时类渲染需要独立于业务事件流的 tick 源（`RENDER_HEARTBEAT` atom），业务空闲时仍按帧率推进（50ms raw tick，2 次推进 1 帧）。
+**涉及文件:** peri-tui/src/kit/atoms.rs（RENDER_HEARTBEAT）, peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/message_area/footer.rs, peri-tui/src/components/spinner/animation.rs（原 components/spinner/mod.rs）, peri-tui/src/kit/entry.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-17-system-note-level-color-not-rendered
+**摘要:** SystemNote 的 Warning/Error 等级字体颜色未区分，全部显示为灰色
+**状态:** Fixed
+**归档日期:** 2026-07-18
+**关键词:** TuiNoteLevel, 启发式 vs 枚举, render_system_note_lines
+**问题本质:** `render_system_note_lines` 颜色决策基于文本关键词（❌/⚠ 启发式）而非 `data.level`；`TuiNoteLevel` 已定义 Info/Warning/Error 三级但未被渲染使用（创建端 `acp_events` 多处已正确设置 level 字段）。
+**通用模式:** 已有语义枚举（level）时渲染必须消费枚举，文本启发式是信息丢失源；创建端已正确设置说明数据流是通的，问题只在消费端。
+**涉及文件:** peri-tui/src/kit/message_area/render.rs, peri-tui/src/kit/tui_render_unit.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
+**CLAUDE.md 链接:** false
 
 
 ---

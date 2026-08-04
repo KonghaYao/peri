@@ -6,7 +6,7 @@
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts --index <N> [--from/--to/--days/--tag/--user/--session/--name/--limit]
  */
-import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, genTokens, fmt, pct } from "./lib.ts";
+import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt, pct } from "./lib.ts";
 
 const args = process.argv.slice(2);
 
@@ -19,30 +19,13 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
-// Find trace to analyze
+// Find trace to analyze: 第一个非选项参数是 traceId，--index <N> 从过滤结果中选
 let traceId: string | undefined;
-
-// Check for explicit traceId as first non-flag arg
-for (const a of args) {
-  if (!a.startsWith("--") && a !== args[args.indexOf("--index") + 1] &&
-      a !== args[args.indexOf("--from") + 1] && a !== args[args.indexOf("--to") + 1] &&
-      a !== args[args.indexOf("--days") + 1] && a !== args[args.indexOf("--tag") + 1] &&
-      a !== args[args.indexOf("--user") + 1] && a !== args[args.indexOf("--session") + 1] &&
-      a !== args[args.indexOf("--name") + 1] && a !== args[args.indexOf("--limit") + 1]) {
-    traceId = a;
-    break;
-  }
-}
+const { traceId: parsedTraceId, index } = parseTraceArg(args);
+traceId = parsedTraceId;
 
 // Or use --index to pick from filtered results
-const indexIdx = args.indexOf("--index");
-if (!traceId && indexIdx !== -1) {
-  const rawIndex = Number(args[indexIdx + 1]);
-  if (!Number.isInteger(rawIndex) || rawIndex < 1) {
-    console.error("Usage: bun trace-tokens.ts --index <N>  (N must be a positive integer)");
-    process.exit(1);
-  }
-  const index = rawIndex;
+if (!traceId && index !== undefined) {
   const filter = parseFilterArgs(args);
   console.error(`Fetching filtered traces (limit ${filter.limit})...`);
   const { traces } = await fetchTracesFiltered({
@@ -73,7 +56,12 @@ if (!generations.length) {
   process.exit(0);
 }
 
-console.log(`## Trace: "${(trace.input as string)?.slice(0, 60)}"`);
+// trace.input 是任意 JSON（chat 类为 string，其他可能为对象/数组），安全字符串化
+const traceLabel =
+  trace.name ||
+  (typeof trace.input === "string" ? trace.input : JSON.stringify(trace.input)) ||
+  trace.id;
+console.log(`## Trace: "${traceLabel.slice(0, 60)}"`);
 console.log(`   Latency: ${trace.latency}s | Generations: ${generations.length}\n`);
 
 // --- Token flow ---

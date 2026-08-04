@@ -75,6 +75,8 @@ const CONFIG_ROWS: &[(&str, RowType)] = &[
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
     // bump：每次操作后递增，强制重渲染（PERI_CONFIG_HANDLE 是 RwLock 非 atom，
     // 写入不会自动触发 ratatui-kit 重渲染，需要手动 bump）
     let bump = hooks.use_state(|| 0u32);
@@ -260,9 +262,17 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::Config,
+        hooks.use_previous_size(),
+        sv,
+    );
+
     panel_shell!(PanelKind::Config, {
         ScrollView(
             scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+            state: Some(sv),
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {

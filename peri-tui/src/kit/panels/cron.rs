@@ -28,6 +28,8 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let confirm_delete = hooks.use_state(|| false);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
 
     // S6c: 订阅 CRON_JOBS atom——后台 service_snapshot 2s 派生一次
     let jobs_store = hooks.use_atom(&CRON_JOBS);
@@ -290,9 +292,13 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Paragraph::new(ratatui::text::Text::from(lines))
     };
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(PanelKind::Cron, hooks.use_previous_size(), sv);
+
     panel_shell!(PanelKind::Cron, {
             ScrollView(
                 scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                state: Some(sv),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

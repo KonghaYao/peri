@@ -29,6 +29,8 @@ use ratatui_kit::{
 pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
 
     // Background Tasks（从 BG_TASKS atom）
     let bg_store = hooks.use_atom(&BG_TASKS);
@@ -155,6 +157,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 "workflow" => i18n::tr("panel-tasks-kind-wf"),
                 _ => i18n::tr("panel-tasks-kind-unknown"),
             };
+            // shell 任务的 summary 是脚本本身，无展示意义 → 只显示 pid
+            let is_shell = task.kind.as_str() == "shell";
             let pid_str = task
                 .pid
                 .map(|p| {
@@ -164,6 +168,16 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     )
                 })
                 .unwrap_or_default();
+            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+            let detail = if is_shell {
+                pid_str
+            } else {
+                format!(
+                    "{}{}",
+                    crate::truncate::truncate_by_width(&task.summary, 60),
+                    pid_str
+                )
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
@@ -175,11 +189,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ),
                 Span::styled(format!(" {} ", task.task_id), name_style),
                 Span::styled(
-                    format!(
-                        "{}{}",
-                        task.summary.chars().take(60).collect::<String>(),
-                        pid_str
-                    ),
+                    detail,
                     Style::new().fg(theme_def.read().semantic.text.muted),
                 ),
             ]));
@@ -219,7 +229,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .map(|t| t.format("%H:%M:%S").to_string())
                 .unwrap_or_else(|| i18n::tr("common-na"));
 
-            let prompt_preview: String = job.prompt.chars().take(50).collect();
+            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+            let prompt_preview: String = crate::truncate::truncate_by_width(&job.prompt, 50);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", cursor),
@@ -325,9 +336,17 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::Tasks,
+        hooks.use_previous_size(),
+        sv,
+    );
+
     panel_shell!(PanelKind::Tasks, {
             ScrollView(
                 scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                state: Some(sv),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

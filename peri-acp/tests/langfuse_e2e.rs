@@ -35,8 +35,16 @@ mod tests {
         tracer.on_turn_start("turn_e2e");
         tracer.on_stage_start(Stage::Receive, "turn_e2e");
         tracer.on_stage_start(Stage::Reason, "turn_e2e");
-        tracer.on_llm_start(0, &[], &[]);
-        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "hello world", None, None);
+        tracer.on_llm_start("main", 0, &[], &[]);
+        tracer.on_llm_end(
+            "main",
+            0,
+            "claude-sonnet-4",
+            "anthropic",
+            "hello world",
+            None,
+            None,
+        );
         let _handle = tracer.on_turn_end(None);
 
         tokio::task::yield_now().await;
@@ -99,12 +107,13 @@ mod tests {
 
         // 子 agent 启动（Agent 工具调用）
         let sa_input = serde_json::json!({"task": "读取文件内容"});
-        tracer.on_tool_start("call_fork", "Agent", &sa_input);
+        tracer.on_tool_start("main", "call_fork", "Agent", &sa_input);
 
         // 子 agent 内部执行（fork 模式：在同一进程中同步运行）
         tracer.on_stage_start(Stage::Reason, "turn_fork");
-        tracer.on_llm_start(0, &[], &[]);
+        tracer.on_llm_start("main", 0, &[], &[]);
         tracer.on_llm_end(
+            "main",
             0,
             "claude-sonnet-4",
             "anthropic",
@@ -116,11 +125,11 @@ mod tests {
         tracer.on_stage_start(Stage::Act, "turn_fork");
         // 子 agent 调用 Read 工具
         let read_params = serde_json::json!({"file_path": "/tmp/test.txt"});
-        tracer.on_tool_start("sub_read", "Read", &read_params);
-        tracer.on_tool_end("sub_read", "文件内容是 hello world", false);
+        tracer.on_tool_start("main", "sub_read", "Read", &read_params);
+        tracer.on_tool_end("main", "sub_read", "文件内容是 hello world", false);
 
         // 子 agent 结束（Agent 工具返回）
-        tracer.on_tool_end("call_fork", "子 agent 执行完毕", false);
+        tracer.on_tool_end("main", "call_fork", "子 agent 执行完毕", false);
 
         // 主 agent 收尾
         let _handle = tracer.on_turn_end(None);
@@ -185,11 +194,11 @@ mod tests {
 
         // 子 agent 启动（Agent 工具调用）
         let sa_input = serde_json::json!({"task": "后台搜索代码"});
-        tracer.on_tool_start("call_bg", "Agent", &sa_input);
+        tracer.on_tool_start("main", "call_bg", "Agent", &sa_input);
 
         // BG 场景：Agent 工具在子 agent 真正启动前就结束
         // （事件时序：on_tool_end 先到达，subagent 内部 StageStarted 后到达）
-        tracer.on_tool_end("call_bg", "后台任务已分派", false);
+        tracer.on_tool_end("main", "call_bg", "后台任务已分派", false);
 
         // 此时栈应为非空且 has_started=false → deferred_output 已记录
         // 验证：on_tool_end 后还没有 subagent ObservationCreate
@@ -208,8 +217,9 @@ mod tests {
         // 模拟子 agent 后续启动（通过 StageStarted 事件恢复活跃）
         tracer.on_stage_start(Stage::Receive, "turn_bg"); // 触发 mark_top_started
         tracer.on_stage_start(Stage::Reason, "turn_bg");
-        tracer.on_llm_start(0, &[], &[]);
+        tracer.on_llm_start("main", 0, &[], &[]);
         tracer.on_llm_end(
+            "main",
             0,
             "claude-sonnet-4",
             "anthropic",
@@ -284,16 +294,24 @@ mod tests {
 
         // 子 agent
         let sa_input = serde_json::json!({"task": "层次测试任务"});
-        tracer.on_tool_start("call_parent", "Agent", &sa_input);
+        tracer.on_tool_start("main", "call_parent", "Agent", &sa_input);
         // 内部执行
         tracer.on_stage_start(Stage::Reason, "turn_parent");
-        tracer.on_llm_start(0, &[], &[]);
-        tracer.on_llm_end(0, "claude-sonnet-4", "anthropic", "完成", None, None);
+        tracer.on_llm_start("main", 0, &[], &[]);
+        tracer.on_llm_end(
+            "main",
+            0,
+            "claude-sonnet-4",
+            "anthropic",
+            "完成",
+            None,
+            None,
+        );
         tracer.on_stage_start(Stage::Act, "turn_parent");
         let tool_input = serde_json::json!({"command": "ls"});
-        tracer.on_tool_start("sub_bash", "Bash", &tool_input);
-        tracer.on_tool_end("sub_bash", "file1 file2", false);
-        tracer.on_tool_end("call_parent", "子 agent 完成", false);
+        tracer.on_tool_start("main", "sub_bash", "Bash", &tool_input);
+        tracer.on_tool_end("main", "sub_bash", "file1 file2", false);
+        tracer.on_tool_end("main", "call_parent", "子 agent 完成", false);
 
         let _handle = tracer.on_turn_end(None);
         // agent-run ObservationCreate 在 tokio::spawn 中异步创建，需 yield

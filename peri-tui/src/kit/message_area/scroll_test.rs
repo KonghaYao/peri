@@ -105,51 +105,66 @@ fn test_proximity_content_smaller_than_viewport_at_bottom() {
     assert!(!proximity_check(total, 0, vis_height));
 }
 
-// ── resize 跟随判断测试 ─────────────────────────────────────────────
+// ── 粘性吸底：用户滚动后跟随状态判定测试 ──────────────────────────────
 
 #[test]
-fn test_resize_follow_when_at_bottom_before_resize() {
-    // 内容 100 行，resize 前视口 20 行，用户停在底部（offset = 旧 max_scroll = 80）
-    let total = 100;
-    let prev_vis = 20;
-    let offset = total - prev_vis;
-    assert!(should_follow_after_resize(total, prev_vis, offset as usize));
+fn test_follow_at_bottom_after_scroll() {
+    // 滚到真正底部（offset == max_scroll）→ 恢复跟随
+    assert!(should_follow_after_user_scroll(80, 80));
+    // Down 溢出到底（offset > max_scroll，含 End 的 usize::MAX 哨兵）→ 跟随
+    assert!(should_follow_after_user_scroll(80, 81));
+    assert!(should_follow_after_user_scroll(80, usize::MAX));
 }
 
 #[test]
-fn test_resize_follow_when_near_bottom_before_resize() {
-    // resize 前距底部 4 行（threshold = max(20/4, 5) = 5）→ 跟随
-    let total = 100;
-    let prev_vis = 20;
-    let offset = total - prev_vis - 4;
-    assert!(should_follow_after_resize(total, prev_vis, offset as usize));
+fn test_follow_at_visual_bottom_with_padding() {
+    // [Fix padding] max_scroll 含 mod.rs 的 +SCROLL_PADDING 滚动缓冲：用户滚到
+    // 视觉底部（真实内容底 = max_scroll - SCROLL_PADDING）时即恢复跟随，
+    // 不再恒差 2 行导致吸底永不恢复。
+    assert!(should_follow_after_user_scroll(80, 80 - SCROLL_PADDING));
+    assert!(should_follow_after_user_scroll(80, 80 - SCROLL_PADDING + 1));
 }
 
 #[test]
-fn test_resize_no_follow_when_scrolled_up_before_resize() {
-    // resize 前用户上滚浏览（距底部 20 行 > threshold 5）→ 不打扰
-    let total = 100;
-    let prev_vis = 20;
-    let offset = total - prev_vis - 20;
-    assert!(!should_follow_after_resize(
-        total,
-        prev_vis,
-        offset as usize
+fn test_no_follow_when_scrolled_up() {
+    // 一向上滚动离开视觉底部（offset < max_scroll - SCROLL_PADDING）→ 退出跟随（浏览模式）
+    assert!(!should_follow_after_user_scroll(
+        80,
+        80 - SCROLL_PADDING - 1
     ));
+    assert!(!should_follow_after_user_scroll(80, 0));
 }
 
 #[test]
-fn test_resize_no_follow_on_first_frame() {
-    // prev_vis_height = 0（首帧哨兵未初始化）→ 不跟随
-    assert!(!should_follow_after_resize(100, 0, 0));
-    // 空内容 → 不跟随
-    assert!(!should_follow_after_resize(0, 20, 0));
+fn test_follow_when_content_fits_viewport() {
+    // 内容不满一屏（max_scroll = 0）：offset 只能为 0，视为在底部 → 跟随
+    assert!(should_follow_after_user_scroll(0, 0));
+    // 短内容（max_scroll ≤ padding）：0 即底部 → 跟随
+    assert!(should_follow_after_user_scroll(1, 0));
+}
+
+// ── 滚动节流：反向落地与位置转换（纯函数） ─────────────────────────────
+
+#[test]
+fn test_is_reverse_direction() {
+    // 同向或零 pending：不触发反向落地
+    assert!(!is_reverse_direction(0, 3));
+    assert!(!is_reverse_direction(3, 3));
+    assert!(!is_reverse_direction(-3, -3));
+    // 反向：旧 pending 立即落地，再累积新方向
+    assert!(is_reverse_direction(3, -3));
+    assert!(is_reverse_direction(-3, 3));
 }
 
 #[test]
-fn test_resize_no_follow_when_content_smaller_than_old_viewport() {
-    // 内容 10 行 < 旧视口 30 行：旧 max_scroll = 0，offset 0 距底 0 → 跟随（无害，滚到底 = 0）
-    assert!(should_follow_after_resize(10, 30, 0));
+fn test_apply_delta_to_offset_clamps() {
+    // 向下不超过 max_scroll（原 scroll_down 无限递增、渲染侧才 clamp）
+    assert_eq!(apply_delta_to_offset(10, 3, 12), 12);
+    assert_eq!(apply_delta_to_offset(10, 3, 100), 13);
+    // 向上不低于 0
+    assert_eq!(apply_delta_to_offset(1, -3, 100), 0);
+    // 从底部向上滚动
+    assert_eq!(apply_delta_to_offset(100, -3, 100), 97);
 }
 
 // ── 滚动条几何 / 反推公式测试 ────────────────────────────────────────

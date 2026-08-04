@@ -35,7 +35,7 @@ use ratatui_kit::{
 mod footer;
 mod props;
 mod render;
-mod scroll;
+pub(crate) mod scroll;
 mod selection;
 use footer::{KeepGoingLayout, build_footer_lines, hash_todo_items};
 pub use footer::{TodoItem, TodoStatus};
@@ -187,7 +187,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .map(|r| r.width.saturating_sub(1))
         .unwrap_or(props.width as u16)
         .max(1);
-    let (footer_lines, keepgoing_layout) = build_footer_lines(
+    let (footer_lines, keepgoing_layout, footer_has_content) = build_footer_lines(
         &mut hooks,
         is_loading,
         &todo_items,
@@ -201,7 +201,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
-    let brewed_lines = if empty && !footer_lines.is_empty() {
+    // [Why has_content 而非 !footer_lines.is_empty()] footer 常驻渲染后恒非空
+    // （idle 态含静止 spinner 占位行），空态若据此判定会让 Welcome 页面被
+    // footer 占位行污染；仅当有实质内容（summary/todo）时才在 Welcome 下展示。
+    let brewed_lines = if empty && footer_has_content {
         Some(footer_lines.clone())
     } else {
         None
@@ -377,13 +380,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     } else {
         0
     };
-    // [Padding] 追加 2 行空白滚动空间，减少流式输出期间因新行到达导致的视口抖动。
-    // 这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length / auto-follow 阈值。
+    // [Padding] 追加 SCROLL_PADDING 行空白滚动空间，减少流式输出期间因新行到达
+    // 导致的视口抖动。这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length；
+    // 吸底跟随恢复判定会扣除它们（scroll::should_follow_after_user_scroll）。
     let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
         if is_loading { 1 } else { 0 }
     } else {
         (core_total_visual_rows + footer_visual_rows)
-            .saturating_add(2)
+            .saturating_add(scroll::SCROLL_PADDING)
             .min(u16::MAX as usize) as u16
     };
 
@@ -498,7 +502,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
+    // ── 吸底自动跟随 ──
+    let last_scrolled_at = hooks.use_state(|| 0u16);
+    // 粘性吸底开关：默认跟随；用户向上滚动即退出（浏览模式），滚回底部才恢复。
+    let follow_bottom = hooks.use_state(|| true);
+
     // 闭包持 clone，原值继续在 render body 内用。
+    // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染
+    // 以相同相对顺序调用——use_event_handler 只是占顺序槽，位置调整无状态错位。
     {
         let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
         let slot_arcs_for_closure = Arc::clone(&slot_arcs_arc);
@@ -518,12 +529,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &slot_offsets_for_closure,
                 &scrollbar_fields,
                 &scrollbar_drag,
+                &follow_bottom,
             )
         });
     }
 
-    // ── 吸底自动跟随 ──
-    let last_scrolled_at = hooks.use_state(|| 0u16);
     let prev_total_visual_rows = hooks.use_state(|| 0u16);
     // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
     // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
@@ -546,6 +556,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     last_scrolled_at,
                     items_len,
                     is_loading,
+                    follow_bottom,
                     prev_total_visual_rows,
                     prev_vis_height,
                     loading_epoch,
@@ -640,6 +651,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .unwrap_or(0);
         g.viewport_length = vis_height as usize;
     }
+
+    // [Fix 滚动尾随] 渲染帧兜底 flush：ratatui-kit 无 tick 定时器，停手后事件不再
+    // 到达时，残留 pending_delta 在任意后续渲染帧（鼠标移动/内容更新/其他事件）
+    // 落地，消除「滚动停止不到位」；反向抵消已由 apply_scroll 先行处理。
+    // write_no_update 不触发 wake，无自激重渲染。
+    scroll::flush_scroll_if_due(
+        &scroll_throttle,
+        &scroll_state,
+        &scrollbar_fields,
+        &follow_bottom,
+    );
 
     let vp_height = vis_height as usize;
 

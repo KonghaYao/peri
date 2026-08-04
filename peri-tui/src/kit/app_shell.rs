@@ -76,6 +76,18 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         (exit_requested_val,),
     );
 
+    // [Fix P0] mount 时重装 panic hook，覆盖 ratatui::init() 的包装 hook。
+    // ratatui 包装的 hook 会先 restore() 终端（向 stdout 写 escape 序列），
+    // agent task 等非渲染线程 panic 时会导致界面乱码崩溃；重装后 panic
+    // 只记录日志 + 通过 PANIC_NOTIFY 通知（entry.rs 消费显示）。
+    hooks.use_effect(
+        move || {
+            crate::kit::panic::install_panic_hook();
+            info!("app_shell: panic hook reinstalled (overrides ratatui wrapper)");
+        },
+        (),
+    );
+
     // 读取状态值（AcpStateSnapshot 非 Copy，用 .read()）
     let state = acp_state.read();
     let wizard_active = *wizard_active.read();

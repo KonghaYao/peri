@@ -73,6 +73,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 左侧 profile 列表的滚动状态——鼠标点击行号反推需要滚动偏移（外部受控，
     // 否则列表滚动后点击命中错位）。`hooks.use_state` 顺序稳定，位于条件渲染之前。
     let left_scroll = hooks.use_state(ScrollViewState::default);
+    // 右栏详情滚动——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let right_scroll = hooks.use_state(ScrollViewState::default);
     // 面板绘制区域（上一帧）——鼠标点击行号反推（值拷贝模式，见 panel_mouse.rs）
     let area;
     {
@@ -367,6 +369,22 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     drop(theme);
 
+    // 面板滚轮仲裁注册（双栏：按 45% 切分左右区域，divider 列并入右侧）
+    let (left_area, right_area) = crate::kit::panel_scroll::split_vertical(prev_size, 45);
+    crate::kit::panel_scroll::register_panel_scrolls(
+        PanelKind::Model,
+        vec![
+            crate::kit::panel_scroll::PanelScrollSlot {
+                area: left_area,
+                state: left_scroll,
+            },
+            crate::kit::panel_scroll::PanelScrollSlot {
+                area: right_area,
+                state: right_scroll,
+            },
+        ],
+    );
+
     panel_shell!(PanelKind::Model, {
         View(height: Constraint::Length(1)) {
             Text(text: title_line)
@@ -393,6 +411,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
                 ScrollView(
                     scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    state: Some(right_scroll),
                     width: Constraint::Fill(1),
                     height: Constraint::Fill(1),
                 ) {

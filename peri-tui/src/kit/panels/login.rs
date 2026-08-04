@@ -4,14 +4,15 @@
 //! （由 service_snapshot 从 peri_config.providers 派生）。Enter 通过
 //! PERI_CONFIG_HANDLE 切换 active_provider_id 并持久化。
 //!
-//! Browse 模式：只读列表 + Enter 激活 + E/Ctrl+E 进入编辑。
-//! Edit 模式：原地编辑 Provider 字段，Esc 放弃、Ctrl+S 保存并持久化。
+//! Browse 模式：只读列表 + Enter/鼠标点击进入编辑。
+//! Edit 模式：原地编辑 Provider 字段（样式与 setup_wizard 表单统一），
+//! 底部确认按钮 Enter 保存并持久化，Esc 放弃，Ctrl+S 快捷保存。
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST,
-    ProviderSummary, SERVICE_SNAPSHOT,
+    ProviderSummary,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 /// Login 面板操作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginPanelMode {
-    /// 浏览模式：上下导航 + Enter 激活 + E/Ctrl+N/Ctrl+D 编辑/新建/删除
+    /// 浏览模式：上下导航 + Enter/鼠标点击编辑 + Ctrl+N/Ctrl+D 新建/删除
     Browse,
     /// 编辑模式：文本编辑 + 字段导航 + Ctrl+S 保存 + Esc 放弃
     Edit,
@@ -43,40 +44,47 @@ enum LoginPanelMode {
     ConfirmDelete,
 }
 
-/// 编辑模式下可编辑的字段
+/// 编辑模式下可编辑的字段（布局与 setup_wizard 的 Form Edit 一致：
+/// Type/ID/BaseUrl/ApiKey + Model 分组 + Confirm 确认按钮）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginEditField {
     ProviderType,
     ProviderId,
-    ApiKey,
     BaseUrl,
+    ApiKey,
+    FableModel,
     OpusModel,
     SonnetModel,
     HaikuModel,
+    Confirm,
 }
 
 impl LoginEditField {
     fn next(self) -> Self {
         match self {
             Self::ProviderType => Self::ProviderId,
-            Self::ProviderId => Self::ApiKey,
-            Self::ApiKey => Self::BaseUrl,
-            Self::BaseUrl => Self::OpusModel,
+            Self::ProviderId => Self::BaseUrl,
+            Self::BaseUrl => Self::ApiKey,
+            Self::ApiKey => Self::FableModel,
+            Self::FableModel => Self::OpusModel,
             Self::OpusModel => Self::SonnetModel,
             Self::SonnetModel => Self::HaikuModel,
-            Self::HaikuModel => Self::ProviderType,
+            Self::HaikuModel => Self::Confirm,
+            Self::Confirm => Self::ProviderType,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::ProviderType => Self::HaikuModel,
+            Self::ProviderType => Self::Confirm,
             Self::ProviderId => Self::ProviderType,
-            Self::ApiKey => Self::ProviderId,
-            Self::BaseUrl => Self::ApiKey,
-            Self::OpusModel => Self::BaseUrl,
+            Self::BaseUrl => Self::ProviderId,
+            Self::ApiKey => Self::BaseUrl,
+            Self::FableModel => Self::ApiKey,
+            Self::OpusModel => Self::FableModel,
             Self::SonnetModel => Self::OpusModel,
             Self::HaikuModel => Self::SonnetModel,
+            Self::Confirm => Self::HaikuModel,
         }
     }
 
@@ -86,9 +94,11 @@ impl LoginEditField {
             Self::ProviderId => "login-field-name",
             Self::ApiKey => "login-field-api-key",
             Self::BaseUrl => "login-field-base-url",
+            Self::FableModel => "login-field-fable-model",
             Self::OpusModel => "login-field-opus-model",
             Self::SonnetModel => "login-field-sonnet-model",
             Self::HaikuModel => "login-field-haiku-model",
+            Self::Confirm => "login-confirm",
         }
     }
 }
@@ -102,6 +112,7 @@ struct LoginEditState {
     provider_id: String,
     api_key: String,
     base_url: String,
+    fable_model: String,
     opus_model: String,
     sonnet_model: String,
     haiku_model: String,
@@ -115,6 +126,7 @@ impl LoginEditState {
             provider_id: config.id.clone(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
+            fable_model: config.models.fable.clone(),
             opus_model: config.models.opus.clone(),
             sonnet_model: config.models.sonnet.clone(),
             haiku_model: config.models.haiku.clone(),
@@ -128,6 +140,7 @@ impl LoginEditState {
             provider_id: String::new(),
             api_key: String::new(),
             base_url: String::new(),
+            fable_model: String::new(),
             opus_model: String::new(),
             sonnet_model: String::new(),
             haiku_model: String::new(),
@@ -140,9 +153,11 @@ impl LoginEditState {
             LoginEditField::ProviderId => &self.provider_id,
             LoginEditField::ApiKey => &self.api_key,
             LoginEditField::BaseUrl => &self.base_url,
+            LoginEditField::FableModel => &self.fable_model,
             LoginEditField::OpusModel => &self.opus_model,
             LoginEditField::SonnetModel => &self.sonnet_model,
             LoginEditField::HaikuModel => &self.haiku_model,
+            LoginEditField::Confirm => "",
         }
     }
 
@@ -152,9 +167,11 @@ impl LoginEditState {
             LoginEditField::ProviderId => &mut self.provider_id,
             LoginEditField::ApiKey => &mut self.api_key,
             LoginEditField::BaseUrl => &mut self.base_url,
+            LoginEditField::FableModel => &mut self.fable_model,
             LoginEditField::OpusModel => &mut self.opus_model,
             LoginEditField::SonnetModel => &mut self.sonnet_model,
             LoginEditField::HaikuModel => &mut self.haiku_model,
+            LoginEditField::Confirm => unreachable!("Confirm is a button, not a text field"),
         }
     }
 }
@@ -165,6 +182,8 @@ impl LoginEditState {
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
     let mode = hooks.use_state(|| LoginPanelMode::Browse);
     let edit_state = hooks.use_state(|| None::<LoginEditState>);
     let edit_focus = hooks.use_state(|| LoginEditField::ProviderType);
@@ -184,65 +203,23 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Browse 列表视口常量（与渲染共用）
     const VISIBLE_ITEMS: usize = 3;
 
-    // Browse 激活动作：Enter 与鼠标左键点击共用（click as enter）
+    // Browse 编辑动作：Enter 与鼠标左键点击共用（click as enter）
     let providers_for_closure = providers.clone();
-    let activate_provider_row = move || {
+    let enter_edit_row = move || {
         let sel = *cursor.read();
-        let latest_providers = PROVIDER_LIST.state().read().clone();
-        if let Some(p) = latest_providers.get(sel) {
-            let provider_id = p.id.clone();
-            let provider_type = p.provider_type.clone();
-            // 同步写 PERI_CONFIG_HANDLE + 更新 PROVIDER_LIST.is_active
-            if let Some(handle) = PERI_CONFIG_HANDLE.get() {
-                let mut cfg = handle.write();
-                let alias = cfg.config.active_alias.clone();
-                if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                    profile.provider = provider_id.clone();
-                    // 联动 model：清空手动 model 以回退 ProviderModels 映射
-                    profile.model = None;
-                }
-                // 即时推送 SERVICE_SNAPSHOT——同时更新 provider_name 和
-                // model_name（不同 provider 的 alias→model 映射可能不同）
-                let snap = cfg.clone();
-                drop(cfg);
-                let resolved_name = {
-                    let active_prov = snap.config.providers.iter().find(|p| p.id == provider_id);
-                    active_prov
-                        .and_then(|p| p.models.get_model(&snap.config.active_alias))
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| snap.config.active_alias.clone())
-                };
-                let s_handle = SERVICE_SNAPSHOT.state();
-                let mut svc_snap = s_handle.read().clone();
-                svc_snap.provider_name = provider_type;
-                svc_snap.model_name = resolved_name;
-                *s_handle.write() = svc_snap;
-            }
-            // 更新 PROVIDER_LIST 的 is_active 标记
-            let updated_providers: Vec<ProviderSummary> = latest_providers
-                .iter()
-                .map(|pr| ProviderSummary {
-                    is_active: pr.id == provider_id,
-                    ..pr.clone()
-                })
-                .collect();
-            *PROVIDER_LIST.state().write() = updated_providers;
-            // 异步持久化 + 推送配置到 ACP 服务端（使切换立即生效）
-            tokio::spawn(async move {
-                activate_provider(&provider_id);
-                if let Some(client) = ACP_CLIENT_HANDLE.get()
-                    && let Some(handle) = PERI_CONFIG_HANDLE.get()
-                {
-                    let snap = handle.read().clone();
-                    if let Err(e) = client.update_config(&snap).await {
-                        tracing::warn!(error = %e, "LoginPanel: update_config push failed");
-                    }
-                }
-            });
+        let provider_state = PROVIDER_LIST.state();
+        let store_read = provider_state.read();
+        if sel < store_read.len() {
+            let provider_id = store_read[sel].id.clone();
+            drop(store_read);
+            enter_login_edit_mode(
+                &mut edit_state.write(),
+                &mut edit_focus.write(),
+                &mut edit_cursor.write(),
+                &provider_id,
+            );
+            *mode.write() = LoginPanelMode::Edit;
         }
-        // 关闭面板
-        close_panel();
     };
 
     // ConfirmDelete 确认动作：Enter 与鼠标左键点击共用
@@ -320,7 +297,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         )
                     {
                         *cursor.write() = idx;
-                        activate_provider_row();
+                        enter_edit_row();
                         return EventResult::Consumed;
                     }
                     // 区域内点击（未命中行 / Edit 模式）也消费，防止穿透
@@ -389,24 +366,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 *mode.write() = LoginPanelMode::ConfirmDelete;
                             }
                         }
-                        // E 或 Ctrl+E：进入编辑模式
-                        KeyCode::Char('e') | KeyCode::Char('E') => {
-                            let sel = *cursor.read();
-                            let provider_state = PROVIDER_LIST.state();
-                            let store_read = provider_state.read();
-                            if sel < store_read.len() {
-                                let provider_id = store_read[sel].id.clone();
-                                drop(store_read);
-                                enter_login_edit_mode(
-                                    &mut edit_state.write(),
-                                    &mut edit_focus.write(),
-                                    &mut edit_cursor.write(),
-                                    &provider_id,
-                                );
-                                *mode.write() = LoginPanelMode::Edit;
-                            }
-                        }
-                        KeyCode::Enter => activate_provider_row(),
+                        // Enter：进入编辑模式
+                        KeyCode::Enter => enter_edit_row(),
                         _ => {}
                     },
                     LoginPanelMode::Edit => {
@@ -437,7 +398,6 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let dim = semantic.text.dim;
     let text_color = semantic.text.primary;
     let focus_color = semantic.status.success;
-    let _accent = semantic.status.warning;
     let muted = semantic.text.muted;
 
     let mut lines: Vec<Line<'_>> = Vec::new();
@@ -475,18 +435,11 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Style::new().fg(text_color)
                     };
 
-                    let active_marker = if p.is_active {
-                        Span::styled(" \u{2714}", Style::new().fg(semantic.status.success).bold())
-                    } else {
-                        Span::styled("  ", Style::new())
-                    };
-
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!(" {} ", cursor_mark),
                             Style::new().fg(theme_def.read().component.panel.title),
                         ),
-                        active_marker,
                         Span::styled(format!("{}  ({})", p.id, p.provider_type), row_style),
                     ]));
 
@@ -496,13 +449,13 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         ("api key: missing", semantic.status.error)
                     };
                     lines.push(Line::from(vec![Span::styled(
-                        format!("     {}", key_marker.0),
+                        format!("   {}", key_marker.0),
                         Style::new().fg(key_marker.1),
                     )]));
                     if let Some(url) = &p.base_url {
                         let url_display: String = url.chars().take(70).collect();
                         lines.push(Line::from(vec![Span::styled(
-                            format!("     base url: {}", url_display),
+                            format!("   base url: {}", url_display),
                             Style::new().fg(dim),
                         )]));
                     }
@@ -518,8 +471,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         "\u{2191}/\u{2193}".to_string(),
                         i18n::tr("hint-login-browse"),
                     ),
-                    ("Enter".to_string(), i18n::tr("hint-login-activate")),
-                    ("E".to_string(), i18n::tr("hint-login-edit")),
+                    ("Enter".to_string(), i18n::tr("hint-login-edit")),
                     ("Ctrl+N".to_string(), i18n::tr("hint-login-new")),
                     ("Ctrl+D".to_string(), i18n::tr("hint-login-delete")),
                     ("Esc".to_string(), i18n::tr("hint-login-close")),
@@ -551,77 +503,94 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 )]));
                 lines.push(Line::from(""));
 
-                // 7 个可编辑字段（ProviderType 为 toggle，其余为文本输入）
+                // ── 标准字段：Type（toggle）+ ID / BaseUrl / ApiKey（文本输入）
+                // 布局与 setup_wizard 的 render_edit 一致：focus 时 ❯ + focus 色 label
+                let type_focused = ef == LoginEditField::ProviderType;
+                let type_prefix = if type_focused { "❯ " } else { "  " };
+                let type_style = if type_focused {
+                    Style::default()
+                        .fg(focus_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(dim)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(type_prefix, Style::default().fg(cursor_color)),
+                    Span::styled(
+                        format!("{}: ", i18n::tr(LoginEditField::ProviderType.i18n_key())),
+                        type_style,
+                    ),
+                    Span::styled(
+                        format!("[{}]", i18n::tr(provider_type_label(&es.provider_type))),
+                        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
                 for field in &[
-                    LoginEditField::ProviderType,
                     LoginEditField::ProviderId,
-                    LoginEditField::ApiKey,
                     LoginEditField::BaseUrl,
+                    LoginEditField::ApiKey,
+                ] {
+                    let is_focused = *field == ef;
+                    let display_val = if *field == LoginEditField::ApiKey {
+                        // API Key 脱敏显示（编辑时也只显示脱敏版本 + 实际输入体现在光标位置）
+                        mask_api_key_display(es.field_value(*field))
+                    } else {
+                        es.field_value(*field).to_string()
+                    };
+                    lines.push(render_login_edit_line(
+                        i18n::tr(field.i18n_key()),
+                        display_val,
+                        is_focused,
+                        ec,
+                        cursor_color,
+                        dim,
+                        text_color,
+                        focus_color,
+                    ));
+                }
+
+                // ── Model 分组标题（与 setup_wizard 一致）
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    i18n::tr("login-model-label"),
+                    Style::default().fg(dim).add_modifier(Modifier::BOLD),
+                )));
+
+                // ── Fable / Opus / Sonnet / Haiku 模型名
+                for field in &[
+                    LoginEditField::FableModel,
                     LoginEditField::OpusModel,
                     LoginEditField::SonnetModel,
                     LoginEditField::HaikuModel,
                 ] {
-                    let is_focused = *field == ef;
-                    if *field == LoginEditField::ProviderType {
-                        // ProviderType 渲染为 toggle（参考 setup_wizard 模式）
-                        let type_prefix = if is_focused { "❯ " } else { "  " };
-                        let type_style = if is_focused {
-                            Style::default()
-                                .fg(focus_color)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(dim)
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled(type_prefix, Style::default().fg(cursor_color)),
-                            Span::styled(format!("{}: ", i18n::tr(field.i18n_key())), type_style),
-                            Span::styled(
-                                format!(
-                                    "[{}]",
-                                    i18n::tr(provider_type_label(es.field_value(*field)))
-                                ),
-                                Style::default().fg(text_color).add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
-                    } else {
-                        let display_val = if *field == LoginEditField::ApiKey {
-                            // API Key 脱敏显示（编辑时也只显示脱敏版本 + 实际输入体现在光标位置）
-                            let raw = es.field_value(*field);
-                            if raw.is_empty() {
-                                String::new()
-                            } else {
-                                // 脱敏：显示最后 4 个字符，其余用 * 代替
-                                if raw.len() <= 4 {
-                                    "*".repeat(raw.len())
-                                } else {
-                                    format!(
-                                        "{}...{}",
-                                        "*".repeat(4),
-                                        raw.chars()
-                                            .rev()
-                                            .take(4)
-                                            .collect::<String>()
-                                            .chars()
-                                            .rev()
-                                            .collect::<String>()
-                                    )
-                                }
-                            }
-                        } else {
-                            es.field_value(*field).to_string()
-                        };
-                        lines.push(render_login_edit_line(
-                            i18n::tr(field.i18n_key()),
-                            display_val,
-                            is_focused,
-                            ec,
-                            cursor_color,
-                            dim,
-                            text_color,
-                            focus_color,
-                        ));
-                    }
+                    lines.push(render_login_edit_line(
+                        i18n::tr(field.i18n_key()),
+                        es.field_value(*field).to_string(),
+                        *field == ef,
+                        ec,
+                        cursor_color,
+                        dim,
+                        text_color,
+                        focus_color,
+                    ));
                 }
+
+                // ── 确认按钮（参考 setup_wizard 的 Confirm 行：focus 时 ❯ + 强调色）
+                let cf_focused = ef == LoginEditField::Confirm;
+                let cf_prefix = if cf_focused { "❯ " } else { "  " };
+                let cf_style = if cf_focused {
+                    Style::default()
+                        .fg(cursor_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(dim)
+                };
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(cf_prefix, Style::default().fg(cursor_color)),
+                    Span::styled(format!("  {}", i18n::tr("login-confirm")), cf_style),
+                ]));
 
                 lines.push(Line::from(""));
                 lines.push(make_hint_line_for_login(
@@ -631,10 +600,10 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             i18n::tr("hint-login-field"),
                         ),
                         (
-                            "\u{2190}/\u{2192}".to_string(),
+                            "\u{2190}/\u{2192}/Space".to_string(),
                             i18n::tr("hint-login-toggle"),
                         ),
-                        ("Ctrl+S".to_string(), i18n::tr("hint-login-save")),
+                        ("Enter".to_string(), i18n::tr("hint-login-confirm")),
                         ("Esc".to_string(), i18n::tr("hint-login-back")),
                     ],
                     dim,
@@ -683,9 +652,17 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::Login,
+        hooks.use_previous_size(),
+        sv,
+    );
+
     panel_shell!(PanelKind::Login, {
             ScrollView(
                 scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                state: Some(sv),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {
@@ -699,39 +676,6 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈
     crate::kit::panel_registry::close_active_panel();
-}
-
-/// H1f: 持久化当前 PERI_CONFIG_HANDLE 到 settings.json。
-///
-/// 不检查 active_provider_id 是否变更——调用方已在事件处理器中同步更新。
-fn activate_provider(_provider_id: &str) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let cfg = handle.read();
-    let snap = cfg.clone();
-    drop(cfg);
-    match crate::config::save(&snap) {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: Instant::now() + Duration::from_secs(2),
-            });
-        }
-    }
-    tracing::info!(provider_id = _provider_id, "LoginPanel: config persisted");
 }
 
 // ── Edit 模式辅助函数 ─────────────────────────────────────────────────────────
@@ -758,7 +702,7 @@ fn enter_login_edit_mode(
 /// 编辑模式下的按键处理。
 ///
 /// 文本编辑（字符、退格、删除、光标移动、Ctrl+W）、字段导航（↑/↓）、
-/// Esc 放弃、Ctrl+S 保存。
+/// 确认按钮 Enter 保存、Esc 放弃、Ctrl+S 快捷保存。
 fn handle_login_edit_keys(
     mode: &mut LoginPanelMode,
     edit_state: &mut Option<LoginEditState>,
@@ -800,7 +744,7 @@ fn handle_login_edit_keys(
         }
     }
 
-    // 导航 / 保存 / 放弃
+    // 导航 / 确认 / 放弃
     match key.code {
         KeyCode::Up if !is_ctrl => {
             *edit_focus = edit_focus.prev();
@@ -818,14 +762,20 @@ fn handle_login_edit_keys(
                 es.field_value(*edit_focus).chars().count()
             };
         }
+        KeyCode::Enter => {
+            // Enter：聚焦在确认按钮时保存（校验通过才回到 Browse，参考 setup_wizard）
+            if *edit_focus == LoginEditField::Confirm && save_login_edit(es) {
+                *mode = LoginPanelMode::Browse;
+                *edit_state = None;
+            }
+        }
         KeyCode::Esc => {
             // 放弃编辑，回到 Browse
             *mode = LoginPanelMode::Browse;
             *edit_state = None;
         }
-        KeyCode::Char('s') if is_ctrl => {
-            // Ctrl+S 保存
-            save_login_edit(es);
+        KeyCode::Char('s') if is_ctrl && save_login_edit(es) => {
+            // Ctrl+S 保存（保留快捷键，校验通过才回到 Browse）
             *mode = LoginPanelMode::Browse;
             *edit_state = None;
         }
@@ -840,8 +790,8 @@ fn handle_login_text_input(
     edit_cursor: &mut usize,
     key: &ratatui_kit::crossterm::event::KeyEvent,
 ) -> bool {
-    // ProviderType 是 toggle，不接受文本输入
-    if field == LoginEditField::ProviderType {
+    // ProviderType 是 toggle、Confirm 是按钮，均不接受文本输入
+    if field == LoginEditField::ProviderType || field == LoginEditField::Confirm {
         return false;
     }
 
@@ -952,16 +902,19 @@ fn handle_login_paste(
     *edit_cursor = pos + paste_len;
 }
 
-/// 保存编辑结果：写 PERI_CONFIG_HANDLE + 持久化 + 刷新 PROVIDER_LIST + 推送 ACP
-fn save_login_edit(es: &LoginEditState) {
+/// 保存编辑结果：先持久化到磁盘，成功后才发布到 PERI_CONFIG_HANDLE /
+/// PROVIDER_LIST / ACP。返回 `true` 表示保存成功；`false` 表示校验失败、
+/// 配置句柄缺失或持久化失败（不退出编辑，防止"假保存成功"）。
+fn save_login_edit(es: &LoginEditState) -> bool {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
+        return false;
     };
 
     let is_new = es.original_provider_id.is_empty();
 
-    {
-        let mut cfg = handle.write();
+    // 构建 detached 配置快照（在副本上修改，落盘成功前不动全局 handle）
+    let snap = {
+        let mut cfg = handle.write().clone();
 
         if is_new {
             // New 路径：校验 provider_id 非空后 push 新 ProviderConfig，自动激活
@@ -970,7 +923,7 @@ fn save_login_edit(es: &LoginEditState) {
                     message: i18n::tr("app-provider-name-empty"),
                     until: Instant::now() + Duration::from_secs(2),
                 });
-                return;
+                return false;
             }
             let new_config = ProviderConfig {
                 provider_type: es.provider_type.clone(),
@@ -978,11 +931,10 @@ fn save_login_edit(es: &LoginEditState) {
                 api_key: es.api_key.clone(),
                 base_url: es.base_url.clone(),
                 models: ProviderModels {
+                    fable: es.fable_model.clone(),
                     opus: es.opus_model.clone(),
                     sonnet: es.sonnet_model.clone(),
                     haiku: es.haiku_model.clone(),
-                    // fable 无编辑字段：留空回退 opus（ProviderModels.get_model 语义）
-                    fable: String::new(),
                 },
                 ..Default::default()
             };
@@ -1004,6 +956,7 @@ fn save_login_edit(es: &LoginEditState) {
                 provider.id = es.provider_id.clone();
                 provider.api_key = es.api_key.clone();
                 provider.base_url = es.base_url.clone();
+                provider.models.fable = es.fable_model.clone();
                 provider.models.opus = es.opus_model.clone();
                 provider.models.sonnet = es.sonnet_model.clone();
                 provider.models.haiku = es.haiku_model.clone();
@@ -1026,24 +979,40 @@ fn save_login_edit(es: &LoginEditState) {
             }
         }
 
-        let snap = cfg.clone();
-        drop(cfg);
+        cfg
+    };
 
-        // 刷新 PROVIDER_LIST（去重提取）
-        refresh_provider_list();
-
-        // 持久化
-        persist_and_notify(&snap);
-
-        // 推送 ACP（使变更立即生效）
-        if let Some(client) = ACP_CLIENT_HANDLE.get() {
-            tokio::spawn(async move {
-                if let Err(e) = client.update_config(&snap).await {
-                    tracing::warn!(error = %e, "LoginPanel: update_config push failed");
-                }
-            });
-        }
+    // 先持久化：失败则不发布任何变更（handle / PROVIDER_LIST / ACP 均不动）
+    if let Err(e) = crate::config::save(&snap) {
+        *NOTIFICATION.state().write() = Some(Notification {
+            message: i18n::tr_args(
+                "config-save-failed",
+                &[(
+                    "error".to_string(),
+                    FluentValue::from(e.to_string().as_str()),
+                )],
+            ),
+            until: Instant::now() + Duration::from_secs(2),
+        });
+        return false;
     }
+
+    // 持久化成功后：发布到全局 handle + 刷新 PROVIDER_LIST + 推送 ACP
+    *handle.write() = snap.clone();
+    refresh_provider_list();
+
+    if let Some(client) = ACP_CLIENT_HANDLE.get() {
+        tokio::spawn(async move {
+            if let Err(e) = client.update_config(&snap).await {
+                tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+            }
+        });
+    }
+
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: i18n::tr("config-saved").to_string(),
+        until: Instant::now() + Duration::from_secs(1),
+    });
 
     if is_new {
         tracing::info!(
@@ -1056,6 +1025,7 @@ fn save_login_edit(es: &LoginEditState) {
             "LoginPanel: provider edit saved"
         );
     }
+    true
 }
 
 /// 从 PERI_CONFIG_HANDLE 刷新 PROVIDER_LIST atom（避免多处重复 25 行）
@@ -1249,6 +1219,25 @@ fn provider_type_label(provider_type: &str) -> &'static str {
         "anthropic" => "setup-provider-anthropic",
         _ => "setup-provider-openai",
     }
+}
+
+/// API Key 脱敏显示：保留最后 4 个字符，其余用 * 代替。
+fn mask_api_key_display(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    if raw.len() <= 4 {
+        return "*".repeat(raw.len());
+    }
+    let tail: String = raw
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{}...{}", "*".repeat(4), tail)
 }
 
 #[cfg(test)]

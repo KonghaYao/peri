@@ -9,14 +9,14 @@ fn test_empty_stack_returns_fallback_main() {
 #[test]
 fn test_begin_subagent_pushes_context() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"prompt": "go"}));
+    s.begin_subagent(&serde_json::json!({"prompt": "go"}), "parent_obs");
     assert_eq!(s.depth(), 1);
 }
 
 #[test]
 fn test_current_agent_id_returns_top() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({}));
+    s.begin_subagent(&serde_json::json!({}), "parent_obs");
     let top = s.current_agent_id("main");
     assert!(top.starts_with("obs_"));
     assert_ne!(top, "main");
@@ -25,15 +25,15 @@ fn test_current_agent_id_returns_top() {
 #[test]
 fn test_nested_subagent_stack_depth_2() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({}));
-    s.begin_subagent(&serde_json::json!({}));
+    s.begin_subagent(&serde_json::json!({}), "parent_obs");
+    s.begin_subagent(&serde_json::json!({}), "parent_obs");
     assert_eq!(s.depth(), 2);
 }
 
 #[test]
 fn test_end_subagent_returns_context() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"prompt": "go"}));
+    s.begin_subagent(&serde_json::json!({"prompt": "go"}), "parent_obs");
     let end = s.end_subagent().expect("should return Some");
     assert!(end.observation_id.starts_with("obs_"));
     assert_eq!(s.depth(), 0);
@@ -65,8 +65,8 @@ fn test_current_tool_batch_mut_returns_main_when_empty() {
 #[test]
 fn test_lifo_order() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"id": 1}));
-    s.begin_subagent(&serde_json::json!({"id": 2}));
+    s.begin_subagent(&serde_json::json!({"id": 1}), "parent_obs");
+    s.begin_subagent(&serde_json::json!({"id": 2}), "parent_obs");
     let _last_end = s.end_subagent().unwrap();
     let _first_end = s.end_subagent().unwrap();
     // 后进先出：last_end 应该是后压的（id=2）
@@ -77,7 +77,7 @@ fn test_lifo_order() {
 #[test]
 fn test_has_started_flag_default_false() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"agent": "test"}));
+    s.begin_subagent(&serde_json::json!({"agent": "test"}), "parent_obs");
     // begin 时 has_started 应为 false
     assert!(!s.top_has_started(), "begin 时 has_started 应为 false");
 }
@@ -85,7 +85,7 @@ fn test_has_started_flag_default_false() {
 #[test]
 fn test_mark_top_started_sets_flag() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"agent": "test"}));
+    s.begin_subagent(&serde_json::json!({"agent": "test"}), "parent_obs");
     assert!(!s.top_has_started());
     s.mark_top_started();
     assert!(
@@ -103,7 +103,7 @@ fn test_top_has_started_returns_false_when_empty() {
 #[test]
 fn test_record_tool_output_stores_on_top() {
     let mut s = SubagentStack::new();
-    s.begin_subagent(&serde_json::json!({"agent": "test"}));
+    s.begin_subagent(&serde_json::json!({"agent": "test"}), "parent_obs");
     s.record_tool_output("bg agent completed successfully");
     let end = s.end_subagent().unwrap();
     assert_eq!(
@@ -136,7 +136,7 @@ fn test_flush_all_subagent_tool_batches_flushes_each_layer() {
     let mut s = SubagentStack::new();
 
     // 压入两层 subagent，每层各有一个工具
-    s.begin_subagent(&serde_json::json!({"agent": "layer1"}));
+    s.begin_subagent(&serde_json::json!({"agent": "layer1"}), "parent_obs");
     {
         let mut dummy = ToolBatch::new();
         let mut top_ref = s.current_tool_batch_mut(&mut dummy);
@@ -149,7 +149,7 @@ fn test_flush_all_subagent_tool_batches_flushes_each_layer() {
         top_ref.on_tool_end("tc1", "content1", false);
     }
 
-    s.begin_subagent(&serde_json::json!({"agent": "layer2"}));
+    s.begin_subagent(&serde_json::json!({"agent": "layer2"}), "parent_obs");
     {
         let mut dummy = ToolBatch::new();
         let mut top_ref = s.current_tool_batch_mut(&mut dummy);

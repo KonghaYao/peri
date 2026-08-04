@@ -838,23 +838,10 @@ fn stable_hash(s: &str) -> u64 {
 }
 
 /// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），超长补省略号。
+///
+/// 委托共享 helper `crate::truncate::truncate_by_width`（历史实现已迁移，语义不变）。
 fn truncate_title_to_width(s: &str, max_width: usize) -> String {
-    let mut width = 0usize;
-    let mut out = String::new();
-    let mut truncated = false;
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
-        if width + w > max_width {
-            truncated = true;
-            break;
-        }
-        out.push(c);
-        width += w;
-    }
-    if truncated {
-        out.push('…');
-    }
-    out
+    crate::truncate::truncate_by_width(s, max_width)
 }
 
 /// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。

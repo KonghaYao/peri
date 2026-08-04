@@ -206,7 +206,8 @@ async fn drain_pipe(mut reader: impl tokio::io::AsyncRead + Unpin, buf: Arc<Mute
 }
 
 /// bg shell 结果收尾（bg 路径与同步超时 promote 续跑共用）：
-/// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → 注册 → complete()。
+/// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
+/// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
 #[allow(clippy::too_many_arguments)]
 fn finalize_bg_shell(
     registry: &BackgroundTaskRegistry,
@@ -216,8 +217,6 @@ fn finalize_bg_shell(
     success: bool,
     output: String,
     duration_ms: u64,
-    cancel_handle: BgCancelHandle,
-    pid: Option<u32>,
     timed_out: bool,
 ) {
     // 输出超长落盘（>100K 字符时截断 + 持久化完整内容到磁盘）
@@ -244,26 +243,9 @@ fn finalize_bg_shell(
     if let Some(ref cb) = on_bg_complete {
         cb(&result);
     }
-    // 注册任务（向 registry 提供 pid 用于取消）
-    let bg_task = BackgroundTask {
-        id: result.task_id.clone(),
-        agent_name: "bg-shell".to_string(),
-        prompt_summary: result.prompt_summary.clone(),
-        status: BackgroundTaskStatus::Running,
-        started_at: std::time::Instant::now(),
-        chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Shell,
-        cancel_handle,
-        pid,
-        output_preview: None,
-    };
-    // register 失败时仍需调 complete()，确保 bg-task-completed 事件推送到 TUI，
-    // 否则任务会残留在状态栏。complete() 在 task 未注册时也能安全处理（仅 push_event）。
-    if let Err(e) = registry.register_with_kind(bg_task) {
-        warn!(error = %e, task_id = %result.task_id, "bg shell: register_with_kind failed (callback already fired)");
-    }
-    let complete_task_id = result.task_id.clone();
-    registry.complete(&complete_task_id, result);
+    // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
+    // complete() 在 task 未注册时也能安全处理（仅 push_event）。
+    registry.complete(&result.task_id.clone(), result);
 }
 
 #[async_trait::async_trait]
@@ -393,6 +375,46 @@ impl BaseTool for BashTool {
                     };
                     let pid = child.id();
 
+                    // 任务启动即注册：推送 BgTaskStarted 事件，运行期间 TUI 展示栏可见。
+                    // 完成时 finalize_bg_shell 只调 complete()，不再重复注册。
+                    let bg_task = BackgroundTask {
+                        id: task_id.clone(),
+                        agent_name: "bg-shell".to_string(),
+                        prompt_summary: command_owned.chars().take(80).collect(),
+                        status: BackgroundTaskStatus::Running,
+                        started_at: std::time::Instant::now(),
+                        chrono_started_at: chrono::Utc::now(),
+                        kind: BgTaskKind::Shell,
+                        cancel_handle: BgCancelHandle::Pid(pid.expect(
+                            "bg shell: child.id() returned None after successful spawn",
+                        )),
+                        pid,
+                        output_preview: None,
+                    };
+                    if let Err(e) = registry.register_with_kind(bg_task) {
+                        // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
+                        warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
+                        kill_process_group_escalating(pid.expect(
+                            "bg shell: child.id() returned None after successful spawn",
+                        ));
+                        let result = BackgroundTaskResult {
+                            task_id: task_id.clone(),
+                            agent_name: "bg-shell".to_string(),
+                            prompt_summary: command_owned.chars().take(80).collect(),
+                            success: false,
+                            output: format!("Failed to register background task: {}", e),
+                            tool_calls_count: 0,
+                            duration_ms: started.elapsed().as_millis() as u64,
+                            child_thread_id: None,
+                            timed_out: false,
+                        };
+                        if let Some(ref cb) = on_bg_complete_cb {
+                            cb(&result);
+                        }
+                        registry.complete(&result.task_id.clone(), result);
+                        return;
+                    }
+
                     // 超时包裹 wait_with_output（后台未显式传 timeout 或 timeout=0 时不超时）
                     let wait_future = child.wait_with_output();
                     let wait_result = match timeout_opt {
@@ -431,26 +453,7 @@ impl BaseTool for BashTool {
                                     if let Some(ref cb) = on_bg_complete_cb {
                                         cb(&result);
                                     }
-                                    let bg_task = BackgroundTask {
-                                        id: result.task_id.clone(),
-                                        agent_name: "bg-shell".to_string(),
-                                        prompt_summary: command_owned
-                                            .chars()
-                                            .take(80)
-                                            .collect(),
-                                        status: BackgroundTaskStatus::Running,
-                                        started_at: std::time::Instant::now(),
-                                        chrono_started_at: chrono::Utc::now(),
-                                        kind: BgTaskKind::Shell,
-                                        cancel_handle: BgCancelHandle::Pid(pid.expect(
-                                            "bg shell: child.id() returned None after successful spawn",
-                                        )),
-                                        pid,
-                                        output_preview: None,
-                                    };
-                                    if let Err(e) = registry.register_with_kind(bg_task) {
-                                        warn!(error = %e, task_id = %result.task_id, "bg shell timeout: register_with_kind failed");
-                                    }
+                                    // 任务在启动时已注册，此处只收尾推送 Completed
                                     let complete_task_id = result.task_id.clone();
                                     registry.complete(&complete_task_id, result);
                                     return;
@@ -488,7 +491,7 @@ impl BaseTool for BashTool {
                         }
                     };
 
-                    // 回调通知 + 注册 + 完成（与 promote 续跑共用收尾逻辑）
+                    // 回调通知 + 完成（任务在启动时已注册，与 promote 续跑共用收尾逻辑）
                     finalize_bg_shell(
                         &registry,
                         &on_bg_complete_cb,
@@ -497,10 +500,6 @@ impl BaseTool for BashTool {
                         output.0,
                         output.1,
                         started.elapsed().as_millis() as u64,
-                        BgCancelHandle::Pid(pid.expect(
-                            "bg shell: child.id() returned None after successful spawn",
-                        )),
-                        pid,
                         false,
                     );
                 })
@@ -660,8 +659,6 @@ impl BaseTool for BashTool {
                                         success,
                                         combined,
                                         started.elapsed().as_millis() as u64,
-                                        BgCancelHandle::Pid(pid),
-                                        Some(pid),
                                         false,
                                     );
                                 });

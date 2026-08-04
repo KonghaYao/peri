@@ -2,24 +2,24 @@
 
 ## 领域综述
 
-Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、SubAgent 构建。核心数据流为消息构建 → ReAct 循环（Compact → Receive → Reason → Act → End）→ 工具分发 → 响应生成。Provider 适配层统一 OpenAI/Anthropic 流式与非流式路径。
+Peri Agent 的 ReAct 循环、工具系统、Context 管理、SubAgent 构建。核心数据流为消息构建 → ReAct 循环（Receive → Compact → Reason → Act）→ 工具分发 → 响应生成。LLM Provider 层独立为 peri-model crate（`Model` trait 统一 OpenAI/Anthropic，流式优先），由 `peri-agent/src/agent/model_bridge.rs`（`AgentModelBridge`）桥接进 ReAct 循环。
 
 ## 核心流程
 
-- **ReAct 循环**：每轮 `before_agent → loop(500) { before_model → LLM → after_model → [工具分发] | [回答] } → End`
-- **消息构建**：`BaseMessage`（Human/Ai/System/Tool），`ContentBlock`（Text/Image/Document/ToolUse/ToolResult/Reasoning）
-- **Provider 适配**：`invoke.rs`（非流式）和 `stream.rs`（流式）双路径，需产出相同的 `BaseMessage` 序列
-- **SubAgent 构建**：fork/non-fork 双模式，共享 `build_v2_subagent_context` 入口，`parent_messages` 注入 transcript
+- **ReAct 循环**：`run_react_loop`（peri-agent/src/agent/stages/mod.rs），每轮 Receive（循环入口与退出判断）→ Compact → Reason（before_model → LLM → after_model）→ Act（工具分发）；`max_iterations` 参数化（主 agent 500，SubAgent 默认 200），超限返回 MaxIterationsExceeded
+- **消息构建**：`BaseMessage`（Human/Ai/System/Tool）与 `ContentBlock`（Text/Image/Document/ToolUse/ToolResult/Reasoning/Unknown）位于 peri-agent/src/messages/（message.rs / content.rs），跨 crate 共享（peri-acp 复用）
+- **Provider 适配**：peri-model crate 提供 `Model` trait（流式优先——`stream()` 为唯一调用路径，`complete()` 聚合事件实现非流式），`AnthropicModel` / `OpenAiModel` 为实现；peri-agent 侧 `AgentModelBridge`（model_bridge.rs）实现 `ReactLLM` 供 Reason 阶段调用
+- **SubAgent 构建**：fork/non-fork 双模式，共享 `build_v2_subagent_context` 入口（peri-middlewares/src/subagent/v2_bridge.rs），`parent_messages` 注入 transcript
 
 ## 技术方案总结
 
 | 维度 | 选型 |
 |------|------|
-| 循环引擎 | ReAct Loop（`run_react_loop`），max 500 iterations |
-| 消息类型 | `BaseMessage` + `ContentBlock` 枚举（ACP 协议对齐） |
-| LLM Provider | OpenAI chat completions + Anthropic Messages API，统一适配层 |
-| SubAgent | fork 模式（隔离构建）+ inline 模式（共享上下文），v2_bridge 统一入口 |
-| 工具分发 | 3 阶段分发（Core/Meta/Deferred），`tool_dispatch.rs` 延迟消息写入 |
+| 循环引擎 | ReAct Loop（`run_react_loop`，peri-agent/src/agent/stages/mod.rs），`max_iterations` 参数化（主 agent 500 / SubAgent 默认 200） |
+| 消息类型 | `BaseMessage` + `ContentBlock` 枚举（peri-agent/src/messages/，ACP 协议对齐） |
+| LLM Provider | peri-model crate：`Model` trait（`stream()` 流式优先 + `complete()` 聚合非流式），`AnthropicModel` / `OpenAiModel`；`AgentModelBridge`（model_bridge.rs）接入 ReAct |
+| SubAgent | fork 模式（隔离构建）+ 非 fork 模式（后台/同步），v2_bridge（peri-middlewares/src/subagent/v2_bridge.rs）统一入口 |
+| 工具分发 | 批量审批 → 并发执行 → 聚合（错误延迟）→ 统一原子写入 transcript，`tool_dispatch.rs`（阶段 A/B/C） |
 
 ---
 
@@ -43,7 +43,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **问题本质:** `build_stream_response` 在 ToolUse 分支中，流式期间累积的 `content_text` 从未被推入 `blocks` 数组。流式路径正确（`TextChunk` → `current_turn` 可见），但 ViewCommit 后 `BaseMessage` 不含 Text block → `AssistantBubble(text="")` → TUI 只显示 ToolCard。非流式路径（`invoke.rs`）正确，仅 OpenAI 流式路径受影响。
 **通用模式:** 流式路径和非流式路径在构建最终 `BaseMessage` 时必须产出相同的 `ContentBlock` 序列——这是协议层的一致性约束。新增 ContentBlock 变体时需检查所有 provider 的流式/非流式路径是否都正确填充。
 **技术决策:** 修复不仅添加了 `content_text` 到 blocks，还新增了 3 个单元测试防止回归——这类"看起来很简单但影响很大的 bug"最适合用测试固化。
-**涉及文件:** peri-agent/src/llm/openai/stream.rs
+**涉及文件:** peri-model/src/openai_compatible/stream.rs（原 peri-agent/src/llm/openai/stream.rs，已迁至 peri-model）
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn
@@ -53,7 +53,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** background agent, loading 生命周期, TurnDone, ReAct 循环
 **问题本质:** AI 调用 Agent 工具（background 模式）后本轮 turn 正常结束（TurnDone），但 bg callback 触发的 `SyntheticUserMessage` 在 agent End 阶段 emit，导致连续 loading 周期——首轮 TurnDone 和 bg callback 的 TurnStart 之间没有 loading=false 间隙。与双通道 flush-then-push 修复关联。
 **通用模式:** ReAct 循环中 background agent 的 loading 生命周期需要显式的 TurnDone→TurnStart 过渡：background agent 启动后当前 turn 应正常 TurnDone（loading 停止），callback 唤醒时创建新的 TurnStart（loading 重新开始）。二者必须独立发送，不能合并为连续 loading。
-**涉及文件:** peri-agent/src/agent/stages/mod.rs, peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/acp_events.rs
+**涉及文件:** peri-agent/src/agent/stages/mod.rs, peri-tui/src/kit/acp_bridge.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks
@@ -85,7 +85,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** Anthropic adapter, tool_result 顺序, insert(0) vs push, 并行工具调用
 **问题本质:** `arr.insert(0, x)` 将每个新结果插到数组最前面，导致多 tool_use 对应的结果顺序反转
 **通用模式:** 序列化合并时优先用 `push()` 保持原始顺序；数组插入位置选择影响下游语义正确性
-**涉及文件:** peri-agent/src/llm/anthropic/adapter.rs
+**涉及文件:** peri-model/src/anthropic/request.rs（原 peri-agent/src/llm/anthropic/adapter.rs，请求序列化部分已迁至 peri-model）
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-17-anthropic-adapter-system-cache-split-missing
@@ -96,7 +96,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **问题本质:** `build_request_body()` 对 `request.system` 直接 push 单块，未调用已存在的 `split_system_blocks()` 拆分静态/动态内容
 **通用模式:** 同一功能（缓存拆分）有两条代码路径时，主路径可能漏掉已实现的辅助函数；fork agent 走 `BaseMessage::System` 路径反而正确拆分
 **架构影响:** `request.system` 和 `BaseMessage::System` 是两条独立序列化路径，未统一抽象
-**涉及文件:** peri-agent/src/llm/anthropic/adapter.rs, peri-agent/src/llm/anthropic/cache.rs
+**涉及文件:** peri-model/src/anthropic/request.rs, peri-model/src/anthropic/cache.rs（原 peri-agent/src/llm/anthropic/adapter.rs, peri-agent/src/llm/anthropic/cache.rs，已迁至 peri-model）
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-18-tools-hashmap-order-breaks-prompt-cache
@@ -170,7 +170,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** SubagentStarted, acp_notifier, 事件丢弃, AgentEvent 通道
 **问题本质:** Phase 2.6 kit 迁移后 `acp_notifier.rs` 的 `AgentEvent` 变体被标记为"暂未处理"静默丢弃，SubagentStarted 永不到达 TUI
 **通用模式:** 架构迁移时新增事件通道必须同步更新 notifier 分发，否则静默丢弃难以排查。单元测试绕过 notifier 层直接调用 downstream 掩盖了上游断层
-**涉及文件:** peri-tui/src/kit/acp_notifier.rs, peri-tui/src/kit/acp_events.rs
+**涉及文件:** peri-tui/src/kit/acp_notifier.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
 **CLAUDE.md 链接:** true
 
 ### issue_2026-07-13-sync-agent-tool-cards-not-showing
@@ -180,7 +180,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** 同步 SubAgent, 子工具卡片, or_insert_with, event_tx 关闭
 **问题本质:** `builder_v2.rs` 用 `or_insert_with` 保留第一 turn 的 SubAgentTool 实例，其 `event_tx` 在第二 turn 时已被 close——所有 SubagentStarted 事件被静默丢弃
 **通用模式:** `or_insert_with` 不适合需要每 turn 重建的有状态对象（含 channel/sender）。每 turn 复用时应确保内部 channel 有效，或改用 `insert` 强制替换
-**涉及文件:** peri-acp/src/agent/builder_v2.rs, peri-tui/src/kit/acp_events.rs
+**涉及文件:** peri-acp/src/agent/builder.rs（原 builder_v2.rs，已并入 builder.rs）, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
 **CLAUDE.md 链接:** true
 
 ### issue_2026-07-17-compact-flags-lost-on-session-restore
@@ -201,7 +201,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** compact, persist_tx=None, V2Session, flags 持久化
 **问题本质:** v2 主路径创建 V2Session 时 `persist_tx` 始终为 None——compact 的 flag 写入通过 `send_persist` 通道为 no-op。turn 结束后 transcript 销毁，flags 全丢
 **通用模式:** 已有基础设施（`with_persistence`、`load_message_flags` 等）就位但未被上游调用——架构迁移时需确认新路径是否激活了所有持久化通道
-**涉及文件:** peri-acp/src/agent/builder_v2.rs, peri-agent/src/session/transcript.rs
+**涉及文件:** peri-acp/src/agent/builder.rs（原 builder_v2.rs，已并入）, peri-agent/src/session/transcript.rs
 **CLAUDE.md 链接:** true
 
 ### issue_2026-07-18-subagent-tool-cards-regression-empty
@@ -211,7 +211,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** SubAgent 卡片回归, 工具调用卡片, 竞态条件, AgentGroup
 **问题本质:** `event_tx` 的替换（or_insert_with→insert）解决了多轮复用问题，但引入了新的竞态——SubAgent 在 tool group 注册到 accumulator 之前就发送了 ToolStart 事件，卡片创建时目标 group 不存在
 **通用模式:** channel 替换修复可能引入时序依赖——子线程事件可能在注册完成前到达。需要在 accumulator 中缓存早到事件，待 group 就绪后重放
-**涉及文件:** peri-acp/src/agent/builder_v2.rs, peri-tui/src/kit/acp_types.rs
+**涉及文件:** peri-acp/src/agent/builder.rs（原 builder_v2.rs，已并入）, peri-tui/src/kit/acp_types.rs
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-18-cleanup-subagent-eventbus-dead-code
@@ -281,7 +281,7 @@ Peri Agent 的 ReAct 循环、LLM 适配器、工具系统、Context 管理、Su
 **关键词:** ViewModel 消除, 中间层精简, ACP 直通 TUI
 **问题本质:** peri-agent 和 peri-tui 共享 8 种 ViewModel 类型形成紧耦合，自定义事件数从 11 个精简到 2 个
 **通用模式:** TUI 应从标准 ACP session/update 事件直接派生渲染结构，不要经过中间共享类型层——每层翻译都是耦合点。Agent 层只产 ACP 标准事件，TUI 层自行解释渲染
-**涉及文件:** peri-agent/src/types/, peri-tui/src/kit/
+**涉及文件:** peri-agent/src/messages/（原 peri-agent/src/types/，已迁移）, peri-tui/src/kit/
 **CLAUDE.md 链接:** false
 
 ### issue_2026-07-08-peri-agent-architecture-improvement
