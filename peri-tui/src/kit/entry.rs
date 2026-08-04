@@ -50,7 +50,7 @@ use ratatui_kit::{
 /// 返回时已调用 `teardown_app`——hooks 清理、MCP 池关闭、Langfuse flush。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
-    panic_notify_rx: mpsc::UnboundedReceiver<String>,
+    mut panic_notify_rx: mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
     // 1. 初始化全局 atoms（必须在 element! 之前）
     atoms::init_atoms();
@@ -59,7 +59,9 @@ pub async fn run_kit_fullscreen(
     input_history::load_history();
 
     // 2. 构建 App + ACP server/client
-    let (mut app, acp_client) = build_app_and_acp(&opts, Some(panic_notify_rx)).await?;
+    // [Fix P0] panic_notify_rx 不再传给 build_app_and_acp（其仅丢弃）——
+    // 改由下方 3a 的消费 task 持有，收到 panic 通知后在状态栏提示用户。
+    let (mut app, acp_client) = build_app_and_acp(&opts, None).await?;
 
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
@@ -179,6 +181,37 @@ pub async fn run_kit_fullscreen(
     //    用户即使离线，也需要看到 CPU/MEM/Cron/Thread 列表。
     let snapshot_src = build_snapshot_source(&app);
     let _snapshot_handle = spawn_service_snapshot(snapshot_src, shutdown.clone());
+
+    // 3a. Panic 通知消费——任意线程 panic（agent task / 渲染线程）时在状态栏
+    //     显示提示，不再静默（原实现把 rx 传入 build_app_and_acp 后丢弃）。
+    //     panic hook 见 kit/panic.rs：记录日志 + PANIC_NOTIFY 通道。
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    msg = panic_notify_rx.recv() => {
+                        let Some(msg) = msg else { break };
+                        tracing::error!("PANIC_NOTIFY consumed: {}", msg);
+                        // 消息含完整 backtrace 可能数 KB，状态栏只取首行摘要
+                        let first_line = msg.lines().next().unwrap_or(&msg).to_string();
+                        let summary = if first_line.chars().count() > 120 {
+                            let truncated: String = first_line.chars().take(120).collect();
+                            format!("{}…", truncated)
+                        } else {
+                            first_line
+                        };
+                        *atoms::NOTIFICATION.state().write() = Some(atoms::Notification {
+                            message: format!("⚠️ 内部错误：{}（详见日志）", summary),
+                            until: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        });
+                        atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+                    }
+                }
+            }
+        });
+    }
 
     // 3b. 渲染心跳任务——每 5 秒写一次 RENDER_HEARTBEAT atom，
     //     确保 ratatui-kit render loop 的 `futures::select` 周期性唤醒。

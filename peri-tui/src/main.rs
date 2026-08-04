@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::sync::OnceLock;
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
@@ -12,57 +11,9 @@ mod cli_plugin;
 mod cli_print;
 
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
-
-/// 全局 panic 通知通道 sender（OnceLock 保证只初始化一次）
-static PANIC_NOTIFY: OnceLock<tokio::sync::mpsc::UnboundedSender<String>> = OnceLock::new();
-
-/// 格式化 panic 信息为可读字符串（消息 + 位置 + backtrace）
-fn format_panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
-    let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
-    };
-
-    let location = panic_info
-        .location()
-        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-        .unwrap_or_else(|| "unknown location".to_string());
-
-    // 自动捕获 backtrace（无需手动设置 RUST_BACKTRACE=1）
-    let backtrace = std::backtrace::Backtrace::capture();
-    let bt_str = match backtrace.status() {
-        std::backtrace::BacktraceStatus::Captured => format!("\n{}", backtrace),
-        _ => String::new(),
-    };
-
-    format!("'{}'\n  at {}{}", payload, location, bt_str)
-}
-
-/// 安装自定义 panic hook：
-/// - 通过 tracing::error! 记录到日志文件（不写 stderr）
-/// - 通过 PANIC_NOTIFY 通道通知 TUI
-fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        let msg = format_panic_message(panic_info);
-        tracing::error!("thread panicked at {}", msg);
-        if let Some(tx) = PANIC_NOTIFY.get() {
-            let _ = tx.send(msg);
-        }
-    }));
-}
-
-/// 创建 panic 通知通道并安装自定义 panic hook。
-/// 必须在 enable_raw_mode() 之前调用。
-/// 返回 UnboundedReceiver 供 TUI 消费。
-pub fn init_panic_notify() -> tokio::sync::mpsc::UnboundedReceiver<String> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = PANIC_NOTIFY.set(tx);
-    install_panic_hook();
-    rx
-}
+// 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
+// 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
+use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
 
