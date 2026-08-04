@@ -145,6 +145,7 @@ pub(super) async fn init_stdio_context(cwd: String) -> anyhow::Result<Arc<StdioC
             Arc::new(peri_config_snapshot),
             permission_mode.clone(),
             None,
+            Some(cron_scheduler.clone()),
         )
     };
 

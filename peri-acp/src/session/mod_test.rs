@@ -4,6 +4,7 @@
 //! `build_frozen_data` 四个新方法，验证 TUI/stdio 三合一重构后的行为契约。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::provider::{
     LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
@@ -29,6 +30,33 @@ fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
 
 /// 构造测试用 SessionManager + 临时 thread store
 fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
+    make_manager_with_cron_option(tmp, None)
+}
+
+/// 构造带 cron scheduler 的 SessionManager（session 级 cron bridge 测试用）。
+///
+/// scheduler 的 primary tx 直接丢弃（同 TUI `cron_state.rs:13` 模式）——
+/// 本测试路径不消费 primary trigger 通道，只验证 extra_trigger_txs（bridge）路径。
+fn make_session_manager_with_cron(
+    tmp: &tempfile::TempDir,
+) -> (
+    SessionManager,
+    Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+) {
+    let scheduler = Arc::new(parking_lot::Mutex::new(
+        peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+    ));
+    (
+        make_manager_with_cron_option(tmp, Some(scheduler.clone())),
+        scheduler,
+    )
+}
+
+/// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
+fn make_manager_with_cron_option(
+    tmp: &tempfile::TempDir,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+) -> SessionManager {
     let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
@@ -47,6 +75,7 @@ fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
+        cron_scheduler,
     )
 }
 
@@ -168,4 +197,91 @@ async fn test_close_session_移除记录后goal_state返回none() {
         mgr.goal_state_for(session_id).is_none(),
         "close_session 后 goal_state_for 应返回 None"
     );
+}
+
+/// [回归] turn 以 Error 结束后 cron 触发仍能注入 session（不丢失）。
+#[tokio::test]
+async fn test_cron_bridge_survives_turn_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (mgr, scheduler) = make_session_manager_with_cron(&tmp);
+    let session_id = "test-cron-turn-error";
+    mgr.ensure_session(session_id, "/tmp");
+
+    // 第一 turn：build_stage_context 挂载 session 级 bridge（幂等）
+    assert!(mgr.cron_bridge_for(session_id));
+
+    // 模拟 turn：构造 per-turn V2Session（共享 session queue）后以 Error drop
+    let queue = mgr.v2_queue_for(session_id).unwrap();
+    {
+        let cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let v2 = peri_agent::session::Session::new_with_cancel_and_queue(
+            Arc::from("/tmp"),
+            peri_agent::session::FrozenContext::builder().build(),
+            None,
+            cancel,
+            queue.clone(),
+        );
+        drop(v2); // turn 结束（LoopResult::Error 路径）→ 旧实现此处杀死 bridge
+    }
+
+    // cron 到点触发（TUI tick 循环等价物）
+    let id = scheduler
+        .lock()
+        .register("* * * * *", "turn-error-survival")
+        .unwrap();
+    {
+        let mut sched = scheduler.lock();
+        assert!(sched.force_next_fire_to_past(&id));
+        sched.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await; // 等 bridge 异步转发（cron_owner_test 同款 50ms 模式）
+
+    // 触发必须已入队（queued，下一 turn 消费），而非被 retain 丢弃
+    let inbox = mgr.session_inbox_for(session_id).unwrap();
+    let drained = inbox.queue().drain_all();
+    assert_eq!(drained.len(), 1, "turn Error 后 cron 触发不得丢失");
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::CronTrigger
+    );
+
+    // 清理：close_session → bridge drop → abort（幂等，无 panic）
+    mgr.close_session(session_id).await.unwrap();
+}
+
+/// [回归] idle 期（无 turn 运行）cron 触发入队不丢弃；"queued, not dropped"
+/// （立即开新 turn 属后续增强，不在本期范围）。
+#[tokio::test]
+async fn test_cron_bridge_idle_trigger_queued_not_dropped() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (mgr, scheduler) = make_session_manager_with_cron(&tmp);
+    let session_id = "test-cron-idle";
+    mgr.ensure_session(session_id, "/tmp");
+    assert!(mgr.cron_bridge_for(session_id));
+
+    // idle：无 executor 运行，仅 TUI tick 循环存活
+    let id = scheduler
+        .lock()
+        .register("* * * * *", "idle-survival")
+        .unwrap();
+    {
+        let mut sched = scheduler.lock();
+        assert!(sched.force_next_fire_to_past(&id));
+        sched.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let inbox = mgr.session_inbox_for(session_id).unwrap();
+    assert_eq!(
+        inbox.queue().len(),
+        1,
+        "idle 期触发必须留在 queue（不丢弃）"
+    );
+    let drained = inbox.queue().drain_all();
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::CronTrigger
+    );
+
+    mgr.close_session(session_id).await.unwrap();
 }

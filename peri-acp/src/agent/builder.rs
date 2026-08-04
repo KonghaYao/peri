@@ -730,7 +730,12 @@ pub(crate) fn build_agent(
 //
 // ## Async Owners
 //
-// 当 cron_scheduler 为 Some 时：
+// 有 SessionManager 的路径（TUI/stdio）：cron bridge 由
+// `SessionManager::cron_bridge_for` 在 AcpSession 上懒启动（session 级，
+// 跨 turn 存活，见 spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md），
+// 本函数不再挂载 turn 级 CronOwner。
+//
+// 仅 print 模式（-p，无 SessionManager）走本函数的 turn 级挂载：
 // 1. 创建 SessionInbox（await-wake wrapper around shared_queue）。
 // 2. 从 CronScheduler 订阅 trigger_rx（通过 subscribe()）。
 // 3. 启动 CronTrigger→String 桥接任务。
@@ -910,13 +915,28 @@ pub(crate) fn build_stage_context(
     }
 
     // Async Owners（SessionInbox + CronOwner）
-    {
-        let shared_queue_arc = Arc::new(shared_queue.clone());
-        let session_inbox = SessionInbox::new(shared_queue_arc);
-        let inbox_handle = session_inbox.handle();
+    //
+    // Session 级路径（TUI/stdio 交互，存在 SessionManager）：cron bridge 由
+    // SessionManager::cron_bridge_for 在 AcpSession 上懒启动，跨 turn 存活——
+    // turn 结束（含 retry Error）不再杀死 bridge
+    // （spec/issues/2026-08-04-cron-trigger-lost-after-turn-error.md）。
+    // 此处不再挂载 turn 级 CronOwner，也不调用 set_async_owners
+    // （AsyncOwners 容器无生产消费者；executor 的 idle_inbox 走 session 级 inbox）。
+    //
+    // 无 SessionManager 的路径（print 模式 -p，单次进程）：保留原 turn 级挂载，
+    // 行为与现状完全一致。
+    if ctx.session_manager.is_some() {
+        if let Some(ref sm) = ctx.session_manager {
+            sm.cron_bridge_for(&ctx.session_id);
+        }
+    } else if let Some(ref scheduler) = cron_scheduler {
+        // ── 原 AsyncOwners 块原样保留（912-960 的 { ... } 内容，含 per-turn
+        //    SessionInbox + subscribe + bridge task + CronOwner + set_async_owners）──
+        {
+            let shared_queue_arc = Arc::new(shared_queue.clone());
+            let session_inbox = SessionInbox::new(shared_queue_arc);
+            let inbox_handle = session_inbox.handle();
 
-        let mut cron_owner = None;
-        if let Some(ref scheduler) = cron_scheduler {
             let mut trigger_rx = {
                 let mut sched = scheduler.lock();
                 sched.subscribe()
@@ -952,11 +972,11 @@ pub(crate) fn build_stage_context(
 
             let mut owner = CronOwner::new();
             owner.start(prompt_rx, inbox_handle, cancel_arc.clone());
-            cron_owner = Some(owner);
             tracing::info!("CronOwner started (ACP bridge path)");
-        }
 
-        session.set_async_owners(session_inbox, cron_owner, None);
+            // 分支内 scheduler 恒为 Some（else-if 绑定），直接注入
+            session.set_async_owners(session_inbox, Some(owner), None);
+        }
     }
 
     let turn = session.start_turn();

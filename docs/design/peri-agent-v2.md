@@ -90,7 +90,9 @@ graph TB
 
 **异步 Owner（AsyncOwners）**
 
-Session 可选持有 `async_owners: Option<RwLock<Option<AsyncOwners>>>`，由 ACP 层通过 `set_async_owners` 注入。包含三个组件：
+cron 主路径为 session 级：`CronOwner` 由 `AcpSession.cron_bridge` 持有（跨 turn 存活，turn 结束含 retry Error 不杀死 bridge），`SessionInbox` 为 session 级 lazy-init（`session_inbox_for`），与 executor 的 `await_wake` 共享同一 wake Notify。
+
+Session 侧 `set_async_owners` 注入的 `async_owners: Option<RwLock<Option<AsyncOwners>>>` 仅 print 模式（`-p`，无 SessionManager）fallback 使用。包含三个组件：
 
 - **SessionInbox**：提供 `await_wake` 机制——Agent 在 idle 时通过 `inbox.await_wake()` 阻塞等待异步事件（bg agent / cron / workflow），醒来后继续执行
 - **CronOwner**：将 cron 定时触发桥接到 inbox，触发 wake

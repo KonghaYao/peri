@@ -80,6 +80,7 @@ fn make_server_config(
         Arc::new(peri_config.clone()),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
+        None,
     );
     AcpServerConfig {
         provider: Arc::new(parking_lot::RwLock::new(provider)),

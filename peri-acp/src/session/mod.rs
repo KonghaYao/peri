@@ -6,11 +6,15 @@
 //! v2 迁移：AcpSession 瘦身为外部句柄，核心状态委托给
 //! `peri_agent::session::Session`。保留 ACP 特有字段（provider_id、
 //! model_alias、thinking、active_agents、goal_state）。
+//!
+//! cron 主路径：session 级 CronOwner 由 `AcpSession.cron_bridge` 持有
+//! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
 
 pub mod agent_pool;
 pub mod agent_runtime;
 pub mod async_router;
 pub mod command;
+pub mod cron_bridge;
 pub mod event_sink;
 pub mod executor;
 pub mod goal_state;
@@ -44,6 +48,7 @@ use executor::PERMISSION_MODE_NEVER_NOTIFIED;
 use crate::{
     provider::{config::PeriConfig, LlmProvider},
     session::agent_runtime::{AgentRuntime, CancelPolicy},
+    session::cron_bridge::SessionCronBridge,
 };
 
 pub struct AcpSession {
@@ -93,6 +98,8 @@ pub struct AcpSession {
     /// `None` means the session doesn't support async wake (e.g., print mode
     /// without a SessionManager). The executor falls back to direct return.
     pub session_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
+    pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,
     /// 后台任务注册中心（session 级，跨 prompt 存活）
     pub background_registry: Arc<BackgroundTaskRegistry>,
 }
@@ -111,6 +118,8 @@ struct SessionManagerInner {
     /// Peri 自定义能力注册表（per-session）。
     /// Key: session_id。使用 Arc<DashMap<...>> 以支持 clone 共享。
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
+    /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
+    pub cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
 }
 
 #[derive(Clone)]
@@ -125,6 +134,7 @@ impl SessionManager {
         peri_config: Arc<PeriConfig>,
         permission_mode: Arc<SharedPermissionMode>,
         agent_overrides: Option<AgentOverrides>,
+        cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
@@ -136,6 +146,7 @@ impl SessionManager {
                 agent_overrides,
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
+                cron_scheduler,
             }),
         }
     }
@@ -200,6 +211,7 @@ impl SessionManager {
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
             session_inbox: None,
+            cron_bridge: None,
             background_registry,
         };
 
@@ -238,6 +250,7 @@ impl SessionManager {
             v2_message_queue: peri_agent::session::MessageQueue::new(),
             v2_session: None,
             session_inbox: None,
+            cron_bridge: None,
             background_registry,
         }
     }
@@ -464,6 +477,40 @@ impl SessionManager {
         } else {
             None
         }
+    }
+
+    /// 确保指定 session 的 session 级 cron bridge 已启动（lazy-init，幂等）。
+    ///
+    /// 首次调用：`scheduler.subscribe()` 一次 + 用 session 级 inbox handle 启动
+    /// `SessionCronBridge`。此后每 turn 重复调用均为 no-op（"already set" 检查在
+    /// `get_mut` 写锁内，杜绝并发双订阅）。bridge 跨 turn 存活，close_session
+    /// 时随 AcpSession drop 而中止。
+    ///
+    /// session 不存在或 scheduler 未配置时返回 false。
+    pub fn cron_bridge_for(&self, session_id: &str) -> bool {
+        let scheduler = match &self.inner.cron_scheduler {
+            Some(s) => s.clone(),
+            None => return false,
+        };
+        // Fast path
+        if let Some(session) = self.inner.sessions.get(session_id) {
+            if session.cron_bridge.is_some() {
+                return true;
+            }
+        }
+        // Slow path: session-level inbox first (shared wake Notify), then bridge
+        let Some(inbox) = self.session_inbox_for(session_id) else {
+            return false;
+        };
+        if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
+            if session.cron_bridge.is_none() {
+                session.cron_bridge = Some(SessionCronBridge::start(&scheduler, inbox.handle()));
+                tracing::info!(session_id = %session_id, "session cron bridge started");
+            }
+        }
+        // 理论性竞态：session_inbox_for 成功后 get_mut 返回 None（并发
+        // close_session 恰好移除）时返回 true 但未实际创建——生产调用方忽略返回值。
+        true
     }
 
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。

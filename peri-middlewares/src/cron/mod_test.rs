@@ -126,3 +126,17 @@ fn test_register_rejects_empty_prompt() {
     let result = sched.register("* * * * *", "");
     assert!(result.is_ok(), "scheduler 层不应拒绝空 prompt");
 }
+
+#[test]
+fn test_tick_removes_dead_extra_sender() {
+    let (mut sched, _rx) = new_scheduler();
+    let rx = sched.subscribe();
+    drop(rx); // bridge 已死（turn 结束后 sender 失效的旧行为）
+    let id = sched.register("* * * * *", "retain test").unwrap();
+    sched.tasks.get_mut(&id).unwrap().next_fire = Some(Utc::now() - chrono::Duration::seconds(10));
+    sched.tick();
+    assert!(
+        sched.extra_trigger_txs.is_empty(),
+        "死 sender 应在 tick 时被 retain 清理"
+    );
+}
