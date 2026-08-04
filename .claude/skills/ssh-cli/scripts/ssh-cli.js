@@ -9,6 +9,8 @@
  *   node ssh-cli.js write <host> <file_path> <content> [--append]   # 或 --stdin 从 stdin 读内容
  *   node ssh-cli.js edit <host> <file_path> <old_string> <new_string> [--all]
  *   node ssh-cli.js ls <host> <dir>
+ *   node ssh-cli.js push <local_path> <host> <remote_path> [--recursive]   # 上传（scp）
+ *   node ssh-cli.js pull <host> <remote_path> <local_path> [--recursive]   # 下载（scp）
  *   node ssh-cli.js test <host>
  *
  * 全局选项（任意子命令后）:
@@ -93,6 +95,8 @@ function printHelp() {
   ssh-cli write <host> <file_path> <content> [--append]        # 或 --stdin
   ssh-cli edit <host> <file_path> <old_string> <new_string> [--all]
   ssh-cli ls <host> <dir>
+  ssh-cli push <local_path> <host> <remote_path> [--recursive]  # 上传（scp）
+  ssh-cli pull <host> <remote_path> <local_path> [--recursive]  # 下载（scp）
   ssh-cli test <host>
 
 全局选项:
@@ -202,6 +206,59 @@ function execRemote(cfg, host, cmd, { timeoutMs, stdin } = {}) {
       });
     });
     if (stdin !== undefined) child.stdin.write(stdin);
+    child.stdin.end();
+  });
+}
+
+/**
+ * 通过 scp 传输文件（本地上传 / 远程下载）。
+ * scp 参数直接传递（不经远程 shell），远程路径含空格也安全。
+ * @returns {Promise<{stdout: Buffer, stderr: Buffer, exitCode: number, timedOut: boolean}>}
+ */
+function scpRemote(cfg, host, scpArgs, { timeoutMs } = {}) {
+  const t = timeoutMs ?? cfg.timeoutMs;
+  const args = [
+    '-o', 'ConnectTimeout=15',
+    '-o', 'ServerAliveInterval=15',
+    '-o', 'ServerAliveCountMax=3',
+    '-o', `StrictHostKeyChecking=${cfg.strict}`,
+    '-o', 'ControlMaster=auto',
+    '-o', `ControlPath=${cfg.controlPath}/control-%C`,
+    '-o', 'ControlPersist=600',
+    '-o', 'BatchMode=yes',
+    ...(cfg.port ? ['-P', String(cfg.port)] : []),
+    ...(cfg.key ? ['-i', cfg.key] : []),
+    ...scpArgs,
+  ];
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn('scp', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      return reject(new Error(`无法启动 scp 进程: ${e.message}`));
+    }
+    const stdout = [];
+    const stderr = [];
+    let timedOut = false;
+    const timer = t > 0 ? setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+    }, t) : null;
+    child.stdout.on('data', (d) => stdout.push(d));
+    child.stderr.on('data', (d) => stderr.push(d));
+    child.on('error', (e) => {
+      if (timer) clearTimeout(timer);
+      reject(new Error(`scp 进程错误: ${e.message}`));
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+        exitCode: code,
+        timedOut,
+      });
+    });
     child.stdin.end();
   });
 }
@@ -366,6 +423,46 @@ async function cmdTest(cfg, args) {
   process.exit(0);
 }
 
+async function cmdPush(cfg, args) {
+  if (args.length < 3) fail('push 需要 <local_path> <host> <remote_path> [--recursive]');
+  const local = args.shift();
+  const host = args.shift();
+  const remote = args.shift();
+  const recursive = args.includes('--recursive');
+  checkHost(cfg, host);
+  if (!fs.existsSync(local)) fail(`本地路径不存在: ${local}`);
+  const t0 = Date.now();
+  const r = await scpRemote(cfg, host, [
+    ...(recursive ? ['-r'] : []),
+    local, `${host}:${remote}`,
+  ]);
+  const bytes = recursive ? null : fs.statSync(local).size;
+  audit(cfg, { cmd: 'push', host, local, remote, recursive, bytes, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: Date.now() - t0 });
+  if (r.timedOut) fail('传输超时（大文件请加大 --timeout）');
+  if (r.exitCode !== 0) fail(`上传失败: ${r.stderr.toString('utf8').trim() || '(无输出)'}`);
+  process.stdout.write(`已上传 ${local} → ${host}:${remote}${bytes ? `（${(bytes / 1024).toFixed(1)} KB）` : ''}\n`);
+  process.exit(0);
+}
+
+async function cmdPull(cfg, args) {
+  if (args.length < 3) fail('pull 需要 <host> <remote_path> <local_path> [--recursive]');
+  const host = args.shift();
+  const remote = args.shift();
+  const local = args.shift();
+  const recursive = args.includes('--recursive');
+  checkHost(cfg, host);
+  const t0 = Date.now();
+  const r = await scpRemote(cfg, host, [
+    ...(recursive ? ['-r'] : []),
+    `${host}:${remote}`, local,
+  ]);
+  audit(cfg, { cmd: 'pull', host, local, remote, recursive, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: Date.now() - t0 });
+  if (r.timedOut) fail('传输超时（大文件请加大 --timeout）');
+  if (r.exitCode !== 0) fail(`下载失败: ${r.stderr.toString('utf8').trim() || '(无输出)'}`);
+  process.stdout.write(`已下载 ${host}:${remote} → ${local}\n`);
+  process.exit(0);
+}
+
 function countMatches(s, sub) {
   let n = 0, i = 0;
   while ((i = s.indexOf(sub, i)) !== -1) { n++; i += sub.length; }
@@ -381,9 +478,10 @@ async function main() {
   const sub = rest.shift();
   const args = rest;
   const subcommands = {
-    exec: cmdExec, read: cmdRead, write: cmdWrite, edit: cmdEdit, ls: cmdLs, test: cmdTest,
+    exec: cmdExec, read: cmdRead, write: cmdWrite, edit: cmdEdit, ls: cmdLs,
+    push: cmdPush, pull: cmdPull, test: cmdTest,
   };
-  if (!subcommands[sub]) fail(`未知子命令: ${sub}（支持 exec/read/write/edit/ls/test）`);
+  if (!subcommands[sub]) fail(`未知子命令: ${sub}（支持 exec/read/write/edit/ls/push/pull/test）`);
   try {
     await subcommands[sub](cfg, args);
   } catch (e) {

@@ -20,6 +20,8 @@ node .claude/skills/ssh-cli/scripts/ssh-cli.js <子命令> ...
 | `write` | 写/追加远程文件 | `write dev-server /app/.env "KEY=value"`（追加加 `--append`，长内容用 `--stdin`） |
 | `edit` | 精确替换（old_string 必须唯一，多匹配加 `--all`） | `edit dev-server /app/main.js "old" "new"` |
 | `ls` | 目录列表 | `ls dev-server /app` |
+| `push` | 本地上传远程（scp，`--recursive` 传目录） | `push ./dist dev-server /srv/app/dist` |
+| `pull` | 远程下载本地（scp） | `pull dev-server /var/log/app.log ./app.log` |
 | `test` | 连接诊断（主机名/系统/连通性） | `test dev-server` |
 
 ## 参数约定
@@ -52,7 +54,22 @@ node .claude/skills/ssh-cli/scripts/ssh-cli.js read dev-server /srv/app/config.j
 node .claude/skills/ssh-cli/scripts/ssh-cli.js edit dev-server /srv/app/config.js "port: 3000" "port: 8080"
 ```
 
-### 4. 大文件/长内容
+### 4. 文件传输用 push / pull（scp 包装）
+
+单文件/目录都支持；大目录建议 `--recursive`，传输超时调大 `--timeout`：
+
+```bash
+node .claude/skills/ssh-cli/scripts/ssh-cli.js push ./build/ dev-server /srv/app/build --recursive
+node .claude/skills/ssh-cli/scripts/ssh-cli.js pull prod /var/log/nginx/access.log ./access.log
+```
+
+需要增量同步/断点续传的大目录时，直接用 rsync（两端都要有）：
+
+```bash
+rsync -avz --partial ./dir/ user@host:/srv/dir/
+```
+
+### 5. 大文件/长内容
 
 - 读大文件：`read` 只传输需要的行区间（sed 实现），返回前会打印总行数
 - 写长内容：`write` 用 `--stdin` 从 stdin 读，避免命令行长度限制与注入风险
@@ -61,7 +78,7 @@ node .claude/skills/ssh-cli/scripts/ssh-cli.js edit dev-server /srv/app/config.j
 cat local-file.txt | node .claude/skills/ssh-cli/scripts/ssh-cli.js write dev-server /srv/app/data.json --stdin
 ```
 
-### 5. 安全建议
+### 6. 安全建议
 
 - 生产主机建议配置 `--hosts "prod"` 白名单，白名单外主机直接拒绝
 - 敏感操作（部署、改配置）配合 `--audit-log /tmp/ssh-cli-audit.jsonl`，每次调用留痕（含命令与退出码）
