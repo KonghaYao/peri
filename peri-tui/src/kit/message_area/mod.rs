@@ -35,7 +35,7 @@ use ratatui_kit::{
 mod footer;
 mod props;
 mod render;
-mod scroll;
+pub(crate) mod scroll;
 mod selection;
 use footer::{KeepGoingLayout, build_footer_lines, hash_todo_items};
 pub use footer::{TodoItem, TodoStatus};
@@ -377,13 +377,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     } else {
         0
     };
-    // [Padding] 追加 2 行空白滚动空间，减少流式输出期间因新行到达导致的视口抖动。
-    // 这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length / auto-follow 阈值。
+    // [Padding] 追加 SCROLL_PADDING 行空白滚动空间，减少流式输出期间因新行到达
+    // 导致的视口抖动。这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length；
+    // 吸底跟随恢复判定会扣除它们（scroll::should_follow_after_user_scroll）。
     let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
         if is_loading { 1 } else { 0 }
     } else {
         (core_total_visual_rows + footer_visual_rows)
-            .saturating_add(2)
+            .saturating_add(scroll::SCROLL_PADDING)
             .min(u16::MAX as usize) as u16
     };
 
@@ -647,6 +648,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .unwrap_or(0);
         g.viewport_length = vis_height as usize;
     }
+
+    // [Fix 滚动尾随] 渲染帧兜底 flush：ratatui-kit 无 tick 定时器，停手后事件不再
+    // 到达时，残留 pending_delta 在任意后续渲染帧（鼠标移动/内容更新/其他事件）
+    // 落地，消除「滚动停止不到位」；反向抵消已由 apply_scroll 先行处理。
+    // write_no_update 不触发 wake，无自激重渲染。
+    scroll::flush_scroll_if_due(
+        &scroll_throttle,
+        &scroll_state,
+        &scrollbar_fields,
+        &follow_bottom,
+    );
 
     let vp_height = vis_height as usize;
 

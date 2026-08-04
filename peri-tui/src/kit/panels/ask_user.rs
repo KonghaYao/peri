@@ -41,6 +41,8 @@ const TYPING_VIEWPORT_ROWS: usize = 3;
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
     let pending: Option<AskUser> = pending_store.read().clone();
     let _ = pending_store;
     let _ = hooks.use_atom(&LANG_VERSION);
@@ -813,10 +815,18 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::AskUser,
+        hooks.use_previous_size(),
+        sv,
+    );
+
     panel_shell!(PanelKind::AskUser, {
         element!(
             ScrollView(
                 scrollbars: panel_registry::clean_scrollbars(),
+                state: Some(sv),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

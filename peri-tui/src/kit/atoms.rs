@@ -241,6 +241,14 @@ pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
 pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
+/// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
+pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =
+    AtomStatic::new(|| None);
+/// 面板滚轮仲裁节流器（复用消息区 ScrollThrottle 与 scroll_fps 配置）。
+pub(crate) static PANEL_SCROLL_THROTTLE: AtomStatic<
+    crate::kit::message_area::scroll::ScrollThrottle,
+> = AtomStatic::new(crate::kit::message_area::scroll::ScrollThrottle::default);
 /// 模型快速切换弹窗锚点（屏幕坐标：状态栏模型段起点 (x, y)）。
 /// StatusBarRow1 在 open_popup(ModelQuickSwitch) 前写入，弹窗组件读取后
 /// 自定位到锚点上方（非居中大弹窗）。

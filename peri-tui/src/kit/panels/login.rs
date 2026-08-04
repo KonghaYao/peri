@@ -182,6 +182,8 @@ impl LoginEditState {
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
     let mode = hooks.use_state(|| LoginPanelMode::Browse);
     let edit_state = hooks.use_state(|| None::<LoginEditState>);
     let edit_focus = hooks.use_state(|| LoginEditField::ProviderType);
@@ -650,9 +652,17 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::Login,
+        hooks.use_previous_size(),
+        sv,
+    );
+
     panel_shell!(PanelKind::Login, {
             ScrollView(
                 scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                state: Some(sv),
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {

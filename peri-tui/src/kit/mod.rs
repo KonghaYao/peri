@@ -29,6 +29,7 @@ pub mod mouse_router;
 pub mod panel_mouse;
 pub mod panel_overlay;
 pub mod panel_registry;
+pub mod panel_scroll;
 pub mod panels;
 pub mod popup_overlay;
 pub mod popups;
