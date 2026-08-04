@@ -91,10 +91,11 @@ fn test_footer_loading_steady_state_has_no_control_state_transition() {
     );
 }
 
-/// idle 态渲染静止图标占位：固定第一帧（不参与动画），无 verb/elapsed
+/// idle 态渲染静止图标占位：固定第一帧（不参与动画），带默认 verb
 #[test]
 fn test_render_idle_spinner_line_static_fixed_frame() {
-    let line = render_idle_spinner_line(ratatui::style::Color::DarkGray);
+    let verb = "格物致知";
+    let line = render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
     let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     let frame0 = crate::components::spinner::animation::tick_to_frame(0);
     assert!(
@@ -102,12 +103,17 @@ fn test_render_idle_spinner_line_static_fixed_frame() {
         "idle 应渲染静止图标（固定第一帧），实际: {rendered}"
     );
     // 静止语义：连续两次渲染内容一致（不随壁钟推进换帧）
-    let again = render_idle_spinner_line(ratatui::style::Color::DarkGray);
+    let again = render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
     let rendered2: String = again.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(rendered, rendered2, "idle 行不应随时间变化");
-    // 不包含 verb/elapsed 后缀
+    // 附带默认 verb 文字（历史会话恢复后不再只有孤零零的图标）
     assert!(
-        !rendered.contains('s') || !rendered.contains("token"),
+        rendered.contains(verb),
+        "idle 行应附带默认 verb 文字，实际: {rendered}"
+    );
+    // 不包含 elapsed/token 后缀
+    assert!(
+        !rendered.contains("token") && !rendered.contains('('),
         "idle 行不应带 elapsed/token 后缀，实际: {rendered}"
     );
 }

@@ -147,7 +147,18 @@ pub fn flush_panel_scroll_due() {
         && *ACTIVE_PANEL.state().read() == Some(owner.kind)
         && let Some(slot) = owner.slots.first()
     {
-        apply_pending_to_view(&mut slot.state.write_no_update(), pending);
+        // [Fix 竞态崩溃] 本函数在 PanelOverlay::update（组件 update 遍历）内执行，
+        // 而 slot.state 是面板 ScrollView 组件的 State——同一遍历中 ScrollView 正在
+        // 更新，可能已持有该 state 的写引用（如面板第二次打开帧）。write_no_update()
+        // 内部 expect 会 panic 崩溃整个 TUI（.tmp/agent-tui 17:47:31 复现，e2e
+        // workflow-run 2/2）。改用 try_write_no_update：借用冲突时跳过本次落地并把
+        // pending 归还节流器，下一节流窗口到期后重试——滚动量不丢、语义不变。
+        if let Some(mut scroll) = slot.state.try_write_no_update() {
+            apply_pending_to_view(&mut scroll, pending);
+        } else if pending != 0 {
+            let mut st = throttle.write_no_update();
+            st.pending_delta += pending;
+        }
     }
 }
 

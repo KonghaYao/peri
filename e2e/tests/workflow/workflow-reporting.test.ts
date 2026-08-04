@@ -77,9 +77,11 @@ describe("workflow: reporting (P2/P0/P3)", () => {
       tester = await launchPeri();
 
       // 触发 workflow：2 个并行 agent
+      // 注：prompt 用中文（模型对中文 workflow 派发指令的遵循更稳定，参见
+      // workflow-run.test.ts / workflow-panel-columns.test.ts 的用法）
       await sendPrompt(
         tester,
-        "/ultracode dispatch a workflow with 2 parallel agents. Agent 1 (label: greeter): say hello world and describe what you see in 3 sentences. Agent 2 (label: counter): count from 1 to 10. Use phase('Test') before the parallel call.",
+        "/ultracode 请用 Workflow 工具派发一个 workflow，包含 2 个并行 agent：Agent 1（label: greeter）说 hello world，并用 3 句话描述你看到的内容；Agent 2（label: counter）从 1 数到 10。并行调用前先使用 phase('Test')。",
       );
 
       // 等待新 run 出现（state.json 就绪）

@@ -10,3 +10,7 @@
 > 测试 Goal
 
  /goal 我们来测试 goal 工具， 你要数到 10 ，但是中间中断， 让 goal 唤醒你
+
+> 测试一下markdown
+
+请你测试一下 markdown 的， 每种样式给一个

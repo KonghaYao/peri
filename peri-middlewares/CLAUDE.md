@@ -23,7 +23,7 @@
 | MCP 合并、server/tool bridge | `src/mcp/` |
 | Plugin manifest、commands、agents、MCP 回退 | `src/plugin/` |
 | Hook 事件与执行器 | `src/hooks/` |
-| Skills 扫描、预加载、工具 | `src/skills/`、`src/tools/skill.rs` |
+| Skills 扫描、预加载、工具 | `src/skills/`、`src/skills/tools.rs` |
 | SubAgent、后台任务、取消和事件 | `src/subagent/` |
 | HITL 权限与审批 | `src/hitl/` |
 | Workflow、LSP、工具搜索 | `src/workflow/`、`src/lsp/`、`src/tool_search/` |

@@ -23,6 +23,41 @@ import {
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
+/**
+ * 等待当前 turn 真正完成（全局 "处理耗时" / "Brewed for" footer 检测）。
+ *
+ * 不依赖 prompt 回显定位——用 lastIndexOf 可能误匹配输入框边框的会话标题，
+ * 且多轮会话中早期 prompt 回显可能被后续内容推出可见行。
+ * 改用全局 footer 检测：发送顺序执行保证所有 footer 属于当前 turn。
+ */
+async function waitTurnCompleted(
+  tester: TmuxTester,
+  marker: string,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    await tester.waitFor(
+      (screen) => {
+        return (
+          screen.lastIndexOf("处理耗时") !== -1 ||
+          screen.lastIndexOf("Brewed for") !== -1
+        );
+      },
+      {
+        timeout: timeoutMs,
+        interval: 1000,
+        message: `等待 turn 完成超时: ${marker}`,
+      },
+    );
+  } catch (e) {
+    // 诊断：超时时 dump 屏幕，便于区分"agent 仍在运行"与"turn 未渲染"
+    const diag = await tester.getScreenText();
+    console.error(`=== [DIAG] ${marker} turn 完成等待超时，当前屏幕（纯文本） ===`);
+    console.error(diag);
+    throw e;
+  }
+}
+
 describe("scenarios: rewind v2 回退链路", () => {
   let tester: TmuxTester;
 
@@ -57,6 +92,14 @@ describe("scenarios: rewind v2 回退链路", () => {
       );
       await tester.waitForText("Write", { timeout: 90_000, interval: 1000 });
       await waitForStableScreen(tester, 180_000, base);
+      // 修复竞态：agent 可能暂停超过 waitForStableScreen 的窗口（thinking /
+      // 工具调用阶段之间），必须等 turn 完成（"处理耗时" footer）再双击 Esc，
+      // 否则候选查询为空、弹窗显示"无可回退的消息"。
+      await waitTurnCompleted(tester, promptPrefix, 180_000);
+      // 等 history 写回：turn 完成事件渲染 footer 后，服务端
+      // SessionState.history（prompt.rs:240）写回可能仍有延迟，
+      // rewind-candidates 读到旧快照 → 候选为空。加 1s 缓冲。
+      await tester.sleep(1000);
 
       // ── 双击 Esc 打开候选弹窗（两次间隔 <500ms 满足双击判定）──
       // 显式控制间隔：sendKeys 内部 100ms sleep + tmux exec 往返可能逼近 500ms 窗口

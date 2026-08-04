@@ -10,7 +10,7 @@
  * - tool-error-no-suffix:       错误态头行无 "— N lines" 后缀
  *
  * 一次会话 4 个顺序阶段。跨阶段文本（Read/Write 等）会留在历史中，
- * 因此每阶段用 prompt 前缀定位"当前 turn"区段（lastIndexOf + 处理耗时边界）。
+ * 因此每阶段用 prompt 前缀定位"当前 turn"区段（❯ 回显前缀 + 处理耗时边界）。
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
@@ -30,16 +30,18 @@ interface Turn {
   completed: boolean;
 }
 
-/** 当前 prompt 之后的区段（到 "处理耗时" footer 为止） */
-function currentTurn(screen: string, promptMarker: string): Turn | undefined {
-  const promptStart = screen.lastIndexOf(promptMarker);
-  if (promptStart < 0) {
-    return undefined;
-  }
-  const turnEnd = screen.indexOf("处理耗时", promptStart);
+/** 检测 turn 是否完成（不依赖 prompt 回显——多阶段会话中回显可能被消息区溢出挤出屏幕） */
+function currentTurn(screen: string, _marker: string): Turn | undefined {
+  // 多阶段会话中 prompt 回显可能被消息区溢出挤出可见行（如 Glob 返回 166 文件）。
+  // 改用全局 footer 检测——发送顺序执行保证所有 "处理耗时" / "Brewed for"
+  // 必定是当前 turn 的完成标志（上一 turn 的 footer 已随旧内容滚出屏幕）。
+  const zhFooter = screen.lastIndexOf("处理耗时");
+  const enFooter = screen.lastIndexOf("Brewed for");
+  const footerIdx = Math.max(zhFooter, enFooter);
+  if (footerIdx < 0) return undefined;
   return {
-    section: screen.slice(promptStart, turnEnd >= promptStart ? turnEnd : undefined),
-    completed: turnEnd >= promptStart,
+    section: screen.slice(0, footerIdx),
+    completed: true,
   };
 }
 

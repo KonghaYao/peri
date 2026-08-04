@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use crate::components::spinner::verb;
 use crate::components::spinner::{SpinnerMode, SpinnerState};
 use crate::i18n;
 use fluent_bundle::FluentValue;
@@ -64,17 +65,19 @@ pub(super) fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
 
 // ── footer 行构建 ─────────────────────────────────────────────────────────
 
-/// idle 态静止图标行：固定第一帧（不参与动画），muted 色。
+/// idle 态静止图标行：固定第一帧（不参与动画），muted 色，附带默认 verb。
 ///
 /// spinner 组件常驻——active 时动画转动，inactive 时以此占位，永不 hidden。
 /// [Why 固定帧] render_to_lines 的帧由壁钟纯计算（Idle 态也会转），
 /// inactive 应静止，故单独输出 `tick_to_frame(0)` 而非复用动画路径。
-pub(super) fn render_idle_spinner_line(color: Color) -> Line<'static> {
+/// [Why 带 verb] 历史会话恢复等场景没有耗时 summary，若只显示图标会显得
+/// 突兀（只有符号没有文字），附带一句默认成语占位，与 loading 行视觉一致。
+pub(super) fn render_idle_spinner_line(color: Color, verb: &str) -> Line<'static> {
     let frame = crate::components::spinner::animation::tick_to_frame(0);
-    Line::from(vec![Span::styled(
-        format!("{frame} "),
-        Style::default().fg(color),
-    )])
+    Line::from(vec![
+        Span::styled(format!("{frame} "), Style::default().fg(color)),
+        Span::styled(verb.to_string(), Style::default().fg(color)),
+    ])
 }
 
 /// keepgoing 按钮在 footer 行内的布局信息（供 MessageArea 计算屏幕点击区域）。
@@ -109,6 +112,8 @@ pub(super) fn build_footer_lines(
     let summary_elapsed_ms = hooks.use_state(|| 0u64);
     let loading_epoch = hooks.use_atom(&LOADING_EPOCH);
     let last_epoch = hooks.use_state(|| 0u64);
+    // idle 占位行的默认 verb：会话期间固定一句成语，避免每次渲染随机闪变。
+    let idle_verb = hooks.use_state(|| verb::pick_verb(None));
 
     let last_reset_counter = hooks.use_state(|| crate::kit::atoms::BRIDGE_RESET_COUNTER.get());
     {
@@ -227,8 +232,11 @@ pub(super) fn build_footer_lines(
     if !todo_items.is_empty() {
         lines.extend(render_todo_lines(todo_items));
     } else if !is_loading && !has_summary {
-        // idle：静止图标占位（inactive 态）。todo/summary 存在时本身即为占位内容。
-        lines.push(render_idle_spinner_line(semantic.text.muted));
+        // idle：静止图标 + 默认 verb 占位（inactive 态）。todo/summary 存在时本身即为占位内容。
+        lines.push(render_idle_spinner_line(
+            semantic.text.muted,
+            &idle_verb.read(),
+        ));
     }
     lines.push(Line::from(""));
     (lines, keepgoing_layout, has_content)
