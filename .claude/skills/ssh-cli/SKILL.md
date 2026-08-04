@@ -42,9 +42,19 @@ node .claude/skills/ssh-cli/scripts/ssh-cli.js dev-server
 ## 参数约定
 
 - `host`：`user@host` 或 `~/.ssh/config` 别名；凭据全部走系统 ssh（config/agent/key），命令行不传密码
-- 全局选项：`--hosts <白名单>`（逗号分隔，`*` 放行所有；不传默认放行）、`--timeout <ms>`、`--port <n>`、`--key <path>`、`--audit-log <path>`
-- 环境变量：`SSH_CLI_ALLOWED_HOSTS` / `SSH_CLI_TIMEOUT` / `SSH_CLI_PORT` / `SSH_CLI_AUDIT_LOG`
+- 全局选项：`--hosts <白名单>`（逗号分隔，`*` 放行所有；不传默认放行）、`--timeout <ms>`、`--port <n>`、`--key <path>`、`--audit-log <path>`、`--ask-pass`
+- 环境变量：`SSH_CLI_ALLOWED_HOSTS` / `SSH_CLI_TIMEOUT` / `SSH_CLI_PORT` / `SSH_CLI_AUDIT_LOG` / `SSH_CLI_PASSWORD`
 - 退出码：`exec` 远程非零退出返回同码；超时 124；其他错误 1 —— 可用于判断成败
+
+### 密码登录（无 key 的机器）
+
+首选 `ssh-copy-id user@host` 一次性导入 key（密码只输一次，之后免密）。也可以直接密码认证：
+
+```bash
+node .claude/skills/ssh-cli/scripts/ssh-cli.js --ask-pass test user@10.0.0.5
+```
+
+`--ask-pass` 要求 OpenSSH 8.4+（2020 年后系统均满足）：密码经 TTY 隐藏输入，或经 `SSH_CLI_PASSWORD` 环境变量提供（REPL 子命令自动透传）。**密码只存在于内存/环境变量/0600 临时 askpass 脚本（退出即删），绝不进命令行参数与审计日志**——不要用 `--password xxx` 这种形式，会泄露进 shell history 和 ps 输出。
 
 ## 工作流
 

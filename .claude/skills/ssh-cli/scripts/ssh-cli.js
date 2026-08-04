@@ -26,6 +26,8 @@
  *   --audit-log <path> 审计日志 JSONL（可选）
  *   --strict <mode>    known_hosts 策略: accept-new(默认) | ask | yes | no
  *   --port <n> / --key <path>  SSH 端口 / 私钥路径（可选）
+ *   --ask-pass                密码认证（OpenSSH 8.4+）：TTY 隐藏输入或
+ *                             环境变量 SSH_CLI_PASSWORD（勿用命令行传密码）
  *
  * 环境变量: SSH_CLI_ALLOWED_HOSTS / SSH_CLI_TIMEOUT / SSH_CLI_AUDIT_LOG /
  *           SSH_CLI_STRICT_HOST_KEY
@@ -55,6 +57,8 @@ function parseGlobalArgs(argv) {
     strict: 'accept-new',
     port: null,
     key: null,
+    askPass: false,       // 密码认证（SSH_ASKPASS_REQUIRE=force，OpenSSH 8.4+）
+    password: null,
     controlPath: path.join(
       os.tmpdir(),
       'ssh-cli-' + (process.getuid ? process.getuid() : 'user'),
@@ -72,6 +76,7 @@ function parseGlobalArgs(argv) {
       case '--strict': cfg.strict = kv(next()) || cfg.strict; break;
       case '--port': cfg.port = Number(next()) || null; break;
       case '--key': cfg.key = kv(next()); break;
+      case '--ask-pass': cfg.askPass = true; break;
       case '--help': case '-h': printHelp(); process.exit(0);
       default:
         if (a.startsWith('-')) {
@@ -115,12 +120,60 @@ function printHelp() {
   --strict <mode>    known_hosts 策略: accept-new(默认) | ask | yes | no
   --port <n>         SSH 端口
   --key <path>       SSH 私钥路径
+  --ask-pass         密码认证（OpenSSH 8.4+）；密码经 TTY 隐藏输入或
+                     SSH_CLI_PASSWORD 环境变量提供，勿用命令行传密码
 
 环境变量: SSH_CLI_ALLOWED_HOSTS / SSH_CLI_TIMEOUT / SSH_CLI_AUDIT_LOG /
           SSH_CLI_STRICT_HOST_KEY / SSH_CLI_PORT
 
 退出码: exec 远程命令非零退出返回同码；超时 124；其他错误 1。
 `);
+}
+
+// ─────────────────────────── 密码认证 ───────────────────────────
+
+/** askpass 临时脚本路径（0600，退出时清理）。ssh 通过它获取密码。 */
+let askpassScript = null;
+function askpassPath() {
+  if (!askpassScript) {
+    askpassScript = path.join(os.tmpdir(), `ssh-cli-askpass-${process.pid}.sh`);
+    // 0o700：ssh 直接 exec 脚本（需执行位），仅属主可读（含密码）
+    fs.writeFileSync(askpassScript, '#!/bin/sh\nprintf "%s" "$SSH_CLI_PASSWORD"\n', { mode: 0o700 });
+    process.on('exit', () => { try { fs.unlinkSync(askpassScript); } catch { /* 已删 */ } });
+  }
+  return askpassScript;
+}
+
+/**
+ * 读取密码（--ask-pass 时调用）：
+ * - 环境变量 SSH_CLI_PASSWORD 优先（REPL 子进程透传用，避免 argv 泄露）
+ * - 否则 TTY 隐藏输入；非 TTY 从 stdin 第一行读取
+ * 密码只存在于内存/env/0600 临时脚本，绝不进 argv 与审计日志。
+ */
+function readPassword() {
+  if (process.env.SSH_CLI_PASSWORD !== undefined) return process.env.SSH_CLI_PASSWORD;
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+      rl._writeToOutput = (s) => { if (s.includes('密码')) rl.output.write(s); }; // 只显示提示，不回显输入
+      rl.question('密码: ', (pw) => { rl.close(); resolve(pw); });
+    } else {
+      let buf = '';
+      process.stdin.on('data', (d) => { buf += d.toString('utf8'); });
+      process.stdin.on('end', () => resolve(buf.split('\n')[0]));
+    }
+  });
+}
+
+/** spawn 环境：启用 askpass 时注入 SSH_ASKPASS 相关变量 */
+function spawnEnv(cfg) {
+  if (!cfg.password) return process.env;
+  return {
+    ...process.env,
+    SSH_ASKPASS: askpassPath(),
+    SSH_ASKPASS_REQUIRE: 'force',
+    SSH_CLI_PASSWORD: cfg.password,
+  };
 }
 
 // ─────────────────────────── 小工具 ───────────────────────────
@@ -182,7 +235,8 @@ function baseSshArgs(cfg, host) {
     '-o', 'ControlMaster=auto',
     '-o', `ControlPath=${cfg.controlPath}/control-${controlHash(host, cfg.port, cfg.key)}`,
     '-o', 'ControlPersist=600',
-    '-o', 'BatchMode=yes',
+    // 密码认证时禁用 BatchMode（否则 askpass 不生效）
+    ...(cfg.password ? [] : ['-o', 'BatchMode=yes']),
   ];
   if (cfg.port) args.push('-p', String(cfg.port));
   if (cfg.key) args.push('-i', cfg.key);
@@ -201,7 +255,7 @@ function execRemote(cfg, host, cmd, { timeoutMs, stdin } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn('ssh', sshArgs, { stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv(cfg) });
     } catch (e) {
       return reject(new Error(`无法启动 ssh 进程: ${e.message}`));
     }
@@ -247,7 +301,8 @@ function scpRemote(cfg, host, scpArgs, { timeoutMs } = {}) {
     '-o', 'ControlMaster=auto',
     '-o', `ControlPath=${cfg.controlPath}/control-${controlHash(host, cfg.port, cfg.key)}`,
     '-o', 'ControlPersist=600',
-    '-o', 'BatchMode=yes',
+    // 密码认证时禁用 BatchMode（否则 askpass 不生效）
+    ...(cfg.password ? [] : ['-o', 'BatchMode=yes']),
     ...(cfg.port ? ['-P', String(cfg.port)] : []),
     ...(cfg.key ? ['-i', cfg.key] : []),
     ...scpArgs,
@@ -255,7 +310,7 @@ function scpRemote(cfg, host, scpArgs, { timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn('scp', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn('scp', args, { stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv(cfg) });
     } catch (e) {
       return reject(new Error(`无法启动 scp 进程: ${e.message}`));
     }
@@ -545,7 +600,10 @@ function cmdRepl(cfg, host) {
     const subArgs = sub === 'push' || sub === 'pull'
       ? [sub, parts[0], host, ...parts.slice(1)]
       : [sub, host, ...parts];
-    const r = spawnSync(process.execPath, [__filename, ...globalArgs, ...subArgs], { stdio: 'inherit' });
+    const r = spawnSync(process.execPath, [__filename, ...globalArgs, ...subArgs], {
+      stdio: 'inherit',
+      env: { ...process.env, ...(cfg.password ? { SSH_CLI_PASSWORD: cfg.password, SSH_CLI_ASK_PASS: '1' } : {}) },
+    });
     if (r.error) process.stderr.write(`[ssh-cli] 子命令执行失败: ${r.error.message}\n`);
     prompt();
   });
@@ -561,6 +619,8 @@ async function main() {
   const { cfg, rest } = parseGlobalArgs(process.argv.slice(2));
   if (rest.length === 0) { printHelp(); process.exit(1); }
   try { fs.mkdirSync(cfg.controlPath, { recursive: true }); } catch { /* 忽略 */ }
+  // --ask-pass 或 REPL 子进程透传标志：读密码（环境变量 / TTY 隐藏输入 / stdin 首行）
+  if (cfg.askPass || process.env.SSH_CLI_ASK_PASS === '1') cfg.password = await readPassword();
   const sub = rest.shift();
   const args = rest;
   const subcommands = {
