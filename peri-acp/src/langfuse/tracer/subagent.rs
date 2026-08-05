@@ -168,6 +168,3 @@ impl SubagentStack {
     }
 }
 
-#[cfg(test)]
-#[path = "subagent_test.rs"]
-mod tests;

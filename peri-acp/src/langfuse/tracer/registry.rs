@@ -175,6 +175,7 @@ pub(crate) struct ClosedSubagent {
 }
 
 /// on_subagent_start 的结果
+#[allow(clippy::large_enum_variant)] // replayed/ClosedSubagent 体积大,一次性结果非热点
 pub(crate) enum SubagentStartOutcome {
     /// join 成功:AGENT obs 已创建(open),gate 事件已取出待重放
     Joined {
@@ -458,18 +459,20 @@ impl SubagentRegistry {
             .pending_starts
             .iter()
             .position(|sp| sp.child_agent_id == child_agent_id)?;
-        let sp = self.pending_starts.remove(sp_pos).unwrap();
-        // 找可绑定 invocation:parent 匹配优先,无匹配取队首(FIFO 稳定)
-        let key = match self
-            .unbounded_invocations
-            .iter()
-            .find(|(p, _)| *p == sp.parent_agent_id)
-        {
-            Some(k) => k.clone(),
-            None => self.unbounded_invocations.front()?.clone(),
+        // 先找可绑定 invocation(不先移除 pending——join 失败时 Start 仍需等待)
+        let key = {
+            let sp = &self.pending_starts[sp_pos];
+            match self
+                .unbounded_invocations
+                .iter()
+                .find(|(p, _)| *p == sp.parent_agent_id)
+            {
+                Some(k) => k.clone(),
+                None => self.unbounded_invocations.front()?.clone(),
+            }
         };
-        // 从 unbounded 索引移除;invocation 本体保留(回收前仍需查 tool_ended)
-        self.unbounded_invocations.retain(|k| k != &key);
+        // 找到后才正式移除 pending 与 unbounded 索引
+        let sp = self.pending_starts.remove(sp_pos).unwrap();
         let mut inv = self.invocations.get_mut(&key)?.clone();
         inv.bound_child = Some(sp.child_agent_id.clone());
         inv.stop_received = self
@@ -617,6 +620,12 @@ impl SubagentRegistry {
             SubagentStatus::Active => {
                 let key = sa.invocation_key.clone();
                 sa.stop = Some(stop);
+                // 同步更新 invocation 的 stop_received(join 时的快照可能早于 Stop)
+                if let Some(key) = &key {
+                    if let Some(inv) = self.invocations.get_mut(key) {
+                        inv.stop_received = true;
+                    }
+                }
                 if let Some(key) = key {
                     if self
                         .invocations
@@ -711,8 +720,8 @@ impl SubagentRegistry {
         for sp in pending {
             self.mark_incomplete(&sp.child_agent_id, IncompleteReason::ParentLost);
         }
-        // 2. gate 缓存残留(Start 从未到达)→ UnknownAgent
-        let remaining: Vec<String> = self
+        // 2. gate 缓存残留(Start 从未到达)→ UnknownAgent(按 agent 去重计数)
+        let remaining: std::collections::HashSet<String> = self
             .gate_cache
             .drain(..)
             .map(|(agent, _)| agent)
@@ -810,6 +819,23 @@ impl SubagentRegistry {
                 return; // 已是终态
             }
             sa.status = SubagentStatus::Incomplete(reason.clone());
+        } else {
+            // 未知 agent(Start 从未到达):插入占位记录(orphan 标记,不产生 obs,
+            // 后续内容事件归属 Unknown 继续走闸门/丢弃)
+            self.by_agent_id.insert(
+                child_agent_id.to_string(),
+                ActiveSubagent {
+                    observation_id: String::new(),
+                    parent_observation_id: String::new(),
+                    start_time: chrono::Utc::now().to_rfc3339(),
+                    agent_name: "unknown".to_string(),
+                    is_background: false,
+                    tool_batch: ToolBatch::new(),
+                    status: SubagentStatus::Incomplete(reason.clone()),
+                    stop: None,
+                    invocation_key: None,
+                },
+            );
         }
         self.incomplete_count += 1;
         tracing::warn!(
@@ -820,3 +846,7 @@ impl SubagentRegistry {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "registry_test.rs"]
+mod tests;
