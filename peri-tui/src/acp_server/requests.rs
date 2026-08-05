@@ -155,6 +155,9 @@ pub(crate) async fn handle_request(
                     workflow_middleware,
                     title: None,
                     tags: Vec::new(),
+                    continuation_armed: false,
+                    continuation_epoch: 0,
+                    continuation_in_flight: false,
                 },
             );
 
@@ -336,6 +339,9 @@ pub(crate) async fn handle_request(
                         workflow_middleware,
                         title: None,
                         tags: Vec::new(),
+                        continuation_armed: false,
+                        continuation_epoch: 0,
+                        continuation_in_flight: false,
                     },
                 );
             }
@@ -436,6 +442,12 @@ pub(crate) async fn handle_request(
         }
 
         "workflow/kill_agent" => {
+            // 显式按请求 sessionId 查找（与 workflow/list_runs 一致），
+            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let run_id = params
                 .get("runId")
                 .and_then(|v| v.as_str())
@@ -445,14 +457,13 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| AcpError::new(-32602, "missing agentId"))?;
 
-            let killed = if let Some(mw) = sessions
-                .values()
-                .find_map(|s| s.workflow_middleware.as_ref())
-            {
-                mw.runner().kill_agent(run_id, agent_id).await
-            } else {
-                false
-            };
+            let mw = sessions
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
+            let killed = mw.runner().kill_agent(run_id, agent_id).await;
 
             if killed {
                 info!(run_id, agent_id, "Workflow agent killed via ACP");
@@ -463,19 +474,24 @@ pub(crate) async fn handle_request(
         }
 
         "workflow/kill_run" => {
+            // 显式按请求 sessionId 查找（与 workflow/list_runs 一致），
+            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let run_id = params
                 .get("runId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
 
-            let killed = if let Some(mw) = sessions
-                .values()
-                .find_map(|s| s.workflow_middleware.as_ref())
-            {
-                mw.registry().kill(run_id).is_ok()
-            } else {
-                false
-            };
+            let mw = sessions
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
+            let killed = mw.registry().kill(run_id).is_ok();
 
             if killed {
                 info!(run_id, "Workflow run killed via ACP");
@@ -486,15 +502,23 @@ pub(crate) async fn handle_request(
         }
 
         "workflow/resume" => {
+            // 显式按请求 sessionId 查找（与 workflow/list_runs、kill_run 一致），
+            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let run_id = params
                 .get("runId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
 
             let mw = sessions
-                .values()
-                .find_map(|s| s.workflow_middleware.as_ref())
-                .ok_or_else(|| AcpError::new(-32602, "no workflow middleware found"))?;
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
 
             let new_run_id = mw
                 .resume_workflow(run_id)
@@ -518,13 +542,18 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing taskId"))?;
 
-            if let Some(session) = cfg.session_manager.get_session(req_session_id) {
-                session
-                    .background_registry
-                    .cancel(task_id)
-                    .map_err(|e| AcpError::new(-32603, e.to_string()))?;
-                info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
-            }
+            // 会话不存在时如实报错（此前静默返回 success，掩盖取消未生效）
+            let session = cfg
+                .session_manager
+                .get_session(req_session_id)
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
+            session
+                .background_registry
+                .cancel(task_id)
+                .map_err(|e| AcpError::new(-32603, e.to_string()))?;
+            info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
             Ok(serde_json::json!({ "success": true }))
         }
 
@@ -585,6 +614,9 @@ pub(crate) async fn handle_request(
                         workflow_middleware,
                         title: None,
                         tags: Vec::new(),
+                        continuation_armed: false,
+                        continuation_epoch: 0,
+                        continuation_in_flight: false,
                     },
                 );
                 info!(session_id = %req_session_id, "Session resumed (new)");
@@ -656,6 +688,9 @@ pub(crate) async fn handle_request(
                     workflow_middleware,
                     title: None,
                     tags: Vec::new(),
+                    continuation_armed: false,
+                    continuation_epoch: 0,
+                    continuation_in_flight: false,
                 },
             );
 

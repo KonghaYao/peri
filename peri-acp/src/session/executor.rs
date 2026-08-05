@@ -59,6 +59,7 @@ use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
 use peri_middlewares::prelude::PermissionMode;
+use peri_middlewares::subagent::BgTaskKind;
 
 use crate::{
     agent::builder::{self},
@@ -96,6 +97,18 @@ pub enum PromptStopReason {
     Cancelled,
     /// The agent reached the maximum number of iterations.
     MaxTurnRequests,
+}
+
+/// bg 完成 → ACP server continuation scheduler 的通知请求。
+///
+/// 由 executor 的 `on_bg_complete` 闭包在 [`AsyncRouter::route_bg_result`] 之后发送：
+/// 先确保 deferred callback 已写入 SessionInbox，再通知 scheduler。
+/// scheduler 按 session 原子 take `session/cancel` 置位的标记后运行一次内部
+/// AsyncContinuation（见 peri-tui/src/acp_server/continuation.rs）。
+#[derive(Debug, Clone)]
+pub struct ContinuationRequest {
+    pub session_id: String,
+    pub kind: BgTaskKind,
 }
 
 /// Result of prompt execution.
@@ -330,8 +343,24 @@ pub struct SessionContext {
     // ── turn: per-turn metadata ────────────────────────────────────────────
     pub session_start_source: Option<String>,
 
+    /// 本轮 prompt RPC 的 requestId（TUI 提交时生成、随 `session/prompt`
+    /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
+    /// 回带，供 TUI 侧 stale `TurnInterrupted` 的 request_id 配对判定
+    /// （Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 /
+    /// stdio / print 模式）为 None——TUI 侧相应跳过 id 判定、回退代际兜底。
+    pub request_id: Option<String>,
+
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
+
+    /// 内部 continuation 通知通道（ACP server session-scoped scheduler 注入）。
+    ///
+    /// `on_bg_complete` 闭包在 `router.route_bg_result` 之后发送
+    /// [`ContinuationRequest`]；server 的 scheduler 原子 take 被取消 prompt
+    /// 的标记后，通过同一 session execution path 执行一次 AsyncContinuation，
+    /// 让父 agent 消费已 route 到 SessionInbox 的 deferred callback。
+    /// None = 无 continuation 消费方（stdio / print mode）。
+    pub continuation_notify: Option<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
 
     /// v2 事件发送通道（替代原 event::v2_channel 全局 OnceLock）。
     /// TUI 入口置入，None 表示无 v2 消费方（如 stdio 模式）。
@@ -368,6 +397,16 @@ pub struct TurnInput {
     pub event_sink: Arc<dyn EventSink>,
     /// 用户本轮输入。
     pub content: MessageContent,
+    /// 内部异步续跑（bg 完成唤醒被取消的 turn）。
+    ///
+    /// 与 keepgoing（空白 user prompt = TUI 按钮"继续跑 loop"）语义隔离：
+    /// - 不把空 user prompt 当 keepgoing（不触发空历史 keepgoing short-circuit）
+    /// - 不写入空 human prompt（Phase 6 跳过 Prompt push，仅消费已 route 的
+    ///   Defer/Info 消息）
+    ///
+    /// 唯一生产者为 ACP server 的 continuation scheduler（内部触发），
+    /// 绝不来自 TUI kit bridge / SubmitRequest。
+    pub continuation: bool,
     /// 会话级 frozen 数据（system prompt 稳定性锚点）。
     pub frozen: Option<FrozenSessionData>,
     /// 现有历史消息（执行前）。
@@ -486,6 +525,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let TurnInput {
         event_sink,
         content,
+        continuation,
         frozen,
         history,
         incoming_recalls,
@@ -498,9 +538,22 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 仅让 Receive 消费计数 >0 从而驱动 ReAct loop 继续。此时不注入 recall——
     // 否则 recall 会拼进 user 消息使其非空，破坏"不插入"语义。
     // 判定与 stages 层共用同一语义：按 content block 判空（见 is_keepgoing 注释）。
-    let is_keepgoing = is_keepgoing(&content);
-    let incoming_recalls = if is_keepgoing {
-        tracing::debug!("keepgoing: empty user prompt, skipping recall injection");
+    //
+    // [AsyncContinuation] 内部续跑（continuation=true）不是 keepgoing：
+    // 空 user prompt 不落入 keepgoing 语义，也不走空历史 keepgoing short-circuit。
+    // 与 keepgoing 相同的是：**不注入 recall**——上一轮留给用户 prompt 的 recall
+    // 由 run_prompt 保留在 SessionState（clone 而非 take），续跑只消费已 route 的
+    // Defer/Info 消息；recall 留给后续用户 prompt 注入。
+    let is_keepgoing = !continuation && is_keepgoing(&content);
+    let incoming_recalls = if is_keepgoing || continuation {
+        tracing::debug!(
+            skip = if continuation {
+                "continuation"
+            } else {
+                "keepgoing"
+            },
+            "empty user prompt, skipping recall injection"
+        );
         Vec::new()
     } else {
         incoming_recalls
@@ -515,7 +568,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         // 不会执行），必须手动发送终止通知（ARC-EVENT-001），否则 TUI 依赖
         // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
         // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
-        event_sink.push_done(&ctx.session_id, "end_turn").await;
+        event_sink
+            .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
+            .await;
         return PromptResult {
             messages: history,
             ok: true,
@@ -575,7 +630,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         if let Some(ref router) = async_router {
             // v2 路径：通过 AsyncRouter → InboxHandle → push_defer（触发 wake）
             for result in &bg_results {
-                router.route_bg_result(result);
+                router.route_bg_result(result, BgTaskKind::Agent);
             }
         } else {
             // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionManager）
@@ -651,7 +706,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                 // is_loading=true 后永久卡住（与 Immediate 命令路径同模式，需手动
                 // 发 peri/agent_event_done 触发 acp_notifier 的 AgentDone→TurnDone）。
                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn").await;
+                    // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
+                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
                 }
             }
         });
@@ -693,6 +749,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                     ),
                     peri_middlewares::subagent::BgRegistryEvent::Completed {
                         task_id,
+                        kind,
                         success,
                         output_preview,
                         duration_ms,
@@ -710,6 +767,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                             "bg-task-completed",
                             serde_json::json!({
                                 "task_id": task_id,
+                                "kind": kind,
                                 "success": success,
                                 "output_preview": output_preview,
                                 "duration_ms": duration_ms,
@@ -847,6 +905,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         effective_context_window,
         langfuse_tracer: langfuse_tracer.clone(),
         trace_input: trace_input.to_string(),
+        request_id: ctx.request_id.clone(),
     });
 
     // 把会 move/借用 的资源直接传入 build_and_execute_agent。
@@ -866,6 +925,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         langfuse_tracer,
         bg_registry_for_cmd,
         mode_notice_booking,
+        continuation,
     )
     .await;
 
@@ -919,6 +979,7 @@ async fn build_and_execute_agent(
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
     mode_notice_booking: Option<ModeNoticeBooking>,
+    continuation: bool,
 ) -> ExecOutcome {
     let (
         system_prompt,
@@ -1000,11 +1061,11 @@ async fn build_and_execute_agent(
         }));
 
     // Session 级 workflow 完成通知消费者（单次 spawn）。
-    // 双路径：
-    //   Path A (TUI): 通过 EventSink 直推 BackgroundTaskCompleted → 通知条
-    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn
-    //
-    // [NOTE] 自动 continuation 需 TUI 侧处理 BackgroundTaskCompleted 事件（参考 bg task auto-continuation）。
+    // 单路径：
+    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn。
+    // TUI 侧通知由 registry 通道提供（registry.complete → BgRegistryEvent::Completed →
+    // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
+    // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
     if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
         // 将 session 级 bg_registry 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
         wf_mw.set_bg_registry(bg_registry.clone());
@@ -1014,9 +1075,6 @@ async fn build_and_execute_agent(
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
             let wf_mw_for_notify = Arc::clone(wf_mw);
-            let notify_sink = Arc::clone(&event_sink);
-            let notify_sid = session_id.to_string();
-            let notify_cw = turn.effective_context_window;
             // AsyncRouter（v2 路径：push_defer + wake Notify）
             // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
@@ -1035,6 +1093,7 @@ async fn build_and_execute_agent(
                                 router.route_workflow_event(
                                     &task_result.run_id,
                                     &task_result.workflow_name,
+                                    task_result.status.as_str(),
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
@@ -1059,9 +1118,15 @@ async fn build_and_execute_agent(
                                         s.name, s.agent_count, token_info, dur_info
                                     ));
                                 }
+                                // 幽灵完成事件防护（issue 2026-08-05）：killed/failed 不得显示为 "completed"
+                                let status_word = match task_result.status.as_str() {
+                                    "completed" => "completed",
+                                    "killed" => "killed",
+                                    _ => "failed",
+                                };
                                 // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
                                 let notif_text = format!(
-                                    "Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+                                    "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
                                     {}Results saved to .claude/workflow-runs/{}/state.json",
                                     task_result.workflow_name,
                                     task_result.duration_ms,
@@ -1077,7 +1142,9 @@ async fn build_and_execute_agent(
                                 ));
                             }
 
-                            // Path A: 发 TUI 通知
+                            // 构造 BackgroundTaskResult 并写入 registry：触发 BgRegistryEvent::Completed
+                            // （→ bg-task-completed unstable event → TUI 通知条），这是通知的真实路径。
+                            // 不再经 EventSink 直推 BackgroundTaskCompleted（S5.1：event_sink 无映射，死路径）。
                             let bg = BackgroundTaskResult {
                                 task_id: task_result.run_id.clone(),
                                 agent_name: format!("workflow:{}", task_result.workflow_name),
@@ -1103,14 +1170,7 @@ async fn build_and_execute_agent(
                             // 若 broadcast consumer 尚未被调度，agent 的 idle_should_wait probe
                             // (active_count > 0) 提前归零 → agent 退出 ReAct loop → Defer 堆积在队列中。
                             // [修复] 将 complete_workflow 移至 consumer 内 Defer push 之后执行。
-                            notify_bg.complete(&task_result.run_id, bg.clone());
-                            notify_sink
-                                .push_event(
-                                    &notify_sid,
-                                    &ExecutorEvent::BackgroundTaskCompleted(bg),
-                                    notify_cw,
-                                )
-                                .await;
+                            notify_bg.complete(&task_result.run_id, bg);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("WF notification consumer lagged by {} messages", n);
@@ -1145,11 +1205,24 @@ async fn build_and_execute_agent(
         .and_then(|sm| sm.get_session(session_id))
         .map(|s| s.background_registry.clone());
 
+    // on_bg_complete：bg 完成时**先**把结果同步 route 到 SessionInbox
+    // （Defer + wake），**再**通知 ACP server 的 per-session continuation
+    // scheduler。回调可能在主 prompt 结束后才发生（bg 独立运行），此时
+    // callback queue 已先写入；scheduler 原子 take session/cancel 标记后
+    // 通过同一 session execution path 发起内部 AsyncContinuation。
     let on_bg_complete = async_router.as_ref().map(|router| {
         let router = router.clone();
-        Arc::new(move |result: &BackgroundTaskResult| {
-            router.route_bg_result(result);
-        }) as Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>
+        let notify = ctx.continuation_notify.clone();
+        let sid = ctx.session_id.clone();
+        Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
+            router.route_bg_result(result, kind);
+            if let Some(ref tx) = notify {
+                let _ = tx.send(ContinuationRequest {
+                    session_id: sid.clone(),
+                    kind,
+                });
+            }
+        }) as Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>
     });
 
     // v2 单一路径。
@@ -1181,6 +1254,7 @@ async fn build_and_execute_agent(
         background_registry,
         on_bg_complete,
         turn.effective_context_window,
+        continuation,
     )
     .await;
 }

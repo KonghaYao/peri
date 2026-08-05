@@ -18,7 +18,7 @@ use peri_agent::{
 };
 
 use super::build_agent::CancelPolicy;
-use super::lifecycle::emit_subagent_stop_bg;
+use super::lifecycle::{emit_subagent_stop_bg, BgCleanupGuard, BgStopEmit, BgStopEmitV2};
 use crate::{
     hooks::types::{HookEvent, RegisteredHook},
     subagent::{
@@ -85,20 +85,12 @@ impl super::SubAgentTool {
 
         let child_thread_id = build_result.child_thread_id.clone();
         let max_iterations = build_result.max_iterations;
-        let instance_id = child_thread_id.clone();
         let prompt_summary: String = prompt.chars().take(100).collect();
 
-        // Independent cancel token（父 cancel 不传播）
+        // Independent cancel token（父 cancel 不传播）。
+        // clone 一份用于 BackgroundTask.cancel_token 与 register_runtime（注册成功后调用）；
+        // 原 token move 进 v2_ctx。
         let cancel_token = build_result.cancel_token.clone().unwrap_or_default();
-
-        // 注册到 active_agents
-        if let Some(register) = &self.register_runtime {
-            register(
-                child_thread_id.clone(),
-                cancel_token.clone(),
-                "independent".into(),
-            );
-        }
 
         // 组装 MiddlewareChain
         let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
@@ -122,7 +114,7 @@ impl super::SubAgentTool {
             chain,
             tools,
             &cwd,
-            cancel_token,
+            cancel_token.clone(),
             Vec::new(),
             build_result.system_prompt,
             None,
@@ -131,6 +123,9 @@ impl super::SubAgentTool {
             None,
             None,
             None,
+            Some(crate::subagent::v2_bridge::agent_id_from_child_thread(
+                &child_thread_id,
+            )),
         );
 
         // push prompt 到 queue
@@ -144,26 +139,13 @@ impl super::SubAgentTool {
                 BaseMessage::human(prompt.clone()),
             ));
 
-        // SubagentStarted 事件 + lifecycle hook（is_background=true）
-        // [arch-align] 通过 bg_event_sender（BG pump，独立通道）发送，与 fork 路径（spawner.rs:203）
-        // 对齐。避免主 pump（event_handler → event_tx）在主 agent 结束后被 close_channel 关闭
-        // 导致的时序风险——SubagentStopped 在 spawn task 内发送时主 agent 已结束，event_tx 已 None。
-        // BG pump 独立运行，直到所有 bg_event_tx clones drop（即所有 bg task 完成）。
-        if let Some(ref sender) = self.bg_event_sender {
-            let _ = sender.send(ExecutorEvent::SubagentStarted {
-                agent_name: agent_id.clone(),
-                instance_id: instance_id.clone(),
-                is_background: true,
-            });
-        } else {
-            tracing::warn!(
-                agent = %agent_id,
-                instance_id = %instance_id,
-                "bg_event_sender unavailable, SubagentStarted event dropped"
-            );
-        }
-        self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, &cwd, &agent_id, None)
-            .await;
+        // SubagentStarted 事件 + lifecycle hook（is_background=true）+ v2 SubagentStart
+        // S3.1 起移入 spawn 闭包内、注册成功之后 emit——注册失败时零事件，
+        // 不产生"已 emit SubagentStarted 无配对 Stop"的 depth 错乱。
+        // [arch-align] 通过 bg_event_sender（BG pump，独立通道）发送，与 fork 路径
+        // （spawner.rs）对齐。避免主 pump（event_handler → event_tx）在主 agent 结束后
+        // 被 close_channel 关闭导致的时序风险——BG pump 独立运行，直到所有
+        // bg_event_tx clones drop（即所有 bg task 完成）。
 
         // 捕获 spawn 所需资源
         let registered_hooks = self.registered_hooks.clone();
@@ -178,12 +160,94 @@ impl super::SubAgentTool {
         let agent_name_clone = agent_id.clone();
         let prompt_summary_clone = prompt_summary.clone();
         let cwd_clone = cwd.clone();
+        // C3: Stop emit 的父 agent 身份（闭包外读取一次）
+        let parent_agent_id_for_stop = *self.parent_agent_id.read();
+
+        // S3.1 注册门控：spawn 包装任务，闭包第一步 await 注册结果 oneshot。
+        // 注册失败（并发撞 kind 上限）时包装任务直接 return——不跑 run_react_loop、
+        // 不 emit 任何事件；注册成功才继续。规避 tokio 无"先注册后 spawn"API
+        // （AbortHandle 只能来自 JoinHandle）的限制。
+        let (reg_tx, reg_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
         // tokio::spawn 执行 v2 ReAct 循环
         let join_handle = tokio::spawn(async move {
+            // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
+            match reg_rx.await {
+                Ok(Ok(())) => {}
+                _ => return,
+            }
+
             let started_at = std::time::Instant::now();
+            // context 将被 move 进 run_react_loop，turn_id 提前提取（Stop emit 用）
+            let subagent_turn_id = v2_ctx.context.turn_id();
             let context = v2_ctx.context;
             let session = v2_ctx.session;
+            // Start/Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
+            let event_bus_for_emit = v2_ctx.event_bus.clone();
+            let subagent_agent_id = v2_ctx.agent_id;
+            let parent_agent_id = parent_agent_id_for_stop;
+
+            // S3.2 同步收尾 guard：abort/panic 时 deregister_runtime + 补发
+            // SubagentStopped（与上方 SubagentStarted 配对）。必须在本段事件 emit
+            // 之前构造——abort 兜底路径（cancel 超时）触发 Drop 时收尾仍执行。
+            let mut cleanup_guard = BgCleanupGuard {
+                thread_id: child_thread_id_clone.clone(),
+                deregister: deregister_runtime.clone(),
+                stop: bg_event_sender.clone().map(|sender| BgStopEmit {
+                    sender,
+                    agent_name: agent_name_clone.clone(),
+                    instance_id: child_thread_id_clone.clone(),
+                }),
+                // P1：v2 Stop 补发参数与下方 emit_subagent_stop_v2 调用参数同构
+                // （C3 配对契约）。guard 在 v2 Start emit 之前构造，abort 兜底路径
+                // 触发 Drop 时经 child EventBus 补发 v2 Stop，闭合 Langfuse AGENT span。
+                stop_v2: Some(BgStopEmitV2 {
+                    event_bus: event_bus_for_emit.clone(),
+                    turn_id: subagent_turn_id,
+                    parent_agent_id,
+                    child_agent_id: subagent_agent_id,
+                    agent_name: agent_name_clone.clone(),
+                }),
+            };
+
+            // SubagentStarted 事件 + lifecycle hook（is_background=true）
+            // [arch-align] 通过 bg_event_sender（BG pump，独立通道）发送，与 fork 路径
+            // （spawner.rs）对齐。S3.1 起在注册成功后才 emit（注册失败零事件，
+            // 无"已 emit Started 无配对 Stop"的 depth 错乱）。避免主 pump
+            // （event_handler → event_tx）在主 agent 结束后被 close_channel 关闭的
+            // 时序风险——BG pump 独立运行，直到所有 bg_event_tx clones drop。
+            if let Some(ref sender) = bg_event_sender {
+                let _ = sender.send(ExecutorEvent::SubagentStarted {
+                    agent_name: agent_name_clone.clone(),
+                    instance_id: child_thread_id_clone.clone(),
+                    is_background: true,
+                });
+            } else {
+                tracing::warn!(
+                    agent = %agent_name_clone,
+                    instance_id = %child_thread_id_clone,
+                    "bg_event_sender unavailable, SubagentStarted event dropped"
+                );
+            }
+            super::fire_subagent_lifecycle_hooks_static(
+                &registered_hooks,
+                HookEvent::SubagentStart,
+                &cwd_clone,
+                &agent_name_clone,
+                None,
+            )
+            .await;
+
+            // 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道（child EventBus）。
+            // parent_agent_id 未注入（测试/嵌套异常）时静默跳过（helper 内 warn）。
+            crate::subagent::v2_bridge::emit_subagent_start_v2(
+                &event_bus_for_emit,
+                subagent_turn_id,
+                parent_agent_id,
+                subagent_agent_id,
+                &agent_name_clone,
+                true,
+            );
 
             // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
             // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本。
@@ -209,6 +273,39 @@ impl super::SubAgentTool {
                 );
 
             let loop_result = run_react_loop(context, max_iterations).await;
+
+            // 补发 v2 SubagentStop（C3）：run_react_loop 返回后立即 emit，
+            // 一个 emit 点覆盖 Completed / Interrupted / Error 三路且恰好一次。
+            let (stop_result, stop_is_error) = match &loop_result {
+                peri_agent::agent::stages::LoopResult::Completed => (
+                    extract_last_ai_text(&session)
+                        .chars()
+                        .take(500)
+                        .collect::<String>(),
+                    false,
+                ),
+                peri_agent::agent::stages::LoopResult::Interrupted => {
+                    ("interrupted".to_string(), true)
+                }
+                peri_agent::agent::stages::LoopResult::Error(e) => (
+                    format!("Background sub-agent failed: {}", e)
+                        .chars()
+                        .take(500)
+                        .collect::<String>(),
+                    true,
+                ),
+            };
+            crate::subagent::v2_bridge::emit_subagent_stop_v2(
+                &event_bus_for_emit,
+                subagent_turn_id,
+                parent_agent_id,
+                subagent_agent_id,
+                &agent_name_clone,
+                &stop_result,
+                stop_is_error,
+            );
+            // 已显式 emit v2 SubagentStop：guard drop 时不得重复发射（P1 防双发）
+            cleanup_guard.disarm_stop_v2();
 
             let (final_text, interrupted) = match loop_result {
                 peri_agent::agent::stages::LoopResult::Completed => {
@@ -244,6 +341,8 @@ impl super::SubAgentTool {
                             &child_thread_id_clone,
                         );
                     }
+                    // 已显式 emit SubagentStopped：guard drop 时不得重复发射
+                    cleanup_guard.disarm_stop();
                     let result = peri_agent::agent::events::BackgroundTaskResult {
                         task_id: task_id_clone.clone(),
                         agent_name: agent_name_clone.clone(),
@@ -257,12 +356,10 @@ impl super::SubAgentTool {
                     };
                     // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
                     if let Some(ref on_complete) = on_bg_complete {
-                        on_complete(&result);
+                        on_complete(&result, BgTaskKind::Agent);
                     }
                     registry_spawn.complete(&task_id_clone, result);
-                    if let Some(deregister) = &deregister_runtime {
-                        deregister(&child_thread_id_clone);
-                    }
+                    // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
                     return;
                 }
             };
@@ -285,6 +382,8 @@ impl super::SubAgentTool {
                     &child_thread_id_clone,
                 );
             }
+            // 已显式 emit SubagentStopped：guard drop 时不得重复发射
+            cleanup_guard.disarm_stop();
             fire_subagent_stop_hooks(
                 &registered_hooks,
                 &cwd_clone,
@@ -329,14 +428,10 @@ impl super::SubAgentTool {
             // 同步推送 Defer 到 MQ——必须在 registry.complete() 之前
             // 确保 active_count 归零时 Defer 已在 MQ 中
             if let Some(ref on_complete) = on_bg_complete {
-                on_complete(&result);
+                on_complete(&result, BgTaskKind::Agent);
             }
             registry_spawn.complete(&task_id_clone, result);
-
-            // deregister
-            if let Some(deregister) = &deregister_runtime {
-                deregister(&child_thread_id_clone);
-            }
+            // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
         });
 
         // 注册到 BackgroundTaskRegistry
@@ -348,14 +443,24 @@ impl super::SubAgentTool {
             started_at: std::time::Instant::now(),
             chrono_started_at: chrono::Utc::now(),
             kind: BgTaskKind::Agent,
-            cancel_handle: BgCancelHandle::Abort(join_handle.abort_handle()),
+            cancel_handle: BgCancelHandle::Abort(join_handle),
+            cancel_token: Some(cancel_token.clone()),
             pid: None,
             output_preview: None,
         };
         if let Err(e) = registry.register_with_kind(bg_task) {
-            // 极端情况：并发超出上限（虽然前面已检查），降级返回错误
+            // S3.1：注册失败（并发撞 kind 上限）——通知包装任务直接 return（不执行
+            // run_react_loop、不 emit 任何事件），再如实返回错误。任务零事件零注册，
+            // 无幽灵执行 / 无泄漏。
+            let _ = reg_tx.send(Err(e.to_string()));
             return Err(format!("Failed to register background task: {}", e).into());
         }
+        // 注册成功：先注册运行时（active_agents，与任务内 guard 的 deregister 配对），
+        // 再放行包装任务继续执行。
+        if let Some(register) = &self.register_runtime {
+            register(child_thread_id.clone(), cancel_token, "independent".into());
+        }
+        let _ = reg_tx.send(Ok(()));
 
         if self.thread_store.is_some() {
             Ok(format!(
@@ -388,8 +493,6 @@ impl super::SubAgentTool {
             .bg_event_sender
             .clone()
             .ok_or("Error: bg_event_sender not set for background fork")?;
-        // 保留一份 clone 用于发 started_event（bg_sender 自身会被 move 到 config → spawn 闭包）
-        let bg_sender_for_started = bg_sender.clone();
 
         let config = crate::subagent::spawner::BgForkConfig {
             prompt: prompt.clone(),
@@ -412,14 +515,14 @@ impl super::SubAgentTool {
             frozen_skill_summary: self.frozen_skill_summary.clone(),
             frozen_system_prompt: self.frozen_system_prompt.clone(),
             langfuse_bridge: self.langfuse_bridge.clone(),
+            parent_agent_id: *self.parent_agent_id.read(),
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;
 
-        // 发送 SubagentStarted（异步走 pump task）。
-        // Agent 工具路径下主 agent 在跑（loading=true），无 race condition——
-        // 不需要像 /bg 命令那样同步推送。
-        let _ = bg_sender_for_started.send(spawned.started_event);
+        // P2：v1 SubagentStarted 已移入 spawner 任务内（gate 放行后）emit，
+        // 与 execute_bg 路径对齐——消除"任务快速完成/被 cancel 时 Stop 先于
+        // Start 到达"（subagent_depth 先减后加）的窗口。此处不再发送。
 
         if self.thread_store.is_some() {
             Ok(format!(

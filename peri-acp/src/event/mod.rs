@@ -89,6 +89,9 @@ pub enum AcpEvent {
         messages_json: String,
         /// 压缩策略: "micro" | "full" | "smart"
         strategy: String,
+        /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"）
+        #[serde(default = "default_compact_trigger")]
+        trigger: String,
         /// Compact 执行的语义结果
         outcome: String,
     },
@@ -149,6 +152,11 @@ pub enum AcpEvent {
         run_status: Option<String>,
         message: Option<String>,
     },
+}
+
+/// CompactCompleted.trigger 缺省值：旧事件（无 trigger 字段）按 "auto" 处理。
+fn default_compact_trigger() -> String {
+    "auto".to_string()
 }
 
 #[cfg(test)]

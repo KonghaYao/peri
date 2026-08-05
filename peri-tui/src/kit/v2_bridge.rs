@@ -117,6 +117,7 @@ fn v2_event_to_acp_event_data(event: V2Event) -> Option<AcpEventData> {
             // SubAgent 生命周期事件：ObserveEvent::SubagentStart / SubagentStop 在生产代码中
             // 从不被 emit；此处返回 None 作为防御性兜底，防止 forwarder.rs 未来启用发射后造成双重发送。
             ObserveEvent::CompactStarted { .. }
+            | ObserveEvent::CompactEnded { .. }
             | ObserveEvent::MessagesCompacted { .. }
             | ObserveEvent::SubagentStart { .. }
             | ObserveEvent::SubagentStop { .. }

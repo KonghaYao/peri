@@ -87,15 +87,39 @@ impl AgentCommand for BgCommand {
             )
         };
 
-        // 调用共享 spawner 启动后台 fork agent
-        let bg_event_sender = ctx
-            .bg_event_sender
-            .expect("bg_event_sender 总是 Some（executor 前置创建）");
-        let bg_registry = ctx
-            .bg_registry
-            .expect("bg_registry 总是 Some（executor 前置创建）");
+        // 调用共享 spawner 启动后台 fork agent。
+        // 两个字段是公开 RPC（session/execute-command / session/rewind）可传 None 的
+        // 入口（dispatch/execute_command.rs 与 dispatch/rewind.rs 均 Option 直传），
+        // 不能用 expect——外部调用方传 None 会 panic 并可能崩掉整个 server task。
+        // 优雅降级：emit 错误提示后返回（/bg 命令报错返回，不 panic）。
+        // bg_event_sender / bg_registry 是 spawn_background_fork 的必需项，缺失时
+        // 无合理 fallback 语义，只能报错。
+        let Some(bg_event_sender) = ctx.bg_event_sender else {
+            events::emit_bg_spawn_error(
+                &ctx.event_sink,
+                &ctx.session_id,
+                "bg_event_sender 未配置（/bg 需经 executor 内部路径执行，RPC 直调缺少后台事件通道）",
+            )
+            .await;
+            return CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        };
+        let Some(bg_registry) = ctx.bg_registry else {
+            events::emit_bg_spawn_error(
+                &ctx.event_sink,
+                &ctx.session_id,
+                "bg_registry 未配置（/bg 需经 executor 内部路径执行，RPC 直调缺少后台任务注册中心）",
+            )
+            .await;
+            return CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+            };
+        };
 
-        let spawned = match peri_middlewares::subagent::spawner::spawn_background_fork(
+        let _spawned = match peri_middlewares::subagent::spawner::spawn_background_fork(
             peri_middlewares::subagent::spawner::BgForkConfig {
                 prompt: prompt.clone(),
                 parent_messages: ctx.history.clone(),
@@ -117,6 +141,7 @@ impl AgentCommand for BgCommand {
                 frozen_skill_summary: ctx.frozen_skill_summary.clone(),
                 frozen_system_prompt: ctx.frozen_system_prompt.clone(),
                 langfuse_bridge: None, // /bg 命令无 Langfuse tracer
+                parent_agent_id: None, // /bg 命令无父 agent 身份（不 emit v2 Start/Stop）
             },
         )
         .await
@@ -131,7 +156,9 @@ impl AgentCommand for BgCommand {
             }
         };
 
-        events::emit_bg_started(&ctx.event_sink, &ctx.session_id, &spawned.started_event).await;
+        // P2：v1 SubagentStarted 已移入 spawner 任务内（gate 放行后）经
+        // bg_event_sender 发送（bg pump → event_sink），此处不再同步推送——
+        // 消除"任务快速完成/被 cancel 时 Stop 先于 Start 到达"的窗口。
 
         // 确认消息（CJK-safe truncation: chars().take(80)）
         events::emit_bg_confirmation(&ctx.event_sink, &ctx.session_id, &prompt).await;

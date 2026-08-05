@@ -95,6 +95,7 @@ pub async fn emit_compact_completed(
             no_op_candidates: 0,
             full_escalation_reason: None,
             cache_hit_rate_before: 0.0,
+            trigger: CompactTrigger::Manual,
             outcome,
         },
         COMPACT_CONTEXT_WINDOW,

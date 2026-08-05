@@ -146,12 +146,15 @@ pub(crate) async fn run(params: PromptExecParams) {
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
         session_start_source,
+        request_id: None, // stdio 无 requestId 配对（TUI 专用）
         allow_await_wake: false,
         v2_event_tx: None,
+        continuation_notify: None, // stdio 无 continuation scheduler
     };
     let turn = executor::TurnInput {
         event_sink,
         content,
+        continuation: false,
         frozen,
         history,
         incoming_recalls: vec![],

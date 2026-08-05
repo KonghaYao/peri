@@ -20,7 +20,10 @@ use super::{
     format_subagent_result,
     lifecycle::{on_subagent_stop_handler, DeregisterGuard},
 };
-use crate::subagent::{v2_bridge::build_v2_subagent_context, SubAgentMiddlewareConfig};
+use crate::subagent::{
+    v2_bridge::{build_v2_subagent_context, emit_subagent_start_v2, emit_subagent_stop_v2},
+    SubAgentMiddlewareConfig,
+};
 
 impl super::SubAgentTool {
     pub(crate) async fn invoke_fork(
@@ -122,6 +125,7 @@ impl super::SubAgentTool {
         .await;
 
         // 9. 构造 v2 StageContext（fork 注入 parent_msgs 到 transcript）
+        // 身份键统一（C1）：child_thread_id → AgentId，subagent 事件侧 agent_id 与其一致
         let v2_ctx = build_v2_subagent_context(
             llm,
             chain,
@@ -136,9 +140,24 @@ impl super::SubAgentTool {
             None, // compact_llm
             None, // error_suggest_registry
             None, // tool_registry_snapshot
+            Some(crate::subagent::v2_bridge::agent_id_from_child_thread(
+                &child_thread_id,
+            )),
         );
 
-        // 9.5. 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
+        // 9.5. 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道
+        // （child EventBus → forwarder → tracer），agent_id = 统一后的 child_thread_id。
+        // parent_agent_id 未注入（测试/嵌套异常）时静默跳过（helper 内 warn）。
+        emit_subagent_start_v2(
+            &v2_ctx.event_bus,
+            v2_ctx.context.turn_id(),
+            *self.parent_agent_id.read(),
+            v2_ctx.agent_id,
+            "fork",
+            false,
+        );
+
+        // 9.6. 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
         // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本 /
         // 推理内容（否则 SubAgent 拥有独立 EventBus，事件全部丢弃）。
         // 必须在 run_react_loop 之前取出 event_handles（之后 v2_ctx.context 被 move）。
@@ -166,7 +185,40 @@ impl super::SubAgentTool {
 
         // 11. 运行 v2 ReAct 循环
         let max_iterations = 200;
+        // context 将被 move 进 run_react_loop，turn_id 提前提取（Stop emit 用）
+        let subagent_turn_id = v2_ctx.context.turn_id();
         let loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+
+        // 12. 补发 v2 SubagentStop（C3）：run_react_loop 返回后立即 emit，
+        // 在下方 match 消费 loop_result 之前。一个 emit 点天然覆盖
+        // Completed / Interrupted / Error 三路且恰好一次；panic/abort 无 emit
+        //（已知限制，tracer 侧 on_turn_end 兜底 + incomplete）。
+        let (stop_result, stop_is_error) = match &loop_result {
+            LoopResult::Completed => (
+                extract_last_ai_text(&v2_ctx.session)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                false,
+            ),
+            LoopResult::Interrupted => ("interrupted".to_string(), true),
+            LoopResult::Error(e) => (
+                format!("Fork sub-agent execution failed: {}", e)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                true,
+            ),
+        };
+        emit_subagent_stop_v2(
+            &v2_ctx.event_bus,
+            subagent_turn_id,
+            *self.parent_agent_id.read(),
+            v2_ctx.agent_id,
+            "fork",
+            &stop_result,
+            stop_is_error,
+        );
 
         // 13. 从 transcript 提取最终 AI 文本
         let (final_text, interrupted) = match loop_result {

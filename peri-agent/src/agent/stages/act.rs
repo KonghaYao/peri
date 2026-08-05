@@ -6,9 +6,25 @@
 
 use super::middleware_runner::run_after_agent;
 use super::tool_dispatch::dispatch_tools;
-use super::{ActInput, ActOutput};
+use super::{ActInput, ActOutput, StageContext};
 use crate::agent::events_v2::{RenderEvent, StateEvent};
 use crate::error::AgentResult;
+
+/// emit TurnCompleted（迭代边界提交信号）：从 transcript 读快照，供成功/失败路径共用，
+/// 保证 TUI committed 视图与 transcript 一致（S5.3：run_after_agent / dispatch_tools
+/// 失败时最终回答或工具结果可能已写入 transcript，必须提交迭代边界再传播错误）。
+fn emit_turn_completed(ctx: &StageContext) {
+    let finalized_messages = ctx.session.transcript.read().visible_snapshot();
+    ctx.runtime
+        .event_bus
+        .emit_render(RenderEvent::TurnCompleted {
+            turn_id: ctx.turn_id(),
+            agent_id: ctx.session.agent_id,
+            steps: ctx.session.turn.current_step(),
+            elapsed_secs: 0.0,
+            finalized_messages,
+        });
+}
 
 /// 运行 Act 阶段
 pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
@@ -53,7 +69,16 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     if has_tool_calls {
         // 工具调用路径：dispatch_tools 处理审批 + 并发执行 + 写入 transcript
         let cancel = ctx.session.turn.cancel_token.clone();
-        let outcome = dispatch_tools(ctx, &input.reasoning, &cancel).await?;
+        let outcome = match dispatch_tools(ctx, &input.reasoning, &cancel).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // 镜像修复（S5.3）：dispatch 失败（cancel / middleware 错误）时
+                // transcript 可能已含本轮消息（阶段 B 提交后），先 emit TurnCompleted
+                // 再传播错误，保持 TUI committed 视图与 transcript 一致。
+                emit_turn_completed(ctx);
+                return Err(e);
+            }
+        };
 
         tracing::debug!(tool_count = outcome.results.len(), "Act 阶段执行了工具调用");
 
@@ -65,16 +90,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 若放到 state_tx 独立通道，TUI forwarder 的 biased select! 会优先消费
         // 下一迭代的 TextChunk，把本轮 TurnCompleted 拖到后面，导致 partial 混合
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
-        let finalized_messages = ctx.session.transcript.read().visible_snapshot();
-        ctx.runtime
-            .event_bus
-            .emit_render(RenderEvent::TurnCompleted {
-                turn_id: ctx.turn_id(),
-                agent_id: ctx.session.agent_id,
-                steps: ctx.session.turn.current_step(),
-                elapsed_secs: 0.0,
-                finalized_messages,
-            });
+        emit_turn_completed(ctx);
 
         Ok(ActOutput {
             has_tool_calls: true,
@@ -122,21 +138,21 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             })
             .collect();
 
-        let output_after = run_after_agent(ctx, output).await?;
+        let output_after = match run_after_agent(ctx, output).await {
+            Ok(output) => output,
+            Err(e) => {
+                // S5.3：最终回答已 append 到 transcript（:97），先 emit TurnCompleted
+                // （从 transcript 读快照，RwLock 无死锁风险——append 已释放锁），
+                // 再传播错误，避免 TUI committed 视图与 transcript/持久化不一致。
+                emit_turn_completed(ctx);
+                return Err(e);
+            }
+        };
 
         // 迭代边界提交信号：emit TurnCompleted 携带 transcript 快照（含本轮最终回答）
         //
         // 必须用 emit_render（详见上方工具路径 同款注释）——保证与同迭代 Render 事件 FIFO。
-        let finalized_messages = ctx.session.transcript.read().visible_snapshot();
-        ctx.runtime
-            .event_bus
-            .emit_render(RenderEvent::TurnCompleted {
-                turn_id: ctx.turn_id(),
-                agent_id: ctx.session.agent_id,
-                steps: ctx.session.turn.current_step(),
-                elapsed_secs: 0.0,
-                finalized_messages,
-            });
+        emit_turn_completed(ctx);
 
         Ok(ActOutput {
             has_tool_calls: false,

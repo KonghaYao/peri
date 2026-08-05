@@ -24,8 +24,9 @@ pub struct BashTool {
     pub cwd: String,
     /// 后台任务注册表（用于 run_in_background 模式）
     pub bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）
-    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）。
+    /// 第二参为任务 kind（bg shell 恒为 Shell，供 continuation scheduler 过滤）。
+    pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
 }
 
 impl BashTool {
@@ -44,7 +45,7 @@ impl BashTool {
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self
@@ -102,6 +103,18 @@ fn truncate_output(output: &str) -> String {
         );
     }
     output.to_string()
+}
+
+/// 生成 bg shell 任务 id：`shell-{完整 UUID v7}`。
+///
+/// **禁止截断 UUID**（issue 2026-08-05）：UUID v7 前 48 位是毫秒时间戳，
+/// 同一毫秒内生成的前 8 字符必然相同。agent 连续多次 `run_in_background`
+/// Bash 调用落在同一毫秒时，截断前缀会导致 task_id 碰撞——registry 覆盖
+/// 注册（Started 事件重复、cancel 句柄丢失），且首个 `complete()` 的 retain
+/// 清理后其余 `complete()` 因 existed=false 静默跳过，TUI 残留任务条目。
+/// 与 bg agent（`bg-{完整 UUID}`）保持一致，用完整 UUID（122 位熵）。
+fn bg_shell_task_id() -> String {
+    format!("shell-{}", uuid::Uuid::now_v7())
 }
 
 /// 解析 timeout 参数（None = 不超时）。
@@ -211,7 +224,7 @@ async fn drain_pipe(mut reader: impl tokio::io::AsyncRead + Unpin, buf: Arc<Mute
 #[allow(clippy::too_many_arguments)]
 fn finalize_bg_shell(
     registry: &BackgroundTaskRegistry,
-    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
     task_id: String,
     prompt_summary: String,
     success: bool,
@@ -241,7 +254,7 @@ fn finalize_bg_shell(
     };
     // 回调通知 Agent inbox（在 registry.complete() 之前，与 execute_bg.rs 对齐）
     if let Some(ref cb) = on_bg_complete {
-        cb(&result);
+        cb(&result, crate::BgTaskKind::Shell);
     }
     // 任务已在启动时注册（run_in_background / promote 路径），此处只收尾推送 Completed。
     // complete() 在 task 未注册时也能安全处理（仅 push_event）。
@@ -310,14 +323,7 @@ impl BaseTool for BashTool {
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
             let timeout_opt = parse_timeout(&input, true);
 
-            let task_id = format!(
-                "shell-{}",
-                uuid::Uuid::now_v7()
-                    .to_string()
-                    .chars()
-                    .take(8)
-                    .collect::<String>()
-            );
+            let task_id = bg_shell_task_id();
             let command_owned = command.to_string();
             let cwd = self.cwd.clone();
             let on_bg_complete_cb = self.on_bg_complete.clone();
@@ -352,7 +358,7 @@ impl BaseTool for BashTool {
                             };
                             // 回调通知 Agent inbox（在 registry 操作之前）
                             if let Some(ref cb) = on_bg_complete_cb {
-                                cb(&result);
+                                cb(&result, crate::BgTaskKind::Shell);
                             }
                             // 注册 + 立即完成
                             let bg_task = BackgroundTask {
@@ -364,6 +370,7 @@ impl BaseTool for BashTool {
                                 chrono_started_at: chrono::Utc::now(),
                                 kind: BgTaskKind::Shell,
                                 cancel_handle: BgCancelHandle::Kill(None),
+                                cancel_token: None,
                                 pid: None,
                                 output_preview: None,
                             };
@@ -388,6 +395,7 @@ impl BaseTool for BashTool {
                         cancel_handle: BgCancelHandle::Pid(pid.expect(
                             "bg shell: child.id() returned None after successful spawn",
                         )),
+                        cancel_token: None,
                         pid,
                         output_preview: None,
                     };
@@ -409,7 +417,7 @@ impl BaseTool for BashTool {
                             timed_out: false,
                         };
                         if let Some(ref cb) = on_bg_complete_cb {
-                            cb(&result);
+                            cb(&result, crate::BgTaskKind::Shell);
                         }
                         registry.complete(&result.task_id.clone(), result);
                         return;
@@ -451,7 +459,7 @@ impl BaseTool for BashTool {
                                     };
                                     // 回调通知 Agent inbox（在 registry 操作之前）
                                     if let Some(ref cb) = on_bg_complete_cb {
-                                        cb(&result);
+                                        cb(&result, crate::BgTaskKind::Shell);
                                     }
                                     // 任务在启动时已注册，此处只收尾推送 Completed
                                     let complete_task_id = result.task_id.clone();
@@ -535,6 +543,7 @@ impl BaseTool for BashTool {
                         chrono_started_at: chrono::Utc::now(),
                         kind: BgTaskKind::Shell,
                         cancel_handle: BgCancelHandle::Kill(None),
+                        cancel_token: None,
                         pid: None,
                         output_preview: None,
                     };
@@ -599,14 +608,7 @@ impl BaseTool for BashTool {
 
                     if let Some(registry) = self.bg_registry.as_ref() {
                         // ── 有注册表：不杀进程，promote 为后台任务续跑 ──
-                        let task_id = format!(
-                            "shell-{}",
-                            uuid::Uuid::now_v7()
-                                .to_string()
-                                .chars()
-                                .take(8)
-                                .collect::<String>()
-                        );
+                        let task_id = bg_shell_task_id();
                         let bg_task = BackgroundTask {
                             id: task_id.clone(),
                             agent_name: "bg-shell".to_string(),
@@ -616,6 +618,7 @@ impl BaseTool for BashTool {
                             chrono_started_at: chrono::Utc::now(),
                             kind: BgTaskKind::Shell,
                             cancel_handle: BgCancelHandle::Pid(pid),
+                            cancel_token: None,
                             pid: Some(pid),
                             output_preview: None,
                         };
@@ -725,7 +728,7 @@ impl BaseTool for BashTool {
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
 pub struct TerminalMiddleware {
     bg_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>>,
 }
 
 impl TerminalMiddleware {
@@ -743,7 +746,7 @@ impl TerminalMiddleware {
 
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<dyn Fn(&BackgroundTaskResult, crate::BgTaskKind) + Send + Sync>,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self

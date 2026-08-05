@@ -53,6 +53,8 @@ pub enum MessageSource {
     UserInput,
     /// SubAgent 完成
     SubAgentComplete,
+    /// 后台 Shell 完成
+    ShellComplete,
     /// Goal steering（中途纠正）
     GoalSteering,
     /// Cron 定时触发
@@ -182,6 +184,19 @@ impl MessageQueue {
             .lock()
             .iter()
             .any(|m| m.kind == MessageKind::Prompt)
+    }
+
+    /// 队列中是否存在指定来源的 pending Defer（wake-able 延迟结果）。
+    ///
+    /// AsyncContinuation 用：`session/cancel` 时确认 SubAgentComplete Defer 是否
+    /// 已入队（race 兜底——bg 完成通知可能已在 cancel 前置位前被 scheduler 跳过），
+    /// continuation scheduler 在真正 dispatch 前确认 Defer 尚未被消费（跳过空跑）。
+    /// 仅匹配 `MessageKind::Defer`：Prompt/Info 均不计入。
+    pub fn has_pending_defer(&self, source: &MessageSource) -> bool {
+        self.inner
+            .lock()
+            .iter()
+            .any(|m| m.kind == MessageKind::Defer && &m.source == source)
     }
 
     /// 队列是否为空

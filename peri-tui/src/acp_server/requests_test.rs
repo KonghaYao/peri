@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
@@ -8,6 +9,13 @@ use peri_acp::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
+use peri_middlewares::subagent::{
+    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+};
+use peri_middlewares::workflow::WorkflowMiddleware;
+use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
+use peri_workflow::runner::AgentExecutor;
 use serde_json::{Value, json};
 
 use super::*;
@@ -314,6 +322,9 @@ fn register_session_with_history(
             workflow_middleware: None,
             title: None,
             tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
         },
     );
     sid
@@ -456,4 +467,464 @@ async fn test_rewind_routes_to_dispatch() {
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
     assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+}
+
+// ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────
+
+/// [回归测试] cancel-bg-task 对 Workflow 类型任务必须真正 kill（issue 2026-08-05）。
+/// 历史 bug：Workflow 注册时固定 `Kill(None)`，cancel() 只 warn 并返回 success——
+/// 条目移除但 runner 继续运行。修复后 kill 闭包（生产路径转发
+/// WorkflowTaskRegistry::kill）随注册存入条目，cancel() 触发闭包。
+/// 本测试用探针闭包在 RPC 层锁定该行为。
+#[tokio::test]
+async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = "cancel-bg-session".to_string();
+    cfg.session_manager
+        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let killed = Arc::new(AtomicBool::new(false));
+    let killed_clone = killed.clone();
+    let task = BackgroundTask {
+        id: "wf-run-1".to_string(),
+        agent_name: "workflow".to_string(),
+        prompt_summary: "wf cancel test".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Workflow,
+        cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
+            killed_clone.store(true, Ordering::SeqCst);
+        }))),
+        cancel_token: None,
+        pid: None,
+        output_preview: None,
+    };
+    let registry = &cfg
+        .session_manager
+        .get_session(&sid)
+        .unwrap()
+        .background_registry;
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": sid, "taskId": "wf-run-1" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "取消 Workflow 任务应返回 success，实际: {:?}",
+        result.err()
+    );
+    assert!(
+        killed.load(Ordering::SeqCst),
+        "cancel-bg-task 必须触发 kill 闭包（runner 真正被终止），而非仅移除条目"
+    );
+    assert_eq!(registry.active_count(), 0, "取消后条目应从 registry 移除");
+}
+
+/// [回归测试] cancel-bg-task 会话不存在时必须如实报错（issue 2026-08-05）。
+/// 历史 bug：静默返回 success，掩盖"取消未生效"。
+#[tokio::test]
+async fn test_cancel_bg_task_session_not_found_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": "no-such-session", "taskId": "wf-run-1" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(result.is_err(), "会话不存在应返回错误");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "错误消息应提及 session not found，实际: {}",
+        err.message
+    );
+}
+
+/// [回归测试] cancel-bg-task 任务不存在时必须如实报错（issue 2026-08-05）。
+/// 与 session_not_found 区分（错误消息不同），客户端可据此判断重试策略。
+#[tokio::test]
+async fn test_cancel_bg_task_task_not_found_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = "cancel-bg-session".to_string();
+    cfg.session_manager
+        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": sid, "taskId": "no-such-task" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(result.is_err(), "任务不存在应返回错误");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("not found"),
+        "错误消息应提及 not found，实际: {}",
+        err.message
+    );
+}
+
+// ── workflow/kill_run & workflow/kill_agent sessionId 分发测试（issue 2026-08-05）──
+
+/// Mock workflow executor（仅用于构造 WorkflowMiddleware，不真正执行 agent）
+struct MockWorkflowExecutor;
+
+#[async_trait]
+impl AgentExecutor for MockWorkflowExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        AgentRunResult::Ok {
+            output: serde_json::json!("mock"),
+            usage: Usage { output_tokens: 0 },
+            model: None,
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
+        }
+    }
+}
+
+/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
+fn register_session_with_workflow(
+    sessions: &mut HashMap<String, SessionState>,
+    sid: &str,
+    cwd: &str,
+) -> Arc<WorkflowMiddleware> {
+    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
+    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
+    let mw = Arc::new(WorkflowMiddleware::new(
+        executor,
+        cwd,
+        notification_tx,
+        None,
+    ));
+    sessions.insert(
+        sid.to_string(),
+        SessionState {
+            session_id: sid.to_string(),
+            thread_id: format!("thread-{sid}"),
+            cwd: cwd.to_string(),
+            history: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+            workflow_middleware: Some(Arc::clone(&mw)),
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+        },
+    );
+    mw
+}
+
+/// 在 middleware 的 registry 注册一个 Running 的 run（kill_tx 保持 open）。
+fn register_run(mw: &Arc<WorkflowMiddleware>, run_id: &str) {
+    let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let child = tokio::spawn(async {});
+    mw.registry()
+        .register(WorkflowRun {
+            run_id: run_id.to_string(),
+            workflow_name: "wf-test".to_string(),
+            script_preview: "test".to_string(),
+            status: WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: child,
+            kill_tx: Some(kill_tx),
+        })
+        .unwrap();
+}
+
+/// [回归测试] workflow/kill_run 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
+/// 多 session 时可能 kill 错 session（run 在另一 session 却报 killed:true）。
+#[tokio::test]
+async fn test_kill_run_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd);
+    register_run(&mw_a, "run-a");
+    register_run(&mw_b, "run-b");
+
+    // run-a 只在 sess-a：请求 sess-b 杀 run-a 必须 killed:false（修复前可能误报 true）
+    let resp = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "sess-b", "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], false, "sess-b 无 run-a，不得误报 killed");
+
+    // 请求 sess-b 杀 run-b → killed:true，且只影响 sess-b 的 registry
+    let resp = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "sess-b", "runId": "run-b" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], true, "sess-b 的 run-b 应被 kill");
+    assert!(
+        mw_b.registry().list_runs().is_empty(),
+        "sess-b 的 registry 应已移除 run-b"
+    );
+    assert!(
+        !mw_a.registry().list_runs().is_empty(),
+        "sess-a 的 registry 不得受影响"
+    );
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前静默返回 killed:false）
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "no-such-session", "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
+        err.message
+    );
+
+    // session 存在但无 workflow middleware → 明确错误
+    let sid = register_session_with_history(&mut sessions, cwd);
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": sid, "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "无 middleware 的会话应报错，实际: {}",
+        err.message
+    );
+}
+
+/// [回归测试] workflow/kill_agent 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 深层 kill 依赖 runner 内部 active_channels（外部不可注入），此处锁定协议层：
+/// 缺失/不存在的 session 如实报错，存在的 session 正常返回 killed 结果。
+#[tokio::test]
+async fn test_kill_agent_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+
+    // 存在 session：正常返回 killed（sess-b 无该 run 的 active channel → false，不报错）
+    let resp = handle_request(
+        "workflow/kill_agent",
+        &json!({ "sessionId": "sess-b", "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], false);
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/kill_agent",
+        &json!({ "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前静默返回 killed:false）
+    let err = handle_request(
+        "workflow/kill_agent",
+        &json!({ "sessionId": "no-such-session", "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
+        err.message
+    );
+}
+
+/// [回归测试] workflow/resume 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
+/// 多 session 时可能 resume 错 session（与 kill_run 同源）。
+#[tokio::test]
+async fn test_resume_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+
+    // 请求 sess-b + 不存在的 run → 错误来自 sess-b 的 middleware（read_state 失败），
+    // 而非 "session not found"——证明分发到了 sess-b 而非第一个 session
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "sessionId": "sess-b", "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("Failed to read workflow state"),
+        "应分发到 sess-b 的 middleware 并报 read_state 失败，实际: {}",
+        err.message
+    );
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前可能误用第一个 session 的 middleware）
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "sessionId": "no-such-session", "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
+        err.message
+    );
 }

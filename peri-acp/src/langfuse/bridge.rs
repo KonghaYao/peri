@@ -159,15 +159,21 @@ pub enum UnifiedLangfuseEvent {
         agents_spawned: usize,
         tool_calls: usize,
     },
-    /// 子 Agent 启动（通过 v2→v1 mapper 到达，暂不追踪）
+    /// 子 Agent 启动（v2 ObserveEvent::SubagentStart 直达；v1 直发事件不映射）。
+    /// C4 最小接入：仅注册/日志/计数，归属逻辑由阶段② tracer registry 接管。
     SubagentStart {
-        agent_id: String,
-        task_id: Option<String>,
+        parent_agent_id: String,
+        child_agent_id: String,
+        agent_name: String,
+        is_background: bool,
     },
-    /// 子 Agent 停止（通过 v2→v1 mapper 到达，暂不追踪）
+    /// 子 Agent 停止（v2 ObserveEvent::SubagentStop 直达）
     SubagentStop {
-        agent_id: String,
-        task_id: Option<String>,
+        parent_agent_id: String,
+        child_agent_id: String,
+        agent_name: String,
+        result: String,
+        is_error: bool,
     },
 }
 
@@ -480,6 +486,25 @@ impl UnifiedLangfuseEvent {
                     trigger: CompactTrigger::Auto, // v2 自动触发
                 })
             }
+            // S1.4：cancel 且未提交变更的 CompactEnded → 闭合 compact span。
+            // 不携带 token 估算（无变更发生）；outcome 字段区分
+            // Interrupted（取消未提交）与 MessagesCompacted 路径。
+            ObserveEvent::CompactEnded { outcome, .. } => {
+                Some(UnifiedLangfuseEvent::CompactEnded {
+                    summary: String::new(),
+                    files_count: 0,
+                    skills_count: 0,
+                    micro_cleared: 0,
+                    is_error: false,
+                    error_message: String::new(),
+                    estimated_tokens_saved: 0,
+                    estimated_tokens_before: 0,
+                    estimated_tokens_after: 0,
+                    cache_hit_rate_before: 0.0,
+                    full_escalation_reason: None,
+                    outcome: Some(format!("{:?}", outcome)),
+                })
+            }
             ObserveEvent::MessagesCompacted {
                 summary,
                 files,
@@ -539,8 +564,33 @@ impl UnifiedLangfuseEvent {
             ObserveEvent::TurnError { message, .. } => {
                 Some(UnifiedLangfuseEvent::TurnError { message })
             }
-            // 无 Langfuse 映射的事件
-            ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. } => None,
+            // v2 SubagentStart/Stop → Unified（C4）：子 agent 生命周期事件直达
+            ObserveEvent::SubagentStart {
+                agent_id,
+                child_agent_id,
+                agent_name,
+                is_background,
+                ..
+            } => Some(UnifiedLangfuseEvent::SubagentStart {
+                parent_agent_id: agent_id.to_string(),
+                child_agent_id: child_agent_id.to_string(),
+                agent_name,
+                is_background,
+            }),
+            ObserveEvent::SubagentStop {
+                agent_id,
+                child_agent_id,
+                agent_name,
+                result,
+                is_error,
+                ..
+            } => Some(UnifiedLangfuseEvent::SubagentStop {
+                parent_agent_id: agent_id.to_string(),
+                child_agent_id: child_agent_id.to_string(),
+                agent_name,
+                result,
+                is_error,
+            }),
         }
     }
 }
@@ -567,17 +617,60 @@ pub struct LangfuseBridge {
     /// 主 agent 自己的 step 记录；v2 ObserveEvent 路径无 LlmRetrying 变体，
     /// subagent 的 start 记录在其自身 key 下，不会覆盖主 agent 的 step。
     llm_start_steps: Arc<Mutex<HashMap<String, usize>>>,
+    /// 活跃 subagent 注册表（C4 最小接入）：child_agent_id → 生命周期信息。
+    /// Start 注册 / Stop 注销，仅验证事件到达与字段完整 + 计数；
+    /// 归属逻辑在阶段②由 tracer registry 接管（此处不影响任何归属决策）。
+    subagent_registry: Arc<Mutex<HashMap<String, SubagentLifecycle>>>,
+    /// subagent 生命周期事件计数（C4 指标，供阶段②对照）：(start, stop)
+    subagent_counters: Arc<Mutex<(u64, u64)>>,
+}
+
+/// C4 最小注册条目：SubagentStart 到达时记录的字段快照。
+/// 阶段①只验证事件到达与字段完整（写入+注销）；字段读取在阶段②
+/// （tracer registry 归属）接管，故暂允许 dead_code。
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct SubagentLifecycle {
+    pub parent_agent_id: String,
+    pub agent_name: String,
+    pub is_background: bool,
 }
 
 impl LangfuseBridge {
     /// 构造新桥接器。
-    pub fn new(tracer: Arc<Mutex<LangfuseTracer>>, provider_display_name: String) -> Self {
+    ///
+    /// `main_agent_id`:主 v2 session 的事件侧 AgentId(Some 时注入 tracer registry,
+    /// 用于区分"主 agent 事件"与"未知 subagent 事件")。bridge2(SubAgent forwarder)
+    /// 与 workflow 路径不需要主 agent 身份,传 None(registry 按"非注册成员即主"
+    /// fallback,兼容旧测试,见 tracer registry 注释)。
+    pub fn new(
+        tracer: Arc<Mutex<LangfuseTracer>>,
+        provider_display_name: String,
+        main_agent_id: Option<String>,
+    ) -> Self {
+        if let Some(ref id) = main_agent_id {
+            tracer.lock().set_main_agent_id(id.clone());
+        }
         Self {
             tracer,
             provider_display_name,
             active_stage: Arc::new(Mutex::new(HashMap::new())),
             llm_start_steps: Arc::new(Mutex::new(HashMap::new())),
+            subagent_registry: Arc::new(Mutex::new(HashMap::new())),
+            subagent_counters: Arc::new(Mutex::new((0, 0))),
         }
+    }
+
+    /// 当前活跃 subagent 注册数量（C4 指标，供测试/阶段②对照）
+    #[cfg(test)]
+    pub(crate) fn active_subagent_count(&self) -> usize {
+        self.subagent_registry.lock().len()
+    }
+
+    /// 生命周期事件计数（C4 指标，供测试/阶段②对照）
+    #[cfg(test)]
+    pub(crate) fn subagent_event_counts(&self) -> (u64, u64) {
+        *self.subagent_counters.lock()
     }
 
     /// 处理统一 Langfuse 事件，转发到 `LangfuseTracer`。
@@ -723,29 +816,20 @@ impl LangfuseBridge {
                 stage,
                 turn_id,
             } => {
-                // 需要先释放 MutexGuard 再获取 trace_id/agent_observation_id。
-                // SubAgent 活跃时，stage span 的父节点使用 SubAgent 的 observation_id；
-                // 否则回退到主 Agent 的 observation_id。
+                // 先释放 MutexGuard 再获取 trace_id/agent_observation_id。
+                // 归属按事件 agent_id 查 tracer registry(替代旧栈顶近似):
+                // ① 命中 by_agent_id → parent = 该 child 的 AGENT obs id;
+                // ② main_agent_id 匹配(或未注入时非 registry 成员)→ 主 agent obs;
+                // ③ 其余 → 注册闸门缓存(等 Start join 重放)或跳过(incomplete),
+                //    绝不 fallback 主 agent。
                 drop(t);
-                let (trace_id, agent_observation_id) = {
-                    let t2 = self.tracer.lock();
-                    let obs_id = t2.subagent.current_agent_id(&t2.agent_observation_id);
-                    (t2.trace_id.clone(), obs_id)
+                let handle = {
+                    let mut t2 = self.tracer.lock();
+                    t2.on_stage_start_gated(agent_id, *stage, &turn_id.to_string())
                 };
-                let mut t2 = self.tracer.lock();
-                // SubAgent 栈非空时标记栈顶已启动。对齐 on_stage_start() 中 mark_top_started 行为，
-                // 确保 fork subagent 的 on_tool_end("Agent") 能正确走 fork 清理路径（flush + emit ObservationCreate）。
-                // 桥路径绕过了 tracer.on_stage_start()，所以必须在此处补调 mark_top_started。
-                t2.subagent.mark_top_started();
-                // stage slot 按事件 agent_id 隔离：并行 subagent 的 stage 生命周期互不覆盖。
-                let handle = t2.stages.on_stage_start(
-                    agent_id,
-                    *stage,
-                    &trace_id,
-                    &turn_id.to_string(),
-                    &agent_observation_id,
-                );
-                active_stage.insert(agent_id.clone(), handle);
+                if let Some(handle) = handle {
+                    active_stage.insert(agent_id.clone(), handle);
+                }
             }
             UnifiedLangfuseEvent::StageEnded { agent_id, status } => {
                 // 按 agent_id 精确配对：只结束该 agent 自己的 handle，
@@ -753,11 +837,16 @@ impl LangfuseBridge {
                 if let Some(handle) = active_stage.remove(agent_id) {
                     t.on_stage_end(agent_id, &handle, *status);
                 } else {
-                    tracing::warn!(
-                        target: "langfuse::forward",
-                        %agent_id,
-                        "StageEnded 无匹配的活跃 stage handle（可能事件乱序或已结束），跳过"
-                    );
+                    // 乱序场景:StageStarted 被注册闸门缓存后重放,handle 在 tracer 侧
+                    if let Some(handle) = t.take_replayed_stage_handle(agent_id) {
+                        t.on_stage_end(agent_id, &handle, *status);
+                    } else {
+                        tracing::warn!(
+                            target: "langfuse::forward",
+                            %agent_id,
+                            "StageEnded 无匹配的活跃 stage handle（可能事件乱序或已结束），跳过"
+                        );
+                    }
                 }
             }
             UnifiedLangfuseEvent::MessageQueueDrained {
@@ -823,9 +912,78 @@ impl LangfuseBridge {
             } => {
                 t.on_workflow_end(workflow_id, *agents_spawned, *tool_calls);
             }
-            // SubagentStart/SubagentStop 暂无 Langfuse 映射，静默跳过
-            UnifiedLangfuseEvent::SubagentStart { .. }
-            | UnifiedLangfuseEvent::SubagentStop { .. } => {}
+            // SubagentStart/Stop:bridge 层保留 C4 注册/注销 + 日志 + 计数(指标),
+            // 归属/生命周期由 tracer registry 接管(AGENT obs 创建/关闭)。
+            UnifiedLangfuseEvent::SubagentStart {
+                parent_agent_id,
+                child_agent_id,
+                agent_name,
+                is_background,
+            } => {
+                let mut reg = self.subagent_registry.lock();
+                if reg.contains_key(child_agent_id) {
+                    tracing::warn!(
+                        target: "langfuse::subagent",
+                        %child_agent_id,
+                        "SubagentStart 重复（child_agent_id 已有活跃记录），覆盖注册"
+                    );
+                }
+                reg.insert(
+                    child_agent_id.clone(),
+                    SubagentLifecycle {
+                        parent_agent_id: parent_agent_id.clone(),
+                        agent_name: agent_name.clone(),
+                        is_background: *is_background,
+                    },
+                );
+                self.subagent_counters.lock().0 += 1;
+                tracing::info!(
+                    target: "langfuse::subagent",
+                    event = "subagent_start",
+                    %parent_agent_id,
+                    %child_agent_id,
+                    %agent_name,
+                    is_background,
+                    active = reg.len(),
+                    "SubagentStart 注册"
+                );
+                drop(reg);
+                // tracer registry:AGENT obs 创建(join 成功后) + gate 重放
+                t.on_subagent_start(parent_agent_id, child_agent_id, agent_name, *is_background);
+            }
+            UnifiedLangfuseEvent::SubagentStop {
+                parent_agent_id,
+                child_agent_id,
+                agent_name,
+                result,
+                is_error,
+            } => {
+                let mut reg = self.subagent_registry.lock();
+                let was_registered = reg.remove(child_agent_id).is_some();
+                self.subagent_counters.lock().1 += 1;
+                tracing::info!(
+                    target: "langfuse::subagent",
+                    event = "subagent_stop",
+                    %parent_agent_id,
+                    %child_agent_id,
+                    %agent_name,
+                    is_error,
+                    was_registered,
+                    active = reg.len(),
+                    result_len = result.len(),
+                    "SubagentStop 注销"
+                );
+                if !was_registered {
+                    tracing::warn!(
+                        target: "langfuse::subagent",
+                        %child_agent_id,
+                        "SubagentStop 无对应 Start（丢失/乱序），阶段②走 incomplete 分支"
+                    );
+                }
+                drop(reg);
+                // tracer registry:AGENT obs 关闭(两信号齐备时)
+                t.on_subagent_stop(parent_agent_id, child_agent_id, result, *is_error);
+            }
         }
     }
 }
@@ -847,3 +1005,210 @@ impl peri_agent::agent::LangfuseBridgeLike for LangfuseBridge {
         }
     }
 }
+
+// ── C4 最小接入测试 ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_agent::agent::LangfuseBridgeLike;
+
+    fn make_bridge() -> (
+        LangfuseBridge,
+        std::sync::Arc<crate::langfuse::fake_session::FakeLangfuseSession>,
+    ) {
+        // FakeLangfuseSession::new() 已返回 Arc<Self>
+        let session = crate::langfuse::fake_session::FakeLangfuseSession::new("sess_c4");
+        let config = crate::langfuse::config::LangfuseConfig {
+            public_key: None,
+            secret_key: None,
+            host: "https://cloud.langfuse.com".to_string(),
+            trace_sampling: 0.0,
+            error_span_always: true,
+            batch_max_events: 50,
+            batch_flush_interval_secs: 10,
+            user_id: None,
+        };
+        let tracer = crate::langfuse::tracer::LangfuseTracer::new(
+            session.clone(),
+            "sess_c4".to_string(),
+            config,
+        );
+        let bridge = LangfuseBridge::new(
+            Arc::new(parking_lot::Mutex::new(tracer)),
+            "test-provider".to_string(),
+            None,
+        );
+        (bridge, session)
+    }
+
+    /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child/parent/name/bg/result/error）
+    #[test]
+    fn test_from_observe_event_subagent_start_stop_mapping() {
+        use peri_agent::group::pipeline::AgentId;
+        use peri_agent::session::turn::TurnId;
+
+        let turn_id = TurnId::new();
+        let parent = AgentId::new();
+        let child = AgentId::new();
+
+        let start = ObserveEvent::SubagentStart {
+            turn_id,
+            agent_id: parent,
+            child_agent_id: child,
+            agent_name: "code-reviewer".to_string(),
+            is_background: true,
+        };
+        match UnifiedLangfuseEvent::from_observe_event(start) {
+            Some(UnifiedLangfuseEvent::SubagentStart {
+                parent_agent_id,
+                child_agent_id,
+                agent_name,
+                is_background,
+            }) => {
+                assert_eq!(parent_agent_id, parent.to_string());
+                assert_eq!(child_agent_id, child.to_string());
+                assert_eq!(agent_name, "code-reviewer");
+                assert!(is_background);
+            }
+            other => panic!("应为 SubagentStart，实际 {:?}", other),
+        }
+
+        let stop = ObserveEvent::SubagentStop {
+            turn_id,
+            agent_id: parent,
+            child_agent_id: child,
+            agent_name: "code-reviewer".to_string(),
+            result: "done".to_string(),
+            is_error: false,
+        };
+        match UnifiedLangfuseEvent::from_observe_event(stop) {
+            Some(UnifiedLangfuseEvent::SubagentStop {
+                parent_agent_id,
+                child_agent_id,
+                agent_name,
+                result,
+                is_error,
+            }) => {
+                assert_eq!(parent_agent_id, parent.to_string());
+                assert_eq!(child_agent_id, child.to_string());
+                assert_eq!(agent_name, "code-reviewer");
+                assert_eq!(result, "done");
+                assert!(!is_error);
+            }
+            other => panic!("应为 SubagentStop，实际 {:?}", other),
+        }
+    }
+
+    /// C4: process_event 的 Start 注册 / Stop 注销 + 计数（归属逻辑未动）
+    #[test]
+    fn test_process_event_registers_and_deregisters() {
+        use peri_agent::group::pipeline::AgentId;
+
+        let (bridge, _session) = make_bridge();
+        let mut active_stage = HashMap::new();
+        let parent = AgentId::new();
+        let child = AgentId::new();
+
+        // Start → 注册 + 计数
+        bridge.process_event(
+            &UnifiedLangfuseEvent::SubagentStart {
+                parent_agent_id: parent.to_string(),
+                child_agent_id: child.to_string(),
+                agent_name: "explorer".to_string(),
+                is_background: false,
+            },
+            &mut active_stage,
+        );
+        assert_eq!(
+            bridge.active_subagent_count(),
+            1,
+            "Start 后应有 1 个活跃注册"
+        );
+        assert_eq!(
+            bridge.subagent_event_counts(),
+            (1, 0),
+            "Start 计数应为 (1, 0)"
+        );
+
+        // 重复 Start → 覆盖注册（不增加条目），计数仍递增
+        bridge.process_event(
+            &UnifiedLangfuseEvent::SubagentStart {
+                parent_agent_id: parent.to_string(),
+                child_agent_id: child.to_string(),
+                agent_name: "explorer".to_string(),
+                is_background: false,
+            },
+            &mut active_stage,
+        );
+        assert_eq!(
+            bridge.active_subagent_count(),
+            1,
+            "重复 Start 不增加注册条目"
+        );
+
+        // Stop → 注销 + 计数
+        bridge.process_event(
+            &UnifiedLangfuseEvent::SubagentStop {
+                parent_agent_id: parent.to_string(),
+                child_agent_id: child.to_string(),
+                agent_name: "explorer".to_string(),
+                result: "found".to_string(),
+                is_error: false,
+            },
+            &mut active_stage,
+        );
+        assert_eq!(bridge.active_subagent_count(), 0, "Stop 后注册应清空");
+        assert_eq!(bridge.subagent_event_counts(), (2, 1));
+
+        // 无对应 Start 的 Stop → 不 panic，计数仍递增（阶段② incomplete 分支）
+        bridge.process_event(
+            &UnifiedLangfuseEvent::SubagentStop {
+                parent_agent_id: parent.to_string(),
+                child_agent_id: AgentId::new().to_string(),
+                agent_name: "ghost".to_string(),
+                result: "lost".to_string(),
+                is_error: true,
+            },
+            &mut active_stage,
+        );
+        assert_eq!(bridge.active_subagent_count(), 0);
+        assert_eq!(bridge.subagent_event_counts(), (2, 2));
+    }
+
+    /// C4: 经 LangfuseBridgeLike 完整链路（forwarder 同入口）Start/Stop 可达
+    #[test]
+    fn test_bridge_like_process_observe_start_stop() {
+        use peri_agent::group::pipeline::AgentId;
+        use peri_agent::session::turn::TurnId;
+
+        let (bridge, _session) = make_bridge();
+        let parent = AgentId::new();
+        let child = AgentId::new();
+        let turn_id = TurnId::new();
+
+        bridge.process_observe_event(&ObserveEvent::SubagentStart {
+            turn_id,
+            agent_id: parent,
+            child_agent_id: child,
+            agent_name: "plan".to_string(),
+            is_background: false,
+        });
+        assert_eq!(bridge.active_subagent_count(), 1);
+
+        bridge.process_observe_event(&ObserveEvent::SubagentStop {
+            turn_id,
+            agent_id: parent,
+            child_agent_id: child,
+            agent_name: "plan".to_string(),
+            result: "done".to_string(),
+            is_error: false,
+        });
+        assert_eq!(bridge.active_subagent_count(), 0);
+        assert_eq!(bridge.subagent_event_counts(), (1, 1));
+    }
+}
+
+#[cfg(test)]
+#[path = "bridge_test.rs"]
+mod bridge_test;

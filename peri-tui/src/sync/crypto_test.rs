@@ -147,3 +147,138 @@ mod tests {
         assert_eq!(skills.files[0].path, "my-skill/SKILL.md");
     }
 }
+
+// ── 新协议 API（v1）测试：data-key + versioned AAD envelope ──
+#[cfg(test)]
+mod v1_tests {
+    use crate::sync::crypto::{
+        DataKey, ENVELOPE_HEADER_LEN, ENVELOPE_VERSION, IV_LEN, open, payload_aad, seal,
+    };
+
+    const CHANNEL: &str = "CH1234567890abcdef";
+    const MANIFEST_HASH: [u8; 32] = [0xAB; 32];
+
+    #[test]
+    fn test_payload_aad_fixed_vector() {
+        let aad = payload_aad(CHANNEL, 5, &MANIFEST_HASH).unwrap();
+        assert_eq!(
+            String::from_utf8(aad).unwrap(),
+            format!(
+                "peri-sync/v1|payload|{CHANNEL}|5|{}",
+                crate::sync::canonical::b64url_nopad(&MANIFEST_HASH)
+            )
+        );
+        // part index 变化必须改变 AAD。
+        assert_ne!(
+            payload_aad(CHANNEL, 5, &MANIFEST_HASH).unwrap(),
+            payload_aad(CHANNEL, 6, &MANIFEST_HASH).unwrap()
+        );
+        // channel 变化必须改变 AAD。
+        assert_ne!(
+            payload_aad(CHANNEL, 5, &MANIFEST_HASH).unwrap(),
+            payload_aad("OTHER", 5, &MANIFEST_HASH).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_seal_open_roundtrip() {
+        let key = DataKey::random().expect("data key 生成应成功");
+        let aad = payload_aad(CHANNEL, 3, &MANIFEST_HASH).unwrap();
+        let plaintext = b"hello peri-sync v1";
+        let envelope = seal(&key, &aad, plaintext);
+        assert_eq!(envelope.len(), ENVELOPE_HEADER_LEN + plaintext.len() + 16);
+        assert_eq!(envelope[0], ENVELOPE_VERSION);
+        let opened = open(&key, &aad, &envelope).expect("解密应成功");
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn test_open_wrong_key_fails() {
+        let key1 = DataKey::random().unwrap();
+        let key2 = DataKey::random().unwrap();
+        let aad = payload_aad(CHANNEL, 0, &MANIFEST_HASH).unwrap();
+        let envelope = seal(&key1, &aad, b"secret");
+        assert!(open(&key2, &aad, &envelope).is_err(), "错误密钥必须失败");
+    }
+
+    #[test]
+    fn test_open_wrong_aad_fails() {
+        let key = DataKey::random().unwrap();
+        let envelope = seal(
+            &key,
+            &payload_aad(CHANNEL, 1, &MANIFEST_HASH).unwrap(),
+            b"secret",
+        );
+        // 不同 part index / channel / manifest hash 的 AAD 均不能解开。
+        assert!(
+            open(
+                &key,
+                &payload_aad(CHANNEL, 2, &MANIFEST_HASH).unwrap(),
+                &envelope
+            )
+            .is_err()
+        );
+        assert!(
+            open(
+                &key,
+                &payload_aad("OTHER", 1, &MANIFEST_HASH).unwrap(),
+                &envelope
+            )
+            .is_err()
+        );
+        let other_hash = [0xCD; 32];
+        assert!(
+            open(
+                &key,
+                &payload_aad(CHANNEL, 1, &other_hash).unwrap(),
+                &envelope
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_open_tampered_ciphertext_fails() {
+        let key = DataKey::random().unwrap();
+        let aad = payload_aad(CHANNEL, 0, &MANIFEST_HASH).unwrap();
+        let mut envelope = seal(&key, &aad, b"payload");
+        let last = envelope.len() - 1;
+        envelope[last] ^= 0x01;
+        assert!(open(&key, &aad, &envelope).is_err(), "篡改密文必须认证失败");
+    }
+
+    #[test]
+    fn test_open_bad_version_fails() {
+        let key = DataKey::random().unwrap();
+        let aad = payload_aad(CHANNEL, 0, &MANIFEST_HASH).unwrap();
+        let mut envelope = seal(&key, &aad, b"payload");
+        envelope[0] = ENVELOPE_VERSION + 1;
+        let err = open(&key, &aad, &envelope).unwrap_err().to_string();
+        assert!(err.contains("version"), "版本错误必须明确报告");
+    }
+
+    #[test]
+    fn test_open_too_short_fails() {
+        let key = DataKey::random().unwrap();
+        let aad = payload_aad(CHANNEL, 0, &MANIFEST_HASH).unwrap();
+        assert!(open(&key, &aad, &[]).is_err());
+        assert!(open(&key, &aad, &[ENVELOPE_VERSION]).is_err());
+        assert!(open(&key, &aad, &[ENVELOPE_VERSION; ENVELOPE_HEADER_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn test_data_key_shape_and_debug_redaction() {
+        let key = DataKey::random().unwrap();
+        assert_eq!(key.as_array().len(), 32);
+        // Debug 必须脱敏（精确匹配，不泄露任何密钥材料）。
+        assert_eq!(format!("{key:?}"), "DataKey(\"[REDACTED]\")");
+        let key2 = DataKey::from_array(*key.as_array());
+        assert_eq!(key.as_array(), key2.as_array());
+    }
+
+    #[test]
+    fn test_envelope_layout_constants() {
+        assert_eq!(ENVELOPE_HEADER_LEN, 1 + IV_LEN);
+        assert_eq!(IV_LEN, 12);
+    }
+}

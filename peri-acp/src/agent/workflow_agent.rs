@@ -183,11 +183,13 @@ impl AgentExecutor for WorkflowAgentExecutor {
         };
 
         // 构造统一 Langfuse 桥接器（替代 forward_langfuse_event）
+        // workflow 无 subagent 场景:不注入 main_agent_id(registry fallback 兼容 v1)
         let langfuse_bridge: Option<crate::langfuse::bridge::LangfuseBridge> =
             langfuse_tracer.as_ref().map(|t| {
                 crate::langfuse::bridge::LangfuseBridge::new(
                     std::sync::Arc::clone(t),
                     provider_display_name.clone(),
+                    None,
                 )
             });
         let bridge_for_handler = langfuse_bridge.clone();
@@ -498,6 +500,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let error_suggest_registry = peri_middlewares::error_suggest::build_default_registry();
 
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
+        // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
         let v2_ctx = peri_middlewares::subagent::v2_bridge::build_v2_subagent_context(
             llm,
             chain,
@@ -512,6 +515,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             compact_llm,
             Some(error_suggest_registry),
             Some(snapshot),
+            None,
         );
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）

@@ -28,6 +28,9 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     dispatch_and_notify(
@@ -123,6 +126,17 @@ fn test_drain_input_buffer_no_submit_tx_safe() {
     // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
 }
 
+/// 确保全局 SUBMIT_TX 已初始化，并尽可能安装可观察的 receiver。
+///
+/// 返回 Some(rx)：本次测试**新安装**了 channel，可断言 drain 实际发出的
+/// SubmitRequest 消息；返回 None：channel 已由先前测试安装（OnceLock 全局
+/// 单例无法重置，只能断言 drain 的核心效应——buffer 被清空）。
+fn ensure_submit_tx_observable() -> Option<mpsc::UnboundedReceiver<SubmitRequest>> {
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    SUBMIT_TX.set(tx).ok()?;
+    Some(rx)
+}
+
 /// BRIDGE_RESET_COUNTER 递增时 acp_bridge 重置分支同步清空 INPUT_BUFFER，
 /// 防止旧会话缓存输入在新会话 TurnDone 时泄漏。
 ///
@@ -188,6 +202,9 @@ fn test_two_turn_done_accumulates_committed() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // 第一轮：stream one text → TurnDone
@@ -248,6 +265,9 @@ fn test_turndone_archives_assistant_to_committed() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // 往 current_turn 写入一条 assistant 文本
@@ -303,12 +323,16 @@ fn test_turn_interrupted_empty_skips_archive() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "test".into(),
+            request_id: None,
         },
     );
 
@@ -323,6 +347,852 @@ fn test_turn_interrupted_empty_skips_archive() {
     }
     assert!(state.current_turn.is_empty(), "current_turn 应已重置");
     assert_eq!(state.phase, SessionPhase::Idle, "phase 应为 Idle");
+}
+
+/// 竞态防护（Issue 2026-08-05）：新提交（LocalUserBubble）先入队后，
+/// stale TurnInterrupted（旧 turn）到达时跳过零产出回滚——不删新气泡、
+/// 不恢复文本；排队输入（用户已提交的新请求，不得静默丢弃）在复位后
+/// **立即 drain 提交**（遗留项修复：不再滞留悬挂至下一 TurnDone）。
+/// 归档旧产出 + 复位。
+/// 本测试走排队分支（B 无 PromptSubmitted、事件 request_id=None）→ 代际判定兜底。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
+
+    // turn A：LocalUserBubble + PromptSubmitted（gen=1, last_prompt=1）
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted { request_id: None },
+    );
+
+    // 竞态：用户提交 B——LocalUserBubble 已到达（gen=2），
+    // PromptSubmitted 尚未发出（B 排队中或 submit_consumer 仍在等 A 的 RPC）。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    INPUT_BUFFER.state().write().push_back("queued".into());
+    assert_eq!(state.turn_generation, 2);
+    assert_eq!(state.last_prompt_generation, 1, "B 的 prompt RPC 尚未发出");
+    let committed_before = state.committed.len(); // A + B 两个气泡
+
+    // stale TurnInterrupted（turn A 的取消事件晚到）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: None,
+        },
+    );
+
+    // 不污染新 turn：B 气泡保留、文本不恢复、loading 复位；
+    // 排队输入立即 drain 提交（遗留项修复——旧 turn 已取消、TurnDone
+    // 永不到达，滞留会悬挂或顺序反转，复位后必须主动提交）
+    assert_eq!(
+        state.committed.len(),
+        committed_before,
+        "stale TurnInterrupted 不得删除新 turn 的用户气泡"
+    );
+    match &state.committed[1] {
+        TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "B"),
+        other => panic!("committed[1] 应为 B 的气泡, got {other:?}"),
+    }
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队输入属于用户已提交的新请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
+    );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
+    assert!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .is_none(),
+        "stale TurnInterrupted 不得恢复旧输入文本"
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "phase 应复位（loading 解除）"
+    );
+    // 返工：stale 分支保留 last_submitted_text——它是最近一次提交（B）的回滚锚点，
+    // 后续 B 被取消（连续取消）时零产出回滚仍需恢复 B 的输入文本。
+    assert_eq!(
+        state.last_submitted_text.as_deref(),
+        Some("B"),
+        "stale TurnInterrupted 应保留最近一次提交的文本锚点"
+    );
+}
+
+/// 非 stale 的零产出回滚保持原行为：删气泡 + 恢复文本 + 清排队输入。
+#[test]
+#[serial]
+fn test_turn_interrupted_zero_output_rollback_still_works() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted { request_id: None },
+    );
+    INPUT_BUFFER.state().write().push_back("queued".into());
+    assert_eq!(state.committed.len(), 1);
+
+    // 无新提交 → 非 stale → 正常回滚
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: None,
+        },
+    );
+
+    assert!(
+        state.committed.is_empty(),
+        "零产出回滚应删除本 turn 的用户气泡"
+    );
+    assert_eq!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .as_deref(),
+        Some("A"),
+        "零产出回滚应恢复输入文本"
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "零产出回滚应清空排队输入"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// 次要项 (a)：TurnInterrupted 归档分支（current_turn 非空）同步清空
+/// INPUT_BUFFER——防止排队输入在下一 TurnDone 被 drain_input_buffer 意外提交。
+#[test]
+#[serial]
+fn test_turn_interrupted_archive_branch_clears_input_buffer() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted { request_id: None },
+    );
+    // A 已产出部分内容
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "partial".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    INPUT_BUFFER.state().write().push_back("queued".into());
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: None,
+        },
+    );
+
+    assert_eq!(
+        state.committed.len(),
+        2,
+        "归档分支：A 气泡 + 已产出内容应归档到 committed"
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "归档分支也应清空排队输入（取消后不得在下一 TurnDone 意外提交）"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// 次要项 (b)：TurnDone 后 last_submitted_text 应清空，避免跨 turn 残留
+/// 导致后续 stale TurnInterrupted 误删不相关气泡。
+#[test]
+#[serial]
+fn test_turn_done_clears_last_submitted_text() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "hello".into(),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted { request_id: None },
+    );
+    assert_eq!(state.last_submitted_text.as_deref(), Some("hello"));
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+    assert!(
+        state.last_submitted_text.is_none(),
+        "TurnDone 后 last_submitted_text 应清空（防跨 turn 残留）"
+    );
+}
+
+/// Issue 2026-08-05 返工核心验收（主导排序）：新提交 B 已发 RPC
+/// （PromptSubmitted 先到）后，旧 turn A 的 TurnInterrupted 晚到——
+/// request_id 配对判定（A1 ≠ B1）应识别为 stale：不删 B 气泡、不恢复文本；
+/// 排队输入（用户已提交的新请求，不得随旧 turn 取消作废）复位后立即
+/// drain 提交（遗留项修复）。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_request_id_mismatch() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // turn A：LocalUserBubble + PromptSubmitted(A1)
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    // turn B：LocalUserBubble + PromptSubmitted(B1)——B 走完整 RPC 路径（主导排序）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("B1".into()),
+        },
+    );
+    // 排队输入（B 提交之后用户又输入的排队请求）——stale 复位后立即 drain 提交
+    INPUT_BUFFER.state().write().push_back("queued".into());
+    assert_eq!(state.current_request_id.as_deref(), Some("B1"));
+    assert_eq!(state.turn_generation, 2);
+    assert_eq!(
+        state.last_prompt_generation, 2,
+        "B 的 PromptSubmitted 已到（v1 判定在此场景失效）"
+    );
+    let committed_before = state.committed.len(); // A + B 两个气泡
+
+    // stale TurnInterrupted（turn A 的取消事件晚到，服务器往返数百 ms）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+
+    // 验收：不删新气泡、不恢复旧文本；排队输入复位后立即 drain 提交
+    assert_eq!(
+        state.committed.len(),
+        committed_before,
+        "stale TurnInterrupted 不得删除新 turn 的用户气泡"
+    );
+    match &state.committed[1] {
+        TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "B"),
+        other => panic!("committed[1] 应为 B 的气泡, got {other:?}"),
+    }
+    assert!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .is_none(),
+        "stale TurnInterrupted 不得恢复旧输入文本"
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队输入属于用户已提交的新请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
+    );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "phase 应复位（loading 解除）"
+    );
+    // 返工：stale 分支保留 last_submitted_text——它是最近一次提交（B）的回滚锚点，
+    // 后续 B 被取消（连续取消）时零产出回滚仍需恢复 B 的输入文本。
+    assert_eq!(
+        state.last_submitted_text.as_deref(),
+        Some("B"),
+        "stale TurnInterrupted 应保留最近一次提交的文本锚点"
+    );
+}
+
+/// Issue 2026-08-05 返工：排队分支（B 仅 LocalUserBubble、无 PromptSubmitted）
+/// 下 stale 判定回退 v1 代际判定——id 配对（A1 == A1）判不出 stale，但
+/// turn_generation(2) > last_prompt_generation(1) 识别为 stale。排队输入 B
+/// 在复位后立即 drain 提交（遗留项修复）。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_queued_branch_still_stale() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    // B 排队中：仅 LocalUserBubble，无 PromptSubmitted（is_loading gate 阻断 RPC）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    INPUT_BUFFER.state().write().push_back("B".into());
+    assert_eq!(
+        state.current_request_id.as_deref(),
+        Some("A1"),
+        "B 无 RPC → current_request_id 停留 A1"
+    );
+    assert_eq!(state.turn_generation, 2);
+    assert_eq!(state.last_prompt_generation, 1);
+    let committed_before = state.committed.len(); // A + B 两个气泡
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+
+    // 代际判定兜底 → stale：B 气泡保留、排队输入复位后立即 drain 提交
+    assert_eq!(state.committed.len(), committed_before);
+    match &state.committed[1] {
+        TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "B"),
+        other => panic!("committed[1] 应为 B 的气泡, got {other:?}"),
+    }
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队分支的 B 是用户已提交的请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
+    );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// Issue 2026-08-05 遗留项：多次 stale TurnInterrupted 不重复 drain——
+/// 第一次复位后 buffer 已清空，第二次（更旧 turn）到达时 drain no-op，
+/// 不重复提交、不重复归档。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_drain_is_idempotent() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    let drain_rx = ensure_submit_tx_observable();
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // turn A 运行中
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    // B 排队中（仅 LocalUserBubble，无 RPC）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    INPUT_BUFFER.state().write().push_back("B".into());
+
+    // 第一个 stale 事件（A 的取消晚到）→ 复位 + drain
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "第一次 stale 后排队输入应立即 drain"
+    );
+
+    // 第二个 stale 事件（更旧 turn 的取消，id 仍不匹配）→ drain no-op
+    let committed_before = state.committed.len();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("X0".into()),
+        },
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "第二次 stale 不得重新产生排队输入"
+    );
+    assert_eq!(
+        state.committed.len(),
+        committed_before,
+        "第二次 stale 不得重复归档/提交"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+    if let Some(mut rx) = drain_rx {
+        // 只应提交 1 条（第一次 stale 的 drain）
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "第二次 stale 不得重复提交排队输入"
+        );
+    }
+}
+
+/// Issue 2026-08-05 返工：正常取消（无新提交）时 request_id 精确配对
+/// （A1 == A1）→ 非 stale → 零产出回滚保持原行为。
+#[test]
+#[serial]
+fn test_turn_interrupted_current_request_id_rollback() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    INPUT_BUFFER.state().write().push_back("queued".into());
+    assert_eq!(state.committed.len(), 1);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+
+    // 非 stale → 正常零产出回滚：删 A 气泡 + 恢复文本 + 清排队输入
+    assert!(
+        state.committed.is_empty(),
+        "零产出回滚应删除本 turn 的用户气泡"
+    );
+    assert_eq!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .as_deref(),
+        Some("A"),
+        "零产出回滚应恢复输入文本"
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "零产出回滚应清空排队输入"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// Issue 2026-08-05 返工：request_id 缺失（continuation / Immediate 命令 /
+/// stdio 等路径回带 None）→ 跳过 id 判定，仅 v1 代际判定（非 stale → 回滚）。
+#[test]
+#[serial]
+fn test_turn_interrupted_none_request_id_falls_back() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: None,
+        },
+    );
+
+    // id 判定跳过；代际判定：turn_generation == last_prompt_generation → 非 stale → 回滚
+    assert!(
+        state.committed.is_empty(),
+        "request_id=None 时回退 v1 判定，正常取消应回滚"
+    );
+    assert_eq!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .as_deref(),
+        Some("A"),
+        "request_id=None 时正常取消应恢复输入文本"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// Issue 2026-08-05 返工：连续取消——A 取消事件（A1）先到（stale，B 保留），
+/// B 的取消事件（B1）后到（id 精确配对 → 回滚 B）。request_id 配对提供
+/// 精确的 turn 归属，时间快照启发式无法区分。
+#[test]
+#[serial]
+fn test_double_cancel_request_id_pairs() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
+        mu.lock().take();
+    }
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // A 提交并运行
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    // A 被取消后用户提交 B（完整 RPC 路径）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("B1".into()),
+        },
+    );
+
+    // 第一个晚到事件：A 的取消（A1 ≠ 当前 B1）→ stale，B 保留
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+    assert_eq!(state.committed.len(), 2, "A 的取消不得删除 B 的气泡");
+    assert_eq!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone()),
+        None,
+        "A 的取消不得恢复旧输入文本"
+    );
+
+    // 随后 B 的取消（B1 == B1）→ 非 stale → 正常回滚 B
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("B1".into()),
+        },
+    );
+    assert_eq!(
+        state.committed.len(),
+        1,
+        "B 的取消应回滚 B 的气泡（A 气泡保留）"
+    );
+    match &state.committed[0] {
+        TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "A"),
+        other => panic!("committed[0] 应为 A 的气泡, got {other:?}"),
+    }
+    assert_eq!(
+        crate::kit::atoms::INPUT_RESTORE_TEXT
+            .get()
+            .and_then(|mu| mu.lock().clone())
+            .as_deref(),
+        Some("B"),
+        "B 的取消应恢复 B 的输入文本"
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
 }
 
 /// push_view_models 以 BridgeState 为准，不再 fallback 到 atom 旧值。
@@ -355,6 +1225,9 @@ fn test_push_view_models_uses_bridge_state() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -449,6 +1322,9 @@ fn test_prediction_writes_prediction_atom() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     use peri_acp_types::event_data::{Prediction, PredictionAction};
@@ -500,6 +1376,9 @@ fn test_rewind_completed_replaces_committed() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     let messages_json = serde_json::json!([
@@ -566,6 +1445,9 @@ fn test_rewind_completed_restores_target_text_to_input() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
     let messages_json = serde_json::json!([
         {"role": "user", "id": "msg-1", "content": "历史用户消息"},
@@ -621,6 +1503,9 @@ fn test_rewind_completed_without_target_text_no_restore() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
     let messages_json = serde_json::json!([]).to_string();
     dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
@@ -653,6 +1538,9 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // === Turn 1: user bubble, reasoning + text → TurnDone ===
@@ -770,8 +1658,8 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
 
 /// C2: compact 完成后 TurnDone 触发 session/load 重放。
 ///
-/// 场景 A：命令 compact（Immediate）后 current_turn 为空 → 触发 THREAD_LOAD_TX。
-/// 场景 B：agent 内部 compact 后 current_turn 非空（有后续流事件）→ 不触发。
+/// 场景 A：命令 compact（Immediate）后无流事件 → 触发 THREAD_LOAD_TX。
+/// 场景 B：agent 内部 auto-compact 后有后续流事件 → 标志被清除，不触发。
 ///
 /// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突。
 #[test]
@@ -802,6 +1690,9 @@ fn test_compact_turndone_reload() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -815,6 +1706,9 @@ fn test_compact_turndone_reload() {
     assert!(!state.compact_just_completed, "场景 A: flag 应清除");
 
     // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
+    // S4.1 红测试改造：按真实时序（CompactCompleted → 流事件 → TurnDone）
+    // 构造，并补 rx 空断言。修复前流事件不清除 compact_just_completed 标志
+    // → TurnDone 误发送（rx 非空，测试红）；修复后标志被流事件清除 → rx 空。
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 
     let mut state = BridgeState {
@@ -833,17 +1727,96 @@ fn test_compact_turndone_reload() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
-    state
-        .current_turn
-        .append_text("agent response after compact", None);
-    state.compact_just_completed = true;
 
+    // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，
+    //    auto compact 不置位，zero-output 后重放旧消息的边缘洞根治）。
+    //    同时注入 SystemNote（current_turn 非空）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CompactCompleted {
+            summary: "compact summary".into(),
+            files: vec![],
+            skills: vec![],
+            micro_cleared: 0,
+            messages_json: String::new(),
+            strategy: "micro".into(),
+            trigger: "auto".into(),
+            outcome: "micro_applied".into(),
+        },
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B: auto compact 后标志不应置位（方案 A）"
+    );
+
+    // ② agent 继续产出——流事件到达（标志从未置位，防御逻辑无操作）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "agent response after compact".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B: 流事件到达后标志仍不应置位"
+    );
+
+    // ③ turn 结束——不得触发 session/load 重放
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-    // 场景 B 的 TurnDone 也会尝试发送（因为 flag 为 true 但 current_turn 非空），
-    // 核心验证：flag 应被清除，但 reload 逻辑条件不满足（current_turn 非空）。
     assert!(!state.compact_just_completed, "场景 B: flag 应清除");
+    assert!(
+        rx_a.try_recv().is_err(),
+        "场景 B: THREAD_LOAD_TX 不应收到消息（auto-compact 不触发重放）"
+    );
+
+    // ── 场景 B2：manual compact + 流事件（方案 B 防御路径保留）────────
+    // manual compact 置位后，若 agent 继续产出流事件（理论上 manual 是
+    // Immediate 命令无流事件，但防御逻辑保留），标志被清除，TurnDone
+    // 不触发 reload。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CompactCompleted {
+            summary: "manual compact summary".into(),
+            files: vec![],
+            skills: vec![],
+            micro_cleared: 0,
+            messages_json: String::new(),
+            strategy: "full".into(),
+            trigger: "manual".into(),
+            outcome: "full_applied".into(),
+        },
+    );
+    assert!(
+        state.compact_just_completed,
+        "场景 B2: manual compact 后标志应置位"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "defensive stream after manual compact".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B2: 流事件到达后标志应清除（方案 B 防御）"
+    );
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(!state.compact_just_completed, "场景 B2: flag 应清除");
+    assert!(
+        rx_a.try_recv().is_err(),
+        "场景 B2: 防御路径下也不应触发重放"
+    );
 }
 
 /// SubagentStopped 在 TurnDone 之后不应重新激活 loading。
@@ -870,6 +1843,9 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // 模拟 TurnDone：归档 + 重置 phase/loading
@@ -920,6 +1896,9 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // 模拟 TurnSuspended：归档 + 重置 phase/loading
@@ -972,6 +1951,9 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // SubagentStarted 设置 phase=PromptRunning
@@ -1030,13 +2012,24 @@ fn test_prompt_submitted_sets_loading() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
-    dispatch_and_notify(&mut state, &AcpEventData::PromptSubmitted);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("rid-1".into()),
+        },
+    );
 
     assert_eq!(state.phase, SessionPhase::PromptRunning);
     assert_eq!(state.variant, 1);
     assert!(ACP_STATE.state().read().is_loading);
+    // 返工：PromptSubmitted 记录 current_request_id 与 last_prompt_generation 快照
+    assert_eq!(state.current_request_id.as_deref(), Some("rid-1"));
+    assert_eq!(state.last_prompt_generation, state.turn_generation);
 }
 
 /// 同步 sub-agent 的 ToolStarted/ToolEnded 事件应路由到 SubAgentAccumulator，
@@ -1062,6 +2055,9 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     // 启动同步 sub-agent
@@ -1204,6 +2200,9 @@ fn test_todo_snapshot_advances_only_after_successful_tool_end() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     let start = |id: &str, status: &str| {
@@ -1269,6 +2268,9 @@ fn test_duplicate_todo_end_cannot_roll_back_newer_successful_snapshot() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
     let start = |id: &str, status: &str| {
         AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
@@ -1326,6 +2328,9 @@ fn test_replay_skill_card_hides_raw_skill_output() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
 
     dispatch_and_notify(
@@ -1380,6 +2385,9 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         last_successful_todo_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
     };
     let start = |id: &str, status: &str| {
         AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
@@ -1412,5 +2420,131 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         todo.changes[0].kind,
         TuiTodoChangeKind::Reopened,
         "较早启动的 Todo 晚到成功结束时不得回退较新成功基线"
+    );
+}
+
+/// S4.2: LocalLoadingReset（cancel / /clear / prompt 失败兜底注入的内部事件）
+/// 应将 phase 从 PromptRunning 复位为 Idle 并重推 ACP_STATE——修复
+/// cancel_consumer 直接写 ACP_STATE 与 bridge phase 派生不同步（取消后
+/// push_acp_state 用 phase 重算 is_loading=true 造成 loading 闪回）。
+/// 幂等：phase 非 PromptRunning 时 no-op。
+#[test]
+#[serial]
+fn test_loading_reset_event_resets_phase() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // 前置：PromptSubmitted 使 bridge 进入 PromptRunning，ACP_STATE 派生 loading
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    assert!(
+        ACP_STATE.state().read().is_loading,
+        "前置：PromptSubmitted 后 is_loading=true"
+    );
+
+    // 取消：LocalLoadingReset → phase 复位 + is_loading=false
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "LocalLoadingReset 后 phase 应为 Idle"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "LocalLoadingReset 后 is_loading 应为 false"
+    );
+
+    // 幂等：phase 已 Idle 时再次 dispatch 无副作用
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    assert_eq!(state.phase, SessionPhase::Idle, "幂等：phase 保持 Idle");
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "幂等：is_loading 保持 false"
+    );
+}
+
+/// S4.2 回归：取消（LocalLoadingReset）后，服务端正常收尾的 TurnInterrupted
+/// 到达不得把 loading 拉回。修复前 cancel_consumer 只直接写 ACP_STATE、
+/// bridge phase 仍为 PromptRunning——TurnInterrupted 的 push_acp_state 会
+/// 用 phase 重算 is_loading=true（取消后 loading 闪回 + 提交判定竞态）。
+#[test]
+#[serial]
+fn test_loading_reset_then_turn_interrupted_keeps_idle() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    assert!(ACP_STATE.state().read().is_loading);
+
+    // 取消：LocalLoadingReset
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    assert_eq!(state.phase, SessionPhase::Idle);
+
+    // 服务端取消收尾：TurnInterrupted（request_id 配对 → 非 stale）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user-cancelled".into(),
+            request_id: Some("r1".into()),
+        },
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "取消后 TurnInterrupted 到达：phase 保持 Idle"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "取消后 loading 不得闪回"
     );
 }

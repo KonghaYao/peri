@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 /// Notification events dispatched from the background pump to the TUI event loop.
+#[derive(Debug)]
 pub enum AcpNotification {
     /// A `notifications/agent_event` notification carrying an AcpEvent DTO.
     /// The TUI converts this to its own AgentEvent via `map_acp_event`.
@@ -30,9 +31,12 @@ pub enum AcpNotification {
     /// An unrecognized notification or request.
     Other { msg: String },
     /// Agent execution completed (synthetic notification from ACP server).
+    /// `request_id` 为被结束 turn 的 prompt requestId（服务器回带，可选）——
+    /// TUI 用它识别事件所属 turn（Issue 2026-08-05 stale 判定）。
     AgentDone {
         session_id: String,
         stop_reason: String,
+        request_id: Option<String>,
     },
     /// Prediction fork 完成后的建议文本与结构化动作。
     PredictionReady {
@@ -60,10 +64,13 @@ pub enum AcpNotification {
 /// Uses `Arc<Mutex<Option<String>>>` for `current_session_id` so that
 /// clones (e.g., in `interrupt()` and `submit_message()`'s async task)
 /// share the same session state.
+///
+/// `notification_tx` 刻意不存于此 struct：sender 必须由 pump task 独占持有，
+/// pump 退出时 channel 关闭，notifier 的 recv-None 分支才能触发（Issue 2
+/// 死代码重接）。若未来需要从 client 主动发通知，走显式参数传递，勿加回字段。
 #[derive(Clone)]
 pub struct AcpTuiClient {
     transport: Arc<MpscClientTransport>,
-    notification_tx: mpsc::UnboundedSender<AcpNotification>,
     current_session_id: Arc<Mutex<Option<String>>>,
 }
 
@@ -86,24 +93,35 @@ impl AcpTuiClient {
 
     /// Create a new client wrapping an existing `MpscClientTransport`.
     ///
-    /// Returns `(Self, notification_receiver)`. The caller must:
-    /// 1. Move `notification_receiver` to the TUI event loop (`AgentComm.acp_notification_rx`)
-    /// 2. Spawn the pump via [`AcpTuiClient::spawn_pump`]
-    pub fn new(transport: MpscClientTransport) -> (Self, mpsc::UnboundedReceiver<AcpNotification>) {
+    /// Returns `(Self, notification_sender, notification_receiver)`. The caller must:
+    /// 1. Move `notification_sender` into [`AcpTuiClient::spawn_pump`] — the pump
+    ///    task must remain its **sole** holder; when the pump exits (transport
+    ///    closed) the sender drops, the channel closes, and the notifier's
+    ///    recv-None fallback fires (Issue 2).
+    /// 2. Move `notification_receiver` to the TUI event loop (`spawn_kit_notifier`).
+    pub fn new(
+        transport: MpscClientTransport,
+    ) -> (
+        Self,
+        mpsc::UnboundedSender<AcpNotification>,
+        mpsc::UnboundedReceiver<AcpNotification>,
+    ) {
         let (notification_tx, notification_rx) = mpsc::unbounded_channel();
         let client = Self {
             transport: Arc::new(transport),
-            notification_tx,
             current_session_id: Arc::new(Mutex::new(None)),
         };
-        (client, notification_rx)
+        (client, notification_tx, notification_rx)
     }
 
-    /// Spawn the notification pump as a tokio task. Consumes internal clones of
-    /// transport and notification sender.
-    pub fn spawn_pump(&self) {
+    /// Spawn the notification pump as a tokio task. Consumes the notification
+    /// sender and clones of transport/session state.
+    ///
+    /// `notification_tx` 由 pump task 独占持有：禁止克隆到 struct/全局/任何
+    /// 长生命周期对象，否则 channel 不再随 pump 退出关闭，notifier 的
+    /// recv-None 兜底失效（Issue 2）。从 client 主动发通知走显式参数传递。
+    pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
         let transport = self.transport.clone();
-        let notification_tx = self.notification_tx.clone();
         let current_session_id = self.current_session_id.clone();
         tokio::spawn(async move {
             Self::run_pump(transport, notification_tx, current_session_id).await;
@@ -239,6 +257,11 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("end_turn")
                             .to_string();
+                        // requestId 为可选字段（缺失路径如 continuation/Immediate 命令/stdio）
+                        let request_id = params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         if !Self::is_current_session(&current_session_id, &session_id) {
                             debug!(session_id = %session_id, "ACP client pump: dropping stale agent_done");
                             continue;
@@ -246,6 +269,7 @@ impl AcpTuiClient {
                         let _ = notification_tx.send(AcpNotification::AgentDone {
                             session_id,
                             stop_reason,
+                            request_id,
                         });
                     } else if method == "peri/prediction_ready" {
                         let session_id = params
@@ -379,9 +403,14 @@ impl AcpTuiClient {
     /// Submit a user message to the current session.
     /// Note: prompt() is called from the spawned async task that already
     /// has a session via new_session(), so current_session_id is guaranteed Some.
+    ///
+    /// `request_id` 为本轮 prompt 的唯一标识（submit_consumer 生成）——服务器
+    /// 随 turn 结束事件（peri/agent_event_done）回带，供 stale 事件配对判定
+    /// （Issue 2026-08-05）。None = 缺失路径（不注入 params）。
     pub async fn prompt(
         &self,
         content: &peri_agent::messages::MessageContent,
+        request_id: Option<String>,
     ) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
@@ -389,10 +418,13 @@ impl AcpTuiClient {
             .unwrap()
             .clone()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-        let params = json!({
+        let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
         });
+        if let Some(rid) = request_id {
+            params["requestId"] = json!(rid);
+        }
         self.transport
             .send_request("session/prompt", params)
             .await
@@ -410,6 +442,7 @@ impl AcpTuiClient {
         &self,
         content: &peri_agent::messages::MessageContent,
         bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
+        request_id: Option<String>,
     ) -> Result<(), AcpError> {
         let session_id = self
             .current_session_id
@@ -417,11 +450,14 @@ impl AcpTuiClient {
             .unwrap()
             .clone()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
-        let params = json!({
+        let mut params = json!({
             "sessionId": session_id,
             "message": { "role": "user", "content": content },
             "bgResults": bg_results,
         });
+        if let Some(rid) = request_id {
+            params["requestId"] = json!(rid);
+        }
         self.transport
             .send_request("session/prompt", params)
             .await
@@ -545,6 +581,20 @@ impl AcpTuiClient {
         .await
     }
 
+    /// Kill a workflow run by run_id（Workflow 面板 Enter / workflow/kill_run RPC）。
+    /// 与 cancel_bg_task 对 Workflow 类型任务等效：走同一 WorkflowTaskRegistry::kill 通道。
+    pub async fn kill_workflow_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Value, AcpError> {
+        self.send_raw_request(
+            "workflow/kill_run",
+            json!({ "sessionId": session_id, "runId": run_id }),
+        )
+        .await
+    }
+
     /// Send a response to a server-initiated request (e.g. HITL approval).
     pub async fn send_response(
         &self,
@@ -552,5 +602,75 @@ impl AcpTuiClient {
         result: Result<Value, AcpError>,
     ) -> Result<(), AcpError> {
         self.transport.send_response(id, result).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
+
+    /// Issue 2026-08-05 返工链路测试：pump 解析 `peri/agent_event_done` 的
+    /// requestId → `AgentDone.request_id`（服务器回带 → TUI stale 配对）。
+    #[tokio::test]
+    async fn test_pump_parses_agent_event_done_request_id() {
+        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+
+        server_transport
+            .send_notification(
+                "peri/agent_event_done",
+                json!({
+                    "sessionId": "s1",
+                    "stopReason": "cancelled",
+                    "requestId": "rid-1",
+                }),
+            )
+            .await
+            .unwrap();
+
+        match notification_rx.recv().await.unwrap() {
+            AcpNotification::AgentDone {
+                session_id,
+                stop_reason,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(stop_reason, "cancelled");
+                assert_eq!(request_id.as_deref(), Some("rid-1"));
+            }
+            other => panic!("expected AgentDone, got {other:?}"),
+        }
+    }
+
+    /// 兼容性：requestId 缺失时 AgentDone.request_id 应为 None（continuation /
+    /// Immediate 命令 / stdio 等路径）。
+    #[tokio::test]
+    async fn test_pump_agent_event_done_without_request_id() {
+        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+
+        server_transport
+            .send_notification(
+                "peri/agent_event_done",
+                json!({ "sessionId": "s1", "stopReason": "end_turn" }),
+            )
+            .await
+            .unwrap();
+
+        match notification_rx.recv().await.unwrap() {
+            AcpNotification::AgentDone {
+                session_id,
+                stop_reason,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(stop_reason, "end_turn");
+                assert_eq!(request_id, None);
+            }
+            other => panic!("expected AgentDone, got {other:?}"),
+        }
     }
 }

@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 /// L6: 抽取 BRIDGE_RESET_COUNTER 变更时的 state 重置逻辑，rx.recv() 与
 /// tick_interval.tick() 两条分支共用。行为必须与原 rx 分支内联代码完全等价：
 /// 更新 last_reset_counter、刷 active_session_id、清空 committed /
-/// current_turn / generation / phase / popup_kind、清 INPUT_BUFFER、
-/// push_view_models_for_reset。
+/// current_turn / generation / phase / popup_kind / 代际与 request_id、
+/// 清 INPUT_BUFFER、push_view_models_for_reset。
 fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, counter: u64) -> u64 {
     let old = *last_reset_counter;
     *last_reset_counter = counter;
@@ -22,6 +22,9 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.committed = im::Vector::new();
     state.current_turn.reset();
     state.generation = 0;
+    state.turn_generation = 0;
+    state.last_prompt_generation = 0;
+    state.current_request_id = None;
     state.phase = SessionPhase::Idle;
     state.popup_kind = None;
     state.last_submitted_text = None;
@@ -68,6 +71,9 @@ pub fn spawn_acp_bridge(
             last_successful_todo_sequence: None,
             next_todo_sequence: 0,
             todo_call_inputs: std::collections::HashMap::new(),
+            turn_generation: 0,
+            last_prompt_generation: 0,
+            current_request_id: None,
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load
@@ -118,6 +124,9 @@ pub fn spawn_acp_bridge(
                                 state.committed = im::Vector::new();
                                 state.current_turn.reset();
                                 state.generation = 0;
+                                state.turn_generation = 0;
+                                state.last_prompt_generation = 0;
+                                state.current_request_id = None;
                                 state.phase = SessionPhase::Idle;
                                 state.popup_kind = None;
                                 state.last_submitted_text = None;
@@ -220,13 +229,14 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         ToolStarted(_) => "ToolStarted",
         ToolEnded(_) => "ToolEnded",
         PromptStarted => "PromptStarted",
-        PromptSubmitted => "PromptSubmitted",
+        PromptSubmitted { .. } => "PromptSubmitted",
         SessionReplayStarted => "SessionReplayStarted",
         SessionReplayDone => "SessionReplayDone",
         TurnDone => "TurnDone",
-        TurnInterrupted { reason: _ } => "TurnInterrupted",
+        TurnInterrupted { .. } => "TurnInterrupted",
         TurnSuspended => "TurnSuspended",
         LocalUserBubble { .. } => "LocalUserBubble",
+        LocalLoadingReset => "LocalLoadingReset",
         BgCallbackBubble { .. } => "BgCallbackBubble",
         CommittedAssistantText { .. } => "CommittedAssistantText",
         ReplayToolStarted { .. } => "ReplayToolStarted",

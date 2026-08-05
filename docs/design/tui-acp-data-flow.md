@@ -510,11 +510,13 @@ sequenceDiagram
 
 ## 6. 回合结束 — AgentDone 生命周期
 
-Agent 完成 ReAct 循环后，Executor 调用 `EventSink.push_done(stop_reason)`。PushDone 通过 transport 发 `peri/agent_event_done`，TUI `acp_client` 映射为 `AcpNotification::AgentDone { stop_reason }`。`acp_notifier` 根据 `stop_reason` 转换为 TUI 内部事件：
+Agent 完成 ReAct 循环后，Executor 调用 `EventSink.push_done(stop_reason, request_id)`。PushDone 通过 transport 发 `peri/agent_event_done`（payload 含可选 `requestId`），TUI `acp_client` 映射为 `AcpNotification::AgentDone { stop_reason, request_id }`。`acp_notifier` 根据 `stop_reason` 转换为 TUI 内部事件：
 
 - `stop_reason = "end_turn"` → `AcpEventData::TurnDone`（正常结束，归档消息）
-- `stop_reason = "cancelled"` → `AcpEventData::TurnInterrupted { reason }`（中断，清空未完成消息）
+- `stop_reason = "cancelled"` → `AcpEventData::TurnInterrupted { reason, request_id }`（中断，清空未完成消息）
 - `stop_reason = "max_turn_requests"` → 同 `TurnDone`
+
+`requestId` 链路（Issue 2026-08-05）：`submit_consumer` 在每次 prompt RPC（含 keepgoing）前生成 `uuid::now_v7()`，经 `session/prompt` params 与 `PromptSubmitted` 事件携带；服务器注入 `SessionContext.request_id`，turn 结束时随 `peri/agent_event_done` 回带；bridge 的 `handle_turn_interrupted` 以 `request_id 配对 OR turn_generation 代际判定` 识别 stale 事件（新提交已发 RPC 后旧 turn 的取消事件晚到时丢弃，不删新气泡/不恢复文本/不清排队输入）。缺失 requestId 的路径（continuation / Immediate 命令 / stdio）回退代际判定。
 
 此外，Agent turn 可能被挂起（idle/await_wake），此时发送 `AcpEventData::TurnSuspended`：归档 current_turn → committed，停止 loading，但**不** `drain_input_buffer`（Agent 保持存活，等待后续唤醒继续）。
 
@@ -542,12 +544,13 @@ sequenceDiagram
     Note over AGENT,ATOM: 回合结束
     AGENT->>EXEC: LoopResult (Completed / Interrupted)
     EXEC->>EXEC: event pump 排空 → 读 oneshot stop_reason
-    EXEC->>SINK: push_done(session_id, "end_turn" | "cancelled")
-    SINK->>TRANSPORT: peri/agent_event_done
-    TRANSPORT->>CLIENT: AcpNotification::AgentDone { stop_reason }
+    EXEC->>SINK: push_done(session_id, "end_turn" | "cancelled", request_id)
+    SINK->>TRANSPORT: peri/agent_event_done {stopReason, requestId?}
+    TRANSPORT->>CLIENT: AcpNotification::AgentDone { stop_reason, request_id }
     CLIENT->>NOTIFIER: AcpNotification::AgentDone
     NOTIFIER->>NOTIFIER: stop_reason → TurnDone / TurnInterrupted
-    NOTIFIER->>BRIDGE: AcpEventData
+    NOTIFIER->>BRIDGE: AcpEventData (TurnInterrupted 携带 request_id)
+    BRIDGE->>BRIDGE: request_id 配对 OR 代际判定 → stale? 跳过回滚 : 零产出回滚
 
     BRIDGE->>BRIDGE: current_turn.view_models() → committed.push_back()
     BRIDGE->>BRIDGE: current_turn.reset()

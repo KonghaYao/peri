@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use super::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::events::AgentEventHandler;
 use crate::agent::events::ExecutorEvent;
-use crate::agent::events_v2::EventHandles;
+use crate::agent::events_v2::{EventHandles, ObserveEvent};
 use crate::agent::events_v2_mapper::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor,
 };
@@ -73,6 +73,22 @@ pub fn spawn_subagent_event_forwarder(
                             // Langfuse bridge 调用必须在 ev 被 observe_event_to_executor move 之前
                             if let Some(ref b) = bridge {
                                 b.process_observe_event(&ev);
+                            }
+                            // [C2/C3] 过滤 v2 SubagentStart/Stop 的 v1 mapper 转发：
+                            // 工具侧已有 v1 直发（execute_fork/execute_bg/spawner 的
+                            // SubagentStarted/Stopped），再经 mapper（child_agent_id → instance_id）
+                            // 转发会形成双发，破坏 TUI instance_id 配对。bridge 侧已处理。
+                            // v2 事件本身仍从 child EventBus 送达 tracer（bridge 调用在上方）。
+                            if matches!(
+                                &ev,
+                                ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. }
+                            ) {
+                                tracing::trace!(
+                                    target: "agent.subagent_forwarder",
+                                    child_thread_id = %child_thread_id,
+                                    "forwarder: filtered v2 SubagentStart/Stop from v1 mapper forwarding"
+                                );
+                                continue;
                             }
                             if let Some(mut exec_ev) = observe_event_to_executor(ev) {
                                 set_source_agent_id(&mut exec_ev, &child_thread_id);

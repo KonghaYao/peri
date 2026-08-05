@@ -285,3 +285,67 @@ async fn test_cron_bridge_idle_trigger_queued_not_dropped() {
 
     mgr.close_session(session_id).await.unwrap();
 }
+
+/// [S1.1] 协商值只消费一次：同一 server 进程内第 2+ 个 session/new 仍拿到协商值。
+///
+/// stdio 路径复现（`acp_stdio/session/create.rs:106` 每次 session/new 都调
+/// `consume_pending_caps`）：旧实现 take() 一次性消费，第 2 个 session 取到
+/// None → 注册全 false caps；`session/load`/`resume`/`fork` 走 `ensure_session_caps`
+/// 则回退 all_enabled——同一客户端不同 session 门控行为不同。
+#[tokio::test]
+async fn test_pending_caps_consumed_once_second_session_gets_negotiated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+
+    // initialize 协商：仅部分 cap 开启
+    let negotiated = peri_acp_types::PeriCaps {
+        replay: true,
+        agent_event: true,
+        ..Default::default()
+    };
+    mgr.set_pending_caps(negotiated.clone());
+
+    // 第 1 个 session/new → 协商值
+    let caps1 = mgr.consume_pending_caps("s1");
+    assert_eq!(caps1, negotiated);
+
+    // 第 2 个 session/new → 仍为协商值（旧实现取到 None → 全 false）
+    let caps2 = mgr.consume_pending_caps("s2");
+    assert_eq!(caps2, negotiated, "第 2+ 个 session/new 必须拿到协商值");
+
+    // load/resume/fork 新 session id（registry 未命中）→ 也应为协商值（旧实现 all_enabled）
+    let caps3 = mgr.ensure_session_caps("s3");
+    assert_eq!(
+        caps3, negotiated,
+        "load/resume/fork 新 session 必须拿到协商值"
+    );
+
+    // registry 幂等：已注册 session 不被覆盖
+    let caps1_again = mgr.ensure_session_caps("s1");
+    assert_eq!(caps1_again, negotiated);
+}
+
+/// [S1.1] 双 fallback 语义必须保留：未协商时 consume=全 false、ensure=all_enabled。
+///
+/// 改坏任一侧都会翻转 TUI/stdio 行为（P0-3 对抗 review 确认）：consume 未协商
+/// → `unwrap_or_default()`（全 false）；ensure 未协商 → `all_enabled()`。
+#[tokio::test]
+async fn test_pending_caps_double_fallback_semantics() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    // 不调用 set_pending_caps（MpscTransport / TUI 内部路径，无 initialize）
+
+    let consumed = mgr.consume_pending_caps("t1");
+    assert_eq!(
+        consumed,
+        peri_acp_types::PeriCaps::default(),
+        "consume 未协商 → 全 false（unwrap_or_default）"
+    );
+
+    let ensured = mgr.ensure_session_caps("t2");
+    assert_eq!(
+        ensured,
+        peri_acp_types::PeriCaps::all_enabled(),
+        "ensure 未协商 → all_enabled"
+    );
+}

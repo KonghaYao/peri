@@ -29,9 +29,12 @@ pub(crate) type RegisterRuntimeFn =
     Arc<dyn Fn(String, peri_agent::agent::AgentCancellationToken, String) + Send + Sync>;
 /// Deregister callback: &str (thread_id) → ()
 pub(crate) type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;
-/// 后台任务完成回调类型
-pub(crate) type OnBgCompleteFn =
-    Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>;
+/// 后台任务完成回调类型（第二参为任务 kind，供 continuation scheduler 过滤）
+pub(crate) type OnBgCompleteFn = Arc<
+    dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, peri_middlewares::subagent::BgTaskKind)
+        + Send
+        + Sync,
+>;
 /// System prompt 构建器类型
 pub type SystemPromptBuilder = Arc<
     dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String + Send + Sync,
@@ -111,6 +114,9 @@ pub struct AgentComponents {
     pub context_budget: Option<ContextBudget>,
     /// Compact 配置
     pub compact_config: Option<CompactConfig>,
+    /// SubAgent 中间件（chain 中已有一份 clone；本字段保留原实例，
+    /// 供 build_stage_context 在主 v2 session 创建后注入 parent_agent_id）
+    pub subagent_mw: Option<peri_middlewares::subagent::SubAgentMiddleware>,
 }
 
 /// 构建可复用的 Agent（ACP 和 TUI 共用核心构建逻辑）
@@ -468,8 +474,12 @@ pub(crate) fn build_agent(
     // 采样决策继承自父 agent（bridge 内部调用 tracer.on_* 方法时，
     // 各方法已内置 sampling.should_emit() 检查）。
     if let Some(ref tracer) = langfuse_tracer {
-        let bridge =
-            LangfuseBridge::new(Arc::clone(tracer), ctx.provider.display_name().to_string());
+        let bridge = LangfuseBridge::new(
+            Arc::clone(tracer),
+            ctx.provider.display_name().to_string(),
+            // SubAgent forwarder bridge:不注入 main_agent_id(child 事件按 registry 归属)
+            None,
+        );
         subagent = subagent.with_langfuse_bridge(
             Arc::new(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>
         );
@@ -595,7 +605,11 @@ pub(crate) fn build_agent(
 
     // ── 第五组：HITL + SubAgent（条件中间件） ──
     chain.add(Box::new(hitl));
-    chain.add(Box::new(subagent));
+    // chain 与 AgentComponents 各持一份 SubAgentMiddleware clone：
+    // 链中实例负责 collect_tools 提供 SubAgentTool；components 中的原实例
+    // 由 build_stage_context 注入主 agent 身份（共享 cell，见 set_parent_agent_id）。
+    let subagent_for_chain = subagent.clone();
+    chain.add(Box::new(subagent_for_chain));
 
     // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
     if let Some(pool) = mcp_pool {
@@ -703,6 +717,7 @@ pub(crate) fn build_agent(
         tool_registry_snapshot: Arc::new(snapshot),
         context_budget: Some(context_budget),
         compact_config: Some(compact_config),
+        subagent_mw: Some(subagent),
     };
 
     (
@@ -876,7 +891,7 @@ pub(crate) fn build_stage_context(
         tool_registry_snapshot,
         context_budget,
         compact_config,
-        ..
+        subagent_mw,
     } = agent_output.components;
 
     let shared_tools: SharedToolMap = shared_tools_opt
@@ -996,10 +1011,14 @@ pub(crate) fn build_stage_context(
     // 复用 build_agent 产出的 LLM（已适配为 ReactLLM）
     let react_llm = llm;
 
+    // 主 agent 事件侧身份（C2）：StageContext agent_id 与 SubAgentTool 共享 cell
+    // 必须同一值——subagent 补发的 SubagentStart.agent_id 指回主 agent。
+    let main_agent_id = AgentId::new();
+
     // 构造 StageContext
     let mut builder = install_tool_invocation_resolver(
         StageContext::builder(turn, transcript, queue)
-            .with_agent_id(AgentId::new())
+            .with_agent_id(main_agent_id)
             .with_llm(react_llm)
             .with_tools(shared_tools),
     )
@@ -1007,6 +1026,12 @@ pub(crate) fn build_stage_context(
     .with_event_bus(Arc::new(event_bus))
     .with_session_context(session_context)
     .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
+
+    // 注入父 agent 身份（C2）：SubAgentTool 持有同一共享 cell，
+    // invoke 时（必然晚于本调用）读到已 set 的值——共享 cell 消除顺序问题。
+    if let Some(mw) = &subagent_mw {
+        mw.set_parent_agent_id(main_agent_id);
+    }
 
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);

@@ -116,3 +116,158 @@ fn test_disallowed_tools_alias() {
     let cli = cli.unwrap();
     assert_eq!(cli.disallowed_tools, Some(vec!["WebFetch".to_string()]));
 }
+
+// ─── Sync 子命令（r2-encrypted-transfer Slice 3）───────────────────────────
+
+use super::*;
+
+#[test]
+fn test_sync_server_defaults_to_https() {
+    // 旧 wss:// 默认值废止；默认必须是 https:// 端点。
+    let cli = Cli::try_parse_from(["peri", "sync", "send", "--to", "AAAABBBBCCCCDDDD"]).unwrap();
+    let Commands::Sync { server, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(
+        server.starts_with("https://"),
+        "server 默认必须是 https，实际: {server}"
+    );
+}
+
+#[test]
+fn test_sync_server_explicit_override() {
+    let cli = Cli::try_parse_from(["peri", "sync", "receive", "--server", "https://example.com"])
+        .unwrap();
+    let Commands::Sync { server, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert_eq!(server, "https://example.com");
+}
+
+#[test]
+fn test_sync_keystore_path_flag() {
+    let cli = Cli::try_parse_from([
+        "peri",
+        "sync",
+        "send",
+        "--to",
+        "AAAABBBBCCCCDDDD",
+        "--keystore-path",
+        "/tmp/ks",
+    ])
+    .unwrap();
+    let Commands::Sync { keystore_path, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert_eq!(keystore_path.as_deref(), Some("/tmp/ks"));
+}
+
+#[test]
+fn test_sync_device_init_parse() {
+    let cli = Cli::try_parse_from(["peri", "sync", "device", "init", "--name", "laptop"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    match action {
+        SyncAction::Device { action } => match action {
+            peri_tui::sync::device_cli::DeviceAction::Init { name } => {
+                assert_eq!(name.as_deref(), Some("laptop"));
+            }
+            _ => panic!("expected device init"),
+        },
+        _ => panic!("expected device subcommand"),
+    }
+}
+
+#[test]
+fn test_sync_device_show_add_list_remove_parse() {
+    let cli = Cli::try_parse_from(["peri", "sync", "device", "show"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(
+        action,
+        SyncAction::Device {
+            action: peri_tui::sync::device_cli::DeviceAction::Show
+        }
+    ));
+
+    let cli = Cli::try_parse_from([
+        "peri",
+        "sync",
+        "device",
+        "add",
+        "peri://device/AAAABBBBCCCCDDDD?ed=x&x=y&n=phone",
+    ])
+    .unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(
+        action,
+        SyncAction::Device {
+            action: peri_tui::sync::device_cli::DeviceAction::Add { .. }
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["peri", "sync", "device", "list"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(
+        action,
+        SyncAction::Device {
+            action: peri_tui::sync::device_cli::DeviceAction::List
+        }
+    ));
+
+    let cli =
+        Cli::try_parse_from(["peri", "sync", "device", "remove", "AAAABBBBCCCCDDDD"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(
+        action,
+        SyncAction::Device {
+            action: peri_tui::sync::device_cli::DeviceAction::Remove { .. }
+        }
+    ));
+}
+
+#[test]
+fn test_sync_send_requires_to() {
+    // send 必须带 --to；缺失时解析失败。
+    assert!(Cli::try_parse_from(["peri", "sync", "send"]).is_err());
+    let cli = Cli::try_parse_from(["peri", "sync", "send", "--to", "AAAABBBBCCCCDDDD"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    match action {
+        SyncAction::Send { to } => assert_eq!(to, "AAAABBBBCCCCDDDD"),
+        _ => panic!("expected send"),
+    }
+}
+
+#[test]
+fn test_sync_receive_parse() {
+    let cli = Cli::try_parse_from(["peri", "sync", "receive"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(action, SyncAction::Receive));
+}
+
+#[test]
+fn test_sync_legacy_ws_actions_still_parse() {
+    // 旧 WebSocket sender/receiver 保持可解析（Slice 4 移除），行为不变。
+    let cli = Cli::try_parse_from(["peri", "sync", "sender"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(action, SyncAction::Sender));
+    let cli = Cli::try_parse_from(["peri", "sync", "receiver"]).unwrap();
+    let Commands::Sync { action, .. } = cli.command.unwrap() else {
+        panic!("expected sync command");
+    };
+    assert!(matches!(action, SyncAction::Receiver));
+}

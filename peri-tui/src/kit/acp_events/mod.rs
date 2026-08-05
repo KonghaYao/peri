@@ -173,8 +173,10 @@ pub struct BridgeState {
     /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
     pub active_session_id: String,
     /// `/compact` 命令刚刚完成，TurnDone 时需触发 session/load 重放。
-    /// 与 agent 内部 compact 区分：命令 compact 后 current_turn 为空，
-    /// agent 内部 compact 后 current_turn 有后续流事件。
+    /// S4.1 方案 B：CompactCompleted 置位后，任何流事件（TextChunk/
+    /// ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted）到达即清除——
+    /// 命令 compact 后无流事件，标志保持；agent 内部 auto-compact 后标志被
+    /// 后续流事件清掉（无需知道 compact 触发来源）。
     pub compact_just_completed: bool,
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
@@ -192,6 +194,22 @@ pub struct BridgeState {
     pub(crate) next_todo_sequence: u64,
     /// 所有未结束 TodoWrite 的启动序号与原始输入，涵盖主 agent、子 agent 和回放。
     pub(crate) todo_call_inputs: HashMap<String, (u64, serde_json::Value)>,
+    /// turn 代际计数器——每次用户可见提交（LocalUserBubble）递增。
+    /// 用于识别 stale 的 turn 结束事件（Issue 2026-08-05）：用户取消旧 turn 后
+    /// 立即提交新输入时，新输入事件可能先于旧 turn 的 TurnInterrupted 到达，
+    /// 该事件会误删新气泡/误恢复旧文本/清空排队输入。代际防护据此跳过回滚。
+    pub turn_generation: u64,
+    /// 最后一次已真正发出 prompt RPC（PromptSubmitted）时的代际快照。
+    /// `turn_generation > last_prompt_generation` 表示存在"已显示气泡但未发出
+    /// 请求"的更新提交——此时到达的 TurnInterrupted 属于旧 turn（stale）。
+    pub last_prompt_generation: u64,
+    /// 当前 turn 的 prompt requestId（PromptSubmitted 时记录，submit_consumer
+    /// 生成、服务器经 turn 结束事件回带）。TurnInterrupted 到达时若携带
+    /// request_id 且与当前值不匹配 → stale（Issue 2026-08-05 返工：request_id
+    /// 配对判定，与 turn_generation 代际判定 OR 组合，覆盖"新提交已发 RPC"的
+    /// 主导排序场景；排队分支无 RPC → current_request_id 停留在旧 turn，由
+    /// 代际判定兜底）。
+    pub current_request_id: Option<String>,
 }
 
 impl BridgeState {
@@ -281,6 +299,24 @@ impl BridgeState {
 /// 每次调用按事件类型更新内部状态，然后 push 到 VIEW_MODELS 和 ACP_STATE Atoms。
 pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
     use AcpEventData::*;
+    // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
+    // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
+    // （TextChunk/ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted/
+    // ToolCount/Progress）必然紧随；命令 /compact（Immediate）后无流事件，
+    // 标志保持到 TurnDone 触发 session/load 重放。无需知道 compact 触发来源
+    // （Issue 2026-08-05）。清单与 issue 声明清单保持同步（含 ToolCount/Progress）。
+    if matches!(
+        event,
+        TextChunk(_)
+            | ReasoningChunk(_)
+            | ToolStarted(_)
+            | ToolEnded(_)
+            | SubagentStarted { .. }
+            | ToolCount(_)
+            | Progress(_)
+    ) {
+        state.compact_just_completed = false;
+    }
     match event {
         // ── §4.1 Streaming events ──
         TextChunk(tc) => streaming::handle_text_chunk(state, tc),
@@ -292,11 +328,13 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
-        PromptSubmitted => turn::handle_prompt_submitted(state),
+        PromptSubmitted { request_id } => turn::handle_prompt_submitted(state, request_id),
         SessionReplayStarted => turn::handle_session_replay_started(state),
         SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),
-        TurnInterrupted { reason } => turn::handle_turn_interrupted(state, reason),
+        TurnInterrupted { reason, request_id } => {
+            turn::handle_turn_interrupted(state, reason, request_id)
+        }
         TurnSuspended => turn::handle_turn_suspended(state),
 
         // ── §4.3 Status events ──
@@ -338,9 +376,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             files,
             skills,
             strategy,
+            trigger,
             outcome,
             ..
-        } => compact::handle_compact_completed(state, summary, files, skills, strategy, outcome),
+        } => compact::handle_compact_completed(
+            state, summary, files, skills, strategy, trigger, outcome,
+        ),
         CompactError { message } => compact::handle_compact_error(state, message),
         BackgroundTaskCompleted {
             task_id,
@@ -366,6 +407,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),
         LocalUserBubble { text } => turn::handle_local_user_bubble(state, text),
+        LocalLoadingReset => turn::handle_loading_reset(state),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
         CommittedAssistantText { text, reasoning } => {
             turn::handle_committed_assistant_text(state, text, reasoning)
@@ -385,8 +427,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot(tasks) => system::handle_bg_task_snapshot(state, tasks),
         BgTaskStarted(entry) => system::handle_bg_task_started(state, entry),
+        // kind payload 保留（bg task UI 展示 / 未来扩展）；内部续跑由 ACP
+        // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。
         BgTaskCompleted {
             task_id,
+            kind: _,
             success,
             duration_ms,
         } => system::handle_bg_task_completed(task_id, *success, *duration_ms),

@@ -5,7 +5,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, WORKFLOW_SNAPSHOT};
+use crate::kit::atoms::{ACP_CLIENT_HANDLE, LANG_VERSION, WORKFLOW_SNAPSHOT};
 use crate::kit::list_nav::{
     cycle_next, cycle_previous, previous_selection, scroll_start_for_selected,
 };
@@ -66,6 +66,8 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let run_count = runs.len();
+    // Enter（kill_run）按当前选中 tab 取 run_id；闭包按值捕获，随每次渲染刷新
+    let run_ids: Vec<String> = runs.iter().map(|r| r.run_id.clone()).collect();
 
     // ── Keyboard event handling ──────────────────────────────────────────
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
@@ -124,7 +126,32 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     return EventResult::Consumed;
                 }
                 KeyCode::Enter => {
-                    // MVP: no-op
+                    // 取消当前选中的 workflow run（workflow/kill_run）。
+                    // 面板保持打开：轮询 workflow/list_runs 将显示 killed 状态。
+                    let idx = *active_run.read();
+                    if let Some(run_id) = run_ids.get(idx) {
+                        if let Some(client) = ACP_CLIENT_HANDLE.get() {
+                            let client = client.clone();
+                            let sid = client.current_session_id().unwrap_or_default();
+                            let rid = run_id.clone();
+                            tokio::spawn(async move {
+                                match client.kill_workflow_run(&sid, &rid).await {
+                                    Ok(v) => tracing::info!(
+                                        run_id = %rid,
+                                        ?v,
+                                        "workflow panel: kill_run"
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        run_id = %rid,
+                                        error = %e,
+                                        "workflow panel: kill_run failed"
+                                    ),
+                                }
+                            });
+                        } else {
+                            tracing::warn!(target: "workflow-panel", "ACP_CLIENT_HANDLE not set, kill skipped");
+                        }
+                    }
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -133,7 +160,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    let sel_run = *active_run.read();
+    let sel_run = clamp_run_selection(*active_run.read(), run_count);
     let current_run = &runs[sel_run];
 
     // ── Selection clamping (during render, not event handler) ────────────
@@ -472,6 +499,10 @@ fn agent_status_color(
     })
 }
 
+fn clamp_run_selection(selected: usize, run_count: usize) -> usize {
+    selected.min(run_count.saturating_sub(1))
+}
+
 /// 壁钟驱动的运行中动画帧指示器。每 100ms 推进一帧。
 fn running_indicator() -> String {
     use std::sync::OnceLock;
@@ -494,5 +525,21 @@ fn abbreviate_count(n: u64) -> String {
         format!("{}k", n / 1_000)
     } else {
         format!("{n}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_run_selection;
+
+    /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
+    ///
+    /// 历史背景：后台 workflow 回调后的快照从多条 run 收缩为一条时，
+    /// `WorkflowPanel` 直接以旧 `active_run` 索引列表，导致 TUI panic。
+    #[test]
+    fn test_clamp_run_selection_after_snapshot_shrinks() {
+        assert_eq!(clamp_run_selection(1, 1), 0);
+        assert_eq!(clamp_run_selection(2, 3), 2);
+        assert_eq!(clamp_run_selection(0, 0), 0);
     }
 }

@@ -17,15 +17,23 @@ pub(super) fn handle_compact_completed(
     files: &[serde_json::Value],
     skills: &[String],
     strategy: &str,
+    trigger: &str,
     outcome: &str,
 ) {
     tracing::info!(
         summary_len = summary.len(),
         %strategy,
+        %trigger,
         %outcome,
         "bridge: CompactCompleted"
     );
-    state.compact_just_completed = true;
+    // S4.1 方案 A：trigger 由服务端透传。仅手动 /compact 置
+    // compact_just_completed（TurnDone 需在完整重建后到达）；auto compact
+    // 不置位——auto 后 ReAct 循环继续运行，zero-output 后重放旧消息的
+    // 边缘洞即被根治（流事件清除逻辑保留为防御）。
+    if trigger == "manual" {
+        state.compact_just_completed = true;
+    }
     // 不重置 phase——auto compact 后 ReAct 循环继续运行，
     // loading 由流式事件（TextChunk/ToolStarted）和 TurnDone 管理。
     // 手动 /compact 路径由 push_done → TurnDone 兜底清除。

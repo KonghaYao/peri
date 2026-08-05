@@ -13,7 +13,7 @@
 //! - `middleware.rs`：中间件链追踪器。
 //! - `generation.rs`：LLM Generation 生命周期追踪器。
 //! - `tool_batch.rs`：工具调用批次管理器。
-//! - `subagent.rs`：SubAgent 嵌套调用栈管理器。
+//! - `registry.rs`：SubAgent 身份注册表(agent_id 查表归属,替代旧 LIFO 栈)。
 //! - `compact.rs`：Compact 操作 Span 追踪器。
 //!
 //! 所有事件通过 session trait 的 try_add() 同步入队，保证事件顺序与调用顺序一致，
@@ -23,15 +23,16 @@ mod compact;
 mod event_builder;
 mod generation;
 pub(crate) mod middleware;
+pub(crate) mod registry;
 mod sampling;
 pub(crate) mod stages;
-mod subagent;
 mod tool_batch;
 mod usage;
 
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
-use crate::langfuse::tracer::stages::MAIN_AGENT_KEY;
+use crate::langfuse::tracer::registry::{GateEvent, Ownership};
+use crate::langfuse::tracer::stages::{StageHandle, MAIN_AGENT_KEY};
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
@@ -66,8 +67,12 @@ pub struct LangfuseTracer {
     pub(crate) middleware: crate::langfuse::tracer::middleware::MiddlewareTracer,
     pub(crate) generation: crate::langfuse::tracer::generation::GenerationTracker,
     pub(crate) tool_batch: crate::langfuse::tracer::tool_batch::ToolBatch,
-    pub(crate) subagent: crate::langfuse::tracer::subagent::SubagentStack,
+    pub(crate) subagent: crate::langfuse::tracer::registry::SubagentRegistry,
     pub(crate) compact: crate::langfuse::tracer::compact::CompactSpan,
+    /// 乱序场景:gate 重放的 StageStarted 产生的 stage handle
+    /// (StageStarted 被注册闸门缓存后重放,bridge 的 active_stage 收不到;
+    /// StageEnded 分支查 active_stage 失败时到此处领取)
+    pub(crate) replayed_stage_handles: std::collections::HashMap<String, StageHandle>,
     /// 当前 stage-compact 阶段中是否有实际 compact 工作（micro/full）
     pub(crate) compact_work_done: bool,
     /// agent-run observation 的开始时间（推迟到 on_turn_end 创建时设置）
@@ -102,8 +107,9 @@ impl LangfuseTracer {
             middleware: crate::langfuse::tracer::middleware::MiddlewareTracer::new(),
             generation: crate::langfuse::tracer::generation::GenerationTracker::new(),
             tool_batch: crate::langfuse::tracer::tool_batch::ToolBatch::new(),
-            subagent: crate::langfuse::tracer::subagent::SubagentStack::new(),
+            subagent: crate::langfuse::tracer::registry::SubagentRegistry::new(),
             compact: crate::langfuse::tracer::compact::CompactSpan::new(),
+            replayed_stage_handles: std::collections::HashMap::new(),
             compact_work_done: false,
             agent_start_time: None,
             agent_input: None,
@@ -212,49 +218,13 @@ impl LangfuseTracer {
         let flush = self.tool_batch.flush();
         self.emit_tools_flush(flush);
 
-        // Flush 所有 subagent 栈中的 tool_batch（bg subagent 延迟清理）
-        let subagent_flushes = self.subagent.flush_all_subagent_tool_batches();
-        for sub_flush in subagent_flushes {
-            self.emit_tools_flush(sub_flush);
+        // 兜底:清理未收 Stop 的活跃 subagent(pending/gate/残留 invocation),
+        // 关闭其 AGENT obs(metadata 携带 incomplete_reason)。
+        let closed_list = self.subagent.cleanup_turn_end();
+        for closed in closed_list {
+            self.emit_subagent_close(closed);
         }
-
-        // 结束子 agent 栈（如有残余），对 bg subagent 发出 ObservationCreate
-        while let Some(end) = self.subagent.end_subagent() {
-            let output_str = end.deferred_output.unwrap_or_default();
-            let body = ObservationBody {
-                id: Some(end.observation_id),
-                trace_id: Some(self.trace_id.clone()),
-                r#type: ObservationType::Agent,
-                name: Some(format!("subagent-{}", end.agent_id)),
-                start_time: Some(end.start_time),
-                end_time: Some(now_rfc3339()),
-                completion_start_time: None,
-                parent_observation_id: Some(end.parent_observation_id),
-                input: Some(end.input),
-                output: Some(serde_json::json!(strip_child_thread_id(&output_str))),
-                metadata: None,
-                model: None,
-                model_parameters: None,
-                usage: None,
-                level: None,
-                status_message: None,
-                version: Some(VERSION.to_string()),
-                environment: None,
-                session_id: Some(self.session_id.clone()),
-            };
-            let event = IngestionEvent::ObservationCreate {
-                id: new_uuid(),
-                timestamp: now_rfc3339(),
-                body,
-                metadata: None,
-            };
-            try_add_or_warn_via_session(
-                &*self.session,
-                event,
-                &self.trace_id,
-                "SubAgent ObservationCreate (deferred cleanup)",
-            );
-        }
+        self.replayed_stage_handles.clear();
 
         let is_error = error_output.is_some();
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
@@ -359,31 +329,38 @@ impl LangfuseTracer {
         let agent_start_time = self.agent_start_time.take();
         let agent_input = self.agent_input.take();
 
-        tokio::spawn(async move {
-            let end_time = now_rfc3339();
+        // agent-run ObservationCreate 同步入队（不放进 spawn 任务）：
+        // 保证 on_turn_end 返回时全部事件已入队，调用方随后显式 flush() 即可
+        // 一次性送达（Batcher::flush 经 mpsc FIFO，先入队者先发送）。
+        // 短生命周期进程（-p/print 模式）在 run_session_loop 返回后调用
+        // session.flush()，不依赖 spawn 任务的调度时序，避免 trace 随进程退出丢失。
+        let end_time = now_rfc3339();
+        let obs_body = ObservationBody {
+            id: Some(agent_observation_id.clone()),
+            trace_id: Some(trace_id.clone()),
+            r#type: ObservationType::Agent,
+            name: Some("agent-run".to_string()),
+            start_time: agent_start_time,
+            end_time: Some(end_time.clone()),
+            input: agent_input.map(|s| serde_json::json!(s)),
+            output: Some(serde_json::json!(output)),
+            parent_observation_id: Some(trace_id.clone()),
+            version: Some(VERSION.to_string()),
+            ..Default::default()
+        };
+        let obs_event = IngestionEvent::ObservationCreate {
+            id: new_uuid(),
+            timestamp: end_time,
+            body: obs_body,
+            metadata: None,
+        };
+        if let Err(e) = session.try_add(obs_event) {
+            tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
+        }
 
-            let obs_body = ObservationBody {
-                id: Some(agent_observation_id.clone()),
-                trace_id: Some(trace_id.clone()),
-                r#type: ObservationType::Agent,
-                name: Some("agent-run".to_string()),
-                start_time: agent_start_time,
-                end_time: Some(end_time.clone()),
-                input: agent_input.map(|s| serde_json::json!(s)),
-                output: Some(serde_json::json!(output)),
-                parent_observation_id: Some(trace_id.clone()),
-                version: Some(VERSION.to_string()),
-                ..Default::default()
-            };
-            let obs_event = IngestionEvent::ObservationCreate {
-                id: new_uuid(),
-                timestamp: end_time,
-                body: obs_body,
-                metadata: None,
-            };
-            if let Err(e) = session.try_add(obs_event) {
-                tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
-            }
+        // 最终 flush 保持 fire-and-forget（不阻塞执行管线；pump_done 已先行发出），
+        // 常驻进程（TUI/ACP server）无需等待；短生命周期进程由调用方显式 flush。
+        tokio::spawn(async move {
             if let Err(e) = session.flush().await {
                 tracing::warn!(error = %e, trace_id = %trace_id, "langfuse: session flush 失败");
             }
@@ -403,11 +380,42 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        // SubAgent 栈非空时，标记栈顶 subagent 已启动
-        // （bg subagent：LLM 调用也是 subagent 启动信号）
-        self.subagent.mark_top_started();
-        self.generation
-            .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+        let _ = self.on_llm_start_inner(agent_id, step, messages, tools);
+    }
+
+    /// LLM 调用开始(业务主体;供 gate 重放复用,不重复采样检查)。
+    /// 返回 false = 事件被注册闸门缓存或丢弃。
+    fn on_llm_start_inner(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        messages: &[BaseMessage],
+        tools: &[ToolDefinition],
+    ) -> bool {
+        match self.subagent.ownership(agent_id) {
+            Ownership::Main | Ownership::Subagent => {
+                self.generation
+                    .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+                true
+            }
+            Ownership::Unknown => {
+                // 未知 agent(Start 未到/已 incomplete)→ 注册闸门缓存,等 join 重放
+                if self.subagent.try_gate(GateEvent::LlmCallStart {
+                    agent_id: agent_id.to_string(),
+                    step,
+                    messages: messages.to_vec(),
+                    tools: tools.to_vec(),
+                }) {
+                    tracing::debug!(
+                        target: "langfuse::subagent",
+                        %agent_id,
+                        "on_llm_start: 未知 agent,事件入注册闸门缓存"
+                    );
+                    return false;
+                }
+                false
+            }
+        }
     }
 
     /// LLM 请求体接收：紧随 on_llm_start 之后，缓存 Provider 实际请求体
@@ -474,21 +482,20 @@ impl LangfuseTracer {
             });
 
         // 优先使用当前活跃 stage span 作为父 observation（按 agent 隔离：
-        // 并行 subagent 各自持有自己的 stage slot，不会取到其他 agent 的 span）
-        // Reason stage → Generation 挂在 stage-reason 下
-        let parent_id = self
-            .stages
-            .active_handle(agent_id)
-            .map(|h| h.span_id.clone())
-            .or_else(|| {
-                // fallback: subagent stack 非空但 stage 尚未创建（竞态/时序问题）
-                if !self.subagent.is_empty() {
-                    Some(self.subagent.current_agent_id(&self.agent_observation_id))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.agent_observation_id.clone());
+        // 并行 subagent 各自持有自己的 stage slot，不会取到其他 agent 的 span）。
+        // 归属链:该 agent 的活跃 stage → 该 agent 的 AGENT obs → 主 agent obs。
+        // 禁止降级挂主 agent:未知 agent(未注册且非 main)直接跳过。
+        let parent_id = match self.llm_parent(agent_id) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    target: "langfuse::subagent",
+                    %agent_id,
+                    "on_llm_end: agent 未注册且非主 agent,跳过 generation 上报"
+                );
+                return;
+            }
+        };
 
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
@@ -672,50 +679,64 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        // 捕获当前活跃 stage span_id 作为 tool-batch 的父节点
-        // （必须在 on_tool_start 时获取，因为 emit_tools_flush 可能在 stage 结束后才调用）。
-        // 按事件 agent_id 隔离：并行 subagent 的工具事件取各自的 stage slot，
-        // 不会误取其他 agent 的 span。
-        let parent_id = self
-            .stages
-            .active_handle(agent_id)
-            .map(|h| h.span_id.clone())
-            .or_else(|| {
-                // fallback: subagent stack 非空但 stage 尚未创建（竞态/时序问题）
-                if !self.subagent.is_empty() {
-                    Some(self.subagent.current_agent_id(&self.agent_observation_id))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.agent_observation_id.clone());
-        // Agent 工具：先写入主 agent 的 ToolBatch，再 push subagent context。
-        // Fix A: 这样 Agent 工具的 parent_observation_id 正确指向主 agent 的 act span，
-        // 后续 subagent 工具会创建新的 sub batch，parent 指向 subagent 的 act span。
-        // WARNING: Fix B（on_tool_end 路由）必须同时应用，否则 Agent 工具完成记录会静默丢失。
+        let _ = self.on_tool_start_inner(agent_id, tool_call_id, name, input);
+    }
+
+    /// 工具调用开始(业务主体;供 gate 重放复用)。返回 false = 事件被注册闸门缓存/丢弃。
+    fn on_tool_start_inner(
+        &mut self,
+        agent_id: &str,
+        tool_call_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> bool {
+        // 归属链:该 agent 的活跃 stage → 该 agent 的 AGENT obs → 主 agent obs。
+        // 未知 agent 走注册闸门(缓存等 Start join 后重放),不挂主 agent。
+        let (owner, parent_id) = match self.content_owner(agent_id) {
+            Some(x) => x,
+            None => {
+                self.subagent.try_gate(GateEvent::ToolStart {
+                    agent_id: agent_id.to_string(),
+                    tool_call_id: tool_call_id.to_string(),
+                    name: name.to_string(),
+                    input: input.clone(),
+                });
+                return false;
+            }
+        };
+        // Agent 工具:写入 owner 自己的 ToolBatch + 登记 invocation。
+        // 不创建任何 AGENT obs——生命周期由 SubagentStart/Stop 驱动。
         let is_agent_tool = name == "Agent" || name == "Task";
-        if is_agent_tool {
-            // Fix A: Write Agent/Task tool to MAIN's ToolBatch BEFORE begin_subagent.
-            // parent_id 捕获后传入 subagent context：AGENT observation 结束时
-            // 用此父节点（而非结束时刻的活跃 stage），避免并行场景循环引用。
-            let _record =
+        match owner {
+            Ownership::Main => {
                 self.tool_batch
                     .on_tool_start(tool_call_id, name, input.clone(), &parent_id);
-            self.subagent.begin_subagent(input, &parent_id);
-        } else {
-            // 非 Agent 工具：路由到正确的 ToolBatch（subagent 栈非空时写入 subagent 的）
-            let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-            let _record = tb_ref.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
+            }
+            Ownership::Subagent => {
+                let tb = self.subagent.tool_batch_mut(agent_id);
+                tb.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
+            }
+            Ownership::Unknown => return false,
         }
+        if is_agent_tool {
+            if let Some(outcome) =
+                self.subagent
+                    .register_invocation(agent_id, tool_call_id, input, &parent_id)
+            {
+                self.handle_join_outcome(outcome);
+            }
+        }
+        true
     }
 
     /// 工具调用结束：同步创建 tool observation
     ///
-    /// `agent_id` 用于保持签名与 on_tool_start 对齐（v2 RenderEvent 携带），
-    /// 当前路由逻辑由 subagent 栈决定，暂不使用。
+    /// `agent_id` 用于按 owner 路由到正确的 ToolBatch 并关联 invocation。
+    /// Agent 工具的 ToolEnded 只结束父工具记录 + 更新 invocation,
+    /// **不再创建/关闭 AGENT obs**(生命周期由 SubagentStart/Stop 驱动)。
     pub fn on_tool_end(
         &mut self,
-        _agent_id: &str,
+        agent_id: &str,
         tool_call_id: &str,
         output: &str,
         is_error: bool,
@@ -723,76 +744,49 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        // 检查是否为 Agent 工具（在路由前检查，路由后 pending_tools 中会移除）
-        let is_agent = self
-            .subagent
-            .is_agent_tool_anywhere(&self.tool_batch, tool_call_id);
+        let _ = self.on_tool_end_inner(agent_id, tool_call_id, output, is_error);
+    }
 
-        // 路由到正确的 ToolBatch 结束工具记录
-        // （必须在 subagent 弹栈之前完成，避免工具数据丢失）
-        // Fix B: Agent 工具写入主 batch，必须路由到主 batch 完成；非 Agent 工具走栈路由。
-        {
-            if is_agent {
-                let _pending = self.tool_batch.on_tool_end(tool_call_id, output, is_error);
-            } else {
-                let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-                let _pending = tb_ref.on_tool_end(tool_call_id, output, is_error);
-            }
-        }
-
-        if is_agent {
-            if self.subagent.top_has_started() {
-                // fork 情况：subagent 已运行完毕，弹栈前先 flush subagent 的 tool_batch
-                let sub_flush = {
-                    let mut tb_ref = self.subagent.current_tool_batch_mut(&mut self.tool_batch);
-                    tb_ref.flush()
-                };
-                self.emit_tools_flush(sub_flush);
-                if let Some(end) = self.subagent.end_subagent() {
-                    // SubAgent ended: emit ObservationCreate for the subagent
-                    // parent 用 begin 时捕获的父节点（主 agent act span 等），
-                    // 而不是结束时刻的活跃 stage——并行 subagent 场景下活跃 stage
-                    // 可能是 subagent 自身的 span，会造成 AGENT observation 与
-                    // 自身子树循环引用（Langfuse UI 树渲染错乱）。
-                    let body = ObservationBody {
-                        id: Some(end.observation_id),
-                        trace_id: Some(self.trace_id.clone()),
-                        r#type: ObservationType::Agent,
-                        name: Some(format!("subagent-{}", end.agent_id)),
-                        start_time: Some(end.start_time),
-                        end_time: Some(now_rfc3339()),
-                        completion_start_time: None,
-                        parent_observation_id: Some(end.parent_observation_id),
-                        input: Some(end.input),
-                        output: Some(serde_json::json!(strip_child_thread_id(output))),
-                        metadata: None,
-                        model: None,
-                        model_parameters: None,
-                        usage: None,
-                        level: None,
-                        status_message: None,
-                        version: Some(VERSION.to_string()),
-                        environment: None,
-                        session_id: Some(self.session_id.clone()),
-                    };
-                    let event = IngestionEvent::ObservationCreate {
-                        id: new_uuid(),
-                        timestamp: now_rfc3339(),
-                        body,
-                        metadata: None,
-                    };
-                    try_add_or_warn_via_session(
-                        &*self.session,
-                        event,
-                        &self.trace_id,
-                        "SubAgent ObservationCreate",
-                    );
+    /// 工具调用结束(业务主体;供 gate 重放复用)
+    fn on_tool_end_inner(
+        &mut self,
+        agent_id: &str,
+        tool_call_id: &str,
+        output: &str,
+        is_error: bool,
+    ) -> bool {
+        match self.subagent.ownership(agent_id) {
+            Ownership::Main | Ownership::Subagent => {
+                let main_domain = matches!(self.subagent.ownership(agent_id), Ownership::Main);
+                if main_domain {
+                    self.tool_batch.on_tool_end(tool_call_id, output, is_error);
+                } else {
+                    let tb = self.subagent.tool_batch_mut(agent_id);
+                    tb.on_tool_end(tool_call_id, output, is_error);
                 }
-            } else {
-                // bg 情况：subagent 尚未启动，不弹栈、不发射 observation
-                // subagent 保留在栈上，等实际启动后恢复活跃，turn_end 时统一清理
-                // 记录 tool output 到栈顶 context（供最终 observation 使用）
-                self.subagent.record_tool_output(output);
+                // Agent 工具 invocation:结束父工具记录、更新 invocation;
+                // 两信号齐备(Stop + ToolEnded)时回收 → 关闭 AGENT obs + flush child batch。
+                // 绝不 end_subagent。
+                if self.subagent.has_invocation(agent_id, tool_call_id) {
+                    if let Some(closed) = self.subagent.on_invocation_tool_end(
+                        agent_id,
+                        tool_call_id,
+                        output,
+                        is_error,
+                    ) {
+                        self.emit_subagent_close(closed);
+                    }
+                }
+                true
+            }
+            Ownership::Unknown => {
+                self.subagent.try_gate(GateEvent::ToolEnd {
+                    agent_id: agent_id.to_string(),
+                    tool_call_id: tool_call_id.to_string(),
+                    output: output.to_string(),
+                    is_error,
+                });
+                false
             }
         }
     }
@@ -892,9 +886,6 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        // SubAgent 栈非空时，标记栈顶 subagent 已启动
-        // （bg subagent：StageStarted 是第一个 subagent 事件，标志着真正开始）
-        self.subagent.mark_top_started();
         let _handle = self.stages.on_stage_start(
             MAIN_AGENT_KEY,
             stage,
@@ -938,11 +929,11 @@ impl LangfuseTracer {
         self.stages.on_stage_end(agent_id, handle, status);
 
         // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
-        // 而非全部堆在第一个 act 中）。仅当子 agent 栈为空时 flush——子 agent Act 结束
-        // 不应影响主 batch（主 batch 中的 Agent 工具可能尚未结束，flush() 的
-        // pending_tools.clear() 会导致丢失）。
-        // 子 agent 的工具批次由 on_tool_end("Agent") fork 路径独立 flush（top_has_started 守卫）。
-        if handle.stage == Stage::Act && self.subagent.is_empty() {
+        // 而非全部堆在第一个 act 中）。仅当该 stage 属于主 agent 域时 flush——
+        // subagent 的 Act 结束不应影响主 batch(主 batch 中的 Agent 工具可能尚未结束,
+        // flush() 的 pending_tools.clear() 会导致丢失)。
+        // subagent 的工具批次由 AGENT obs 关闭(Stop/ToolEnded 双信号)时独立 flush。
+        if handle.stage == Stage::Act && self.subagent.is_main_agent(agent_id) {
             let flush = self.tool_batch.flush();
             self.emit_tools_flush(flush);
         }
@@ -1227,77 +1218,262 @@ impl LangfuseTracer {
         );
     }
 
-    // ── SubAgent 辅助方法 ──────────────────────────────────────────────────
+    // ── SubAgent 身份注册表(registry)入口 ────────────────────────────────────
 
-    /// 查询 `tool_call_id` 是否对应 Agent 工具调用
-    pub(crate) fn is_agent_tool(&self, tool_call_id: &str) -> bool {
-        self.subagent
-            .is_agent_tool_anywhere(&self.tool_batch, tool_call_id)
+    /// 注入主 agent 身份(bridge1 构造时调用;bridge2/workflow 不注入 → None fallback)
+    pub(crate) fn set_main_agent_id(&mut self, id: String) {
+        self.subagent.set_main_agent_id(id);
     }
 
-    /// 获取当前活动的 agent observation ID
-    pub(crate) fn current_agent_id(&self) -> String {
-        self.subagent.current_agent_id(&self.agent_observation_id)
+    /// 内容事件归属:返回 (归属域, parent observation id)。
+    /// 归属链:该 agent 的活跃 stage span → 该 agent 的 AGENT obs → 主 agent obs。
+    /// None = 未知 agent(未注册且非主)→ 调用方走注册闸门/跳过,禁止挂主 agent。
+    fn content_owner(&self, agent_id: &str) -> Option<(Ownership, String)> {
+        if let Some(h) = self.stages.active_handle(agent_id) {
+            let owner = match self.subagent.ownership(agent_id) {
+                Ownership::Subagent => Ownership::Subagent,
+                _ => Ownership::Main,
+            };
+            return Some((owner, h.span_id.clone()));
+        }
+        if let Some(obs) = self.subagent.observation_id_of(agent_id) {
+            return Some((Ownership::Subagent, obs));
+        }
+        if self.subagent.is_main_agent(agent_id) {
+            return Some((Ownership::Main, self.agent_observation_id.clone()));
+        }
+        None
     }
 
-    /// 创建 SubAgent 上下文并压入 subagent 栈
-    pub(crate) fn begin_subagent(
+    /// generation 的 parent:该 agent 的活跃 stage → 该 agent 的 AGENT obs → 主 agent obs。
+    /// None = 未知 agent(禁止降级主 agent)。
+    fn llm_parent(&self, agent_id: &str) -> Option<String> {
+        if let Some(h) = self.stages.active_handle(agent_id) {
+            return Some(h.span_id.clone());
+        }
+        if let Some(obs) = self.subagent.observation_id_of(agent_id) {
+            return Some(obs);
+        }
+        if self.subagent.is_main_agent(agent_id) {
+            return Some(self.agent_observation_id.clone());
+        }
+        None
+    }
+
+    /// bridge 的 StageStarted 分支入口:按事件 agent_id 决策 parent。
+    /// 未知 agent → 入注册闸门缓存(等 Start join 后重放)或跳过;返回 None 时
+    /// bridge 不创建 stage handle。乱序重放产生的 handle 存入
+    /// `replayed_stage_handles`,由 StageEnded 分支领取。
+    pub(crate) fn on_stage_start_gated(
         &mut self,
-        input: &serde_json::Value,
-        parent_observation_id: &str,
-    ) {
-        self.subagent.begin_subagent(input, parent_observation_id);
+        agent_id: &str,
+        stage: Stage,
+        turn_id: &str,
+    ) -> Option<StageHandle> {
+        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+            return None;
+        }
+        let parent = match self.content_owner(agent_id) {
+            Some((_, p)) => p,
+            None => {
+                self.subagent.try_gate(GateEvent::StageStarted {
+                    agent_id: agent_id.to_string(),
+                    stage,
+                    turn_id: turn_id.to_string(),
+                });
+                return None;
+            }
+        };
+        let handle = self
+            .stages
+            .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
+        Some(handle)
     }
 
-    /// 完成当前 SubAgent Observation：先发 ObservationCreate，再弹出栈
-    pub(crate) fn end_subagent(&mut self, result: &str, is_error: bool) {
-        if let Some(end) = self.subagent.end_subagent() {
-            let level = if is_error {
-                Some(ObservationLevel::Error)
-            } else {
-                None
-            };
-            let body = ObservationBody {
-                id: Some(end.observation_id),
-                trace_id: Some(self.trace_id.clone()),
-                r#type: ObservationType::Agent,
-                name: Some(format!("subagent-{}", end.agent_id)),
-                start_time: Some(end.start_time),
-                end_time: Some(now_rfc3339()),
-                completion_start_time: None,
-                parent_observation_id: Some(end.parent_observation_id),
-                input: Some(end.input),
-                output: Some(serde_json::json!(strip_child_thread_id(result))),
-                metadata: None,
-                model: None,
-                model_parameters: None,
-                usage: None,
-                level,
-                status_message: None,
-                version: Some(VERSION.to_string()),
-                environment: None,
-                session_id: Some(self.session_id.clone()),
-            };
-            let event = IngestionEvent::ObservationCreate {
-                id: new_uuid(),
-                timestamp: now_rfc3339(),
-                body,
-                metadata: None,
-            };
-            try_add_or_warn_via_session(
-                &*self.session,
-                event,
-                &self.trace_id,
-                "SubAgent ObservationCreate",
-            );
+    /// StageEnded 分支领取乱序重放的 stage handle(active_stage 未命中时)
+    pub(crate) fn take_replayed_stage_handle(&mut self, agent_id: &str) -> Option<StageHandle> {
+        self.replayed_stage_handles.remove(agent_id)
+    }
+
+    /// SubagentStart:驱动 AGENT obs 创建(join 成功后 emit ObservationCreate open),
+    /// 并重放该 child 被注册闸门缓存的内容事件。
+    pub(crate) fn on_subagent_start(
+        &mut self,
+        parent_agent_id: &str,
+        child_agent_id: &str,
+        agent_name: &str,
+        is_background: bool,
+    ) {
+        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+            return;
+        }
+        let outcome = self.subagent.on_subagent_start(
+            parent_agent_id,
+            child_agent_id,
+            agent_name,
+            is_background,
+        );
+        self.handle_join_outcome(outcome);
+    }
+
+    /// SubagentStop:驱动 AGENT obs 关闭(两信号齐备时 emit ObservationUpdate + flush)
+    pub(crate) fn on_subagent_stop(
+        &mut self,
+        parent_agent_id: &str,
+        child_agent_id: &str,
+        result: &str,
+        is_error: bool,
+    ) {
+        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+            return;
+        }
+        if let Some(closed) =
+            self.subagent
+                .on_subagent_stop(parent_agent_id, child_agent_id, result, is_error)
+        {
+            self.emit_subagent_close(closed);
         }
     }
 
-    /// 提交当前批次 Tools Span（end subagent first, then flush tool batch）
-    pub(crate) fn flush_tools_batch(&mut self) {
-        let _ = self.subagent.end_subagent();
-        let flush = self.tool_batch.flush();
-        self.emit_tools_flush(flush);
+    /// 处理 join 结果:emit AGENT obs open → 重放 gate 事件 → 可能立即关闭
+    fn handle_join_outcome(&mut self, outcome: registry::SubagentStartOutcome) {
+        let registry::SubagentStartOutcome::Joined {
+            obs,
+            replayed,
+            immediately_close,
+        } = outcome
+        else {
+            return; // Pending / Duplicate 无 obs 动作
+        };
+        self.emit_subagent_obs_start(&obs);
+        for ev in replayed {
+            match ev {
+                GateEvent::StageStarted {
+                    agent_id,
+                    stage,
+                    turn_id,
+                } => {
+                    if let Some(h) = self.on_stage_start_gated(&agent_id, stage, &turn_id) {
+                        // 乱序重放:bridge 的 active_stage 未参与,handle 由 StageEnded 领取
+                        self.replayed_stage_handles.insert(agent_id, h);
+                    }
+                }
+                GateEvent::LlmCallStart {
+                    agent_id,
+                    step,
+                    messages,
+                    tools,
+                } => {
+                    self.on_llm_start_inner(&agent_id, step, &messages, &tools);
+                }
+                GateEvent::ToolStart {
+                    agent_id,
+                    tool_call_id,
+                    name,
+                    input,
+                } => {
+                    self.on_tool_start_inner(&agent_id, &tool_call_id, &name, &input);
+                }
+                GateEvent::ToolEnd {
+                    agent_id,
+                    tool_call_id,
+                    output,
+                    is_error,
+                } => {
+                    self.on_tool_end_inner(&agent_id, &tool_call_id, &output, is_error);
+                }
+            }
+        }
+        if let Some(closed) = immediately_close {
+            self.emit_subagent_close(closed);
+        }
+    }
+
+    /// AGENT obs 创建(open):ObservationCreate,无 end_time。
+    /// start 时刻 = Start join 时刻(≤ 最早 child 事件,17ms 空壳场景不复现)。
+    fn emit_subagent_obs_start(&self, obs: &registry::AgentObsStart) {
+        let body = ObservationBody {
+            id: Some(obs.observation_id.clone()),
+            trace_id: Some(self.trace_id.clone()),
+            r#type: ObservationType::Agent,
+            name: Some(format!("subagent-{}", obs.agent_name)),
+            start_time: Some(obs.start_time.clone()),
+            end_time: None,
+            completion_start_time: None,
+            parent_observation_id: Some(obs.parent_observation_id.clone()),
+            input: None,
+            output: None,
+            metadata: None,
+            model: None,
+            model_parameters: None,
+            usage: None,
+            level: None,
+            status_message: None,
+            version: Some(VERSION.to_string()),
+            environment: None,
+            session_id: Some(self.session_id.clone()),
+        };
+        let event = IngestionEvent::ObservationCreate {
+            id: new_uuid(),
+            timestamp: now_rfc3339(),
+            body,
+            metadata: None,
+        };
+        try_add_or_warn_via_session(
+            &*self.session,
+            event,
+            &self.trace_id,
+            "SubAgent ObservationCreate",
+        );
+    }
+
+    /// AGENT obs 关闭:flush child tool_batch + ObservationUpdate(带 end_time/output)。
+    /// end 时刻 = Stop 时刻;output = Stop result(空则父工具 deferred_output)。
+    fn emit_subagent_close(&self, closed: registry::ClosedSubagent) {
+        // 先 flush child 的工具批次(工具 span 挂在 child 的 batch/stage 下)
+        self.emit_tools_flush(closed.flush);
+        let level = if closed.is_error {
+            Some(ObservationLevel::Error)
+        } else {
+            None
+        };
+        let mut metadata = serde_json::json!({});
+        if let Some(reason) = &closed.incomplete_reason {
+            metadata["incomplete_reason"] = serde_json::json!(format!("{:?}", reason));
+        }
+        let body = ObservationBody {
+            id: Some(closed.observation_id),
+            trace_id: Some(self.trace_id.clone()),
+            r#type: ObservationType::Agent,
+            name: Some(format!("subagent-{}", closed.agent_name)),
+            start_time: Some(closed.start_time),
+            end_time: Some(closed.stop_time),
+            completion_start_time: None,
+            parent_observation_id: Some(closed.parent_observation_id),
+            input: None,
+            output: Some(serde_json::json!(strip_child_thread_id(&closed.output))),
+            metadata: Some(metadata),
+            model: None,
+            model_parameters: None,
+            usage: None,
+            level,
+            status_message: None,
+            version: Some(VERSION.to_string()),
+            environment: None,
+            session_id: Some(self.session_id.clone()),
+        };
+        let event = IngestionEvent::ObservationUpdate {
+            id: new_uuid(),
+            timestamp: now_rfc3339(),
+            body,
+            metadata: None,
+        };
+        try_add_or_warn_via_session(
+            &*self.session,
+            event,
+            &self.trace_id,
+            "SubAgent ObservationUpdate",
+        );
     }
 
     /// 将 ToolsBatchFlush 转换为 Langfuse SpanCreate 事件并入队

@@ -5,6 +5,7 @@ use parking_lot::RwLock;
 use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
+    group::pipeline::AgentId,
     messages::BaseMessage,
     thread::ThreadStore,
     tools::BaseTool,
@@ -76,11 +77,20 @@ pub struct SubAgentTool {
     pub(crate) frozen_skill_summary: Option<Arc<String>>,
     /// Frozen system prompt（session/new 时捕获，fork 路径复用以避免重建）。
     pub(crate) frozen_system_prompt: Option<Arc<String>>,
-    /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行
-    pub(crate) on_bg_complete:
-        Option<Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>>,
+    /// bg 完成时的同步回调：在 invoke_background 路径调用 registry.complete() 之前执行。
+    /// 第二参为任务 kind（Agent/Shell/Workflow），供 continuation scheduler 过滤。
+    pub(crate) on_bg_complete: Option<
+        Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
+    >,
     /// Langfuse bridge for subagent trace（None 表示遥测禁用）
     pub(crate) langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    /// 父 agent 的 v2 事件侧 AgentId（共享 cell，由 peri-acp builder 在
+    /// 主 v2 session 创建后注入；None = 未注入/测试路径 → 不 emit v2 Start/Stop）。
+    pub(crate) parent_agent_id: Arc<RwLock<Option<AgentId>>>,
 }
 
 impl SubAgentTool {
@@ -113,6 +123,7 @@ impl SubAgentTool {
             frozen_system_prompt: None,
             on_bg_complete: None,
             langfuse_bridge: None,
+            parent_agent_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -211,7 +222,11 @@ impl SubAgentTool {
     /// 在 invoke_background 路径调用 registry.complete() 之前执行。
     pub fn with_on_bg_complete(
         mut self,
-        cb: Arc<dyn Fn(&peri_agent::agent::events::BackgroundTaskResult) + Send + Sync>,
+        cb: Arc<
+            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
+                + Send
+                + Sync,
+        >,
     ) -> Self {
         self.on_bg_complete = Some(cb);
         self
@@ -220,6 +235,12 @@ impl SubAgentTool {
     /// 设置 Langfuse 桥接器，用于 SubAgent 的完整 Langfuse trace。
     pub fn with_langfuse_bridge(mut self, bridge: Arc<dyn LangfuseBridgeLike>) -> Self {
         self.langfuse_bridge = Some(bridge);
+        self
+    }
+
+    /// 注入父 agent 事件侧 AgentId 共享 cell（与 SubAgentMiddleware 同一 Arc）。
+    pub(crate) fn with_parent_agent_id(mut self, cell: Arc<RwLock<Option<AgentId>>>) -> Self {
+        self.parent_agent_id = cell;
         self
     }
 
@@ -489,6 +510,20 @@ impl BaseTool for SubAgentTool {
             None,
             None,
             None,
+            Some(crate::subagent::v2_bridge::agent_id_from_child_thread(
+                &child_thread_id,
+            )),
+        );
+
+        // 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道。
+        // parent_agent_id 未注入（测试/嵌套异常）时静默跳过（helper 内 warn）。
+        crate::subagent::v2_bridge::emit_subagent_start_v2(
+            &v2_ctx.event_bus,
+            v2_ctx.context.turn_id(),
+            *self.parent_agent_id.read(),
+            v2_ctx.agent_id,
+            &agent_id,
+            false,
         );
 
         // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
@@ -514,8 +549,39 @@ impl BaseTool for SubAgentTool {
             ));
 
         // 运行 v2 ReAct 循环
+        // context 将被 move 进 run_react_loop，turn_id 提前提取（Stop emit 用）
+        let subagent_turn_id = v2_ctx.context.turn_id();
         let loop_result =
             peri_agent::agent::stages::run_react_loop(v2_ctx.context, max_iterations).await;
+
+        // 补发 v2 SubagentStop（C3）：run_react_loop 返回后立即 emit，
+        // 一个 emit 点覆盖 Completed / Interrupted / Error 三路且恰好一次。
+        let (stop_result, stop_is_error) = match &loop_result {
+            peri_agent::agent::stages::LoopResult::Completed => (
+                extract_last_ai_text(&v2_ctx.session)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                false,
+            ),
+            peri_agent::agent::stages::LoopResult::Interrupted => ("interrupted".to_string(), true),
+            peri_agent::agent::stages::LoopResult::Error(e) => (
+                format!("Sub-agent execution failed: {}", e)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                true,
+            ),
+        };
+        crate::subagent::v2_bridge::emit_subagent_stop_v2(
+            &v2_ctx.event_bus,
+            subagent_turn_id,
+            *self.parent_agent_id.read(),
+            v2_ctx.agent_id,
+            &agent_id,
+            &stop_result,
+            stop_is_error,
+        );
 
         let (final_text, interrupted) = match loop_result {
             peri_agent::agent::stages::LoopResult::Completed => {

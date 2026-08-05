@@ -43,7 +43,7 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }
@@ -54,6 +54,53 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         history: vec![],
         cwd: "/tmp".to_string(),
         peri_config: Arc::new(Default::default()),
+        auxiliary_model: None,
+        event_sink: sink,
+        args: args.to_string(),
+        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        thread_store: None,
+        thread_id: None,
+        bg_event_sender: None,
+        bg_registry: None,
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
+        frozen_system_prompt: None,
+    }
+}
+
+/// 构造带有效 provider 配置的 CommandContext（LLM 构造成功，能越过
+/// `LlmProvider::from_config` 提前返回路径，直达 bg_event_sender/bg_registry 检查）。
+/// 两个 Option 字段仍为 None——复现公开 RPC 直调 /bg 传 None 的场景。
+fn make_ctx_with_provider(
+    sink: Arc<dyn crate::session::event_sink::EventSink>,
+    args: &str,
+) -> CommandContext {
+    let mut peri_config = crate::provider::PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![crate::provider::ProviderConfig {
+        id: "a".to_string(),
+        provider_type: "openai".to_string(),
+        api_key: "sk-test".to_string(),
+        models: crate::provider::ProviderModels {
+            sonnet: "gpt-4o".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+    peri_config.config.profiles = crate::provider::Profiles {
+        sonnet: crate::provider::ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    CommandContext {
+        session_id: "test-session".to_string(),
+        history: vec![],
+        cwd: "/tmp".to_string(),
+        peri_config: Arc::new(peri_config),
         auxiliary_model: None,
         event_sink: sink,
         args: args.to_string(),
@@ -124,6 +171,38 @@ async fn test_bg_command_does_not_call_push_done_itself() {
     assert_eq!(
         count, 0,
         "BgCommand 自身不应调用 push_done，由 executor 负责"
+    );
+}
+
+// ── 缺省 bg 上下文优雅降级测试（S1.2）───────────────────────────────────────
+
+/// [S1.2] 公开 RPC（session/execute-command / session/rewind）传 None 时
+/// /bg 不得 panic——两个 expect 改为 emit 错误提示 + EndTurn 返回。
+#[tokio::test]
+async fn test_bg_command_missing_bg_context_gracefully_fails() {
+    let sink = Arc::new(MockEventSink::new());
+    // 有效 provider（越过 LLM 构造检查）+ bg_event_sender/bg_registry 均 None
+    let ctx = make_ctx_with_provider(sink.clone(), "整理周报");
+    let cmd = BgCommand;
+
+    let result = cmd.execute(ctx).await;
+
+    // 不 panic，正常返回 EndTurn
+    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(result.messages.len(), 0);
+
+    // 应 emit 一条错误提示，指明缺失的字段（bg_event_sender 先被检查）
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "应恰好 emit 一条错误提示");
+    assert!(
+        events[0].1.contains("后台任务启动失败"),
+        "错误提示应包含失败前缀，实际: {}",
+        events[0].1
+    );
+    assert!(
+        events[0].1.contains("bg_event_sender"),
+        "错误提示应指明缺失字段 bg_event_sender，实际: {}",
+        events[0].1
     );
 }
 

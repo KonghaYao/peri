@@ -641,6 +641,18 @@ impl WorkflowRunner {
                 );
             }
 
+            // 收尾收敛 progress_store：msg_loop 自然退出（Node 崩溃/stdout 关闭）时
+            // Node 侧 run_done 事件不会到达，run 会永久停留在 Running（幽灵 running，
+            // 与 kill 分支同源，issue 2026-08-05）。status 取 final_result.status：
+            // completed 路径与 Node 已发的 RunDone 幂等，failed 路径修复永久 Running。
+            // 与 kill 分支时序无冲突：kill 会 abort 本 msg_loop，收尾不执行。
+            progress_store_clone.apply_event(&ProgressEvent::RunDone {
+                run_id: final_result.run_id.clone(),
+                status: final_result.status.clone(),
+                return_value: None,
+                error: final_result.error.clone(),
+            });
+
             final_result.stderr_tail = stderr_tail;
             let _ = done_tx.send(Some(final_result));
         });
@@ -691,6 +703,16 @@ impl WorkflowRunner {
                     error: Some("workflow killed by user".to_string()),
                 };
                 let _ = journal_clone2.write_state(&run_id, &state);
+
+                // 复用 reducer 标记 Killed 终态（与 Node 正常路径 run_done 同一状态机入口）：
+                // msg_loop 已被 abort，Node 侧 run_done 不会到达；不标记则 progress_store 会
+                // 永久保留 Running 条目（workflow/list_runs 幽灵 running）
+                progress_store.apply_event(&ProgressEvent::RunDone {
+                    run_id: run_id.clone(),
+                    status: "killed".to_string(),
+                    return_value: None,
+                    error: Some("workflow killed by user".to_string()),
+                });
 
                 // 发送 done_tx（kill 分支作为唯一出口，确保通知任务收到 "killed" 状态）
                 let killed_result = WorkflowResult {

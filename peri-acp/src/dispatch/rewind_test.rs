@@ -35,7 +35,7 @@ impl EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
 /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)

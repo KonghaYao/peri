@@ -5,7 +5,14 @@
 
 use std::sync::Arc;
 
-use peri_agent::agent::events::{AgentEventHandler, ExecutorEvent};
+use peri_agent::{
+    agent::{
+        events::{AgentEventHandler, ExecutorEvent},
+        events_v2::EventBus,
+    },
+    group::pipeline::AgentId,
+    session::turn::TurnId,
+};
 
 use super::fire_subagent_lifecycle_hooks_static;
 use crate::hooks::types::{HookEvent, RegisteredHook};
@@ -20,6 +27,85 @@ impl Drop for DeregisterGuard {
     fn drop(&mut self) {
         if let Some(ref deregister) = self.deregister {
             deregister(&self.thread_id);
+        }
+    }
+}
+
+/// SubagentStopped 补发参数（BgCleanupGuard 取消兜底路径使用）
+pub(crate) struct BgStopEmit {
+    pub(crate) sender: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    pub(crate) agent_name: String,
+    pub(crate) instance_id: String,
+}
+
+/// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
+///
+/// 字段与 `v2_bridge::emit_subagent_stop_v2` 调用参数一一对应（C3 配对契约）：
+/// abort 兜底路径下 v2 Start 已 emit 而 v2 Stop 永不 emit → Langfuse AGENT span
+/// 悬挂，Drop 时经 child EventBus 补发（`emit_observe` 为同步 unbounded send，
+/// 可在同步 Drop 中安全执行）。
+pub(crate) struct BgStopEmitV2 {
+    pub(crate) event_bus: Arc<EventBus>,
+    pub(crate) turn_id: TurnId,
+    pub(crate) parent_agent_id: Option<AgentId>,
+    pub(crate) child_agent_id: AgentId,
+    pub(crate) agent_name: String,
+}
+
+/// bg 任务同步收尾 guard（S3.2）：Drop 时（任务被 abort / panic / 正常结束）执行：
+/// - `deregister_runtime`（active_agents 清理，防泄漏）
+/// - 补发 `SubagentStopped`（若未显式 emit——正常路径 emit 后需 `disarm_stop`，
+///   保证与已 emit 的 `SubagentStarted` 配对，subagent_depth 正确递减）
+/// - 补发 v2 `SubagentStop`（若未显式 emit——正常路径 emit 后需 `disarm_stop_v2`，
+///   保证与已 emit 的 v2 `SubagentStart` 配对，Langfuse AGENT span 闭合）
+///
+/// async 收尾（`update_thread_status` / `fire_stop_hooks`）无法在同步 Drop 中 await，
+/// abort 兜底路径丢失，由 background.rs `cancel()` 的 abort 分支记日志。
+pub(crate) struct BgCleanupGuard {
+    pub(crate) thread_id: String,
+    pub(crate) deregister: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// 未显式 emit SubagentStopped 时补发（取消/abort 兜底路径）
+    pub(crate) stop: Option<BgStopEmit>,
+    /// 未显式 emit v2 SubagentStop 时补发（取消/abort 兜底路径）
+    pub(crate) stop_v2: Option<BgStopEmitV2>,
+}
+
+impl BgCleanupGuard {
+    /// 正常路径已显式 emit SubagentStopped 后调用，防止 drop 时重复发射。
+    pub(crate) fn disarm_stop(&mut self) {
+        self.stop = None;
+    }
+
+    /// 正常路径已显式 emit v2 SubagentStop 后调用，防止 drop 时重复发射。
+    pub(crate) fn disarm_stop_v2(&mut self) {
+        self.stop_v2 = None;
+    }
+}
+
+impl Drop for BgCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(ref deregister) = self.deregister {
+            deregister(&self.thread_id);
+        }
+        if let Some(stop) = &self.stop {
+            emit_subagent_stop_bg(
+                &stop.sender,
+                &stop.agent_name,
+                "Background sub-agent was cancelled".to_string(),
+                true,
+                &stop.instance_id,
+            );
+        }
+        if let Some(stop_v2) = &self.stop_v2 {
+            crate::subagent::v2_bridge::emit_subagent_stop_v2(
+                &stop_v2.event_bus,
+                stop_v2.turn_id,
+                stop_v2.parent_agent_id,
+                stop_v2.child_agent_id,
+                &stop_v2.agent_name,
+                "Background sub-agent was cancelled",
+                true,
+            );
         }
     }
 }

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use tokio::{
     sync::{mpsc, oneshot},
@@ -31,6 +34,9 @@ enum BatcherCommand {
 pub struct Batcher {
     tx: mpsc::Sender<BatcherCommand>,
     backpressure: BackpressurePolicy,
+    /// 因命令通道满/关闭而被丢弃的事件计数（add/try_add 侧累加；
+    /// run_loop 每次 flush 完成后汇总输出并清零——S5.2 丢弃可观测性）
+    dropped: Arc<AtomicUsize>,
 }
 
 impl Batcher {
@@ -43,12 +49,26 @@ impl Batcher {
         let batch_client = Arc::clone(&client);
         let max_events = config.max_events;
         let flush_interval = config.flush_interval;
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let run_dropped = Arc::clone(&dropped);
 
         let _handle = tokio::spawn(async move {
-            Self::run_loop(batch_client, rx, max_events, flush_interval, backpressure).await;
+            Self::run_loop(
+                batch_client,
+                rx,
+                max_events,
+                flush_interval,
+                backpressure,
+                run_dropped,
+            )
+            .await;
         });
 
-        Self { tx, backpressure }
+        Self {
+            tx,
+            backpressure,
+            dropped,
+        }
     }
 
     /// 后台事件处理循环
@@ -58,6 +78,7 @@ impl Batcher {
         max_events: usize,
         flush_interval: Duration,
         backpressure: BackpressurePolicy,
+        dropped: Arc<AtomicUsize>,
     ) {
         let mut buffer: std::collections::VecDeque<IngestionEvent> =
             std::collections::VecDeque::with_capacity(max_events);
@@ -83,10 +104,12 @@ impl Batcher {
                             buffer.push_back(event);
                             if buffer.len() >= max_events {
                                 Self::do_flush(&client, &mut buffer).await;
+                                Self::report_dropped(&dropped);
                             }
                         }
                         Some(BatcherCommand::Flush(ack)) => {
                             Self::do_flush(&client, &mut buffer).await;
+                            Self::report_dropped(&dropped);
                             if ack.send(()).is_err() {
                                 warn!("Batcher: flush ack receiver dropped");
                             }
@@ -99,6 +122,7 @@ impl Batcher {
                                 );
                                 Self::do_flush(&client, &mut buffer).await;
                             }
+                            Self::report_dropped(&dropped);
                             return;
                         }
                     }
@@ -111,6 +135,7 @@ impl Batcher {
                             flush_interval
                         );
                         Self::do_flush(&client, &mut buffer).await;
+                        Self::report_dropped(&dropped);
                     }
                 }
             }
@@ -139,6 +164,23 @@ impl Batcher {
         }
     }
 
+    /// 输出丢弃汇总日志并清零计数（每次 flush 完成后调用）。
+    ///
+    /// S5.2：`do_flush`（HTTP + 重试）await 期间 run_loop 无法消费命令通道，
+    /// DropNew/DropOldest 在通道满时会丢弃事件；本函数保证"已丢弃 N 条"
+    /// 至少在每个 flush 周期后可见，避免静默丢失。
+    fn report_dropped(dropped: &AtomicUsize) {
+        let n = dropped.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            warn!(
+                target: "langfuse::batcher",
+                dropped = n,
+                "Batcher 已丢弃 {} 条事件（上一 flush 周期内命令通道满/关闭）",
+                n
+            );
+        }
+    }
+
     /// 添加事件到批量队列
     ///
     /// DropNew/DropOldest：使用 try_send 非阻塞发送，channel 满时 DropNew 直接丢弃，
@@ -150,6 +192,7 @@ impl Batcher {
             BackpressurePolicy::DropNew | BackpressurePolicy::DropOldest => {
                 self.tx.try_send(cmd).map_err(|e| match e {
                     mpsc::error::TrySendError::Full(_) => {
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
                         let policy_name = if self.backpressure == BackpressurePolicy::DropOldest {
                             "DropOldest"
                         } else {
@@ -162,12 +205,14 @@ impl Batcher {
                         LangfuseError::ChannelClosed
                     }
                     mpsc::error::TrySendError::Closed(_) => {
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
                         warn!("Batcher channel closed, event dropped");
                         LangfuseError::ChannelClosed
                     }
                 })
             }
             BackpressurePolicy::Block => self.tx.send(cmd).await.map_err(|_| {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 warn!("Batcher channel closed during send");
                 LangfuseError::ChannelClosed
             }),
@@ -181,6 +226,7 @@ impl Batcher {
         let cmd = BatcherCommand::Add(event);
         self.tx.try_send(cmd).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 warn!(
                     "Batcher queue full, dropping event ({} policy)",
                     if self.backpressure == BackpressurePolicy::DropOldest {
@@ -192,6 +238,7 @@ impl Batcher {
                 LangfuseError::ChannelClosed
             }
             mpsc::error::TrySendError::Closed(_) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
                 warn!("Batcher channel closed, event dropped");
                 LangfuseError::ChannelClosed
             }
@@ -209,6 +256,12 @@ impl Batcher {
             warn!("Batcher dropped flush acknowledgment");
             LangfuseError::ChannelClosed
         })
+    }
+
+    /// 当前累计的丢弃事件数（通道满/关闭导致；run_loop 每次 flush 后清零）。
+    /// 供调用方/测试观测丢弃量——S5.2 慢 flush 期间 DropNew 丢事件的可观测性。
+    pub fn dropped_count(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 

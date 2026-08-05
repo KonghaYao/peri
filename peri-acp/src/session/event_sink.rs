@@ -39,7 +39,11 @@ pub trait EventSink: Send + Sync {
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
 
     /// Signal that the agent execution stream has ended (no more events).
-    async fn push_done(&self, session_id: &str, stop_reason: &str);
+    ///
+    /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
+    /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
+    /// `TurnInterrupted` 配对判定（Issue 2026-08-05）；缺失路径传 None。
+    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>);
 
     /// Push an unstable event (peri/unstable-event) directly to the transport.
     ///
@@ -204,6 +208,7 @@ impl EventSink for TransportEventSink {
                     micro_cleared,
                     messages,
                     strategy,
+                    trigger,
                     outcome,
                     ..
                 } => {
@@ -215,6 +220,7 @@ impl EventSink for TransportEventSink {
                         }
                     };
                     let strategy_str = to_serde_str(strategy);
+                    let trigger_str = to_serde_str(trigger);
                     let outcome_str = to_serde_str(outcome);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
@@ -229,6 +235,7 @@ impl EventSink for TransportEventSink {
                         micro_cleared: *micro_cleared,
                         messages_json,
                         strategy: strategy_str,
+                        trigger: trigger_str,
                         outcome: outcome_str,
                     })
                 }
@@ -291,7 +298,7 @@ impl EventSink for TransportEventSink {
     // transport 层 "peri/agent_event_done" method 映射为 AcpNotification::AgentDone，
     // acp_notifier.rs:127 再将 AgentDone 转换为 AcpEventData::TurnDone 推入双 bridge。
     // 若未来 ACP 标准协议新增 turn_done tag，应迁移至 session/update 标准通道。
-    async fn push_done(&self, session_id: &str, stop_reason: &str) {
+    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>) {
         let caps = self
             .caps_registry
             .get(session_id)
@@ -305,12 +312,15 @@ impl EventSink for TransportEventSink {
             });
         if caps.agent_event_done {
             debug!(session_id = %session_id, "EventSink: sending agent_event_done");
+            let mut payload = json!({ "sessionId": session_id, "stopReason": stop_reason });
+            // requestId 为可选字段：有则回带（TUI stale TurnInterrupted 配对），
+            // 无则省略（缺失路径如 continuation/Immediate 命令/stdio 不携带）。
+            if let Some(rid) = request_id {
+                payload["requestId"] = json!(rid);
+            }
             if let Err(e) = self
                 .transport
-                .send_notification(
-                    "peri/agent_event_done",
-                    json!({ "sessionId": session_id, "stopReason": stop_reason }),
-                )
+                .send_notification("peri/agent_event_done", payload)
                 .await
             {
                 error!(session_id = %session_id, error = %e, "EventSink: agent_event_done send failed")
@@ -408,7 +418,7 @@ impl EventSink for StdioEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
         // No explicit done signal in standard ACP protocol.
     }
 }

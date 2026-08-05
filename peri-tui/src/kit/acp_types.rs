@@ -924,7 +924,9 @@ pub enum AcpEventData {
 
     /// TUI 内部事件：用户已提交 prompt，loading spinner 应立即显示。
     /// submit_consumer 发出，bridge 收到后设 phase=PromptRunning, variant=1。
-    PromptSubmitted,
+    /// `request_id` 为本轮 prompt RPC 的 id（submit_consumer 生成）——bridge
+    /// 记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对判定。
+    PromptSubmitted { request_id: Option<String> },
 
     /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。
     SessionReplayStarted,
@@ -936,7 +938,13 @@ pub enum AcpEventData {
     TurnDone,
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
-    TurnInterrupted { reason: String },
+    /// `request_id` 为被中断 turn 的 prompt requestId（服务器经
+    /// `peri/agent_event_done` 回带）——TUI 用它识别事件所属 turn，
+    /// 丢弃早于当前 turn 的 stale 事件（Issue 2026-08-05）。
+    TurnInterrupted {
+        reason: String,
+        request_id: Option<String>,
+    },
 
     /// `"turn-suspended"` -- agent turn suspended, waiting for bg agent/cron/workflow.
     /// TUI 收到后应归档 current_turn + 停止 loading spinner。
@@ -945,6 +953,15 @@ pub enum AcpEventData {
 
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     LocalUserBubble { text: String },
+
+    /// TUI 内部事件：本地 loading 复位请求（cancel / /clear / prompt 失败
+    /// 兜底时由 submit_consumer 发出）。仅 TUI 内部使用，不走 ACP 协议。
+    /// bridge 收到后若 phase == PromptRunning 则复位为 Idle 并重推 ACP_STATE
+    /// ——与直接写 ACP_STATE.is_loading 的兜底互补：兜底覆盖 bridge 已退出的
+    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（cancel 后迟到
+    /// 事件触发 push_acp_state 会用 phase 重算 is_loading=true，造成闪回）。
+    /// 幂等：phase 非 PromptRunning 时 no-op（Issue 2026-08-05 S4.2）。
+    LocalLoadingReset,
 
     /// bg agent 完成回调 user bubble——要求先 flush current_turn 到 committed，
     /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：
@@ -1044,6 +1061,7 @@ pub enum AcpEventData {
     /// `"bg-task-completed"` -- a background task has finished.
     BgTaskCompleted {
         task_id: String,
+        kind: Option<String>,
         success: bool,
         duration_ms: u64,
     },
@@ -1070,6 +1088,9 @@ pub enum AcpEventData {
         messages_json: String,
         /// 压缩策略: "micro" | "full" | "smart"
         strategy: String,
+        /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"，由
+        /// acp_notifier 透传时补默认值）
+        trigger: String,
         /// Compact 执行的语义结果
         outcome: String,
     },
@@ -1130,7 +1151,10 @@ impl AcpEventData {
             "turn-done" => AcpEventData::TurnDone,
             "turn-interrupted" => {
                 let reason = data["reason"].as_str().unwrap_or("").to_string();
-                AcpEventData::TurnInterrupted { reason }
+                // requestId 为可选字段：unstable-event 通道当前未发射 turn-interrupted
+                // （router 返回 None），保留解析以兼容未来启用（协议文档已标注）。
+                let request_id = data["requestId"].as_str().map(String::from);
+                AcpEventData::TurnInterrupted { reason, request_id }
             }
             "turn-suspended" => AcpEventData::TurnSuspended,
 
@@ -1175,6 +1199,7 @@ impl AcpEventData {
             "bg-task-completed" => decode_or_unknown(event, data, |d: BgTaskCompletedData| {
                 AcpEventData::BgTaskCompleted {
                     task_id: d.task_id,
+                    kind: d.kind,
                     success: d.success,
                     duration_ms: d.duration_ms,
                 }
@@ -1233,6 +1258,8 @@ pub struct BgTaskEntry {
 #[derive(Debug, serde::Deserialize)]
 struct BgTaskCompletedData {
     task_id: String,
+    #[serde(default)]
+    kind: Option<String>,
     success: bool,
     duration_ms: u64,
 }

@@ -568,7 +568,22 @@ where
                 });
             out
         }
-        Err(e) => return Err(LoopResult::Error(e)),
+        Err(e) => {
+            // S1.4：Err 路径也必须 emit StageEnded（status=Error），否则
+            // StageStarted 无条件 emit 而 StageEnded 只在 Ok 分支 emit，
+            // LLM 失败/cancel/工具错误等退出路径留下悬挂 Langfuse span。
+            context
+                .runtime
+                .event_bus
+                .emit_observe(ObserveEvent::StageEnded {
+                    turn_id: context.turn_id(),
+                    agent_id: context.session.agent_id,
+                    stage,
+                    status: StageStatus::Error,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            return Err(LoopResult::Error(e));
+        }
     };
     Ok(out)
 }

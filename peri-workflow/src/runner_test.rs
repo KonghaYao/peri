@@ -2,16 +2,19 @@
 
 use super::{workflow_local_dist_in, AgentExecutor, WorkflowInput, WorkflowRunner};
 use crate::journal::WorkflowJournalStore;
-use crate::progress::WorkflowProgressStore;
+use crate::progress::{RunStatus, WorkflowProgressStore};
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
 use std::sync::Arc;
 
-/// Mock executor: 返回固定结果
-struct MockAgentExecutor;
+/// Mock executor: 返回固定结果（delay 用于模拟慢 agent，保证 kill 测试的窗口）
+struct MockAgentExecutor {
+    delay: std::time::Duration,
+}
 
 #[async_trait::async_trait]
 impl AgentExecutor for MockAgentExecutor {
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult {
+        tokio::time::sleep(self.delay).await;
         let preview = &params.prompt[..20.min(params.prompt.len())];
         AgentRunResult::Ok {
             output: format!("mock response to: {preview}").into(),
@@ -53,7 +56,9 @@ async fn test_e2e_simple_workflow() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
-    let executor = Arc::new(MockAgentExecutor) as Arc<dyn AgentExecutor>;
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
     let runner = WorkflowRunner::new(executor, cwd, None);
     let journal = Arc::new(WorkflowJournalStore::new(cwd));
     let progress = Arc::new(WorkflowProgressStore::new());
@@ -102,4 +107,185 @@ return { output: result }
         });
         assert!(is_bunx_noise, "stderr 含非预期的错误输出:\n{}", stderr);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires @peri-code/workflow installed"]
+async fn test_kill_marks_run_killed_in_progress_store() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::from_secs(5),
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, cwd, None);
+    let journal = Arc::new(WorkflowJournalStore::new(cwd));
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let (done_tx, mut done_rx) = tokio::sync::watch::channel(None);
+    // 持有 kill_tx：v1 打通后 kill 通道是 (kill_tx → kill_rx)，测试需保留 sender 以便触发
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+
+    let script = r#"
+export const meta = { name: 'kill-test', description: 'kill test' }
+const result = await agent('say hello')
+return { output: result }
+"#;
+
+    let input = WorkflowInput {
+        script: script.to_string(),
+        args: None,
+        max_concurrency: 3,
+        budget_total: None,
+        workflow_name: "kill-test".to_string(),
+        resume_from: None,
+    };
+
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let progress_for_runner = Arc::clone(&progress);
+    let run_id_for_runner = run_id.clone();
+    let run_handle = tokio::spawn(async move {
+        runner
+            .run(
+                run_id_for_runner,
+                input,
+                progress_for_runner,
+                journal,
+                done_tx,
+                kill_rx,
+            )
+            .await
+    });
+
+    // 等待 run_started 写入 progress_store（run 进入 Running 状态）
+    let progress_wait = Arc::clone(&progress);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(run) = progress_wait.get_run(&run_id) {
+                if matches!(run.status, RunStatus::Running) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("run 未在超时内进入 Running 状态");
+
+    // 触发 kill（等效 workflow/kill_run RPC → WorkflowTaskRegistry::kill → kill_tx）
+    kill_tx.send(()).unwrap();
+
+    // 等待完成信号：kill 分支是 done_tx 的唯一出口，必达
+    tokio::time::timeout(std::time::Duration::from_secs(30), done_rx.changed())
+        .await
+        .expect("kill 后未收到完成信号")
+        .unwrap();
+    let result = done_rx.borrow().clone().unwrap();
+    assert_eq!(result.status, "killed");
+
+    // 核心断言：kill 后 progress_store 显示 Killed（workflow/list_runs 与 get_run 同源，
+    // 回归点：修复前此处永久 Running —— 幽灵 running 根因）
+    let run = progress
+        .get_run(&run_id)
+        .expect("run 应存在于 progress_store");
+    assert!(
+        matches!(run.status, RunStatus::Killed),
+        "kill 后 progress_store 应显示 Killed，实际 {:?}",
+        run.status
+    );
+    assert!(
+        run.completed_at.is_some(),
+        "Killed 条目必须设置 completed_at，否则 cleanup_completed 永不清理"
+    );
+
+    // run() 应在 kill 分支后正常返回 Ok
+    run_handle.await.unwrap().unwrap();
+}
+
+/// [回归测试] Node 自然崩溃（非 kill）时 msg_loop failed 收尾必须收敛 progress_store
+/// 为 Failed（issue 2026-08-05 遗留 2：修复前 run 永久 Running，幽灵 running 与
+/// kill 分支同源）。
+///
+/// 防假阳性：脚本在 agent 执行**之后**顶层 throw → workflow/start 已成功、
+/// RunStarted 已写入（先轮询 Running），随后 Node 进程崩溃退出——崩溃时进程已死，
+/// 没有机会发 run_done progress 事件，只有 msg_loop 收尾（stdout 关闭 → recv None
+/// → final_result 保持 "failed"）能标记终态。修复前该路径不写 progress_store，
+/// 断言必然失败。
+#[tokio::test]
+#[ignore = "requires @peri-code/workflow installed"]
+async fn test_natural_crash_marks_run_failed_in_progress_store() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, cwd, None);
+    let journal = Arc::new(WorkflowJournalStore::new(cwd));
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let (done_tx, _done_rx) = tokio::sync::watch::channel(None);
+    let (_kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+
+    let script = r#"
+export const meta = { name: 'crash-test', description: 'crash test' }
+const result = await agent('say hello')
+throw new Error('intentional crash after agent')
+"#;
+
+    let input = WorkflowInput {
+        script: script.to_string(),
+        args: None,
+        max_concurrency: 3,
+        budget_total: None,
+        workflow_name: "crash-test".to_string(),
+        resume_from: None,
+    };
+
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let progress_for_runner = Arc::clone(&progress);
+    let run_id_for_runner = run_id.clone();
+    let run_handle = tokio::spawn(async move {
+        runner
+            .run(
+                run_id_for_runner,
+                input,
+                progress_for_runner,
+                journal,
+                done_tx,
+                kill_rx,
+            )
+            .await
+    });
+
+    // 等待 run_started 写入 progress_store（run 进入 Running 状态）——
+    // 证明 workflow/start 已成功且 msg_loop 已 spawn（修复前此处之后永久 Running）
+    let progress_wait = Arc::clone(&progress);
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(run) = progress_wait.get_run(&run_id) {
+                if matches!(run.status, RunStatus::Running) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("run 未在超时内进入 Running 状态");
+
+    // 不触发 kill：Node 自然崩溃 → run() 应正常返回
+    run_handle.await.unwrap().unwrap();
+
+    // 核心断言：自然崩溃后 progress_store 显示 Failed（修复前此处永久 Running）
+    let run = progress
+        .get_run(&run_id)
+        .expect("run 应存在于 progress_store");
+    assert!(
+        matches!(run.status, RunStatus::Failed),
+        "自然崩溃后 progress_store 应显示 Failed，实际 {:?}",
+        run.status
+    );
+    assert!(
+        run.completed_at.is_some(),
+        "Failed 条目必须设置 completed_at，否则 cleanup_completed 永不清理"
+    );
 }

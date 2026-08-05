@@ -1,12 +1,38 @@
 name = "peri-sync"
 main = "src/cf-worker.ts"
-compatibility_date = "2025-05-17"
+compatibility_date = "2026-02-24"
 
-# PairRoom Durable Object — 全局单例，确保 sender/receiver 始终连到同一实例
+# ── 旧 PairRoom（全局 WebSocket 中继）───────────────────────────────────────
+# Slice 4 部署验证后独立删除；在此之前保持与旧 /ws 客户端兼容。
+
 [[durable_objects.bindings]]
 name = "PAIR_ROOM"
 class_name = "PairRoom"
 
+# ── v1 Channel DO（channel 状态事实源）──────────────────────────────────────
+
+[[durable_objects.bindings]]
+name = "CHANNEL"
+class_name = "Channel"
+
+# ── v1 CodeIndex DO（码定位索引，全局单例）───────────────────────────────────
+
+[[durable_objects.bindings]]
+name = "CODE_INDEX"
+class_name = "CodeIndex"
+
+# ── v1 数据面：R2 只存 AEAD 密文 ─────────────────────────────────────────────
+# bucket_name 为部署门禁占位；真实 bucket 名/account 由部署批准时提供，
+# 本地测试使用 miniflare 模拟 bucket（binding 名固定为 PERI_SYNC_PAYLOADS）。
+
+[[r2_buckets]]
+binding = "PERI_SYNC_PAYLOADS"
+bucket_name = "peri-sync-payloads"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PairRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Channel", "CodeIndex"]

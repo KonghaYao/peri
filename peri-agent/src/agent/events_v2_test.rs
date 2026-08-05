@@ -736,6 +736,80 @@ fn test_observe_event_compact_started_serde_roundtrip() {
     assert!(matches!(back, ObserveEvent::CompactStarted { step: 7, .. }));
 }
 
+/// C2/C3 事件契约：SubagentStart 序列化/反序列化 round-trip，全部字段全等
+/// （生产 emit 依赖此契约：bridge 消费的事件必须字段完整、id 可反解）。
+#[test]
+fn test_observe_event_subagent_start_serde_roundtrip() {
+    let (turn_id, agent_id) = make_ids();
+    // child_agent_id 使用可解析的 UUID v7（身份键统一后 = child_thread_id）
+    let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
+    let event = ObserveEvent::SubagentStart {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "code-reviewer".to_string(),
+        is_background: true,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
+    match back {
+        ObserveEvent::SubagentStart {
+            turn_id: t,
+            agent_id: a,
+            child_agent_id: c,
+            agent_name,
+            is_background,
+        } => {
+            assert_eq!(t, turn_id);
+            assert_eq!(a, agent_id);
+            assert_eq!(c, child_agent_id);
+            assert_eq!(agent_name, "code-reviewer");
+            assert!(is_background);
+            // 身份契约：child_agent_id 字符串形式即 child_thread_id（instance_id）
+            assert_eq!(
+                c.as_uuid().to_string(),
+                child_agent_id.as_uuid().to_string()
+            );
+        }
+        other => panic!("应为 SubagentStart，实际 {:?}", other),
+    }
+}
+
+/// C2/C3 事件契约：SubagentStop 序列化/反序列化 round-trip，全部字段全等
+#[test]
+fn test_observe_event_subagent_stop_serde_roundtrip() {
+    let (turn_id, agent_id) = make_ids();
+    let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
+    let event = ObserveEvent::SubagentStop {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "code-reviewer".to_string(),
+        result: "found 3 issues".to_string(),
+        is_error: false,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    let back: ObserveEvent = serde_json::from_str(&json).unwrap();
+    match back {
+        ObserveEvent::SubagentStop {
+            turn_id: t,
+            agent_id: a,
+            child_agent_id: c,
+            agent_name,
+            result,
+            is_error,
+        } => {
+            assert_eq!(t, turn_id);
+            assert_eq!(a, agent_id);
+            assert_eq!(c, child_agent_id);
+            assert_eq!(agent_name, "code-reviewer");
+            assert_eq!(result, "found 3 issues");
+            assert!(!is_error);
+        }
+        other => panic!("应为 SubagentStop，实际 {:?}", other),
+    }
+}
+
 #[test]
 fn test_event_unified_serde_roundtrip() {
     let (turn_id, agent_id) = make_ids();

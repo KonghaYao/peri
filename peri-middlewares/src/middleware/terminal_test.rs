@@ -297,6 +297,17 @@ fn test_parse_timeout_semantics() {
     );
 }
 
+/// bg shell 任务 id 唯一性（issue 2026-08-05 回归防护）：
+/// 旧实现取 UUID v7 前 8 字符（毫秒时间戳高 32 位），同一毫秒内多次调用
+/// 必然碰撞 → registry 覆盖注册 → 后续 complete() 被静默跳过 → TUI 条目残留。
+/// 连续生成（大概率落在同一毫秒）必须全部唯一，且保留 `shell-` 前缀。
+#[test]
+fn test_bg_shell_task_id_uniqueness() {
+    let ids: std::collections::HashSet<String> = (0..64).map(|_| bg_shell_task_id()).collect();
+    assert_eq!(ids.len(), 64, "同一毫秒内生成的 bg shell task_id 必须唯一");
+    assert!(ids.iter().all(|id| id.starts_with("shell-")));
+}
+
 /// bg 显式超时：应杀死整个进程组（bash 为组长），sh/sleep 子进程不得孤儿存活创建 marker。
 /// 命令 `sh -c 'sleep 3; touch marker'` + timeout 2000：若只杀 bash 单进程（旧行为），
 /// sh 孤儿会在 3s 时 touch；等 3.5s 断言 marker 不存在可区分新旧行为。
@@ -312,7 +323,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry)
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 
@@ -361,7 +372,7 @@ async fn test_bg_shell_registered_while_running() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry.clone())
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 
@@ -408,7 +419,7 @@ async fn test_sync_timeout_promotes_to_background() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
         .with_registry(registry.clone())
-        .with_on_bg_complete(Arc::new(move |r| {
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
 

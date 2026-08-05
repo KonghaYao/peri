@@ -9,7 +9,7 @@ use serial_test::serial;
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
         mpsc_transport_pair();
-    let (client, _notification_rx) = AcpTuiClient::new(client_transport);
+    let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
 

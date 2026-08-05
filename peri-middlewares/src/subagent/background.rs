@@ -2,7 +2,12 @@ use std::collections::HashMap;
 
 use peri_agent::agent::BackgroundTaskResult;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+/// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
+/// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
+const CANCEL_GRACE_SECS: u64 = 3;
 
 /// 后台任务注册表错误（结构化，取代 String 错误）
 ///
@@ -14,6 +19,8 @@ pub enum BackgroundRegistryError {
     ConcurrentLimit(usize),
     #[error("Task {0} not found")]
     TaskNotFound(String),
+    #[error("Task {0} cannot be cancelled: kill handle unavailable")]
+    KillUnavailable(String),
     #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
     KindConcurrentLimit {
         kind: String,
@@ -32,14 +39,27 @@ pub enum BgTaskKind {
 }
 
 /// 后台任务取消句柄（按 kind 分发取消逻辑）
-#[derive(Debug)]
 pub enum BgCancelHandle {
-    /// bg agent：取消 tokio task
-    Abort(tokio::task::AbortHandle),
-    /// workflow：通过 oneshot 通知 workflow runner kill
-    Kill(Option<tokio::sync::oneshot::Sender<()>>),
+    /// bg agent：取消 tokio task。
+    /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
+    /// 优雅退出，再 await JoinHandle 等待其走完收尾，超时才 abort。
+    Abort(tokio::task::JoinHandle<()>),
+    /// workflow：kill 闭包——转发到 `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
+    /// `None` 表示 kill 通道不可用（如 spawn 失败），此时 `cancel()` 返回明确错误
+    /// 而非假装成功（issue 2026-08-05：Workflow 取消无效）。
+    Kill(Option<Box<dyn FnOnce() + Send + Sync>>),
     /// bg shell：OS 进程 kill
     Pid(u32),
+}
+
+impl std::fmt::Debug for BgCancelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BgCancelHandle::Abort(_) => f.write_str("Abort(_)"),
+            BgCancelHandle::Kill(_) => f.write_str("Kill(_)"),
+            BgCancelHandle::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
+        }
+    }
 }
 
 /// 后台任务信息（注册表条目）
@@ -55,6 +75,10 @@ pub struct BackgroundTask {
     pub kind: BgTaskKind,
     /// 按 kind 分发的取消句柄
     pub cancel_handle: BgCancelHandle,
+    /// 取消令牌（仅 Agent 类任务）：cancel() 时先 `token.cancel()` 让工具层取消链
+    /// 生效（run_react_loop 的 await 点响应后走完整收尾），超时再 abort 兜底。
+    /// Shell/Workflow 类任务为 None（取消走 Pid/Kill 句柄）。
+    pub cancel_token: Option<CancellationToken>,
     /// OS 进程 PID（仅 bg shell 有效）
     pub pid: Option<u32>,
     /// 输出预览（completed 时写入，最多 500 字符）
@@ -95,6 +119,7 @@ pub enum BgRegistryEvent {
     },
     Completed {
         task_id: String,
+        kind: Option<BgTaskKind>,
         success: bool,
         output_preview: String,
         duration_ms: u64,
@@ -211,8 +236,12 @@ impl BackgroundTaskRegistry {
         Ok(())
     }
 
-    /// 任务完成时调用：更新状态 + 推送通知
-    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) {
+    /// 任务完成时调用：更新状态 + 推送通知。
+    ///
+    /// 返回 `true` 表示条目存在且已处理；`false` 表示任务已不在 registry
+    /// （如已被 cancel 移除后自然完成），此时不推送 Completed 事件——否则会
+    /// 产生幽灵完成事件（issue 2026-08-05：kill 后仍推 bg-task-completed）。
+    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
         tracing::info!(
             task_id = %task_id,
             agent_name = %result.agent_name,
@@ -226,6 +255,8 @@ impl BackgroundTaskRegistry {
 
         // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
+        let kind = tasks.get(task_id).map(|task| task.kind);
+        let existed = tasks.contains_key(task_id);
         if let Some(task) = tasks.get_mut(task_id) {
             task.status = if result.success {
                 BackgroundTaskStatus::Completed
@@ -237,14 +268,31 @@ impl BackgroundTaskRegistry {
         tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
         drop(tasks);
 
+        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）。
+        // warn 而非静默：任务不在 registry 却走到 complete()，通常是
+        // task_id 碰撞覆盖注册（同毫秒 UUID v7 截断前缀）或双重 complete，
+        // 会导致 TUI 任务条目残留（issue 2026-08-05）。
+        if !existed {
+            warn!(
+                task_id = %task_id,
+                agent_name = %result.agent_name,
+                success,
+                "background registry: complete() called for unknown task (collision or double-complete); \
+                 Completed event suppressed"
+            );
+            return false;
+        }
+
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
             task_id: task_id.to_string(),
+            kind,
             success,
             output_preview,
             duration_ms,
             result,
         });
+        true
     }
 
     /// 获取所有任务状态（UI 使用）
@@ -277,19 +325,70 @@ impl BackgroundTaskRegistry {
     /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
+        // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如 workflow kill 闭包缺失、
+        // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
+        // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
+        let handle_unavailable = matches!(
+            tasks.get(task_id).map(|t| &t.cancel_handle),
+            Some(BgCancelHandle::Kill(None))
+        );
+        if handle_unavailable {
+            return Err(BackgroundRegistryError::KillUnavailable(
+                task_id.to_string(),
+            ));
+        }
         if let Some(task) = tasks.remove(task_id) {
             match task.cancel_handle {
-                BgCancelHandle::Abort(handle) => {
-                    handle.abort();
+                BgCancelHandle::Abort(mut handle) => {
+                    // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点
+                    // （reason LLM 调用 / 工具执行 / idle 等待）退出，走完整收尾
+                    // （SubagentStopped / deregister / thread status / stop hooks）。
+                    if let Some(token) = task.cancel_token.as_ref() {
+                        token.cancel();
+                    }
+                    // 超时兜底：等待任务自然结束（grace 窗口内响应 cancel 则保留
+                    // async 收尾），超时再 abort——否则"取消后任务继续跑"比 abort 更糟。
+                    // abort 兜底路径：任务内同步收尾 guard（deregister_runtime 等）仍执行，
+                    // async 收尾（update_thread_status / stop hooks）丢失并记日志。
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(_) => {
+                            let task_id_owned = task_id.to_string();
+                            tokio::spawn(async move {
+                                if tokio::time::timeout(
+                                    std::time::Duration::from_secs(CANCEL_GRACE_SECS),
+                                    &mut handle,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    handle.abort();
+                                    warn!(
+                                        task_id = %task_id_owned,
+                                        "bg task cancel: grace period elapsed, aborted task \
+                                         (async cleanup lost: thread status / stop hooks; \
+                                         sync cleanup runs via in-task guard)"
+                                    );
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            // 无 tokio runtime 上下文（防御；生产调用点均在 async 上下文）：
+                            // 无法异步等待，直接 abort 兜底。
+                            handle.abort();
+                            warn!(
+                                task_id = %task_id,
+                                "bg task cancel: no tokio runtime for graceful wait, aborted task"
+                            );
+                        }
+                    }
                 }
-                BgCancelHandle::Kill(Some(tx)) => {
-                    let _ = tx.send(());
+                BgCancelHandle::Kill(Some(kill)) => {
+                    // 触发 kill 闭包：workflow 场景转发到 WorkflowTaskRegistry::kill
+                    kill();
                 }
                 BgCancelHandle::Kill(None) => {
-                    warn!(
-                        task_id = %task_id,
-                        "bg task cancel: kill_tx already consumed"
-                    );
+                    // 上方已校验，理论不可达；防御性保留
+                    unreachable!("Kill(None) checked before task removal");
                 }
                 BgCancelHandle::Pid(pid) => {
                     if pid == 0 {

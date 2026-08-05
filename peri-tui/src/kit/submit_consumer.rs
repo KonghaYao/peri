@@ -34,6 +34,10 @@ use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
+/// cancel_consumer 中 cancel RPC 的超时上限。transport 死亡时 cancel 可能
+/// 挂起——超时后仍执行本地复位（兜底路径，Issue 2026-08-05 S4.2）。
+const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
+
 /// 启动提交消费者后台任务。
 ///
 /// 参数：
@@ -124,11 +128,10 @@ async fn handle_clear_submit(
     ACTIVE_SESSION_ID.set(String::new());
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     acp_events::push_view_models_for_reset();
-    {
-        let ref_guard = ACP_STATE.state();
-        let mut acp = ref_guard.write();
-        acp.is_loading = false;
-    }
+    // S4.2: 与 cancel 路径同构的复位（直接写 + LocalLoadingReset 注入）——
+    // bridge 检测到 BRIDGE_RESET_COUNTER 前，直接写保证 UI 立即响应；注入
+    // 事件保证 bridge phase 同步复位（幂等，Issue 2026-08-05）。
+    clear_loading_state();
     // H1/M3/L5/L10：同步清空弹窗 payload、Todo 列表、输入历史指针，
     // 防止旧 session 残留阻塞新会话。close_popup 在无弹窗时是 no-op，安全；
     // TODO_ITEMS 会在新 session 的 SessionUpdate::Plan 事件到来时重新填充；
@@ -149,11 +152,8 @@ async fn handle_clear_submit(
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
 
     acp_events::push_view_models_for_reset();
-    {
-        let ref_guard = ACP_STATE.state();
-        let mut acp = ref_guard.write();
-        acp.is_loading = false;
-    }
+    // S4.2: 同第一处——/clear 后 bridge 侧 phase 复位（幂等）。
+    clear_loading_state();
     Ok(())
 }
 
@@ -174,12 +174,19 @@ async fn handle_agent_text_submit(
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     }
 
+    // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的
+    // request_id（uuid v7）——PromptSubmitted 事件与 prompt RPC 必须携带同一
+    // id，bridge 才能把它记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对。
+    let request_id = Some(uuid::Uuid::now_v7().to_string());
+
     // 通过 LOCAL_EVENT_TX 发送 PromptSubmitted 事件到 acp_bridge，
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     {
         if let Some(tx) = LOCAL_EVENT_TX.get() {
             let _ = tx.send(AcpEventWithEpoch {
-                event: AcpEventData::PromptSubmitted,
+                event: AcpEventData::PromptSubmitted {
+                    request_id: request_id.clone(),
+                },
                 active_session_id: String::new(),
             });
         } else {
@@ -196,7 +203,7 @@ async fn handle_agent_text_submit(
     );
 
     let content = MessageContent::text(trimmed.to_string());
-    acp_client.prompt(&content).await.map_err(|e| {
+    acp_client.prompt(&content, request_id).await.map_err(|e| {
         warn!(error = %e, "kit submit_consumer: prompt RPC failed");
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
@@ -220,11 +227,18 @@ async fn handle_keepgoing_submit(
         return Ok(());
     }
 
+    // Issue 2026-08-05 返工：keepgoing 同样生成 request_id（每次 keepgoing RPC
+    // 都是新 turn）——修复 v1 在 keepgoing 场景（无 LocalUserBubble、代际不变）
+    // 下 stale 判定失效的漏洞。
+    let request_id = Some(uuid::Uuid::now_v7().to_string());
+
     // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
-            event: AcpEventData::PromptSubmitted,
+            event: AcpEventData::PromptSubmitted {
+                request_id: request_id.clone(),
+            },
             active_session_id: String::new(),
         });
     } else {
@@ -238,7 +252,7 @@ async fn handle_keepgoing_submit(
     );
 
     acp_client
-        .prompt(&MessageContent::text(""))
+        .prompt(&MessageContent::text(""), request_id)
         .await
         .map_err(|e| {
             warn!(error = %e, "kit submit_consumer: keepgoing prompt RPC failed");
@@ -379,11 +393,28 @@ fn debug_export_path(cwd: &str) -> PathBuf {
     ))
 }
 
-/// 清空 loading 状态——prompt 失败时兜底，防止 loading 永久卡死。
+/// 清空 loading 状态——prompt 失败 / cancel / /clear 时兜底，防止 loading 永久卡死。
+///
+/// S4.2 双保险（Issue 2026-08-05）：
+/// 1. 直接写 ACP_STATE.is_loading=false——bridge 已退出（shutdown 路径）时
+///    事件无人消费，直接写是唯一生效路径；
+/// 2. 注入 LocalLoadingReset 内部事件——bridge 存活时同步复位 phase（幂等），
+///    否则后续任意事件触发 push_acp_state 会用 phase 重算 is_loading=true，
+///    造成取消后 loading 闪回 + 提交判定竞态（误入 INPUT_BUFFER）。
 fn clear_loading_state() {
-    let ref_guard = ACP_STATE.state();
-    let mut acp = ref_guard.write();
-    acp.is_loading = false;
+    {
+        let ref_guard = ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = false;
+    }
+    if let Some(tx) = LOCAL_EVENT_TX.get() {
+        let _ = tx.send(AcpEventWithEpoch {
+            event: AcpEventData::LocalLoadingReset,
+            active_session_id: String::new(),
+        });
+    } else {
+        warn!("LOCAL_EVENT_TX not initialized, LocalLoadingReset event dropped");
+    }
 }
 
 /// 启动取消消费者后台任务。
@@ -415,9 +446,27 @@ pub fn spawn_cancel_consumer(
                             break;
                         }
                         Some(()) => {
-                            if let Err(e) = acp_client.cancel().await {
-                                tracing::warn!(%e, "cancel_consumer: cancel 失败");
+                            // Issue 2026-08-05 S4.2: 顺序——先 cancel RPC（带
+                            // 超时）再复位。cancel 完成前服务端仍在推流（流尾巴），
+                            // 若先复位，这些事件会把 bridge phase 拉回 PromptRunning
+                            // （loading 闪回）；cancel 完成后流已停止，复位才稳定。
+                            // timeout 防止 transport 死亡时 cancel 挂起阻塞复位
+                            // （兜底路径：transport 死 / prompt task panic 时
+                            // TurnInterrupted 永不到达，复位使 Ctrl+C 双击退出
+                            // 路径恢复可用，与服务端 TurnInterrupted 幂等）。
+                            let cancel_result = tokio::time::timeout(
+                                Duration::from_secs(CANCEL_RPC_TIMEOUT_SECS),
+                                acp_client.cancel(),
+                            )
+                            .await;
+                            match cancel_result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => tracing::warn!(%e, "cancel_consumer: cancel 失败"),
+                                Err(_) => {
+                                    tracing::warn!("cancel_consumer: cancel RPC 超时，继续本地复位")
+                                }
                             }
+                            clear_loading_state();
                         }
                     }
                 }

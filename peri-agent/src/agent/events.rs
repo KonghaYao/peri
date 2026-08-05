@@ -156,6 +156,13 @@ pub enum CompactTrigger {
     Manual,
 }
 
+impl Default for CompactTrigger {
+    /// 反序列化缺省值：旧事件（无 trigger 字段）按 Auto 处理
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactThreshold {
@@ -379,6 +386,10 @@ pub enum ExecutorEvent {
         /// 压缩前缓存命中率（0.0-1.0）
         #[serde(default)]
         cache_hit_rate_before: f64,
+        /// 压缩触发方式（Manual=用户 /compact 命令；Auto=agent 内部自动压缩）。
+        /// 旧事件（无此字段）按 Auto 处理（serde(default)）。
+        #[serde(default)]
+        trigger: CompactTrigger,
         /// Compact 执行的语义结果
         outcome: crate::agent::compact_v2::CompactOutcome,
     },

@@ -152,7 +152,10 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
     };
     // Immediate 命令跳过 agent event pump，必须手动发送 push_done
     // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-    req.event_sink.push_done(req.session_id, "end_turn").await;
+    // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
+    req.event_sink
+        .push_done(req.session_id, "end_turn", None)
+        .await;
     Some(PromptResult {
         messages: result.messages,
         ok: true,
@@ -173,6 +176,8 @@ pub(super) struct SpawnPumpRequest {
     pub(super) effective_context_window: u32,
     pub(super) langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     pub(super) trace_input: String,
+    /// 本轮 prompt 的 requestId——push_done 时透传回带（TUI stale 判定用）。
+    pub(super) request_id: Option<String>,
 }
 
 /// 后台事件泵句柄，通过 oneshot channel 与 pump_done_rx 配对。
@@ -195,6 +200,7 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         effective_context_window,
         langfuse_tracer,
         trace_input,
+        request_id,
     } = req;
 
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
@@ -256,7 +262,8 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             super::PromptStopReason::Cancelled => "cancelled",
             super::PromptStopReason::MaxTurnRequests => "max_turn_requests",
         };
-        sink.push_done(&session_id, stop_reason_str).await;
+        sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
+            .await;
 
         // Signal pump completion BEFORE Langfuse flush.
         // Langfuse is telemetry — it must never block the execution pipeline.
@@ -371,8 +378,13 @@ pub(super) async fn build_and_execute_agent_v2(
     thread_persistence: crate::agent::builder::ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
     background_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult) + Send + Sync>>,
+    on_bg_complete: Option<
+        Arc<dyn Fn(&BackgroundTaskResult, peri_middlewares::subagent::BgTaskKind) + Send + Sync>,
+    >,
     effective_context_window: u32,
+    // 内部异步续跑：不 push 空 user Prompt（AsyncContinuation 只消费已 route
+    // 的 Defer/Info 消息），mode 通知记账同样跳过（下一 turn 重新检测）。
+    continuation: bool,
 ) -> ExecOutcome {
     use peri_agent::agent::stages::{run_react_loop, LoopResult};
     use peri_agent::session::queue::{
@@ -467,8 +479,15 @@ pub(super) async fn build_and_execute_agent_v2(
     // 以保证 biased select 顺序不变量与 workflow_agent 调用点一致。
     {
         let tx_for_v2 = event_tx.clone();
+        // 主 bridge 注入主 agent 事件侧身份(registry 区分主/未知 agent)。
+        // v2_out.context.session.agent_id 与 SubAgentTool 共享 cell 是同一值(C1/C2)。
+        let main_agent_id = v2_out.context.session.agent_id.to_string();
         let bridge = langfuse_tracer.clone().map(|t| {
-            crate::langfuse::bridge::LangfuseBridge::new(t, ctx.provider.display_name().to_string())
+            crate::langfuse::bridge::LangfuseBridge::new(
+                t,
+                ctx.provider.display_name().to_string(),
+                Some(main_agent_id.clone()),
+            )
         });
         crate::event::spawn_eventbus_forwarder(
             v2_out.event_handles,
@@ -515,17 +534,23 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
+    // [AsyncContinuation] continuation 内部续跑不 push 空 user prompt——
+    // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
+    // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
+    // Defer/Info 消息（bg 结果、workflow 完成等）。
     // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
     // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
     // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
     // 消费进 transcript，不会重复注入也不会丢失。
-    v2_out.context.session.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        V2MessageSource::UserInput,
-        BaseMessage::human(agent_input.content),
-    ));
-    if let Some(booking) = &mode_notice_booking {
-        mark_permission_mode_notified(&booking.last_notified, booking.mode);
+    if !continuation {
+        v2_out.context.session.queue.push(QueuedMessage::new(
+            MessageKind::Prompt,
+            V2MessageSource::UserInput,
+            BaseMessage::human(agent_input.content),
+        ));
+        if let Some(booking) = &mode_notice_booking {
+            mark_permission_mode_notified(&booking.last_notified, booking.mode);
+        }
     }
 
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
@@ -546,6 +571,19 @@ pub(super) async fn build_and_execute_agent_v2(
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
+    // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
+    // 根因兜底（覆盖全部 6 个 run_react_loop 调用方），此处是主路径双保险——
+    // 让会话恢复方在 turn 结束即可读到完整历史，不依赖 drop 时序。失败不阻断
+    // 内存路径（后续 Drop 仍会尝试 flush）。
+    // [SAFE] 先在 guard 作用域内同步提取 Send 的 writer 通道句柄（guard 语句结束即
+    // drop，不跨 await），再经关联函数 `flush_via_tx` 异步等待 barrier——调用链
+    // future 不持有 parking_lot guard，保持 Send（peri-tui 在 tokio::spawn 中调用本链）。
+    let flush_tx = v2_out.session.transcript().read().persist_tx_handle();
+    if let Some(tx) = flush_tx {
+        if let Err(e) = peri_agent::session::MessageTranscript::flush_via_tx(&tx).await {
+            tracing::warn!(session_id = %ctx.session_id, error = %e, "[v2] phase 8 transcript flush failed");
+        }
+    }
     let (messages, history_replaced_by_compaction) = {
         let transcript = v2_out.session.transcript();
         let transcript = transcript.read();

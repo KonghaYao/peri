@@ -199,7 +199,23 @@ fn test_decode_turn_interrupted() {
     let data = serde_json::json!({"reason": "user cancelled"});
     let decoded = AcpEventData::decode("turn-interrupted", data);
     match decoded {
-        AcpEventData::TurnInterrupted { reason } => assert_eq!(reason, "user cancelled"),
+        AcpEventData::TurnInterrupted { reason, request_id } => {
+            assert_eq!(reason, "user cancelled");
+            assert_eq!(request_id, None, "requestId 缺失时应为 None");
+        }
+        _ => panic!("expected TurnInterrupted"),
+    }
+}
+
+#[test]
+fn test_decode_turn_interrupted_with_request_id() {
+    let data = serde_json::json!({"reason": "user cancelled", "requestId": "rid-1"});
+    let decoded = AcpEventData::decode("turn-interrupted", data);
+    match decoded {
+        AcpEventData::TurnInterrupted { reason, request_id } => {
+            assert_eq!(reason, "user cancelled");
+            assert_eq!(request_id.as_deref(), Some("rid-1"));
+        }
         _ => panic!("expected TurnInterrupted"),
     }
 }

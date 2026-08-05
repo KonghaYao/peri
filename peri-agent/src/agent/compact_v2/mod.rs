@@ -93,6 +93,11 @@ pub enum CompactOutcome {
     SmartAppliedThenFullFailed,
     /// Compact 已提交（transcript 已修改），但在事件发送前被取消（G6）。
     InterruptedAfterCommit,
+    /// Compact 被取消且未提交任何变更（S1.4：CompactEnded 结束观测用）。
+    ///
+    /// 与 `InterruptedAfterCommit` 互补：后者走 `MessagesCompacted`（确有变更），
+    /// 前者走 `CompactEnded`（无变更，不误导遥测以为压缩发生了）。
+    Interrupted,
 }
 
 impl CompactOutcome {
