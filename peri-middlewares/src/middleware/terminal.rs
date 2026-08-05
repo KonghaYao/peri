@@ -105,6 +105,18 @@ fn truncate_output(output: &str) -> String {
     output.to_string()
 }
 
+/// 生成 bg shell 任务 id：`shell-{完整 UUID v7}`。
+///
+/// **禁止截断 UUID**（issue 2026-08-05）：UUID v7 前 48 位是毫秒时间戳，
+/// 同一毫秒内生成的前 8 字符必然相同。agent 连续多次 `run_in_background`
+/// Bash 调用落在同一毫秒时，截断前缀会导致 task_id 碰撞——registry 覆盖
+/// 注册（Started 事件重复、cancel 句柄丢失），且首个 `complete()` 的 retain
+/// 清理后其余 `complete()` 因 existed=false 静默跳过，TUI 残留任务条目。
+/// 与 bg agent（`bg-{完整 UUID}`）保持一致，用完整 UUID（122 位熵）。
+fn bg_shell_task_id() -> String {
+    format!("shell-{}", uuid::Uuid::now_v7())
+}
+
 /// 解析 timeout 参数（None = 不超时）。
 ///
 /// - **后台**：未传 → None（默认不超时，与"后台"语义一致）；显式 0 → None；
@@ -311,14 +323,7 @@ impl BaseTool for BashTool {
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
             let timeout_opt = parse_timeout(&input, true);
 
-            let task_id = format!(
-                "shell-{}",
-                uuid::Uuid::now_v7()
-                    .to_string()
-                    .chars()
-                    .take(8)
-                    .collect::<String>()
-            );
+            let task_id = bg_shell_task_id();
             let command_owned = command.to_string();
             let cwd = self.cwd.clone();
             let on_bg_complete_cb = self.on_bg_complete.clone();
@@ -603,14 +608,7 @@ impl BaseTool for BashTool {
 
                     if let Some(registry) = self.bg_registry.as_ref() {
                         // ── 有注册表：不杀进程，promote 为后台任务续跑 ──
-                        let task_id = format!(
-                            "shell-{}",
-                            uuid::Uuid::now_v7()
-                                .to_string()
-                                .chars()
-                                .take(8)
-                                .collect::<String>()
-                        );
+                        let task_id = bg_shell_task_id();
                         let bg_task = BackgroundTask {
                             id: task_id.clone(),
                             agent_name: "bg-shell".to_string(),

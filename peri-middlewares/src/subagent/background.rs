@@ -268,8 +268,18 @@ impl BackgroundTaskRegistry {
         tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
         drop(tasks);
 
-        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）
+        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）。
+        // warn 而非静默：任务不在 registry 却走到 complete()，通常是
+        // task_id 碰撞覆盖注册（同毫秒 UUID v7 截断前缀）或双重 complete，
+        // 会导致 TUI 任务条目残留（issue 2026-08-05）。
         if !existed {
+            warn!(
+                task_id = %task_id,
+                agent_name = %result.agent_name,
+                success,
+                "background registry: complete() called for unknown task (collision or double-complete); \
+                 Completed event suppressed"
+            );
             return false;
         }
 
