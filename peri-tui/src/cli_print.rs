@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::cli_args::OutputFormat;
 use anyhow::Result;
 use chrono::Local;
+use peri_acp::langfuse::LangfuseSessionLike;
 
 /// -p 模式执行入口
 #[allow(clippy::too_many_arguments)]
@@ -182,6 +183,19 @@ pub async fn run_print(
     let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
     let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
+    // Langfuse 上报（与 TUI 模式一致；print 模式为短生命周期进程，
+    // 退出前需显式 flush，见下方 run_session_loop 返回后的冲刷点）
+    let langfuse_session: Option<Arc<peri_acp::langfuse::LangfuseSession>> = {
+        if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
+            tracing::info!("Langfuse tracing enabled (print mode)");
+            peri_acp::langfuse::LangfuseSession::new(config, "live".into())
+                .await
+                .map(Arc::new)
+        } else {
+            None
+        }
+    };
+
     // broker（自动批准所有）
     let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(PrintBroker);
 
@@ -251,11 +265,22 @@ pub async fn run_print(
         history: vec![],
         incoming_recalls: vec![],
         bg_results: vec![],     // print 模式无后台任务
-        langfuse_session: None, // print 模式暂不启用
+        langfuse_session: langfuse_session.clone(),
     };
     let result = peri_acp::session::executor::run_session_loop(ctx, turn).await;
     let c = collector.lock().unwrap();
     c.output_final(result.ok);
+
+    // 短生命周期进程冲刷：run_session_loop 内部的 Langfuse flush 是
+    // fire-and-forget（独立 tokio task），进程退出会将其 abort 导致 trace
+    // 丢失。此处显式 flush —— Batcher::flush 经 mpsc FIFO 保证返回时
+    // 所有已入队事件（含 on_turn_end 同步入队的 agent-run obs）已送达。
+    if let Some(session) = langfuse_session {
+        match session.flush().await {
+            Ok(()) => tracing::info!("Langfuse trace flushed before exit (print mode)"),
+            Err(e) => tracing::warn!(error = %e, "langfuse: print 模式退出前 flush 失败"),
+        }
+    }
 
     Ok(())
 }

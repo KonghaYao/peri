@@ -329,31 +329,38 @@ impl LangfuseTracer {
         let agent_start_time = self.agent_start_time.take();
         let agent_input = self.agent_input.take();
 
-        tokio::spawn(async move {
-            let end_time = now_rfc3339();
+        // agent-run ObservationCreate 同步入队（不放进 spawn 任务）：
+        // 保证 on_turn_end 返回时全部事件已入队，调用方随后显式 flush() 即可
+        // 一次性送达（Batcher::flush 经 mpsc FIFO，先入队者先发送）。
+        // 短生命周期进程（-p/print 模式）在 run_session_loop 返回后调用
+        // session.flush()，不依赖 spawn 任务的调度时序，避免 trace 随进程退出丢失。
+        let end_time = now_rfc3339();
+        let obs_body = ObservationBody {
+            id: Some(agent_observation_id.clone()),
+            trace_id: Some(trace_id.clone()),
+            r#type: ObservationType::Agent,
+            name: Some("agent-run".to_string()),
+            start_time: agent_start_time,
+            end_time: Some(end_time.clone()),
+            input: agent_input.map(|s| serde_json::json!(s)),
+            output: Some(serde_json::json!(output)),
+            parent_observation_id: Some(trace_id.clone()),
+            version: Some(VERSION.to_string()),
+            ..Default::default()
+        };
+        let obs_event = IngestionEvent::ObservationCreate {
+            id: new_uuid(),
+            timestamp: end_time,
+            body: obs_body,
+            metadata: None,
+        };
+        if let Err(e) = session.try_add(obs_event) {
+            tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
+        }
 
-            let obs_body = ObservationBody {
-                id: Some(agent_observation_id.clone()),
-                trace_id: Some(trace_id.clone()),
-                r#type: ObservationType::Agent,
-                name: Some("agent-run".to_string()),
-                start_time: agent_start_time,
-                end_time: Some(end_time.clone()),
-                input: agent_input.map(|s| serde_json::json!(s)),
-                output: Some(serde_json::json!(output)),
-                parent_observation_id: Some(trace_id.clone()),
-                version: Some(VERSION.to_string()),
-                ..Default::default()
-            };
-            let obs_event = IngestionEvent::ObservationCreate {
-                id: new_uuid(),
-                timestamp: end_time,
-                body: obs_body,
-                metadata: None,
-            };
-            if let Err(e) = session.try_add(obs_event) {
-                tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
-            }
+        // 最终 flush 保持 fire-and-forget（不阻塞执行管线；pump_done 已先行发出），
+        // 常驻进程（TUI/ACP server）无需等待；短生命周期进程由调用方显式 flush。
+        tokio::spawn(async move {
             if let Err(e) = session.flush().await {
                 tracing::warn!(error = %e, trace_id = %trace_id, "langfuse: session flush 失败");
             }
