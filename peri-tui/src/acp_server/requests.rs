@@ -502,15 +502,23 @@ pub(crate) async fn handle_request(
         }
 
         "workflow/resume" => {
+            // 显式按请求 sessionId 查找（与 workflow/list_runs、kill_run 一致），
+            // 多 session 时不得取第一个带 middleware 的 session（issue 2026-08-05）
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
             let run_id = params
                 .get("runId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing runId"))?;
 
             let mw = sessions
-                .values()
-                .find_map(|s| s.workflow_middleware.as_ref())
-                .ok_or_else(|| AcpError::new(-32602, "no workflow middleware found"))?;
+                .get(req_session_id)
+                .and_then(|s| s.workflow_middleware.as_ref())
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
 
             let new_run_id = mw
                 .resume_workflow(run_id)

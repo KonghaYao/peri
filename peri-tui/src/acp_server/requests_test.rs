@@ -856,3 +856,74 @@ async fn test_kill_agent_targets_requested_session() {
         err.message
     );
 }
+
+/// [回归测试] workflow/resume 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
+/// 多 session 时可能 resume 错 session（与 kill_run 同源）。
+#[tokio::test]
+async fn test_resume_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+
+    // 请求 sess-b + 不存在的 run → 错误来自 sess-b 的 middleware（read_state 失败），
+    // 而非 "session not found"——证明分发到了 sess-b 而非第一个 session
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "sessionId": "sess-b", "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("Failed to read workflow state"),
+        "应分发到 sess-b 的 middleware 并报 read_state 失败，实际: {}",
+        err.message
+    );
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前可能误用第一个 session 的 middleware）
+    let err = handle_request(
+        "workflow/resume",
+        &json!({ "sessionId": "no-such-session", "runId": "no-such-run" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
+        err.message
+    );
+}
