@@ -126,6 +126,17 @@ fn test_drain_input_buffer_no_submit_tx_safe() {
     // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
 }
 
+/// 确保全局 SUBMIT_TX 已初始化，并尽可能安装可观察的 receiver。
+///
+/// 返回 Some(rx)：本次测试**新安装**了 channel，可断言 drain 实际发出的
+/// SubmitRequest 消息；返回 None：channel 已由先前测试安装（OnceLock 全局
+/// 单例无法重置，只能断言 drain 的核心效应——buffer 被清空）。
+fn ensure_submit_tx_observable() -> Option<mpsc::UnboundedReceiver<SubmitRequest>> {
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    SUBMIT_TX.set(tx).ok()?;
+    Some(rx)
+}
+
 /// BRIDGE_RESET_COUNTER 递增时 acp_bridge 重置分支同步清空 INPUT_BUFFER，
 /// 防止旧会话缓存输入在新会话 TurnDone 时泄漏。
 ///
@@ -340,7 +351,8 @@ fn test_turn_interrupted_empty_skips_archive() {
 
 /// 竞态防护（Issue 2026-08-05）：新提交（LocalUserBubble）先入队后，
 /// stale TurnInterrupted（旧 turn）到达时跳过零产出回滚——不删新气泡、
-/// 不恢复文本、不清排队输入（排队输入属用户已提交的新请求，不得静默丢弃）；
+/// 不恢复文本；排队输入（用户已提交的新请求，不得静默丢弃）在复位后
+/// **立即 drain 提交**（遗留项修复：不再滞留悬挂至下一 TurnDone）。
 /// 归档旧产出 + 复位。
 /// 本测试走排队分支（B 无 PromptSubmitted、事件 request_id=None）→ 代际判定兜底。
 #[test]
@@ -352,6 +364,9 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
 
     // turn A：LocalUserBubble + PromptSubmitted（gen=1, last_prompt=1）
     let mut state = BridgeState {
@@ -403,8 +418,9 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         },
     );
 
-    // 不污染新 turn：B 气泡保留、文本不恢复、排队输入保留（返工语义——
-    // 排队输入是用户已提交的新请求，不得随旧 turn 取消作废）、loading 复位
+    // 不污染新 turn：B 气泡保留、文本不恢复、loading 复位；
+    // 排队输入立即 drain 提交（遗留项修复——旧 turn 已取消、TurnDone
+    // 永不到达，滞留会悬挂或顺序反转，复位后必须主动提交）
     assert_eq!(
         state.committed.len(),
         committed_before,
@@ -414,11 +430,17 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "B"),
         other => panic!("committed[1] 应为 B 的气泡, got {other:?}"),
     }
-    assert_eq!(
-        INPUT_BUFFER.state().read().iter().collect::<Vec<_>>(),
-        vec!["queued"],
-        "排队输入属于用户已提交的新请求，stale TurnInterrupted 不得清空（否则静默丢弃用户输入）"
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队输入属于用户已提交的新请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
     );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
     assert!(
         crate::kit::atoms::INPUT_RESTORE_TEXT
             .get()
@@ -628,8 +650,9 @@ fn test_turn_done_clears_last_submitted_text() {
 
 /// Issue 2026-08-05 返工核心验收（主导排序）：新提交 B 已发 RPC
 /// （PromptSubmitted 先到）后，旧 turn A 的 TurnInterrupted 晚到——
-/// request_id 配对判定（A1 ≠ B1）应识别为 stale：不删 B 气泡、不恢复文本、
-/// 不清排队输入（排队输入属用户已提交的新请求，不得随旧 turn 取消作废）。
+/// request_id 配对判定（A1 ≠ B1）应识别为 stale：不删 B 气泡、不恢复文本；
+/// 排队输入（用户已提交的新请求，不得随旧 turn 取消作废）复位后立即
+/// drain 提交（遗留项修复）。
 #[test]
 #[serial]
 fn test_stale_turn_interrupted_request_id_mismatch() {
@@ -639,6 +662,9 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -682,7 +708,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
             request_id: Some("B1".into()),
         },
     );
-    // 排队输入（B 提交之后用户又输入的排队请求）——验收：不得清空
+    // 排队输入（B 提交之后用户又输入的排队请求）——stale 复位后立即 drain 提交
     INPUT_BUFFER.state().write().push_back("queued".into());
     assert_eq!(state.current_request_id.as_deref(), Some("B1"));
     assert_eq!(state.turn_generation, 2);
@@ -701,7 +727,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         },
     );
 
-    // 验收：不删新气泡、不恢复旧文本、不清新 buffer
+    // 验收：不删新气泡、不恢复旧文本；排队输入复位后立即 drain 提交
     assert_eq!(
         state.committed.len(),
         committed_before,
@@ -718,11 +744,17 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
             .is_none(),
         "stale TurnInterrupted 不得恢复旧输入文本"
     );
-    assert_eq!(
-        INPUT_BUFFER.state().read().iter().collect::<Vec<_>>(),
-        vec!["queued"],
-        "stale TurnInterrupted 不得清空排队输入（静默丢弃用户请求）"
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队输入属于用户已提交的新请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
     );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
     assert_eq!(
         state.phase,
         SessionPhase::Idle,
@@ -739,7 +771,8 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
 
 /// Issue 2026-08-05 返工：排队分支（B 仅 LocalUserBubble、无 PromptSubmitted）
 /// 下 stale 判定回退 v1 代际判定——id 配对（A1 == A1）判不出 stale，但
-/// turn_generation(2) > last_prompt_generation(1) 识别为 stale。
+/// turn_generation(2) > last_prompt_generation(1) 识别为 stale。排队输入 B
+/// 在复位后立即 drain 提交（遗留项修复）。
 #[test]
 #[serial]
 fn test_stale_turn_interrupted_queued_branch_still_stale() {
@@ -749,6 +782,9 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
+    // 确保 SUBMIT_TX 已初始化（stale 分支 drain 依赖）；若本次成功安装
+    // 可观察 channel，则顺带验证提交消息确实发出。
+    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -803,18 +839,119 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         },
     );
 
-    // 代际判定兜底 → stale：B 气泡保留、排队输入保留
+    // 代际判定兜底 → stale：B 气泡保留、排队输入复位后立即 drain 提交
     assert_eq!(state.committed.len(), committed_before);
     match &state.committed[1] {
         TuiRenderUnit::TuiUserBubble(d) => assert_eq!(d.text, "B"),
         other => panic!("committed[1] 应为 B 的气泡, got {other:?}"),
     }
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "排队分支的 B 是用户已提交的请求：stale 复位后应立即 drain 提交（不得滞留悬挂）"
+    );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+    }
+    assert_eq!(state.phase, SessionPhase::Idle);
+}
+
+/// Issue 2026-08-05 遗留项：多次 stale TurnInterrupted 不重复 drain——
+/// 第一次复位后 buffer 已清空，第二次（更旧 turn）到达时 drain no-op，
+/// 不重复提交、不重复归档。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_drain_is_idempotent() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    INPUT_BUFFER.state().write().clear();
+    let drain_rx = ensure_submit_tx_observable();
+
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // turn A 运行中
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "A".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A1".into()),
+        },
+    );
+    // B 排队中（仅 LocalUserBubble，无 RPC）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "B".into() },
+    );
+    INPUT_BUFFER.state().write().push_back("B".into());
+
+    // 第一个 stale 事件（A 的取消晚到）→ 复位 + drain
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("A1".into()),
+        },
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "第一次 stale 后排队输入应立即 drain"
+    );
+
+    // 第二个 stale 事件（更旧 turn 的取消，id 仍不匹配）→ drain no-op
+    let committed_before = state.committed.len();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("X0".into()),
+        },
+    );
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "第二次 stale 不得重新产生排队输入"
+    );
     assert_eq!(
-        INPUT_BUFFER.state().read().iter().collect::<Vec<_>>(),
-        vec!["B"],
-        "排队分支的 B 是用户已提交的请求，stale 不得清空"
+        state.committed.len(),
+        committed_before,
+        "第二次 stale 不得重复归档/提交"
     );
     assert_eq!(state.phase, SessionPhase::Idle);
+    if let Some(mut rx) = drain_rx {
+        // 只应提交 1 条（第一次 stale 的 drain）
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "B"),
+            Ok(other) => panic!("stale drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("stale drain 应发出排队输入, got {e:?}"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "第二次 stale 不得重复提交排队输入"
+        );
+    }
 }
 
 /// Issue 2026-08-05 返工：正常取消（无新提交）时 request_id 精确配对

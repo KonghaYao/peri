@@ -12,6 +12,10 @@ use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::subagent::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
 };
+use peri_middlewares::workflow::WorkflowMiddleware;
+use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
+use peri_workflow::runner::AgentExecutor;
 use serde_json::{Value, json};
 
 use super::*;
@@ -605,6 +609,250 @@ async fn test_cancel_bg_task_task_not_found_returns_error() {
     assert!(
         err.message.contains("not found"),
         "错误消息应提及 not found，实际: {}",
+        err.message
+    );
+}
+
+// ── workflow/kill_run & workflow/kill_agent sessionId 分发测试（issue 2026-08-05）──
+
+/// Mock workflow executor（仅用于构造 WorkflowMiddleware，不真正执行 agent）
+struct MockWorkflowExecutor;
+
+#[async_trait]
+impl AgentExecutor for MockWorkflowExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        AgentRunResult::Ok {
+            output: serde_json::json!("mock"),
+            usage: Usage { output_tokens: 0 },
+            model: None,
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
+        }
+    }
+}
+
+/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
+fn register_session_with_workflow(
+    sessions: &mut HashMap<String, SessionState>,
+    sid: &str,
+    cwd: &str,
+) -> Arc<WorkflowMiddleware> {
+    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
+    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
+    let mw = Arc::new(WorkflowMiddleware::new(
+        executor,
+        cwd,
+        notification_tx,
+        None,
+    ));
+    sessions.insert(
+        sid.to_string(),
+        SessionState {
+            session_id: sid.to_string(),
+            thread_id: format!("thread-{sid}"),
+            cwd: cwd.to_string(),
+            history: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
+            workflow_middleware: Some(Arc::clone(&mw)),
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+        },
+    );
+    mw
+}
+
+/// 在 middleware 的 registry 注册一个 Running 的 run（kill_tx 保持 open）。
+fn register_run(mw: &Arc<WorkflowMiddleware>, run_id: &str) {
+    let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let child = tokio::spawn(async {});
+    mw.registry()
+        .register(WorkflowRun {
+            run_id: run_id.to_string(),
+            workflow_name: "wf-test".to_string(),
+            script_preview: "test".to_string(),
+            status: WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: child,
+            kill_tx: Some(kill_tx),
+        })
+        .unwrap();
+}
+
+/// [回归测试] workflow/kill_run 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
+/// 多 session 时可能 kill 错 session（run 在另一 session 却报 killed:true）。
+#[tokio::test]
+async fn test_kill_run_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd);
+    register_run(&mw_a, "run-a");
+    register_run(&mw_b, "run-b");
+
+    // run-a 只在 sess-a：请求 sess-b 杀 run-a 必须 killed:false（修复前可能误报 true）
+    let resp = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "sess-b", "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], false, "sess-b 无 run-a，不得误报 killed");
+
+    // 请求 sess-b 杀 run-b → killed:true，且只影响 sess-b 的 registry
+    let resp = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "sess-b", "runId": "run-b" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], true, "sess-b 的 run-b 应被 kill");
+    assert!(
+        mw_b.registry().list_runs().is_empty(),
+        "sess-b 的 registry 应已移除 run-b"
+    );
+    assert!(
+        !mw_a.registry().list_runs().is_empty(),
+        "sess-a 的 registry 不得受影响"
+    );
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前静默返回 killed:false）
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": "no-such-session", "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
+        err.message
+    );
+
+    // session 存在但无 workflow middleware → 明确错误
+    let sid = register_session_with_history(&mut sessions, cwd);
+    let err = handle_request(
+        "workflow/kill_run",
+        &json!({ "sessionId": sid, "runId": "run-a" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "无 middleware 的会话应报错，实际: {}",
+        err.message
+    );
+}
+
+/// [回归测试] workflow/kill_agent 必须按请求 sessionId 定位 session（issue 2026-08-05）。
+/// 深层 kill 依赖 runner 内部 active_channels（外部不可注入），此处锁定协议层：
+/// 缺失/不存在的 session 如实报错，存在的 session 正常返回 killed 结果。
+#[tokio::test]
+async fn test_kill_agent_targets_requested_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    register_session_with_workflow(&mut sessions, "sess-a", cwd);
+    register_session_with_workflow(&mut sessions, "sess-b", cwd);
+
+    // 存在 session：正常返回 killed（sess-b 无该 run 的 active channel → false，不报错）
+    let resp = handle_request(
+        "workflow/kill_agent",
+        &json!({ "sessionId": "sess-b", "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["killed"], false);
+
+    // 缺失 sessionId → -32602
+    let err = handle_request(
+        "workflow/kill_agent",
+        &json!({ "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报错，实际: {}",
+        err.message
+    );
+
+    // session 不存在 → 明确错误（修复前静默返回 killed:false）
+    let err = handle_request(
+        "workflow/kill_agent",
+        &json!({ "sessionId": "no-such-session", "runId": "run-x", "agentId": 1 }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "会话不存在应报 session not found，实际: {}",
         err.message
     );
 }

@@ -503,22 +503,6 @@ fn clamp_run_selection(selected: usize, run_count: usize) -> usize {
     selected.min(run_count.saturating_sub(1))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::clamp_run_selection;
-
-    /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
-    ///
-    /// 历史背景：后台 workflow 回调后的快照从多条 run 收缩为一条时，
-    /// `WorkflowPanel` 直接以旧 `active_run` 索引列表，导致 TUI panic。
-    #[test]
-    fn test_clamp_run_selection_after_snapshot_shrinks() {
-        assert_eq!(clamp_run_selection(1, 1), 0);
-        assert_eq!(clamp_run_selection(2, 3), 2);
-        assert_eq!(clamp_run_selection(0, 0), 0);
-    }
-}
-
 /// 壁钟驱动的运行中动画帧指示器。每 100ms 推进一帧。
 fn running_indicator() -> String {
     use std::sync::OnceLock;
@@ -541,5 +525,21 @@ fn abbreviate_count(n: u64) -> String {
         format!("{}k", n / 1_000)
     } else {
         format!("{n}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_run_selection;
+
+    /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
+    ///
+    /// 历史背景：后台 workflow 回调后的快照从多条 run 收缩为一条时，
+    /// `WorkflowPanel` 直接以旧 `active_run` 索引列表，导致 TUI panic。
+    #[test]
+    fn test_clamp_run_selection_after_snapshot_shrinks() {
+        assert_eq!(clamp_run_selection(1, 1), 0);
+        assert_eq!(clamp_run_selection(2, 3), 2);
+        assert_eq!(clamp_run_selection(0, 0), 0);
     }
 }

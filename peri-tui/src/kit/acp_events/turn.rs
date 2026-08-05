@@ -86,9 +86,9 @@ pub(super) fn handle_turn_interrupted(
             "TurnInterrupted: stale (belongs to an older turn), skipping zero-output rollback"
         );
         // stale 分支：只归档旧 turn 已产出内容 + 复位状态，不执行回滚副作用
-        // （不删新气泡、不恢复文本）。INPUT_BUFFER 排队输入**保留**——它们
-        // 是用户已提交的新请求（loading 期间排队），随旧 turn 作废会静默丢弃
-        // 用户输入；保留至下一 TurnDone 由 drain_input_buffer 按序提交。
+        // （不删新气泡、不恢复文本）。INPUT_BUFFER 排队输入是用户已提交的新
+        // 请求（loading 期间排队，LocalUserBubble 已显示），不得静默丢弃——
+        // 复位后立即 drain 按序提交（见下方 drain_input_buffer 调用）。
         // last_submitted_text **保留**——它指向最近一次提交（新 turn 的锚点），
         // 后续该 turn 被取消（连续取消场景）时零产出回滚仍需它恢复输入文本；
         // 旧 turn 的锚点残留风险由 TurnDone 清空（handle_turn_done）兜底。
@@ -105,6 +105,19 @@ pub(super) fn handle_turn_interrupted(
         state.phase = SessionPhase::Idle;
         super::render::push_view_models(state);
         super::render::push_acp_state(state);
+        // Issue 2026-08-05 遗留项（中）：stale 分支复位后主动 drain 排队输入。
+        // 旧 turn 已取消、其 TurnDone 永不到达——排队输入（用户 loading 期间
+        // 提交的请求）若无触发器会永久悬挂；若用户随后提交新内容 C，排队输入
+        // 要等 C 的 TurnDone 才被 drain，执行顺序从 B→C 反转为 C→B。复位后
+        // （is_loading=false）立即按序提交，语义与 TurnDone 路径的
+        // drain_input_buffer 完全一致：每条 SubmitRequest::AgentText →
+        // submit_consumer 生成新 request_id → PromptSubmitted → prompt RPC
+        // （request_id 由 submit_consumer 生成，与 handle_prompt_submitted 的
+        // current_request_id 记录自动对齐，此处不自行生成）。不递增
+        // turn_generation（不重复发 LocalUserBubble——气泡已显示）。
+        // 边界：buffer 为空时 no-op；多次 stale 事件第二次起 buffer 已空，
+        // 不会重复提交；drain 后用户手动提交经 SUBMIT_TX FIFO 顺序追加。
+        super::render::drain_input_buffer();
         return;
     }
 

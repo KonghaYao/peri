@@ -225,8 +225,12 @@ impl BackgroundTaskRegistry {
         Ok(())
     }
 
-    /// 任务完成时调用：更新状态 + 推送通知
-    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) {
+    /// 任务完成时调用：更新状态 + 推送通知。
+    ///
+    /// 返回 `true` 表示条目存在且已处理；`false` 表示任务已不在 registry
+    /// （如已被 cancel 移除后自然完成），此时不推送 Completed 事件——否则会
+    /// 产生幽灵完成事件（issue 2026-08-05：kill 后仍推 bg-task-completed）。
+    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
         tracing::info!(
             task_id = %task_id,
             agent_name = %result.agent_name,
@@ -241,6 +245,7 @@ impl BackgroundTaskRegistry {
         // 持锁：更新状态 + 清理所有非 Running 任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
         let kind = tasks.get(task_id).map(|task| task.kind);
+        let existed = tasks.contains_key(task_id);
         if let Some(task) = tasks.get_mut(task_id) {
             task.status = if result.success {
                 BackgroundTaskStatus::Completed
@@ -252,6 +257,11 @@ impl BackgroundTaskRegistry {
         tasks.retain(|_, t| matches!(t.status, BackgroundTaskStatus::Running));
         drop(tasks);
 
+        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）
+        if !existed {
+            return false;
+        }
+
         // 推送 BgTaskCompleted 事件（携带完整 result 供下游注入主 agent inbox）
         self.push_event(BgRegistryEvent::Completed {
             task_id: task_id.to_string(),
@@ -261,6 +271,7 @@ impl BackgroundTaskRegistry {
             duration_ms,
             result,
         });
+        true
     }
 
     /// 获取所有任务状态（UI 使用）

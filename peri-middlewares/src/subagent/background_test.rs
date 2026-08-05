@@ -294,6 +294,90 @@ async fn test_list_tasks_full_returns_info() {
     assert_eq!(tasks[0].kind, BgTaskKind::Agent);
 }
 
+// ── complete() 幽灵完成事件防护（issue 2026-08-05）───────────────────────────
+
+fn make_result(task_id: &str, success: bool) -> BackgroundTaskResult {
+    BackgroundTaskResult {
+        task_id: task_id.to_string(),
+        agent_name: "test-agent".to_string(),
+        prompt_summary: "test".to_string(),
+        success,
+        output: "done".to_string(),
+        tool_calls_count: 2,
+        duration_ms: 100,
+        child_thread_id: None,
+        timed_out: false,
+    }
+}
+
+/// [回归测试] cancel 后条目已移除，自然完成的 complete() 不得推幽灵 Completed 事件。
+/// 历史 bug（issue 2026-08-05）：kill 后 workflow 自然完成仍 push bg-task-completed，
+/// TUI 用户已看到"已取消"却收到完成通知。
+#[tokio::test]
+async fn test_complete_after_cancel_does_not_push_ghost_event() {
+    let registry = make_registry();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+    registry.set_event_sender(tx, "sess-1".to_string());
+
+    registry.register_with_kind(make_task("bg-1")).unwrap();
+    registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
+
+    let handled = registry.complete("bg-1", make_result("bg-1", true));
+
+    assert!(!handled, "已移除条目的 complete 应返回 false");
+    let mut saw_completed = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, BgRegistryEvent::Completed { .. }) {
+            saw_completed = true;
+        }
+    }
+    assert!(
+        !saw_completed,
+        "已取消条目不得推 Completed 幽灵事件（用户已收到 Cancelled）"
+    );
+}
+
+/// 未注册任务 complete() 返回 false 且不推任何事件。
+#[tokio::test]
+async fn test_complete_unknown_task_returns_false_no_event() {
+    let registry = make_registry();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+    registry.set_event_sender(tx, "sess-1".to_string());
+
+    let handled = registry.complete("never-registered", make_result("never-registered", true));
+
+    assert!(!handled, "未注册任务的 complete 应返回 false");
+    assert!(
+        rx.try_recv().is_err(),
+        "未注册任务的 complete 不得推任何事件"
+    );
+}
+
+/// 正常路径：条目存在时 complete() 返回 true 且推 Completed 事件。
+#[tokio::test]
+async fn test_complete_existing_task_returns_true_and_pushes_event() {
+    let registry = make_registry();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+    registry.set_event_sender(tx, "sess-1".to_string());
+
+    registry.register_with_kind(make_task("bg-1")).unwrap();
+    // 消费 register 推的 Started 事件
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        BgRegistryEvent::Started { .. }
+    ));
+
+    let handled = registry.complete("bg-1", make_result("bg-1", true));
+
+    assert!(handled, "条目存在时 complete 应返回 true");
+    let event = rx.try_recv().unwrap();
+    assert!(
+        matches!(event, BgRegistryEvent::Completed { .. }),
+        "条目存在时应推 Completed 事件"
+    );
+    assert!(rx.try_recv().is_err(), "不应有多余事件");
+}
+
 /// cancel() 应杀死整个进程组（bash 为组长）：sh/sleep 子进程不得孤儿存活创建 marker。
 /// 命令 `sh -c 'sleep 2; touch marker'`：若只杀 bash 单进程（旧行为），sh 孤儿会在
 /// 2s 时 touch；等 3s 断言 marker 不存在可区分新旧行为。

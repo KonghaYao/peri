@@ -27,6 +27,18 @@ pub enum WorkflowRunStatus {
     Killed,
 }
 
+impl WorkflowRunStatus {
+    /// 序列化为协议字符串（与 `ProgressEvent::RunDone.status` / state.json 口径一致）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkflowRunStatus::Running => "running",
+            WorkflowRunStatus::Completed => "completed",
+            WorkflowRunStatus::Failed => "failed",
+            WorkflowRunStatus::Killed => "killed",
+        }
+    }
+}
+
 /// 单个 workflow run 记录。
 pub struct WorkflowRun {
     pub run_id: String,

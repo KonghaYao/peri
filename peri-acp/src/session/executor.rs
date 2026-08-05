@@ -1096,6 +1096,7 @@ async fn build_and_execute_agent(
                                 router.route_workflow_event(
                                     &task_result.run_id,
                                     &task_result.workflow_name,
+                                    task_result.status.as_str(),
                                     task_result.duration_ms,
                                     task_result.agent_count,
                                     task_result.tool_calls_count,
@@ -1120,9 +1121,15 @@ async fn build_and_execute_agent(
                                         s.name, s.agent_count, token_info, dur_info
                                     ));
                                 }
+                                // 幽灵完成事件防护（issue 2026-08-05）：killed/failed 不得显示为 "completed"
+                                let status_word = match task_result.status.as_str() {
+                                    "completed" => "completed",
+                                    "killed" => "killed",
+                                    _ => "failed",
+                                };
                                 // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
                                 let notif_text = format!(
-                                    "Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+                                    "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
                                     {}Results saved to .claude/workflow-runs/{}/state.json",
                                     task_result.workflow_name,
                                     task_result.duration_ms,

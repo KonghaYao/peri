@@ -81,13 +81,18 @@ impl AsyncRouter {
     /// into a human-readable notification string and pushes it as a `Defer`
     /// message with `MessageSource::WorkflowComplete`.
     ///
+    /// `status` 区分 completed / killed / failed 文本——kill/failed 不得显示为
+    /// "completed"（幽灵完成事件，issue 2026-08-05）。
+    ///
     /// This replaces the executor's direct `notify_queue.push(QueuedMessage::new(
     /// Defer, WorkflowComplete, human(notif_text)))` inside the workflow
     /// notification subscriber task.
+    #[allow(clippy::too_many_arguments)]
     pub fn route_workflow_event(
         &self,
         run_id: &str,
         workflow_name: &str,
+        status: &str,
         duration_ms: u64,
         agent_count: usize,
         tool_calls_count: usize,
@@ -110,9 +115,14 @@ impl AsyncRouter {
                 s.name, s.agent_count, token_info, dur_info
             ));
         }
+        let status_word = match status {
+            "completed" => "completed",
+            "killed" => "killed",
+            _ => "failed",
+        };
         // 不包裹 <system-reminder>：append_messages_to_transcript 统一包裹所有 Defer/Info
         let notif_text = format!(
-            "Workflow '{}' completed. ({}ms, {} agents, {} tool calls)\n\
+            "Workflow '{}' {status_word}. ({}ms, {} agents, {} tool calls)\n\
             {}Results saved to .claude/workflow-runs/{}/state.json",
             workflow_name, duration_ms, agent_count, tool_calls_count, phase_lines, run_id,
         );

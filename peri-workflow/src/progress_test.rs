@@ -244,6 +244,33 @@ fn test_run_done_killed_sets_killed_status() {
     assert!(run.completed_at.is_some());
 }
 
+/// [回归测试] msg_loop failed 收尾补发的 RunDone{failed} 必须收敛为 Failed 终态
+/// （issue 2026-08-05：Node 自然崩溃时 run 永久 Running 的 reducer 层锁定）。
+#[test]
+fn test_run_done_failed_sets_failed_status() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "test".into(),
+        meta: None,
+    });
+    assert!(matches!(
+        store.get_run("r1").unwrap().status,
+        RunStatus::Running
+    ));
+
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: "r1".into(),
+        status: "failed".into(),
+        return_value: None,
+        error: Some("workflow process exited unexpectedly".into()),
+    });
+    let run = store.get_run("r1").expect("run 应存在");
+    assert!(matches!(run.status, RunStatus::Failed));
+    // Failed 是终态：completed_at 必须设置（否则 cleanup_completed 永不清理）
+    assert!(run.completed_at.is_some());
+}
+
 #[test]
 fn test_cleanup_completed_keeps_recently_killed_runs() {
     let store = make_store();
