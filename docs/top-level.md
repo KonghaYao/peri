@@ -1,6 +1,6 @@
 Peri 3.0 架构
 
-> 3.0 全新分层 | 日期：2026-08-05 | 修订：v3.6（任务三分法 + Task/Thread 双概念 + crate 归位）
+> 3.0 全新分层 | 日期：2026-08-05 | 修订：v3.7（设计自洽：矛盾修正 + 归层判据 + 聚合根 + 链路定义）
 
 0. 依赖规则
 
@@ -23,6 +23,15 @@ flowchart BT
 - 未声明边一律禁止
 - crate 依赖方向进 CI 验证
 
+归层判据：
+
+- 状态生命周期 = session -> Agent
+- 状态生命周期 = 进程/多 session -> Runtime
+- 与协议形态绑定 -> ACP
+- 外部系统的状态/格式 -> Resources
+- 消费者是客户端、需组合多源 -> Controller
+- 争议项以此判据裁定，不另行讨论
+
 1. Peri Model 层
 
 - 协议适配：openai + anthropic 双协议 adapter
@@ -33,6 +42,7 @@ flowchart BT
 2. Peri Agent 层
 
 - session 生命周期容器：Session 创建/运行/销毁全生命周期归此层
+  - 聚合根原则：归此层的职责以 session 生命周期为界；session 是聚合根，本节职责范围由此自洽
   - AgentGroup（agm 理念：Agent 平等、管线通讯）
   - frozen data 构建与持有：session 创建时从 Resources 拉磁盘数据（CLAUDE.md/skills/日期）冻结；subagent 创建时 copy
   - Session 级 hook（on_session_start/end）随 session 归此层
@@ -54,7 +64,9 @@ flowchart BT
 3. Peri Runtime 层
 
 - 多 session 编排器：创建/销毁 session（经 Agent 层工厂）、事件聚合路由、调度
-- 无状态：不持有 session 状态、无持久态、无业务配置；状态在 Agent 层各 session 内
+- 无状态：唯一持有 `session_id -> SessionHandle` 映射
+  - 不持有 session 状态、无持久态、无业务配置
+  - 其余全部注入，状态在 Agent 层各 session 内
 
 4. Peri Middleware 分片
 
@@ -70,14 +82,17 @@ flowchart BT
   - peri-config：直操配置文件（settings.json 等）
   - peri-sessions：直操 sqlite（session 持久化、transcript；SqliteThreadStore 实现迁入）
   - MCP 状态维持、HITL broker、secret
-- 无重业务能力：状态/存储/配置适配；重实现仅限协议适配且显式声明
+- 不解释业务语义：只保存与适配状态（存储/配置/连接）；重实现仅限协议适配且显式声明
 - 以 context 形式提供给 Agent / Middleware / Controller
 
 6. Peri Controller 层
 
 - 控制面：lite params -> pick Resources -> pick Runtime -> run Session -> pop events
+  - lite params 定义：session 标识、agent 定义引用、cwd、初始输入
+  - 其余上下文由 Controller 从 Resources 组装注入
 - 事件聚合/过滤（业务事件 -> 协议化前的出口）
-- cancel 传递：接收上层请求，转发至目标 session 所在 Agent
+- cancel：`Controller::cancel(session_id, policy)` -> Runtime 查映射 -> Agent 执行判定 -> Model 中止
+  - 只定位与转发，不解释取消语义
 - 观测：Langfuse bridge 挂此层
 
 7. Peri ACP 层
@@ -113,8 +128,17 @@ flowchart LR
     Agent -->|执行中止| Model
 ```
 
-- 事件带 session_id + turn_id
+- 事件携带 turn_id + agent_id；session_id 由 Runtime 聚合时按 session 维度补打（Agent 层事件不携带）
 - cancel：Agent 持有最终执行权，上层仅传递，Model 执行中止
+
+续跑链路（cancel 的镜像）：
+
+```mermaid
+flowchart LR
+    Bg[bg 完成] --> R[Runtime/AsyncRouter]
+    R --> I[Agent/SessionInbox]
+    I --> A[Agent 续跑被取消的 turn]
+```
 
 错误模型：边界类型化，层内 anyhow
 
@@ -140,7 +164,7 @@ Task vs Thread：
 | Model | peri-model | 不变 |
 | Agent | peri-agent | 扩展：Session/AgentGroup/async tasks/frozen/装配迁入；BackgroundTaskRegistry 迁入 |
 | Runtime | peri-runtime（新） | 薄编排器 |
-| Middleware | peri-middlewares | 不变（迁出 BackgroundTaskRegistry） |
+| Middleware | peri-middlewares | 不变（BackgroundTaskRegistry 定义与实现迁入 peri-agent，Middleware 仅经 TaskManager 接口发起） |
 | Resources | peri-resources（新） | 内含 peri-config/peri-sessions 子模块 |
 | Controller | peri-controller（新） | Langfuse bridge 自 peri-acp 迁入 |
 | ACP | peri-acp | 瘦身：协议/映射/caps |
@@ -149,3 +173,5 @@ Task vs Thread：
 | Resources | peri-lsp | resource，被 middleware 使用 |
 | Resources | peri-workflow | resource，被 middleware 使用 |
 | TUI | peri-web-pty | TUI 层 CLI 命令 |
+
+注：peri-lsp / peri-workflow 为既有 crate，作为 resource 实现接入 peri-resources（包装为 context），不参与分层主链；Middleware 经 context 使用，不直接依赖。
