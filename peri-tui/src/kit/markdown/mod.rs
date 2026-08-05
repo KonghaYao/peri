@@ -12,7 +12,8 @@
 //! - `heading`：heading_line（不渲染 # 前缀）
 //! - `list`：list_item_line
 //! - `code_block`：highlight_code_block, code_block_lines, syntect 单例
-//! - `table`：compute_table_col_widths, table_data_to_lines (ratatui-kit 风格渲染)
+//! - `table`：compute_table_col_widths（最长不可断词约束）、table_data_to_lines
+//!   （智能断词换行 + unicode 网格线渲染）
 //! - `convert`：convert_to_segments（块级分发）
 
 mod code_block;
