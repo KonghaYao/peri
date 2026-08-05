@@ -479,8 +479,15 @@ pub(super) async fn build_and_execute_agent_v2(
     // 以保证 biased select 顺序不变量与 workflow_agent 调用点一致。
     {
         let tx_for_v2 = event_tx.clone();
+        // 主 bridge 注入主 agent 事件侧身份(registry 区分主/未知 agent)。
+        // v2_out.context.session.agent_id 与 SubAgentTool 共享 cell 是同一值(C1/C2)。
+        let main_agent_id = v2_out.context.session.agent_id.to_string();
         let bridge = langfuse_tracer.clone().map(|t| {
-            crate::langfuse::bridge::LangfuseBridge::new(t, ctx.provider.display_name().to_string())
+            crate::langfuse::bridge::LangfuseBridge::new(
+                t,
+                ctx.provider.display_name().to_string(),
+                Some(main_agent_id.clone()),
+            )
         });
         crate::event::spawn_eventbus_forwarder(
             v2_out.event_handles,
