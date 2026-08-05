@@ -264,12 +264,17 @@ pub async fn run_print(
         frozen: Some(frozen_data),
         history: vec![],
         incoming_recalls: vec![],
-        bg_results: vec![],     // print 模式无后台任务
+        bg_results: vec![], // print 模式无后台任务
         langfuse_session: langfuse_session.clone(),
     };
     let result = peri_acp::session::executor::run_session_loop(ctx, turn).await;
-    let c = collector.lock().unwrap();
-    c.output_final(result.ok);
+    {
+        // 收窄锁作用域：collector 仅在 output_final 期间需要，guard 不得跨
+        // 下方 Langfuse flush 的 await 存活（MutexGuard !Send，且会阻塞其他
+        // 需要 collector 的任务）。
+        let c = collector.lock().unwrap();
+        c.output_final(result.ok);
+    }
 
     // 短生命周期进程冲刷：run_session_loop 内部的 Langfuse flush 是
     // fire-and-forget（独立 tokio task），进程退出会将其 abort 导致 trace

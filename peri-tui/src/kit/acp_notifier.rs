@@ -114,6 +114,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             micro_cleared,
             messages_json,
             strategy,
+            trigger,
             outcome,
         } => {
             let files_json: Vec<serde_json::Value> = files
@@ -127,6 +128,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
                 micro_cleared,
                 messages_json,
                 strategy,
+                trigger,
                 outcome,
             })
         }

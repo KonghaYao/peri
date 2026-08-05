@@ -113,7 +113,8 @@ struct SessionManagerInner {
     /// Global agent overrides from CLI --agent flag (applied to all sessions)
     pub agent_overrides: Option<AgentOverrides>,
     /// initialize 阶段暂存的 peri caps（尚未关联到具体 session）。
-    /// session/new 时取出写入 caps_registry，然后清空。
+    /// session/new 时 clone 写入 caps_registry；协商值保留（不再清空），
+    /// 供同一 server 进程内第 2+ 个 session 复用（S1.1，防 stdio 多 session 门控错乱）。
     pub pending_caps: parking_lot::Mutex<Option<PeriCaps>>,
     /// Peri 自定义能力注册表（per-session）。
     /// Key: session_id。使用 Arc<DashMap<...>> 以支持 clone 共享。
@@ -339,8 +340,12 @@ impl SessionManager {
 
     /// session/new 时调用：将暂存的 caps 关联到 session_id，返回 caps 副本。
     /// 如果 initialize 时未声明任何 caps，返回默认值（全 false）。
+    ///
+    /// S1.1：改为 clone 而非 take —— 协商值是 server 进程级配置（initialize 只
+    /// 调用一次），必须保留供第 2+ 个 session 复用；否则 stdio 第 2 个
+    /// session/new 会取到 None 注册全 false caps。
     pub fn consume_pending_caps(&self, session_id: &str) -> PeriCaps {
-        let caps = self.inner.pending_caps.lock().take().unwrap_or_default();
+        let caps = self.inner.pending_caps.lock().clone().unwrap_or_default();
         self.inner
             .caps_registry
             .insert(session_id.to_string(), caps.clone());
@@ -366,8 +371,13 @@ impl SessionManager {
     /// 确保指定 session 的 caps 已在 registry 中注册。
     ///
     /// - registry 已有条目 → 直接返回（幂等）。
-    /// - `pending_caps` 有值（stdio 路径经过 initialize）→ take 并写入。
-    /// - 否则（MpscTransport / TUI 内部路径，无 initialize）→ 写入 `all_enabled()`。
+    /// - 已协商过（`pending_caps_was_set()`，stdio 路径经过 initialize）→
+    ///   用协商值 clone 并写入。
+    /// - 未协商（MpscTransport / TUI 内部路径，无 initialize）→ 写入 `all_enabled()`。
+    ///
+    /// S1.1：协商值不再被 consume 清空，因此 load/resume/fork 新 session id
+    /// 也能拿到协商值；未协商才回退 all_enabled（与 `consume_pending_caps`
+    /// 未协商回退全 false 的语义刻意不同，两侧不可互换）。
     ///
     /// 幂等：重复调用不会覆盖已有值。
     /// 与 `consume_pending_caps` 的 lock 独立操作，避免 TOCTOU 竞态。
@@ -376,10 +386,12 @@ impl SessionManager {
         if let Some(caps) = self.inner.caps_registry.get(session_id) {
             return caps.clone();
         }
-        // 原子地 take pending_caps：有 → 用协商值，无 → 默认全启用
-        let caps = {
-            let mut pending = self.inner.pending_caps.lock();
-            pending.take().unwrap_or_else(PeriCaps::all_enabled)
+        // 协商过 → 用协商值 clone；未协商 → 默认全启用。
+        // pending_caps 只被 set 从不被 take/clear，was_set 检查后 clone 无竞态。
+        let caps = if self.pending_caps_was_set() {
+            self.inner.pending_caps.lock().clone().unwrap_or_default()
+        } else {
+            PeriCaps::all_enabled()
         };
         self.inner
             .caps_registry

@@ -54,18 +54,6 @@ pub async fn emit_bg_spawn_error(sink: &Arc<dyn EventSink>, session_id: &str, er
     .await;
 }
 
-/// 同步推送 `SubagentStarted` 事件到 ACP transport。
-///
-/// 走 event_sink 直接入 TransportEventSink channel（in-memory mpsc），
-/// 保证 TUI 端按 FIFO 顺序处理：SubagentStarted 必先于 Done 到达。
-pub async fn emit_bg_started(
-    sink: &Arc<dyn EventSink>,
-    session_id: &str,
-    started_event: &ExecutorEvent,
-) {
-    sink.push_event(session_id, started_event, 0).await;
-}
-
 /// 发出后台任务启动确认消息（prompt 自动 CJK-safe truncation: chars().take(80)）。
 pub async fn emit_bg_confirmation(sink: &Arc<dyn EventSink>, session_id: &str, prompt: &str) {
     let truncated: String = prompt.chars().take(80).collect();

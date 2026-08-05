@@ -1658,8 +1658,8 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
 
 /// C2: compact 完成后 TurnDone 触发 session/load 重放。
 ///
-/// 场景 A：命令 compact（Immediate）后 current_turn 为空 → 触发 THREAD_LOAD_TX。
-/// 场景 B：agent 内部 compact 后 current_turn 非空（有后续流事件）→ 不触发。
+/// 场景 A：命令 compact（Immediate）后无流事件 → 触发 THREAD_LOAD_TX。
+/// 场景 B：agent 内部 auto-compact 后有后续流事件 → 标志被清除，不触发。
 ///
 /// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突。
 #[test]
@@ -1706,6 +1706,9 @@ fn test_compact_turndone_reload() {
     assert!(!state.compact_just_completed, "场景 A: flag 应清除");
 
     // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
+    // S4.1 红测试改造：按真实时序（CompactCompleted → 流事件 → TurnDone）
+    // 构造，并补 rx 空断言。修复前流事件不清除 compact_just_completed 标志
+    // → TurnDone 误发送（rx 非空，测试红）；修复后标志被流事件清除 → rx 空。
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 
     let mut state = BridgeState {
@@ -1728,16 +1731,92 @@ fn test_compact_turndone_reload() {
         last_prompt_generation: 0,
         current_request_id: None,
     };
-    state
-        .current_turn
-        .append_text("agent response after compact", None);
-    state.compact_just_completed = true;
 
+    // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，
+    //    auto compact 不置位，zero-output 后重放旧消息的边缘洞根治）。
+    //    同时注入 SystemNote（current_turn 非空）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CompactCompleted {
+            summary: "compact summary".into(),
+            files: vec![],
+            skills: vec![],
+            micro_cleared: 0,
+            messages_json: String::new(),
+            strategy: "micro".into(),
+            trigger: "auto".into(),
+            outcome: "micro_applied".into(),
+        },
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B: auto compact 后标志不应置位（方案 A）"
+    );
+
+    // ② agent 继续产出——流事件到达（标志从未置位，防御逻辑无操作）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "agent response after compact".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B: 流事件到达后标志仍不应置位"
+    );
+
+    // ③ turn 结束——不得触发 session/load 重放
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-    // 场景 B 的 TurnDone 也会尝试发送（因为 flag 为 true 但 current_turn 非空），
-    // 核心验证：flag 应被清除，但 reload 逻辑条件不满足（current_turn 非空）。
     assert!(!state.compact_just_completed, "场景 B: flag 应清除");
+    assert!(
+        rx_a.try_recv().is_err(),
+        "场景 B: THREAD_LOAD_TX 不应收到消息（auto-compact 不触发重放）"
+    );
+
+    // ── 场景 B2：manual compact + 流事件（方案 B 防御路径保留）────────
+    // manual compact 置位后，若 agent 继续产出流事件（理论上 manual 是
+    // Immediate 命令无流事件，但防御逻辑保留），标志被清除，TurnDone
+    // 不触发 reload。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CompactCompleted {
+            summary: "manual compact summary".into(),
+            files: vec![],
+            skills: vec![],
+            micro_cleared: 0,
+            messages_json: String::new(),
+            strategy: "full".into(),
+            trigger: "manual".into(),
+            outcome: "full_applied".into(),
+        },
+    );
+    assert!(
+        state.compact_just_completed,
+        "场景 B2: manual compact 后标志应置位"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "defensive stream after manual compact".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    assert!(
+        !state.compact_just_completed,
+        "场景 B2: 流事件到达后标志应清除（方案 B 防御）"
+    );
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(!state.compact_just_completed, "场景 B2: flag 应清除");
+    assert!(
+        rx_a.try_recv().is_err(),
+        "场景 B2: 防御路径下也不应触发重放"
+    );
 }
 
 /// SubagentStopped 在 TurnDone 之后不应重新激活 loading。
@@ -2341,5 +2420,131 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
         todo.changes[0].kind,
         TuiTodoChangeKind::Reopened,
         "较早启动的 Todo 晚到成功结束时不得回退较新成功基线"
+    );
+}
+
+/// S4.2: LocalLoadingReset（cancel / /clear / prompt 失败兜底注入的内部事件）
+/// 应将 phase 从 PromptRunning 复位为 Idle 并重推 ACP_STATE——修复
+/// cancel_consumer 直接写 ACP_STATE 与 bridge phase 派生不同步（取消后
+/// push_acp_state 用 phase 重算 is_loading=true 造成 loading 闪回）。
+/// 幂等：phase 非 PromptRunning 时 no-op。
+#[test]
+#[serial]
+fn test_loading_reset_event_resets_phase() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    // 前置：PromptSubmitted 使 bridge 进入 PromptRunning，ACP_STATE 派生 loading
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    assert!(
+        ACP_STATE.state().read().is_loading,
+        "前置：PromptSubmitted 后 is_loading=true"
+    );
+
+    // 取消：LocalLoadingReset → phase 复位 + is_loading=false
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "LocalLoadingReset 后 phase 应为 Idle"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "LocalLoadingReset 后 is_loading 应为 false"
+    );
+
+    // 幂等：phase 已 Idle 时再次 dispatch 无副作用
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    assert_eq!(state.phase, SessionPhase::Idle, "幂等：phase 保持 Idle");
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "幂等：is_loading 保持 false"
+    );
+}
+
+/// S4.2 回归：取消（LocalLoadingReset）后，服务端正常收尾的 TurnInterrupted
+/// 到达不得把 loading 拉回。修复前 cancel_consumer 只直接写 ACP_STATE、
+/// bridge phase 仍为 PromptRunning——TurnInterrupted 的 push_acp_state 会
+/// 用 phase 重算 is_loading=true（取消后 loading 闪回 + 提交判定竞态）。
+#[test]
+#[serial]
+fn test_loading_reset_then_turn_interrupted_keeps_idle() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    assert!(ACP_STATE.state().read().is_loading);
+
+    // 取消：LocalLoadingReset
+    dispatch_and_notify(&mut state, &AcpEventData::LocalLoadingReset);
+    assert_eq!(state.phase, SessionPhase::Idle);
+
+    // 服务端取消收尾：TurnInterrupted（request_id 配对 → 非 stale）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user-cancelled".into(),
+            request_id: Some("r1".into()),
+        },
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "取消后 TurnInterrupted 到达：phase 保持 Idle"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "取消后 loading 不得闪回"
     );
 }

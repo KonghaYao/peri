@@ -208,6 +208,7 @@ impl EventSink for TransportEventSink {
                     micro_cleared,
                     messages,
                     strategy,
+                    trigger,
                     outcome,
                     ..
                 } => {
@@ -219,6 +220,7 @@ impl EventSink for TransportEventSink {
                         }
                     };
                     let strategy_str = to_serde_str(strategy);
+                    let trigger_str = to_serde_str(trigger);
                     let outcome_str = to_serde_str(outcome);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
@@ -233,6 +235,7 @@ impl EventSink for TransportEventSink {
                         micro_cleared: *micro_cleared,
                         messages_json,
                         strategy: strategy_str,
+                        trigger: trigger_str,
                         outcome: outcome_str,
                     })
                 }

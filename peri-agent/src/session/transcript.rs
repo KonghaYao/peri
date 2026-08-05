@@ -72,6 +72,8 @@ pub enum PersistOp {
     },
     /// 确认此前所有持久化操作均已实际调用 store
     Barrier(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
+    /// 优雅关闭：flush 剩余积压后退出 writer task（Drop / shutdown_persistence 发送）
+    Shutdown,
 }
 
 // ─── 持久化 writer 辅助 ──────────────────────────────────────────────────────
@@ -264,6 +266,25 @@ impl MessageTranscript {
                         .await;
                         let _ = ack.send(barrier_error.take().map_or(Ok(()), Err));
                     }
+                    Some(PersistOp::Shutdown) | None => {
+                        // 优雅关闭：flush 剩余积压后退出。
+                        // - Shutdown：Drop / shutdown_persistence 显式请求（参照
+                        //   langfuse-client/src/batcher.rs 的 Shutdown 模式——不 abort，
+                        //   abort 会立即取消任务导致 pending_appends 和通道中未处理的
+                        //   消息被直接丢弃）
+                        // - None：通道关闭（所有发送端已 drop），等效于 Shutdown
+                        // 注意：必须放在 `Some(other)` 通配分支之前，否则 Shutdown
+                        // 会被当作普通 op 落入 unreachable!。
+                        flush_appends(
+                            store.as_ref(),
+                            &tid,
+                            &mut pending_appends,
+                            &mut barrier_error,
+                            &mut processed,
+                        )
+                        .await;
+                        break;
+                    }
                     Some(other) => {
                         // 保序：先 flush 积压 Append，再处理非 Append op
                         flush_appends(
@@ -296,7 +317,7 @@ impl MessageTranscript {
                                 }
                                 first_err.map_or(Ok(()), Err)
                             }
-                            PersistOp::Append(_) | PersistOp::Barrier(_) => {
+                            PersistOp::Append(_) | PersistOp::Barrier(_) | PersistOp::Shutdown => {
                                 unreachable!("handled in dedicated branches above")
                             }
                         };
@@ -307,18 +328,6 @@ impl MessageTranscript {
                             }
                         }
                         processed = processed.saturating_add(1);
-                    }
-                    None => {
-                        // 通道关闭：flush 剩余后退出
-                        flush_appends(
-                            store.as_ref(),
-                            &tid,
-                            &mut pending_appends,
-                            &mut barrier_error,
-                            &mut processed,
-                        )
-                        .await;
-                        break;
                     }
                 }
 
@@ -729,10 +738,26 @@ impl MessageTranscript {
     /// 同一 writer 按 FIFO 处理 barrier，因此收到确认时，所有此前操作都已调用 store。
     /// 返回并消费自上个 barrier 以来的第一个持久化错误。
     pub async fn flush_persistence(&self) -> anyhow::Result<()> {
-        let Some(tx) = &self.persist_tx else {
+        let Some(tx) = self.persist_tx_handle() else {
             return Ok(());
         };
+        Self::flush_via_tx(&tx).await
+    }
 
+    /// 同步取出持久化 writer 通道句柄（owned `Arc<Sender>`，Send）。
+    ///
+    /// 用途：调用方持有 `Arc<RwLock<MessageTranscript>>` 时，先在 guard 作用域内
+    /// 同步提取句柄、释放 guard，再调用 [`flush_via_tx`] 异步等待——避免
+    /// parking_lot guard 跨 await 存活（`!Send`，会令整个调用链 future 不满足
+    /// `Send`，`tokio::spawn` 编译失败）。
+    pub fn persist_tx_handle(&self) -> Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>> {
+        self.persist_tx.clone()
+    }
+
+    /// barrier 等待逻辑（基于 owned sender，Send 安全）
+    pub async fn flush_via_tx(
+        tx: &tokio::sync::mpsc::UnboundedSender<PersistOp>,
+    ) -> anyhow::Result<()> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         tx.send(PersistOp::Barrier(ack_tx))
             .map_err(|_| anyhow!("transcript persistence writer channel closed"))?;
@@ -750,10 +775,18 @@ impl MessageTranscript {
         }
     }
 
-    /// 优雅关闭持久化 writer task
+    /// 优雅关闭持久化 writer task：发送 `Shutdown` 信号，writer flush 剩余积压后自行退出。
+    ///
+    /// 不调用 `abort()`：abort 会立即取消任务，导致 `pending_appends` 和通道中未处理的
+    /// 消息被直接丢弃（参照 `langfuse-client/src/batcher.rs` 的 Shutdown 模式）。
+    /// Drop 是同步的无法 await，因此不等待 writer 完成：writer 持有 store 的独立 Arc
+    /// （`with_persistence` 中 clone），detached 收尾安全。
     pub fn shutdown_persistence(&self) {
-        if let Some(ref handle) = self.persist_handle {
-            handle.abort();
+        if let Some(ref tx) = self.persist_tx {
+            if let Err(e) = tx.send(PersistOp::Shutdown) {
+                // writer 已退出（channel closed）时无需处理：退出前已 flush 剩余积压
+                tracing::debug!("transcript persist shutdown send failed (channel closed): {e}");
+            }
         }
     }
 }

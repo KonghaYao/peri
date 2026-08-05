@@ -204,6 +204,7 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
             no_op_candidates,
             full_escalation_reason,
             cache_hit_rate_before,
+            trigger: CompactTrigger::Auto,
             outcome,
         }),
         ObserveEvent::SubagentStart {

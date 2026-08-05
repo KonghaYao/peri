@@ -365,6 +365,7 @@ impl BaseTool for BashTool {
                                 chrono_started_at: chrono::Utc::now(),
                                 kind: BgTaskKind::Shell,
                                 cancel_handle: BgCancelHandle::Kill(None),
+                                cancel_token: None,
                                 pid: None,
                                 output_preview: None,
                             };
@@ -389,6 +390,7 @@ impl BaseTool for BashTool {
                         cancel_handle: BgCancelHandle::Pid(pid.expect(
                             "bg shell: child.id() returned None after successful spawn",
                         )),
+                        cancel_token: None,
                         pid,
                         output_preview: None,
                     };
@@ -536,6 +538,7 @@ impl BaseTool for BashTool {
                         chrono_started_at: chrono::Utc::now(),
                         kind: BgTaskKind::Shell,
                         cancel_handle: BgCancelHandle::Kill(None),
+                        cancel_token: None,
                         pid: None,
                         output_preview: None,
                     };
@@ -617,6 +620,7 @@ impl BaseTool for BashTool {
                             chrono_started_at: chrono::Utc::now(),
                             kind: BgTaskKind::Shell,
                             cancel_handle: BgCancelHandle::Pid(pid),
+                            cancel_token: None,
                             pid: Some(pid),
                             output_preview: None,
                         };

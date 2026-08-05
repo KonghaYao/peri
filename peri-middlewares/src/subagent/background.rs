@@ -2,7 +2,12 @@ use std::collections::HashMap;
 
 use peri_agent::agent::BackgroundTaskResult;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+/// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
+/// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
+const CANCEL_GRACE_SECS: u64 = 3;
 
 /// 后台任务注册表错误（结构化，取代 String 错误）
 ///
@@ -35,8 +40,10 @@ pub enum BgTaskKind {
 
 /// 后台任务取消句柄（按 kind 分发取消逻辑）
 pub enum BgCancelHandle {
-    /// bg agent：取消 tokio task
-    Abort(tokio::task::AbortHandle),
+    /// bg agent：取消 tokio task。
+    /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
+    /// 优雅退出，再 await JoinHandle 等待其走完收尾，超时才 abort。
+    Abort(tokio::task::JoinHandle<()>),
     /// workflow：kill 闭包——转发到 `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
     /// `None` 表示 kill 通道不可用（如 spawn 失败），此时 `cancel()` 返回明确错误
     /// 而非假装成功（issue 2026-08-05：Workflow 取消无效）。
@@ -68,6 +75,10 @@ pub struct BackgroundTask {
     pub kind: BgTaskKind,
     /// 按 kind 分发的取消句柄
     pub cancel_handle: BgCancelHandle,
+    /// 取消令牌（仅 Agent 类任务）：cancel() 时先 `token.cancel()` 让工具层取消链
+    /// 生效（run_react_loop 的 await 点响应后走完整收尾），超时再 abort 兜底。
+    /// Shell/Workflow 类任务为 None（取消走 Pid/Kill 句柄）。
+    pub cancel_token: Option<CancellationToken>,
     /// OS 进程 PID（仅 bg shell 有效）
     pub pid: Option<u32>,
     /// 输出预览（completed 时写入，最多 500 字符）
@@ -318,8 +329,48 @@ impl BackgroundTaskRegistry {
         }
         if let Some(task) = tasks.remove(task_id) {
             match task.cancel_handle {
-                BgCancelHandle::Abort(handle) => {
-                    handle.abort();
+                BgCancelHandle::Abort(mut handle) => {
+                    // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点
+                    // （reason LLM 调用 / 工具执行 / idle 等待）退出，走完整收尾
+                    // （SubagentStopped / deregister / thread status / stop hooks）。
+                    if let Some(token) = task.cancel_token.as_ref() {
+                        token.cancel();
+                    }
+                    // 超时兜底：等待任务自然结束（grace 窗口内响应 cancel 则保留
+                    // async 收尾），超时再 abort——否则"取消后任务继续跑"比 abort 更糟。
+                    // abort 兜底路径：任务内同步收尾 guard（deregister_runtime 等）仍执行，
+                    // async 收尾（update_thread_status / stop hooks）丢失并记日志。
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(_) => {
+                            let task_id_owned = task_id.to_string();
+                            tokio::spawn(async move {
+                                if tokio::time::timeout(
+                                    std::time::Duration::from_secs(CANCEL_GRACE_SECS),
+                                    &mut handle,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    handle.abort();
+                                    warn!(
+                                        task_id = %task_id_owned,
+                                        "bg task cancel: grace period elapsed, aborted task \
+                                         (async cleanup lost: thread status / stop hooks; \
+                                         sync cleanup runs via in-task guard)"
+                                    );
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            // 无 tokio runtime 上下文（防御；生产调用点均在 async 上下文）：
+                            // 无法异步等待，直接 abort 兜底。
+                            handle.abort();
+                            warn!(
+                                task_id = %task_id,
+                                "bg task cancel: no tokio runtime for graceful wait, aborted task"
+                            );
+                        }
+                    }
                 }
                 BgCancelHandle::Kill(Some(kill)) => {
                     // 触发 kill 闭包：workflow 场景转发到 WorkflowTaskRegistry::kill

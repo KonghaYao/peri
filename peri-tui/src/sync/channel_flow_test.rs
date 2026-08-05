@@ -1543,8 +1543,8 @@ mod tests {
             }
         );
 
-        let sender_outcome = sender_res
-            .expect("sender flow 必须成功（confirm 轮询被限流后仍以 404 正常结束）");
+        let sender_outcome =
+            sender_res.expect("sender flow 必须成功（confirm 轮询被限流后仍以 404 正常结束）");
         let receiver_outcome = receiver_res.expect("receiver flow 必须成功");
         assert!(sender_outcome.parts_uploaded >= 1);
         assert_eq!(receiver_outcome.files, 1);

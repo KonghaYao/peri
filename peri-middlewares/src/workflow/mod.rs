@@ -51,6 +51,7 @@ impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
             // kill 闭包由 WorkflowTool::invoke 构造（转发到 WorkflowTaskRegistry::kill），
             // 使 session/cancel-bg-task 真正终止 workflow runner（issue 2026-08-05）
             cancel_handle: BgCancelHandle::Kill(kill),
+            cancel_token: None,
             pid: None,
             output_preview: None,
         };

@@ -397,3 +397,70 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
         "Applied mixed completion 必须反映实际变更"
     );
 }
+
+/// [S1.4] cancel 且未提交变更时 CompactStarted 必须有配对结束事件：
+/// emit `CompactEnded { outcome: Interrupted }`，且**不得** emit
+/// `MessagesCompacted`（那会误导遥测以为压缩发生了）。
+///
+/// 覆盖 `compact.rs` select cancel arm 的"未提交"分支（:203）：
+/// 预先取消 turn token → biased cancel arm 立即胜出，run_compact 未执行，
+/// post_compact_flagged == pre_compact_flagged。
+#[tokio::test]
+async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
+    let (mut ctx, mut handles) = make_context_with_observe();
+    append_compactable_history(&ctx);
+    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
+    ctx.compact.compact_config = Some(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    });
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 196_000,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    // 预先取消 turn token：select biased cancel arm 立即胜出
+    ctx.session.turn.cancel_token.cancel();
+
+    let result = run_compact(CompactInput {
+        context: ctx,
+        has_tool_calls: true,
+    })
+    .await;
+
+    assert!(
+        matches!(result, Err(crate::error::AgentError::Interrupted)),
+        "cancel 且未提交变更应返回 Interrupted"
+    );
+
+    let events = observe_events(&mut handles);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+            .count(),
+        1,
+        "cancel arm 已 emit CompactStarted"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
+            .count(),
+        0,
+        "未提交变更不得 emit MessagesCompacted（会误导遥测以为压缩发生了）"
+    );
+    let ended: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ObserveEvent::CompactEnded { outcome, .. } => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        vec![crate::agent::compact_v2::CompactOutcome::Interrupted],
+        "cancel 未提交应恰好 emit 一次 CompactEnded(Interrupted)"
+    );
+}

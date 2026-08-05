@@ -40,9 +40,11 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     super::render::drain_input_buffer();
 
     // C2: compact 命令完成后触发 session/load 重放。
-    // 区分 agent 内部 compact：命令 compact（Immediate）后无后续流事件，
-    // current_turn 为空；agent 内部 compact 后 current_turn 有内容。
-    if state.compact_just_completed && state.current_turn.is_empty() {
+    // S4.1 方案 B：命令 compact（Immediate）后无流事件，标志保持到 TurnDone；
+    // agent 内部 auto-compact 后标志已被后续流事件清除（见 dispatch_and_notify
+    // 入口的流事件判定）。原 `current_turn.is_empty()` 判定失效——flush 之后
+    // current_turn 恒空、失去区分能力（Issue 2026-08-05），已删除。
+    if state.compact_just_completed {
         state.compact_just_completed = false;
         if let Some(tx) = THREAD_LOAD_TX.get() {
             let session_id = state.active_session_id.clone();
@@ -257,6 +259,19 @@ pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
         )));
     super::render::push_view_models(state);
     super::render::push_acp_state(state);
+}
+
+/// S4.2: 本地 loading 复位请求（cancel / /clear / prompt 失败兜底，由
+/// submit_consumer 注入 LOCAL_EVENT_TX）。幂等：phase 非 PromptRunning 时
+/// no-op（不 push）——命令 compact、replay、正常提交等场景不受影响；phase
+/// 为 PromptRunning 时复位为 Idle 并重推 ACP_STATE，防止后续事件触发
+/// push_acp_state 时用 phase 重算 is_loading=true 造成取消后 loading 闪回
+/// （Issue 2026-08-05 S4.2）。
+pub(super) fn handle_loading_reset(state: &mut BridgeState) {
+    if state.phase == SessionPhase::PromptRunning {
+        state.phase = SessionPhase::Idle;
+        super::render::push_acp_state(state);
+    }
 }
 
 pub(super) fn handle_bg_callback_bubble(state: &mut BridgeState) {

@@ -288,6 +288,20 @@ pub enum ObserveEvent {
         /// 压缩策略（Micro / Full / Smart）
         strategy: crate::agent::events::CompactStrategy,
     },
+    /// Compact 阶段结束（无变更发生的结束路径专用，与 `CompactStarted` 成对）。
+    ///
+    /// S1.4：cancel 且未提交变更时不能 emit `MessagesCompacted`（那会误导遥测
+    /// 以为压缩发生了），需要独立的结束观测闭合 span。仅"确有压缩变更"的路径
+    /// emit `MessagesCompacted`。
+    CompactEnded {
+        turn_id: TurnId,
+        agent_id: AgentId,
+        step: usize,
+        /// 压缩策略（Micro / Full / Smart）
+        strategy: crate::agent::events::CompactStrategy,
+        /// 结束语义（Interrupted = 被取消且未提交变更）
+        outcome: crate::agent::compact_v2::CompactOutcome,
+    },
     /// 消息被压缩
     MessagesCompacted {
         turn_id: TurnId,
@@ -410,6 +424,7 @@ impl ObserveEvent {
             Self::LlmCallStart { turn_id, .. }
             | Self::LlmCallEnd { turn_id, .. }
             | Self::CompactStarted { turn_id, .. }
+            | Self::CompactEnded { turn_id, .. }
             | Self::MessagesCompacted { turn_id, .. }
             | Self::TurnError { turn_id, .. }
             | Self::SubagentStart { turn_id, .. }
@@ -428,6 +443,7 @@ impl ObserveEvent {
             Self::LlmCallStart { agent_id, .. }
             | Self::LlmCallEnd { agent_id, .. }
             | Self::CompactStarted { agent_id, .. }
+            | Self::CompactEnded { agent_id, .. }
             | Self::MessagesCompacted { agent_id, .. }
             | Self::TurnError { agent_id, .. }
             | Self::SubagentStart { agent_id, .. }

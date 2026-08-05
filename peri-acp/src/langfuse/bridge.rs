@@ -486,6 +486,25 @@ impl UnifiedLangfuseEvent {
                     trigger: CompactTrigger::Auto, // v2 自动触发
                 })
             }
+            // S1.4：cancel 且未提交变更的 CompactEnded → 闭合 compact span。
+            // 不携带 token 估算（无变更发生）；outcome 字段区分
+            // Interrupted（取消未提交）与 MessagesCompacted 路径。
+            ObserveEvent::CompactEnded { outcome, .. } => {
+                Some(UnifiedLangfuseEvent::CompactEnded {
+                    summary: String::new(),
+                    files_count: 0,
+                    skills_count: 0,
+                    micro_cleared: 0,
+                    is_error: false,
+                    error_message: String::new(),
+                    estimated_tokens_saved: 0,
+                    estimated_tokens_before: 0,
+                    estimated_tokens_after: 0,
+                    cache_hit_rate_before: 0.0,
+                    full_escalation_reason: None,
+                    outcome: Some(format!("{:?}", outcome)),
+                })
+            }
             ObserveEvent::MessagesCompacted {
                 summary,
                 files,

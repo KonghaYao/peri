@@ -173,8 +173,10 @@ pub struct BridgeState {
     /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
     pub active_session_id: String,
     /// `/compact` 命令刚刚完成，TurnDone 时需触发 session/load 重放。
-    /// 与 agent 内部 compact 区分：命令 compact 后 current_turn 为空，
-    /// agent 内部 compact 后 current_turn 有后续流事件。
+    /// S4.1 方案 B：CompactCompleted 置位后，任何流事件（TextChunk/
+    /// ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted）到达即清除——
+    /// 命令 compact 后无流事件，标志保持；agent 内部 auto-compact 后标志被
+    /// 后续流事件清掉（无需知道 compact 触发来源）。
     pub compact_just_completed: bool,
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
@@ -297,6 +299,24 @@ impl BridgeState {
 /// 每次调用按事件类型更新内部状态，然后 push 到 VIEW_MODELS 和 ACP_STATE Atoms。
 pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
     use AcpEventData::*;
+    // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
+    // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
+    // （TextChunk/ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted/
+    // ToolCount/Progress）必然紧随；命令 /compact（Immediate）后无流事件，
+    // 标志保持到 TurnDone 触发 session/load 重放。无需知道 compact 触发来源
+    // （Issue 2026-08-05）。清单与 issue 声明清单保持同步（含 ToolCount/Progress）。
+    if matches!(
+        event,
+        TextChunk(_)
+            | ReasoningChunk(_)
+            | ToolStarted(_)
+            | ToolEnded(_)
+            | SubagentStarted { .. }
+            | ToolCount(_)
+            | Progress(_)
+    ) {
+        state.compact_just_completed = false;
+    }
     match event {
         // ── §4.1 Streaming events ──
         TextChunk(tc) => streaming::handle_text_chunk(state, tc),
@@ -356,9 +376,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             files,
             skills,
             strategy,
+            trigger,
             outcome,
             ..
-        } => compact::handle_compact_completed(state, summary, files, skills, strategy, outcome),
+        } => compact::handle_compact_completed(
+            state, summary, files, skills, strategy, trigger, outcome,
+        ),
         CompactError { message } => compact::handle_compact_error(state, message),
         BackgroundTaskCompleted {
             task_id,
@@ -384,6 +407,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),
         LocalUserBubble { text } => turn::handle_local_user_bubble(state, text),
+        LocalLoadingReset => turn::handle_loading_reset(state),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
         CommittedAssistantText { text, reasoning } => {
             turn::handle_committed_assistant_text(state, text, reasoning)

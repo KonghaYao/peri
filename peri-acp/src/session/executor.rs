@@ -1061,11 +1061,11 @@ async fn build_and_execute_agent(
         }));
 
     // Session 级 workflow 完成通知消费者（单次 spawn）。
-    // 双路径：
-    //   Path A (TUI): 通过 EventSink 直推 BackgroundTaskCompleted → 通知条
-    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn
-    //
-    // [NOTE] 自动 continuation 需 TUI 侧处理 BackgroundTaskCompleted 事件（参考 bg task auto-continuation）。
+    // 单路径：
+    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn。
+    // TUI 侧通知由 registry 通道提供（registry.complete → BgRegistryEvent::Completed →
+    // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
+    // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
     if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
         // 将 session 级 bg_registry 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
         wf_mw.set_bg_registry(bg_registry.clone());
@@ -1075,9 +1075,6 @@ async fn build_and_execute_agent(
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
             let wf_mw_for_notify = Arc::clone(wf_mw);
-            let notify_sink = Arc::clone(&event_sink);
-            let notify_sid = session_id.to_string();
-            let notify_cw = turn.effective_context_window;
             // AsyncRouter（v2 路径：push_defer + wake Notify）
             // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
@@ -1145,7 +1142,9 @@ async fn build_and_execute_agent(
                                 ));
                             }
 
-                            // Path A: 发 TUI 通知
+                            // 构造 BackgroundTaskResult 并写入 registry：触发 BgRegistryEvent::Completed
+                            // （→ bg-task-completed unstable event → TUI 通知条），这是通知的真实路径。
+                            // 不再经 EventSink 直推 BackgroundTaskCompleted（S5.1：event_sink 无映射，死路径）。
                             let bg = BackgroundTaskResult {
                                 task_id: task_result.run_id.clone(),
                                 agent_name: format!("workflow:{}", task_result.workflow_name),
@@ -1171,14 +1170,7 @@ async fn build_and_execute_agent(
                             // 若 broadcast consumer 尚未被调度，agent 的 idle_should_wait probe
                             // (active_count > 0) 提前归零 → agent 退出 ReAct loop → Defer 堆积在队列中。
                             // [修复] 将 complete_workflow 移至 consumer 内 Defer push 之后执行。
-                            notify_bg.complete(&task_result.run_id, bg.clone());
-                            notify_sink
-                                .push_event(
-                                    &notify_sid,
-                                    &ExecutorEvent::BackgroundTaskCompleted(bg),
-                                    notify_cw,
-                                )
-                                .await;
+                            notify_bg.complete(&task_result.run_id, bg);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("WF notification consumer lagged by {} messages", n);

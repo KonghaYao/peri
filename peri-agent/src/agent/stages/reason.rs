@@ -261,10 +261,14 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         request_id: None,
                     });
                     // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
+                    // S1.3：LLM 内部自报 cancel（model_bridge.rs is_cancelled → Err(Interrupted)，
+                    // 外层 biased select 的 cancel 分支未必抢先，微竞态可达）必须映射为
+                    // Interrupted，不能吞成 LlmFailure（遥测分类错误）。
                     let reason = match &e {
                         AgentError::LlmHttpError { .. } | AgentError::LlmError(..) => {
                             TurnErrorReason::LlmFailure
                         }
+                        AgentError::Interrupted => TurnErrorReason::Interrupted,
                         _ => TurnErrorReason::LlmFailure,
                     };
                     ctx.runtime.event_bus.emit_observe(ObserveEvent::TurnError {

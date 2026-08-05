@@ -19,7 +19,8 @@ fn make_task(id: &str) -> BackgroundTask {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
-        cancel_handle: BgCancelHandle::Abort(handle.abort_handle()),
+        cancel_handle: BgCancelHandle::Abort(handle),
+        cancel_token: None,
         pid: None,
         output_preview: None,
     }
@@ -119,7 +120,8 @@ async fn test_cancel_propagates_to_running_task() {
         started_at: std::time::Instant::now(),
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Agent,
-        cancel_handle: BgCancelHandle::Abort(handle.abort_handle()),
+        cancel_handle: BgCancelHandle::Abort(handle),
+        cancel_token: None,
         pid: None,
         output_preview: None,
     };
@@ -165,6 +167,7 @@ async fn test_cancel_workflow_invokes_kill_closure() {
         cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
             killed_clone.store(true, Ordering::SeqCst);
         }))),
+        cancel_token: None,
         pid: None,
         output_preview: None,
     };
@@ -203,6 +206,7 @@ async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Workflow,
         cancel_handle: BgCancelHandle::Kill(None),
+        cancel_token: None,
         pid: None,
         output_preview: None,
     };
@@ -408,6 +412,7 @@ async fn test_cancel_kills_process_group() {
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Shell,
         cancel_handle: BgCancelHandle::Pid(pid),
+        cancel_token: None,
         pid: Some(pid),
         output_preview: None,
     };
@@ -424,4 +429,99 @@ async fn test_cancel_kills_process_group() {
 
     // child 句柄 drop（进程已被 cancel 杀死，无孤儿残留）
     drop(child);
+}
+
+// ── S3.2 取消序列（token.cancel() → 超时 abort 兜底）────────────────────────
+
+/// [回归测试] cancel() 的 Abort 分支必须先触发 token.cancel()：任务响应取消链
+/// 自然退出（走完整收尾），而非立即 abort（abort 会跳过 SubagentStopped /
+/// deregister / thread status 等收尾）。
+/// 历史 bug（issue 2026-08-05）：cancel 仅 handle.abort()，任务收尾全部丢失。
+#[tokio::test]
+async fn test_cancel_abort_token_cancels_task_first() {
+    let registry = make_registry();
+    let token = CancellationToken::new();
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_clone = finished.clone();
+    let token_clone = token.clone();
+    let handle = tokio::spawn(async move {
+        // 模拟响应 cancel 的 bg agent：token 取消后执行"收尾"再结束
+        token_clone.cancelled().await;
+        finished_clone.store(true, Ordering::SeqCst);
+    });
+
+    let task = BackgroundTask {
+        id: "bg-token-cancel".to_string(),
+        agent_name: "test-agent".to_string(),
+        prompt_summary: "token cancel test".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Agent,
+        cancel_handle: BgCancelHandle::Abort(handle),
+        cancel_token: Some(token),
+        pid: None,
+        output_preview: None,
+    };
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    registry.cancel("bg-token-cancel").unwrap();
+    assert_eq!(registry.active_count(), 0);
+
+    // 任务应因 token 取消而自然结束（收尾标志被置位），而非等待 abort 兜底
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !finished.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("任务应响应 token.cancel() 自然退出（保留收尾），而非被 abort");
+}
+
+/// [回归测试] 任务不响应 cancel（如阻塞在不支持取消的 await 点）时，
+/// grace 窗口超时后 abort 兜底终止任务——保证"取消后任务继续跑"不会发生。
+/// 历史 bug（issue 2026-08-05）：abort 跳过全部收尾；修复后 abort 仅作为兜底，
+/// 同步收尾由任务内 guard 执行（本测试验证任务终止语义）。
+#[tokio::test]
+async fn test_cancel_abort_grace_timeout_fallback() {
+    let registry = make_registry();
+    let token = CancellationToken::new();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        // 不响应 cancel：阻塞等待永不触发的 oneshot
+        let _ = rx.await;
+    });
+    // 保留 abort 视图用于轮询任务终止
+    let abort_view = handle.abort_handle();
+
+    let task = BackgroundTask {
+        id: "bg-stubborn".to_string(),
+        agent_name: "test-agent".to_string(),
+        prompt_summary: "no cancel response".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Agent,
+        cancel_handle: BgCancelHandle::Abort(handle),
+        cancel_token: Some(token),
+        pid: None,
+        output_preview: None,
+    };
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    registry.cancel("bg-stubborn").unwrap();
+    assert_eq!(registry.active_count(), 0);
+
+    // grace（3s）超时后 abort 兜底：任务终止
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !abort_view.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("grace 超时后 abort 兜底应终止任务");
+
+    drop(tx);
 }

@@ -571,6 +571,19 @@ pub(super) async fn build_and_execute_agent_v2(
     let loop_result = run_react_loop(v2_out.context, 500).await;
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
+    // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
+    // 根因兜底（覆盖全部 6 个 run_react_loop 调用方），此处是主路径双保险——
+    // 让会话恢复方在 turn 结束即可读到完整历史，不依赖 drop 时序。失败不阻断
+    // 内存路径（后续 Drop 仍会尝试 flush）。
+    // [SAFE] 先在 guard 作用域内同步提取 Send 的 writer 通道句柄（guard 语句结束即
+    // drop，不跨 await），再经关联函数 `flush_via_tx` 异步等待 barrier——调用链
+    // future 不持有 parking_lot guard，保持 Send（peri-tui 在 tokio::spawn 中调用本链）。
+    let flush_tx = v2_out.session.transcript().read().persist_tx_handle();
+    if let Some(tx) = flush_tx {
+        if let Err(e) = peri_agent::session::MessageTranscript::flush_via_tx(&tx).await {
+            tracing::warn!(session_id = %ctx.session_id, error = %e, "[v2] phase 8 transcript flush failed");
+        }
+    }
     let (messages, history_replaced_by_compaction) = {
         let transcript = v2_out.session.transcript();
         let transcript = transcript.read();

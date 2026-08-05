@@ -147,6 +147,7 @@ fn test_compact_completed_serde_roundtrip() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        trigger: CompactTrigger::Auto,
         outcome: crate::agent::compact_v2::CompactOutcome::SmartApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
@@ -197,6 +198,7 @@ fn test_compact_completed_micro_serde() {
         no_op_candidates: 0,
         full_escalation_reason: None,
         cache_hit_rate_before: 0.0,
+        trigger: CompactTrigger::Auto,
         outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
     let json = serde_json::to_string(&ev).unwrap();
@@ -215,6 +217,46 @@ fn test_compact_completed_micro_serde() {
         assert_eq!(micro_cleared, 8);
     } else {
         panic!("Deserialized to wrong variant");
+    }
+}
+
+#[test]
+fn test_compact_completed_legacy_json_defaults_trigger_to_auto() {
+    // S4.1 方案 A 向后兼容：旧事件（无 trigger 字段）反序列化后 trigger 应为 Auto。
+    // 旧 JSON 手工构造（不经过 to_string，确保字段确实缺失）。
+    let legacy_json = r#"{
+        "type": "compact_completed",
+        "value": {
+            "summary": "legacy summary",
+            "files": [],
+            "skills": [],
+            "micro_cleared": 0,
+            "messages": [],
+            "token_before": 0,
+            "token_after": 0,
+            "strategy": "smart",
+            "affected_count": 0,
+            "estimated_tokens_saved": 0,
+            "estimated_tokens_before": 0,
+            "estimated_tokens_after": 0,
+            "changed_messages": 0,
+            "changed_fields": 0,
+            "no_op_candidates": 0,
+            "full_escalation_reason": null,
+            "cache_hit_rate_before": 0.0,
+            "outcome": "full_applied"
+        }
+    }"#;
+    let deserialized: ExecutorEvent = serde_json::from_str(legacy_json).unwrap();
+    match deserialized {
+        ExecutorEvent::CompactCompleted { trigger, .. } => {
+            assert_eq!(
+                trigger,
+                CompactTrigger::Auto,
+                "旧事件无 trigger 字段必须按 Auto 处理"
+            );
+        }
+        _ => panic!("Deserialized to wrong variant"),
     }
 }
 

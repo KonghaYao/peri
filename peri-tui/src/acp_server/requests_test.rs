@@ -508,6 +508,7 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
         cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
             killed_clone.store(true, Ordering::SeqCst);
         }))),
+        cancel_token: None,
         pid: None,
         output_preview: None,
     };

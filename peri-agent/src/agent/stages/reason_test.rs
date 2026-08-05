@@ -115,15 +115,17 @@ async fn test_reason_captures_message_snapshot() {
     assert!(result.is_err());
 }
 
-/// 验证 LLM 调用失败时 TurnError 事件被 emit 到 EventBus
+/// 验证 LLM 返回 Interrupted 时 TurnError 事件被 emit 为 Interrupted 原因
 ///
-/// 覆盖：reason.rs 错误分支 → TurnErrorReason::LlmFailure → v2_bridge → AgentExecutionFailed
+/// S1.3 回归锁定：NullReactLLM 直接返回 `Err(AgentError::Interrupted)`（cancel
+/// 竞态窗口无法自然触发，用 mock 注入）；旧实现 match 两分支相同，把 Interrupted
+/// 吞成 LlmFailure。覆盖：reason.rs 错误分支 → TurnErrorReason::Interrupted。
 #[tokio::test]
-async fn test_run_reason_emits_turn_error_on_llm_failure() {
+async fn test_run_reason_emits_turn_error_interrupted_on_null_llm() {
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let event_bus = Arc::new(bus);
 
-    let cwd: Arc<str> = Arc::from("/tmp/llm_failure");
+    let cwd: Arc<str> = Arc::from("/tmp/interrupted");
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
@@ -137,13 +139,17 @@ async fn test_run_reason_emits_turn_error_on_llm_failure() {
     })
     .await;
 
-    // 收集所有 ObserveEvent，检查 TurnError 是否存在
+    // 收集所有 ObserveEvent，检查 TurnError 是否存在且 reason 为 Interrupted
     let mut found_turn_error = false;
     let mut found_llm_call_end = false;
     while let Some(ev) = handles.try_observe() {
         match ev {
             ObserveEvent::TurnError { reason, .. } => {
-                assert_eq!(reason, TurnErrorReason::LlmFailure);
+                assert_eq!(
+                    reason,
+                    TurnErrorReason::Interrupted,
+                    "LLM 自报取消必须映射为 Interrupted，不能吞成 LlmFailure"
+                );
                 found_turn_error = true;
             }
             ObserveEvent::LlmCallEnd { .. } => {
@@ -152,6 +158,95 @@ async fn test_run_reason_emits_turn_error_on_llm_failure() {
             _ => {}
         }
     }
-    assert!(found_turn_error, "应在 LLM 失败时 emit TurnError");
+    assert!(found_turn_error, "Interrupted 时应 emit TurnError");
     assert!(found_llm_call_end, "应同时 emit LlmCallEnd（现有行为）");
+}
+
+// ── run_on_error 行为断言（S1.3）──────────────────────────────────────────────
+
+/// 记录 on_error 调用的测试中间件（验证 run_on_error 副作用与 LlmFailure 路径一致）。
+struct RecordingErrorMiddleware {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RecordingErrorMiddleware {
+    fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::middleware::Middleware for RecordingErrorMiddleware {
+    fn name(&self) -> &str {
+        "recording-error-middleware"
+    }
+
+    async fn on_error(
+        &self,
+        _state: &mut dyn crate::middleware::MiddlewareState,
+        error: &crate::error::AgentError,
+    ) -> crate::error::AgentResult<()> {
+        self.calls.lock().unwrap().push(error.to_string());
+        Ok(())
+    }
+}
+
+/// [S1.3] mock LLM 直接返回 `Err(Interrupted)`：
+/// 1. TurnError 的 reason 为 Interrupted（不误报 LlmFailure）；
+/// 2. `run_on_error` 仍被调用（middleware on_error 收到 Interrupted，
+///    副作用与现有 LlmFailure 路径一致，issue 声明可接受）。
+#[tokio::test]
+async fn test_run_reason_interrupted_runs_on_error_with_interrupted() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let event_bus = Arc::new(bus);
+
+    let (mw, calls) = RecordingErrorMiddleware::new();
+    let mut chain = crate::middleware::MiddlewareChain::new();
+    chain.add(Box::new(mw));
+
+    let cwd: Arc<str> = Arc::from("/tmp/interrupted-on-error");
+    let frozen = FrozenContext::builder().build();
+    let session = Session::new(cwd, frozen, None);
+    let turn = session.start_turn();
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_event_bus(event_bus)
+        .with_middleware_chain(Arc::new(chain))
+        .build();
+    // builder 默认 NullReactLLM → generate_reasoning 直接返回 Err(AgentError::Interrupted)
+
+    let result = run_reason(ReasonInput {
+        context: ctx,
+        has_tool_calls: false,
+    })
+    .await;
+    assert!(
+        matches!(result, Err(AgentError::Interrupted)),
+        "NullReactLLM 应返回 Interrupted，实际 {:?}",
+        result
+    );
+
+    // TurnError reason == Interrupted
+    let mut found_interrupted_reason = false;
+    while let Some(ev) = handles.try_observe() {
+        if let ObserveEvent::TurnError { reason, .. } = ev {
+            assert_eq!(reason, TurnErrorReason::Interrupted);
+            found_interrupted_reason = true;
+        }
+    }
+    assert!(found_interrupted_reason, "应 emit TurnError(Interrupted)");
+
+    // run_on_error 行为：middleware on_error 被调用且收到 Interrupted
+    let recorded = calls.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "on_error 应恰好被调用一次");
+    assert!(
+        recorded[0].contains("Interrupted"),
+        "on_error 应收到 Interrupted 错误，实际: {}",
+        recorded[0]
+    );
 }

@@ -503,11 +503,8 @@ pub async fn run_receiver(flow: ReceiverFlow<'_>, code_input: &str) -> Result<Re
         .cfg
         .min_part_interval
         .saturating_mul(part_count.saturating_add(1) as u32);
-    let download_deadline = SystemTime::now()
-        + flow
-            .cfg
-            .start_timeout
-            .max(pacing_budget.saturating_mul(2));
+    let download_deadline =
+        SystemTime::now() + flow.cfg.start_timeout.max(pacing_budget.saturating_mul(2));
     // Medium-2 复审修复：下载全量 part 自节流 ≤1 req/s（60/min 限流窗口内
     // 512 parts 不突发），throttler 跨 part 共享。
     let mut throttler = PartThrottler::new(flow.cfg.min_part_interval);

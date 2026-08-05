@@ -954,6 +954,15 @@ pub enum AcpEventData {
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     LocalUserBubble { text: String },
 
+    /// TUI 内部事件：本地 loading 复位请求（cancel / /clear / prompt 失败
+    /// 兜底时由 submit_consumer 发出）。仅 TUI 内部使用，不走 ACP 协议。
+    /// bridge 收到后若 phase == PromptRunning 则复位为 Idle 并重推 ACP_STATE
+    /// ——与直接写 ACP_STATE.is_loading 的兜底互补：兜底覆盖 bridge 已退出的
+    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（cancel 后迟到
+    /// 事件触发 push_acp_state 会用 phase 重算 is_loading=true，造成闪回）。
+    /// 幂等：phase 非 PromptRunning 时 no-op（Issue 2026-08-05 S4.2）。
+    LocalLoadingReset,
+
     /// bg agent 完成回调 user bubble——要求先 flush current_turn 到 committed，
     /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：
     /// 在 agent ReAct 循环中间插入用户气泡，把同一轮 TurnDone 的 AI 内容
@@ -1079,6 +1088,9 @@ pub enum AcpEventData {
         messages_json: String,
         /// 压缩策略: "micro" | "full" | "smart"
         strategy: String,
+        /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"，由
+        /// acp_notifier 透传时补默认值）
+        trigger: String,
         /// Compact 执行的语义结果
         outcome: String,
     },
