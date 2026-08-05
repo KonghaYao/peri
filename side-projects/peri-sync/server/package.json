@@ -6,13 +6,16 @@
     "dev": "bun run src/index.ts",
     "dev:cf": "wrangler dev",
     "deploy:cf": "wrangler deploy",
-    "test": "bun test src/pair-manager.test.ts"
+    "test": "bun test"
   },
   "dependencies": {
     "hono": "^4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4",
+    "@types/bun": "^1.3.14",
+    "esbuild": "0.27.3",
+    "miniflare": "4.20260515.0",
     "wrangler": "^4"
   }
 }
