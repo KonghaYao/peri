@@ -108,9 +108,16 @@ enum Commands {
     Sync {
         #[command(subcommand)]
         action: SyncAction,
-        /// Relay server URL
-        #[arg(long, default_value = "wss://peri-sync.claude-code-best.win")]
+        /// Server URL（仅 HTTPS；http/ws/wss 一律拒绝）
+        #[arg(
+            long,
+            default_value = "https://peri-sync.claude-code-best.win",
+            global = true
+        )]
         server: String,
+        /// 显式加密 keystore 文件路径（仅打开已存在的加密 keystore）
+        #[arg(long, global = true)]
+        keystore_path: Option<String>,
     },
     /// 插件管理
     Plugin {
@@ -130,9 +137,22 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SyncAction {
-    /// 发送本地配置到远端设备
+    /// 设备身份与信任管理
+    Device {
+        #[command(subcommand)]
+        action: peri_tui::sync::device_cli::DeviceAction,
+    },
+    /// 发送本地配置到已信任远端设备
+    Send {
+        /// 目标设备 ID（trusted peers 中）
+        #[arg(long)]
+        to: String,
+    },
+    /// 从已信任远端设备接收配置（掩码输入同步码）
+    Receive,
+    /// 旧 WebSocket 发送模式（Slice 4 移除）
     Sender,
-    /// 从远端设备接收配置
+    /// 旧 WebSocket 接收模式（Slice 4 移除）
     Receiver,
 }
 
@@ -413,11 +433,26 @@ fn main() -> Result<()> {
                 Ok(())
             })
         }
-        Some(Commands::Sync { action, server }) => {
+        Some(Commands::Sync {
+            action,
+            server,
+            keystore_path,
+        }) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
+            let keystore_path = keystore_path.as_deref().map(std::path::Path::new);
             rt.block_on(async {
                 match action {
+                    SyncAction::Device { action } => {
+                        peri_tui::sync::device_cli::dispatch(action, keystore_path)
+                    }
+                    SyncAction::Send { to } => {
+                        peri_tui::sync::channel_flow::run_send_cli(&server, keystore_path, &to)
+                            .await
+                    }
+                    SyncAction::Receive => {
+                        peri_tui::sync::channel_flow::run_receive_cli(&server, keystore_path).await
+                    }
                     SyncAction::Sender => peri_tui::sync::run_sync_sender(&server).await,
                     SyncAction::Receiver => peri_tui::sync::run_sync_receiver(&server).await,
                 }
