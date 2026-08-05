@@ -13,7 +13,7 @@
 //! - `middleware.rs`：中间件链追踪器。
 //! - `generation.rs`：LLM Generation 生命周期追踪器。
 //! - `tool_batch.rs`：工具调用批次管理器。
-//! - `subagent.rs`：SubAgent 嵌套调用栈管理器。
+//! - `registry.rs`：SubAgent 身份注册表(agent_id 查表归属,替代旧 LIFO 栈)。
 //! - `compact.rs`：Compact 操作 Span 追踪器。
 //!
 //! 所有事件通过 session trait 的 try_add() 同步入队，保证事件顺序与调用顺序一致，
@@ -26,7 +26,6 @@ pub(crate) mod middleware;
 pub(crate) mod registry;
 mod sampling;
 pub(crate) mod stages;
-mod subagent;
 mod tool_batch;
 mod usage;
 
