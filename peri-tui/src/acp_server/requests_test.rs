@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
@@ -8,6 +9,9 @@ use peri_acp::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
+use peri_middlewares::subagent::{
+    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+};
 use serde_json::{Value, json};
 
 use super::*;
@@ -459,4 +463,148 @@ async fn test_rewind_routes_to_dispatch() {
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
     assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+}
+
+// ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────
+
+/// [回归测试] cancel-bg-task 对 Workflow 类型任务必须真正 kill（issue 2026-08-05）。
+/// 历史 bug：Workflow 注册时固定 `Kill(None)`，cancel() 只 warn 并返回 success——
+/// 条目移除但 runner 继续运行。修复后 kill 闭包（生产路径转发
+/// WorkflowTaskRegistry::kill）随注册存入条目，cancel() 触发闭包。
+/// 本测试用探针闭包在 RPC 层锁定该行为。
+#[tokio::test]
+async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = "cancel-bg-session".to_string();
+    cfg.session_manager
+        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let killed = Arc::new(AtomicBool::new(false));
+    let killed_clone = killed.clone();
+    let task = BackgroundTask {
+        id: "wf-run-1".to_string(),
+        agent_name: "workflow".to_string(),
+        prompt_summary: "wf cancel test".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Workflow,
+        cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
+            killed_clone.store(true, Ordering::SeqCst);
+        }))),
+        pid: None,
+        output_preview: None,
+    };
+    let registry = &cfg
+        .session_manager
+        .get_session(&sid)
+        .unwrap()
+        .background_registry;
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": sid, "taskId": "wf-run-1" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "取消 Workflow 任务应返回 success，实际: {:?}",
+        result.err()
+    );
+    assert!(
+        killed.load(Ordering::SeqCst),
+        "cancel-bg-task 必须触发 kill 闭包（runner 真正被终止），而非仅移除条目"
+    );
+    assert_eq!(registry.active_count(), 0, "取消后条目应从 registry 移除");
+}
+
+/// [回归测试] cancel-bg-task 会话不存在时必须如实报错（issue 2026-08-05）。
+/// 历史 bug：静默返回 success，掩盖"取消未生效"。
+#[tokio::test]
+async fn test_cancel_bg_task_session_not_found_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": "no-such-session", "taskId": "wf-run-1" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(result.is_err(), "会话不存在应返回错误");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("session not found"),
+        "错误消息应提及 session not found，实际: {}",
+        err.message
+    );
+}
+
+/// [回归测试] cancel-bg-task 任务不存在时必须如实报错（issue 2026-08-05）。
+/// 与 session_not_found 区分（错误消息不同），客户端可据此判断重试策略。
+#[tokio::test]
+async fn test_cancel_bg_task_task_not_found_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn peri_acp::transport::AcpTransport> = Arc::new(MockTransport);
+    let sid = "cancel-bg-session".to_string();
+    cfg.session_manager
+        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let result = handle_request(
+        "session/cancel-bg-task",
+        &json!({ "sessionId": sid, "taskId": "no-such-task" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await;
+
+    assert!(result.is_err(), "任务不存在应返回错误");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("not found"),
+        "错误消息应提及 not found，实际: {}",
+        err.message
+    );
 }

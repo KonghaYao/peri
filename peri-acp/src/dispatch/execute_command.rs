@@ -123,7 +123,8 @@ pub async fn execute_command(
     // Immediate command bypasses the agent event pump, so we must manually
     // signal completion. Otherwise the TUI stays in loading state.
     // [TRAP] See issue_2026-05-29-immediate-command-missing-push-done.
-    event_sink.push_done(&session_id, "end_turn").await;
+    // Command turns carry no request_id (None).
+    event_sink.push_done(&session_id, "end_turn", None).await;
 
     // Serialize the result messages into a compact JSON array of { role, content }.
     let messages_json: Vec<Value> = result

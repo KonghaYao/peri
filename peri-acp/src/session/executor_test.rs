@@ -32,9 +32,10 @@ use peri_middlewares::{
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
-/// Mock EventSink，记录所有 push_done 调用。
+/// Mock EventSink，记录所有 push_done 调用（含 request_id）。
 struct MockEventSink {
     push_done_count: Mutex<usize>,
+    push_done_request_ids: Mutex<Vec<Option<String>>>,
     pushed_events: Mutex<Vec<String>>,
 }
 
@@ -42,12 +43,22 @@ impl MockEventSink {
     fn new() -> Self {
         Self {
             push_done_count: Mutex::new(0),
+            push_done_request_ids: Mutex::new(Vec::new()),
             pushed_events: Mutex::new(Vec::new()),
         }
     }
 
     fn push_done_count(&self) -> usize {
         *self.push_done_count.lock().unwrap()
+    }
+
+    fn last_push_done_request_id(&self) -> Option<String> {
+        self.push_done_request_ids
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .flatten()
     }
 }
 
@@ -58,8 +69,12 @@ impl EventSink for MockEventSink {
         self.pushed_events.lock().unwrap().push(json);
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, request_id: Option<&str>) {
         *self.push_done_count.lock().unwrap() += 1;
+        self.push_done_request_ids
+            .lock()
+            .unwrap()
+            .push(request_id.map(String::from));
     }
 }
 
@@ -151,6 +166,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         workflow_executor: None,
         workflow_middleware: None,
         session_start_source: None,
+        request_id: None,
         allow_await_wake: false,
         v2_event_tx: None,
         continuation_notify: None,
@@ -587,6 +603,37 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
         mock_sink.push_done_count(),
         1,
         "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
+    );
+}
+
+/// Issue 2026-08-05 返工链路验证：keepgoing 短路路径的 push_done 必须透传
+/// SessionContext.request_id（服务器回带 → TUI stale TurnInterrupted 配对）。
+#[tokio::test]
+async fn test_run_session_loop_keepgoing_short_circuit_forwards_request_id() {
+    // Arrange
+    let mock_sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_session_context("test-session");
+    ctx.request_id = Some("req-1".to_string());
+    let turn = TurnInput {
+        event_sink: Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        continuation: false,
+        frozen: None,
+        history: vec![],
+        incoming_recalls: vec![],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert
+    assert!(result.ok);
+    assert_eq!(
+        mock_sink.last_push_done_request_id().as_deref(),
+        Some("req-1"),
+        "push_done 必须透传 SessionContext.request_id"
     );
 }
 

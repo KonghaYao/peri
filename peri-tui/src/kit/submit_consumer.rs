@@ -174,12 +174,19 @@ async fn handle_agent_text_submit(
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
     }
 
+    // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的
+    // request_id（uuid v7）——PromptSubmitted 事件与 prompt RPC 必须携带同一
+    // id，bridge 才能把它记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对。
+    let request_id = Some(uuid::Uuid::now_v7().to_string());
+
     // 通过 LOCAL_EVENT_TX 发送 PromptSubmitted 事件到 acp_bridge，
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     {
         if let Some(tx) = LOCAL_EVENT_TX.get() {
             let _ = tx.send(AcpEventWithEpoch {
-                event: AcpEventData::PromptSubmitted,
+                event: AcpEventData::PromptSubmitted {
+                    request_id: request_id.clone(),
+                },
                 active_session_id: String::new(),
             });
         } else {
@@ -196,7 +203,7 @@ async fn handle_agent_text_submit(
     );
 
     let content = MessageContent::text(trimmed.to_string());
-    acp_client.prompt(&content).await.map_err(|e| {
+    acp_client.prompt(&content, request_id).await.map_err(|e| {
         warn!(error = %e, "kit submit_consumer: prompt RPC failed");
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
@@ -220,11 +227,18 @@ async fn handle_keepgoing_submit(
         return Ok(());
     }
 
+    // Issue 2026-08-05 返工：keepgoing 同样生成 request_id（每次 keepgoing RPC
+    // 都是新 turn）——修复 v1 在 keepgoing 场景（无 LocalUserBubble、代际不变）
+    // 下 stale 判定失效的漏洞。
+    let request_id = Some(uuid::Uuid::now_v7().to_string());
+
     // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
-            event: AcpEventData::PromptSubmitted,
+            event: AcpEventData::PromptSubmitted {
+                request_id: request_id.clone(),
+            },
             active_session_id: String::new(),
         });
     } else {
@@ -238,7 +252,7 @@ async fn handle_keepgoing_submit(
     );
 
     acp_client
-        .prompt(&MessageContent::text(""))
+        .prompt(&MessageContent::text(""), request_id)
         .await
         .map_err(|e| {
             warn!(error = %e, "kit submit_consumer: keepgoing prompt RPC failed");
@@ -415,6 +429,12 @@ pub fn spawn_cancel_consumer(
                             break;
                         }
                         Some(()) => {
+                            // Issue 2026-08-05: cancel 兜底复位。transport 死亡或
+                            // prompt task panic 时 TurnInterrupted 永不到达，is_loading
+                            // 无事件驱动复位路径，TUI 软锁死。收到取消信号先本地复位
+                            // （与服务端 TurnInterrupted 幂等——事件到达后再次复位无害），
+                            // 使 Ctrl+C 双击退出路径恢复可用。
+                            clear_loading_state();
                             if let Err(e) = acp_client.cancel().await {
                                 tracing::warn!(%e, "cancel_consumer: cancel 失败");
                             }

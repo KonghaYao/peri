@@ -223,3 +223,56 @@ fn test_cleanup_completed_keeps_recently_completed_runs() {
     // 刚完成的 run 不应被清理（completed_at 在 5 分钟保留期内）
     assert!(store.get_run("r1").is_some());
 }
+
+#[test]
+fn test_run_done_killed_sets_killed_status() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "test".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: "r1".into(),
+        status: "killed".into(),
+        return_value: None,
+        error: Some("workflow killed by user".into()),
+    });
+    let run = store.get_run("r1").expect("run 应存在");
+    assert!(matches!(run.status, RunStatus::Killed));
+    // Killed 是终态：completed_at 必须设置（否则 cleanup_completed 永不清理）
+    assert!(run.completed_at.is_some());
+}
+
+#[test]
+fn test_cleanup_completed_keeps_recently_killed_runs() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "test".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: "r1".into(),
+        status: "killed".into(),
+        return_value: None,
+        error: None,
+    });
+    store.cleanup_completed();
+    // 刚 killed 的 run 不应被清理（completed_at 在 5 分钟保留期内）
+    assert!(store.get_run("r1").is_some());
+}
+
+#[test]
+fn test_run_done_unknown_run_is_noop() {
+    let store = make_store();
+    // 对不存在的 run_id 调 RunDone：不 panic、不创建条目
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: "missing".into(),
+        status: "killed".into(),
+        return_value: None,
+        error: None,
+    });
+    assert!(store.get_run("missing").is_none());
+    assert!(store.list_runs().is_empty());
+}

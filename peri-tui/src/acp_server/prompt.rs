@@ -74,6 +74,14 @@ pub(crate) async fn run_prompt(
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
 
+    // Issue 2026-08-05 返工：requestId 透传——TUI 提交时生成、随 prompt RPC 到达，
+    // 服务器随 turn 结束事件（peri/agent_event_done）原样回带，供 TUI 侧 stale
+    // TurnInterrupted 的 request_id 配对判定。缺失路径（stdio / continuation 等）为 None。
+    let request_id = params
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     // Create cancel token and register in sessions.
     let cancel = AgentCancellationToken::new();
     {
@@ -196,6 +204,7 @@ pub(crate) async fn run_prompt(
         } else {
             None
         },
+        request_id,
         allow_await_wake: true,
         v2_event_tx: crate::kit::atoms::V2_EVENT_TX.get().cloned(),
         continuation_notify: cont_tx,

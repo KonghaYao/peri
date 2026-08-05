@@ -151,7 +151,8 @@ pub async fn rewind_execute(
 
     // 与 execute-command dispatch 一致：Immediate 命令绕过 agent event pump，
     // 必须手动 signal completion（TRAP: issue_2026-05-29-immediate-command-missing-push-done）。
-    event_sink.push_done(&session_id, "end_turn").await;
+    // 命令 turn 无 request_id（None）。
+    event_sink.push_done(&session_id, "end_turn", None).await;
 
     if result.stop_reason == PromptStopReason::Cancelled {
         return Err(AcpError::new(-32603, "rewind cancelled"));

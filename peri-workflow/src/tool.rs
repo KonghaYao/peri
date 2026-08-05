@@ -21,7 +21,15 @@ use crate::runner::{WorkflowInput, WorkflowResult, WorkflowRunner};
 ///
 /// Implemented by `peri_middlewares::BackgroundTaskRegistry`.
 pub trait BgTaskRegistry: Send + Sync {
-    fn register_workflow(&self, task_id: String, summary: String);
+    /// 注册 workflow bg 任务。`kill` 为 kill 闭包（None = kill 通道不可用）：
+    /// 由注册方在同时持有 `WorkflowTaskRegistry` 的位置构造，取消时转发到
+    /// `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
+    fn register_workflow(
+        &self,
+        task_id: String,
+        summary: String,
+        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
+    );
     fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64);
 }
 
@@ -222,6 +230,10 @@ impl BaseTool for WorkflowTool {
 
         // 注册到统一后台任务注册表
         if let Some(ref bg) = self.bg_registry {
+            // 携带 kill 闭包：session/cancel-bg-task 时转发到 WorkflowTaskRegistry::kill
+            // （kill_tx 的唯一持有者，与 workflow/kill_run RPC 同一通道）。
+            let kill_registry = Arc::clone(&self.registry);
+            let kill_run_id = run_id.clone();
             bg.register_workflow(
                 run_id.clone(),
                 format!(
@@ -229,6 +241,9 @@ impl BaseTool for WorkflowTool {
                     workflow_name,
                     script.chars().take(80).collect::<String>()
                 ),
+                Some(Box::new(move || {
+                    let _ = kill_registry.kill(&kill_run_id);
+                })),
             );
         }
 

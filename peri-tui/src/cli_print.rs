@@ -238,6 +238,7 @@ pub async fn run_print(
         workflow_executor: None,
         workflow_middleware: None,
         session_start_source: Some("startup".to_string()),
+        request_id: None, // print 模式无 requestId 配对
         allow_await_wake: false,
         v2_event_tx: None,
         continuation_notify: None, // print 模式无 continuation scheduler
@@ -317,7 +318,7 @@ impl peri_acp::session::event_sink::EventSink for PrintEventSink {
         }
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
 /// 事件收集器

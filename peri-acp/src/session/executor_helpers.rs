@@ -152,7 +152,10 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
     };
     // Immediate 命令跳过 agent event pump，必须手动发送 push_done
     // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-    req.event_sink.push_done(req.session_id, "end_turn").await;
+    // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
+    req.event_sink
+        .push_done(req.session_id, "end_turn", None)
+        .await;
     Some(PromptResult {
         messages: result.messages,
         ok: true,
@@ -173,6 +176,8 @@ pub(super) struct SpawnPumpRequest {
     pub(super) effective_context_window: u32,
     pub(super) langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     pub(super) trace_input: String,
+    /// 本轮 prompt 的 requestId——push_done 时透传回带（TUI stale 判定用）。
+    pub(super) request_id: Option<String>,
 }
 
 /// 后台事件泵句柄，通过 oneshot channel 与 pump_done_rx 配对。
@@ -195,6 +200,7 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         effective_context_window,
         langfuse_tracer,
         trace_input,
+        request_id,
     } = req;
 
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
@@ -256,7 +262,8 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
             super::PromptStopReason::Cancelled => "cancelled",
             super::PromptStopReason::MaxTurnRequests => "max_turn_requests",
         };
-        sink.push_done(&session_id, stop_reason_str).await;
+        sink.push_done(&session_id, stop_reason_str, request_id.as_deref())
+            .await;
 
         // Signal pump completion BEFORE Langfuse flush.
         // Langfuse is telemetry — it must never block the execution pipeline.

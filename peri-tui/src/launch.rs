@@ -255,8 +255,9 @@ pub async fn build_app_and_acp(
                 run_acp_server(Arc::new(server_transport), server_config).await;
             });
 
-            let (acp_client, notification_rx) = AcpTuiClient::new(client_transport);
-            acp_client.spawn_pump();
+            let (acp_client, notification_tx, notification_rx) =
+                AcpTuiClient::new(client_transport);
+            acp_client.spawn_pump(notification_tx);
 
             app.acp_client = Some(acp_client.clone());
 

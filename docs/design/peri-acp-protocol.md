@@ -32,7 +32,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults? }` | `{}` | 提交用户输入（notification，sessionId 同时支持 `session_id` 别名） |
+| `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults?, requestId? }` | `{}` | 提交用户输入（notification，sessionId 同时支持 `session_id` 别名；`requestId` 为可选的本轮 turn 标识，服务器随 `peri/agent_event_done` 回带，供 TUI stale 事件配对） |
 | `session/cancel` | `{ sessionId }` | — | 中断当前 Agent（notification，非 request-response） |
 | `session/execute-command` | `{ session_id, command, args }` | `{}` | 执行 Slash 命令（HITL 审批和 AskUser 回答均走此方法） |
 
@@ -83,7 +83,7 @@ EventSink 在 `push_event()` 中依次投递各通道：
 2. **`peri/agent_event`**：TUI 专用 notification，携带 `{sessionId, event_json}`，event_json 为 `AcpEvent` DTO 序列化后的 JSON 字符串。
 3. **`peri/hitl_pending`**：HITL 审批 notification（预留）。
 4. **`peri/unstable-event`**：新协议事件路由，由 `router::route()` 从 ExecutorEvent 映射为 `{event, data}` 格式。仅 3 个事件产出此通道。
-5. **`peri/agent_event_done`**：turn 结束信号 notification（`push_done()` 发送），TUI 侧映射为 `AcpNotification::AgentDone → AcpEventData::TurnDone`。
+5. **`peri/agent_event_done`**：turn 结束信号 notification（`push_done()` 发送），TUI 侧映射为 `AcpNotification::AgentDone → AcpEventData::TurnDone`。payload 为 `{sessionId, stopReason}`，可选扩展字段 `requestId`：TUI 提交 prompt 时生成（`session/prompt` params 携带 `requestId`），服务器随 done 事件原样回带，供 TUI 侧 stale `TurnInterrupted` 的 turn 归属配对判定（Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 / stdio 等）不携带该字段。
 
 > **`_meta` key 序列化**：ACP SDK 的 `ContentChunk`/`ToolCall`/`ToolCallUpdate` 均标注 `#[serde(rename = "_meta")]`，运行时 key 为 `"_meta"`（带下划线）。session replay 检测采用四级 fallback：`_meta → meta → content._meta → content.meta`，取 `periReplay` 布尔值。
 

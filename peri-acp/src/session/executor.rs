@@ -343,6 +343,13 @@ pub struct SessionContext {
     // ── turn: per-turn metadata ────────────────────────────────────────────
     pub session_start_source: Option<String>,
 
+    /// 本轮 prompt RPC 的 requestId（TUI 提交时生成、随 `session/prompt`
+    /// params 传入）。turn 结束（push_done → `peri/agent_event_done`）时透传
+    /// 回带，供 TUI 侧 stale `TurnInterrupted` 的 request_id 配对判定
+    /// （Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 /
+    /// stdio / print 模式）为 None——TUI 侧相应跳过 id 判定、回退代际兜底。
+    pub request_id: Option<String>,
+
     // ── transport: transport-aware flags ───────────────────────────────────
     pub allow_await_wake: bool,
 
@@ -561,7 +568,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         // 不会执行），必须手动发送终止通知（ARC-EVENT-001），否则 TUI 依赖
         // AgentDone→TurnDone 退出 loading 的机制失效，界面永久卡在 loading。
         // stop_reason 与正常路径保持一致（executor_helpers push_done "end_turn"）。
-        event_sink.push_done(&ctx.session_id, "end_turn").await;
+        event_sink
+            .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
+            .await;
         return PromptResult {
             messages: history,
             ok: true,
@@ -697,7 +706,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                 // is_loading=true 后永久卡住（与 Immediate 命令路径同模式，需手动
                 // 发 peri/agent_event_done 触发 acp_notifier 的 AgentDone→TurnDone）。
                 if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn").await;
+                    // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
+                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
                 }
             }
         });
@@ -895,6 +905,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         effective_context_window,
         langfuse_tracer: langfuse_tracer.clone(),
         trace_input: trace_input.to_string(),
+        request_id: ctx.request_id.clone(),
     });
 
     // 把会 move/借用 的资源直接传入 build_and_execute_agent。

@@ -3,14 +3,15 @@
 #[cfg(test)]
 use super::*;
 
-use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::atoms::{ACP_STATE, VIEW_MODELS, ViewModelsSnapshot};
 use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
+use serial_test::serial;
 
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {
     let (client_transport, server_transport): (MpscClientTransport, MpscServerTransport) =
         mpsc_transport_pair();
-    let (client, _notification_rx) = AcpTuiClient::new(client_transport);
+    let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     (client, server_transport)
 }
 
@@ -72,6 +73,36 @@ async fn test_dropped_tx_exits_loop() {
 
     drop(tx);
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+}
+
+/// Issue 2026-08-05: cancel 收到信号时先本地兜底复位 is_loading——
+/// transport 死亡 / prompt task panic 时 TurnInterrupted 永不到达，
+/// loading 无事件驱动复位路径；本地复位后 Ctrl+C 双击退出路径恢复可用
+/// （与服务端 TurnInterrupted 幂等：事件到达后再次复位无害）。
+#[tokio::test]
+#[serial]
+async fn test_cancel_consumer_resets_loading_locally() {
+    crate::kit::atoms::init_atoms();
+    // 模拟卡死状态：is_loading=true（事件流已中断，无法靠事件复位）
+    {
+        let ref_guard = ACP_STATE.state();
+        let mut acp = ref_guard.write();
+        acp.is_loading = true;
+    }
+    let (client, _server_transport) = make_client_without_pump();
+    let (tx, rx) = mpsc::unbounded_channel::<()>();
+    let shutdown = CancellationToken::new();
+    let _handle = spawn_cancel_consumer(client, rx, shutdown.clone());
+
+    tx.send(()).unwrap();
+    // 复位发生在 cancel().await 之前——即使 cancel RPC 无响应（transport 已死）
+    // 挂起，复位也已生效。
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "cancel 信号后 is_loading 应本地复位为 false"
+    );
+    shutdown.cancel();
 }
 
 /// 编译期断言：UnboundedSender<SubmitRequest> 与 atoms::SUBMIT_TX 类型契约一致。

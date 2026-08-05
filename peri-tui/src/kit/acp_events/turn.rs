@@ -19,6 +19,10 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
+    // Issue 2026-08-05 次要项 (b)：last_submitted_text 是"最近一次用户提交"的
+    // 回滚锚点，只对运行中的 turn 有效。TurnDone 后本 turn 已结束，不清除会让
+    // 旧文本跨 turn 残留——后续到达的 stale TurnInterrupted 会误删不相关气泡。
+    state.last_submitted_text = None;
 
     state.phase = SessionPhase::Idle;
 
@@ -51,7 +55,59 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     }
 }
 
-pub(super) fn handle_turn_interrupted(state: &mut BridgeState, _reason: &str) {
+pub(super) fn handle_turn_interrupted(
+    state: &mut BridgeState,
+    _reason: &str,
+    request_id: &Option<String>,
+) {
+    // Issue 2026-08-05（返工）：stale 判定 = request_id 配对（主导排序）
+    // OR 代际判定（排队分支兜底），两条互补：
+    //
+    // - request_id 配对：事件携带 request_id 且 ≠ 当前 turn 的 request_id →
+    //   stale。覆盖"新提交已发 RPC（PromptSubmitted 先到）而旧 turn 的
+    //   TurnInterrupted 晚到"的主导排序场景——v1 仅靠代际判定在此场景失效
+    //   （last_prompt_generation 已被新提交刷新，N+1 > N+1 为 false）。
+    // - 代际判定：turn_generation > last_prompt_generation → stale。覆盖
+    //   排队分支——B 仅 LocalUserBubble（无 RPC、无 request_id），
+    //   current_request_id 停留在 A，id 配对判不出 stale，代际判定兜底。
+    //
+    // 正常取消（无新提交）两条都不命中 → 非 stale → 走零产出回滚。
+    let id_mismatch = request_id
+        .as_ref()
+        .is_some_and(|rid| state.current_request_id.as_ref() != Some(rid));
+    let is_stale = id_mismatch || state.turn_generation > state.last_prompt_generation;
+    if is_stale {
+        tracing::info!(
+            turn_generation = state.turn_generation,
+            last_prompt_generation = state.last_prompt_generation,
+            id_mismatch,
+            request_id = ?request_id,
+            current_request_id = ?state.current_request_id,
+            "TurnInterrupted: stale (belongs to an older turn), skipping zero-output rollback"
+        );
+        // stale 分支：只归档旧 turn 已产出内容 + 复位状态，不执行回滚副作用
+        // （不删新气泡、不恢复文本）。INPUT_BUFFER 排队输入**保留**——它们
+        // 是用户已提交的新请求（loading 期间排队），随旧 turn 作废会静默丢弃
+        // 用户输入；保留至下一 TurnDone 由 drain_input_buffer 按序提交。
+        // last_submitted_text **保留**——它指向最近一次提交（新 turn 的锚点），
+        // 后续该 turn 被取消（连续取消场景）时零产出回滚仍需它恢复输入文本；
+        // 旧 turn 的锚点残留风险由 TurnDone 清空（handle_turn_done）兜底。
+        if !state.current_turn.committed && !state.current_turn.is_empty() {
+            state.current_turn.deactivate();
+            for vm in state.current_turn.view_models() {
+                state.committed.push_back(vm.clone());
+            }
+        }
+        state.current_turn = CurrentTurn::new();
+        state.last_pushed_text_len = 0;
+        state.last_pushed_reasoning_len = 0;
+        state.variant = 0;
+        state.phase = SessionPhase::Idle;
+        super::render::push_view_models(state);
+        super::render::push_acp_state(state);
+        return;
+    }
+
     // 零产出回滚：Agent 尚未产出任何 AI 内容时（current_turn 为空），
     // 撤销本次用户气泡 + 恢复文本到输入框。
     // 仅当有 last_submitted_text 时才执行（正常情况下 LocalUserBubble 已到达）。
@@ -88,6 +144,10 @@ pub(super) fn handle_turn_interrupted(state: &mut BridgeState, _reason: &str) {
             state.committed.push_back(vm.clone());
         }
     }
+    // Issue 2026-08-05 次要项 (a)：归档分支同步清空 INPUT_BUFFER——本 turn 被
+    // 取消，loading 期间排队的输入作废；不清的话它们会在下一 TurnDone 被
+    // drain_input_buffer 意外提交（用户以为已取消，输入却在下轮自动发出）。
+    INPUT_BUFFER.state().write().clear();
     state.current_turn = CurrentTurn::new();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
@@ -133,10 +193,17 @@ pub(super) fn handle_prompt_started(state: &mut BridgeState) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_prompt_submitted(state: &mut BridgeState) {
+pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: &Option<String>) {
     // submit_consumer 在 prompt RPC 之前发出此事件，让 bridge 统一管理 loading 状态。
     state.phase = SessionPhase::PromptRunning;
     state.variant = 1;
+    // Issue 2026-08-05: 记录"已真正发出 prompt RPC"时的代际快照——
+    // TurnInterrupted 的 stale 判定以 turn_generation > last_prompt_generation
+    // 为依据（存在已显示气泡但请求未发出/晚到的更新提交）。
+    state.last_prompt_generation = state.turn_generation;
+    // Issue 2026-08-05 返工：记录当前 turn 的 request_id——stale TurnInterrupted
+    // 的 request_id 配对判定基准（主导排序场景，见 handle_turn_interrupted 注释）。
+    state.current_request_id = request_id.clone();
     super::render::push_acp_state(state);
 }
 
@@ -166,6 +233,10 @@ pub(super) fn handle_session_replay_done(state: &mut BridgeState) {
 
 pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
     state.last_submitted_text = Some(text.to_string());
+    // Issue 2026-08-05: 每次用户可见提交递增 turn 代际——这是 stale TurnInterrupted
+    // 判定的基准（注意 session replay 的 user_message_chunk 也走本变体，但 replay
+    // 期间无 turn 运行、无 TurnInterrupted 到达，递增不会造成误判）。
+    state.turn_generation = state.turn_generation.wrapping_add(1);
     state
         .committed
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(

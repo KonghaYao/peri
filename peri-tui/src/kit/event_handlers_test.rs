@@ -69,3 +69,20 @@ fn test_determine_ctrl_c_action_idle_expired() {
         CtrlCAction::FirstQuit
     );
 }
+
+/// Issue 2026-08-05 验收：transport 死亡且 notifier 兜底复位后
+/// （is_loading=false），Ctrl+C 退出链路恢复可达——第一次 → FirstQuit，
+/// 1 秒内第二次 → Quit，不再被 loading 门禁恒拦截为 Cancel。
+#[test]
+fn test_disconnected_recovery_makes_ctrl_c_quit_reachable() {
+    let now = Instant::now();
+    assert_eq!(
+        determine_ctrl_c_action(false, None, now),
+        CtrlCAction::FirstQuit
+    );
+    let first = now - Duration::from_millis(500);
+    assert_eq!(
+        determine_ctrl_c_action(false, Some(first), now),
+        CtrlCAction::Quit
+    );
+}

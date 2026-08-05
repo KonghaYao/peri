@@ -14,6 +14,8 @@ pub enum BackgroundRegistryError {
     ConcurrentLimit(usize),
     #[error("Task {0} not found")]
     TaskNotFound(String),
+    #[error("Task {0} cannot be cancelled: kill handle unavailable")]
+    KillUnavailable(String),
     #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
     KindConcurrentLimit {
         kind: String,
@@ -32,14 +34,25 @@ pub enum BgTaskKind {
 }
 
 /// 后台任务取消句柄（按 kind 分发取消逻辑）
-#[derive(Debug)]
 pub enum BgCancelHandle {
     /// bg agent：取消 tokio task
     Abort(tokio::task::AbortHandle),
-    /// workflow：通过 oneshot 通知 workflow runner kill
-    Kill(Option<tokio::sync::oneshot::Sender<()>>),
+    /// workflow：kill 闭包——转发到 `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
+    /// `None` 表示 kill 通道不可用（如 spawn 失败），此时 `cancel()` 返回明确错误
+    /// 而非假装成功（issue 2026-08-05：Workflow 取消无效）。
+    Kill(Option<Box<dyn FnOnce() + Send + Sync>>),
     /// bg shell：OS 进程 kill
     Pid(u32),
+}
+
+impl std::fmt::Debug for BgCancelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BgCancelHandle::Abort(_) => f.write_str("Abort(_)"),
+            BgCancelHandle::Kill(_) => f.write_str("Kill(_)"),
+            BgCancelHandle::Pid(pid) => f.debug_tuple("Pid").field(pid).finish(),
+        }
+    }
 }
 
 /// 后台任务信息（注册表条目）
@@ -280,19 +293,30 @@ impl BackgroundTaskRegistry {
     /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
     pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
         let mut tasks = self.tasks.lock();
+        // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如 workflow kill 闭包缺失、
+        // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
+        // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
+        let handle_unavailable = matches!(
+            tasks.get(task_id).map(|t| &t.cancel_handle),
+            Some(BgCancelHandle::Kill(None))
+        );
+        if handle_unavailable {
+            return Err(BackgroundRegistryError::KillUnavailable(
+                task_id.to_string(),
+            ));
+        }
         if let Some(task) = tasks.remove(task_id) {
             match task.cancel_handle {
                 BgCancelHandle::Abort(handle) => {
                     handle.abort();
                 }
-                BgCancelHandle::Kill(Some(tx)) => {
-                    let _ = tx.send(());
+                BgCancelHandle::Kill(Some(kill)) => {
+                    // 触发 kill 闭包：workflow 场景转发到 WorkflowTaskRegistry::kill
+                    kill();
                 }
                 BgCancelHandle::Kill(None) => {
-                    warn!(
-                        task_id = %task_id,
-                        "bg task cancel: kill_tx already consumed"
-                    );
+                    // 上方已校验，理论不可达；防御性保留
+                    unreachable!("Kill(None) checked before task removal");
                 }
                 BgCancelHandle::Pid(pid) => {
                     if pid == 0 {

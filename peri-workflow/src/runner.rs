@@ -692,6 +692,16 @@ impl WorkflowRunner {
                 };
                 let _ = journal_clone2.write_state(&run_id, &state);
 
+                // 复用 reducer 标记 Killed 终态（与 Node 正常路径 run_done 同一状态机入口）：
+                // msg_loop 已被 abort，Node 侧 run_done 不会到达；不标记则 progress_store 会
+                // 永久保留 Running 条目（workflow/list_runs 幽灵 running）
+                progress_store.apply_event(&ProgressEvent::RunDone {
+                    run_id: run_id.clone(),
+                    status: "killed".to_string(),
+                    return_value: None,
+                    error: Some("workflow killed by user".to_string()),
+                });
+
                 // 发送 done_tx（kill 分支作为唯一出口，确保通知任务收到 "killed" 状态）
                 let killed_result = WorkflowResult {
                     run_id: run_id.clone(),

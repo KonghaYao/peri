@@ -524,13 +524,18 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing taskId"))?;
 
-            if let Some(session) = cfg.session_manager.get_session(req_session_id) {
-                session
-                    .background_registry
-                    .cancel(task_id)
-                    .map_err(|e| AcpError::new(-32603, e.to_string()))?;
-                info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
-            }
+            // 会话不存在时如实报错（此前静默返回 success，掩盖取消未生效）
+            let session = cfg
+                .session_manager
+                .get_session(req_session_id)
+                .ok_or_else(|| {
+                    AcpError::new(-32602, format!("session not found: {req_session_id}"))
+                })?;
+            session
+                .background_registry
+                .cancel(task_id)
+                .map_err(|e| AcpError::new(-32603, e.to_string()))?;
+            info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
             Ok(serde_json::json!({ "success": true }))
         }
 

@@ -9,7 +9,7 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{BG_TASKS, CRON_JOBS, LANG_VERSION, VIEW_MODELS};
+use crate::kit::atoms::{ACP_CLIENT_HANDLE, BG_TASKS, CRON_JOBS, LANG_VERSION, VIEW_MODELS};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
@@ -64,17 +64,42 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match key.code {
                 KeyCode::Esc => close_panel(),
                 KeyCode::Enter => {
-                    // 如果选中了 bg task，尝试取消
+                    // 选中 bg task：真实取消。Workflow 走 workflow/kill_run（kill 通道与
+                    // cancel-bg-task 已打通，见 issue 2026-08-05），Agent/Shell 走 cancel-bg-task。
                     let sel = *selected.read();
                     let bg_count = BG_TASKS.state().read().len();
                     if sel < bg_count
                         && let Some(task) = BG_TASKS.state().read().get(sel)
                     {
-                        tracing::info!(
-                            task_id = %task.task_id,
-                            kind = %task.kind,
-                            "tasks panel: cancel bg task (RPC not yet wired)"
-                        );
+                        let task_id = task.task_id.clone();
+                        let kind = task.kind.clone();
+                        if let Some(client) = ACP_CLIENT_HANDLE.get() {
+                            let client = client.clone();
+                            let sid = client.current_session_id().unwrap_or_default();
+                            tokio::spawn(async move {
+                                let result = if kind == "workflow" {
+                                    client.kill_workflow_run(&sid, &task_id).await
+                                } else {
+                                    client.cancel_bg_task(&sid, &task_id).await
+                                };
+                                match result {
+                                    Ok(v) => tracing::info!(
+                                        task_id = %task_id,
+                                        kind = %kind,
+                                        ?v,
+                                        "tasks panel: cancel bg task"
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        task_id = %task_id,
+                                        kind = %kind,
+                                        error = %e,
+                                        "tasks panel: cancel bg task failed"
+                                    ),
+                                }
+                            });
+                        } else {
+                            tracing::warn!(target: "tasks-panel", "ACP_CLIENT_HANDLE not set, cancel skipped");
+                        }
                     }
                     close_panel()
                 }

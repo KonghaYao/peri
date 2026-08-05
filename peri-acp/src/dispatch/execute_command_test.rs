@@ -20,7 +20,7 @@ impl EventSink for PendingEventSink {
         std::future::pending::<()>().await;
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str) {}
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }
 
 #[test]

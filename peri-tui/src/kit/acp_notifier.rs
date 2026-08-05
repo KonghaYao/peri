@@ -22,8 +22,8 @@ use crate::acp_client::AcpNotification;
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
-    ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, PERI_CONFIG_HANDLE,
-    SKILL_NAMES, SPINNER_TOKEN_COUNT,
+    ACP_STATE, ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, INPUT_BUFFER,
+    NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SKILL_NAMES, SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::truncate::summarize_input;
@@ -57,6 +57,19 @@ pub fn spawn_kit_notifier(
                         Some(notif) => forward_notification(&bridge_tx, notif),
                         None => {
                             debug!("kit ACP notifier: notification channel closed (transport disconnected)");
+                            // Issue 2026-08-05: 事件流中断兜底复位。
+                            // transport 死亡后不再有任何事件到达，is_loading 的所有
+                            // 复位路径都依赖事件，会永久卡 true 锁死 TUI（Ctrl+C 退出、
+                            // /exit、/clear 全被 loading 门禁拦截）。此处直接复位 atom：
+                            // 清 loading + 排队输入 + 提示断连（app-agent-disconnected
+                            // 文案此前在 FTL 中存在但零引用，此处接上）。
+                            ACP_STATE.state().write().is_loading = false;
+                            INPUT_BUFFER.state().write().clear();
+                            *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+                                message: i18n::tr("app-agent-disconnected"),
+                                until: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                            });
+                            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
                             break;
                         }
                     }
@@ -232,10 +245,14 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
         AcpNotification::AgentDone {
             session_id,
             stop_reason,
+            request_id,
         } => {
             let decoded = if stop_reason == "cancelled" {
                 AcpEventData::TurnInterrupted {
                     reason: "user cancelled".into(),
+                    // 透传被中断 turn 的 requestId——bridge 据此识别事件所属 turn，
+                    // 丢弃早于当前 turn 的 stale 取消事件（Issue 2026-08-05）。
+                    request_id,
                 }
             } else {
                 AcpEventData::TurnDone

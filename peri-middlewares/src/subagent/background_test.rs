@@ -1,6 +1,8 @@
 #[cfg(unix)]
 use std::time::Duration;
 
+use std::sync::atomic::Ordering;
+
 use super::*;
 
 fn make_registry() -> BackgroundTaskRegistry {
@@ -142,6 +144,81 @@ async fn test_cancel_propagates_to_running_task() {
 }
 
 // ── 新增：per-kind 上限测试 ──
+
+/// [回归测试] Workflow 类型任务的 kill 闭包必须被 cancel() 真正调用。
+/// 历史背景（issue 2026-08-05）：Workflow 注册时固定 `Kill(None)`，
+/// cancel() 只 warn 并假装成功——runner 实际未被终止，条目移除但 workflow 继续跑。
+/// 修复后 `Kill(Some(kill))` 分支执行 kill 闭包（转发到 WorkflowTaskRegistry::kill）。
+#[tokio::test]
+async fn test_cancel_workflow_invokes_kill_closure() {
+    let registry = make_registry();
+    let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let killed_clone = killed.clone();
+    let task = BackgroundTask {
+        id: "bg-wf-1".to_string(),
+        agent_name: "workflow".to_string(),
+        prompt_summary: "workflow cancel test".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Workflow,
+        cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
+            killed_clone.store(true, Ordering::SeqCst);
+        }))),
+        pid: None,
+        output_preview: None,
+    };
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    registry.cancel("bg-wf-1").unwrap();
+
+    assert!(
+        killed.load(Ordering::SeqCst),
+        "cancel() 必须调用 kill 闭包（runner 真正被终止），而非仅移除条目"
+    );
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "cancel 后任务应从 registry 移除"
+    );
+    assert!(
+        registry.list_tasks().is_empty(),
+        "cancel 后任务应从 registry 移除"
+    );
+}
+
+/// [回归测试] kill 通道不可用（Kill(None)）时 cancel() 必须如实返回错误，
+/// 且条目保留（等待自然完成），不得移除条目 + 发 cancelled 事件假装成功。
+/// 历史背景（issue 2026-08-05）：`Kill(None)` 分支此前仅 warn 并返回 Ok。
+#[tokio::test]
+async fn test_cancel_with_unavailable_handle_returns_error_and_keeps_entry() {
+    let registry = make_registry();
+    let task = BackgroundTask {
+        id: "bg-wf-none".to_string(),
+        agent_name: "workflow".to_string(),
+        prompt_summary: "no kill handle".to_string(),
+        status: BackgroundTaskStatus::Running,
+        started_at: std::time::Instant::now(),
+        chrono_started_at: chrono::Utc::now(),
+        kind: BgTaskKind::Workflow,
+        cancel_handle: BgCancelHandle::Kill(None),
+        pid: None,
+        output_preview: None,
+    };
+    registry.register_with_kind(task).unwrap();
+    assert_eq!(registry.active_count(), 1);
+
+    let err = registry.cancel("bg-wf-none").unwrap_err();
+    assert!(
+        err.to_string().contains("cannot be cancelled"),
+        "不可取消时应返回明确错误，实际: {}",
+        err
+    );
+    // 条目保留：任务仍在运行，等待自然完成
+    assert_eq!(registry.active_count(), 1, "取消失败时条目应保留");
+    assert_eq!(registry.list_tasks().len(), 1, "取消失败时条目应保留");
+}
 
 #[tokio::test]
 async fn test_count_by_kind_works() {

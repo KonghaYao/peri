@@ -924,7 +924,9 @@ pub enum AcpEventData {
 
     /// TUI 内部事件：用户已提交 prompt，loading spinner 应立即显示。
     /// submit_consumer 发出，bridge 收到后设 phase=PromptRunning, variant=1。
-    PromptSubmitted,
+    /// `request_id` 为本轮 prompt RPC 的 id（submit_consumer 生成）——bridge
+    /// 记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对判定。
+    PromptSubmitted { request_id: Option<String> },
 
     /// session/load 历史恢复开始。Replay 不是 agent turn，不能触发 loading。
     SessionReplayStarted,
@@ -936,7 +938,13 @@ pub enum AcpEventData {
     TurnDone,
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
-    TurnInterrupted { reason: String },
+    /// `request_id` 为被中断 turn 的 prompt requestId（服务器经
+    /// `peri/agent_event_done` 回带）——TUI 用它识别事件所属 turn，
+    /// 丢弃早于当前 turn 的 stale 事件（Issue 2026-08-05）。
+    TurnInterrupted {
+        reason: String,
+        request_id: Option<String>,
+    },
 
     /// `"turn-suspended"` -- agent turn suspended, waiting for bg agent/cron/workflow.
     /// TUI 收到后应归档 current_turn + 停止 loading spinner。
@@ -1131,7 +1139,10 @@ impl AcpEventData {
             "turn-done" => AcpEventData::TurnDone,
             "turn-interrupted" => {
                 let reason = data["reason"].as_str().unwrap_or("").to_string();
-                AcpEventData::TurnInterrupted { reason }
+                // requestId 为可选字段：unstable-event 通道当前未发射 turn-interrupted
+                // （router 返回 None），保留解析以兼容未来启用（协议文档已标注）。
+                let request_id = data["requestId"].as_str().map(String::from);
+                AcpEventData::TurnInterrupted { reason, request_id }
             }
             "turn-suspended" => AcpEventData::TurnSuspended,
 

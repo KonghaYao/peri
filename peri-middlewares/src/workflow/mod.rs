@@ -34,7 +34,12 @@ use crate::subagent::{
 
 /// 将 BackgroundTaskRegistry 适配为 peri-workflow 的 BgTaskRegistry trait
 impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
-    fn register_workflow(&self, task_id: String, summary: String) {
+    fn register_workflow(
+        &self,
+        task_id: String,
+        summary: String,
+        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
+    ) {
         let bg_task = BackgroundTask {
             id: task_id,
             agent_name: "workflow".to_string(),
@@ -43,7 +48,9 @@ impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
             started_at: std::time::Instant::now(),
             chrono_started_at: chrono::Utc::now(),
             kind: BgTaskKind::Workflow,
-            cancel_handle: BgCancelHandle::Kill(None),
+            // kill 闭包由 WorkflowTool::invoke 构造（转发到 WorkflowTaskRegistry::kill），
+            // 使 session/cancel-bg-task 真正终止 workflow runner（issue 2026-08-05）
+            cancel_handle: BgCancelHandle::Kill(kill),
             pid: None,
             output_preview: None,
         };
@@ -443,5 +450,33 @@ mod tests {
             !tools[0].is_direct(),
             "WorkflowTool 是 deferred tool，不得直接进入 LLM tools"
         );
+    }
+
+    /// [回归测试] register_workflow 携带的 kill 闭包必须存入 bg registry 条目，
+    /// session/cancel-bg-task（cancel()）时真正触发——锁定 issue 2026-08-05
+    /// 修复后的行为：Workflow 取消不再只是移除条目 + 发事件，runner 被真实 kill。
+    #[tokio::test]
+    async fn test_register_workflow_kill_closure_invoked_on_cancel() {
+        use peri_workflow::tool::BgTaskRegistry;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let bg_registry = Arc::new(BackgroundTaskRegistry::new());
+        let killed = Arc::new(AtomicBool::new(false));
+        let killed_clone = killed.clone();
+        bg_registry.register_workflow(
+            "run-1".to_string(),
+            "wf: test".to_string(),
+            Some(Box::new(move || {
+                killed_clone.store(true, Ordering::SeqCst);
+            })),
+        );
+        assert_eq!(bg_registry.active_count(), 1);
+
+        bg_registry.cancel("run-1").unwrap();
+        assert!(
+            killed.load(Ordering::SeqCst),
+            "cancel() 必须调用 kill 闭包（runner 真正被终止）"
+        );
+        assert_eq!(bg_registry.active_count(), 0);
     }
 }
