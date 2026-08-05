@@ -23,6 +23,7 @@ mod compact;
 mod event_builder;
 mod generation;
 pub(crate) mod middleware;
+pub(crate) mod registry;
 mod sampling;
 pub(crate) mod stages;
 mod subagent;
