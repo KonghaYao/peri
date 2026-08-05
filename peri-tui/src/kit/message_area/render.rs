@@ -124,26 +124,30 @@ const MD_COPY_MIN_CHARS: usize = 400;
 
 /// 生成 md 复制按钮行（AssistantBubble 内容末尾）。
 ///
-/// 布局：` Copy `——整个反色块（含左右 1 空格）即按钮视觉；点击区域
-/// 与反色块完全重合（[x_start, x_end) = 整行）。宽度不足（按钮行会被
-/// 折行）时返回 None——调用方不渲染按钮行，避免点击区域与实际渲染
-/// 位置错位（同 footer keepgoing 的 m4 fix）。
+/// 布局：行尾右对齐的 ` Copy `——整个反色块（含左右 1 空格）即按钮视觉，
+/// 前导无样式空格把按钮推到行尾（继承消息区背景，视觉上不留痕迹）；点击
+/// 区域与反色块完全重合（[x_start, x_end) = 按钮块本身，不含前导空格）。
+/// 宽度不足（按钮行会被折行）时返回 None——调用方不渲染按钮行，避免
+/// 点击区域与实际渲染位置错位（同 footer keepgoing 的 m4 fix）。
 fn copy_button_line(width: usize) -> Option<(Line<'static>, u16, u16)> {
     let semantic = THEME_ATOM.state().read().semantic;
     let btn_text = i18n::tr("msg-copy-md");
-    let line = Line::from(vec![Span::styled(
+    let btn_span = Span::styled(
         format!(" {btn_text} "),
         // 反色：accent 前景 + REVERSED → 终端交换为 accent 背景 + 默认前景。
         // 空格也在 span 内，一并反色——反色块即按钮。
         Style::default()
             .fg(semantic.accent)
             .add_modifier(Modifier::REVERSED),
-    )]);
-    if line.width() > width {
+    );
+    let btn_width = btn_span.width();
+    if btn_width > width {
         return None;
     }
-    let x_start = 0;
-    let x_end = x_start + line.width() as u16;
+    // 右对齐：前导无样式空格（默认样式，渲染时继承消息区背景）占满按钮左侧。
+    let line = Line::from(vec![Span::raw(" ".repeat(width - btn_width)), btn_span]);
+    let x_start = (width - btn_width) as u16;
+    let x_end = width as u16;
     Some((line, x_start, x_end))
 }
 

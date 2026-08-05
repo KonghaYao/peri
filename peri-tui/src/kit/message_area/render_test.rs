@@ -486,16 +486,21 @@ fn test_assistant_bubble_renders_copy_button() {
 
     let btn_line = lines.last().unwrap();
     let text: String = btn_line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, " Copy ", "按钮行 = 左右各 1 空格 + i18n 按钮文本");
+    let btn_width = 2 + crate::i18n::tr("msg-copy-md").width();
+    assert_eq!(
+        text,
+        format!("{}{}", " ".repeat(80 - btn_width), " Copy "),
+        "按钮行 = 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
+    );
 
     let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
     assert_eq!(btn.logical_idx, lines.len() - 1, "按钮行是最后一逻辑行");
-    assert_eq!(btn.x_start, 0, "点击区域覆盖整个反色块（含两侧空格）");
     assert_eq!(
-        btn.x_end,
-        2 + crate::i18n::tr("msg-copy-md").width() as u16,
-        "x_end = 左空格 + 文本 + 右空格"
+        btn.x_start,
+        (80 - btn_width) as u16,
+        "点击区域 = 反色块本身（右对齐，不含前导填充）"
     );
+    assert_eq!(btn.x_end, 80, "x_end = 行尾（左空格 + 文本 + 右空格）");
 }
 
 /// 宽度不足时按钮行会折行 → 不渲染按钮（也不返回布局），避免点击区域错位。
