@@ -121,6 +121,10 @@ impl SubAgentMiddlewareConfig {
 /// In the `before_agent` phase, provides `SubAgentTool` to the parent agent via `collect_tools`,
 /// enabling the LLM to call the `Agent` tool to delegate sub-tasks to specialized sub-agents.
 ///
+/// `#[derive(Clone)]`：字段全为 Arc/Option，clone 廉价；builder 需要同时把本中间件
+/// 加入 chain 与保留在 `AgentComponents.subagent_mw`（供主 v2 session 创建后注入
+/// `parent_agent_id`）。
+///
 /// # Usage Example
 ///
 /// ```rust,ignore
@@ -138,6 +142,7 @@ impl SubAgentMiddlewareConfig {
 ///     .with_system_builder(system_builder);
 /// // 注册到 middleware chain，由 v2 stages 自动 collect_tools 收集 SubAgentTool
 /// ```
+#[derive(Clone)]
 pub struct SubAgentMiddleware {
     /// Parent agent tool set (Arc shared, passed to child agent for use)
     parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
@@ -195,6 +200,9 @@ pub struct SubAgentMiddleware {
     >,
     /// Langfuse bridge（from peri-acp，用于 SubAgent 完整 trace）
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    /// 父 agent 事件侧 AgentId 共享 cell（builder 在主 v2 session 创建后注入；
+    /// SubAgentTool 与 SubAgentMiddleware 共享同一 Arc）
+    parent_agent_id: Arc<RwLock<Option<peri_agent::group::pipeline::AgentId>>>,
 }
 
 impl SubAgentMiddleware {
@@ -229,6 +237,7 @@ impl SubAgentMiddleware {
             frozen_system_prompt: None,
             on_bg_complete: None,
             langfuse_bridge: None,
+            parent_agent_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -311,6 +320,12 @@ impl SubAgentMiddleware {
     pub fn with_langfuse_bridge(mut self, bridge: Arc<dyn LangfuseBridgeLike>) -> Self {
         self.langfuse_bridge = Some(bridge);
         self
+    }
+
+    /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
+    /// SubAgentTool 持有同一共享 cell，invoke 时（必然晚于本调用）读到已 set 的值。
+    pub fn set_parent_agent_id(&self, id: peri_agent::group::pipeline::AgentId) {
+        *self.parent_agent_id.write() = Some(id);
     }
 
     /// Set thread persistence store for child thread creation
@@ -422,6 +437,8 @@ impl SubAgentMiddleware {
         if let Some(ref bridge) = self.langfuse_bridge {
             tool = tool.with_langfuse_bridge(Arc::clone(bridge));
         }
+        // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
+        tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
         tool
     }
 }

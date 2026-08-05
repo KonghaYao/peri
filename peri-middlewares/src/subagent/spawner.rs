@@ -16,6 +16,7 @@ use peri_agent::{
         events::ExecutorEvent,
         stages::{run_react_loop, LoopResult},
     },
+    group::pipeline::AgentId,
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
     thread::ThreadMeta,
@@ -99,6 +100,9 @@ pub struct BgForkConfig {
     pub frozen_system_prompt: Option<Arc<String>>,
     /// Langfuse bridge for subagent trace（None 表示遥测禁用）
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
+    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
+    pub parent_agent_id: Option<AgentId>,
 }
 
 /// 后台 fork agent spawn 结果
@@ -196,6 +200,7 @@ pub async fn spawn_background_fork(
     let cancel_token = CancellationToken::new();
 
     // 8. 构造 v2 StageContext（注入 parent_messages 到 transcript）
+    // 身份键统一（C1）：child_thread_id → AgentId，subagent 事件侧 agent_id 与其一致
     let v2_ctx = build_v2_subagent_context(
         config.llm,
         chain,
@@ -213,6 +218,9 @@ pub async fn spawn_background_fork(
         None,
         None,
         None,
+        Some(crate::subagent::v2_bridge::agent_id_from_child_thread(
+            &child_thread_id,
+        )),
     );
 
     // 9. push fork_directive 到 queue
@@ -239,6 +247,17 @@ pub async fn spawn_background_fork(
         is_background: true,
     };
 
+    // 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道（child EventBus）。
+    // parent_agent_id 为 None（/bg 命令路径）时静默跳过（helper 内 warn）。
+    crate::subagent::v2_bridge::emit_subagent_start_v2(
+        &v2_ctx.event_bus,
+        v2_ctx.context.turn_id(),
+        config.parent_agent_id,
+        v2_ctx.agent_id,
+        &agent_name,
+        true,
+    );
+
     // 11. 捕获 spawn 资源
     let on_bg_complete = config.on_bg_complete.clone();
     let thread_store = config.thread_store.clone();
@@ -254,12 +273,19 @@ pub async fn spawn_background_fork(
     let max_iterations = config.max_iterations;
     let event_handles = v2_ctx.event_handles;
     let langfuse_bridge = config.langfuse_bridge;
+    // C3: Stop emit 的父 agent 身份（Copy，闭包捕获）
+    let parent_agent_id_for_stop = config.parent_agent_id;
 
     // 12. tokio::spawn 执行
     let join_handle = tokio::spawn(async move {
         let started_at = std::time::Instant::now();
+        // context 将被 move 进 run_react_loop，turn_id 提前提取（Stop emit 用）
+        let subagent_turn_id = v2_ctx.context.turn_id();
         let context = v2_ctx.context;
         let session = v2_ctx.session;
+        // Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
+        let event_bus_for_stop = v2_ctx.event_bus.clone();
+        let subagent_agent_id = v2_ctx.agent_id;
 
         // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
         // 后转发到 bg_event_sender。同时桥接 Langfuse trace。
@@ -280,6 +306,35 @@ pub async fn spawn_background_fork(
             );
 
         let loop_result = run_react_loop(context, max_iterations).await;
+
+        // 补发 v2 SubagentStop（C3）：run_react_loop 返回后立即 emit，
+        // 一个 emit 点覆盖 Completed / Interrupted / Error 三路且恰好一次。
+        let (stop_result, stop_is_error) = match &loop_result {
+            LoopResult::Completed => (
+                extract_last_ai_text(&session)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                false,
+            ),
+            LoopResult::Interrupted => ("interrupted".to_string(), true),
+            LoopResult::Error(e) => (
+                format!("Background fork agent failed: {}", e)
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                true,
+            ),
+        };
+        crate::subagent::v2_bridge::emit_subagent_stop_v2(
+            &event_bus_for_stop,
+            subagent_turn_id,
+            parent_agent_id_for_stop,
+            subagent_agent_id,
+            &agent_name_clone,
+            &stop_result,
+            stop_is_error,
+        );
 
         let (final_text, interrupted) = match loop_result {
             LoopResult::Completed => (extract_last_ai_text(&session), false),

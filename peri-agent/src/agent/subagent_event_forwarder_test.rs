@@ -185,14 +185,15 @@ async fn test_forwarder_propagates_all_event_layers() {
         finalized_messages: Arc::new(Vec::new()),
     });
 
-    // Observe layer（SubagentStart → SubagentStarted）
+    // Observe layer（LlmCallStart → LlmCallStart；SubagentStart 自 C2 起被过滤，
+    // 见 test_forwarder_filters_v2_subagent_start_stop，不在此验证）
     let (turn_id, agent_id) = ids();
-    bus.emit_observe(ObserveEvent::SubagentStart {
+    bus.emit_observe(ObserveEvent::LlmCallStart {
         turn_id,
         agent_id,
-        child_agent_id: AgentId::new(),
-        agent_name: "explore".to_string(),
-        is_background: false,
+        step: 3,
+        messages: Arc::new(Vec::new()),
+        tools: Vec::new(),
     });
 
     // 期望 2 个事件（Render + Observe），State 层被过滤
@@ -208,16 +209,12 @@ async fn test_forwarder_propagates_all_event_layers() {
                 if text == "thinking" && source_agent_id.as_deref() == Some("test_id")
         )
     });
-    let has_subagent_started = events_snapshot
+    let has_llm_start = events_snapshot
         .iter()
-        .any(|e| matches!(e, ExecutorEvent::SubagentStarted { agent_name, .. } if agent_name == "explore"));
+        .any(|e| matches!(e, ExecutorEvent::LlmCallStart { step: 3, .. }));
 
     assert!(has_ai_reasoning, "应有 AiReasoning：{:?}", events_snapshot);
-    assert!(
-        has_subagent_started,
-        "应有 SubagentStarted：{:?}",
-        events_snapshot
-    );
+    assert!(has_llm_start, "应有 LlmCallStart：{:?}", events_snapshot);
 }
 
 #[tokio::test]
@@ -480,10 +477,12 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
 /// active_stage=None 时工具 parent 错误回落到主 agent。
 ///
 /// 场景模拟：
-/// 1. SubagentStart    ─── Observe（observe_rx → 先消费）
+/// 1. LlmCallStart   ─── Observe（observe_rx → 先消费）
 /// 2. ToolStarted(Read) ─── Render  （render_rx → 后消费）
 ///
 /// 关键不变量：当 render 和 observe 事件同时 ready 时，biased 应优先消费 observe。
+/// 注：不用 SubagentStart 验证顺序——C2 起它被 forwarder 过滤（不转发 v1，
+/// 防与工具侧 v1 直发双发），见 test_forwarder_filters_v2_subagent_start_stop。
 #[tokio::test]
 async fn test_forwarder_observes_before_render_when_both_ready() {
     let (bus, handles) = EventBus::new(EventBusConfig::default());
@@ -500,7 +499,7 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
 
     let (turn_id, agent_id) = ids();
 
-    // 同步 emit：先 emit render（ToolStarted），再 emit observe（SubagentStart）
+    // 同步 emit：先 emit render（ToolStarted），再 emit observe（LlmCallStart）
     // 由于 biased select observe_rx 在前，observe 事件应先被消费
     bus.emit_render(RenderEvent::ToolStarted {
         turn_id,
@@ -509,12 +508,12 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
     });
-    bus.emit_observe(ObserveEvent::SubagentStart {
+    bus.emit_observe(ObserveEvent::LlmCallStart {
         turn_id,
         agent_id,
-        child_agent_id: AgentId::new(),
-        agent_name: "explore".to_string(),
-        is_background: false,
+        step: 1,
+        messages: Arc::new(Vec::new()),
+        tools: Vec::new(),
     });
 
     wait_for_event_count(&captured, 2).await;
@@ -527,10 +526,10 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         events
     );
 
-    // 第 1 个应为 Observe 事件（SubagentStarted）
+    // 第 1 个应为 Observe 事件（LlmCallStart）
     assert!(
-        matches!(events[0], ExecutorEvent::SubagentStarted { ref agent_name, .. } if agent_name == "explore"),
-        "第 1 个应为 SubagentStarted（observe 优先消费），实际：{:?}",
+        matches!(events[0], ExecutorEvent::LlmCallStart { step: 1, .. }),
+        "第 1 个应为 LlmCallStart（observe 优先消费），实际：{:?}",
         events[0]
     );
 
@@ -544,5 +543,89 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         ),
         "第 2 个应为 ToolStart(Read)（render 后消费），实际：{:?}",
         events[1]
+    );
+}
+
+// ─── C2/C3：v2 SubagentStart/Stop forwarder 过滤 ─────────────────────────────
+
+/// 记录 process_observe_event 调用次数的 mock bridge
+struct CapturingBridge {
+    observes: Arc<Mutex<Vec<ObserveEvent>>>,
+}
+
+impl LangfuseBridgeLike for CapturingBridge {
+    fn process_render_event(&self, _ev: &RenderEvent) {}
+
+    fn process_observe_event(&self, ev: &ObserveEvent) {
+        self.observes.lock().push(ev.clone());
+    }
+}
+
+/// C2/C3 契约：SubagentStart/Stop 到达 forwarder observe 分支时——
+/// 1. bridge 必须收到事件（Langfuse 链路不丢）
+/// 2. 不得经 mapper 转发为 v1 SubagentStarted/Stopped（避免与工具侧 v1 直发双发，
+///    破坏 TUI instance_id 配对）
+#[tokio::test]
+async fn test_forwarder_filters_v2_subagent_start_stop() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(CapturingHandler {
+        events: Arc::clone(&captured),
+    });
+    let observes: Arc<Mutex<Vec<ObserveEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let bridge = Arc::new(CapturingBridge {
+        observes: Arc::clone(&observes),
+    }) as Arc<dyn LangfuseBridgeLike>;
+
+    let _forwarder =
+        spawn_subagent_event_forwarder(handles, Some(handler), Some(bridge), "test".to_string());
+
+    // 给 forwarder 一点启动时间
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let (turn_id, agent_id) = ids();
+    let child_agent_id = AgentId::from_uuid(uuid::Uuid::now_v7());
+    bus.emit_observe(ObserveEvent::SubagentStart {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "explore".to_string(),
+        is_background: false,
+    });
+    bus.emit_observe(ObserveEvent::SubagentStop {
+        turn_id,
+        agent_id,
+        child_agent_id,
+        agent_name: "explore".to_string(),
+        result: "done".to_string(),
+        is_error: false,
+    });
+
+    // 等待 forwarder 消费（足够时间让过滤逻辑执行）
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 1. bridge 收到两个事件（Langfuse 链路不丢）
+    let bridge_events = observes.lock().clone();
+    assert_eq!(
+        bridge_events.len(),
+        2,
+        "bridge 应收到 Start+Stop 共 2 个 observe 事件：{:?}",
+        bridge_events
+    );
+    assert!(matches!(
+        bridge_events[0],
+        ObserveEvent::SubagentStart { .. }
+    ));
+    assert!(matches!(
+        bridge_events[1],
+        ObserveEvent::SubagentStop { .. }
+    ));
+
+    // 2. 无 v1 转发（handler 未收到任何事件）
+    let events: Vec<ExecutorEvent> = captured.lock().clone();
+    assert!(
+        events.is_empty(),
+        "SubagentStart/Stop 不得转发为 v1 ExecutorEvent（防双发）：{:?}",
+        events
     );
 }

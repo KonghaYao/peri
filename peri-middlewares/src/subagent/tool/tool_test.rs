@@ -3,9 +3,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_agent::{
     agent::{
+        events::ExecutorEvent,
+        events_v2::ObserveEvent,
         react::{ReactLLM, Reasoning, StreamingContext},
         AgentCancellationToken,
     },
+    group::pipeline::AgentId,
     messages::BaseMessage,
     tools::BaseTool,
 };
@@ -2099,5 +2102,304 @@ async fn test_integration_fork_plus_background_priority() {
     assert!(
         captured_prompt.contains("do both"),
         "fork directive should wrap original prompt 'do both'"
+    );
+}
+
+// ─── C2/C3：v2 SubagentStart/Stop 生产 emit 契约测试 ─────────────────────────
+//
+// 每条生产路径（fork 同步 / define 同步 / bg 非 fork / bg fork）各一测试：
+// Start/Stop 恰好一次、字段配对、child_agent_id 为 UUID v7（= child_thread_id）。
+// 捕获通道：child EventBus → forwarder observe 分支 → mock LangfuseBridgeLike
+// （v1 mapper 转发已被过滤，见 peri-agent subagent_event_forwarder 测试）。
+
+/// mock LangfuseBridgeLike：记录 forwarder 转发的全部 ObserveEvent
+struct RecordingBridge {
+    observes: Arc<std::sync::Mutex<Vec<ObserveEvent>>>,
+}
+
+impl peri_agent::agent::LangfuseBridgeLike for RecordingBridge {
+    fn process_render_event(&self, _ev: &peri_agent::agent::events_v2::RenderEvent) {}
+
+    fn process_observe_event(&self, ev: &ObserveEvent) {
+        self.observes.lock().unwrap().push(ev.clone());
+    }
+}
+
+/// 构造注入父身份的 SubAgentTool + 记录 bridge（parent_agent_id 已 set → emit 生效）
+fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
+    let bridge = Arc::new(RecordingBridge {
+        observes: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    let t = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        "/tmp".to_string(),
+    )
+    .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
+    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
+    (t, bridge)
+}
+
+/// 轮询等待 bridge 收到 Start 与 Stop 各至少一次（forwarder 异步消费，
+/// 内容事件可能先到，不能只按数量等待）
+async fn wait_for_observe_start_stop(
+    bridge: &Arc<RecordingBridge>,
+    timeout_ms: u64,
+) -> Vec<ObserveEvent> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let evs = bridge.observes.lock().unwrap().clone();
+        let has_start = evs
+            .iter()
+            .any(|e| matches!(e, ObserveEvent::SubagentStart { .. }));
+        let has_stop = evs
+            .iter()
+            .any(|e| matches!(e, ObserveEvent::SubagentStop { .. }));
+        if has_start && has_stop {
+            return evs;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "等待 v2 SubagentStart/Stop 超时（{}ms）：当前事件：{:?}",
+                timeout_ms, evs
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// 断言 Start/Stop 恰好一次且字段配对（agent_name / is_background / 父子 id 一致）
+fn assert_start_stop_pair(evs: &[ObserveEvent], expected_name: &str, expected_bg: bool) {
+    let starts: Vec<&ObserveEvent> = evs
+        .iter()
+        .filter(|e| matches!(e, ObserveEvent::SubagentStart { .. }))
+        .collect();
+    let stops: Vec<&ObserveEvent> = evs
+        .iter()
+        .filter(|e| matches!(e, ObserveEvent::SubagentStop { .. }))
+        .collect();
+    assert_eq!(starts.len(), 1, "SubagentStart 必须恰好一次: {:?}", evs);
+    assert_eq!(stops.len(), 1, "SubagentStop 必须恰好一次: {:?}", evs);
+
+    let (start_parent, start_child, start_name, start_bg) = match starts[0] {
+        ObserveEvent::SubagentStart {
+            agent_id,
+            child_agent_id,
+            agent_name,
+            is_background,
+            ..
+        } => (agent_id, child_agent_id, agent_name, is_background),
+        _ => unreachable!(),
+    };
+    let (stop_parent, stop_child, stop_name, stop_result, stop_err) = match stops[0] {
+        ObserveEvent::SubagentStop {
+            agent_id,
+            child_agent_id,
+            agent_name,
+            result,
+            is_error,
+            ..
+        } => (agent_id, child_agent_id, agent_name, result, is_error),
+        _ => unreachable!(),
+    };
+    assert_eq!(start_name.as_str(), expected_name, "agent_name 不符");
+    assert_eq!(*start_bg, expected_bg, "is_background 不符");
+    assert_eq!(
+        start_parent, stop_parent,
+        "Start/Stop 父 agent_id 必须一致（同一次调用）"
+    );
+    assert_eq!(
+        start_child, stop_child,
+        "Start/Stop child_agent_id 必须配对（同一 subagent）"
+    );
+    assert_eq!(stop_name.as_str(), expected_name, "Stop agent_name 不符");
+    assert!(!stop_result.is_empty() || *stop_err, "Stop 必须携带 result");
+    assert!(
+        uuid::Uuid::parse_str(&start_child.to_string()).is_ok(),
+        "child_agent_id 必须是可解析 UUID（= child_thread_id）"
+    );
+}
+
+fn write_test_agent(dir: &tempfile::TempDir) {
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("test-agent.md"),
+        "---\nname: test-agent\ndescription: A test agent\n---\n\nYou are a test agent.\n",
+    )
+    .unwrap();
+}
+
+/// 从事件流中取出 Start 事件的 child_agent_id
+fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_agent::group::pipeline::AgentId {
+    evs.iter()
+        .find_map(|e| match e {
+            ObserveEvent::SubagentStart { child_agent_id, .. } => Some(*child_agent_id),
+            _ => None,
+        })
+        .expect("事件流中应有 SubagentStart")
+}
+
+/// S1/T1：fork 同步路径（execute_fork.rs）—— Start/Stop 恰好一次，
+/// 且 child_agent_id == child_thread_id（C1 身份统一契约）
+#[tokio::test]
+async fn test_fork_path_emits_v2_start_stop_exactly_once() {
+    let dir = tempdir().unwrap();
+    // thread_store 存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
+    let (t, bridge) = make_tool_with_bridge();
+    let t = t.with_thread_store(Arc::new(peri_agent::thread::FilesystemThreadStore::new(
+        dir.path().join("threads"),
+    )) as Arc<dyn peri_agent::thread::ThreadStore>);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "prompt": "fork task"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "fork 应成功: {:?}", result.err());
+    let result = result.unwrap();
+    let child_thread_id = result
+        .split("child_thread_id: ")
+        .nth(1)
+        .and_then(|s| s.lines().next())
+        .expect("fork 返回值应包含 child_thread_id")
+        .to_string();
+
+    let evs = wait_for_observe_start_stop(&bridge, 3000).await;
+    assert_start_stop_pair(&evs, "fork", false);
+    assert_eq!(
+        start_child_agent_id(&evs).to_string(),
+        child_thread_id,
+        "C1：Start.child_agent_id 必须等于 child_thread_id（身份统一）"
+    );
+}
+
+/// S4/T4：define 同步路径（define.rs）—— Start/Stop 恰好一次，
+/// 且 child_agent_id == child_thread_id（C1 身份统一契约）
+#[tokio::test]
+async fn test_define_path_emits_v2_start_stop_exactly_once() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let (t, bridge) = make_tool_with_bridge();
+    let t = t.with_thread_store(Arc::new(peri_agent::thread::FilesystemThreadStore::new(
+        dir.path().join("threads"),
+    )) as Arc<dyn peri_agent::thread::ThreadStore>);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "cwd": dir.path().to_str().unwrap(),
+                "prompt": "do it"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "define 应成功: {:?}", result.err());
+    let result = result.unwrap();
+    let child_thread_id = result
+        .split("child_thread_id: ")
+        .nth(1)
+        .and_then(|s| s.lines().next())
+        .expect("define 返回值应包含 child_thread_id")
+        .to_string();
+
+    let evs = wait_for_observe_start_stop(&bridge, 3000).await;
+    assert_start_stop_pair(&evs, "test-agent", false);
+    assert_eq!(
+        start_child_agent_id(&evs).to_string(),
+        child_thread_id,
+        "C1：Start.child_agent_id 必须等于 child_thread_id（身份统一）"
+    );
+}
+
+/// S2/T2：bg 非 fork 路径（execute_bg.rs）—— Start/Stop 恰好一次（is_background=true），
+/// 且 child_agent_id == v1 SubagentStarted.instance_id（C1 身份统一契约）
+#[tokio::test]
+async fn test_background_path_emits_v2_start_stop_exactly_once() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let (t, bridge) = make_tool_with_bridge();
+    let t = t
+        .with_background_registry(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent",
+                "run_in_background": true,
+                "cwd": dir.path().to_str().unwrap(),
+                "prompt": "bg task"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "bg 应启动成功: {:?}", result.err());
+
+    let evs = wait_for_observe_start_stop(&bridge, 5000).await;
+    assert_start_stop_pair(&evs, "test-agent", true);
+
+    // v1 SubagentStarted.instance_id（= child_thread_id）与 v2 Start.child_agent_id 对齐
+    let instance_id = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
+        .await
+        .expect("应收到 SubagentStarted")
+        .expect("通道不应关闭");
+    let instance_id = match instance_id {
+        ExecutorEvent::SubagentStarted { instance_id, .. } => instance_id,
+        other => panic!("应为 SubagentStarted，实际 {:?}", other),
+    };
+    assert_eq!(
+        start_child_agent_id(&evs).to_string(),
+        instance_id,
+        "C1：Start.child_agent_id 必须等于 child_thread_id（身份统一）"
+    );
+}
+
+/// S3/T3：bg fork 路径（spawner.rs spawn_background_fork）—— Start/Stop 恰好一次，
+/// 且 child_agent_id == v1 SubagentStarted.instance_id（C1 身份统一契约）
+#[tokio::test]
+async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
+    let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let parent_messages: Arc<RwLock<Vec<BaseMessage>>> =
+        Arc::new(RwLock::new(vec![BaseMessage::human("ctx for bg fork")]));
+    let (t, bridge) = make_tool_with_bridge();
+    let t = t
+        .with_parent_messages(parent_messages)
+        .with_background_registry(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "fork": true,
+                "run_in_background": true,
+                "prompt": "bg fork task"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "bg fork 应启动成功: {:?}", result.err());
+
+    let evs = wait_for_observe_start_stop(&bridge, 5000).await;
+    assert_start_stop_pair(&evs, "fork", true);
+
+    // v1 SubagentStarted.instance_id（= child_thread_id）与 v2 Start.child_agent_id 对齐
+    let instance_id = tokio::time::timeout(std::time::Duration::from_secs(2), bg_rx.recv())
+        .await
+        .expect("应收到 SubagentStarted")
+        .expect("通道不应关闭");
+    let instance_id = match instance_id {
+        ExecutorEvent::SubagentStarted { instance_id, .. } => instance_id,
+        other => panic!("应为 SubagentStarted，实际 {:?}", other),
+    };
+    assert_eq!(
+        start_child_agent_id(&evs).to_string(),
+        instance_id,
+        "C1：Start.child_agent_id 必须等于 child_thread_id（身份统一）"
     );
 }

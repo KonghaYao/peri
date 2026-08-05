@@ -25,6 +25,11 @@ impl AgentId {
         Self(Uuid::now_v7())
     }
 
+    /// 从 UUID 构造 AgentId（供 subagent 身份统一：child_thread_id → AgentId）
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -33,6 +38,14 @@ impl AgentId {
 impl Default for AgentId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl TryFrom<String> for AgentId {
+    type Error = uuid::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Uuid::parse_str(&value).map(Self::from_uuid)
     }
 }
 

@@ -131,6 +131,9 @@ impl super::SubAgentTool {
             None,
             None,
             None,
+            Some(crate::subagent::v2_bridge::agent_id_from_child_thread(
+                &child_thread_id,
+            )),
         );
 
         // push prompt 到 queue
@@ -165,6 +168,17 @@ impl super::SubAgentTool {
         self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, &cwd, &agent_id, None)
             .await;
 
+        // 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道（child EventBus）。
+        // parent_agent_id 未注入（测试/嵌套异常）时静默跳过（helper 内 warn）。
+        crate::subagent::v2_bridge::emit_subagent_start_v2(
+            &v2_ctx.event_bus,
+            v2_ctx.context.turn_id(),
+            *self.parent_agent_id.read(),
+            v2_ctx.agent_id,
+            &agent_id,
+            true,
+        );
+
         // 捕获 spawn 所需资源
         let registered_hooks = self.registered_hooks.clone();
         let thread_store = self.thread_store.clone();
@@ -178,12 +192,20 @@ impl super::SubAgentTool {
         let agent_name_clone = agent_id.clone();
         let prompt_summary_clone = prompt_summary.clone();
         let cwd_clone = cwd.clone();
+        // C3: Stop emit 的父 agent 身份（闭包外读取一次）
+        let parent_agent_id_for_stop = *self.parent_agent_id.read();
 
         // tokio::spawn 执行 v2 ReAct 循环
         let join_handle = tokio::spawn(async move {
             let started_at = std::time::Instant::now();
+            // context 将被 move 进 run_react_loop，turn_id 提前提取（Stop emit 用）
+            let subagent_turn_id = v2_ctx.context.turn_id();
             let context = v2_ctx.context;
             let session = v2_ctx.session;
+            // Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
+            let event_bus_for_stop = v2_ctx.event_bus.clone();
+            let subagent_agent_id = v2_ctx.agent_id;
+            let parent_agent_id = parent_agent_id_for_stop;
 
             // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
             // 后转发到父 Agent 的事件处理器。让 TUI 能看到 SubAgent 内的工具调用 / AI 文本。
@@ -209,6 +231,37 @@ impl super::SubAgentTool {
                 );
 
             let loop_result = run_react_loop(context, max_iterations).await;
+
+            // 补发 v2 SubagentStop（C3）：run_react_loop 返回后立即 emit，
+            // 一个 emit 点覆盖 Completed / Interrupted / Error 三路且恰好一次。
+            let (stop_result, stop_is_error) = match &loop_result {
+                peri_agent::agent::stages::LoopResult::Completed => (
+                    extract_last_ai_text(&session)
+                        .chars()
+                        .take(500)
+                        .collect::<String>(),
+                    false,
+                ),
+                peri_agent::agent::stages::LoopResult::Interrupted => {
+                    ("interrupted".to_string(), true)
+                }
+                peri_agent::agent::stages::LoopResult::Error(e) => (
+                    format!("Background sub-agent failed: {}", e)
+                        .chars()
+                        .take(500)
+                        .collect::<String>(),
+                    true,
+                ),
+            };
+            crate::subagent::v2_bridge::emit_subagent_stop_v2(
+                &event_bus_for_stop,
+                subagent_turn_id,
+                parent_agent_id,
+                subagent_agent_id,
+                &agent_name_clone,
+                &stop_result,
+                stop_is_error,
+            );
 
             let (final_text, interrupted) = match loop_result {
                 peri_agent::agent::stages::LoopResult::Completed => {
@@ -412,6 +465,7 @@ impl super::SubAgentTool {
             frozen_skill_summary: self.frozen_skill_summary.clone(),
             frozen_system_prompt: self.frozen_system_prompt.clone(),
             langfuse_bridge: self.langfuse_bridge.clone(),
+            parent_agent_id: *self.parent_agent_id.read(),
         };
 
         let spawned = crate::subagent::spawner::spawn_background_fork(config).await?;

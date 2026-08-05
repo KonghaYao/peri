@@ -91,10 +91,11 @@ pub fn spawn_eventbus_forwarder<F>(
                 ev_res = handles.observe_rx.recv() => {
                     match ev_res {
                         Ok(ev) => {
-                            // SubAgent 事件（SubagentStart/SubagentStop）不在 v2_bridge 映射。
-                            // 规范路径：on_event → event_sink → peri/agent_event → acp_notifier → bridge_tx。
-                            // 此处 try_send_v2_event 若与 on_event 同时发送同一 SubAgent 事件会造成双重发送陷阱。
-                            // v2_bridge.rs 有意对这些变体返回 None 作为防御性兜底。
+                            // v2 SubagentStart/Stop 只在 child EventBus emit（经
+                            // subagent_event_forwarder 消费并过滤 v1 mapper 转发，防与工具侧
+                            // v1 直发双发，见 subagent_event_forwarder.rs），主 EventBus 上
+                            // 不会出现这两个变体，故此处无需过滤。Langfuse 消费在 child
+                            // forwarder 侧直达 bridge（C4）。
                             if let Some(ref tx) = v2_tx {
                                 let _ = tx.send(V2Event::from_observe(ev.clone()));
                             }

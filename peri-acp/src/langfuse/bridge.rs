@@ -1189,3 +1189,7 @@ mod tests {
         assert_eq!(bridge.subagent_event_counts(), (1, 1));
     }
 }
+
+#[cfg(test)]
+#[path = "bridge_test.rs"]
+mod bridge_test;

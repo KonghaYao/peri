@@ -117,6 +117,7 @@ impl AgentCommand for BgCommand {
                 frozen_skill_summary: ctx.frozen_skill_summary.clone(),
                 frozen_system_prompt: ctx.frozen_system_prompt.clone(),
                 langfuse_bridge: None, // /bg 命令无 Langfuse tracer
+                parent_agent_id: None, // /bg 命令无父 agent 身份（不 emit v2 Start/Stop）
             },
         )
         .await
