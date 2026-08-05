@@ -1,6 +1,6 @@
 Peri 3.0 架构
 
-> 3.0 全新分层 | 日期：2026-08-05 | 修订：v3.7（设计自洽：矛盾修正 + 归层判据 + 聚合根 + 链路定义）
+> 3.0 全新分层 | 日期：2026-08-05 | 修订：v3.9（时序契约 + cancel 与 MQ 语义）
 
 0. 依赖规则
 
@@ -23,14 +23,33 @@ flowchart BT
 - 未声明边一律禁止
 - crate 依赖方向进 CI 验证
 
-归层判据：
+归层判据（三问定层）：
 
-- 状态生命周期 = session -> Agent
-- 状态生命周期 = 进程/多 session -> Runtime
-- 与协议形态绑定 -> ACP
-- 外部系统的状态/格式 -> Resources
-- 消费者是客户端、需组合多源 -> Controller
-- 争议项以此判据裁定，不另行讨论
+问 1：状态活多久？
+
+- 跟着 session 活 -> Agent（聚合根内）
+- 跟着进程/多 session 活 -> Runtime
+- 跟着一次调用活 -> 局部，不跨层
+
+问 2：东西从哪来？
+
+- 内部业务状态 -> 按问 1
+- LLM 协议形态 -> Model（协议适配层）
+- ACP 协议形态 -> ACP
+- 外部系统（文件/网络/服务）-> 通道归 Resources，持有按问 1
+
+问 3：给谁用？
+
+- 界面呈现 -> TUI（View 层，仅经 ACP 拿数据）
+- 组合多源决策 -> Controller
+- 旁路观测 -> 独立观测通道，不参与业务链路
+
+优先级（双命中时）：
+
+1. 通道与持有分离：外部数据的访问通道一律归 Resources；状态持有按问 1
+2. 生命周期优先于消费：持有层由问 1 定，消费层只拿只读引用
+3. 盲区兜底：协议适配 -> Model；业务切面 -> Middleware；界面 -> TUI；跨层接口契约 -> peri-acp-types
+4. 按 1-3 顺序裁定，不另行讨论
 
 1. Peri Model 层
 
@@ -51,7 +70,7 @@ flowchart BT
   - 建 session：transcript 绑定存储（with_persistence）
   - 运行 + 结束：更新 agent_status
 - async tasks manager：异步 shell 实际执行、bg agent、cron、channel 触发
-  - BackgroundTaskRegistry 归此层统一管理（生命周期/取消/事件跟随 session）
+  - BackgroundTaskRegistry 归此层统一管理：per-session 实例化，随 session 创建/销毁（生命周期/取消/事件跟随 session）
   - Middleware 只做定义与启动发起，不持有管理权
   - 任务启动执行（进程 spawn/进程组/超时/输出收集）在此层
 - 消息统一：MessageType（Human/Ai/Tool/SystemReminder，v2 BaseMessage 更名；协议转换在 Reason 阶段）
@@ -93,7 +112,11 @@ flowchart BT
 - 事件聚合/过滤（业务事件 -> 协议化前的出口）
 - cancel：`Controller::cancel(session_id, policy)` -> Runtime 查映射 -> Agent 执行判定 -> Model 中止
   - 只定位与转发，不解释取消语义
-- 观测：Langfuse bridge 挂此层
+- 观测：横切面旁路，非业务职责
+  - 采集点分散各层：Model 层 token/调用、Agent 层 stage/turn、Controller 操作、ACP 事件
+  - 汇聚：观测事件随主事件流走，在协议化前分支给 Langfuse bridge
+  - bridge 是事件流旁路消费者（装配在 Controller 侧宿主），不承担 Controller 职责
+  - 关联靠身份牌（session_id + turn_id + agent_id），不改变业务链路
 
 7. Peri ACP 层
 
@@ -101,9 +124,12 @@ flowchart BT
 - 事件协议化映射、caps 门控
 - 全部客户端（TUI/CLI/stdio/IDE/print）一律经 ACP
 
-8. Peri TUI 层
+8. Peri TUI 层（View 层）
 
-- 仅经 ACP 协议交互；print = 轻量 CLI 渲染封装，同为 ACP 客户端
+- 职责：把 ACP 传来的数据映射成界面呈现（渲染）
+- cli = 启动接口：装配 View 与 ACP 客户端，不承载业务
+- print = 同层轻量渲染客户端（无界面，输出文本）
+- 只经 ACP 拿数据，不触碰业务层
 
 9. 横切面
 
@@ -128,8 +154,33 @@ flowchart LR
     Agent -->|执行中止| Model
 ```
 
+事件契约：
+
 - 事件携带 turn_id + agent_id；session_id 由 Runtime 聚合时按 session 维度补打（Agent 层事件不携带）
-- cancel：Agent 持有最终执行权，上层仅传递，Model 执行中止
+- 同 session 事件带单调序号（session_seq）
+- terminal 事件必须位于该 turn 全部输出事件之后
+
+身份标识：
+
+- 跨层消息统一携带 (session_id, session_epoch, turn_id, attempt_id)
+- epoch/attempt_id 不可复用（防迟到消息命中新 session）
+
+cancel 契约：
+
+- Agent 持有最终执行权，上层仅传递，Model 执行中止
+- 幂等：针对 (session_id, turn_id, attempt_id)；重复 cancel 结果一致；turn 终态唯一（Completed 或 Interrupted）
+- 优先级：cancel > 续跑 > promote > retry；cancel 后已排队的 resume/promote 全部失效
+- cancel ≠ 清除待办：MQ 未消费消息保留，随下次循环消费（作为新 attempt 输入）
+  - cancel 请求可带 clear_queue 标志（默认 false）
+
+session 销毁顺序：
+
+- 停收新输入 -> 取消 owned tasks -> join（带 deadline）-> 超时 abort -> 持久化事务收束 -> drain 事件 -> 移除映射
+
+持久真相：
+
+- Thread/transcript = 持久真相；Task = 易失投影
+- 重启不复活 Task；遗留 Running/Creating 记录标记为中断
 
 续跑链路（cancel 的镜像）：
 
@@ -162,7 +213,7 @@ Task vs Thread：
 | 层 | crate | 动作 |
 |---|---|---|
 | Model | peri-model | 不变 |
-| Agent | peri-agent | 扩展：Session/AgentGroup/async tasks/frozen/装配迁入；BackgroundTaskRegistry 迁入 |
+| Agent | peri-agent | 扩展：Session/AgentGroup/async tasks/frozen/装配迁入；BackgroundTaskRegistry 迁入（per-session 实例化） |
 | Runtime | peri-runtime（新） | 薄编排器 |
 | Middleware | peri-middlewares | 不变（BackgroundTaskRegistry 定义与实现迁入 peri-agent，Middleware 仅经 TaskManager 接口发起） |
 | Resources | peri-resources（新） | 内含 peri-config/peri-sessions 子模块 |
