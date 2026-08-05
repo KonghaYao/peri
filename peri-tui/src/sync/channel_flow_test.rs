@@ -2033,6 +2033,11 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "staged 文件必须 0600");
         }
+        #[cfg(not(unix))]
+        {
+            // 权限断言仅限 unix；其他平台仍执行 stage_package 验证打包成功。
+            let _ = writes;
+        }
     }
 
     #[test]
