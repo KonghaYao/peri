@@ -761,10 +761,12 @@ impl LangfuseTracer {
                 // 两信号齐备(Stop + ToolEnded)时回收 → 关闭 AGENT obs + flush child batch。
                 // 绝不 end_subagent。
                 if self.subagent.has_invocation(agent_id, tool_call_id) {
-                    if let Some(closed) =
-                        self.subagent
-                            .on_invocation_tool_end(agent_id, tool_call_id, output, is_error)
-                    {
+                    if let Some(closed) = self.subagent.on_invocation_tool_end(
+                        agent_id,
+                        tool_call_id,
+                        output,
+                        is_error,
+                    ) {
                         self.emit_subagent_close(closed);
                     }
                 }
@@ -1275,13 +1277,9 @@ impl LangfuseTracer {
                 return None;
             }
         };
-        let handle = self.stages.on_stage_start(
-            agent_id,
-            stage,
-            &self.trace_id,
-            turn_id,
-            &parent,
-        );
+        let handle = self
+            .stages
+            .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
         Some(handle)
     }
 

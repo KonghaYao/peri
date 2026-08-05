@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
-use langfuse_client::IngestionEvent;
 use langfuse_client::types::ObservationType;
+use langfuse_client::IngestionEvent;
 use peri_agent::agent::events::{Stage, StageStatus};
 
 use super::*;
@@ -49,8 +49,7 @@ fn parent_map(events: &[IngestionEvent]) -> HashMap<String, Option<String>> {
             | IngestionEvent::ObservationUpdate { body, .. } => {
                 (body.id.clone(), body.parent_observation_id.clone())
             }
-            IngestionEvent::SpanCreate { body, .. }
-            | IngestionEvent::SpanUpdate { body, .. } => {
+            IngestionEvent::SpanCreate { body, .. } | IngestionEvent::SpanUpdate { body, .. } => {
                 (body.id.clone(), body.parent_observation_id.clone())
             }
             IngestionEvent::GenerationCreate { body, .. } => {
@@ -85,7 +84,9 @@ fn agent_obs_creates(events: &[IngestionEvent]) -> Vec<(String, Option<String>, 
 }
 
 /// AGENT observation 关闭(update)列表:(id, end_time, output)
-fn agent_obs_updates(events: &[IngestionEvent]) -> Vec<(String, Option<String>, Option<serde_json::Value>)> {
+fn agent_obs_updates(
+    events: &[IngestionEvent],
+) -> Vec<(String, Option<String>, Option<serde_json::Value>)> {
     events
         .iter()
         .filter_map(|e| {
@@ -198,10 +199,23 @@ async fn test_full_lifecycle_eight_steps() {
 
     // ④ child LlmCallStart/End
     t.on_llm_start("child_1", 0, &[], &[]);
-    t.on_llm_end("child_1", 0, "claude-4.7", "anthropic", "analysis done", None, None);
+    t.on_llm_end(
+        "child_1",
+        0,
+        "claude-4.7",
+        "anthropic",
+        "analysis done",
+        None,
+        None,
+    );
 
     // ⑤ child ToolStart/End
-    t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({"cmd": "ls"}));
+    t.on_tool_start(
+        "child_1",
+        "call_bash",
+        "Bash",
+        &serde_json::json!({"cmd": "ls"}),
+    );
     t.on_tool_end("child_1", "call_bash", "file list", false);
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);
 
@@ -222,7 +236,10 @@ async fn test_full_lifecycle_eight_steps() {
     t.on_subagent_stop("main", "child_1", "review complete", false);
     let updates = agent_obs_updates(&session.events_snapshot());
     assert_eq!(updates.len(), 1, "⑦ 后应有恰好 1 个 AGENT obs close");
-    assert_eq!(updates[0].0, *child_obs_id, "关闭的 obs 应为 child 的 AGENT obs");
+    assert_eq!(
+        updates[0].0, *child_obs_id,
+        "关闭的 obs 应为 child 的 AGENT obs"
+    );
 
     // ⑧ on_turn_end:无残留
     let _h = t.on_turn_end(None);
@@ -231,8 +248,14 @@ async fn test_full_lifecycle_eight_steps() {
 
     // 图断言:child 内容全部挂 child AGENT obs 链,不挂 agent-run
     let all = child_events(&final_events);
-    let child_spans: Vec<_> = all.iter().filter(|(_, _, p)| *p == Some(child_obs_id.clone())).collect();
-    assert!(!child_spans.is_empty(), "child stage/llm 应挂 child AGENT obs");
+    let child_spans: Vec<_> = all
+        .iter()
+        .filter(|(_, _, p)| *p == Some(child_obs_id.clone()))
+        .collect();
+    assert!(
+        !child_spans.is_empty(),
+        "child stage/llm 应挂 child AGENT obs"
+    );
 
     // 无 17ms 空壳:AGENT obs 有子节点,且 start ≤ 最早 child 事件 start
     let child_event_times: Vec<_> = all
@@ -240,7 +263,10 @@ async fn test_full_lifecycle_eight_steps() {
         .filter(|(_, _, p)| *p == Some(child_obs_id.clone()))
         .filter_map(|(_, s, _)| s.as_ref().map(|s| parse_time(s)))
         .collect();
-    assert!(!child_event_times.is_empty(), "child AGENT obs 应有子节点(非空壳)");
+    assert!(
+        !child_event_times.is_empty(),
+        "child AGENT obs 应有子节点(非空壳)"
+    );
     let earliest_child = child_event_times.iter().min().unwrap();
     let agent_start = parse_time(child_start.as_ref().expect("AGENT start"));
     assert!(
@@ -257,7 +283,93 @@ async fn test_full_lifecycle_eight_steps() {
     );
 
     // 每 obs 至多一个 parent + 无环(递归查 parent 不得回到自身)
-    assert_eq!(t.subagent.status_of("child_1"), Some(&SubagentStatus::Closed));
+    assert_eq!(
+        t.subagent.status_of("child_1"),
+        Some(&SubagentStatus::Closed)
+    );
+    assert_eq!(t.subagent.incomplete_count(), 0);
+}
+
+// ── Start 后于 ToolEnded ────────────────────────────────────────────────────
+
+/// ①ToolStart → ②ToolEnded → ③SubagentStart → ④child events → ⑤SubagentStop
+/// ②只结束父工具记录,**不关闭任何 child、不注销映射**;③join 未绑定 invocation
+/// 仍成功(① 建的 invocation 在 ② 仅标 tool_ended,保留等 Stop);④ parent 正确;
+/// ⑤两信号齐备(tool_ended + stop)→ 关闭 AGENT obs。
+#[tokio::test]
+async fn test_start_after_tool_ended() {
+    let (mut t, session) = make_tracer(1.0);
+    t.set_main_agent_id("main".to_string());
+    t.on_turn_start("turn_1b");
+
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_1b")
+        .unwrap();
+    let main_span = main_act.span_id.clone();
+    // ① 父 ToolStart(Agent):invocation 登记,parent 冻结为 main_span
+    t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
+    // ② 父 ToolEnded:只结束父工具记录,不关闭任何 child、不注销映射
+    t.on_tool_end("main", "call_agent", "dispatched", false);
+    assert_eq!(
+        agent_obs_updates(&session.events_snapshot()).len(),
+        0,
+        "② 不应创建/关闭任何 AGENT obs"
+    );
+    assert_eq!(
+        t.subagent.by_agent_id_len(),
+        0,
+        "② 不应有 subagent 注册(映射未注销)"
+    );
+
+    // ③ SubagentStart:invocation 仍可 join(② 仅标 tool_ended)
+    t.on_subagent_start("main", "child_1", "fork", false);
+    let events = session.events_snapshot();
+    let creates = agent_obs_creates(&events);
+    assert_eq!(creates.len(), 1, "③ join 应创建 AGENT obs");
+    let (child_obs_id, child_parent, _) = &creates[0];
+    assert_eq!(
+        child_parent.as_deref(),
+        Some(main_span.as_str()),
+        "AGENT obs parent 应为 ① 冻结的父 stage span"
+    );
+    assert_eq!(
+        t.subagent.status_of("child_1"),
+        Some(&SubagentStatus::Active),
+        "③ join 后 child 应 Active(ToolEnded 不提前关闭)"
+    );
+
+    // ④ child events:parent 正确(挂 child AGENT obs)
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_1b")
+        .expect("child stage 应创建 handle");
+    assert_eq!(child_reason.parent_observation_id, *child_obs_id);
+    // 确保 stage duration > 0(v2 条件上报:0ms stage span 不上报)
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    t.on_llm_start("child_1", 0, &[], &[]);
+    t.on_llm_end("child_1", 0, "claude-4.7", "anthropic", "out", None, None);
+    t.on_stage_end("child_1", &child_reason, StageStatus::Done);
+
+    // ⑤ SubagentStop:两信号齐备 → 关闭 AGENT obs
+    t.on_subagent_stop("main", "child_1", "review done", false);
+    let updates = agent_obs_updates(&session.events_snapshot());
+    assert_eq!(updates.len(), 1, "⑤ Stop 后应关闭 AGENT obs");
+    assert_eq!(
+        updates[0].0, *child_obs_id,
+        "关闭的 obs 应为 child 的 AGENT obs"
+    );
+    assert_eq!(
+        updates[0].2.as_ref().and_then(|o| o.as_str()),
+        Some("review done"),
+        "AGENT obs output 应为 Stop result"
+    );
+    assert_eq!(
+        t.subagent.status_of("child_1"),
+        Some(&SubagentStatus::Closed)
+    );
+
+    // on_turn_end 无残留、无 incomplete
+    let _h = t.on_turn_end(None);
+    tokio::task::yield_now().await;
     assert_eq!(t.subagent.incomplete_count(), 0);
 }
 
@@ -271,11 +383,15 @@ async fn test_stop_before_tool_ended() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_2");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_2").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_2")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
 
-    let child_reason = t.on_stage_start_gated("child_1", Stage::Reason, "turn_2").unwrap();
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_2")
+        .unwrap();
     // 确保 stage duration > 0(v2 条件上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
@@ -342,7 +458,10 @@ async fn test_content_before_start_gate() {
 
     // ① child StageStarted 先到:入闸门,不创建 handle
     let gate_stage = t.on_stage_start_gated("child_1", Stage::Reason, "turn_3");
-    assert!(gate_stage.is_none(), "Start 未到时 StageStarted 应被闸门缓存");
+    assert!(
+        gate_stage.is_none(),
+        "Start 未到时 StageStarted 应被闸门缓存"
+    );
     // ② child LlmCallStart 先到:入闸门
     t.on_llm_start("child_1", 0, &[], &[]);
     assert_eq!(t.subagent.gated_len(), 2, "两条内容事件应被缓存");
@@ -366,7 +485,9 @@ async fn test_content_before_start_gate() {
     );
 
     // ④ 父 ToolStart 晚到:register_invocation → join → 重放
-    let _main_act = t.on_stage_start_gated("main", Stage::Act, "turn_3").unwrap();
+    let _main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_3")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
 
     let events = session.events_snapshot();
@@ -394,13 +515,15 @@ async fn test_content_before_start_gate() {
     // 无任何 obs 挂 agent-run
     let agent_run = &t.agent_observation_id;
     assert!(
-        !map.values().any(|p| p.as_deref() == Some(agent_run.as_str())),
+        !map.values()
+            .any(|p| p.as_deref() == Some(agent_run.as_str())),
         "乱序内容事件不应挂 agent-run"
     );
     // child stage span 的 parent 为 child AGENT obs
     let all = child_events(&final_events);
     assert!(
-        all.iter().any(|(_, _, p)| p.as_deref() == Some(child_obs_id.as_str())),
+        all.iter()
+            .any(|(_, _, p)| p.as_deref() == Some(child_obs_id.as_str())),
         "重放的 stage/generation 应挂 child AGENT obs"
     );
     assert_eq!(t.subagent.gated_len(), 0, "重放后闸门缓存应清空");
@@ -429,7 +552,9 @@ async fn test_start_before_parent_tool_start() {
     assert_eq!(t.subagent.gated_len(), 1);
 
     // ③ 父 ToolStart → join → AGENT obs + 重放
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_4").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_4")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
 
     let events = session.events_snapshot();
@@ -459,14 +584,20 @@ async fn test_parallel_two_subagents_interleaved() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_5");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_5").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_5")
+        .unwrap();
     t.on_tool_start("main", "call_a", "Agent", &serde_json::json!({}));
     t.on_tool_start("main", "call_b", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_a", "explorer-a", false);
     t.on_subagent_start("main", "child_b", "explorer-b", false);
 
-    let a_stage = t.on_stage_start_gated("child_a", Stage::Reason, "turn_5").unwrap();
-    let b_stage = t.on_stage_start_gated("child_b", Stage::Reason, "turn_5").unwrap();
+    let a_stage = t
+        .on_stage_start_gated("child_a", Stage::Reason, "turn_5")
+        .unwrap();
+    let b_stage = t
+        .on_stage_start_gated("child_b", Stage::Reason, "turn_5")
+        .unwrap();
     // 确保 stage duration > 0(v2 条件上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_llm_start("child_a", 0, &[], &[]);
@@ -488,12 +619,12 @@ async fn test_parallel_two_subagents_interleaved() {
     let events = session.events_snapshot();
     let creates = agent_obs_creates(&events);
     assert_eq!(creates.len(), 2, "两个 child 各一个 AGENT obs");
-    let obs_a = creates.iter().find(|(id, _, _)| {
-        t.subagent.observation_id_of("child_a").as_deref() == Some(id.as_str())
-    });
-    let obs_b = creates.iter().find(|(id, _, _)| {
-        t.subagent.observation_id_of("child_b").as_deref() == Some(id.as_str())
-    });
+    let obs_a = creates
+        .iter()
+        .find(|(id, _, _)| t.subagent.observation_id_of("child_a").as_deref() == Some(id.as_str()));
+    let obs_b = creates
+        .iter()
+        .find(|(id, _, _)| t.subagent.observation_id_of("child_b").as_deref() == Some(id.as_str()));
     assert!(obs_a.is_some() && obs_b.is_some());
     let obs_a_id = t.subagent.observation_id_of("child_a").unwrap();
     let obs_b_id = t.subagent.observation_id_of("child_b").unwrap();
@@ -517,16 +648,34 @@ async fn test_parallel_two_subagents_interleaved() {
     // 无任何 A 内容挂 B:generation/tool 的 parent 链均指向各自 batch/stage
     let gen_a = events.iter().find_map(|e| {
         if let IngestionEvent::GenerationCreate { body, .. } = e {
-            if body.output.as_ref().and_then(|o| o.get("text")).and_then(|t| t.as_str()) == Some("a-out") {
-                return Some((body.id.clone().unwrap_or_default(), body.parent_observation_id.clone()));
+            if body
+                .output
+                .as_ref()
+                .and_then(|o| o.get("text"))
+                .and_then(|t| t.as_str())
+                == Some("a-out")
+            {
+                return Some((
+                    body.id.clone().unwrap_or_default(),
+                    body.parent_observation_id.clone(),
+                ));
             }
         }
         None
     });
     let gen_b = events.iter().find_map(|e| {
         if let IngestionEvent::GenerationCreate { body, .. } = e {
-            if body.output.as_ref().and_then(|o| o.get("text")).and_then(|t| t.as_str()) == Some("b-out") {
-                return Some((body.id.clone().unwrap_or_default(), body.parent_observation_id.clone()));
+            if body
+                .output
+                .as_ref()
+                .and_then(|o| o.get("text"))
+                .and_then(|t| t.as_str())
+                == Some("b-out")
+            {
+                return Some((
+                    body.id.clone().unwrap_or_default(),
+                    body.parent_observation_id.clone(),
+                ));
             }
         }
         None
@@ -593,7 +742,8 @@ async fn test_unknown_agent_id_incomplete() {
     let final_events = session.events_snapshot();
     let map = parent_map(&final_events);
     assert!(
-        !map.values().any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
+        !map.values()
+            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
         "ghost 内容不应挂主 agent-run"
     );
 }
@@ -606,7 +756,9 @@ async fn test_missing_start_incomplete() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_7");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_7").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_7")
+        .unwrap();
     // ① 父 ToolStart(Agent):invocation 登记,但 child Start 永不出现
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     // ② ToolEnded
@@ -620,12 +772,17 @@ async fn test_missing_start_incomplete() {
     let _h = t.on_turn_end(None);
     tokio::task::yield_now().await;
     assert_eq!(t.subagent.gated_len(), 0, "on_turn_end 应清空闸门缓存");
-    assert_eq!(t.subagent.incomplete_count(), 1, "缺失 Start 应计数 incomplete");
+    assert_eq!(
+        t.subagent.incomplete_count(),
+        1,
+        "缺失 Start 应计数 incomplete"
+    );
 
     let final_events = session.events_snapshot();
     let map = parent_map(&final_events);
     assert!(
-        !map.values().any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
+        !map.values()
+            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
         "child 内容不应挂主 agent-run"
     );
     let _ = main_act;
@@ -640,17 +797,25 @@ async fn test_duplicate_start() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_8a");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_8a").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_8a")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
     // 重复 Start
     t.on_subagent_start("main", "child_1", "fork", false);
     assert_eq!(
         t.subagent.status_of("child_1"),
-        Some(&SubagentStatus::Incomplete(IncompleteReason::DuplicateStart)),
+        Some(&SubagentStatus::Incomplete(
+            IncompleteReason::DuplicateStart
+        )),
         "重复 Start 应标记 DuplicateStart"
     );
-    assert_eq!(agent_obs_creates(&session.events_snapshot()).len(), 1, "AGENT obs 只创建一次");
+    assert_eq!(
+        agent_obs_creates(&session.events_snapshot()).len(),
+        1,
+        "AGENT obs 只创建一次"
+    );
     assert_eq!(t.subagent.incomplete_count(), 1);
 
     let _h = t.on_turn_end(None);
@@ -665,7 +830,9 @@ async fn test_duplicate_stop() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_8b");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_8b").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_8b")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
     t.on_subagent_stop("main", "child_1", "done", false);
@@ -713,11 +880,7 @@ async fn test_gate_cache_overflow() {
     for i in 0..70 {
         t.on_llm_start("child_1", i, &[], &[]);
     }
-    assert_eq!(
-        t.subagent.gated_len(),
-        64,
-        "闸门缓存应有界(上限 64)"
-    );
+    assert_eq!(t.subagent.gated_len(), 64, "闸门缓存应有界(上限 64)");
     assert_eq!(
         t.subagent.status_of("child_1"),
         Some(&SubagentStatus::Incomplete(IncompleteReason::CacheOverflow)),
@@ -725,7 +888,9 @@ async fn test_gate_cache_overflow() {
     );
 
     // 父 ToolStart 到达:child 已 incomplete → 不 join
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_9").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_9")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     assert_eq!(
         agent_obs_creates(&session.events_snapshot()).len(),
@@ -750,7 +915,9 @@ async fn test_parent_frozen_no_drift() {
     t.on_turn_start("turn_10");
 
     // 父 stage A1
-    let act_a1 = t.on_stage_start_gated("main", Stage::Act, "turn_10").unwrap();
+    let act_a1 = t
+        .on_stage_start_gated("main", Stage::Act, "turn_10")
+        .unwrap();
     let frozen_span = act_a1.span_id.clone();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
@@ -762,11 +929,15 @@ async fn test_parent_frozen_no_drift() {
     );
 
     // 父另开新 stage A2
-    let act_a2 = t.on_stage_start_gated("main", Stage::Act, "turn_10").unwrap();
+    let act_a2 = t
+        .on_stage_start_gated("main", Stage::Act, "turn_10")
+        .unwrap();
     assert_ne!(act_a2.span_id, frozen_span);
 
     // child 继续:内容归属仍为 child AGENT obs
-    let child_reason = t.on_stage_start_gated("child_1", Stage::Reason, "turn_10").unwrap();
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_10")
+        .unwrap();
     assert_eq!(child_reason.parent_observation_id, *child_obs_id);
 
     // 关闭后 AGENT obs parent 仍为冻结 span(ObservationUpdate 与 create 一致)
@@ -790,14 +961,18 @@ async fn test_no_cycle_parent_neq_child() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_11");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_11").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_11")
+        .unwrap();
     // child1
     t.on_tool_start("main", "call_1", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "c1", false);
     let obs_1 = t.subagent.observation_id_of("child_1").unwrap();
 
     // child1 内再调 Agent → child2
-    let c1_stage = t.on_stage_start_gated("child_1", Stage::Act, "turn_11").unwrap();
+    let c1_stage = t
+        .on_stage_start_gated("child_1", Stage::Act, "turn_11")
+        .unwrap();
     t.on_tool_start("child_1", "call_2", "Agent", &serde_json::json!({}));
     t.on_subagent_start("child_1", "child_2", "c2", false);
     let obs_2 = t.subagent.observation_id_of("child_2").unwrap();
@@ -805,7 +980,10 @@ async fn test_no_cycle_parent_neq_child() {
     assert_ne!(obs_1, obs_2, "嵌套 child 的 obs id 应不同");
     // child2 的 AGENT obs parent = child1 的 active stage(冻结)
     let creates = agent_obs_creates(&session.events_snapshot());
-    let create_2 = creates.iter().find(|(id, _, _)| *id == obs_2).expect("child2 obs create");
+    let create_2 = creates
+        .iter()
+        .find(|(id, _, _)| *id == obs_2)
+        .expect("child2 obs create");
     assert_eq!(
         create_2.1.as_deref(),
         Some(c1_stage.span_id.as_str()),
@@ -844,10 +1022,14 @@ async fn test_tool_ended_never_closes_child() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_12");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_12").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_12")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "fork", false);
-    let child_reason = t.on_stage_start_gated("child_1", Stage::Reason, "turn_12").unwrap();
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_12")
+        .unwrap();
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);
 
     // 父 ToolEnded:child 不得关闭
@@ -878,10 +1060,14 @@ async fn test_bg_subagent_turn_end_cleanup() {
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_13");
 
-    let main_act = t.on_stage_start_gated("main", Stage::Act, "turn_13").unwrap();
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_13")
+        .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
     t.on_subagent_start("main", "child_1", "bg", true);
-    let child_reason = t.on_stage_start_gated("child_1", Stage::Reason, "turn_13").unwrap();
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_13")
+        .unwrap();
     t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
     t.on_tool_end("child_1", "call_bash", "out", false);
     t.on_stage_end("child_1", &child_reason, StageStatus::Done);
@@ -929,7 +1115,8 @@ async fn test_bg_subagent_turn_end_cleanup() {
     // 无幽灵序列挂主 agent:任何 child 事件 parent 链不指向 agent-run
     let map = parent_map(&events);
     assert!(
-        !map.values().any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
+        !map.values()
+            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
         "bg child 内容不应挂主 agent-run"
     );
     let _ = (obs_id, main_act);

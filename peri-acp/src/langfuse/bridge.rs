@@ -930,12 +930,7 @@ impl LangfuseBridge {
                 );
                 drop(reg);
                 // tracer registry:AGENT obs 创建(join 成功后) + gate 重放
-                t.on_subagent_start(
-                    parent_agent_id,
-                    child_agent_id,
-                    agent_name,
-                    *is_background,
-                );
+                t.on_subagent_start(parent_agent_id, child_agent_id, agent_name, *is_background);
             }
             UnifiedLangfuseEvent::SubagentStop {
                 parent_agent_id,

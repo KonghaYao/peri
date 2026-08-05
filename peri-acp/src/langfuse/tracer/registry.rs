@@ -285,7 +285,11 @@ impl SubagentRegistry {
 
     /// 该 agent 自己的 ToolBatch(仅 Subagent 归属时调用)
     pub(crate) fn tool_batch_mut(&mut self, agent_id: &str) -> &mut ToolBatch {
-        &mut self.by_agent_id.get_mut(agent_id).expect("registered subagent").tool_batch
+        &mut self
+            .by_agent_id
+            .get_mut(agent_id)
+            .expect("registered subagent")
+            .tool_batch
     }
 
     pub(crate) fn has_invocation(&self, agent_id: &str, tool_call_id: &str) -> bool {
@@ -721,11 +725,8 @@ impl SubagentRegistry {
             self.mark_incomplete(&sp.child_agent_id, IncompleteReason::ParentLost);
         }
         // 2. gate 缓存残留(Start 从未到达)→ UnknownAgent(按 agent 去重计数)
-        let remaining: std::collections::HashSet<String> = self
-            .gate_cache
-            .drain(..)
-            .map(|(agent, _)| agent)
-            .collect();
+        let remaining: std::collections::HashSet<String> =
+            self.gate_cache.drain(..).map(|(agent, _)| agent).collect();
         for agent in remaining {
             self.mark_incomplete(&agent, IncompleteReason::UnknownAgent);
         }
