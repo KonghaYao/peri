@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile.workspace = true
 serial_test.workspace = true
+tracing-subscriber.workspace = true
 [dependencies]
 serde.workspace = true
 peri-agent = { path = "../peri-agent" }
@@ -60,12 +61,24 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 aes-gcm = "0.11"
 ring = "0.17"
 rmp-serde = "1.3"
+# ── 设备到设备加密传输（r2-encrypted-transfer，Slice 1）──
+# 仅本地基础：身份/密钥/握手/限额。wire 与 HTTP 客户端在 Slice 3 接入。
+ed25519-dalek = "2.2"
+# static_secrets 提供长期静态密钥类型（StaticSecret）；zeroize 为默认 feature。
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+snow = "0.10"
+# 4.1.6 已验证 rust-version 1.88（本机 rustc 1.96.1）且 macOS 默认启用 Keychain；
+# 精确锁定，避免解析到更高 MSRV 的补丁版本。
+keyring = "=4.1.6"
+zeroize = "1"
 thiserror.workspace = true
 rand = "0.10"
 futures-util = "0.3"
 fuzzy-matcher = "0.3"
 im = "15"
 reqwest.workspace = true
+# ── Slice 3：CLI 掩码输入同步码 / keystore 密码（无网络依赖）──
+rpassword = "7"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true

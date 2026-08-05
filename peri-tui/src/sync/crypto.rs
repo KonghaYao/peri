@@ -1,11 +1,13 @@
+use std::fmt;
 use std::num::NonZeroU32;
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
 use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
+use zeroize::Zeroizing;
 
 /// AES-256 密钥长度（32 字节）
 pub const AES_KEY_LEN: usize = 32;
@@ -74,4 +76,138 @@ pub fn decrypt(encrypted_data: &[u8], key: &[u8; AES_KEY_LEN]) -> anyhow::Result
         .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("AES-GCM decryption failed: {e}"))?;
     Ok(plaintext)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 新协议 API（r2-encrypted-transfer v1）
+//
+// 与上方旧的 pair-code API 完全隔离：新模块只允许调用本段 API，禁止新增
+// 任何 pair-code 调用点。载荷 envelope 为 `[version(1)][nonce(12)]
+// [ciphertext+tag(16)]`；AAD 必须经 [`payload_aad`] 构造（绑定协议版本、
+// channel ID、part index 与 manifest hash）。
+// ═══════════════════════════════════════════════════════════════════════
+
+/// envelope 版本字节。
+pub const ENVELOPE_VERSION: u8 = 1;
+
+/// envelope 头部长度：版本(1) + nonce(12)。
+pub const ENVELOPE_HEADER_LEN: usize = 1 + IV_LEN;
+
+/// AEAD 认证标签长度（AES-256-GCM，16 字节）。
+pub const AEAD_TAG_LEN: usize = 16;
+
+/// 进程内存中的 channel data key（32 字节，drop 时清零，Debug 脱敏）。
+///
+/// v1 语义：data key 仅驻留进程内存；进程重启后中止该 transfer，用户需重新
+/// send/receive。禁止把 data key 写入 staging 或任意磁盘。
+#[derive(Clone)]
+pub struct DataKey(Zeroizing<[u8; AES_KEY_LEN]>);
+
+impl DataKey {
+    /// 生成 channel 新鲜随机 data key（CSPRNG）。
+    pub fn random() -> anyhow::Result<Self> {
+        let rng = SystemRandom::new();
+        let mut key = [0u8; AES_KEY_LEN];
+        rng.fill(&mut key)
+            .map_err(|_| anyhow::anyhow!("OS RNG failure"))?;
+        Ok(Self(Zeroizing::new(key)))
+    }
+
+    /// 从 32 字节构造（Noise msg1 载荷提取路径）。
+    pub fn from_array(key: [u8; AES_KEY_LEN]) -> Self {
+        Self(Zeroizing::new(key))
+    }
+
+    /// 以 `[u8; 32]` 形式访问。
+    pub fn as_array(&self) -> &[u8; AES_KEY_LEN] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for DataKey {
+    type Target = [u8; AES_KEY_LEN];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DataKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DataKey").field(&"[REDACTED]").finish()
+    }
+}
+
+/// 构造 payload 版本化 AAD：
+/// `peri-sync/v1|payload|<channel_id>|<part_index>|<manifest_hash_b64>`。
+///
+/// `channel_id` 为 16 字节 base64url-no-pad 字符串；`manifest_hash` 为
+/// manifest 的 SHA-256 摘要字节（AAD 内以 base64url-no-pad 编码）。
+pub fn payload_aad(
+    channel_id: &str,
+    part_index: u64,
+    manifest_hash: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    Ok(crate::sync::canonical::context(
+        "payload",
+        &[
+            channel_id,
+            &part_index.to_string(),
+            &crate::sync::canonical::b64url_nopad(manifest_hash),
+        ],
+    )?
+    .into_bytes())
+}
+
+/// 使用版本化 envelope 加密：`[version(1)][nonce(12)][ciphertext+tag(16)]`。
+pub fn seal(key: &[u8; AES_KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; IV_LEN];
+    rng.fill(&mut nonce_bytes).expect("OS RNG should not fail");
+    let nonce = Nonce::try_from(&nonce_bytes[..]).expect("12 bytes should construct a valid Nonce");
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .expect("AES-GCM encryption should not fail with valid inputs");
+
+    let mut result = Vec::with_capacity(ENVELOPE_HEADER_LEN + ciphertext.len());
+    result.push(ENVELOPE_VERSION);
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&ciphertext);
+    result
+}
+
+/// 校验版本与认证标签后解密；任何篡改/版本不符/长度不足均返回错误。
+///
+/// 错误消息不含密钥材料。
+pub fn open(key: &[u8; AES_KEY_LEN], aad: &[u8], envelope: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if envelope.len() < ENVELOPE_HEADER_LEN {
+        anyhow::bail!(
+            "envelope too short: {} bytes, need at least {}",
+            envelope.len(),
+            ENVELOPE_HEADER_LEN
+        );
+    }
+    if envelope[0] != ENVELOPE_VERSION {
+        anyhow::bail!("unsupported envelope version: {}", envelope[0]);
+    }
+    let (_, rest) = envelope.split_at(1);
+    let (nonce_bytes, ciphertext) = rest.split_at(IV_LEN);
+    let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
+    let nonce = Nonce::try_from(nonce_bytes).map_err(|_| anyhow::anyhow!("invalid nonce"))?;
+    cipher
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("AES-GCM authentication failed"))
 }

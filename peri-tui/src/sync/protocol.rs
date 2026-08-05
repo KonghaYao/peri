@@ -68,16 +68,16 @@ pub struct SyncPackage {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SyncItems {
     /// settings.json 内容
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<SettingsItem>,
     /// skills 目录文件列表
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<FilesItem>,
     /// MCP 配置
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpItem>,
     /// 插件文件列表
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<FilesItem>,
 }
 
@@ -94,6 +94,7 @@ pub struct SettingsItem {
 /// 文件集合（用于 skills、plugins 等）
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct FilesItem {
+    #[serde(default)]
     pub files: Vec<FileEntry>,
 }
 
@@ -110,9 +111,9 @@ pub struct FileEntry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct McpItem {
     /// ~/.mcp.json 内容
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global: Option<String>,
     /// 项目级 .mcp.json 内容（如有）
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 }
