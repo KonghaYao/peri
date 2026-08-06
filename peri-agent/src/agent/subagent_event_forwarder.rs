@@ -6,16 +6,21 @@
 //! AI 文本、推理内容。
 //!
 //! 本模块封装转发器 spawn 函数：**直接消费 SubAgent 的 v2 事件**（三层
-//! EventHandles），经 v1 兼容映射（`events_v2::*_event_to_executor`）转为
-//! `ExecutorEvent`，注入 `source_agent_id = child_thread_id` 后转发到父 Agent
-//! 的 `AgentEventHandler`（`2026-07-18-events-v2-mapper-removal.md` 退役步骤 4：
-//! 不再经独立 mapper 模块桥接）。
+//! EventHandles），经协议序列化面映射（`events_v2::*_event_to_executor`，
+//! `2026-07-18-events-v2-mapper-removal.md` 退役步骤 4：不再经独立 mapper 模块
+//! 桥接）转为 `ExecutorEvent`，注入 `source_agent_id = child_thread_id` 后转发到
+//! 父 Agent 的 `AgentEventHandler`（ACP 协议化入口 → Controller）。
 //!
 //! ## 关键不变量
 //!
 //! - **`child_thread_id` 必须与 `SubagentStarted { instance_id }` 一致**：TUI 的
 //!   `find_running_subagent_mut(aid)` 按 instance_id 精确匹配，不匹配则事件被忽略。
 //!   注意：v2 内部 `AgentId::new()` 与 child_thread_id 是不同值，不能用错。
+//! - **SubagentStart/Stop 不在此转发**（[C2/C3] filter）：发射侧已同步协议化直发
+//!   （`session::subagent::forward_subagent_start_v1` / `forward_subagent_stop_v1`，
+//!   从 v2 事件构造同步映射，批 2「v1-retire」），再经本转发器转发会形成双发，
+//!   破坏 TUI instance_id 配对。bridge 侧已处理（v2 事件本身仍从 child EventBus
+//!   送达 tracer）。
 //! - **转发器 task 在通道关闭时自动退出**：`select! { else => break }` 处理所有
 //!   通道关闭场景，避免 task 泄漏。
 //! - **ObserveEvent 的 Lagged 不 panic**：只记日志，继续处理后续事件。
@@ -77,10 +82,11 @@ pub fn spawn_subagent_event_forwarder(
                                 b.process_observe_event(&ev);
                             }
                             // [C2/C3] 过滤 v2 SubagentStart/Stop 的 v1 mapper 转发：
-                            // 工具侧已有 v1 直发（execute_fork/execute_bg/spawner 的
-                            // SubagentStarted/Stopped），再经 mapper（child_agent_id → instance_id）
-                            // 转发会形成双发，破坏 TUI instance_id 配对。bridge 侧已处理。
-                            // v2 事件本身仍从 child EventBus 送达 tracer（bridge 调用在上方）。
+                            // 发射侧已同步协议化直发（subagent.rs 的
+                            // forward_subagent_start_v1/stop_v1，批 2「v1-retire」），
+                            // 再经 mapper 转发会形成双发，破坏 TUI instance_id 配对。
+                            // bridge 侧已处理。v2 事件本身仍从 child EventBus 送达
+                            // tracer（bridge 调用在上方）。
                             if matches!(
                                 &ev,
                                 ObserveEvent::SubagentStart { .. } | ObserveEvent::SubagentStop { .. }

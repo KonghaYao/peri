@@ -13,11 +13,13 @@ use super::{convert_model_message, stop_reason_display, AgentModelBridge, Stream
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events::{ExecutorEvent, FnEventHandler},
+        events_v2::{EventBus, EventBusConfig, RenderEvent},
         react::ReactLLM,
     },
     error::AgentError,
+    group::pipeline::AgentId,
     messages::{BaseMessage, ContentBlock, MessageContent},
+    session::turn::TurnId,
 };
 
 struct FakeModel;
@@ -78,14 +80,12 @@ impl Model for FakeModel {
 
 #[tokio::test]
 async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(FakeModel));
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event);
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
     };
 
@@ -103,11 +103,20 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
     assert_eq!(reasoning.usage.unwrap().input_tokens, 3);
     assert_eq!(reasoning.stop_reason, StopReason::ToolUse);
 
-    let events = events.lock();
-    assert!(matches!(events[0], ExecutorEvent::TextChunk { .. }));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, ExecutorEvent::ToolStart { .. })));
+    // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextDelta → RenderEvent::TextChunk
+    let first = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到 RenderEvent::TextChunk");
+    assert!(matches!(
+        first,
+        RenderEvent::TextChunk { chunk, .. } if chunk == "answer"
+    ));
+    // ToolCallDelta / Usage 不产生 Render 事件（ToolStarted 由工具分发阶段 emit）
+    assert!(
+        handles.render_rx.try_recv().is_err(),
+        "不应有额外 Render 事件"
+    );
 }
 
 #[test]
@@ -254,16 +263,14 @@ impl Model for HalfStreamingModel {
 
 #[tokio::test]
 async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(CancellingModel));
     let cancel = CancellationToken::new();
     cancel.cancel();
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event);
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel,
     };
 
@@ -277,27 +284,36 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
         result
     );
     assert!(
-        events.lock().is_empty(),
-        "取消后不得 emit 任何 ExecutorEvent"
+        handles.render_rx.try_recv().is_err(),
+        "取消后不得 emit 任何 RenderEvent"
     );
 }
 
 #[tokio::test]
 async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
-    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let received_events = Arc::clone(&events);
     let bridge = AgentModelBridge::from_arc(Arc::new(HalfStreamingModel));
     let cancel = CancellationToken::new();
-    let cancel_in_handler = cancel.clone();
+    let cancel_on_first_render = cancel.clone();
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    // v2 直发后无法在发射点挂钩 cancel：观察任务在首个 Render 事件到达时取消，
+    // 并统计取消后的残留事件（bridge 必须在 poll 下一项前中断，不得再 emit）。
+    let mut handles_for_watcher = handles;
+    let watcher = tokio::spawn(async move {
+        let first = handles_for_watcher.render_rx.recv().await;
+        if first.is_none() {
+            return 0; // 通道关闭（未收到事件）
+        }
+        cancel_on_first_render.cancel();
+        let mut extra = 0;
+        while handles_for_watcher.render_rx.recv().await.is_some() {
+            extra += 1;
+        }
+        extra
+    });
     let streaming = StreamingContext {
-        event_handler: Arc::new(FnEventHandler(move |event| {
-            received_events.lock().push(event.clone());
-            // 首个可见增量到达时立即取消 → bridge 必须在 poll 下一项前中断
-            if matches!(event, ExecutorEvent::TextChunk { .. }) {
-                cancel_in_handler.cancel();
-            }
-        })),
-        message_id: crate::messages::MessageId::new(),
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
         cancel,
     };
 
@@ -305,12 +321,15 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
         .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
         .await;
 
+    let extra_events = watcher.await.unwrap();
     assert!(
         matches!(result, Err(AgentError::Interrupted)),
         "流中途取消应映射为 Interrupted，实际 {:?}",
         result
     );
-    let events = events.lock();
-    assert_eq!(events.len(), 1, "取消后不得再 emit 事件");
-    assert!(matches!(events[0], ExecutorEvent::TextChunk { .. }));
+    assert_eq!(
+        extra_events, 0,
+        "取消后不得再 emit 事件（残留 {} 个）",
+        extra_events
+    );
 }

@@ -12,7 +12,7 @@ use peri_model::{
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
-        events::ExecutorEvent,
+        events_v2::{ObserveEvent, RenderEvent},
         react::{ReactLLM, Reasoning, StreamingContext, ToolCall},
     },
     error::{AgentError, AgentResult},
@@ -233,10 +233,12 @@ impl AgentModelBridge {
                             stream.abort();
                             return Err(AgentError::Interrupted);
                         }
-                        context.event_handler.on_event(ExecutorEvent::TextChunk {
-                            message_id: context.message_id,
+                        // v2 直发（v1 ExecutorEvent 流式中间态已退役）：TextChunk 是
+                        // 渲染层事件，身份（turn_id/agent_id）来自 StreamingContext。
+                        context.event_bus.emit_render(RenderEvent::TextChunk {
+                            turn_id: context.turn_id,
+                            agent_id: context.agent_id,
                             chunk: text,
-                            source_agent_id: None,
                         });
                     }
                 }
@@ -246,10 +248,22 @@ impl AgentModelBridge {
                             stream.abort();
                             return Err(AgentError::Interrupted);
                         }
-                        context.event_handler.on_event(ExecutorEvent::AiReasoning {
-                            text,
-                            source_agent_id: None,
+                        // v2 直发：ThinkingChunk（渲染层）+ AiReasoningChunk（观测层，
+                        // Langfuse/tracer 消费）。主 agent 无 source_agent_id（None）；
+                        // subagent 场景的 source_agent_id 由 forwarder 注入。
+                        context.event_bus.emit_render(RenderEvent::ThinkingChunk {
+                            turn_id: context.turn_id,
+                            agent_id: context.agent_id,
+                            chunk: text.clone(),
                         });
+                        context
+                            .event_bus
+                            .emit_observe(ObserveEvent::AiReasoningChunk {
+                                turn_id: context.turn_id,
+                                agent_id: context.agent_id,
+                                text,
+                                source_agent_id: None,
+                            });
                     }
                 }
                 Some(Ok(ModelStreamEvent::ToolCallDelta { .. } | ModelStreamEvent::Usage(_))) => {}

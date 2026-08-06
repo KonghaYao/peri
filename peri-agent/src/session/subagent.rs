@@ -29,7 +29,9 @@ use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
-use crate::agent::events_v2::{EventBus, EventBusConfig, EventHandles};
+use crate::agent::events_v2::{
+    observe_event_to_executor, EventBus, EventBusConfig, EventHandles, ObserveEvent,
+};
 use crate::agent::react::{AgentOutput, ReactLLM};
 use crate::agent::stages::{run_react_loop, LoopResult, SharedToolMap, StageContext};
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder;
@@ -584,14 +586,7 @@ async fn run_sync_subagent(
         deregister: deregister_runtime,
     };
 
-    // v1 SubagentStarted + lifecycle hook（SubagentStart）
-    if let Some(ref handler) = event_handler {
-        handler.on_event(ExecutorEvent::SubagentStarted {
-            agent_name: agent_name.clone(),
-            instance_id: child_thread_id.to_string(),
-            is_background: false,
-        });
-    }
+    // lifecycle hook（SubagentStart）
     if let Some(ref on_start) = on_subagent_start {
         on_start(&agent_name, &cwd);
     }
@@ -604,6 +599,21 @@ async fn run_sync_subagent(
         v2_ctx.agent_id,
         &agent_name,
         false,
+    );
+    // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
+    // （ObserveEvent 身份透传：child_agent_id → instance_id），经
+    // `observe_event_to_executor` 同步映射后直发父 handler——同步保证 Started
+    // 恒先于本 turn 后续事件到达父协议化链路（v1 ExecutorEvent 中间态已退役，
+    // 仅保留 ACP 协议序列化面映射，`2026-07-18-executor-event-retirement.md`）。
+    forward_subagent_start_v1(
+        event_handler.as_ref(),
+        build_subagent_start_v2(
+            v2_ctx.context.turn_id(),
+            parent_agent_id,
+            v2_ctx.agent_id,
+            &agent_name,
+            false,
+        ),
     );
 
     // v2 事件转发器：子 EventBus → 父事件 handler（TUI 可见子 agent 工具调用/AI 文本）
@@ -645,6 +655,20 @@ async fn run_sync_subagent(
         &stop_result,
         stop_is_error,
     );
+    // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
+    // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
+    // 父协议化链路（TUI 容器销毁 / depth 配对）。
+    forward_subagent_stop_v1(
+        event_handler.as_ref(),
+        build_subagent_stop_v2(
+            subagent_turn_id,
+            parent_agent_id,
+            v2_ctx.agent_id,
+            &agent_name,
+            &stop_result,
+            stop_is_error,
+        ),
+    );
 
     let (final_text, interrupted) = match loop_result {
         LoopResult::Completed => {
@@ -655,9 +679,9 @@ async fn run_sync_subagent(
         LoopResult::Error(e) => {
             let error_summary = format!("{} execution failed: {}", agent_name, e);
             let error_result: String = error_summary.chars().take(500).collect();
-            // 统一后处理（事件 + hook + thread_store）
+            // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
+            // 之后经 forward_subagent_stop_v1 发出）
             on_subagent_stop_handler(
-                &event_handler,
                 &on_subagent_stop,
                 &thread_store,
                 &agent_name,
@@ -677,7 +701,6 @@ async fn run_sync_subagent(
         final_text.chars().take(500).collect()
     };
     on_subagent_stop_handler(
-        &event_handler,
         &on_subagent_stop,
         &thread_store,
         &agent_name,
@@ -749,57 +772,24 @@ async fn spawn_background_subagent(
         let subagent_agent_id = v2_ctx.agent_id;
 
         // S3.2 同步收尾 guard：abort/panic 时 deregister_runtime + 补发
-        // SubagentStopped（与 SubagentStarted 配对）。必须在本段事件 emit 之前构造。
+        // v2 SubagentStop（含 v1 协议化直发，与 SubagentStarted 配对）。
+        // 必须在本段事件 emit 之前构造。
         let mut cleanup_guard = BgCleanupGuard {
             thread_id: child_thread_id_for_task.clone(),
             deregister: deregister_runtime.clone(),
-            stop: bg_event_sender.clone().map(|sender| BgStopEmit {
-                sender,
-                agent_name: agent_name_for_task.clone(),
-                instance_id: child_thread_id_for_task.clone(),
-            }),
-            // v2 Stop 补发参数与 emit_subagent_stop_v2 调用参数同构（C3 配对契约）。
-            stop_v2: Some(BgStopEmitV2 {
+            stop: Some(BgStopEmitV2 {
                 event_bus: event_bus_for_emit.clone(),
                 turn_id: subagent_turn_id,
                 parent_agent_id,
                 child_agent_id: subagent_agent_id,
                 agent_name: agent_name_for_task.clone(),
+                // v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
+                sender: bg_event_sender.clone(),
             }),
         };
 
-        // 补发 v1 SubagentStarted（P2）：由任务内 gate 放行后 emit，
-        // 保证 v1 Started 恒先于任何 SubagentStopped（正常/取消/abort 三路）。
-        if let Some(ref sender) = bg_event_sender {
-            let _ = sender.send(ExecutorEvent::SubagentStarted {
-                agent_name: agent_name_for_task.clone(),
-                instance_id: child_thread_id_for_task.clone(),
-                is_background: true,
-            });
-        } else {
-            tracing::warn!(
-                agent = %agent_name_for_task,
-                instance_id = %child_thread_id_for_task,
-                "bg_event_sender unavailable, SubagentStarted event dropped"
-            );
-        }
-        // lifecycle hook（SubagentStart）
-        if let Some(ref on_start) = on_subagent_start {
-            on_start(&agent_name_for_task, &cwd_for_task);
-        }
-
-        // 补发 v2 SubagentStart（C2）：与 v1 SubagentStarted 同点、同通道（child EventBus）。
-        emit_subagent_start_v2(
-            &event_bus_for_emit,
-            subagent_turn_id,
-            parent_agent_id,
-            subagent_agent_id,
-            &agent_name_for_task,
-            true,
-        );
-
-        // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
-        // 后转发到 bg_event_sender（BG pump 独立于主 pump，主 turn 结束后仍存活）。
+        // v1 协议化发射目标（bg 泵）：BG pump 独立于主 pump，主 turn 结束后仍存活。
+        // 构造提前到 Started 直发之前（start 借用、stop 直发 clone、forwarder move）。
         let bg_forwarder_handler: Option<Arc<dyn AgentEventHandler>> =
             bg_event_sender.clone().map(|tx| {
                 Arc::new(crate::agent::events::FnEventHandler(
@@ -808,6 +798,50 @@ async fn spawn_background_subagent(
                     },
                 )) as Arc<dyn AgentEventHandler>
             });
+        let bg_stop_handler = bg_forwarder_handler.clone();
+
+        // lifecycle hook（SubagentStart）
+        if let Some(ref on_start) = on_subagent_start {
+            on_start(&agent_name_for_task, &cwd_for_task);
+        }
+
+        // v2 SubagentStart（C2）：与 lifecycle hook 同点、同通道（child EventBus）。
+        emit_subagent_start_v2(
+            &event_bus_for_emit,
+            subagent_turn_id,
+            parent_agent_id,
+            subagent_agent_id,
+            &agent_name_for_task,
+            true,
+        );
+        // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
+        // （ObserveEvent 身份透传：child_agent_id → instance_id），经
+        // `observe_event_to_executor` 同步映射后直发 bg_event_sender——同步保证
+        // Started 恒先于任何 SubagentStopped / BackgroundTaskCompleted
+        // （正常/取消/abort 三路，P2 顺序契约）。
+        if bg_event_sender.is_some() {
+            forward_subagent_start_v1(
+                bg_forwarder_handler.as_ref(),
+                build_subagent_start_v2(
+                    subagent_turn_id,
+                    parent_agent_id,
+                    subagent_agent_id,
+                    &agent_name_for_task,
+                    true,
+                ),
+            );
+        } else {
+            tracing::warn!(
+                agent = %agent_name_for_task,
+                instance_id = %child_thread_id_for_task,
+                "bg_event_sender unavailable, SubagentStarted event dropped"
+            );
+        }
+
+        // 启动 v2 事件转发器：消费 SubAgent EventBus 的事件，注入 source_agent_id
+        // 后转发到 bg_event_sender（BG pump 独立于主 pump，主 turn 结束后仍存活）。
+        // SubagentStart/Stop 不在此转发（发射侧已同步协议化直发，防双发——
+        // 见 `forward_subagent_start_v1` / `forward_subagent_stop_v1`）。
         let _forwarder_handle = spawn_subagent_event_forwarder(
             v2_ctx.event_handles,
             bg_forwarder_handler,
@@ -844,8 +878,9 @@ async fn spawn_background_subagent(
             &stop_result,
             stop_is_error,
         );
-        // 已显式 emit v2 SubagentStop：guard drop 时不得重复发射（P1 防双发）
-        cleanup_guard.disarm_stop_v2();
+        // v1 协议化直发（SubagentStopped）在下方各分支显式执行（Error 分支 / 正常
+        // 分支），此处仅闭合 v2 发射：guard drop 时不得重复（P1 防双发）。
+        cleanup_guard.disarm_stop();
 
         let (final_text, interrupted) = match loop_result {
             LoopResult::Completed => (extract_last_ai_text(&session), false),
@@ -862,18 +897,20 @@ async fn spawn_background_subagent(
                         .await;
                 }
                 // 错误分支也必须发射 SubagentStopped（is_error=true），保证 depth 配对减 1。
+                // v1 协议化直发从 v2 事件构造同步映射（发射语义单一事实源 = v2；
+                // ObserveEvent 身份透传：child_agent_id → instance_id）。
                 // 必须在 BackgroundTaskResult 构造之前发射——后者会 move output。
-                if let Some(ref sender) = bg_event_sender {
-                    emit_subagent_stop_bg(
-                        sender,
+                forward_subagent_stop_v1(
+                    bg_stop_handler.as_ref(),
+                    build_subagent_stop_v2(
+                        subagent_turn_id,
+                        parent_agent_id,
+                        subagent_agent_id,
                         &agent_name_for_task,
-                        output.clone(),
+                        &output,
                         true,
-                        &child_thread_id_for_task,
-                    );
-                }
-                // 已显式 emit SubagentStopped：guard drop 时不得重复发射
-                cleanup_guard.disarm_stop();
+                    ),
+                );
                 let result = crate::agent::events::BackgroundTaskResult {
                     task_id: task_id_for_task.clone(),
                     agent_name: agent_name_for_task.clone(),
@@ -901,18 +938,20 @@ async fn spawn_background_subagent(
             final_text.chars().take(500).collect()
         };
 
-        // SubagentStopped 事件 + lifecycle hook（通过 bg_event_sender，与 spawner 对齐）
-        if let Some(ref sender) = bg_event_sender {
-            emit_subagent_stop_bg(
-                sender,
+        // SubagentStopped v1 协议化直发 + lifecycle hook（经 bg_event_sender，
+        // 与 spawner 对齐）。v1 从 v2 事件构造同步映射，保证 Stopped 先于
+        // BackgroundTaskCompleted 到达 bg 泵（顺序契约）。
+        forward_subagent_stop_v1(
+            bg_stop_handler.as_ref(),
+            build_subagent_stop_v2(
+                subagent_turn_id,
+                parent_agent_id,
+                subagent_agent_id,
                 &agent_name_for_task,
-                output_summary.clone(),
+                &output_summary,
                 interrupted,
-                &child_thread_id_for_task,
-            );
-        }
-        // 已显式 emit SubagentStopped：guard drop 时不得重复发射
-        cleanup_guard.disarm_stop();
+            ),
+        );
         if let Some(ref on_stop) = on_subagent_stop {
             on_stop(
                 &agent_name_for_task,
@@ -1021,10 +1060,32 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
     )
 }
 
-/// 经 child EventBus 补发 v2 `SubagentStart`（C2）。
+/// 构造 v2 `SubagentStart` 事件（发射语义单一事实源）。
+///
+/// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（/bg、测试路径）时以
+/// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
+/// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
+pub(crate) fn build_subagent_start_v2(
+    turn_id: TurnId,
+    parent_agent_id: Option<AgentId>,
+    child_agent_id: AgentId,
+    agent_name: &str,
+    is_background: bool,
+) -> ObserveEvent {
+    ObserveEvent::SubagentStart {
+        turn_id,
+        agent_id: parent_agent_id.unwrap_or(child_agent_id),
+        child_agent_id,
+        agent_name: agent_name.to_string(),
+        is_background,
+    }
+}
+
+/// 经 child EventBus 发射 v2 `SubagentStart`（C2）。
 ///
 /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
 /// 防脏数据：缺父身份的事件会让 tracer 无法归属，宁可走 incomplete 分支。
+/// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
 pub(crate) fn emit_subagent_start_v2(
     event_bus: &Arc<EventBus>,
     turn_id: TurnId,
@@ -1033,7 +1094,7 @@ pub(crate) fn emit_subagent_start_v2(
     agent_name: &str,
     is_background: bool,
 ) {
-    let Some(parent_agent_id) = parent_agent_id else {
+    if parent_agent_id.is_none() {
         tracing::warn!(
             target: "langfuse::subagent",
             child_agent_id = %child_agent_id,
@@ -1041,17 +1102,37 @@ pub(crate) fn emit_subagent_start_v2(
             "parent_agent_id 未注入，跳过 v2 SubagentStart emit（防脏数据）"
         );
         return;
-    };
-    event_bus.emit_observe(crate::agent::events_v2::ObserveEvent::SubagentStart {
+    }
+    event_bus.emit_observe(build_subagent_start_v2(
         turn_id,
-        agent_id: parent_agent_id,
+        parent_agent_id,
         child_agent_id,
-        agent_name: agent_name.to_string(),
+        agent_name,
         is_background,
-    });
+    ));
 }
 
-/// 经 child EventBus 补发 v2 `SubagentStop`（C3）。
+/// 构造 v2 `SubagentStop` 事件（发射语义单一事实源）。占位规则同
+/// [`build_subagent_start_v2`]。
+pub(crate) fn build_subagent_stop_v2(
+    turn_id: TurnId,
+    parent_agent_id: Option<AgentId>,
+    child_agent_id: AgentId,
+    agent_name: &str,
+    result: &str,
+    is_error: bool,
+) -> ObserveEvent {
+    ObserveEvent::SubagentStop {
+        turn_id,
+        agent_id: parent_agent_id.unwrap_or(child_agent_id),
+        child_agent_id,
+        agent_name: agent_name.to_string(),
+        result: result.to_string(),
+        is_error,
+    }
+}
+
+/// 经 child EventBus 发射 v2 `SubagentStop`（C3）。
 ///
 /// 与 [`emit_subagent_start_v2`] 同一通道；parent_agent_id 为 None 时同样跳过。
 pub(crate) fn emit_subagent_stop_v2(
@@ -1063,7 +1144,7 @@ pub(crate) fn emit_subagent_stop_v2(
     result: &str,
     is_error: bool,
 ) {
-    let Some(parent_agent_id) = parent_agent_id else {
+    if parent_agent_id.is_none() {
         tracing::warn!(
             target: "langfuse::subagent",
             child_agent_id = %child_agent_id,
@@ -1071,15 +1152,45 @@ pub(crate) fn emit_subagent_stop_v2(
             "parent_agent_id 未注入，跳过 v2 SubagentStop emit（防脏数据）"
         );
         return;
-    };
-    event_bus.emit_observe(crate::agent::events_v2::ObserveEvent::SubagentStop {
+    }
+    event_bus.emit_observe(build_subagent_stop_v2(
         turn_id,
-        agent_id: parent_agent_id,
+        parent_agent_id,
         child_agent_id,
-        agent_name: agent_name.to_string(),
-        result: result.to_string(),
+        agent_name,
+        result,
         is_error,
-    });
+    ));
+}
+
+// ─── v1 协议化载体直发（发射侧同步映射） ───────────────────────────────────
+//
+// v1 `ExecutorEvent` 中间态已退役（`2026-07-18-executor-event-retirement.md`）：
+// SubagentStart/Stop 的发射语义单一事实源为 v2 事件构造，v1 仅作 ACP 协议化
+// 载体——经 `peri-acp-types::event_v2::observe_event_to_executor`（协议序列化面
+// 保留的最小映射）同步映射后直发父 handler / bg 泵。同步直发（非 forwarder
+// 异步转发）保证 Started/Stopped 与 BackgroundTaskCompleted 的顺序契约；
+// 转发器（`subagent_event_forwarder`）对 v2 SubagentStart/Stop 保持过滤（防双发）。
+
+/// v1 协议化直发 `SubagentStarted`（从 v2 事件同步映射）。
+///
+/// `handler` 为 None（无父 handler / 无 bg 通道）时静默跳过。
+fn forward_subagent_start_v1(handler: Option<&Arc<dyn AgentEventHandler>>, ev: ObserveEvent) {
+    let Some(h) = handler else { return };
+    // SubagentStarted 无 source_agent_id 字段（TUI 按 instance_id 配对），
+    // 无需 set_source_agent_id；instance_id 由 child_agent_id 身份透传（C1）。
+    if let Some(exec_ev) = observe_event_to_executor(ev) {
+        h.on_event(exec_ev);
+    }
+}
+
+/// v1 协议化直发 `SubagentStopped`（从 v2 事件同步映射）。语义同
+/// [`forward_subagent_start_v1`]。
+fn forward_subagent_stop_v1(handler: Option<&Arc<dyn AgentEventHandler>>, ev: ObserveEvent) {
+    let Some(h) = handler else { return };
+    if let Some(exec_ev) = observe_event_to_executor(ev) {
+        h.on_event(exec_ev);
+    }
 }
 
 /// 构造 SubAgent v2 上下文（自 `build_v2_subagent_context` 迁移；
@@ -1258,48 +1369,38 @@ impl Drop for DeregisterGuard {
     }
 }
 
-/// SubagentStopped 补发参数（BgCleanupGuard 取消兜底路径使用）
-pub(crate) struct BgStopEmit {
-    pub(crate) sender: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    pub(crate) agent_name: String,
-    pub(crate) instance_id: String,
-}
-
 /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
 ///
-/// 字段与 [`emit_subagent_stop_v2`] 调用参数一一对应（C3 配对契约）：
+/// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
 /// abort 兜底路径下 v2 Start 已 emit 而 v2 Stop 永不 emit → Langfuse AGENT span
-/// 悬挂，Drop 时经 child EventBus 补发。
+/// 悬挂，Drop 时经 child EventBus 补发；同时 v1 协议化直发（`sender` 存在时）
+/// 补发 SubagentStopped——两者共用同一 v2 事件构造（发射语义单一事实源）。
 pub(crate) struct BgStopEmitV2 {
     pub(crate) event_bus: Arc<EventBus>,
     pub(crate) turn_id: TurnId,
     pub(crate) parent_agent_id: Option<AgentId>,
     pub(crate) child_agent_id: AgentId,
     pub(crate) agent_name: String,
+    /// v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
+    pub(crate) sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
 }
 
 /// bg 任务同步收尾 guard（S3.2）：Drop 时（任务被 abort / panic / 正常结束）执行：
 /// - `deregister_runtime`（active_agents 清理，防泄漏）
-/// - 补发 `SubagentStopped`（若未显式 emit——正常路径 emit 后需 `disarm_stop`）
-/// - 补发 v2 `SubagentStop`（若未显式 emit——正常路径 emit 后需 `disarm_stop_v2`）
+/// - 补发 v2 `SubagentStop`（若未显式 emit——正常路径 emit 后需 `disarm_stop`）
+///   + v1 协议化直发 `SubagentStopped`（sender 存在时，同一事件构造）
 pub(crate) struct BgCleanupGuard {
     pub(crate) thread_id: String,
     pub(crate) deregister: Option<DeregisterRuntimeFn>,
-    /// 未显式 emit SubagentStopped 时补发（取消/abort 兜底路径）
-    pub(crate) stop: Option<BgStopEmit>,
     /// 未显式 emit v2 SubagentStop 时补发（取消/abort 兜底路径）
-    pub(crate) stop_v2: Option<BgStopEmitV2>,
+    pub(crate) stop: Option<BgStopEmitV2>,
 }
 
 impl BgCleanupGuard {
-    /// 正常路径已显式 emit SubagentStopped 后调用，防止 drop 时重复发射。
+    /// 正常路径已显式 emit v2 SubagentStop + v1 协议化直发后调用，
+    /// 防止 drop 时重复发射。
     pub(crate) fn disarm_stop(&mut self) {
         self.stop = None;
-    }
-
-    /// 正常路径已显式 emit v2 SubagentStop 后调用，防止 drop 时重复发射。
-    pub(crate) fn disarm_stop_v2(&mut self) {
-        self.stop_v2 = None;
     }
 }
 
@@ -1309,55 +1410,39 @@ impl Drop for BgCleanupGuard {
             deregister(&self.thread_id);
         }
         if let Some(stop) = &self.stop {
-            emit_subagent_stop_bg(
-                &stop.sender,
+            // 单一 v2 事件构造：v2 发射（parent 身份存在时）+ v1 协议化直发
+            // （sender 存在时）。ObserveEvent 身份透传：child_agent_id → instance_id。
+            let ev = build_subagent_stop_v2(
+                stop.turn_id,
+                stop.parent_agent_id,
+                stop.child_agent_id,
                 &stop.agent_name,
-                "Background sub-agent was cancelled".to_string(),
-                true,
-                &stop.instance_id,
-            );
-        }
-        if let Some(stop_v2) = &self.stop_v2 {
-            emit_subagent_stop_v2(
-                &stop_v2.event_bus,
-                stop_v2.turn_id,
-                stop_v2.parent_agent_id,
-                stop_v2.child_agent_id,
-                &stop_v2.agent_name,
                 "Background sub-agent was cancelled",
                 true,
             );
+            if stop.parent_agent_id.is_some() {
+                stop.event_bus.emit_observe(ev.clone());
+            }
+            if let Some(sender) = &stop.sender {
+                if let Some(exec_ev) = observe_event_to_executor(ev) {
+                    let _ = sender.send(exec_ev);
+                }
+            }
         }
     }
-}
-
-/// BG SubAgent 停止事件发射（后台路径）。
-///
-/// 通过 `bg_event_sender` 发送 `SubagentStopped` 事件。
-pub(crate) fn emit_subagent_stop_bg(
-    bg_event_sender: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    agent_name: &str,
-    output_summary: String,
-    is_error: bool,
-    instance_id: &str,
-) {
-    let _ = bg_event_sender.send(ExecutorEvent::SubagentStopped {
-        agent_name: agent_name.to_string(),
-        result: output_summary,
-        is_error,
-        instance_id: instance_id.to_string(),
-    });
 }
 
 /// 同步 SubAgent 停止统一后处理（fork + agent 定义路径）。
 ///
 /// 按顺序执行：
-/// 1. emit SubagentStopped
-/// 2. lifecycle hook (SubagentStop，经闭包)
-/// 3. thread_store 状态更新（仅 sync 路径有此步骤）
+/// 1. lifecycle hook (SubagentStop，经闭包)
+/// 2. thread_store 状态更新（仅 sync 路径有此步骤）
+///
+/// v1 SubagentStopped 协议化直发不在本函数内——由调用方在
+/// `emit_subagent_stop_v2` 之后经 `forward_subagent_stop_v1` 同步映射发出
+/// （发射语义单一事实源 = v2 事件构造，v1 仅 ACP 协议化载体）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn on_subagent_stop_handler(
-    event_handler: &Option<Arc<dyn AgentEventHandler>>,
     on_subagent_stop: &Option<SubagentLifecycleStop>,
     thread_store: &Option<Arc<dyn ThreadStore>>,
     agent_id: &str,
@@ -1366,16 +1451,7 @@ pub(crate) async fn on_subagent_stop_handler(
     is_error: bool,
     cwd: &str,
 ) {
-    // 1. emit SubagentStopped
-    if let Some(ref handler) = event_handler {
-        handler.on_event(ExecutorEvent::SubagentStopped {
-            agent_name: agent_id.to_string(),
-            result: output_summary.to_string(),
-            is_error,
-            instance_id: child_thread_id.to_string(),
-        });
-    }
-    // 2. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
+    // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
     if let Some(ref on_stop) = on_subagent_stop {
         on_stop(agent_id, cwd, output_summary, is_error);
     }

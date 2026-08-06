@@ -10,9 +10,10 @@
 //! - **观测层**（broadcast，无界）：LlmCallStart / LlmCallEnd / MessagesCompacted /
 //!   TurnError / SubagentStart / SubagentStop
 //!
-//! 本模块同时承载 v1 兼容映射（`*_event_to_executor`，穷尽匹配，
+//! 本模块同时承载 v1 协议序列化面映射（`*_event_to_executor`，穷尽匹配，
 //! `2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）——
-//! 映射保留在 ACP 协议面，发射点（EventBus emit）在 Agent 层。
+//! v1 `ExecutorEvent` 中间态已退役（批 2「v1-retire」），本组函数是 ACP
+//! 协议化唯一需要的 v1 兼容面，发射点（EventBus emit）统一在 Agent 层。
 
 //! v2 事件流 — 三层分级事件总线
 //!
@@ -636,19 +637,21 @@ impl EventHandles {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-// ─── v1 兼容映射（v2 → ExecutorEvent） ──────────────────────────────────────
+// ─── v1 兼容映射（v2 → ExecutorEvent，协议序列化面） ─────────────────────
 //
-// v1 `ExecutorEvent` 中间态尚未全量退役（依赖 StdioEventSink 迁移，
-// `2026-07-18-executor-event-retirement.md`），v2 事件经本组函数转换为
-// v1 事件后由 peri-acp 协议化。本组函数是 canonical 事件的唯一 v1 兼容映射：
+// v1 `ExecutorEvent` 中间态已退役（批 2「v1-retire」：peri-agent 内部发射统一
+// v2 形态，ObserveEvent 身份透传），本组函数保留为 **ACP 协议序列化面需要的
+// 最小映射**——v2 事件经本组函数转为 v1 协议化载体后由 ACP 序列化
+// （SessionUpdate / AcpEvent，wire format 不变）：
 //
 // - **穷尽匹配**：每个 v2 变体显式声明映射结果或过滤理由，新增变体无法静默
 //   落入 wildcard 丢弃分支（`2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）。
 // - **身份透传**：`source_agent_id` 透传 v2 `agent_id`（不再置 None 伪装）；
 //   `message_id` 以 turn_id 填充（v2 chunk 事件无 message 级身份，turn_id 是
-//   该 chunk 可获得的唯一稳定身份；真实 message 身份由 transcript/envelope 承载）。
-// - **随 ExecutorEvent 退役**：本组函数是 v1 中间态的组成部分，随 ExecutorEvent
-//   全量退役（另一子 issue）一起删除。
+//   该 chunk 可获得的唯一稳定身份；真实 message 身份由 transcript/envelope 承载）；
+//   `SubagentStart/Stop.child_agent_id` 透传为 `SubagentStarted/Stopped.instance_id`（C1 契约）。
+// - **不承载 Agent 层发射**：发射点在 Agent 层 EventBus（v2），本组函数仅 ACP
+//   消费侧协议化时调用（`host/exec/forwarder.rs`、subagent 发射侧同步映射）。
 
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {

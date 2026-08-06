@@ -199,11 +199,17 @@ pub enum MiddlewareHook {
     OnNotification,
 }
 
-/// Agent 执行过程中的增量事件
+/// Agent 执行过程中的增量事件（v1 协议化载体）
 ///
 /// 历史名 `AgentEvent`，因与 `peri-tui::app::events::AgentEvent` 同名造成歧义，
 /// 重命名为 `ExecutorEvent`（更准确地反映其作为 executor 层事件类型的角色）。
 /// serde tag/content 序列化不含 enum 名，wire format 零变化。
+///
+/// **v1 中间态已退役**（批 2「v1-retire」）：Agent 层事件发射统一 v2 形态
+/// （`event_v2` 三层事件，ObserveEvent 身份透传）；本类型仅保留为 ACP 协议
+/// 序列化面需要的最小映射载体——由 `event_v2::*_event_to_executor` 从 v2 事件
+/// 转换后经 `EventSink`/`map_event` 协议化（SessionUpdate / AcpEvent），
+/// wire format 保持不变。不承载 peri-agent 内部业务事件发射。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
