@@ -2,33 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
-// ─── TodoStatus ───────────────────────────────────────────────────────────────
+// ─── TodoStatus / TodoItem（L5：契约化至 peri-acp-types::tools，re-export 保兼容）──
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-// ─── TodoItem ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodoItem {
-    pub content: String,
-    #[serde(
-        default,
-        rename = "activeForm",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub active_form: Option<String>,
-    pub status: TodoStatus,
-}
+pub use peri_acp_types::tools::{TodoItem, TodoStatus};
 
 // ─── TodoWriteTool ────────────────────────────────────────────────────────────
 

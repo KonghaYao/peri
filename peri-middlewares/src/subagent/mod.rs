@@ -595,6 +595,22 @@ pub fn scan_agents_detailed(
     result
 }
 
+// L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，
+// 不直接引用本类型；见 peri_agent::session::factory::SubAgentMiddlewarePort）。
+impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn set_parent_agent_id(&self, id: peri_agent::group::pipeline::AgentId) {
+        SubAgentMiddleware::set_parent_agent_id(self, id);
+    }
+
+    fn set_parent_session(&self, session: Arc<Session>) {
+        SubAgentMiddleware::set_parent_session(self, session);
+    }
+}
+
 #[async_trait]
 impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {

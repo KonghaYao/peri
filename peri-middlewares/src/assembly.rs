@@ -5,170 +5,58 @@
 //! （`peri-agent/src/session/factory.rs` 的 `production_blueprint`），
 //! 本模块按蓝本构造中间件实例——顺序是行为契约，禁止重排。
 //!
-//! 依赖方向说明：装配实现引用具体中间件类型（本 crate），
-//! 经 Agent 层 [`MiddlewareChainAssembler`] trait 边界接入，
-//! 避免 Agent 层反向依赖本 crate 成环；依赖反转（中间件类型下沉）
-//! 完成后装配实现整体物理迁入 Agent 层。
+//! 依赖方向说明（L5）：装配上下文（[`AssemblyContext`] / [`ChainAssembly`] /
+//! [`OnBgCompleteFn`] / [`SystemPromptBuilder`]）随 L5 stage 装配迁入 Agent 层
+//! session 工厂（事实源），middlewares 具体类型经 `peri-acp-types` 端口
+//! （`McpPoolPort` / `ToolSearchPort` / `WorkflowMiddlewarePort` /
+//! `CronSchedulerPort`）接入，本模块装配时 downcast 还原具体实例。
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_agent::{
-    agent::{
-        async_tasks::{BgTaskKind, TaskManager},
-        events::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
-        react::ReactLLM,
-        AgentCancellationToken, LangfuseBridgeLike,
-    },
-    error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
-    goal::GoalController,
+    agent::{events::AgentEventHandler, react::ReactLLM},
     interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
     messages::BaseMessage,
     middleware::chain::MiddlewareChain,
-    session::factory::{
-        ChainSlot, ChildHandlerFactory, DeregisterRuntimeFn, MiddlewareChainAssembler,
-        RegisterRuntimeFn,
-    },
-    thread::ThreadStore,
+    session::factory::{ChainSlot, MiddlewareChainAssembler, SubAgentMiddlewarePort},
     tools::BaseTool,
 };
-use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_resources::workflow::runner::AgentExecutor;
+use peri_resources::lsp::config::LspConfigFile;
 
 use crate::{
-    agent_define::AgentOverrides,
-    cron::{CronMiddleware, CronScheduler},
+    cron::{CronMiddleware, CronScheduler, CronSchedulerPortHandle},
     error_suggest,
     hitl::{
         default_requires_approval, AutoClassifier, HumanInTheLoopMiddleware, LlmAutoClassifier,
-        SharedPermissionMode,
     },
-    hooks::{HookMiddleware, RegisteredHook},
+    hooks::HookMiddleware,
     mcp::{build_tool_bridges, McpClientPool, McpMiddleware, McpResourceTool},
     middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
-    plugin::{LoadedPlugin, PluginMiddleware},
-    skills::{SkillRoot, SkillsMiddleware},
+    plugin::PluginMiddleware,
+    skills::SkillsMiddleware,
     subagent::{SkillPreloadMiddleware, SubAgentMiddleware},
     tool_search::{ToolSearchIndex, ToolSearchMiddleware},
-    tools::{AskUserTool, TodoItem},
+    tools::AskUserTool,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
     AgentDefineMiddleware, AgentsMdMiddleware, AtMentionMiddleware, GitAttributionMiddleware,
     GoalMiddleware, ImageMiddleware, LspMiddleware,
 };
 
-/// 后台任务完成回调类型（第二参为任务 kind，供 continuation scheduler 过滤）
-pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
-/// System prompt 构建器类型
-pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>;
+/// 后台任务完成回调类型（事实源 peri-agent::session::factory，L5 迁入）
+pub use peri_agent::session::factory::OnBgCompleteFn;
+/// System prompt 构建器类型（事实源 peri-agent::session::factory，L5 迁入）
+pub use peri_agent::session::factory::SystemPromptBuilder;
 
-/// 链装配上下文（Agent 层装配接口的上下文投影）。
+/// 链装配上下文（事实源 peri-agent::session::factory，L5 迁入）。
 ///
-/// 由 ACP 侧（`peri-acp/src/agent/builder.rs`）从 `SessionContext` 投影构造，
-/// 仅含中间件构造所需的依赖；LLM/prompt 渲染等 ACP 私有逻辑不进入本结构。
-#[allow(clippy::type_complexity)]
-pub struct AssemblyContext {
-    // ── 会话级 ──
-    /// 工作目录
-    pub cwd: String,
-    /// 取消令牌（子 agent / 工具执行共享）
-    pub cancel: AgentCancellationToken,
-    /// 用户交互 broker（HITL 审批）
-    pub broker: Arc<dyn UserInteractionBroker>,
-    /// 权限模式
-    pub permission_mode: Arc<SharedPermissionMode>,
-    // ── 模型 ──
-    /// 模型名称（GitAttribution 注入用）
-    pub model_name: String,
-    /// 模型显示名（hook 注入用）
-    pub provider_name: String,
-    /// 辅助模型（goal steering / compact）
-    pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    /// 自动分类模型（HITL auto-classifier）
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
-    // ── 配置 / 插件 / 技能 ──
-    /// CLAUDE.md 排除项
-    pub claude_md_excludes: Vec<String>,
-    /// 预加载技能名
-    pub preload_skills: Vec<String>,
-    /// 插件技能根目录
-    pub plugin_skill_roots: Vec<SkillRoot>,
-    /// 已加载插件
-    pub plugin_loaded: Vec<LoadedPlugin>,
-    /// Hook 组（每组一个 HookMiddleware 实例）
-    pub hook_groups: Vec<Vec<RegisteredHook>>,
-    /// session 启动来源（hook 注入用）
-    pub session_start_source: Option<String>,
-    // ── 外部服务 ──
-    /// Cron 调度器（None = 构造临时实例）
-    pub cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
-    /// MCP 连接池（None = 不注册 MCP 中间件/工具）
-    pub mcp_pool: Option<Arc<McpClientPool>>,
-    /// Channel 状态（MultiplexBroker 包装用）
-    pub channel_state: Option<Arc<peri_agent::interaction::ChannelState>>,
-    /// 工具搜索索引
-    pub tool_search_index: Arc<ToolSearchIndex>,
-    /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
-    pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// LSP server 配置（非空时注册 LspMiddleware）
-    pub lsp_servers: Vec<LspServerConfig>,
-    /// Workflow executor（Some 时注册 Workflow 中间件）
-    pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
-    /// 会话级 WorkflowMiddleware（复用，None = 构造临时实例）
-    pub workflow_middleware: Option<Arc<WorkflowMiddleware>>,
-    // ── 事件 / 后台 ──
-    /// 事件 handler（子 agent 事件转发）
-    pub event_handler: Arc<dyn AgentEventHandler>,
-    /// 后台任务注册表（session 级，None 时上层已回退为临时实例）
-    pub task_manager: Arc<TaskManager>,
-    /// 后台任务完成事件发送端（bg_event_rx 由上层持有）
-    pub bg_event_tx: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    /// 后台任务完成回调
-    pub on_bg_complete: Option<OnBgCompleteFn>,
-    /// SubAgent Langfuse bridge（由上层构造注入）
-    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
-    // ── 子 agent 持久化 ──
-    /// 子线程持久化存储
-    pub thread_store: Option<Arc<dyn ThreadStore>>,
-    /// 父线程 ID（子 agent 层级）
-    pub parent_thread_id: Option<String>,
-    /// 子 agent 启动注册回调
-    pub register_runtime: Option<RegisterRuntimeFn>,
-    /// 子 agent 结束注销回调
-    pub deregister_runtime: Option<DeregisterRuntimeFn>,
-    /// 子 agent 事件 handler 工厂
-    pub child_handler_factory: Option<ChildHandlerFactory>,
-    // ── 冻结数据 / prompt ──
-    /// 冻结 CLAUDE.md（None = 每轮从磁盘读，legacy）
-    pub frozen_claude_md: Option<String>,
-    /// 冻结 CLAUDE.local.md
-    pub frozen_claude_local_md: Option<String>,
-    /// 冻结 skills 摘要
-    pub frozen_skill_summary: Option<String>,
-    /// 子 agent / fork 复用的冻结 prompt（无 16_workflow 版本）
-    pub system_prompt_for_sub: String,
-    // ── 工厂 ──
-    /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
-    /// System prompt 构建器（SubAgent 用）
-    pub system_builder: SystemPromptBuilder,
-    /// Todo 更新通道发送端（todo_rx 由上层持有）
-    pub todo_tx: tokio::sync::mpsc::Sender<Vec<TodoItem>>,
-    // ── goal ──
-    /// Goal 控制器（Some 时在链最后注册 GoalMiddleware）
-    pub goal_controller: Option<Arc<dyn GoalController>>,
-}
+/// 由 stage 装配（Agent 层 `session::exec::stage_builder`）从会话输入投影构造；
+/// middlewares 具体类型经 `peri-acp-types` 端口接入，本模块装配时
+/// downcast 还原（见 [`ProductionChainAssembler::assemble`]）。
+pub use peri_agent::session::factory::AssemblyContext;
 
-/// 链装配产物（ACP `build_agent` 直接消费）
-pub struct ChainAssembly {
-    /// 中间件链（StageContext 复用）
-    pub chain: MiddlewareChain,
-    /// SubAgent 中间件原实例（链中已有一份 clone；供上层注入主 agent 身份）
-    pub subagent_mw: Option<SubAgentMiddleware>,
-    /// 错误感知建议注册表
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（工具名 + subagent 类型）
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
-}
+/// 链装配产物（事实源 peri-agent::session::factory，L5 迁入）。
+pub use peri_agent::session::factory::ChainAssembly;
 
 /// 生产链装配器（当前唯一装配实现，见模块文档）。
 pub struct ProductionChainAssembler;
@@ -227,24 +115,64 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             goal_controller,
         } = ctx;
 
+        // L5：middlewares 具体类型经 peri-acp-types 端口接入，此处 downcast
+        // 还原（端口实现方为本 crate，生产路径必成功；失败回退与原上层
+        // 回退逻辑一致——临时实例 / None 降级）。
+
+        // Cron 调度器：端口 → Arc<Mutex<CronScheduler>>（CronMiddleware 消费）。
+        // downcast 失败或无注入时构造临时实例（行为与迁移前一致）。
+        let cron_scheduler_concrete: Option<Arc<parking_lot::Mutex<CronScheduler>>> =
+            cron_scheduler.as_ref().map(|p| {
+                Arc::clone(p)
+                    .downcast_arc::<CronSchedulerPortHandle>()
+                    .map(|h| h.0.clone())
+                    .unwrap_or_else(|_| {
+                        Arc::new(parking_lot::Mutex::new(CronScheduler::new(
+                            tokio::sync::mpsc::unbounded_channel().0,
+                        )))
+                    })
+            });
+
+        // MCP 连接池：端口 → Arc<McpClientPool>。downcast 失败按未注入处理
+        //（不注册 MCP 中间件/工具）。
+        let mcp_pool_concrete: Option<Arc<McpClientPool>> = mcp_pool.as_ref().map(|p| {
+            Arc::clone(p)
+                .downcast_arc::<McpClientPool>()
+                .unwrap_or_else(|_| Arc::new(McpClientPool::new_pending()))
+        });
+
+        // 工具搜索索引：端口 → Arc<ToolSearchIndex>（失败回退默认实例）。
+        let tool_search_index_concrete: Arc<ToolSearchIndex> = Arc::clone(tool_search_index)
+            .downcast_arc::<ToolSearchIndex>()
+            .unwrap_or_else(|_| Arc::new(ToolSearchIndex::default()));
+
+        // WorkflowMiddleware 端口（会话级复用，None 时构造临时实例）。
+        let workflow_middleware_concrete: Option<Arc<WorkflowMiddleware>> = workflow_middleware
+            .as_ref()
+            .and_then(|p| Arc::clone(p).downcast_arc::<WorkflowMiddleware>().ok());
+
         // HITL middleware — reuse auto_classifier model from cache when available
         let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(
             LlmAutoClassifier::new(auto_classifier_model.clone()),
         ));
         // 构造 permission broker（当 channel_state 存在时用 MultiplexBroker 包装）
-        let effective_broker: Arc<dyn UserInteractionBroker> = match (channel_state, mcp_pool) {
-            (Some(cs), Some(pool)) => {
-                let channel_broker = Arc::new(ChannelBroker::new(cs.clone(), pool.clone()));
-                Arc::new(MultiplexBroker::new(vec![
-                    ("tui".to_string(), broker.clone()),
-                    (
-                        "channel".to_string(),
-                        channel_broker as Arc<dyn UserInteractionBroker>,
-                    ),
-                ]))
-            }
-            _ => broker.clone(),
-        };
+        let effective_broker: Arc<dyn UserInteractionBroker> =
+            match (channel_state, mcp_pool_concrete.as_ref()) {
+                (Some(cs), Some(pool)) => {
+                    let pool_arc: Arc<McpClientPool> = Arc::clone(pool);
+                    let sender: Arc<dyn peri_agent::interaction::ChannelNotificationSender> =
+                        pool_arc;
+                    let channel_broker = Arc::new(ChannelBroker::new(cs.clone(), sender));
+                    Arc::new(MultiplexBroker::new(vec![
+                        ("tui".to_string(), broker.clone()),
+                        (
+                            "channel".to_string(),
+                            channel_broker as Arc<dyn UserInteractionBroker>,
+                        ),
+                    ]))
+                }
+                _ => broker.clone(),
+            };
 
         // AskUser 工具：使用原始 broker，不使用 MultiplexBroker。
         // ChannelBroker 对 Questions 立即返回空答案，MultiplexBroker 竞速时 Channel 总是先返回，
@@ -255,7 +183,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         let mut parent_tools: Vec<Box<dyn BaseTool>> = FilesystemMiddleware::build_tools(cwd);
         parent_tools.extend(TerminalMiddleware::build_tools(cwd));
         parent_tools.extend(WebMiddleware::build_tools());
-        if let Some(ref pool) = mcp_pool {
+        if let Some(ref pool) = mcp_pool_concrete {
             let mcp_tools = build_tool_bridges(pool);
             for tool in mcp_tools {
                 parent_tools.push(tool);
@@ -270,7 +198,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // 仅在无 session 级实例时创建临时实例（print 模式等）。
         let mut wf_adaptor: Option<WorkflowMiddlewareAdaptor> = None;
         if let Some(ref executor) = workflow_executor {
-            let wf_mw = if let Some(ref session_mw) = workflow_middleware {
+            let wf_mw = if let Some(ref session_mw) = workflow_middleware_concrete {
                 Arc::clone(session_mw)
             } else {
                 let (notification_tx, _) = tokio::sync::broadcast::channel(32);
@@ -383,7 +311,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 ChainSlot::Cron => {
                     chain.add(Box::new(CronMiddleware::new(
-                        cron_scheduler.clone().unwrap_or_else(|| {
+                        cron_scheduler_concrete.clone().unwrap_or_else(|| {
                             Arc::new(parking_lot::Mutex::new(CronScheduler::new(
                                 tokio::sync::mpsc::unbounded_channel().0,
                             )))
@@ -449,7 +377,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
                 ChainSlot::Mcp => {
-                    if let Some(pool) = mcp_pool {
+                    if let Some(pool) = mcp_pool_concrete.as_ref() {
                         chain.add(Box::new(McpMiddleware::new(Arc::clone(pool))));
                     }
                 }
@@ -462,7 +390,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // ToolSearch 中间件
                 ChainSlot::ToolSearch => {
                     chain.add(Box::new(ToolSearchMiddleware::new(
-                        Arc::clone(tool_search_index),
+                        Arc::clone(&tool_search_index_concrete),
                         Arc::clone(shared_tools),
                     )));
                 }
@@ -516,7 +444,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 
         ChainAssembly {
             chain,
-            subagent_mw: Some(subagent),
+            subagent_mw: Some(Arc::new(subagent) as Arc<dyn SubAgentMiddlewarePort>),
             error_suggest_registry: Some(registry),
             tool_registry_snapshot: Arc::new(snapshot),
         }
