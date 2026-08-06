@@ -106,7 +106,7 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         session_id: "test-session".to_string(),
         history: vec![],
         cwd: "/tmp".to_string(),
-        peri_config: Arc::new(Default::default()),
+        compact_config: Default::default(),
         auxiliary_model: None,
         event_sink: sink,
         args: String::new(),
@@ -302,6 +302,28 @@ fn test_default_registry_contains_compact_and_clear() {
     assert!(names.contains(&"clear"), "默认注册表应包含 clear");
 }
 
+#[test]
+fn test_default_registry_contains_bg() {
+    let reg = crate::session::command::default_command_registry();
+    let names: Vec<&str> = reg.list().iter().map(|(n, _, _)| *n).collect();
+    assert!(names.contains(&"bg"), "默认注册表应包含 bg 命令");
+}
+
+#[test]
+fn test_bg_command_registry_find() {
+    let reg = crate::session::command::default_command_registry();
+
+    // 通过名称查找
+    let (cmd, args) = reg.find("/bg 帮我搜索 Rust 2026 roadmap").unwrap();
+    assert_eq!(cmd.name(), "bg");
+    assert_eq!(args, "帮我搜索 Rust 2026 roadmap");
+
+    // 通过别名查找
+    let (cmd, args) = reg.find("/background 调研 tokio 最新版本").unwrap();
+    assert_eq!(cmd.name(), "bg");
+    assert_eq!(args, "调研 tokio 最新版本");
+}
+
 // ── ClearCommand 测试 ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -368,7 +390,7 @@ async fn test_clear_command_ignores_existing_history() {
         session_id: "test-session".to_string(),
         history: vec![BaseMessage::human("你好"), BaseMessage::ai("世界")],
         cwd: "/tmp".to_string(),
-        peri_config: Arc::new(Default::default()),
+        compact_config: Default::default(),
         auxiliary_model: None,
         event_sink: sink.clone(),
         args: String::new(),

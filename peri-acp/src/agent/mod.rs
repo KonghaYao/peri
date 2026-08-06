@@ -1,8 +1,8 @@
 //! Agent construction and lifecycle.
 //!
-//! 3.0 批 2 归位：`build_agent` / `build_stage_context`（AgentComponents 装配）
-//! 随执行面迁至 `crate::host::exec::stage_builder`（装配注入面，L5 物理迁入
-//! peri-agent session 工厂）；workflow agent 执行器迁至
-//! `crate::host::exec::workflow_agent`（本模块保留 re-export 保调用方兼容）。
-
-pub mod workflow_agent;
+//! 3.0 批 2 + L5 归位：`build_agent` / `build_stage_context`（AgentComponents 装配）
+//! 装配桥在 `crate::host::stage_builder`（装配注入面，装配本体在
+//! peri-agent session 工厂）；workflow agent 执行器在 `crate::host::workflow_agent`
+//! （ACP 装配面宿主——深绑 ACP provider/prompt/AgentPool 与
+//! peri-middlewares / peri-workflow 装配面，§0 边 8 禁止迁入 peri-agent，
+//! 见 `host/workflow_agent.rs` 归位裁定）。

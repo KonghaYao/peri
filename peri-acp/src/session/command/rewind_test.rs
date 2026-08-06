@@ -122,7 +122,7 @@ fn make_ctx(
         session_id: "test-session".to_string(),
         history,
         cwd,
-        peri_config: Arc::new(Default::default()),
+        compact_config: Default::default(),
         auxiliary_model: None,
         event_sink: sink,
         args,

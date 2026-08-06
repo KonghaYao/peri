@@ -3,6 +3,10 @@
 //! Different frontends (TUI via MpscTransport, IDE via stdio SDK) route agent
 //! execution events differently. [`EventSink`] abstracts this so the core
 //! prompt execution logic can live in `peri-acp`.
+//!
+//! L5：trait 定义已契约化至 `peri-acp-types::event::EventSink`（命令执行体 /
+//! 事件发射辅助经契约端口调用），本模块保留 ACP 协议面实现
+//! （TransportEventSink / StdioEventSink 等）。
 
 // Re-export SDK types used by StdioEventSink.
 pub use agent_client_protocol::{
@@ -21,6 +25,9 @@ use crate::{
     event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
 };
 
+/// EventSink 契约（L5：事实源 peri-acp-types::event）。
+pub use peri_acp_types::event::EventSink;
+
 /// Serializes a serde `Serialize` value into its serde snake_case string
 /// representation. Used for CompactStrategy/CompactOutcome enum variants
 /// so TUI string matching works correctly.
@@ -38,41 +45,8 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 /// 序列化面入口——输入为协议化载体事件（由 v2 事件经
 /// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
 /// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
-#[async_trait]
-pub trait EventSink: Send + Sync {
-    /// Push a single executor event. Called from the background pump task.
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
-
-    /// Signal that the agent execution stream has ended (no more events).
-    ///
-    /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
-    /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
-    /// `TurnInterrupted` 配对判定（Issue 2026-08-05）；缺失路径传 None。
-    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>);
-
-    /// Push an unstable event (peri/unstable-event) directly to the transport.
-    ///
-    /// Used to inject terminal signals (e.g. "turn-done") that don't originate
-    /// from an ExecutorEvent variant. Default: no-op (for non-TUI sinks like
-    /// StdioEventSink that don't support the unstable-event channel).
-    async fn push_unstable_event(
-        &self,
-        _session_id: &str,
-        _event: String,
-        _data: serde_json::Value,
-    ) {
-    }
-
-    /// Push an arbitrary `session/update` notification to the transport.
-    ///
-    /// Used for events that don't originate from `ExecutorEvent` — e.g. bg agent
-    /// completion synthetic user messages. Default: no-op (non-TUI sinks have no
-    /// need for ad-hoc session/update emission).
-    async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
-}
-
+/// （L5：trait 定义契约化至 peri-acp-types，实现见下方。）
 // ── TUI transport-backed EventSink ──────────────────────────────────────────
-
 /// [`EventSink`] backed by an [`AcpTransport`]. Sends two notification types:
 /// - `session/update` — standard ACP SessionUpdate (with `_peri` metadata for TUI)
 /// - `peri/agent_event` — AcpEvent DTO 序列化（TUI-only events，categories ②③）

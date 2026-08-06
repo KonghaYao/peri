@@ -14,9 +14,16 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
+use peri_controller::langfuse::bridge::LangfuseBridge;
+use peri_controller::langfuse::tracer::LangfuseTracer;
 use peri_controller::langfuse::LangfuseSession;
 use serde_json::Value;
 use tracing::info;
+
+use peri_agent::session::exec::executor_helpers::{
+    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
+};
+use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 
 use super::SharedSessions;
 use crate::provider::{LlmProvider, PeriConfig};
@@ -135,8 +142,8 @@ pub(crate) async fn run_prompt(
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    let workflow_executor = crate::agent::workflow_agent::create_executor(
-        crate::agent::workflow_agent::WorkflowAgentContext {
+    let workflow_executor = crate::host::workflow_agent::create_executor(
+        crate::host::workflow_agent::WorkflowAgentContext {
             provider: Arc::clone(provider),
             cwd: cwd.clone(),
             frozen_claude_md: frozen
@@ -183,14 +190,237 @@ pub(crate) async fn run_prompt(
     // Track first history message ID for cancel-with-progress path (history is moved below)
     // Uses Option<MessageId> (16 bytes) instead of cloning the entire history.
     let first_history_id = history.first().map(|m| m.id());
+
+    // ── L5：SessionContext 投影（provider / peri_config / pool / SessionManager /
+    //    Controller 端口化——执行体迁入 peri-agent 后由本宿主构造注入面）──
+    let provider_name = provider_snapshot.display_name().to_string();
+    let provider_model_name = provider_snapshot.model_name().to_string();
+    let provider_fp = crate::session::agent_pool::fingerprint(&provider_snapshot);
+    let effective_context_window = if provider_snapshot.context_1m() {
+        1_000_000
+    } else {
+        provider_snapshot.context_window()
+    };
+    let claude_md_excludes = peri_config_snapshot.config.claude_md_excludes.clone();
+    let language = peri_config_snapshot.config.language.clone();
+    let mut compact_config = peri_config_snapshot
+        .config
+        .compact
+        .clone()
+        .unwrap_or_default();
+    compact_config.apply_env_overrides();
+    let retry_events = pool.lock().retry_events.clone();
+
+    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
+    let bg_llm_factory: Arc<
+        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
+            + Send
+            + Sync,
+    > = {
+        let peri_config = Arc::clone(&peri_config_snapshot);
+        Arc::new(move || match LlmProvider::from_config(&peri_config) {
+            Some(provider) => Ok(Box::new(
+                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+                    provider.into_model(),
+                )),
+            )),
+            None => {
+                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
+            }
+        })
+    };
+    // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
+    let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
+        let pool = Arc::clone(&pool);
+        let provider = provider_snapshot.clone();
+        Some(Arc::new(move || {
+            let guard = pool.lock();
+            if guard.has_valid_cache(&provider) {
+                guard.get_cached_llm().cloned()
+            } else {
+                None
+            }
+        }))
+    };
+    // fresh auxiliary model（缓存缺失时；retry observer 烘焙）
+    let fresh_auxiliary_model: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
+        let pool = Arc::clone(&pool);
+        let provider = provider_snapshot.clone();
+        Some(Arc::new(move || {
+            let provider = provider
+                .clone()
+                .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()));
+            provider.into_model().into()
+        }))
+    };
+    // LLM 缓存回写（AgentPool store_llm 语义）
+    let store_llm: Option<Arc<dyn Fn(CachedLlmInstances) + Send + Sync>> = {
+        let pool = Arc::clone(&pool);
+        Some(Arc::new(move |cache: CachedLlmInstances| {
+            pool.lock().store_llm(cache);
+        }))
+    };
+    // stage 装配 LLM 工厂（主 LLM / auto-classifier / 子 agent；与迁移前
+    // stage_builder 桥内构造同源——AgentPool 缓存 + RetryObserver 烘焙）
+    let primary_llm_factory: Option<Arc<dyn Fn() -> Arc<dyn peri_model::Model> + Send + Sync>> = {
+        let pool = Arc::clone(&pool);
+        let provider = provider_snapshot.clone();
+        let retry_events = retry_events.clone();
+        Some(Arc::new(move || {
+            let fp = crate::session::agent_pool::fingerprint(&provider);
+            crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(&pool, &fp, || {
+                provider
+                    .clone()
+                    .with_retry_observer(Some(retry_events.as_retry_observer()))
+                    .into_model()
+            })
+        }))
+    };
+    let auto_classifier_factory: Option<executor::AutoClassifierFactory> = {
+        let provider = provider_snapshot.clone();
+        let retry_events = retry_events.clone();
+        Some(Arc::new(move || {
+            Arc::new(tokio::sync::Mutex::new(
+                provider
+                    .clone()
+                    .with_retry_observer(Some(retry_events.as_retry_observer()))
+                    .into_model(),
+            ))
+        }))
+    };
+    let subagent_llm_factory: Option<executor::SubagentLlmFactory> = {
+        let provider = provider_snapshot.clone();
+        let peri_config = Arc::clone(&peri_config_snapshot);
+        let pool = Arc::clone(&pool);
+        let retry_events = retry_events.clone();
+        let sid = session_id.clone();
+        Some(Arc::new(move |model_alias: Option<&str>| {
+            // 解析 provider 并构建 fingerprint
+            let (p, fp) = if let Some(alias) = model_alias {
+                match LlmProvider::from_config_for_alias(&peri_config, alias) {
+                    Some(p) => {
+                        let fp = crate::session::agent_pool::fingerprint(&p);
+                        (Some(p), fp)
+                    }
+                    None => {
+                        let fp = crate::session::agent_pool::fingerprint(&provider);
+                        (None, fp)
+                    }
+                }
+            } else {
+                let fp = crate::session::agent_pool::fingerprint(&provider);
+                (None, fp)
+            };
+            // 尝试 SubAgent 缓存
+            let model: Arc<dyn peri_model::Model> =
+                crate::session::agent_pool::AgentPool::get_or_create_subagent_llm(
+                    &pool,
+                    &fp,
+                    || match &p {
+                        Some(p) => p
+                            .clone()
+                            .with_retry_observer(Some(retry_events.as_retry_observer()))
+                            .into_model(),
+                        None => provider
+                            .clone()
+                            .with_retry_observer(Some(retry_events.as_retry_observer()))
+                            .into_model(),
+                    },
+                );
+            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
+            llm = llm.with_session_id(sid.clone());
+            Box::new(llm)
+        }))
+    };
+
+    // 事件端口（Controller 适配）
+    let event_publisher: Arc<dyn peri_acp_types::event::EventPublisher> = Arc::new(
+        crate::host::controller_ports::ControllerEventPublisher(Arc::clone(controller)),
+    );
+    let subscribe: Arc<dyn Fn() -> Box<dyn peri_acp_types::event::EventSubscriber> + Send + Sync> = {
+        let controller = Arc::clone(controller);
+        Arc::new(move || {
+            Box::new(
+                crate::host::controller_ports::ControllerSubscriptionAdapter(
+                    controller.subscribe(),
+                ),
+            )
+        })
+    };
+
+    // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
+    let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
+        crate::session::command::default_prompt_command_registry().find_arc(text)
+    });
+    let compact_config_loader: Arc<
+        dyn Fn() -> peri_acp_types::compact::CompactConfig + Send + Sync,
+    > = {
+        let peri_config = Arc::clone(&peri_config_snapshot);
+        Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
+    };
+    let parent_tools_factory: ParentToolsFactory = {
+        let bg_cwd = cwd.clone();
+        Arc::new(move || {
+            // 文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch
+            //（MCP tools 有意排除：后台任务不依赖可能不可用的外部 MCP server；
+            //  可能要求交互式审批的工具不适用于后台 agent）。
+            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
+                peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd);
+            tools.extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
+            tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
+            Arc::new(
+                tools
+                    .into_iter()
+                    .map(|t| {
+                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
+                            as Arc<dyn peri_agent::tools::BaseTool>
+                    })
+                    .collect(),
+            )
+        })
+    };
+    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
+        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
+    let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
+        Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
+
+    // 防御性 frozen 构建器（turn.frozen=None 回落；生产不可达）
+    let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = {
+        let sm = session_manager.clone();
+        let roots = plugin_skill_roots.to_vec();
+        let dirs = plugin_agent_dirs.to_vec();
+        let wf = true; // create_executor 返回 Arc（非 Option），原 ctx.workflow_executor.is_some() 恒真
+        Some(Arc::new(move |cwd, _language| {
+            sm.build_frozen_data(cwd, &roots, &dirs, wf)
+        }))
+    };
+
     let ctx = executor::SessionContext {
-        provider: provider_snapshot,
-        peri_config: peri_config_snapshot,
         cwd,
+        provider_name,
+        provider_model_name,
+        provider_fp,
+        effective_context_window,
+        claude_md_excludes,
+        language,
+        compact_config,
+        bg_llm_factory,
+        get_cached_llm,
+        fresh_auxiliary_model,
+        store_llm,
+        retry_events: Some(Arc::new(retry_events)),
+        primary_llm_factory,
+        auto_classifier_factory,
+        subagent_llm_factory,
         session_id: session_id.clone(),
         cancel,
         broker,
         permission_mode: permission_mode.clone(),
+        session_access: Some(
+            Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
+        ),
+        thread_store: Some(Arc::clone(thread_store)),
+        thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
         plugin_agent_dirs: plugin_agent_dirs.to_vec(),
         plugin_loaded: plugin_loaded.to_vec(),
@@ -202,13 +432,15 @@ pub(crate) async fn run_prompt(
         skills,
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
-        pool,
-        thread_store: Some(Arc::clone(thread_store)),
-        thread_id: Some(thread_id.clone()),
-        session_manager: Some(session_manager),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
-        controller: Arc::clone(controller),
+        event_publisher,
+        subscribe,
+        command_lookup,
+        compact_config_loader,
+        parent_tools_factory,
+        chain_assembler,
+        tool_invocation_resolver,
         session_start_source: if !continuation && is_empty {
             Some("startup".to_string())
         } else {
@@ -217,7 +449,112 @@ pub(crate) async fn run_prompt(
         request_id,
         allow_await_wake: true,
         continuation_notify: cont_tx,
+        frozen_fallback_builder,
     };
+
+    // ── L5：TurnInput 注入面（Langfuse hooks / stage 装配桥 / forwarder）──
+    // Langfuse hooks：从 session 级 LangfuseSession 构造 tracer 并烘焙三个闭包
+    //（turn 开始/结束 trace + 观测旁路 bridge 工厂）。
+    let langfuse_hooks: Option<executor::LangfuseHooks> = langfuse_session.as_ref().map(|s| {
+        let session_clone = Arc::clone(s);
+        let config = session_clone.config.clone();
+        let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+            session_clone;
+        let tracer = Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
+            session,
+            session_id.clone(),
+            config,
+        )));
+        executor::LangfuseHooks {
+            on_turn_start: {
+                let tracer = Arc::clone(&tracer);
+                Arc::new(move |input: &str| {
+                    tracer.lock().on_turn_start(input);
+                }) as Arc<dyn Fn(&str) + Send + Sync>
+            },
+            on_turn_end: {
+                let tracer = Arc::clone(&tracer);
+                Arc::new(move |err: Option<String>| {
+                    tracer.lock().on_turn_end(err.as_deref()).into()
+                })
+                    as Arc<
+                        dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync,
+                    >
+            },
+            bridge_factory: {
+                let tracer = Arc::clone(&tracer);
+                Arc::new(move |name: String, agent_id: Option<String>| {
+                    Some(
+                        Arc::new(LangfuseBridge::new(Arc::clone(&tracer), name, agent_id))
+                            as Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
+                    )
+                })
+                    as Arc<
+                        dyn Fn(
+                                String,
+                                Option<String>,
+                            )
+                                -> Option<Arc<dyn peri_agent::agent::LangfuseBridgeLike>>
+                            + Send
+                            + Sync,
+                    >
+            },
+        }
+    });
+
+    // stage 装配桥：从 SessionContext 投影 StageBuildInput 并补齐注入面
+    //（Langfuse bridge factory 经 turn 级 hooks 构造），再调用 ACP 装配桥。
+    let ctx_for_stage = ctx.clone();
+    let bridge_factory_for_stage: Option<
+        Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>,
+    > = langfuse_hooks.as_ref().map(|h| {
+        let bf = Arc::clone(&h.bridge_factory);
+        let provider_display = ctx_for_stage.provider_name.clone();
+        Arc::new(move || {
+            bf(provider_display.clone(), None)
+                .expect("stage bridge_factory: hooks 存在时 bridge 构造必须成功")
+        }) as Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>
+    });
+    let stage_build: StageBuildFn = Arc::new(move |sbr| {
+        crate::host::stage_builder::build_stage_context(
+            &ctx_for_stage,
+            sbr.cached_llm.as_ref(),
+            sbr.system_prompt,
+            sbr.subagent_system_prompt,
+            sbr.frozen,
+            sbr.event_handler,
+            sbr.agent_overrides,
+            sbr.preload_skills,
+            sbr.child_handler_factory,
+            sbr.auxiliary_model,
+            sbr.thread_persistence,
+            sbr.goal_controller,
+            sbr.task_manager,
+            sbr.on_bg_complete,
+            bridge_factory_for_stage.clone(),
+        )
+    });
+
+    // EventBus forwarder 启动器（Langfuse bridge 构造留在 ACP——观测旁路；
+    // biased select 顺序不变量单点保持在 crate::event::spawn_eventbus_forwarder）。
+    let forwarder_launcher: ForwarderLauncherFn = {
+        let provider_display = ctx.provider_name.clone();
+        let bridge_factory = langfuse_hooks
+            .as_ref()
+            .map(|h| Arc::clone(&h.bridge_factory));
+        Arc::new(move |handles, agent_id, on_event| {
+            let bridge: Option<LangfuseBridge> = bridge_factory
+                .as_ref()
+                .and_then(|bf| bf(provider_display.clone(), Some(agent_id)))
+                .and_then(|b| {
+                    // LangfuseBridgeLike: Any 上界（L5）——trait upcasting 还原具体类型
+                    let any: Arc<dyn std::any::Any + Send + Sync> = b;
+                    any.downcast::<LangfuseBridge>().ok().map(|b| (*b).clone())
+                });
+            crate::event::spawn_eventbus_forwarder(handles, on_event, bridge);
+        })
+    };
+
     let turn = executor::TurnInput {
         event_sink,
         content,
@@ -226,16 +563,17 @@ pub(crate) async fn run_prompt(
         history,
         incoming_recalls,
         bg_results,
-        langfuse_session,
+        langfuse: langfuse_hooks,
+        stage_build,
+        forwarder_launcher,
     };
 
     // 3.0 批 2：执行发起经 Controller（控制面第四步 run Session）。
     // 本轮执行句柄（PromptHandle）注册进 Runtime 映射（注册或替换，
     // 不递增 epoch/seq）→ `Controller::run_session` 经 Runtime 查映射发起 →
     // `run_session_loop` 执行完成（返回时结果已就绪）→ take_result。
-    let handle = Arc::new(crate::host::exec::prompt_handle::PromptHandle::new(
-        ctx, turn,
-    ));
+    // L5：执行体固定为 `run_session_loop`（句柄内部直接调用，无需 runner 注入）。
+    let handle = Arc::new(crate::host::prompt_handle::PromptHandle::new(ctx, turn));
     controller.register_session(&session_id, Arc::clone(&handle));
     controller
         .run_session(&session_id)

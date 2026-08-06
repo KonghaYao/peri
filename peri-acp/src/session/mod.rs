@@ -17,7 +17,6 @@
 //! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
 
 pub mod agent_pool;
-pub mod async_router;
 pub mod command;
 pub mod cron_bridge;
 pub mod event_sink;
@@ -25,6 +24,9 @@ pub mod executor;
 pub mod goal_state;
 pub mod retry_events;
 pub mod state_builders;
+
+// AsyncRouter（L5：物理迁入 peri-agent，仅依赖契约层；本处 re-export 桥保兼容）。
+pub use peri_agent::session::async_router::AsyncRouter;
 
 pub use retry_events::RetryEventForwarder;
 
@@ -430,7 +432,9 @@ impl SessionManager {
     /// TUI/stdio 正常路径恒为 true（prompt 执行时无条件创建 executor）；
     /// print mode 不经过此入口（直接调 `FrozenSessionData::build` 传 false）。
     ///
-    /// 直接委托给 [`FrozenSessionData::build`]（Immutable Value Object 的唯一构造入口）。
+    /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
+    /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
+    /// 类型经 `from_frozen_parts` 装配（peri-agent 侧不可变数据存储）。
     pub fn build_frozen_data(
         &self,
         cwd: &str,
@@ -441,15 +445,59 @@ impl SessionManager {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
         let pm = self.inner.permission_mode.load();
-        crate::session::executor::FrozenSessionData::build(
+        let (claude_md, claude_local_md) =
+            peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
+        // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
+        // （保持系统提示词稳定性：会话内不重读）
+        let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
+        let skill_summary = peri_middlewares::SkillsMiddleware::build_frozen_summary(
             cwd,
-            frozen_language.as_deref(),
-            plugin_skill_roots,
-            plugin_agent_dirs,
-            &frozen_date,
-            pm,
-            workflow_enabled,
+            plugin_skill_roots.to_vec(),
+            disable_bundled,
+        );
+
+        let features = crate::prompt::PromptFeatures::detect(pm, workflow_enabled);
+        let template = crate::prompt::PromptTemplate::new();
+        let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
+        let system_prompt = template.render(
+            &env,
+            &features,
             self.inner.skills.as_ref(),
+            plugin_agent_dirs,
+            frozen_language.as_deref(),
+        );
+
+        // 子 agent / fork / workflow agent 复用的冻结 prompt（P2-2026-08-02）：
+        // 这些链不注册 WorkflowTool（shared_tools: None），主链冻结 prompt 中
+        // 的 16_workflow section 不得被 fork 继承或 workflow agent 复用。
+        // 仅在 workflow_enabled 时多渲染一次（session 创建时一次性，不违反
+        // ARC-FROZEN-001 的每 turn 重建禁令）；workflow 关闭时两版相同。
+        let subagent_system_prompt = if workflow_enabled {
+            let sub_features = crate::prompt::PromptFeatures::detect_without_workflow(pm);
+            Some(Arc::from(template.render(
+                &env,
+                &sub_features,
+                self.inner.skills.as_ref(),
+                plugin_agent_dirs,
+                frozen_language.as_deref(),
+            )))
+        } else {
+            None
+        };
+
+        // 构建 v2 FrozenContext
+        let v2_frozen = peri_agent::session::FrozenContext {
+            system_prompt: Arc::from(system_prompt),
+            claude_md: claude_md.map(Arc::from).unwrap_or_default(),
+            skill_summary: skill_summary.map(Arc::from).unwrap_or_default(),
+            date: Arc::from(frozen_date),
+            language: frozen_language.map(|l| Arc::from(l.to_string())),
+        };
+
+        crate::session::executor::FrozenSessionData::from_frozen_parts(
+            v2_frozen,
+            claude_local_md.map(Arc::from),
+            subagent_system_prompt,
         )
     }
 
@@ -578,3 +626,98 @@ impl AcpSession {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+// ── L5：executor 对 SessionManager 的访问端口实现 ──────────────────────────
+
+use std::str::FromStr;
+
+use peri_acp_types::session::SessionAccessPort;
+use peri_acp_types::thread::CancelPolicy;
+
+impl SessionAccessPort for SessionManager {
+    fn v2_message_queue(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
+        self.v2_queue_for(session_id)
+    }
+
+    fn session_inbox(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<peri_acp_types::session::SessionInbox>> {
+        self.session_inbox_for(session_id)
+    }
+
+    fn task_manager(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskManager>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.task_manager.clone())
+    }
+
+    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.last_notified_permission_mode.clone())
+    }
+
+    fn goal_controller(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::goal::GoalController>> {
+        self.goal_state_for(session_id)
+            .map(|gs| Arc::new(gs) as Arc<dyn peri_acp_types::goal::GoalController>)
+    }
+
+    fn register_runtime(
+        &self,
+        session_id: &str,
+    ) -> Option<peri_acp_types::frozen::RegisterRuntimeFn> {
+        // 原 executor 语义：SessionManager 存在即返回闭包（session 不存在时
+        // 闭包内静默跳过，不注册）。
+        let sm = self.clone();
+        let sid = session_id.to_string();
+        Some(Arc::new(
+            move |thread_id: String, cancel_token: CancellationToken, policy: String| {
+                if let Some(mut session) = sm.get_session_mut(&sid) {
+                    // policy 字符串（"cascade"/"independent"）来自 SubAgentMiddleware；
+                    // 契约类型 FromStr 对非法值报错，此处保留迁移前 `_ => Cascade`
+                    // 的容错语义（Default = Cascade）。
+                    let cancel_policy = CancelPolicy::from_str(&policy).unwrap_or_default();
+                    let runtime = AgentRuntime::new(thread_id.clone(), cancel_policy);
+                    // Store the provided cancel_token so external cancellation works
+                    let rt = AgentRuntime {
+                        thread_id,
+                        cancel_token,
+                        cancel_policy: runtime.cancel_policy,
+                        status: runtime.status,
+                    };
+                    session.active_agents.insert(rt.thread_id.clone(), rt);
+                }
+            },
+        ))
+    }
+
+    fn deregister_runtime(
+        &self,
+        session_id: &str,
+    ) -> Option<peri_acp_types::frozen::DeregisterRuntimeFn> {
+        let sm = self.clone();
+        let sid = session_id.to_string();
+        Some(Arc::new(move |thread_id: &str| {
+            if let Some(mut session) = sm.get_session_mut(&sid) {
+                session.active_agents.remove(thread_id);
+            }
+        }))
+    }
+
+    fn cancel_cascade_children(&self, session_id: &str) {
+        self.cancel_cascade_children_for(session_id);
+    }
+
+    fn cron_bridge_for(&self, session_id: &str) -> bool {
+        SessionManager::cron_bridge_for(self, session_id)
+    }
+}

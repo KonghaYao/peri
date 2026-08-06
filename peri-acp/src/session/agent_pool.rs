@@ -19,17 +19,9 @@ use crate::session::retry_events::RetryEventForwarder;
 ///
 /// Contains `reqwest::Client` with connection pool + TLS session cache.
 /// Reusing across prompts eliminates transient per-turn allocations.
-#[derive(Clone)]
-pub struct CachedLlmInstances {
-    /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。
-    /// Contains reqwest Client with connection pool.
-    pub auxiliary_model: Arc<dyn peri_model::Model>,
-    /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
-    /// Contains a second reqwest Client.
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>>,
-    /// Provider fingerprint at time of creation (`"provider_name:model_name:think=effort:budget"`).
-    pub fingerprint: String,
-}
+///
+/// L5：类型契约化迁入 peri-agent（stage 装配消费），本处 re-export 保兼容。
+pub use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 
 /// Session-scoped agent component pool.
 ///

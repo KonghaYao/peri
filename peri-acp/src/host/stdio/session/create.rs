@@ -46,9 +46,9 @@ pub(crate) async fn handle_new(
     let frozen_data = freeze::build(ctx, &cwd_str);
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-    // 构造收拢在 host/exec 执行本体（豁免至 L5），此处只持端口句柄
+    // 构造收拢在 host 装配面（workflow_agent 执行体，L5 归位），此处只持端口句柄
     // （3.0 批 2 波 2 装配边界收口）。
-    let workflow_middleware = crate::host::exec::workflow_agent::create_session_workflow_middleware(
+    let workflow_middleware = crate::host::workflow_agent::create_session_workflow_middleware(
         Arc::clone(&ctx.provider),
         Arc::new(ctx.peri_config.read().clone()),
         &cwd_str,

@@ -10,18 +10,27 @@ path = "src/lib.rs"
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
-# 3.0 批 2 显式豁免清单（见 spec/issues/2026-08-05-3.0-acp-events-session-batch2.md）：
-# - peri-middlewares / peri-workflow：仅 host/exec 执行本体（RCRA loop / stage
-#   装配 / workflow agent）与测试文件引用——「过渡宿主豁免至 L5」；随 L5
-#   executor 拆分（执行本体迁入 peri-agent）后逐项移除。装配面（assemble.rs /
-#   host/stdio / TUI）已改经 peri-acp-types 端口注入，不再依赖本清单。
-# - peri-lsp：装配面类型（LspServerConfig）已 move 至 peri-acp-types，
-#   peri-acp 代码零引用，依赖已移除。
-# - peri-model：仅 host/exec 执行本体（executor_helpers / stage_builder /
-#   compact_pipeline，Arc<dyn peri_model::Model> LLM 抽象）引用——与 peri-agent
-#   同性质豁免至 L5；随 L5 迁出后移除。
-# - check-acp-imports.sh 为验收门：非测试、非 host/exec 代码禁止引用
-#   peri-middlewares / peri-lsp / peri-workflow。
+# L5（l5-shell）收口后依赖声明（host/exec/ 已拆桥删除，执行本体在
+# peri-agent::session::exec）：
+# - peri-agent：薄壳调用面——`session/executor.rs` 协议化入口 re-export
+#   （run_session_loop / SessionContext / TurnInput 等）+ host 装配面闭包签名
+#   （StageBuildFn / ForwarderLauncherFn / CachedLlmInstances / TaskManager），
+#   保留。
+# - peri-middlewares：宿主装配面引用（host/workflow_agent.rs 中间件链 /
+#   host/stage_builder.rs 装配实现 ProductionChainAssembler / host/prompt.rs +
+#   prompt_exec.rs 注入闭包构造 parent_tools / chain_assembler /
+#   tool_invocation_resolver / session/mod.rs build_frozen_data 渲染面），
+#   保留（workflow_agent 执行体留 ACP 的裁定见 host/workflow_agent.rs；
+#   WorkflowMiddlewareFactoryPort 注入为彻底收口方案，另立收紧任务）。
+# - peri-workflow：host/workflow_agent.rs 的 AgentExecutor trait / protocol
+#   引用（同上，随 workflow_agent 归位裁定保留）。
+# - peri-model：宿主装配面类型签名（host/workflow_agent.rs / host/stage_builder.rs
+#   的 Arc<dyn peri_model::Model>）与 ACP 既有引用（provider/mod.rs LLM 工厂 /
+#   session/agent_pool.rs 模型缓存 / event/mapper.rs StopReason 协议映射 /
+#   dispatch/* 执行上下文签名），保留。
+# - check-layer-imports.sh 为验收门：非测试、非豁免路径代码禁止引用
+#   peri-middlewares / peri-lsp / peri-workflow（豁免见 scripts/import-exemptions.conf，
+#   host/workflow_agent.rs + host/stage_builder.rs 为 L5 装配面宿主）。
 peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }

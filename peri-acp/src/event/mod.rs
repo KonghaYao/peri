@@ -4,11 +4,12 @@
 //! `peri/agent_event` channel. It contains only the fields that TUI consumers need,
 //! avoiding a direct `ExecutorEvent` dependency in the TUI.
 
+mod forwarder;
 #[cfg(test)]
 mod forwarder_test;
 pub mod mapper;
 
-pub(crate) use crate::host::exec::forwarder::spawn_eventbus_forwarder;
+pub(crate) use self::forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};
 pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
@@ -21,8 +22,9 @@ pub use peri_acp_types::summary::{
 // 协议序列化面载体——发射点经 `Controller::publish_event`
 // （Controller → Runtime 补打身份 → 弹出队列 + 订阅广播），
 // 协议化消费经 `Controller::subscribe` / `pop_events` 订阅——事件
-// 三层化的统一出口在 Controller，见 `host/exec/forwarder.rs` 与
-// `host/exec/executor_helpers.rs::spawn_event_pump`）。
+// 三层化的统一出口在 Controller，见 `event/forwarder.rs` 与
+// 事件泵（`peri-agent::session::exec::executor_helpers::spawn_event_pump`，
+// 经 `peri_acp_types::event::{EventPublisher, EventSubscriber}` 端口接入））。
 pub use peri_acp_types::event_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor,
 };

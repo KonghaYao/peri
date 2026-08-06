@@ -132,7 +132,8 @@ pub async fn rewind_execute(
         session_id: session_id.clone(),
         history: session_history,
         cwd: cwd.to_string(),
-        peri_config: Arc::clone(peri_config),
+        // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
+        compact_config: crate::host::compact_config::load_compact_config(peri_config),
         auxiliary_model,
         event_sink: Arc::clone(event_sink),
         args: params.to_string(),

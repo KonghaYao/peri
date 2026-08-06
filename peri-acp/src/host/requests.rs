@@ -37,7 +37,7 @@ fn persist_config(cfg: &AcpServerConfig) {
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
 ///
-/// 构造收拢在 host/exec 执行本体（豁免至 L5），命令面只持
+/// 构造收拢在 host 装配面（workflow_agent 执行体，L5 归位），命令面只持
 /// `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2 波 2 装配边界收口）。
 fn create_session_workflow_middleware(
     cfg: &AcpServerConfig,
@@ -45,7 +45,7 @@ fn create_session_workflow_middleware(
     session_id: &str,
     frozen_data: &crate::session::executor::FrozenSessionData,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    crate::host::exec::workflow_agent::create_session_workflow_middleware(
+    crate::host::workflow_agent::create_session_workflow_middleware(
         Arc::clone(&cfg.provider),
         Arc::new(cfg.peri_config.read().clone()),
         cwd,

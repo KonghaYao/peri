@@ -37,13 +37,20 @@ use crate::provider::{LlmProvider, PeriConfig};
 use peri_acp_types::event_data::PredictionAction;
 
 pub mod assemble;
+pub(crate) mod compact_config;
 mod continuation;
-pub mod exec;
+pub mod controller_ports;
+#[cfg(test)]
+#[path = "executor_flow_test.rs"]
+mod executor_flow_tests;
 pub mod lease;
 mod notify;
 mod prompt;
+pub mod prompt_handle;
 mod requests;
+pub mod stage_builder;
 pub mod stdio;
+pub mod workflow_agent;
 
 pub(crate) use continuation::run_continuation_scheduler;
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
@@ -410,8 +417,13 @@ pub(crate) async fn dispatch_prompt_turn(
 
             // Facade：agent 构建与执行统一由 peri-acp executor 承担，
             // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
+            // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
+            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
+                Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+                    Arc::from(llm_provider.into_model()),
+                ));
             let result = crate::session::executor::execute_prediction(
-                llm_provider,
+                llm,
                 recent,
                 &cwd,
                 current_title.as_deref(),
