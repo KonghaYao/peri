@@ -6,7 +6,7 @@
 
 - **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
 - **Rule**：TUI 的用户交互主路径经 ACP transport 调用服务；不得从 TUI 直接驱动 `peri-agent` 或 `peri-middlewares` 的 Agent 运行时。TUI 可在启动和配置层复用相关 crate 的类型与初始化能力，Agent 执行入口仍保持在 ACP 会话路径。
-- **Verify**：人工检查 TUI 的 prompt、cancel、session 等请求经 ACP client/transport；RCRA 循环定义与 cancel 执行权在 Agent 层——循环本体为 `peri-agent/src/agent/stages/mod.rs` 的 `run_react_loop`（Receive 唯一退出口 + cancel 检查，Model 中止由 Agent 发起），子 agent 的 Cascade/Independent 判定与终止执行为 `peri-agent/src/session/runtime.rs` 的 `cancel_cascade_agents` / `cancel_all_agents`（L5 归位；`AgentRuntime`/`CancelPolicy`/`AgentStatus` 同处，契约类型经 `peri-acp-types::thread` 事实源）；ACP 仅定位（`SessionManager::cancel_session` / `close_session` 查 session 映射）并传递 active_agents 注册表，经 `peri-acp/src/session/executor_helpers.rs` 的 `build_and_execute_agent_v2` 驱动循环（loop 定义在 Agent 层、调用点在 ACP 会话路径）。
+- **Verify**：人工检查 TUI 的 prompt、cancel、session 等请求经 ACP client/transport；RCRA 循环定义与 cancel 执行权在 Agent 层——循环本体为 `peri-agent/src/agent/stages/mod.rs` 的 `run_react_loop`（Receive 唯一退出口 + cancel 检查，Model 中止由 Agent 发起），子 agent 的 Cascade/Independent 判定与终止执行为 `peri-agent/src/session/runtime.rs` 的 `cancel_cascade_agents` / `cancel_all_agents`（L5 归位；`AgentRuntime`/`CancelPolicy`/`AgentStatus` 同处，契约类型经 `peri-acp-types::thread` 事实源）；ACP 仅定位（`SessionManager::cancel_session` / `close_session` 查 session 映射）并传递 active_agents 注册表，经 `peri-agent/src/session/exec/executor_helpers.rs` 的 `build_and_execute_agent_v2` 驱动循环（L5 归位：执行本体在 Agent 层 `session/exec/`，ACP 侧仅协议化薄壳 `peri-acp/src/session/executor.rs` 与装配面宿主 `peri-acp/src/host/stage_builder.rs` 驱动调用）。
 
 ### ARC-CANCEL-001
 
@@ -36,7 +36,7 @@
 
 - **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
 - **Rule**：空白 user prompt（按 content block 判空，必须用 `MessageContent::is_empty()`，禁止用 `text_content().trim()` 替代）是「继续跑 loop」指令（keepgoing），唯一生产者是 TUI keepgoing 按钮；keepgoing turn 不注入 recall；空历史 + 空白 prompt 时 ACP executor 短路返回，且必须发送终止通知（`push_done`）使客户端退出 loading；畸形请求（`message.content` 反序列化失败）静默落入 keepgoing 路径是防御性设计，各 transport 行为一致。
-- **Verify**：`cargo test -p peri-acp --lib executor_test`（`is_keepgoing` 判空三例 + keepgoing 短路 push_done）；`cargo test -p peri-agent --lib stages`（`test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`）；人工检查 `peri-acp/src/session/executor.rs` 短路分支与 `peri-tui/src/kit/submit_consumer.rs` 的 keepgoing 提交路径。
+- **Verify**：`cargo test -p peri-agent --lib session::exec::executor_test`（`is_keepgoing` 判空三例 + keepgoing 短路 push_done + request_id 透传）；`cargo test -p peri-agent --lib stages`（`test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`）；人工检查 `peri-agent/src/session/exec/executor.rs` 短路分支与 `peri-tui/src/kit/submit_consumer.rs` 的 keepgoing 提交路径。
 
 ### ARC-SERIAL-001
 
