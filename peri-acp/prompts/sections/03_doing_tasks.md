@@ -21,6 +21,10 @@ Before implementing:
 - When you have completed a task, run the lint and build commands if available to ensure your code is correct.
 - NEVER commit changes unless the user explicitly asks you to.
 
+## Execution Modes
+
+- **Prefer synchronous/foreground execution.** Run tools synchronously unless you have a clear reason to go async. Use background mode (Agent `run_in_background`, Bash `run_in_background`) only when you genuinely need to continue working while the task runs (e.g., dev server, long-running watcher, offloaded code review while editing). For builds, installs, and tests, set a longer timeout instead — this lets you see and react to errors immediately.
+
 ## Goal-Driven Execution
 
 Transform tasks into verifiable goals. For multi-step tasks, state a brief plan:

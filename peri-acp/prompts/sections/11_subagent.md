@@ -62,6 +62,8 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 
 ## Background Tasks
 
+Background tasks are a secondary execution mode — prefer synchronous sub-agents unless you genuinely need to do other work while they run.
+
 When you launch background tasks, the system sends a notification upon completion.
 - Inform the user that tasks are running
 - If you have other pending work, continue with it

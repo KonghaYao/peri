@@ -173,11 +173,11 @@ impl BaseTool for BashTool {
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "Optional timeout in milliseconds (default 15s for foreground; background tasks run until completion unless timeout is explicitly set; 0 = no timeout; max 600000). If the command takes longer than this, the entire process group is killed and a timeout error returned. The short foreground default encourages efficient commands — for long-running tasks (builds, installs), set a higher timeout or use run_in_background."
+                    "description": "Optional timeout in milliseconds (default 15s for foreground; background tasks run until completion unless timeout is explicitly set; 0 = no timeout; max 600000). If the command takes longer than this, the entire process group is killed and a timeout error returned. For builds, installs, or tests, set a higher timeout (e.g. 300000 for 5 minutes) rather than automatically switching to background."
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "If true, runs the command in the background and returns immediately with a task_id. Use for long-running servers (dev server, watcher, etc.). The task can be monitored in the Tasks panel."
+                    "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
                 }
             },
             "required": ["command"]

@@ -11,7 +11,7 @@ Usage:
   - Write files: Use Write (NOT echo/cat with redirect)
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Foreground commands default to 15000ms (15 seconds) to encourage efficient commands; background tasks (run_in_background: true) run until completion unless timeout is explicitly set. Set `timeout: 0` to disable the timeout entirely
 - When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other
-- For long-running commands, consider setting an explicit timeout or using run_in_background: true
+- For builds, installs, or tests that may exceed 15s, set a longer `timeout` value (e.g. `timeout: 300000` for 5 minutes). Only use `run_in_background: true` for truly long-running processes like dev servers or watchers that should keep running while you continue work.
 
 Platform behavior:
 - Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands
