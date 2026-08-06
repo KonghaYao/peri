@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
 
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events::{Stage, StageStatus};
@@ -26,7 +27,6 @@ use crate::agent::events_v2::{EventBus, ObserveEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
-use crate::group::pipeline::AgentId;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::turn::TurnContext;
@@ -694,7 +694,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
                             continue;
                         }
-                        _ = &mut cancel_fut => return LoopResult::Interrupted,
+                        _ = &mut cancel_fut => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
+                            return LoopResult::Interrupted;
+                        }
                     }
                 }
             }

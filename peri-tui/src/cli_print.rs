@@ -120,53 +120,9 @@ pub async fn run_print(
     };
     let shared_permission = peri_acp_types::permission::SharedPermissionMode::new(permission_mode);
 
-    // cron scheduler（必须提供）
-    let cron_scheduler = {
-        let scheduler =
-            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0);
-        Arc::new(parking_lot::Mutex::new(scheduler))
-    };
-
-    // MCP pool（bare 时跳过）
-    let mcp_pool = if bare {
-        None
-    } else {
-        let claude_home = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-        let pool_clone = pool.clone();
-        let cwd_clone = cwd.clone();
-        let (init_tx, _init_rx) =
-            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
-        tokio::spawn(async move {
-            peri_middlewares::mcp::McpClientPool::run_initialize(
-                pool_clone,
-                std::path::Path::new(&cwd_clone),
-                &claude_home,
-                init_tx,
-                None,
-                None,
-            )
-            .await;
-        });
-        Some(pool)
-    };
-
-    // 插件（bare 时跳过）
-    let plugin_data = if bare {
-        None
-    } else {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
-            &claude_dir,
-            Some(std::path::Path::new(&cwd)),
-        ))
-    };
-
-    // thread 存储（经 Resources 门面）——ACP host 的 ephemeral session 需要
+    // thread 存储（经 Resources 门面）——协议面输入，ACP host 的 ephemeral
+    // session 需要；middlewares 具体实现（CronScheduler / McpClientPool / 插件
+    // 数据等）由 ACP Host 装配面内部构造（§0 依赖方向）。
     let thread_store = peri_resources::Resources::open()
         .await
         .map(|resources| resources.thread_store())
@@ -177,21 +133,11 @@ pub async fn run_print(
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: shared_permission,
-        // 3.0 批 2 波 2：cron 调度器经端口 handle 注入（ACP 侧只持端口）。
-        cron_scheduler: Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
-            cron_scheduler,
-        ))),
-        mcp_pool: mcp_pool.map(|p| p as Arc<dyn peri_acp_types::ports::McpPoolPort>),
-        // 装配注入面：资源类具体实现由宿主装配点构造后 upcast 注入
-        // （§0 依赖方向；ACP 不直接 new 资源类）。
-        tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
-        settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         thread_store: thread_store.clone(),
         cwd: cwd.clone(),
-        plugin_data,
         bare,
+        // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
+        drive_cron_tick: false,
     })
     .await;
     // Langfuse 句柄先行 clone：host_config 将 move 进 host task，

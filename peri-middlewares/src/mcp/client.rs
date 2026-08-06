@@ -138,6 +138,10 @@ pub struct McpClientPool {
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
     pub(crate) plugin_sources: parking_lot::RwLock<HashMap<String, String>>,
+    /// 初始化阶段内部存储（M-TUI 收口：TUI 不再持有 watch channel，`mcp/list`
+    /// 命令面经 `McpPoolPort::snapshot` 读取；`run_initialize` 与外部
+    /// `status_tx` 同步更新）。
+    pub(crate) init_status: parking_lot::RwLock<McpInitStatus>,
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -151,6 +155,7 @@ impl McpClientPool {
             services: tokio::sync::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
+            init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
         }
     }
 
@@ -498,9 +503,35 @@ pub(crate) fn build_authed_transport(
 }
 
 // 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
+// M-TUI 收口：`shutdown`（host/shutdown 命令面）与 `snapshot`（mcp/list
+// 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
+#[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn shutdown(&self) {
+        McpClientPool::shutdown(self).await;
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let init_phase = match &*self.init_status.read() {
+            McpInitStatus::Pending => "pending",
+            McpInitStatus::Initializing { .. } => "initializing",
+            McpInitStatus::Ready { .. } => "ready",
+            McpInitStatus::Failed(_) => "failed",
+        };
+        let infos = self.all_server_infos();
+        serde_json::json!({
+            "initPhase": init_phase,
+            "servers": infos.iter().map(|info| serde_json::json!({
+                "name": info.name.clone(),
+                "status": format!("{:?}", info.status).to_lowercase(),
+                "transport": info.transport_type.clone(),
+                "toolsCount": info.tool_count,
+            })).collect::<Vec<_>>(),
+        })
     }
 }
 

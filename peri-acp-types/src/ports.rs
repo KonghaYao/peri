@@ -6,8 +6,9 @@
 //! upcast 为端口注入，ACP 侧只持端口接口（`docs/top-level.md` §0 依赖方向）。
 //!
 //! 具体实现位于 `peri-middlewares`（端口 impl 归实现方）。
-//! `downcast_arc` 为过渡期桥：host/exec 执行本体（L2/L5 迁出范围）在豁免期内
-//! 经 `as_any` 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
+//! `downcast_arc` 为还原点：middlewares 装配面（`assembly.rs:127-152`）与
+//! 装配面宿主（`host/workflow_agent.rs` / `host/stage_builder.rs`）经 `as_any`
+//! 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
 
 use std::any::{Any, TypeId};
 use std::path::PathBuf;
@@ -16,53 +17,72 @@ use std::sync::Arc;
 use crate::agents::AgentCapability;
 use crate::skills::{SkillMetadata, SkillRoot};
 
-/// 资源端口声明宏：`Send + Sync` 透传句柄 + `as_any` 还原点。
-macro_rules! port_with_downcast {
-    ($(#[$doc:meta])* $port:ident) => {
-        $(#[$doc])*
-        pub trait $port: Send + Sync {
-            /// 还原具体实现（过渡期 host/exec 豁免面使用；L2/L5 迁出后移除）。
-            fn as_any(&self) -> &dyn Any;
-        }
+/// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
+///
+/// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
+/// 句柄，工具桥接/服务器管理在装配面宿主（`host/workflow_agent.rs` /
+/// `host/stage_builder.rs`）。`shutdown` / `snapshot` 为 M-TUI 收口新增
+/// 数据端口（`host/shutdown` 与 `mcp/list` 命令面经此访问，TUI 不再
+/// 直持具体句柄）。
+#[async_trait::async_trait]
+pub trait McpPoolPort: Send + Sync {
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
+    fn as_any(&self) -> &dyn Any;
 
-        impl dyn $port {
-            /// 将 `Arc<dyn $port>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
-            pub fn downcast_arc<T: $port + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
-                let ptr = Arc::into_raw(self);
-                unsafe {
-                    if (*ptr).type_id() == TypeId::of::<T>() {
-                        Ok(Arc::from_raw(ptr as *const T))
-                    } else {
-                        Err(Arc::from_raw(ptr))
-                    }
-                }
-            }
-        }
-    };
+    /// 关闭连接池（`host/shutdown` 命令面调用；与 `McpClientPool::shutdown`
+    /// 语义一致）。
+    async fn shutdown(&self);
+
+    /// 池状态快照（`mcp/list` 命令面数据源）：`{"initPhase": ..., "servers":
+    /// [...]}`，字段语义与 TUI 面板投影一致（序列化格式由实现方保证，
+    /// 契约层不透传具体类型）。
+    fn snapshot(&self) -> serde_json::Value;
 }
 
-port_with_downcast!(
-    /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
-    ///
-    /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
-    /// 句柄，工具桥接/服务器管理在 host/exec 执行本体（L2/L5 迁出）。
-    McpPoolPort
-);
+impl dyn McpPoolPort {
+    /// 将 `Arc<dyn McpPoolPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: McpPoolPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+        let ptr = Arc::into_raw(self);
+        unsafe {
+            if (*ptr).type_id() == TypeId::of::<T>() {
+                Ok(Arc::from_raw(ptr as *const T))
+            } else {
+                Err(Arc::from_raw(ptr))
+            }
+        }
+    }
+}
 
-port_with_downcast!(
-    /// 工具检索索引端口（`peri-middlewares::tool_search::ToolSearchIndex` 实现）。
-    ToolSearchPort
-);
+/// 工具检索索引端口（`peri-middlewares::tool_search::ToolSearchIndex` 实现）。
+pub trait ToolSearchPort: Send + Sync {
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl dyn ToolSearchPort {
+    /// 将 `Arc<dyn ToolSearchPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: ToolSearchPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+        let ptr = Arc::into_raw(self);
+        unsafe {
+            if (*ptr).type_id() == TypeId::of::<T>() {
+                Ok(Arc::from_raw(ptr as *const T))
+            } else {
+                Err(Arc::from_raw(ptr))
+            }
+        }
+    }
+}
 
 /// Workflow 中间件端口（`peri-middlewares::workflow::WorkflowMiddleware` 实现）。
 ///
-/// per-session 实例；构造点（依赖 host/exec 执行本体的 `create_executor`）
-/// 豁免至 L5，协议面只持端口句柄。命令面（workflow/list_runs / kill_agent /
-/// kill_run / resume）与执行装配（bg registry 注入 / 完成通知订阅）均经本
-/// 端口；host/exec 豁免期内可经 `downcast_arc` 还原具体类型。
+/// per-session 实例；构造点（装配面宿主 `host/workflow_agent.rs` 的
+/// `create_session_workflow_middleware`）持有具体实现，协议面只持端口句柄。
+/// 命令面（workflow/list_runs / kill_agent / kill_run / resume）与执行装配
+/// （bg registry 注入 / 完成通知订阅）均经本端口；装配面宿主可经
+/// `downcast_arc` 还原具体类型。
 #[async_trait::async_trait]
 pub trait WorkflowMiddlewarePort: Send + Sync {
-    /// 还原具体实现（过渡期 host/exec 豁免面使用；L2/L5 迁出后移除）。
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
     /// 全部 run 快照（JSON 透传：`RunProgress` 保留在 peri-workflow，

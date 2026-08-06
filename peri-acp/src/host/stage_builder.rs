@@ -7,25 +7,25 @@
 //!
 //! 1. 从投影型 [`SessionContext`]（`peri-agent::session::exec::executor`）投影
 //!    构造 [`StageBuildInput`]（会话数据逐字段对应；注入面按原 ACP 语义构造）；
-//! 2. 注入 `peri-middlewares::assembly::ProductionChainAssembler`（既有装配面
-//!    豁免）并调用 peri_agent 正式 `build_stage_context`，**透传**其
-//!    `V2AgentOutput`（本地不再定义同名类型）。
+//! 2. 经注入参数接入装配器（`MiddlewareChainAssembler`，宿主传
+//!    `ProductionChainAssembler`）与 compact hook 闭包，调用 peri_agent 正式
+//!    `build_stage_context`，**透传**其 `V2AgentOutput`（本地不再定义同名类型）。
 //!
 //! 注入面（原 ACP 特有构造）在此构造：
 //! - `render_system_prompt`：agent overrides 主 prompt 覆盖渲染（workflow
 //!   feature 与 WorkflowTool 条件注册同源——`workflow_executor.is_some()`）；
 //! - `system_builder`：SubAgent system prompt 构建器（无 workflow feature +
 //!   frozen date）；
-//! - `compact_pre_hook` / `compact_post_hook`：hook_groups 非空时构造
-//!   `fire_pre_compact` / `fire_post_compact` 转发（tokio::spawn，语义同迁移前）；
+//! - `compact_pre_hook` / `compact_post_hook`：经注入参数接入（宿主
+//!   host/prompt.rs `build_compact_hooks` 构造，本模块不再承载）；
 //! - `langfuse_bridge_factory`：由宿主 turn 级 Langfuse hooks 捕获后传入；
 //! - `shared_queue` / `idle_inbox` / `launch_cron_bridge`：经
 //!   [`SessionAccessPort`] 定位（原 `SessionManager` 路径；None = print mode /
 //!   无 session，走 turn 级 CronOwner 路径）。
 //!
 //! 依赖方向（§0）：本模块只依赖 peri-acp-types / peri-agent（执行面）/
-//! peri-middlewares（仅装配器 `ProductionChainAssembler`，既有豁免）/
-//! crate 内部（prompt 渲染）。
+//! crate 内部（prompt 渲染）。装配器与 compact hook fire 动作经注入参数接入，
+//! 本模块不再引用 middlewares。
 
 use std::sync::Arc;
 
@@ -34,7 +34,6 @@ use peri_acp_types::{
     event::AgentEventHandler,
     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
     goal::GoalController,
-    hooks::RegisteredHook,
     session::SessionInbox,
 };
 use peri_agent::agent::{async_tasks::TaskManager, LangfuseBridgeLike};
@@ -42,22 +41,37 @@ use peri_agent::session::exec::stage_builder::{
     build_stage_context as build_stage_context_agent, CachedLlmInstances, StageBuildInput,
     V2AgentOutput,
 };
-use peri_middlewares::assembly::{OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder};
+// 装配器与注入闭包类型事实源在 peri-agent（middlewares 侧仅 re-export，
+// 本模块直接引事实源，不触碰 middlewares）
+use peri_agent::session::factory::{
+    AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn, SystemPromptBuilder,
+};
 
 use crate::prompt::{PromptEnv, PromptFeatures, PromptTemplate};
 
 /// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
 /// `build_stage_context`（stage 装配本体，`peri-agent/src/session/exec/stage_builder.rs`）。
 ///
-/// 签名保持 ACP 装配面形态（15 参数）：前 14 个与正式签名一一对应，
-/// 第 15 个 `langfuse_bridge_factory` 为 ACP 特有注入面（宿主 turn 级
-/// Langfuse hooks 构造的闭包工厂；正式实现的 Langfuse bridge 经
-/// `StageBuildInput::langfuse_bridge_factory` 消费）。
+/// 签名保持 ACP 装配面形态（18 参数）：前 17 个与正式签名一一对应
+/// （`assembler` 为链装配器注入——宿主传 `ProductionChainAssembler`；
+/// `compact_pre_hook` / `compact_post_hook` 为 compact hook 闭包注入——宿主
+/// `host/prompt.rs build_compact_hooks` 构造），第 18 个 `langfuse_bridge_factory`
+/// 为 ACP 特有注入面（宿主 turn 级 Langfuse hooks 构造的闭包工厂；正式实现的
+/// Langfuse bridge 经 `StageBuildInput::langfuse_bridge_factory` 消费）。
 ///
 /// 返回 peri_agent 的 [`V2AgentOutput`]（透传；`StageBuildFn` 契约类型）。
-#[allow(clippy::too_many_arguments)]
+///
+/// `auxiliary_model` 为 `StageBuildFn` 契约镜像签名（`StageBuildRequest.
+/// auxiliary_model` 同型透传）：经 `peri_acp_types::model::Model` 引用
+/// （re-export，非直接持有 `peri_model` 路径），类型与 peri-agent 正式
+/// `build_stage_context` 参数一致。
+///
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn build_stage_context(
     ctx: &crate::session::executor::SessionContext,
+    assembler: &dyn MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
+    compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
     cached_llm: Option<&CachedLlmInstances>,
     system_prompt: String,
     subagent_system_prompt: Option<String>,
@@ -66,7 +80,7 @@ pub(crate) fn build_stage_context(
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
     child_handler_factory: Option<ChildHandlerFactory>,
-    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
+    auxiliary_model: Option<Arc<dyn peri_acp_types::model::Model>>,
     thread_persistence: ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
     task_manager: Option<Arc<TaskManager>>,
@@ -149,59 +163,9 @@ pub(crate) fn build_stage_context(
         })
     };
 
-    // ── 注入面：compact plugin hook 回调（hook_groups 非空时构造；语义同
-    //    迁移前 stage_builder：tokio::spawn 转发 fire_pre_compact /
-    //    fire_post_compact，不阻塞管线）──
-    let hook_groups_flat: Vec<RegisteredHook> = ctx.hook_groups.iter().flatten().cloned().collect();
-    let (compact_pre_hook, compact_post_hook) = if hook_groups_flat.is_empty() {
-        (None, None)
-    } else {
-        let cwd = ctx.cwd.clone();
-        let sid = ctx.session_id.clone();
-        let model = ctx.provider_model_name.clone();
-        let pre: Arc<dyn Fn() + Send + Sync> = {
-            let hooks = hook_groups_flat.clone();
-            let cwd = cwd.clone();
-            let sid = sid.clone();
-            let model = model.clone();
-            Arc::new(move || {
-                let hooks = hooks.clone();
-                let cwd = cwd.clone();
-                let sid = sid.clone();
-                let model = model.clone();
-                tokio::spawn(async move {
-                    peri_middlewares::hooks::stage_firing::fire_pre_compact(
-                        &hooks, &cwd, &sid, "", &model, 0,
-                    )
-                    .await;
-                });
-            })
-        };
-        let post: Arc<dyn Fn(bool, usize) + Send + Sync> = {
-            let hooks = hook_groups_flat.clone();
-            let cwd = cwd.clone();
-            let sid = sid.clone();
-            let model = model.clone();
-            Arc::new(move |_compacted: bool, affected_count: usize| {
-                let hooks = hooks.clone();
-                let cwd = cwd.clone();
-                let sid = sid.clone();
-                let model = model.clone();
-                tokio::spawn(async move {
-                    peri_middlewares::hooks::stage_firing::fire_post_compact(
-                        &hooks,
-                        &cwd,
-                        &sid,
-                        "",
-                        &model,
-                        affected_count,
-                    )
-                    .await;
-                });
-            })
-        };
-        (Some(pre), Some(post))
-    };
+    // ── 注入面：compact plugin hook 回调（宿主 host/prompt.rs
+    //    build_compact_hooks 构造，经参数接入；语义同迁移前 stage_builder：
+    //    tokio::spawn 转发 fire_pre_compact / fire_post_compact，不阻塞管线）──
 
     // ── StageBuildInput 投影（会话数据逐字段对应 + 注入面）──
     let input = StageBuildInput {
@@ -267,7 +231,7 @@ pub(crate) fn build_stage_context(
     // 调用 peri_agent 正式 stage 装配本体（透传 V2AgentOutput）
     build_stage_context_agent(
         &input,
-        &ProductionChainAssembler,
+        assembler,
         cached_llm,
         system_prompt,
         subagent_system_prompt,

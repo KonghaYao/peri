@@ -419,47 +419,14 @@ fn main() -> Result<()> {
             let rt = build_runtime()?;
             rt.block_on(async {
                 // stdio host 位于 ACP 层（部署装配点），cli 仅作为启动入口调用；
-                // thread 存储经 Resources 门面打开后注入（§0：ACP 层不直接依赖 Resources）
-                let resources = peri_resources::Resources::open()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
-                // 3.0 批 2 波 2：装配点（cli 白名单文件）构造具体实现后以端口
-                // 注入（§0 依赖方向；ACP 侧只持接口，不直接 new 资源类）。
-                let cwd_str = cwd.clone();
-                let cron_scheduler = std::sync::Arc::new(parking_lot::Mutex::new(
-                    peri_middlewares::cron::CronScheduler::new(
-                        tokio::sync::mpsc::unbounded_channel().0,
-                    ),
-                ));
-                let claude_dir = dirs_next::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join(".claude");
-                let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
-                    &claude_dir,
-                    Some(std::path::Path::new(&cwd_str)),
-                );
+                // thread 存储与 middlewares 具体实现（CronScheduler / McpClientPool /
+                // 插件数据等）由 init_stdio_context 内部构造（§0 依赖方向，
+                // docs/top-level.md §7/§8）；cli 只提供协议面输入。
                 peri_acp::host::stdio::run_acp_stdio(StdioAssemblyInput {
-                    cwd: cwd_str,
-                    thread_store: resources.thread_store(),
+                    cwd,
                     permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                         peri_acp_types::permission::PermissionMode::Bypass,
                     ),
-                    cron_scheduler: Some(std::sync::Arc::new(
-                        peri_middlewares::cron::CronSchedulerPortHandle(cron_scheduler),
-                    )),
-                    mcp_pool: None,
-                    tool_search_index: std::sync::Arc::new(
-                        peri_middlewares::tool_search::ToolSearchIndex::new(),
-                    ),
-                    skills: std::sync::Arc::new(peri_middlewares::host_ports::SkillsProvider),
-                    settings_hooks: std::sync::Arc::new(
-                        peri_middlewares::host_ports::SettingsHooksLoader,
-                    ),
-                    plugin_skill_roots: plugin_data.all_skill_roots,
-                    plugin_agent_dirs: plugin_data.all_agent_dirs,
-                    plugin_hooks: plugin_data.all_hooks,
-                    plugin_loaded: plugin_data.plugins,
-                    plugin_lsp_servers: plugin_data.all_lsp_servers,
                 })
                 .await
             })

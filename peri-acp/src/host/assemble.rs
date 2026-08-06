@@ -22,30 +22,27 @@ use crate::session::SessionManager;
 
 use super::AcpServerConfig;
 
-/// host 装配输入：调用方（cli/TUI/print/stdio）已持有的组件。
+/// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
+///
+/// M-TUI 收口（`spec/issues/2026-08-05-3.0-m-tui-acp-client-path.md`）：
+/// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
+/// SkillsProvider / PluginManager / SettingsHooksLoader /
+/// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
+/// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
+/// （provider / config / permission / thread_store / cwd），不再直接触碰
+/// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
 pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
-    pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
-    /// 工具检索索引端口（宿主装配点构造 `ToolSearchIndex` 后 upcast 注入；
-    /// ACP 侧不直接 new 资源类）。
-    pub tool_search_index: Arc<dyn ToolSearchPort>,
-    /// Skills 扫描端口（宿主装配点构造 `SkillsProvider` 后注入；命令面
-    /// available-commands / agents 扫描经此访问，ACP 侧不直调业务面）。
-    pub skills: Arc<dyn SkillsPort>,
-    /// 插件管理端口（plugin/install 等命令面经此访问；实现留在实现方）。
-    pub plugin_manager: Arc<dyn PluginManagerPort>,
-    /// Settings hooks 加载端口（global/project/local 三级；装配面只做组序组合）。
-    pub settings_hooks: Arc<dyn SettingsHooksPort>,
     pub thread_store: Arc<dyn ThreadStore>,
     /// 工作目录（用于加载 project/local settings hooks）
     pub cwd: String,
-    /// 已加载的插件聚合数据（bare 模式为 None）
-    pub plugin_data: Option<PluginLoadResult>,
     /// 跳过 settings hooks / LSP / 插件（print --bare 语义）
     pub bare: bool,
+    /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
+    /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
+    pub drive_cron_tick: bool,
 }
 
 /// 组装 settings hook 组（plugin → global → project → local，顺序即迁移前
@@ -117,22 +114,106 @@ pub fn build_session_manager(
 ///
 /// 自迁移前 `launch.rs` 的内嵌 server 装配原样搬移：hook 组加载、tool search
 /// index、shared tools、Langfuse（环境启用时创建）、SessionManager。
+///
+/// M-TUI 收口：middlewares 具体实现（cron / MCP 池 / 工具检索索引 / skills /
+/// plugin / settings hooks / workflow 装配端口）与插件聚合数据在本装配面
+/// 内部构造（`peri-middlewares` 引用豁免见 `scripts/import-exemptions.conf`
+/// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
+/// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
 pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
     let HostAssemblyInput {
         provider,
         peri_config,
         permission_mode,
-        cron_scheduler,
-        mcp_pool,
-        tool_search_index,
-        skills,
-        plugin_manager,
-        settings_hooks,
         thread_store,
         cwd,
-        plugin_data,
         bare,
+        drive_cron_tick,
     } = input;
+
+    let claude_dir = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".claude");
+
+    // ── 插件聚合数据（bare 时跳过；迁移前 TUI launch / cli_print 各自构造）──
+    let plugin_data: Option<PluginLoadResult> = if bare {
+        None
+    } else {
+        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+            Some(std::path::Path::new(&cwd)),
+        ))
+    };
+
+    // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造；tick 驱动仅
+    //    TUI 复刻——drive_cron_tick flag，L2 遗留登记 M-TUI issue）──
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = {
+        let scheduler = Arc::new(parking_lot::Mutex::new(
+            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
+        if drive_cron_tick {
+            let tick_scheduler = scheduler.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    tick_scheduler.lock().tick();
+                }
+            });
+        }
+        Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
+            scheduler,
+        )))
+    };
+
+    // ── MCP 连接池（bare 时跳过；后台初始化不阻塞，迁移前 cli_print 语义）──
+    let mcp_pool: Option<Arc<dyn McpPoolPort>> = if bare {
+        None
+    } else {
+        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+        let pool_clone = pool.clone();
+        let cwd_clone = cwd.clone();
+        let claude_home_clone = claude_dir.clone();
+        let (init_tx, _init_rx) =
+            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+        tokio::spawn(async move {
+            peri_middlewares::mcp::McpClientPool::run_initialize(
+                pool_clone,
+                std::path::Path::new(&cwd_clone),
+                &claude_home_clone,
+                init_tx,
+                None,
+                None,
+            )
+            .await;
+        });
+        Some(pool)
+    };
+
+    // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
+    let tool_search_index: Arc<dyn ToolSearchPort> =
+        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
+    let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
+    let plugin_manager: Arc<dyn PluginManagerPort> =
+        Arc::new(peri_middlewares::host_ports::PluginManager);
+    let settings_hooks: Arc<dyn SettingsHooksPort> =
+        Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    let workflow_middleware_factory =
+        peri_middlewares::assembly::default_workflow_middleware_factory();
+
+    // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
+    if !bare {
+        let claude_dir_clone = claude_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+            {
+                tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+            } else {
+                tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+            }
+        });
+    }
 
     let plugin_skill_roots = plugin_data
         .as_ref()
@@ -195,6 +276,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         plugin_skill_roots,
         plugin_agent_dirs,
         plugin_hooks: flat_hooks,
+        // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
+        // 直读 plugin_data）
+        plugin_hooks_only: plugin_hooks,
         plugin_loaded,
         hook_groups,
         plugin_lsp_servers,
@@ -203,6 +287,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         plugin_manager,
         settings_hooks,
         shared_tools,
+        workflow_middleware_factory,
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,

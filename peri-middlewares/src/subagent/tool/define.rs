@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
 use peri_agent::session::subagent::{
     SessionFactory, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
     SubagentSpawnConfig, SubagentSpawned,
 };
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
-    group::pipeline::AgentId,
     messages::BaseMessage,
     tools::BaseTool,
 };

@@ -1,11 +1,14 @@
 //! EventBus 转发器（v2 → ExecutorEvent）公共抽取。
 //!
-//! 主 executor（`session/executor.rs`）与 workflow agent（`agent/workflow_agent.rs`）
-//! 原先各自维护一份完全相同的 `tokio::spawn` + biased `select!` 循环，仅 "消费 ExecutorEvent
-//! 后做什么" 不同。本模块封装循环骨架，调用方通过 `on_event: F` 闭包注入目标行为：
+//! 主 executor（`peri-agent::session::exec`）与 workflow agent（`peri-agent::
+//! agent::workflow`，p1-wa 归位）原先各自维护一份完全相同的 `tokio::spawn` +
+//! biased `select!` 循环，仅 "消费 ExecutorEvent 后做什么" 不同。本模块封装
+//! 循环骨架，调用方通过 `on_event: F` 闭包注入目标行为：
 //!
 //! - 主 executor 端：`|ev| { event_tx.send(ev) }`（投递到 mpsc，由 `spawn_event_pump` 消费）
-//! - workflow_agent 端：`|ev| { event_handler.on_event(ev) }`（直接调用 handler）
+//! - workflow_agent 端：`|ev| { event_handler.on_event(ev) }`（直接调用 handler；
+//!   ACP 宿主经 `ForwarderLauncherFn` 注入，workflow 专用 launcher 见
+//!   `host/workflow_agent.rs`）
 //!
 //! ## 关键不变量（修改者必读）
 //!

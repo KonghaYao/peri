@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
 use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +38,6 @@ use crate::agent::stages::{run_react_loop, LoopResult, SharedToolMap, StageConte
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder;
 use crate::agent::{CompactConfig, ContextBudget, LangfuseBridgeLike};
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
-use crate::group::pipeline::AgentId;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};

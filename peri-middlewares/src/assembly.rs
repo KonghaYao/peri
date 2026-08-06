@@ -455,6 +455,158 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 // `build_middleware_chain`（唯一触发点，ARC-MIDDLEWARE-001）触发，
 // 本模块仅保留 trait 实现（`ProductionChainAssembler`）。
 
+// ── Workflow agent 装配端口实现（p1-wa 收口）──────────────────────────────
+//
+// 实现 `peri_agent::agent::workflow::WorkflowMiddlewareFactory`（§0
+// Middleware → Agent 声明边）：workflow agent 执行体所需的中间件链 / 工具
+// 列表 / error_suggest / tool resolver / session 级 WorkflowMiddleware 实例
+// 装配全部收拢在本节（自 `peri-acp::host::workflow_agent` 执行本体迁出）；
+// ACP 宿主装配点（`host/assemble.rs` 经 TUI 部署装配点 / `host/stdio`
+// 装配面）构造本工厂后 upcast 为端口注入。
+//
+// 链序/工具集与迁移前 `create_session_workflow_middleware` /
+// `WorkflowAgentExecutor::execute` 内装配完全一致（行为契约，禁止重排）。
+
+use peri_acp_types::ports::WorkflowMiddlewarePort;
+use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
+use peri_agent::agent::workflow::{WorkflowAgentContext, WorkflowMiddlewareFactory};
+use peri_agent::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
+use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::tools::ToolInvocationResolver;
+
+/// workflow agent 装配工厂（ZST：无状态装配器）。
+pub struct WorkflowAgentMiddlewareFactory;
+
+/// 构造 workflow agent 装配端口并 upcast（部署装配点调用；返回类型已锚定
+/// 端口 trait，调用方无需引用 peri-agent 类型路径——TUI 等消费方只写
+/// `peri_middlewares::assembly::default_workflow_middleware_factory()`）。
+pub fn default_workflow_middleware_factory(
+) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
+    Arc::new(WorkflowAgentMiddlewareFactory)
+}
+
+impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
+    fn build_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        let mut tools: Vec<Box<dyn BaseTool>> = FilesystemMiddleware::build_tools(cwd);
+        tools.extend(TerminalMiddleware::build_tools(cwd));
+        tools.extend(WebMiddleware::build_tools());
+        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
+        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
+        // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
+        // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
+        let project_skills_root = std::path::PathBuf::from(cwd).join(".claude").join("skills");
+        let skills = crate::skills::loader::scan_skill_roots(&[crate::skills::SkillRoot {
+            path: project_skills_root,
+            source: crate::skills::SkillSource::Project,
+            plugin_name: None,
+        }]);
+        let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        }));
+        tools.push(Box::new(crate::skills::tools::SkillTool::new(Arc::clone(
+            &cached,
+        ))));
+        tools.push(Box::new(crate::skills::tools::DiscoverSkillsTool::new(
+            cached,
+        )));
+        tools
+    }
+
+    fn build_middlewares(
+        &self,
+        ctx: &WorkflowAgentContext,
+        model_name: &str,
+    ) -> Vec<Box<dyn Middleware>> {
+        let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
+
+        let mut agents_md = AgentsMdMiddleware::new();
+        if let Some(ref md) = ctx.frozen_claude_md {
+            agents_md =
+                agents_md.with_frozen_content(md.clone(), ctx.frozen_claude_local_md.clone());
+        }
+        middlewares.push(Box::new(agents_md));
+
+        let mut skills_mw = SkillsMiddleware::new();
+        if let Some(ref summary) = ctx.frozen_skill_summary {
+            skills_mw = skills_mw.with_frozen_summary(summary.clone());
+        }
+        middlewares.push(Box::new(skills_mw));
+
+        // GAP-01: SkillPreloadMiddleware（预加载 skill 全文，空列表 = 仅注册工具）
+        middlewares.push(Box::new(SkillPreloadMiddleware::new(Vec::new(), &ctx.cwd)));
+
+        middlewares.push(Box::new(FilesystemMiddleware::new()));
+
+        // 3a. GitAttributionMiddleware（在 FilesystemMiddleware 之后）
+        middlewares.push(Box::new(GitAttributionMiddleware::new(model_name)));
+
+        middlewares.push(Box::new(TerminalMiddleware::new()));
+        middlewares.push(Box::new(WebMiddleware::new()));
+
+        // 3b. TodoMiddleware（在 WebMiddleware 之后）
+        let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<crate::tools::TodoItem>>(8);
+        middlewares.push(Box::new(TodoMiddleware::new(todo_tx)));
+
+        // GAP-03: HITL 审批中间件。
+        // broker + permission_mode 均 Some 时启用审批（遵循 session 权限模式）；
+        // 否则 Bypass（自主后台 agent 默认行为）。
+        let hitl = match (&ctx.broker, &ctx.permission_mode) {
+            (Some(broker), Some(mode)) => HumanInTheLoopMiddleware::with_shared_mode(
+                Arc::clone(broker),
+                default_requires_approval,
+                Arc::clone(mode),
+                None, // auto_classifier: workflow agent 不需要 LLM 分类器
+            ),
+            _ => HumanInTheLoopMiddleware::disabled(),
+        };
+        middlewares.push(Box::new(hitl));
+
+        // [v2] CompactMiddleware 已移除——Workflow agent 的自动 compact 由 v2
+        // stages/compact.rs 统一接管（run_react_loop 在每轮开头调 compact_v2::run_compact）。
+
+        middlewares
+    }
+
+    fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
+        Arc::new(crate::tool_search::ExecuteExtraToolResolver::default())
+    }
+
+    fn build_error_suggest(
+        &self,
+        cwd: &str,
+        tool_names: &[String],
+    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot) {
+        let agents_dir = std::path::Path::new(cwd).join(".claude").join("agents");
+        let agents_dir_opt = if agents_dir.exists() {
+            Some(agents_dir.as_path())
+        } else {
+            None
+        };
+        let snapshot = crate::error_suggest::build_tool_registry_snapshot(
+            tool_names.iter().cloned(),
+            agents_dir_opt,
+        );
+        (crate::error_suggest::build_default_registry(), snapshot)
+    }
+
+    fn build_workflow_middleware(
+        &self,
+        executor: Arc<dyn AgentExecutor>,
+        cwd: &str,
+        notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
+        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
+    ) -> Arc<dyn WorkflowMiddlewarePort> {
+        Arc::new(WorkflowMiddleware::new(
+            executor,
+            cwd,
+            notification_tx,
+            progress_rx,
+        ))
+    }
+}
+
 #[cfg(test)]
 #[path = "assembly_test.rs"]
 mod tests;

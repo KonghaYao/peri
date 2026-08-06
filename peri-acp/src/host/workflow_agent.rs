@@ -1,144 +1,148 @@
-//! Workflow agent executor — bridges workflow engine's agent() calls to v2 stages.
+//! Workflow agent 装配面薄壳（p1-wa 收口）。
 //!
-//! 当 Node workflow engine 调用 agent(prompt) 时，
-//! WorkflowRunner 通过 AgentExecutor trait 回调此模块，
-//! 通过 `build_v2_subagent_context` + `run_react_loop` 执行并返回结果。
+//! 执行体已随 p1-wa 物理迁入 `peri_agent::agent::workflow`（`agent.rs` /
+//! `factory.rs`——session 运行单元归 Agent 层，§2）；中间件链 / 工具 /
+//! error_suggest / tool resolver / session 级 WorkflowMiddleware 装配经
+//! [`WorkflowMiddlewareFactory`] 端口注入（peri-middlewares 实现，ACP 宿主
+//! 装配点注入）。
 //!
-//! 复用 SubAgent v2 基础设施：workflow agent 携带
-//! frozen CLAUDE.md / skills 并经过完整中间件链（Filesystem/Terminal/Web），
-//! + error_suggest wiring。
+//! 本模块保留 ACP 装配面职责（§0 边 2：ACP 不再持有 middlewares/workflow
+//! 引用——`scripts/import-exemptions.conf` 的 L5 豁免随本任务移除）：
+//!
+//! 1. `create_session_workflow_middleware`：session 级 WorkflowMiddleware
+//!    装配编排（executor 构造 + progress channel + 端口装配）；
+//! 2. 注入面构造 helpers（provider/peri_config 投影模型工厂、publish hook、
+//!    forwarder launcher、system prompt fallback）——构造点收敛在本模块，
+//!    防注入面漂移（`host/requests.rs` / `host/stdio` 装配面共用）。
 
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use peri_acp_types::{
     compact::CompactConfig,
-    event::{AgentEventHandler, ExecutorEvent, FnEventHandler},
-    interaction::UserInteractionBroker,
+    permission::PermissionMode,
+    ports::{SkillsPort, WorkflowMiddlewarePort},
+    workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
-// 3.0 批 2：执行核心类型（AgentModelBridge / ContextBudget /
-// SubagentV2ContextBuilder）为过渡宿主引用（全路径 `peri_agent::…`，
-// 豁免至 L5——见 `spec/issues/2026-08-05-3.0-acp-events-session-batch2.md`；
-// 随 executor 拆分物理迁入 peri-agent）。
-// `SubagentV2ContextBuilder` 实例经 `subagent_ctx_builder` 字段注入；
-// 当前所有调用方均传 None，回退到 peri-agent 默认实现
-// （`DefaultSubagentV2ContextBuilder`）为过渡行为——L5 迁出后取消回退、
-// 改为强制注入。
-use peri_middlewares::middleware::TodoMiddleware;
-use peri_middlewares::{
-    middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware},
-    prelude::*,
-    tools::TodoItem,
+use peri_agent::agent::workflow::{
+    create_executor, WorkflowAgentContext, WorkflowMiddlewareFactory, WorkflowModel,
+    WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
-use peri_workflow::protocol::{AgentRunParams, AgentRunResult, ProgressEvent, Usage};
-use peri_workflow::runner::AgentExecutor;
-use tracing::{debug, warn};
+use peri_agent::session::exec::executor_helpers::ForwarderLauncherFn;
 
-use crate::provider::LlmProvider;
-use crate::session::agent_pool::AgentPool;
+use crate::provider::{LlmProvider, PeriConfig};
+use crate::session::executor::FrozenSessionData;
 
-/// Workflow agent 构建上下文——携带 session 级 frozen data。
+/// 模型工厂构造：provider / peri_config 投影。
 ///
-/// frozen 数据在 session/new 时捕获，确保 workflow agent 看到的
-/// CLAUDE.md / skills 与主会话一致（系统提示词稳定性第一优先级）。
-#[derive(Clone)]
-pub struct WorkflowAgentContext {
-    /// LLM provider——通过 Arc<RwLock<>> 共享，provider/model 切换后自动感知，无需重建 executor。
-    pub provider: Arc<RwLock<LlmProvider>>,
-    pub cwd: String,
-    /// Frozen CLAUDE.md content（含解析的 @import），None = 无文件。
-    pub frozen_claude_md: Option<String>,
-    /// Frozen CLAUDE.local.md content，None = 无文件。
-    pub frozen_claude_local_md: Option<String>,
-    /// Frozen skills summary，None = 无 skills。
-    pub frozen_skill_summary: Option<String>,
-
-    // Phase 2 新增
-    /// Session ID（用于 compact 事件和日志）
-    pub session_id: Option<String>,
-    /// Compact 配置（None = 不启用自动 compact）
-    pub compact_config: Option<CompactConfig>,
-    /// 取消令牌（None = workflow agent 创建内部 token）
-    pub cancel: Option<tokio_util::sync::CancellationToken>,
-
-    // GAP-05: 标准 system prompt（session/new 时冻结的 build_system_prompt() 输出）。
-    // None = 回退到 build_system_prompt() 运行时构建。
-    pub system_prompt: Option<String>,
-    // GAP-03: HITL broker + 共享权限模式。两者均 Some 时启用审批；
-    // 任一为 None 时 Bypass（自主后台 agent 默认行为）。
-    pub broker: Option<Arc<dyn UserInteractionBroker>>,
-    pub permission_mode: Option<Arc<SharedPermissionMode>>,
-
-    // GAP-16: Frozen date + language（用于 system prompt fallback 构建时的日期/语言一致性）。
-    pub frozen_date: Option<String>,
-    pub frozen_language: Option<String>,
-
-    // GAP-13: AgentPool LLM 缓存（复用 reqwest::Client，~1-2 MB/实例）。
-    // None = 每次创建新 Model（当前行为，向后兼容）。
-    pub agent_pool: Option<Arc<parking_lot::Mutex<AgentPool>>>,
-
-    /// PeriConfig（用于 model alias 解析，如 haiku/sonnet/opus → 真实模型名）。
-    /// None = 不做 alias 解析，model 参数按字面量传给 provider。
-    pub peri_config: Option<Arc<crate::provider::PeriConfig>>,
-
-    // GAP-08: Langfuse 追踪会话（None = 不启用遥测）。
-    pub langfuse_session: Option<Arc<peri_controller::langfuse::session::LangfuseSession>>,
-
-    // GAP-18: ThreadStore（持久化 workflow agent 消息到统一存储）。
-    // None = 不持久化（内存中运行，当前行为）。
-    pub thread_store: Option<Arc<dyn peri_acp_types::store::ThreadStore>>,
-
-    /// 进度事件发送通道（None = 不发送 agent_progress 事件）
-    pub progress_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_workflow::protocol::ProgressEvent>>,
-
-    // 3.0 批 2 注入面：subagent v2 上下文构建器（`build_v2_subagent_context`
-    // 已随 L3 迁入 peri-agent，本层经 `subagent_ctx_builder` 注入调用）。
-    // None = 回退到 peri-agent 默认实现（`DefaultSubagentV2ContextBuilder`，
-    // 过渡行为——随 L5 executor 拆分迁入 peri-agent 后取消回退）。
-    pub subagent_ctx_builder:
-        Option<Arc<dyn peri_agent::session::subagent::SubagentV2ContextBuilder>>,
-
-    // 3.0 批 2：事件三层化发射宿主（workflow agent 的 v2 事件经
-    // `Controller::publish_event` 统一发射，与主 executor 同一出口）。
-    // None = 无 Controller（print 等无控制面宿主场景，保持内部消费）。
-    pub controller: Option<Arc<peri_controller::Controller>>,
+/// provider 经 `Arc<RwLock<>>` 共享——provider/model 切换后自动感知，无需
+/// 重建 executor（与迁移前 `WorkflowAgentContext.provider` 语义一致）；
+/// retry observer 由执行体按 run 传入（重试观测翻译为 LlmRetrying 交给
+/// 本 run handler）。
+///
+/// 池化分支（迁移前 `ctx.agent_pool`）：未文档化契约——与主 builder 的
+/// `ctx.pool` 必须是同一 `Arc<Mutex<AgentPool>>`，池化模型烘焙的 observer
+/// 才会与主链路共享同一转发器；迁移前 4 处入口均传 `agent_pool: None`
+/// （死路径）。若未来接线，池化烘焙在本工厂内实现。
+pub(crate) fn build_model_factory(
+    provider: &Arc<RwLock<LlmProvider>>,
+    peri_config: &RwLock<PeriConfig>,
+) -> WorkflowModelFactory {
+    let provider = Arc::clone(provider);
+    let peri_config = Arc::new(peri_config.read().clone());
+    Arc::new(move |model: Option<&str>, observer| {
+        // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
+        // 不一致——与迁移前 execute() 块作用域语义一致）。如 workflow 脚本
+        // 指定了 model 参数：
+        //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
+        //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
+        let effective = {
+            let provider_read = provider.read();
+            match model {
+                Some(m) => match LlmProvider::from_config_for_alias(&peri_config, m) {
+                    Some(p) => p,
+                    None => provider_read.with_model_name(m.to_string()),
+                },
+                None => provider_read.clone(),
+            }
+        };
+        let model_name = effective.model_name().to_string();
+        WorkflowModel {
+            model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
+            model_name,
+        }
+    })
 }
 
-/// Workflow agent executor — builds and runs v2 stages for workflow agent() calls.
-pub struct WorkflowAgentExecutor {
-    ctx: WorkflowAgentContext,
+/// 事件发射钩子构造（`Controller::publish_event` 适配；事件三层化统一出口，
+/// workflow agent 的 v2 事件经此进入协议化路径，与主 executor 同一出口）。
+pub(crate) fn build_publish_hook(
+    controller: &Arc<peri_controller::Controller>,
+) -> WorkflowPublishHook {
+    let controller = Arc::clone(controller);
+    Arc::new(move |sid: &str, source, ev| controller.publish_event(sid, source, ev.clone()))
 }
 
-impl WorkflowAgentExecutor {
-    pub fn new(ctx: WorkflowAgentContext) -> Self {
-        Self { ctx }
-    }
+/// EventBus forwarder 启动器构造（workflow 专用：bridge = None——workflow 的
+/// Langfuse 处理在外部事件旁路处理器，与迁移前 `spawn_eventbus_forwarder`
+/// 调用点一致；biased select 顺序不变量单点保持在 `crate::event`）。
+pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
+    Arc::new(|handles, _agent_id, on_event| {
+        crate::event::spawn_eventbus_forwarder(handles, on_event, None);
+    })
 }
 
-/// 创建携带 frozen data 的 workflow agent executor。
-pub fn create_executor(ctx: WorkflowAgentContext) -> Arc<dyn AgentExecutor> {
-    Arc::new(WorkflowAgentExecutor::new(ctx))
+/// system prompt fallback 渲染闭包构造（`PromptTemplate` 渲染面；skills 经
+/// 注入的 [`SkillsPort`] 访问——与宿主装配点注入的端口实现同一类型）。
+///
+/// workflow agent 链不注册 WorkflowTool（无嵌套 workflow），fallback 渲染
+/// 关闭 workflow section，与工具注册一致（P2-2026-08-02）。
+pub(crate) fn build_workflow_system_prompt_fallback(
+    skills: Arc<dyn SkillsPort>,
+) -> WorkflowSystemPromptFallback {
+    Arc::new(
+        move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>| {
+            let features =
+                crate::prompt::PromptFeatures::detect_without_workflow(PermissionMode::Bypass);
+            let template = crate::prompt::PromptTemplate::new();
+            let env = if let Some(date) = frozen_date {
+                crate::prompt::PromptEnv::with_frozen_date(cwd, date)
+            } else {
+                crate::prompt::PromptEnv::detect(cwd)
+            };
+            template.render(&env, &features, skills.as_ref(), &[], frozen_language)
+        },
+    )
 }
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
 ///
-/// 构造细节（executor 装配 + 进度通道 + 通知通道）收拢在本执行本体（豁免至
-/// L5）；返回端口句柄，host/stdio 命令面与 host/requests 命令面只持
+/// 编排：构造 executor（`WorkflowAgentContext` 注入面）+ progress 通道 +
+/// 经 [`WorkflowMiddlewareFactory`] 端口装配 `WorkflowMiddleware` 实例；
+/// 返回端口句柄，host/stdio 命令面与 host/requests 命令面只持
 /// `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2 波 2 装配边界收口）。
+///
+/// 事件发布：session 级路径与迁移前一致（`controller: None`），不启用事件
+/// 发布——publish_hook 传 None，workflow 事件仅由内部 handler 消费
+/// （usage/progress），不进入协议化事件流。TUI/stdio 主会话 session/new 均
+/// 走此路径；每-turn executor 调用点（`host/prompt.rs` /
+/// `host/stdio/session/prompt_exec.rs`）仍传 Some（与迁移前一致）。统一发射
+/// 接线留待单独裁定。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_session_workflow_middleware(
-    provider: Arc<RwLock<crate::provider::LlmProvider>>,
-    peri_config: Arc<crate::provider::PeriConfig>,
+    provider: Arc<RwLock<LlmProvider>>,
+    peri_config: &RwLock<PeriConfig>,
     cwd: &str,
     session_id: &str,
-    frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Option<Arc<dyn peri_acp_types::ports::WorkflowMiddlewarePort>> {
-    let mut compact_config = peri_acp_types::compact::CompactConfig::default();
+    frozen_data: &FrozenSessionData,
+    middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
+    publish_hook: Option<WorkflowPublishHook>,
+    skills: Arc<dyn SkillsPort>,
+) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
+    let mut compact_config = CompactConfig::default();
     compact_config.apply_env_overrides();
-    let (progress_tx, progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<peri_workflow::protocol::ProgressEvent>();
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     let wf_executor = create_executor(WorkflowAgentContext {
-        provider,
         cwd: cwd.to_string(),
         frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
         frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
@@ -153,682 +157,35 @@ pub(crate) fn create_session_workflow_middleware(
         permission_mode: None,
         frozen_date: Some(frozen_data.date().to_string()),
         frozen_language: frozen_data.language().map(|s| s.to_string()),
-        agent_pool: None,
-        langfuse_session: None,
         thread_store: None,
-        peri_config: Some(peri_config),
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
-        controller: None,
+        model_factory: build_model_factory(&provider, peri_config),
+        middleware_factory: Arc::clone(&middleware_factory),
+        system_prompt_fallback: build_workflow_system_prompt_fallback(skills),
+        forwarder_launcher: build_workflow_forwarder_launcher(),
+        publish_hook,
+        // Langfuse 观测：与迁移前一致（调用点均传 None，workflow agent 路径
+        // 未启用遥测；注入面预留，未来接线经 LangfuseHooks 构造）。
+        langfuse_hooks: None,
+        langfuse_event_handler: None,
     });
     let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-    Some(Arc::new(
-        peri_middlewares::workflow::WorkflowMiddleware::new(
-            wf_executor,
-            cwd,
-            notification_tx,
-            Some(progress_rx),
-        ),
+    Some(middleware_factory.build_workflow_middleware(
+        wf_executor,
+        cwd,
+        notification_tx,
+        Some(progress_rx),
     ))
 }
 
-/// 便捷工厂：创建无 frozen data 的 workflow agent executor。
-pub fn create_default_executor(provider: LlmProvider, cwd: &str) -> Arc<dyn AgentExecutor> {
-    Arc::new(WorkflowAgentExecutor::new(WorkflowAgentContext {
-        provider: Arc::new(RwLock::new(provider)),
-        cwd: cwd.to_string(),
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        session_id: None,
-        compact_config: None,
-        cancel: None,
-        system_prompt: None,
-        broker: None,
-        permission_mode: None,
-        frozen_date: None,
-        frozen_language: None,
-        agent_pool: None,
-        langfuse_session: None,
-        thread_store: None,
-        peri_config: None,
-        progress_tx: None,
-        subagent_ctx_builder: None,
-        controller: None,
-    }))
-}
-
-#[async_trait::async_trait]
-impl AgentExecutor for WorkflowAgentExecutor {
-    async fn execute(&self, params: AgentRunParams) -> AgentRunResult {
-        debug!(
-            agent_id = params.agent_id,
-            label = ?params.label,
-            phase = ?params.phase,
-            prompt_len = params.prompt.len(),
-            allowed_tools = ?params.allowed_tools,
-            "Workflow agent: starting execution"
-        );
-
-        let started_at = std::time::Instant::now();
-
-        // 0. GAP-08: 创建 Langfuse tracer（如果 session 可用）
-        let langfuse_tracer = self.ctx.langfuse_session.as_ref().map(|s| {
-            let session_clone = Arc::clone(s);
-            let config = session_clone.config.clone();
-            let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
-                session_clone;
-            Arc::new(parking_lot::Mutex::new(
-                peri_controller::langfuse::tracer::LangfuseTracer::new(
-                    session,
-                    self.ctx.session_id.clone().unwrap_or_default(),
-                    config,
-                ),
-            ))
-        });
-        if let Some(ref tracer) = langfuse_tracer {
-            tracer.lock().on_turn_start(&params.prompt);
-        }
-
-        // 0b. 创建日志 + Langfuse event handler
-        // 合并 3 次 provider.read() 为一次，避免中间切换导致 display_name 与实际 provider 不一致。
-        // 用块作用域确保 RwLockReadGuard 在第一个 .await 前释放。
-        // 如 workflow 脚本指定了 model 参数：
-        //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
-        //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
-        let (provider_display_name, effective_provider) = {
-            let provider_read = self.ctx.provider.read();
-            let display_name = provider_read.display_name().to_string();
-            let effective = if let Some(ref model) = params.model {
-                self.ctx
-                    .peri_config
-                    .as_ref()
-                    .and_then(|cfg| LlmProvider::from_config_for_alias(cfg, model))
-                    .unwrap_or_else(|| provider_read.with_model_name(model.clone()))
-            } else {
-                provider_read.clone()
-            };
-            (display_name, effective)
-        };
-
-        // 构造统一 Langfuse 桥接器（替代 forward_langfuse_event）
-        // workflow 无 subagent 场景:不注入 main_agent_id(registry fallback 兼容 v1)
-        let langfuse_bridge: Option<peri_controller::langfuse::bridge::LangfuseBridge> =
-            langfuse_tracer.as_ref().map(|t| {
-                peri_controller::langfuse::bridge::LangfuseBridge::new(
-                    std::sync::Arc::clone(t),
-                    provider_display_name.clone(),
-                    None,
-                )
-            });
-        let bridge_for_handler = langfuse_bridge.clone();
-
-        // Agent usage 累积器：从 LlmCallEnd 事件收集实际 token 用量
-        // (output_tokens, model_name)
-        let usage_stats: Arc<Mutex<(u64, Option<String>)>> = Arc::new(Mutex::new((0, None)));
-        let usage_stats_for_handler = Arc::clone(&usage_stats);
-
-        // 工具调用次数计数器
-        let tool_call_count: std::sync::Arc<std::sync::Mutex<u64>> =
-            std::sync::Arc::new(std::sync::Mutex::new(0));
-        let tool_call_count_for_handler = Arc::clone(&tool_call_count);
-        let progress_tx_for_handler = self.ctx.progress_tx.clone();
-        let run_id_for_handler = params.run_id.clone();
-        let agent_id_for_handler = params.agent_id;
-
-        let event_handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(
-            move |event: ExecutorEvent| {
-                match &event {
-                    ExecutorEvent::ToolStart { name, .. } => {
-                        *tool_call_count_for_handler.lock().unwrap() += 1;
-                        debug!(tool = %name, "workflow agent: tool started");
-                        // 发送实时进度更新
-                        if let Some(ref tx) = progress_tx_for_handler {
-                            let s = usage_stats_for_handler.lock();
-                            let tc = tool_call_count_for_handler.lock().unwrap();
-                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
-                                run_id: run_id_for_handler.clone(),
-                                agent_id: agent_id_for_handler,
-                                label: None,
-                                phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
-                            }) {
-                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
-                            }
-                        }
-                    }
-                    ExecutorEvent::ToolEnd { name, is_error, .. } => {
-                        if *is_error {
-                            warn!(tool = %name, "workflow agent: tool failed");
-                        } else {
-                            debug!(tool = %name, "workflow agent: tool completed");
-                        }
-                    }
-                    ExecutorEvent::LlmCallEnd { model, usage, .. } => {
-                        debug!(
-                            model = %model,
-                            tokens = ?usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
-                            "workflow agent: llm call completed"
-                        );
-                        // 累积真实 token 用量，供 AgentRunResult 上报
-                        {
-                            let mut s = usage_stats_for_handler.lock();
-                            if let Some(u) = usage {
-                                s.0 += u.output_tokens as u64;
-                            }
-                            s.1 = Some(model.clone());
-                        }
-                        // 发送实时进度更新
-                        if let Some(ref tx) = progress_tx_for_handler {
-                            let s = usage_stats_for_handler.lock();
-                            let tc = tool_call_count_for_handler.lock().unwrap();
-                            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
-                                run_id: run_id_for_handler.clone(),
-                                agent_id: agent_id_for_handler,
-                                label: None,
-                                phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
-                            }) {
-                                warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
-                            }
-                        }
-                    }
-                    ExecutorEvent::LlmRetrying {
-                        attempt,
-                        max_attempts,
-                        error,
-                        ..
-                    } => {
-                        warn!(attempt, max_attempts, error = %error, "workflow agent: llm retrying");
-                    }
-                    _ => {}
-                }
-
-                // Langfuse 事件转发（统一桥接器）
-                if let Some(ref bridge) = bridge_for_handler {
-                    if let Some(u) =
-                        peri_controller::langfuse::bridge::UnifiedLangfuseEvent::from_executor_event(
-                            event.clone(),
-                        )
-                    {
-                        // workflow agent 路径不维护 stage 生命周期（v1 无 Stage 事件），
-                        // 传入一次性局部 HashMap 即可
-                        let mut dummy_stage = std::collections::HashMap::new();
-                        bridge.process_event(&u, &mut dummy_stage);
-                    }
-                }
-            },
-        ));
-
-        let model_name = effective_provider.model_name().to_string();
-
-        // ── compact 配置 ──
-        // 从 WorkflowAgentContext 读取 compact_config，与主 agent builder 模式一致。
-        // 必须在 effective_provider 被 consume 之前构建 compact_llm。
-        let compact_config = self.ctx.compact_config.clone();
-        let context_budget = compact_config.as_ref().map(|cc| {
-            peri_agent::agent::token::ContextBudget::new(
-                peri_agent::agent::token::ContextBudget::DEFAULT_CONTEXT_WINDOW,
-            )
-            .with_auto_compact_threshold(cc.auto_compact_threshold)
-            .with_warning_threshold(cc.micro_compact_threshold)
-        });
-        // 本 run 的 retry observer：重试观测直接翻译为 LlmRetrying 交给本地 handler。
-        let retry_observer =
-            crate::session::retry_events::retry_observer_for(Arc::clone(&event_handler));
-
-        let compact_llm: Option<Arc<dyn peri_model::Model>> = if compact_config.is_some() {
-            Some(Arc::from(
-                effective_provider
-                    .clone()
-                    .with_retry_observer(Some(retry_observer.clone()))
-                    .into_model(),
-            ))
-        } else {
-            None
-        };
-
-        // 前置条件（未文档化契约）：`ctx.agent_pool` 与主 builder 的 `ctx.pool` 必须是
-        // 同一 `Arc<Mutex<AgentPool>>`——池化模型烘焙的 observer 才会与主链路共享同一
-        // 转发器。当前 4 处入口均传 `agent_pool: None`（死路径），未来接线时须保证同源。
-        let base_model: Arc<dyn peri_model::Model> = if let Some(ref pool) = self.ctx.agent_pool {
-            let fp = format!(
-                "{}:{}",
-                effective_provider.display_name(),
-                effective_provider.model_name()
-            );
-            AgentPool::get_or_create_subagent_llm(pool, &fp, || {
-                // 池化分支：烘焙 session 级转发器的 observer（从 AgentPool 取值）。
-                // 池化模型跨 run/跨 turn 存活，不能绑定 per-run 的本地 observer。
-                effective_provider
-                    .clone()
-                    .with_retry_observer(Some(pool.lock().retry_events.as_retry_observer()))
-                    .into_model()
-            })
-        } else {
-            Arc::from(
-                effective_provider
-                    .with_retry_observer(Some(retry_observer))
-                    .into_model(),
-            )
-        };
-
-        // 2. 注册工具
-        let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
-            FilesystemMiddleware::build_tools(&self.ctx.cwd);
-        tools.extend(TerminalMiddleware::build_tools(&self.ctx.cwd));
-        tools.extend(WebMiddleware::build_tools());
-        // Workflow agent 无 plugin_skill_roots，仅 project-level skill 可用。
-        // 在注册工具前扫描 project skills，预填充缓存（SkillTool 无懒扫描回退）。
-        // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
-        // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
-        let project_skills_root = std::path::PathBuf::from(&self.ctx.cwd)
-            .join(".claude")
-            .join("skills");
-        let skills = peri_middlewares::skills::loader::scan_skill_roots(&[
-            peri_middlewares::skills::SkillRoot {
-                path: project_skills_root,
-                source: peri_middlewares::skills::SkillSource::Project,
-                plugin_name: None,
-            },
-        ]);
-        let cached = std::sync::Arc::new(std::sync::RwLock::new(if skills.is_empty() {
-            None
-        } else {
-            Some(skills)
-        }));
-        tools.push(Box::new(peri_middlewares::skills::tools::SkillTool::new(
-            Arc::clone(&cached),
-        )));
-        tools.push(Box::new(
-            peri_middlewares::skills::tools::DiscoverSkillsTool::new(cached),
-        ));
-
-        // 3. allowedTools 过滤
-        if let Some(ref allowed) = params.allowed_tools {
-            if !allowed.is_empty() {
-                tools.retain(|t| allowed.contains(&t.name().to_string()));
-            }
-        }
-
-        // 4. GAP-05: 使用标准 system prompt（复用 frozen 或运行时构建）
-        let system_prompt = self.ctx.system_prompt.clone().unwrap_or_else(|| {
-            // workflow agent 链不注册 WorkflowTool（无嵌套 workflow），
-            // fallback 渲染关闭 workflow section，与工具注册一致。
-            // detect_without_workflow：子 agent / fork / workflow agent 共用
-            // 的 capability 快照（P2-2026-08-02）。
-            let features = crate::prompt::PromptFeatures::detect_without_workflow(
-                peri_middlewares::prelude::PermissionMode::Bypass,
-            );
-            let template = crate::prompt::PromptTemplate::new();
-            let env = if let Some(ref date) = self.ctx.frozen_date {
-                crate::prompt::PromptEnv::with_frozen_date(&self.ctx.cwd, date)
-            } else {
-                crate::prompt::PromptEnv::detect(&self.ctx.cwd)
-            };
-            // 豁免面（host/exec，L5 迁出）：skills 扫描端口使用标准实现
-            // （`SkillsProvider`，与宿主装配点注入的端口实现同一类型）。
-            let skills_provider = peri_middlewares::host_ports::SkillsProvider;
-            template.render(
-                &env,
-                &features,
-                &skills_provider,
-                &[],
-                self.ctx.frozen_language.as_deref(),
-            )
-        });
-
-        // 5. 构建中间件链
-        let mut middlewares: Vec<Box<dyn peri_agent::middleware::r#trait::Middleware>> = Vec::new();
-
-        let mut agents_md = AgentsMdMiddleware::new();
-        if let Some(ref md) = self.ctx.frozen_claude_md {
-            agents_md =
-                agents_md.with_frozen_content(md.clone(), self.ctx.frozen_claude_local_md.clone());
-        }
-        middlewares.push(Box::new(agents_md));
-
-        let mut skills_mw = SkillsMiddleware::new();
-        if let Some(ref summary) = self.ctx.frozen_skill_summary {
-            skills_mw = skills_mw.with_frozen_summary(summary.clone());
-        }
-        middlewares.push(Box::new(skills_mw));
-
-        // GAP-01: SkillPreloadMiddleware（预加载 skill 全文，空列表 = 仅注册工具）
-        middlewares.push(Box::new(SkillPreloadMiddleware::new(
-            Vec::new(),
-            &self.ctx.cwd,
-        )));
-
-        middlewares.push(Box::new(FilesystemMiddleware::new()));
-
-        // 3a. GitAttributionMiddleware（在 FilesystemMiddleware 之后）
-        middlewares.push(Box::new(GitAttributionMiddleware::new(&model_name)));
-
-        middlewares.push(Box::new(TerminalMiddleware::new()));
-        middlewares.push(Box::new(WebMiddleware::new()));
-
-        // 3b. TodoMiddleware（在 WebMiddleware 之后）
-        let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
-        middlewares.push(Box::new(TodoMiddleware::new(todo_tx)));
-
-        // GAP-03: HITL 审批中间件。
-        // broker + permission_mode 均 Some 时启用审批（遵循 session 权限模式）；
-        // 否则 Bypass（自主后台 agent 默认行为）。
-        let hitl = match (&self.ctx.broker, &self.ctx.permission_mode) {
-            (Some(broker), Some(mode)) => HumanInTheLoopMiddleware::with_shared_mode(
-                Arc::clone(broker),
-                default_requires_approval,
-                Arc::clone(mode),
-                None, // auto_classifier: workflow agent 不需要 LLM 分类器
-            ),
-            _ => HumanInTheLoopMiddleware::disabled(),
-        };
-        middlewares.push(Box::new(hitl));
-
-        // [v2] CompactMiddleware 已移除——Workflow agent 的自动 compact 由 v2
-        // stages/compact.rs 统一接管（run_react_loop 在每轮开头调 compact_v2::run_compact）。
-
-        // 5. v2 stages 装配（替代 SubAgentBuilder）
-        let cancel_token = self.ctx.cancel.clone().unwrap_or_default();
-        let max_iterations = 200;
-
-        // 组装 MiddlewareChain
-        let mut chain = peri_agent::middleware::chain::MiddlewareChain::new();
-        for mw in middlewares {
-            chain.add(mw);
-        }
-
-        // tools: Vec<Box<dyn BaseTool>> → Vec<Arc<dyn BaseTool>>
-        let tools_arc: Vec<Arc<dyn peri_agent::tools::BaseTool>> = tools
-            .into_iter()
-            .map(|t| Arc::from(t) as Arc<dyn peri_agent::tools::BaseTool>)
-            .collect();
-
-        // 收集中间件 prompt_contribution，合并到 system_prompt
-        let contributions = chain.collect_prompt_contributions();
-        let system_prompt = if contributions.is_empty() {
-            system_prompt
-        } else {
-            format!("{system_prompt}\n\n{contributions}")
-        };
-
-        // 构造 AgentModelBridge（现在 system_prompt 已就绪）
-        let mut base_llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(base_model)
-            .with_system(system_prompt.clone());
-        if let Some(ref sid) = self.ctx.session_id {
-            base_llm = base_llm.with_session_id(sid);
-        }
-        let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
-
-        // error_suggest wiring（与 SubAgentBuilder.with_error_suggest() 等价）
-        let all_tool_names: Vec<String> = tools_arc.iter().map(|t| t.name().to_string()).collect();
-        let agents_dir = std::path::Path::new(&self.ctx.cwd)
-            .join(".claude")
-            .join("agents");
-        let agents_dir_opt = if agents_dir.exists() {
-            Some(agents_dir.as_path())
-        } else {
-            None
-        };
-        let snapshot = peri_middlewares::error_suggest::build_tool_registry_snapshot(
-            all_tool_names,
-            agents_dir_opt,
-        );
-        let error_suggest_registry = peri_middlewares::error_suggest::build_default_registry();
-
-        // 构造 v2 StageContext（workflow agent 无 parent_messages）
-        // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
-        // L3：build_v2_subagent_context 迁至 peri-agent；本层经注入的
-        // SubagentV2ContextBuilder 调用（resolver 参数化；workflow 保持迁移前
-        // 的 ExecuteExtraToolResolver 语义）。None 回退到 peri-agent 默认实现
-        // （过渡行为，见上方字段注释；L5 迁出后取消回退——豁免清单见
-        // `spec/issues/2026-08-05-3.0-acp-events-session-batch2.md`）。
-        let ctx_builder = self.ctx.subagent_ctx_builder.clone().unwrap_or_else(|| {
-            Arc::new(peri_agent::session::subagent::DefaultSubagentV2ContextBuilder)
-        });
-        let v2_ctx = ctx_builder.build(
-            None, // workflow agent 无预创建 session（内部自建）
-            llm,
-            chain,
-            tools_arc,
-            &self.ctx.cwd,
-            cancel_token.clone(),
-            Some(Arc::new(
-                peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
-            )),
-            Some(error_suggest_registry),
-            Some(snapshot),
-            compact_config,
-            context_budget,
-            compact_llm,
-            None, // workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
-        );
-
-        // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）
-        // 用于 Langfuse trace + token usage 累积。
-        //
-        // 循环实现抽取至 `crate::event::forwarder::spawn_eventbus_forwarder`，
-        // 以保证 biased select 顺序不变量与 main executor 调用点一致。
-        //
-        // 事件三层化（3.0 M-event-chain）：workflow agent 的 v2 事件同时经
-        // `Controller::publish_event` 统一发射（事件统一出口；主 session 的
-        // 事件泵按 session_id 过滤消费，workflow agent 流式事件与子 agent
-        // 一致进入协议化路径）。内部 handler 保留（Langfuse/usage/progress）。
-        let handler_for_forwarder = Arc::clone(&event_handler);
-        let controller_for_forwarder = self.ctx.controller.clone();
-        let sid_for_forwarder = self.ctx.session_id.clone();
-        crate::event::spawn_eventbus_forwarder(
-            v2_ctx.event_handles,
-            move |source, exec_ev| {
-                handler_for_forwarder.on_event(exec_ev.clone());
-                if let (Some(controller), Some(sid)) = (
-                    controller_for_forwarder.as_ref(),
-                    sid_for_forwarder.as_ref(),
-                ) {
-                    controller.publish_event(sid, &source, exec_ev);
-                }
-            },
-            None, // bridge: workflow 在外部 handler 中处理 Langfuse
-        );
-
-        // push prompt 到 queue
-        v2_ctx
-            .context
-            .session
-            .queue
-            .push(peri_acp_types::session::QueuedMessage::new(
-                peri_acp_types::session::MessageKind::Prompt,
-                peri_acp_types::session::MessageSource::UserInput,
-                peri_acp_types::messages::BaseMessage::human(params.prompt.clone()),
-            ));
-
-        // 7. 运行 v2 ReAct 循环
-        let loop_result =
-            peri_agent::agent::stages::run_react_loop(v2_ctx.context, max_iterations).await;
-
-        let agent_result = match loop_result {
-            peri_agent::agent::stages::LoopResult::Completed => {
-                let output_text = extract_last_ai_text(&v2_ctx.session);
-
-                // 获取 agent 执行期间累积的 token 用量
-                let (total_output_tokens, last_model) = {
-                    let s = usage_stats.lock();
-                    let mut tokens = s.0;
-                    // P0 fallback: haiku 等模型 usage=None 时 token 累积为 0，
-                    // 按 output_text 长度启发式估算（每个 token ~4 字符）
-                    if tokens == 0 && !output_text.is_empty() {
-                        tokens = (output_text.len() as u64 / 4).max(1);
-                    }
-                    // P0 fallback: 如果事件从未 emit LlmCallEnd（如纯工具调用），
-                    // 回退到 Node 传入的 model 参数
-                    let model = s.1.clone().or_else(|| params.model.clone());
-                    (tokens, model)
-                };
-
-                // Schema 校验
-                if let Some(ref schema) = params.schema {
-                    if let Err(err) = validate_json_schema(&output_text, schema) {
-                        debug!(error = %err, "Workflow agent: schema validation failed");
-                        AgentRunResult::Dead {
-                            reason: Some("no-structured-output".into()),
-                            detail: Some(err),
-                        }
-                    } else {
-                        AgentRunResult::Ok {
-                            output: serde_json::Value::String(output_text),
-                            usage: Usage {
-                                output_tokens: total_output_tokens,
-                            },
-                            model: last_model,
-                            tool_count: {
-                                let c = tool_call_count.lock().unwrap();
-                                Some(*c)
-                            },
-                            token_count: Some(total_output_tokens),
-                            phase: params.phase.clone(),
-                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                        }
-                    }
-                } else {
-                    AgentRunResult::Ok {
-                        output: serde_json::Value::String(output_text),
-                        usage: Usage {
-                            output_tokens: total_output_tokens,
-                        },
-                        model: last_model,
-                        tool_count: {
-                            let c = tool_call_count.lock().unwrap();
-                            Some(*c)
-                        },
-                        token_count: Some(total_output_tokens),
-                        phase: params.phase.clone(),
-                        duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                    }
-                }
-            }
-            peri_agent::agent::stages::LoopResult::Interrupted => {
-                debug!("Workflow agent: execution interrupted");
-                AgentRunResult::Dead {
-                    reason: Some("interrupted".into()),
-                    detail: Some("Workflow agent execution was interrupted".into()),
-                }
-            }
-            peri_agent::agent::stages::LoopResult::Error(e) => {
-                debug!(error = %e, "Workflow agent: execution failed");
-                AgentRunResult::Dead {
-                    reason: Some("runagent-threw".into()),
-                    detail: Some(e.to_string()),
-                }
-            }
-        };
-
-        // GAP-08: 结束 Langfuse trace（fire-and-forget flush）
-        if let Some(tracer) = langfuse_tracer {
-            let error_output = match &agent_result {
-                AgentRunResult::Dead { detail, .. } => detail.as_deref(),
-                _ => None,
-            };
-            let handle = tracer.lock().on_turn_end(error_output);
-            drop(handle); // fire-and-forget flush
-        }
-
-        agent_result
-    }
-}
-
-/// 从 session transcript 提取最后一条非空 AI 消息文本
-fn extract_last_ai_text(session: &Arc<peri_agent::session::Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, peri_acp_types::messages::BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
-}
-/// JSON Schema 校验——基础类型 + required 字段检查。
-///
-/// schema 为 None 或空 {} 时仅验证是合法 JSON（向后兼容）。
-/// 否则检查：
-/// 1. 顶层 type 匹配（object/array/string/number/boolean/null）
-/// 2. 若 type 为 object，检查 required 字段存在
-/// 3. 若 type 为 object 且有 properties，检查各属性 type 匹配
-fn validate_json_schema(text: &str, schema: &serde_json::Value) -> Result<(), String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("output is not valid JSON: {e}"))?;
-
-    // 如果 schema 为空或不是 object，仅验证 JSON 格式
-    let schema_obj = match schema.as_object() {
-        Some(obj) if obj.is_empty() => return Ok(()),
-        Some(_) => schema,
-        _ => return Ok(()),
-    };
-
-    // 检查顶层 type
-    if let Some(expected_type) = schema_obj.get("type").and_then(|v| v.as_str()) {
-        let actual_type = json_type_name(&value);
-        if actual_type != expected_type {
-            return Err(format!(
-                "expected top-level type '{expected_type}', got '{actual_type}'"
-            ));
-        }
-    }
-
-    // 对 object 类型检查 required + properties
-    if let Some(obj) = value.as_object() {
-        if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
-            for field in required {
-                let field_name = field
-                    .as_str()
-                    .ok_or_else(|| format!("required 数组元素不是字符串: {field}"))?;
-                if !obj.contains_key(field_name) {
-                    return Err(format!("missing required field: {field_name}"));
-                }
-            }
-        }
-
-        if let Some(properties) = schema_obj.get("properties").and_then(|v| v.as_object()) {
-            for (prop_name, prop_schema) in properties {
-                if let Some(prop_value) = obj.get(prop_name) {
-                    if let Some(expected_type) = prop_schema.get("type").and_then(|v| v.as_str()) {
-                        let actual_type = json_type_name(prop_value);
-                        if actual_type != expected_type {
-                            return Err(format!(
-                                "field '{prop_name}': expected type '{expected_type}', got '{actual_type}'"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// 返回 JSON value 的类型名称（用于错误消息）。
-fn json_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
+// 类型锚点：确认端口装配方法的入参类型与编排处一致（防签名漂移）。
+#[allow(dead_code)]
+fn _type_anchor(
+    f: Arc<dyn WorkflowMiddlewareFactory>,
+    e: Arc<dyn AgentExecutor>,
+    n: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
+    p: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
+) -> Arc<dyn WorkflowMiddlewarePort> {
+    f.build_workflow_middleware(e, "cwd", n, p)
 }

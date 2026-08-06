@@ -17,10 +17,10 @@ use crate::{
         react::ReactLLM,
     },
     error::AgentError,
-    group::pipeline::AgentId,
     messages::{BaseMessage, ContentBlock, MessageContent},
     session::turn::TurnId,
 };
+use peri_acp_types::identity::AgentId;
 
 struct FakeModel;
 

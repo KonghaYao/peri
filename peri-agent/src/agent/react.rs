@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use peri_acp_types::identity::AgentId;
 use peri_model::{StopReason, TokenUsage};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent::events_v2::EventBus,
-    group::pipeline::AgentId,
     messages::{BaseMessage, MessageContent},
     session::turn::TurnId,
     tools::BaseTool,

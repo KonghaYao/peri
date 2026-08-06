@@ -313,13 +313,23 @@ async fn make_session_context_with_manager(
     (ctx, sm)
 }
 
-/// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式；测试无
-/// Langfuse → bridge factory None）。
+/// 构造 stage 装配桥（真实 ACP 桥，与生产 host/prompt.rs 同模式：ZST
+/// ProductionChainAssembler + build_compact_hooks（测试 ctx hook_groups 为空
+/// → (None, None)）；测试无 Langfuse → bridge factory None）。
 fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
     let ctx_for_stage = ctx.clone();
     Arc::new(move |sbr| {
+        let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
+            &ctx_for_stage.hook_groups,
+            &ctx_for_stage.cwd,
+            &ctx_for_stage.session_id,
+            &ctx_for_stage.provider_model_name,
+        );
         crate::host::stage_builder::build_stage_context(
             &ctx_for_stage,
+            &peri_middlewares::assembly::ProductionChainAssembler, // ZST 装配器
+            compact_pre_hook,
+            compact_post_hook,
             sbr.cached_llm.as_ref(),
             sbr.system_prompt,
             sbr.subagent_system_prompt,

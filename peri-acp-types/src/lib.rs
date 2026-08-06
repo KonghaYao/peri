@@ -45,6 +45,7 @@ pub mod identity;
 pub mod interaction;
 pub mod lsp;
 pub mod messages;
+pub mod model;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
 pub mod permission;

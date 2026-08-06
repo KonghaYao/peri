@@ -62,6 +62,10 @@ pub(super) struct StdioContext {
     /// Skills 扫描端口（available-commands 通知经此访问）。
     pub(super) skills: Arc<dyn SkillsPort>,
     pub(super) shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+    /// Workflow agent 装配端口（p1-wa 收口：宿主装配点（cli）构造后注入，
+    /// ACP 侧只持端口）。
+    pub(super) workflow_middleware_factory:
+        Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
     pub(super) sessions: RwLock<HashMap<String, SessionInfo>>,
     pub(super) thread_store: Arc<dyn ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）

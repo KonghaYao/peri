@@ -113,6 +113,9 @@ pub struct AcpServerConfig {
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+    /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
+    /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
+    pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
@@ -125,6 +128,11 @@ pub struct AcpServerConfig {
     pub settings_hooks: Arc<dyn SettingsHooksPort>,
     pub shared_tools:
         Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+    /// Workflow agent 装配端口（peri-middlewares 实现，TUI 部署装配点构造后
+    /// 经 [`assemble::HostAssemblyInput`] 注入；p1-wa 收口——ACP 不直接
+    /// 引用 middlewares，见 `host/workflow_agent.rs`）。
+    pub workflow_middleware_factory:
+        Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
     pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
     /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
@@ -395,6 +403,7 @@ pub(crate) async fn dispatch_prompt_turn(
         cfg.langfuse_session.clone(),
         pool_arc.clone(),
         cfg.session_manager.clone(),
+        &cfg.workflow_middleware_factory,
         Some(cont_tx.clone()),
         is_continuation,
     )

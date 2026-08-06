@@ -30,6 +30,7 @@ impl McpClientPool {
             .count();
         if config.mcp_servers.is_empty() {
             let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
+            *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
             return;
         }
 
@@ -48,6 +49,10 @@ impl McpClientPool {
             connected: 0,
             total: connectable,
         });
+        *pool.init_status.write() = McpInitStatus::Initializing {
+            connected: 0,
+            total: connectable,
+        };
 
         let mut connected = 0usize;
         for (name, server_config) in &config.mcp_servers {
@@ -268,6 +273,10 @@ impl McpClientPool {
                         connected,
                         total: connectable,
                     });
+                    *pool.init_status.write() = McpInitStatus::Initializing {
+                        connected,
+                        total: connectable,
+                    };
                 }
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
@@ -292,6 +301,7 @@ impl McpClientPool {
                 .all(|h| h.oauth_status == OAuthStatus::NeedsAuthorization);
             if all_need_auth {
                 let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
+                *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
             } else {
                 let failed: Vec<String> = pool
                     .clients
@@ -311,9 +321,15 @@ impl McpClientPool {
                     connectable,
                     failed.join("; ")
                 )));
+                *pool.init_status.write() = McpInitStatus::Failed(format!(
+                    "{} 个服务器连接失败: {}",
+                    connectable,
+                    failed.join("; ")
+                ));
             }
         } else {
             let _ = status_tx.send(McpInitStatus::Ready { total: connected });
+            *pool.init_status.write() = McpInitStatus::Ready { total: connected };
         }
     }
 
@@ -568,6 +584,7 @@ impl McpClientPool {
                 services: tokio::sync::Mutex::new(HashMap::new()),
                 configs: parking_lot::RwLock::new(p.configs.read().clone()),
                 plugin_sources: parking_lot::RwLock::new(p.plugin_sources.read().clone()),
+                init_status: parking_lot::RwLock::new(p.init_status.read().clone()),
             }
         })
     }

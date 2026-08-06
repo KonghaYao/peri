@@ -20,6 +20,9 @@ pub mod state;
 pub mod subagent_event_forwarder;
 #[doc(hidden)]
 pub mod token;
+/// workflow agent 执行单元（p1-wa 归位：session 运行单元归 Agent 层；
+/// 装配经 [`workflow::factory`] 端口注入，§0 边 8）。
+pub mod workflow;
 
 #[doc(hidden)]
 pub use compact_v2::CompactConfig;

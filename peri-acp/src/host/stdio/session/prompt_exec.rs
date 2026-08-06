@@ -76,9 +76,9 @@ pub(crate) async fn run(params: PromptExecParams) {
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    let workflow_executor = crate::host::workflow_agent::create_executor(
-        crate::host::workflow_agent::WorkflowAgentContext {
-            provider: Arc::clone(&ctx.provider),
+    // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面。
+    let workflow_executor = peri_agent::agent::workflow::create_executor(
+        peri_agent::agent::workflow::WorkflowAgentContext {
             cwd: agent_cwd.clone(),
             frozen_claude_md: frozen
                 .as_ref()
@@ -111,13 +111,25 @@ pub(crate) async fn run(params: PromptExecParams) {
             frozen_language: frozen
                 .as_ref()
                 .and_then(|f| f.language().map(|s| s.to_string())),
-            agent_pool: None,
-            langfuse_session: None,
             thread_store: None,
-            peri_config: Some(peri_config_snapshot.clone()),
             progress_tx: None,
             subagent_ctx_builder: None,
-            controller: Some(Arc::clone(&ctx.controller)),
+            model_factory: crate::host::workflow_agent::build_model_factory(
+                &ctx.provider,
+                &ctx.peri_config,
+            ),
+            middleware_factory: Arc::clone(&ctx.workflow_middleware_factory),
+            system_prompt_fallback:
+                crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
+                    &ctx.skills,
+                )),
+            forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
+            publish_hook: Some(crate::host::workflow_agent::build_publish_hook(
+                &ctx.controller,
+            )),
+            // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
+            langfuse_hooks: None,
+            langfuse_event_handler: None,
         },
     );
 
@@ -447,8 +459,19 @@ pub(crate) async fn run(params: PromptExecParams) {
         }) as Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>
     });
     let stage_build: StageBuildFn = Arc::new(move |sbr| {
+        // compact hook 闭包在每次装配时构造（hook_groups 非空才产生动作；
+        // 与迁移前 stage_builder 内构造时机逐次一致）
+        let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
+            &cx_for_stage.hook_groups,
+            &cx_for_stage.cwd,
+            &cx_for_stage.session_id,
+            &cx_for_stage.provider_model_name,
+        );
         crate::host::stage_builder::build_stage_context(
             &cx_for_stage,
+            &peri_middlewares::assembly::ProductionChainAssembler, // ZST 装配器
+            compact_pre_hook,
+            compact_post_hook,
             sbr.cached_llm.as_ref(),
             sbr.system_prompt,
             sbr.subagent_system_prompt,

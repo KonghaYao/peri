@@ -21,10 +21,10 @@ use std::time::Duration;
 use langfuse_client::types::ObservationType;
 use langfuse_client::IngestionEvent;
 use parking_lot::Mutex;
+use peri_acp_types::identity::AgentId;
 use peri_agent::agent::events::{Stage, StageStatus};
 use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
 use peri_agent::agent::LangfuseBridgeLike;
-use peri_agent::group::pipeline::AgentId;
 use peri_agent::session::turn::TurnId;
 
 use super::*;

@@ -7,32 +7,18 @@ use std::sync::Arc;
 use crate::provider::LlmProvider;
 use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
-use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
-use peri_acp_types::lsp::LspServerConfig;
+use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::permission::SharedPermissionMode;
-use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
-use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 
 use super::context::StdioContext;
 
-/// stdio 宿主装配输入（3.0 批 2 波 2）：具体实现由部署装配点（cli/TUI
-/// 白名单文件）构造后以端口/协议类型注入；ACP 侧只持接口。
+/// stdio 宿主装配输入（M-TUI 收口：middlewares 具体实现由本装配面内部
+/// 构造——「ACP Host = 部署单元」；cli 只提供协议面输入）。
 pub struct StdioAssemblyInput {
     pub cwd: String,
-    pub thread_store: Arc<dyn ThreadStore>,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
-    pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
-    pub tool_search_index: Arc<dyn ToolSearchPort>,
-    pub skills: Arc<dyn SkillsPort>,
-    pub settings_hooks: Arc<dyn SettingsHooksPort>,
-    pub plugin_skill_roots: Vec<SkillRoot>,
-    pub plugin_agent_dirs: Vec<PathBuf>,
-    pub plugin_hooks: Vec<RegisteredHook>,
-    pub plugin_loaded: Vec<LoadedPlugin>,
-    pub plugin_lsp_servers: Vec<LspServerConfig>,
 }
 
 /// 初始化 ACP Stdio 运行环境，返回共享上下文。
@@ -69,20 +55,69 @@ pub(super) async fn init_stdio_context(
     );
 
     let StdioAssemblyInput {
-        cron_scheduler,
-        mcp_pool,
-        tool_search_index,
-        skills,
-        settings_hooks,
+        cwd: input_cwd,
         permission_mode,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_hooks,
-        plugin_loaded,
-        plugin_lsp_servers,
-        thread_store,
-        ..
     } = input;
+    let _ = input_cwd;
+
+    // ── M-TUI 收口：middlewares 具体实现由本装配面内部构造（与 TUI/print
+    //    的 `assemble_server_config` 同源；stdio 无 bare 语义、无 cron tick，
+    //    行为与迁移前 main.rs stdio 装配一致）──
+    let claude_dir = dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude");
+
+    let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
+        &claude_dir,
+        Some(std::path::Path::new(&cwd)),
+    );
+    let plugin_skill_roots = plugin_data.all_skill_roots;
+    let plugin_agent_dirs = plugin_data.all_agent_dirs;
+    let plugin_hooks = plugin_data.all_hooks;
+    let plugin_loaded = plugin_data.plugins;
+    let plugin_lsp_servers = plugin_data.all_lsp_servers;
+
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = {
+        let scheduler = Arc::new(parking_lot::Mutex::new(
+            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
+        Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
+            scheduler,
+        )))
+    };
+    let mcp_pool: Option<Arc<dyn McpPoolPort>> = {
+        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+        let pool_clone = pool.clone();
+        let cwd_clone = cwd.clone();
+        let claude_home_clone = claude_dir.clone();
+        let (init_tx, _init_rx) =
+            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+        tokio::spawn(async move {
+            peri_middlewares::mcp::McpClientPool::run_initialize(
+                pool_clone,
+                std::path::Path::new(&cwd_clone),
+                &claude_home_clone,
+                init_tx,
+                None,
+                None,
+            )
+            .await;
+        });
+        Some(pool)
+    };
+    let tool_search_index: Arc<dyn ToolSearchPort> =
+        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
+    let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
+    let settings_hooks: Arc<dyn SettingsHooksPort> =
+        Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    let workflow_middleware_factory =
+        peri_middlewares::assembly::default_workflow_middleware_factory();
+
+    // thread 存储经 peri-agent 工厂构造（§0：ACP 层不直接依赖 Resources；
+    // M-res 收口——存储实例化点归 Agent 层声明边）
+    let thread_store: Arc<dyn ThreadStore> = peri_agent::resources::open_thread_store()
+        .await
+        .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
 
     // 组装 hook groups（顺序与迁移前一致：plugin → global → project → local；
     // 经 host::assemble 统一装配，ARC-MIDDLEWARE-001 链序不重排；三级 settings
@@ -95,9 +130,6 @@ pub(super) async fn init_stdio_context(
     );
 
     let shared_tools = Arc::new(RwLock::new(BTreeMap::new()));
-
-    // thread 存储由部署装配点（cli）注入（§0：ACP 层不直接依赖 Resources）
-    let thread_store: Arc<dyn ThreadStore> = thread_store;
 
     // 初始化 Langfuse
     let langfuse_session =
@@ -145,6 +177,7 @@ pub(super) async fn init_stdio_context(
         tool_search_index,
         skills,
         shared_tools,
+        workflow_middleware_factory,
         sessions: RwLock::new(HashMap::new()),
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),

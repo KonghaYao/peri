@@ -2,8 +2,8 @@
 
 use super::*;
 
-use crate::group::pipeline::AgentId;
 use crate::session::turn::TurnId;
+use peri_acp_types::identity::AgentId;
 
 // ─── 构造辅助 ──────────────────────────────────────────────────────────
 

@@ -11,6 +11,7 @@ use crate::{
 use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
@@ -54,6 +55,8 @@ pub(crate) async fn run_prompt(
     langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
     session_manager: crate::session::SessionManager,
+    // p1-wa：workflow agent 装配端口（宿主装配点注入，ACP 侧只持端口）。
+    workflow_middleware_factory: &Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
     // 内部 continuation 通知通道（注入 SessionContext，供 on_bg_complete
     // 闭包通知 server 的 continuation scheduler）。stdio 等无 scheduler 场景为 None。
     cont_tx: Option<
@@ -142,9 +145,10 @@ pub(crate) async fn run_prompt(
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    let workflow_executor = crate::host::workflow_agent::create_executor(
-        crate::host::workflow_agent::WorkflowAgentContext {
-            provider: Arc::clone(provider),
+    // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面
+    // （模型工厂 / 装配端口 / forwarder / publish hook / prompt fallback）。
+    let workflow_executor = peri_agent::agent::workflow::create_executor(
+        peri_agent::agent::workflow::WorkflowAgentContext {
             cwd: cwd.clone(),
             frozen_claude_md: frozen
                 .as_ref()
@@ -177,13 +181,20 @@ pub(crate) async fn run_prompt(
             frozen_language: frozen
                 .as_ref()
                 .and_then(|f| f.language().map(|s| s.to_string())),
-            agent_pool: None,
-            langfuse_session: None,
             thread_store: None,
-            peri_config: Some(peri_config_snapshot.clone()),
             progress_tx: None,
             subagent_ctx_builder: None,
-            controller: Some(Arc::clone(controller)),
+            model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
+            middleware_factory: Arc::clone(workflow_middleware_factory),
+            system_prompt_fallback:
+                crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
+                    &skills,
+                )),
+            forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
+            publish_hook: Some(crate::host::workflow_agent::build_publish_hook(controller)),
+            // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
+            langfuse_hooks: None,
+            langfuse_event_handler: None,
         },
     );
 
@@ -516,8 +527,19 @@ pub(crate) async fn run_prompt(
         }) as Arc<dyn Fn() -> Arc<dyn peri_agent::agent::LangfuseBridgeLike> + Send + Sync>
     });
     let stage_build: StageBuildFn = Arc::new(move |sbr| {
+        // compact hook 闭包在每次装配时构造（hook_groups 非空才产生动作；
+        // 与迁移前 stage_builder 内构造时机逐次一致）
+        let (compact_pre_hook, compact_post_hook) = crate::host::prompt::build_compact_hooks(
+            &ctx_for_stage.hook_groups,
+            &ctx_for_stage.cwd,
+            &ctx_for_stage.session_id,
+            &ctx_for_stage.provider_model_name,
+        );
         crate::host::stage_builder::build_stage_context(
             &ctx_for_stage,
+            &peri_middlewares::assembly::ProductionChainAssembler, // ZST 装配器
+            compact_pre_hook,
+            compact_post_hook,
             sbr.cached_llm.as_ref(),
             sbr.system_prompt,
             sbr.subagent_system_prompt,
@@ -704,6 +726,71 @@ fn take_recall_for_turn(recall_items: &mut Vec<String>, continuation: bool) -> V
     } else {
         std::mem::take(recall_items)
     }
+}
+
+/// 构造 compact plugin hook 回调（宿主装配面职责，L5 归位自
+/// host/stage_builder.rs：hook_groups 非空时构造 `fire_pre_compact` /
+/// `fire_post_compact` 转发闭包；语义同迁移前——tokio::spawn 转发、不阻塞
+/// 管线；hook_groups 为空返回 `(None, None)`）。
+#[allow(clippy::type_complexity)]
+pub(crate) fn build_compact_hooks(
+    hook_groups: &[Vec<RegisteredHook>],
+    cwd: &str,
+    session_id: &str,
+    model: &str,
+) -> (
+    Option<Arc<dyn Fn() + Send + Sync>>,
+    Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
+) {
+    let hook_groups_flat: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
+    if hook_groups_flat.is_empty() {
+        return (None, None);
+    }
+    let cwd = cwd.to_string();
+    let sid = session_id.to_string();
+    let model = model.to_string();
+    let pre: Arc<dyn Fn() + Send + Sync> = {
+        let hooks = hook_groups_flat.clone();
+        let cwd = cwd.clone();
+        let sid = sid.clone();
+        let model = model.clone();
+        Arc::new(move || {
+            let hooks = hooks.clone();
+            let cwd = cwd.clone();
+            let sid = sid.clone();
+            let model = model.clone();
+            tokio::spawn(async move {
+                peri_middlewares::hooks::stage_firing::fire_pre_compact(
+                    &hooks, &cwd, &sid, "", &model, 0,
+                )
+                .await;
+            });
+        })
+    };
+    let post: Arc<dyn Fn(bool, usize) + Send + Sync> = {
+        let hooks = hook_groups_flat.clone();
+        let cwd = cwd.clone();
+        let sid = sid.clone();
+        let model = model.clone();
+        Arc::new(move |_compacted: bool, affected_count: usize| {
+            let hooks = hooks.clone();
+            let cwd = cwd.clone();
+            let sid = sid.clone();
+            let model = model.clone();
+            tokio::spawn(async move {
+                peri_middlewares::hooks::stage_firing::fire_post_compact(
+                    &hooks,
+                    &cwd,
+                    &sid,
+                    "",
+                    &model,
+                    affected_count,
+                )
+                .await;
+            });
+        })
+    };
+    (Some(pre), Some(post))
 }
 
 /// 本轮结束时是否允许用 `result.recall_items` 覆盖 `SessionState.recall_items`。

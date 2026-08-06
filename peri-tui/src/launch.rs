@@ -148,31 +148,16 @@ pub async fn build_app_and_acp(
                     provider: provider.clone(),
                     peri_config: app.services.peri_config.clone(),
                     permission_mode: app.services.permission_mode.clone(),
-                    // 3.0 批 2 波 2：cron 调度器经端口 handle 注入（TUI 仍持
-                    // 具体句柄驱动 tick；ACP 侧只持 `Arc<dyn CronSchedulerPort>`）。
-                    cron_scheduler: Some(Arc::new(
-                        peri_middlewares::cron::CronSchedulerPortHandle(
-                            app.services.cron.scheduler.clone(),
-                        ),
-                    )),
-                    mcp_pool: app
-                        .services
-                        .mcp_pool
-                        .clone()
-                        .map(|p| p as Arc<dyn peri_acp_types::ports::McpPoolPort>),
-                    // 装配注入面：资源类具体实现（ToolSearchIndex / SkillsProvider /
-                    // PluginManager / SettingsHooksLoader）由宿主装配点构造后 upcast
-                    // 注入（§0 依赖方向；ACP 不直接 new 资源类）。
-                    tool_search_index: Arc::new(
-                        peri_middlewares::tool_search::ToolSearchIndex::new(),
-                    ),
-                    skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
-                    plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
-                    settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
+                    // M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
+                    // ToolSearchIndex / SkillsProvider / PluginManager /
+                    // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
+                    // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
                     thread_store: app.services.thread_store.clone(),
                     cwd: app.services.cwd.clone(),
-                    plugin_data: app.services.plugin_data.clone(),
                     bare: false,
+                    // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
+                    // cron_state，tick 由 host 侧 scheduler 驱动执行）。
+                    drive_cron_tick: true,
                 },
             )
             .await;

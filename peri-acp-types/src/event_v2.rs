@@ -18,7 +18,8 @@
 //! v2 事件流 — 三层分级事件总线
 //!
 //! 所有事件强制携带 `turn_id`（TurnContext 纽带）和 `agent_id`（AgentId 来源标识），
-//! 由 AgentGroup 统一聚合后投递。事件按消费者视角分三层：
+//! 由 Agent 层 EventBus 发射，经事件转发器（`peri-acp/src/event/forwarder.rs`）
+//! 投递给消费者。事件按消费者视角分三层：
 //!
 //! - **渲染层**（critical 同步，有界通道）：TextChunk / ThinkingChunk /
 //!   ToolStarted / ToolEnded / BudgetWarning / HitlPending
@@ -651,7 +652,7 @@ impl EventHandles {
 //   该 chunk 可获得的唯一稳定身份；真实 message 身份由 transcript/envelope 承载）；
 //   `SubagentStart/Stop.child_agent_id` 透传为 `SubagentStarted/Stopped.instance_id`（C1 契约）。
 // - **不承载 Agent 层发射**：发射点在 Agent 层 EventBus（v2），本组函数仅 ACP
-//   消费侧协议化时调用（`host/exec/forwarder.rs`、subagent 发射侧同步映射）。
+//   消费侧协议化时调用（`peri-acp/src/event/forwarder.rs`、subagent 发射侧同步映射）。
 
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {

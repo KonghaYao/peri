@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
 use peri_agent::{
     agent::{
         events::ExecutorEvent,
@@ -8,7 +9,6 @@ use peri_agent::{
         react::{ReactLLM, Reasoning, StreamingContext},
         AgentCancellationToken,
     },
-    group::pipeline::AgentId,
     messages::BaseMessage,
     tools::BaseTool,
 };
@@ -2232,7 +2232,7 @@ fn write_test_agent(dir: &tempfile::TempDir) {
 }
 
 /// 从事件流中取出 Start 事件的 child_agent_id
-fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_agent::group::pipeline::AgentId {
+fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_acp_types::identity::AgentId {
     evs.iter()
         .find_map(|e| match e {
             ObserveEvent::SubagentStart { child_agent_id, .. } => Some(*child_agent_id),

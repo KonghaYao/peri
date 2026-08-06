@@ -10,32 +10,31 @@ path = "src/lib.rs"
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
-# L5（l5-shell）收口后依赖声明（host/exec/ 已拆桥删除，执行本体在
-# peri-agent::session::exec）：
+# 依赖方向注释（p1-deps-acp 收敛后状态）：
 # - peri-agent：薄壳调用面——`session/executor.rs` 协议化入口 re-export
 #   （run_session_loop / SessionContext / TurnInput 等）+ host 装配面闭包签名
-#   （StageBuildFn / ForwarderLauncherFn / CachedLlmInstances / TaskManager），
-#   保留。
-# - peri-middlewares：宿主装配面引用（host/workflow_agent.rs 中间件链 /
-#   host/stage_builder.rs 装配实现 ProductionChainAssembler / host/prompt.rs +
-#   prompt_exec.rs 注入闭包构造 parent_tools / chain_assembler /
-#   tool_invocation_resolver / session/mod.rs build_frozen_data 渲染面），
-#   保留（workflow_agent 执行体留 ACP 的裁定见 host/workflow_agent.rs；
-#   WorkflowMiddlewareFactoryPort 注入为彻底收口方案，另立收紧任务）。
-# - peri-workflow：host/workflow_agent.rs 的 AgentExecutor trait / protocol
-#   引用（同上，随 workflow_agent 归位裁定保留）。
-# - peri-model：宿主装配面类型签名（host/workflow_agent.rs / host/stage_builder.rs
-#   的 Arc<dyn peri_model::Model>）与 ACP 既有引用（provider/mod.rs LLM 工厂 /
-#   session/agent_pool.rs 模型缓存 / event/mapper.rs StopReason 协议映射 /
-#   dispatch/* 执行上下文签名），保留。
+#   （StageBuildFn / ForwarderLauncherFn / CachedLlmInstances / TaskManager）
+#   + workflow agent 执行体与装配端口（`agent::workflow`，p1-wa 迁入），保留。
+# - peri-middlewares：L5 宿主装配面引用（host/prompt.rs + prompt_exec.rs 注入
+#   闭包构造 parent_tools / chain_assembler / tool_invocation_resolver /
+#   session/mod.rs build_frozen_data 渲染面）+ ACP Host 部署装配点
+#   （host/assemble.rs + host/stdio/init.rs 内部构造 CronScheduler /
+#   McpClientPool / ToolSearchIndex / workflow 中间件工厂，M-TUI 装配迁移
+#   落点），保留（L5 复核时再收）。
+# - peri-workflow：生产引用已清零（p1-wa：执行体迁入 peri-agent，协议类型走
+#   peri-acp-types::workflow 同源 re-export），仅 dev-dependencies 保留
+#   （requests_test.rs 构造 WorkflowRun/AgentExecutor 测试面）。
+# - peri-model：裁定保留——(a) 装配面透传签名（host/stage_builder.rs
+#   auxiliary_model 为 StageBuildFn 契约镜像，经 peri-acp-types::model
+#   re-export 引用）；(b) ACP 既有功能：provider/mod.rs LLM 工厂与协议配置、
+#   dispatch/* + session/agent_pool.rs 执行上下文签名、event/mapper.rs
+#   StopReason 协议映射（随 v1 退役收敛）。
 # - check-layer-imports.sh 为验收门：非测试、非豁免路径代码禁止引用
-#   peri-middlewares / peri-lsp / peri-workflow（豁免见 scripts/import-exemptions.conf，
-#   host/workflow_agent.rs + host/stage_builder.rs 为 L5 装配面宿主）。
+#   peri-middlewares / peri-lsp / peri-workflow（豁免见 scripts/import-exemptions.conf）。
 peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
-peri-workflow = { path = "../peri-workflow" }
 agent-client-protocol = { version = "1.2", features = ["unstable"] }
 agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
 tokio.workspace = true
@@ -58,3 +57,6 @@ tempfile.workspace = true
 serial_test.workspace = true
 mockito = "1"
 langfuse-client = { path = "../langfuse-client" }
+# 测试面（requests_test.rs 构造真实 WorkflowMiddleware：WorkflowRun /
+# AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
+peri-workflow = { path = "../peri-workflow" }

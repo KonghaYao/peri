@@ -10,11 +10,11 @@ mod tests {
     use langfuse_client::types::ObservationType;
     use langfuse_client::IngestionEvent;
     use parking_lot::Mutex;
+    use peri_acp_types::identity::AgentId;
     use peri_agent::agent::events::Stage;
     use peri_agent::agent::events::StageStatus;
     use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
     use peri_agent::agent::LangfuseBridgeLike;
-    use peri_agent::group::pipeline::AgentId;
     use peri_agent::session::turn::TurnId;
     use peri_controller::langfuse::bridge::LangfuseBridge;
     use peri_controller::langfuse::config::LangfuseConfig;

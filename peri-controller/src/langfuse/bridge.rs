@@ -1047,7 +1047,7 @@ mod tests {
     /// C4: v2 SubagentStart/Stop → Unified 映射字段完整（child/parent/name/bg/result/error）
     #[test]
     fn test_from_observe_event_subagent_start_stop_mapping() {
-        use peri_agent::group::pipeline::AgentId;
+        use peri_acp_types::identity::AgentId;
         use peri_agent::session::turn::TurnId;
 
         let turn_id = TurnId::new();
@@ -1105,7 +1105,7 @@ mod tests {
     /// C4: process_event 的 Start 注册 / Stop 注销 + 计数（归属逻辑未动）
     #[test]
     fn test_process_event_registers_and_deregisters() {
-        use peri_agent::group::pipeline::AgentId;
+        use peri_acp_types::identity::AgentId;
 
         let (bridge, _session) = make_bridge();
         let mut active_stage = HashMap::new();
@@ -1181,7 +1181,7 @@ mod tests {
     /// C4: 经 LangfuseBridgeLike 完整链路（forwarder 同入口）Start/Stop 可达
     #[test]
     fn test_bridge_like_process_observe_start_stop() {
-        use peri_agent::group::pipeline::AgentId;
+        use peri_acp_types::identity::AgentId;
         use peri_agent::session::turn::TurnId;
 
         let (bridge, _session) = make_bridge();

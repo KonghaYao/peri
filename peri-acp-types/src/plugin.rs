@@ -406,6 +406,27 @@ pub trait PluginManagerPort: Send + Sync {
     /// 刷新 marketplace（按名称定位 known_marketplaces 条目），返回插件数量。
     async fn refresh_marketplace(&self, name: &str) -> Result<usize, String>;
 
+    /// 清理孤儿插件文件（`plugin/cleanup` 命令面；返回清理数量）。
+    async fn cleanup(&self, claude_dir: &Path) -> Result<usize, String>;
+
+    /// 注册 marketplace（解析 source → 加载/去重 known_marketplaces →
+    /// clone/fetch），返回 marketplace 显示名。
+    async fn marketplace_add(&self, source: &str) -> Result<String, String>;
+
+    /// 移除 marketplace（按名称），并清除其磁盘缓存目录。
+    async fn marketplace_remove(&self, name: &str) -> Result<(), String>;
+
+    /// 更新 marketplace（按名称 refresh + 记录 install_location/last_updated），
+    /// 返回 marketplace 显示名。
+    async fn marketplace_update(&self, name: &str) -> Result<String, String>;
+
+    /// Marketplace 面板数据快照（`marketplace/list` 命令面数据源）：
+    /// `{"marketplaces": [...], "discover": [...]}`。派生逻辑（known
+    /// marketplaces × 缓存 manifest × installed 记录 → 状态/计数）与迁移前
+    /// TUI 面板 `load_marketplace_data` / `load_discover_plugins_from_disk`
+    /// 一致（JSON 透传，契约层不引入面板类型）。
+    fn marketplace_snapshot(&self) -> serde_json::Value;
+
     /// 聚合快照：已启用插件 × 已安装记录 → 协议快照条目（plugin-snapshot 事件）。
     fn snapshot(&self, claude_dir: &Path) -> Vec<crate::event_data::PluginSnapshotEntry>;
 }

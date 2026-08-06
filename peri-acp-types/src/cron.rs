@@ -8,6 +8,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 /// 触发事件（由 CronScheduler 发送到 App）
@@ -15,6 +16,19 @@ use tokio::sync::mpsc;
 pub struct CronTrigger {
     pub task_id: String,
     pub prompt: String,
+}
+
+/// Cron 任务信息（`CronScheduler::list_tasks` 的契约镜像，供 cron/list 命令面
+/// 与 TUI 面板经 ACP 拿数据——契约层不引入 middlewares 的 `CronTask`）。
+#[derive(Debug, Clone)]
+pub struct CronTaskInfo {
+    pub id: String,
+    pub expression: String,
+    /// 触发时提交的用户输入
+    pub prompt: String,
+    /// 下次触发时间（UTC）
+    pub next_fire: Option<DateTime<Utc>>,
+    pub enabled: bool,
 }
 
 /// Cron 调度器端口（装配注入面，`peri-middlewares::cron::CronScheduler` 实现）。
@@ -26,7 +40,16 @@ pub trait CronSchedulerPort: Send + Sync {
     /// 订阅 cron 触发事件（每触发一次收到一条 `CronTrigger`）。
     fn subscribe(&self) -> mpsc::UnboundedReceiver<CronTrigger>;
 
-    /// 还原具体实现（过渡期 host/exec 豁免面使用；L2/L5 迁出后移除）。
+    /// 全部任务快照（cron/list 命令面数据源；TUI 面板经 ACP 拿数据）。
+    fn list_tasks(&self) -> Vec<CronTaskInfo>;
+
+    /// 切换任务启用状态（返回是否命中）。
+    fn toggle(&self, id: &str) -> bool;
+
+    /// 移除任务（返回是否命中）。
+    fn remove(&self, id: &str) -> bool;
+
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 }
 

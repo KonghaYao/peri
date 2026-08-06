@@ -4,9 +4,9 @@ use super::*;
 
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, RenderEvent, StateEvent};
-use crate::group::pipeline::AgentId;
 use crate::session::turn::TurnId;
 use parking_lot::Mutex;
+use peri_acp_types::identity::AgentId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 记录所有 ExecutorEvent 的 mock handler

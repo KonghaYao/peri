@@ -143,7 +143,7 @@ pub struct SubAgentMiddleware {
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
     /// 父 agent 事件侧 AgentId 共享 cell（builder 在主 v2 session 创建后注入；
     /// SubAgentTool 与 SubAgentMiddleware 共享同一 Arc）
-    parent_agent_id: Arc<RwLock<Option<peri_agent::group::pipeline::AgentId>>>,
+    parent_agent_id: Arc<RwLock<Option<peri_acp_types::identity::AgentId>>>,
     /// 父 v2 session（L3）：builder 在主 session 创建后注入；subagent 创建所需的
     /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取，Middleware 不再
     /// 逐字段透传（L3 管理权移出）。
@@ -225,7 +225,7 @@ impl SubAgentMiddleware {
 
     /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
     /// SubAgentTool 持有同一共享 cell，invoke 时（必然晚于本调用）读到已 set 的值。
-    pub fn set_parent_agent_id(&self, id: peri_agent::group::pipeline::AgentId) {
+    pub fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
         *self.parent_agent_id.write() = Some(id);
     }
 
@@ -602,7 +602,7 @@ impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware
         self
     }
 
-    fn set_parent_agent_id(&self, id: peri_agent::group::pipeline::AgentId) {
+    fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
         SubAgentMiddleware::set_parent_agent_id(self, id);
     }
 

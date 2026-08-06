@@ -116,8 +116,9 @@ pub trait AgentCommand: Send + Sync {
 ///
 /// 命令定义（Agent 层 `session::exec::bg::BgCommand`）只构造本请求并交给
 /// 注入的 [`BgForkSpawner`]；深绑 ACP/Agent 层类型（LLM 构造 / 工具集 /
-/// SubAgent 发起）的实现在 ACP 装配面（`host/exec/executor_helpers.rs`），
-/// 命令层不引用业务面实现。
+/// SubAgent 发起）的实现在装配面（`peri-agent::session::exec::executor_helpers`
+/// 的 `DefaultBgForkSpawner`，经 `BgForkSpawner` 端口注入），命令层不引用
+/// 业务面实现。
 pub struct BgForkRequest {
     /// 后台任务描述。
     pub prompt: String,

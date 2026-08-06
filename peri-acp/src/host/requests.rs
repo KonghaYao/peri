@@ -37,8 +37,10 @@ fn persist_config(cfg: &AcpServerConfig) {
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
 ///
-/// 构造收拢在 host 装配面（workflow_agent 执行体，L5 归位），命令面只持
-/// `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2 波 2 装配边界收口）。
+/// 构造收拢在 host 装配面（`host/workflow_agent.rs` 薄壳：executor 注入面 +
+/// 端口装配），命令面只持 `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2
+/// 波 2 装配边界收口；p1-wa：执行体在 peri-agent，装配经
+/// `workflow_middleware_factory` 端口）。
 fn create_session_workflow_middleware(
     cfg: &AcpServerConfig,
     cwd: &str,
@@ -47,10 +49,15 @@ fn create_session_workflow_middleware(
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
     crate::host::workflow_agent::create_session_workflow_middleware(
         Arc::clone(&cfg.provider),
-        Arc::new(cfg.peri_config.read().clone()),
+        &cfg.peri_config,
         cwd,
         session_id,
         frozen_data,
+        Arc::clone(&cfg.workflow_middleware_factory),
+        // session 级路径与迁移前一致，不启用事件发布（workflow 事件仅由
+        // 内部 handler 消费：usage/progress）；统一发射接线留待单独裁定。
+        None,
+        Arc::clone(&cfg.skills),
     )
 }
 
