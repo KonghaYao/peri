@@ -4,12 +4,11 @@
 //! 系统通道（thread 存储）由部署单元（cli）打开后经 `thread_store` 注入，
 //! ACP 层不直接依赖 Resources（§0 依赖方向）。
 
-use std::sync::Arc;
-
 mod commands;
 mod context;
 mod freeze;
 mod init;
+pub use init::StdioAssemblyInput;
 mod model;
 mod notification;
 mod session;
@@ -17,11 +16,13 @@ mod transport;
 
 // ─── run_acp_stdio ───────────────────────────────────────────────────────
 
-pub async fn run_acp_stdio(
-    cwd: String,
-    thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
-) -> anyhow::Result<()> {
-    let ctx = init::init_stdio_context(cwd, thread_store).await?;
+/// 启动 ACP stdio 宿主。
+///
+/// 装配输入（cron/MCP 池/工具检索索引/插件数据等具体实现）由部署装配点
+/// （cli 白名单文件，见 `peri-tui/src/main.rs`）构造后经 [`init::StdioAssemblyInput`]
+/// 注入；ACP 层只持端口接口（3.0 批 2 波 2，§0 依赖方向）。
+pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()> {
+    let ctx = init::init_stdio_context(input).await?;
 
     use agent_client_protocol::{
         schema::v1::{

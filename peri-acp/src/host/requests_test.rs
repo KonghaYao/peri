@@ -7,9 +7,8 @@ use std::{
 use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
-use peri_agent::agent::async_tasks::{
-    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-};
+use peri_acp_types::ports::WorkflowMiddlewarePort;
+use peri_acp_types::tasks::BgTaskKind;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
@@ -81,7 +80,7 @@ fn make_server_config(
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
     let thread_store = FilesystemThreadStore::new(tmp.path().join("threads"));
-    let arc_thread_store: Arc<dyn peri_agent::thread::ThreadStore> = Arc::new(thread_store);
+    let arc_thread_store: Arc<dyn peri_acp_types::store::ThreadStore> = Arc::new(thread_store);
     let session_manager = crate::session::SessionManager::new(
         arc_thread_store.clone(),
         provider.clone(),
@@ -89,6 +88,12 @@ fn make_server_config(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
+        // 注入真实 TaskManager 工厂：cancel-bg-task 回归测试依赖 registry 簿记
+        Some(Arc::new(|| {
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
     );
     AcpServerConfig {
         provider: Arc::new(parking_lot::RwLock::new(provider)),
@@ -104,9 +109,12 @@ fn make_server_config(
         hook_groups: Vec::new(),
         plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
+        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
+        settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
         thread_store: arc_thread_store.clone(),
-        controller: peri_controller::Controller::new(arc_thread_store),
+        controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
         config_path: tmp.path().join("test_config.json"),
         session_manager,
@@ -304,9 +312,9 @@ fn register_session_with_history(
     cwd: &str,
 ) -> String {
     let history = vec![
-        peri_agent::messages::BaseMessage::human("第一轮用户问题"),
-        peri_agent::messages::BaseMessage::ai("第一轮回答"),
-        peri_agent::messages::BaseMessage::human("第二轮用户问题"),
+        peri_acp_types::messages::BaseMessage::human("第一轮用户问题"),
+        peri_acp_types::messages::BaseMessage::ai("第一轮回答"),
+        peri_acp_types::messages::BaseMessage::human("第二轮用户问题"),
     ];
     let sid = "rewind-test-session".to_string();
     sessions.insert(
@@ -499,23 +507,18 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
 
     let killed = Arc::new(AtomicBool::new(false));
     let killed_clone = killed.clone();
-    let task = BackgroundTask {
-        id: "wf-run-1".to_string(),
-        agent_name: "workflow".to_string(),
-        prompt_summary: "wf cancel test".to_string(),
-        status: BackgroundTaskStatus::Running,
-        started_at: std::time::Instant::now(),
-        chrono_started_at: chrono::Utc::now(),
-        kind: BgTaskKind::Workflow,
-        cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
-            killed_clone.store(true, Ordering::SeqCst);
-        }))),
-        cancel_token: None,
-        pid: None,
-        output_preview: None,
-    };
     let registry = &cfg.session_manager.get_session(&sid).unwrap().task_manager;
-    registry.register_with_kind(task).unwrap();
+    registry
+        .register(peri_acp_types::tasks::BgTaskRegistration {
+            task_id: "wf-run-1".to_string(),
+            kind: BgTaskKind::Workflow,
+            summary: "wf cancel test".to_string(),
+            pid: None,
+            kill: Some(Box::new(move || {
+                killed_clone.store(true, Ordering::SeqCst);
+            })),
+        })
+        .unwrap();
     assert_eq!(registry.active_count(), 1);
 
     let result = handle_request(
@@ -657,7 +660,7 @@ fn register_session_with_workflow(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: Some(Arc::clone(&mw)),
+            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
             title: None,
             tags: Vec::new(),
             continuation_armed: false,

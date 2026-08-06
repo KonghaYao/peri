@@ -152,7 +152,7 @@ pub struct AppConfig {
     pub env: Option<HashMap<String, String>>,
     /// Compact 系统配置
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compact: Option<peri_agent::agent::CompactConfig>,
+    pub compact: Option<peri_acp_types::compact::CompactConfig>,
     /// UI 语言
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,

@@ -39,18 +39,16 @@ use crate::transport::types::AcpError;
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     params: &Value,
-    session_history: Vec<peri_agent::messages::BaseMessage>,
+    session_history: Vec<peri_acp_types::messages::BaseMessage>,
     cwd: &str,
     peri_config: &std::sync::Arc<crate::provider::PeriConfig>,
     event_sink: &std::sync::Arc<dyn crate::session::event_sink::EventSink>,
     auxiliary_model: Option<std::sync::Arc<dyn peri_model::Model>>,
-    cancel_token: &peri_agent::agent::AgentCancellationToken,
+    cancel_token: &tokio_util::sync::CancellationToken,
     controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
-    >,
-    task_manager: Option<std::sync::Arc<peri_agent::agent::async_tasks::TaskManager>>,
+    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+    task_manager: Option<std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
     frozen_claude_md: Option<std::sync::Arc<String>>,
     frozen_claude_local_md: Option<std::sync::Arc<String>>,
     frozen_skill_summary: Option<std::sync::Arc<String>>,
@@ -112,6 +110,7 @@ pub async fn execute_command(
         frozen_claude_local_md,
         frozen_skill_summary,
         frozen_system_prompt,
+        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
     };
 
     let result = tokio::select! {

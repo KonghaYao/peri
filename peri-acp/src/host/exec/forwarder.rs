@@ -17,19 +17,39 @@
 //!   `Closed`（break 退出）。
 //! - **三通道全部关闭时 task 自动退出**：`else => break` 防止 task 泄漏。
 
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::agent::events_v2::{
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor, EventHandles,
 };
+use peri_acp_types::identity::EventDeliveryClass;
+use peri_acp_types::runtime::UnstampedEvent;
 
 use peri_controller::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
 use peri_controller::langfuse::tracer::stages::StageHandle;
+
+/// 从 v1 payload 提取 message_id（v2 事件无 message 级身份；映射后的事件
+/// 携带 `MessageId`，作为 envelope 身份的一部分）。
+fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
+    match event {
+        ExecutorEvent::TextChunk { message_id, .. }
+        | ExecutorEvent::ToolStart { message_id, .. }
+        | ExecutorEvent::ToolEnd { message_id, .. } => Some(message_id.as_uuid().to_string()),
+        _ => None,
+    }
+}
 
 /// 启动 EventBus forwarder task。
 ///
 /// 消费 `handles` 内三层 v2 事件（render / state / observe），经 v1 兼容映射
 /// （`events_v2::*_event_to_executor`）转为 [`ExecutorEvent`]，然后调用 `on_event`
 /// 闭包投递到调用方指定的目标。
+///
+/// **事件三层化（3.0 M-event-chain）**：闭包签名携带 `UnstampedEvent`（事件源
+/// 身份：turn_id / agent_id / message_id / delivery_class）与 v1 payload；
+/// 调用方（ACP 发射点）应把两者交给 Controller（`Controller::publish_event`）
+/// 统一发射——Controller 经 Runtime 补打 session_id / session_seq 后扇出，
+/// ACP 协议化消费侧从 `Controller::subscribe` / `pop_events` 订阅（不再直连
+/// Agent EventBus）。
 ///
 /// v2_tx 双轨（v2 事件直连 TUI）已随
 /// `2026-08-05-3.0-m-event-chain-canonical.md` 下线：TUI 事件仅经本 forwarder
@@ -38,7 +58,8 @@ use peri_controller::langfuse::tracer::stages::StageHandle;
 /// # 参数
 ///
 /// - `handles`：v2 [`EventHandles`]（调用方取出所有权后传入，本函数内部 `mut` 消费）
-/// - `on_event`：每条映射后的 `ExecutorEvent` 的消费闭包。签名 `Fn(ExecutorEvent) + Send + Sync + 'static`
+/// - `on_event`：每条映射后的 `ExecutorEvent` + 事件源身份的消费闭包。
+///   签名 `Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static`
 /// - `bridge`：统一 Langfuse 桥接器。`None` 表示遥测禁用。
 ///
 /// # 返回
@@ -54,7 +75,7 @@ pub fn spawn_eventbus_forwarder<F>(
     on_event: F,
     bridge: Option<LangfuseBridge>,
 ) where
-    F: Fn(ExecutorEvent) + Send + Sync + 'static,
+    F: Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static,
 {
     tokio::spawn(async move {
         // key = 事件 agent_id（主 agent 路径下只有主 agent 的事件，单 entry）
@@ -77,14 +98,26 @@ pub fn spawn_eventbus_forwarder<F>(
                             bridge.process_event(&u, &mut active_stage);
                         }
                     }
-                    if let Some(exec_ev) = render_event_to_executor(ev) {
-                        on_event(exec_ev);
+                    if let Some(exec_ev) = render_event_to_executor(ev.clone()) {
+                        let source = UnstampedEvent::new(
+                            ev.turn_id().to_string(),
+                            ev.agent_id().to_string(),
+                            extract_message_id(&exec_ev),
+                            EventDeliveryClass::Critical,
+                        );
+                        on_event(source, exec_ev);
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
                     // Langfuse: state 层追踪（当前无映射）
-                    if let Some(exec_ev) = state_event_to_executor(ev) {
-                        on_event(exec_ev);
+                    if let Some(exec_ev) = state_event_to_executor(ev.clone()) {
+                        let source = UnstampedEvent::new(
+                            ev.turn_id().to_string(),
+                            ev.agent_id().to_string(),
+                            extract_message_id(&exec_ev),
+                            EventDeliveryClass::Critical,
+                        );
+                        on_event(source, exec_ev);
                     }
                 }
                 ev_res = handles.observe_rx.recv() => {
@@ -101,8 +134,14 @@ pub fn spawn_eventbus_forwarder<F>(
                                     bridge.process_event(&u, &mut active_stage);
                                 }
                             }
-                            if let Some(exec_ev) = observe_event_to_executor(ev) {
-                                on_event(exec_ev);
+                            if let Some(exec_ev) = observe_event_to_executor(ev.clone()) {
+                                let source = UnstampedEvent::new(
+                                    ev.turn_id().to_string(),
+                                    ev.agent_id().to_string(),
+                                    extract_message_id(&exec_ev),
+                                    EventDeliveryClass::Broadcast,
+                                );
+                                on_event(source, exec_ev);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

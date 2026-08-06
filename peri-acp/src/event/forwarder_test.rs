@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, RenderEvent};
-use peri_agent::group::pipeline::AgentId;
-use peri_agent::session::turn::TurnId;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event_v2::{EventBus, EventBusConfig, ObserveEvent, RenderEvent};
+use peri_acp_types::identity::AgentId;
+use peri_acp_types::session::TurnId;
 use peri_controller::langfuse::bridge::LangfuseBridge;
 use peri_controller::langfuse::config::LangfuseConfig;
 use peri_controller::langfuse::fake_session::FakeLangfuseSession;
@@ -69,7 +69,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
     let collected_for_task = Arc::clone(&collected);
     spawn_eventbus_forwarder(
         handles,
-        move |ev| collected_for_task.lock().push(ev),
+        move |_source, ev| collected_for_task.lock().push(ev),
         Some(bridge),
     );
 
@@ -191,7 +191,11 @@ async fn test_forwarder_without_bridge_keeps_mapper_path() {
     let agent_id = AgentId::new();
     let collected: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_task = Arc::clone(&collected);
-    spawn_eventbus_forwarder(handles, move |ev| collected_for_task.lock().push(ev), None);
+    spawn_eventbus_forwarder(
+        handles,
+        move |_source, ev| collected_for_task.lock().push(ev),
+        None,
+    );
 
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
@@ -235,14 +239,14 @@ async fn test_forwarder_stage_events_reach_bridge() {
     let collected_for_task = Arc::clone(&collected);
     spawn_eventbus_forwarder(
         handles,
-        move |ev| collected_for_task.lock().push(ev),
+        move |_source, ev| collected_for_task.lock().push(ev),
         Some(bridge),
     );
 
     // 生产路径中 turn 开始时由 spawn_event_pump 头调用 on_turn_start
     tracer.lock().on_turn_start("input");
 
-    use peri_agent::agent::events::{Stage, StageStatus};
+    use peri_acp_types::event::{Stage, StageStatus};
     bus.emit_observe(ObserveEvent::StageStarted {
         turn_id,
         agent_id: main_id,

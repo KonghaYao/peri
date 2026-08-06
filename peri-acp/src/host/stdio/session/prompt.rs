@@ -6,10 +6,8 @@ use agent_client_protocol::{
     schema::v1::{PromptRequest, PromptResponse, StopReason},
     Client, ConnectionTo, Responder,
 };
-use peri_agent::{
-    agent::AgentCancellationToken, messages::ContentBlock as PeriContentBlock,
-    messages::MessageContent,
-};
+use peri_acp_types::messages::{ContentBlock as PeriContentBlock, MessageContent};
+use tokio_util::sync::CancellationToken;
 
 use super::super::context::StdioContext;
 use super::prompt_exec::{self, PromptExecParams};
@@ -75,7 +73,7 @@ pub(crate) async fn handle_prompt(
     };
     let history_len = history.len();
 
-    let cancel = AgentCancellationToken::new();
+    let cancel = CancellationToken::new();
     {
         let mut sessions = ctx.sessions.write();
         if let Some(s) = sessions.get_mut(&sid) {

@@ -2,7 +2,7 @@
 //! 原子 take、epoch 代际失效（用户新 prompt 清除未运行的续跑）、
 //! cancel race 兜底 eligibility、取消续跑不 arm、dispatch 前 Defer 确认。
 
-use peri_agent::agent::async_tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskKind;
 
 use super::{
     cancel_arms_continuation, cancel_should_schedule_continuation, continuation_dispatchable,

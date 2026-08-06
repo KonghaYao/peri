@@ -30,23 +30,22 @@
 // 其余外部依赖（peri_agent / crate::*）单独 use。
 use std::sync::Arc;
 
-use peri_agent::{
-    agent::{
-        async_tasks::{BgTaskKind, TaskManager},
-        events::{
-            AgentEventHandler, BackgroundTaskResult, ExecutorEvent, TurnErrorKind, TurnStatus,
-        },
-        state::AgentState,
-        AgentCancellationToken,
-    },
+use peri_acp_types::{
     error::AgentError,
+    event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent, TurnErrorKind, TurnStatus},
     goal::GoalController,
     messages::{BaseMessage, MessageContent},
+    tasks::{BgTaskKind, TaskManager},
 };
 use peri_middlewares::agent_define::AgentOverrides;
+use peri_middlewares::middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware};
+use peri_middlewares::tools::BoxToolWrapper;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{debug, error};
 
+use crate::provider::LlmProvider;
+use crate::session::command::BgForkRequest;
 use crate::session::{agent_pool::CachedLlmInstances, event_sink::EventSink};
 use peri_controller::langfuse::LangfuseTracer;
 
@@ -68,7 +67,7 @@ pub(super) struct InterceptRequest<'a> {
     pub(super) cwd: &'a str,
     pub(super) session_id: &'a str,
     pub(super) cancel: &'a AgentCancellationToken,
-    pub(super) thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    pub(super) thread_store: Option<Arc<dyn peri_acp_types::store::ThreadStore>>,
     pub(super) thread_id: Option<String>,
     // ── 运行时服务 ──
     pub(super) peri_config: &'a Arc<crate::provider::PeriConfig>,
@@ -76,9 +75,158 @@ pub(super) struct InterceptRequest<'a> {
     pub(super) auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub(super) bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    pub(super) task_manager: &'a Arc<TaskManager>,
+    pub(super) task_manager: &'a Arc<dyn TaskManager>,
     // ── 冻结数据 ──
     pub(super) frozen: Option<&'a FrozenSessionData>,
+}
+
+/// `/bg` fork agent 启动器默认实现（装配注入面，3.0 批 2）。
+///
+/// 深绑 Agent 层 `SessionFactory`（L3 迁出后经统一入口调用）：LLM 构造 /
+/// 父工具集 / SubAgent 发起在本实现内完成；命令定义（`host/exec/bg.rs`）
+/// 只经 [`BgForkSpawner`] 接口发起，不引用 Agent 层业务面。
+/// 本实现随 L5 executor 拆分迁入 peri-agent。
+struct DefaultBgForkSpawner {
+    task_manager: Arc<dyn TaskManager>,
+}
+
+#[async_trait::async_trait]
+impl crate::session::command::BgForkSpawner for DefaultBgForkSpawner {
+    async fn spawn_fork(&self, req: BgForkRequest) -> Result<(), String> {
+        // 并发限制（迁移前由 spawn_background_fork 内部预检，错误文案保持）
+        if self.task_manager.active_count() >= 3 {
+            return Err("已有 3 个后台任务在运行".to_string());
+        }
+
+        // 构造 LLM 实例（从 peri_config 构建）
+        let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
+            match LlmProvider::from_config(&req.peri_config) {
+                Some(provider) => Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
+                    Arc::from(provider.into_model()),
+                )),
+                None => {
+                    return Err(
+                        "无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string(),
+                    )
+                }
+            };
+
+        // 构造父工具集（文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch）
+        // NOTE: MCP tools are intentionally excluded because:
+        // 1. Background workers should not depend on external MCP servers that may be unavailable
+        // 2. MCP tools may require interactive approval, which doesn't work for background agents
+        // 3. Core filesystem + terminal + web tools cover the majority of background task use cases
+        let parent_tools: Arc<Vec<Arc<dyn peri_agent::tools::BaseTool>>> = {
+            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
+                FilesystemMiddleware::build_tools(&req.cwd);
+            tools.extend(TerminalMiddleware::build_tools(&req.cwd));
+            tools.extend(WebMiddleware::build_tools());
+            Arc::new(
+                tools
+                    .into_iter()
+                    .map(|t| Arc::new(BoxToolWrapper(t)) as Arc<dyn peri_agent::tools::BaseTool>)
+                    .collect(),
+            )
+        };
+
+        // 装配注入的 per-session TaskManager 实现（L1：BackgroundTaskRegistry
+        // per-session 实例化）；SubAgent 发起面需要具体类型，经 trait 对象
+        // downcast 还原——非 Agent 层实现（如 NoopTaskManager）时优雅报错。
+        let concrete_tm: Option<Arc<peri_agent::agent::async_tasks::TaskManager>> = {
+            let tm_any: Arc<dyn std::any::Any + Send + Sync> =
+                Arc::clone(&self.task_manager) as Arc<dyn std::any::Any + Send + Sync>;
+            tm_any
+                .downcast::<peri_agent::agent::async_tasks::TaskManager>()
+                .ok()
+        };
+        let Some(concrete_tm) = concrete_tm else {
+            return Err(
+                "task_manager 实现不支持 /bg（需 Agent 层 per-session TaskManager）".to_string(),
+            );
+        };
+
+        // L3：/bg 经 Agent 层统一入口 spawn_subagent（parent 缺失：无主 session 对象，
+        // 父侧数据经 config 显式携带；frozen 数据来自 executor 注入的冻结值，不重读磁盘）。
+        let host = peri_agent::session::subagent::SubagentHost {
+            thread_store: Some(req.thread_store.clone()),
+            task_manager: Some(Arc::clone(&concrete_tm)),
+            bg_event_sender: Some(req.bg_event_sender.clone()),
+            on_bg_complete: None, // /bg 命令的主 agent 不在 loop，注入无效
+            register_runtime: None,
+            deregister_runtime: None,
+            langfuse_bridge: None, // /bg 命令无 Langfuse tracer
+            frozen_claude_local_md: req
+                .frozen_claude_local_md
+                .as_ref()
+                .map(|s| Arc::new(s.clone())),
+            frozen_system_prompt: req
+                .frozen_system_prompt
+                .as_ref()
+                .map(|s| Arc::new(s.clone())),
+            parent_thread_id: req.parent_thread_id.clone(),
+            frozen_claude_md: req.frozen_claude_md.as_ref().map(|s| Arc::new(s.clone())),
+            frozen_skill_summary: req
+                .frozen_skill_summary
+                .as_ref()
+                .map(|s| Arc::new(s.clone())),
+        };
+        let _spawned = match peri_agent::session::subagent::SessionFactory::spawn_subagent(
+            None,
+            peri_agent::session::subagent::SubagentSpawnConfig {
+                agent_name: "fork".to_string(),
+                prompt: req.prompt.clone(),
+                parent_messages: req.parent_messages.clone(),
+                cancel_policy: peri_agent::session::subagent::SubagentCancelPolicy::Independent,
+                max_iterations: 200,
+                fork_directive_kind: Some(peri_agent::session::subagent::ForkDirectiveKind::Bg),
+                run_mode: peri_agent::session::subagent::SubagentRunMode::Background,
+                skill_names: Vec::new(),
+                llm,
+                chain_assembler: Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl),
+                tools: parent_tools
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<Arc<dyn peri_agent::tools::BaseTool>>>(),
+                system_prompt: req.frozen_system_prompt.clone(),
+                error_suggest_registry: None,
+                tool_registry_snapshot: None,
+                tool_invocation_resolver: Some(Arc::new(
+                    peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
+                )),
+                compact_config: None,
+                context_budget: None,
+                compact_llm: None,
+                thread_store: Some(req.thread_store.clone()),
+                event_handler: None,
+                bg_event_sender: Some(host.bg_event_sender.clone().unwrap()),
+                task_manager: Some(Arc::clone(&concrete_tm)),
+                on_bg_complete: None,
+                langfuse_bridge: None,
+                on_subagent_start: None,
+                on_subagent_stop: None,
+                register_runtime: None,
+                deregister_runtime: None,
+                parent_agent_id: None, // /bg 命令无父 agent 身份（不 emit v2 Start/Stop）
+                cancel_token: None,    // /bg 独立任务，Independent 策略内部新建
+                cwd: Some(req.cwd.clone()),
+                parent_thread_id: req.parent_thread_id.clone(),
+                frozen_claude_md: req.frozen_claude_md.clone(),
+                frozen_claude_local_md: req.frozen_claude_local_md.clone(),
+                frozen_skill_summary: req.frozen_skill_summary.clone(),
+                frozen_date: None,
+            },
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        // P2：v1 SubagentStarted 已移入 spawner 任务内（gate 放行后）经
+        // bg_event_sender 发送（bg pump → event_sink），此处不再同步推送——
+        // 消除"任务快速完成/被 cancel 时 Stop 先于 Start 到达"的窗口。
+        Ok(())
+    }
 }
 
 /// 命令拦截：检查 content 是否为 Immediate 类型 slash 命令。
@@ -138,6 +286,11 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
             // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本
             //（P2-2026-08-02）：fork 链不注册 WorkflowTool。
             .map(|f| Arc::new(f.subagent_system_prompt().to_string())),
+        // 3.0 批 2：/bg fork agent 发起经装配注入的 spawner
+        // （命令定义不直接引用 Agent 层 SessionFactory）。
+        bg_spawner: Some(Arc::new(DefaultBgForkSpawner {
+            task_manager: req.task_manager.clone(),
+        })),
     };
     let result = tokio::select! {
         r = cmd.execute(ctx) => r,
@@ -168,6 +321,11 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
 
 /// 事件泵启动请求（参数对象）。
 pub(super) struct SpawnPumpRequest {
+    /// Controller 事件订阅（事件三层化出口：发射点统一经
+    /// `Controller::publish_event`，泵经 `subscribe` 消费并按 session_id 过滤）。
+    pub(super) subscription: peri_controller::Subscription,
+    /// 事件发射点集合的关闭信号：所有发射点（forwarder / v1 直发）结束、
+    /// `event_tx` 全部 drop 时触发（`closed()`），泵随后 drain 广播在途事件。
     pub(super) event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
     pub(super) stop_reason_rx: tokio::sync::oneshot::Receiver<super::PromptStopReason>,
     pub(super) sink: Arc<dyn EventSink>,
@@ -184,14 +342,52 @@ pub(super) struct PumpHandle {
     pub(super) pump_done_rx: oneshot::Receiver<()>,
 }
 
+/// 单条事件的处理（Langfuse error_kind 捕获 / bg callback unstable 事件 /
+/// 协议化推送）。事件循环与 drain 分支共用，保证两条路径处理语义一致。
+async fn pump_process(
+    exec_event: &ExecutorEvent,
+    last_error: &mut Option<String>,
+    sink: &Arc<dyn EventSink>,
+    session_id: &str,
+    effective_context_window: u32,
+) {
+    // Capture error_kind from TurnEnded for on_turn_end at pump tail
+    if let ExecutorEvent::TurnEnded { error_kind, .. } = exec_event {
+        *last_error = error_kind.as_ref().map(|k| format!("{:?}", k));
+    }
+
+    // 4. bg callback: MessageAdded → TUI flush-then-push.
+    //    agent ReAct 循环在消费 MQ Defer 消息时通过 EventBus 发出
+    //    SyntheticUserMessage → mapper → ExecutorEvent::MessageAdded。
+    //    TUI bridge 收到 BgCallbackBubble 后会先 flush current_turn 到
+    //    committed，再 push bg callback，把同一轮 TurnDone 的 AI 内容
+    //    分割为「bg 前」和「bg 后」两段。
+    if matches!(exec_event, ExecutorEvent::MessageAdded(_)) {
+        if let ExecutorEvent::MessageAdded(msg) = exec_event {
+            let text = msg.content();
+            sink.push_unstable_event(
+                session_id,
+                "bg-callback-user-message".to_string(),
+                serde_json::json!({ "text": text }),
+            )
+            .await;
+        }
+    }
+
+    sink.push_event(session_id, exec_event, effective_context_window)
+        .await;
+}
+
 /// 启动主事件泵任务。
 ///
-/// 任务循环：
-/// 1. trace_start → recv events → forward to sink
-/// 2. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
-/// 3. Langfuse flush（fire-and-forget，不得阻塞管线）
+/// 任务循环（事件三层化：发射点 → `Controller::publish_event` → 本泵订阅）：
+/// 1. trace_start → 订阅 Controller 事件流（按 session_id 过滤）→ 协议化推送 sink
+/// 2. 发射点全部结束（`event_rx.closed()`）→ drain 广播在途事件 → 退出事件循环
+/// 3. trace_end + push_done → signal pump completion（在 Langfuse flush 之前）
+/// 4. Langfuse flush（fire-and-forget，不得阻塞管线）
 pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
     let SpawnPumpRequest {
+        mut subscription,
         mut event_rx,
         stop_reason_rx,
         sink,
@@ -216,32 +412,66 @@ pub(super) fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
 
         let mut last_error: Option<String> = None;
 
-        while let Some(exec_event) = event_rx.recv().await {
-            // Capture error_kind from TurnEnded for on_turn_end at pump tail
-            if let ExecutorEvent::TurnEnded { error_kind, .. } = &exec_event {
-                last_error = error_kind.as_ref().map(|k| format!("{:?}", k));
-            }
-
-            // 4. bg callback: MessageAdded → TUI flush-then-push.
-            //    agent ReAct 循环在消费 MQ Defer 消息时通过 EventBus 发出
-            //    SyntheticUserMessage → mapper → ExecutorEvent::MessageAdded。
-            //    TUI bridge 收到 BgCallbackBubble 后会先 flush current_turn 到
-            //    committed，再 push bg callback，把同一轮 TurnDone 的 AI 内容
-            //    分割为「bg 前」和「bg 后」两段。
-            if matches!(&exec_event, ExecutorEvent::MessageAdded(_)) {
-                if let ExecutorEvent::MessageAdded(msg) = &exec_event {
-                    let text = msg.content();
-                    sink.push_unstable_event(
-                        &session_id,
-                        "bg-callback-user-message".to_string(),
-                        serde_json::json!({ "text": text }),
-                    )
-                    .await;
+        loop {
+            tokio::select! {
+                biased;
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(m) => {
+                            // 订阅是全局广播：只处理本 session 的事件
+                            if m.envelope.session_id == session_id {
+                                if let Some(ev) = m.event {
+                                    pump_process(
+                                        &ev, &mut last_error, &sink, &session_id,
+                                        effective_context_window,
+                                    ).await;
+                                }
+                            }
+                        }
+                        Err(peri_controller::SubscriptionError::Lagged(n)) => {
+                            tracing::warn!(n, "event subscription lagged, events dropped");
+                        }
+                        Err(peri_controller::SubscriptionError::Closed) => break,
+                    }
+                }
+                ev = event_rx.recv() => {
+                    match ev {
+                        // 防御分支：event_tx 的遗留直发（如有遗漏的发送点）
+                        Some(exec_event) => {
+                            pump_process(
+                                &exec_event, &mut last_error, &sink, &session_id,
+                                effective_context_window,
+                            ).await;
+                        }
+                        None => {
+                            // 发射点集合全部结束（event_tx 全 drop）：drain 广播中
+                            // 已入 buffer 的在途事件（broadcast send 同步入 buffer，
+                            // 关闭后到达的事件与 pump 退出后的丢弃语义一致——
+                            // 对应迁移前 close_channel 后 forwarder 检查 None 丢弃）。
+                            loop {
+                                match subscription.try_recv() {
+                                    Ok(Some(m)) if m.envelope.session_id == session_id => {
+                                        if let Some(ev) = m.event {
+                                            pump_process(
+                                                &ev, &mut last_error, &sink, &session_id,
+                                                effective_context_window,
+                                            ).await;
+                                        }
+                                    }
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => break,
+                                    Err(peri_controller::SubscriptionError::Lagged(n)) => {
+                                        tracing::warn!(n, "event subscription lagged, events dropped");
+                                        break;
+                                    }
+                                    Err(peri_controller::SubscriptionError::Closed) => break,
+                                }
+                            }
+                            break;
+                        }
+                    }
                 }
             }
-
-            sink.push_event(&session_id, &exec_event, effective_context_window)
-                .await;
         }
 
         // End Langfuse trace and flush
@@ -357,8 +587,6 @@ pub(super) async fn build_and_execute_agent_v2(
     cached_llm: Option<&CachedLlmInstances>,
     agent_input: peri_agent::agent::react::AgentInput,
     history: Vec<BaseMessage>,
-    event_tx: &Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>>>,
-    event_sink: &Arc<dyn EventSink>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
     // ── AAC-only ──
     system_prompt: String,
@@ -368,28 +596,32 @@ pub(super) async fn build_and_execute_agent_v2(
     // D2：mode 通知的入队记账委托（None = 无通知或无需记账）。
     // 仅在 Phase 6 把消息推入模型可见 v2 MessageQueue 时记账。
     mode_notice_booking: Option<ModeNoticeBooking>,
-    frozen: peri_agent::session::factory::FrozenData,
+    frozen: peri_acp_types::frozen::FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
-    child_handler_factory: Option<peri_agent::session::factory::ChildHandlerFactory>,
+    child_handler_factory: Option<peri_acp_types::frozen::ChildHandlerFactory>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    thread_persistence: peri_agent::session::factory::ThreadPersistence,
+    thread_persistence: peri_acp_types::frozen::ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
-    task_manager: Option<Arc<TaskManager>>,
+    task_manager: Option<Arc<dyn TaskManager>>,
     on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    effective_context_window: u32,
     // 内部异步续跑：不 push 空 user Prompt（AsyncContinuation 只消费已 route
     // 的 Defer/Info 消息），mode 通知记账同样跳过（下一 turn 重新检测）。
     continuation: bool,
 ) -> ExecOutcome {
-    use peri_agent::agent::stages::{run_react_loop, LoopResult};
-    use peri_agent::session::queue::{
-        MessageKind, MessageSource as V2MessageSource, QueuedMessage,
-    };
+    use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource, QueuedMessage};
 
     // Phase 1: build StageContext（内部消费 AgentComponents）
-    let (v2_out, new_cache) = crate::agent::builder::build_stage_context(
+    let concrete_tm: Option<Arc<peri_agent::agent::async_tasks::TaskManager>> =
+        task_manager.clone().and_then(|tm| {
+            let tm_any: Arc<dyn std::any::Any + Send + Sync> =
+                tm as Arc<dyn std::any::Any + Send + Sync>;
+            tm_any
+                .downcast::<peri_agent::agent::async_tasks::TaskManager>()
+                .ok()
+        });
+    let (v2_out, new_cache) = crate::host::exec::stage_builder::build_stage_context(
         ctx,
         cached_llm,
         system_prompt,
@@ -402,7 +634,7 @@ pub(super) async fn build_and_execute_agent_v2(
         auxiliary_model,
         thread_persistence,
         goal_controller,
-        task_manager,
+        concrete_tm,
         on_bg_complete,
         langfuse_tracer.clone(),
     );
@@ -411,16 +643,26 @@ pub(super) async fn build_and_execute_agent_v2(
     }
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
+    // 事件三层化：发射点统一经 `Controller::publish_event`（身份：v2 循环
+    // turn_id / 主 agent_id——bg 子 agent 事件归属当前 turn），消费端为主 pump
+    // （已在 run_session_loop 中订阅 Controller，按 session_id 过滤推送）。
     {
         let mut bg_event_rx = v2_out.bg_event_rx;
+        let controller = Arc::clone(&ctx.controller);
         let bg_session_id = ctx.session_id.clone();
-        let bg_sink = Arc::clone(event_sink);
-        let bg_cw = effective_context_window;
+        let bg_turn_id = v2_out.context.turn_id().to_string();
+        let bg_agent_id = v2_out.context.session.agent_id.to_string();
         tokio::spawn(async move {
             let mut bg_event_count: u64 = 0;
             while let Some(bg_event) = bg_event_rx.recv().await {
                 bg_event_count += 1;
-                bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
+                let source = peri_acp_types::runtime::UnstampedEvent::new(
+                    bg_turn_id.clone(),
+                    bg_agent_id.clone(),
+                    None,
+                    peri_acp_types::identity::EventDeliveryClass::Critical,
+                );
+                controller.publish_event(&bg_session_id, &source, bg_event);
             }
             tracing::debug!(
                 total = bg_event_count,
@@ -432,30 +674,36 @@ pub(super) async fn build_and_execute_agent_v2(
     // Phase 3: todo forwarder（同 v1，复用 V2AgentOutput.todo_rx）
     {
         let mut todo_rx = v2_out.todo_rx;
-        let tx_for_todo = event_tx.clone();
+        let controller = Arc::clone(&ctx.controller);
+        let sid = ctx.session_id.clone();
         tokio::spawn(async move {
             while let Some(todos) = todo_rx.recv().await {
-                let entries: Vec<peri_agent::agent::events::TodoEntry> = todos
+                let entries: Vec<peri_acp_types::event::TodoEntry> = todos
                     .into_iter()
-                    .map(|t| peri_agent::agent::events::TodoEntry {
+                    .map(|t| peri_acp_types::event::TodoEntry {
                         content: t.content,
                         active_form: t.active_form,
                         status: match t.status {
                             peri_middlewares::tools::todo::TodoStatus::Pending => {
-                                peri_agent::agent::events::TodoStatus::Pending
+                                peri_acp_types::event::TodoStatus::Pending
                             }
                             peri_middlewares::tools::todo::TodoStatus::InProgress => {
-                                peri_agent::agent::events::TodoStatus::InProgress
+                                peri_acp_types::event::TodoStatus::InProgress
                             }
                             peri_middlewares::tools::todo::TodoStatus::Completed => {
-                                peri_agent::agent::events::TodoStatus::Completed
+                                peri_acp_types::event::TodoStatus::Completed
                             }
                         },
                     })
                     .collect();
-                if let Some(tx) = tx_for_todo.lock().as_ref() {
-                    let _ = tx.send(ExecutorEvent::TodoUpdate(entries));
-                }
+                // todo 更新是事件流的一部分，发射点统一经 Controller
+                let source = peri_acp_types::runtime::UnstampedEvent::new(
+                    String::new(),
+                    String::new(),
+                    None,
+                    peri_acp_types::identity::EventDeliveryClass::Critical,
+                );
+                controller.publish_event(&sid, &source, ExecutorEvent::TodoUpdate(entries));
             }
         });
     }
@@ -464,8 +712,9 @@ pub(super) async fn build_and_execute_agent_v2(
     // 通过 tokio::select! 同时排空 render / state / observe 三层通道，
     // 将 v2 事件经 mapper_v2 映射为 v1 ExecutorEvent，转发到 event_tx。
     //
-    // 注意：不直接 push 到 event_sink —— spawn_event_pump 已订阅 event_tx 并
-    // 负责推送 sink（含 Langfuse trace + pump_done 同步）。直推会造成 TUI 双重渲染。
+    // 注意：不直接 push 到 event_sink —— spawn_event_pump 已订阅 Controller
+    // 事件流并负责推送 sink（含 Langfuse trace + pump_done 同步）。直推会造成
+    // TUI 双重渲染。
     //
     // [TRAP] TurnCompleted 在 render_tx 通道（与同迭代 TextChunk/ToolStarted/
     // ToolEnded 共享 FIFO），不能放回 state_tx：跨通道 biased select! 只保证
@@ -474,24 +723,24 @@ pub(super) async fn build_and_execute_agent_v2(
     //
     // 循环实现抽取至 `crate::event::forwarder::spawn_eventbus_forwarder`，
     // 以保证 biased select 顺序不变量与 workflow_agent 调用点一致。
+    //
+    // 事件三层化（3.0 M-event-chain）：forwarder 是发射点——经
+    // `Controller::publish_event` 统一发射（Controller → Runtime 补打身份 →
+    // 弹出队列 + 订阅广播），pump 从 Controller 订阅消费，不再直连 event_tx。
     {
-        let tx_for_v2 = event_tx.clone();
-        // 主 bridge 注入主 agent 事件侧身份(registry 区分主/未知 agent)。
-        // v2_out.context.session.agent_id 与 SubAgentTool 共享 cell 是同一值(C1/C2)。
-        let main_agent_id = v2_out.context.session.agent_id.to_string();
+        let controller = Arc::clone(&ctx.controller);
+        let sid = ctx.session_id.clone();
         let bridge = langfuse_tracer.clone().map(|t| {
             peri_controller::langfuse::bridge::LangfuseBridge::new(
                 t,
                 ctx.provider.display_name().to_string(),
-                Some(main_agent_id.clone()),
+                Some(v2_out.context.session.agent_id.to_string()),
             )
         });
         crate::event::spawn_eventbus_forwarder(
             v2_out.event_handles,
-            move |exec_ev| {
-                if let Some(tx) = tx_for_v2.lock().as_ref() {
-                    let _ = tx.send(exec_ev);
-                }
+            move |source, exec_ev| {
+                controller.publish_event(&sid, &source, exec_ev);
             },
             bridge,
         );
@@ -557,14 +806,24 @@ pub(super) async fn build_and_execute_agent_v2(
     // langfuse v2: capture turn_id before move, emit TurnStarted
     let loop_turn_id = v2_out.context.turn_id().to_string();
     {
-        if let Some(tx) = event_tx.lock().as_ref() {
-            let _ = tx.send(ExecutorEvent::TurnStarted {
+        // TurnStarted 是事件流的一部分，发射点统一经 Controller
+        // （v1 直发路径的身份：turn_id 取自 v2 循环，agent_id 为空降级）。
+        let source = peri_acp_types::runtime::UnstampedEvent::new(
+            loop_turn_id.clone(),
+            String::new(),
+            None,
+            peri_acp_types::identity::EventDeliveryClass::Critical,
+        );
+        ctx.controller.publish_event(
+            &ctx.session_id,
+            &source,
+            ExecutorEvent::TurnStarted {
                 turn_id: loop_turn_id.clone(),
                 session_id: ctx.session_id.clone(),
-            });
-        }
+            },
+        );
     }
-    let loop_result = run_react_loop(v2_out.context, 500).await;
+    let loop_result = peri_agent::agent::stages::run_react_loop(v2_out.context, 500).await;
 
     // Phase 8: 从 transcript 提取最终消息列表，构造 AgentState（兼容下游 PromptResult）
     // 前置：显式 flush 剩余积压，确保最终回答已落库。Drop 层 Shutdown 优雅关闭是
@@ -587,7 +846,8 @@ pub(super) async fn build_and_execute_agent_v2(
             transcript.visible_messages().into_iter().cloned().collect();
         (messages, transcript.full_compaction_committed())
     };
-    let mut agent_state = AgentState::with_messages(ctx.cwd.clone(), messages);
+    let mut agent_state =
+        peri_agent::agent::state::AgentState::with_messages(ctx.cwd.clone(), messages);
     agent_state.set_context("session_id", &ctx.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
 
@@ -608,9 +868,9 @@ pub(super) async fn build_and_execute_agent_v2(
 
     // Phase 9: 映射 LoopResult → ExecOutcome
     let (ok, stop_reason) = match loop_result {
-        LoopResult::Completed => (true, PromptStopReason::EndTurn),
-        LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
-        LoopResult::Error(ref e) => {
+        peri_agent::agent::stages::LoopResult::Completed => (true, PromptStopReason::EndTurn),
+        peri_agent::agent::stages::LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
+        peri_agent::agent::stages::LoopResult::Error(ref e) => {
             error!(session_id = %ctx.session_id, error = %e, "[v2] loop failed");
             // 对非 Interrupted/MaxIterations 的致命错误，通知 TUI 显示红色错误提示
             // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
@@ -618,11 +878,20 @@ pub(super) async fn build_and_execute_agent_v2(
                 && !matches!(e, AgentError::MaxIterationsExceeded(_))
                 && !ctx.cancel.is_cancelled()
             {
-                if let Some(tx) = event_tx.lock().as_ref() {
-                    let _ = tx.send(ExecutorEvent::AgentExecutionFailed {
+                // 发射点统一经 Controller
+                let source = peri_acp_types::runtime::UnstampedEvent::new(
+                    String::new(),
+                    String::new(),
+                    None,
+                    peri_acp_types::identity::EventDeliveryClass::Critical,
+                );
+                ctx.controller.publish_event(
+                    &ctx.session_id,
+                    &source,
+                    ExecutorEvent::AgentExecutionFailed {
                         message: e.user_facing_message(),
-                    });
-                }
+                    },
+                );
             }
             let reason = if ctx.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
                 PromptStopReason::Cancelled
@@ -638,9 +907,11 @@ pub(super) async fn build_and_execute_agent_v2(
     // langfuse v2: emit TurnEnded
     {
         let (status, error_kind) = match loop_result {
-            LoopResult::Completed => (TurnStatus::Done, None),
-            LoopResult::Interrupted => (TurnStatus::Interrupted, Some(TurnErrorKind::Interrupted)),
-            LoopResult::Error(ref e) => {
+            peri_agent::agent::stages::LoopResult::Completed => (TurnStatus::Done, None),
+            peri_agent::agent::stages::LoopResult::Interrupted => {
+                (TurnStatus::Interrupted, Some(TurnErrorKind::Interrupted))
+            }
+            peri_agent::agent::stages::LoopResult::Error(ref e) => {
                 let kind = if matches!(e, AgentError::Interrupted) {
                     TurnErrorKind::Interrupted
                 } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
@@ -651,14 +922,23 @@ pub(super) async fn build_and_execute_agent_v2(
                 (TurnStatus::Error, Some(kind))
             }
         };
-        if let Some(tx) = event_tx.lock().as_ref() {
-            let _ = tx.send(ExecutorEvent::TurnEnded {
+        // 发射点统一经 Controller（TurnEnded 是事件流终末事件）
+        let source = peri_acp_types::runtime::UnstampedEvent::new(
+            loop_turn_id.clone(),
+            String::new(),
+            None,
+            peri_acp_types::identity::EventDeliveryClass::Critical,
+        );
+        ctx.controller.publish_event(
+            &ctx.session_id,
+            &source,
+            ExecutorEvent::TurnEnded {
                 turn_id: loop_turn_id,
                 session_id: ctx.session_id.clone(),
                 status,
                 error_kind,
-            });
-        }
+            },
+        );
     }
 
     // Cancel cascade children when this agent is cancelled

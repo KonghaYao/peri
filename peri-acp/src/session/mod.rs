@@ -8,10 +8,10 @@
 //! model_alias、thinking、active_agents、goal_state）。
 //!
 //! L5（executor 拆分）：active_agents 注册表的条目类型与 cancel 判定/终止
-//! 执行已归 Agent 层（`peri_agent::session::runtime`，Cascade/Independent
-//! 判定经 `cancel_cascade_agents` / `cancel_all_agents`），本层仅定位
-//! （查 session 映射）并传递注册表；注册表字段随 L2/L5 运行态归位迁入
-//! `peri_agent::session::Session`。
+//! 执行归 Agent 层（Cascade/Independent 判定经契约面
+//! `peri_acp_types::session::cancel_cascade_agents` / `cancel_all_agents`），
+//! 本层仅定位（查 session 映射）并传递注册表；注册表字段随 L2/L5 运行态
+//! 归位迁入 `peri_agent::session::Session`。
 //!
 //! cron 主路径：session 级 CronOwner 由 `AcpSession.cron_bridge` 持有
 //! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
@@ -35,14 +35,12 @@ use std::{
 
 use chrono::Utc;
 use dashmap::DashMap;
-use peri_agent::agent::async_tasks::TaskManager;
-use peri_agent::{
-    messages::BaseMessage,
-    thread::{ThreadId, ThreadMeta, ThreadStore},
-};
-use peri_middlewares::{
-    agent_define::AgentOverrides,
-    prelude::{PermissionMode, SharedPermissionMode},
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::{
+    store::ThreadStore,
+    thread::{ThreadId, ThreadMeta},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -54,7 +52,14 @@ use crate::{
     provider::{config::PeriConfig, LlmProvider},
     session::cron_bridge::SessionCronBridge,
 };
-use peri_agent::session::runtime::AgentRuntime;
+use peri_acp_types::session::AgentRuntime;
+
+/// 后台任务管理器工厂（装配注入面）：session 创建时调用一次，产出 per-session
+/// 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合：registry + bg shell 执行；
+/// 随 session 创建/销毁）。实现类由部署装配点提供（host 装配面），ACP 协议面
+/// 只持有契约 `peri_acp_types::tasks::TaskManager`。
+pub type TaskManagerFactory =
+    Arc<dyn Fn() -> Arc<dyn peri_acp_types::tasks::TaskManager> + Send + Sync>;
 
 pub struct AcpSession {
     pub session_id: String,
@@ -84,16 +89,13 @@ pub struct AcpSession {
     /// 统一收件箱（session 级共享，所有路径用）
     ///
     /// v2 stages 使用独立类型
-    /// `peri_agent::session::MessageQueue`（富类型，带 Kind/Source）。
+    /// `peri_acp_types::session::MessageQueue`（富类型，带 Kind/Source）。
     /// 每轮 v2 路径调用 `build_stage_context` 时传入此实例的 clone，
     /// 让 main agent 与 SubAgent / Hook / GoalSteering 互可见彼此的
     /// deferred / info 消息。
     ///
     /// 内部 `Arc<Mutex<VecDeque>> + Arc<Notify>`，clone 共享底层。
-    pub v2_message_queue: peri_agent::session::MessageQueue,
-    /// peri-agent Session（核心实体聚合）
-    /// None 表示尚未初始化，session/new 时创建。
-    pub v2_session: Option<Arc<peri_agent::session::Session>>,
+    pub v2_message_queue: peri_acp_types::session::MessageQueue,
     /// Session-level inbox (await-wake wrapper around v2_message_queue).
     ///
     /// Created lazily on first access via `SessionManager::session_inbox_for`.
@@ -102,12 +104,12 @@ pub struct AcpSession {
     ///
     /// `None` means the session doesn't support async wake (e.g., print mode
     /// without a SessionManager). The executor falls back to direct return.
-    pub session_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
+    pub session_inbox: Option<Arc<peri_acp_types::session::SessionInbox>>,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
     /// 随 session 创建/销毁，close_session 时 cancel_all 取消 owned 任务）
-    pub task_manager: Arc<TaskManager>,
+    pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
 }
 
 struct SessionManagerInner {
@@ -126,7 +128,13 @@ struct SessionManagerInner {
     /// Key: session_id。使用 Arc<DashMap<...>> 以支持 clone 共享。
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
-    pub cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
+    pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
+    /// per-session 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合）。
+    /// None = 未注入时 fallback `NoopTaskManager`（print 等无 bg 场景）。
+    pub task_manager_factory: Option<TaskManagerFactory>,
 }
 
 #[derive(Clone)]
@@ -135,13 +143,16 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
     pub fn new(
         thread_store: Arc<dyn ThreadStore>,
         provider: LlmProvider,
         peri_config: Arc<PeriConfig>,
         permission_mode: Arc<SharedPermissionMode>,
         agent_overrides: Option<AgentOverrides>,
-        cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+        cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+        task_manager_factory: Option<TaskManagerFactory>,
+        skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
@@ -154,8 +165,20 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                skills,
+                task_manager_factory,
             }),
         }
+    }
+
+    /// 构造 per-session 后台任务管理器（装配注入的工厂调用一次；未注入时
+    /// fallback `NoopTaskManager`——print 等无 bg 场景）。
+    fn make_task_manager(&self) -> Arc<dyn peri_acp_types::tasks::TaskManager> {
+        self.inner
+            .task_manager_factory
+            .as_ref()
+            .map(|f| f())
+            .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager))
     }
 
     /// 使用指定 session_id 创建会话（用于 session/load 和 session/resume）
@@ -195,7 +218,7 @@ impl SessionManager {
 
         let session_id = thread_id.clone();
 
-        let task_manager = Arc::new(TaskManager::new());
+        let task_manager = self.make_task_manager();
 
         let session = AcpSession {
             session_id: session_id.clone(),
@@ -212,11 +235,10 @@ impl SessionManager {
             last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
-                Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
+                Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
                 session_id.clone(),
             ),
-            v2_message_queue: peri_agent::session::MessageQueue::new(),
-            v2_session: None,
+            v2_message_queue: peri_acp_types::session::MessageQueue::new(),
             session_inbox: None,
             cron_bridge: None,
             task_manager,
@@ -227,7 +249,7 @@ impl SessionManager {
     }
 
     fn build_session(&self, session_id: &str, thread_id: ThreadId, cwd: &str) -> AcpSession {
-        let task_manager = Arc::new(TaskManager::new());
+        let task_manager = self.make_task_manager();
 
         AcpSession {
             session_id: session_id.to_string(),
@@ -251,11 +273,10 @@ impl SessionManager {
             last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
-                Arc::new(peri_agent::goal::InMemoryGoalStore::new()),
+                Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
                 session_id.to_string(),
             ),
-            v2_message_queue: peri_agent::session::MessageQueue::new(),
-            v2_session: None,
+            v2_message_queue: peri_acp_types::session::MessageQueue::new(),
             session_inbox: None,
             cron_bridge: None,
             task_manager,
@@ -265,7 +286,7 @@ impl SessionManager {
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
             // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
-            peri_agent::session::runtime::cancel_all_agents(session.active_agents.values());
+            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
             // L1：取消 owned 后台任务（§9 销毁顺序「取消 owned tasks」：
             // bg shell / bg agent / workflow 随 session 销毁，多会话互不干扰）
@@ -300,7 +321,7 @@ impl SessionManager {
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
             // Cascade/Independent 判定与终止执行归 Agent 层（L5：cancel 最终
             // 执行权在 Agent，top-level.md §2/§9）；此处仅定位并传递注册表。
-            peri_agent::session::runtime::cancel_cascade_agents(session.active_agents.values());
+            peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
 
             // Cancel the current token so all clones (held by link tasks,
             // permission loops) detect cancellation. Then replace with a fresh
@@ -413,7 +434,7 @@ impl SessionManager {
     pub fn build_frozen_data(
         &self,
         cwd: &str,
-        plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
+        plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
         workflow_enabled: bool,
     ) -> crate::session::executor::FrozenSessionData {
@@ -428,6 +449,7 @@ impl SessionManager {
             &frozen_date,
             pm,
             workflow_enabled,
+            self.inner.skills.as_ref(),
         )
     }
 
@@ -462,7 +484,7 @@ impl SessionManager {
 
     /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
     /// 内部 Arc 共享，clone 廉价。session 不存在时返回 None。
-    pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_agent::session::MessageQueue> {
+    pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
         self.inner
             .sessions
             .get(session_id)
@@ -477,7 +499,7 @@ impl SessionManager {
     pub fn session_inbox_for(
         &self,
         session_id: &str,
-    ) -> Option<Arc<peri_agent::agent::session::SessionInbox>> {
+    ) -> Option<Arc<peri_acp_types::session::SessionInbox>> {
         // Fast path: already initialized
         if let Some(session) = self.inner.sessions.get(session_id) {
             if let Some(ref inbox) = session.session_inbox {
@@ -487,7 +509,7 @@ impl SessionManager {
         // Slow path: lazy init
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
             let queue_arc = Arc::new(session.v2_message_queue.clone());
-            let inbox = Arc::new(peri_agent::agent::session::SessionInbox::new(queue_arc));
+            let inbox = Arc::new(peri_acp_types::session::SessionInbox::new(queue_arc));
             session.session_inbox = Some(Arc::clone(&inbox));
             Some(inbox)
         } else {
@@ -541,15 +563,15 @@ impl AcpSession {
     /// 取消指定 agent 的所有 cascade 子 agent。
     ///
     /// 薄委托：Cascade/Independent 判定与终止执行归 Agent 层
-    /// （`peri_agent::session::runtime::cancel_cascade_agents`，L5 cancel
+    /// （`peri_acp_types::session::cancel_cascade_agents`，L5 cancel
     /// 最终执行权归位）；本方法仅定位（持有 active_agents 注册表）。
     pub fn cancel_cascade_children(&self) {
-        peri_agent::session::runtime::cancel_cascade_agents(self.active_agents.values());
+        peri_acp_types::session::cancel_cascade_agents(self.active_agents.values());
     }
 
     /// 取消所有 agent（session 结束时）
     pub fn cancel_all_agents(&self) {
-        peri_agent::session::runtime::cancel_all_agents(self.active_agents.values());
+        peri_acp_types::session::cancel_all_agents(self.active_agents.values());
     }
 }
 

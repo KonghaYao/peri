@@ -11,20 +11,13 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::RwLock;
-use peri_agent::{
-    agent::{
-        async_tasks::TaskManager,
-        compact_v2::CompactConfig,
-        events::{AgentEventHandler, ExecutorEvent},
-        model_bridge::AgentModelBridge,
-        token::ContextBudget,
-    },
-    error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot},
-    middleware::chain::MiddlewareChain,
-    session::factory::{
-        build_middleware_chain, ChildHandlerFactory, FrozenData, ThreadPersistence,
-    },
-    tools::BaseTool,
+use peri_acp_types::{
+    compact::CompactConfig,
+    event::{AgentEventHandler, ExecutorEvent},
+    event_v2::{EventBus, EventBusConfig, EventHandles},
+    frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+    identity::AgentId,
+    session::{CronOwner, SessionInbox},
 };
 use peri_middlewares::{
     assembly::{
@@ -45,7 +38,7 @@ use peri_controller::langfuse::tracer::LangfuseTracer;
 //
 // 链装配（含 SubAgentMiddleware 构造点）已随 L2 迁出：
 // - 唯一触发点与链序事实源：peri-agent/src/session/factory.rs 的
-//   `build_middleware_chain` + `production_blueprint`（ARC-MIDDLEWARE-001）
+//   `peri_agent::session::factory::build_middleware_chain` + `production_blueprint`（ARC-MIDDLEWARE-001）
 // - 装配实现：peri-middlewares/src/assembly.rs 的 `ProductionChainAssembler`
 // - 随迁类型：`FrozenData` / `ThreadPersistence` / `ChildHandlerFactory` /
 //   `RegisterRuntimeFn` / `DeregisterRuntimeFn` 位于
@@ -63,23 +56,24 @@ pub(crate) struct AcpAgentOutput {
 
 /// Agent 装配产物（v2 builder 直接消费，P5.3 抽取）
 ///
-/// `build_agent` 经 Agent 层 session 工厂装配 `MiddlewareChain`，
+/// `build_agent` 经 Agent 层 session 工厂装配 `peri_agent::middleware::chain::MiddlewareChain`，
 /// 并组装 LLM + system prompt 等字段产出本结构，
-/// `build_stage_context` 消费它构造 v2 `StageContext`。
+/// `build_stage_context` 消费它构造 v2 `peri_agent::agent::stages::StageContext`。
 pub struct AgentComponents {
-    /// 主 LLM（已通过 `AgentModelBridge` 适配为标准 ReAct 抽象）
-    pub llm: Arc<dyn ReactLLM + Send + Sync>,
-    /// 中间件链（v2 StageContext 直接复用）
-    pub chain: MiddlewareChain,
+    /// 主 LLM（已通过 `peri_agent::agent::model_bridge::AgentModelBridge` 适配为标准 ReAct 抽象）
+    pub llm: Arc<dyn peri_agent::agent::react::ReactLLM + Send + Sync>,
+    /// 中间件链（v2 peri_agent::agent::stages::StageContext 直接复用）
+    pub chain: peri_agent::middleware::chain::MiddlewareChain,
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
-    pub shared_tools: Option<Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
+    pub shared_tools:
+        Option<Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>>,
     /// 错误感知建议注册表
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+    pub error_suggest_registry: Option<Arc<peri_agent::error_suggest::ErrorSuggestRegistry>>,
     /// 工具注册表快照（工具名 + subagent 类型）
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
+    pub tool_registry_snapshot: Arc<peri_agent::error_suggest::ToolRegistrySnapshot>,
     /// 上下文预算（token 监控）
-    pub context_budget: Option<ContextBudget>,
+    pub context_budget: Option<peri_agent::agent::token::ContextBudget>,
     /// Compact 配置
     pub compact_config: Option<CompactConfig>,
     /// SubAgent 中间件（chain 中已有一份 clone；本字段保留原实例，
@@ -90,7 +84,7 @@ pub struct AgentComponents {
 /// 构建可复用的 Agent（ACP 和 TUI 共用核心构建逻辑）
 ///
 /// 迁移自 peri-tui/src/app/agent.rs:build_bare_agent()。
-/// 中间件链装配经 Agent 层 session 工厂（唯一触发点 `build_middleware_chain`，
+/// 中间件链装配经 Agent 层 session 工厂（唯一触发点 `peri_agent::session::factory::build_middleware_chain`，
 /// 链序蓝本 `production_blueprint`，ARC-MIDDLEWARE-001）与
 /// `peri-middlewares::assembly::ProductionChainAssembler` 完成，
 /// 本函数构造装配上下文并组装 LLM/prompt/缓存。
@@ -114,8 +108,8 @@ pub(crate) fn build_agent(
     child_handler_factory: Option<ChildHandlerFactory>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: ThreadPersistence,
-    goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
-    task_manager: Option<Arc<TaskManager>>,
+    goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    task_manager: Option<Arc<peri_agent::agent::async_tasks::TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
@@ -140,7 +134,11 @@ pub(crate) fn build_agent(
     let cancel = ctx.cancel.clone();
     let permission_mode = ctx.permission_mode.clone();
     let peri_config = ctx.peri_config.clone();
-    let cron_scheduler = ctx.cron_scheduler.clone();
+    let cron_scheduler = ctx.cron_scheduler.clone().and_then(|s| {
+        s.downcast_arc::<peri_middlewares::cron::CronSchedulerPortHandle>()
+            .ok()
+            .map(|handle| handle.0.clone())
+    });
     let session_id = Some(ctx.session_id.clone());
     let permission_broker = ctx.broker.clone();
     let plugin_skill_roots = ctx.plugin_skill_roots.clone();
@@ -148,13 +146,26 @@ pub(crate) fn build_agent(
     let plugin_loaded = ctx.plugin_loaded.clone();
     let hook_groups = ctx.hook_groups.clone();
     let session_start_source = ctx.session_start_source.clone();
-    let mcp_pool = ctx.mcp_pool.clone();
+    let mcp_pool = ctx.mcp_pool.clone().and_then(|s| {
+        s.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+            .ok()
+    });
     let channel_state = ctx.channel_state.clone();
-    let tool_search_index = ctx.tool_search_index.clone();
+    let tool_search_index = match ctx
+        .tool_search_index
+        .clone()
+        .downcast_arc::<peri_middlewares::tool_search::ToolSearchIndex>()
+    {
+        Ok(idx) => idx,
+        Err(_) => Arc::new(peri_middlewares::tool_search::ToolSearchIndex::default()),
+    };
     let shared_tools = ctx.shared_tools.clone();
     let lsp_servers = ctx.lsp_servers.clone();
     let workflow_executor = ctx.workflow_executor.clone();
-    let workflow_middleware = ctx.workflow_middleware.clone();
+    let workflow_middleware = ctx.workflow_middleware.clone().and_then(|s| {
+        s.downcast_arc::<peri_middlewares::workflow::WorkflowMiddleware>()
+            .ok()
+    });
     let mw_auxiliary_model = auxiliary_model;
     let pool = &ctx.pool;
 
@@ -184,7 +195,13 @@ pub(crate) fn build_agent(
             );
             let template = crate::prompt::PromptTemplate::with_overrides(ov);
             let env = crate::prompt::PromptEnv::detect(&cwd);
-            template.render(&env, &features, &plugin_agent_dirs, None)
+            template.render(
+                &env,
+                &features,
+                ctx.skills.as_ref(),
+                &plugin_agent_dirs,
+                None,
+            )
         },
     );
 
@@ -192,7 +209,7 @@ pub(crate) fn build_agent(
     let model_name = provider.model_name().to_string();
     let provider_name = provider.display_name().to_string();
 
-    // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
+    // 提前提取模型实例（chain 构建完成后才组装 peri_agent::agent::model_bridge::AgentModelBridge，
     // 以便收集中间件 prompt_contribution 合并到 system prompt）。
     // 与 SubAgent 模型共享 session 级 AgentPool 缓存（同一 fingerprint）：
     // 跨 turn / 跨 agent 实例复用 reqwest::Client（连接池 + TLS session cache），
@@ -273,7 +290,7 @@ pub(crate) fn build_agent(
                 },
             );
 
-        let mut llm = AgentModelBridge::from_arc(model);
+        let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
         if let Some(s) = sid {
             llm = llm.with_session_id(s);
         }
@@ -283,6 +300,7 @@ pub(crate) fn build_agent(
     // 系统提示构建器
     let frozen_language_for_sub = peri_config.config.language.clone();
     let frozen_date_for_sub = frozen_date.clone();
+    let skills_for_sub = ctx.skills.clone();
     // PromptFeatures is detected at build-time: hitl 来自 permission mode，
     // workflow 对子 agent / fork 恒为 false（detect_without_workflow）——
     // 这些链不注册 WorkflowTool、shared_tools 为 None，不得宣称 workflow
@@ -304,13 +322,22 @@ pub(crate) fn build_agent(
         t.render(
             &env,
             &features_for_sub,
+            skills_for_sub.as_ref(),
             &[],
             frozen_language_for_sub.as_deref(),
         )
     });
 
     // 后台任务通知通道
-    let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
+    // 装配注入的 per-session TaskManager（L1：BackgroundTaskRegistry per-session
+    // 实例化，经 Arc<dyn TaskManager> downcast 还原）。无注入时（NoopTaskManager
+    // 降级 / print mode）回退临时实例：AssemblyContext.task_manager 为必填
+    // Arc（peri-middlewares::assembly 契约），SubAgentMiddleware 依赖它注册
+    // 子 agent（行为契约，见 ARC-MIDDLEWARE-001 装配面）；回退构造点随 L5
+    // executor 拆分迁入 Agent 层 session 工厂（豁免清单见
+    // `spec/issues/2026-08-05-3.0-acp-events-session-batch2.md`）。
+    let task_manager = task_manager
+        .unwrap_or_else(|| Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
 
     // 后台任务完成事件的独立通道（不随 executor 生命周期销毁）
     let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -337,7 +364,7 @@ pub(crate) fn build_agent(
     // 不再手动拼接到 system_prompt。
 
     // 构造装配上下文并调 Agent 层 session 工厂构建中间件链（L2 归位）。
-    // - 唯一触发点：peri-agent/src/session/factory.rs 的 `build_middleware_chain`
+    // - 唯一触发点：peri-agent/src/session/factory.rs 的 `peri_agent::session::factory::build_middleware_chain`
     //   （session 初始化装配入口；链序事实源 `production_blueprint` 同处，
     //   ARC-MIDDLEWARE-001，顺序是行为契约，禁止重排）
     // - 装配实现：peri-middlewares/src/assembly.rs 的 `ProductionChainAssembler`
@@ -348,7 +375,7 @@ pub(crate) fn build_agent(
         subagent_mw,
         error_suggest_registry: registry,
         tool_registry_snapshot: snapshot,
-    } = build_middleware_chain(
+    } = peri_agent::session::factory::build_middleware_chain(
         &ProductionChainAssembler,
         &AssemblyContext {
             cwd: cwd.clone(),
@@ -414,12 +441,13 @@ pub(crate) fn build_agent(
         format!("{system_prompt}\n\n{contributions}")
     };
 
-    // 构造 AgentModelBridge（带系统提示词）
-    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
+    // 构造 peri_agent::agent::model_bridge::AgentModelBridge（带系统提示词）
+    let mut base_llm = peri_agent::agent::model_bridge::AgentModelBridge::new(base_model)
+        .with_system(merged_system_prompt);
     if let Some(ref sid) = session_id {
         base_llm = base_llm.with_session_id(sid);
     }
-    let model: Arc<dyn ReactLLM + Send + Sync> = Arc::new(base_llm);
+    let model: Arc<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Arc::new(base_llm);
 
     // 构建 CachedLlmInstances 供跨 prompt 复用
     let auxiliary_model_for_cache: Option<Arc<dyn peri_model::Model>> = mw_auxiliary_model.clone();
@@ -454,14 +482,14 @@ pub(crate) fn build_agent(
     )
 }
 
-// ── v2 StageContext 构建（合并自 builder_v2.rs）────────────────────────────────
+// ── v2 peri_agent::agent::stages::StageContext 构建（合并自 builder_v2.rs）────────────────────────────────
 //
-// 直接构造 StageContext 供 run_react_loop 消费。
+// 直接构造 peri_agent::agent::stages::StageContext 供 run_react_loop 消费。
 // 复用上方 build_agent() 的中间件链与 LLM 构造（AgentComponents），避免重复 700+ 行装配逻辑。
 //
 // ## 工具注入
 //
-// run_react_loop 每轮从 shared_tools（SharedToolMap）按名读取工具，
+// run_react_loop 每轮从 shared_tools（peri_agent::agent::stages::SharedToolMap）按名读取工具，
 // 不会每轮重新填充。因此 build_stage_context 内部显式调用
 // chain.collect_tools(cwd) 把 middleware 提供的工具 + register_tool 注册的
 // AskUserQuestion 一次性 merge 到 shared_tools（已存在的同名工具不覆盖，
@@ -480,21 +508,15 @@ pub(crate) fn build_agent(
 // 3. 启动 CronTrigger→String 桥接任务。
 // 4. 创建并启动 CronOwner（trigger_rx → inbox）。
 // 5. 通过 Session::set_async_owners 注入到 Session。
+//
+// （事件总线 / CronOwner / SessionInbox 经 `peri_acp_types` 契约面导入；
+// 执行面类型（StageContext / ReactLLM / TaskManager 等）保留全路径引用，
+// 随 L5 executor 拆分物理迁入 peri-agent。）
 
-// Note: 以下类型已在文件头部导入，此处仅补充增量导入。
-use peri_agent::{
-    agent::{
-        events_v2::{EventBus, EventBusConfig, EventHandles},
-        react::ReactLLM,
-        session::{cron_owner::CronOwner, inbox::SessionInbox},
-        stages::{SharedToolMap, StageContext, StageContextBuilder},
-    },
-    group::pipeline::AgentId,
-    session::Session as V2Session,
-};
-
-/// 为 ACP 生产 StageContext 安装 wrapper-aware canonical invocation resolver。
-fn install_tool_invocation_resolver(builder: StageContextBuilder) -> StageContextBuilder {
+/// 为 ACP 生产 peri_agent::agent::stages::StageContext 安装 wrapper-aware canonical invocation resolver。
+fn install_tool_invocation_resolver(
+    builder: peri_agent::agent::stages::StageContextBuilder,
+) -> peri_agent::agent::stages::StageContextBuilder {
     builder.with_tool_invocation_resolver(Arc::new(
         peri_middlewares::ExecuteExtraToolResolver::default(),
     ))
@@ -502,10 +524,10 @@ fn install_tool_invocation_resolver(builder: StageContextBuilder) -> StageContex
 
 /// v2 builder 产物
 pub(crate) struct V2AgentOutput {
-    /// 已配置的 StageContext（用于 run_react_loop）
-    pub context: StageContext,
+    /// 已配置的 peri_agent::agent::stages::StageContext（用于 run_react_loop）
+    pub context: peri_agent::agent::stages::StageContext,
     /// v2 Session（持有 transcript + queue + store）
-    pub session: Arc<V2Session>,
+    pub session: Arc<peri_agent::session::Session>,
     /// EventBus 消费端（转 ExecutorEvent 用）
     pub event_handles: EventHandles,
     /// Todo 更新通道（spawn todo forwarder 用）
@@ -514,14 +536,14 @@ pub(crate) struct V2AgentOutput {
     pub bg_event_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
 }
 
-/// 从 SessionContext 构造 StageContext
+/// 从 SessionContext 构造 peri_agent::agent::stages::StageContext
 ///
 /// 内部调用 build_agent 提取 middleware chain + LLM + 共享组件（AgentComponents），
-/// 然后构造 StageContext。
+/// 然后构造 peri_agent::agent::stages::StageContext。
 ///
 /// **shared_queue**：会话级共享的 v2 MessageQueue。每个 turn 调用本函数时
 /// 必须传入**同一个**实例（来自 AcpSession.v2_message_queue），让本 turn 的
-/// StageContext.queue 与会话级共享。
+/// peri_agent::agent::stages::StageContext.queue 与会话级共享。
 ///
 /// MessageQueue 内部 Arc<Mutex<VecDeque>> + Arc<Notify>，clone 共享底层；
 /// 传入引用只是为了避免在签名里 move。
@@ -539,8 +561,8 @@ pub(crate) fn build_stage_context(
     child_handler_factory: Option<ChildHandlerFactory>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     thread_persistence: ThreadPersistence,
-    goal_controller: Option<Arc<dyn peri_agent::goal::GoalController>>,
-    task_manager: Option<Arc<TaskManager>>,
+    goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    task_manager: Option<Arc<peri_agent::agent::async_tasks::TaskManager>>,
     on_bg_complete: Option<OnBgCompleteFn>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
@@ -559,8 +581,12 @@ pub(crate) fn build_stage_context(
     let hook_model = ctx.provider.model_name().to_string();
     let hook_session_id = session_id.clone();
 
-    // 提取 cron_scheduler
-    let cron_scheduler = ctx.cron_scheduler.clone();
+    // 提取 cron_scheduler（装配注入端口 → 具体类型，downcast 还原）
+    let cron_scheduler = ctx.cron_scheduler.clone().and_then(|s| {
+        s.downcast_arc::<peri_middlewares::cron::CronSchedulerPortHandle>()
+            .ok()
+            .map(|handle| handle.0.clone())
+    });
 
     // 从 SessionContext 推导会话级共享变量
     let shared_queue = ctx
@@ -621,7 +647,7 @@ pub(crate) fn build_stage_context(
     } = agent_output.components;
     let bg_event_tx = agent_output.bg_event_tx;
 
-    let shared_tools: SharedToolMap = shared_tools_opt
+    let shared_tools: peri_agent::agent::stages::SharedToolMap = shared_tools_opt
         .unwrap_or_else(|| Arc::new(RwLock::new(std::collections::BTreeMap::new())));
 
     // 一次性把 middleware 提供的工具注入到 shared_tools。
@@ -640,7 +666,7 @@ pub(crate) fn build_stage_context(
     let cwd_arc: Arc<str> = Arc::from(cwd.as_str());
     let frozen_ctx = peri_agent::session::FrozenContext::builder().build();
     let cancel_arc = Arc::new(cancel_token);
-    let session = V2Session::new_with_cancel_and_queue(
+    let session = peri_agent::session::Session::new_with_cancel_and_queue(
         cwd_arc,
         frozen_ctx,
         None,
@@ -738,13 +764,13 @@ pub(crate) fn build_stage_context(
     // 复用 build_agent 产出的 LLM（已适配为 ReactLLM）
     let react_llm = llm;
 
-    // 主 agent 事件侧身份（C2）：StageContext agent_id 与 SubAgentTool 共享 cell
+    // 主 agent 事件侧身份（C2）：peri_agent::agent::stages::StageContext agent_id 与 SubAgentTool 共享 cell
     // 必须同一值——subagent 补发的 SubagentStart.agent_id 指回主 agent。
     let main_agent_id = AgentId::new();
 
-    // 构造 StageContext
+    // 构造 peri_agent::agent::stages::StageContext
     let mut builder = install_tool_invocation_resolver(
-        StageContext::builder(turn, transcript, queue)
+        peri_agent::agent::stages::StageContext::builder(turn, transcript, queue)
             .with_agent_id(main_agent_id)
             .with_llm(react_llm)
             .with_tools(shared_tools),
@@ -929,8 +955,12 @@ mod builder_v2_tests {
             )),
         );
         let context = install_tool_invocation_resolver(
-            StageContext::builder(turn, session.transcript(), session.queue().clone())
-                .with_tools(tools),
+            peri_agent::agent::stages::StageContext::builder(
+                turn,
+                session.transcript(),
+                session.queue().clone(),
+            )
+            .with_tools(tools),
         )
         .build();
         let snapshot = context.runtime.tools.read().clone();
@@ -954,10 +984,14 @@ mod builder_v2_tests {
     fn test_v2_context_has_null_llm_by_default() {
         let cwd: Arc<str> = Arc::from("/tmp");
         let frozen = peri_agent::session::FrozenContext::builder().build();
-        let session = V2Session::new(cwd, frozen, None);
+        let session = peri_agent::session::Session::new(cwd, frozen, None);
         let turn = session.start_turn();
-        let ctx =
-            StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
+        let ctx = peri_agent::agent::stages::StageContext::builder(
+            turn,
+            session.transcript(),
+            session.queue().clone(),
+        )
+        .build();
         assert_eq!(ctx.runtime.llm.model_name(), "null");
     }
 }

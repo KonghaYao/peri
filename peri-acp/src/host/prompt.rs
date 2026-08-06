@@ -10,9 +10,11 @@ use crate::{
 };
 use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
 use parking_lot::RwLock;
-use peri_agent::{agent::AgentCancellationToken, interaction::ChannelState};
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::interaction::ChannelState;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
 use peri_controller::langfuse::LangfuseSession;
-use peri_middlewares::prelude::*;
 use serde_json::Value;
 use tracing::info;
 
@@ -28,18 +30,20 @@ pub(crate) async fn run_prompt(
     provider: &Arc<RwLock<LlmProvider>>,
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: &Arc<SharedPermissionMode>,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
-    plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
+    cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
     plugin_agent_dirs: &[std::path::PathBuf],
-    plugin_loaded: &[peri_middlewares::plugin::LoadedPlugin],
-    hook_groups: &[Vec<peri_middlewares::hooks::RegisteredHook>],
-    mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    plugin_loaded: &[peri_acp_types::plugin::LoadedPlugin],
+    hook_groups: &[Vec<peri_acp_types::hooks::RegisteredHook>],
+    mcp_pool: Option<Arc<dyn McpPoolPort>>,
     channel_state: Option<Arc<ChannelState>>,
-    tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
+    tool_search_index: Arc<dyn ToolSearchPort>,
+    skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    plugin_lsp_servers: &[peri_lsp::config::LspServerConfig],
+    plugin_lsp_servers: &[peri_acp_types::lsp::LspServerConfig],
     transport: &Arc<dyn crate::transport::AcpTransport>,
-    thread_store: &Arc<dyn peri_agent::thread::ThreadStore>,
+    thread_store: &Arc<dyn peri_acp_types::store::ThreadStore>,
+    controller: &Arc<peri_controller::Controller>,
     langfuse_session: Option<Arc<LangfuseSession>>,
     pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
     session_manager: crate::session::SessionManager,
@@ -63,13 +67,13 @@ pub(crate) async fn run_prompt(
     let message = params
         .get("message")
         .ok_or_else(|| AcpError::new(-32602, "missing message"))?;
-    let content: peri_agent::messages::MessageContent = message
+    let content: peri_acp_types::messages::MessageContent = message
         .get("content")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
 
     // Parse optional background task results for synthetic tool_use + tool_result injection
-    let bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult> = params
+    let bg_results: Vec<peri_acp_types::event::BackgroundTaskResult> = params
         .get("bgResults")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
         .unwrap_or_default();
@@ -83,7 +87,9 @@ pub(crate) async fn run_prompt(
         .map(String::from);
 
     // Create cancel token and register in sessions.
-    let cancel = AgentCancellationToken::new();
+    // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
+    // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
+    let cancel = tokio_util::sync::CancellationToken::new();
     {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -113,10 +119,10 @@ pub(crate) async fn run_prompt(
     };
     let history_len = history.len();
     // Save message IDs for compact persistence path (history is moved into run_session_loop below).
-    let history_ids: Vec<peri_agent::messages::MessageId> =
+    let history_ids: Vec<peri_acp_types::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
 
-    let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(
+    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
         AcpTransportBroker::new(Arc::clone(transport), session_id.clone().into()),
     );
     let event_sink = Arc::new(TransportEventSink::new(
@@ -169,6 +175,8 @@ pub(crate) async fn run_prompt(
             thread_store: None,
             peri_config: Some(peri_config_snapshot.clone()),
             progress_tx: None,
+            subagent_ctx_builder: None,
+            controller: Some(Arc::clone(controller)),
         },
     );
 
@@ -191,6 +199,7 @@ pub(crate) async fn run_prompt(
         mcp_pool,
         channel_state,
         tool_search_index,
+        skills,
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
         pool,
@@ -199,6 +208,7 @@ pub(crate) async fn run_prompt(
         session_manager: Some(session_manager),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        controller: Arc::clone(controller),
         session_start_source: if !continuation && is_empty {
             Some("startup".to_string())
         } else {
@@ -218,7 +228,20 @@ pub(crate) async fn run_prompt(
         bg_results,
         langfuse_session,
     };
-    let result = executor::run_session_loop(ctx, turn).await;
+
+    // 3.0 批 2：执行发起经 Controller（控制面第四步 run Session）。
+    // 本轮执行句柄（PromptHandle）注册进 Runtime 映射（注册或替换，
+    // 不递增 epoch/seq）→ `Controller::run_session` 经 Runtime 查映射发起 →
+    // `run_session_loop` 执行完成（返回时结果已就绪）→ take_result。
+    let handle = Arc::new(crate::host::exec::prompt_handle::PromptHandle::new(
+        ctx, turn,
+    ));
+    controller.register_session(&session_id, Arc::clone(&handle));
+    controller
+        .run_session(&session_id)
+        .await
+        .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
+    let result = handle.take_result();
 
     // Persist new messages to ThreadStore and update in-memory state.
     {
@@ -356,10 +379,10 @@ fn recall_overwrite_allowed(continuation: bool) -> bool {
 /// Returns `None` when a partial result omits existing history. A committed Full Compact
 /// explicitly replaces prior visible messages with its persisted summary, so it is accepted.
 fn strip_leaked_prepends(
-    result_messages: &[peri_agent::messages::BaseMessage],
-    first_history_id: Option<peri_agent::messages::MessageId>,
+    result_messages: &[peri_acp_types::messages::BaseMessage],
+    first_history_id: Option<peri_acp_types::messages::MessageId>,
     full_compaction_committed: bool,
-) -> Option<Vec<peri_agent::messages::BaseMessage>> {
+) -> Option<Vec<peri_acp_types::messages::BaseMessage>> {
     match first_history_id {
         Some(first_id) => {
             // Find where original history starts in result (skip leaked prepends).

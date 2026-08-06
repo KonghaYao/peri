@@ -57,6 +57,7 @@ fn test_all_executor_event_variants_mapped() {
         "BudgetThresholdHit",
         "WorkflowStarted",
         "WorkflowEnded",
+        "BgRegistryEvent",
     ];
     for v in exhausted_variants {
         assert!(

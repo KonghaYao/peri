@@ -11,7 +11,7 @@ mod events;
 
 use std::path::Path;
 
-use peri_agent::messages::{BaseMessage, ContentBlock, MessageId};
+use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
 
 use super::{AgentCommand, CommandContext, CommandKind, CommandResult};

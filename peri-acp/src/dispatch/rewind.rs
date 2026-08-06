@@ -40,7 +40,7 @@ fn default_true() -> bool {
 /// 按时间逆序（最新变更在前）。
 pub async fn rewind_preview(
     params: &Value,
-    session_history: &[peri_agent::messages::BaseMessage],
+    session_history: &[peri_acp_types::messages::BaseMessage],
     event_sink: &Arc<dyn EventSink>,
     session_id: &str,
 ) -> Result<Value, AcpError> {
@@ -59,7 +59,7 @@ pub async fn rewind_preview(
             event_sink
                 .push_event(
                     session_id,
-                    &peri_agent::agent::events::ExecutorEvent::RewindError {
+                    &peri_acp_types::event::ExecutorEvent::RewindError {
                         message: msg.clone(),
                     },
                     0,
@@ -100,18 +100,16 @@ pub async fn rewind_preview(
 #[allow(clippy::too_many_arguments)]
 pub async fn rewind_execute(
     params: &Value,
-    session_history: Vec<peri_agent::messages::BaseMessage>,
+    session_history: Vec<peri_acp_types::messages::BaseMessage>,
     cwd: &str,
     peri_config: &Arc<PeriConfig>,
     event_sink: &Arc<dyn EventSink>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    cancel_token: &peri_agent::agent::AgentCancellationToken,
+    cancel_token: &tokio_util::sync::CancellationToken,
     controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
-    >,
-    task_manager: Option<Arc<peri_agent::agent::async_tasks::TaskManager>>,
+    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+    task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     frozen_claude_md: Option<Arc<String>>,
     frozen_claude_local_md: Option<Arc<String>>,
     frozen_skill_summary: Option<Arc<String>>,
@@ -147,6 +145,7 @@ pub async fn rewind_execute(
         frozen_claude_local_md,
         frozen_skill_summary,
         frozen_system_prompt,
+        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
     };
 
     let result = RewindCommand.execute(ctx).await;

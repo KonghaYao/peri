@@ -18,11 +18,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::events::ExecutorEvent,
+use peri_acp_types::{
+    event::ExecutorEvent,
     messages::{BaseMessage, ContentBlock},
-    thread::{FilesystemThreadStore, SqliteThreadStore, ThreadMeta, ThreadStore},
+    store::ThreadStore,
+    thread::ThreadMeta,
 };
+use peri_agent::thread::{FilesystemThreadStore, SqliteThreadStore};
 
 use super::*;
 use crate::session::executor::PromptStopReason;
@@ -80,7 +82,7 @@ fn make_ctx(
         auxiliary_model: None,
         event_sink: sink,
         args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
@@ -89,6 +91,7 @@ fn make_ctx(
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 
@@ -127,7 +130,7 @@ fn make_ctx_with_model_and_thread(
         auxiliary_model: Some(model),
         event_sink: sink,
         args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store,
         thread_id,
         bg_event_sender: None,
@@ -136,13 +139,14 @@ fn make_ctx_with_model_and_thread(
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 
 // ── extract_file_info 测试 ───────────────────────────────────────────
 // 注意：[v2] extract_file_info / extract_skill_names 已迁移到 peri_agent::agent::compact_v2，
 // 通过 `use super::*` 间接可见。这里显式引用以保持独立可读。
-use peri_agent::agent::compact_v2::{extract_file_info, extract_skill_names};
+use peri_acp_types::compact::{extract_file_info, extract_skill_names};
 
 #[test]
 fn test_extract_file_info_single_file() {

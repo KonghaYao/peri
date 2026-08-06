@@ -10,8 +10,8 @@ use agent_client_protocol::schema::v1::{
     TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     UsageUpdate,
 };
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::ExecutorEvent;
 
 /// Result of mapping a single [`ExecutorEvent`].
 ///
@@ -131,13 +131,11 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                         e.content.clone(),
                         PlanEntryPriority::Medium,
                         match e.status {
-                            peri_agent::agent::events::TodoStatus::Pending => {
-                                PlanEntryStatus::Pending
-                            }
-                            peri_agent::agent::events::TodoStatus::InProgress => {
+                            peri_acp_types::event::TodoStatus::Pending => PlanEntryStatus::Pending,
+                            peri_acp_types::event::TodoStatus::InProgress => {
                                 PlanEntryStatus::InProgress
                             }
-                            peri_agent::agent::events::TodoStatus::Completed => {
+                            peri_acp_types::event::TodoStatus::Completed => {
                                 PlanEntryStatus::Completed
                             }
                         },
@@ -236,7 +234,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::MiddlewareEnded { .. }
         | ExecutorEvent::BudgetThresholdHit { .. }
         | ExecutorEvent::WorkflowStarted { .. }
-        | ExecutorEvent::WorkflowEnded { .. } => {
+        | ExecutorEvent::WorkflowEnded { .. }
+        | ExecutorEvent::BgRegistryEvent(_) => {
             vec![MappedEvent::standard(vec![])]
         }
     }

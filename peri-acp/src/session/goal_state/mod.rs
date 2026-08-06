@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::goal::{GoalStatus, GoalStore, ThreadGoal};
+use peri_acp_types::goal::{GoalStatus, GoalStore, ThreadGoal};
 
 /// Goal 快照（只读视图，供 middleware / TUI 读取）
 #[derive(Debug, Clone, Default)]
@@ -81,7 +81,7 @@ impl GoalState {
         &self,
         objective: String,
         token_budget: Option<u64>,
-    ) -> Result<(), peri_agent::goal::GoalStoreError> {
+    ) -> Result<(), peri_acp_types::goal::GoalStoreError> {
         let new_goal = ThreadGoal::new(objective, token_budget);
         let (thread_id, store) = {
             let mut guard = self.inner.write();
@@ -99,7 +99,7 @@ impl GoalState {
     }
 
     /// clear：清空 goal
-    pub async fn clear(&self) -> Result<(), peri_agent::goal::GoalStoreError> {
+    pub async fn clear(&self) -> Result<(), peri_acp_types::goal::GoalStoreError> {
         let (thread_id, store) = {
             let mut guard = self.inner.write();
             guard.goal = None;
@@ -237,10 +237,10 @@ impl GoalState {
     }
 }
 
-impl peri_agent::goal::GoalStateView for GoalState {
-    fn snapshot(&self) -> peri_agent::goal::GoalViewSnapshot {
+impl peri_acp_types::goal::GoalStateView for GoalState {
+    fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {
         let snap = self.snapshot();
-        peri_agent::goal::GoalViewSnapshot {
+        peri_acp_types::goal::GoalViewSnapshot {
             objective: snap.objective,
             status: snap.status,
             token_budget: snap.token_budget,
@@ -255,7 +255,7 @@ impl peri_agent::goal::GoalStateView for GoalState {
 }
 
 #[async_trait]
-impl peri_agent::goal::GoalController for GoalState {
+impl peri_acp_types::goal::GoalController for GoalState {
     async fn create_goal(&self, objective: String) -> Result<(), String> {
         // 原子化：检查 + 插入在同一写锁内，消除 TOCTOU 竞态窗口
         let new_goal = ThreadGoal::new(objective, None);
@@ -289,8 +289,8 @@ impl peri_agent::goal::GoalController for GoalState {
         self.clear().await.map_err(|e| e.to_string())
     }
 
-    fn snapshot(&self) -> peri_agent::goal::GoalViewSnapshot {
-        peri_agent::goal::GoalStateView::snapshot(self)
+    fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {
+        peri_acp_types::goal::GoalStateView::snapshot(self)
     }
 }
 

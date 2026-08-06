@@ -10,11 +10,22 @@ path = "src/lib.rs"
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
+# 3.0 批 2 显式豁免清单（见 spec/issues/2026-08-05-3.0-acp-events-session-batch2.md）：
+# - peri-middlewares / peri-workflow：仅 host/exec 执行本体（RCRA loop / stage
+#   装配 / workflow agent）与测试文件引用——「过渡宿主豁免至 L5」；随 L5
+#   executor 拆分（执行本体迁入 peri-agent）后逐项移除。装配面（assemble.rs /
+#   host/stdio / TUI）已改经 peri-acp-types 端口注入，不再依赖本清单。
+# - peri-lsp：装配面类型（LspServerConfig）已 move 至 peri-acp-types，
+#   peri-acp 代码零引用，依赖已移除。
+# - peri-model：仅 host/exec 执行本体（executor_helpers / stage_builder /
+#   compact_pipeline，Arc<dyn peri_model::Model> LLM 抽象）引用——与 peri-agent
+#   同性质豁免至 L5；随 L5 迁出后移除。
+# - check-acp-imports.sh 为验收门：非测试、非 host/exec 代码禁止引用
+#   peri-middlewares / peri-lsp / peri-workflow。
 peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
-peri-lsp = { path = "../peri-lsp" }
 peri-workflow = { path = "../peri-workflow" }
 agent-client-protocol = { version = "1.2", features = ["unstable"] }
 agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }

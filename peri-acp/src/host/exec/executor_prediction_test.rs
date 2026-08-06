@@ -6,7 +6,7 @@
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数）。
 
 use peri_acp_types::event_data::PredictionAction;
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::messages::BaseMessage;
 
 use super::{extract_prediction_text, parse_prediction_actions};
 

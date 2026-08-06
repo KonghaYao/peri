@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use peri_agent::agent::events::{AgentEventHandler, ExecutorEvent};
+use peri_acp_types::event::{AgentEventHandler, ExecutorEvent};
 use peri_model::{RetryObservation, RetryObserver};
 
 /// 将 `RetryObservation` 翻译为 `ExecutorEvent::LlmRetrying` 并交给 handler。

@@ -1,9 +1,18 @@
 use super::*;
+use peri_middlewares::host_ports::SkillsProvider;
 use peri_middlewares::PermissionMode;
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         result.contains("Following conventions"),
         "应包含 02_system 段落"
@@ -26,7 +35,15 @@ fn test_no_overrides_contains_all_sections() {
 
 #[test]
 fn test_no_overrides_no_duplicate_tone_proactiveness() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     // "# Tone and style" 仅出现 1 次（来自 06_tone_style.md 静态段落，不来自覆盖块）
     assert_eq!(
         result.matches("# Tone and style").count(),
@@ -48,7 +65,15 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
 
 #[test]
 fn test_no_overrides_no_leading_newlines() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         !result.starts_with("\n\n"),
         "无 overrides 时提示词不应以空行开头"
@@ -67,6 +92,7 @@ fn test_with_overrides_uses_override_block() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         None,
@@ -90,6 +116,7 @@ fn test_placeholders_replaced() {
         None,
         "/custom/path",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         None,
@@ -104,6 +131,7 @@ fn test_env_contains_cwd() {
         None,
         "/custom/path",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         None,
@@ -113,7 +141,15 @@ fn test_env_contains_cwd() {
 
 #[test]
 fn test_features_none_excludes_all_gated_sections() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         !result.contains("Human-in-the-Loop"),
         "全关闭时不应包含 HITL 段落"
@@ -139,7 +175,7 @@ fn test_hitl_enabled_includes_hitl_section() {
         hitl_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(
         result.contains("Human-in-the-Loop"),
         "hitl_enabled 时应包含 HITL 段落"
@@ -152,7 +188,7 @@ fn test_subagent_enabled_includes_subagent_section() {
         subagent_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(
         result.contains("SubAgent Delegation"),
         "subagent_enabled 时应包含 SubAgent 段落"
@@ -165,7 +201,7 @@ fn test_skills_enabled_includes_skills_section() {
         skills_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(
         result.contains("# Skills"),
         "skills_enabled 时应包含 Skills 段落标题"
@@ -178,7 +214,7 @@ fn test_workflow_enabled_includes_workflow_section() {
         workflow_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(
         result.contains("Workflow Orchestration"),
         "workflow_enabled 时应包含 16_workflow 段落"
@@ -191,7 +227,7 @@ fn test_workflow_disabled_excludes_workflow_section() {
         workflow_enabled: false,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(
         !result.contains("Workflow Orchestration"),
         "workflow_enabled=false 时不应包含 16_workflow 段落（print mode 等无 executor 场景）"
@@ -234,7 +270,7 @@ fn test_all_features_enabled_includes_all() {
         channel_enabled: true,
         workflow_enabled: true,
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
     assert!(
         result.contains("SubAgent Delegation"),
@@ -293,7 +329,7 @@ fn test_detect_without_workflow_and_channel_gates() {
     let main = PromptFeatures::detect(PermissionMode::Default, true);
     assert!(main.workflow_enabled, "主 agent 的 workflow 声明保持可用");
     // 渲染面：子面向 features 渲染不出现 16_workflow / 15_channel
-    let result = build_system_prompt(None, "/tmp", sub, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", sub, &SkillsProvider, &[], None, None);
     assert!(
         !result.contains("Workflow Orchestration"),
         "子面向 prompt 不得包含 16_workflow"
@@ -308,7 +344,15 @@ fn test_detect_without_workflow_and_channel_gates() {
 
 #[test]
 fn test_boundary_marker_present() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         result.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
         "system prompt 应包含边界标记"
@@ -317,7 +361,15 @@ fn test_boundary_marker_present() {
 
 #[test]
 fn test_boundary_marker_before_dynamic_content() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     // 06_tone_style 在边界之前
     assert!(
@@ -340,7 +392,7 @@ fn test_boundary_marker_with_all_features() {
         channel_enabled: true,
         workflow_enabled: true,
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], None, None);
+    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
     // feature-gated 段落都应在边界之后
     assert!(
@@ -365,6 +417,7 @@ fn test_overrides_after_boundary_marker() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         None,
@@ -411,7 +464,15 @@ fn test_available_agents_placeholder_replaced() {
         subagent_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, dir.to_str().unwrap(), features, &[], None, None);
+    let result = build_system_prompt(
+        None,
+        dir.to_str().unwrap(),
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     // D4：catalog 只含 agent_id / tier / access，不注入自由 description
     assert!(
         result.contains("- tester [inherit] [writes]"),
@@ -438,7 +499,15 @@ fn test_available_agents_placeholder_empty_dir() {
         subagent_enabled: true,
         ..PromptFeatures::none()
     };
-    let result = build_system_prompt(None, dir.to_str().unwrap(), features, &[], None, None);
+    let result = build_system_prompt(
+        None,
+        dir.to_str().unwrap(),
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         result.contains("- explorer [haiku] [readonly]"),
         "Should contain built-in agents even without .claude/agents/ directory"
@@ -454,7 +523,15 @@ fn test_available_agents_placeholder_empty_dir() {
 fn test_available_agents_not_replaced_when_subagent_disabled() {
     let dir = tmp_dir("prompt_test_agent_disabled");
     let features = PromptFeatures::none();
-    let result = build_system_prompt(None, dir.to_str().unwrap(), features, &[], None, None);
+    let result = build_system_prompt(
+        None,
+        dir.to_str().unwrap(),
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         !result.contains("SubAgent Delegation"),
         "SubAgent section should not be included when disabled"
@@ -478,7 +555,7 @@ fn test_format_available_agents_with_agents() {
     )
     .unwrap();
 
-    let result = format_available_agents(dir.to_str().unwrap(), &[]);
+    let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[]);
     // D4：不注入 description
     assert!(
         result.contains("- reviewer [inherit] [writes]"),
@@ -509,7 +586,11 @@ fn test_format_available_agents_with_agents() {
 
 #[test]
 fn test_format_available_agents_empty_dir() {
-    let result = format_available_agents("/nonexistent/path/that/does/not/exist", &[]);
+    let result = format_available_agents(
+        &SkillsProvider,
+        "/nonexistent/path/that/does/not/exist",
+        &[],
+    );
     // Built-in agents are always available
     assert!(
         result.contains("- explorer [haiku] [readonly]"),
@@ -529,6 +610,7 @@ fn test_language_simplified_chinese_injected() {
         None,
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         Some("zh-CN"),
@@ -550,7 +632,15 @@ fn test_language_simplified_chinese_injected() {
 
 #[test]
 fn test_language_none_no_injection() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         !result.contains("\n# Language\n"),
         "language=None 时不应注入 Language 段落"
@@ -563,6 +653,7 @@ fn test_language_section_after_boundary_marker() {
         None,
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         None,
         Some("zh-CN"),
@@ -580,7 +671,15 @@ fn test_language_section_after_boundary_marker() {
 
 #[test]
 fn test_language_zh_maps_to_simplified_chinese() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, Some("zh"));
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        Some("zh"),
+    );
     assert!(
         result.contains("Simplified Chinese"),
         "zh 应映射到 Simplified Chinese"
@@ -589,7 +688,15 @@ fn test_language_zh_maps_to_simplified_chinese() {
 
 #[test]
 fn test_language_custom_code_passthrough() {
-    let result = build_system_prompt(None, "/tmp", PromptFeatures::none(), &[], None, Some("fr"));
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        Some("fr"),
+    );
     assert!(
         result.contains("Always respond in fr"),
         "未知语言代码应原样保留"
@@ -649,12 +756,14 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     no_overrides,
                     cwd,
                     *features,
+                    &SkillsProvider,
                     &[],
                     Some(frozen_date),
                     *language,
                 );
                 let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let new = PromptTemplate::new().render(&env, features, &[], *language);
+                let new =
+                    PromptTemplate::new().render(&env, features, &SkillsProvider, &[], *language);
                 assert_eq!(
                     old, new,
                     "byte mismatch: features={:?}, lang={:?}, overrides=None",
@@ -667,6 +776,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     Some(&with_overrides),
                     cwd,
                     *features,
+                    &SkillsProvider,
                     &[],
                     Some(frozen_date),
                     *language,
@@ -675,6 +785,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 let new = PromptTemplate::with_overrides(&with_overrides).render(
                     &env,
                     features,
+                    &SkillsProvider,
                     &[],
                     *language,
                 );
@@ -690,6 +801,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     Some(&empty_overrides),
                     cwd,
                     *features,
+                    &SkillsProvider,
                     &[],
                     Some(frozen_date),
                     *language,
@@ -698,6 +810,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                 let new = PromptTemplate::with_overrides(&empty_overrides).render(
                     &env,
                     features,
+                    &SkillsProvider,
                     &[],
                     *language,
                 );
@@ -718,6 +831,7 @@ fn test_template_boundary_position_identical() {
         None,
         "/tmp",
         PromptFeatures::detect(PermissionMode::Bypass, true),
+        &SkillsProvider,
         &[],
         None,
         None,
@@ -726,6 +840,7 @@ fn test_template_boundary_position_identical() {
     let new = PromptTemplate::new().render(
         &env,
         &PromptFeatures::detect(PermissionMode::Bypass, true),
+        &SkillsProvider,
         &[],
         None,
     );
@@ -758,6 +873,7 @@ fn test_render_full_mode_preserves_immutable_layers() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -798,6 +914,7 @@ fn test_render_full_mode_preserves_secret_policy() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -824,6 +941,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -850,6 +968,7 @@ fn test_render_full_mode_preserves_tool_discipline() {
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -880,6 +999,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
         Some(&full_overrides),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -888,6 +1008,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
         None,
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -920,7 +1041,15 @@ fn test_render_immutable_layer_order() {
         channel_enabled: true,
         workflow_enabled: true,
     };
-    let result = build_system_prompt(None, "/tmp", features, &[], Some("2026-01-01"), None);
+    let result = build_system_prompt(
+        None,
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
     let safety_pos = result.find("Treat secrets").unwrap(); // 02_system（SafetyAuthorization）
     let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
     let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
@@ -957,6 +1086,7 @@ fn test_render_full_mode_keeps_env() {
         Some(&overrides),
         "/custom/project",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -991,6 +1121,7 @@ fn test_render_extend_mode_unchanged() {
         Some(&overrides_none),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,
@@ -999,6 +1130,7 @@ fn test_render_extend_mode_unchanged() {
         Some(&overrides_extend),
         "/tmp",
         PromptFeatures::none(),
+        &SkillsProvider,
         &[],
         Some("2026-01-01"),
         None,

@@ -29,7 +29,7 @@ pub(crate) async fn handle_new(
 ) -> Result<(), agent_client_protocol::Error> {
     let cwd_str = req.cwd.to_string_lossy().to_string();
     let cwd_for_skills = cwd_str.clone();
-    let meta = peri_agent::thread::ThreadMeta::new(&cwd_str);
+    let meta = peri_acp_types::thread::ThreadMeta::new(&cwd_str);
     let thread_id = match ctx.thread_store.create_thread(meta).await {
         Ok(id) => id,
         Err(e) => {
@@ -46,45 +46,15 @@ pub(crate) async fn handle_new(
     let frozen_data = freeze::build(ctx, &cwd_str);
 
     // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-    let workflow_middleware = {
-        let mut compact_config = peri_agent::agent::CompactConfig::default();
-        compact_config.apply_env_overrides();
-        let (progress_tx, progress_rx) =
-            tokio::sync::mpsc::unbounded_channel::<peri_workflow::protocol::ProgressEvent>();
-        let wf_executor = crate::agent::workflow_agent::create_executor(
-            crate::agent::workflow_agent::WorkflowAgentContext {
-                provider: Arc::clone(&ctx.provider),
-                cwd: cwd_str.clone(),
-                frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
-                frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
-                frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
-                session_id: Some(sid.clone()),
-                compact_config: Some(compact_config),
-                cancel: None,
-                // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-                // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-                system_prompt: Some(frozen_data.subagent_system_prompt().to_string()),
-                broker: None,
-                permission_mode: None,
-                frozen_date: Some(frozen_data.date().to_string()),
-                frozen_language: frozen_data.language().map(|s| s.to_string()),
-                agent_pool: None,
-                langfuse_session: None,
-                thread_store: None,
-                peri_config: Some(Arc::new(ctx.peri_config.read().clone())),
-                progress_tx: Some(progress_tx),
-            },
-        );
-        let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-        Some(Arc::new(
-            peri_middlewares::workflow::WorkflowMiddleware::new(
-                wf_executor,
-                &cwd_str,
-                notification_tx,
-                Some(progress_rx),
-            ),
-        ))
-    };
+    // 构造收拢在 host/exec 执行本体（豁免至 L5），此处只持端口句柄
+    // （3.0 批 2 波 2 装配边界收口）。
+    let workflow_middleware = crate::host::exec::workflow_agent::create_session_workflow_middleware(
+        Arc::clone(&ctx.provider),
+        Arc::new(ctx.peri_config.read().clone()),
+        &cwd_str,
+        &sid,
+        &frozen_data,
+    );
 
     {
         let mut sessions = ctx.sessions.write();
@@ -118,6 +88,7 @@ pub(crate) async fn handle_new(
     );
     // Push AvailableCommandsUpdate notification
     commands::send_available_commands(
+        ctx.skills.as_ref(),
         &cwd_for_skills,
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
@@ -146,7 +117,7 @@ pub(crate) async fn handle_load(
     let frozen_data = freeze::build(ctx, &cwd);
 
     // Load history from ThreadStore via dispatch function（经 Controller 通道）
-    let history = dispatch::load_session_messages(&ctx.controller, &sid).await;
+    let history = dispatch::load_session_messages(ctx.controller.as_ref(), &sid).await;
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
     let replay_sender = StdioReplaySender { cx: cx.clone() };
@@ -195,6 +166,7 @@ pub(crate) async fn handle_load(
 
     // Scan skills for AvailableCommands notification
     commands::send_available_commands(
+        ctx.skills.as_ref(),
         &cwd_for_skills,
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
@@ -221,7 +193,7 @@ pub(crate) async fn handle_resume(
     let frozen_data = freeze::build(ctx, &cwd);
 
     // Load history from ThreadStore (deferred load — emit view-commit if any)
-    let history = dispatch::load_session_messages(&ctx.controller, &sid).await;
+    let history = dispatch::load_session_messages(ctx.controller.as_ref(), &sid).await;
 
     {
         let mut sessions = ctx.sessions.write();
@@ -289,7 +261,7 @@ pub(crate) async fn handle_fork(
 
     // Fork via dispatch function（经 Controller 通道）
     let (new_thread_id, copied_history) = match dispatch::fork_session(
-        &ctx.controller,
+        ctx.controller.as_ref(),
         &source_id,
         &source_history,
         &cwd_str,

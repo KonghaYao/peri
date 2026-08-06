@@ -3,10 +3,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::agent::events::ExecutorEvent;
+use peri_acp_types::event::ExecutorEvent;
 
-use super::super::{AgentCommand, CommandContext, CommandKind};
 use super::BgCommand;
+use crate::session::command::{AgentCommand, CommandContext, CommandKind};
 use crate::session::executor::PromptStopReason;
 
 // ── Mock EventSink ────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         auxiliary_model: None,
         event_sink: sink,
         args: args.to_string(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
@@ -66,6 +66,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 
@@ -104,7 +105,7 @@ fn make_ctx_with_provider(
         auxiliary_model: None,
         event_sink: sink,
         args: args.to_string(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
@@ -113,6 +114,7 @@ fn make_ctx_with_provider(
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 
@@ -191,7 +193,9 @@ async fn test_bg_command_missing_bg_context_gracefully_fails() {
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(result.messages.len(), 0);
 
-    // 应 emit 一条错误提示，指明缺失的字段（bg_event_sender 先被检查）
+    // 应 emit 一条错误提示，指明缺失的装配面（3.0 批 2：bg_spawner 注入面
+    // 先于 bg_event_sender/thread_store 被检查——RPC 直调缺少 executor 装配面
+    // 是 /bg 无法执行的根因）。
     let events = sink.events();
     assert_eq!(events.len(), 1, "应恰好 emit 一条错误提示");
     assert!(
@@ -200,8 +204,8 @@ async fn test_bg_command_missing_bg_context_gracefully_fails() {
         events[0].1
     );
     assert!(
-        events[0].1.contains("bg_event_sender"),
-        "错误提示应指明缺失字段 bg_event_sender，实际: {}",
+        events[0].1.contains("未配置"),
+        "错误提示应指明缺失字段，实际: {}",
         events[0].1
     );
 }
@@ -210,14 +214,14 @@ async fn test_bg_command_missing_bg_context_gracefully_fails() {
 
 #[test]
 fn test_default_registry_contains_bg() {
-    let reg = super::super::default_command_registry();
+    let reg = crate::session::command::default_command_registry();
     let names: Vec<&str> = reg.list().iter().map(|(n, _, _)| *n).collect();
     assert!(names.contains(&"bg"), "默认注册表应包含 bg 命令");
 }
 
 #[test]
 fn test_bg_command_registry_find() {
-    let reg = super::super::default_command_registry();
+    let reg = crate::session::command::default_command_registry();
 
     // 通过名称查找
     let (cmd, args) = reg.find("/bg 帮我搜索 Rust 2026 roadmap").unwrap();

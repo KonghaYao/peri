@@ -11,10 +11,8 @@
 
 use std::sync::Arc;
 
-use peri_agent::{
-    agent::events::{CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent},
-    messages::BaseMessage,
-};
+use peri_acp_types::event::{CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent};
+use peri_acp_types::messages::BaseMessage;
 
 use crate::session::event_sink::EventSink;
 
@@ -71,7 +69,7 @@ pub async fn emit_compact_completed(
     micro_cleared: usize,
     messages: Vec<BaseMessage>,
     strategy: CompactStrategy,
-    outcome: peri_agent::agent::compact_v2::CompactOutcome,
+    outcome: peri_acp_types::compact::CompactOutcome,
     estimated_tokens_saved: u64,
     affected_count: usize,
 ) {

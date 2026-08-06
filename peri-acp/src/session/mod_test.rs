@@ -75,7 +75,12 @@ fn make_manager_with_cron_option(
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
-        cron_scheduler,
+        cron_scheduler.map(|s| {
+            Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
+                as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
+        }),
+        None, // 无 bg 场景：fallback NoopTaskManager
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
     )
 }
 
@@ -242,7 +247,7 @@ async fn test_cron_bridge_survives_turn_error() {
     assert_eq!(drained.len(), 1, "turn Error 后 cron 触发不得丢失");
     assert_eq!(
         drained[0].source,
-        peri_agent::session::MessageSource::CronTrigger
+        peri_acp_types::session::MessageSource::CronTrigger
     );
 
     // 清理：close_session → bridge drop → abort（幂等，无 panic）
@@ -280,7 +285,7 @@ async fn test_cron_bridge_idle_trigger_queued_not_dropped() {
     let drained = inbox.queue().drain_all();
     assert_eq!(
         drained[0].source,
-        peri_agent::session::MessageSource::CronTrigger
+        peri_acp_types::session::MessageSource::CronTrigger
     );
 
     mgr.close_session(session_id).await.unwrap();

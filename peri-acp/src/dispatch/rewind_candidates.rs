@@ -8,7 +8,7 @@
 //! 注意：Bypass 模式下首轮 user 消息末尾会被追加 `<system-reminder>` 权限通知，
 //! 不能直接 `contains` 过滤，否则会连带排除用户真实输入（rewind 候选为空）。
 
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::messages::BaseMessage;
 use serde_json::{json, Value};
 
 use crate::transport::types::AcpError;

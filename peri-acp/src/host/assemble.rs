@@ -10,13 +10,12 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use peri_agent::thread::ThreadStore;
-use peri_middlewares::cron::CronScheduler;
-use peri_middlewares::hooks::RegisteredHook;
-use peri_middlewares::mcp::McpClientPool;
-use peri_middlewares::plugin::PluginLoadResult;
-use peri_middlewares::prelude::SharedPermissionMode;
-use peri_middlewares::tool_search::ToolSearchIndex;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::store::ThreadStore;
 
 use crate::provider::{config_path, LlmProvider, PeriConfig};
 use crate::session::SessionManager;
@@ -28,8 +27,18 @@ pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
-    pub mcp_pool: Option<Arc<McpClientPool>>,
+    pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// 工具检索索引端口（宿主装配点构造 `ToolSearchIndex` 后 upcast 注入；
+    /// ACP 侧不直接 new 资源类）。
+    pub tool_search_index: Arc<dyn ToolSearchPort>,
+    /// Skills 扫描端口（宿主装配点构造 `SkillsProvider` 后注入；命令面
+    /// available-commands / agents 扫描经此访问，ACP 侧不直调业务面）。
+    pub skills: Arc<dyn SkillsPort>,
+    /// 插件管理端口（plugin/install 等命令面经此访问；实现留在实现方）。
+    pub plugin_manager: Arc<dyn PluginManagerPort>,
+    /// Settings hooks 加载端口（global/project/local 三级；装配面只做组序组合）。
+    pub settings_hooks: Arc<dyn SettingsHooksPort>,
     pub thread_store: Arc<dyn ThreadStore>,
     /// 工作目录（用于加载 project/local settings hooks）
     pub cwd: String,
@@ -43,9 +52,11 @@ pub struct HostAssemblyInput {
 /// TUI/print/stdio 三处一致的既有顺序，ARC-MIDDLEWARE-001 不重排）。
 ///
 /// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
-/// 一致）；plugin hooks 为空时不产生空组。
+/// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
+/// [`SettingsHooksPort`] 注入（装配点构造，磁盘加载留在实现方）。
 pub fn assemble_hook_groups(
     plugin_hooks: &[RegisteredHook],
+    settings_hooks: &dyn SettingsHooksPort,
     cwd: &str,
     skip_settings_hooks: bool,
 ) -> Vec<Vec<RegisteredHook>> {
@@ -56,15 +67,15 @@ pub fn assemble_hook_groups(
     if skip_settings_hooks {
         return hook_groups;
     }
-    let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
+    let global_hooks = settings_hooks.global();
     if !global_hooks.is_empty() {
         hook_groups.push(global_hooks);
     }
-    let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(cwd);
+    let project_hooks = settings_hooks.project(cwd);
     if !project_hooks.is_empty() {
         hook_groups.push(project_hooks);
     }
-    let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(cwd);
+    let local_hooks = settings_hooks.local(cwd);
     if !local_hooks.is_empty() {
         hook_groups.push(local_hooks);
     }
@@ -80,7 +91,8 @@ pub fn build_session_manager(
     provider: LlmProvider,
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: Arc<SharedPermissionMode>,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
+    cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    skills: Arc<dyn SkillsPort>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
     SessionManager::new(
@@ -90,6 +102,14 @@ pub fn build_session_manager(
         permission_mode,
         None,
         cron_scheduler,
+        // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
+        // 聚合：registry + bg shell 执行），由本装配点构造后注入（全路径引用）；
+        // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
+        Some(Arc::new(|| {
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+        skills,
     )
 }
 
@@ -104,6 +124,10 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         permission_mode,
         cron_scheduler,
         mcp_pool,
+        tool_search_index,
+        skills,
+        plugin_manager,
+        settings_hooks,
         thread_store,
         cwd,
         plugin_data,
@@ -131,7 +155,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         .map(|pd| pd.plugins.clone())
         .unwrap_or_default();
 
-    let hook_groups = assemble_hook_groups(&plugin_hooks, &cwd, bare);
+    let hook_groups = assemble_hook_groups(&plugin_hooks, settings_hooks.as_ref(), &cwd, bare);
     let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
     tracing::info!(
         groups = hook_groups.len(),
@@ -139,7 +163,6 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         "Hook groups assembled for ACP host"
     );
 
-    let tool_search_index = Arc::new(ToolSearchIndex::new());
     let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
     let session_manager = build_session_manager(
@@ -148,6 +171,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         &peri_config,
         permission_mode.clone(),
         cron_scheduler.clone(),
+        skills.clone(),
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
@@ -175,9 +199,12 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         hook_groups,
         plugin_lsp_servers,
         tool_search_index,
+        skills,
+        plugin_manager,
+        settings_hooks,
         shared_tools,
         thread_store: thread_store.clone(),
-        controller: peri_controller::Controller::new(thread_store.clone()),
+        controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,
         config_path: config_path(),
         session_manager,

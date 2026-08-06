@@ -9,12 +9,14 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::{async_tasks::TaskManager, events::ExecutorEvent, AgentCancellationToken},
+use peri_acp_types::{
+    event::ExecutorEvent,
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
-    thread::{FilesystemThreadStore, ThreadStore},
+    store::ThreadStore,
 };
+use peri_agent::{agent::async_tasks::TaskManager, thread::FilesystemThreadStore};
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{
     intercept_immediate_command, is_keepgoing, mark_permission_mode_notified,
@@ -26,6 +28,7 @@ use crate::{
     session::{agent_pool::AgentPool, event_sink::EventSink},
 };
 use peri_middlewares::{
+    host_ports::SkillsProvider,
     prelude::{PermissionMode, SharedPermissionMode},
     tool_search::ToolSearchIndex,
 };
@@ -112,7 +115,7 @@ fn make_intercept_request<'a>(
     peri_config: &'a Arc<PeriConfig>,
     event_sink: &'a Arc<dyn EventSink>,
     bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    task_manager: &'a Arc<TaskManager>,
+    task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
 ) -> InterceptRequest<'a> {
     InterceptRequest {
         content,
@@ -134,10 +137,10 @@ fn make_intercept_request<'a>(
 /// 构造共享的 bg registry + bg channel（拦截测试不实际触发 bg，但需要传入句柄）。
 fn make_bg_infra() -> (
     tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    Arc<TaskManager>,
+    Arc<dyn peri_acp_types::tasks::TaskManager>,
 ) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(TaskManager::new());
+    let registry = Arc::new(TaskManager::new()) as Arc<dyn peri_acp_types::tasks::TaskManager>;
     (tx, registry)
 }
 
@@ -174,7 +177,14 @@ fn make_session_context(session_id: &str) -> SessionContext {
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         lsp_servers: vec![],
         workflow_executor: None,
+        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
         workflow_middleware: None,
+        controller: Arc::new(peri_controller::Controller::new(Arc::new(
+            peri_agent::thread::FilesystemThreadStore::new(
+                std::env::temp_dir().join(format!("peri-exec-test-{}", uuid::Uuid::new_v4())),
+            ),
+        )
+            as Arc<dyn ThreadStore>)),
         session_start_source: None,
         request_id: None,
         allow_await_wake: false,
@@ -687,6 +697,8 @@ async fn make_session_context_with_manager(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
+        None, // 无 bg 场景：fallback NoopTaskManager
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
     );
     sm.new_session_with_id(session_id, "/tmp")
         .await
@@ -881,7 +893,9 @@ fn test_frozen_session_data_build_is_deterministic() {
         frozen_date,
         PermissionMode::Bypass,
         true,
+        &SkillsProvider,
     );
+
     let b = FrozenSessionData::build(
         cwd,
         None,
@@ -890,7 +904,9 @@ fn test_frozen_session_data_build_is_deterministic() {
         frozen_date,
         PermissionMode::Bypass,
         true,
+        &SkillsProvider,
     );
+
     assert_eq!(
         a.system_prompt(),
         b.system_prompt(),
@@ -930,7 +946,9 @@ fn test_frozen_system_prompt_immune_to_disk_changes() {
         "2026-01-01",
         PermissionMode::Bypass,
         true,
+        &SkillsProvider,
     );
+
     let frozen_prompt = frozen.system_prompt().to_string();
     let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
     assert!(
@@ -982,7 +1000,9 @@ fn test_frozen_prompt_workflow_section_gated_by_workflow_enabled() {
         frozen_date,
         PermissionMode::Bypass,
         true,
+        &SkillsProvider,
     );
+
     assert!(
         enabled.system_prompt().contains("Workflow Orchestration"),
         "workflow_enabled=true 时 16_workflow section 应渲染"
@@ -996,7 +1016,9 @@ fn test_frozen_prompt_workflow_section_gated_by_workflow_enabled() {
         frozen_date,
         PermissionMode::Bypass,
         false,
+        &SkillsProvider,
     );
+
     assert!(
         !disabled.system_prompt().contains("Workflow Orchestration"),
         "workflow_enabled=false（print mode）时 16_workflow section 不应渲染"
@@ -1029,7 +1051,9 @@ fn test_frozen_subagent_prompt_never_claims_workflow() {
         frozen_date,
         PermissionMode::Bypass,
         true,
+        &SkillsProvider,
     );
+
     assert!(
         enabled.system_prompt().contains("Workflow Orchestration"),
         "主链 workflow 可用时主 prompt 应声明（主 ACP/stdio 仍可用）"
@@ -1050,7 +1074,9 @@ fn test_frozen_subagent_prompt_never_claims_workflow() {
         frozen_date,
         PermissionMode::Bypass,
         false,
+        &SkillsProvider,
     );
+
     assert!(
         !disabled.system_prompt().contains("Workflow Orchestration"),
         "print mode 主 prompt 不应声明 Workflow"

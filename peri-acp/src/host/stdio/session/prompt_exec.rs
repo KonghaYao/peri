@@ -7,8 +7,9 @@ use agent_client_protocol::{
     schema::v1::{PromptResponse, SessionId, SessionInfoUpdate, SessionUpdate, StopReason},
     Client, ConnectionTo, Responder,
 };
+use peri_acp_types::messages::MessageContent;
 use peri_acp_types::PeriCaps;
-use peri_agent::{agent::AgentCancellationToken, messages::MessageContent};
+use tokio_util::sync::CancellationToken;
 
 use super::super::context::StdioContext;
 
@@ -21,10 +22,10 @@ pub(crate) struct PromptExecParams {
     pub agent_cwd: String,
     pub content: MessageContent,
     pub frozen: Option<executor::FrozenSessionData>,
-    pub history: Vec<peri_agent::messages::BaseMessage>,
+    pub history: Vec<peri_acp_types::messages::BaseMessage>,
     pub session_start_source: Option<String>,
     pub history_len: usize,
-    pub cancel: AgentCancellationToken,
+    pub cancel: CancellationToken,
     pub pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
     pub thread_id: String,
     pub responder: Responder<PromptResponse>,
@@ -51,7 +52,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         peri_caps,
     } = params;
 
-    let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> =
+    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
         Arc::new(super::super::context::StdioBroker::new());
 
     let event_sink = Arc::new(StdioEventSink::new(
@@ -107,6 +108,8 @@ pub(crate) async fn run(params: PromptExecParams) {
             thread_store: None,
             peri_config: Some(peri_config_snapshot.clone()),
             progress_tx: None,
+            subagent_ctx_builder: None,
+            controller: Some(Arc::clone(&ctx.controller)),
         },
     );
 
@@ -137,6 +140,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         mcp_pool: ctx.mcp_pool.clone(),
         channel_state: ctx.channel_state.clone(),
         tool_search_index: ctx.tool_search_index.clone(),
+        skills: ctx.skills.clone(),
         shared_tools: ctx.shared_tools.clone(),
         lsp_servers: ctx.plugin_lsp_servers.clone(),
         pool: pool.clone(),
@@ -145,6 +149,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         session_manager: Some(ctx.session_manager.clone()),
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
+        controller: Arc::clone(&ctx.controller),
         session_start_source,
         request_id: None, // stdio 无 requestId 配对（TUI 专用）
         allow_await_wake: false,
@@ -160,7 +165,20 @@ pub(crate) async fn run(params: PromptExecParams) {
         bg_results: vec![], // stdio 无后台任务
         langfuse_session: ctx.langfuse_session.clone(),
     };
-    let result = executor::run_session_loop(cx, turn).await;
+
+    // 3.0 批 2：执行发起经 Controller（控制面第四步 run Session）。
+    // 本轮执行句柄（PromptHandle）注册进 Runtime 映射 → run_session 发起 →
+    // 返回时结果已就绪 → take_result。
+    let handle = Arc::new(crate::host::exec::prompt_handle::PromptHandle::new(
+        cx, turn,
+    ));
+    ctx.controller.register_session(&sid, Arc::clone(&handle));
+    if let Err(e) = ctx.controller.run_session(&sid).await {
+        tracing::error!(session_id = %sid, error = %e, "run_session failed");
+        let _ = responder.respond(PromptResponse::new(StopReason::Cancelled));
+        return;
+    }
+    let result = handle.take_result();
 
     // Restore AgentPool back into session
     if let Ok(mutex) = Arc::try_unwrap(pool) {

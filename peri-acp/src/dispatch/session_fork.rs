@@ -3,8 +3,8 @@
 //! 存储访问经 [`Controller::sessions`]（ARC-BOUNDARY-001 方向）。
 
 use anyhow::{Context, Result};
-use peri_agent::messages::BaseMessage;
-use peri_agent::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_controller::Controller;
 
 /// Fork a session by creating a new thread and copying source messages.

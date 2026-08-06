@@ -1,12 +1,12 @@
 //! Tests for async_router
 
 use super::*;
-use peri_agent::agent::async_tasks::BgTaskKind;
-use peri_agent::agent::session::inbox::SessionInbox;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::tasks::BgTaskKind;
 use std::sync::Arc;
 
 fn make_inbox() -> (SessionInbox, InboxHandle) {
-    let queue = Arc::new(peri_agent::session::MessageQueue::new());
+    let queue = Arc::new(peri_acp_types::session::MessageQueue::new());
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
     (inbox, handle)

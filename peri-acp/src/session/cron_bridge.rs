@@ -1,4 +1,4 @@
-//! Session-scoped cron bridge: CronScheduler → CronOwner → session inbox.
+//! Session-scoped cron bridge: CronSchedulerPort → CronOwner → session inbox.
 //!
 //! Lives exactly as long as its owning [`crate::session::AcpSession`]: created
 //! lazily on the first turn of a session, dropped (task aborted) when the
@@ -6,10 +6,9 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use peri_agent::agent::session::cron_owner::CronOwner;
-use peri_agent::agent::session::inbox::InboxHandle;
-use peri_middlewares::cron::CronScheduler;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::session::CronOwner;
+use peri_acp_types::session::InboxHandle;
 use tokio_util::sync::CancellationToken;
 
 pub struct SessionCronBridge {
@@ -27,8 +26,8 @@ impl SessionCronBridge {
     /// `UnboundedReceiver<String>`（cron_owner.rs:87-91），而
     /// `subscribe()` 返回 `UnboundedReceiver<CronTrigger>`（cron/mod.rs:71-75）。
     /// 结构照搬 builder.rs:925-951。
-    pub fn start(scheduler: &Mutex<CronScheduler>, inbox: InboxHandle) -> Self {
-        let mut trigger_rx = { scheduler.lock().subscribe() }; // UnboundedReceiver<CronTrigger>
+    pub fn start(scheduler: &Arc<dyn CronSchedulerPort>, inbox: InboxHandle) -> Self {
+        let mut trigger_rx = scheduler.subscribe(); // UnboundedReceiver<CronTrigger>
         let shutdown = CancellationToken::new();
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown_clone = shutdown.clone();

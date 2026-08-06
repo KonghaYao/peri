@@ -1,6 +1,6 @@
 //! dispatch/rewind_candidates 单元测试。
 
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::messages::BaseMessage;
 
 use super::rewind_candidates;
 

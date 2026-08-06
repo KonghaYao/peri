@@ -14,12 +14,12 @@
 //! Both use `Defer` semantics: consumed by `drain_all` during the Receive stage
 //! (RCRA), or detectable by `drain_for_end` for external callers.
 
-use peri_agent::agent::async_tasks::BgTaskKind;
-use peri_agent::agent::events::BackgroundTaskResult;
-use peri_agent::agent::session::inbox::InboxHandle;
-use peri_agent::messages::{BaseMessage, MessageContent};
-use peri_agent::session::MessageSource;
-use peri_workflow::progress::PhaseSummary;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::messages::{BaseMessage, MessageContent};
+use peri_acp_types::session::InboxHandle;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::workflow::PhaseSummary;
 use tracing::debug;
 
 /// Routes async results (bg SubAgent completion, workflow events) into the Session inbox.

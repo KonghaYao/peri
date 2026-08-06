@@ -3,8 +3,8 @@
 //! 存储访问经 [`Controller::sessions`]（ARC-BOUNDARY-001 方向：ACP 不直操
 //! `ThreadStore`，统一经 Controller 通道）。
 
-use peri_agent::messages::BaseMessage;
-use peri_agent::thread::ThreadId;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::thread::ThreadId;
 use peri_controller::Controller;
 
 /// Load complete context for a session thread including ancestor snapshots.

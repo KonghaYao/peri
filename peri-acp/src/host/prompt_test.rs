@@ -1,5 +1,7 @@
 use super::*;
 
+use peri_acp_types::messages::BaseMessage;
+
 /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
 #[test]
 fn test_strip_leaked_prepends_有历史时剥离头部system消息() {

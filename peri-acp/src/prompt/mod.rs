@@ -6,7 +6,9 @@
 //! Sections are loaded from `prompts/sections/` directory using
 //! `include_str!` with paths relative to the peri-acp crate root.
 
-use peri_middlewares::{AgentOverrides, PermissionMode};
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::ports::SkillsPort;
 
 /// 控制 Feature-gated 提示词段落的注入。
 ///
@@ -375,6 +377,7 @@ impl PromptTemplate {
         &self,
         env: &PromptEnv,
         features: &PromptFeatures,
+        skills: &dyn SkillsPort,
         extra_agent_dirs: &[std::path::PathBuf],
         language: Option<&str>,
     ) -> String {
@@ -440,7 +443,7 @@ impl PromptTemplate {
             .replace("{{date}}", &env.date)
             .replace(
                 "{{available_agents}}",
-                &format_available_agents(&env.cwd, extra_agent_dirs),
+                &format_available_agents(skills, &env.cwd, extra_agent_dirs),
             )
     }
 }
@@ -463,8 +466,14 @@ impl Default for PromptTemplate {
 /// **不注入自由 description**：description 是仓库本地元数据（可能来自被 clone
 /// 的第三方仓库），只作为检索判断依据；完整职责说明由 Agent 工具传入。
 /// 无 agent 时返回提示信息。
-fn format_available_agents(cwd: &str, extra_agent_dirs: &[std::path::PathBuf]) -> String {
-    let agents = peri_middlewares::scan_agents_detailed(cwd, extra_agent_dirs);
+///
+/// agents 扫描经注入的 [`SkillsPort`]（§0 依赖方向；ACP 侧不直调业务 crate）。
+fn format_available_agents(
+    skills: &dyn SkillsPort,
+    cwd: &str,
+    extra_agent_dirs: &[std::path::PathBuf],
+) -> String {
+    let agents = skills.agents(cwd, extra_agent_dirs);
     if agents.is_empty() {
         return "No agents currently configured. You can add agent definitions in `.claude/agents/`.".to_string();
     }
@@ -491,6 +500,7 @@ pub fn build_system_prompt(
     overrides: Option<&AgentOverrides>,
     cwd: &str,
     features: PromptFeatures,
+    skills: &dyn SkillsPort,
     extra_agent_dirs: &[std::path::PathBuf],
     frozen_date: Option<&str>,
     language: Option<&str>,
@@ -501,7 +511,7 @@ pub fn build_system_prompt(
     } else {
         PromptEnv::detect(cwd)
     };
-    template.render(&env, &features, extra_agent_dirs, language)
+    template.render(&env, &features, skills, extra_agent_dirs, language)
 }
 
 /// 将 `AgentOverrides` 拼成注入到提示词顶部的覆盖块。

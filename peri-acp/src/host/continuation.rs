@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
-use peri_agent::agent::async_tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::info;

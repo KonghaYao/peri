@@ -7,8 +7,8 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::messages::MessageId;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::MessageId;
 
 use crate::session::event_sink::EventSink;
 
@@ -19,20 +19,6 @@ pub async fn emit_bg_usage_hint(sink: &Arc<dyn EventSink>, session_id: &str) {
         &ExecutorEvent::TextChunk {
             message_id: MessageId::new(),
             chunk: "用法: /bg <任务描述>\n".into(),
-            source_agent_id: None,
-        },
-        0,
-    )
-    .await;
-}
-
-/// 发出 LLM 构造失败的错误提示。
-pub async fn emit_bg_llm_error(sink: &Arc<dyn EventSink>, session_id: &str) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::TextChunk {
-            message_id: MessageId::new(),
-            chunk: "✗ 后台任务启动失败: 无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）\n".into(),
             source_agent_id: None,
         },
         0,

@@ -10,12 +10,13 @@ pub(crate) async fn handle_list(
     req: ListSessionsRequest,
 ) -> ListSessionsResponse {
     let cwd_filter = req.cwd.as_ref().map(|p| p.to_string_lossy().to_string());
-    let entries = crate::dispatch::list_sessions_as_info(&ctx.controller, cwd_filter.as_deref())
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "session/list: failed to list threads");
-            Vec::new()
-        });
+    let entries =
+        crate::dispatch::list_sessions_as_info(ctx.controller.as_ref(), cwd_filter.as_deref())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "session/list: failed to list threads");
+                Vec::new()
+            });
     ListSessionsResponse::new(entries)
 }
 

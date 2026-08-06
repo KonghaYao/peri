@@ -2,22 +2,27 @@
 //!
 //! [`AcpEvent`] is the DTO that replaces raw `ExecutorEvent` serialization on the
 //! `peri/agent_event` channel. It contains only the fields that TUI consumers need,
-//! avoiding a direct `peri_agent::agent::events::ExecutorEvent` dependency in the TUI.
+//! avoiding a direct `ExecutorEvent` dependency in the TUI.
 
-pub mod forwarder;
 #[cfg(test)]
 mod forwarder_test;
 pub mod mapper;
 
-pub(crate) use forwarder::spawn_eventbus_forwarder;
+pub(crate) use crate::host::exec::forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};
 pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
 };
-// v1 兼容映射（v2 → ExecutorEvent）统一由 peri_agent::agent::events_v2 提供
-// （`2026-07-18-events-v2-mapper-removal.md`：events_v2_mapper 模块已退役）。
-pub use peri_agent::agent::events_v2::{
+// v1 兼容映射（v2 → ExecutorEvent）保留在 ACP 协议面
+// `peri_acp_types::event_v2`（`2026-07-18-events-v2-mapper-removal.md`：
+// events_v2_mapper 模块已退役；3.0 M-event-chain：发射点在 Agent 层
+// EventBus，ACP 消费侧经 `Controller::publish_event` 统一发射
+// （Controller → Runtime 补打身份 → 弹出队列 + 订阅广播），
+// 协议化消费经 `Controller::subscribe` / `pop_events` 订阅——事件
+// 三层化的统一出口在 Controller，见 `host/exec/forwarder.rs` 与
+// `host/exec/executor_helpers.rs::spawn_event_pump`）。
+pub use peri_acp_types::event_v2::{
     observe_event_to_executor, render_event_to_executor, state_event_to_executor,
 };
 

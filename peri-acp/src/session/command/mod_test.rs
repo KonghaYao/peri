@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
 
 use super::clear::ClearCommand;
 use super::{AgentCommand, CommandContext, CommandKind, CommandRegistry, CommandResult};
@@ -110,7 +110,7 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         auxiliary_model: None,
         event_sink: sink,
         args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
@@ -119,6 +119,7 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 
@@ -371,7 +372,7 @@ async fn test_clear_command_ignores_existing_history() {
         auxiliary_model: None,
         event_sink: sink.clone(),
         args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
@@ -380,6 +381,7 @@ async fn test_clear_command_ignores_existing_history() {
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     };
     let cmd = ClearCommand;
 

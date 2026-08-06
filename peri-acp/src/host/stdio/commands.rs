@@ -4,40 +4,29 @@ use agent_client_protocol::{
     schema::v1::{AvailableCommandsUpdate, SessionId, SessionNotification, SessionUpdate},
     Client, ConnectionTo,
 };
+use peri_acp_types::ports::SkillsPort;
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::PeriCaps;
 
 /// 扫描 skill 目录并发送 AvailableCommandsUpdate 通知。
+///
+/// skills 扫描经注入的 [`SkillsPort`]（宿主装配点构造实现后注入，
+/// §0 依赖方向）；ACP 协议面不直调业务 crate。
 pub(super) fn send_available_commands(
+    skills_port: &dyn SkillsPort,
     cwd: &str,
-    plugin_skill_roots: &[peri_middlewares::skills::SkillRoot],
+    plugin_skill_roots: &[SkillRoot],
     session_id: &SessionId,
     cx: &ConnectionTo<Client>,
     caps: &PeriCaps,
 ) {
-    let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-    tracing::info!(
-        target: "acp_stdio.commands",
-        disable_bundled,
-        plugin_roots_count = plugin_skill_roots.len(),
-        "send_available_commands: 开始扫描 skills"
-    );
-    let skill_roots = peri_middlewares::SkillsMiddleware::resolve_roots_static(
-        cwd,
-        plugin_skill_roots.to_vec(),
-        disable_bundled, // Stdio 侧仅用于显示
-    );
-    tracing::info!(
-        target: "acp_stdio.commands",
-        total_roots = skill_roots.len(),
-        "send_available_commands: resolve_roots_static 完成"
-    );
-    let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
+    let skills = skills_port.available_skills(cwd, plugin_skill_roots);
     let skill_names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
     tracing::info!(
         target: "acp_stdio.commands",
         skills_count = skills.len(),
         ?skill_names,
-        "send_available_commands: scan_skill_roots 完成"
+        "send_available_commands: scan skill roots 完成"
     );
     let cmds = crate::dispatch::build_available_commands(&skills);
     tracing::info!(

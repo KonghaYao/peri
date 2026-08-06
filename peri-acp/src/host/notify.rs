@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
 use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::PeriCaps;
-use peri_agent::agent::async_tasks::BgTaskKind;
-use peri_agent::session::MessageSource;
-use peri_middlewares::skills::SkillMetadata;
 use serde_json::Value;
 use tracing::{debug, info};
 

@@ -11,8 +11,8 @@ pub use agent_client_protocol::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::ExecutorEvent;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -437,7 +437,7 @@ impl EventSink for StdioEventSink {
 mod tests {
     use super::*;
     use crate::transport::types::{AcpError, IncomingMessage, RequestId};
-    use peri_agent::messages::{BaseMessage, MessageContent, MessageId};
+    use peri_acp_types::messages::{BaseMessage, MessageContent, MessageId};
     use serde_json::Value;
     use std::sync::Mutex;
 

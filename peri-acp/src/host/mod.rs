@@ -23,15 +23,22 @@ pub use crate::session::state_builders::{
     parse_permission_mode,
 };
 use crate::transport::types::{AcpError, IncomingMessage};
-use peri_agent::{agent::AgentCancellationToken, interaction::ChannelState, messages::BaseMessage};
-use peri_middlewares::prelude::*;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::hooks::SettingsHooksPort;
+use peri_acp_types::interaction::ChannelState;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::plugin::PluginManagerPort;
+use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::provider::{LlmProvider, PeriConfig};
 use peri_acp_types::event_data::PredictionAction;
 
 pub mod assemble;
 mod continuation;
+pub mod exec;
 pub mod lease;
 mod notify;
 mod prompt;
@@ -51,7 +58,7 @@ pub(crate) struct SessionState {
     thread_id: String,
     cwd: String,
     pub(crate) history: Vec<BaseMessage>,
-    cancel_token: Option<AgentCancellationToken>,
+    cancel_token: Option<CancellationToken>,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).
@@ -59,7 +66,7 @@ pub(crate) struct SessionState {
     /// Session-scoped agent component pool for reusing heavy objects across prompts.
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
-    pub(crate) workflow_middleware: Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>>,
+    pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,
@@ -92,22 +99,29 @@ pub struct AcpServerConfig {
     pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub cron_scheduler: Option<Arc<parking_lot::Mutex<CronScheduler>>>,
-    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
     pub channel_state: Option<Arc<ChannelState>>,
-    pub plugin_skill_roots: Vec<peri_middlewares::skills::SkillRoot>,
+    pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
-    pub plugin_hooks: Vec<peri_middlewares::hooks::RegisteredHook>,
-    pub plugin_loaded: Vec<peri_middlewares::plugin::LoadedPlugin>,
-    pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
-    pub plugin_lsp_servers: Vec<peri_lsp::config::LspServerConfig>,
-    pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
+    pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+    pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
+    pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
+    pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
+    pub tool_search_index: Arc<dyn ToolSearchPort>,
+    /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
+    pub skills: Arc<dyn SkillsPort>,
+    /// 插件管理端口（plugin/* 命令面经此访问）。
+    pub plugin_manager: Arc<dyn PluginManagerPort>,
+    /// Settings hooks 加载端口（hook 组装配经此访问）。
+    pub settings_hooks: Arc<dyn SettingsHooksPort>,
     pub shared_tools:
         Arc<parking_lot::RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
-    pub thread_store: Arc<dyn peri_agent::thread::ThreadStore>,
+    pub thread_store: Arc<dyn peri_acp_types::store::ThreadStore>,
     /// Controller 层宿主：dispatch 存储操作（load/list/fork/execute-command/rewind）
-    /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）。
-    pub controller: peri_controller::Controller,
+    /// 经此访问持久化存储（ARC-BOUNDARY-001 方向，不再直操 `thread_store`）；
+    /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。
+    pub controller: Arc<peri_controller::Controller>,
     pub langfuse_session: Option<Arc<peri_controller::langfuse::LangfuseSession>>,
     pub config_path: std::path::PathBuf,
     /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
@@ -286,7 +300,7 @@ pub(crate) async fn dispatch_prompt_turn(
                     .get_session(&prompt_session_id)
                     .map(|session| {
                         session.v2_message_queue.has_pending_defer(
-                            &peri_agent::session::MessageSource::SubAgentComplete,
+                            &peri_acp_types::session::MessageSource::SubAgentComplete,
                         )
                     })
                     .unwrap_or(false);
@@ -336,10 +350,12 @@ pub(crate) async fn dispatch_prompt_turn(
         cfg.mcp_pool.clone(),
         cfg.channel_state.clone(),
         cfg.tool_search_index.clone(),
+        cfg.skills.clone(),
         cfg.shared_tools.clone(),
         &cfg.plugin_lsp_servers,
         transport,
         &cfg.thread_store,
+        &cfg.controller,
         cfg.langfuse_session.clone(),
         pool_arc.clone(),
         cfg.session_manager.clone(),

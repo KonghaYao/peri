@@ -251,7 +251,7 @@ fn test_fingerprint_no_effort_distinct() {
 /// 同一 observer（模拟缓存命中的池化模型）收到 turn 2 事件。
 #[test]
 fn test_retry_events_forwarder_survives_across_turns() {
-    use peri_agent::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
+    use peri_acp_types::event::{AgentEventHandler, ExecutorEvent, FnEventHandler};
     use std::sync::Mutex;
 
     fn capturing_handler(captured: &Arc<Mutex<Vec<String>>>) -> Arc<dyn AgentEventHandler> {

@@ -15,8 +15,9 @@ use agent_client_protocol::schema::v1::{
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
+use peri_acp_types::ports::WorkflowMiddlewarePort;
+use peri_acp_types::thread::ThreadMeta;
 use peri_acp_types::PeriCaps;
-use peri_agent::thread::ThreadMeta;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -34,50 +35,23 @@ fn persist_config(cfg: &AcpServerConfig) {
     }
 }
 
-/// 创建 session 级 WorkflowMiddleware。
+/// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
+///
+/// 构造收拢在 host/exec 执行本体（豁免至 L5），命令面只持
+/// `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2 波 2 装配边界收口）。
 fn create_session_workflow_middleware(
     cfg: &AcpServerConfig,
     cwd: &str,
     session_id: &str,
     frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Option<Arc<peri_middlewares::workflow::WorkflowMiddleware>> {
-    let mut compact_config = peri_agent::agent::CompactConfig::default();
-    compact_config.apply_env_overrides();
-    let (progress_tx, progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<peri_workflow::protocol::ProgressEvent>();
-    let wf_executor = crate::agent::workflow_agent::create_executor(
-        crate::agent::workflow_agent::WorkflowAgentContext {
-            provider: Arc::clone(&cfg.provider),
-            cwd: cwd.to_string(),
-            frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
-            frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
-            frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
-            session_id: Some(session_id.to_string()),
-            compact_config: Some(compact_config),
-            cancel: None,
-            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            system_prompt: Some(frozen_data.subagent_system_prompt().to_string()),
-            broker: None,
-            permission_mode: None,
-            frozen_date: Some(frozen_data.date().to_string()),
-            frozen_language: frozen_data.language().map(|s| s.to_string()),
-            agent_pool: None,
-            langfuse_session: None,
-            thread_store: None,
-            peri_config: Some(Arc::new(cfg.peri_config.read().clone())),
-            progress_tx: Some(progress_tx),
-        },
-    );
-    let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-    Some(Arc::new(
-        peri_middlewares::workflow::WorkflowMiddleware::new(
-            wf_executor,
-            cwd,
-            notification_tx,
-            Some(progress_rx),
-        ),
-    ))
+) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
+    crate::host::exec::workflow_agent::create_session_workflow_middleware(
+        Arc::clone(&cfg.provider),
+        Arc::new(cfg.peri_config.read().clone()),
+        cwd,
+        session_id,
+        frozen_data,
+    )
 }
 
 pub(crate) async fn handle_request(
@@ -173,13 +147,7 @@ pub(crate) async fn handle_request(
                 .modes(modes)
                 .config_options(config_options);
             // Scan skills for AvailableCommands
-            let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-            let skill_roots = peri_middlewares::SkillsMiddleware::resolve_roots_static(
-                &cwd,
-                cfg.plugin_skill_roots.clone(),
-                disable_bundled, // TUI 侧仅用于显示
-            );
-            let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
+            let skills = cfg.skills.available_skills(&cwd, &cfg.plugin_skill_roots);
 
             // 将暂存的 peri caps 关联到新 session。
             // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
@@ -299,7 +267,8 @@ pub(crate) async fn handle_request(
             let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
             // Load history from ThreadStore via Controller
-            let history = dispatch::load_session_messages(&cfg.controller, req_session_id).await;
+            let history =
+                dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
             // ── 先构建 frozen + workflow_middleware，再插入 session ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
@@ -380,13 +349,7 @@ pub(crate) async fn handle_request(
                 .modes(modes)
                 .config_options(config_options);
             // Scan skills for AvailableCommands (same as session/new)
-            let disable_bundled = peri_middlewares::skills::load_disable_bundled_skills();
-            let skill_roots = peri_middlewares::SkillsMiddleware::resolve_roots_static(
-                cwd,
-                cfg.plugin_skill_roots.clone(),
-                disable_bundled, // TUI 侧仅用于显示
-            );
-            let skills = peri_middlewares::skills::scan_skill_roots(&skill_roots);
+            let skills = cfg.skills.available_skills(cwd, &cfg.plugin_skill_roots);
             send_available_commands_update(transport.as_ref(), req_session_id, &skills, &caps)
                 .await;
             serde_json::to_value(resp)
@@ -395,7 +358,7 @@ pub(crate) async fn handle_request(
 
         "session/list" => {
             let cwd_filter = params.get("cwd").and_then(|v| v.as_str());
-            let entries = dispatch::list_sessions_as_info(&cfg.controller, cwd_filter)
+            let entries = dispatch::list_sessions_as_info(cfg.controller.as_ref(), cwd_filter)
                 .await
                 .map_err(|e| AcpError::new(-32603, format!("Failed to list sessions: {e}")))?;
 
@@ -413,7 +376,7 @@ pub(crate) async fn handle_request(
             let runs = sessions
                 .get(req_session_id)
                 .and_then(|s| s.workflow_middleware.as_ref())
-                .map(|mw| mw.progress_store().get_all_runs_snapshot())
+                .map(|mw| mw.runs_snapshot())
                 .unwrap_or_default();
 
             let resp = serde_json::json!({ "runs": runs });
@@ -442,7 +405,7 @@ pub(crate) async fn handle_request(
                 .ok_or_else(|| {
                     AcpError::new(-32602, format!("session not found: {req_session_id}"))
                 })?;
-            let killed = mw.runner().kill_agent(run_id, agent_id).await;
+            let killed = mw.kill_agent(run_id, agent_id).await;
 
             if killed {
                 info!(run_id, agent_id, "Workflow agent killed via ACP");
@@ -470,7 +433,7 @@ pub(crate) async fn handle_request(
                 .ok_or_else(|| {
                     AcpError::new(-32602, format!("session not found: {req_session_id}"))
                 })?;
-            let killed = mw.registry().kill(run_id).is_ok();
+            let killed = mw.kill_run(run_id);
 
             if killed {
                 info!(run_id, "Workflow run killed via ACP");
@@ -500,7 +463,7 @@ pub(crate) async fn handle_request(
                 })?;
 
             let new_run_id = mw
-                .resume_workflow(run_id)
+                .resume(run_id)
                 .await
                 .map_err(|e| AcpError::new(-32603, e))?;
 
@@ -563,7 +526,8 @@ pub(crate) async fn handle_request(
             let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
             // Load history from ThreadStore via Controller (deferred load)
-            let history = dispatch::load_session_messages(&cfg.controller, req_session_id).await;
+            let history =
+                dispatch::load_session_messages(cfg.controller.as_ref(), req_session_id).await;
 
             // ── 先构建 frozen + workflow_middleware ──
             cfg.session_manager.ensure_session(req_session_id, cwd);
@@ -635,7 +599,7 @@ pub(crate) async fn handle_request(
                 })?;
 
             let (new_thread_id, copied_history) =
-                dispatch::fork_session(&cfg.controller, source_id, &source_history, cwd)
+                dispatch::fork_session(cfg.controller.as_ref(), source_id, &source_history, cwd)
                     .await
                     .map_err(|e| AcpError::new(-32603, format!("{e}")))?;
 
@@ -760,9 +724,9 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("user");
             let scope = match scope_str {
-                "project" => peri_middlewares::plugin::InstallScope::Project,
-                "local" => peri_middlewares::plugin::InstallScope::Local,
-                _ => peri_middlewares::plugin::InstallScope::User,
+                "project" => peri_acp_types::plugin::InstallScope::Project,
+                "local" => peri_acp_types::plugin::InstallScope::Local,
+                _ => peri_acp_types::plugin::InstallScope::User,
             };
             let session_id = params
                 .get("sessionId")
@@ -772,19 +736,14 @@ pub(crate) async fn handle_request(
             let claude_dir = dirs_next::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
-            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+            let cache_dir = cfg.plugin_manager.cache_dir();
 
             let caps = cfg.session_manager.get_caps(session_id);
 
-            match peri_middlewares::plugin::install_plugin(
-                name,
-                marketplace,
-                scope,
-                &cache_dir,
-                &claude_dir,
-                None,
-            )
-            .await
+            match cfg
+                .plugin_manager
+                .install(name, marketplace, scope, &cache_dir, &claude_dir)
+                .await
             {
                 Ok(installed) => {
                     let _ = push_plugin_action_result(
@@ -797,9 +756,13 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
-                    let _ =
-                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
-                            .await;
+                    let _ = push_plugin_snapshot(
+                        transport.as_ref(),
+                        session_id,
+                        &cfg.plugin_manager.snapshot(&claude_dir),
+                        &caps,
+                    )
+                    .await;
                     Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
                 }
                 Err(e) => {
@@ -834,7 +797,7 @@ pub(crate) async fn handle_request(
 
             let caps = cfg.session_manager.get_caps(session_id);
 
-            match peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None).await {
+            match cfg.plugin_manager.uninstall(plugin_id, &claude_dir).await {
                 Ok(()) => {
                     let _ = push_plugin_action_result(
                         transport.as_ref(),
@@ -846,9 +809,13 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
-                    let _ =
-                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
-                            .await;
+                    let _ = push_plugin_snapshot(
+                        transport.as_ref(),
+                        session_id,
+                        &cfg.plugin_manager.snapshot(&claude_dir),
+                        &caps,
+                    )
+                    .await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -881,9 +848,9 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("user");
             let scope = match scope_str {
-                "project" => peri_middlewares::plugin::InstallScope::Project,
-                "local" => peri_middlewares::plugin::InstallScope::Local,
-                _ => peri_middlewares::plugin::InstallScope::User,
+                "project" => peri_acp_types::plugin::InstallScope::Project,
+                "local" => peri_acp_types::plugin::InstallScope::Local,
+                _ => peri_acp_types::plugin::InstallScope::User,
             };
             let session_id = params
                 .get("sessionId")
@@ -894,21 +861,9 @@ pub(crate) async fn handle_request(
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
 
-            let result = if enable {
-                peri_middlewares::plugin::update_enabled_plugins(
-                    plugin_id,
-                    scope,
-                    &claude_dir,
-                    None,
-                )
-            } else {
-                peri_middlewares::plugin::remove_from_enabled_plugins(
-                    plugin_id,
-                    &scope,
-                    &claude_dir,
-                    None,
-                )
-            };
+            let result = cfg
+                .plugin_manager
+                .set_enabled(plugin_id, scope, &claude_dir, enable);
 
             let caps = cfg.session_manager.get_caps(session_id);
 
@@ -925,9 +880,13 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
-                    let _ =
-                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
-                            .await;
+                    let _ = push_plugin_snapshot(
+                        transport.as_ref(),
+                        session_id,
+                        &cfg.plugin_manager.snapshot(&claude_dir),
+                        &caps,
+                    )
+                    .await;
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -957,7 +916,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+            let cache_dir = cfg.plugin_manager.cache_dir();
             let results = search_marketplace_plugins(query, &cache_dir);
 
             let caps = cfg.session_manager.get_caps(session_id);
@@ -987,11 +946,13 @@ pub(crate) async fn handle_request(
             let claude_dir = dirs_next::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude");
-            let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
+            let cache_dir = cfg.plugin_manager.cache_dir();
 
             let caps = cfg.session_manager.get_caps(session_id);
 
-            match peri_middlewares::plugin::update_plugin(plugin_id, &cache_dir, &claude_dir, None)
+            match cfg
+                .plugin_manager
+                .update(plugin_id, &cache_dir, &claude_dir)
                 .await
             {
                 Ok(updated) => {
@@ -1005,9 +966,13 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
-                    let _ =
-                        push_plugin_snapshot(transport.as_ref(), session_id, &claude_dir, &caps)
-                            .await;
+                    let _ = push_plugin_snapshot(
+                        transport.as_ref(),
+                        session_id,
+                        &cfg.plugin_manager.snapshot(&claude_dir),
+                        &caps,
+                    )
+                    .await;
                     Ok(serde_json::json!({ "success": true, "plugin": updated.id }))
                 }
                 Err(e) => {
@@ -1115,8 +1080,8 @@ pub(crate) async fn handle_request(
                 &peri_config_snapshot,
                 &event_sink,
                 None, // auxiliary_model：RewindCommand 不使用
-                &peri_agent::agent::AgentCancellationToken::new(),
-                &cfg.controller,
+                &tokio_util::sync::CancellationToken::new(),
+                cfg.controller.as_ref(),
                 Some(session_id.clone()),
                 None, // bg_event_tx
                 None, // task_manager
@@ -1136,7 +1101,7 @@ pub(crate) async fn handle_request(
                 ) {
                     let h = h.clone();
                     if let Ok(msgs) = serde_json::from_value::<
-                        Vec<peri_agent::messages::BaseMessage>,
+                        Vec<peri_acp_types::messages::BaseMessage>,
                     >(serde_json::Value::Array(h))
                     {
                         s.history = msgs;
@@ -1150,23 +1115,13 @@ pub(crate) async fn handle_request(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
-            // 从 known_marketplaces.json 查找 source
-            let kms = peri_middlewares::plugin::load_known_marketplaces(None)
-                .map_err(|e| AcpError::new(-32603, format!("Failed to load marketplaces: {e}")))?;
-            let km = kms
-                .iter()
-                .find(|km| {
-                    peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source) == name
-                })
-                .ok_or_else(|| AcpError::new(-32602, format!("marketplace not found: {name}")))?;
-
-            match peri_middlewares::plugin::marketplace::refresh_marketplace(&km.source, name).await
-            {
-                Ok((manifest, _install_location)) => {
-                    let plugin_count = manifest.plugins.len();
+            // 定位 known_marketplaces 条目 + 刷新（实现留在插件管理端口，
+            // 命令面不触碰 marketplace 目录结构）
+            match cfg.plugin_manager.refresh_marketplace(name).await {
+                Ok(plugin_count) => {
                     Ok(serde_json::json!({ "success": true, "pluginCount": plugin_count }))
                 }
-                Err(e) => Err(AcpError::new(-32603, e.to_string())),
+                Err(e) => Err(AcpError::new(-32603, e)),
             }
         }
 
@@ -1228,14 +1183,15 @@ async fn push_plugin_action_result(
 async fn push_plugin_snapshot(
     transport: &dyn crate::transport::AcpTransport,
     session_id: &str,
-    claude_dir: &std::path::Path,
+    plugins: &[PluginSnapshotEntry],
     caps: &PeriCaps,
 ) {
     if !caps.unstable_event {
         return;
     }
-    let plugins = collect_plugin_snapshot(claude_dir);
-    let payload = PluginSnapshot { plugins };
+    let payload = PluginSnapshot {
+        plugins: plugins.to_vec(),
+    };
     let data = serde_json::to_value(&payload).unwrap_or_default();
     let envelope = serde_json::json!({
         "sessionId": session_id,
@@ -1277,40 +1233,6 @@ async fn push_plugin_search_result(
     {
         tracing::warn!(error = %e, "Failed to push plugin-search-result");
     }
-}
-
-fn collect_plugin_snapshot(claude_dir: &std::path::Path) -> Vec<PluginSnapshotEntry> {
-    let loaded = peri_middlewares::plugin::load_enabled_plugins_aggregated(claude_dir, None);
-
-    let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-    let installed = peri_middlewares::plugin::load_installed_plugins(Some(&plugins_path))
-        .ok()
-        .unwrap_or_default();
-
-    loaded
-        .plugins
-        .iter()
-        .map(|p| PluginSnapshotEntry {
-            name: p.manifest.name.clone(),
-            version: p.manifest.version.clone(),
-            enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
-            root: p.install_path.to_string_lossy().to_string(),
-            description: p.manifest.description.clone(),
-            marketplace: p.marketplace.clone(),
-            author: p.manifest.author.as_ref().map(|a| a.name.clone()),
-            skills_count: p.skills_roots.len(),
-            commands_count: p.commands.len(),
-            agents_count: p.agents_dirs.len(),
-            mcp_count: p.mcp_servers.len(),
-            install_scope: installed
-                .plugins
-                .iter()
-                .find(|ip| ip.name == p.name)
-                .map(|ip| format!("{:?}", ip.scope).to_lowercase())
-                .unwrap_or_default(),
-            load_error: None,
-        })
-        .collect()
 }
 
 fn search_marketplace_plugins(
