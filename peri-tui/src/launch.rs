@@ -148,8 +148,27 @@ pub async fn build_app_and_acp(
                     provider: provider.clone(),
                     peri_config: app.services.peri_config.clone(),
                     permission_mode: app.services.permission_mode.clone(),
-                    cron_scheduler: Some(app.services.cron.scheduler.clone()),
-                    mcp_pool: app.services.mcp_pool.clone(),
+                    // 3.0 批 2 波 2：cron 调度器经端口 handle 注入（TUI 仍持
+                    // 具体句柄驱动 tick；ACP 侧只持 `Arc<dyn CronSchedulerPort>`）。
+                    cron_scheduler: Some(Arc::new(
+                        peri_middlewares::cron::CronSchedulerPortHandle(
+                            app.services.cron.scheduler.clone(),
+                        ),
+                    )),
+                    mcp_pool: app
+                        .services
+                        .mcp_pool
+                        .clone()
+                        .map(|p| p as Arc<dyn peri_acp_types::ports::McpPoolPort>),
+                    // 装配注入面：资源类具体实现（ToolSearchIndex / SkillsProvider /
+                    // PluginManager / SettingsHooksLoader）由宿主装配点构造后 upcast
+                    // 注入（§0 依赖方向；ACP 不直接 new 资源类）。
+                    tool_search_index: Arc::new(
+                        peri_middlewares::tool_search::ToolSearchIndex::new(),
+                    ),
+                    skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+                    plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
+                    settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
                     thread_store: app.services.thread_store.clone(),
                     cwd: app.services.cwd.clone(),
                     plugin_data: app.services.plugin_data.clone(),

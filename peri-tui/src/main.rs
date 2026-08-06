@@ -12,6 +12,7 @@ mod cli_print;
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
 // 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
 // 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
+use peri_acp::host::stdio::StdioAssemblyInput;
 use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
@@ -422,7 +423,45 @@ fn main() -> Result<()> {
                 let resources = peri_resources::Resources::open()
                     .await
                     .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
-                peri_acp::host::stdio::run_acp_stdio(cwd, resources.thread_store()).await
+                // 3.0 批 2 波 2：装配点（cli 白名单文件）构造具体实现后以端口
+                // 注入（§0 依赖方向；ACP 侧只持接口，不直接 new 资源类）。
+                let cwd_str = cwd.clone();
+                let cron_scheduler = std::sync::Arc::new(parking_lot::Mutex::new(
+                    peri_middlewares::cron::CronScheduler::new(
+                        tokio::sync::mpsc::unbounded_channel().0,
+                    ),
+                ));
+                let claude_dir = dirs_next::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join(".claude");
+                let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
+                    &claude_dir,
+                    Some(std::path::Path::new(&cwd_str)),
+                );
+                peri_acp::host::stdio::run_acp_stdio(StdioAssemblyInput {
+                    cwd: cwd_str,
+                    thread_store: resources.thread_store(),
+                    permission_mode: peri_middlewares::prelude::SharedPermissionMode::new(
+                        peri_middlewares::prelude::PermissionMode::Bypass,
+                    ),
+                    cron_scheduler: Some(std::sync::Arc::new(
+                        peri_middlewares::cron::CronSchedulerPortHandle(cron_scheduler),
+                    )),
+                    mcp_pool: None,
+                    tool_search_index: std::sync::Arc::new(
+                        peri_middlewares::tool_search::ToolSearchIndex::new(),
+                    ),
+                    skills: std::sync::Arc::new(peri_middlewares::host_ports::SkillsProvider),
+                    settings_hooks: std::sync::Arc::new(
+                        peri_middlewares::host_ports::SettingsHooksLoader,
+                    ),
+                    plugin_skill_roots: plugin_data.all_skill_roots,
+                    plugin_agent_dirs: plugin_data.all_agent_dirs,
+                    plugin_hooks: plugin_data.all_hooks,
+                    plugin_loaded: plugin_data.plugins,
+                    plugin_lsp_servers: plugin_data.all_lsp_servers,
+                })
+                .await
             })
         }
         Some(Commands::Update) => {

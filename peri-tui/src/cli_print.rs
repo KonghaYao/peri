@@ -177,8 +177,17 @@ pub async fn run_print(
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: shared_permission,
-        cron_scheduler: Some(cron_scheduler),
-        mcp_pool,
+        // 3.0 批 2 波 2：cron 调度器经端口 handle 注入（ACP 侧只持端口）。
+        cron_scheduler: Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
+            cron_scheduler,
+        ))),
+        mcp_pool: mcp_pool.map(|p| p as Arc<dyn peri_acp_types::ports::McpPoolPort>),
+        // 装配注入面：资源类具体实现由宿主装配点构造后 upcast 注入
+        // （§0 依赖方向；ACP 不直接 new 资源类）。
+        tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
+        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
+        settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         thread_store: thread_store.clone(),
         cwd: cwd.clone(),
         plugin_data,
