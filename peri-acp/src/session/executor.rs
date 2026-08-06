@@ -36,6 +36,7 @@
 //!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
+use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -53,26 +54,28 @@ use peri_agent::{
     },
     interaction::{ChannelState, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, MessageContent},
-    session::queue::QueuedMessage,
+    session::{
+        factory::{FrozenData, ThreadPersistence},
+        queue::QueuedMessage,
+    },
 };
 use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
+use peri_agent::agent::async_tasks::{BgRegistryEvent, BgTaskKind, TaskManager};
 use peri_middlewares::prelude::PermissionMode;
-use peri_middlewares::subagent::BgTaskKind;
 
 use crate::{
-    agent::builder::{self},
-    langfuse::{LangfuseSession, LangfuseTracer},
     provider::LlmProvider,
     session::{
         agent_pool::{AgentPool, CachedLlmInstances},
-        agent_runtime::{AgentRuntime, CancelPolicy},
         async_router::AsyncRouter,
         event_sink::EventSink,
         SessionManager,
     },
 };
+use peri_agent::session::runtime::{AgentRuntime, CancelPolicy};
+use peri_controller::langfuse::{LangfuseSession, LangfuseTracer};
 
 // 引入子流程 helper：intercept_immediate_command / InterceptRequest /
 // spawn_event_pump / SpawnPumpRequest / PumpHandle /
@@ -361,11 +364,6 @@ pub struct SessionContext {
     /// 让父 agent 消费已 route 到 SessionInbox 的 deferred callback。
     /// None = 无 continuation 消费方（stdio / print mode）。
     pub continuation_notify: Option<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
-
-    /// v2 事件发送通道（替代原 event::v2_channel 全局 OnceLock）。
-    /// TUI 入口置入，None 表示无 v2 消费方（如 stdio 模式）。
-    pub v2_event_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events_v2_mapper::V2Event>>,
 }
 
 /// Per-turn computed configuration derived from [`SessionContext`].
@@ -684,13 +682,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 前置创建 bg 事件通道（BgCommand 等 Immediate 命令依赖）
     let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
         tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    // session 级 registry（跨 prompt 存活，由 executor 从 session 获取）
-    let bg_registry_for_cmd = ctx
+    // session 级 TaskManager（跨 prompt 存活，由 executor 从 session 获取）
+    let task_manager_for_cmd = ctx
         .session_manager
         .as_ref()
         .and_then(|sm| sm.get_session(&ctx.session_id))
-        .map(|s| s.background_registry.clone())
-        .unwrap_or_else(|| Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new()));
+        .map(|s| s.task_manager.clone())
+        .unwrap_or_else(|| Arc::new(TaskManager::new()));
 
     // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）
     {
@@ -716,24 +714,22 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // Registry → ACP 事件泵：将 BgRegistryEvent 转换为 ACP unstable 事件
     {
         let (registry_event_tx, mut registry_event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<peri_middlewares::subagent::BgRegistryEvent>();
-        bg_registry_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
+            tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
+        task_manager_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
         let registry_sink = Arc::clone(&event_sink);
         let registry_sid = ctx.session_id.clone();
         tokio::spawn(async move {
             while let Some(event) = registry_event_rx.recv().await {
                 tracing::info!(
                     event_type = match &event {
-                        peri_middlewares::subagent::BgRegistryEvent::Started { .. } => "Started",
-                        peri_middlewares::subagent::BgRegistryEvent::Completed { .. } =>
-                            "Completed",
-                        peri_middlewares::subagent::BgRegistryEvent::Cancelled { .. } =>
-                            "Cancelled",
+                        BgRegistryEvent::Started { .. } => "Started",
+                        BgRegistryEvent::Completed { .. } => "Completed",
+                        BgRegistryEvent::Cancelled { .. } => "Cancelled",
                     },
                     "[bg-diag] registry event pump: received event"
                 );
                 let (event_name, payload) = match &event {
-                    peri_middlewares::subagent::BgRegistryEvent::Started {
+                    BgRegistryEvent::Started {
                         task_id,
                         kind,
                         summary,
@@ -747,7 +743,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                             "started_at": started_at,
                         }),
                     ),
-                    peri_middlewares::subagent::BgRegistryEvent::Completed {
+                    BgRegistryEvent::Completed {
                         task_id,
                         kind,
                         success,
@@ -756,7 +752,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                         result: _result,
                     } => {
                         // route_bg_result 现在在 spawner 中同步执行
-                        // （在 bg_registry.complete() 之前），
+                        // （在 task_manager.complete() 之前），
                         // 不再需要 registry 事件泵异步注入
                         tracing::info!(
                             task_id = %task_id,
@@ -774,7 +770,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                             }),
                         )
                     }
-                    peri_middlewares::subagent::BgRegistryEvent::Cancelled { task_id, reason } => (
+                    BgRegistryEvent::Cancelled { task_id, reason } => (
                         "bg-task-cancelled",
                         serde_json::json!({
                             "task_id": task_id,
@@ -802,7 +798,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         thread_store: ctx.thread_store.clone(),
         thread_id: ctx.thread_id.clone(),
         bg_event_tx: &bg_event_tx_for_cmd,
-        bg_registry: &bg_registry_for_cmd,
+        task_manager: &task_manager_for_cmd,
         frozen: frozen.as_ref(),
     })
     .await
@@ -887,7 +883,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         langfuse_session.as_ref().map(|s| {
             let session_clone = Arc::clone(s);
             let config = session_clone.config.clone();
-            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
+            let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+                session_clone;
             Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
                 session,
                 ctx.session_id.clone(),
@@ -923,7 +920,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         &v2_message_queue,
         async_router.clone(),
         langfuse_tracer,
-        bg_registry_for_cmd,
+        task_manager_for_cmd,
         mode_notice_booking,
         continuation,
     )
@@ -977,7 +974,7 @@ async fn build_and_execute_agent(
     v2_message_queue: &peri_agent::session::MessageQueue,
     async_router: Option<AsyncRouter>,
     langfuse_tracer: Option<Arc<parking_lot::Mutex<LangfuseTracer>>>,
-    bg_registry: Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    task_manager: Arc<TaskManager>,
     mode_notice_booking: Option<ModeNoticeBooking>,
     continuation: bool,
 ) -> ExecOutcome {
@@ -1027,8 +1024,11 @@ async fn build_and_execute_agent(
         Arc::new(
             move |thread_id: String, cancel_token: AgentCancellationToken, policy: String| {
                 if let Some(mut session) = sm.get_session_mut(&sid) {
-                    let runtime =
-                        AgentRuntime::new(thread_id.clone(), CancelPolicy::from_str(&policy));
+                    // policy 字符串（"cascade"/"independent"）来自 SubAgentMiddleware；
+                    // 契约类型 FromStr 对非法值报错，此处保留迁移前 `_ => Cascade`
+                    // 的容错语义（Default = Cascade）。
+                    let cancel_policy = CancelPolicy::from_str(&policy).unwrap_or_default();
+                    let runtime = AgentRuntime::new(thread_id.clone(), cancel_policy);
                     // Store the provided cancel_token so external cancellation works
                     let rt = AgentRuntime {
                         thread_id,
@@ -1039,7 +1039,7 @@ async fn build_and_execute_agent(
                     session.active_agents.insert(rt.thread_id.clone(), rt);
                 }
             },
-        ) as crate::agent::builder::RegisterRuntimeFn
+        ) as peri_agent::session::factory::RegisterRuntimeFn
     });
     let deregister_runtime = ctx.session_manager.clone().map(|sm| {
         let sid = session_id.to_string();
@@ -1047,7 +1047,7 @@ async fn build_and_execute_agent(
             if let Some(mut session) = sm.get_session_mut(&sid) {
                 session.active_agents.remove(thread_id);
             }
-        }) as crate::agent::builder::DeregisterRuntimeFn
+        }) as peri_agent::session::factory::DeregisterRuntimeFn
     });
 
     let event_handler: Arc<dyn AgentEventHandler> =
@@ -1067,8 +1067,8 @@ async fn build_and_execute_agent(
     // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
     // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
     if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
-        // 将 session 级 bg_registry 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
-        wf_mw.set_bg_registry(bg_registry.clone());
+        // 将 session 级 TaskManager 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
+        wf_mw.set_bg_registry(task_manager.clone());
 
         // init_notification_buffer() 是 set-once gate：首次返回 true，后续返回 false。
         // WorkflowMiddleware 是 session 级实例（session/new 创建），
@@ -1079,8 +1079,8 @@ async fn build_and_execute_agent(
             // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
             let fallback_queue = v2_message_queue.clone();
-            // bg_registry 用于在 Defer 入队后递减 active_count，消除竞态窗口
-            let notify_bg = bg_registry.clone();
+            // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
+            let notify_bg = task_manager.clone();
             tokio::spawn(async move {
                 let mut rx = wf_mw_for_notify.subscribe_notifications();
                 loop {
@@ -1192,18 +1192,18 @@ async fn build_and_execute_agent(
         .and_then(|sm| sm.goal_state_for(session_id))
         .map(|gs| Arc::new(gs) as Arc<dyn peri_agent::goal::GoalController>);
 
-    let thread_persistence = builder::ThreadPersistence {
+    let thread_persistence = ThreadPersistence {
         store: ctx.thread_store.clone(),
         parent_thread_id: ctx.thread_id.clone(),
         register_runtime,
         deregister_runtime,
     };
 
-    let background_registry = ctx
+    let task_manager = ctx
         .session_manager
         .as_ref()
         .and_then(|sm| sm.get_session(session_id))
-        .map(|s| s.background_registry.clone());
+        .map(|s| s.task_manager.clone());
 
     // on_bg_complete：bg 完成时**先**把结果同步 route 到 SessionInbox
     // （Defer + wake），**再**通知 ACP server 的 per-session continuation
@@ -1238,7 +1238,7 @@ async fn build_and_execute_agent(
         system_prompt,
         subagent_system_prompt,
         mode_notice_booking,
-        builder::FrozenData {
+        FrozenData {
             claude_md: frozen_claude_md,
             claude_local_md: frozen_claude_local_md,
             skill_summary: frozen_skill_summary,
@@ -1251,7 +1251,7 @@ async fn build_and_execute_agent(
         turn.auxiliary_model.clone(),
         thread_persistence,
         goal_controller,
-        background_registry,
+        task_manager,
         on_bg_complete,
         turn.effective_context_window,
         continuation,

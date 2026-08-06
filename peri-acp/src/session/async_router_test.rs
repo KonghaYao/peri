@@ -1,8 +1,8 @@
 //! Tests for async_router
 
 use super::*;
+use peri_agent::agent::async_tasks::BgTaskKind;
 use peri_agent::agent::session::inbox::SessionInbox;
-use peri_middlewares::subagent::BgTaskKind;
 use std::sync::Arc;
 
 fn make_inbox() -> (SessionInbox, InboxHandle) {

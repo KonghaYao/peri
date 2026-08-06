@@ -5,6 +5,8 @@
 //! avoiding a direct `peri_agent::agent::events::ExecutorEvent` dependency in the TUI.
 
 pub mod forwarder;
+#[cfg(test)]
+mod forwarder_test;
 pub mod mapper;
 
 pub(crate) use forwarder::spawn_eventbus_forwarder;
@@ -13,8 +15,10 @@ pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
     WorkflowProgressDto,
 };
-pub use peri_agent::agent::events_v2_mapper::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor, V2Event,
+// v1 兼容映射（v2 → ExecutorEvent）统一由 peri_agent::agent::events_v2 提供
+// （`2026-07-18-events-v2-mapper-removal.md`：events_v2_mapper 模块已退役）。
+pub use peri_agent::agent::events_v2::{
+    observe_event_to_executor, render_event_to_executor, state_event_to_executor,
 };
 
 use serde::{Deserialize, Serialize};
@@ -64,6 +68,13 @@ pub enum AcpEvent {
         /// 上下文窗口总量
         context_total_tokens: Option<u64>,
     },
+    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    ///
+    /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
+    /// TUI 收到后归档 current_turn、停止 loading spinner。
+    ///
+    /// `turn_id` / `agent_id` 为 v2 事件透传的身份（v1 兼容层最小身份载体）。
+    TurnSuspended { turn_id: String, agent_id: String },
     /// SubAgent started executing
     SubagentStarted {
         agent_name: String,

@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use peri_agent::{
     agent::{
+        async_tasks::{BgTaskKind, TaskManager},
         events::{
             AgentEventHandler, BackgroundTaskResult, ExecutorEvent, TurnErrorKind, TurnStatus,
         },
@@ -42,14 +43,12 @@ use peri_agent::{
     goal::GoalController,
     messages::{BaseMessage, MessageContent},
 };
-use peri_middlewares::{agent_define::AgentOverrides, subagent::BackgroundTaskRegistry};
+use peri_middlewares::agent_define::AgentOverrides;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
-use crate::{
-    langfuse::LangfuseTracer,
-    session::{agent_pool::CachedLlmInstances, event_sink::EventSink},
-};
+use crate::session::{agent_pool::CachedLlmInstances, event_sink::EventSink};
+use peri_controller::langfuse::LangfuseTracer;
 
 // 共享类型从 executor 模块（super）显式引入——这些类型在 executor.rs 中
 // 是 `struct`（默认 private）但子模块对父模块所有项可见。
@@ -77,7 +76,7 @@ pub(super) struct InterceptRequest<'a> {
     pub(super) auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub(super) bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    pub(super) bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    pub(super) task_manager: &'a Arc<TaskManager>,
     // ── 冻结数据 ──
     pub(super) frozen: Option<&'a FrozenSessionData>,
 }
@@ -120,7 +119,7 @@ pub(super) async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Op
         thread_store: req.thread_store,
         thread_id: req.thread_id,
         bg_event_sender: Some(req.bg_event_tx.clone()),
-        bg_registry: Some(req.bg_registry.clone()),
+        task_manager: Some(req.task_manager.clone()),
         frozen_claude_md: req
             .frozen
             .as_ref()
@@ -369,18 +368,16 @@ pub(super) async fn build_and_execute_agent_v2(
     // D2：mode 通知的入队记账委托（None = 无通知或无需记账）。
     // 仅在 Phase 6 把消息推入模型可见 v2 MessageQueue 时记账。
     mode_notice_booking: Option<ModeNoticeBooking>,
-    frozen: crate::agent::builder::FrozenData,
+    frozen: peri_agent::session::factory::FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
-    child_handler_factory: Option<crate::agent::builder::ChildHandlerFactory>,
+    child_handler_factory: Option<peri_agent::session::factory::ChildHandlerFactory>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    thread_persistence: crate::agent::builder::ThreadPersistence,
+    thread_persistence: peri_agent::session::factory::ThreadPersistence,
     goal_controller: Option<Arc<dyn GoalController>>,
-    background_registry: Option<Arc<BackgroundTaskRegistry>>,
-    on_bg_complete: Option<
-        Arc<dyn Fn(&BackgroundTaskResult, peri_middlewares::subagent::BgTaskKind) + Send + Sync>,
-    >,
+    task_manager: Option<Arc<TaskManager>>,
+    on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
     effective_context_window: u32,
     // 内部异步续跑：不 push 空 user Prompt（AsyncContinuation 只消费已 route
     // 的 Defer/Info 消息），mode 通知记账同样跳过（下一 turn 重新检测）。
@@ -405,7 +402,7 @@ pub(super) async fn build_and_execute_agent_v2(
         auxiliary_model,
         thread_persistence,
         goal_controller,
-        background_registry,
+        task_manager,
         on_bg_complete,
         langfuse_tracer.clone(),
     );
@@ -483,7 +480,7 @@ pub(super) async fn build_and_execute_agent_v2(
         // v2_out.context.session.agent_id 与 SubAgentTool 共享 cell 是同一值(C1/C2)。
         let main_agent_id = v2_out.context.session.agent_id.to_string();
         let bridge = langfuse_tracer.clone().map(|t| {
-            crate::langfuse::bridge::LangfuseBridge::new(
+            peri_controller::langfuse::bridge::LangfuseBridge::new(
                 t,
                 ctx.provider.display_name().to_string(),
                 Some(main_agent_id.clone()),
@@ -497,7 +494,6 @@ pub(super) async fn build_and_execute_agent_v2(
                 }
             },
             bridge,
-            ctx.v2_event_tx.clone(),
         );
     }
 

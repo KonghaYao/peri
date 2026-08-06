@@ -263,6 +263,16 @@ impl EventSink for TransportEventSink {
                 ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
                     message: message.clone(),
                 }),
+                // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading）。
+                // v2 StateEvent::TurnSuspended 经 v1 兼容映射（events_v2::
+                // state_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-
+                // event-chain-canonical）后此信号仅经 ACP 路径送达 TUI。
+                ExecutorEvent::TurnSuspended { turn_id, agent_id } => {
+                    Some(AcpEvent::TurnSuspended {
+                        turn_id: turn_id.clone(),
+                        agent_id: agent_id.clone(),
+                    })
+                }
                 // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                 // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
                 // 丢弃 messages_json），Langfuse bridge 亦不读取（bridge.rs:319）。

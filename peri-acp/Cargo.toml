@@ -11,11 +11,11 @@ path = "src/lib.rs"
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
 peri-agent = { path = "../peri-agent" }
+peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 peri-workflow = { path = "../peri-workflow" }
-langfuse-client = { path = "../langfuse-client" }
 agent-client-protocol = { version = "1.2", features = ["unstable"] }
 agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
 tokio.workspace = true
@@ -37,3 +37,4 @@ url.workspace = true
 tempfile.workspace = true
 serial_test.workspace = true
 mockito = "1"
+langfuse-client = { path = "../langfuse-client" }

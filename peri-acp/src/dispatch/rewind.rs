@@ -19,6 +19,7 @@ use crate::{
     },
     transport::types::AcpError,
 };
+use peri_controller::Controller;
 
 /// 解析 `session/rewind` 系请求的公共参数。
 #[derive(serde::Deserialize)]
@@ -94,7 +95,8 @@ pub async fn rewind_preview(
 
 /// 执行回退：复用 `RewindCommand`（Immediate 命令）。
 ///
-/// 参数清单与 `dispatch/execute_command.rs::execute_command` 对齐。
+/// 参数清单与 `dispatch/execute_command.rs::execute_command` 对齐；
+/// 存储访问经 `controller.sessions()`（ARC-BOUNDARY-001 方向）。
 #[allow(clippy::too_many_arguments)]
 pub async fn rewind_execute(
     params: &Value,
@@ -104,12 +106,12 @@ pub async fn rewind_execute(
     event_sink: &Arc<dyn EventSink>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     cancel_token: &peri_agent::agent::AgentCancellationToken,
-    thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
+    controller: &Controller,
     thread_id: Option<String>,
     bg_event_tx: Option<
         tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
     >,
-    bg_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    task_manager: Option<Arc<peri_agent::agent::async_tasks::TaskManager>>,
     frozen_claude_md: Option<Arc<String>>,
     frozen_claude_local_md: Option<Arc<String>>,
     frozen_skill_summary: Option<Arc<String>>,
@@ -137,10 +139,10 @@ pub async fn rewind_execute(
         event_sink: Arc::clone(event_sink),
         args: params.to_string(),
         cancel_token: cancel_token.clone(),
-        thread_store,
+        thread_store: Some(controller.sessions()),
         thread_id,
         bg_event_sender: bg_event_tx,
-        bg_registry,
+        task_manager,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,

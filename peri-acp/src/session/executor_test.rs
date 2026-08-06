@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{events::ExecutorEvent, AgentCancellationToken},
+    agent::{async_tasks::TaskManager, events::ExecutorEvent, AgentCancellationToken},
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
     messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
     thread::{FilesystemThreadStore, ThreadStore},
@@ -36,6 +36,7 @@ use peri_middlewares::{
 struct MockEventSink {
     push_done_count: Mutex<usize>,
     push_done_request_ids: Mutex<Vec<Option<String>>>,
+    push_done_stop_reasons: Mutex<Vec<String>>,
     pushed_events: Mutex<Vec<String>>,
 }
 
@@ -44,6 +45,7 @@ impl MockEventSink {
         Self {
             push_done_count: Mutex::new(0),
             push_done_request_ids: Mutex::new(Vec::new()),
+            push_done_stop_reasons: Mutex::new(Vec::new()),
             pushed_events: Mutex::new(Vec::new()),
         }
     }
@@ -60,6 +62,10 @@ impl MockEventSink {
             .cloned()
             .flatten()
     }
+
+    fn last_push_done_stop_reason(&self) -> Option<String> {
+        self.push_done_stop_reasons.lock().unwrap().last().cloned()
+    }
 }
 
 #[async_trait]
@@ -69,12 +75,16 @@ impl EventSink for MockEventSink {
         self.pushed_events.lock().unwrap().push(json);
     }
 
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, request_id: Option<&str>) {
+    async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
         *self.push_done_count.lock().unwrap() += 1;
         self.push_done_request_ids
             .lock()
             .unwrap()
             .push(request_id.map(String::from));
+        self.push_done_stop_reasons
+            .lock()
+            .unwrap()
+            .push(stop_reason.to_string());
     }
 }
 
@@ -102,7 +112,7 @@ fn make_intercept_request<'a>(
     peri_config: &'a Arc<PeriConfig>,
     event_sink: &'a Arc<dyn EventSink>,
     bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    bg_registry: &'a Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    task_manager: &'a Arc<TaskManager>,
 ) -> InterceptRequest<'a> {
     InterceptRequest {
         content,
@@ -116,7 +126,7 @@ fn make_intercept_request<'a>(
         thread_store: None,
         thread_id: None,
         bg_event_tx,
-        bg_registry,
+        task_manager,
         frozen: None,
     }
 }
@@ -124,10 +134,10 @@ fn make_intercept_request<'a>(
 /// 构造共享的 bg registry + bg channel（拦截测试不实际触发 bg，但需要传入句柄）。
 fn make_bg_infra() -> (
     tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    Arc<peri_middlewares::subagent::BackgroundTaskRegistry>,
+    Arc<TaskManager>,
 ) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(TaskManager::new());
     (tx, registry)
 }
 
@@ -168,7 +178,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         session_start_source: None,
         request_id: None,
         allow_await_wake: false,
-        v2_event_tx: None,
         continuation_notify: None,
     }
 }
@@ -604,6 +613,11 @@ async fn test_run_session_loop_keepgoing_short_circuit_calls_push_done() {
         1,
         "keepgoing 短路路径必须调用 push_done 一次（TRAP: TUI 永久 loading）"
     );
+    assert_eq!(
+        mock_sink.last_push_done_stop_reason().as_deref(),
+        Some("end_turn"),
+        "keepgoing 短路的协议出口终态必须唯一且为 end_turn"
+    );
 }
 
 /// Issue 2026-08-05 返工链路验证：keepgoing 短路路径的 push_done 必须透传
@@ -711,6 +725,73 @@ async fn test_continuation_bypasses_keepgoing_short_circuit() {
         result.stop_reason,
         PromptStopReason::Cancelled,
         "进入管线后被预取消 token 中断"
+    );
+}
+
+/// [Seam 2 / 验收⑤] turn 终态唯一 + terminal 事件位于 turn 全部输出之后。
+///
+/// §9 事件契约（docs/top-level.md）：terminal 事件必须位于该 turn 全部输出
+/// 事件之后；turn 终态唯一（Completed 或 Interrupted）。本测试走预取消中断
+/// 路径（Interrupted 终态）：断言 TurnStarted/TurnEnded 各恰好一次、
+/// TurnEnded 是事件流最后一条且 status=Interrupted、协议出口 push_done
+/// 恰好一次且 stop_reason=cancelled（与 TurnEnded 语义一致）。
+#[tokio::test]
+async fn test_turn_terminal_state_unique_and_last() {
+    // Arrange：预取消 token，进入管线后立即中断（不触发真实 LLM 调用）
+    let mock_sink = Arc::new(MockEventSink::new());
+    let ctx = make_session_context("test-turn-terminal");
+    ctx.cancel.cancel();
+    let turn = TurnInput {
+        event_sink: Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        content: MessageContent::text(""),
+        continuation: true,
+        frozen: None,
+        history: vec![],
+        incoming_recalls: vec![],
+        bg_results: vec![],
+        langfuse_session: None,
+    };
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert：终态唯一（Interrupted）
+    assert!(!result.ok);
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+
+    // terminal 事件唯一且位于全部输出之后
+    let events = mock_sink.pushed_events.lock().unwrap();
+    assert!(
+        !events.is_empty(),
+        "进入管线后应产生事件流（至少 TurnStarted + TurnEnded）"
+    );
+    let started = events
+        .iter()
+        .filter(|e| e.contains("\"turn_started\""))
+        .count();
+    let ended = events
+        .iter()
+        .filter(|e| e.contains("\"turn_ended\""))
+        .count();
+    assert_eq!(started, 1, "每个 turn 恰好一个 TurnStarted");
+    assert_eq!(ended, 1, "每个 turn 恰好一个 terminal 事件（终态唯一）");
+    let last = events.last().expect("事件流非空");
+    assert!(
+        last.contains("\"turn_ended\"") && last.contains("interrupted"),
+        "terminal 事件必须位于该 turn 全部输出之后且 status=Interrupted: {last}"
+    );
+    drop(events);
+
+    // 协议出口终态唯一，且与 TurnEnded 语义一致
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "终态信号（push_done）必须恰好一次"
+    );
+    assert_eq!(
+        mock_sink.last_push_done_stop_reason().as_deref(),
+        Some("cancelled"),
+        "push_done 终态与 TurnEnded(Interrupted) 语义一致"
     );
 }
 

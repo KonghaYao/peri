@@ -7,11 +7,16 @@
 //! `peri_agent::session::Session`。保留 ACP 特有字段（provider_id、
 //! model_alias、thinking、active_agents、goal_state）。
 //!
+//! L5（executor 拆分）：active_agents 注册表的条目类型与 cancel 判定/终止
+//! 执行已归 Agent 层（`peri_agent::session::runtime`，Cascade/Independent
+//! 判定经 `cancel_cascade_agents` / `cancel_all_agents`），本层仅定位
+//! （查 session 映射）并传递注册表；注册表字段随 L2/L5 运行态归位迁入
+//! `peri_agent::session::Session`。
+//!
 //! cron 主路径：session 级 CronOwner 由 `AcpSession.cron_bridge` 持有
 //! （跨 turn 存活）；`set_async_owners` 仅 print fallback 使用。
 
 pub mod agent_pool;
-pub mod agent_runtime;
 pub mod async_router;
 pub mod command;
 pub mod cron_bridge;
@@ -30,6 +35,7 @@ use std::{
 
 use chrono::Utc;
 use dashmap::DashMap;
+use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::{
     messages::BaseMessage,
     thread::{ThreadId, ThreadMeta, ThreadStore},
@@ -37,7 +43,6 @@ use peri_agent::{
 use peri_middlewares::{
     agent_define::AgentOverrides,
     prelude::{PermissionMode, SharedPermissionMode},
-    subagent::BackgroundTaskRegistry,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -47,9 +52,9 @@ use executor::PERMISSION_MODE_NEVER_NOTIFIED;
 
 use crate::{
     provider::{config::PeriConfig, LlmProvider},
-    session::agent_runtime::{AgentRuntime, CancelPolicy},
     session::cron_bridge::SessionCronBridge,
 };
+use peri_agent::session::runtime::AgentRuntime;
 
 pub struct AcpSession {
     pub session_id: String,
@@ -100,8 +105,9 @@ pub struct AcpSession {
     pub session_inbox: Option<Arc<peri_agent::agent::session::SessionInbox>>,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,
-    /// 后台任务注册中心（session 级，跨 prompt 存活）
-    pub background_registry: Arc<BackgroundTaskRegistry>,
+    /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
+    /// 随 session 创建/销毁，close_session 时 cancel_all 取消 owned 任务）
+    pub task_manager: Arc<TaskManager>,
 }
 
 struct SessionManagerInner {
@@ -189,7 +195,7 @@ impl SessionManager {
 
         let session_id = thread_id.clone();
 
-        let background_registry = Arc::new(BackgroundTaskRegistry::new());
+        let task_manager = Arc::new(TaskManager::new());
 
         let session = AcpSession {
             session_id: session_id.clone(),
@@ -213,7 +219,7 @@ impl SessionManager {
             v2_session: None,
             session_inbox: None,
             cron_bridge: None,
-            background_registry,
+            task_manager,
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -221,7 +227,7 @@ impl SessionManager {
     }
 
     fn build_session(&self, session_id: &str, thread_id: ThreadId, cwd: &str) -> AcpSession {
-        let background_registry = Arc::new(BackgroundTaskRegistry::new());
+        let task_manager = Arc::new(TaskManager::new());
 
         AcpSession {
             session_id: session_id.to_string(),
@@ -252,17 +258,18 @@ impl SessionManager {
             v2_session: None,
             session_inbox: None,
             cron_bridge: None,
-            background_registry,
+            task_manager,
         }
     }
 
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
-            // 取消所有运行时 agent 实例
-            for runtime in session.active_agents.values() {
-                runtime.cancel_token.cancel();
-            }
+            // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
+            peri_agent::session::runtime::cancel_all_agents(session.active_agents.values());
             session.cancel_token.cancel();
+            // L1：取消 owned 后台任务（§9 销毁顺序「取消 owned tasks」：
+            // bg shell / bg agent / workflow 随 session 销毁，多会话互不干扰）
+            session.task_manager.cancel_all();
         }
         Ok(())
     }
@@ -291,12 +298,9 @@ impl SessionManager {
 
     pub fn cancel_session(&self, session_id: &str) {
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
-            // Cancel all cascade-policy agents first
-            for runtime in session.active_agents.values() {
-                if runtime.cancel_policy == CancelPolicy::Cascade {
-                    runtime.cancel_token.cancel();
-                }
-            }
+            // Cascade/Independent 判定与终止执行归 Agent 层（L5：cancel 最终
+            // 执行权在 Agent，top-level.md §2/§9）；此处仅定位并传递注册表。
+            peri_agent::session::runtime::cancel_cascade_agents(session.active_agents.values());
 
             // Cancel the current token so all clones (held by link tasks,
             // permission loops) detect cancellation. Then replace with a fresh
@@ -534,20 +538,18 @@ impl SessionManager {
 }
 
 impl AcpSession {
-    /// 取消指定 agent 的所有 cascade 子 agent
+    /// 取消指定 agent 的所有 cascade 子 agent。
+    ///
+    /// 薄委托：Cascade/Independent 判定与终止执行归 Agent 层
+    /// （`peri_agent::session::runtime::cancel_cascade_agents`，L5 cancel
+    /// 最终执行权归位）；本方法仅定位（持有 active_agents 注册表）。
     pub fn cancel_cascade_children(&self) {
-        for runtime in self.active_agents.values() {
-            if runtime.cancel_policy == CancelPolicy::Cascade {
-                runtime.cancel_token.cancel();
-            }
-        }
+        peri_agent::session::runtime::cancel_cascade_agents(self.active_agents.values());
     }
 
     /// 取消所有 agent（session 结束时）
     pub fn cancel_all_agents(&self) {
-        for runtime in self.active_agents.values() {
-            runtime.cancel_token.cancel();
-        }
+        peri_agent::session::runtime::cancel_all_agents(self.active_agents.values());
     }
 }
 

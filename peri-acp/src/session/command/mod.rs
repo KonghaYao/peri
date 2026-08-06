@@ -55,9 +55,9 @@ pub struct CommandContext {
     /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
     pub bg_event_sender:
         Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
-    /// 后台任务注册中心（BgCommand 等 Immediate 命令依赖）。
+    /// 后台任务管理器（BgCommand 等 Immediate 命令依赖）。
     /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
-    pub bg_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    pub task_manager: Option<Arc<peri_agent::agent::async_tasks::TaskManager>>,
     /// Frozen CLAUDE.md main content（会话级捕获，BgCommand 透传到 fork agent）。
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen CLAUDE.local.md content

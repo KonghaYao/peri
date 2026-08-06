@@ -130,7 +130,7 @@ fn make_ctx(
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
-        bg_registry: None,
+        task_manager: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,

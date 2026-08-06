@@ -61,7 +61,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
-        bg_registry: None,
+        task_manager: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
@@ -70,7 +70,7 @@ fn make_ctx(sink: Arc<dyn crate::session::event_sink::EventSink>, args: &str) ->
 }
 
 /// 构造带有效 provider 配置的 CommandContext（LLM 构造成功，能越过
-/// `LlmProvider::from_config` 提前返回路径，直达 bg_event_sender/bg_registry 检查）。
+/// `LlmProvider::from_config` 提前返回路径，直达 bg_event_sender/task_manager 检查）。
 /// 两个 Option 字段仍为 None——复现公开 RPC 直调 /bg 传 None 的场景。
 fn make_ctx_with_provider(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
@@ -108,7 +108,7 @@ fn make_ctx_with_provider(
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
-        bg_registry: None,
+        task_manager: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
@@ -181,7 +181,7 @@ async fn test_bg_command_does_not_call_push_done_itself() {
 #[tokio::test]
 async fn test_bg_command_missing_bg_context_gracefully_fails() {
     let sink = Arc::new(MockEventSink::new());
-    // 有效 provider（越过 LLM 构造检查）+ bg_event_sender/bg_registry 均 None
+    // 有效 provider（越过 LLM 构造检查）+ bg_event_sender/task_manager 均 None
     let ctx = make_ctx_with_provider(sink.clone(), "整理周报");
     let cmd = BgCommand;
 

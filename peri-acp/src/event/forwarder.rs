@@ -18,25 +18,28 @@
 //! - **三通道全部关闭时 task 自动退出**：`else => break` 防止 task 泄漏。
 
 use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::agent::events_v2::EventHandles;
-use peri_agent::agent::events_v2_mapper::V2Event;
+use peri_agent::agent::events_v2::{
+    observe_event_to_executor, render_event_to_executor, state_event_to_executor, EventHandles,
+};
 
-use crate::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
-use crate::langfuse::tracer::stages::StageHandle;
-
-use super::{observe_event_to_executor, render_event_to_executor, state_event_to_executor};
+use peri_controller::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
+use peri_controller::langfuse::tracer::stages::StageHandle;
 
 /// 启动 EventBus forwarder task。
 ///
-/// 消费 `handles` 内三层 v2 事件（render / state / observe），经 `*_event_to_executor`
-/// 映射为 [`ExecutorEvent`]，然后调用 `on_event` 闭包投递到调用方指定的目标。
+/// 消费 `handles` 内三层 v2 事件（render / state / observe），经 v1 兼容映射
+/// （`events_v2::*_event_to_executor`）转为 [`ExecutorEvent`]，然后调用 `on_event`
+/// 闭包投递到调用方指定的目标。
+///
+/// v2_tx 双轨（v2 事件直连 TUI）已随
+/// `2026-08-05-3.0-m-event-chain-canonical.md` 下线：TUI 事件仅经本 forwarder
+/// 的 ACP 协议化路径，不再有第二套扇出。
 ///
 /// # 参数
 ///
 /// - `handles`：v2 [`EventHandles`]（调用方取出所有权后传入，本函数内部 `mut` 消费）
 /// - `on_event`：每条映射后的 `ExecutorEvent` 的消费闭包。签名 `Fn(ExecutorEvent) + Send + Sync + 'static`
 /// - `bridge`：统一 Langfuse 桥接器。`None` 表示遥测禁用。
-/// - `v2_tx`：v2 事件直连发送通道（TUI 消费路径）。`None` 表示无 v2 消费方。
 ///
 /// # 返回
 ///
@@ -50,7 +53,6 @@ pub fn spawn_eventbus_forwarder<F>(
     mut handles: EventHandles,
     on_event: F,
     bridge: Option<LangfuseBridge>,
-    v2_tx: Option<tokio::sync::mpsc::UnboundedSender<V2Event>>,
 ) where
     F: Fn(ExecutorEvent) + Send + Sync + 'static,
 {
@@ -80,9 +82,6 @@ pub fn spawn_eventbus_forwarder<F>(
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
-                    if let Some(ref tx) = v2_tx {
-                        let _ = tx.send(V2Event::from_state(ev.clone()));
-                    }
                     // Langfuse: state 层追踪（当前无映射）
                     if let Some(exec_ev) = state_event_to_executor(ev) {
                         on_event(exec_ev);
@@ -96,9 +95,6 @@ pub fn spawn_eventbus_forwarder<F>(
                             // v1 直发双发，见 subagent_event_forwarder.rs），主 EventBus 上
                             // 不会出现这两个变体，故此处无需过滤。Langfuse 消费在 child
                             // forwarder 侧直达 bridge（C4）。
-                            if let Some(ref tx) = v2_tx {
-                                let _ = tx.send(V2Event::from_observe(ev.clone()));
-                            }
                             // Langfuse: observe 层追踪（LLM/Tool/Stage/Compact）
                             if let Some(ref bridge) = bridge {
                                 if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {

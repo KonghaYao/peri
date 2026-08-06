@@ -79,7 +79,7 @@ pub struct WorkflowAgentContext {
     pub peri_config: Option<Arc<crate::provider::PeriConfig>>,
 
     // GAP-08: Langfuse 追踪会话（None = 不启用遥测）。
-    pub langfuse_session: Option<Arc<crate::langfuse::session::LangfuseSession>>,
+    pub langfuse_session: Option<Arc<peri_controller::langfuse::session::LangfuseSession>>,
 
     // GAP-18: ThreadStore（持久化 workflow agent 消息到统一存储）。
     // None = 不持久化（内存中运行，当前行为）。
@@ -148,9 +148,10 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let langfuse_tracer = self.ctx.langfuse_session.as_ref().map(|s| {
             let session_clone = Arc::clone(s);
             let config = session_clone.config.clone();
-            let session: std::sync::Arc<dyn crate::langfuse::LangfuseSessionLike> = session_clone;
+            let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+                session_clone;
             Arc::new(parking_lot::Mutex::new(
-                crate::langfuse::tracer::LangfuseTracer::new(
+                peri_controller::langfuse::tracer::LangfuseTracer::new(
                     session,
                     self.ctx.session_id.clone().unwrap_or_default(),
                     config,
@@ -184,9 +185,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 构造统一 Langfuse 桥接器（替代 forward_langfuse_event）
         // workflow 无 subagent 场景:不注入 main_agent_id(registry fallback 兼容 v1)
-        let langfuse_bridge: Option<crate::langfuse::bridge::LangfuseBridge> =
+        let langfuse_bridge: Option<peri_controller::langfuse::bridge::LangfuseBridge> =
             langfuse_tracer.as_ref().map(|t| {
-                crate::langfuse::bridge::LangfuseBridge::new(
+                peri_controller::langfuse::bridge::LangfuseBridge::new(
                     std::sync::Arc::clone(t),
                     provider_display_name.clone(),
                     None,
@@ -280,7 +281,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 // Langfuse 事件转发（统一桥接器）
                 if let Some(ref bridge) = bridge_for_handler {
                     if let Some(u) =
-                        crate::langfuse::bridge::UnifiedLangfuseEvent::from_executor_event(
+                        peri_controller::langfuse::bridge::UnifiedLangfuseEvent::from_executor_event(
                             event.clone(),
                         )
                     {
@@ -501,21 +502,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
         // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
-        let v2_ctx = peri_middlewares::subagent::v2_bridge::build_v2_subagent_context(
+        // L3：build_v2_subagent_context 迁至 peri-agent（resolver 参数化；
+        // workflow 保持迁移前的 ExecuteExtraToolResolver 语义）
+        let v2_ctx = peri_agent::session::subagent::build_v2_subagent_context(
+            None, // workflow agent 无预创建 session（内部自建）
             llm,
             chain,
             tools_arc,
             &self.ctx.cwd,
             cancel_token.clone(),
-            Vec::new(),
-            Some(system_prompt),
-            None, // shared_tools
+            Some(Arc::new(
+                peri_middlewares::tool_search::ExecuteExtraToolResolver::default(),
+            )),
+            Some(error_suggest_registry),
+            Some(snapshot),
             compact_config,
             context_budget,
             compact_llm,
-            Some(error_suggest_registry),
-            Some(snapshot),
-            None,
+            None, // workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
         );
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）
@@ -530,7 +534,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 handler_for_forwarder.on_event(exec_ev);
             },
             None, // bridge: workflow 在外部 handler 中处理 Langfuse
-            None, // v2_tx
         );
 
         // push prompt 到 queue
