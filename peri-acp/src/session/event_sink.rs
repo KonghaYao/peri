@@ -252,6 +252,27 @@ impl EventSink for TransportEventSink {
                         agent_id: agent_id.clone(),
                     })
                 }
+                // StateSnapshotMeta：状态栏上下文消耗（budget_pct + 总量）。
+                // v2 StateEvent::StateSnapshot 经 mapper_v2 → v1 StateSnapshotMeta
+                // 到达此处；双轨下线（v2_bridge.rs 删除）后此信号仅经 ACP 路径
+                // 送达 TUI（acp_notifier.rs 写 CONTEXT_USAGE atom）。此前该分支
+                // 缺失落入 `_ => None` 静默丢弃，TUI status_bar ctx% 段永不渲染
+                // （e2e compact-command 回归，2026-08-06 修复）。
+                ExecutorEvent::StateSnapshotMeta {
+                    message_count,
+                    total_tokens,
+                    current_step,
+                    consecutive_failures,
+                    budget_pct,
+                    context_total_tokens,
+                } => Some(AcpEvent::StateSnapshotMeta {
+                    message_count: *message_count,
+                    total_tokens: *total_tokens,
+                    current_step: *current_step,
+                    consecutive_failures: *consecutive_failures,
+                    budget_pct: *budget_pct,
+                    context_total_tokens: *context_total_tokens,
+                }),
                 // TurnCommitted：messages 载荷（全量消息快照）在本链路无消费者——
                 // TUI 仅用 steps 做 ReAct 迭代边界刷新检查点（acp_events/mod.rs:331
                 // 丢弃 messages_json），Langfuse bridge 亦不读取（bridge.rs:319）。
