@@ -406,7 +406,7 @@ pub(crate) fn spawn_stdio_transport(
     use std::process::Stdio;
 
     let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let mut cmd = crate::process::shell_command(command, &arg_strs);
+    let mut cmd = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
     cmd.envs(env);
 
     let builder = rmcp::transport::child_process::TokioChildProcess::builder(cmd)

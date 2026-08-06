@@ -48,7 +48,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = { version = "0.22", features = ["alloc"] }
 ipnet = "2.10"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
-peri-lsp = { path = "../peri-lsp" }
+peri-resources = { path = "../peri-resources" }
 lsp-types.workspace = true
 peri-workflow = { path = "../peri-workflow" }
 

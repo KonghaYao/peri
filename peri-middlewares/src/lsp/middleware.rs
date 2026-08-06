@@ -7,7 +7,7 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
-use peri_lsp::{
+use peri_resources::lsp::{
     config::{LspConfigFile, LspServerConfig},
     pool::LspServerPool,
 };

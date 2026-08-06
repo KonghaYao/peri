@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::tools::BaseTool;
 
 use super::*;
@@ -267,46 +268,8 @@ fn test_truncate_output_persists_full_content_on_byte_truncation() {
 }
 
 // ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
-
-/// parse_timeout 纯函数语义：
-/// - 后台：未传 → None（不超时）；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - 同步：未传 → Some(15000)；显式 0 → None；显式 >0 → clamp 到 [min, 600000]
-/// - min：Unix 为 1；Windows 为 5000（进程创建/终止开销大，过短超时不可靠）
-#[test]
-fn test_parse_timeout_semantics() {
-    let min = if cfg!(target_os = "windows") { 5000 } else { 1 };
-    // 后台
-    assert_eq!(parse_timeout(&serde_json::json!({}), true), None);
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), true),
-        None
-    );
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000}), true),
-        Some(2000.max(min))
-    );
-    // 同步
-    assert_eq!(parse_timeout(&serde_json::json!({}), false), Some(15_000));
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 0}), false),
-        None
-    );
-    assert_eq!(
-        parse_timeout(&serde_json::json!({"timeout": 2000000}), false),
-        Some(600_000)
-    );
-}
-
-/// bg shell 任务 id 唯一性（issue 2026-08-05 回归防护）：
-/// 旧实现取 UUID v7 前 8 字符（毫秒时间戳高 32 位），同一毫秒内多次调用
-/// 必然碰撞 → registry 覆盖注册 → 后续 complete() 被静默跳过 → TUI 条目残留。
-/// 连续生成（大概率落在同一毫秒）必须全部唯一，且保留 `shell-` 前缀。
-#[test]
-fn test_bg_shell_task_id_uniqueness() {
-    let ids: std::collections::HashSet<String> = (0..64).map(|_| bg_shell_task_id()).collect();
-    assert_eq!(ids.len(), 64, "同一毫秒内生成的 bg shell task_id 必须唯一");
-    assert!(ids.iter().all(|id| id.starts_with("shell-")));
-}
+// parse_timeout / bg_shell_task_id 纯函数测试已随实现迁至
+// `peri-agent/src/agent/async_tasks_test.rs`（L1 迁移点），此处不再重复。
 
 /// bg 显式超时：应杀死整个进程组（bash 为组长），sh/sleep 子进程不得孤儿存活创建 marker。
 /// 命令 `sh -c 'sleep 3; touch marker'` + timeout 2000：若只杀 bash 单进程（旧行为），
@@ -314,7 +277,7 @@ fn test_bg_shell_task_id_uniqueness() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_explicit_timeout_kills_process_group() {
-    let registry = Arc::new(BackgroundTaskRegistry::new());
+    let registry = Arc::new(TaskManager::new());
     let marker = std::env::temp_dir().join(format!(
         "peri-bg-timeout-kill-{}.marker",
         uuid::Uuid::new_v4()
@@ -322,7 +285,7 @@ async fn test_bg_explicit_timeout_kills_process_group() {
     let marker_path = marker.to_string_lossy().to_string();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
-        .with_registry(registry)
+        .with_task_manager(registry)
         .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
@@ -368,10 +331,10 @@ async fn test_bg_explicit_timeout_kills_process_group() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_bg_shell_registered_while_running() {
-    let registry = Arc::new(BackgroundTaskRegistry::new());
+    let registry = Arc::new(TaskManager::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
-        .with_registry(registry.clone())
+        .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));
@@ -415,10 +378,10 @@ async fn test_bg_shell_registered_while_running() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_sync_timeout_promotes_to_background() {
-    let registry = Arc::new(BackgroundTaskRegistry::new());
+    let registry = Arc::new(TaskManager::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
-        .with_registry(registry.clone())
+        .with_task_manager(registry.clone())
         .with_on_bg_complete(Arc::new(move |r, _kind| {
             let _ = tx.send(r.clone());
         }));

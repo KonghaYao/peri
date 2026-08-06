@@ -14,8 +14,8 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::{
-    agent::events::BackgroundTaskResult,
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
@@ -27,54 +27,6 @@ use peri_workflow::{
     runner::{AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner},
     tool::WorkflowTool,
 };
-
-use crate::subagent::{
-    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-};
-
-/// 将 BackgroundTaskRegistry 适配为 peri-workflow 的 BgTaskRegistry trait
-impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
-    fn register_workflow(
-        &self,
-        task_id: String,
-        summary: String,
-        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
-    ) {
-        let bg_task = BackgroundTask {
-            id: task_id,
-            agent_name: "workflow".to_string(),
-            prompt_summary: summary,
-            status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
-            chrono_started_at: chrono::Utc::now(),
-            kind: BgTaskKind::Workflow,
-            // kill 闭包由 WorkflowTool::invoke 构造（转发到 WorkflowTaskRegistry::kill），
-            // 使 session/cancel-bg-task 真正终止 workflow runner（issue 2026-08-05）
-            cancel_handle: BgCancelHandle::Kill(kill),
-            cancel_token: None,
-            pid: None,
-            output_preview: None,
-        };
-        if let Err(e) = self.register_with_kind(bg_task) {
-            tracing::warn!(error = %e, "workflow bg registry: register_with_kind failed");
-        }
-    }
-
-    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64) {
-        let result = BackgroundTaskResult {
-            task_id: task_id.to_string(),
-            agent_name: "workflow".to_string(),
-            prompt_summary: String::new(),
-            success,
-            output: output.chars().take(500).collect(),
-            tool_calls_count: 0,
-            duration_ms,
-            child_thread_id: None,
-            timed_out: false,
-        };
-        self.complete(task_id, result);
-    }
-}
 
 /// Workflow 中间件持有者——session 级共享状态，跨 turn 存活。
 ///
@@ -90,8 +42,8 @@ pub struct WorkflowMiddleware {
     /// 原 notification_buffer_rx 通道已迁移到 MessageQueue 模式，
     /// 保留此 gate 用于 session 级 consumer 去重。
     notification_consumer_spawned: AtomicBool,
-    /// 统一后台任务注册表（可选，创建后可通过 set_bg_registry 延迟注入）
-    bg_registry: parking_lot::RwLock<Option<Arc<BackgroundTaskRegistry>>>,
+    /// 统一后台任务管理器（Agent 层 per-session TaskManager；可选，创建后可通过 set_bg_registry 延迟注入）
+    bg_registry: parking_lot::RwLock<Option<Arc<TaskManager>>>,
 }
 
 impl WorkflowMiddleware {
@@ -126,13 +78,13 @@ impl WorkflowMiddleware {
     }
 
     /// 设置统一后台任务注册表（构造时链式调用）
-    pub fn with_bg_registry(self, bg_registry: Arc<BackgroundTaskRegistry>) -> Self {
+    pub fn with_bg_registry(self, bg_registry: Arc<TaskManager>) -> Self {
         *self.bg_registry.write() = Some(bg_registry);
         self
     }
 
     /// 延迟注入 bg_registry（创建后设置，通过 RwLock 支持内部可变性）
-    pub fn set_bg_registry(&self, bg_registry: Arc<BackgroundTaskRegistry>) {
+    pub fn set_bg_registry(&self, bg_registry: Arc<TaskManager>) {
         *self.bg_registry.write() = Some(bg_registry);
     }
 
@@ -461,7 +413,7 @@ mod tests {
         use peri_workflow::tool::BgTaskRegistry;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let bg_registry = Arc::new(BackgroundTaskRegistry::new());
+        let bg_registry = Arc::new(TaskManager::new());
         let killed = Arc::new(AtomicBool::new(false));
         let killed_clone = killed.clone();
         bg_registry.register_workflow(

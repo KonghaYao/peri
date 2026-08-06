@@ -54,7 +54,7 @@ pub async fn execute_command_hook(
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut cmd = crate::process::shell_command(&command, &[]);
+        let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

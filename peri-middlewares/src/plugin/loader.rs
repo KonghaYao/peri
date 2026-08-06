@@ -4,7 +4,7 @@ use std::{
 };
 
 use gray_matter::{engine::YAML, Matter};
-use peri_lsp::config::{LspConfigSource, LspServerConfig};
+use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};

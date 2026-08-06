@@ -1623,7 +1623,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
 
     // Background registry
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
 
     // 父消息（fork background 需要）
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
@@ -1643,7 +1643,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     )
     .with_parent_messages(parent_messages)
     .with_cancel(parent_cancel.clone())
-    .with_background_registry(Arc::clone(&registry))
+    .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx);
 
     // Act 1: 启动 background fork
@@ -1895,7 +1895,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     }
 
     let parent_cancel = AgentCancellationToken::new();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let tool = SubAgentTool::new(
         Arc::new(vec![]),
@@ -1909,7 +1909,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         dir.path().to_str().unwrap().to_string(),
     )
     .with_cancel(parent_cancel.clone())
-    .with_background_registry(registry)
+    .with_task_manager(registry)
     .with_bg_event_sender(bg_tx);
 
     let started = tool
@@ -2000,7 +2000,7 @@ async fn test_integration_fork_plus_background_priority() {
     }
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
 
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
@@ -2018,7 +2018,7 @@ async fn test_integration_fork_plus_background_priority() {
         "/tmp".to_string(),
     )
     .with_parent_messages(parent_messages)
-    .with_background_registry(Arc::clone(&registry))
+    .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx);
 
     // Act: 同时 fork=true + run_in_background=true（优先级测试）
@@ -2323,10 +2323,10 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (t, bridge) = make_tool_with_bridge();
     let t = t
-        .with_background_registry(Arc::clone(&registry))
+        .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
     let result = t
         .invoke(
@@ -2365,13 +2365,13 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
 #[tokio::test]
 async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> =
         Arc::new(RwLock::new(vec![BaseMessage::human("ctx for bg fork")]));
     let (t, bridge) = make_tool_with_bridge();
     let t = t
         .with_parent_messages(parent_messages)
-        .with_background_registry(Arc::clone(&registry))
+        .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
     let result = t
         .invoke(
@@ -2407,8 +2407,8 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
 // ─── S3.1 注册门控 + S3.2 取消收尾（issue 2026-08-05）────────────────────
 
 /// 构造一个已注册状态的 bg 任务（预置 registry 占用额度用）
-fn make_registered_bg_task(id: &str) -> crate::subagent::background::BackgroundTask {
-    use crate::subagent::background::{
+fn make_registered_bg_task(id: &str) -> peri_agent::agent::async_tasks::BackgroundTask {
+    use peri_agent::agent::async_tasks::{
         BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
     };
     let handle = tokio::runtime::Handle::current().spawn(async {});
@@ -2457,7 +2457,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
     .unwrap();
 
     // 预置 2 个 Agent 任务（total=2）：4 个并发 invoke 都能通过 total 预检
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     for i in 0..2 {
         registry
             .register_with_kind(make_registered_bg_task(&format!("bg-pre-{}", i)))
@@ -2526,7 +2526,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
         llm_factory,
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_background_registry(Arc::clone(&registry))
+    .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx)
     .with_register_runtime(register_cb)
     .with_deregister_runtime(deregister_cb);
@@ -2689,10 +2689,10 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
             }) as Box<dyn ReactLLM + Send + Sync>
         });
 
-    let registry = Arc::new(crate::subagent::BackgroundTaskRegistry::new());
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let (reg_events_tx, mut reg_events_rx) =
-        mpsc::unbounded_channel::<crate::subagent::background::BgRegistryEvent>();
+        mpsc::unbounded_channel::<peri_agent::agent::async_tasks::BgRegistryEvent>();
     registry.set_event_sender(reg_events_tx, "sess-cancel".to_string());
 
     let deregistered: Arc<std::sync::Mutex<Vec<String>>> =
@@ -2708,7 +2708,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         llm_factory,
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_background_registry(Arc::clone(&registry))
+    .with_task_manager(Arc::clone(&registry))
     .with_bg_event_sender(bg_tx)
     .with_deregister_runtime(deregister_cb);
 
@@ -2783,7 +2783,7 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
     while let Ok(ev) = reg_events_rx.try_recv() {
         if matches!(
             ev,
-            crate::subagent::background::BgRegistryEvent::Completed { .. }
+            peri_agent::agent::async_tasks::BgRegistryEvent::Completed { .. }
         ) {
             saw_completed = true;
         }

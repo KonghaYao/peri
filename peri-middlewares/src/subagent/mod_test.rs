@@ -279,7 +279,7 @@ fn test_scan_agents_with_extra_dirs_empty() {
 fn test_count_tool_calls_from_session_zero_when_empty() {
     let session = make_session();
     assert_eq!(
-        count_tool_calls_from_session(&session),
+        peri_agent::session::subagent::count_tool_calls_from_session(&session),
         0,
         "空 transcript 应返回 0"
     );
@@ -296,7 +296,7 @@ fn test_count_tool_calls_from_session_counts_multiple_tools() {
         tx.append(BaseMessage::tool_result("call_3", "result 3"));
     }
     assert_eq!(
-        count_tool_calls_from_session(&session),
+        peri_agent::session::subagent::count_tool_calls_from_session(&session),
         3,
         "3 条 Tool 消息应被正确统计"
     );
@@ -315,7 +315,7 @@ fn test_count_tool_calls_from_session_ignores_non_tool_messages() {
         tx.append(BaseMessage::system("system prompt"));
     }
     assert_eq!(
-        count_tool_calls_from_session(&session),
+        peri_agent::session::subagent::count_tool_calls_from_session(&session),
         2,
         "只应统计 Tool 消息，忽略 Human/Ai/System"
     );
@@ -334,7 +334,7 @@ fn test_count_tool_calls_from_session_counts_error_tools() {
         ));
     }
     assert_eq!(
-        count_tool_calls_from_session(&session),
+        peri_agent::session::subagent::count_tool_calls_from_session(&session),
         2,
         "错误工具调用也应被统计（失败也是一次执行）"
     );

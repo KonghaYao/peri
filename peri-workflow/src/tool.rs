@@ -19,7 +19,8 @@ use crate::runner::{WorkflowInput, WorkflowResult, WorkflowRunner};
 
 /// Background task registry interface — avoids peri-workflow → peri-middlewares dependency.
 ///
-/// Implemented by `peri_middlewares::BackgroundTaskRegistry`.
+/// Implemented by `peri_agent::agent::async_tasks::TaskManager`（Agent 层 per-session
+/// 聚合，3.0 L1 迁移后 Middleware 经 TaskManager 发起任务）。
 pub trait BgTaskRegistry: Send + Sync {
     /// 注册 workflow bg 任务。`kill` 为 kill 闭包（None = kill 通道不可用）：
     /// 由注册方在同时持有 `WorkflowTaskRegistry` 的位置构造，取消时转发到
@@ -31,6 +32,56 @@ pub trait BgTaskRegistry: Send + Sync {
         kill: Option<Box<dyn FnOnce() + Send + Sync>>,
     );
     fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64);
+}
+
+/// 将 Agent 层 `TaskManager` 适配为 [`BgTaskRegistry`]。
+///
+/// workflow 任务定义 + 启动发起经 TaskManager 接口（`register_with_kind` /
+/// `complete`），不持有 registry 管理权。kill 闭包由 `WorkflowTool::invoke`
+/// 构造（转发到 `WorkflowTaskRegistry::kill`），使 session/cancel-bg-task
+/// 真正终止 workflow runner（issue 2026-08-05）。
+impl BgTaskRegistry for peri_agent::agent::async_tasks::TaskManager {
+    fn register_workflow(
+        &self,
+        task_id: String,
+        summary: String,
+        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
+    ) {
+        use peri_agent::agent::async_tasks::{
+            BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+        };
+        let bg_task = BackgroundTask {
+            id: task_id,
+            agent_name: "workflow".to_string(),
+            prompt_summary: summary,
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Workflow,
+            cancel_handle: BgCancelHandle::Kill(kill),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+        };
+        if let Err(e) = self.register_with_kind(bg_task) {
+            tracing::warn!(error = %e, "workflow bg registry: register_with_kind failed");
+        }
+    }
+
+    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64) {
+        let result = peri_agent::agent::events::BackgroundTaskResult {
+            task_id: task_id.to_string(),
+            agent_name: "workflow".to_string(),
+            prompt_summary: String::new(),
+            success,
+            output: output.chars().take(500).collect(),
+            tool_calls_count: 0,
+            duration_ms,
+            child_thread_id: None,
+            timed_out: false,
+        };
+        self.complete(task_id, result);
+    }
 }
 
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
