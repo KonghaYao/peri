@@ -1,13 +1,13 @@
 //! Langfuse 桥接器抽象 trait。
 //!
-//! peri-agent 层通过此 trait 消费 v2 事件，无需依赖 peri-acp。
-//! peri-acp 的 `LangfuseBridge` impl 此 trait，内部完成
+//! peri-agent 层通过此 trait 消费 v2 事件，无需依赖 peri-controller。
+//! peri-controller 的 `LangfuseBridge` impl 此 trait，内部完成
 //! RenderEvent/ObserveEvent → UnifiedLangfuseEvent → LangfuseTracer 的映射链路。
 
 /// Langfuse 桥接器抽象。
 ///
-/// peri-agent 层通过此 trait 消费 v2 事件，无需依赖 peri-acp。
-/// peri-acp 的 `LangfuseBridge` impl 此 trait，内部完成
+/// peri-agent 层通过此 trait 消费 v2 事件，无需依赖 peri-controller。
+/// peri-controller 的 `LangfuseBridge` impl 此 trait，内部完成
 /// RenderEvent/ObserveEvent → UnifiedLangfuseEvent → LangfuseTracer 的映射链路。
 pub trait LangfuseBridgeLike: Send + Sync {
     /// 处理 RenderEvent，映射为 Langfuse 追踪事件。

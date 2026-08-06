@@ -21,8 +21,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
+use crate::agent::events::{CompactTrigger, ExecutorEvent};
 use crate::group::pipeline::AgentId;
 use crate::messages::BaseMessage;
+use crate::messages::MessageId;
 use crate::session::turn::TurnId;
 
 // ─── TurnErrorReason ──────────────────────────────────────────────────────────
@@ -620,6 +622,265 @@ impl EventHandles {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
+// ─── v1 兼容映射（v2 → ExecutorEvent） ──────────────────────────────────────
+//
+// v1 `ExecutorEvent` 中间态尚未全量退役（依赖 StdioEventSink 迁移，
+// `2026-07-18-executor-event-retirement.md`），v2 事件经本组函数转换为
+// v1 事件后由 peri-acp 协议化。本组函数是 canonical 事件的唯一 v1 兼容映射：
+//
+// - **穷尽匹配**：每个 v2 变体显式声明映射结果或过滤理由，新增变体无法静默
+//   落入 wildcard 丢弃分支（`2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）。
+// - **身份透传**：`source_agent_id` 透传 v2 `agent_id`（不再置 None 伪装）；
+//   `message_id` 以 turn_id 填充（v2 chunk 事件无 message 级身份，turn_id 是
+//   该 chunk 可获得的唯一稳定身份；真实 message 身份由 transcript/envelope 承载）。
+// - **随 ExecutorEvent 退役**：本组函数是 v1 中间态的组成部分，随 ExecutorEvent
+//   全量退役（另一子 issue）一起删除。
+
+/// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
+pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
+    match event {
+        RenderEvent::TextChunk {
+            turn_id,
+            agent_id,
+            chunk,
+        } => Some(ExecutorEvent::TextChunk {
+            // v2 chunk 事件无 message 级身份；以 turn_id 填充（同一 turn 的
+            // chunk 共享稳定归组键），不使用 Default::default() 伪装。
+            message_id: MessageId::from(turn_id.as_uuid()),
+            chunk,
+            source_agent_id: Some(agent_id.to_string()),
+        }),
+        RenderEvent::ThinkingChunk {
+            agent_id, chunk, ..
+        } => Some(ExecutorEvent::AiReasoning {
+            text: chunk,
+            source_agent_id: Some(agent_id.to_string()),
+        }),
+        RenderEvent::ToolStarted {
+            turn_id,
+            agent_id,
+            tool_call_id,
+            name,
+            input,
+        } => Some(ExecutorEvent::ToolStart {
+            message_id: MessageId::from(turn_id.as_uuid()),
+            tool_call_id,
+            name,
+            input,
+            source_agent_id: Some(agent_id.to_string()),
+        }),
+        RenderEvent::ToolEnded {
+            turn_id,
+            agent_id,
+            tool_call_id,
+            name,
+            output,
+            is_error,
+        } => Some(ExecutorEvent::ToolEnd {
+            message_id: MessageId::from(turn_id.as_uuid()),
+            tool_call_id,
+            name,
+            output,
+            is_error,
+            source_agent_id: Some(agent_id.to_string()),
+        }),
+        RenderEvent::BudgetWarning {
+            used_tokens,
+            total_tokens,
+            percentage,
+            ..
+        } => Some(ExecutorEvent::ContextWarning {
+            used_tokens,
+            total_tokens,
+            percentage,
+        }),
+        // HitlPending：v1 中无对应变体，由 HITL 审批独立通道（RequestPermission）
+        // 处理，不在事件链映射。
+        RenderEvent::HitlPending { .. } => None,
+        RenderEvent::TurnCompleted {
+            finalized_messages,
+            steps,
+            ..
+        } => Some(ExecutorEvent::TurnCommitted {
+            // Arc 直接透传（浅拷贝），消除每迭代的全量消息深拷贝
+            messages: finalized_messages,
+            steps,
+        }),
+    }
+}
+
+/// 将 v2 `StateEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
+pub fn state_event_to_executor(event: StateEvent) -> Option<ExecutorEvent> {
+    match event {
+        StateEvent::StateSnapshot {
+            message_count,
+            total_tokens,
+            current_step,
+            consecutive_failures,
+            budget_pct,
+            context_total_tokens,
+            ..
+        } => Some(ExecutorEvent::StateSnapshotMeta {
+            message_count,
+            total_tokens,
+            current_step,
+            consecutive_failures,
+            budget_pct,
+            context_total_tokens,
+        }),
+        StateEvent::SyntheticUserMessage { text, .. } => Some(ExecutorEvent::MessageAdded(
+            crate::messages::BaseMessage::human(crate::messages::MessageContent::text(text)),
+        )),
+        // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading），
+        // 经 ExecutorEvent::TurnSuspended 透传 turn_id/agent_id 身份。
+        StateEvent::TurnSuspended { turn_id, agent_id } => Some(ExecutorEvent::TurnSuspended {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }),
+    }
+}
+
+/// 将 v2 `ObserveEvent` 转换为 `ExecutorEvent`（穷尽匹配）。
+pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
+    match event {
+        ObserveEvent::LlmCallStart {
+            step,
+            messages,
+            tools,
+            ..
+        } => Some(ExecutorEvent::LlmCallStart {
+            step,
+            messages,
+            tools,
+        }),
+        ObserveEvent::LlmCallEnd {
+            step,
+            model,
+            output,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            request_id,
+            ..
+        } => Some(ExecutorEvent::LlmCallEnd {
+            step,
+            model,
+            output,
+            usage: Some(peri_model::TokenUsage {
+                input_tokens: input_tokens as u32,
+                output_tokens: output_tokens as u32,
+                // 0 表示 Provider 不支持 caching；保留 Option 让下游区分"不支持" vs "未命中"
+                cache_creation_input_tokens: if cache_creation_input_tokens > 0 {
+                    Some(cache_creation_input_tokens as u32)
+                } else {
+                    None
+                },
+                cache_read_input_tokens: if cache_read_input_tokens > 0 {
+                    Some(cache_read_input_tokens as u32)
+                } else {
+                    None
+                },
+            }),
+            stop_reason: None,
+            request_id,
+        }),
+        ObserveEvent::CompactStarted {
+            turn_id,
+            agent_id,
+            step,
+            strategy,
+            ..
+        } => Some(ExecutorEvent::CompactStarted {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+            step,
+            strategy,
+            trigger: CompactTrigger::Auto,
+        }),
+        // CompactEnded：无变更的结束路径（cancel 且未提交变更），v1 无对应
+        // 事件变体；仅 Langfuse bridge 直消费 v2 闭合 span。
+        ObserveEvent::CompactEnded { .. } => None,
+        ObserveEvent::MessagesCompacted {
+            before_count,
+            after_count,
+            summary,
+            messages,
+            files,
+            skills,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            estimated_tokens_before,
+            estimated_tokens_after,
+            changed_messages,
+            changed_fields,
+            no_op_candidates,
+            full_escalation_reason,
+            cache_hit_rate_before,
+            outcome,
+            ..
+        } => Some(ExecutorEvent::CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared: before_count.saturating_sub(after_count),
+            messages,
+            token_before: estimated_tokens_before,
+            token_after: estimated_tokens_after,
+            strategy,
+            affected_count,
+            estimated_tokens_saved,
+            estimated_tokens_before,
+            estimated_tokens_after,
+            changed_messages,
+            changed_fields,
+            no_op_candidates,
+            full_escalation_reason,
+            cache_hit_rate_before,
+            trigger: CompactTrigger::Auto,
+            outcome,
+        }),
+        // TurnError：TUI 错误展示经 executor_helpers 的 AgentExecutionFailed
+        // （LoopResult::Error 分支）；Langfuse 经 bridge 直消费 v2。v1 无对应变体。
+        ObserveEvent::TurnError { .. } => None,
+        ObserveEvent::SubagentStart {
+            agent_name,
+            child_agent_id,
+            is_background,
+            ..
+        } => Some(ExecutorEvent::SubagentStarted {
+            agent_name,
+            instance_id: child_agent_id.to_string(),
+            is_background,
+        }),
+        ObserveEvent::SubagentStop {
+            agent_name,
+            child_agent_id,
+            result,
+            is_error,
+            ..
+        } => Some(ExecutorEvent::SubagentStopped {
+            agent_name,
+            result,
+            is_error,
+            instance_id: child_agent_id.to_string(),
+        }),
+        ObserveEvent::LlmRequestPayload { step, body, .. } => {
+            Some(ExecutorEvent::LlmRequestPayload { step, body })
+        }
+        // ── tracer-only：Langfuse bridge 直消费 v2，v1 无对应变体 ──
+        ObserveEvent::AiReasoningChunk { .. } => None,
+        ObserveEvent::StageStarted { .. } => None,
+        ObserveEvent::StageEnded { .. } => None,
+        ObserveEvent::MessageQueueDrained { .. } => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "events_v2_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "events_v2_mapper_test.rs"]
+mod v1_compat_tests;

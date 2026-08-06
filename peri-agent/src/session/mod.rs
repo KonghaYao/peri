@@ -24,15 +24,20 @@
 //! `set_async_owners` 仅 print fallback 使用。
 
 pub mod config;
+pub mod factory;
 pub mod queue;
+pub mod runtime;
 pub mod store;
+pub mod subagent;
 pub mod transcript;
 pub mod turn;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
+/// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。
+pub use peri_acp_types::store::MessageFlags;
 pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 pub use store::{FrozenContext, FrozenContextBuilder, SessionId, SessionStore};
-pub use transcript::{MessageFlags, MessageTranscript, StagedData, TranscriptEntry};
+pub use transcript::{MessageTranscript, StagedData, TranscriptEntry};
 pub use turn::{TurnContext, TurnId};
 
 use std::sync::Arc;
@@ -72,6 +77,11 @@ pub struct Session {
     /// None 表示未启用 async owner 路径（TUI polling 路径仍有效）。
     /// Some(rwlock) 表示 v2 路径已启用，可后续通过 set_async_owners 注入。
     async_owners: Option<parking_lot::RwLock<Option<AsyncOwners>>>,
+    /// 子 agent 运行时宿主（L3）：executor/builder 在主 session 创建后注入，
+    /// subagent 创建所需的运行时通道（thread_store / task_manager / bg 事件 /
+    /// register / deregister / langfuse / frozen local_md / frozen system_prompt）
+    /// 统一经此读取，SubAgentMiddleware 不再逐字段透传。
+    subagent_host: parking_lot::RwLock<Option<Arc<subagent::SubagentHost>>>,
 }
 
 impl Session {
@@ -91,6 +101,7 @@ impl Session {
             queue,
             config,
             async_owners: None,
+            subagent_host: parking_lot::RwLock::new(None),
         })
     }
 
@@ -117,6 +128,7 @@ impl Session {
             queue,
             config,
             async_owners: None,
+            subagent_host: parking_lot::RwLock::new(None),
         })
     }
 
@@ -152,6 +164,7 @@ impl Session {
             config,
             // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
             async_owners: Some(parking_lot::RwLock::new(None)),
+            subagent_host: parking_lot::RwLock::new(None),
         })
     }
 
@@ -168,6 +181,24 @@ impl Session {
     /// 收件箱
     pub fn queue(&self) -> &MessageQueue {
         &self.queue
+    }
+
+    /// 子 agent 运行时宿主（L3）。executor/builder 在主 session 创建后注入；
+    /// 未注入（测试/遗留路径）返回 None。
+    pub fn subagent_host(&self) -> Option<Arc<subagent::SubagentHost>> {
+        self.subagent_host.read().clone()
+    }
+
+    /// 注入子 agent 运行时宿主（L3）。
+    ///
+    /// set-once：重复注入仅记录 warn 并忽略（宿主随主 session 创建，每 turn 重建）。
+    pub fn set_subagent_host(&self, host: subagent::SubagentHost) {
+        let mut guard = self.subagent_host.write();
+        if guard.is_some() {
+            tracing::warn!("set_subagent_host: already set, ignoring duplicate call");
+            return;
+        }
+        *guard = Some(Arc::new(host));
     }
 
     /// 可变配置

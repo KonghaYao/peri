@@ -23,6 +23,8 @@ tokio-util.workspace = true
 sqlx = { workspace = true }
 parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
+peri-acp-types = { path = "../peri-acp-types" }
+peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
 fuzzy-matcher = "0.3"
 

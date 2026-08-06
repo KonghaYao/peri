@@ -269,6 +269,17 @@ pub enum ExecutorEvent {
     },
     /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
     MessageAdded(crate::messages::BaseMessage),
+    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
+    ///
+    /// v2 `StateEvent::TurnSuspended` 经 v1 兼容映射（`events_v2::state_event_to_executor`）
+    /// 转换为本变体；TUI 收到后归档 current_turn、停止 loading spinner。
+    ///
+    /// `turn_id` / `agent_id` 为 v2 事件透传的身份字段（v1 其余变体无身份字段，
+    /// 本变体为 TUI 挂起信号的最小身份载体）。
+    TurnSuspended {
+        turn_id: String,
+        agent_id: String,
+    },
     /// LLM 调用开始（携带完整 input messages 快照 + 工具定义，用于 Langfuse Generation）
     LlmCallStart {
         step: usize,

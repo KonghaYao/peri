@@ -5,9 +5,11 @@
 //! 全部丢弃在 SubAgent 自己的 EventBus 内部，TUI 看不到 SubAgent 的工具调用、
 //! AI 文本、推理内容。
 //!
-//! 本模块封装转发器 spawn 函数：从 SubAgent 的 EventBus 消费 v2 事件，经
-//! `events_v2_mapper` 映射为 `ExecutorEvent`，注入 `source_agent_id = child_thread_id`
-//! 后转发到父 Agent 的 `AgentEventHandler`。
+//! 本模块封装转发器 spawn 函数：**直接消费 SubAgent 的 v2 事件**（三层
+//! EventHandles），经 v1 兼容映射（`events_v2::*_event_to_executor`）转为
+//! `ExecutorEvent`，注入 `source_agent_id = child_thread_id` 后转发到父 Agent
+//! 的 `AgentEventHandler`（`2026-07-18-events-v2-mapper-removal.md` 退役步骤 4：
+//! 不再经独立 mapper 模块桥接）。
 //!
 //! ## 关键不变量
 //!
@@ -25,9 +27,9 @@ use tokio::task::JoinHandle;
 use super::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::events::AgentEventHandler;
 use crate::agent::events::ExecutorEvent;
-use crate::agent::events_v2::{EventHandles, ObserveEvent};
-use crate::agent::events_v2_mapper::{
-    observe_event_to_executor, render_event_to_executor, state_event_to_executor,
+use crate::agent::events_v2::{
+    observe_event_to_executor, render_event_to_executor, state_event_to_executor, EventHandles,
+    ObserveEvent,
 };
 
 /// 启动 SubAgent 事件转发器。
@@ -140,11 +142,14 @@ pub fn spawn_subagent_event_forwarder(
                     }
                 }
                 Some(ev) = handles.state_rx.recv() => {
-                    // 过滤：子 Agent 的 StateSnapshot 不应污染父 Agent transcript
-                    // （TurnCompleted 已迁移到 RenderEvent，在 render 分支同样过滤）
+                    // 过滤：子 Agent 的 StateSnapshot / TurnSuspended 不应转发到
+                    // 父 Agent（StateSnapshot 不应污染父 transcript；TurnSuspended
+                    // 是子 Agent 自身挂起信号，转发会让父 TUI 错误归档 current_turn
+                    // 并停止 loading——父子并行时父 turn 仍在运行）。
                     let should_forward = !matches!(
                         &ev,
                         crate::agent::events_v2::StateEvent::StateSnapshot { .. }
+                            | crate::agent::events_v2::StateEvent::TurnSuspended { .. }
                     );
                     if should_forward {
                         if let Some(exec_ev) = state_event_to_executor(ev) {

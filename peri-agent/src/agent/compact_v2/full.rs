@@ -21,7 +21,8 @@ use crate::agent::{
 };
 use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
-use crate::session::transcript::{MessageFlags, MessageTranscript};
+use crate::session::transcript::MessageTranscript;
+use crate::session::MessageFlags;
 use crate::thread::CompactionLifecycle;
 
 // ─── 公共常量 ──────────────────────────────────────────────────────────────────
