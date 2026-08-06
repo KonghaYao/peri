@@ -1,0 +1,123 @@
+//! 装配注入端口（3.0 批 2 波 2）。
+//!
+//! 资源类（`McpClientPool` / `CronScheduler` / `ToolSearchIndex` /
+//! `WorkflowMiddleware`）与业务操作面（skills 扫描 / plugin 管理）在
+//! peri-acp 协议面不再直接引用具体实现；宿主装配点构造具体实例后
+//! upcast 为端口注入，ACP 侧只持端口接口（`docs/top-level.md` §0 依赖方向）。
+//!
+//! 具体实现位于 `peri-middlewares`（端口 impl 归实现方）。
+//! `downcast_arc` 为过渡期桥：host/exec 执行本体（L2/L5 迁出范围）在豁免期内
+//! 经 `as_any` 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
+
+use std::any::{Any, TypeId};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::agents::AgentCapability;
+use crate::skills::{SkillMetadata, SkillRoot};
+
+/// 资源端口声明宏：`Send + Sync` 透传句柄 + `as_any` 还原点。
+macro_rules! port_with_downcast {
+    ($(#[$doc:meta])* $port:ident) => {
+        $(#[$doc])*
+        pub trait $port: Send + Sync {
+            /// 还原具体实现（过渡期 host/exec 豁免面使用；L2/L5 迁出后移除）。
+            fn as_any(&self) -> &dyn Any;
+        }
+
+        impl dyn $port {
+            /// 将 `Arc<dyn $port>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+            pub fn downcast_arc<T: $port + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+                let ptr = Arc::into_raw(self);
+                unsafe {
+                    if (*ptr).type_id() == TypeId::of::<T>() {
+                        Ok(Arc::from_raw(ptr as *const T))
+                    } else {
+                        Err(Arc::from_raw(ptr))
+                    }
+                }
+            }
+        }
+    };
+}
+
+port_with_downcast!(
+    /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
+    ///
+    /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
+    /// 句柄，工具桥接/服务器管理在 host/exec 执行本体（L2/L5 迁出）。
+    McpPoolPort
+);
+
+port_with_downcast!(
+    /// 工具检索索引端口（`peri-middlewares::tool_search::ToolSearchIndex` 实现）。
+    ToolSearchPort
+);
+
+/// Workflow 中间件端口（`peri-middlewares::workflow::WorkflowMiddleware` 实现）。
+///
+/// per-session 实例；构造点（依赖 host/exec 执行本体的 `create_executor`）
+/// 豁免至 L5，协议面只持端口句柄。命令面（workflow/list_runs / kill_agent /
+/// kill_run / resume）与执行装配（bg registry 注入 / 完成通知订阅）均经本
+/// 端口；host/exec 豁免期内可经 `downcast_arc` 还原具体类型。
+#[async_trait::async_trait]
+pub trait WorkflowMiddlewarePort: Send + Sync {
+    /// 还原具体实现（过渡期 host/exec 豁免面使用；L2/L5 迁出后移除）。
+    fn as_any(&self) -> &dyn Any;
+
+    /// 全部 run 快照（JSON 透传：`RunProgress` 保留在 peri-workflow，
+    /// 契约层不引入 indexmap 依赖）。
+    fn runs_snapshot(&self) -> serde_json::Value;
+
+    /// 终止单个 workflow agent（返回是否命中）。
+    async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool;
+
+    /// 终止整个 run（返回是否命中）。
+    fn kill_run(&self, run_id: &str) -> bool;
+
+    /// 从 journal 恢复 run。
+    async fn resume(&self, run_id: &str) -> Result<String, String>;
+
+    /// 订阅 run 完成通知（每 run 一条 `WorkflowTaskResult`）。
+    fn subscribe_notifications(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::workflow::WorkflowTaskResult>;
+
+    /// 注入统一后台任务注册表（session 级 TaskManager）。
+    fn set_bg_registry(&self, bg_registry: std::sync::Arc<dyn crate::tasks::TaskManager>);
+
+    /// 通知消费者单次 spawn 门（首次调用返回 true）。
+    fn init_notification_buffer(&self) -> bool;
+}
+
+impl dyn WorkflowMiddlewarePort {
+    /// 将 `Arc<dyn WorkflowMiddlewarePort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: WorkflowMiddlewarePort + 'static>(
+        self: Arc<Self>,
+    ) -> Result<Arc<T>, Arc<Self>> {
+        let ptr = Arc::into_raw(self);
+        unsafe {
+            if (*ptr).type_id() == TypeId::of::<T>() {
+                Ok(Arc::from_raw(ptr as *const T))
+            } else {
+                Err(Arc::from_raw(ptr))
+            }
+        }
+    }
+}
+
+/// Skills 扫描端口：协议命令面（available-commands / skill 列表 / agent 列表）
+/// 经此访问 skills/agents 扫描业务，具体扫描逻辑留在 `peri-middlewares`
+/// （`SkillsMiddleware::resolve_roots_static` / `scan_skill_roots` /
+/// `scan_agents_detailed`）。
+pub trait SkillsPort: Send + Sync {
+    /// 解析 skill 根目录并扫描全部 skill 元数据（含 bundled 禁用判定）。
+    fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata>;
+
+    /// 扫描可调度 agent 目录，返回 `(agent_id, name, description, capability)`。
+    fn agents(
+        &self,
+        cwd: &str,
+        extra_dirs: &[PathBuf],
+    ) -> Vec<(String, String, String, AgentCapability)>;
+}

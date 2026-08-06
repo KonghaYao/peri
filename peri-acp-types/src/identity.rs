@@ -12,6 +12,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::thread::CancelPolicy;
 
+/// Agent 唯一标识 — UUID v7（subagent 身份统一：child_thread_id → AgentId）。
+///
+/// v2 事件强制携带 `agent_id`（事件源 agent；SubAgent 场景即 source_agent_id）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentId(uuid::Uuid);
+
+impl AgentId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    /// 从 UUID 构造 AgentId（供 subagent 身份统一：child_thread_id → AgentId）
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TryFrom<String> for AgentId {
+    type Error = uuid::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        uuid::Uuid::parse_str(&value).map(Self::from_uuid)
+    }
+}
+
+impl std::fmt::Display for AgentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// 会话纪元：session 每次创建/恢复递增。
 ///
 /// 不可复用约束：epoch 只增不减（[`SessionEpoch::next`]），迟到消息携带的旧
