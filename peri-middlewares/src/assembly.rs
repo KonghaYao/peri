@@ -33,7 +33,7 @@ use peri_agent::{
     tools::BaseTool,
 };
 use peri_resources::lsp::config::{LspConfigFile, LspServerConfig};
-use peri_workflow::runner::AgentExecutor;
+use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,

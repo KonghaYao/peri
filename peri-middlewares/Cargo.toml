@@ -51,7 +51,6 @@ ipnet = "2.10"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 peri-resources = { path = "../peri-resources" }
 lsp-types.workspace = true
-peri-workflow = { path = "../peri-workflow" }
 
 
 [dev-dependencies]

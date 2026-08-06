@@ -32,10 +32,10 @@ impl super::SubAgentTool {
             .map(|sp| sp.as_ref().to_string())
             .or_else(|| self.system_builder.as_ref().map(|b| b(None, cwd)));
 
-        // LLM（fork 用默认 provider，无 model alias）；注入 event_handler，
-        // 使 SubAgent 内 LLM 的重试事件能被父级 Langfuse 追踪
-        let mut llm = (self.llm_factory)(None);
-        llm.inject_event_handler(self.event_handler.clone());
+        // LLM（fork 用默认 provider，无 model alias）。v1 `inject_event_handler`
+        // 已随流式事件中间态退役（v1-retire）：LLM 重试/流式事件统一经 v2
+        // EventBus 发射，父级 Langfuse 追踪由事件链协议化面覆盖。
+        let llm = (self.llm_factory)(None);
 
         // 工具集：父工具 clone 为 Vec<Arc<dyn BaseTool>>
         let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();

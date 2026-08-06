@@ -1194,9 +1194,11 @@ async fn build_and_execute_agent(
 
     let event_handler: Arc<dyn AgentEventHandler> =
         Arc::new(peri_acp_types::event::FnEventHandler({
-            // v1 直发事件（retry observer 等）发射点统一经 Controller：
-            // v1 事件无 turn_id/agent_id 身份，身份降级为空串（envelope 仅 ACP
-            // 内部使用，TUI 协议化映射不消费空身份字段）。
+            // v1 协议化载体直发（subagent 发射侧同步映射 / retry observer 等）
+            // 统一经 Controller：无 turn_id/agent_id 身份的事件身份降级为空串
+            // （envelope 仅 ACP 内部使用，TUI 协议化映射不消费空身份字段）。
+            // v1 ExecutorEvent 中间态已退役（批 2「v1-retire」）：本 handler 是
+            // ACP 协议序列化面的接收端，不承载 Agent 层业务发射。
             let controller = Arc::clone(&ctx.controller);
             let sid = session_id.to_string();
             move |event: ExecutorEvent| {

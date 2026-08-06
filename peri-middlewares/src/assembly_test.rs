@@ -26,8 +26,8 @@ use peri_agent::{
 };
 use peri_model::{Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream};
 use peri_resources::lsp::config::LspServerConfig;
-use peri_workflow::protocol::{AgentRunParams, AgentRunResult};
-use peri_workflow::runner::AgentExecutor;
+use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
+use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,

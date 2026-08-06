@@ -562,9 +562,7 @@ impl BaseTool for SubAgentTool {
             )
             .await?;
 
-        // 注入 event_handler，使 SubAgent 内 LLM 的重试事件能被父级 Langfuse 追踪
-        let mut llm = build_result.llm;
-        llm.inject_event_handler(self.event_handler.clone());
+        let llm = build_result.llm;
 
         let config = self.spawn_config_base(
             agent_id.clone(),

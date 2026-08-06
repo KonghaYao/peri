@@ -20,7 +20,7 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
-use peri_workflow::{
+use peri_resources::workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
     registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
@@ -56,10 +56,10 @@ impl WorkflowMiddleware {
         agent_executor: Arc<dyn AgentExecutor>,
         cwd: &str,
         notification_tx: tokio::sync::broadcast::Sender<
-            peri_workflow::registry::WorkflowTaskResult,
+            peri_resources::workflow::registry::WorkflowTaskResult,
         >,
         progress_rx: Option<
-            tokio::sync::mpsc::UnboundedReceiver<peri_workflow::protocol::ProgressEvent>,
+            tokio::sync::mpsc::UnboundedReceiver<peri_resources::workflow::protocol::ProgressEvent>,
         >,
     ) -> Self {
         let runner = Arc::new(WorkflowRunner::new(agent_executor, cwd, progress_rx));
@@ -97,14 +97,9 @@ impl WorkflowMiddleware {
             Arc::clone(&self.journal_store),
         );
         if let Some(ref bg) = *self.bg_registry.read() {
-            // trait 对象 → concrete（装配注入的 per-session TaskManager 实现）
-            // → upcast 到 workflow 侧 BgTaskRegistry（workflow 只经此接口发起）。
-            let bg_any: Arc<dyn std::any::Any + Send + Sync> =
-                Arc::clone(bg) as Arc<dyn std::any::Any + Send + Sync>;
-            if let Ok(concrete) = bg_any.downcast::<peri_agent::agent::async_tasks::TaskManager>() {
-                tool =
-                    tool.with_bg_registry(concrete as Arc<dyn peri_workflow::tool::BgTaskRegistry>);
-            }
+            // 直接注入 acp-types 契约句柄——WorkflowTool 只经 TaskManager 接口
+            // 发起（register/complete），不再需要 downcast 到具体实现。
+            tool = tool.with_bg_registry(Arc::clone(bg));
         }
         tool
     }
@@ -312,7 +307,8 @@ impl WorkflowMiddleware {
     /// 订阅 workflow 完成通知。每轮 build_agent 调用一次，获取新的 Receiver。
     pub fn subscribe_notifications(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<peri_workflow::registry::WorkflowTaskResult> {
+    ) -> tokio::sync::broadcast::Receiver<peri_resources::workflow::registry::WorkflowTaskResult>
+    {
         self.registry.notification_tx().subscribe()
     }
 
@@ -399,7 +395,7 @@ impl Middleware for WorkflowMiddlewareAdaptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+    use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
 
     struct MockAgentExecutor;
 
@@ -449,24 +445,29 @@ mod tests {
         );
     }
 
-    /// [回归测试] register_workflow 携带的 kill 闭包必须存入 bg registry 条目，
+    /// [回归测试] register 携带的 kill 闭包必须存入 bg registry 条目，
     /// session/cancel-bg-task（cancel()）时真正触发——锁定 issue 2026-08-05
     /// 修复后的行为：Workflow 取消不再只是移除条目 + 发事件，runner 被真实 kill。
     #[tokio::test]
     async fn test_register_workflow_kill_closure_invoked_on_cancel() {
-        use peri_workflow::tool::BgTaskRegistry;
+        use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let bg_registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+        let bg_registry: Arc<dyn TaskManager> =
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         let killed = Arc::new(AtomicBool::new(false));
         let killed_clone = killed.clone();
-        bg_registry.register_workflow(
-            "run-1".to_string(),
-            "wf: test".to_string(),
-            Some(Box::new(move || {
-                killed_clone.store(true, Ordering::SeqCst);
-            })),
-        );
+        bg_registry
+            .register(BgTaskRegistration {
+                task_id: "run-1".to_string(),
+                kind: BgTaskKind::Workflow,
+                summary: "wf: test".to_string(),
+                pid: None,
+                kill: Some(Box::new(move || {
+                    killed_clone.store(true, Ordering::SeqCst);
+                })),
+            })
+            .unwrap();
         assert_eq!(bg_registry.active_count(), 1);
 
         bg_registry.cancel("run-1").unwrap();

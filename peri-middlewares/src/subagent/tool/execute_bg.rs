@@ -40,8 +40,7 @@ impl super::SubAgentTool {
 
         let spawned = if is_fork {
             // fork 路径（bg fork）：父消息注入 + fork directive 包装
-            let mut llm = (self.llm_factory)(None);
-            llm.inject_event_handler(self.event_handler.clone());
+            let llm = (self.llm_factory)(None);
             let system_prompt = host
                 .as_ref()
                 .and_then(|h| h.frozen_system_prompt.clone())
@@ -89,8 +88,7 @@ impl super::SubAgentTool {
                 )
                 .await?;
 
-            let mut llm = build_result.llm;
-            llm.inject_event_handler(self.event_handler.clone());
+            let llm = build_result.llm;
 
             let config = self.spawn_config_base(
                 agent_id.clone(),

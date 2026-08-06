@@ -40,8 +40,9 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
 
 /// 启动 EventBus forwarder task。
 ///
-/// 消费 `handles` 内三层 v2 事件（render / state / observe），经 v1 兼容映射
-/// （`events_v2::*_event_to_executor`）转为 [`ExecutorEvent`]，然后调用 `on_event`
+/// 消费 `handles` 内三层 v2 事件（render / state / observe），经协议序列化面映射
+/// （`events_v2::*_event_to_executor`，v1 ExecutorEvent 中间态已退役、仅保留为
+/// ACP 协议化载体——批 2「v1-retire」）转为 [`ExecutorEvent`]，然后调用 `on_event`
 /// 闭包投递到调用方指定的目标。
 ///
 /// **事件三层化（3.0 M-event-chain）**：闭包签名携带 `UnstampedEvent`（事件源
