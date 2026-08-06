@@ -54,12 +54,12 @@ impl FromStr for PluginScope {
     }
 }
 
-impl From<PluginScope> for peri_middlewares::plugin::InstallScope {
+impl From<PluginScope> for peri_acp_types::plugin::InstallScope {
     fn from(scope: PluginScope) -> Self {
         match scope {
-            PluginScope::User => peri_middlewares::plugin::InstallScope::User,
-            PluginScope::Project => peri_middlewares::plugin::InstallScope::Project,
-            PluginScope::Local => peri_middlewares::plugin::InstallScope::Local,
+            PluginScope::User => peri_acp_types::plugin::InstallScope::User,
+            PluginScope::Project => peri_acp_types::plugin::InstallScope::Project,
+            PluginScope::Local => peri_acp_types::plugin::InstallScope::Local,
         }
     }
 }

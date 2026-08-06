@@ -5,11 +5,6 @@ use chrono::Local;
 use std::path::Path;
 
 use crate::cli_args::PluginScope;
-use peri_middlewares::plugin::{
-    KnownMarketplace, MarketplaceSource, load_known_marketplaces,
-    marketplace::{MarketplaceManager, refresh_marketplace},
-    parse_marketplace_input, save_known_marketplaces, update_plugin,
-};
 
 struct PluginListEntry {
     id: String,
@@ -38,9 +33,9 @@ fn load_plugins() -> Vec<PluginListEntry> {
             marketplace: p.marketplace,
             enabled: true,
             scope: match p.scope {
-                peri_middlewares::plugin::InstallScope::User => "user",
-                peri_middlewares::plugin::InstallScope::Project => "project",
-                peri_middlewares::plugin::InstallScope::Local => "local",
+                peri_acp_types::plugin::InstallScope::User => "user",
+                peri_acp_types::plugin::InstallScope::Project => "project",
+                peri_acp_types::plugin::InstallScope::Local => "local",
             }
             .to_string(),
         })
@@ -129,19 +124,18 @@ pub async fn run_plugin_uninstall(plugin_id: &str, _scope_str: Option<&str>) -> 
 }
 
 pub async fn run_marketplace_add(source: &str) -> Result<()> {
-    let marketplace_source = parse_marketplace_input(source)
+    let marketplace_source = peri_middlewares::plugin::parse_marketplace_input(source)
         .map_err(|e| anyhow::anyhow!("无效的 marketplace source: {e}"))?;
 
-    let name = MarketplaceManager::extract_name(&marketplace_source);
+    let name = peri_middlewares::plugin::MarketplaceManager::extract_name(&marketplace_source);
 
-    let mut marketplaces =
-        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+    let mut marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
+        .map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
     // 检查是否已存在：如果已有 valid install_location 则真重复，否则是旧残留（需刷新）
-    if let Some(existing) = marketplaces
-        .iter()
-        .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
-    {
+    if let Some(existing) = marketplaces.iter().position(|mkt| {
+        peri_middlewares::plugin::MarketplaceManager::extract_name(&mkt.source) == name
+    }) {
         let old = &marketplaces[existing];
         if !old.install_location.is_empty() {
             println!("marketplace \"{}\" 已存在，跳过", name);
@@ -152,22 +146,23 @@ pub async fn run_marketplace_add(source: &str) -> Result<()> {
     }
 
     // 立即 clone/fetch marketplace，不等到下次启动
-    let (manifest, install_location) = refresh_marketplace(&marketplace_source, &name)
-        .await
-        .map_err(|e| anyhow::anyhow!("无法拉取 marketplace: {e}"))?;
+    let (manifest, install_location) =
+        peri_middlewares::plugin::marketplace::refresh_marketplace(&marketplace_source, &name)
+            .await
+            .map_err(|e| anyhow::anyhow!("无法拉取 marketplace: {e}"))?;
 
     // 用 manifest 里的 name 覆盖从 source 提取的名称
     let actual_name = manifest.name;
 
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    marketplaces.push(KnownMarketplace {
+    marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
         source: marketplace_source,
         install_location,
         auto_update: false,
         last_updated: now,
     });
 
-    save_known_marketplaces(&marketplaces, None)
+    peri_middlewares::plugin::save_known_marketplaces(&marketplaces, None)
         .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
 
     println!("已添加 marketplace: {}", actual_name);
@@ -175,8 +170,8 @@ pub async fn run_marketplace_add(source: &str) -> Result<()> {
 }
 
 pub fn run_marketplace_list() -> Result<()> {
-    let marketplaces =
-        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+    let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
+        .map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
     if marketplaces.is_empty() {
         println!("没有注册的 marketplace。");
@@ -186,14 +181,20 @@ pub fn run_marketplace_list() -> Result<()> {
     println!("{:<30} {:<60} {:<20}", "名称", "来源", "最后更新");
     println!("{}", "-".repeat(112));
     for mkt in &marketplaces {
-        let name = MarketplaceManager::extract_name(&mkt.source);
+        let name = peri_middlewares::plugin::MarketplaceManager::extract_name(&mkt.source);
         let source_str = match &mkt.source {
-            MarketplaceSource::GitHub { repo } => format!("github:{}", repo),
-            MarketplaceSource::Git { url } => format!("git:{}", url),
-            MarketplaceSource::Url { url } => url.clone(),
-            MarketplaceSource::File { path } => format!("file:{}", path),
-            MarketplaceSource::Directory { path } => format!("dir:{}", path),
-            MarketplaceSource::Npm { package } => format!("npm:{}", package),
+            peri_middlewares::plugin::MarketplaceSource::GitHub { repo } => {
+                format!("github:{}", repo)
+            }
+            peri_middlewares::plugin::MarketplaceSource::Git { url } => format!("git:{}", url),
+            peri_middlewares::plugin::MarketplaceSource::Url { url } => url.clone(),
+            peri_middlewares::plugin::MarketplaceSource::File { path } => format!("file:{}", path),
+            peri_middlewares::plugin::MarketplaceSource::Directory { path } => {
+                format!("dir:{}", path)
+            }
+            peri_middlewares::plugin::MarketplaceSource::Npm { package } => {
+                format!("npm:{}", package)
+            }
         };
         println!("{:<30} {:<60} {:<20}", name, source_str, mkt.last_updated);
     }
@@ -201,27 +202,29 @@ pub fn run_marketplace_list() -> Result<()> {
 }
 
 pub fn run_marketplace_remove(name: &str) -> Result<()> {
-    let marketplaces =
-        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+    let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
+        .map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
     let original_len = marketplaces.len();
 
     // D-del: 找到被删除的 entry，用于清理磁盘缓存
     let removed_location = marketplaces
         .iter()
-        .find(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+        .find(|mkt| peri_middlewares::plugin::MarketplaceManager::extract_name(&mkt.source) == name)
         .map(|km| km.install_location.clone());
 
-    let filtered: Vec<KnownMarketplace> = marketplaces
+    let filtered: Vec<peri_middlewares::plugin::KnownMarketplace> = marketplaces
         .into_iter()
-        .filter(|mkt| MarketplaceManager::extract_name(&mkt.source) != name)
+        .filter(|mkt| {
+            peri_middlewares::plugin::MarketplaceManager::extract_name(&mkt.source) != name
+        })
         .collect();
 
     if filtered.len() == original_len {
         anyhow::bail!("未找到名为 \"{}\" 的 marketplace", name);
     }
 
-    save_known_marketplaces(&filtered, None)
+    peri_middlewares::plugin::save_known_marketplaces(&filtered, None)
         .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
 
     // D-del: 清除磁盘缓存目录
@@ -240,28 +243,29 @@ pub fn run_marketplace_remove(name: &str) -> Result<()> {
 // ── marketplace update ──────────────────────────────────────────────────
 
 pub async fn run_marketplace_update(name: &str) -> Result<()> {
-    let marketplaces =
-        load_known_marketplaces(None).map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
+    let marketplaces = peri_middlewares::plugin::load_known_marketplaces(None)
+        .map_err(|e| anyhow::anyhow!("加载 marketplace 失败: {e}"))?;
 
-    let entry_index = marketplaces
-        .iter()
-        .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name);
+    let entry_index = marketplaces.iter().position(|mkt| {
+        peri_middlewares::plugin::MarketplaceManager::extract_name(&mkt.source) == name
+    });
     let entry_index = match entry_index {
         Some(i) => i,
         None => anyhow::bail!("未找到名为 \"{}\" 的 marketplace", name),
     };
 
     let entry = &marketplaces[entry_index];
-    let (manifest, install_location) = refresh_marketplace(&entry.source, name)
-        .await
-        .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
+    let (manifest, install_location) =
+        peri_middlewares::plugin::marketplace::refresh_marketplace(&entry.source, name)
+            .await
+            .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
 
     let mut updated = marketplaces;
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     updated[entry_index].install_location = install_location;
     updated[entry_index].last_updated = now;
 
-    save_known_marketplaces(&updated, None)
+    peri_middlewares::plugin::save_known_marketplaces(&updated, None)
         .map_err(|e| anyhow::anyhow!("保存 marketplace 失败: {e}"))?;
 
     let actual_name = manifest.name;
@@ -275,7 +279,7 @@ pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
     let scope: PluginScope = scope_str
         .parse()
         .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_middlewares::plugin::InstallScope = scope.into();
+    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
@@ -293,7 +297,7 @@ pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
     let scope: PluginScope = scope_str
         .parse()
         .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_middlewares::plugin::InstallScope = scope.into();
+    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
@@ -316,13 +320,13 @@ pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
     let scope: PluginScope = scope_str
         .parse()
         .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let _install_scope: peri_middlewares::plugin::InstallScope = scope.into();
+    let _install_scope: peri_acp_types::plugin::InstallScope = scope.into();
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
-    match update_plugin(plugin_id, &cache_dir, &claude_dir, None).await {
+    match peri_middlewares::plugin::update_plugin(plugin_id, &cache_dir, &claude_dir, None).await {
         Ok(installed) => {
             println!("已更新插件: {} v{}", installed.id, installed.version);
         }
@@ -368,15 +372,15 @@ pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
     println!(
         "Scope:       {}",
         match target.scope {
-            peri_middlewares::plugin::InstallScope::User => "user",
-            peri_middlewares::plugin::InstallScope::Project => "project",
-            peri_middlewares::plugin::InstallScope::Local => "local",
+            peri_acp_types::plugin::InstallScope::User => "user",
+            peri_acp_types::plugin::InstallScope::Project => "project",
+            peri_acp_types::plugin::InstallScope::Local => "local",
         }
     );
 
     // 检查是否启用（根据 scope 选择正确的 settings.json 路径）
     let settings_path = match target.scope {
-        peri_middlewares::plugin::InstallScope::Project => {
+        peri_acp_types::plugin::InstallScope::Project => {
             let cwd = std::env::current_dir().unwrap_or_default();
             cwd.join(".claude").join("settings.json")
         }

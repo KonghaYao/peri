@@ -31,15 +31,15 @@ fn test_plugin_scope_parse() {
 
     // From<PluginScope> for InstallScope 转换
     assert_eq!(
-        peri_middlewares::plugin::InstallScope::from(PluginScope::User),
-        peri_middlewares::plugin::InstallScope::User
+        peri_acp_types::plugin::InstallScope::from(PluginScope::User),
+        peri_acp_types::plugin::InstallScope::User
     );
     assert_eq!(
-        peri_middlewares::plugin::InstallScope::from(PluginScope::Project),
-        peri_middlewares::plugin::InstallScope::Project
+        peri_acp_types::plugin::InstallScope::from(PluginScope::Project),
+        peri_acp_types::plugin::InstallScope::Project
     );
     assert_eq!(
-        peri_middlewares::plugin::InstallScope::from(PluginScope::Local),
-        peri_middlewares::plugin::InstallScope::Local
+        peri_acp_types::plugin::InstallScope::from(PluginScope::Local),
+        peri_acp_types::plugin::InstallScope::Local
     );
 }

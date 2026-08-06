@@ -12,7 +12,7 @@ use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::app::App;
 use crate::app::agent::LlmProvider;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_middlewares::prelude::PermissionMode;
+use peri_acp_types::permission::PermissionMode;
 
 /// TUI 启动选项——CLI 解析后由调用方填好传入。
 ///

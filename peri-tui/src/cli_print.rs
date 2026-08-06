@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
 use anyhow::Result;
+use peri_acp::LangfuseSessionLike;
 use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_agent::messages::MessageContent;
-use peri_controller::langfuse::LangfuseSessionLike;
+use peri_acp_types::messages::MessageContent;
 use peri_tui::acp_client::{AcpNotification, AcpTuiClient};
 use serde_json::{Value, json};
 
@@ -52,7 +52,7 @@ pub async fn run_print(
         anyhow::bail!("无输入 prompt。用法: peri -p \"你的问题\" 或 echo \"问题\" | peri -p");
     }
 
-    let _telemetry = peri_agent::telemetry::init_tracing("peri-print");
+    let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
 
     // 加载配置
     let peri_config = match &settings_path {
@@ -106,19 +106,19 @@ pub async fn run_print(
 
     // 权限模式（-p 默认 bypass）
     let permission_mode = if skip_permissions {
-        peri_middlewares::prelude::PermissionMode::Bypass
+        peri_acp_types::permission::PermissionMode::Bypass
     } else if let Some(ref mode_str) = permission_mode_str {
         match mode_str.as_str() {
-            "bypass" => peri_middlewares::prelude::PermissionMode::Bypass,
-            "default" => peri_middlewares::prelude::PermissionMode::Default,
-            "accept-edit" => peri_middlewares::prelude::PermissionMode::AcceptEdit,
-            "auto-mode" => peri_middlewares::prelude::PermissionMode::AutoMode,
-            _ => peri_middlewares::prelude::PermissionMode::Bypass,
+            "bypass" => peri_acp_types::permission::PermissionMode::Bypass,
+            "default" => peri_acp_types::permission::PermissionMode::Default,
+            "accept-edit" => peri_acp_types::permission::PermissionMode::AcceptEdit,
+            "auto-mode" => peri_acp_types::permission::PermissionMode::AutoMode,
+            _ => peri_acp_types::permission::PermissionMode::Bypass,
         }
     } else {
-        peri_middlewares::prelude::PermissionMode::Bypass
+        peri_acp_types::permission::PermissionMode::Bypass
     };
-    let shared_permission = peri_middlewares::prelude::SharedPermissionMode::new(permission_mode);
+    let shared_permission = peri_acp_types::permission::SharedPermissionMode::new(permission_mode);
 
     // cron scheduler（必须提供）
     let cron_scheduler = {

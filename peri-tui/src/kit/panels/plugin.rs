@@ -2396,11 +2396,7 @@ fn render_errors(
 }
 
 fn load_marketplace_data() -> Vec<MsEntry> {
-    use peri_middlewares::plugin::{
-        MarketplaceManager, MarketplaceSource, load_known_marketplaces, marketplace,
-    };
-
-    let known = load_known_marketplaces(None).unwrap_or_default();
+    let known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
     let _ = std::fs::create_dir_all(&cache_dir);
 
@@ -2409,11 +2405,12 @@ fn load_marketplace_data() -> Vec<MsEntry> {
     known
         .iter()
         .map(|km| {
-            let name = MarketplaceManager::extract_name(&km.source);
+            let name = peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source);
 
             // 确定状态
             let cache_path = cache_dir.join(&name);
-            let manifest_path = marketplace::find_marketplace_json(&cache_path);
+            let manifest_path =
+                peri_middlewares::plugin::marketplace::find_marketplace_json(&cache_path);
             let mut status = if km.install_location.is_empty() {
                 MsStatus::NotFound
             } else if manifest_path.is_none() {
@@ -2477,12 +2474,18 @@ fn load_marketplace_data() -> Vec<MsEntry> {
             MsEntry {
                 name,
                 source_label: match &km.source {
-                    MarketplaceSource::GitHub { repo } => format!("github:{}", repo),
-                    MarketplaceSource::Git { url } => format!("git:{}", url),
-                    MarketplaceSource::Url { url } => url.clone(),
-                    MarketplaceSource::Directory { path } => path.clone(),
-                    MarketplaceSource::File { path } => path.clone(),
-                    MarketplaceSource::Npm { package } => format!("npm:{}", package),
+                    peri_middlewares::plugin::MarketplaceSource::GitHub { repo } => {
+                        format!("github:{}", repo)
+                    }
+                    peri_middlewares::plugin::MarketplaceSource::Git { url } => {
+                        format!("git:{}", url)
+                    }
+                    peri_middlewares::plugin::MarketplaceSource::Url { url } => url.clone(),
+                    peri_middlewares::plugin::MarketplaceSource::Directory { path } => path.clone(),
+                    peri_middlewares::plugin::MarketplaceSource::File { path } => path.clone(),
+                    peri_middlewares::plugin::MarketplaceSource::Npm { package } => {
+                        format!("npm:{}", package)
+                    }
                 },
                 plugin_count,
                 installed_count,
@@ -2499,22 +2502,20 @@ fn load_marketplace_data() -> Vec<MsEntry> {
 }
 
 fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
-    use peri_middlewares::plugin::{
-        MarketplaceManager, MarketplaceSource, load_known_marketplaces, marketplace,
-    };
-
-    let mut known = load_known_marketplaces(None).unwrap_or_default();
+    let mut known = peri_middlewares::plugin::load_known_marketplaces(None).unwrap_or_default();
     let cache_dir = peri_middlewares::plugin::marketplaces_cache_dir();
     let _ = std::fs::create_dir_all(&cache_dir);
 
     // 确保 official marketplace 已注册（参考项目行为：自动注入）
     let has_official = known.iter().any(|km| match &km.source {
-        MarketplaceSource::GitHub { repo } => repo == "anthropics/claude-plugins-official",
+        peri_middlewares::plugin::MarketplaceSource::GitHub { repo } => {
+            repo == "anthropics/claude-plugins-official"
+        }
         _ => false,
     });
     if !has_official {
         known.push(peri_middlewares::plugin::KnownMarketplace {
-            source: MarketplaceSource::GitHub {
+            source: peri_middlewares::plugin::MarketplaceSource::GitHub {
                 repo: "anthropics/claude-plugins-official".into(),
             },
             install_location: cache_dir
@@ -2532,12 +2533,13 @@ fn load_discover_plugins_from_disk() -> Vec<PluginSearchResultItem> {
         installed.plugins.iter().map(|p| p.id.clone()).collect();
 
     for km in &known {
-        let mp_name = MarketplaceManager::extract_name(&km.source);
+        let mp_name = peri_middlewares::plugin::MarketplaceManager::extract_name(&km.source);
         let mp_dir = cache_dir.join(&mp_name);
-        let manifest_path = match marketplace::find_marketplace_json(&mp_dir) {
-            Some(path) => path,
-            None => continue,
-        };
+        let manifest_path =
+            match peri_middlewares::plugin::marketplace::find_marketplace_json(&mp_dir) {
+                Some(path) => path,
+                None => continue,
+            };
         if let Ok(content) = std::fs::read_to_string(&manifest_path)
             && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
             && let Some(plugin_list) = manifest.get("plugins").and_then(|v| v.as_array())

@@ -14,7 +14,7 @@ use crate::kit::atoms::{
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
-use peri_middlewares::prelude::PermissionMode;
+use peri_acp_types::permission::PermissionMode;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},

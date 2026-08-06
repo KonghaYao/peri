@@ -224,7 +224,7 @@ fn test_app_config_env_skip_when_none() {
 
 #[test]
 fn test_app_config_compact_serde_roundtrip() {
-    let compact = peri_agent::agent::CompactConfig {
+    let compact = peri_acp_types::compact::CompactConfig {
         auto_compact_enabled: false,
         auto_compact_threshold: 0.9,
         ..Default::default()

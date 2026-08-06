@@ -337,7 +337,7 @@ pub static TUI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,
 > = OnceLock::new();
 pub static PERMISSION_MODE_HANDLE: OnceLock<
-    std::sync::Arc<peri_middlewares::prelude::SharedPermissionMode>,
+    std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
 > = OnceLock::new();
 pub static CRON_SCHEDULER_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,

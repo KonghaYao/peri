@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use fluent_bundle::FluentValue;
-use peri_agent::messages::MessageContent;
-use peri_middlewares::hitl::PermissionMode;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::permission::PermissionMode;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

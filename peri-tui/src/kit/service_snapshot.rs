@@ -21,11 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use peri_middlewares::cron::CronScheduler;
-use peri_middlewares::hitl::PermissionMode;
-use peri_middlewares::hitl::SharedPermissionMode;
-use peri_middlewares::mcp::McpClientPool;
-use peri_middlewares::mcp::McpInitStatus;
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -47,12 +43,13 @@ pub struct SnapshotSource {
     pub thread_store: Arc<dyn ThreadStore>,
     pub peri_config: SharedPeriConfig,
     pub permission_mode: Arc<SharedPermissionMode>,
-    pub cron_scheduler: Arc<Mutex<CronScheduler>>,
-    pub mcp_pool: Option<Arc<McpClientPool>>,
+    /// Cron/MCP 资源句柄直读（C 类豁免至 M-TUI，见批 3 tui-deps 未做项）
+    pub cron_scheduler: Arc<Mutex<peri_middlewares::cron::CronScheduler>>,
+    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
     /// MCP 初始化状态 watch receiver——`.borrow()` 即可读当前状态。
     /// 用 `tokio::sync::watch::Receiver` 而非 `Arc<watch::Sender<...>>` 因为
     /// receiver 自身 `Clone` 后仍指向同一 watch channel。
-    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<McpInitStatus>>,
+    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
     /// 独立的进程监控器（采样进程级数据，多实例不影响正确性）。
     /// 用 `Arc<Mutex<_>>` 让 task 间共享，避免每 tick 重建。
     pub resource_monitor: Arc<Mutex<ProcessResourceMonitor>>,
@@ -513,7 +510,9 @@ fn derive_providers(peri_config: &SharedPeriConfig) -> Vec<ProviderSummary> {
 }
 
 /// 从 `McpClientPool` 派生详细 MCP server 列表（H1d）。
-fn derive_mcp_servers(pool: &Option<Arc<McpClientPool>>) -> Vec<McpServerSummary> {
+fn derive_mcp_servers(
+    pool: &Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+) -> Vec<McpServerSummary> {
     let Some(p) = pool else {
         return Vec::new();
     };
@@ -584,15 +583,15 @@ fn scan_memory_dir() -> Vec<MemoryEntry> {
 
 /// 从 `McpClientPool` + `McpInitStatus` watch 派生 MCP 池状态。
 fn derive_mcp_status(
-    pool: &Option<Arc<McpClientPool>>,
-    init_rx: &Option<tokio::sync::watch::Receiver<McpInitStatus>>,
+    pool: &Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    init_rx: &Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
 ) -> McpStatusSnapshot {
     let init_phase = match init_rx {
         Some(rx) => match *rx.borrow() {
-            McpInitStatus::Pending => McpInitPhase::Pending,
-            McpInitStatus::Initializing { .. } => McpInitPhase::Initializing,
-            McpInitStatus::Ready { .. } => McpInitPhase::Ready,
-            McpInitStatus::Failed(_) => McpInitPhase::Failed,
+            peri_middlewares::mcp::McpInitStatus::Pending => McpInitPhase::Pending,
+            peri_middlewares::mcp::McpInitStatus::Initializing { .. } => McpInitPhase::Initializing,
+            peri_middlewares::mcp::McpInitStatus::Ready { .. } => McpInitPhase::Ready,
+            peri_middlewares::mcp::McpInitStatus::Failed(_) => McpInitPhase::Failed,
         },
         None => McpInitPhase::Pending,
     };

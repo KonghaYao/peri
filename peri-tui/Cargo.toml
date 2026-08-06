@@ -18,10 +18,18 @@ serial_test.workspace = true
 tracing-subscriber.workspace = true
 [dependencies]
 serde.workspace = true
-peri-agent = { path = "../peri-agent" }
-peri-resources = { path = "../peri-resources" }
+# 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
+# - peri-middlewares：宿主装配点（launch.rs / main.rs / cli_print.rs 构造
+#   CronScheduler / McpClientPool / ToolSearchIndex / host_ports 注入 ACP 端口）
+#   与面板数据源直读（cron/mcp/plugin 具体句柄，service_snapshot / panels /
+#   atoms / cli_plugin）——「ACP Host 部署装配点职责」，M-TUI 收紧后移除
+#   （「面板数据全部经 ACP」需新增 cron/list、mcp/list 命令面，见批 3
+#   tui-deps 未做项）
+# - peri-resources：Resources::open() 门面（app/mod.rs / main.rs / cli_print.rs
+#   初始化 thread store）+ thread/mod.rs 的 SqliteThreadStore re-export；
+#   M-TUI / L5 收紧后移除
 peri-middlewares = { path = "../peri-middlewares" }
-peri-lsp = { path = "../peri-lsp" }
+peri-resources = { path = "../peri-resources" }
 # ratatui-widgets（reflow.rs WordWrapper）由 ratatui 0.30 传递引入；
 # status_bar.rs `model_click_areas` 复刻了该内部算法——升级本依赖或 ratatui 版本时
 # 必须运行 `cargo test -p peri-tui --lib status_bar_test` 的 ground-truth 差分测试
@@ -44,8 +52,6 @@ png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
 peri-theme = { path = "../peri-theme" }
 peri-acp = { path = "../peri-acp" }
-peri-controller = { path = "../peri-controller" }
-peri-workflow = { path = "../peri-workflow" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }
 agent-client-protocol = { version = "1.2", features = ["unstable"] }

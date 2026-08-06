@@ -441,8 +441,8 @@ fn main() -> Result<()> {
                 peri_acp::host::stdio::run_acp_stdio(StdioAssemblyInput {
                     cwd: cwd_str,
                     thread_store: resources.thread_store(),
-                    permission_mode: peri_middlewares::prelude::SharedPermissionMode::new(
-                        peri_middlewares::prelude::PermissionMode::Bypass,
+                    permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
+                        peri_acp_types::permission::PermissionMode::Bypass,
                     ),
                     cron_scheduler: Some(std::sync::Arc::new(
                         peri_middlewares::cron::CronSchedulerPortHandle(cron_scheduler),
@@ -600,7 +600,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
 
     // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
     // 的内部 runtime 与应用 runtime 完全隔离，避免嵌套 runtime drop panic。
-    let _telemetry = peri_agent::telemetry::init_tracing("agent-tui");
+    let _telemetry = peri_acp::telemetry::init_tracing("agent-tui");
 
     // 安装自定义 panic hook，必须在 enable_raw_mode() 之前，
     // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。

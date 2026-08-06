@@ -16,7 +16,7 @@ use ratatui_kit::{
     prelude::*,
 };
 
-use peri_middlewares::hitl::PermissionMode;
+use peri_acp_types::permission::PermissionMode;
 
 use super::atoms::{
     ACP_STATE, CANCEL_TX, INPUT_AREA_ESC_PREFIX, LAST_CTRL_C_PROCESSED, LAST_ESC_TIME,
