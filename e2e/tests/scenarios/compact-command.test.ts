@@ -61,13 +61,16 @@ describe("scenarios: /compact 命令", () => {
 
       expect(afterCompact.text.length).toBeGreaterThan(0);
 
-      // LLM judge
+      // LLM judge —— 正向可观察断言。历史教训：负向模糊断言
+      // "消息区域不应出现渲染异常" 会让 Judge 把正常的消息区留白
+      // （内容不满屏）误判为渲染残留，导致 flaky（2026-08-06 两轮运行
+      // 一轮通过一轮失败，录制布局与通过用例一致）。改为正向断言。
       const result = await judge({
         ansiRaw: afterCompact.raw,
         criteria: [
+          "屏幕消息区应显示上下文压缩完成的卡片或提示行（如包含 '温故知新'、'压缩'、'完成' 或 token 数信息，如 '↓ 15k tokens'）",
+          "界面底部输入框应仍然可见可用（包含 '❯' 提示符）",
           "状态栏应显示上下文消耗百分比（格式如 'NN% NNNk'），百分比数值应合理（>0% 且 <=100%）",
-          "消息区域不应出现渲染异常（如文字覆盖、布局错位、空白闪烁残留）",
-          "界面底部输入框应仍然可见可用",
         ],
       });
       console.log("Judge (/compact):", JSON.stringify(result, null, 2));

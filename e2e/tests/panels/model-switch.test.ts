@@ -7,11 +7,49 @@
  * - Model / Effort 字段切换后值必须真的变化（确定性断言，回归保护）；
  * - Esc 退出右侧焦点后再次 Esc 关闭面板；
  * - 状态栏中的 alias/model/effort 随 active profile 更新。
+ *
+ * 隔离策略：以临时 HOME（含预置测试配置）启动 peri，避免读取/修改用户真实
+ * ~/.peri/settings.json（此前测试会把 sonnet 档位的 model/effort 持久化成
+ * pro/low，污染用户配置；且初始 active 依赖上次运行残留导致断言不稳定）。
+ * 预置配置初始 active_alias=fable，测试流程（↓↓ 切到 sonnet）确定性成立。
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
+
+/** 测试专用临时 HOME（含预置 settings.json），afterAll 清理 */
+let testHome: string | undefined;
+
+const TEST_SETTINGS = {
+  config: {
+    active_alias: "fable",
+    providers: [
+      {
+        id: "test-provider",
+        type: "openai",
+        apiKey: "test-key",
+        baseUrl: "http://127.0.0.1:9/v1",
+        name: "test",
+        models: {
+          fable: "test-model-fable",
+          opus: "test-model-opus",
+          sonnet: "test-model-sonnet",
+          haiku: "test-model-haiku",
+        },
+      },
+    ],
+    profiles: {
+      fable: { provider: "test-provider", effort: "max", max_tokens: 32000 },
+      opus: { provider: "test-provider", effort: "high", max_tokens: 32000 },
+      sonnet: { provider: "test-provider", effort: "medium", max_tokens: 32000 },
+      haiku: { provider: "test-provider", effort: "low", max_tokens: 32000 },
+    },
+  },
+};
 
 /**
  * 从屏幕纯文本中提取右侧 K/V 行的值（按分隔线 │ 切分右侧，再按 key 定位）。
@@ -36,6 +74,24 @@ function extractRightValue(text: string, key: string): string | null {
 describe("panels: model switch", () => {
   let tester: TmuxTester;
 
+  beforeAll(() => {
+    // 预置隔离配置：临时 HOME + settings.json（初始 active_alias=fable）
+    testHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-model-"));
+    const settingsDir = path.join(testHome, ".peri");
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(settingsDir, "settings.json"),
+      JSON.stringify(TEST_SETTINGS, null, 2),
+    );
+  });
+
+  afterAll(() => {
+    if (testHome) {
+      fs.rmSync(testHome, { recursive: true, force: true });
+      testHome = undefined;
+    }
+  });
+
   afterEach(async () => {
     if (tester?.isRunning()) {
       await tester.stop().catch(() => {});
@@ -46,7 +102,7 @@ describe("panels: model switch", () => {
     "/model 打开面板，切换 profile，编辑 Effort，状态栏更新",
     { timeout: 120_000 },
     async () => {
-      tester = await launchPeri();
+      tester = await launchPeri({ env: { HOME: testHome! } });
 
       // 阶段 1：通过 /model 命令打开模型面板
       await sendPrompt(tester, "/model");
