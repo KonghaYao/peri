@@ -42,6 +42,10 @@ jobs:
               with:
                   key: ${{ matrix.target }}
 
+            # §0 依赖方向 CI 门（Seam 3，PRD 决策 2）：Resources 层不越层 import 业务 crate。
+            - name: Check §0 resources imports
+              run: bash scripts/check-resources-imports.sh
+
             - name: Build
               run: cargo build --workspace --all-targets
 
