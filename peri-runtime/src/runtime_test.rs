@@ -12,6 +12,7 @@ use std::time::Duration;
 use peri_acp_types::identity::{
     AttemptId, AttemptIdentity, CancelRequest, EventDeliveryClass, SessionEpoch, SessionSeq,
 };
+use peri_acp_types::messages::MessageContent;
 use peri_acp_types::thread::CancelPolicy;
 
 use super::{Runtime, RuntimeError, SessionHandle, UnstampedEvent};
@@ -24,6 +25,10 @@ struct MockHandle {
     drained: Mutex<VecDeque<UnstampedEvent>>,
     /// 最近收到的 cancel 请求（断言三元组透传/幂等转发用）。
     last_cancel: Mutex<Option<CancelRequest>>,
+    /// 最近收到的运行时输入（submit_input 透传断言用）。
+    last_input: Mutex<Option<MessageContent>>,
+    /// submit_input 是否报错（注入失败路径断言用）。
+    submit_ok: AtomicBool,
 }
 
 impl MockHandle {
@@ -34,6 +39,8 @@ impl MockHandle {
             persist_ok: AtomicBool::new(true),
             drained: Mutex::new(drained.into()),
             last_cancel: Mutex::new(None),
+            last_input: Mutex::new(None),
+            submit_ok: AtomicBool::new(true),
         })
     }
 
@@ -43,6 +50,10 @@ impl MockHandle {
 
     fn last_cancel(&self) -> Option<CancelRequest> {
         self.last_cancel.lock().unwrap().clone()
+    }
+
+    fn last_input(&self) -> Option<MessageContent> {
+        self.last_input.lock().unwrap().clone()
     }
 
     fn cancel_count(&self) -> usize {
@@ -65,6 +76,16 @@ impl SessionHandle for MockHandle {
     fn cancel(&self, request: &CancelRequest) {
         self.calls.lock().unwrap().push("cancel");
         *self.last_cancel.lock().unwrap() = Some(request.clone());
+    }
+
+    fn submit_input(&self, input: MessageContent) -> Result<(), anyhow::Error> {
+        self.calls.lock().unwrap().push("submit_input");
+        *self.last_input.lock().unwrap() = Some(input);
+        if self.submit_ok.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("submit input failed"))
+        }
     }
 
     fn stop_accepting(&self) {
@@ -350,4 +371,64 @@ async fn cancel_passes_clear_queue_and_policy() {
     let received = handle.last_cancel().unwrap();
     assert!(received.clear_queue, "clear_queue 标志透传");
     assert_eq!(received.policy, CancelPolicy::Independent, "policy 透传");
+}
+
+// ─── join（等待会话自然终止，带 deadline） ────────────────────────────────────
+
+#[tokio::test]
+async fn join_forwards_deadline_result() {
+    let handle = MockHandle::new(true, vec![]); // join 在 deadline 内结束
+    let rt = Runtime::new();
+    rt.register("s1", Arc::clone(&handle)).unwrap();
+
+    assert!(
+        rt.join("s1", Duration::from_secs(5)).await.unwrap(),
+        "deadline 内结束返回 true"
+    );
+    assert_eq!(handle.call_sequence(), vec!["join"]);
+
+    // 超时分支：返回 false（不自动 abort；abort 由销毁路径编排）
+    let slow = MockHandle::new(false, vec![]);
+    rt.register("s2", Arc::clone(&slow)).unwrap();
+    assert!(
+        !rt.join("s2", Duration::from_millis(1)).await.unwrap(),
+        "超时返回 false"
+    );
+
+    // 未注册 session：类型化错误
+    let err = rt
+        .join("missing", Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RuntimeError::UnknownSession(_)));
+}
+
+// ─── submit_input（消息/工具注入面：运行时输入收口） ────────────────────────────
+
+#[test]
+fn submit_input_forwards_to_handle() {
+    let handle = MockHandle::new(true, vec![]);
+    let rt = Runtime::new();
+    rt.register("s1", Arc::clone(&handle)).unwrap();
+
+    rt.submit_input("s1", MessageContent::text("hi")).unwrap();
+    assert_eq!(
+        handle.last_input(),
+        Some(MessageContent::text("hi")),
+        "运行时输入透传到句柄"
+    );
+    assert_eq!(handle.call_sequence(), vec!["submit_input"]);
+
+    // 未注册 session：定位失败
+    let err = rt
+        .submit_input("missing", MessageContent::text("hi"))
+        .unwrap_err();
+    assert!(matches!(err, RuntimeError::UnknownSession(_)));
+
+    // 句柄注入失败：anyhow 穿透包 context 为 SubmitFailed
+    handle.submit_ok.store(false, Ordering::SeqCst);
+    let err = rt
+        .submit_input("s1", MessageContent::text("hi"))
+        .unwrap_err();
+    assert!(matches!(err, RuntimeError::SubmitFailed(s, _) if s == "s1"));
 }

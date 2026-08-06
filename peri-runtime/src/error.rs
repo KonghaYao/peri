@@ -18,4 +18,7 @@ pub enum RuntimeError {
     /// 持久化事务收束失败（销毁阶段 5；映射保留，可重试销毁）。
     #[error("session {0} persist failed: {1}")]
     PersistFailed(String, #[source] anyhow::Error),
+    /// 运行时输入注入失败（submit_input 语义；Agent 侧错误经 anyhow 穿透到边界）。
+    #[error("session {0} submit input failed: {1}")]
+    SubmitFailed(String, #[source] anyhow::Error),
 }

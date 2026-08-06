@@ -368,7 +368,8 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::WorkflowProgress(_)
             | ExecutorEvent::AgentExecutionFailed { .. }
             | ExecutorEvent::RewindError { .. }
-            | ExecutorEvent::TurnSuspended { .. } => None,
+            | ExecutorEvent::TurnSuspended { .. }
+            | ExecutorEvent::BgRegistryEvent(_) => None,
         }
     }
 

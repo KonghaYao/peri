@@ -12,75 +12,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use peri_acp_types::identity::{
-    CancelRequest, EventDeliveryClass, EventEnvelope, SessionEpoch, SessionSeq,
-};
+use peri_acp_types::identity::{CancelRequest, EventEnvelope, SessionEpoch, SessionSeq};
+use peri_acp_types::messages::MessageContent;
+// 接口契约（§9 层间接口签名先行落位）：SessionHandle / UnstampedEvent 定义于
+// `peri-acp-types::runtime`（各层接口引用同一签名），本层经契约引用并 re-export。
+pub use peri_acp_types::runtime::{SessionHandle, UnstampedEvent};
 
 use crate::error::RuntimeError;
-
-/// 未补打事件：Agent 层业务事件的身份最小投影。
-///
-/// §9 事件契约：事件携带 turn_id + agent_id（Agent 层事件不携带 session_id）；
-/// session_id 与 session_seq 由 [`Runtime::stamp`] 按 session 维度补打。
-/// 本类型为聚合补打与销毁 drain 的最小载体，不承载事件 payload；
-/// 生产接线（Agent EventBus → 本类型）随 executor 拆分（L5）落地。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnstampedEvent {
-    /// 事件源 agent 的 turn 纽带（v2 事件强制携带）。
-    pub turn_id: String,
-    /// 事件源 agent（SubAgent 场景即 source_agent_id）。
-    pub agent_id: String,
-    /// 可选但语义明确的 message_id（v2 chunk 事件无 message 级身份时为 None）。
-    pub message_id: Option<String>,
-    /// 交付类别（critical 同步 / broadcast 观测）。
-    pub delivery_class: EventDeliveryClass,
-}
-
-/// 运行句柄：Runtime 编排 Agent 层 session 运行单元的最小接口。
-///
-/// 语义（伞形 PRD 决策 20/21、`docs/top-level.md` §9）：
-/// - [`SessionHandle::run`]：启动/恢复执行（run 语义，Controller 经 Runtime 发起）
-/// - [`SessionHandle::cancel`]：取消当前执行（cancel 语义；携带 §9 三元组
-///   (session_id, turn_id, attempt_id) 与 clear_queue/policy——幂等判定与
-///   turn 终态唯一归 Agent 侧实现，上层仅传递）
-/// - 销毁六阶段（§9 session 销毁顺序）：停收新输入 → 取消 owned tasks →
-///   join（带 deadline）→ 超时 abort → 持久化事务收束 → drain 事件；
-///   编排顺序由 [`Runtime::destroy`] 保证，本 trait 暴露各阶段最小操作
-///
-/// **与 `peri-agent::agent::stages::SessionHandle` 区分**：后者是 RCRA 阶段间
-/// 共享上下文（turn/transcript/queue 引用），非运行句柄；本类型是 Runtime
-/// 编排 Agent 层运行单元的边界接口。实现方为 Agent 层 session 工厂 / 装配点
-/// （L5），本 crate 不解释 Agent 层语义；trait 方法以 anyhow 表达层内错误，
-/// 由 Runtime 边界包 context 为 [`RuntimeError`]。
-#[async_trait]
-pub trait SessionHandle: Send + Sync {
-    /// 启动/恢复执行（run 语义）。
-    async fn run(&self) -> Result<(), anyhow::Error>;
-    /// 取消当前执行（cancel 语义，携带 §9 cancel 请求）。
-    ///
-    /// 幂等：重复 cancel 针对同一 (session_id, turn_id, attempt_id) 结果一致、
-    /// turn 终态唯一（Completed 或 Interrupted）——判定簿记在 Agent 侧
-    /// （Agent 持有最终执行权，上层仅传递）；本方法为边界透传口。
-    fn cancel(&self, request: &CancelRequest);
-    /// 销毁阶段 1：停收新输入。
-    fn stop_accepting(&self);
-    /// 销毁阶段 2：取消 owned tasks。
-    fn cancel_owned(&self);
-    /// 销毁阶段 3：带 deadline 的 join。
-    ///
-    /// 返回 `true` = deadline 内结束；`false` = 超时（调用方应执行
-    /// 销毁阶段 4 [`SessionHandle::abort`]）。
-    async fn join(&self, deadline: Duration) -> bool;
-    /// 销毁阶段 4：超时 abort（fire-and-forget 强杀）。
-    fn abort(&self);
-    /// 销毁阶段 5：持久化事务收束（Thread/transcript = 持久真相，§9）。
-    async fn persist(&self) -> Result<(), anyhow::Error>;
-    /// 销毁阶段 6：排干剩余事件（未补打形态，由 Runtime 补打后投递）。
-    fn drain(&self) -> Vec<UnstampedEvent>;
-}
 
 /// 映射条目：句柄 + 事件补打簿记（epoch/seq）。
 ///
@@ -140,6 +80,35 @@ impl Runtime {
             },
         );
         Ok(())
+    }
+
+    /// 注册或替换 session 句柄（同 session 每轮执行发起前的句柄刷新面）。
+    ///
+    /// 语义：已注册则替换句柄（**不递增 epoch / 不重置 seq**——同一 session
+    /// 实例的新一轮执行，事件序号继续单调）；未注册则等价 [`Runtime::register`]。
+    ///
+    /// 适用场景：ACP 层执行薄壳在每轮 `session/prompt` 发起前注册本轮句柄，
+    /// 经 `Controller::run_session` 发起（§6 run Session）；句柄生命周期 = 本轮
+    /// 执行生命周期，下一轮发起前替换，无需先 destroy。
+    pub fn register_or_replace<H>(&self, session_id: impl Into<String>, handle: Arc<H>)
+    where
+        H: SessionHandle + 'static,
+    {
+        let session_id = session_id.into();
+        let mut guard = self.sessions.write();
+        match guard.get_mut(&session_id) {
+            Some(entry) => entry.handle = handle,
+            None => {
+                guard.insert(
+                    session_id,
+                    SessionEntry {
+                        handle,
+                        epoch: SessionEpoch::initial(),
+                        seq: SessionSeq::initial(),
+                    },
+                );
+            }
+        }
     }
 
     /// 已注册 session_id 列表（无顺序保证）。
@@ -215,6 +184,36 @@ impl Runtime {
             .await
             .map_err(|err| RuntimeError::RunFailed(session_id.to_string(), err))?;
         Ok(())
+    }
+
+    /// join 会话：查映射 → 转发句柄 join（带 deadline）。
+    ///
+    /// 返回 `true` = deadline 内结束；`false` = 超时（调用方决定 abort 或
+    /// 继续等待；销毁路径的超时 abort 由 [`Runtime::destroy`] 编排）。
+    /// 与 §9 销毁顺序第 3 步复用同一句柄操作，供非销毁场景的「等待会话
+    /// 自然终止」（Controller join 面）使用。
+    pub async fn join(&self, session_id: &str, deadline: Duration) -> Result<bool, RuntimeError> {
+        let handle = self
+            .handle(session_id)
+            .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
+        Ok(handle.join(deadline).await)
+    }
+
+    /// 注入运行时输入：查映射 → 转发句柄 submit_input（消息/工具注入面）。
+    ///
+    /// 未知 session 报 [`RuntimeError::UnknownSession`]；句柄注入失败包
+    /// context 为 [`RuntimeError::SubmitFailed`]（Agent 侧细节错误 anyhow 穿透）。
+    pub fn submit_input(
+        &self,
+        session_id: &str,
+        input: MessageContent,
+    ) -> Result<(), RuntimeError> {
+        let handle = self
+            .handle(session_id)
+            .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
+        handle
+            .submit_input(input)
+            .map_err(|err| RuntimeError::SubmitFailed(session_id.to_string(), err))
     }
 
     /// 销毁 session（§9 session 销毁顺序契约，编排顺序固定）：
