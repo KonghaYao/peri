@@ -457,6 +457,35 @@ impl From<Vec<ContentBlock>> for MessageContent {
     }
 }
 
+// ─── 文本清洗 ─────────────────────────────────────────────────────────────────
+
+/// 剥离文本中所有 `<system-reminder>...</system-reminder>` 块，只保留用户真实内容。
+///
+/// 系统注入（权限模式通知、recall、后台任务结果等）以该标签包裹追加在 user
+/// 消息尾部——rewind 候选预览 / 输入框回填展示用户输入时应剔除，避免把注入
+/// 内容当作"用户刚发送的问题文本"。
+///
+/// 未闭合标签（极端防御）保留标签及之后的内容，不损坏用户输入。
+pub fn strip_system_reminders(text: &str) -> String {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        result.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        match after_open.find(CLOSE) {
+            Some(end) => rest = &after_open[end + CLOSE.len()..],
+            None => {
+                result.push_str(&rest[start..]);
+                return result;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

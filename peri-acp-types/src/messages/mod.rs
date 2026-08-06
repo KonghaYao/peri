@@ -6,5 +6,7 @@
 pub mod content;
 pub mod message;
 
-pub use content::{ContentBlock, DocumentSource, ImageSource, MessageContent};
+pub use content::{
+    strip_system_reminders, ContentBlock, DocumentSource, ImageSource, MessageContent,
+};
 pub use message::{BaseMessage, MessageId, ToolCallRequest};

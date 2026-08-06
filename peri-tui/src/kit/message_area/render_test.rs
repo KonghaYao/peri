@@ -588,3 +588,66 @@ fn test_copy_button_hidden_for_short_text() {
         assert!(!rendered.contains("Copy"), "≤200 字符不应渲染按钮行");
     }
 }
+
+/// Glob/Grep 工具卡完成后头行应显示 "— N matches" 匹配数后缀。
+///
+/// e2e 回归（spec/issues/2026-08-06-e2e-glob-grep-match-suffix-missing.md）：
+/// Glob/Grep 头行格式 `Tool (pattern: ...) — N matches`，N 为实际结果行数
+/// （≥ 1 的正整数）；错误态 / 运行中不显示该后缀。
+#[test]
+fn test_glob_grep_header_match_suffix() {
+    crate::i18n::init(Some("zh-CN"));
+    let make_card = |tool_name: &str, output_summary: &str, is_error: bool| {
+        TuiRenderUnit::TuiToolCard(TuiToolCard {
+            tool_id: format!("tc-{tool_name}"),
+            tool_name: tool_name.to_string(),
+            input_summary: r#"pattern: "peri-tui/src/**/*.rs""#.into(),
+            output_summary: output_summary.to_string(),
+            is_error,
+            is_running: false,
+            running_duration_ms: None,
+            diff: None,
+            presentation: TuiToolPresentation::Generic,
+            content_hash: 1,
+            tool_calls_count: 0,
+        })
+    };
+
+    // 163 个匹配：输出每行一个路径，头行应显示 "— 163 matches"
+    let files: Vec<String> = (0..163)
+        .map(|i| format!("/repo/peri-tui/src/kit/file_{i}.rs"))
+        .collect();
+    let output = files.join("\n");
+
+    for tool_name in ["Glob", "Grep"] {
+        let lines = vm_to_lines(&make_card(tool_name, &output, false), 100);
+        let header = header_of(&lines);
+        assert!(
+            header.contains("— 163 matches"),
+            "{tool_name} 头行应包含 '— 163 matches'，实际: {header:?}"
+        );
+        assert!(
+            header.contains(&format!("{tool_name} (pattern:")),
+            "{tool_name} 头行应包含 pattern 参数，实际: {header:?}"
+        );
+    }
+
+    // 错误态：头行不得包含匹配数后缀
+    for tool_name in ["Glob", "Grep"] {
+        let lines = vm_to_lines(&make_card(tool_name, "Error: something failed", true), 100);
+        let header = header_of(&lines);
+        assert!(
+            !header.contains("matches"),
+            "{tool_name} 错误态头行不应包含 'matches'，实际: {header:?}"
+        );
+    }
+}
+
+/// 拼接首个非空渲染行的文本（`with_message_spacing` 会在行首插入空行）。
+fn header_of(lines: &[ratatui_kit::ratatui::text::Line<'static>]) -> String {
+    lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| !s.content.is_empty()))
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .unwrap_or_default()
+}

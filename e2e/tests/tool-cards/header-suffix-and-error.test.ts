@@ -100,6 +100,20 @@ describe("tool-card: header suffix + error display", () => {
           "必须使用 Glob 和 Grep 两个工具，不要跳过",
       );
       await waitTurnCompleted(tester, STAGE.globGrep, 180_000);
+
+      // agent 回复可能很长（如 markdown 表格），turn 完成后消息区吸底会把
+      // 位于 Grep 卡上方的 Glob 卡挤出屏幕，Judge 将误判为缺少匹配数后缀。
+      // 用 Ctrl+Home 滚动到消息区顶部，确保两张工具卡进入可见区域再截图
+      //（scroll.rs 键盘滚动：Global/High handler 放行 Ctrl+Home）。
+      await tester.sendKey("Home", { ctrl: true });
+      await tester.waitFor(
+        (screen) => screen.includes("● Glob ("),
+        {
+          timeout: 10_000,
+          interval: 500,
+          message: "滚动到顶部后 Glob 工具卡应可见",
+        },
+      );
       const globGrepCapture = await takePeriSnapshot(
         tester,
         "header-suffix-glob-grep",

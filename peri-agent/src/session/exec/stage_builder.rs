@@ -585,18 +585,6 @@ pub fn build_stage_context(
     let shared_tools: SharedToolMap = shared_tools_opt
         .unwrap_or_else(|| Arc::new(RwLock::new(std::collections::BTreeMap::new())));
 
-    // 一次性把 middleware 提供的工具注入到 shared_tools。
-    // 已存在的同名工具不覆盖（deferred tools 优先保留外部注册版本）。
-    {
-        let middleware_tools = chain.collect_tools(&cwd);
-        let mut tools = shared_tools.write();
-        for tool in middleware_tools {
-            let arc: Arc<dyn BaseTool> = Arc::from(tool);
-            // 使用 insert：有状态工具（如 SubAgentTool）需每 turn 更新。
-            tools.insert(arc.name().to_string(), arc);
-        }
-    }
-
     // 构造 v2 Session（复用外部 cancel token + 会话级共享 MessageQueue）
     let cwd_arc: Arc<str> = Arc::from(cwd.as_str());
     let frozen_ctx = FrozenContext::builder().build();
@@ -699,17 +687,6 @@ pub fn build_stage_context(
     // 必须同一值——subagent 补发的 SubagentStart.agent_id 指回主 agent。
     let main_agent_id = AgentId::new();
 
-    // 构造 StageContext
-    let mut builder = StageContext::builder(turn, transcript, queue)
-        .with_agent_id(main_agent_id)
-        .with_llm(react_llm)
-        .with_tools(shared_tools)
-        .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
-        .with_middleware_chain(Arc::new(chain))
-        .with_event_bus(Arc::new(event_bus))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
-
     // 注入父 agent 身份（C2）：SubAgentTool 持有同一共享 cell，
     // invoke 时（必然晚于本调用）读到已 set 的值——共享 cell 消除顺序问题。
     if let Some(mw) = &subagent_mw {
@@ -749,6 +726,35 @@ pub fn build_stage_context(
             mw.set_parent_session(session.clone());
         }
     }
+
+    // [时序契约] 工具注入必须晚于 parent_session 注入：SubAgentTool 在
+    // build_tool（collect_tools）时读取 parent_session 以获取运行时 host
+    // （task_manager / bg_event_sender / thread_store / frozen 回退）——先于
+    // 注入则 host 为空，`run_in_background: true` 会静默降级为同步执行
+    // （bg subagent 不注册 TaskManager，BgTaskArea 无运行条目，
+    // issue 2026-08-06-e2e-bg-task-area-entry-missing）。每轮重建，顺序不可调换。
+    // 已存在的同名工具不覆盖（deferred tools 优先保留外部注册版本）。
+    {
+        let middleware_tools = chain.collect_tools(&cwd);
+        let mut tools = shared_tools.write();
+        for tool in middleware_tools {
+            let arc: Arc<dyn BaseTool> = Arc::from(tool);
+            // 使用 insert：有状态工具（如 SubAgentTool）需每 turn 更新。
+            tools.insert(arc.name().to_string(), arc);
+        }
+    }
+
+    // 构造 StageContext（builder 构造晚于工具注入：chain 在
+    // collect_tools 借用后被 move 进 builder，顺序不可调换）
+    let mut builder = StageContext::builder(turn, transcript, queue)
+        .with_agent_id(main_agent_id)
+        .with_llm(react_llm)
+        .with_tools(shared_tools)
+        .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
+        .with_middleware_chain(Arc::new(chain))
+        .with_event_bus(Arc::new(event_bus))
+        .with_session_context(session_context)
+        .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
 
     if let Some(reg) = error_suggest_registry {
         builder = builder.with_error_suggest_registry(reg);

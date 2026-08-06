@@ -13,6 +13,8 @@ const execAsync = promisify(exec);
 
 // ---- tmux 环境检查与清理 ----
 
+// 只清理 tui-tester 创建的残留 session（前缀 tui-test-），
+// 避免误伤用户其他 tmux session；tmux server 不存在时静默通过。
 async function killTestSessions(): Promise<void> {
   try {
     const { stdout } = await execAsync(
@@ -20,8 +22,8 @@ async function killTestSessions(): Promise<void> {
     );
     const sessions = stdout
       .split("\n")
-      .filter((s) => s.includes("peri-e2e") || s.includes("tui-test") || s.includes("test-") || s.includes("minimal-"))
-      .filter(Boolean);
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith("tui-test-"));
     for (const session of sessions) {
       await execAsync(`tmux kill-session -t ${session} 2>/dev/null`).catch(
         () => {},

@@ -139,6 +139,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
             // 消息 JSON 直接提取 id/role/preview，保证候选列表与消息区一致。
             // P1：只保留 user 消息且排除系统注入（与 rewind-candidates 口径
             // 一致），并逆序（最新在前）——弹窗第一条 = 回退一步。
+            // 口径统一：剥离 `<system-reminder>` 注入块后为空（纯系统注入）
+            // 的消息不进候选；带尾部注入的用户输入剥离后保留（与服务端
+            // rewind-candidates 行为一致，避免多轮场景候选不一致）。
             let preview = RewindPreview {
                 files: vec![],
                 messages: msgs
@@ -151,8 +154,11 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let text = super::extract_message_text(msg);
-                        if role != "user" || text.contains("<system-reminder>") {
+                        let text = peri_acp_types::messages::strip_system_reminders(
+                            &super::extract_message_text(msg),
+                        );
+                        let text = text.trim();
+                        if role != "user" || text.is_empty() {
                             return None;
                         }
                         Some(RewindMessage {

@@ -445,6 +445,33 @@ mod tests {
         );
     }
 
+    /// [回归测试] WorkflowMiddlewarePort::downcast_arc 必须还原 session 级
+    /// 具体实例（issue 2026-08-06-e2e-workflow-not-completing）。
+    ///
+    /// 历史 bug：downcast_arc 直接对 trait object 调 `type_id()`——trait 不
+    /// 继承 `Any`，方法经 `Any` blanket impl 解析，返回
+    /// `TypeId::of::<dyn WorkflowMiddlewarePort>()`（trait object 自身），
+    /// 恒不等于 `TypeId::of::<WorkflowMiddleware>()` → downcast 恒失败 →
+    /// 装配面回退临时 WorkflowMiddleware → WorkflowTool 注册的 registry 与
+    /// executor 完成通知消费者订阅的 session 级 registry 分离，workflow 完成
+    /// 通知丢失（registry complete 报 "no subscribers"，TUI 永不显示完成文本）。
+    #[test]
+    fn test_workflow_middleware_port_downcast_restores_concrete() {
+        use peri_acp_types::ports::WorkflowMiddlewarePort;
+
+        let mw = make_middleware();
+        let port: Arc<dyn WorkflowMiddlewarePort> =
+            Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>;
+        let restored = match Arc::clone(&port).downcast_arc::<WorkflowMiddleware>() {
+            Ok(concrete) => concrete,
+            Err(_) => panic!("downcast 必须还原具体类型 WorkflowMiddleware"),
+        };
+        assert!(
+            Arc::ptr_eq(&mw, &restored),
+            "还原实例必须是原 Arc（registry/runner 跨 turn 复用）"
+        );
+    }
+
     /// [回归测试] register 携带的 kill 闭包必须存入 bg registry 条目，
     /// session/cancel-bg-task（cancel()）时真正触发——锁定 issue 2026-08-05
     /// 修复后的行为：Workflow 取消不再只是移除条目 + 发事件，runner 被真实 kill。

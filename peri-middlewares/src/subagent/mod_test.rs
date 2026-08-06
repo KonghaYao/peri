@@ -216,6 +216,49 @@ fn test_build_tool_receives_parent_messages() {
     assert_eq!(tool.name(), "Agent");
 }
 
+/// 回归测试（issue 2026-08-06-e2e-bg-task-area-entry-missing）：
+/// `set_parent_session` 之后 `build_tool` 的 SubAgentTool 必须能经 parent_session
+/// 读到 session 级运行时 host（task_manager / bg_event_sender 等）——生产路径
+/// `build_stage_context` 中工具注入（collect_tools）晚于 parent_session 注入，
+/// 若时序倒置则 `host()` 回退到空 host，`run_in_background: true` 静默降级为
+/// 同步执行，BgTaskArea 无运行条目。
+#[test]
+fn test_build_tool_after_set_parent_session_reads_runtime_host() {
+    use peri_agent::{
+        agent::async_tasks::TaskManager,
+        session::{subagent::SubagentHost, FrozenContext, MessageQueue, Session},
+    };
+
+    // 构造带运行时 host 的父 session（模拟 build_stage_context 注入点）
+    let session = Session::new_with_cancel_and_queue(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        None,
+        Arc::new(AgentCancellationToken::new()),
+        MessageQueue::new(),
+    );
+    let task_manager = Arc::new(TaskManager::new());
+    session.set_subagent_host(SubagentHost {
+        task_manager: Some(Arc::clone(&task_manager)),
+        ..Default::default()
+    });
+
+    let m = SubAgentMiddleware::new(
+        vec![],
+        None,
+        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+    );
+    // 先注入 parent_session（模拟 set_parent_session 先于 collect_tools）
+    m.set_parent_session(Arc::clone(&session));
+    let tool = m.build_tool("/tmp");
+
+    let host = tool.host().expect("build_tool 后 host 应可读");
+    assert!(
+        host.task_manager.is_some(),
+        "tool.host().task_manager 应为 Some（parent_session 注入后构建工具）"
+    );
+}
+
 #[test]
 fn test_scan_agents_with_extra_dirs() {
     use tempfile::tempdir;

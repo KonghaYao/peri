@@ -117,7 +117,14 @@ impl dyn WorkflowMiddlewarePort {
     ) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
         unsafe {
-            if (*ptr).type_id() == TypeId::of::<T>() {
+            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
+            // `type_id()` 会命中 `Any` 的 blanket impl，返回
+            // `TypeId::of::<dyn WorkflowMiddlewarePort>()`（trait object 自身），
+            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
+            // 临时实例，WorkflowTool 注册的 registry 与 executor 完成通知
+            // 消费者订阅的 registry 分离，workflow 完成通知丢失
+            // （e2e workflow 超时，2026-08-06）。
+            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
                 Err(Arc::from_raw(ptr))

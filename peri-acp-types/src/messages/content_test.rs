@@ -250,3 +250,48 @@ fn test_message_content_text_content_from_raw() {
     ]);
     assert_eq!(mc.text_content(), "hello world");
 }
+
+// ── strip_system_reminders ────────────────────────────────────────────────────
+
+#[test]
+fn test_strip_system_reminders_removes_trailing_block() {
+    let text = "请用 Write 工具创建文件\n\
+                <system-reminder>\nCurrent permission mode: Bypass: All tool calls are allowed without approval.\n\
+                </system-reminder>";
+    assert_eq!(
+        strip_system_reminders(text),
+        "请用 Write 工具创建文件\n",
+        "尾部注入的 reminder 应被剥离，用户输入保留"
+    );
+}
+
+#[test]
+fn test_strip_system_reminders_multiple_blocks() {
+    let text = "问题一<system-reminder>recall a</system-reminder>问题二\
+                <system-reminder>recall b</system-reminder>";
+    assert_eq!(strip_system_reminders(text), "问题一问题二");
+}
+
+#[test]
+fn test_strip_system_reminders_no_tag_unchanged() {
+    assert_eq!(strip_system_reminders("普通文本"), "普通文本");
+    assert_eq!(strip_system_reminders(""), "");
+}
+
+#[test]
+fn test_strip_system_reminders_unclosed_keeps_rest() {
+    // 防御路径：未闭合标签不损坏用户输入
+    assert_eq!(
+        strip_system_reminders("前缀<system-reminder>未闭合"),
+        "前缀<system-reminder>未闭合"
+    );
+}
+
+#[test]
+fn test_strip_system_reminders_standalone_block_becomes_empty() {
+    assert_eq!(
+        strip_system_reminders("<system-reminder>后台任务完成通知</system-reminder>"),
+        "",
+        "纯注入消息剥离后为空（候选过滤依据）"
+    );
+}
