@@ -1,6 +1,6 @@
 # bg agent 取消（Abort）跳过全部收尾：active_agents 泄漏 + 子进程孤儿化
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-08-05
 **关联计划**：`2026-08-05-core-flow-bugfix-plan.md` S3.2
@@ -71,5 +71,5 @@ RAII guard 方案被推翻（async 收尾无法在 Drop 中 await），改为组
 - remove 语义（"标记 Cancelled"）未改：token.cancel() 生效后幽灵写入窗口极小（任务在下一个 await 点退出），hidden thread 写入可接受；status 枚举/complete/TUI 映射改动面大，留待后续
 - bg shell 子进程孤儿化不在本修复范围（Shell 路径走 Pid 进程组 kill，既有行为）
 
-**验证状态**：待验证（`cargo test -p peri-middlewares --lib` 全绿 1099 通过；`cargo clippy -p peri-middlewares --lib -- -D warnings` 无警告）
+**验证状态**：已验证（L1 复验 2026-08-05：`cargo test -p peri-agent --lib async_tasks` 35 通过，含 test_cancel_abort_token_cancels_task_first / test_cancel_abort_grace_timeout_fallback；peri-middlewares subagent 135 通过含 test_bg_cancel_trigger_token_and_cleanup。残余风险记录见上，HITL 审批等待不响应 cancel 等随 L5/Runtime 处理）
 

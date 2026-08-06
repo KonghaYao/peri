@@ -1,6 +1,6 @@
 # BgCommand 双 expect 可经公开 RPC session/execute-command 触发 panic
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-08-05
 **关联计划**：`2026-08-05-core-flow-bugfix-plan.md` S1.2
@@ -55,4 +55,4 @@
     - `bg_event_sender` / `bg_registry` 是 `spawn_background_fork` 的必需项，无合理 fallback，报错返回是唯一正确语义（issue 修复方向确认）
   - **测试**：`peri-acp/src/session/command/bg_test.rs` 新增 `test_bg_command_missing_bg_context_gracefully_fails`（有效 provider 越过 LLM 构造检查 + 两字段 None，断言不 panic、EndTurn、emit 含 "bg_event_sender" 的错误提示）
   - **顺带评估**（未改动）：`workflow_agent.rs:214-256` 的 `Mutex::lock().unwrap()` 低概率同类隐患，不在本 slice 范围
-- **验证状态**：待验证（build ✅ / peri-acp lib 415 tests ✅，含 1 个新测试）
+- **验证状态**：已验证（L1 复验 2026-08-05：`cargo test -p peri-acp --lib bg` 12 通过，含 test_bg_command_missing_bg_context_gracefully_fails——两字段 None 时 emit 错误提示 + EndTurn 返回，不 panic）
