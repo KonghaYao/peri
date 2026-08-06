@@ -74,18 +74,11 @@ impl App {
             None => lc.tr("app-not-configured"),
         };
 
-        // 初始化 thread 存储（失败时 fallback 到临时目录）
-        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> =
-            match crate::thread::SqliteThreadStore::default_path().await {
-                Ok(store) => std::sync::Arc::new(store),
-                Err(_) => std::sync::Arc::new(
-                    crate::thread::SqliteThreadStore::new(
-                        std::env::temp_dir().join("zen-threads.db"),
-                    )
-                    .await
-                    .expect("无法创建临时 SQLite 数据库"),
-                ),
-            };
+        // 初始化 thread 存储（经 Resources 门面；失败时 fallback 到临时目录的逻辑在门面内）
+        let resources = peri_resources::Resources::open()
+            .await
+            .expect("无法初始化 Resources 层");
+        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> = resources.thread_store();
 
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();

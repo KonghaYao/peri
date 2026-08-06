@@ -9,11 +9,8 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
-use crate::acp_server::{AcpServerConfig, run_acp_server};
 use crate::app::App;
 use crate::app::agent::LlmProvider;
-use crate::config::config_path;
-use peri_acp::session::SessionManager;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_middlewares::prelude::PermissionMode;
 
@@ -134,7 +131,10 @@ pub async fn build_app_and_acp(
         });
     }
 
-    // ── ACP Server + Client ─────────────────────────────────────────────
+    // ── ACP Host + Client ────────────────────────────────────────────────
+    // 内嵌 server 已迁出为 ACP 层 host（`peri_acp::host`）：控制面装配经
+    // `assemble_server_config` 统一完成，TUI 进程不再持有控制面，只经
+    // AcpTuiClient（mpsc client）与 host 通信。
     let acp_client = {
         let provider = {
             let cfg_guard = app.services.peri_config.read();
@@ -143,116 +143,27 @@ pub async fn build_app_and_acp(
         .or_else(LlmProvider::from_env);
 
         if let Some(provider) = provider {
-            let plugin_skill_roots = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_skill_roots.clone())
-                .unwrap_or_default();
-            let plugin_agent_dirs = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_agent_dirs.clone())
-                .unwrap_or_default();
-            let plugin_lsp_servers = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_lsp_servers.clone())
-                .unwrap_or_default();
-            let plugin_hooks = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_hooks.clone())
-                .unwrap_or_default();
-            let plugin_loaded = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.plugins.clone())
-                .unwrap_or_default();
-
-            let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
-            if !plugin_hooks.is_empty() {
-                hook_groups.push(plugin_hooks);
-            }
-            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
-            if !global_hooks.is_empty() {
-                hook_groups.push(global_hooks);
-            }
-            let project_hooks =
-                peri_middlewares::hooks::loader::load_settings_project_hooks(&app.services.cwd);
-            if !project_hooks.is_empty() {
-                hook_groups.push(project_hooks);
-            }
-            let local_hooks =
-                peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
-            if !local_hooks.is_empty() {
-                hook_groups.push(local_hooks);
-            }
-
-            let flat_hooks: Vec<peri_middlewares::hooks::RegisteredHook> =
-                hook_groups.iter().flatten().cloned().collect();
-            tracing::info!(
-                groups = hook_groups.len(),
-                total_hooks = flat_hooks.len(),
-                "Hook groups assembled for ACP server"
-            );
-
-            let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-            let shared_tools =
-                Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
-
-            let shared_peri_config = app.services.peri_config.clone();
-            let session_manager_peri_config_snapshot =
-                Arc::new(app.services.peri_config.read().clone());
-            let session_manager = SessionManager::new(
-                app.services.thread_store.clone(),
-                provider.clone(),
-                session_manager_peri_config_snapshot,
-                app.services.permission_mode.clone(),
-                None,
-                Some(app.services.cron.scheduler.clone()),
-            );
+            let host_config = peri_acp::host::assemble::assemble_server_config(
+                peri_acp::host::assemble::HostAssemblyInput {
+                    provider: provider.clone(),
+                    peri_config: app.services.peri_config.clone(),
+                    permission_mode: app.services.permission_mode.clone(),
+                    cron_scheduler: Some(app.services.cron.scheduler.clone()),
+                    mcp_pool: app.services.mcp_pool.clone(),
+                    thread_store: app.services.thread_store.clone(),
+                    cwd: app.services.cwd.clone(),
+                    plugin_data: app.services.plugin_data.clone(),
+                    bare: false,
+                },
+            )
+            .await;
 
             // (I17-D) app.services.acp_session_manager 字段已退役——
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
-            let server_config = AcpServerConfig {
-                provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
-                peri_config: shared_peri_config,
-                permission_mode: app.services.permission_mode.clone(),
-                cron_scheduler: Some(app.services.cron.scheduler.clone()),
-                mcp_pool: app.services.mcp_pool.clone(),
-                channel_state: None, // (S13c-4c) ServiceRegistry.channel_state 已删除
-                plugin_skill_roots,
-                plugin_agent_dirs,
-                plugin_hooks: flat_hooks,
-                plugin_loaded,
-                hook_groups,
-                plugin_lsp_servers,
-                tool_search_index: tool_search_index.clone(),
-                shared_tools: shared_tools.clone(),
-                thread_store: app.services.thread_store.clone(),
-                langfuse_session: {
-                    if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
-                        tracing::info!("Langfuse tracing enabled (TUI mode)");
-                        peri_acp::langfuse::LangfuseSession::new(config, "live".into())
-                            .await
-                            .map(Arc::new)
-                    } else {
-                        None
-                    }
-                },
-                config_path: config_path(),
-                session_manager,
-            };
-
             let (client_transport, server_transport) = mpsc_transport_pair();
             tokio::spawn(async move {
-                run_acp_server(Arc::new(server_transport), server_config).await;
+                peri_acp::host::run_acp_server(Arc::new(server_transport), host_config).await;
             });
 
             let (acp_client, notification_tx, notification_rx) =

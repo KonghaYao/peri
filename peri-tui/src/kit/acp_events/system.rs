@@ -66,7 +66,7 @@ pub(super) fn handle_prediction(p: &Prediction) {
         match action {
             PredictionAction::Placeholder { text: t } => text = t.clone(),
             PredictionAction::Summary { text: t } => summary = Some(t.clone()),
-            _ => {} // SetTitle / AddTag 由 acp_server 执行写入，此处仅展示
+            _ => {} // SetTitle / AddTag 由 ACP host 执行写入，此处仅展示
         }
     }
     let mut state = crate::kit::atoms::PredictionState {

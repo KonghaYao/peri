@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 [dependencies]
 serde.workspace = true
 peri-agent = { path = "../peri-agent" }
+peri-resources = { path = "../peri-resources" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-lsp = { path = "../peri-lsp" }
 # ratatui-widgets（reflow.rs WordWrapper）由 ratatui 0.30 传递引入；
@@ -43,6 +44,7 @@ png = "0.18"
 base64 = { version = "0.22", features = ["alloc"] }
 peri-theme = { path = "../peri-theme" }
 peri-acp = { path = "../peri-acp" }
+peri-controller = { path = "../peri-controller" }
 peri-workflow = { path = "../peri-workflow" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-web-pty = { path = "../peri-web-pty" }

@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod acp_stdio;
 mod cli_args;
 mod cli_plugin;
 mod cli_print;
@@ -417,7 +416,14 @@ fn main() -> Result<()> {
         }) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
-            rt.block_on(acp_stdio::run_acp_stdio(cwd))
+            rt.block_on(async {
+                // stdio host 位于 ACP 层（部署装配点），cli 仅作为启动入口调用；
+                // thread 存储经 Resources 门面打开后注入（§0：ACP 层不直接依赖 Resources）
+                let resources = peri_resources::Resources::open()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
+                peri_acp::host::stdio::run_acp_stdio(cwd, resources.thread_store()).await
+            })
         }
         Some(Commands::Update) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack

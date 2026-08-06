@@ -8,9 +8,10 @@
 //! - **usage_update**：token 消耗通过标准 session/update 的 `usage_update` tag
 //!   携带，直接写入 `SPINNER_TOKEN_COUNT` atom，不产生 AcpEventData。
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
-//!   （SubagentStarted/SubagentStopped）通过 `convert_agent_event` 转换为
-//!   AcpEventData 推入双 bridge channel。未映射变体（TurnCommitted/
-//!   StateSnapshotMeta/CompactCompleted/...）保持静默丢弃，S5+ 迭代扩展。
+//!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
+//!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
+//!   未映射变体（TurnCommitted/StateSnapshotMeta/CompactCompleted/...）保持
+//!   静默丢弃，S5+ 迭代扩展。
 //!
 //! 该任务是**纯转换 + channel push**——不做状态突变。
 
@@ -183,6 +184,10 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
         AcpEvent::RewindError { message } => Some(AcpEventData::RewindError { message }),
+        // TurnSuspended：bg agent/cron/workflow 挂起信号——归档 current_turn、
+        // 停止 loading spinner。双轨下线后（2026-08-05-3.0-m-event-chain-canonical）
+        // 此信号仅经 ACP peri/agent_event 通道送达。
+        AcpEvent::TurnSuspended { .. } => Some(AcpEventData::TurnSuspended),
         // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
         AcpEvent::StateSnapshotMeta {
             context_total_tokens,
