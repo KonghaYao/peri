@@ -1177,6 +1177,71 @@ pub fn build_v2_subagent_context(
     }
 }
 
+/// SubAgent v2 上下文构建器（3.0 批 2 注入面）。
+///
+/// `build_v2_subagent_context` 的 trait 封装：ACP workflow agent 等协议面
+/// 经装配注入本 trait 调用（不直接引用本层实现），默认实现即委托
+/// [`build_v2_subagent_context`]（[`DefaultSubagentV2ContextBuilder`]）。
+#[allow(clippy::too_many_arguments)]
+pub trait SubagentV2ContextBuilder: Send + Sync {
+    /// 构造 SubAgent v2 上下文（参数与 [`build_v2_subagent_context`] 一致）。
+    fn build(
+        &self,
+        session: Option<Arc<Session>>,
+        llm: Box<dyn ReactLLM + Send + Sync>,
+        chain: MiddlewareChain,
+        tools: Vec<Arc<dyn BaseTool>>,
+        cwd: &str,
+        cancel_token: CancellationToken,
+        tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
+        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+        compact_config: Option<CompactConfig>,
+        context_budget: Option<ContextBudget>,
+        compact_llm: Option<Arc<dyn peri_model::Model>>,
+        agent_id: Option<AgentId>,
+    ) -> V2SubagentContext;
+}
+
+/// [`SubagentV2ContextBuilder`] 的默认实现：委托 [`build_v2_subagent_context`]。
+pub struct DefaultSubagentV2ContextBuilder;
+
+#[allow(clippy::too_many_arguments)]
+impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
+    fn build(
+        &self,
+        session: Option<Arc<Session>>,
+        llm: Box<dyn ReactLLM + Send + Sync>,
+        chain: MiddlewareChain,
+        tools: Vec<Arc<dyn BaseTool>>,
+        cwd: &str,
+        cancel_token: CancellationToken,
+        tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
+        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+        compact_config: Option<CompactConfig>,
+        context_budget: Option<ContextBudget>,
+        compact_llm: Option<Arc<dyn peri_model::Model>>,
+        agent_id: Option<AgentId>,
+    ) -> V2SubagentContext {
+        build_v2_subagent_context(
+            session,
+            llm,
+            chain,
+            tools,
+            cwd,
+            cancel_token,
+            tool_invocation_resolver,
+            error_suggest_registry,
+            tool_registry_snapshot,
+            compact_config,
+            context_budget,
+            compact_llm,
+            agent_id,
+        )
+    }
+}
+
 // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
 
 /// RAII guard that calls deregister on drop (panic-safe cleanup).

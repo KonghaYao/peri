@@ -8,52 +8,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use uuid::Uuid;
 
 use crate::session::queue::QueuedMessage;
 
-// ─── AgentId ───────────────────────────────────────────────────────────────
+// ─── AgentId（事实源 peri-acp-types::identity） ─────────────────────────────
 
-/// Agent 唯一标识符 — UUID v7（时间有序，跨进程安全）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(Uuid);
-
-impl AgentId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// 从 UUID 构造 AgentId（供 subagent 身份统一：child_thread_id → AgentId）
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for AgentId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TryFrom<String> for AgentId {
-    type Error = uuid::Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Uuid::parse_str(&value).map(Self::from_uuid)
-    }
-}
-
-impl std::fmt::Display for AgentId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Agent 唯一标识 — UUID v7（subagent 身份统一：child_thread_id → AgentId）
+pub use peri_acp_types::identity::AgentId;
 
 // ─── AgentPipeline ────────────────────────────────────────────────────────
 

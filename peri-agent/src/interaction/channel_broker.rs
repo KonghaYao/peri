@@ -3,10 +3,9 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
-use crate::interaction::{
-    channel_types::{short_request_id, PermissionRequest},
-    ApprovalDecision, ApprovalItem, ChannelNotificationSender, ChannelState, InteractionContext,
-    InteractionResponse, UserInteractionBroker,
+use peri_acp_types::interaction::{
+    short_request_id, ApprovalDecision, ApprovalItem, ChannelNotificationSender, ChannelState,
+    InteractionContext, InteractionResponse, PermissionRequest, UserInteractionBroker,
 };
 
 /// 对 MCP Channel 发起权限审批的 broker

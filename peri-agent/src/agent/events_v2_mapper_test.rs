@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{RenderEvent, StateEvent};
 use crate::group::pipeline::AgentId;
 use crate::session::turn::TurnId;

@@ -47,16 +47,9 @@ pub enum BackgroundRegistryError {
     },
 }
 
-/// 后台任务类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BgTaskKind {
-    Shell,
-    Agent,
-    Workflow,
-}
+/// 后台任务类别（事实源 peri-acp-types::tasks）
+pub use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
 
-/// 后台任务取消句柄（按 kind 分发取消逻辑）
 pub enum BgCancelHandle {
     /// bg agent：取消 tokio task。
     /// 持 `JoinHandle`（而非 `AbortHandle`）——取消时先 `token.cancel()` 让任务
@@ -126,28 +119,8 @@ pub struct BgTaskInfo {
 }
 
 /// Registry → ACP 层事件桥接
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum BgRegistryEvent {
-    Started {
-        task_id: String,
-        kind: BgTaskKind,
-        summary: String,
-        started_at: String,
-    },
-    Completed {
-        task_id: String,
-        kind: Option<BgTaskKind>,
-        success: bool,
-        output_preview: String,
-        duration_ms: u64,
-        result: BackgroundTaskResult,
-    },
-    Cancelled {
-        task_id: String,
-        reason: String,
-    },
-}
+/// 后台任务注册表事件（事实源 peri-acp-types::tasks）
+pub use peri_acp_types::tasks::BgRegistryEvent;
 
 /// 后台任务注册中心
 pub struct BackgroundTaskRegistry {
@@ -756,6 +729,98 @@ pub struct TaskManager {
 impl Default for TaskManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl peri_acp_types::tasks::TaskManager for TaskManager {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn set_event_sender(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<BgRegistryEvent>,
+        session_id: String,
+    ) {
+        self.set_event_sender(sender, session_id);
+    }
+
+    fn active_count(&self) -> usize {
+        self.active_count()
+    }
+
+    fn register(&self, request: BgTaskRegistration) -> Result<(), String> {
+        let cancel_handle = match request.kind {
+            BgTaskKind::Shell => request
+                .pid
+                .map(BgCancelHandle::Pid)
+                .ok_or_else(|| "bg shell register: pid 缺失".to_string())?,
+            BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
+            BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
+        };
+        let task = BackgroundTask {
+            id: request.task_id,
+            agent_name: match request.kind {
+                BgTaskKind::Shell => "bg-shell",
+                BgTaskKind::Agent => "agent",
+                BgTaskKind::Workflow => "workflow",
+            }
+            .to_string(),
+            prompt_summary: request.summary,
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: request.kind,
+            cancel_handle,
+            cancel_token: None,
+            pid: request.pid,
+            output_preview: None,
+        };
+        self.register_with_kind(task).map_err(|e| e.to_string())
+    }
+
+    fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
+        self.complete(task_id, result)
+    }
+
+    fn cancel(&self, task_id: &str) -> Result<(), String> {
+        self.cancel(task_id).map_err(|e| e.to_string())
+    }
+
+    fn cancel_all(&self) {
+        self.cancel_all();
+    }
+
+    fn spawn_shell(
+        &self,
+        command: String,
+        cwd: String,
+        timeout_ms: Option<u64>,
+        on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.spawn_shell(command, cwd, timeout_ms, on_bg_complete)
+    }
+
+    fn finalize_bg_shell(
+        &self,
+        on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        task_id: String,
+        prompt_summary: String,
+        success: bool,
+        output: String,
+        duration_ms: u64,
+        timed_out: bool,
+    ) {
+        finalize_bg_shell(
+            &self.registry,
+            on_bg_complete,
+            task_id,
+            prompt_summary,
+            success,
+            output,
+            duration_ms,
+            timed_out,
+        );
     }
 }
 

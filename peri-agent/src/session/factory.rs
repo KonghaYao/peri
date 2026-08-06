@@ -10,50 +10,13 @@
 //! 会话级冻结数据（[`FrozenData`]）与子 Agent 线程持久化（[`ThreadPersistence`]）
 //! 亦自 ACP builder 随迁至此，保持构建入口的归位。
 
-use std::sync::Arc;
+/// 子 Agent 事件 handler 工厂类型（事实源 peri-acp-types::frozen）
+pub use peri_acp_types::frozen::ChildHandlerFactory;
 
-use crate::{agent::events::AgentEventHandler, agent::AgentCancellationToken, thread::ThreadStore};
-
-/// 子 Agent 事件 handler 工厂类型
-pub type ChildHandlerFactory = Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>;
-
-/// Register callback: (thread_id, cancel_token, cancel_policy_str) → ()
-pub type RegisterRuntimeFn = Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>;
-
-/// Deregister callback: &str (thread_id) → ()
-pub type DeregisterRuntimeFn = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// 会话级冻结数据（session/new 一次性捕获，后续轮次直接复用）。
-///
-/// 零跨依赖分组：四个字段在链装配与 SubAgent 构造中独立使用，
-/// 不与其它字段共享 mutable state。
-#[derive(Clone)]
-pub struct FrozenData {
-    /// Frozen CLAUDE.md content (None = read from disk each turn, legacy).
-    pub claude_md: Option<String>,
-    /// Frozen CLAUDE.local.md content.
-    pub claude_local_md: Option<String>,
-    /// Frozen skills summary (None = scan each turn).
-    pub skill_summary: Option<String>,
-    /// Frozen session date in YYYY-MM-DD (None = compute fresh each turn).
-    pub date: Option<String>,
-}
-
-/// 子 Agent 线程持久化分组（零跨依赖）。
-///
-/// 全部为 `Option`，链装配内仅用于 SubAgent 的链式 `with_*` 调用，
-/// 无跨字段约束。
-#[derive(Clone)]
-pub struct ThreadPersistence {
-    /// Thread persistence store for child thread creation (None = non-persistent)
-    pub store: Option<Arc<dyn ThreadStore>>,
-    /// Parent thread ID for child thread hierarchy (None = top-level agent)
-    pub parent_thread_id: Option<String>,
-    /// Register callback: called when a child agent starts executing.
-    pub register_runtime: Option<RegisterRuntimeFn>,
-    /// Deregister callback: called when a child agent finishes.
-    pub deregister_runtime: Option<DeregisterRuntimeFn>,
-}
+/// Register/Deregister 回调与冻结数据（事实源 peri-acp-types::frozen）
+pub use peri_acp_types::frozen::{
+    DeregisterRuntimeFn, FrozenData, RegisterRuntimeFn, ThreadPersistence,
+};
 
 /// 生产链槽位（顺序 = 行为契约，ARC-MIDDLEWARE-001，禁止重排）。
 ///

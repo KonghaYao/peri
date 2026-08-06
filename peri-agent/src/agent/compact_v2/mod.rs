@@ -68,57 +68,8 @@ pub struct CompactResult {
     pub no_op_candidates: usize,
 }
 
-/// Compact 执行的语义结果。
-///
-/// `strategy` 暂时仍是对外兼容的有效策略视图；调用方应通过本枚举判断
-/// Full Compact 是否真正完成。后续可将此查询结果提升为持久化的完整 outcome。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactOutcome {
-    /// 本轮未应用 Compact。
-    Skipped,
-    /// 已应用 Micro Compact。
-    MicroApplied,
-    /// 已应用 Smart Compact。
-    SmartApplied,
-    /// 已成功应用 Full Compact。
-    FullApplied,
-    /// Full Compact 未成功应用。
-    FullFailed,
-    /// 仅估算了 Compact 收益，未修改 transcript。
-    Shadowed,
-    /// 已应用 Micro Compact，但后续 Full Compact 失败。
-    MicroAppliedThenFullFailed,
-    /// 已应用 Smart Compact，但后续 Full Compact 失败。
-    SmartAppliedThenFullFailed,
-    /// Compact 已提交（transcript 已修改），但在事件发送前被取消（G6）。
-    InterruptedAfterCommit,
-    /// Compact 被取消且未提交任何变更（S1.4：CompactEnded 结束观测用）。
-    ///
-    /// 与 `InterruptedAfterCommit` 互补：后者走 `MessagesCompacted`（确有变更），
-    /// 前者走 `CompactEnded`（无变更，不误导遥测以为压缩发生了）。
-    Interrupted,
-}
-
-impl CompactOutcome {
-    /// 是否已在 transcript 中应用 Compact 变更。
-    pub fn has_applied_change(self) -> bool {
-        matches!(
-            self,
-            Self::MicroApplied
-                | Self::SmartApplied
-                | Self::FullApplied
-                | Self::MicroAppliedThenFullFailed
-                | Self::SmartAppliedThenFullFailed
-                | Self::InterruptedAfterCommit
-        )
-    }
-
-    /// 是否已成功应用 Full Compact。
-    pub fn is_full_applied(self) -> bool {
-        matches!(self, Self::FullApplied)
-    }
-}
+/// Compact 执行语义结果（事实源 peri-acp-types::compact）
+pub use peri_acp_types::compact::CompactOutcome;
 
 impl CompactResult {
     /// 返回本轮 Compact 的语义结果。

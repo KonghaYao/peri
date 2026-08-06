@@ -10,38 +10,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-// ─── TurnId ──────────────────────────────────────────────────────────────────
+// ─── TurnId（事实源 peri-acp-types::session） ─────────────────────────────
 
-/// Turn 唯一标识符 — UUID v7（时间有序）
-///
-/// 作为一次 turn 内所有事件的统一纽带。从 LlmCallStart 到 TurnCompleted 全程一致。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TurnId(uuid::Uuid);
-
-impl TurnId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::now_v7())
-    }
-
-    pub fn as_uuid(&self) -> uuid::Uuid {
-        self.0
-    }
-}
-
-impl Default for TurnId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for TurnId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use peri_acp_types::session::TurnId;
 
 // ─── TurnContext ─────────────────────────────────────────────────────────────
 
