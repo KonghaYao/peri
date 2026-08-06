@@ -21,6 +21,7 @@
 //! - `error` — 层边界错误契约（AgentError）
 //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
+//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext/BgForkRequest）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
@@ -30,6 +31,7 @@
 //! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort）
 
 pub mod agents;
+pub mod command;
 pub mod compact;
 pub mod cron;
 pub mod error;

@@ -7,6 +7,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::BaseMessage;
 
+/// Todo 条目状态（L5：自 `peri-middlewares/src/tools/todo.rs` 迁入，
+/// middlewares 保留 re-export；与 `crate::event::TodoStatus`（事件 DTO）同构
+/// 但独立定义，避免改动事件序列化语义）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// Todo 列表条目（L5：自 `peri-middlewares/src/tools/todo.rs` 迁入契约层，
+/// TodoWrite 工具 / 装配上下文 todo 通道共用；middlewares 保留 re-export）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    #[serde(
+        default,
+        rename = "activeForm",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_form: Option<String>,
+    pub status: TodoStatus,
+}
+
 /// 工具定义（JSON Schema 格式参数描述）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {

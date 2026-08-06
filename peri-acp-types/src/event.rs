@@ -5,6 +5,89 @@
 //! [`crate::event_v2`]，随 ExecutorEvent 全量退役（`2026-07-18-executor-event-retirement.md`）
 //! 一起删除。
 
+/// 事件发射端口（L5：自 `peri-acp/src/session/event_sink.rs` 迁入）。
+///
+/// 接收 [`ExecutorEvent`] 并路由到对应 transport。实现方为 ACP 协议面
+/// （TransportEventSink / StdioEventSink 等）：v1 `ExecutorEvent` 中间态已退役，
+/// 本 trait 是 ACP 协议序列化面入口——输入为协议化载体事件（由 v2 事件经
+/// `event_v2::*_event_to_executor` 转换而来，或命令/bg 等无 v2 等价物的
+/// 功能载体事件），输出为 ACP wire 通知（SessionUpdate / AcpEvent）。
+/// Agent 层命令执行体（`session::exec::*`）经本端口发射，不触碰协议实现。
+#[async_trait::async_trait]
+pub trait EventSink: Send + Sync {
+    /// Push a single executor event. Called from the background pump task.
+    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
+
+    /// Signal that the agent execution stream has ended (no more events).
+    ///
+    /// `request_id` 为可选的本轮 prompt requestId（TUI 提交时生成、经
+    /// `session/prompt` params 传入、此处透传回带）。TUI 侧用它做 stale
+    /// `TurnInterrupted` 配对判定（Issue 2026-08-05）；缺失路径传 None。
+    async fn push_done(&self, session_id: &str, stop_reason: &str, request_id: Option<&str>);
+
+    /// Push an unstable event (peri/unstable-event) directly to the transport.
+    ///
+    /// Used to inject terminal signals (e.g. "turn-done") that don't originate
+    /// from an ExecutorEvent variant. Default: no-op (for non-TUI sinks like
+    /// StdioEventSink that don't support the unstable-event channel).
+    async fn push_unstable_event(
+        &self,
+        _session_id: &str,
+        _event: String,
+        _data: serde_json::Value,
+    ) {
+    }
+
+    /// Push an arbitrary `session/update` notification to the transport.
+    ///
+    /// Used for events that don't originate from `ExecutorEvent` — e.g. bg agent
+    /// completion synthetic user messages. Default: no-op (non-TUI sinks have no
+    /// need for ad-hoc session/update emission).
+    async fn push_session_update(&self, _session_id: &str, _update: serde_json::Value) {}
+}
+
+/// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
+///
+/// 实现方为 ACP/Controller 适配层（语义对齐 `Controller::publish_event`：
+/// 补打 session_id / session_seq 后扇出弹出队列 + 订阅广播）；Agent 层执行体
+/// （`session::exec::*`）经本端口发射，不触碰 Controller 实现。
+pub trait EventPublisher: Send + Sync {
+    /// 发射一条协议化前事件（携带事件源身份 [`crate::runtime::UnstampedEvent`]）。
+    fn publish_event(
+        &self,
+        session_id: &str,
+        source: &crate::runtime::UnstampedEvent,
+        event: ExecutorEvent,
+    );
+}
+
+/// 事件订阅错误（[`EventSubscriber::recv`] 流语义）。
+///
+/// 与 Controller 侧 `SubscriptionError` 枚举镜像（L5：契约层定义，避免
+/// Agent 层引用 Controller）；`Lagged` 为可恢复错误（可继续 recv），
+/// `Closed` 为终态（事件流终止）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionError {
+    /// 慢消费者错过事件（可继续 recv；错过条数可观测）。
+    Lagged(u64),
+    /// 事件流已终止（广播通道关闭）。
+    Closed,
+}
+
+/// 事件订阅端口（L5：事件泵迁入 Agent 层的消费面）。
+///
+/// 实现方为 ACP 适配层（包装 Controller `Subscription`）；泵经本端口消费
+/// 广播事件（按 [`EventMessage::envelope`] 的 session_id 过滤），`recv`
+/// 阻塞接收 / `try_recv` 排干在途事件，两态语义对齐 §9 事件契约 Broadcast 类。
+#[async_trait::async_trait]
+pub trait EventSubscriber: Send + Sync {
+    /// 接收下一条事件。
+    async fn recv(&mut self) -> Result<EventMessage, SubscriptionError>;
+
+    /// 非阻塞取一条事件（空返回 `None`；用于事件源结束后排干在途事件）。
+    fn try_recv(&mut self) -> Result<Option<EventMessage>, SubscriptionError>;
+}
+
 /// 后台任务完成通知（注入到主 agent 消息流中）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BackgroundTaskResult {

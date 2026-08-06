@@ -7,13 +7,45 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::command::PromptStopReason;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
+
+// ─── PromptResult（L5：自 peri-acp host/exec/executor.rs 契约化）────────────
+
+/// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
+/// 执行句柄经本类型回传）。
+pub struct PromptResult {
+    /// 执行后的消息历史。
+    pub messages: Vec<BaseMessage>,
+    /// 是否执行成功。
+    pub ok: bool,
+    /// 执行停止原因。
+    pub stop_reason: PromptStopReason,
+    /// 本轮是否发生 Full Compact 提交并替换了先前的可见历史。
+    pub history_replaced_by_compaction: bool,
+    /// 执行期间收集的 recall 项（供下一轮注入）。
+    pub recall_items: Vec<String>,
+}
+
+impl Default for PromptResult {
+    /// 防御性回退（结果缺失 / 未执行时使用）：空失败结果。
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            ok: false,
+            stop_reason: PromptStopReason::EndTurn,
+            history_replaced_by_compaction: false,
+            recall_items: Vec::new(),
+        }
+    }
+}
 
 // ─── TurnId ──────────────────────────────────────────────────────────────────
 
@@ -563,4 +595,45 @@ pub fn cancel_all_in<'a>(runtimes: impl IntoIterator<Item = &'a HashMap<ThreadId
     for map in runtimes {
         cancel_all_agents(map.values());
     }
+}
+
+// ─── SessionAccessPort（L5：executor 对 ACP SessionManager 的访问端口）──────
+
+/// L5：`run_session_loop` 会话编排对 ACP `SessionManager` 的依赖端口。
+///
+/// 依赖反转（§0）：executor 迁入 peri-agent 后不再引用 ACP `SessionManager`
+/// 类型，改为经本端口访问会话级状态（v2 MessageQueue / inbox / task manager /
+/// permission-mode 记账 / goal / 子 agent 注册表 / cron bridge）。
+/// ACP 侧 `SessionManager` 实现本端口；print mode / 测试等无 session 场景
+/// 为 `None`（调用方保持原 None 语义，仅读路径可用时生效）。
+pub trait SessionAccessPort: Send + Sync {
+    /// 会话级共享 v2 MessageQueue（`AcpSession.v2_message_queue`）。
+    /// 返回 clone（内部 Arc 共享，语义同 `SessionManager::v2_queue_for`）。
+    fn v2_message_queue(&self, session_id: &str) -> Option<MessageQueue>;
+
+    /// 会话级 SessionInbox（await-wake wrapper；lazy-init 语义由实现方保证）。
+    fn session_inbox(&self, session_id: &str) -> Option<Arc<SessionInbox>>;
+
+    /// 会话级后台任务管理器（`AcpSession.task_manager`）。
+    fn task_manager(&self, session_id: &str) -> Option<Arc<dyn crate::tasks::TaskManager>>;
+
+    /// 最近一次已通知模型的 PermissionMode（D2 记账值，跨 turn 持久）。
+    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>>;
+
+    /// 会话级 GoalController（`AcpSession.goal_state`）。
+    fn goal_controller(&self, session_id: &str) -> Option<Arc<dyn crate::goal::GoalController>>;
+
+    /// 构造子 agent runtime 注册闭包（`AcpSession.active_agents` insert）。
+    /// 返回 None 表示无注册能力（print mode / session 不存在）。
+    fn register_runtime(&self, session_id: &str) -> Option<crate::frozen::RegisterRuntimeFn>;
+
+    /// 构造子 agent runtime 注销闭包（`AcpSession.active_agents` remove）。
+    fn deregister_runtime(&self, session_id: &str) -> Option<crate::frozen::DeregisterRuntimeFn>;
+
+    /// cancel cascade 子 agent（Cascade 判定归 Agent 层契约，本端口仅定位）。
+    fn cancel_cascade_children(&self, session_id: &str);
+
+    /// 确保 session 级 cron bridge 已启动（lazy-init，幂等；见
+    /// `SessionManager::cron_bridge_for`）。
+    fn cron_bridge_for(&self, session_id: &str) -> bool;
 }
