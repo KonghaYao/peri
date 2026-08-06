@@ -366,7 +366,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 }
                 ChainSlot::Terminal => {
                     let mut tm = TerminalMiddleware::new();
-                    tm = tm.with_task_manager(Arc::clone(task_manager));
+                    tm = tm.with_task_manager(
+                        Arc::clone(task_manager) as Arc<dyn peri_acp_types::tasks::TaskManager>
+                    );
                     if let Some(ref cb) = on_bg_complete {
                         tm = tm.with_on_bg_complete(Arc::clone(cb));
                     }

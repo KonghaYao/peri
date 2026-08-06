@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::{
-    hooks::types::{HooksConfig, RegisteredHook},
+    hooks::types::RegisteredHook,
     mcp::{config::McpConfigFile, McpServerConfig},
     plugin::{
         config::{
@@ -24,6 +24,13 @@ use crate::{
     skills::{SkillRoot, SkillSource},
 };
 
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
+// `CommandSource` / `CommandEntry` / `LoadedPlugin` / `PluginLoadResult` 自本文件
+// 迁出；本模块保留 re-export 保兼容。`CommandProvider` 随迁（trait 引用迁出类型）。
+pub use peri_acp_types::plugin::{
+    CommandEntry, CommandProvider, CommandSource, LoadedPlugin, PluginLoadResult,
+};
+
 #[derive(Debug, Error)]
 pub enum LoaderError {
     #[error("插件清单加载失败: {0}")]
@@ -32,23 +39,6 @@ pub enum LoaderError {
     ConfigError(#[from] crate::plugin::PluginConfigError),
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
-}
-
-#[derive(Debug, Clone)]
-pub enum CommandSource {
-    Builtin,
-    Plugin { path: PathBuf },
-}
-
-#[derive(Debug, Clone)]
-pub struct CommandEntry {
-    pub name: String,
-    pub description: String,
-    pub source: CommandSource,
-}
-
-pub trait CommandProvider: Send + Sync {
-    fn commands(&self) -> Vec<CommandEntry>;
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -75,24 +65,6 @@ pub fn parse_command_md(path: &Path) -> Option<(CommandFrontmatter, String)> {
         None => CommandFrontmatter::default(),
     };
     Some((fm, result.content))
-}
-
-#[derive(Debug, Clone)]
-pub struct LoadedPlugin {
-    pub name: String,
-    pub version: String,
-    pub install_path: PathBuf,
-    pub manifest: PluginManifest,
-    pub commands: Vec<CommandEntry>,
-    pub skills_roots: Vec<SkillRoot>,
-    pub agents_dirs: Vec<PathBuf>,
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 插件数据目录（install_path/.claude-plugin/data），供 ${CLAUDE_PLUGIN_DATA} 展开
-    pub data_path: PathBuf,
-    /// 插件 hooks 配置（从 hooks/hooks.json 或 plugin.json hooks 字段提取）
-    pub hooks_config: Option<HooksConfig>,
-    /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
-    pub marketplace: String,
 }
 
 pub fn load_manifest(plugin_dir: &Path) -> Result<PluginManifest, LoaderError> {
@@ -574,17 +546,6 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
 }
 
 /// 所有已启用插件的聚合加载结果
-#[derive(Debug, Clone)]
-pub struct PluginLoadResult {
-    pub plugins: Vec<LoadedPlugin>,
-    pub all_skill_roots: Vec<SkillRoot>,
-    pub all_mcp_servers: HashMap<String, McpServerConfig>,
-    pub all_agent_dirs: Vec<PathBuf>,
-    pub all_commands: Vec<CommandEntry>,
-    pub all_hooks: Vec<RegisteredHook>,
-    /// 聚合所有插件的 LSP 服务器配置
-    pub all_lsp_servers: Vec<LspServerConfig>,
-}
 
 /// 加载所有已启用插件，返回聚合结果（skills 路径、MCP 服务器、agent 路径、命令列表）
 ///

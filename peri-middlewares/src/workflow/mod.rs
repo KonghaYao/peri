@@ -14,7 +14,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use peri_agent::agent::async_tasks::TaskManager;
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::{
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
@@ -43,7 +43,7 @@ pub struct WorkflowMiddleware {
     /// 保留此 gate 用于 session 级 consumer 去重。
     notification_consumer_spawned: AtomicBool,
     /// 统一后台任务管理器（Agent 层 per-session TaskManager；可选，创建后可通过 set_bg_registry 延迟注入）
-    bg_registry: parking_lot::RwLock<Option<Arc<TaskManager>>>,
+    bg_registry: parking_lot::RwLock<Option<Arc<dyn TaskManager>>>,
 }
 
 impl WorkflowMiddleware {
@@ -78,13 +78,13 @@ impl WorkflowMiddleware {
     }
 
     /// 设置统一后台任务注册表（构造时链式调用）
-    pub fn with_bg_registry(self, bg_registry: Arc<TaskManager>) -> Self {
+    pub fn with_bg_registry(self, bg_registry: Arc<dyn TaskManager>) -> Self {
         *self.bg_registry.write() = Some(bg_registry);
         self
     }
 
     /// 延迟注入 bg_registry（创建后设置，通过 RwLock 支持内部可变性）
-    pub fn set_bg_registry(&self, bg_registry: Arc<TaskManager>) {
+    pub fn set_bg_registry(&self, bg_registry: Arc<dyn TaskManager>) {
         *self.bg_registry.write() = Some(bg_registry);
     }
 
@@ -97,8 +97,14 @@ impl WorkflowMiddleware {
             Arc::clone(&self.journal_store),
         );
         if let Some(ref bg) = *self.bg_registry.read() {
-            tool = tool
-                .with_bg_registry(Arc::clone(bg) as Arc<dyn peri_workflow::tool::BgTaskRegistry>);
+            // trait 对象 → concrete（装配注入的 per-session TaskManager 实现）
+            // → upcast 到 workflow 侧 BgTaskRegistry（workflow 只经此接口发起）。
+            let bg_any: Arc<dyn std::any::Any + Send + Sync> =
+                Arc::clone(bg) as Arc<dyn std::any::Any + Send + Sync>;
+            if let Ok(concrete) = bg_any.downcast::<peri_agent::agent::async_tasks::TaskManager>() {
+                tool =
+                    tool.with_bg_registry(concrete as Arc<dyn peri_workflow::tool::BgTaskRegistry>);
+            }
         }
         tool
     }
@@ -331,6 +337,44 @@ pub struct WorkflowMiddlewareAdaptor {
     inner: Arc<WorkflowMiddleware>,
 }
 
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn WorkflowMiddlewarePort>`）。
+#[async_trait::async_trait]
+impl peri_acp_types::ports::WorkflowMiddlewarePort for WorkflowMiddleware {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn runs_snapshot(&self) -> serde_json::Value {
+        let runs = self.progress_store().get_all_runs_snapshot();
+        serde_json::to_value(runs).unwrap_or_default()
+    }
+
+    async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool {
+        self.runner().kill_agent(run_id, agent_id).await
+    }
+
+    fn kill_run(&self, run_id: &str) -> bool {
+        self.registry().kill(run_id).is_ok()
+    }
+
+    async fn resume(&self, run_id: &str) -> Result<String, String> {
+        self.resume_workflow(run_id).await
+    }
+
+    fn subscribe_notifications(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<peri_acp_types::workflow::WorkflowTaskResult> {
+        self.subscribe_notifications()
+    }
+
+    fn set_bg_registry(&self, bg_registry: std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>) {
+        self.set_bg_registry(bg_registry);
+    }
+
+    fn init_notification_buffer(&self) -> bool {
+        self.init_notification_buffer()
+    }
+}
+
 impl WorkflowMiddlewareAdaptor {
     pub fn new(inner: Arc<WorkflowMiddleware>) -> Self {
         Self { inner }
@@ -413,7 +457,7 @@ mod tests {
         use peri_workflow::tool::BgTaskRegistry;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let bg_registry = Arc::new(TaskManager::new());
+        let bg_registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         let killed = Arc::new(AtomicBool::new(false));
         let killed_clone = killed.clone();
         bg_registry.register_workflow(

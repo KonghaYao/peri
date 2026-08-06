@@ -6,30 +6,9 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
 };
 
+pub use peri_acp_types::agents::AgentOverrides;
+
 use crate::parse_agent_file;
-
-/// agent.md 中可覆盖 system prompt 的部分
-///
-/// 所有字段均为 `Option`，`None` 表示使用默认值。
-#[derive(Debug, Clone, Default)]
-pub struct AgentOverrides {
-    /// 角色定位（替换 `{{persona}}`）
-    pub persona: Option<String>,
-    /// 输出风格（替换 `{{tone_and_style}}`）
-    pub tone: Option<String>,
-    /// 主动性（替换 `{{proactiveness}}`）
-    pub proactiveness: Option<String>,
-    /// agent.md frontmatter 中 prompt_mode 的值："extend"|"full"，默认 extend。
-    /// `full` 只替换 PersonaDomain 层（persona/domain instructions）；
-    /// 安全与授权、工程行为、能力契约与运行时边界层始终保留，不会被移除。
-    pub mode: Option<String>,
-}
-
-impl AgentOverrides {
-    pub fn is_empty(&self) -> bool {
-        self.persona.is_none() && self.tone.is_none() && self.proactiveness.is_none()
-    }
-}
 
 /// AgentDefineMiddleware - 根据 agent_id 注入 Claude Code Agent 定义文件
 ///

@@ -497,6 +497,13 @@ pub(crate) fn build_authed_transport(
     rmcp::transport::StreamableHttpClientTransport::with_client(auth_client, config)
 }
 
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
+impl peri_acp_types::ports::McpPoolPort for McpClientPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[cfg(test)]
 #[path = "client_test.rs"]
 mod tests;

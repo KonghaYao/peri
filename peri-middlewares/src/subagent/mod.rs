@@ -427,28 +427,8 @@ pub fn scan_agents_with_extra_dirs(
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
 ///
 /// 主 Agent 在 Prompt 中看到此信息后可以判断：
-/// - 能否并行执行（readonly agent 可安全并发）
-/// - 质量/成本/延迟预期（模型级别）
-///
-/// `can_mutate` 是**保守调度提示**，不是代码级锁或安全边界：
-/// 实际能力由 `filter_tools` 在工具注册层真裁剪，标签仅间接影响主模型
-/// 的并行决策（见审计 prompt-sections-audit.md P1-8 修正后判定）。
-#[derive(Debug, Clone)]
-pub struct AgentCapability {
-    /// 模型级别：`haiku` / `sonnet` / `opus` / `inherit`
-    pub model_tier: String,
-    /// 该 agent 是否会修改项目代码（保守推断，D5）。
-    /// 只有能根据最终注册工具集合证明无项目写能力时才为 false：
-    /// - omitted tools（继承父工具）含 Bash / folder_operations 等 → true，
-    ///   除非显式 disallow 全部核心写能力工具；
-    /// - 显式 `tools: []` → false（零工具）；
-    /// - 白名单含任一写能力工具（Bash / Write / Edit / folder_operations /
-    ///   cron_register / mcp__*）→ true。
-    ///
-    /// `allowedWriteDirs` 声明的 WriteSandbox 不计入 can_mutate，
-    /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
-    pub can_mutate: bool,
-}
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
+pub use peri_acp_types::agents::AgentCapability;
 
 /// 工具名是否为项目写能力（保守集合，D5）。
 ///

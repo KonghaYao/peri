@@ -2,10 +2,10 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::agent::async_tasks::{
-    bg_shell_task_id, drain_pipe, finalize_bg_shell, kill_process_group_escalating, parse_timeout,
-    shell_command, truncate_bytes, BackgroundTask, BackgroundTaskStatus, BgCancelHandle,
-    BgTaskKind, TaskManager,
+    bg_shell_task_id, drain_pipe, kill_process_group_escalating, parse_timeout, shell_command,
+    truncate_bytes, BgTaskKind,
 };
 use peri_agent::{
     agent::events::BackgroundTaskResult, middleware::r#trait::Middleware, tools::BaseTool,
@@ -21,7 +21,7 @@ const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
 pub struct BashTool {
     pub cwd: String,
     /// 后台任务管理器（Agent 层 per-session TaskManager；用于 run_in_background 模式）
-    pub task_manager: Option<Arc<TaskManager>>,
+    pub task_manager: Option<Arc<dyn TaskManager>>,
     /// bg shell 完成时的同步回调（在 registry.complete() 之前调用）。
     /// 第二参为任务 kind（bg shell 恒为 Shell，供 continuation scheduler 过滤）。
     pub on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
@@ -36,7 +36,7 @@ impl BashTool {
         }
     }
 
-    pub fn with_task_manager(mut self, task_manager: Arc<TaskManager>) -> Self {
+    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
         self
     }
@@ -276,20 +276,15 @@ impl BaseTool for BashTool {
                     if let Some(task_manager) = self.task_manager.as_ref() {
                         // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
                         let task_id = bg_shell_task_id();
-                        let bg_task = BackgroundTask {
-                            id: task_id.clone(),
-                            agent_name: "bg-shell".to_string(),
-                            prompt_summary: command.chars().take(80).collect(),
-                            status: BackgroundTaskStatus::Running,
-                            started_at: std::time::Instant::now(),
-                            chrono_started_at: chrono::Utc::now(),
-                            kind: BgTaskKind::Shell,
-                            cancel_handle: BgCancelHandle::Pid(pid),
-                            cancel_token: None,
-                            pid: Some(pid),
-                            output_preview: None,
-                        };
-                        match task_manager.register_with_kind(bg_task) {
+                        let register_result =
+                            task_manager.register(peri_acp_types::tasks::BgTaskRegistration {
+                                task_id: task_id.clone(),
+                                kind: BgTaskKind::Shell,
+                                summary: command.chars().take(80).collect(),
+                                pid: Some(pid),
+                                kill: None,
+                            });
+                        match register_result {
                             Ok(()) => {
                                 let task_manager = task_manager.clone();
                                 let on_bg_complete_cb = self.on_bg_complete.clone();
@@ -321,8 +316,7 @@ impl BaseTool for BashTool {
                                         Err(poisoned) => poisoned.into_inner().clone(),
                                     };
                                     let combined = merge_output(&stdout, &stderr, exit_code);
-                                    finalize_bg_shell(
-                                        task_manager.registry(),
+                                    task_manager.finalize_bg_shell(
                                         &on_bg_complete_cb,
                                         task_id_owned,
                                         command_owned.chars().take(80).collect(),
@@ -394,7 +388,7 @@ impl BaseTool for BashTool {
 
 /// TerminalMiddleware - 与 TypeScript TerminalMiddleware 对齐
 pub struct TerminalMiddleware {
-    task_manager: Option<Arc<TaskManager>>,
+    task_manager: Option<Arc<dyn TaskManager>>,
     on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
 }
 
@@ -406,7 +400,7 @@ impl TerminalMiddleware {
         }
     }
 
-    pub fn with_task_manager(mut self, task_manager: Arc<TaskManager>) -> Self {
+    pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
         self
     }
@@ -425,7 +419,7 @@ impl TerminalMiddleware {
 
     pub fn build_tools_with_registry(
         cwd: &str,
-        task_manager: Option<Arc<TaskManager>>,
+        task_manager: Option<Arc<dyn TaskManager>>,
     ) -> Vec<Box<dyn BaseTool>> {
         vec![Box::new(BashTool {
             cwd: cwd.to_string(),

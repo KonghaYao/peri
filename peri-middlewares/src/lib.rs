@@ -23,6 +23,8 @@ pub mod assembly;
 pub mod claude_agent_parser;
 pub mod goal;
 pub mod goal_middleware;
+/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
+pub mod host_ports;
 pub mod subagent;
 pub use claude_agent_parser::{
     format_agent_id, parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue,

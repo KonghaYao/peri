@@ -111,14 +111,9 @@ async fn ensure_workflow_install() {
     }
 }
 
-// ─── Agent 回调 trait ─────────────────────────────────────────
+// ─── Agent 回调 trait（3.0 批 2 波 1 迁入 peri-acp-types）────────────
 
-/// Agent 回调执行器 trait（由 peri-acp 实现）
-#[async_trait::async_trait]
-pub trait AgentExecutor: Send + Sync {
-    /// 执行单个 workflow agent，返回 AgentRunResult
-    async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
-}
+pub use peri_acp_types::workflow::AgentExecutor;
 
 // ─── 公开类型 ──────────────────────────────────────────────────
 
