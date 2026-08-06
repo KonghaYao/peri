@@ -2,9 +2,13 @@
 name = "peri-acp-types"
 version.workspace = true
 edition.workspace = true
-description = "Pure DTO crate for TUI <-> ACP contract. Depends only on serde."
+description = "Type contract layer across layers. Depends only on serde/chrono/thiserror/async-trait."
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
