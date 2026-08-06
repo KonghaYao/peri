@@ -38,6 +38,13 @@ use crate::kit::submit_request::{
 /// 挂起——超时后仍执行本地复位（兜底路径，Issue 2026-08-05 S4.2）。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
 
+/// 首次会话懒初始化互斥锁（spawn 化后并发防护）。
+///
+/// submit_consumer 从"串行 await prompt RPC"改为"每请求 spawn"后，两个
+/// 并发 AgentText 提交可能同时命中 `!has_session()` 分支（双 Enter / 排队
+/// 输入），加锁 + 双重检查保证只创建一个 session。
+static SESSION_INIT_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 /// 启动提交消费者后台任务。
 ///
 /// 参数：
@@ -66,10 +73,20 @@ pub fn spawn_submit_consumer(
                             break;
                         }
                         Some(request) => {
-                            if let Err(e) = handle_submit(&acp_client, &cwd, request).await {
-                                error!(error = %e, "kit submit_consumer: prompt failed");
-                                clear_loading_state();
-                            }
+                            // Issue 2026-08-06：每请求 spawn 分离 task，不再串行 await。
+                            // 旧实现单飞阻塞在 prompt() RPC 上直到 turn 完成——挂起期间
+                            // （await_wake，bg 任务活跃）RPC 会挂住，后续用户输入在
+                            // SUBMIT_TX channel 中排队，表现为"输入石沉大海"。spawn 化后
+                            // 每个请求独立推进：挂起期间的新 prompt 立即发出 RPC，服务端
+                            // 走注入路径（见 host dispatch_prompt_turn），无需等待 bg 完成。
+                            let client = acp_client.clone();
+                            let cwd = cwd.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_submit(&client, &cwd, request).await {
+                                    error!(error = %e, "kit submit_consumer: prompt failed");
+                                    clear_loading_state();
+                                }
+                            });
                         }
                     }
                 }
@@ -147,6 +164,12 @@ async fn handle_clear_submit(
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     crate::kit::input_history::reset_history_cursor();
 
+    // Issue 2026-08-06：与 handle_agent_text_submit 同源并发保护——spawn 化后
+    // /clear 的 new_session 可能与其他提交（首次 AgentText / 另一 /clear）并发，
+    // 锁内创建保证同一时刻只有一条 session 创建路径在途（clear 无条件创建，
+    // 无需 double-check；AgentText 侧在锁内 double-check 会复用本 session）。
+    let lock = SESSION_INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
     let new_sid = acp_client.new_session(cwd, None).await?;
     ACTIVE_SESSION_ID.set(new_sid);
     BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
@@ -168,10 +191,18 @@ async fn handle_agent_text_submit(
     }
 
     if !acp_client.has_session() {
-        info!(cwd = %cwd, "kit submit_consumer: creating initial session");
-        let session_id = acp_client.new_session(cwd, None).await?;
-        ACTIVE_SESSION_ID.set(session_id);
-        BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+        // 并发保护（Issue 2026-08-06）：spawn 化后首个提交的 new_session 可能被
+        // 第二个并发提交触发（双 Enter / 排队输入），加锁 + 双重检查保证只创建
+        // 一个 session——否则两个 session 并存，第二个 prompt 会被路由到新 session
+        // 而 TUI 只记录一个 ACTIVE_SESSION_ID，历史错乱。
+        let lock = SESSION_INIT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+        let _guard = lock.lock().await;
+        if !acp_client.has_session() {
+            info!(cwd = %cwd, "kit submit_consumer: creating initial session");
+            let session_id = acp_client.new_session(cwd, None).await?;
+            ACTIVE_SESSION_ID.set(session_id);
+            BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
+        }
     }
 
     // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的

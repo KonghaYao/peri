@@ -139,6 +139,9 @@ pub struct StageBuildInput {
     pub shared_queue: MessageQueue,
     /// 会话级 SessionInbox（allow_await_wake 路径；ACP 装配点判断）
     pub idle_inbox: Option<Arc<SessionInbox>>,
+    /// 会话级 idle-suspended 标志（await_wake 挂起期间置 true；宿主
+    /// dispatch_prompt_turn 据此把挂起期间到达的用户 prompt 注入 inbox）。
+    pub idle_suspended_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// session 级 cron bridge 惰性启动器（SessionManager 路径；无则走
     /// print 模式 turn 级 CronOwner）
     pub launch_cron_bridge: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
@@ -764,6 +767,9 @@ pub fn build_stage_context(
     }
     if let Some(probe) = idle_should_wait {
         builder = builder.with_idle_should_wait(probe);
+    }
+    if let Some(flag) = input.idle_suspended_flag.clone() {
+        builder = builder.with_idle_suspended_flag(flag);
     }
 
     // 注入 compact plugin hook 回调（hook_groups 非空时 ACP 装配点构造闭包）

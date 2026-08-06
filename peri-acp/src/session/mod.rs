@@ -32,7 +32,7 @@ pub use retry_events::RetryEventForwarder;
 
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicU8, Arc},
+    sync::{atomic::AtomicBool, atomic::AtomicU8, Arc},
 };
 
 use chrono::Utc;
@@ -112,6 +112,10 @@ pub struct AcpSession {
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
     /// 随 session 创建/销毁，close_session 时 cancel_all 取消 owned 任务）
     pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    /// idle-suspended 标志：executor 在 await_wake 挂起期间置 true（跨 turn
+    /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
+    /// 用户 prompt 注入 inbox 唤醒 loop（而非在 prompt lock 上阻塞）。
+    pub idle_suspended: Arc<AtomicBool>,
 }
 
 struct SessionManagerInner {
@@ -244,6 +248,7 @@ impl SessionManager {
             session_inbox: None,
             cron_bridge: None,
             task_manager,
+            idle_suspended: Arc::new(AtomicBool::new(false)),
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -282,6 +287,7 @@ impl SessionManager {
             session_inbox: None,
             cron_bridge: None,
             task_manager,
+            idle_suspended: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -565,6 +571,19 @@ impl SessionManager {
         }
     }
 
+    /// 读取 session 的 idle-suspended 标志（await_wake 挂起期间为 true）。
+    ///
+    /// 宿主 `dispatch_prompt_turn` 在等待 per-session prompt lock 之前检查：
+    /// 挂起中到达的用户 prompt 应注入 inbox 唤醒 loop，而不是在锁上阻塞
+    /// 至当前 turn 完成。session 不存在时返回 false（走正常排队路径）。
+    pub fn is_idle_suspended(&self, session_id: &str) -> bool {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.idle_suspended.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
     /// 确保指定 session 的 session 级 cron bridge 已启动（lazy-init，幂等）。
     ///
     /// 首次调用：`scheduler.subscribe()` 一次 + 用 session 级 inbox handle 启动
@@ -644,6 +663,13 @@ impl SessionAccessPort for SessionManager {
         session_id: &str,
     ) -> Option<Arc<peri_acp_types::session::SessionInbox>> {
         self.session_inbox_for(session_id)
+    }
+
+    fn idle_suspended_flag(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.idle_suspended.clone())
     }
 
     fn task_manager(

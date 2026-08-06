@@ -88,6 +88,16 @@ pub(crate) fn build_stage_context(
     } else {
         None
     };
+    // 会话级 idle-suspended 标志（与 idle_inbox 同源注入；await_wake 挂起期间
+    // executor 置 true，宿主 dispatch_prompt_turn 据此把挂起期间到达的用户
+    // prompt 注入 inbox 唤醒 loop，而非在 prompt lock 上阻塞）。
+    let idle_suspended_flag: Option<Arc<std::sync::atomic::AtomicBool>> = if ctx.allow_await_wake {
+        session_access
+            .as_ref()
+            .and_then(|sa| sa.idle_suspended_flag(&ctx.session_id))
+    } else {
+        None
+    };
     // session 级 cron bridge 惰性启动器（SessionManager 路径；无则走
     // print 模式 turn 级 CronOwner——正式实现内部处理）
     let launch_cron_bridge: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>> =
@@ -247,6 +257,7 @@ pub(crate) fn build_stage_context(
         langfuse_bridge_factory,
         shared_queue,
         idle_inbox,
+        idle_suspended_flag,
         launch_cron_bridge,
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,

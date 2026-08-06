@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -613,6 +613,15 @@ pub trait SessionAccessPort: Send + Sync {
 
     /// 会话级 SessionInbox（await-wake wrapper；lazy-init 语义由实现方保证）。
     fn session_inbox(&self, session_id: &str) -> Option<Arc<SessionInbox>>;
+
+    /// 会话级 idle-suspended 标志（共享 Arc，executor 在 await_wake 挂起期间
+    /// 置 true、醒来/取消时复位）。
+    ///
+    /// 宿主 `dispatch_prompt_turn` 读取此标志决定"注入 vs 排队"：turn 挂起时
+    /// 用户新 prompt 直接注入 inbox（Prompt + wake）让挂起的 loop 立即醒来，
+    /// 而不是在 per-session prompt lock 上阻塞至当前 turn 完成（bg 任务可能
+    /// 长达数分钟，阻塞会让用户输入"石沉大海"）。
+    fn idle_suspended_flag(&self, session_id: &str) -> Option<Arc<AtomicBool>>;
 
     /// 会话级后台任务管理器（`AcpSession.task_manager`）。
     fn task_manager(&self, session_id: &str) -> Option<Arc<dyn crate::tasks::TaskManager>>;
