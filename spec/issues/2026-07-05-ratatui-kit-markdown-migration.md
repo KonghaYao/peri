@@ -29,9 +29,7 @@
 - 仅 AssistantBubble.text 使用 ratatui-kit `Markdown` 组件
 - 文本选区降级删除（后续独立补回）
 
-## 涉及文件
-
-详见已归档的 [`2026-07-09-ratatui-kit-markdown-migration.md`](../archive-docs/superpowers/plans/2026-07-09-ratatui-kit-markdown-migration.md) 实施计划（原 07-05 计划文件不存在）。
+## 涉及范围
 
 | 角色 | 文件数 | 典型文件 |
 |------|--------|----------|

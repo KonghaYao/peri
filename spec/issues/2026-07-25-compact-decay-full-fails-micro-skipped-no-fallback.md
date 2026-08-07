@@ -125,7 +125,7 @@ pub fn target_reclaim_tokens(&self) -> u64 {
 | **决策指标** | `affected_count ≥ 5` | `estimated_tokens_saved ≥ reclaim_target` | 单位不同 |
 | **`micro_min_affected`** | 核心参数 | **死代码**：`run_compact` 零引用 | 配置无效 |
 
-**历史设计文档**：[`spec/archive-docs/design/peri-agent-compact-v2.md`](../archive-docs/design/peri-agent-compact-v2.md)（已归档，不能作为当前规范）
+历史设计曾采用“先执行 Micro，再检查 `affected_count` 决定是否叠加 Full”的流程；该设计已被清理，不能作为当前规范。
 ```
 先执行 Micro → 检查 affected_count → 再决定叠加 Full 或跳过
 ```
