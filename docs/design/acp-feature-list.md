@@ -1,6 +1,6 @@
 # ACP 协议功能清单
 
-> 生成日期：2026-07-15 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/tui_render_unit.rs`
+> 最后核对：2026-08-07 | 数据来源：`peri-acp/`、`peri-acp-types/`、`peri-tui/src/kit/tui_render_unit.rs`
 
 ## 一、标准 ACP 方法（TUI → Agent，JSON-RPC request/response）
 
@@ -141,33 +141,16 @@
 
 | 方法 | 作用 | 状态 |
 |------|------|------|
-| `session/query` | 面板数据查询（13 种资源类型） | ✅ 已实现 |
-| `session/suggest-files` | @ 提及文件补全 | ✅ 已实现 |
-| `config/update` | 更新单个配置项 | ✅ 已实现 |
-| `session/update_config` | 完整 PeriConfig CRUD | ✅ 已实现 |
-| `session/switch-model` | 切换模型 | ✅ 已实现 |
-| `session/switch-provider` | 切换 Provider | ✅ 已实现 |
+| `session/query` | 面板数据查询 | ❌ 未实现 |
+| `session/suggest-files` | @ 提及文件补全 | ❌ 未实现（TUI 本地 `FILE_LIST` + `SkimMatcher`） |
+| `config/update` | 更新单个配置项 | ❌ 未实现（使用 `session/set_config_option` 或 `session/config_update`） |
+| `session/update_config` | 完整 PeriConfig CRUD | ❌ 未实现 |
+| `session/switch-model` | 切换模型 | ❌ 未实现（实际方法为 `session/set_model`） |
+| `session/switch-provider` | 切换 Provider | ❌ 未实现 |
 
-#### JSON 结构
+#### 当前状态
 
-**`session/query`**
-```json
-// req
-{ "method": "session/query", "params": {
-    "session_id": "abc123",
-    "resource": "skills"  // skills | cron | mcp | hooks | plugins | agents
-} }
-// res
-{ "id": 1, "result": { "data": [...] } }
-```
-
-**`config/update`**
-```json
-// req
-{ "method": "config/update", "params": { "key": "model", "value": "claude-sonnet-4-20250514" } }
-// res
-{ "id": 1, "result": {} }
-```
+`session/query`、`session/suggest-files`、`config/update`、`session/update_config`、`session/switch-model` 与 `session/switch-provider` 均未实现。模型切换使用 `session/set_model`；配置更新使用 `session/set_config_option` 或 `session/config_update`；文件补全由 TUI 本地 `FILE_LIST` 与 `SkimMatcher` 完成。
 
 ### 1.5 初始化
 
@@ -209,10 +192,9 @@
 
 ---
 
-## 二、自定义事件 `peri/unstable-event`（Agent → TUI 推送）
+## 二、ACP 事件通知（Agent → TUI）
 
-> 消息格式：`{ "event": "<事件名>", "data": <事件数据> }`
-> 事件名均为 kebab-case 字符串。
+> 当前主链路是 `session/update` 与 `peri/agent_event`；`peri/unstable-event` 仅保留兼容或特定扩展用途。完整事件契约以 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001 为准。
 
 ### §4.1 流式事件 → 已废弃，走标准 `session/update`
 
@@ -231,7 +213,7 @@
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
 | `view-commit` | 完整 ViewModel 列表全量替换 UI | 🗑 废弃（改用 `session/update` 增量） |
-| `turn-suspended` | Agent turn 挂起（等待 bg agent/cron/workflow），通知 TUI 停止 loading spinner | ✅ 已实现 |
+| `turn-suspended` | Agent turn 挂起（等待 bg agent/cron/workflow），通知 TUI 停止 loading spinner | ✅ 已实现（`peri/agent_event`） |
 
 > **决策（2026-07-08）**：`turn-done` / `turn-interrupted` 改用 ACP 标准 `session/prompt` 响应 `StopReason`（EndTurn / Cancelled），不再作为 `peri/unstable-event` 发送。push_done 签名扩展，AgentDone 通知携带 `stopReason` 字段。
 > 注意：TUI 侧 `acp_types.rs:808-812` 仍 decode `turn-done` / `turn-interrupted` 作为 `AcpEventData` 变体，它们可能通过 `peri/agent_event` 等其他通道到达。
@@ -240,7 +222,7 @@
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `budget-warning` | 上下文预算警告（阈值 0.70/0.85） | ✅ 已实现 |
+| `budget-warning` | 上下文预算警告 | 当前无用户可见生产路径 |
 | `progress` | 进度百分比 + 文本 | 🔲 预留 |
 | `system-notification` | 系统通知文本 + 级别 | 🔲 预留 |
 
@@ -260,8 +242,8 @@
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `prediction` | 输入预测建议，灰色占位符 | 🔲 预留 |
-| `file-suggestions` | @ 提及文件补全候选 | 🔲 预留 |
+| `prediction` | 输入预测建议，灰色占位符 | ✅ 已由 TUI 消费 |
+| `file-suggestions` | @ 提及文件补全候选 | TUI 本地 `FILE_LIST` + `SkimMatcher` |
 
 #### JSON 结构
 
@@ -277,8 +259,8 @@
 
 | 事件名 | 作用 | 状态 |
 |--------|------|------|
-| `rewind-preview` | 回退预览（FileChange + RewindMessage） | ✅ 已实现 |
-| `oauth-needed` | MCP OAuth 授权请求 | 🔲 预留 |
+| `rewind-preview` | 回退预览（FileChange + RewindMessage） | ✅ 已实现（`peri/agent_event` + `session/rewind*` RPC） |
+| `oauth-needed` | MCP OAuth 授权请求 | ✅ 已由 TUI 消费 |
 
 > `hitl-pending` / `ask-user`：实际走 broker JSON-RPC（`session/request_permission` / `elicitation/create`），从未作为 `peri/unstable-event` 产出，已从事件目录移除。
 
@@ -302,7 +284,7 @@
 | `subagent-started` | SubAgent 创建，TUI 打开折叠组 | ✅ 已实现（走 `peri/agent_event`，非 `peri/unstable-event` router） |
 | `subagent-stopped` | SubAgent 退出，TUI 关闭组 | ✅ 已实现（同上） |
 
-> **决策（2026-07-08）**：SubAgent 事件不再走 `peri/unstable-event` router（已从 router.rs 删除），改走 `peri/agent_event`（mapper.rs → AcpEvent）通道。router.rs 仅保留 3 个分支：`budget-warning` + `rewind-preview` + `turn-suspended`。
+> **当前事件映射**：v2 事件经 `peri-acp/src/event/` 的 EventSink 协议化后，主要投递为 `session/update` 或 `peri/agent_event`；transport router 仅负责消息编解码与分发。
 
 #### JSON 结构
 

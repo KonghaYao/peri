@@ -6,7 +6,7 @@
 
 - **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
 - **Rule**：TUI 的用户交互主路径经 ACP transport 调用服务；不得从 TUI 直接驱动 `peri-agent` 或 `peri-middlewares` 的 Agent 运行时。TUI 可在启动和配置层复用相关 crate 的类型与初始化能力，Agent 执行入口仍保持在 ACP 会话路径。
-- **Verify**：人工检查 TUI 的 prompt、cancel、session 等请求经 ACP client/transport；RCRA 循环定义与 cancel 执行权在 Agent 层——循环本体为 `peri-agent/src/agent/stages/mod.rs` 的 `run_react_loop`（Receive 唯一退出口 + cancel 检查，Model 中止由 Agent 发起），子 agent 的 Cascade/Independent 判定与终止执行为 `peri-agent/src/session/runtime.rs` 的 `cancel_cascade_agents` / `cancel_all_agents`（L5 归位；`AgentRuntime`/`CancelPolicy`/`AgentStatus` 同处，契约类型经 `peri-acp-types::thread` 事实源）；ACP 仅定位（`SessionManager::cancel_session` / `close_session` 查 session 映射）并传递 active_agents 注册表，经 `peri-agent/src/session/exec/executor_helpers.rs` 的 `build_and_execute_agent_v2` 驱动循环（L5 归位：执行本体在 Agent 层 `session/exec/`，ACP 侧仅协议化薄壳 `peri-acp/src/session/executor.rs` 与装配面宿主 `peri-acp/src/host/stage_builder.rs` 驱动调用）。
+- **Verify**：人工检查 TUI 的 prompt、cancel、session 等请求经 ACP client/transport；RCRA 循环定义与 cancel 执行权在 Agent 层——循环本体为 `peri-agent/src/agent/stages/mod.rs` 的 `run_react_loop`（Receive 唯一退出口 + cancel 检查，Model 中止由 Agent 发起），子 agent 的 Cascade/Independent 判定与终止执行复用 `peri-acp-types/src/session.rs` 定义的 `cancel_cascade_agents` / `cancel_all_agents`（Agent session runtime 持有和调用；`AgentRuntime`/`CancelPolicy`/`AgentStatus` 的契约类型以 `peri-acp-types` 为事实源）；ACP 仅定位（`SessionManager::cancel_session` / `close_session` 查 session 映射）并传递 active_agents 注册表，经 `peri-agent/src/session/exec/executor_helpers.rs` 的 `build_and_execute_agent_v2` 驱动循环（L5 归位：执行本体在 Agent 层 `session/exec/`，ACP 侧仅协议化薄壳 `peri-acp/src/session/executor.rs` 与装配面宿主 `peri-acp/src/host/stage_builder.rs` 驱动调用）。
 
 ### ARC-CANCEL-001
 
@@ -18,12 +18,12 @@
 
 - **Scope**：会话、Prompt、SubAgent。
 - **Rule**：会话创建时冻结日期、项目指引、skills 摘要和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。
-- **Verify**：`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `FrozenSessionData::build` 与 SubAgent `with_frozen_data` 调用。
+- **Verify**：`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`from_frozen_parts` 与 SubAgent `with_frozen_data` 调用。
 
 ### ARC-EVENT-001
 
 - **Scope**：v2 事件（`peri-acp-types/src/event_v2.rs`）、v1 `ExecutorEvent` 协议化载体、ACP 映射、TUI 通知。
-- **Rule**：事件链路为单事实源 `Agent →(emit v2 事件，ObserveEvent 身份透传) →(协议序列化面映射) ACP →(协议化) TUI`：新增或变更事件必须覆盖完整链路——发射（v2 EventBus，唯一发射点，禁止 Agent 层构造 v1 `ExecutorEvent`；v1 中间态已退役，`2026-07-18-executor-event-retirement.md`）、协议序列化面映射（`event_v2::*_event_to_executor`，穷尽匹配，禁止 wildcard 兜底，仅 ACP 协议化/发射侧同步映射使用）、ACP 映射/转发（`peri-acp/src/event/`）、能力门控（如适用）和 TUI 消费（`peri-tui/src/kit/acp_notifier.rs`）；终止事件必须使客户端离开 loading 状态。v2_tx 双轨直连已下线（`2026-08-05-3.0-m-event-chain-canonical.md`），TUI 事件仅经 ACP 协议化路径，禁止恢复第二套事件投递。v1 兼容层仅保留协议序列化面需要的最小映射（在 `peri-acp-types`），wire format 不变。
+- **Rule**：事件链路为单事实源 `Agent →(emit v2 事件，ObserveEvent 身份透传) →(协议序列化面映射) ACP →(协议化) TUI`：新增或变更事件必须覆盖完整链路——发射（v2 EventBus，唯一发射点，禁止 Agent 层构造 v1 `ExecutorEvent`；v1 中间态已退役，历史迁移记录已归档）、协议序列化面映射（`event_v2::*_event_to_executor`，穷尽匹配，禁止 wildcard 兜底，仅 ACP 协议化/发射侧同步映射使用）、ACP 映射/转发（`peri-acp/src/event/`）、能力门控（如适用）和 TUI 消费（`peri-tui/src/kit/acp_notifier.rs`）；终止事件必须使客户端离开 loading 状态。v2_tx 双轨直连已下线（`2026-08-05-3.0-m-event-chain-canonical.md`），TUI 事件仅经 ACP 协议化路径，禁止恢复第二套事件投递。v1 兼容层仅保留协议序列化面需要的最小映射（在 `peri-acp-types`），wire format 不变。
 - **Verify**：`cargo test -p peri-acp --lib mapper`（含 `variant_coverage_test` 的 map_event 穷尽断言）；`cargo test -p peri-agent --lib events_v2`（协议序列化面映射穷尽 + 身份透传）；`cargo test -p peri-agent --lib model_bridge`（流式事件 v2 直发，无 v1 中间态）；`cargo test -p peri-acp-types --lib identity`（canonical envelope / session_seq 单调契约）；人工检查 `peri-acp/src/event/`、事件 sink 和 `peri-tui/src/kit/acp_notifier.rs` 的对应分支。
 
 ### ARC-TOOLS-001

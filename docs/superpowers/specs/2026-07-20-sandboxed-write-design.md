@@ -1,7 +1,7 @@
 # Sandboxed Write Tool：用 Write + allowedWriteDirs 替代 WriteSandbox
 
 **日期**：2026-07-20  
-**状态**：设计完成，待实现  
+**状态**：未采纳（实现保留 WriteSandboxTool 路径）
 **作者**：deepseek-v4-pro
 
 ---

@@ -1,16 +1,16 @@
 # peri-acp 协议设计
 
-> 日期：2026-07-15（v2.1 修订）
+> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-07
 
 ## 1. 协议分层
 
-ACP 协议分为两层——标准 ACP 方法处理 TUI → Agent 的请求-响应模式，自定义事件处理 Agent → TUI 的推送模式。有标准走标准，标准不覆盖的走自定义事件。
+ACP 协议分为标准 ACP 方法（TUI → 服务）与 ACP 事件通知（服务 → TUI）。标准方法承载请求-响应和交互；事件经 ACP 的 v2 映射与协议化面投递给客户端。
 
 **标准 ACP（JSON-RPC 方法）**：TUI 调用，ACP 执行并返回。覆盖会话生命周期、prompt 提交、命令执行、交互应答、面板数据查询。请求-响应语义——发一个请求，收一个结果。
 
-**自定义事件（`peri/unstable-event`）**：Agent 产出后 ACP 推送到 TUI。覆盖流式输出、状态更新、输入辅助、交互请求。推送语义——Agent 侧发起，TUI 被动接收。
+**ACP 事件通知**：当前 TUI 的主事件面是标准 `session/update` 和 `peri/agent_event`。`peri/unstable-event` 只保留兼容或特定扩展用途，不作为通用 Agent → TUI 事件管道；完整链路见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
 
-两层在实现上共享同一传输通道——标准方法走 JSON-RPC 的 method/params/result 格式，自定义事件走 `{event, data}` 格式。传输层在收到消息时根据格式自动分流：有 `method` 字段走标准 RPC，有 `event` 字段走自定义事件。
+这些消息复用传输通道；transport 只负责编解码和分发，不解释 Agent 业务语义。
 
 ---
 
@@ -57,54 +57,40 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 ---
 
-## 3. 自定义事件（Agent → TUI）
+## 3. ACP 事件通知（服务 → TUI）
 
-Agent 产出的事件经 ACP 事件映射器（`mapper.rs`）四路分路后推入 TUI。事件传输架构如下：
+Agent 侧 v2 事件经 ACP 的协议序列化与 EventSink 映射后发送给客户端。新增或变更事件必须同时覆盖发射、ACP 映射、能力门控（如适用）和 TUI 消费；以 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001 为单一事实源。
 
-### 3.1 事件传输架构（四路分路）
+### 3.1 当前事件面
 
 ```
-ExecutorEvent
+v2 EventBus
     ↓
-map_event() 四路分路
-    ├─ ① session/update（标准 ACP）     TextChunk/AiReasoning/ToolStart/ToolEnd
-    │                                    TodoUpdate/LlmCallEnd(usage)/MessageAdded
-    ├─ ② peri/hitl_pending（HITL 审批）   预留，当前 HITL 走 UserInteractionBroker
-    ├─ ③ peri/agent_event（TUI 专用）    StateSnapshot/TurnCommitted/Subagent*/
-    │                                    Compact*/RewindCompleted/BackgroundTask*/
-    │                                    LspDiagnostics/AgentExecutionFailed/ContextWarning
-    │                                    LlmRetrying/WorkflowProgress
-    └─ ④ peri/observable（观测层）       预留，无外部订阅者
+ACP 事件映射 / EventSink
+    ├─ `session/update`：标准流式内容、工具与 usage 更新
+    ├─ `peri/agent_event`：TUI 专用状态、结构与扩展事件
+    ├─ 标准交互请求：HITL / Elicitation
+    └─ `peri/agent_event_done`：turn 终止通知
 ```
 
-EventSink 在 `push_event()` 中依次投递各通道：
+`peri/unstable-event` 不参与上述通用链路；其剩余兼容/扩展用途不应作为新 Agent 事件的目标通道。
 
-1. **`session/update`**：标准 ACP notification，携带 `{sessionId, update}`，IDE/stdio 客户端消费。`_peri` 扩展字段携带 `sourceAgentId`。
-2. **`peri/agent_event`**：TUI 专用 notification，携带 `{sessionId, event_json}`，event_json 为 `AcpEvent` DTO 序列化后的 JSON 字符串。
-3. **`peri/hitl_pending`**：HITL 审批 notification（预留）。
-4. **`peri/unstable-event`**：新协议事件路由，由 `router::route()` 从 ExecutorEvent 映射为 `{event, data}` 格式。仅 3 个事件产出此通道。
-5. **`peri/agent_event_done`**：turn 结束信号 notification（`push_done()` 发送），TUI 侧映射为 `AcpNotification::AgentDone → AcpEventData::TurnDone`。payload 为 `{sessionId, stopReason}`，可选扩展字段 `requestId`：TUI 提交 prompt 时生成（`session/prompt` params 携带 `requestId`），服务器随 done 事件原样回带，供 TUI 侧 stale `TurnInterrupted` 的 turn 归属配对判定（Issue 2026-08-05）。缺失路径（continuation / Immediate 命令 / stdio 等）不携带该字段。
+### 3.2 通知格式
 
-> **`_meta` key 序列化**：ACP SDK 的 `ContentChunk`/`ToolCall`/`ToolCallUpdate` 均标注 `#[serde(rename = "_meta")]`，运行时 key 为 `"_meta"`（带下划线）。session replay 检测采用四级 fallback：`_meta → meta → content._meta → content.meta`，取 `periReplay` 布尔值。
+通知的 wire 结构由 ACP method 决定：
 
-### 3.2 消息格式
+- `session/update` 使用标准 ACP `SessionUpdate` payload，承载流式内容、工具调用与 usage 更新。
+- `peri/agent_event` 使用 ACP 的 TUI 专用 DTO，承载低频状态、结构和扩展事件。
+- `peri/agent_event_done` 承载本轮终止状态，并可带 `requestId` 关联提交请求。
 
-```json
-{
-  "event": "<事件名>",
-  "data": <事件数据>
-}
-```
-
-- `event` — kebab-case 字符串，全局唯一。
-- `data` — 每个事件名对应一个特定的 JSON 结构。流式事件的 data 小（几十字节），边界事件的 data 大（可能数十 KB）。
+不要为新 Agent 事件定义平行的 `{event, data}` 协议；需要新增或扩展时，按 ARC-EVENT-001 同步更新事件类型、ACP 映射与 TUI 消费。
 
 ### 3.3 设计原则
 
-1. **字符串事件名，非类型化枚举**：事件名是字符串，不在 Rust 类型系统中定义枚举。新增事件只需约定事件名和 data 结构。
-2. **消费端各自保证类型安全**：ACP 事件路由器负责 AgentEvent → `{event, data}` 的映射正确性。TUI 状态机负责按事件名解析 data。通道本身不做类型校验。
-3. **高频事件轻量，边界事件完整**：流式事件 data 仅携带原始文本片段。边界事件 data 携带完整 ViewModel 列表。
-4. **传输无关**：开发环境用 MpscTransport，生产环境可换 StdioTransport。事件格式不变。
+1. **事件链路单一**：新增事件经 v2 EventBus、ACP 映射和协议化面到达 TUI，不恢复 v2_tx 或其他直连通道。
+2. **协议面类型化**：标准更新使用 ACP 类型，TUI 专用通知使用 `AcpEvent` DTO；两者的兼容性由映射层维护。
+3. **终止可观测**：每个 terminal 事件必须使客户端离开 loading 状态。
+4. **传输无关**：MpscTransport 与 StdioTransport 复用同一协议语义；transport 不解释 Agent 业务逻辑。
 
 ---
 
@@ -123,118 +109,27 @@ EventSink 在 `push_event()` 中依次投递各通道：
 
 `sourceAgentId` 通过 `params._peri.sourceAgentId` 扩展字段传递——有值时表示此事件属于子 Agent。
 
-### 4.2 边界事件（低频）
+### 4.2 边界与状态事件
 
-data 携带完整结构或标志状态切换。跳过节流立即渲染。
+| 事件 | 当前传递方式 | 语义 |
+|------|--------------|------|
+| turn 终止 | `peri/agent_event_done` | 客户端离开 loading 状态；可携带 `requestId` 用于关联 |
+| `TurnSuspended` | `peri/agent_event` | Agent 等待后台任务、cron 或 workflow 时更新 TUI 状态 |
+| rewind | `peri/agent_event` + `session/rewind*` RPC | 候选、预览与执行结果由 RPC 和事件共同驱动 |
+| 上下文使用量 | `session/update` 的 usage 更新与状态快照 | 当前没有单独的用户可见 `budget-warning` 生产路径 |
+| compact、subagent、后台任务、workflow | `peri/agent_event` | 由 TUI 专用 DTO 消费 |
 
-| 事件名 | data 结构 | 语义 | 通道 |
-|--------|----------|------|------|
-| `"turn-done"` | `{}` | Agent 本轮结束，Streaming → Idle | `peri/agent_event_done` |
-| `"turn-interrupted"` | `{ reason: string }` | Agent 被中断（用户取消或超时） | `peri/unstable-event`（未实现，router 返回 None） |
-| `"turn-suspended"` | `{}` | Agent turn 挂起，等待 bg agent/cron/workflow | `peri/unstable-event` |
+HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPermission`、`Elicitation`）往返；它们不是通用事件目录的一部分。
 
-> **已移除事件**：`view-commit` 是 TUI 内部概念（由 `TurnCommitted` → `AcpEvent::TurnCommitted` 在 `peri/agent_event` 通道传输），不作为 `peri/unstable-event` 事件产出。
+### 4.3 兼容与扩展事件
 
-### 4.3 状态事件（更新状态栏，不触发消息区变化）
-
-| 事件名 | data 结构 | 语义 | 通道 |
-|--------|----------|------|------|
-| `"tool-count"` | `{ count: number }` | 本轮工具调用次数 | `peri/unstable-event`（未实现） |
-| `"progress"` | `{ percent: number, label: string }` | 进度百分比 | `peri/unstable-event`（未实现） |
-| `"budget-warning"` | `{ used: number, limit: number, threshold: string }` | 上下文预算警告 | `peri/unstable-event` |
-| `"system-notification"` | `{ text: string, level: string }` | 系统通知文本 | `peri/unstable-event`（未实现） |
-
-> **已移除事件**：`token-usage` 已废弃——token 用量现通过标准 ACP `session/update` 的 `UsageUpdate` tag 传递（`map_event()` Category ①）。
-
-### 4.4 输入辅助事件
-
-| 事件名 | data 结构 | 语义 |
-|--------|----------|------|
-| `"prediction"` | `{ text: string }` | 输入预测建议，灰色占位符 |
-| `"file-suggestions"` | `{ files: string[] }` | @ 提及文件补全候选 |
-
-### 4.5 交互请求事件（需要用户决策）
-
-| 事件名 | data 结构 | 语义 | 通道 |
-|--------|----------|------|------|
-| `"hitl-pending"` | `{ tool_name: string, tool_input: Value, batch: ToolApproval[] \| null }` | HITL 工具审批 | `UserInteractionBroker`（不走事件路由） |
-| `"ask-user"` | `{ questions: Question[] }` | Agent 发起的多问题表单 | `UserInteractionBroker`（不走事件路由） |
-| `"rewind-preview"` | `{ files: FileChange[], messages: RewindMessage[] }` | 回滚变更预览 | `peri/unstable-event` |
-| `"oauth-needed"` | `{ server_name: string, auth_url: string }` | MCP 服务授权 | `peri/unstable-event`（未实现） |
-
-> HITL 审批和 AskUser 不经过 `peri/unstable-event` 或 `peri/agent_event` 通道——通过 `UserInteractionBroker` 直接交互。TUI 侧通过 `HITL_RESPONSE_TX` / `ASK_USER_TX` 发送回答，走 `session/execute-command`。
-
-### 4.6 结构事件（控制消息区布局）
-
-| 事件名 | data 结构 | 语义 | 通道 |
-|--------|----------|------|------|
-| `"subagent-started"` | `{ agent_id: string, agent_name: string, is_background: bool }` | 子 Agent 创建 | `peri/agent_event`（Category ③+④） |
-| `"subagent-stopped"` | `{ agent_id: string }` | 子 Agent 退出 | `peri/agent_event`（Category ③+④） |
-
-子 Agent 的流式事件（`"text-chunk"`、`"tool-started"` 等）通过 `_peri.sourceAgentId` 扩展字段标识归属。TUI 将其路由到对应的 SubAgentGroup 内渲染——不合并到父 Agent 的输出流中。
-
-### 4.7 后台任务事件（bg-task-*）
-
-| 事件名 | data 结构 | 语义 | 通道 |
-|--------|----------|------|------|
-| `"bg-task-started"` | `BgTaskEntry` | 后台任务注册 | `peri/agent_event` |
-| `"bg-task-completed"` | `{ task_id, success, duration_ms }` | 后台任务完成 | `peri/agent_event` |
-| `"bg-task-cancelled"` | `{ task_id, reason }` | 后台任务取消 | `peri/agent_event` |
-| `"bg-task-snapshot"` | `BgTaskEntry[]` | 全量后台任务快照 | `peri/agent_event` |
-
-### 4.8 Agent Event 扩展事件（P1-5，通过 peri/agent_event 传输）
-
-| 事件名 | data 结构 | 语义 |
-|--------|----------|------|
-| `"turn-committed"` | `{ messages_json: string, steps: number }` | ReAct 迭代提交信号，TUI 归档 current_turn |
-| `"compact-started"` | — | 上下文压缩开始 |
-| `"compact-completed"` | `{ summary, files, skills, micro_cleared, messages_json }` | 上下文压缩完成 |
-| `"compact-error"` | `{ message }` | 上下文压缩失败 |
-| `"background-task-completed"` | `{ task_id, agent_name, success, output, tool_calls_count, duration_ms, child_thread_id? }` | 后台 agent 任务完成 |
-| `"agent-execution-failed"` | `{ message }` | agent 执行失败 |
-| `"workflow-progress"` | `{ run_id, workflow_name, event_type, agent_id?, phase?, label?, agent_status?, token_count?, tool_count?, run_status?, message? }` | 工作流进度更新 |
-
-### 4.9 插件事件（plugin-*）
-
-| 事件名 | data 结构 | 语义 |
-|--------|----------|------|
-| `"plugin-snapshot"` | `PluginSnapshot` | 插件列表全量快照 |
-| `"plugin-action-result"` | `PluginActionResult` | 插件操作结果通知 |
-| `"plugin-search-result"` | `PluginSearchResult` | Discover 搜索返回 |
+`peri/unstable-event` 不再承载 v2 Agent 事件映射。它仅保留给兼容或特定扩展用途；新增 Agent 事件必须经 ARC-EVENT-001 规定的 `session/update` 或 `peri/agent_event` 链路接入。
 
 ---
 
-## 5. 事件路由器（peri/unstable-event 通道）
+## 5. 事件映射职责
 
-ACP 层持有事件路由器（`router.rs`）——将 `ExecutorEvent` 映射为 `peri/unstable-event` 通知。此通道仅承载**少量新协议事件**，大部分事件已迁移至标准 ACP 或 `peri/agent_event` 通道（见 §3.1）。
-
-### 5.1 活跃映射表
-
-当前仅 3 个 `ExecutorEvent` 变体产出 `peri/unstable-event`：
-
-| ExecutorEvent | 事件名 | data 结构 | 备注 |
-|---------------|--------|----------|------|
-| `ContextWarning` | `"budget-warning"` | `{ used, limit, threshold }` | 上下文预算警告 |
-| `RewindCompleted` | `"rewind-preview"` | `{ files: [], messages: RewindMessage[] }` | 回滚预览（files 字段当前为空） |
-| `TurnSuspended` | `"turn-suspended"` | `{}` | Agent turn 挂起，TUI 应停止 loading |
-
-### 5.2 丢弃的 ExecutorEvent
-
-除上述 3 个变体外，所有 `ExecutorEvent` 均不产出 `peri/unstable-event`。丢弃列表包括但不限于：
-
-| 类别 | 变体 | 原因 |
-|------|------|------|
-| 流式（已迁移至 session/update） | `TextChunk`、`AiReasoning`、`AiReasoningChunk`、`ToolStart`、`ToolEnd` | §3.1 Category ① |
-| turn 生命周期 | `TurnStarted`、`TurnEnded`、`TurnCommitted`、`SessionStarted` | Category ③ `peri/agent_event` 或无输出 |
-| LLM 生命周期 | `LlmCallStart`、`LlmCallEnd`、`LlmRequestPayload`、`LlmRetrying` | 观测层或 Category ③ |
-| Compact 生命周期 | `CompactStarted`、`CompactCompleted`、`CompactError` | Category ③ `peri/agent_event` |
-| SubAgent 生命周期 | `SubagentStarted`、`SubagentStopped` | Category ③+④ `peri/agent_event` |
-| 状态快照 | `StateSnapshot`、`StateSnapshotMeta`、`MessageAdded` | Category ③ 或 ① |
-| 后台/工作流 | `BackgroundTaskCompleted`、`BgToolStep`、`WorkflowProgress`、`WorkflowStarted`、`WorkflowEnded` | Category ③ 或无输出 |
-| 预算 | `BudgetThresholdHit` | 静默丢弃 |
-| 其他 | `TodoUpdate`、`LspDiagnostics`、`MessageQueueDrained`、`AgentExecutionFailed`、`StageStarted`、`StageEnded`、`MiddlewareStarted`、`MiddlewareEnded` | Category ③ 或无输出 |
-
-> **HITL/AskUser/OAuth**：`ExecutorEvent` 中无对应的 `HitlPending`、`AskUserQuestion`、`OAuthAuthorizationNeeded` 变体。HITL 审批走 `UserInteractionBroker`，AskUser 走 `UserInteractionBroker`，OAuth 走 MCP 服务交互。
+事件映射收敛在 `peri-acp/src/event/` 的 EventSink 与协议化层：负责把 Agent v2 事件转换为标准更新、TUI 专用 DTO 或终止通知。transport 的 router 只负责消息编解码与分发，不应作为 Agent 事件映射事实源。
 
 ---
 
@@ -246,28 +141,22 @@ ACP 层持有事件路由器（`router.rs`）——将 `ExecutorEvent` 映射为
 
 | 通道 | method | 格式 | 语义 |
 |------|--------|------|------|
-| 标准 ACP JSON-RPC | `session/new`、`session/prompt` 等 | `{method, params, id?}` | TUI → Agent 请求-响应 |
-| 标准 ACP notification | `session/update` | `{method: "session/update", params: {sessionId, update}}` | Agent → TUI 流式推送 |
-| TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | Agent → TUI 低频事件 |
-| 新协议事件路由 | `peri/unstable-event` | `{method: "peri/unstable-event", params: {sessionId, event, data}}` | Agent → TUI 少量事件 |
-| HITL 审批（预留） | `peri/hitl_pending` | `{method: "peri/hitl_pending", params: {sessionId}}` | HITL 审批信号 |
-| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stop_reason}}` | Agent → TUI turn 完成 |
+| 标准 ACP JSON-RPC | `session/new`、`session/prompt` 等 | `{method, params, id?}` | TUI → 服务请求或 notification |
+| 标准 ACP notification | `session/update` | `{method: "session/update", params: {sessionId, update}}` | 服务 → 客户端流式与使用量更新 |
+| TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | 服务 → TUI 低频状态、结构与扩展事件 |
+| 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
+| 兼容/扩展 | `peri/unstable-event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
+| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stop_reason}}` | 服务 → 客户端 turn 完成 |
 
 ### 6.2 传输实现
 
 - **开发环境（TUI 内嵌 ACP）**：`MpscTransport`。同一进程内通过 tokio mpsc 通道传递消息。
 - **生产环境（IDE 插件、远程代理）**：`StdioTransport`。stdin/stdout 传递 JSON 消息。
 
-传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。通道分流由 EventSink（`event_sink.rs`）在推送时按 `map_event()` 的分路结果决定。
+传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。事件协议化与通道选择由 `peri-acp/src/event/` 的 EventSink 和映射层决定。
 
 ---
 
-## 7. 稳定性
+## 7. 兼容性
 
-自定义事件通道名为 `peri/unstable-event`，永久保持此名称——不改为 `stable` 或版本化命名。事件名和 data 结构在 v2 开发期间可能变化。标准 ACP 方法按 ACP 协议版本管理。
-
-不稳定期的约束：
-
-- 新增事件名——随时允许
-- 修改已有事件的 data 结构——破坏性变更，需同步更新 ACP 和 TUI 两侧的解析代码
-- 删除事件名——需确认两侧不再使用
+`peri/unstable-event` 的遗留兼容 payload 可能随协议演进变化；新事件应优先使用 `session/update` 或 `peri/agent_event`。修改既有 wire payload 时，必须同步更新 ACP 与 TUI 两侧解析，并按 ARC-EVENT-001 验证完整事件链路。

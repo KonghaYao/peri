@@ -1,7 +1,7 @@
 # Perihelion 测试规范
 
-> 最后更新：2026-07-15
-> 全工作区现状：~200 个测试文件，~2500 个测试函数，覆盖 12 个 crate。
+> 最后核对：2026-08-07
+> 覆盖 workspace 各 crate；具体数量以当前代码与 `cargo metadata` 为准。
 
 ---
 
@@ -103,7 +103,7 @@ fn test_edit_file_single_replace() {
 
 ### 3.3 回归测试
 
-标注 `/// [回归测试]` 注释，包含**历史背景**（哪个 bug / 哪次修复）。参考 `peri-agent/src/agent/events_v2.rs:1168`：
+`peri-agent/src/agent/events_v2_test.rs` 中的回归测试：
 
 ```rust
 /// [回归测试] TurnCompleted 必须在 render_tx 通道中，与同迭代 Render 事件 FIFO。
@@ -241,7 +241,7 @@ impl ReactLLM for EchoLLM {
 
 - [ ] 新增数据结构（含 serde） → serde roundtrip + 不完全 JSON 反序列化测试
 - [ ] 新增 `ExecutorEvent`/`ObserveEvent` 变体 → `mapper_test.rs` 增加映射测试 + `variant_coverage_test.rs` 扩展覆盖
-- [ ] 新增 v2 事件变体（`RenderEvent`/`StateEvent`/`ObserveEvent`） → `events_v2.rs` 内 36 个测试保持覆盖，`events_v2_mapper_test.rs` 同步（如 peri-acp/event 层有对应映射）
+- [ ] 新增 v2 事件变体（`RenderEvent`/`StateEvent`/`ObserveEvent`） → `events_v2_test.rs` 与 `events_v2_mapper_test.rs` 的对应覆盖同步更新（如 peri-acp/event 层有对应映射）
 - [ ] 新增 Core 工具 → `core_tools_test.rs` 同步
 - [ ] 新增中间件 → `before_agent`/`after_agent`/`before_tool`/`after_tool` 关键路径各 ≥1 条
 - [ ] 文件系统工具操作 → 各错误路径（not found / ambiguous / permission / not unique）
@@ -271,20 +271,25 @@ lefthook run pre-commit    # fmt + check + clippy + typos
 
 ---
 
-## 九、各 Crate 测试覆盖现状（参考）
+## 九、各 Crate 测试覆盖范围（参考）
 
-| Crate | 测试文件数 | 估算测试数 | 主要测试类型 |
-|-------|-----------|-----------|------------|
-| peri-middlewares | ~74 | ~550 | 工具、中间件、MCP、hooks、plugin、subagent |
-| peri-acp | ~25（含 8 个 langfuse/tracer/）+ 3 集成测试 | ~400+ | 事件映射、session、命令、prompt、langfuse tracer（compact/generation/middleware/sampling/stages/subagent/tool_batch/tracer） |
-| peri-agent | ~37 | ~174 | 事件（v2 EventBus 36 个测试）、线程、LLM 适配、中间件链 |
-| peri-widgets | ~22 | ~170 | widget 渲染、textarea 状态、diff |
-| peri-tui | ~12 | ~130 | 配置、同步、CLI、ACP server |
-| langfuse-client | ~6 | ~60 | 客户端、类型、batcher |
-| agm | ~6 | ~37 | 安装器、存储、过滤 |
-| peri-workflow | ~1+ 内嵌 | ~30 | runner、protocol、registry |
-| peri-lsp | ~6 | ~30 | 诊断、池、编解码 |
-| peri-web-pty | ~5 | ~25 | PTY session、WebSocket、HTTP |
-| peri-acp-types | ~1 | ~11 | DTO serde roundtrip |
-| peri-theme | 0（src 内 _test.rs）+ 2（tests/ 集成测试） | ~5 | 主题加载器 |
-| side-projects/git-stats | 0 | 0 | — |
+测试数量随演进变化，不作为规范基线；以 `cargo metadata`、crate 内测试与 CI 为准。
+
+| Crate | 主要测试类型 |
+|-------|--------------|
+| peri-middlewares | 工具、中间件、MCP、hooks、plugin、subagent |
+| peri-acp | 事件映射、session、命令、prompt、协议适配 |
+| peri-agent | v2 事件、线程、LLM 适配、中间件链 |
+| peri-controller | Langfuse bridge、控制面与跨层转发 |
+| peri-runtime | 多 session 编排、事件路由、cancel 转发 |
+| peri-resources | 配置、会话存储与外部资源 context |
+| peri-model | provider 无关协议、流式适配、传输与重试 |
+| peri-tui | kit、配置、同步、CLI 与 ACP client |
+| peri-acp-types | DTO、identity、事件与协议 serde roundtrip |
+| peri-theme | 主题加载、palette 与 atoms |
+| langfuse-client | 客户端、类型、batcher |
+| agm | 安装器、存储、过滤 |
+| peri-workflow | runner、protocol、registry |
+| peri-lsp | 诊断、池、编解码 |
+| peri-web-pty | PTY session、WebSocket、HTTP |
+| acp-hub | hub、router、child 与全局协调 |

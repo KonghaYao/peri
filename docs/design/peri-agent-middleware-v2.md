@@ -173,5 +173,5 @@ for aspect in chain:
 | **ReAct 循环** | hook 点嵌入 ReAct 循环固定检查点 |
 | **System Prompt** | 切面通过声明贡献，不通过 prepend_message |
 | **工具系统** | 切面声明 tools，Executor 统一收集 |
-| **Compact** | 已从中间件链移除（`CompactMiddleware` 已删除）。自动 compact 由 `peri-agent::agent::stages::compact` 在 `run_react_loop` 每轮开头处理：0.70 触发 micro-compact（零 LLM，标 `truncated`），0.85 触发 full compact（LLM 摘要 + `excluded` 标记）。Compact 不再作为切面参与链执行 |
+| **Compact** | 已从中间件链移除（`CompactMiddleware` 已删除）。自动 compact 由 `peri-agent::agent::stages::compact` 在 RCRA 循环中处理；旧版固定阈值仅是历史实现参数，不作为当前约束。当前策略与回收目标以 `docs/design/micro-compact-improvement-proposals.md` 和 `ContextPressure::target_reclaim_tokens()` 为事实源。Compact 不再作为切面参与链执行 |
 | **Plugin** | `PluginMiddleware`（#3）是基础中间件，在 `before_agent` hook 中执行插件兼容性校验。插件扩展的 Skills 通过 `SkillsMiddleware.with_plugin_roots()` 注入，Hooks 通过 `HookMiddleware`（#13，可多实例）注入 |
