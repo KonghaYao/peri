@@ -68,6 +68,20 @@ fn palette_markdown_key(p: &ratatui_kit::prelude::Palette) -> u64 {
     h.finish()
 }
 
+/// 计算可滚动内容的视觉高度。
+///
+/// 视觉行索引和滚动偏移均为 `usize`；仅终端几何坐标保留 `u16`，避免长消息在
+/// 65,535 行处截断而无法滚到底部。
+fn total_visual_rows(core_rows: usize, footer_rows: usize, is_loading: bool) -> usize {
+    if core_rows == 0 && footer_rows == 0 {
+        usize::from(is_loading)
+    } else {
+        core_rows
+            .saturating_add(footer_rows)
+            .saturating_add(scroll::SCROLL_PADDING)
+    }
+}
+
 // ── 渲染性能诊断（PERI_RENDER_TIMING=1 启用）──────────────────────────────
 
 fn render_timing_enabled() -> bool {
@@ -116,7 +130,7 @@ struct VmCacheSlot {
     /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
     wrap_map: Arc<Vec<WrappedLineInfo>>,
     /// 该 VM 占据的视觉行数（= wrap_map 末项 visual_end）。
-    visual_rows: u16,
+    visual_rows: usize,
     /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
     /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
     markdown_cache: crate::kit::markdown::MarkdownRenderCache,
@@ -308,7 +322,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 vm_to_lines_cached(vm, vis_width as usize, &mut slot.markdown_cache, true);
             let lines = Arc::new(lines);
             let (_, wm) = build_wrap_map(&lines, vis_width);
-            let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0) as u16;
+            let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0);
             slot.content_hash = vm_hash;
             slot.width = vis_width;
             slot.palette_key = current_palette_key;
@@ -353,7 +367,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             slot_arcs.push(Arc::clone(&slot.lines));
             slots.push((&slot.wrap_map, lines_start, slot_index));
             slot_visual_starts.push(core_total_visual_rows);
-            core_total_visual_rows += slot.visual_rows as usize;
+            core_total_visual_rows += slot.visual_rows;
         }
         concat_wrap_maps(&slots)
     };
@@ -383,13 +397,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Padding] 追加 SCROLL_PADDING 行空白滚动空间，减少流式输出期间因新行到达
     // 导致的视口抖动。这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length；
     // 吸底跟随恢复判定会扣除它们（scroll::should_follow_after_user_scroll）。
-    let total_visual_rows: u16 = if core_total_visual_rows == 0 && footer_visual_rows == 0 {
-        if is_loading { 1 } else { 0 }
-    } else {
-        (core_total_visual_rows + footer_visual_rows)
-            .saturating_add(scroll::SCROLL_PADDING)
-            .min(u16::MAX as usize) as u16
-    };
+    let total_visual_rows =
+        total_visual_rows(core_total_visual_rows, footer_visual_rows, is_loading);
 
     // ── keepgoing 按钮点击（footer summary 行右侧）──
     // [Why] 必须注册在 scroll handler 之前：两者同 Global+High，同优先级按注册序分发，
@@ -503,7 +512,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
     // ── 吸底自动跟随 ──
-    let last_scrolled_at = hooks.use_state(|| 0u16);
+    let last_scrolled_at = hooks.use_state(|| 0usize);
     // 粘性吸底开关：默认跟随；用户向上滚动即退出（浏览模式），滚回底部才恢复。
     let follow_bottom = hooks.use_state(|| true);
 
@@ -534,7 +543,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         });
     }
 
-    let prev_total_visual_rows = hooks.use_state(|| 0u16);
+    let prev_total_visual_rows = hooks.use_state(|| 0usize);
     // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
     // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
     let prev_vis_height = hooks.use_state(|| 0u16);
@@ -623,7 +632,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         .unwrap_or(false);
 
     // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
-    let max_scroll = (total_visual_rows as usize).saturating_sub(vis_height as usize);
+    let max_scroll = total_visual_rows.saturating_sub(vis_height as usize);
     let scroll_y_raw = scroll_state.read().offset();
     let scroll_y = scroll_y_raw.min(max_scroll);
 
@@ -645,8 +654,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // content_length - 1）。需要把 [0, max_scroll] 线性映射到 [0, content_length-1]。
     {
         let mut g = scrollbar_fields.write_no_update();
-        g.content_length = total_visual_rows as usize;
-        g.position = (scroll_y * (total_visual_rows as usize - 1))
+        g.content_length = total_visual_rows;
+        g.position = scroll_y
+            .saturating_mul(total_visual_rows.saturating_sub(1))
             .checked_div(max_scroll)
             .unwrap_or(0);
         g.viewport_length = vis_height as usize;

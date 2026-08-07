@@ -700,18 +700,18 @@ pub(super) fn handle_event(
 /// `use_effect` 闭包提取的上下文结构体。
 /// 所有 `State<T>` 字段在 mod.rs 闭包外构造时用 `.clone()`（State 是 Arc，clone 是廉价引用拷贝）。
 pub(super) struct AutoFollowCtx {
-    pub total_visual_rows: u16,
+    pub total_visual_rows: usize,
     pub vis_height: u16,
     pub scroll_state: State<ScrollPos>,
     pub prev_items_len: State<usize>,
-    pub last_scrolled_at: State<u16>,
+    pub last_scrolled_at: State<usize>,
     pub items_len: usize,
     pub is_loading: bool,
     /// 粘性吸底开关：用户一向上滚动即 false（浏览模式），滚回真正底部才恢复 true。
     /// 跟随态下内容增长无条件滚底；浏览态下不打扰。
     pub follow_bottom: State<bool>,
     /// 用于检测 resize：total_visual_rows 变化后钳制 scroll_state.offset 到有效范围。
-    pub prev_total_visual_rows: State<u16>,
+    pub prev_total_visual_rows: State<usize>,
     /// 用于检测 resize：vis_height 变化（终端高度变化）后，若处于跟随态则跟随到底。
     /// use_effect 依赖不含 vis_height，此哨兵负责补上这个缺口。
     pub prev_vis_height: State<u16>,
@@ -745,7 +745,9 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_total = *ctx.prev_total_visual_rows.read();
     *ctx.prev_total_visual_rows.write() = ctx.total_visual_rows;
     if prev_total != ctx.total_visual_rows && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
-        let max_scroll = ctx.total_visual_rows.saturating_sub(ctx.vis_height) as usize;
+        let max_scroll = ctx
+            .total_visual_rows
+            .saturating_sub(ctx.vis_height as usize);
         let current_y = ctx.scroll_state.read().offset();
         if current_y > max_scroll {
             ctx.scroll_state.write().set_offset(max_scroll);
