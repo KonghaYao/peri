@@ -1,6 +1,6 @@
 # session/cancel-bg-task 对 Workflow 类型任务无效（条目移除但 runner 继续运行，UI 状态矛盾）
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **创建日期**：2026-08-05
 
@@ -64,3 +64,4 @@
 | 2026-08-05 | Open | Open | agent | 修复验证：**有条件通过**。核心 P1 已修复并经实证（/tmp 独立程序 + 真实 Node runtime：kill 闭包 → 同一条 kill_tx → runner ~100ms 内终止，registry 条目移除，二次 kill NotFound；RPC 层测试探针真实走通全链路）。残余 P2：kill 后 workflow/list_runs 仍永久显示 running——Node 侧 run_done{status:killed} 被 runner.rs:664 的 msg_loop.abort() 丢弃，progress_store.cleanup_completed 保留 Running（3/3 次实证均为 Running），workflow 面板持续 spinning（issue 症状表第二行未覆盖，kill_run 既有路径同样触发）。残余 P3：kill 后仍推 bg-task-completed 幽灵失败通知。待跟进：kill 后主动标记 progress_store 为 Killed（tool.rs 通知任务处已有引用，约 3 行） |
 | 2026-08-05 | Open | Open | agent | 修复 v2（残余 P2 幽灵 running）：runner.rs:698-703 kill 分支、done_tx_for_kill.send() 之前补发 `progress_store.apply_event(RunDone{status:"killed"})`（+10 行），复用既有 reducer（progress.rs:207-215）标记 Killed + completed_at；progress.rs/tool.rs/TUI 零改动。MockAgentExecutor 加 delay 字段供 kill 测试维持 Running 窗口。+4 测试（progress 层 3 个：killed 状态/cleanup 保留/no-op；runner 层 1 个 #[ignore] 核心回归）。peri-workflow 42 + 2 ignored（真实 Node runtime 实证通过）、peri-middlewares 1084、peri-tui 841 passed |
 | 2026-08-05 | Open | Open | agent | 修复验证（workflow review）：**通过**。kill 标记与方案候选 A 完全一致（标记 → send done_tx → cleanup 时序确定）；单实例 progress_store 贯穿 middleware→tool→runner→list_runs（workflow/mod.rs:86,120,139-151）——kill 标记对 list_runs 可见；核心回归测试防假阳性到位（先轮询 Running 再 kill，修复前必然失败），--ignored 实证通过。新发现 P2：workflow/kill_run 与 kill_agent handler 忽略 sessionId 参数取第一个带 middleware 的 session（requests.rs:454-461,477-484，多 session 时可能 kill 错 session，单 session 不受影响），建议与 list_runs 对齐改 sessions.get()。P3：Node 自然崩溃（非 kill）时 msg_loop failed 收尾不写 progress_store（同源幽灵 running 另一路径）。P3：幽灵完成事件（方案明确本次不实现）。待处理：sessionId 匹配修复；failed 收尾补 RunDone |
+| 2026-08-05 | Open | Fixed | agent | L1 复验（2026-08-05）：核心 P1 修复闭环确认——Kill(Some) 闭包打通（`BgTaskRegistry for TaskManager::register_workflow` 携 kill 闭包转发 `WorkflowTaskRegistry::kill`）、cancel() 对 Kill(None) 报错保留条目、kill 后 progress_store 标记 Killed（残余 P2 幽灵 running 修复 v2）；`test_cancel_workflow_invokes_kill_closure` / `test_cancel_with_unavailable_handle_returns_error_and_keeps_entry` 随迁 async_tasks_test.rs 通过。残余待办（不在 L1 范围）：workflow/kill_run 与 kill_agent 的 sessionId 匹配、Node 非 kill 崩溃时 failed 收尾补 RunDone、kill 后幽灵完成事件 |

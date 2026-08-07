@@ -1,0 +1,25 @@
+[package]
+name = "peri-resources"
+version.workspace = true
+edition.workspace = true
+description = "Resources layer: external system facade (peri-config / peri-sessions / context)"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true }
+tokio.workspace = true
+uuid.workspace = true
+peri-acp-types = { path = "../peri-acp-types" }
+# 资源实现（PRD 决策 20）：peri-lsp / peri-workflow 作为 resource 实现接入，
+# 门面见 src/lsp.rs / src/workflow.rs。workflow 依赖环已解除
+# （peri-workflow → peri-agent 边切断，仅依赖契约层），接入后成环风险消除。
+peri-lsp = { path = "../peri-lsp" }
+peri-workflow = { path = "../peri-workflow" }
+
+[dev-dependencies]
+tempfile.workspace = true

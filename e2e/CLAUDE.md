@@ -45,6 +45,8 @@ npm run report
 
 发布前如需全量验证，执行 `npm test`。
 
+运行前置：`tests/setup.ts` 会在测试启动前自动清理残留 `tui-test-*` tmux session（防止上次运行残留干扰 tmux server）；tmux 未安装或 server 不存在时静默跳过。
+
 ## 按需引用 / Verify
 
 - 新增场景前先阅读目标测试与对应 helper，复用 `launchPeri`、`sendPrompt`、`takePeriSnapshot`、`waitForStableScreen`。

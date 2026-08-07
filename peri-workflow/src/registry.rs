@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::progress::PhaseSummary;
+// 3.0 批 2 波 1：协议类型迁入契约层 `peri_acp_types::workflow`
+// （`WorkflowRunStatus` / `WorkflowTaskResult`）；本模块保留 re-export 保兼容。
+pub use peri_acp_types::workflow::{WorkflowRunStatus, WorkflowTaskResult};
 
 /// Registry 层错误。
 #[derive(Debug, Error)]
@@ -15,28 +16,6 @@ pub enum RegistryError {
     ConcurrentLimit(usize),
     #[error("Workflow {0} not found")]
     NotFound(String),
-}
-
-/// Workflow run 状态。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowRunStatus {
-    Running,
-    Completed,
-    Failed,
-    Killed,
-}
-
-impl WorkflowRunStatus {
-    /// 序列化为协议字符串（与 `ProgressEvent::RunDone.status` / state.json 口径一致）。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WorkflowRunStatus::Running => "running",
-            WorkflowRunStatus::Completed => "completed",
-            WorkflowRunStatus::Failed => "failed",
-            WorkflowRunStatus::Killed => "killed",
-        }
-    }
 }
 
 /// 单个 workflow run 记录。
@@ -48,64 +27,6 @@ pub struct WorkflowRun {
     pub started_at: std::time::Instant,
     pub child_handle: tokio::task::JoinHandle<()>,
     pub kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-/// Workflow 完成后通过 broadcast channel 推送的结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowTaskResult {
-    pub run_id: String,
-    pub workflow_name: String,
-    pub success: bool,
-    pub status: WorkflowRunStatus,
-    pub duration_ms: u64,
-    pub agent_count: usize,
-    pub tool_calls_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub phase_summaries: Vec<PhaseSummary>,
-}
-
-impl WorkflowTaskResult {
-    /// 格式化为 `<system-reminder>` 块，含 phase breakdown。
-    pub fn to_notification(&self) -> String {
-        let success_msg = if self.success { "completed" } else { "failed" };
-
-        let mut phase_lines = String::new();
-        if !self.phase_summaries.is_empty() {
-            for s in &self.phase_summaries {
-                let token_info = if s.token_count > 0 {
-                    format!(", {} tokens", s.token_count)
-                } else {
-                    String::new()
-                };
-                let dur_info = if let Some(d) = s.duration_ms {
-                    format!(", {}ms", d)
-                } else {
-                    String::new()
-                };
-                phase_lines.push_str(&format!(
-                    "- {}: {} agents{}{}\n",
-                    s.name, s.agent_count, token_info, dur_info
-                ));
-            }
-        }
-
-        format!(
-            "<system-reminder>\n\
-            Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
-            {}Results saved to .claude/workflow-runs/{}/state.json\n\
-            Use Read tool to view full results.\n\
-            </system-reminder>",
-            self.workflow_name,
-            success_msg,
-            self.duration_ms,
-            self.agent_count,
-            self.tool_calls_count,
-            phase_lines,
-            self.run_id,
-        )
-    }
 }
 
 /// 管理活跃 workflow run，并发限制 + 完成通知。
@@ -163,7 +84,7 @@ impl WorkflowTaskRegistry {
     pub fn complete(&self, run_id: &str, result: WorkflowTaskResult) {
         let mut runs = self.runs.lock();
         if let Some(run) = runs.get_mut(run_id) {
-            run.status = result.status.clone();
+            run.status = result.status;
         }
         if let Err(e) = self.notification_tx.send(result) {
             warn!(target: "workflow", run_id = %run_id, error = %e, "registry: notification send failed (no subscribers)");
@@ -191,7 +112,7 @@ impl WorkflowTaskRegistry {
     pub fn list_runs(&self) -> Vec<(String, WorkflowRunStatus, String)> {
         let runs = self.runs.lock();
         runs.values()
-            .map(|r| (r.run_id.clone(), r.status.clone(), r.workflow_name.clone()))
+            .map(|r| (r.run_id.clone(), r.status, r.workflow_name.clone()))
             .collect()
     }
 }

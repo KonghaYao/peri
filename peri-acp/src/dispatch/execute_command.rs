@@ -10,6 +10,8 @@
 
 use serde_json::Value;
 
+use peri_controller::Controller;
+
 use crate::session::command::{
     default_command_registry, CommandContext, CommandKind, CommandResult,
 };
@@ -23,6 +25,9 @@ use crate::transport::types::AcpError;
 /// runs it synchronously (blocking the caller) and returns the updated
 /// message list.
 ///
+/// 存储访问经 `controller.sessions()`（ARC-BOUNDARY-001 方向），不再由调用方
+/// 直传 `thread_store`。
+///
 /// # Errors
 ///
 /// Returns `AcpError` when:
@@ -34,18 +39,16 @@ use crate::transport::types::AcpError;
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     params: &Value,
-    session_history: Vec<peri_agent::messages::BaseMessage>,
+    session_history: Vec<peri_acp_types::messages::BaseMessage>,
     cwd: &str,
     peri_config: &std::sync::Arc<crate::provider::PeriConfig>,
     event_sink: &std::sync::Arc<dyn crate::session::event_sink::EventSink>,
     auxiliary_model: Option<std::sync::Arc<dyn peri_model::Model>>,
-    cancel_token: &peri_agent::agent::AgentCancellationToken,
-    thread_store: Option<std::sync::Arc<dyn peri_agent::thread::ThreadStore>>,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
-    >,
-    bg_registry: Option<std::sync::Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+    task_manager: Option<std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
     frozen_claude_md: Option<std::sync::Arc<String>>,
     frozen_claude_local_md: Option<std::sync::Arc<String>>,
     frozen_skill_summary: Option<std::sync::Arc<String>>,
@@ -94,19 +97,21 @@ pub async fn execute_command(
         session_id: session_id.clone(),
         history: session_history,
         cwd: cwd.to_string(),
-        peri_config: std::sync::Arc::clone(peri_config),
+        // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
+        compact_config: crate::host::compact_config::load_compact_config(peri_config),
         auxiliary_model,
         event_sink: std::sync::Arc::clone(event_sink),
         args: args_string,
         cancel_token: cancel_token.clone(),
-        thread_store,
+        thread_store: Some(controller.sessions()),
         thread_id,
         bg_event_sender: bg_event_tx,
-        bg_registry,
+        task_manager,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
         frozen_system_prompt,
+        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
     };
 
     let result = tokio::select! {

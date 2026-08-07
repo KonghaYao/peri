@@ -1,16 +1,19 @@
-//! List sessions via [`ThreadStore`], returning ACP [`SessionInfo`] entries.
+//! List sessions via Controller 存储通道，返回 ACP [`SessionInfo`] entries。
 
 use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
 use anyhow::{Context, Result};
-use peri_agent::thread::ThreadStore;
+use peri_controller::Controller;
 
 /// Query all sessions from persistent storage, convert to ACP
 /// [`SessionInfo`] entries, and optionally filter by `cwd`.
+///
+/// 存储访问经 [`Controller::sessions`]（ARC-BOUNDARY-001 方向）。
 pub async fn list_sessions_as_info(
-    thread_store: &dyn ThreadStore,
+    controller: &Controller,
     cwd_filter: Option<&str>,
 ) -> Result<Vec<SessionInfo>> {
-    let threads = thread_store
+    let threads = controller
+        .sessions()
         .list_threads()
         .await
         .context("Failed to list sessions")?;

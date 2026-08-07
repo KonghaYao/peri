@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-
-use peri_agent::{messages::BaseMessage, middleware::r#trait::Middleware, session::Session};
+use peri_agent::{
+    middleware::chain::MiddlewareChain,
+    middleware::r#trait::Middleware,
+    session::subagent::{SubagentChainAssembler, SubagentChainContext},
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -107,63 +109,34 @@ pub(crate) async fn fire_subagent_lifecycle_hooks_static(
     }
 }
 
-/// Format sub-agent execution result as a summary string returned to the parent agent.
-fn format_subagent_result(output: &peri_agent::agent::react::AgentOutput) -> String {
-    if output.tool_calls.is_empty() {
-        return output.text.clone();
-    }
-
-    let mut tool_counts: HashMap<&str, usize> = HashMap::new();
-    for (call, _) in &output.tool_calls {
-        *tool_counts.entry(call.name.as_str()).or_insert(0) += 1;
-    }
-
-    let mut tools: Vec<_> = tool_counts.into_iter().collect();
-    tools.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-    let tool_summary = tools
-        .into_iter()
-        .map(|(name, count)| format!("{} {} times", name, count))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    format!(
-        "[Sub-agent executed {} tool calls: {}]\n\n{}",
-        output.tool_calls.len(),
-        tool_summary,
-        output.text
-    )
-}
-
-/// 从 session transcript 提取最后一条非空 AI 消息文本（P1-11: define/execute_fork/execute_bg/spawner 共用）。
-pub(crate) fn extract_last_ai_text(session: &std::sync::Arc<Session>) -> String {
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if matches!(m, BaseMessage::Ai { .. }) {
-                let t = m.content();
-                let trimmed = t.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
-}
-
 mod build_agent;
 mod define;
 mod execute_bg;
 mod execute_fork;
-pub(crate) mod lifecycle;
 pub use define::SubAgentTool;
+
+/// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，
+/// 由 middlewares 提供实现——Agent 层 [`spawn_subagent`] 从父 session copy frozen
+/// 数据后调用本实现构建子链，链序保持 [`build_subagent_middlewares`] 不变
+/// （AgentsMd→Skills→[SkillPreload]→Todo，ARC-MIDDLEWARE-001）。
+pub struct SubagentChainAssemblerImpl;
+
+impl SubagentChainAssembler for SubagentChainAssemblerImpl {
+    fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain {
+        let config =
+            super::SubAgentMiddlewareConfig::for_agent_def(ctx.skill_names.clone(), &ctx.cwd)
+                .with_frozen(
+                    ctx.frozen_claude_md.clone(),
+                    ctx.frozen_claude_local_md.clone(),
+                    ctx.frozen_skill_summary.clone(),
+                );
+        let mut chain = MiddlewareChain::new();
+        for mw in build_subagent_middlewares(config) {
+            chain.add(mw);
+        }
+        chain
+    }
+}
 
 #[cfg(test)]
 #[path = "tool_test.rs"]

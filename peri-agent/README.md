@@ -134,15 +134,15 @@ impl BaseTool for EchoTool {
 }
 ```
 
-### 事件回调（EventBus / ExecutorEvent）
+### 事件回调（EventBus）
 
-v2 通过 `EventBus` 发出三层事件：
+v2 通过 `EventBus` 发出三层事件（发射统一 v2 形态，v1 `ExecutorEvent` 中间态已退役）：
 
 - **RenderEvent** —— LLM 调用 / 工具调用（UI 渲染层消费）
 - **StateEvent** —— 消息追加 / 状态变更 / Todo / MessagesCompacted（持久化层消费）
-- **ObserveEvent** —— 可观测性事件（langfuse / metrics）
+- **ObserveEvent** —— 可观测性事件（langfuse / metrics，身份透传）
 
-历史兼容的 `ExecutorEvent` 仍保留（`peri_agent::agent::events::ExecutorEvent`），由上层 mapper 从 v2 事件桥接而来。通过 `AgentEventHandler` / `FnEventHandler` 消费：
+`ExecutorEvent`（`peri_agent::agent::events::ExecutorEvent`）不再由 Agent 层发射——仅保留为 ACP 协议序列化面载体（由 `event_v2::*_event_to_executor` 从 v2 事件转换，wire format 不变）。`AgentEventHandler` / `FnEventHandler` 是 ACP 协议化接收端接口：
 
 ```rust,ignore
 use std::sync::Arc;

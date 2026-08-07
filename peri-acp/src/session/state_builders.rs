@@ -11,7 +11,7 @@ pub use agent_client_protocol_schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeId, SessionModeState,
 };
 use parking_lot::RwLock;
-use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
 use crate::provider::{LlmProvider, PeriConfig, Profiles};
 

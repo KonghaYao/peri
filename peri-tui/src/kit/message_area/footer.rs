@@ -188,7 +188,7 @@ pub(super) fn build_footer_lines(
             Style::default().fg(semantic.text.muted),
         ));
         let btn_text = i18n::tr("msg-keepgoing");
-        // keepgoing 按钮：仅 agent 空闲（spinner 不转）时追加到 summary 行右侧。
+        // keepgoing 按钮：仅 agent 空闲（spinner 不转）时右对齐渲染于 summary 行。
         // 样式与 md 复制按钮统一：左右各 1 空格 + 反色（REVERSED）。
         // 防抖期间以 muted 色渲染（不可点击）。
         let btn_span = Span::styled(
@@ -202,21 +202,23 @@ pub(super) fn build_footer_lines(
                 .add_modifier(Modifier::REVERSED),
         );
         let btn_width = btn_span.width() as u16;
-        // 按钮与 summary 文本之间空 1 个普通空格（不反色）表示间距，
-        // 按钮点击区域从该空格之后算起。
-        let start_col = summary_line.width() as u16 + 1;
-        // [Fix m4] 窄终端下 summary + 按钮超宽时 WordWrapper 会把按钮换到下一
-        // 视觉行，而 compute_keepgoing_rect 按"每 footer 行占 1 视觉行"假设计算
-        // 点击区域——换行后按钮实际位置与 rect 错位、点击失效。超宽时跳过按钮
-        // 渲染（布局保持单行，rect 不产生）。
-        if start_col.saturating_add(btn_width) <= vis_width {
+        // 右对齐：按钮起始列 = vis_width - btn_width，summary 文本与按钮之间填充空格。
+        let start_col = vis_width.saturating_sub(btn_width);
+        // [Fix m4] 窄终端下 summary 文本超宽时会与按钮重叠——超宽时跳过按钮渲染。
+        let summary_text_width = summary_line.width() as u16;
+        if summary_text_width
+            .saturating_add(btn_width)
+            .saturating_add(1)
+            <= vis_width
+        {
             keepgoing_layout = Some(KeepGoingLayout {
                 line_index: lines.len(),
                 start_col,
                 width: btn_width,
             });
             let mut line = summary_line;
-            line.spans.push(Span::raw(" "));
+            let gap = vis_width.saturating_sub(summary_text_width + btn_width);
+            line.spans.push(Span::raw(" ".repeat(gap as usize)));
             line.spans.push(btn_span);
             lines.push(line);
         } else {

@@ -1415,6 +1415,63 @@ fn test_rewind_completed_replaces_committed() {
     assert_eq!(preview.messages[0].preview, "rewound user msg");
 }
 
+/// H4-b: RewindCompleted 重建 preview 时剥离 `<system-reminder>` 注入块——
+/// 带尾部注入的用户输入保留（与服务端 rewind-candidates 口径一致），
+/// 纯系统注入消息不进候选。
+#[test]
+#[serial]
+fn test_rewind_completed_rebuild_preview_strips_reminder() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+    let messages_json = serde_json::json!([
+        {
+            "role": "user",
+            "id": "msg-1",
+            "content": "请用 Write 工具创建文件\n<system-reminder>\nCurrent permission mode: Bypass: All tool calls are allowed without approval.\n</system-reminder>",
+        },
+        {
+            "role": "user",
+            "id": "msg-2",
+            "content": "<system-reminder>后台任务完成通知</system-reminder>",
+        },
+    ])
+    .to_string();
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+
+    let preview = crate::kit::atoms::REWIND_PREVIEW.state().read().clone();
+    let preview = preview.expect("rewind 后 REWIND_PREVIEW 应被重建");
+    assert_eq!(
+        preview.messages.len(),
+        1,
+        "带尾部注入的用户消息剥离后保留；纯注入消息丢弃"
+    );
+    assert_eq!(preview.messages[0].id, "msg-1");
+    assert_eq!(
+        preview.messages[0].preview, "请用 Write 工具创建文件",
+        "preview 不得携带 system-reminder 注入文本"
+    );
+}
+
 /// RewindCompleted 后：目标文本回填输入框（INPUT_RESTORE_TEXT）并触发心跳。
 #[test]
 #[serial]

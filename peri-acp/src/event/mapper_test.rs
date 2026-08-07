@@ -1,10 +1,10 @@
-use peri_acp_types::PeriCaps;
-use peri_agent::agent::events::{
+use peri_acp_types::event::{
     BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
     TodoEntry, TodoStatus,
 };
-use peri_agent::messages::{BaseMessage, MessageId};
-use peri_agent::tools::ToolDefinition;
+use peri_acp_types::messages::{BaseMessage, MessageId};
+use peri_acp_types::tools::ToolDefinition;
+use peri_acp_types::PeriCaps;
 use peri_model::{StopReason, TokenUsage};
 
 use super::*;
@@ -492,7 +492,7 @@ fn test_compact_completed_no_session_update() {
             full_escalation_reason: None,
             cache_hit_rate_before: 0.0,
             trigger: CompactTrigger::Auto,
-            outcome: peri_agent::agent::compact_v2::CompactOutcome::FullApplied,
+            outcome: peri_acp_types::compact::CompactOutcome::FullApplied,
         },
         "CompactCompleted",
     );

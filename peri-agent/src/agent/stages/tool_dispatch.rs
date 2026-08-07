@@ -25,7 +25,7 @@ use super::StageContext;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::{message::MessageId, BaseMessage, ToolCallRequest};
+use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
 use crate::tools::{BaseTool, CanonicalToolInvocation};
 
 /// 连续失败检测阈值

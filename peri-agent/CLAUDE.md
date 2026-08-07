@@ -13,6 +13,7 @@
 | 任务 | 优先读取 |
 | --- | --- |
 | RCRA、Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
+| 中间件链装配入口与链序蓝本（ARC-MIDDLEWARE-001） | `src/session/factory.rs`；装配实现在 `../peri-middlewares/src/assembly.rs` |
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |
 | 测试位置与覆盖要求 | `../docs/design/testing-standards.md` |
 | compact 阈值与环境覆盖 | `src/agent/compact_v2/config.rs` 的 `CompactConfig` |
@@ -26,6 +27,7 @@
 - `FrozenContext` 的 prompt、指引、skills 与日期在会话内不可漂移；SubAgent 复用上游冻结数据。
 - `BaseTool::is_direct()` 是工具可见性事实源；deferred 工具经搜索/执行代理访问。
 - Compact 行为、阈值和环境覆盖仅引用 `CompactConfig`，本文不复制数值。
+- 中间件链装配在 session 初始化时经 `src/session/factory.rs` 构建（`production_blueprint` 是链序事实源，ARC-MIDDLEWARE-001；装配实现当前位于 `../peri-middlewares/src/assembly.rs`，依赖反转完成后物理迁入本层）。
 
 ## 目标命令
 

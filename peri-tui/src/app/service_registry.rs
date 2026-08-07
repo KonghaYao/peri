@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use peri_middlewares::{
-    mcp::{McpClientPool, McpInitStatus},
-    plugin::PluginLoadResult,
-    prelude::SharedPermissionMode,
-};
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::plugin::PluginLoadResult;
 
 use super::cron_state::CronState;
 use crate::{config::PeriConfig, thread::ThreadStore};
@@ -83,8 +80,8 @@ pub struct ServiceRegistry {
     pub provider_name: String,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
-    pub mcp_pool: Option<Arc<McpClientPool>>,
-    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<McpInitStatus>>,
+    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
     /// 进程内存监控（2s 刷新）

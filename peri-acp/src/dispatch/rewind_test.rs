@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::events::ExecutorEvent,
+use peri_acp_types::{
+    event::ExecutorEvent,
     messages::{BaseMessage, ContentBlock, ToolCallRequest},
 };
 

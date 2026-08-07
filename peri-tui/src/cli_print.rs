@@ -1,11 +1,21 @@
-//! -p/--print 非交互模式：单轮问答后自动退出
+//! -p/--print 非交互模式：经 ACP ephemeral session 单轮问答后自动退出。
+//!
+//! 3.0 归位（`docs/top-level.md` §8）：print = 同层轻量渲染客户端（无界面，
+//! 输出文本），经 ACP 走 ephemeral session（不造 sessionless）。本模块不再
+//! 直连 `run_session_loop`；host 装配复用 `peri_acp::host::assemble`（与 TUI
+//! 同源，不复制），执行路径与 TUI 完全一致（session/new → prompt → 事件收集
+//! → close）。
 
 use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
 use anyhow::Result;
-use chrono::Local;
-use peri_acp::langfuse::LangfuseSessionLike;
+use peri_acp::LangfuseSessionLike;
+use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
+use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp_types::messages::MessageContent;
+use peri_tui::acp_client::{AcpNotification, AcpTuiClient};
+use serde_json::{Value, json};
 
 /// -p 模式执行入口
 #[allow(clippy::too_many_arguments)]
@@ -42,7 +52,7 @@ pub async fn run_print(
         anyhow::bail!("无输入 prompt。用法: peri -p \"你的问题\" 或 echo \"问题\" | peri -p");
     }
 
-    let _telemetry = peri_agent::telemetry::init_tracing("peri-print");
+    let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
 
     // 加载配置
     let peri_config = match &settings_path {
@@ -96,268 +106,175 @@ pub async fn run_print(
 
     // 权限模式（-p 默认 bypass）
     let permission_mode = if skip_permissions {
-        peri_middlewares::prelude::PermissionMode::Bypass
+        peri_acp_types::permission::PermissionMode::Bypass
     } else if let Some(ref mode_str) = permission_mode_str {
         match mode_str.as_str() {
-            "bypass" => peri_middlewares::prelude::PermissionMode::Bypass,
-            "default" => peri_middlewares::prelude::PermissionMode::Default,
-            "accept-edit" => peri_middlewares::prelude::PermissionMode::AcceptEdit,
-            "auto-mode" => peri_middlewares::prelude::PermissionMode::AutoMode,
-            _ => peri_middlewares::prelude::PermissionMode::Bypass,
+            "bypass" => peri_acp_types::permission::PermissionMode::Bypass,
+            "default" => peri_acp_types::permission::PermissionMode::Default,
+            "accept-edit" => peri_acp_types::permission::PermissionMode::AcceptEdit,
+            "auto-mode" => peri_acp_types::permission::PermissionMode::AutoMode,
+            _ => peri_acp_types::permission::PermissionMode::Bypass,
         }
     } else {
-        peri_middlewares::prelude::PermissionMode::Bypass
+        peri_acp_types::permission::PermissionMode::Bypass
     };
-    let shared_permission = peri_middlewares::prelude::SharedPermissionMode::new(permission_mode);
+    let shared_permission = peri_acp_types::permission::SharedPermissionMode::new(permission_mode);
 
-    // cron scheduler（必须提供）
-    let cron_scheduler = {
-        let scheduler =
-            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0);
-        Arc::new(parking_lot::Mutex::new(scheduler))
-    };
+    // thread 存储（经 Resources 门面）——协议面输入，ACP host 的 ephemeral
+    // session 需要；middlewares 具体实现（CronScheduler / McpClientPool / 插件
+    // 数据等）由 ACP Host 装配面内部构造（§0 依赖方向）。
+    let thread_store = peri_resources::Resources::open()
+        .await
+        .map(|resources| resources.thread_store())
+        .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
 
-    // MCP pool（bare 时跳过）
-    let mcp_pool = if bare {
-        None
-    } else {
-        let claude_home = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-        let pool_clone = pool.clone();
-        let cwd_clone = cwd.clone();
-        let (init_tx, _init_rx) =
-            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
-        tokio::spawn(async move {
-            peri_middlewares::mcp::McpClientPool::run_initialize(
-                pool_clone,
-                std::path::Path::new(&cwd_clone),
-                &claude_home,
-                init_tx,
-                None,
-                None,
-            )
-            .await;
-        });
-        Some(pool)
-    };
-
-    // 插件（bare 时跳过）
-    let (plugin_skill_roots, plugin_agent_dirs, hook_groups, plugin_lsp_servers, plugin_loaded) =
-        if bare {
-            (vec![], vec![], vec![], vec![], vec![])
-        } else {
-            let claude_dir = dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude");
-            let plugin_data = peri_middlewares::plugin::load_enabled_plugins_aggregated(
-                &claude_dir,
-                Some(std::path::Path::new(&cwd)),
-            );
-            let mut hg: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
-            if !plugin_data.all_hooks.is_empty() {
-                hg.push(plugin_data.all_hooks.clone());
-            }
-            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
-            if !global_hooks.is_empty() {
-                hg.push(global_hooks);
-            }
-            let project_hooks = peri_middlewares::hooks::loader::load_settings_project_hooks(&cwd);
-            if !project_hooks.is_empty() {
-                hg.push(project_hooks);
-            }
-            let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
-            if !local_hooks.is_empty() {
-                hg.push(local_hooks);
-            }
-            (
-                plugin_data.all_skill_roots,
-                plugin_data.all_agent_dirs,
-                hg,
-                plugin_data.all_lsp_servers,
-                plugin_data.plugins.clone(),
-            )
-        };
-
-    let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
-
-    // Langfuse 上报（与 TUI 模式一致；print 模式为短生命周期进程，
-    // 退出前需显式 flush，见下方 run_session_loop 返回后的冲刷点）
-    let langfuse_session: Option<Arc<peri_acp::langfuse::LangfuseSession>> = {
-        if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
-            tracing::info!("Langfuse tracing enabled (print mode)");
-            peri_acp::langfuse::LangfuseSession::new(config, "live".into())
-                .await
-                .map(Arc::new)
-        } else {
-            None
-        }
-    };
-
-    // broker（自动批准所有）
-    let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(PrintBroker);
-
-    // EventSink 实现（收集事件）
-    let collector = Arc::new(std::sync::Mutex::new(PrintCollector::new(fmt)));
-    let event_sink: Arc<dyn peri_acp::session::event_sink::EventSink> = {
-        let c = collector.clone();
-        Arc::new(PrintEventSink { collector: c })
-    };
-
-    let cancel = peri_agent::agent::AgentCancellationToken::new();
-    let peri_config_arc = Arc::new(peri_config);
-
-    // 创建一次性 AgentPool（print 模式无跨 prompt 复用）
-    let pool = Arc::new(parking_lot::Mutex::new(
-        peri_acp::session::agent_pool::AgentPool::new(),
-    ));
-
-    // 构建 frozen data（-p 模式与正常路径一致，保证 system prompt 稳定性）
-    let frozen_date = Local::now().format("%Y-%m-%d").to_string();
-    let frozen_data = peri_acp::session::executor::FrozenSessionData::build(
-        &cwd,
-        None, // print 模式无语言偏好
-        &plugin_skill_roots,
-        &plugin_agent_dirs,
-        &frozen_date,
-        permission_mode,
-        false, // print 模式无 workflow executor：16_workflow section 不渲染
-    );
-
-    // run_session_loop 是 async 函数（返回 PromptResult）
-    let ctx = peri_acp::session::executor::SessionContext {
-        provider,
-        peri_config: peri_config_arc,
-        cwd,
-        session_id: String::new(), // print 模式不需要
-        cancel,
-        broker,
+    // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
+    let host_config = assemble_server_config(HostAssemblyInput {
+        provider: provider.clone(),
+        peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: shared_permission,
-        plugin_skill_roots,
-        plugin_agent_dirs,
-        plugin_loaded,
-        hook_groups,
-        cron_scheduler: Some(cron_scheduler),
-        mcp_pool,
-        channel_state: None,
-        tool_search_index,
-        shared_tools,
-        lsp_servers: plugin_lsp_servers,
-        pool,
-        thread_store: None,    // print 模式不需要持久化
-        thread_id: None,       // parent_thread_id
-        session_manager: None, // print 模式不需要 cancel 级联
-        workflow_executor: None,
-        workflow_middleware: None,
-        session_start_source: Some("startup".to_string()),
-        request_id: None, // print 模式无 requestId 配对
-        allow_await_wake: false,
-        v2_event_tx: None,
-        continuation_notify: None, // print 模式无 continuation scheduler
-    };
-    let turn = peri_acp::session::executor::TurnInput {
-        event_sink,
-        content: peri_agent::messages::MessageContent::text(prompt_text),
-        continuation: false,
-        frozen: Some(frozen_data),
-        history: vec![],
-        incoming_recalls: vec![],
-        bg_results: vec![], // print 模式无后台任务
-        langfuse_session: langfuse_session.clone(),
-    };
-    let result = peri_acp::session::executor::run_session_loop(ctx, turn).await;
+        thread_store: thread_store.clone(),
+        cwd: cwd.clone(),
+        bare,
+        // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
+        drive_cron_tick: false,
+    })
+    .await;
+    // Langfuse 句柄先行 clone：host_config 将 move 进 host task，
+    // 退出前 flush 仍需引用（短生命周期进程语义，见下方冲刷点）。
+    let langfuse_session = host_config.langfuse_session.clone();
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let host_task = tokio::spawn(async move {
+        peri_acp::host::run_acp_server(Arc::new(server_transport), host_config).await;
+    });
+
+    let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    acp_client.spawn_pump(notification_tx);
+
+    // ── ephemeral session：new → prompt（流式收集事件）→ close ──
+    let session_id = acp_client.new_session(&cwd, None).await?;
+
+    let mut output = PrintOutput::new(fmt);
     {
-        // 收窄锁作用域：collector 仅在 output_final 期间需要，guard 不得跨
-        // 下方 Langfuse flush 的 await 存活（MutexGuard !Send，且会阻塞其他
-        // 需要 collector 的任务）。
-        let c = collector.lock().unwrap();
-        c.output_final(result.ok);
+        // prompt future 借用 acp_client，收敛在块内以便之后 drop(client)
+        let content = MessageContent::text(prompt_text);
+        let prompt_fut = acp_client.prompt(&content, None);
+        tokio::pin!(prompt_fut);
+
+        let mut prompt_returned = false;
+        loop {
+            if !prompt_returned {
+                tokio::select! {
+                    res = &mut prompt_fut => {
+                        res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
+                        prompt_returned = true;
+                    }
+                    notif = notification_rx.recv() => {
+                        if !consume_print_notification(&acp_client, &mut output, notif).await {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // prompt 响应已返回：turn 已结束，drain 尾部事件后退出
+                match notification_rx.recv().await {
+                    Some(notif) => {
+                        if !consume_print_notification(&acp_client, &mut output, Some(notif)).await
+                        {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if prompt_returned && notification_rx.is_empty() {
+                break;
+            }
+        }
     }
 
-    // 短生命周期进程冲刷：run_session_loop 内部的 Langfuse flush 是
-    // fire-and-forget（独立 tokio task），进程退出会将其 abort 导致 trace
-    // 丢失。此处显式 flush —— Batcher::flush 经 mpsc FIFO 保证返回时
-    // 所有已入队事件（含 on_turn_end 同步入队的 agent-run obs）已送达。
-    if let Some(session) = langfuse_session {
+    output.output_final();
+
+    // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
+    let _ = acp_client
+        .send_raw_request("session/close", json!({ "sessionId": session_id }))
+        .await;
+    drop(acp_client); // drop transport → host loop 退出
+
+    // 短生命周期进程冲刷：Langfuse 事件在 host 侧收集，退出前显式 flush
+    // （fire-and-forget 的 flush task 会随进程退出被 abort，导致 trace 丢失）。
+    if let Some(session) = &langfuse_session {
         match session.flush().await {
             Ok(()) => tracing::info!("Langfuse trace flushed before exit (print mode)"),
             Err(e) => tracing::warn!(error = %e, "langfuse: print 模式退出前 flush 失败"),
         }
     }
 
+    let _ = host_task.await;
     Ok(())
 }
 
-/// 自动批准所有的 broker
-struct PrintBroker;
-
-#[async_trait::async_trait]
-impl peri_agent::interaction::UserInteractionBroker for PrintBroker {
-    async fn request(
-        &self,
-        context: peri_agent::interaction::InteractionContext,
-    ) -> peri_agent::interaction::InteractionResponse {
-        match context {
-            peri_agent::interaction::InteractionContext::Approval { items } => {
-                peri_agent::interaction::InteractionResponse::Decisions(
-                    items
-                        .into_iter()
-                        .map(|_| peri_agent::interaction::ApprovalDecision::Approve {
-                            source: None,
-                        })
-                        .collect(),
-                )
-            }
-            peri_agent::interaction::InteractionContext::Questions { requests } => {
-                peri_agent::interaction::InteractionResponse::Answers(
-                    requests
-                        .into_iter()
-                        .map(|q| peri_agent::interaction::QuestionAnswer {
-                            id: q.id,
-                            selected: vec![],
-                            text: Some(String::new()),
-                        })
-                        .collect(),
-                )
+/// 消费一条 ACP 通知：流式输出 / 自动批准 / 忽略。返回 `false` 表示通道关闭。
+async fn consume_print_notification(
+    acp_client: &AcpTuiClient,
+    output: &mut PrintOutput,
+    notif: Option<AcpNotification>,
+) -> bool {
+    let Some(notif) = notif else {
+        return false;
+    };
+    match notif {
+        AcpNotification::SessionUpdate { params, .. } => {
+            if let Some(line) = output.handle_session_update(&params) {
+                println!("{line}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
             }
         }
+        AcpNotification::RequestPermission { id, params } => {
+            auto_approve(acp_client, id, &params).await;
+        }
+        AcpNotification::Elicitation { id, .. } => {
+            let _ = acp_client
+                .send_response(id, Ok(json!({"answers": []})))
+                .await;
+        }
+        _ => {}
+    }
+    true
+}
+
+/// 自动批准所有权限请求（等价迁移前 `PrintBroker` 语义：-p 模式无交互）。
+async fn auto_approve(
+    client: &AcpTuiClient,
+    id: peri_acp::transport::types::RequestId,
+    params: &Value,
+) {
+    let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
+    let tool_name = tool_call
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    tracing::info!(tool = %tool_name, "print mode: auto-approving permission request");
+    let response = json!({
+        "action": "accept",
+        "content": Value::Null,
+    });
+    if let Err(e) = client.send_response(id, Ok(response)).await {
+        tracing::warn!(error = %e, "print mode: auto-approve send_response failed");
     }
 }
 
-/// EventSink 实现：收集事件并输出
-struct PrintEventSink {
-    collector: Arc<std::sync::Mutex<PrintCollector>>,
-}
-
-#[async_trait::async_trait]
-impl peri_acp::session::event_sink::EventSink for PrintEventSink {
-    async fn push_event(
-        &self,
-        _session_id: &str,
-        event: &peri_agent::agent::events::ExecutorEvent,
-        _context_window: u32,
-    ) {
-        let mut c = self.collector.lock().unwrap();
-        let output = c.handle_event(event.clone());
-        if let Some(line) = output {
-            println!("{}", line);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
-    }
-
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
-}
-
-/// 事件收集器
-struct PrintCollector {
+/// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
+/// 迁移前 `PrintCollector`（ExecutorEvent 直连）保持一致。
+struct PrintOutput {
     fmt: OutputFormat,
     text_buffer: String,
 }
 
-impl PrintCollector {
+impl PrintOutput {
     fn new(fmt: OutputFormat) -> Self {
         Self {
             fmt,
@@ -365,54 +282,101 @@ impl PrintCollector {
         }
     }
 
-    fn handle_event(&mut self, event: peri_agent::agent::ExecutorEvent) -> Option<String> {
-        use peri_agent::agent::ExecutorEvent as E;
-
-        match self.fmt {
-            OutputFormat::StreamJson => match event {
-                E::TextChunk { chunk, .. } => Some(
-                    serde_json::to_string(&serde_json::json!({
-                        "type": "text",
-                        "content": chunk
-                    }))
-                    .unwrap(),
-                ),
-                E::ToolStart {
-                    tool_call_id, name, ..
-                } => Some(
-                    serde_json::to_string(&serde_json::json!({
-                        "type": "tool_use",
-                        "id": tool_call_id,
-                        "name": name,
-                        "input": null
-                    }))
-                    .unwrap(),
-                ),
-                E::ToolEnd {
-                    tool_call_id,
-                    output,
-                    ..
-                } => Some(
-                    serde_json::to_string(&serde_json::json!({
-                        "type": "tool_result",
-                        "id": tool_call_id,
-                        "output": output
-                    }))
-                    .unwrap(),
-                ),
-                _ => None,
-            },
-            OutputFormat::Text | OutputFormat::Json => match event {
-                E::TextChunk { chunk, .. } => {
-                    self.text_buffer.push_str(&chunk);
+    /// 处理一条 `session/update` 通知，返回需要立即输出的行（None = 无输出）。
+    ///
+    /// 提取逻辑与 TUI `kit/acp_notifier.rs` 一致（同一协议化事实源）：
+    /// `params.update` 携带 `sessionUpdate` tag；流式 tag 为
+    /// `agent_message_chunk` / `tool_call` / `tool_call_update`。
+    fn handle_session_update(&mut self, params: &Value) -> Option<String> {
+        let update = params.get("update")?;
+        let tag = update.get("sessionUpdate").and_then(|v| v.as_str())?;
+        match tag {
+            "agent_message_chunk" => {
+                let text = update
+                    .get("content")
+                    .and_then(|c| c.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match self.fmt {
+                    OutputFormat::StreamJson => Some(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "text",
+                            "content": text
+                        }))
+                        .unwrap(),
+                    ),
+                    OutputFormat::Text | OutputFormat::Json => {
+                        self.text_buffer.push_str(&text);
+                        None
+                    }
+                }
+            }
+            "tool_call" => {
+                if self.fmt == OutputFormat::StreamJson {
+                    let tool_call_id = update
+                        .get("toolCallId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // ACP SDK ToolCall 使用 "title" 字段，而非 "name"
+                    let name = update
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = update.get("rawInput").cloned().unwrap_or(Value::Null);
+                    Some(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "tool_use",
+                            "id": tool_call_id,
+                            "name": name,
+                            "input": input,
+                        }))
+                        .unwrap(),
+                    )
+                } else {
                     None
                 }
-                _ => None,
-            },
+            }
+            "tool_call_update" => {
+                if self.fmt == OutputFormat::StreamJson {
+                    let tool_call_id = update
+                        .get("toolCallId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let status = update
+                        .get("status")
+                        .or_else(|| update.get("fields").and_then(|f| f.get("status")))
+                        .and_then(|v| v.as_str());
+                    // 仅 completed/failed 视为工具结果；其余状态（in_progress 等）跳过
+                    let _ = status.filter(|s| matches!(*s, "completed" | "failed"))?;
+                    let output = update
+                        .get("rawOutput")
+                        .or_else(|| update.get("fields").and_then(|f| f.get("rawOutput")));
+                    let output = match output {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    Some(
+                        serde_json::to_string(&serde_json::json!({
+                            "type": "tool_result",
+                            "id": tool_call_id,
+                            "output": output,
+                        }))
+                        .unwrap(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
-    fn output_final(&self, _ok: bool) {
+    fn output_final(&self) {
         match self.fmt {
             OutputFormat::Text => {
                 println!("{}", self.text_buffer);

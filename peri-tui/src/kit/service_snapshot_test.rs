@@ -4,8 +4,8 @@
 use super::*;
 use crate::app::service_registry::ProcessResourceMonitor;
 use chrono::Utc;
-use peri_agent::thread::SqliteThreadStore;
 use peri_middlewares::cron::CronScheduler;
+use peri_resources::sessions::SqliteThreadStore;
 use serial_test::serial;
 
 /// 创建一个 SQLite in-memory thread store 用于测试。
@@ -110,7 +110,7 @@ async fn test_cron_tasks_collected() {
 #[tokio::test]
 #[serial]
 async fn test_tick_once_derives_current_session_title() {
-    use peri_agent::thread::ThreadMeta;
+    use peri_acp_types::thread::ThreadMeta;
 
     crate::kit::atoms::init_atoms();
     crate::kit::atoms::ACTIVE_SESSION_ID.set(String::new());
@@ -153,7 +153,7 @@ async fn test_tick_once_derives_current_session_title() {
 #[tokio::test]
 #[serial]
 async fn test_tick_once_missing_thread_keeps_previous_title() {
-    use peri_agent::thread::ThreadMeta;
+    use peri_acp_types::thread::ThreadMeta;
 
     crate::kit::atoms::init_atoms();
 

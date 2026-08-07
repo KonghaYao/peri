@@ -7,8 +7,8 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use peri_agent::agent::events::ExecutorEvent;
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
 
 use crate::session::event_sink::EventSink;
 

@@ -4,7 +4,7 @@
 //! Both TUI (MpscTransport) and stdio transport paths share this handler to avoid
 //! duplicating parameter extraction and session-lookup logic.
 
-use peri_agent::messages::MessageContent;
+use peri_acp_types::messages::MessageContent;
 use serde_json::Value;
 
 use crate::transport::types::AcpError;

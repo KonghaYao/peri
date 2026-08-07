@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use peri_lsp::config::LspServerConfig;
+use peri_resources::lsp::config::LspServerConfig;
 
 use super::*;
 

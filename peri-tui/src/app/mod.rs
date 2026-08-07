@@ -74,25 +74,18 @@ impl App {
             None => lc.tr("app-not-configured"),
         };
 
-        // 初始化 thread 存储（失败时 fallback 到临时目录）
-        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> =
-            match crate::thread::SqliteThreadStore::default_path().await {
-                Ok(store) => std::sync::Arc::new(store),
-                Err(_) => std::sync::Arc::new(
-                    crate::thread::SqliteThreadStore::new(
-                        std::env::temp_dir().join("zen-threads.db"),
-                    )
-                    .await
-                    .expect("无法创建临时 SQLite 数据库"),
-                ),
-            };
+        // 初始化 thread 存储（经 Resources 门面；失败时 fallback 到临时目录的逻辑在门面内）
+        let resources = peri_resources::Resources::open()
+            .await
+            .expect("无法初始化 Resources 层");
+        let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> = resources.thread_store();
 
         // 初始化 cron state + spawn tick task
         let (cron_state, scheduler_arc) = CronState::new();
         CronState::spawn_tick_task(scheduler_arc);
 
-        let permission_mode = peri_middlewares::prelude::SharedPermissionMode::new(
-            peri_middlewares::prelude::PermissionMode::Bypass,
+        let permission_mode = peri_acp_types::permission::SharedPermissionMode::new(
+            peri_acp_types::permission::PermissionMode::Bypass,
         );
         let services = ServiceRegistry {
             peri_config: std::sync::Arc::new(parking_lot::RwLock::new(
@@ -121,12 +114,13 @@ impl App {
 
     /// 后台初始化 MCP 连接池（不阻塞 UI），在 run_app 中 App::new() 之后调用
     pub fn spawn_mcp_init(&mut self) {
-        use peri_middlewares::mcp::{McpClientPool, McpInitStatus};
-
-        let pool = std::sync::Arc::new(McpClientPool::new_pending());
+        // MCP 资源句柄直读（C 类豁免至 M-TUI；「面板数据全部经 ACP」需
+        // mcp/list 命令面，见批 3 tui-deps 未做项）
+        let pool = std::sync::Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
         self.services.mcp_pool = Some(pool.clone());
 
-        let (init_tx, init_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
+        let (init_tx, init_rx) =
+            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
         self.services.mcp_init_rx = Some(init_rx);
 
         let cwd = self.services.cwd.clone();
@@ -135,7 +129,7 @@ impl App {
             .join(".claude");
 
         tokio::spawn(async move {
-            McpClientPool::run_initialize(
+            peri_middlewares::mcp::McpClientPool::run_initialize(
                 pool,
                 std::path::Path::new(&cwd),
                 &claude_home,
@@ -170,7 +164,7 @@ impl App {
         }
     }
 
-    pub fn get_compact_config(&self) -> peri_agent::agent::CompactConfig {
+    pub fn get_compact_config(&self) -> peri_acp_types::compact::CompactConfig {
         let mut config = self
             .services
             .peri_config

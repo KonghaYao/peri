@@ -58,7 +58,9 @@ const VALUE_ALIGN_COL: usize = 40;
 #[component]
 pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
-    let cursor = hooks.use_state(|| 0usize); // 左侧 profile 光标
+    // 左侧 profile 无独立光标：键盘导航基于 active_alias（SERVICE_SNAPSHOT 的事实源）
+    // 移动，与渲染高亮（active_idx）天然一致——此前 cursor 固定从 0（fable）初始化，
+    // active ≠ fable 时按 ↓ 会从当前档位跳到错误的下一档。
     let right_cursor = hooks.use_state(|| 0usize); // 右侧字段光标
     let right_focus = hooks.use_state(|| false); // 是否在右侧编辑焦点
     // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
@@ -114,7 +116,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 },
                             )
                         {
-                            *cursor.write() = idx;
                             switch_active_alias(idx);
                             return EventResult::Consumed;
                         }
@@ -146,9 +147,12 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let mut c = right_cursor.write();
                             *c = previous_selection(*c);
                         } else {
-                            let mut c = cursor.write();
-                            *c = previous_selection(*c);
-                            switch_active_alias(*c);
+                            // 从当前 active 档位出发上移（与渲染高亮一致）
+                            let idx = PROFILE_KEYS
+                                .iter()
+                                .position(|k| *k == handler_alias)
+                                .unwrap_or(1);
+                            switch_active_alias(previous_selection(idx));
                         }
                     }
                     KeyCode::Down => {
@@ -156,9 +160,12 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let mut c = right_cursor.write();
                             *c = next_selection(*c, FIELD_COUNT);
                         } else {
-                            let mut c = cursor.write();
-                            *c = next_selection(*c, PROFILE_KEYS.len());
-                            switch_active_alias(*c);
+                            // 从当前 active 档位出发下移（与渲染高亮一致）
+                            let idx = PROFILE_KEYS
+                                .iter()
+                                .position(|k| *k == handler_alias)
+                                .unwrap_or(1);
+                            switch_active_alias(next_selection(idx, PROFILE_KEYS.len()));
                         }
                     }
                     KeyCode::Tab => {
@@ -480,11 +487,22 @@ fn edit_field(alias: String, field: usize, forward: bool) {
         .get(&alias)
         .map(|p| p.provider.clone())
         .unwrap_or_default();
+    // 当前显示的模型名：profile.model 未手动设置时回退到 provider 同档位映射，
+    // 否则 FIELD_MODEL 定位 idx 落空（unwrap_or(0)）导致首次 → 恰好选中 fallback
+    // 显示值、视觉上"切换未生效"。
     let current_model = cfg
         .config
         .profiles
         .get(&alias)
         .and_then(|p| p.model.clone())
+        .or_else(|| {
+            cfg.config
+                .providers
+                .iter()
+                .find(|p| p.id == profile_provider)
+                .and_then(|p| p.models.get_model(&alias))
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let current_effort = cfg
         .config

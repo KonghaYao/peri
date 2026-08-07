@@ -95,7 +95,7 @@ fn test_projection_directive_serde_roundtrip() {
 
 #[test]
 fn test_legacy_message_flags_deserialize_without_directive() {
-    use crate::session::transcript::MessageFlags;
+    use peri_acp_types::store::MessageFlags;
 
     let legacy_json = r#"{"truncated":true,"excluded":false}"#;
     let flags: MessageFlags = serde_json::from_str(legacy_json).expect("旧 JSON 反序列化失败");
@@ -109,7 +109,7 @@ fn test_legacy_message_flags_deserialize_without_directive() {
 
 #[test]
 fn test_legacy_v1_compact_tool_input_deserializes_but_is_rejected_by_policy_version() {
-    use crate::session::transcript::MessageFlags;
+    use peri_acp_types::store::MessageFlags;
 
     let mut transcript = MessageTranscript::new();
     let message = BaseMessage::human("legacy compacted content");
@@ -151,7 +151,7 @@ fn test_legacy_v1_compact_tool_input_deserializes_but_is_rejected_by_policy_vers
 
 #[test]
 fn test_message_flags_with_projection_serde_roundtrip() {
-    use crate::session::transcript::MessageFlags;
+    use peri_acp_types::store::MessageFlags;
 
     let msg_id = MessageId::new();
     let flags = MessageFlags {

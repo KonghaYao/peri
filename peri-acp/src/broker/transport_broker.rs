@@ -11,7 +11,7 @@ use agent_client_protocol_schema::v1::{
     EnumOption, MultiSelectPropertySchema, StringPropertySchema,
 };
 use async_trait::async_trait;
-use peri_agent::interaction::{
+use peri_acp_types::interaction::{
     ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, QuestionAnswer,
     QuestionItem, UserInteractionBroker,
 };

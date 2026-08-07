@@ -7,8 +7,10 @@
 //!
 //! 注意：Bypass 模式下首轮 user 消息末尾会被追加 `<system-reminder>` 权限通知，
 //! 不能直接 `contains` 过滤，否则会连带排除用户真实输入（rewind 候选为空）。
+//! preview 生成时经 `strip_system_reminders` 剔除注入块，只保留用户真实文本
+//! （TUI 回填/弹窗展示的都是干净的用户输入）。
 
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::messages::{strip_system_reminders, BaseMessage};
 use serde_json::{json, Value};
 
 use crate::transport::types::AcpError;
@@ -27,11 +29,18 @@ pub fn rewind_candidates(session_history: &[BaseMessage]) -> Result<Value, AcpEr
         .rev() // P1：最新在前——弹窗第一条 = 最近一次 user 消息 = 回退一步
         .filter(|m| matches!(m, BaseMessage::Human { .. }))
         .filter(|m| !looks_like_pure_system_reminder(&m.content()))
-        .map(|m| {
-            json!({
+        .filter_map(|m| {
+            // 剥离 system-reminder 注入块：Bypass 权限通知/recall 等不应进入
+            // 候选预览与输入框回填。剥离后为空（纯注入）的消息不进候选。
+            let preview = strip_system_reminders(&m.content());
+            let preview = preview.trim();
+            if preview.is_empty() {
+                return None;
+            }
+            Some(json!({
                 "id": m.id().as_uuid().to_string(),
-                "preview": m.content().chars().take(200).collect::<String>(),
-            })
+                "preview": preview.chars().take(200).collect::<String>(),
+            }))
         })
         .collect();
 

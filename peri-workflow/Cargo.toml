@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-peri-agent = { path = "../peri-agent" }
+peri-acp-types = { path = "../peri-acp-types" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

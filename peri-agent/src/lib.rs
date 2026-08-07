@@ -24,12 +24,12 @@ pub mod agent;
 pub mod error;
 pub mod error_suggest;
 pub mod goal;
-pub mod group;
 pub mod hitl;
 pub mod interaction;
 pub mod messages;
 pub mod metrics;
 pub mod middleware;
+pub mod resources;
 pub mod session;
 pub mod telemetry;
 pub mod thread;
@@ -50,7 +50,6 @@ pub mod prelude {
             AgentCancellationToken,
         },
         error::{AgentError, AgentResult},
-        group::AgentGroup,
         hitl::{BatchItem, HitlDecision},
         messages::{
             BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,

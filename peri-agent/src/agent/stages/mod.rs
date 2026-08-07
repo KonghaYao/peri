@@ -15,10 +15,11 @@ pub mod speculation_guard;
 pub mod tool_dispatch;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
 
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::events::{Stage, StageStatus};
@@ -26,7 +27,6 @@ use crate::agent::events_v2::{EventBus, ObserveEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
 use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
-use crate::group::pipeline::AgentId;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::turn::TurnContext;
@@ -99,6 +99,13 @@ pub struct CompactContext {
 pub struct AsyncContext {
     pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
     pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// 会话级 idle-suspended 标志（宿主 SessionAccessPort 注入的共享 Arc）。
+    ///
+    /// run_react_loop 在 await_wake 挂起期间置 true、醒来/取消时复位。
+    /// 宿主 `dispatch_prompt_turn` 读取此标志把挂起期间到达的用户 prompt
+    /// 注入 inbox（Prompt + wake），让挂起的 loop 立即醒来消费，而不是在
+    /// per-session prompt lock 上阻塞至当前 turn 完成。
+    pub idle_suspended_flag: Option<Arc<AtomicBool>>,
 }
 
 // ─── 阶段间共享上下文 ───────────────────────────────────────────────────────
@@ -179,6 +186,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                idle_suspended_flag: None,
             },
             recall_buffer: rbuf,
             ask_discipline: true,
@@ -224,6 +232,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 idle_inbox: None,
                 idle_should_wait: None,
+                idle_suspended_flag: None,
             },
             ask_discipline: true,
         }
@@ -391,6 +400,13 @@ impl StageContextBuilder {
     /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
     pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.async_ctx.idle_should_wait = Some(probe);
+        self
+    }
+
+    /// 设置会话级 idle-suspended 标志（await_wake 挂起期间置 true；宿主
+    /// `dispatch_prompt_turn` 据此把挂起期间到达的用户 prompt 注入 inbox）。
+    pub fn with_idle_suspended_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.async_ctx.idle_suspended_flag = Some(flag);
         self
     }
 
@@ -645,6 +661,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             if should_wait {
                 if let Some(inbox) = &context.async_ctx.idle_inbox {
                     tracing::debug!("Receive: queue empty, awaiting wake (idle_should_wait=true)");
+                    // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
+                    // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
+                    // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
+                    if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                        flag.store(true, Ordering::Release);
+                    }
                     context.runtime.event_bus.emit_state(
                         crate::agent::events_v2::StateEvent::TurnSuspended {
                             turn_id: context.turn_id(),
@@ -655,6 +677,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     tokio::pin!(cancel_fut);
                     tokio::select! {
                         _ = inbox.await_wake() => {
+                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
                             if context.session.turn.is_cancelled() {
                                 return LoopResult::Interrupted;
                             }
@@ -667,7 +694,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
                             continue;
                         }
-                        _ = &mut cancel_fut => return LoopResult::Interrupted,
+                        _ = &mut cancel_fut => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
+                            return LoopResult::Interrupted;
+                        }
                     }
                 }
             }

@@ -42,6 +42,13 @@ jobs:
               with:
                   key: ${{ matrix.target }}
 
+            # §0 依赖方向 CI 门（Seam 3 完整版，PRD 决策 2）：八条边（TUI / ACP
+            # 业务面 / ACP→model / Controller / Runtime / Resources / Middlewares /
+            # Agent）× use 导入 + 全路径引用双模式全校验；豁免清单唯一事实源 =
+            # scripts/import-exemptions.conf。
+            - name: Check §0 layer imports
+              run: bash scripts/check-layer-imports.sh
+
             - name: Build
               run: cargo build --workspace --all-targets
 

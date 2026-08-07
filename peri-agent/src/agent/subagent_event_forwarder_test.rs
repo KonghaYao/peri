@@ -4,9 +4,9 @@ use super::*;
 
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{EventBus, EventBusConfig, ObserveEvent, RenderEvent, StateEvent};
-use crate::group::pipeline::AgentId;
 use crate::session::turn::TurnId;
 use parking_lot::Mutex;
+use peri_acp_types::identity::AgentId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// 记录所有 ExecutorEvent 的 mock handler
@@ -344,6 +344,10 @@ async fn test_forwarder_filters_turn_committed() {
         budget_pct: None,
         context_total_tokens: None,
     });
+
+    // 发送 TurnSuspended → 应被过滤（子 Agent 挂起信号不得让父 TUI 停止 loading）
+    let (turn_id, agent_id) = ids();
+    bus.emit_state(StateEvent::TurnSuspended { turn_id, agent_id });
 
     // 发送 TextChunk → 应正常转发
     let (turn_id, agent_id) = ids();

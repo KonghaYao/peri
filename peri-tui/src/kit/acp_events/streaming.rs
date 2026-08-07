@@ -4,13 +4,14 @@ use super::*;
 use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
 
 pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
-    if let Some(agent_id) = tc.agent_id.as_deref() {
-        if !state.current_turn.append_subagent_text(agent_id, &tc.text) {
-            tracing::trace!(
-                agent_id,
-                "kit bridge: subagent text chunk has no active group"
-            );
-        }
+    // 先尝试 SubAgent 组路由；带 agent_id 但无匹配组 = 主 agent 文本
+    // （v2 事件身份透传后主 agent chunk 亦携带 agent_id，`append_subagent_text`
+    // 找不到组即回退主 agent 分支，不能静默丢弃——否则主 agent 回复不显示）。
+    let routed_to_subagent = tc
+        .agent_id
+        .as_deref()
+        .is_some_and(|agent_id| state.current_turn.append_subagent_text(agent_id, &tc.text));
+    if routed_to_subagent {
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         // SubAgent 文本：Streaming/Block→always push, None→skip
@@ -47,16 +48,14 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
 }
 
 pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningChunk) {
-    if let Some(agent_id) = rc.agent_id.as_deref() {
-        if !state
+    // 同 handle_text_chunk：subagent 路由失败时回退主 agent 推理分支
+    // （主 agent thinking chunk 亦携带 agent_id，不能静默丢弃）。
+    let routed_to_subagent = rc.agent_id.as_deref().is_some_and(|agent_id| {
+        state
             .current_turn
             .append_subagent_reasoning(agent_id, &rc.text)
-        {
-            tracing::trace!(
-                agent_id,
-                "kit bridge: subagent reasoning chunk has no active group"
-            );
-        }
+    });
+    if routed_to_subagent {
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         // SubAgent 推理：Streaming/Block→always push, None→skip

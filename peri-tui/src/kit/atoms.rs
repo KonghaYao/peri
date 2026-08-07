@@ -337,7 +337,7 @@ pub static TUI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,
 > = OnceLock::new();
 pub static PERMISSION_MODE_HANDLE: OnceLock<
-    std::sync::Arc<peri_middlewares::prelude::SharedPermissionMode>,
+    std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
 > = OnceLock::new();
 pub static CRON_SCHEDULER_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
@@ -346,11 +346,6 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
 /// 在 entry.rs 中 acp_client 就绪后 set。
 pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
     OnceLock::new();
-/// v2 事件直连发送通道——替代 peri_acp::event::v2_channel 全局 OnceLock。
-/// TUI entry.rs 在启动时 set，acp_server/prompt.rs 在构建 SessionContext 时读取。
-pub static V2_EVENT_TX: OnceLock<
-    tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events_v2_mapper::V2Event>,
-> = OnceLock::new();
 /// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
 pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);

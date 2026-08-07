@@ -1,3 +1,5 @@
+use peri_acp_types::goal::ThreadGoal;
+
 use super::*;
 
 #[tokio::test]

@@ -3,7 +3,6 @@
 //! planner 只能读取 MessageTranscript 和 CompactConfig，绝对不能调用
 //! set_truncated、set_excluded、send_persist、invalidate_context_cache 或 provider。
 
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::messages::{BaseMessage, MessageId};
@@ -47,15 +46,8 @@ impl ContextPressure {
 }
 
 /// 需要升级到 Full Compact 的原因
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FullEscalationReason {
-    /// Micro 回收不足
-    InsufficientReclaim,
-    /// 达到强制 Full 阈值
-    ForceThresholdExceeded,
-    /// 手动触发
-    ManualForce,
-}
+/// 升级到 Full Compact 的原因（事实源 peri-acp-types::compact）
+pub use peri_acp_types::compact::FullEscalationReason;
 
 /// Compact 策略配置
 #[derive(Debug, Clone)]

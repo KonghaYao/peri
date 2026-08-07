@@ -388,6 +388,13 @@ impl Default for ToolSearchIndex {
     }
 }
 
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn ToolSearchPort>`）。
+impl peri_acp_types::ports::ToolSearchPort for ToolSearchIndex {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[cfg(test)]
 #[path = "tool_index_test.rs"]
 mod tests;

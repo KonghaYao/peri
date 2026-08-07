@@ -2,9 +2,18 @@
 name = "peri-acp-types"
 version.workspace = true
 edition.workspace = true
-description = "Pure DTO crate for TUI <-> ACP contract. Depends only on serde."
+description = "Type contract layer across layers. Data contracts plus layer-boundary event/session/runtime contracts (tokio-backed channel types)."
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+peri-model = { path = "../peri-model" }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }

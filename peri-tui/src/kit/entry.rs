@@ -310,17 +310,6 @@ pub async fn run_kit_fullscreen(
             }
         });
 
-        // 4c2. v2 事件直连通道（Phase A：双轨运行，与 ACP 路径并存）
-        let (v2_event_tx, v2_event_rx) = mpsc::unbounded_channel();
-        atoms::V2_EVENT_TX
-            .set(v2_event_tx)
-            .expect("V2_EVENT_TX 已注册（只能设置一次）");
-        let _v2_bridge_handle = crate::kit::v2_bridge::spawn_v2_bridge(
-            v2_event_rx,
-            bridge_tx.clone(),
-            shutdown.clone(),
-        );
-
         // 4d. 启动三链路（render_bridge 已删除）
         let _notifier_handle = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
         let _bridge_handle = spawn_acp_bridge(bridge_rx, shutdown.clone());

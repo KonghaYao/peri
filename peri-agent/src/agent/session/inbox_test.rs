@@ -1,7 +1,9 @@
 //! 从 inbox.rs 分离的测试模块
 
 use super::*;
-use crate::messages::MessageContent;
+use crate::messages::{BaseMessage, MessageContent};
+use crate::session::{MessageQueue, MessageSource, QueuedMessage};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn make_msg(text: &str) -> BaseMessage {

@@ -8,52 +8,6 @@ use super::{ReasonInput, ReasonOutput};
 use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
 use crate::agent::react::{Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::MessageId;
-
-/// SSE 流式事件 → EventBus 桥接器。
-///
-/// LLM 适配器在 SSE 解析过程中通过 AgentEventHandler 发射 ExecutorEvent，
-/// 此桥接器将其映射为 RenderEvent/ObserveEvent 并通过 EventBus 推送到 TUI。
-struct StreamingEventBridge {
-    event_bus: std::sync::Arc<crate::agent::events_v2::EventBus>,
-    turn_id: crate::session::turn::TurnId,
-    agent_id: crate::group::pipeline::AgentId,
-}
-
-impl crate::agent::events::AgentEventHandler for StreamingEventBridge {
-    fn on_event(&self, event: crate::agent::events::ExecutorEvent) {
-        match event {
-            crate::agent::events::ExecutorEvent::TextChunk { chunk, .. } => {
-                self.event_bus
-                    .emit_render(crate::agent::events_v2::RenderEvent::TextChunk {
-                        turn_id: self.turn_id,
-                        agent_id: self.agent_id,
-                        chunk,
-                    });
-            }
-            crate::agent::events::ExecutorEvent::AiReasoning {
-                text,
-                source_agent_id,
-            } => {
-                self.event_bus
-                    .emit_render(crate::agent::events_v2::RenderEvent::ThinkingChunk {
-                        turn_id: self.turn_id,
-                        agent_id: self.agent_id,
-                        chunk: text.clone(),
-                    });
-                self.event_bus.emit_observe(
-                    crate::agent::events_v2::ObserveEvent::AiReasoningChunk {
-                        turn_id: self.turn_id,
-                        agent_id: self.agent_id,
-                        text,
-                        source_agent_id,
-                    },
-                );
-            }
-            _ => {}
-        }
-    }
-}
 
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let ctx = &input.context;
@@ -207,20 +161,15 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             tools: start_tools,
         });
 
-    // 构造 StreamingContext（桥接 v1 ExecutorEvent → v2 RenderEvent）
-    // LLM 适配器在 SSE 解析过程中通过 event_handler 发射 ExecutorEvent，
-    // 此 handler 将其映射为 RenderEvent 并通过 EventBus::emit_render 推送到 TUI。
-    let message_id = MessageId::new();
+    // 构造 StreamingContext：LLM 适配器（AgentModelBridge）在流式解析过程中
+    // 直接 emit v2 RenderEvent/ObserveEvent（v1 ExecutorEvent 流式中间态已退役，
+    // v1 兼容映射仅保留在 ACP 协议序列化面）。身份（turn_id/agent_id）随上下文注入。
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
-    let bridge = std::sync::Arc::new(StreamingEventBridge {
+    let streaming = Some(StreamingContext {
         event_bus: std::sync::Arc::clone(&ctx.runtime.event_bus),
         turn_id,
         agent_id,
-    });
-    let streaming = Some(StreamingContext {
-        event_handler: bridge,
-        message_id,
         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
     });
 

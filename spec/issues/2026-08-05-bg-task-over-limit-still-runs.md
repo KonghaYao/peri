@@ -1,6 +1,6 @@
 # bg 任务"检查-注册"竞态：超限任务报错但仍实际运行（幽灵任务）
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **创建日期**：2026-08-05
 **关联计划**：`2026-08-05-core-flow-bugfix-plan.md` S3.1
@@ -58,5 +58,5 @@
 - `BgCancelHandle::Abort` 由 `AbortHandle` 改为 `JoinHandle<()>`（支撑 S3.2 超时等待语义）
 - 覆盖测试：`test_bg_register_failure_does_not_execute_task`（multi_thread + barrier 确定性制造注册竞态：4 并发 invoke 1 成功 3 失败；断言失败任务零 LLM 调用、零事件、零 register_runtime 注册、registry 无幽灵条目）
 
-**验证状态**：待验证（`cargo test -p peri-middlewares --lib` 全绿 1099 通过；`cargo clippy -p peri-middlewares --lib -- -D warnings` 无警告）
+**验证状态**：已验证（L1 复验 2026-08-05：`cargo test -p peri-middlewares --lib subagent` 135 通过，含 test_bg_register_failure_does_not_execute_task 与 test_p0_2_background_defined_skill_preload_once_after_parent_cancel；注册失败零事件零注册语义保持）
 

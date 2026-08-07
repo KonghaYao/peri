@@ -19,9 +19,12 @@
 
 pub mod agent_define;
 pub mod agents_md;
+pub mod assembly;
 pub mod claude_agent_parser;
 pub mod goal;
 pub mod goal_middleware;
+/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
+pub mod host_ports;
 pub mod subagent;
 pub use claude_agent_parser::{
     format_agent_id, parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue,
@@ -36,7 +39,6 @@ pub mod lsp;
 pub mod mcp;
 pub mod middleware;
 pub mod plugin;
-pub mod process;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,
@@ -72,9 +74,7 @@ pub use skills::{
 };
 pub use subagent::{
     infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
-    AgentCapability, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
-    BgRegistryEvent, BgTaskInfo, BgTaskKind, SkillPreloadMiddleware, SubAgentMiddleware,
-    SubAgentTool,
+    AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
 };
 pub use tool_search::{
     resolve_effective_tool_name, ExecuteExtraToolResolver, ToolSearchMiddleware,

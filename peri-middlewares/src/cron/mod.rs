@@ -39,11 +39,8 @@ pub struct CronTask {
 }
 
 /// 触发事件（由 CronScheduler 发送到 App）
-#[derive(Debug, Clone)]
-pub struct CronTrigger {
-    pub task_id: String,
-    pub prompt: String,
-}
+// 3.0 批 2 波 1：协议类型归契约层（`peri_acp_types::cron::CronTrigger`）。
+pub use peri_acp_types::cron::CronTrigger;
 
 /// 定时任务调度器（纯内存）
 pub struct CronScheduler {
@@ -189,6 +186,48 @@ impl CronScheduler {
     fn calculate_next_fire(expression: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let cron = croner::Cron::from_str(expression).ok()?;
         cron.iter_after(after).next()
+    }
+}
+
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn CronSchedulerPort>`）。
+//
+// 端口实现目标为本地 wrapper（`CronSchedulerPortHandle`），避免对外部
+// `Mutex<CronScheduler>` 实现 trait 触发 orphan rule；宿主装配点构造
+// `Arc::new(CronSchedulerPortHandle(Arc::new(Mutex::new(CronScheduler::new(tx)))))`
+// 后 upcast 注入。装配面宿主（`host/workflow_agent.rs` / `host/stage_builder.rs`）
+// 经 `downcast_arc` 还原取 `.0`。
+pub struct CronSchedulerPortHandle(pub std::sync::Arc<parking_lot::Mutex<CronScheduler>>);
+
+impl peri_acp_types::cron::CronSchedulerPort for CronSchedulerPortHandle {
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<CronTrigger> {
+        self.0.lock().subscribe()
+    }
+
+    fn list_tasks(&self) -> Vec<peri_acp_types::cron::CronTaskInfo> {
+        self.0
+            .lock()
+            .list_tasks()
+            .into_iter()
+            .map(|t| peri_acp_types::cron::CronTaskInfo {
+                id: t.id.clone(),
+                expression: t.expression.clone(),
+                prompt: t.prompt.clone(),
+                next_fire: t.next_fire,
+                enabled: t.enabled,
+            })
+            .collect()
+    }
+
+    fn toggle(&self, id: &str) -> bool {
+        self.0.lock().toggle(id)
+    }
+
+    fn remove(&self, id: &str) -> bool {
+        self.0.lock().remove(id)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

@@ -21,6 +21,15 @@ pre-commit:
     typos:
       run: typos
 
+    # §0 依赖方向 CI 门（Seam 3 完整版，PRD 决策 2）：八条边（TUI / ACP 业务面 /
+    # ACP→model / Controller / Runtime / Resources / Middlewares / Agent）×
+    # use 导入 + 全路径引用双模式全校验；豁免清单唯一事实源 =
+    # scripts/import-exemptions.conf（每条豁免标注归属收紧任务）。
+    # 取代 check-resources-imports.sh / check-acp-imports.sh / check-tui-imports.sh。
+    # 无 glob——无论改哪个文件都校验（依赖方向与单文件改动无必然关联）。
+    layer-imports:
+      run: bash scripts/check-layer-imports.sh
+
     # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
     # 显式验证用: cargo test --workspace --doc
 

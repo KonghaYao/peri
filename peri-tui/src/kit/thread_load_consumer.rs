@@ -11,8 +11,8 @@
 //!
 //! ## 加载成功后 UI 怎么刷新？
 //!
-//! ACP server 端 `session/load` 会通过 `peri/unstable-event` 推送 ViewCommit
-//! 通知（见 acp_server/requests.rs:241-260），由 kit_notifier → acp_bridge
+//! ACP host 端 `session/load` 会通过 `peri/unstable-event` 推送 ViewCommit
+//! 通知（见 peri-acp/src/host/requests.rs:241-260），由 kit_notifier → acp_bridge
 //! 转化为 `AcpEventData::ViewCommit`，自动覆写 `VIEW_MODELS` atom——面板会
 //! 自然关闭（Enter 后由 panel_overlay 处理），消息流自动刷新。
 

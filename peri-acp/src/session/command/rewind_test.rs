@@ -12,8 +12,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::{
-    agent::events::ExecutorEvent,
+use peri_acp_types::{
+    event::ExecutorEvent,
     messages::{BaseMessage, ContentBlock, ToolCallRequest},
 };
 
@@ -122,19 +122,20 @@ fn make_ctx(
         session_id: "test-session".to_string(),
         history,
         cwd,
-        peri_config: Arc::new(Default::default()),
+        compact_config: Default::default(),
         auxiliary_model: None,
         event_sink: sink,
         args,
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
         bg_event_sender: None,
-        bg_registry: None,
+        task_manager: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
+        bg_spawner: None,
     }
 }
 

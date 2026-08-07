@@ -6,74 +6,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// MCP 服务器配置来源
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigSource {
-    /// 项目级配置（{cwd}/.mcp.json）
-    Project(PathBuf),
-    /// 全局配置（~/.peri/settings.json）
-    Global(PathBuf),
-    /// 插件配置
-    Plugin,
-}
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
+// `ConfigSource` / `McpServerConfig` / `OAuthConfig` 自本文件迁出；
+// 本模块保留 re-export 保兼容。
+pub use peri_acp_types::plugin::{ConfigSource, McpServerConfig, OAuthConfig};
 
-/// 单个 MCP 服务器配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    /// stdio 传输的可执行命令（如 "npx"）
-    pub command: Option<String>,
-    /// stdio 传输的命令参数
-    #[serde(default)]
-    pub args: Option<Vec<String>>,
-    /// 传递给子进程的环境变量
-    #[serde(default)]
-    pub env: Option<HashMap<String, String>>,
-    /// Streamable HTTP 传输的 URL
-    pub url: Option<String>,
-    /// HTTP 请求的自定义头
-    #[serde(default)]
-    pub headers: Option<HashMap<String, String>>,
-    /// OAuth 2.0 配置
-    #[serde(default)]
-    pub oauth: Option<OAuthConfig>,
-    /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub disabled: Option<bool>,
-    /// 配置来源（运行时标记，不序列化）
-    #[serde(skip)]
-    pub source: Option<ConfigSource>,
-}
-
-fn is_false(v: &Option<bool>) -> bool {
-    !v.unwrap_or(false)
-}
-
-/// MCP 服务器 OAuth 2.0 配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct OAuthConfig {
-    /// 是否启用 OAuth（默认 true）
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    /// OAuth 客户端 ID
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// OAuth 客户端密钥（支持 ${VAR} 环境变量展开）
-    #[serde(default)]
-    pub client_secret: Option<String>,
-    /// OAuth 权限范围列表
-    #[serde(default)]
-    pub scopes: Option<Vec<String>>,
-}
-
-impl OAuthConfig {
-    /// 判断 OAuth 是否启用，默认 true
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.unwrap_or(true)
-    }
-}
-
-/// MCP 配置文件顶层结构（.mcp.json / settings.json 中的 mcpServers 片段）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpConfigFile {

@@ -1,5 +1,5 @@
 use super::*;
-use peri_agent::goal::InMemoryGoalStore;
+use peri_acp_types::goal::InMemoryGoalStore;
 use std::sync::Arc;
 
 fn make_state() -> GoalState {
@@ -51,7 +51,7 @@ async fn test_set_goal_覆盖旧_goal_生成新_goal_id() {
 #[tokio::test]
 async fn test_store_写入失败_内存镜像仍可读() {
     use async_trait::async_trait;
-    use peri_agent::goal::{GoalStore, GoalStoreError, ThreadGoal};
+    use peri_acp_types::goal::{GoalStore, GoalStoreError, ThreadGoal};
 
     struct FailingStore;
     #[async_trait]
@@ -255,7 +255,7 @@ async fn test_usage_pct_基于_flushed_值() {
 
 // ---- GoalController trait 实现测试 ----
 
-use peri_agent::goal::{GoalController, GoalStore};
+use peri_acp_types::goal::{GoalController, GoalStore};
 
 #[tokio::test]
 async fn test_goal_controller_create_duplicate_errors() {

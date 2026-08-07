@@ -14,67 +14,19 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::tasks::TaskManager;
 use peri_agent::{
-    agent::events::BackgroundTaskResult,
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
-use peri_workflow::{
+use peri_resources::workflow::{
     journal::WorkflowJournalStore,
     progress::WorkflowProgressStore,
     registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult},
     runner::{AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner},
     tool::WorkflowTool,
 };
-
-use crate::subagent::{
-    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
-};
-
-/// 将 BackgroundTaskRegistry 适配为 peri-workflow 的 BgTaskRegistry trait
-impl peri_workflow::tool::BgTaskRegistry for BackgroundTaskRegistry {
-    fn register_workflow(
-        &self,
-        task_id: String,
-        summary: String,
-        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
-    ) {
-        let bg_task = BackgroundTask {
-            id: task_id,
-            agent_name: "workflow".to_string(),
-            prompt_summary: summary,
-            status: BackgroundTaskStatus::Running,
-            started_at: std::time::Instant::now(),
-            chrono_started_at: chrono::Utc::now(),
-            kind: BgTaskKind::Workflow,
-            // kill 闭包由 WorkflowTool::invoke 构造（转发到 WorkflowTaskRegistry::kill），
-            // 使 session/cancel-bg-task 真正终止 workflow runner（issue 2026-08-05）
-            cancel_handle: BgCancelHandle::Kill(kill),
-            cancel_token: None,
-            pid: None,
-            output_preview: None,
-        };
-        if let Err(e) = self.register_with_kind(bg_task) {
-            tracing::warn!(error = %e, "workflow bg registry: register_with_kind failed");
-        }
-    }
-
-    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64) {
-        let result = BackgroundTaskResult {
-            task_id: task_id.to_string(),
-            agent_name: "workflow".to_string(),
-            prompt_summary: String::new(),
-            success,
-            output: output.chars().take(500).collect(),
-            tool_calls_count: 0,
-            duration_ms,
-            child_thread_id: None,
-            timed_out: false,
-        };
-        self.complete(task_id, result);
-    }
-}
 
 /// Workflow 中间件持有者——session 级共享状态，跨 turn 存活。
 ///
@@ -90,8 +42,8 @@ pub struct WorkflowMiddleware {
     /// 原 notification_buffer_rx 通道已迁移到 MessageQueue 模式，
     /// 保留此 gate 用于 session 级 consumer 去重。
     notification_consumer_spawned: AtomicBool,
-    /// 统一后台任务注册表（可选，创建后可通过 set_bg_registry 延迟注入）
-    bg_registry: parking_lot::RwLock<Option<Arc<BackgroundTaskRegistry>>>,
+    /// 统一后台任务管理器（Agent 层 per-session TaskManager；可选，创建后可通过 set_bg_registry 延迟注入）
+    bg_registry: parking_lot::RwLock<Option<Arc<dyn TaskManager>>>,
 }
 
 impl WorkflowMiddleware {
@@ -104,10 +56,10 @@ impl WorkflowMiddleware {
         agent_executor: Arc<dyn AgentExecutor>,
         cwd: &str,
         notification_tx: tokio::sync::broadcast::Sender<
-            peri_workflow::registry::WorkflowTaskResult,
+            peri_resources::workflow::registry::WorkflowTaskResult,
         >,
         progress_rx: Option<
-            tokio::sync::mpsc::UnboundedReceiver<peri_workflow::protocol::ProgressEvent>,
+            tokio::sync::mpsc::UnboundedReceiver<peri_resources::workflow::protocol::ProgressEvent>,
         >,
     ) -> Self {
         let runner = Arc::new(WorkflowRunner::new(agent_executor, cwd, progress_rx));
@@ -126,13 +78,13 @@ impl WorkflowMiddleware {
     }
 
     /// 设置统一后台任务注册表（构造时链式调用）
-    pub fn with_bg_registry(self, bg_registry: Arc<BackgroundTaskRegistry>) -> Self {
+    pub fn with_bg_registry(self, bg_registry: Arc<dyn TaskManager>) -> Self {
         *self.bg_registry.write() = Some(bg_registry);
         self
     }
 
     /// 延迟注入 bg_registry（创建后设置，通过 RwLock 支持内部可变性）
-    pub fn set_bg_registry(&self, bg_registry: Arc<BackgroundTaskRegistry>) {
+    pub fn set_bg_registry(&self, bg_registry: Arc<dyn TaskManager>) {
         *self.bg_registry.write() = Some(bg_registry);
     }
 
@@ -145,8 +97,9 @@ impl WorkflowMiddleware {
             Arc::clone(&self.journal_store),
         );
         if let Some(ref bg) = *self.bg_registry.read() {
-            tool = tool
-                .with_bg_registry(Arc::clone(bg) as Arc<dyn peri_workflow::tool::BgTaskRegistry>);
+            // 直接注入 acp-types 契约句柄——WorkflowTool 只经 TaskManager 接口
+            // 发起（register/complete），不再需要 downcast 到具体实现。
+            tool = tool.with_bg_registry(Arc::clone(bg));
         }
         tool
     }
@@ -354,7 +307,8 @@ impl WorkflowMiddleware {
     /// 订阅 workflow 完成通知。每轮 build_agent 调用一次，获取新的 Receiver。
     pub fn subscribe_notifications(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<peri_workflow::registry::WorkflowTaskResult> {
+    ) -> tokio::sync::broadcast::Receiver<peri_resources::workflow::registry::WorkflowTaskResult>
+    {
         self.registry.notification_tx().subscribe()
     }
 
@@ -377,6 +331,44 @@ impl WorkflowMiddleware {
 /// 因此必须通过 `collect_tools()` 注册。
 pub struct WorkflowMiddlewareAdaptor {
     inner: Arc<WorkflowMiddleware>,
+}
+
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn WorkflowMiddlewarePort>`）。
+#[async_trait::async_trait]
+impl peri_acp_types::ports::WorkflowMiddlewarePort for WorkflowMiddleware {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn runs_snapshot(&self) -> serde_json::Value {
+        let runs = self.progress_store().get_all_runs_snapshot();
+        serde_json::to_value(runs).unwrap_or_default()
+    }
+
+    async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool {
+        self.runner().kill_agent(run_id, agent_id).await
+    }
+
+    fn kill_run(&self, run_id: &str) -> bool {
+        self.registry().kill(run_id).is_ok()
+    }
+
+    async fn resume(&self, run_id: &str) -> Result<String, String> {
+        self.resume_workflow(run_id).await
+    }
+
+    fn subscribe_notifications(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<peri_acp_types::workflow::WorkflowTaskResult> {
+        self.subscribe_notifications()
+    }
+
+    fn set_bg_registry(&self, bg_registry: std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>) {
+        self.set_bg_registry(bg_registry);
+    }
+
+    fn init_notification_buffer(&self) -> bool {
+        self.init_notification_buffer()
+    }
 }
 
 impl WorkflowMiddlewareAdaptor {
@@ -403,7 +395,7 @@ impl Middleware for WorkflowMiddlewareAdaptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
+    use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
 
     struct MockAgentExecutor;
 
@@ -453,24 +445,56 @@ mod tests {
         );
     }
 
-    /// [回归测试] register_workflow 携带的 kill 闭包必须存入 bg registry 条目，
+    /// [回归测试] WorkflowMiddlewarePort::downcast_arc 必须还原 session 级
+    /// 具体实例（issue 2026-08-06-e2e-workflow-not-completing）。
+    ///
+    /// 历史 bug：downcast_arc 直接对 trait object 调 `type_id()`——trait 不
+    /// 继承 `Any`，方法经 `Any` blanket impl 解析，返回
+    /// `TypeId::of::<dyn WorkflowMiddlewarePort>()`（trait object 自身），
+    /// 恒不等于 `TypeId::of::<WorkflowMiddleware>()` → downcast 恒失败 →
+    /// 装配面回退临时 WorkflowMiddleware → WorkflowTool 注册的 registry 与
+    /// executor 完成通知消费者订阅的 session 级 registry 分离，workflow 完成
+    /// 通知丢失（registry complete 报 "no subscribers"，TUI 永不显示完成文本）。
+    #[test]
+    fn test_workflow_middleware_port_downcast_restores_concrete() {
+        use peri_acp_types::ports::WorkflowMiddlewarePort;
+
+        let mw = make_middleware();
+        let port: Arc<dyn WorkflowMiddlewarePort> =
+            Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>;
+        let restored = match Arc::clone(&port).downcast_arc::<WorkflowMiddleware>() {
+            Ok(concrete) => concrete,
+            Err(_) => panic!("downcast 必须还原具体类型 WorkflowMiddleware"),
+        };
+        assert!(
+            Arc::ptr_eq(&mw, &restored),
+            "还原实例必须是原 Arc（registry/runner 跨 turn 复用）"
+        );
+    }
+
+    /// [回归测试] register 携带的 kill 闭包必须存入 bg registry 条目，
     /// session/cancel-bg-task（cancel()）时真正触发——锁定 issue 2026-08-05
     /// 修复后的行为：Workflow 取消不再只是移除条目 + 发事件，runner 被真实 kill。
     #[tokio::test]
     async fn test_register_workflow_kill_closure_invoked_on_cancel() {
-        use peri_workflow::tool::BgTaskRegistry;
+        use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let bg_registry = Arc::new(BackgroundTaskRegistry::new());
+        let bg_registry: Arc<dyn TaskManager> =
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         let killed = Arc::new(AtomicBool::new(false));
         let killed_clone = killed.clone();
-        bg_registry.register_workflow(
-            "run-1".to_string(),
-            "wf: test".to_string(),
-            Some(Box::new(move || {
-                killed_clone.store(true, Ordering::SeqCst);
-            })),
-        );
+        bg_registry
+            .register(BgTaskRegistration {
+                task_id: "run-1".to_string(),
+                kind: BgTaskKind::Workflow,
+                summary: "wf: test".to_string(),
+                pid: None,
+                kill: Some(Box::new(move || {
+                    killed_clone.store(true, Ordering::SeqCst);
+                })),
+            })
+            .unwrap();
         assert_eq!(bg_registry.active_count(), 1);
 
         bg_registry.cancel("run-1").unwrap();

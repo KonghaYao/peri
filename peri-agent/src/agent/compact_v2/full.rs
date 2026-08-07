@@ -16,12 +16,13 @@ use tracing::{debug, warn};
 
 use crate::agent::{
     compact_v2::{config::CompactConfig, CompactOutcome},
-    events::{CompactFileInfo, CompactStrategy},
+    events::CompactStrategy,
     model_bridge::map_model_error,
 };
 use crate::error::AgentResult;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
-use crate::session::transcript::{MessageFlags, MessageTranscript};
+use crate::session::transcript::MessageTranscript;
+use crate::session::MessageFlags;
 use crate::thread::CompactionLifecycle;
 
 // ─── 公共常量 ──────────────────────────────────────────────────────────────────
@@ -646,39 +647,8 @@ async fn collect_reinject_v2(
     }
 }
 
-/// 从 re_inject 消息中提取文件信息（CompactCompleted 事件用）
-pub fn extract_file_info(messages: &[BaseMessage]) -> Vec<CompactFileInfo> {
-    let mut files = Vec::new();
-    for msg in messages {
-        let content = msg.content();
-        if let Some(rest) = content.strip_prefix("[最近读取的文件: ") {
-            let path = rest.lines().next().unwrap_or("");
-            let line_count = rest.lines().count().saturating_sub(1);
-            if !path.is_empty() {
-                files.push(CompactFileInfo {
-                    path: path.to_string(),
-                    lines: line_count,
-                });
-            }
-        }
-    }
-    files
-}
-
-/// 从 re_inject 消息中提取 Skill 名称（CompactCompleted 事件用）
-pub fn extract_skill_names(messages: &[BaseMessage]) -> Vec<String> {
-    let mut skills = Vec::new();
-    for msg in messages {
-        let content = msg.content();
-        if let Some(rest) = content.strip_prefix("[激活的 Skill 指令: ") {
-            let name = rest.lines().next().unwrap_or("");
-            if !name.is_empty() {
-                skills.push(name.to_string());
-            }
-        }
-    }
-    skills
-}
+/// 从 re_inject 消息提取文件/Skill 信息（事实源 peri-acp-types::compact）
+pub use peri_acp_types::compact::{extract_file_info, extract_skill_names};
 
 #[cfg(test)]
 #[path = "full_test.rs"]

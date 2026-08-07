@@ -3681,7 +3681,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
- "peri-lsp",
+ "peri-controller",
  "peri-middlewares",
  "peri-model",
  "peri-workflow",
@@ -3701,8 +3701,17 @@ dependencies = [
 name = "peri-acp-types"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "peri-model",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -3718,7 +3727,9 @@ dependencies = [
  "fuzzy-matcher",
  "libc",
  "parking_lot",
+ "peri-acp-types",
  "peri-model",
+ "peri-resources",
  "serde",
  "serde_json",
  "sqlx",
@@ -3735,12 +3746,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-controller"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "langfuse-client",
+ "parking_lot",
+ "peri-acp-types",
+ "peri-agent",
+ "peri-model",
+ "peri-resources",
+ "peri-runtime",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "peri-lsp"
 version = "0.2.0"
 dependencies = [
  "lru",
  "lsp-types",
  "parking_lot",
+ "peri-acp-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -3771,10 +3806,10 @@ dependencies = [
  "lsp-types",
  "num_cpus",
  "parking_lot",
+ "peri-acp-types",
  "peri-agent",
- "peri-lsp",
  "peri-model",
- "peri-workflow",
+ "peri-resources",
  "pulldown-cmark",
  "regex",
  "reqwest",
@@ -3808,6 +3843,38 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+]
+
+[[package]]
+name = "peri-resources"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs-next",
+ "peri-acp-types",
+ "peri-lsp",
+ "peri-workflow",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "peri-runtime"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "parking_lot",
+ "peri-acp-types",
+ "peri-agent",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3845,12 +3912,10 @@ dependencies = [
  "parking_lot",
  "peri-acp",
  "peri-acp-types",
- "peri-agent",
- "peri-lsp",
  "peri-middlewares",
+ "peri-resources",
  "peri-theme",
  "peri-web-pty",
- "peri-workflow",
  "png",
  "pulldown-cmark",
  "rand 0.10.2",
@@ -3912,7 +3977,7 @@ dependencies = [
  "dashmap",
  "indexmap 2.14.0",
  "parking_lot",
- "peri-agent",
+ "peri-acp-types",
  "serde",
  "serde_json",
  "tempfile",

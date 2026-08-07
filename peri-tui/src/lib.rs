@@ -12,7 +12,6 @@
 )]
 
 pub mod acp_client;
-pub mod acp_server;
 pub mod alloc_config;
 pub mod app;
 pub mod components;

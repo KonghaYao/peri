@@ -4,13 +4,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use peri_agent::agent::LangfuseBridgeLike;
-use peri_agent::thread::ThreadStore;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
     error::AgentResult,
     messages::BaseMessage,
     middleware::{r#trait::Middleware, state::MiddlewareState},
+    session::Session,
     tools::BaseTool,
 };
 
@@ -20,41 +19,19 @@ use crate::{
 };
 
 mod agent_result;
-mod background;
 mod built_in_agents;
 mod fork;
 mod skill_preload;
-pub mod spawner;
 mod tool;
-pub mod v2_bridge;
 pub use agent_result::AgentResultTool;
-pub use background::{
-    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgRegistryEvent,
-    BgTaskInfo, BgTaskKind,
-};
 pub use built_in_agents::{
     built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
 };
-pub use fork::build_prediction_directive;
+pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
-pub use spawner::{spawn_background_fork, BgForkConfig, BgForkDirectiveKind, BgForkSpawned};
 pub use tool::SubAgentTool;
-
-/// 从 session transcript 统计 subagent 实际执行的工具调用次数。
-///
-/// 遍历 `visible_messages()` 中所有 `BaseMessage::Tool` 条目——每条对应一次
-/// 工具执行（含成功和失败）。与 `extract_last_ai_text` 模式一致：都从
-/// `session.transcript()` 读取完整消息历史。
-pub(crate) fn count_tool_calls_from_session(session: &Arc<peri_agent::session::Session>) -> usize {
-    use peri_agent::messages::BaseMessage;
-    let transcript = session.transcript();
-    let tx = transcript.read();
-    tx.visible_messages()
-        .iter()
-        .filter(|m| matches!(m, BaseMessage::Tool { .. }))
-        .count()
-}
+pub use tool::SubagentChainAssemblerImpl;
 
 /// SubAgent 中间件链构造配置
 ///
@@ -153,56 +130,27 @@ pub struct SubAgentMiddleware {
     #[allow(clippy::type_complexity)]
     llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
-    /// When set, child agent injects system prompt via with_system_prompt() (visible in Langfuse)
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
     /// Parent agent cancellation token (passed to child agent, supports user interruption)
     cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot, written in before_agent, read by Fork child agent
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
-    /// 后台任务注册中心（通过 build_tool 传递给 SubAgentTool）
-    background_registry: Option<Arc<BackgroundTaskRegistry>>,
     /// Registered hooks for SubagentStart/SubagentStop lifecycle events
     registered_hooks: Arc<Vec<crate::hooks::types::RegisteredHook>>,
     /// Per-child agent event handler factory: takes agent_id → returns handler for that child.
-    /// When set, child agents use this factory instead of wrapping the parent's event_handler,
-    /// avoiding shared Lock (e.g., Langfuse Mutex) contention in concurrent execution.
     #[allow(clippy::type_complexity)]
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
-    /// 后台任务完成事件的���立发送通道（不随 executor 生命周期销毁）
-    bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
-    /// Thread persistence store for child threads
-    thread_store: Option<Arc<dyn ThreadStore>>,
-    /// Parent thread ID for child thread hierarchy
-    parent_thread_id: Option<String>,
-    /// Register callback: (thread_id, cancel_token, cancel_policy_str) → inserts into active_agents map
-    #[allow(clippy::type_complexity)]
-    register_runtime: Option<Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>>,
-    /// Deregister callback: removes from active_agents map by thread_id
-    deregister_runtime: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-    /// Frozen CLAUDE.md/AGENTS.md main content（session/new 时捕获，Arc 共享）。
-    /// 透传到 SubAgentMiddleware，确保 SubAgent 与 main agent 看到一致的 CLAUDE.md。
-    frozen_claude_md: Option<Arc<String>>,
-    /// Frozen CLAUDE.local.md content
-    frozen_claude_local_md: Option<Arc<String>>,
-    /// Frozen skills summary
-    frozen_skill_summary: Option<Arc<String>>,
-    /// Frozen system prompt（session/new 时捕获，fork 路径复用以避免重建）。
-    frozen_system_prompt: Option<Arc<String>>,
-    /// bg 完成时的同步回调（第二参为任务 kind，供 continuation scheduler 过滤）
-    on_bg_complete: Option<
-        Arc<
-            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
-                + Send
-                + Sync,
-        >,
-    >,
-    /// Langfuse bridge（from peri-acp，用于 SubAgent 完整 trace）
-    langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 父 agent 事件侧 AgentId 共享 cell（builder 在主 v2 session 创建后注入；
     /// SubAgentTool 与 SubAgentMiddleware 共享同一 Arc）
-    parent_agent_id: Arc<RwLock<Option<peri_agent::group::pipeline::AgentId>>>,
+    parent_agent_id: Arc<RwLock<Option<peri_acp_types::identity::AgentId>>>,
+    /// 父 v2 session（L3）：builder 在主 session 创建后注入；subagent 创建所需的
+    /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取，Middleware 不再
+    /// 逐字段透传（L3 管理权移出）。
+    parent_session: Arc<RwLock<Option<Arc<Session>>>>,
+    /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
+    /// 注册 AgentResultTool）
+    task_manager_available: bool,
 }
 
 impl SubAgentMiddleware {
@@ -223,21 +171,11 @@ impl SubAgentMiddleware {
             system_builder: None,
             cancel: None,
             parent_messages: None,
-            background_registry: None,
             registered_hooks: Arc::new(Vec::new()),
             child_handler_factory: None,
-            bg_event_sender: None,
-            thread_store: None,
-            parent_thread_id: None,
-            register_runtime: None,
-            deregister_runtime: None,
-            frozen_claude_md: None,
-            frozen_claude_local_md: None,
-            frozen_skill_summary: None,
-            frozen_system_prompt: None,
-            on_bg_complete: None,
-            langfuse_bridge: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
+            parent_session: Arc::new(RwLock::new(None)),
+            task_manager_available: false,
         }
     }
 
@@ -263,12 +201,6 @@ impl SubAgentMiddleware {
         self
     }
 
-    /// Set background task registry for run_in_background mode
-    pub fn with_background_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
-        self.background_registry = Some(registry);
-        self
-    }
-
     /// Set registered hooks for SubagentStart/SubagentStop lifecycle events
     pub fn with_registered_hooks(
         mut self,
@@ -291,88 +223,21 @@ impl SubAgentMiddleware {
         self
     }
 
-    /// Set background task event sender.
-    /// The sender survives executor lifecycle, allowing bg task results to reach TUI
-    /// even after the main agent finishes.
-    pub fn with_bg_event_sender(
-        mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
-    ) -> Self {
-        self.bg_event_sender = Some(sender);
-        self
-    }
-
-    /// 设置 bg 完成时的同步回调。
-    /// 在 registry.complete() 之前调用，用于同步推入 Defer 到 MQ。
-    pub fn with_on_bg_complete(
-        mut self,
-        cb: Arc<
-            dyn Fn(&peri_agent::agent::events::BackgroundTaskResult, crate::BgTaskKind)
-                + Send
-                + Sync,
-        >,
-    ) -> Self {
-        self.on_bg_complete = Some(cb);
-        self
-    }
-
-    /// 设置 Langfuse 桥接器，用于 SubAgent 的完整 Langfuse trace。
-    pub fn with_langfuse_bridge(mut self, bridge: Arc<dyn LangfuseBridgeLike>) -> Self {
-        self.langfuse_bridge = Some(bridge);
-        self
-    }
-
     /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
     /// SubAgentTool 持有同一共享 cell，invoke 时（必然晚于本调用）读到已 set 的值。
-    pub fn set_parent_agent_id(&self, id: peri_agent::group::pipeline::AgentId) {
+    pub fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
         *self.parent_agent_id.write() = Some(id);
     }
 
-    /// Set thread persistence store for child thread creation
-    pub fn with_thread_store(mut self, store: Arc<dyn ThreadStore>) -> Self {
-        self.thread_store = Some(store);
-        self
+    /// 注入父 v2 session（L3，主 session 创建后调用）：subagent 创建所需的
+    /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取。
+    pub fn set_parent_session(&self, session: Arc<Session>) {
+        *self.parent_session.write() = Some(session);
     }
 
-    /// Set parent thread ID for child thread hierarchy
-    pub fn with_parent_thread_id(mut self, id: String) -> Self {
-        self.parent_thread_id = Some(id);
-        self
-    }
-
-    /// Set register callback: called when a child agent thread starts executing.
-    /// Parameters: (thread_id, cancel_token, cancel_policy_str)
-    #[allow(clippy::type_complexity)]
-    pub fn with_register_runtime(
-        mut self,
-        cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>,
-    ) -> Self {
-        self.register_runtime = Some(cb);
-        self
-    }
-
-    /// Set deregister callback: called when a child agent thread finishes (ok/error/cancel).
-    /// Parameters: &str (thread_id)
-    pub fn with_deregister_runtime(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
-        self.deregister_runtime = Some(cb);
-        self
-    }
-
-    /// 注入 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills 数据。
-    /// 透传给 SubAgentTool，确保所有 SubAgent 调用复用同一份 frozen 数据，
-    /// 避免文件中途变更导致 SubAgent 行为漂移（违反第一优先级不变量）。
-    pub fn with_frozen_data(
-        mut self,
-        claude_md: Option<Arc<String>>,
-        claude_local_md: Option<Arc<String>>,
-        skill_summary: Option<Arc<String>>,
-        system_prompt: Option<Arc<String>>,
-    ) -> Self {
-        self.frozen_claude_md = claude_md;
-        self.frozen_claude_local_md = claude_local_md;
-        self.frozen_skill_summary = skill_summary;
-        self.frozen_system_prompt = system_prompt;
-        self
+    /// 设置后台任务管理器可用性（assembly 注入，仅能力声明）。
+    pub fn set_task_manager_available(&mut self, available: bool) {
+        self.task_manager_available = available;
     }
 
     /// Build SubAgentTool instance (clone Arc fields, do not transfer ownership)
@@ -392,53 +257,18 @@ impl SubAgentMiddleware {
         if let Some(ref pm) = self.parent_messages {
             tool = tool.with_parent_messages(Arc::clone(pm));
         }
-        if let Some(ref registry) = self.background_registry {
-            tool = tool.with_background_registry(Arc::clone(registry));
-        }
         if !self.registered_hooks.is_empty() {
             tool = tool.with_registered_hooks(self.registered_hooks.to_vec());
         }
         if let Some(ref factory) = self.child_handler_factory {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
-        if let Some(ref sender) = self.bg_event_sender {
-            tool = tool.with_bg_event_sender(sender.clone());
-        }
-        if let Some(ref store) = self.thread_store {
-            tool = tool.with_thread_store(Arc::clone(store));
-        }
-        if let Some(ref id) = self.parent_thread_id {
-            tool = tool.with_parent_thread_id(id.clone());
-        }
-        if let Some(ref register) = self.register_runtime {
-            tool = tool.with_register_runtime(Arc::clone(register));
-        }
-        if let Some(ref deregister) = self.deregister_runtime {
-            tool = tool.with_deregister_runtime(Arc::clone(deregister));
-        }
-        if let Some(ref cb) = self.on_bg_complete {
-            tool = tool.with_on_bg_complete(Arc::clone(cb));
-        }
-        // [TRAP] 透传 frozen 数据到 SubAgentTool，避免每轮 build_tool clone 大字符串。
-        // Arc::clone 廉价，spawn 时再提取为 String 注入 SubAgentMiddlewareConfig。
-        if self.frozen_claude_md.is_some()
-            || self.frozen_claude_local_md.is_some()
-            || self.frozen_skill_summary.is_some()
-        {
-            tool = tool.with_frozen_data(
-                self.frozen_claude_md.clone(),
-                self.frozen_claude_local_md.clone(),
-                self.frozen_skill_summary.clone(),
-            );
-        }
-        if let Some(ref sp) = self.frozen_system_prompt {
-            tool = tool.with_frozen_system_prompt(Arc::clone(sp));
-        }
-        if let Some(ref bridge) = self.langfuse_bridge {
-            tool = tool.with_langfuse_bridge(Arc::clone(bridge));
-        }
         // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
         tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
+        // L3：父 v2 session（运行时通道 + frozen 数据经 host 读取）
+        if let Some(ref session) = *self.parent_session.read() {
+            tool = tool.with_parent_session(Arc::clone(session));
+        }
         tool
     }
 }
@@ -597,28 +427,8 @@ pub fn scan_agents_with_extra_dirs(
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
 ///
 /// 主 Agent 在 Prompt 中看到此信息后可以判断：
-/// - 能否并行执行（readonly agent 可安全并发）
-/// - 质量/成本/延迟预期（模型级别）
-///
-/// `can_mutate` 是**保守调度提示**，不是代码级锁或安全边界：
-/// 实际能力由 `filter_tools` 在工具注册层真裁剪，标签仅间接影响主模型
-/// 的并行决策（见审计 prompt-sections-audit.md P1-8 修正后判定）。
-#[derive(Debug, Clone)]
-pub struct AgentCapability {
-    /// 模型级别：`haiku` / `sonnet` / `opus` / `inherit`
-    pub model_tier: String,
-    /// 该 agent 是否会修改项目代码（保守推断，D5）。
-    /// 只有能根据最终注册工具集合证明无项目写能力时才为 false：
-    /// - omitted tools（继承父工具）含 Bash / folder_operations 等 → true，
-    ///   除非显式 disallow 全部核心写能力工具；
-    /// - 显式 `tools: []` → false（零工具）；
-    /// - 白名单含任一写能力工具（Bash / Write / Edit / folder_operations /
-    ///   cron_register / mcp__*）→ true。
-    ///
-    /// `allowedWriteDirs` 声明的 WriteSandbox 不计入 can_mutate，
-    /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
-    pub can_mutate: bool,
-}
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
+pub use peri_acp_types::agents::AgentCapability;
 
 /// 工具名是否为项目写能力（保守集合，D5）。
 ///
@@ -785,6 +595,22 @@ pub fn scan_agents_detailed(
     result
 }
 
+// L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，
+// 不直接引用本类型；见 peri_agent::session::factory::SubAgentMiddlewarePort）。
+impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn set_parent_agent_id(&self, id: peri_acp_types::identity::AgentId) {
+        SubAgentMiddleware::set_parent_agent_id(self, id);
+    }
+
+    fn set_parent_session(&self, session: Arc<Session>) {
+        SubAgentMiddleware::set_parent_session(self, session);
+    }
+}
+
 #[async_trait]
 impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
@@ -793,7 +619,7 @@ impl Middleware for SubAgentMiddleware {
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         let mut tools: Vec<Box<dyn BaseTool>> = vec![Box::new(self.build_tool(cwd))];
-        if self.background_registry.is_some() {
+        if self.task_manager_available {
             tools.push(Box::new(AgentResultTool::new()));
         }
         tools

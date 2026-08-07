@@ -1,6 +1,6 @@
 //! dispatch/rewind_candidates 单元测试。
 
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::messages::BaseMessage;
 
 use super::rewind_candidates;
 
@@ -40,7 +40,8 @@ fn test_candidates_excludes_system_reminder_injection() {
 }
 
 /// Bypass 模式下首轮 user 消息末尾会被追加 `<system-reminder>` 权限通知——
-/// 这类消息主体仍是用户输入，不应被过滤。
+/// 这类消息主体仍是用户输入，不应被过滤；且 preview 应剥离注入块，
+/// 只保留用户真实输入（回填/弹窗展示的干净文本）。
 #[test]
 fn test_candidates_preserves_user_message_with_trailing_reminder() {
     let history = vec![BaseMessage::human(
@@ -55,13 +56,27 @@ fn test_candidates_preserves_user_message_with_trailing_reminder() {
         1,
         "用户消息 + 尾部 system-reminder 应保留（非纯系统提醒）"
     );
-    assert!(
-        messages[0]["preview"]
-            .as_str()
-            .unwrap()
-            .starts_with("请用 Write 工具创建文件"),
-        "preview 应截取用户输入部分"
+    let preview = messages[0]["preview"].as_str().unwrap();
+    assert_eq!(
+        preview, "请用 Write 工具创建文件",
+        "preview 应剥离 system-reminder 注入块，只含用户输入"
     );
+    assert!(
+        !preview.contains("<system-reminder>"),
+        "preview 不得携带系统注入文本"
+    );
+}
+
+/// 纯系统注入消息（含前导空白等边缘形态）不产生候选。
+#[test]
+fn test_candidates_drops_pure_reminder_after_strip() {
+    let history = vec![BaseMessage::human(
+        " \n<system-reminder>后台任务完成通知</system-reminder>\n",
+    )];
+
+    let result = rewind_candidates(&history).unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 0, "剥离后为空的注入消息不进候选");
 }
 
 #[test]

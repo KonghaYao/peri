@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::agent::session::inbox::SessionInbox;
-use crate::session::MessageQueue;
+use crate::session::{MessageQueue, MessageSource};
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn test_cron_owner_forwards_trigger_to_inbox() {

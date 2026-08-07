@@ -13,10 +13,10 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate, TextContent,
     ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
-use peri_acp_types::PeriCaps;
-use peri_agent::messages::{
+use peri_acp_types::messages::{
     BaseMessage, ContentBlock as PeriContentBlock, MessageContent as PeriMessageContent,
 };
+use peri_acp_types::PeriCaps;
 
 /// Replay session history via `session/update` notifications.
 ///

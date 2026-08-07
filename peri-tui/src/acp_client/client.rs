@@ -409,7 +409,7 @@ impl AcpTuiClient {
     /// （Issue 2026-08-05）。None = 缺失路径（不注入 params）。
     pub async fn prompt(
         &self,
-        content: &peri_agent::messages::MessageContent,
+        content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
         let session_id = self
@@ -440,8 +440,8 @@ impl AcpTuiClient {
     /// wrapped in `<system-reminder>` (see `append_messages_to_transcript`).
     pub async fn prompt_with_bg_results(
         &self,
-        content: &peri_agent::messages::MessageContent,
-        bg_results: Vec<peri_agent::agent::events::BackgroundTaskResult>,
+        content: &peri_acp_types::messages::MessageContent,
+        bg_results: Vec<peri_acp_types::event::BackgroundTaskResult>,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
         let session_id = self

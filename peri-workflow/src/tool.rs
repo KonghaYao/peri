@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::tools::BaseTool;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager};
+use peri_acp_types::tools::BaseTool;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 use tracing::debug;
@@ -17,30 +19,15 @@ use crate::progress::WorkflowProgressStore;
 use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry, WorkflowTaskResult};
 use crate::runner::{WorkflowInput, WorkflowResult, WorkflowRunner};
 
-/// Background task registry interface — avoids peri-workflow → peri-middlewares dependency.
-///
-/// Implemented by `peri_middlewares::BackgroundTaskRegistry`.
-pub trait BgTaskRegistry: Send + Sync {
-    /// 注册 workflow bg 任务。`kill` 为 kill 闭包（None = kill 通道不可用）：
-    /// 由注册方在同时持有 `WorkflowTaskRegistry` 的位置构造，取消时转发到
-    /// `WorkflowTaskRegistry::kill`（真正的 kill_tx 在其内部）。
-    fn register_workflow(
-        &self,
-        task_id: String,
-        summary: String,
-        kill: Option<Box<dyn FnOnce() + Send + Sync>>,
-    );
-    fn complete_workflow(&self, task_id: &str, success: bool, output: String, duration_ms: u64);
-}
-
 /// Workflow 工具 — 启动 workflow（fire-and-forget）
 pub struct WorkflowTool {
     runner: Arc<WorkflowRunner>,
     registry: Arc<WorkflowTaskRegistry>,
     progress_store: Arc<WorkflowProgressStore>,
     journal_store: Arc<WorkflowJournalStore>,
-    /// Optional background task registry for unified task management
-    bg_registry: Option<Arc<dyn BgTaskRegistry>>,
+    /// 统一后台任务管理（经 acp-types 契约接口；Agent 层 per-session
+    /// TaskManager 实现，装配注入，取消转发到 [`WorkflowTaskRegistry::kill`]）
+    bg_registry: Option<Arc<dyn TaskManager>>,
 }
 
 impl WorkflowTool {
@@ -59,7 +46,7 @@ impl WorkflowTool {
         }
     }
 
-    pub fn with_bg_registry(mut self, bg_registry: Arc<dyn BgTaskRegistry>) -> Self {
+    pub fn with_bg_registry(mut self, bg_registry: Arc<dyn TaskManager>) -> Self {
         self.bg_registry = Some(bg_registry);
         self
     }
@@ -124,7 +111,7 @@ impl BaseTool for WorkflowTool {
     async fn invoke(
         &self,
         input: Value,
-        _ctx: peri_agent::tools::ToolContext<'_>,
+        _ctx: peri_acp_types::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // scriptPath 优先于 inline script（GAP-09 命名 Workflow 支持）
         // 路径安全：限定在 cwd 内，拒绝越权读取
@@ -228,23 +215,27 @@ impl BaseTool for WorkflowTool {
             return Err(format!("Workflow concurrency limit: {e}").into());
         }
 
-        // 注册到统一后台任务注册表
+        // 注册到统一后台任务注册表（经 acp-types 契约，装配注入的 Agent 层 TaskManager）
         if let Some(ref bg) = self.bg_registry {
             // 携带 kill 闭包：session/cancel-bg-task 时转发到 WorkflowTaskRegistry::kill
             // （kill_tx 的唯一持有者，与 workflow/kill_run RPC 同一通道）。
             let kill_registry = Arc::clone(&self.registry);
             let kill_run_id = run_id.clone();
-            bg.register_workflow(
-                run_id.clone(),
-                format!(
+            if let Err(e) = bg.register(BgTaskRegistration {
+                task_id: run_id.clone(),
+                kind: BgTaskKind::Workflow,
+                summary: format!(
                     "{}: {}",
                     workflow_name,
                     script.chars().take(80).collect::<String>()
                 ),
-                Some(Box::new(move || {
+                pid: None,
+                kill: Some(Box::new(move || {
                     let _ = kill_registry.kill(&kill_run_id);
                 })),
-            );
+            }) {
+                warn!(error = %e, "workflow bg registry: register failed");
+            }
         }
 
         // ─── 快速失败检测（1s 内 done 到来即同步报错）───
@@ -280,10 +271,21 @@ impl BaseTool for WorkflowTool {
                     .map(|s| format!("\n\nstderr (last 20 lines):\n{}", s))
                     .unwrap_or_default();
 
-                // 快速失败清理：update bg_registry so BgTaskArea transitions from ◎ to ✗
+                // 快速失败清理：complete 使 BgTaskArea 从 ◎ 过渡到 ✗
                 let fast_duration = started_at.elapsed().as_millis() as u64;
                 if let Some(ref bg) = self.bg_registry {
-                    bg.complete_workflow(&run_id, false, String::new(), fast_duration);
+                    let result = BackgroundTaskResult {
+                        task_id: run_id.clone(),
+                        agent_name: "workflow".to_string(),
+                        prompt_summary: String::new(),
+                        success: false,
+                        output: String::new(),
+                        tool_calls_count: 0,
+                        duration_ms: fast_duration,
+                        child_thread_id: None,
+                        timed_out: false,
+                    };
+                    bg.complete(&run_id, result);
                 }
                 // 同步标记 registry 为失败，发送通知给 agent
                 self.registry.complete(

@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use peri_acp_types::identity::AgentId;
 use peri_model::{StopReason, TokenUsage};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    agent::events::AgentEventHandler,
-    messages::{BaseMessage, MessageContent, MessageId},
+    agent::events_v2::EventBus,
+    messages::{BaseMessage, MessageContent},
+    session::turn::TurnId,
     tools::BaseTool,
 };
 
@@ -187,11 +189,19 @@ impl Reasoning {
 }
 
 /// 流式输出上下文，由 Reason 阶段注入到 ReactLLM。
+///
+/// 承载 v2 事件总线与身份（turn_id / agent_id）：LLM 适配器在流式解析过程中
+/// 直接 emit v2 `RenderEvent`（TextChunk / ThinkingChunk）与 `ObserveEvent`
+/// （AiReasoningChunk）。v1 `ExecutorEvent` 流式中间态已退役（v1 兼容映射仅
+/// 保留在 ACP 协议序列化面，`peri-acp-types::event_v2::*_event_to_executor`）。
 #[derive(Clone)]
 pub struct StreamingContext {
-    pub event_handler: Arc<dyn AgentEventHandler>,
-    /// 预生成的 AI 消息 ID，所有增量 TextChunk 关联到此 ID。
-    pub message_id: MessageId,
+    /// v2 事件总线（发射点：流式增量直接 emit RenderEvent/ObserveEvent）
+    pub event_bus: Arc<EventBus>,
+    /// 当前 turn（v2 事件强制身份字段）
+    pub turn_id: TurnId,
+    /// 当前 agent（v2 事件强制身份字段）
+    pub agent_id: AgentId,
     /// 取消令牌：bridge 将其传入底层 Model stream。
     pub cancel: CancellationToken,
 }
@@ -214,14 +224,6 @@ pub trait ReactLLM: Send + Sync {
     /// 返回模型的上下文窗口大小（token 数），默认 200K
     fn context_window(&self) -> u32 {
         200_000
-    }
-
-    /// 注入事件处理器（用于 LlmRetrying 等事件转发到 AgentEventHandler）。
-    /// 默认空实现——大多数 LLM 实现无需此能力。
-    fn inject_event_handler(
-        &mut self,
-        _handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
-    ) {
     }
 
     /// 返回由安全 `PreparedModelRequest` 投影出的 Provider 请求体，用于受控观测。
@@ -288,13 +290,6 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
 
     fn context_window(&self) -> u32 {
         (**self).context_window()
-    }
-
-    fn inject_event_handler(
-        &mut self,
-        handler: Option<std::sync::Arc<dyn crate::agent::events::AgentEventHandler>>,
-    ) {
-        (**self).inject_event_handler(handler);
     }
 
     fn observed_provider_request_body(

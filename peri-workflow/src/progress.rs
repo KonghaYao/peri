@@ -28,81 +28,14 @@ pub struct RunProgress {
     pub completed_at: Option<std::time::Instant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    Running,
-    Completed,
-    Failed,
-    Killed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowMeta {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub phases: Vec<MetaPhase>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetaPhase {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhaseProgress {
-    pub title: String,
-    pub status: PhaseStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PhaseStatus {
-    Pending,
-    Active,
-    Done,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentProgress {
-    pub agent_id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    pub status: AgentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<AgentRunResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentStatus {
-    Pending,
-    Running,
-    Done,
-    Dead,
-    Skipped,
-}
-
-/// Per-phase agent count and token summary for notification formatting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhaseSummary {
-    pub name: String,
-    pub agent_count: usize,
-    pub token_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
+// 3.0 批 2 波 1：协议投影类型迁入契约层 `peri_acp_types::workflow`
+// （`RunStatus` / `WorkflowMeta` / `MetaPhase` / `PhaseProgress` /
+// `PhaseStatus` / `AgentProgress` / `AgentStatus` / `PhaseSummary`）；
+// 本模块保留 re-export 保兼容。`RunProgress`（含 `IndexMap` 字段）保留在本文件。
+pub use peri_acp_types::workflow::{
+    AgentProgress, AgentStatus, MetaPhase, PhaseProgress, PhaseStatus, PhaseSummary, RunStatus,
+    WorkflowMeta,
+};
 
 // ─── Store ──────────────────────────────────────────────────
 

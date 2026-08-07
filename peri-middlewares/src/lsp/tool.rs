@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use peri_lsp::pool::LspServerPool;
+use peri_resources::lsp::pool::LspServerPool;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -107,7 +107,7 @@ impl LspTool {
     async fn get_initialized_server(
         &self,
         file_path: &str,
-    ) -> Result<Arc<peri_lsp::client::LspClient>, LspToolError> {
+    ) -> Result<Arc<peri_resources::lsp::client::LspClient>, LspToolError> {
         match self.pool.server_for_file(file_path) {
             Some(s) if s.is_ready() => Ok(s),
             Some(s) => {
@@ -115,8 +115,8 @@ impl LspTool {
                 let state = s.state();
                 if matches!(
                     state,
-                    peri_lsp::client::ServerState::Error(_)
-                        | peri_lsp::client::ServerState::Stopped
+                    peri_resources::lsp::client::ServerState::Error(_)
+                        | peri_resources::lsp::client::ServerState::Stopped
                 ) {
                     // 服务器崩溃或停止，尝试重启
                     tracing::warn!(
@@ -173,7 +173,9 @@ impl LspTool {
     }
 
     /// 获取任意一个已就绪的服务器，尝试重启崩溃的服务器
-    async fn get_any_ready_server(&self) -> Result<Arc<peri_lsp::client::LspClient>, LspToolError> {
+    async fn get_any_ready_server(
+        &self,
+    ) -> Result<Arc<peri_resources::lsp::client::LspClient>, LspToolError> {
         if let Some(s) = self.pool.any_server() {
             return Ok(s);
         }
@@ -185,7 +187,8 @@ impl LspTool {
             let state = s.state();
             if matches!(
                 state,
-                peri_lsp::client::ServerState::Error(_) | peri_lsp::client::ServerState::Stopped
+                peri_resources::lsp::client::ServerState::Error(_)
+                    | peri_resources::lsp::client::ServerState::Stopped
             ) {
                 tracing::warn!(
                     target: "lsp",

@@ -14,10 +14,10 @@ fn retry_event_forwarder_translates_observation_to_llm_retrying() {
     use std::sync::Mutex;
 
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let handler: Arc<dyn peri_agent::agent::events::AgentEventHandler> =
-        Arc::new(peri_agent::agent::events::FnEventHandler({
+    let handler: Arc<dyn peri_acp_types::event::AgentEventHandler> =
+        Arc::new(peri_acp_types::event::FnEventHandler({
             let recorded = recorded.clone();
-            move |event: peri_agent::agent::events::ExecutorEvent| {
+            move |event: peri_acp_types::event::ExecutorEvent| {
                 recorded.lock().expect("record lock").push(event);
             }
         }));
@@ -37,7 +37,7 @@ fn retry_event_forwarder_translates_observation_to_llm_retrying() {
     assert_eq!(guard.len(), 1);
     assert!(matches!(
         &guard[0],
-        peri_agent::agent::events::ExecutorEvent::LlmRetrying {
+        peri_acp_types::event::ExecutorEvent::LlmRetrying {
             attempt: 2,
             max_attempts: 3,
             delay_ms: 1000,

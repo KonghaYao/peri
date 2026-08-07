@@ -2,13 +2,8 @@
 
 use super::*;
 
-// ─── 测试辅助 impl（须置于 test module 内，避免 items-after-test-module）──
-impl EventHandles {
-    /// 测试辅助：从配置创建 (EventBus, EventHandles)
-    fn from_bus(config: EventBusConfig) -> (EventBus, Self) {
-        EventBus::new(config)
-    }
-}
+use crate::session::turn::TurnId;
+use peri_acp_types::identity::AgentId;
 
 // ─── 构造辅助 ──────────────────────────────────────────────────────────
 
@@ -507,7 +502,7 @@ async fn test_event_bus_subscribe_observe_shares_channel() {
 #[tokio::test]
 async fn test_event_bus_render_channel_full_drops_event() {
     // 极小容量（1），填满后 try_send 应丢弃
-    let (bus, mut handles) = EventHandles::from_bus(EventBusConfig {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
         render_capacity: 1,
         ..Default::default()
     });
@@ -535,7 +530,7 @@ async fn test_event_bus_render_channel_full_drops_event() {
 
 #[tokio::test]
 async fn test_event_bus_state_channel_full_drops_event() {
-    let (bus, mut handles) = EventHandles::from_bus(EventBusConfig {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
         state_capacity: 1,
         ..Default::default()
     });
