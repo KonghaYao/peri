@@ -65,6 +65,7 @@ const SYSTEM_PROMPT = `你是一个终端 UI 测试的自动化评判者。你�
 5. 可接受状态集合：检查项中若列出多个可接受状态（如"空白或仅显示欢迎页/logo"、"如 A 或 B"），屏幕内容属于其中任一状态即判 pass=true。
 6. 结论必须与 detail 一致：若 detail 描述的事实表明屏幕满足检查项（如"未找到面板元素"、"屏幕已是欢迎页"），则 pass 必须是 true；若判断失败，detail 必须指出屏幕实际内容与要求的明确差异。发现矛盾时以事实为准重新判断。
 7. detail 字段用中文简述判断依据，失败时必须说明原因
+8. 检查清单是唯一判断依据：若检查项明确列出可接受值集合（如 "fable/opus/sonnet/haiku 之一"）或给出格式定义（如 "alias model effort" 三段式），屏幕内容属于该集合或符合该格式即判 pass=true。不要基于清单外的知识（如模型命名惯例、厂商术语）对屏幕值做额外推理，也不要要求屏幕出现检查清单未要求的内容。
 
 ## 输出格式
 严格返回 JSON（不要 markdown 代码块包裹）。checks 的数量、顺序和 id 必须与输入检查清单完全一致；每项仅按对应 id 判断，不要回显 criterion:
@@ -73,6 +74,9 @@ const SYSTEM_PROMPT = `你是一个终端 UI 测试的自动化评判者。你�
     { "id": 1, "pass": true, "detail": "判断依据" }
   ]
 }`;
+
+/** 无效响应类失败的 detail 统一前缀（解析失败或结构校验失败） */
+const INVALID_RESPONSE_PREFIX = "Judge 返回无效 JSON 响应";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -84,6 +88,20 @@ function failedChecks(criteria: string[], detail: string): JudgeCheck[] {
     pass: false,
     detail,
   }));
+}
+
+/**
+ * 判断一组 checks 是否全部因"Judge 响应无效"而失败。
+ * 解析失败或结构校验失败时 parseJudgeChecks 会返回全 fail 且 detail 带统一前缀，
+ * 这类结果不是 UI 结论，需要重试而不是当作真实失败。
+ */
+function isInvalidResponse(checks: JudgeCheck[]): boolean {
+  return (
+    checks.length > 0 &&
+    checks.every(
+      (c) => !c.pass && c.detail.startsWith(INVALID_RESPONSE_PREFIX),
+    )
+  );
 }
 
 const VALID_JSON_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t"]);
@@ -217,7 +235,7 @@ export function parseJudgeChecks(
 ): JudgeCheck[] {
   const { parsed, error } = parseJudgeJson(rawResponse);
   if (parsed === null) {
-    return failedChecks(criteria, `Judge 返回无效 JSON 响应（${error}）`);
+    return failedChecks(criteria, `${INVALID_RESPONSE_PREFIX}（${error}）`);
   }
 
   try {
@@ -225,7 +243,7 @@ export function parseJudgeChecks(
   } catch (validationError) {
     const reason =
       validationError instanceof Error ? validationError.message : "未知错误";
-    return failedChecks(criteria, `Judge 返回无效 JSON 响应（${reason}）`);
+    return failedChecks(criteria, `${INVALID_RESPONSE_PREFIX}（${reason}）`);
   }
 }
 
@@ -233,6 +251,11 @@ export function parseJudgeChecks(
 
 /**
  * LLM judge：传入 snapshot ANSI 和检查清单，返回结构化判断
+ *
+ * 重试策略：JSON 解析失败或结构校验失败（checks 数量/id 顺序/类型不匹配）
+ * 均视为"响应无效"而非 UI 结论，最多重试一次（共 2 次调用）；
+ * 第二次调用会在提示中附带上次的失败原因，引导模型修正输出格式。
+ * 只有两次都无效时才把"响应无效"作为失败结论返回。
  */
 export async function judge(input: JudgeInput): Promise<JudgeResult> {
   const client = getClient();
@@ -242,7 +265,7 @@ export async function judge(input: JudgeInput): Promise<JudgeResult> {
     .map((criterion, index) => `[id: ${index + 1}] ${criterion}`)
     .join("\n");
 
-  const userMessage = `## 检查清单
+  const baseUserMessage = `## 检查清单
 ${criteriaText}
 
 ## 终端屏幕内容（ANSI 原始）
@@ -254,8 +277,18 @@ ${input.ansiRaw}
 
   let lastUsage: JudgeResult["usage"] = { prompt_tokens: 0, completion_tokens: 0 };
   let checks: JudgeCheck[] | null = null;
+  let lastInvalidReason = "输出不符合要求";
 
   for (let attempt = 1; attempt <= MAX_JUDGE_ATTEMPTS; attempt++) {
+    const userMessage =
+      attempt === 1
+        ? baseUserMessage
+        : `${baseUserMessage}
+
+## 上次输出格式不合格：${lastInvalidReason}
+请严格按输出格式重新回答：checks 的数量与 id 顺序必须与检查清单完全一致（逐项对应），
+每项的 pass 必须是布尔值，detail 必须是非空字符串。不要省略任何一项，不要改变顺序。`;
+
     const response = await client.chat.completions.create({
       model: JUDGE_MODEL,
       messages: [
@@ -275,24 +308,33 @@ ${input.ansiRaw}
       };
     }
 
-    const { parsed, error } = parseJudgeJson(rawResponse);
-    if (parsed !== null) {
-      checks = parseJudgeChecks(rawResponse, input.criteria);
+    const attemptChecks = parseJudgeChecks(rawResponse, input.criteria);
+    if (!isInvalidResponse(attemptChecks)) {
+      // 结构有效（即使个别 check 判 false，也是真实 UI 结论）
+      checks = attemptChecks;
       break;
     }
 
-    // JSON 语法无效（修复后仍无法解析）：最多重试一次，共 2 次调用。
+    // 响应无效：记录原因，最后一次尝试时把"响应无效"作为失败结论返回。
+    const firstDetail = attemptChecks[0]?.detail ?? "";
+    lastInvalidReason = firstDetail.startsWith(INVALID_RESPONSE_PREFIX)
+      ? firstDetail
+          .slice(INVALID_RESPONSE_PREFIX.length)
+          .replace(/^（/, "")
+          .replace(/）$/, "")
+      : "输出不符合要求";
+
     if (attempt === MAX_JUDGE_ATTEMPTS) {
-      checks = failedChecks(
-        input.criteria,
-        `Judge 返回无效 JSON 响应（${error}）`,
-      );
+      checks = attemptChecks;
     }
   }
 
   // 循环保证至少执行一次后 checks 一定非空，此处仅为类型收窄兜底。
   if (checks === null) {
-    checks = failedChecks(input.criteria, "Judge 返回无效 JSON 响应（未知错误）");
+    checks = failedChecks(
+      input.criteria,
+      `${INVALID_RESPONSE_PREFIX}（未知错误）`,
+    );
   }
 
   const durationMs = Date.now() - startTime;

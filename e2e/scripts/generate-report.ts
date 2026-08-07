@@ -16,8 +16,14 @@ import { fileURLToPath } from "node:url";
 import { loadAllRecords, type SnapshotRecord } from "../helpers/recorder.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RECORDINGS_DIR = path.resolve(__dirname, "..", "recordings");
-const REPORT_PATH = path.resolve(__dirname, "..", "report.html");
+// 与 helpers/recorder.ts 保持一致：并行模式下每个 worker 使用独立录制目录，
+// 报告就近写入该目录，避免多个 worker 并发覆盖同一个 report.html。
+const RECORDINGS_DIR =
+  process.env.E2E_RECORDINGS_DIR ??
+  path.resolve(__dirname, "..", "recordings");
+const REPORT_PATH = process.env.E2E_RECORDINGS_DIR
+  ? path.join(process.env.E2E_RECORDINGS_DIR, "report.html")
+  : path.resolve(__dirname, "..", "report.html");
 
 // 是否由 vitest globalTeardown 调用（此时不可 watch）
 const isVitestTeardown = !!process.env.VITEST_POOL_ID || process.argv.some((a) => a.includes("vitest"));

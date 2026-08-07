@@ -5,7 +5,9 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "report": "tsx scripts/generate-report.ts"
+    "report": "tsx scripts/generate-report.ts",
+    "e2e": "node scripts/run-e2e.mjs",
+    "e2e:all": "node scripts/run-e2e.mjs --all"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
