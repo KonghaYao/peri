@@ -140,3 +140,35 @@ fn test_tick_removes_dead_extra_sender() {
         "死 sender 应在 tick 时被 retain 清理"
     );
 }
+
+/// [回归测试] CronSchedulerPort::downcast_arc 必须还原具体实例
+/// （issue 2026-08-07-cron-tool-task-never-triggers）。
+///
+/// 历史 bug：downcast_arc 直接对 trait object 调 `type_id()`——trait 不
+/// 继承 `Any`，方法经 `Any` blanket impl 解析，返回
+/// `TypeId::of::<dyn CronSchedulerPort>()`（trait object 自身），恒不等于
+/// `TypeId::of::<CronSchedulerPortHandle>()` → downcast 恒失败 → 装配面
+/// 回退临时 CronScheduler → cron 工具注册的 scheduler 与 host tick /
+/// SessionManager bridge 订阅的 scheduler 分离，触发完全静默
+/// （同构 2026-08-06-e2e-workflow-not-completing）。
+#[test]
+fn test_cron_scheduler_port_downcast_restores_concrete() {
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+    use peri_acp_types::cron::CronSchedulerPort;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let concrete = Arc::new(Mutex::new(CronScheduler::new(tx)));
+    let handle = Arc::new(CronSchedulerPortHandle(concrete.clone()));
+    let port: Arc<dyn CronSchedulerPort> = handle.clone() as Arc<dyn CronSchedulerPort>;
+
+    let restored = match Arc::clone(&port).downcast_arc::<CronSchedulerPortHandle>() {
+        Ok(h) => h,
+        Err(_) => panic!("downcast 必须还原具体类型 CronSchedulerPortHandle"),
+    };
+    assert!(
+        Arc::ptr_eq(&handle, &restored),
+        "还原实例必须是原 Arc（工具/订阅/tick 共享同一 scheduler）"
+    );
+}
