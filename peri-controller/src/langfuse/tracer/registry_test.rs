@@ -357,11 +357,7 @@ async fn test_start_after_tool_ended() {
         updates[0].0, *child_obs_id,
         "关闭的 obs 应为 child 的 AGENT obs"
     );
-    assert_eq!(
-        updates[0].2.as_ref().and_then(|o| o.as_str()),
-        Some("review done"),
-        "AGENT obs output 应为 Stop result"
-    );
+    assert!(updates[0].2.is_none(), "AGENT obs 不应保存 Stop result");
     assert_eq!(
         t.subagent.status_of("child_1"),
         Some(&SubagentStatus::Closed)
@@ -414,11 +410,7 @@ async fn test_stop_before_tool_ended() {
     t.on_tool_end("main", "call_agent", "subagent done", false);
     let updates = agent_obs_updates(&session.events_snapshot());
     assert_eq!(updates.len(), 1, "ToolEnded 后应关闭 AGENT obs");
-    assert_eq!(
-        updates[0].2.as_ref().and_then(|o| o.as_str()),
-        Some("done"),
-        "AGENT obs output 应为 Stop result"
-    );
+    assert!(updates[0].2.is_none(), "AGENT obs 不应保存 Stop result");
 
     // flush 恰好一次:child tool-batch span 恰好 1 个
     let final_events = session.events_snapshot();

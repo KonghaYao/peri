@@ -206,6 +206,9 @@ settings.json
 !.claude/skills/project-maturity/
 !.claude/skills/advisor-consultation/**
 !.claude/skills/advisor-consultation/
+!.claude/skills/langfuse/
+!.claude/skills/langfuse/scripts/
+!.claude/skills/langfuse/scripts/**
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*

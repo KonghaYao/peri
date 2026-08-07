@@ -6,6 +6,8 @@
 
 use langfuse_client::IngestionEvent;
 
+use super::super::drop_telemetry::{LangfuseDropReason, LangfuseEventKind};
+
 use super::super::session_like::LangfuseSessionLike;
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -34,13 +36,19 @@ pub(crate) fn try_add_or_warn(
     trace_id: &str,
     context_msg: &str,
 ) {
-    if let Err(e) = batcher.try_add(event) {
-        tracing::warn!(
-            error = %e,
-            trace_id = %trace_id,
-            "{}（背压丢弃）",
-            context_msg
-        );
+    let event_kind = LangfuseEventKind::from_event(&event);
+    if let Err(error) = batcher.try_add(event) {
+        if let Some(reason) = LangfuseDropReason::from_error(&error) {
+            tracing::warn!(
+                target: "langfuse::drop",
+                trace_id = %trace_id,
+                event_kind = ?event_kind,
+                reason = ?reason,
+                "langfuse event dropped"
+            );
+        } else {
+            tracing::warn!(target: "langfuse::drop", trace_id = %trace_id, event_kind = ?event_kind, "{} was not queued", context_msg);
+        }
     }
 }
 
@@ -51,14 +59,29 @@ pub(crate) fn try_add_or_warn_via_session(
     session: &dyn LangfuseSessionLike,
     event: IngestionEvent,
     trace_id: &str,
-    context_msg: &str,
+    _context_msg: &str,
 ) {
-    if let Err(e) = session.try_add(event) {
-        tracing::warn!(
-            error = %e,
-            trace_id = %trace_id,
-            "{}（背压丢弃）",
-            context_msg
-        );
+    let event_kind = LangfuseEventKind::from_event(&event);
+    if let Err(error) = session.try_add(event) {
+        if let Some(reason) = LangfuseDropReason::from_error(&error) {
+            session.drop_registry().record(trace_id, event_kind, reason);
+            tracing::warn!(
+                target: "langfuse::drop",
+                trace_id = %trace_id,
+                event_kind = ?event_kind,
+                reason = ?reason,
+                "langfuse event dropped"
+            );
+        } else {
+            tracing::warn!(
+                target: "langfuse::drop",
+                trace_id = %trace_id,
+                "langfuse event was not queued"
+            );
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "event_builder_test.rs"]
+mod tests;

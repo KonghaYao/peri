@@ -40,6 +40,7 @@ use langfuse_client::{GenerationBody, IngestionEvent, ObservationBody, Observati
 use peri_agent::agent::events::{
     CompactStrategy, CompactTrigger, MiddlewareHook, Stage, StageStatus,
 };
+use peri_agent::agent::events_v2::TurnErrorReason;
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
 use peri_model::TokenUsage;
@@ -77,12 +78,8 @@ pub struct LangfuseTracer {
     pub(crate) compact_work_done: bool,
     /// agent-run observation 的开始时间（推迟到 on_turn_end 创建时设置）
     pub(crate) agent_start_time: Option<String>,
-    /// agent-run observation 的输入（推迟到 on_turn_end 创建时设置）
-    pub(crate) agent_input: Option<String>,
-    /// 最近一次 TurnError 的完整错误消息（on_turn_error 捕获，on_turn_end 写入 ErrorTurn span）。
-    /// LLM 失败时 reason.rs 以 `TurnError { message }` 携带 provider 错误详情，
-    /// 用于弥补 TurnEnded 只带 error_kind 枚举名的信息缺口。
-    pub(crate) last_turn_error: Option<String>,
+    /// 最近一次 TurnError 的稳定分类；原始错误正文绝不写入 Langfuse。
+    pub(crate) last_error_class: Option<TurnErrorReason>,
 }
 
 impl LangfuseTracer {
@@ -112,8 +109,7 @@ impl LangfuseTracer {
             replayed_stage_handles: std::collections::HashMap::new(),
             compact_work_done: false,
             agent_start_time: None,
-            agent_input: None,
-            last_turn_error: None,
+            last_error_class: None,
         }
     }
 
@@ -132,18 +128,14 @@ impl LangfuseTracer {
 
     // ── Turn 生命周期 ──────────────────────────────────────────────────────
 
-    /// TurnError 事件：捕获完整错误消息，供 on_turn_end 的 ErrorTurn span 使用。
-    ///
-    /// LLM 失败时 reason.rs emit `TurnError { message }`（`e.to_string()` 全文），
-    /// 而 TurnEnded 只携带 error_kind 枚举名——此处补上丢失的错误详情。
-    /// 不依赖采样：错误信息始终记录，on_turn_end 消费后清空。
-    pub fn on_turn_error(&mut self, message: &str) {
-        self.last_turn_error = Some(message.to_string());
+    /// TurnError 事件：仅捕获稳定枚举分类，避免将 provider/tool 错误正文上报。
+    pub fn on_turn_error(&mut self, reason: TurnErrorReason) {
+        self.last_error_class = Some(reason);
     }
 
     /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
     /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
-    pub fn on_turn_start(&mut self, input: &str) {
+    pub fn on_turn_start(&mut self, _input: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -200,7 +192,6 @@ impl LangfuseTracer {
         // 推迟 agent-run ObservationCreate 到 on_turn_end，
         // 避免 OTEL span 不可变导致 end_time 无法更新 → 0s latency
         self.agent_start_time = Some(start_time);
-        self.agent_input = Some(input.to_string());
     }
 
     /// 对话轮次结束：更新 agent-run Observation 输出和结束时间，并强制 flush。
@@ -228,18 +219,17 @@ impl LangfuseTracer {
 
         let is_error = error_output.is_some();
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
+        let error_class = self
+            .last_error_class
+            .take()
+            .map(|reason| reason.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
         // ErrorSpan：错误时始终发送（即使未采样），确保错误可观测
         if is_error && self.config.error_span_always {
-            let error_msg = error_output.unwrap_or("unknown error").to_string();
             let turn_id = self.trace_id.clone();
-            // 完整错误消息来自 TurnError 事件（reason.rs），弥补 TurnEnded 仅带枚举名的缺口。
-            // on_turn_error 与 on_turn_end 分属不同 forwarder task，可能尚未到达（竞态）——
-            // 取不到时只输出枚举名，不劣于修复前行为。
-            let mut error_out = serde_json::json!({"error": &error_msg});
-            if let Some(m) = self.last_turn_error.take() {
-                error_out["message"] = serde_json::json!(m);
-            }
+            let error_out =
+                serde_json::json!({"error_class": &error_class, "error_schema_version": 1});
 
             if !sampled {
                 // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
@@ -253,7 +243,11 @@ impl LangfuseTracer {
                     release: None,
                     version: Some(VERSION.to_string()),
                     public: None,
-                    metadata: Some(serde_json::json!({"synthetic_error": true})),
+                    metadata: Some(serde_json::json!({
+                        "synthetic_error": true,
+                        "error_class": &error_class,
+                        "error_schema_version": 1,
+                    })),
                     tags: None,
                     environment: None,
                     timestamp: Some(now_rfc3339()),
@@ -286,6 +280,8 @@ impl LangfuseTracer {
                     "is_synthetic": !sampled,
                     "was_sampled": sampled,
                     "turn_id": &turn_id,
+                    "error_class": &error_class,
+                    "error_schema_version": 1,
                 })),
                 level: Some(ObservationLevel::Error),
                 status_message: None,
@@ -317,17 +313,16 @@ impl LangfuseTracer {
         let session = Arc::clone(&self.session);
         let trace_id = self.trace_id.clone();
         let agent_observation_id = self.agent_observation_id.clone();
-        let output = if let Some(err) = error_output {
-            err.to_string()
+        let output = if error_output.is_some() {
+            Some(serde_json::json!({"error_class": &error_class}))
         } else {
-            std::mem::take(&mut self.final_answer)
+            None
         };
 
         self.sampling.cleanup_turn(&self.trace_id);
 
-        // 取出推迟到现在的 start_time 和 input（on_turn_start 时存储）
+        // 取出推迟到现在的 start_time。
         let agent_start_time = self.agent_start_time.take();
-        let agent_input = self.agent_input.take();
 
         // agent-run ObservationCreate 同步入队（不放进 spawn 任务）：
         // 保证 on_turn_end 返回时全部事件已入队，调用方随后显式 flush() 即可
@@ -342,8 +337,8 @@ impl LangfuseTracer {
             name: Some("agent-run".to_string()),
             start_time: agent_start_time,
             end_time: Some(end_time.clone()),
-            input: agent_input.map(|s| serde_json::json!(s)),
-            output: Some(serde_json::json!(output)),
+            input: None,
+            output,
             parent_observation_id: Some(trace_id.clone()),
             version: Some(VERSION.to_string()),
             ..Default::default()
@@ -354,15 +349,18 @@ impl LangfuseTracer {
             body: obs_body,
             metadata: None,
         };
-        if let Err(e) = session.try_add(obs_event) {
-            tracing::warn!(error = %e, trace_id = %trace_id, obs_id = %agent_observation_id, "langfuse: agent-run observation 创建失败");
-        }
+        try_add_or_warn_via_session(
+            &*session,
+            obs_event,
+            &trace_id,
+            "agent-run ObservationCreate",
+        );
 
         // 最终 flush 保持 fire-and-forget（不阻塞执行管线；pump_done 已先行发出），
         // 常驻进程（TUI/ACP server）无需等待；短生命周期进程由调用方显式 flush。
         tokio::spawn(async move {
-            if let Err(e) = session.flush().await {
-                tracing::warn!(error = %e, trace_id = %trace_id, "langfuse: session flush 失败");
+            if session.flush().await.is_err() {
+                tracing::warn!(trace_id = %trace_id, "langfuse: session flush failed");
             }
         })
     }
@@ -537,12 +535,15 @@ impl LangfuseTracer {
             }
         }
 
-        // LLM 失败路径（reason.rs 以 "ERROR: " 前缀标记 output）：
-        // generation 标记为 Error 级并写入完整错误详情（Langfuse UI 可筛选/查看 statusMessage）。
-        let (level, status_message) = if output.starts_with("ERROR: ") {
-            (Some(ObservationLevel::Error), Some(output.to_string()))
+        // LLM 失败路径只保留固定分类，避免将 provider 原始错误写入 statusMessage 或 output。
+        let (level, status_message, generation_output) = if output.starts_with("ERROR: ") {
+            (
+                Some(ObservationLevel::Error),
+                Some("provider_or_stream_failure".to_string()),
+                Some(serde_json::json!({"error_class": "provider_or_stream_failure"})),
+            )
         } else {
-            (None, None)
+            (None, None, Some(parse_output(output)))
         };
 
         let gen_body = GenerationBody {
@@ -551,8 +552,8 @@ impl LangfuseTracer {
             name: Some(format!("step-{}", step)),
             start_time: Some(gen_end.start_time),
             end_time: Some(end_time.clone()),
-            input: Some(gen_end.input_json),
-            output: Some(parse_output(output)),
+            input: None,
+            output: generation_output,
             metadata: Some(meta),
             level,
             status_message,
@@ -811,7 +812,7 @@ impl LangfuseTracer {
         skills_count: usize,
         micro_cleared: usize,
         is_error: bool,
-        error_message: &str,
+        _error_message: &str,
     ) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
@@ -830,7 +831,7 @@ impl LangfuseTracer {
         }
 
         let output = if is_error {
-            serde_json::json!({"error": error_message})
+            serde_json::json!({"error_class": "compact_failure"})
         } else {
             serde_json::json!({
                 "summary": summary,
@@ -1009,7 +1010,7 @@ impl LangfuseTracer {
             name: Some(format!("workflow-{}", workflow_id)),
             start_time: Some(now_rfc3339()),
             end_time: None,
-            input: Some(serde_json::json!({"plan": plan})),
+            input: None,
             output: None,
             metadata: None,
             level: None,
@@ -1108,14 +1109,12 @@ impl LangfuseTracer {
             StageStatus::Error => Some(ObservationLevel::Error),
             _ => Some(ObservationLevel::Default),
         };
-        let mut output_json = serde_json::json!({
+        let output_json = serde_json::json!({
             "hook": format!("{:?}", record.hook),
             "status": format!("{:?}", record.status),
             "duration_ms": duration_ms,
+            "error_class": record.is_error.then_some("middleware_failure"),
         });
-        if let Some(ref err) = record.error {
-            output_json["error"] = serde_json::json!(err);
-        }
         let span_body = SpanBody {
             id: Some(record.span_id),
             trace_id: Some(self.trace_id.clone()),
@@ -1126,7 +1125,7 @@ impl LangfuseTracer {
             output: Some(output_json),
             metadata: None,
             level,
-            status_message: record.error,
+            status_message: record.is_error.then_some("middleware_failure".to_string()),
             version: Some(VERSION.to_string()),
             environment: None,
             parent_observation_id: Some(self.agent_observation_id.clone()),
@@ -1451,7 +1450,11 @@ impl LangfuseTracer {
             completion_start_time: None,
             parent_observation_id: Some(closed.parent_observation_id),
             input: None,
-            output: Some(serde_json::json!(strip_child_thread_id(&closed.output))),
+            output: if closed.is_error {
+                Some(serde_json::json!({"error_class": "subagent_failure"}))
+            } else {
+                None
+            },
             metadata: Some(metadata),
             model: None,
             model_parameters: None,
@@ -1500,16 +1503,8 @@ impl LangfuseTracer {
                 };
                 serde_json::json!({
                     "duration_ms": duration_ms,
-                    "tool_results": flush.tools.iter().map(|t| serde_json::json!({
-                        "name": t.name,
-                        "is_error": t.is_error,
-                        "output_preview": if t.output.len() > 200 {
-                            let preview: String = t.output.chars().take(200).collect();
-                            format!("{}...", preview)
-                        } else {
-                            t.output.clone()
-                        },
-                    })).collect::<Vec<_>>(),
+                    "tool_count": flush.tools.len(),
+                    "failed_tools": flush.tools.iter().filter(|tool| tool.is_error).count(),
                 })
             };
 
@@ -1554,8 +1549,10 @@ impl LangfuseTracer {
                     name: Some(tool.name.clone()),
                     start_time: Some(tool.start_time.clone()),
                     end_time: Some(tool.end_time.clone()),
-                    input: Some(tool.input.clone()),
-                    output: Some(serde_json::json!(tool.output)),
+                    input: None,
+                    output: tool
+                        .is_error
+                        .then_some(serde_json::json!({"error_class": "tool_failure"})),
                     parent_observation_id: Some(batch.batch_span_id.clone()),
                     level,
                     version: Some(VERSION.to_string()),

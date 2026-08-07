@@ -40,11 +40,11 @@ fn test_concurrent_same_hook_preserves_pairing() {
 }
 
 #[test]
-fn test_on_end_with_error_carries_message() {
+fn test_on_end_with_error_keeps_only_error_state() {
     let mut m = MiddlewareTracer::new();
     let h = m.on_start("FailingMW", MiddlewareHook::AfterTool);
     let end = m
-        .on_end(&h, StageStatus::Error, Some("panic".into()))
+        .on_end(&h, StageStatus::Error, Some("sentinel-secret".into()))
         .unwrap();
-    assert_eq!(end.error.as_deref(), Some("panic"));
+    assert!(end.is_error);
 }

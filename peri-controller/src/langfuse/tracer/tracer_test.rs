@@ -153,7 +153,7 @@ async fn test_llm_generation_emits_events() {
 }
 
 #[tokio::test]
-async fn test_llm_error_marks_generation_error() {
+async fn test_llm_error_uses_safe_status_message() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_llm_start("main", 0, &[], &[]);
@@ -162,7 +162,7 @@ async fn test_llm_error_marks_generation_error() {
         0,
         "gpt-4",
         "openai",
-        "ERROR: provider returned 503 Service Unavailable",
+        "ERROR: sentinel-secret",
         None,
         None,
     );
@@ -185,37 +185,46 @@ async fn test_llm_error_marks_generation_error() {
     );
     assert_eq!(
         gen.status_message.as_deref(),
-        Some("ERROR: provider returned 503 Service Unavailable"),
-        "generation statusMessage 应包含完整错误"
+        Some("provider_or_stream_failure"),
+        "generation statusMessage 应为稳定分类"
     );
+    assert!(!format!("{gen:?}").contains("sentinel-secret"));
 }
 
 #[tokio::test]
-async fn test_turn_error_message_in_error_span() {
+async fn test_turn_error_reason_is_safe_in_error_span() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
-    t.on_turn_error("provider returned 503 Service Unavailable");
-    let _handle = t.on_turn_end(Some("LlmFailure"));
+    t.on_turn_error(peri_agent::agent::events_v2::TurnErrorReason::LlmFailure);
+    let _handle = t.on_turn_end(Some("sentinel-secret"));
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
-    let span_out = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            if body.name.as_deref() == Some("ErrorTurn") {
-                return body.output.clone();
+    let error_span = events
+        .iter()
+        .find_map(|e| {
+            if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+                (body.name.as_deref() == Some("ErrorTurn")).then_some(body)
+            } else {
+                None
             }
-        }
-        None
-    });
-    let span_out = span_out.expect("应有 ErrorTurn span");
+        })
+        .expect("应有 ErrorTurn span");
     assert_eq!(
-        span_out["error"], "LlmFailure",
-        "ErrorTurn output 应保留错误枚举名"
+        error_span
+            .output
+            .as_ref()
+            .and_then(|output| output.get("error_class")),
+        Some(&serde_json::json!("llm_failure"))
     );
     assert_eq!(
-        span_out["message"], "provider returned 503 Service Unavailable",
-        "ErrorTurn output 应包含 TurnError 的完整错误消息"
+        error_span
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("error_schema_version")),
+        Some(&serde_json::json!(1))
     );
+    assert!(!format!("{error_span:?}").contains("sentinel-secret"));
 }
 
 #[tokio::test]

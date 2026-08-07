@@ -158,8 +158,8 @@ impl Batcher {
             Ok(()) => {
                 debug!("Batcher OTLP flush successful");
             }
-            Err(e) => {
-                error!("Batcher native ingestion flush failed: {}", e);
+            Err(_) => {
+                error!("Batcher native ingestion flush failed");
             }
         }
     }
@@ -202,7 +202,7 @@ impl Batcher {
                             "Batcher queue full, dropping event ({} policy)",
                             policy_name
                         );
-                        LangfuseError::ChannelClosed
+                        LangfuseError::QueueFull
                     }
                     mpsc::error::TrySendError::Closed(_) => {
                         self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -235,7 +235,7 @@ impl Batcher {
                         "DropNew"
                     }
                 );
-                LangfuseError::ChannelClosed
+                LangfuseError::QueueFull
             }
             mpsc::error::TrySendError::Closed(_) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);

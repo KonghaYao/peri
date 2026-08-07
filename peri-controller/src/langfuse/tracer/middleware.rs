@@ -27,7 +27,7 @@ pub(crate) struct MiddlewareEndRecord {
     pub hook: MiddlewareHook,
     pub start_time: String,
     pub status: StageStatus,
-    pub error: Option<String>,
+    pub is_error: bool,
 }
 
 pub(crate) struct MiddlewareTracer {
@@ -63,7 +63,7 @@ impl MiddlewareTracer {
         &mut self,
         handle: &MiddlewareSpanHandle,
         status: StageStatus,
-        error: Option<String>,
+        _error: Option<String>,
     ) -> Option<MiddlewareEndRecord> {
         let active = self.active.remove(&handle.span_id)?;
         Some(MiddlewareEndRecord {
@@ -72,7 +72,7 @@ impl MiddlewareTracer {
             hook: active.hook,
             start_time: active.start_time,
             status,
-            error,
+            is_error: status == StageStatus::Error,
         })
     }
 
