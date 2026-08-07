@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+#[cfg(unix)]
 use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::tools::BaseTool;
 
