@@ -1,6 +1,9 @@
 use std::io::Write;
 
-use super::load_from;
+use serial_test::serial;
+
+use super::{load_from, save, save_to};
+use crate::provider::config::PeriConfig;
 
 /// 在临时目录创建 .peri/settings.json
 fn write_settings(dir: &std::path::Path, content: &str) {
@@ -8,6 +11,16 @@ fn write_settings(dir: &std::path::Path, content: &str) {
     std::fs::create_dir_all(&peri_dir).unwrap();
     let mut f = std::fs::File::create(peri_dir.join("settings.json")).unwrap();
     f.write_all(content.as_bytes()).unwrap();
+}
+
+/// RAII guard：测试结束时复位全局配置路径重定向，
+/// 防止断言失败后残留全局态污染其他测试。
+struct ConfigPathGuard;
+
+impl Drop for ConfigPathGuard {
+    fn drop(&mut self) {
+        super::set_global_config_path(None);
+    }
 }
 
 #[test]
@@ -69,4 +82,101 @@ fn test_merge_global_and_workspace_via_load_from() {
     assert_eq!(global.config.providers[0].api_key, "sk-global");
     // profiles 未被工作区定义 → 保留全局默认
     assert_eq!(global.config.profiles.sonnet.effort, "xhigh");
+}
+
+// ─── set_global_config_path 重定向（进程级全局态，全部 #[serial]）──────────
+
+#[test]
+#[serial]
+fn test_set_global_config_path_none_keeps_default() {
+    let _guard = ConfigPathGuard;
+    super::set_global_config_path(None);
+    let expected = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".peri")
+        .join("settings.json");
+    assert_eq!(super::config_path(), expected);
+}
+
+#[test]
+#[serial]
+fn test_redirect_config_path_and_save_roundtrip() {
+    let _guard = ConfigPathGuard;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("global").join("settings.json");
+    // tempdir 路径本身是绝对路径，set 后不做相对路径解析
+    super::set_global_config_path(Some(target.clone()));
+    assert_eq!(super::config_path(), target);
+
+    save(&PeriConfig::default()).unwrap();
+    assert!(target.exists());
+    // 写入内容必须是合法 JSON（save 内部 serde_json::to_string_pretty 已保证，
+    // 此处防御性验证文件可解析）
+    let content = std::fs::read_to_string(&target).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert!(parsed.is_object());
+}
+
+#[test]
+#[serial]
+fn test_redirect_load_reads_override_file() {
+    let _guard = ConfigPathGuard;
+    // 测试 cwd 是 peri-acp 包根，无 ./.peri/ 目录，
+    // 工作区 merge 不介入，load() 只读重定向后的全局文件。
+    let tmp = tempfile::tempdir().unwrap();
+    let content = r#"{
+        "config": {
+            "active_alias": "sonnet",
+            "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-redirect"}]
+        }
+    }"#;
+    write_settings(tmp.path(), content);
+    let target = tmp.path().join(".peri").join("settings.json");
+    super::set_global_config_path(Some(target.clone()));
+
+    let cfg = super::load().unwrap();
+    assert_eq!(cfg.config.active_alias, "sonnet");
+    assert_eq!(cfg.config.providers.len(), 1);
+    assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
+}
+
+#[test]
+#[serial]
+fn test_redirect_save_unwritable_errors() {
+    let _guard = ConfigPathGuard;
+    let tmp = tempfile::tempdir().unwrap();
+    // 以普通文件为父目录，create_dir_all 必然失败
+    let f = tmp.path().join("f");
+    std::fs::write(&f, "not a dir").unwrap();
+    let target = f.join("settings.json");
+    super::set_global_config_path(Some(target.clone()));
+
+    let result = save(&PeriConfig::default());
+    assert!(result.is_err());
+    assert!(!target.exists());
+}
+
+#[test]
+#[serial]
+fn test_redirect_absolutizes_relative_path() {
+    let _guard = ConfigPathGuard;
+    super::set_global_config_path(Some(std::path::PathBuf::from("settings.json")));
+    let resolved = super::config_path();
+    let cwd = std::env::current_dir().unwrap();
+    assert!(resolved.is_absolute());
+    assert_eq!(resolved, cwd.join("settings.json"));
+}
+
+#[test]
+#[serial]
+fn test_redirect_save_to_unaffected_by_override() {
+    // save_to 显式指定路径，不经过 config_path()，
+    // 重定向设置后行为不变（防御显式路径语义不被全局态污染）。
+    let _guard = ConfigPathGuard;
+    let tmp = tempfile::tempdir().unwrap();
+    super::set_global_config_path(Some(tmp.path().join("override").join("settings.json")));
+    let explicit = tmp.path().join("explicit").join("settings.json");
+    save_to(&PeriConfig::default(), &explicit).unwrap();
+    assert!(explicit.exists());
+    assert!(!tmp.path().join("override").join("settings.json").exists());
 }

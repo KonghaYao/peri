@@ -1,6 +1,7 @@
 //! CLI 参数解析集成测试
 
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "peri")]
@@ -39,6 +40,10 @@ struct TestCli {
     disallowed_tools: Option<Vec<String>>,
     #[arg(long = "settings")]
     settings: Option<String>,
+    #[arg(long = "config-file", visible_alias = "configFile")]
+    config_file: Option<PathBuf>,
+    #[arg(long = "db-path", visible_alias = "dbPath")]
+    db_path: Option<PathBuf>,
 }
 
 #[test]
@@ -270,4 +275,80 @@ fn test_sync_legacy_ws_actions_still_parse() {
         panic!("expected sync command");
     };
     assert!(matches!(action, SyncAction::Receiver));
+}
+
+// ─── 全局配置/数据库路径参数（Slice C1）─────────────────────────────────────
+
+#[test]
+fn test_config_file_flag_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--config-file", "/tmp/cfg.json"]).unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+}
+
+#[test]
+fn test_config_file_alias_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--configFile", "/tmp/cfg.json"]).unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+}
+
+#[test]
+fn test_config_file_equals_form_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--config-file=/tmp/cfg.json"]).unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+}
+
+#[test]
+fn test_config_file_camel_equals_form_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--configFile=/tmp/cfg.json"]).unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+}
+
+#[test]
+fn test_db_path_flag_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--db-path", "/tmp/threads.db"]).unwrap();
+    assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+}
+
+#[test]
+fn test_db_path_alias_parses() {
+    let cli = TestCli::try_parse_from(["peri", "--dbPath", "/tmp/threads.db"]).unwrap();
+    assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+}
+
+#[test]
+fn test_config_file_missing_value_errors() {
+    assert!(TestCli::try_parse_from(["peri", "--config-file"]).is_err());
+}
+
+#[test]
+fn test_db_path_missing_value_errors() {
+    assert!(TestCli::try_parse_from(["peri", "--db-path"]).is_err());
+}
+
+#[test]
+fn test_config_file_and_db_path_combined() {
+    let cli = TestCli::try_parse_from([
+        "peri",
+        "--config-file",
+        "/tmp/cfg.json",
+        "--db-path",
+        "/tmp/threads.db",
+    ])
+    .unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+    assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
+}
+
+#[test]
+fn test_real_cli_parses_config_and_db_flags() {
+    // 直测真实 Cli（防 TestCli 镜像漂移）
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--config-file=/tmp/cfg.json",
+        "--db-path",
+        "/tmp/threads.db",
+    ])
+    .unwrap();
+    assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
+    assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
 }

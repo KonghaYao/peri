@@ -6,6 +6,7 @@
 //! 同源，不复制），执行路径与 TUI 完全一致（session/new → prompt → 事件收集
 //! → close）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cli_args::OutputFormat;
@@ -32,6 +33,7 @@ pub async fn run_print(
     disallowed_tools: Vec<String>,
     settings_path: Option<String>,
     cwd: Option<String>,
+    db_path: Option<PathBuf>,
 ) -> Result<()> {
     let fmt: OutputFormat = match output_format.as_deref() {
         Some(s) => s.parse().map_err(|e: String| anyhow::anyhow!(e))?,
@@ -123,7 +125,8 @@ pub async fn run_print(
     // thread 存储（经 Resources 门面）——协议面输入，ACP host 的 ephemeral
     // session 需要；middlewares 具体实现（CronScheduler / McpClientPool / 插件
     // 数据等）由 ACP Host 装配面内部构造（§0 依赖方向）。
-    let thread_store = peri_resources::Resources::open()
+    // db_path 显式指定时打开失败直接上抛（不 fallback），经 `?` 传播 exit 1。
+    let thread_store = peri_resources::Resources::open_with(db_path)
         .await
         .map(|resources| resources.thread_store())
         .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;

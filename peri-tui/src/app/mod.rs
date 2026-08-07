@@ -22,6 +22,7 @@ mod provider;
 
 use crate::acp_client::AcpTuiClient;
 use crate::config::PeriConfig;
+use std::path::PathBuf;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new() -> Self {
+    /// `db_path`：显式指定 SQLite 会话数据库路径；`None` 保持默认路径
+    /// + fallback 临时目录行为（`Resources::open_with`）。
+    pub async fn new(db_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()
             .unwrap_or_default()
             .to_string_lossy()
@@ -74,10 +77,11 @@ impl App {
             None => lc.tr("app-not-configured"),
         };
 
-        // 初始化 thread 存储（经 Resources 门面；失败时 fallback 到临时目录的逻辑在门面内）
-        let resources = peri_resources::Resources::open()
+        // 初始化 thread 存储（经 Resources 门面；失败时 fallback 到临时目录的逻辑在门面内。
+        // db_path 显式指定时打开失败直接上抛——TUI 路径由 run_tui 决定 exit 码）
+        let resources = peri_resources::Resources::open_with(db_path)
             .await
-            .expect("无法初始化 Resources 层");
+            .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
         let thread_store: std::sync::Arc<dyn crate::thread::ThreadStore> = resources.thread_store();
 
         // 初始化 cron state + spawn tick task
@@ -104,12 +108,12 @@ impl App {
             ),
         };
 
-        Self {
+        Ok(Self {
             services,
             global_ui: GlobalUiState::new(),
             focused: true,
             acp_client: None,
-        }
+        })
     }
 
     /// 后台初始化 MCP 连接池（不阻塞 UI），在 run_app 中 App::new() 之后调用

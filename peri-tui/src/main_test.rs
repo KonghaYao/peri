@@ -157,3 +157,91 @@ fn test_project_local_settings_env_injection() {
         std::env::remove_var("PRJ_LOCAL_KEY");
     }
 }
+
+// ─── pre_scan_config_file（Slice C1，gate 决策 Option A）─────────────────────
+
+#[test]
+fn test_prescan_config_file_space_form() {
+    let args = ["--config-file", "/tmp/cfg.json"].map(std::ffi::OsString::from);
+    assert_eq!(
+        pre_scan_config_file(args.into_iter()),
+        Some(PathBuf::from("/tmp/cfg.json"))
+    );
+}
+
+#[test]
+fn test_prescan_config_file_equals_form() {
+    let args = ["--config-file=/tmp/cfg.json"].map(std::ffi::OsString::from);
+    assert_eq!(
+        pre_scan_config_file(args.into_iter()),
+        Some(PathBuf::from("/tmp/cfg.json"))
+    );
+}
+
+#[test]
+fn test_prescan_config_file_camel_alias() {
+    let args = ["--configFile", "/tmp/cfg.json"].map(std::ffi::OsString::from);
+    assert_eq!(
+        pre_scan_config_file(args.into_iter()),
+        Some(PathBuf::from("/tmp/cfg.json"))
+    );
+}
+
+#[test]
+fn test_prescan_config_file_camel_equals_form() {
+    let args = ["--configFile=/tmp/cfg.json"].map(std::ffi::OsString::from);
+    assert_eq!(
+        pre_scan_config_file(args.into_iter()),
+        Some(PathBuf::from("/tmp/cfg.json"))
+    );
+}
+
+#[test]
+fn test_prescan_config_file_non_utf8_value() {
+    // 非 UTF-8 值直接构造 PathBuf，保留原始字节（Unix OsStringExt）
+    use std::os::unix::ffi::OsStringExt;
+    let value = std::ffi::OsString::from_vec(vec![0x2f, 0x74, 0x6d, 0x70, 0xff, 0xfe]);
+    let result = pre_scan_config_file(
+        [std::ffi::OsString::from("--config-file"), value.clone()].into_iter(),
+    )
+    .unwrap();
+    assert_eq!(result.as_os_str(), value.as_os_str());
+}
+
+#[test]
+fn test_prescan_config_file_missing_value_none() {
+    // 下一 token 是 option-like（--db-path）→ 缺值，fail-open 返回 None 交给 clap 报错
+    let args = ["--config-file", "--db-path"].map(std::ffi::OsString::from);
+    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+}
+
+#[test]
+fn test_prescan_config_file_followed_by_short_flag_none() {
+    // M2 增补：后跟短 flag（-p）→ 缺值 → None
+    let args = ["--config-file", "-p", "x"].map(std::ffi::OsString::from);
+    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+}
+
+#[test]
+fn test_prescan_config_file_followed_by_db_flag_none() {
+    // M2 增补：后跟 --db-path → 缺值 → None
+    let args = ["--config-file", "--db-path", "/x"].map(std::ffi::OsString::from);
+    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+}
+
+#[test]
+fn test_prescan_stops_after_double_dash() {
+    // `--` 之后停止扫描，`--config-file` 不再被识别
+    let args = ["--", "--config-file", "x"].map(std::ffi::OsString::from);
+    assert_eq!(pre_scan_config_file(args.into_iter()), None);
+}
+
+#[test]
+fn test_prescan_last_occurrence_wins() {
+    // 重复 flag 取最后一次（last-wins）
+    let args = ["--config-file", "a", "--config-file", "b"].map(std::ffi::OsString::from);
+    assert_eq!(
+        pre_scan_config_file(args.into_iter()),
+        Some(PathBuf::from("b"))
+    );
+}

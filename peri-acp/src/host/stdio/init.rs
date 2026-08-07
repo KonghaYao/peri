@@ -19,6 +19,9 @@ use super::context::StdioContext;
 pub struct StdioAssemblyInput {
     pub cwd: String,
     pub permission_mode: Arc<SharedPermissionMode>,
+    /// 显式指定 SQLite 会话数据库路径；`None` 保持默认路径 + fallback
+    /// 临时目录行为（`open_thread_store_with`）。
+    pub db_path: Option<PathBuf>,
 }
 
 /// 初始化 ACP Stdio 运行环境，返回共享上下文。
@@ -57,6 +60,7 @@ pub(super) async fn init_stdio_context(
     let StdioAssemblyInput {
         cwd: input_cwd,
         permission_mode,
+        db_path,
     } = input;
     let _ = input_cwd;
 
@@ -115,7 +119,7 @@ pub(super) async fn init_stdio_context(
 
     // thread 存储经 peri-agent 工厂构造（§0：ACP 层不直接依赖 Resources；
     // M-res 收口——存储实例化点归 Agent 层声明边）
-    let thread_store: Arc<dyn ThreadStore> = peri_agent::resources::open_thread_store()
+    let thread_store: Arc<dyn ThreadStore> = peri_agent::resources::open_thread_store_with(db_path)
         .await
         .map_err(|e| anyhow::anyhow!("无法初始化 Resources 层: {e}"))?;
 

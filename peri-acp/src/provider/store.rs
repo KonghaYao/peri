@@ -1,15 +1,53 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::Result;
 
 use super::config::PeriConfig;
 
-/// 配置文件路径：~/.peri/settings.json
+/// 进程级全局配置路径重定向（None 表示未设置，使用默认路径）。
+///
+/// 由部署装配点（CLI 入口）在启动早期调用一次；相对路径按启动时 cwd 解析为绝对路径。
+static CONFIG_PATH_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// 全局配置文件路径。
+///
+/// 已通过 [`set_global_config_path`] 设置重定向时返回重定向路径，否则返回默认
+/// `~/.peri/settings.json`。
 pub fn config_path() -> PathBuf {
+    CONFIG_PATH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(default_config_path)
+}
+
+/// 默认配置文件路径：~/.peri/settings.json
+fn default_config_path() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".peri")
         .join("settings.json")
+}
+
+/// 进程级重定向全局配置文件路径；`None` 复位为默认路径。
+///
+/// 由部署装配点（CLI 入口）在启动早期调用一次，之后 [`config_path()`]、
+/// [`load()`]、[`save()`] 均跟随该路径。相对路径按启动时 cwd 解析为绝对路径。
+pub fn set_global_config_path(path: Option<PathBuf>) {
+    let resolved = path.map(|p| {
+        if p.is_relative() {
+            std::env::current_dir()
+                .ok()
+                .map(|c| c.join(&p))
+                .unwrap_or(p)
+        } else {
+            p
+        }
+    });
+    *CONFIG_PATH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = resolved;
 }
 
 /// 工作区配置文件路径：{cwd}/.peri/settings.json
