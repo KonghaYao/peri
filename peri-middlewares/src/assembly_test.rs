@@ -31,7 +31,10 @@ use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,
-    assembly::{AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder},
+    assembly::{
+        default_workflow_middleware_factory, AssemblyContext, OnBgCompleteFn,
+        ProductionChainAssembler, SystemPromptBuilder,
+    },
     hitl::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::McpClientPool,
@@ -469,4 +472,62 @@ fn full_config_chain_order() {
             "GoalMiddleware",
         ]
     );
+}
+
+#[test]
+fn workflow_agent_type_uses_project_definition_before_built_in() {
+    let temp = tempfile::tempdir().unwrap();
+    let agents_dir = temp.path().join(".claude/agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("explorer.md"),
+        "---\nname: explorer\ndescription: Project override\ntools: Read, Grep\ndisallowedTools: Grep\nmodel: opus\nmaxTurns: 7\nskills: [research]\n---\n\nProject explorer persona.",
+    )
+    .unwrap();
+
+    let factory = default_workflow_middleware_factory();
+    let definition = factory
+        .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
+        .unwrap();
+
+    assert_eq!(definition.model.as_deref(), Some("opus"));
+    assert_eq!(
+        definition.allowed_tools,
+        Some(vec!["Read".into(), "Grep".into()])
+    );
+    assert_eq!(definition.disallowed_tools, vec!["Grep"]);
+    assert_eq!(definition.skill_names, vec!["research"]);
+    assert_eq!(definition.max_iterations, 7);
+    assert_eq!(
+        definition
+            .prompt_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.persona.as_deref()),
+        Some("Project explorer persona.")
+    );
+}
+
+#[test]
+fn workflow_plan_definition_inherits_model_and_preserves_sandbox_write_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition = default_workflow_middleware_factory()
+        .resolve_agent_definition("plan", temp.path().to_str().unwrap())
+        .unwrap();
+
+    assert_eq!(definition.model, None);
+    assert_eq!(definition.allowed_write_dirs, vec![".peri/plans/"]);
+    assert!(definition
+        .disallowed_tools
+        .iter()
+        .any(|tool| tool.eq_ignore_ascii_case("Write")));
+}
+
+#[test]
+fn workflow_agent_type_rejects_unknown_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = default_workflow_middleware_factory()
+        .resolve_agent_definition("does-not-exist", temp.path().to_str().unwrap())
+        .unwrap_err();
+
+    assert!(error.contains("cannot find agent definition 'does-not-exist'"));
 }

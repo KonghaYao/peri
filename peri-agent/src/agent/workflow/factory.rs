@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
 
@@ -20,15 +21,53 @@ use crate::tools::{BaseTool, ToolInvocationResolver};
 
 use super::WorkflowAgentContext;
 
+/// Workflow agent 从 `agentType` 解析出的 subagent 定义投影。
+///
+/// 解析、文件优先级和工具实例化保留在 `peri-middlewares`；本结构只携带 Agent
+/// 执行单元需要的无行为数据，避免反向依赖 Middleware。
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowAgentDefinition {
+    /// agent.md 指定的模型档位；`None` / `inherit` 表示继承 workflow 请求。
+    pub model: Option<String>,
+    /// `tools` 的显式白名单。`None` 表示继承 workflow 的基础工具；Some(empty)
+    /// 表示严格零工具边界。
+    pub allowed_tools: Option<Vec<String>>,
+    /// 在白名单/继承结果上继续移除的工具。
+    pub disallowed_tools: Vec<String>,
+    /// agent.md 声明、需要预加载的 skills。
+    pub skill_names: Vec<String>,
+    /// agent.md 声明的沙箱写目录；有声明且 tools 非 `[]` 时注入 SandboxWrite。
+    pub allowed_write_dirs: Vec<String>,
+    /// agent.md 的 ReAct 最大轮数；0 表示使用默认值。
+    pub max_iterations: usize,
+    /// agent.md 对标准 subagent prompt 的 persona/tone/proactiveness 覆盖。
+    pub prompt_overrides: Option<AgentOverrides>,
+}
+
 /// Workflow agent 中间件/工具装配端口。
 ///
-/// `peri-middlewares` 实现（`assembly::workflow_agent::WorkflowAgentMiddlewareFactory`）；
+/// `peri-middlewares` 实现（`assembly::WorkflowAgentMiddlewareFactory`）；
 /// 方法面 = workflow agent 执行体所需的全部中间件/工具装配，返回类型一律为
 /// Agent 层/契约层类型（实现方经 re-export 构造，不产生 ACP/Middleware 依赖）。
 pub trait WorkflowMiddlewareFactory: Send + Sync {
+    /// 按普通 subagent 的同一优先级解析 `agentType`。
+    fn resolve_agent_definition(
+        &self,
+        agent_type: &str,
+        cwd: &str,
+    ) -> Result<WorkflowAgentDefinition, String>;
+
     /// 装配 workflow agent 工具列表（filesystem / terminal / web / skills tools；
     /// 仅 project-level skills，与迁移前行为一致）。
     fn build_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>>;
+
+    /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。
+    /// 定义中的 `tools: []` / `disallowedTools` 边界由调用方先行检查。
+    fn build_sandbox_write_tool(
+        &self,
+        cwd: &str,
+        allowed_dirs: &[String],
+    ) -> Option<Box<dyn BaseTool>>;
 
     /// 装配 workflow agent 中间件链（frozen CLAUDE.md / skills summary / HITL
     /// broker+permission_mode 语义自 `ctx` 读取；`model_name` 供
@@ -37,6 +76,7 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
         &self,
         ctx: &WorkflowAgentContext,
         model_name: &str,
+        skill_names: &[String],
     ) -> Vec<Box<dyn Middleware>>;
 
     /// 构造 tool invocation resolver（迁移前语义 =
@@ -69,15 +109,24 @@ pub struct WorkflowModel {
     pub model_name: String,
 }
 
-/// Workflow agent 模型工厂（ACP 宿主构造：alias 解析 + retry observer 烘焙 +
-/// AgentPool 缓存；`peri-agent` 侧不持有 provider 实现）。
+/// Workflow agent 模型工厂（ACP 宿主构造：alias 解析 + `maxTokens` 覆盖 + retry
+/// observer 烘焙 + AgentPool 缓存；`peri-agent` 侧不持有 provider 实现）。
 ///
-/// 参数 = workflow script 指定的 model（`None` = provider 默认模型）+ 本 run 的
-/// retry observer（重试观测翻译为 `LlmRetrying` 交给本 run handler，语义同
-/// 主 executor 的 per-turn observer）。每次调用返回新实例——compact 与 base
-/// 各持一份，与迁移前 `create_executor` 行为一致。
-pub type WorkflowModelFactory =
-    Arc<dyn Fn(Option<&str>, Arc<dyn peri_model::RetryObserver>) -> WorkflowModel + Send + Sync>;
+/// 参数依次为有效模型选择（None = provider 默认）、本次调用的输出 token 上限
+/// （None = profile/provider 默认）和 retry observer。每次调用返回新实例——compact
+/// 与 base 各持一份，与迁移前 `create_executor` 行为一致。
+pub type WorkflowModelFactory = Arc<
+    dyn Fn(Option<&str>, Option<u32>, Arc<dyn peri_model::RetryObserver>) -> WorkflowModel
+        + Send
+        + Sync,
+>;
+
+/// Workflow agent 的 subagent prompt 渲染端口。
+///
+/// agent type 指定时使用其 `agent.md` overrides 渲染；无 agent type 时继续使用
+/// session 冻结的默认 subagent prompt。
+pub type WorkflowAgentPromptBuilder =
+    Arc<dyn Fn(Option<&AgentOverrides>, &str, Option<&str>, Option<&str>) -> String + Send + Sync>;
 
 /// Workflow agent system prompt fallback 渲染闭包（ACP 宿主构造：`PromptTemplate`
 /// 渲染面；参数 = cwd / frozen date / frozen language）。

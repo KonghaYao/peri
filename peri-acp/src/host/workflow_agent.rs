@@ -19,14 +19,15 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::{
+    agents::AgentOverrides,
     compact::CompactConfig,
     permission::PermissionMode,
     ports::{SkillsPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
 use peri_agent::agent::workflow::{
-    create_executor, WorkflowAgentContext, WorkflowMiddlewareFactory, WorkflowModel,
-    WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
+    create_executor, WorkflowAgentContext, WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory,
+    WorkflowModel, WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
 use peri_agent::session::exec::executor_helpers::ForwarderLauncherFn;
 
@@ -50,28 +51,35 @@ pub(crate) fn build_model_factory(
 ) -> WorkflowModelFactory {
     let provider = Arc::clone(provider);
     let peri_config = Arc::new(peri_config.read().clone());
-    Arc::new(move |model: Option<&str>, observer| {
-        // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
-        // 不一致——与迁移前 execute() 块作用域语义一致）。如 workflow 脚本
-        // 指定了 model 参数：
-        //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
-        //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
-        let effective = {
-            let provider_read = provider.read();
-            match model {
-                Some(m) => match LlmProvider::from_config_for_alias(&peri_config, m) {
-                    Some(p) => p,
-                    None => provider_read.with_model_name(m.to_string()),
-                },
-                None => provider_read.clone(),
+    Arc::new(
+        move |model: Option<&str>, max_tokens: Option<u32>, observer| {
+            // 合并 provider 读取为一次（display/model 同源，避免中间切换导致
+            // 不一致——与迁移前 execute() 块作用域语义一致）。如 workflow 脚本
+            // 指定了 model 参数：
+            //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
+            //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
+            let effective = {
+                let provider_read = provider.read();
+                match model {
+                    Some(m) => match LlmProvider::from_config_for_alias(&peri_config, m) {
+                        Some(p) => p,
+                        None => provider_read.with_model_name(m.to_string()),
+                    },
+                    None => provider_read.clone(),
+                }
+            };
+            // `maxTokens` 是单次 workflow agent 调用的输出上限；提供时覆盖 profile，
+            // 未提供时保留 profile/provider 的默认值。
+            let effective = max_tokens
+                .map(|max_tokens| effective.with_max_tokens(max_tokens))
+                .unwrap_or(effective);
+            let model_name = effective.model_name().to_string();
+            WorkflowModel {
+                model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
+                model_name,
             }
-        };
-        let model_name = effective.model_name().to_string();
-        WorkflowModel {
-            model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
-            model_name,
-        }
-    })
+        },
+    )
 }
 
 /// 事件发射钩子构造（`Controller::publish_event` 适配；事件三层化统一出口，
@@ -110,6 +118,30 @@ pub(crate) fn build_workflow_system_prompt_fallback(
             } else {
                 crate::prompt::PromptEnv::detect(cwd)
             };
+            template.render(&env, &features, skills.as_ref(), &[], frozen_language)
+        },
+    )
+}
+
+/// workflow `agentType` 指定时的 subagent prompt 渲染器。
+///
+/// 与主链注入的 `system_builder` 使用相同的 PromptTemplate override 语义，但始终
+/// 关闭 workflow section，确保 prompt 声明与 workflow agent 的工具集一致。
+pub(crate) fn build_workflow_agent_prompt_builder(
+    skills: Arc<dyn SkillsPort>,
+) -> WorkflowAgentPromptBuilder {
+    Arc::new(
+        move |overrides: Option<&AgentOverrides>, cwd, frozen_date, frozen_language| {
+            let features =
+                crate::prompt::PromptFeatures::detect_without_workflow(PermissionMode::Bypass);
+            let template = overrides.map_or_else(
+                crate::prompt::PromptTemplate::new,
+                crate::prompt::PromptTemplate::with_overrides,
+            );
+            let env = frozen_date.map_or_else(
+                || crate::prompt::PromptEnv::detect(cwd),
+                |date| crate::prompt::PromptEnv::with_frozen_date(cwd, date),
+            );
             template.render(&env, &features, skills.as_ref(), &[], frozen_language)
         },
     )
@@ -160,6 +192,7 @@ pub(crate) fn create_session_workflow_middleware(
         thread_store: None,
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
+        agent_prompt_builder: build_workflow_agent_prompt_builder(Arc::clone(&skills)),
         model_factory: build_model_factory(&provider, peri_config),
         middleware_factory: Arc::clone(&middleware_factory),
         system_prompt_fallback: build_workflow_system_prompt_fallback(skills),

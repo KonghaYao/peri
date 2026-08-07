@@ -12,6 +12,6 @@ pub use agent::{
     create_default_executor, create_executor, WorkflowAgentContext, WorkflowAgentExecutor,
 };
 pub use factory::{
-    WorkflowMiddlewareFactory, WorkflowModel, WorkflowModelFactory, WorkflowPublishHook,
-    WorkflowSystemPromptFallback,
+    WorkflowAgentDefinition, WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory, WorkflowModel,
+    WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
