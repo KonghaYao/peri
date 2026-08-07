@@ -54,6 +54,9 @@ pub struct TuiAgentProgress {
     pub label: Option<String>,
     #[serde(default)]
     pub phase: Option<String>,
+    /// 有效/解析后的模型名（旧版快照无此字段 → None，面板渲染 '-'）。
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: String, // "pending" | "running" | "done" | "dead" | "skipped"
     #[serde(default)]
     pub token_count: Option<u64>,

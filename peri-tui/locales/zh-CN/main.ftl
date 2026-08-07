@@ -960,6 +960,8 @@ panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 workflow-loading-runs = 正在加载工作流运行信息
 workflow-no-runs = 当前会话无工作流运行
 workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::查看 · Esc::关闭
+workflow-phases-header = 阶段（共 { $count } 个 agent）
+workflow-model-header = 模型
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   暂无待答问题。

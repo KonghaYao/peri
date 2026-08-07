@@ -272,8 +272,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
+                                model: None,
+                                token_count: Some(s.0),
+                                tool_count: Some(*tc),
                             }) {
                                 warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
                             }
@@ -309,8 +310,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
+                                model: None,
+                                token_count: Some(s.0),
+                                tool_count: Some(*tc),
                             }) {
                                 warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
                             }
@@ -366,6 +368,25 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let base_model = built_model.model;
         // 有效模型名（alias 解析后；GitAttribution 装配用）。
         let model_name = built_model.model_name;
+
+        // 模型解析完成后尽早上报有效模型名（模型信息专用更新）：TUI 在
+        // 运行中即可显示 Model 列，不必等首个 LlmCallEnd。计数保持 None，避免
+        // 引擎重试同一 agent 时以 0 覆盖前一次尝试已累计的统计。
+        // reducer 仅在 Some 时覆盖 agent.model，后续 ToolStart/LlmCallEnd
+        // 进度（model: None）不会冲掉该值。
+        if let Some(ref tx) = self.ctx.progress_tx {
+            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
+                run_id: params.run_id.clone(),
+                agent_id: params.agent_id,
+                label: None,
+                phase: None,
+                model: Some(model_name.clone()),
+                token_count: None,
+                tool_count: None,
+            }) {
+                warn!(target: "workflow", run_id = %params.run_id, agent_id = params.agent_id, error = %e, "progress_tx.send failed (model)");
+            }
+        }
 
         // 2. 注册工具（端口装配：fs/terminal/web/skills tools，仅 project-level
         // skills——workflow agent 无 plugin_skill_roots）。

@@ -122,8 +122,14 @@ pub enum ProgressEvent {
         label: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
-        token_count: u64,
-        tool_count: u64,
+        /// 有效/解析后的模型名（serde-optional：旧版事件无此字段 → None）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// 进度事件可只更新模型；旧版引擎始终提供计数。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_count: Option<u64>,
     },
     #[serde(rename = "agent_done", rename_all = "camelCase")]
     AgentDone {
@@ -223,6 +229,10 @@ pub struct AgentProgress {
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// 有效/解析后的模型名（运行中由 AgentProgress.model 携带，完成时以
+    /// AgentRunResult::Ok.model 为准；旧版快照无此字段 → None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_count: Option<u64>,
