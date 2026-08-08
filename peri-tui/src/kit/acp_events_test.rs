@@ -1809,6 +1809,13 @@ fn test_compact_turndone_reload() {
         !state.compact_just_completed,
         "场景 B: auto compact 后标志不应置位（方案 A）"
     );
+    assert!(
+        crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_none(),
+        "场景 B: auto compact 不应写入 PENDING_COMPACT_NOTE（无 replay）"
+    );
 
     // ② agent 继续产出——流事件到达（标志从未置位，防御逻辑无操作）
     dispatch_and_notify(
@@ -1853,6 +1860,21 @@ fn test_compact_turndone_reload() {
     assert!(
         state.compact_just_completed,
         "场景 B2: manual compact 后标志应置位"
+    );
+    // B2 补充（issue 2026-08-08-e2e-compact-command-screenshot-too-early）：
+    // manual compact 写入 PENDING_COMPACT_NOTE——TurnDone 触发 session/load
+    // replay 时 bridge reset 会清空 committed（含 SystemNote），replay 后由
+    // reset 分支从该 atom 重建完成提示。
+    let pending_note = crate::kit::atoms::PENDING_COMPACT_NOTE
+        .state()
+        .read()
+        .clone();
+    let note_ok = pending_note
+        .as_deref()
+        .is_some_and(|t| t.contains("compaction completed") || t.contains("压缩完成"));
+    assert!(
+        note_ok,
+        "场景 B2: manual compact 应写入 compact 完成提示，实际: {pending_note:?}"
     );
 
     dispatch_and_notify(

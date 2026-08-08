@@ -99,7 +99,16 @@ pub(super) fn handle_compact_completed(
             ],
         )
     };
-    state.inject_system_note(text, TuiNoteLevel::Warning);
+    state.inject_system_note(text.clone(), TuiNoteLevel::Warning);
+
+    // manual /compact 的完成提示需跨 TurnDone → session/load replay 存活：
+    // replay 的 BRIDGE_RESET_COUNTER 重置会清空 committed（含本 SystemNote），
+    // bridge reset 分支从 PENDING_COMPACT_NOTE 重建（issue
+    // 2026-08-08-e2e-compact-command-screenshot-too-early）。auto compact 不
+    // 写入——无 replay 触发，避免残留串到后续 thread 切换的 reset。
+    if trigger == "manual" {
+        crate::kit::atoms::PENDING_COMPACT_NOTE.set(Some(text));
+    }
 }
 
 pub(super) fn handle_compact_error(state: &mut BridgeState, message: &str) {

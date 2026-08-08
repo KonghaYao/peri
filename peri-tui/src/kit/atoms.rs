@@ -272,6 +272,16 @@ pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
 pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 
+/// manual /compact 完成提示（SystemNote 文本）暂存——CompactCompleted 写入，
+/// bridge 的 BRIDGE_RESET_COUNTER 重置（session/load replay）后重建注入。
+///
+/// 背景：manual /compact 后 TurnDone 触发 session/load replay，reset 清空
+/// committed 会把刚注入的"压缩完成"SystemNote 一并丢弃，replay 后屏幕无
+/// 任何完成提示（issue 2026-08-08-e2e-compact-command-screenshot-too-early）。
+/// 消费后立即清空；auto compact 不写入（无 replay，且避免残留串到后续
+/// thread 切换的 reset）。
+pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
 pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
 
 /// 回退目标 user 消息文本暂存——候选 Enter 时写入，RewindCompleted 到达后
