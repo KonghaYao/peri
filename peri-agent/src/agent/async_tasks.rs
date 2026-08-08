@@ -48,7 +48,7 @@ pub enum BackgroundRegistryError {
 }
 
 /// 后台任务类别（事实源 peri-acp-types::tasks）
-pub use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
+pub use peri_acp_types::tasks::{BgShellHandle, BgTaskKind, BgTaskRegistration};
 
 pub enum BgCancelHandle {
     /// bg agent：取消 tokio task。
@@ -797,7 +797,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         cwd: String,
         timeout_ms: Option<u64>,
         on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         self.spawn_shell(command, cwd, timeout_ms, on_bg_complete)
     }
 
@@ -915,7 +915,8 @@ impl TaskManager {
     /// `timeout_ms`：`None` = 不超时（后台语义：跑完为止）；`Some(ms)` 超时后
     /// kill 整个进程组（TERM → 2s 后 KILL 升级）。
     ///
-    /// 返回 `task_id`（格式 `shell-{uuid v7}`）。
+    /// 返回 [`BgShellHandle`]（`task_id` 格式 `shell-{uuid v7}` + 进程 PID）；
+    /// PID 供工具层回显，LLM 可经另一个 shell `kill` 进程组终止任务。
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::type_complexity)]
     pub fn spawn_shell(
@@ -924,65 +925,73 @@ impl TaskManager {
         cwd: String,
         timeout_ms: Option<u64>,
         on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         let task_id = bg_shell_task_id();
         let registry = Arc::clone(&self.registry);
         let command_owned = command;
         let on_bg_complete_cb = on_bg_complete;
         let task_id_for_return = task_id.clone();
 
+        // 同步 spawn：PID 必须在返回前确定，供工具层回显给 LLM 管理任务
+        let mut cmd = shell_command(&command_owned, &[]);
+        cmd.current_dir(&cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
+                let result = BackgroundTaskResult {
+                    task_id: task_id.clone(),
+                    agent_name: "bg-shell".to_string(),
+                    prompt_summary: command_owned.chars().take(80).collect(),
+                    success: false,
+                    output: format!("Failed to spawn: {}", e),
+                    tool_calls_count: 0,
+                    duration_ms: 0,
+                    child_thread_id: None,
+                    timed_out: false,
+                };
+                // 回调通知 Agent inbox（在 registry 操作之前）
+                if let Some(ref cb) = on_bg_complete_cb {
+                    cb(&result, BgTaskKind::Shell);
+                }
+                // 注册 + 立即完成
+                let bg_task = BackgroundTask {
+                    id: result.task_id.clone(),
+                    agent_name: "bg-shell".to_string(),
+                    prompt_summary: command_owned.chars().take(80).collect(),
+                    status: BackgroundTaskStatus::Running,
+                    started_at: std::time::Instant::now(),
+                    chrono_started_at: chrono::Utc::now(),
+                    kind: BgTaskKind::Shell,
+                    cancel_handle: BgCancelHandle::Kill(None),
+                    cancel_token: None,
+                    pid: None,
+                    output_preview: None,
+                };
+                let _ = registry.register_with_kind(bg_task);
+                let complete_task_id = result.task_id.clone();
+                registry.complete(&complete_task_id, result);
+                return Ok(BgShellHandle {
+                    task_id: task_id_for_return,
+                    pid: None,
+                });
+            }
+        };
+        let pid = child
+            .id()
+            .expect("bg shell: child.id() returned None after successful spawn");
+
         tokio::spawn(async move {
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
             // 防止 bg shell 任務殘留在狀態欄。
             let started = std::time::Instant::now();
             let result = std::panic::AssertUnwindSafe(async {
-                let mut cmd = shell_command(&command_owned, &[]);
-                cmd.current_dir(&cwd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                #[cfg(unix)]
-                cmd.process_group(0);
-
-                let child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let result = BackgroundTaskResult {
-                            task_id: task_id.clone(),
-                            agent_name: "bg-shell".to_string(),
-                            prompt_summary: command_owned.chars().take(80).collect(),
-                            success: false,
-                            output: format!("Failed to spawn: {}", e),
-                            tool_calls_count: 0,
-                            duration_ms: started.elapsed().as_millis() as u64,
-                            child_thread_id: None,
-                            timed_out: false,
-                        };
-                        // 回调通知 Agent inbox（在 registry 操作之前）
-                        if let Some(ref cb) = on_bg_complete_cb {
-                            cb(&result, BgTaskKind::Shell);
-                        }
-                        // 注册 + 立即完成
-                        let bg_task = BackgroundTask {
-                            id: result.task_id.clone(),
-                            agent_name: "bg-shell".to_string(),
-                            prompt_summary: command_owned.chars().take(80).collect(),
-                            status: BackgroundTaskStatus::Running,
-                            started_at: std::time::Instant::now(),
-                            chrono_started_at: chrono::Utc::now(),
-                            kind: BgTaskKind::Shell,
-                            cancel_handle: BgCancelHandle::Kill(None),
-                            cancel_token: None,
-                            pid: None,
-                            output_preview: None,
-                        };
-                        let _ = registry.register_with_kind(bg_task);
-                        let complete_task_id = result.task_id.clone();
-                        registry.complete(&complete_task_id, result);
-                        return;
-                    }
-                };
-                let pid = child.id();
 
                 // 任务启动即注册：推送 BgTaskStarted 事件，运行期间 TUI 展示栏可见。
                 // 完成时 finalize_bg_shell 只调 complete()，不再重复注册。
@@ -994,19 +1003,15 @@ impl TaskManager {
                     started_at: std::time::Instant::now(),
                     chrono_started_at: chrono::Utc::now(),
                     kind: BgTaskKind::Shell,
-                    cancel_handle: BgCancelHandle::Pid(pid.expect(
-                        "bg shell: child.id() returned None after successful spawn",
-                    )),
+                    cancel_handle: BgCancelHandle::Pid(pid),
                     cancel_token: None,
-                    pid,
+                    pid: Some(pid),
                     output_preview: None,
                 };
                 if let Err(e) = registry.register_with_kind(bg_task) {
                     // 并发上限已满：杀掉进程组，按失败收尾（防孤儿进程 + 推送 Completed）
                     warn!(error = %e, task_id = %task_id, "bg shell: register_with_kind failed at start, killing process group");
-                    kill_process_group_escalating(pid.expect(
-                        "bg shell: child.id() returned None after successful spawn",
-                    ));
+                    kill_process_group_escalating(pid);
                     let result = BackgroundTaskResult {
                         task_id: task_id.clone(),
                         agent_name: "bg-shell".to_string(),
@@ -1037,9 +1042,7 @@ impl TaskManager {
                             Err(_elapsed) => {
                                 // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
                                 // 2s 后若 TERM 无效再升级 KILL（fire-and-forget）
-                                kill_process_group_escalating(pid.expect(
-                                    "bg shell: child.id() returned None after successful spawn",
-                                ));
+                                kill_process_group_escalating(pid);
                                 // 构造超时错误结果
                                 let result = BackgroundTaskResult {
                                     task_id: task_id.clone(),
@@ -1155,7 +1158,10 @@ impl TaskManager {
             }
         });
 
-        Ok(task_id_for_return)
+        Ok(BgShellHandle {
+            task_id: task_id_for_return,
+            pid: Some(pid),
+        })
     }
 }
 

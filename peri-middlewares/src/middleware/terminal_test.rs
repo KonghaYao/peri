@@ -350,6 +350,11 @@ async fn test_bg_shell_registered_while_running() {
         )
         .await
         .unwrap();
+    assert!(
+        result.lines().any(|l| l.starts_with("pid: ")),
+        "应返回 pid 行: {result}"
+    );
+    assert!(result.contains("kill"), "应说明 kill 方式: {result}");
     let task_id = result
         .lines()
         .find(|l| l.starts_with("task_id: "))
@@ -404,6 +409,11 @@ async fn test_sync_timeout_promotes_to_background() {
         err.contains("background task"),
         "Err 应说明已转后台续跑: {err}"
     );
+    assert!(
+        err.lines().any(|l| l.starts_with("pid: ")),
+        "Err 应含 pid 行: {err}"
+    );
+    assert!(err.contains("kill"), "Err 应说明 kill 方式: {err}");
 
     // Err 中的 task_id 应与回调结果一致
     let task_id = err

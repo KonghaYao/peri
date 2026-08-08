@@ -62,6 +62,20 @@ pub struct BgTaskRegistration {
 /// bg 完成回调（TaskManager 完成收尾时通知调用方）。
 pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
 
+/// 后台 shell 启动结果（`TaskManager::spawn_shell` 返回值）。
+///
+/// 工具层将 task_id 与 pid 回显给 LLM：LLM 可通过另一个 shell 执行
+/// `kill <pid>` 终止任务，或凭 task_id 在 Tasks 面板监控状态与输出预览。
+#[derive(Debug, Clone)]
+pub struct BgShellHandle {
+    /// 任务标识（`shell-{uuid v7}`）。
+    pub task_id: String,
+    /// OS 进程 PID（Unix 下为进程组组长：`kill -- -{pid}` 可杀整组含子进程，
+    /// 与 Agent 层 `kill_process_group_escalating` 语义一致）。
+    /// `None` = 进程 spawn 失败（任务注册后立即按失败收尾，失败通知仍会到达）。
+    pub pid: Option<u32>,
+}
+
 /// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、
 /// middleware 的 shell 发起与完成收尾使用）。
 ///
@@ -106,13 +120,16 @@ pub trait TaskManager: std::any::Any + Send + Sync {
 
     /// 启动后台 shell 任务（run_in_background 路径；进程 spawn / 进程组 /
     /// 超时 / 输出收集 / 完成收尾全部在 Agent 层完成）。
+    ///
+    /// 返回 [`BgShellHandle`]（task_id + 进程 PID）：工具层回显给 LLM，
+    /// 使 LLM 能经另一个 shell 杀进程组（`kill -- -{pid}`）或凭 task_id 监控。
     fn spawn_shell(
         &self,
         command: String,
         cwd: String,
         timeout_ms: Option<u64>,
         on_bg_complete: Option<OnBgCompleteFn>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>>;
 
     /// 后台 shell 完成收尾（超长输出落盘 → on_bg_complete 回调 → complete）。
     #[allow(clippy::too_many_arguments)] // 收尾参数集为跨层固定契约，不分组
@@ -167,7 +184,7 @@ impl TaskManager for NoopTaskManager {
         _cwd: String,
         _timeout_ms: Option<u64>,
         _on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         Err("no task manager configured".into())
     }
 

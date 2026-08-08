@@ -213,17 +213,28 @@ impl BaseTool for BashTool {
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
             let timeout_opt = parse_timeout(&input, true);
 
-            let task_id = task_manager.spawn_shell(
+            let handle = task_manager.spawn_shell(
                 command.to_string(),
                 self.cwd.clone(),
                 timeout_opt,
                 self.on_bg_complete.clone(),
             )?;
 
-            return Ok(format!(
-                "Background shell task started.\ntask_id: {}\nThe command is running in the background. Monitor in the Tasks panel.",
-                task_id
-            ));
+            let mut msg = format!(
+                "Background shell task started.\ntask_id: {}\nThe command is running in the background.",
+                handle.task_id
+            );
+            match handle.pid {
+                Some(pid) => msg.push_str(&format!(
+                    "\npid: {pid}\n\
+                     - Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n\
+                     - Monitor: check the Tasks panel for status and output preview\n\
+                     - Output: the captured output is returned via a completion notification; for live output, redirect the command to a file (e.g. `> /tmp/{}.log 2>&1`) and Read it",
+                    handle.task_id
+                )),
+                None => msg.push_str("\n(process failed to spawn — a failure notification will arrive shortly)"),
+            }
+            return Ok(msg);
         }
 
         // ── 同步执行路径 ──
@@ -327,7 +338,7 @@ impl BaseTool for BashTool {
                                     );
                                 });
                                 return Err(format!(
-                                    "Command timed out after {:.1}s; the process is now running as a background task.\ntask_id: {task_id}\nThe process is now running as a background task; you will be notified when it completes.\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s; the process is now running as a background task.\ntask_id: {task_id}\npid: {pid}\nThe process is now running as a background task; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
                                 )
                                 .into());
