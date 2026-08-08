@@ -116,23 +116,50 @@ const subResult = await workflow(
 return subResult  // 子 workflow 的 return 值
 ```
 
-### 7. The workflow runs asynchronously
+### 7. Validate a saved script before running it
+
+`@peri-code/workflow` provides a CLI preflight check for an existing workflow file:
+
+```bash
+npx -y @peri-code/workflow validate scripts/parallel-review.mjs
+# Machine-readable output for tooling:
+npx -y @peri-code/workflow validate scripts/parallel-review.mjs --json
+```
+
+Use it when a workflow script is already saved and non-trivial. It checks engine syntax and exports, rejects old `workflow.agent(...)`-style calls, requires `export const meta = { name, description }`, and warns when the script has no top-level `return`.
+
+Do not create a file solely to validate an inline script passed directly to the Workflow tool.
+
+### 8. Inspect saved workflow results with the CLI
+
+After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. The Read tool remains suitable for a known result file; use the built-in CLI when you need a complete report or need to discover runs:
+
+```bash
+npx -y @peri-code/workflow list
+npx -y @peri-code/workflow list --json
+npx -y @peri-code/workflow read <run_id>
+npx -y @peri-code/workflow read <run_id> --short --json
+```
+
+`read` and `list` search upward from the current directory for `.claude/workflow-runs/`. `read` restores extracted long outputs in its report.
+
+### 9. The workflow runs asynchronously
 
 The Workflow tool returns immediately with a run_id. You'll receive a notification when it completes. The results are saved to `.claude/workflow-runs/<run_id>/state.json`.
 
-Use the Read tool to examine the results after completion.
+Use the Read tool or the `read` CLI command to examine the results after completion.
 
-### 8. Monitor progress
+### 10. Monitor progress
 
 Use `/workflows` to open the workflow panel and see real-time progress (phases, agents, token counts).
 
 ## Prerequisites
 
-The Workflow tool requires **Node.js** (provides `npx`) or **Bun** (provides `bunx`). If neither is available, the tool returns an error:
+The Peri host prefers its locally installed `@peri-code/workflow` Node bundle and automatically falls back to `npx -y @peri-code/workflow` when that bundle is unavailable. No global `@peri-code/workflow` installation is required. The Workflow tool requires **Node.js** (provides `npx`); if npx is unavailable, it returns an error:
 
-> Failed to spawn workflow runner: bun and npx are both unavailable. Install Node.js (https://nodejs.org/) or Bun (https://bun.sh/) to enable multi-agent workflow support.
+> npx is not available. Install Node.js (https://nodejs.org/) to enable workflow support.
 
-In that case, tell the user to install one of them and retry.
+In that case, tell the user to install Node.js and retry.
 
 ## Best Practices
 
