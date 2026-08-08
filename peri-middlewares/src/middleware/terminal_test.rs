@@ -379,6 +379,74 @@ async fn test_bg_shell_registered_while_running() {
     assert_eq!(registry.active_count(), 0, "完成后任务应已清理");
 }
 
+/// bg shell 的 stdout/stderr 应 tee 到日志文件：返回消息含日志路径，
+/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含全部输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_log_file_tee() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "printf 'first\\n'; sleep 1.5; printf 'second\\n'",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let log_line = result
+        .lines()
+        .find(|l| l.contains("stdout.log"))
+        .expect("应返回 stdout 日志路径: {result}");
+    let log_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-"))
+        .expect("日志路径应含 peri-bg- 前缀: {log_line}")
+        .to_string();
+    let stderr_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-") && t.contains("stderr.log"))
+        .expect("应返回 stderr 日志路径: {log_line}")
+        .to_string();
+
+    // 运行期间（sleep 1.5 未结束）：日志文件应已含 first，不含 second
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let partial = std::fs::read_to_string(&log_path).expect("运行期间应可读日志文件");
+    assert!(
+        partial.contains("first"),
+        "运行期间应已写入 first: {partial}"
+    );
+    assert!(!partial.contains("second"), "second 尚未输出: {partial}");
+
+    // 完成后：通知到达时日志文件应含全部输出
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success);
+    assert!(
+        notif.output.contains("second"),
+        "通知应含完整输出: {}",
+        notif.output
+    );
+    let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
+    assert!(
+        full.contains("first") && full.contains("second"),
+        "完成后应含全部输出: {full}"
+    );
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&stderr_path);
+}
+
 /// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
 /// 完成回调收到 success=true 含 "done"，active_count 归零。
 #[cfg(unix)]

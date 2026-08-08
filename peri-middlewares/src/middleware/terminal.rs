@@ -225,14 +225,32 @@ impl BaseTool for BashTool {
                 handle.task_id
             );
             match handle.pid {
-                Some(pid) => msg.push_str(&format!(
-                    "\npid: {pid}\n\
-                     - Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n\
-                     - Monitor: check the Tasks panel for status and output preview\n\
-                     - Output: the captured output is returned via a completion notification; for live output, redirect the command to a file (e.g. `> /tmp/{}.log 2>&1`) and Read it",
-                    handle.task_id
-                )),
-                None => msg.push_str("\n(process failed to spawn — a failure notification will arrive shortly)"),
+                Some(pid) => {
+                    msg.push_str(&format!(
+                        "\npid: {pid}\n\
+                         - Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n\
+                         - Live output: Read the log file {}",
+                        handle
+                            .stdout_log
+                            .as_deref()
+                            .unwrap_or("<unavailable>")
+                    ));
+                    if let Some(stderr_log) = handle.stderr_log.as_deref() {
+                        msg.push_str(&format!(" (stderr: {stderr_log})"));
+                    }
+                    if handle.stdout_log.is_some() {
+                        msg.push_str(
+                            " — it appends while the command runs (use the Read tool to view)",
+                        );
+                    }
+                    msg.push_str(
+                        "\n- Monitor: check the Tasks panel for status and output preview; \
+                         the captured output is returned via a completion notification when the task finishes",
+                    );
+                }
+                None => msg.push_str(
+                    "\n(process failed to spawn — a failure notification will arrive shortly)",
+                ),
             }
             return Ok(msg);
         }

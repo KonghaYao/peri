@@ -64,8 +64,9 @@ pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send +
 
 /// 后台 shell 启动结果（`TaskManager::spawn_shell` 返回值）。
 ///
-/// 工具层将 task_id 与 pid 回显给 LLM：LLM 可通过另一个 shell 执行
-/// `kill <pid>` 终止任务，或凭 task_id 在 Tasks 面板监控状态与输出预览。
+/// 工具层将 task_id / pid / 日志路径回显给 LLM：LLM 可通过另一个 shell
+/// 执行 `kill <pid>` 终止任务，凭 task_id 在 Tasks 面板监控状态与输出预览，
+/// 或经 Read 工具实时读取输出日志文件。
 #[derive(Debug, Clone)]
 pub struct BgShellHandle {
     /// 任务标识（`shell-{uuid v7}`）。
@@ -74,6 +75,11 @@ pub struct BgShellHandle {
     /// 与 Agent 层 `kill_process_group_escalating` 语义一致）。
     /// `None` = 进程 spawn 失败（任务注册后立即按失败收尾，失败通知仍会到达）。
     pub pid: Option<u32>,
+    /// stdout 实时输出日志文件路径（运行期间持续追加，agent 可用 Read 读取；
+    /// 完成后文件保留）。`None` = 日志不可用（spawn 失败或文件创建失败）。
+    pub stdout_log: Option<String>,
+    /// stderr 实时输出日志文件路径（同上）。
+    pub stderr_log: Option<String>,
 }
 
 /// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、

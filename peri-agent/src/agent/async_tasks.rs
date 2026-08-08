@@ -669,6 +669,38 @@ pub async fn drain_pipe(
 /// 防止子进程写管道时阻塞
 const MAX_PARTIAL_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
+/// 将 stdout/stderr 管道流式读入共享缓冲，同时追加到日志文件（tee）。
+/// 缓冲超过 `MAX_PARTIAL_CAPTURE_BYTES` 后继续排空（丢弃新内容），
+/// 防止子进程写满管道时阻塞。日志文件写入失败仅降级（不影响执行链）。
+/// `log: None` = 不落盘（等价于 [`drain_pipe`]）。
+pub async fn tee_pipe(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    buf: Arc<std::sync::Mutex<String>>,
+    mut log: Option<std::fs::File>,
+) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if let Some(f) = log.as_mut() {
+            use std::io::Write;
+            let _ = f.write_all(&chunk[..n]);
+        }
+        let mut guard = match buf.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.len() < MAX_PARTIAL_CAPTURE_BYTES {
+            let s = String::from_utf8_lossy(&chunk[..n]);
+            let remaining = MAX_PARTIAL_CAPTURE_BYTES - guard.len();
+            guard.push_str(&s[..s.len().min(remaining)]);
+        }
+    }
+}
+
 /// bg shell 结果收尾（bg 路径与同步超时 promote 续跑共用）：
 /// 超长输出落盘 → 构造 BackgroundTaskResult → on_bg_complete 回调 → complete()。
 /// 任务在启动时已注册（BgTaskStarted 已推送），此处只收尾，不再重复注册。
@@ -941,7 +973,7 @@ impl TaskManager {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 // spawn 失败：注册 + 立即按失败收尾（agent 仍收到失败通知，语义不变）
@@ -980,12 +1012,27 @@ impl TaskManager {
                 return Ok(BgShellHandle {
                     task_id: task_id_for_return,
                     pid: None,
+                    stdout_log: None,
+                    stderr_log: None,
                 });
             }
         };
         let pid = child
             .id()
             .expect("bg shell: child.id() returned None after successful spawn");
+
+        // 创建实时输出日志文件（尽力而为：创建失败仅降级为不落盘，不影响执行链）。
+        // 运行期间 agent 可经 Read 工具读取；完成后文件保留。
+        let stdout_log = std::env::temp_dir().join(format!("peri-bg-{task_id}.stdout.log"));
+        let stderr_log = std::env::temp_dir().join(format!("peri-bg-{task_id}.stderr.log"));
+        let stdout_log_file = std::fs::File::create(&stdout_log).ok();
+        let stderr_log_file = std::fs::File::create(&stderr_log).ok();
+        let stdout_log_path = stdout_log_file
+            .as_ref()
+            .map(|_| stdout_log.to_string_lossy().into_owned());
+        let stderr_log_path = stderr_log_file
+            .as_ref()
+            .map(|_| stderr_log.to_string_lossy().into_owned());
 
         tokio::spawn(async move {
             // 外層 catch_unwind 保護：確保任何意外 panic 也會調用 registry.complete()，
@@ -1030,15 +1077,29 @@ impl TaskManager {
                     return;
                 }
 
-                // 超时包裹 wait_with_output（后台未显式传 timeout 或 timeout=0 时不超时）
-                let wait_future = child.wait_with_output();
+                // 流式读取 stdout/stderr：tee 到日志文件（运行期 agent 可读）+ 内存缓冲
+                // （wait_with_output 内部消费管道无法 tee，故显式 take pipe 自行读取）
+                let stdout_reader = tokio::io::BufReader::new(
+                    child.stdout.take().expect("bg shell: stdout is piped"),
+                );
+                let stderr_reader = tokio::io::BufReader::new(
+                    child.stderr.take().expect("bg shell: stderr is piped"),
+                );
+                let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
+                let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
+                let drain_stdout =
+                    tokio::spawn(tee_pipe(stdout_reader, stdout_buf.clone(), stdout_log_file));
+                let drain_stderr =
+                    tokio::spawn(tee_pipe(stderr_reader, stderr_buf.clone(), stderr_log_file));
+
+                // 超时包裹 wait（后台未显式传 timeout 或 timeout=0 时不超时）
                 let wait_result = match timeout_ms {
-                    None => wait_future.await.map(Some),
+                    None => child.wait().await.map(Some),
                     Some(ms) => {
-                        match tokio::time::timeout(std::time::Duration::from_millis(ms), wait_future)
+                        match tokio::time::timeout(std::time::Duration::from_millis(ms), child.wait())
                             .await
                         {
-                            Ok(output_result) => output_result.map(Some),
+                            Ok(status) => status.map(Some),
                             Err(_elapsed) => {
                                 // 超时：kill 整个进程组（bash 为组长，负号 PID 语义），
                                 // 2s 后若 TERM 无效再升级 KILL（fire-and-forget）
@@ -1076,10 +1137,18 @@ impl TaskManager {
                 };
 
                 let output = match wait_result {
-                    Ok(Some(out)) => {
-                        let success = out.status.success();
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    Ok(Some(status)) => {
+                        let _ = drain_stdout.await;
+                        let _ = drain_stderr.await;
+                        let success = status.success();
+                        let stdout = match stdout_buf.lock() {
+                            Ok(g) => g.clone(),
+                            Err(poisoned) => poisoned.into_inner().clone(),
+                        };
+                        let stderr = match stderr_buf.lock() {
+                            Ok(g) => g.clone(),
+                            Err(poisoned) => poisoned.into_inner().clone(),
+                        };
                         let mut combined = String::new();
                         if !stdout.is_empty() {
                             combined.push_str(&stdout);
@@ -1093,14 +1162,14 @@ impl TaskManager {
                         }
                         if combined.is_empty() {
                             combined =
-                                format!("[exit code: {}]", out.status.code().unwrap_or(-1));
+                                format!("[exit code: {}]", status.code().unwrap_or(-1));
                         }
                         (success, combined)
                     }
                     Err(e) => (false, format!("Command failed: {}", e)),
-                    // unreachable: wait_with_output() always returns Ok(Output)
+                    // unreachable: child.wait() 恒返回 Ok(ExitStatus)
                     Ok(None) => {
-                        unreachable!("bg shell: wait_with_output returned Ok(None)")
+                        unreachable!("bg shell: child.wait returned Ok(None)")
                     }
                 };
 
@@ -1161,6 +1230,8 @@ impl TaskManager {
         Ok(BgShellHandle {
             task_id: task_id_for_return,
             pid: Some(pid),
+            stdout_log: stdout_log_path,
+            stderr_log: stderr_log_path,
         })
     }
 }

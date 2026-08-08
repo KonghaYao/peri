@@ -26,7 +26,7 @@ Output handling:
 - Both stdout and stderr are captured
 
 Background mode (run_in_background: true):
-- Returns immediately with a `task_id` and the process `pid` of the background shell
+- Returns immediately with a `task_id`, the process `pid` of the background shell, and log file paths for live output
 - To stop the task, run another shell command with `kill <pid>` (use `kill -- -<pid>` to kill the whole process group including child processes)
-- Monitor status and output preview in the Tasks panel; the full output arrives via a completion notification when the task finishes
-- For live output while the task runs, redirect to a file (e.g. `> /tmp/<name>.log 2>&1`) and Read it
+- Read the stdout/stderr log files at any time (they append while the command runs); monitor status and output preview in the Tasks panel
+- The full captured output also arrives via a completion notification when the task finishes
