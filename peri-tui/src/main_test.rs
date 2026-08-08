@@ -196,11 +196,25 @@ fn test_prescan_config_file_camel_equals_form() {
     );
 }
 
+/// 构造一个非 UTF-8 的 OsString（`to_str()` 返回 None），按平台区分：
+/// - Unix：OsString 是任意字节序列，直接嵌入非法 UTF-8 字节
+/// - Windows：OsString 是 WTF-16，孤立 surrogate（0xD800）合法但非 UTF-8
+#[cfg(unix)]
+fn non_utf8_os_string() -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(vec![0x2f, 0x74, 0x6d, 0x70, 0xff, 0xfe])
+}
+
+#[cfg(windows)]
+fn non_utf8_os_string() -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    std::ffi::OsString::from_wide(&[0x2f, 0x74, 0x6d, 0x70, 0xd800])
+}
+
 #[test]
 fn test_prescan_config_file_non_utf8_value() {
-    // 非 UTF-8 值直接构造 PathBuf，保留原始字节（Unix OsStringExt）
-    use std::os::unix::ffi::OsStringExt;
-    let value = std::ffi::OsString::from_vec(vec![0x2f, 0x74, 0x6d, 0x70, 0xff, 0xfe]);
+    // 非 UTF-8 值直接构造 PathBuf，保留原始字节
+    let value = non_utf8_os_string();
     let result = pre_scan_config_file(
         [std::ffi::OsString::from("--config-file"), value.clone()].into_iter(),
     )
