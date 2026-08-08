@@ -44,7 +44,13 @@ impl dyn McpPoolPort {
     pub fn downcast_arc<T: McpPoolPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
         unsafe {
-            if (*ptr).type_id() == TypeId::of::<T>() {
+            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
+            // `type_id()` 会命中 `Any` 的 blanket impl，返回
+            // `TypeId::of::<dyn McpPoolPort>()`（trait object 自身），
+            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
+            // 临时实例，注入的连接池与装配产物分离（同构
+            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
                 Err(Arc::from_raw(ptr))
@@ -64,7 +70,13 @@ impl dyn ToolSearchPort {
     pub fn downcast_arc<T: ToolSearchPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
         unsafe {
-            if (*ptr).type_id() == TypeId::of::<T>() {
+            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
+            // `type_id()` 会命中 `Any` 的 blanket impl，返回
+            // `TypeId::of::<dyn ToolSearchPort>()`（trait object 自身），
+            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
+            // 默认实例，注入的搜索索引与装配产物分离（同构
+            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
                 Err(Arc::from_raw(ptr))
@@ -148,3 +160,7 @@ pub trait SkillsPort: Send + Sync {
         extra_dirs: &[PathBuf],
     ) -> Vec<(String, String, String, AgentCapability)>;
 }
+
+#[cfg(test)]
+#[path = "ports_test.rs"]
+mod tests;

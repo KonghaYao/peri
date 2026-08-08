@@ -202,7 +202,12 @@ impl dyn SubAgentMiddlewarePort {
     ) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
         unsafe {
-            if (*ptr).type_id() == std::any::TypeId::of::<T>() {
+            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
+            // `type_id()` 会命中 `Any` 的 blanket impl，返回
+            // `TypeId::of::<dyn SubAgentMiddlewarePort>()`（trait object
+            // 自身），恒不等于 `TypeId::of::<T>()` → downcast 恒失败
+            // （同构 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            if (*ptr).as_any().type_id() == std::any::TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
                 Err(Arc::from_raw(ptr))
