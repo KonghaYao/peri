@@ -469,7 +469,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
 
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
-use peri_agent::agent::workflow::{WorkflowAgentContext, WorkflowMiddlewareFactory};
+use peri_agent::agent::workflow::{
+    WorkflowAgentContext, WorkflowAgentDefinition, WorkflowMiddlewareFactory,
+};
 use peri_agent::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::tools::ToolInvocationResolver;
@@ -486,6 +488,58 @@ pub fn default_workflow_middleware_factory(
 }
 
 impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
+    fn resolve_agent_definition(
+        &self,
+        agent_type: &str,
+        cwd: &str,
+    ) -> Result<WorkflowAgentDefinition, String> {
+        let project_path = AgentDefineMiddleware::candidate_paths(cwd, agent_type)
+            .into_iter()
+            .find(|path| path.is_file());
+        let agent = if let Some(path) = project_path {
+            let content = std::fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "failed to read agent definition '{}': {error}",
+                    path.display()
+                )
+            })?;
+            crate::parse_agent_file(&content)
+                .ok_or_else(|| format!("failed to parse agent definition '{}'", path.display()))?
+        } else {
+            let built_in = crate::subagent::get_built_in_agent(agent_type)
+                .ok_or_else(|| format!("cannot find agent definition '{agent_type}'"))?;
+            crate::parse_agent_file(built_in.content).ok_or_else(|| {
+                format!("failed to parse built-in agent definition '{agent_type}'")
+            })?
+        };
+        let frontmatter = agent.frontmatter;
+        let prompt_overrides = {
+            let overrides = crate::AgentOverrides {
+                persona: (!agent.system_prompt.is_empty()).then_some(agent.system_prompt),
+                tone: frontmatter.tone.clone(),
+                proactiveness: frontmatter.proactiveness.clone(),
+                mode: frontmatter.prompt_mode.clone(),
+            };
+            (!overrides.is_empty()).then_some(overrides)
+        };
+        let model = frontmatter
+            .model
+            .filter(|model| !model.is_empty() && model != "inherit");
+        let allowed_tools = match frontmatter.tools {
+            crate::ToolsValue::Empty => None,
+            tools => Some(tools.to_vec()),
+        };
+        Ok(WorkflowAgentDefinition {
+            model,
+            allowed_tools,
+            disallowed_tools: frontmatter.disallowed_tools.to_vec(),
+            skill_names: frontmatter.skills,
+            allowed_write_dirs: frontmatter.allowed_write_dirs,
+            max_iterations: frontmatter.max_turns.unwrap_or(200) as usize,
+            prompt_overrides,
+        })
+    }
+
     fn build_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         let mut tools: Vec<Box<dyn BaseTool>> = FilesystemMiddleware::build_tools(cwd);
         tools.extend(TerminalMiddleware::build_tools(cwd));
@@ -514,10 +568,29 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         tools
     }
 
+    fn build_sandbox_write_tool(
+        &self,
+        cwd: &str,
+        allowed_dirs: &[String],
+    ) -> Option<Box<dyn BaseTool>> {
+        match crate::tools::filesystem::WriteSandboxTool::new(cwd, allowed_dirs.to_vec()) {
+            Ok(tool) => Some(Box::new(tool)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    sandbox_dirs = ?allowed_dirs,
+                    "workflow agent: failed to construct SandboxWrite"
+                );
+                None
+            }
+        }
+    }
+
     fn build_middlewares(
         &self,
         ctx: &WorkflowAgentContext,
         model_name: &str,
+        skill_names: &[String],
     ) -> Vec<Box<dyn Middleware>> {
         let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
@@ -534,8 +607,11 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         }
         middlewares.push(Box::new(skills_mw));
 
-        // GAP-01: SkillPreloadMiddleware（预加载 skill 全文，空列表 = 仅注册工具）
-        middlewares.push(Box::new(SkillPreloadMiddleware::new(Vec::new(), &ctx.cwd)));
+        // 与普通 subagent 一致：agent.md 声明的 skills 在启动时预加载。
+        middlewares.push(Box::new(SkillPreloadMiddleware::new(
+            skill_names.to_vec(),
+            &ctx.cwd,
+        )));
 
         middlewares.push(Box::new(FilesystemMiddleware::new()));
 

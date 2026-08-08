@@ -5,6 +5,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod drop_telemetry;
 pub mod fake_session;
 pub mod session;
 pub mod session_like;

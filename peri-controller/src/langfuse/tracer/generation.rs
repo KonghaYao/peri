@@ -26,7 +26,6 @@ pub(crate) struct RetryAttempt {
     pub attempt: usize,
     pub max_attempts: usize,
     pub delay_ms: u64,
-    pub error: String,
 }
 
 pub(crate) struct GenerationStart {
@@ -103,7 +102,7 @@ impl GenerationTracker {
         attempt: usize,
         max_attempts: usize,
         delay_ms: u64,
-        error: &str,
+        _error: &str,
     ) {
         self.retry_attempts
             .entry((agent_id.to_string(), step))
@@ -112,7 +111,6 @@ impl GenerationTracker {
                 attempt,
                 max_attempts,
                 delay_ms,
-                error: error.to_string(),
             });
     }
 
@@ -150,7 +148,6 @@ fn build_retry_metadata(retries: &[RetryAttempt]) -> serde_json::Value {
             "attempt": r.attempt,
             "max_attempts": r.max_attempts,
             "delay_ms": r.delay_ms,
-            "error": r.error,
         })).collect::<Vec<_>>(),
     })
 }

@@ -10,8 +10,13 @@ use std::sync::Arc;
 
 pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
 use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
-pub use store::{config_path, load, load_from, save, save_to, workspace_config_path};
+pub use store::{
+    config_path, load, load_from, save, save_to, set_global_config_path, workspace_config_path,
+};
 use url::Url;
+
+const MIN_ANTHROPIC_THINKING_BUDGET: u32 = 1_024;
+const DEFAULT_ANTHROPIC_THINKING_BUDGET: u32 = 10_000;
 
 #[derive(Clone)]
 pub enum LlmProvider {
@@ -199,6 +204,22 @@ impl LlmProvider {
         clone
     }
 
+    /// 覆盖单次调用的输出 token 上限；provider 在本次模型构造后即被消费。
+    pub fn with_max_tokens(&self, max_tokens: u32) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Self::OpenAi {
+                max_tokens: configured_max_tokens,
+                ..
+            }
+            | Self::Anthropic {
+                max_tokens: configured_max_tokens,
+                ..
+            } => *configured_max_tokens = max_tokens,
+        }
+        clone
+    }
+
     /// 绑定 retry observer；`into_model()` 构造模型时注入 runtime。
     pub fn with_retry_observer(
         mut self,
@@ -263,12 +284,17 @@ impl LlmProvider {
                     }
                     None => Url::parse("https://api.anthropic.com").expect("静态默认 endpoint"),
                 };
+                let output_max_tokens = max_tokens;
                 let mut config = AnthropicConfig::new(endpoint, api_key, model);
-                if let Some(e) = effort.as_ref() {
-                    // budget_tokens = max_tokens（Profile 唯一事实源，不新增字段）
-                    config = config.with_extended_thinking(max_tokens, e);
+                if let Some(e) = effort
+                    .as_ref()
+                    .filter(|_| output_max_tokens > MIN_ANTHROPIC_THINKING_BUDGET)
+                {
+                    let thinking_budget =
+                        DEFAULT_ANTHROPIC_THINKING_BUDGET.min(output_max_tokens.saturating_sub(1));
+                    config = config.with_extended_thinking(thinking_budget, e);
                 }
-                config = config.with_max_tokens(max_tokens);
+                config = config.with_max_tokens(output_max_tokens);
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
                 config = config.with_runtime(match retry_observer {
                     Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()

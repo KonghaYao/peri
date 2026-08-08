@@ -100,6 +100,20 @@ fn into_model_thinking_config_applies_max_tokens() {
 }
 
 #[test]
+fn with_max_tokens_overrides_output_limit_without_changing_model() {
+    let model = openai_provider("gpt-4o").with_max_tokens(4096).into_model();
+    let prepared = model
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功");
+
+    assert_eq!(prepared.model_id(), "gpt-4o");
+    assert_eq!(
+        prepared.body().as_value()["max_tokens"],
+        serde_json::json!(4096)
+    );
+}
+
+#[test]
 fn into_model_anthropic_extended_thinking_applied() {
     let provider = LlmProvider::Anthropic {
         api_key: "test-key".to_string(),
@@ -117,16 +131,69 @@ fn into_model_anthropic_extended_thinking_applied() {
         .body()
         .as_value()
         .clone();
-    // budget_tokens = max_tokens（Profile 唯一事实源）
     assert_eq!(
         body["thinking"],
-        serde_json::json!({ "type": "enabled", "budget_tokens": 64000 })
+        serde_json::json!({ "type": "enabled", "budget_tokens": 10_000 })
     );
     assert_eq!(
         body["output_config"],
         serde_json::json!({ "effort": "high" })
     );
     assert_eq!(body["max_tokens"], serde_json::json!(64000));
+}
+
+#[test]
+fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
+    let provider = LlmProvider::Anthropic {
+        api_key: "test-key".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        base_url: None,
+        effort: Some("high".to_string()),
+        max_tokens: 64_000,
+        context_1m: false,
+        retry_observer: None,
+    }
+    .with_max_tokens(1_024);
+
+    let body = provider
+        .into_model()
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功")
+        .body()
+        .as_value()
+        .clone();
+
+    assert_eq!(body["max_tokens"], serde_json::json!(1_024));
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
+    let provider = LlmProvider::Anthropic {
+        api_key: "test-key".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        base_url: None,
+        effort: Some("high".to_string()),
+        max_tokens: 64_000,
+        context_1m: false,
+        retry_observer: None,
+    }
+    .with_max_tokens(4_096);
+
+    let body = provider
+        .into_model()
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功")
+        .body()
+        .as_value()
+        .clone();
+
+    assert_eq!(body["max_tokens"], serde_json::json!(4_096));
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({ "type": "enabled", "budget_tokens": 4_095 })
+    );
 }
 
 #[test]

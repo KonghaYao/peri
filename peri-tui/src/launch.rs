@@ -3,6 +3,7 @@
 //! 把 App 初始化、ACP server/client 配对、插件/Hook 装配等步骤提取为
 //! `build_app_and_acp` / `teardown_app` 公共函数，供 `kit::entry::run_kit_fullscreen` 调用。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -31,6 +32,7 @@ pub struct TuiLaunchOptions {
     pub settings: Option<String>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
+    pub db_path: Option<PathBuf>,
 }
 
 /// 构建 App + ACP server/client，并把 acp_client 注入 App。
@@ -43,7 +45,7 @@ pub async fn build_app_and_acp(
     App,
     Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
 )> {
-    let mut app = App::new().await;
+    let mut app = App::new(opts.db_path.clone()).await?;
 
     // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
     // 该参数仅保留签名以维持调用方兼容；实际 panic 通知走 tracing log。

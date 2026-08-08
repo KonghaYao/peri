@@ -26,7 +26,17 @@ fn test_empty_without_todo_is_truly_empty() {
     assert!(empty);
 }
 
-// ── keepgoing 按钮屏幕区域计算 ──
+#[test]
+fn test_total_visual_rows_exceeds_u16_max() {
+    let core_rows = u16::MAX as usize + 100;
+    let footer_rows = 3;
+
+    assert_eq!(
+        total_visual_rows(core_rows, footer_rows, false),
+        core_rows + footer_rows + scroll::SCROLL_PADDING,
+        "长消息的可滚动高度不得在 u16::MAX 处截断"
+    );
+}
 
 fn layout_at(line_index: usize, start_col: u16, width: u16) -> KeepGoingLayout {
     KeepGoingLayout {

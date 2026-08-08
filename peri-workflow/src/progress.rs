@@ -103,14 +103,24 @@ impl WorkflowProgressStore {
             }
             ProgressEvent::AgentProgress {
                 agent_id,
+                model,
                 token_count,
                 tool_count,
                 ..
             } => {
                 if let Some(run) = runs.get_mut(&run_id) {
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
-                        agent.token_count = Some(*token_count);
-                        agent.tool_count = Some(*tool_count);
+                        // model 仅在 Some 时更新：运行中由 agent 侧 0 token/0 tool
+                        // 的专用更新携带，后续不带 model 的进度事件不得覆盖。
+                        if model.is_some() {
+                            agent.model = model.clone();
+                        }
+                        if let Some(token_count) = token_count {
+                            agent.token_count = Some(*token_count);
+                        }
+                        if let Some(tool_count) = tool_count {
+                            agent.tool_count = Some(*tool_count);
+                        }
                         agent.status = AgentStatus::Running;
                     });
                 }
@@ -134,6 +144,11 @@ impl WorkflowProgressStore {
                         // 只在 result 携带 tool_count/token_count 时才更新，保留 AgentProgress 已设的值
                         agent.tool_count = result.tool_count().or(agent.tool_count);
                         agent.token_count = result.token_count().or(agent.token_count);
+                        // 完成快照模型名以 AgentRunResult::Ok.model 为准
+                        // （仅在 Some 时更新，保留 AgentProgress 已设的值）
+                        if let AgentRunResult::Ok { model: Some(m), .. } = result {
+                            agent.model = Some(m.clone());
+                        }
                     });
                 }
             }
@@ -217,6 +232,7 @@ where
         agent_id,
         label: None,
         phase: None,
+        model: None,
         status: AgentStatus::Pending,
         token_count: None,
         tool_count: None,

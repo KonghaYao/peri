@@ -961,6 +961,8 @@ panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
 workflow-loading-runs = Loading workflow runs
 workflow-no-runs = No workflow runs in current session
 workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::inspect · Esc::close
+workflow-phases-header = Phases ({ $count } agents)
+workflow-model-header = Model
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   No pending questions.

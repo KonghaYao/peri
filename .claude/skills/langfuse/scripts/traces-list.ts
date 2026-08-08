@@ -14,9 +14,13 @@
  *   --name <str>   按 name 过滤
  *   --limit <N>    条数限制
  */
-import { fetchTracesFiltered, fetchObservations, parseFilterArgs, summarizeTokens, genTokens, fmt, pct, ms, isoToLocal } from "./lib.ts";
+import { fetchTracesFiltered, fetchObservations, parseFilterArgs, genTokens, fmt, pct, fmtLatency, summarizeLatency } from "./lib.ts";
 
 const args = process.argv.slice(2);
+if (args.includes("--help") || args.includes("-h")) {
+  console.log("用法: bun traces-list.ts [N] [--from ISO] [--to ISO] [--days N] [--tag tag] [--user id] [--session id] [--name text] [--limit N]");
+  process.exit(0);
+}
 const filter = parseFilterArgs(args);
 
 if (filter.time.from) {
@@ -42,7 +46,6 @@ if (traces.length === 0) {
 
 interface TraceSummary {
   id: string;
-  input: string;
   llmCalls: number;
   toolCalls: number;
   totalInput: number;
@@ -50,7 +53,7 @@ interface TraceSummary {
   totalCache: number;
   effective: number;
   cachePct: number;
-  latency: number;
+  latency: ReturnType<typeof summarizeLatency>;
   timestamp: string;
 }
 
@@ -75,7 +78,6 @@ for (let i = 0; i < traces.length; i += 5) {
 
     summaries.push({
       id: t.id,
-      input: (t.input as string)?.slice(0, 45) || "",
       llmCalls: gens.length,
       toolCalls: tools.length,
       totalInput,
@@ -83,20 +85,19 @@ for (let i = 0; i < traces.length; i += 5) {
       totalCache,
       effective: totalInput - totalCache,
       cachePct: totalInput > 0 ? (totalCache / totalInput) * 100 : 0,
-      latency: t.latency || 0,
+      latency: summarizeLatency(obs),
       timestamp: t.timestamp || "",
     });
   }
 }
 
-console.log("| # | Input | LLM | Tools | Input tok | Output tok | Cache% | Eff. new | Latency |");
-console.log("|---|---------------------------------------------|-----|-------|-----------|------------|--------|----------|---------|");
+console.log("| # | Trace | LLM | Tools | Input tok | Output tok | Cache% | Eff. new | Latency |");
+console.log("|---|--------------|-----|-------|-----------|------------|--------|----------|---------|");
 
 for (let i = 0; i < summaries.length; i++) {
   const s = summaries[i];
-  const label = s.input.replace(/\|/g, "\\|");
   console.log(
-    `| ${i + 1} | ${label} | ${s.llmCalls} | ${s.toolCalls} | ${fmt(s.totalInput)} | ${fmt(s.totalOutput)} | ${s.cachePct.toFixed(1)}% | ${fmt(s.effective)} | ${ms(s.latency)} |`
+    `| ${i + 1} | ${s.id.slice(0, 12)} | ${s.llmCalls} | ${s.toolCalls} | ${fmt(s.totalInput)} | ${fmt(s.totalOutput)} | ${s.cachePct.toFixed(1)}% | ${fmt(s.effective)} | ${fmtLatency(s.latency)} |`
   );
 }
 

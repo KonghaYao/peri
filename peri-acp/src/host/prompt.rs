@@ -184,6 +184,9 @@ pub(crate) async fn run_prompt(
             thread_store: None,
             progress_tx: None,
             subagent_ctx_builder: None,
+            agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
+                Arc::clone(&skills),
+            ),
             model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
             middleware_factory: Arc::clone(workflow_middleware_factory),
             system_prompt_fallback:

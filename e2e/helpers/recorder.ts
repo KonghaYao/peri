@@ -14,7 +14,15 @@ import type { ScreenCapture } from "tui-tester";
 // ---- 路径 ----
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RECORDINGS_DIR = path.resolve(__dirname, "..", "recordings");
+
+/**
+ * 录制目录：默认 e2e/recordings/，可通过环境变量 E2E_RECORDINGS_DIR 覆盖。
+ * 并行执行（scripts/run-e2e.mjs）时为每个 worker 指定独立目录，
+ * 避免多个 vitest 进程并发写同一个 index.jsonl 互相覆盖/损坏。
+ */
+export const RECORDINGS_DIR =
+  process.env.E2E_RECORDINGS_DIR ??
+  path.resolve(__dirname, "..", "recordings");
 const INDEX_FILE = path.join(RECORDINGS_DIR, "index.jsonl");
 
 // ---- 当前测试名（由 vitest setup 注入） ----

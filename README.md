@@ -109,6 +109,12 @@ peri update
 
 First launch guides you through model and API key configuration — no config file editing required.
 
+### CLI 全局参数（路径重定向）
+
+- `--config-file <path>`（别名 `--configFile`）— 重定向全局配置文件（默认 `~/.peri/settings.json`），TUI / `-p` print / `peri acp` 三路径的配置读取与保存均跟随；相对路径按启动时 cwd 解析。
+- `--db-path <path>`（别名 `--dbPath`）— 重定向 SQLite 会话数据库（默认 `~/.peri/threads/threads.db`）；显式指定路径打开失败时直接报错（不 fallback 临时目录），TUI/print/acp 均以非零码退出。
+- `--settings <file|json>` 语义不同：仅注入 env 字段（接受 JSON 字符串），不改变配置读写路径；`-p` 模式下 `--settings` 全权替换配置加载，`--config-file` 仍负责 env 注入与保存目标。
+
 ---
 
 ## Built by AI, Published by Human

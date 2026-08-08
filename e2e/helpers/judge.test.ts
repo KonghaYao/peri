@@ -185,4 +185,49 @@ describe("judge response validation", () => {
       }),
     ]);
   });
+
+  it("retries once when the response is structurally invalid, then passes", async () => {
+    // 第一次：结构校验失败（id 不匹配）；第二次：有效响应。
+    // 回归保护：此前结构校验失败不会触发重试，直接判 fail
+    // （2026-08-06 bash-running-duration 因 Judge id 不匹配被误判失败）。
+    mockCreate
+      .mockImplementationOnce(async () => ({
+        choices: [{ message: { content: JSON.stringify({ checks: [{ id: 2, pass: true, detail: "id 乱序" }] }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }))
+      .mockImplementationOnce(async () => ({
+        choices: [{ message: { content: JSON.stringify({ checks: [{ id: 1, pass: true, detail: "屏幕满足" }] }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }));
+
+    const result = await judge({
+      ansiRaw: "screen",
+      criteria: ["expected criterion"],
+    });
+
+    expect(result.pass).toBe(true);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    // 第二次调用的提示中应附带上次的失败原因
+    const secondCallMessages = mockCreate.mock.calls[1]?.[0]?.messages ?? [];
+    const secondUserMessage = secondCallMessages.at(-1)?.content ?? "";
+    expect(secondUserMessage).toContain("上次输出格式不合格");
+    expect(secondUserMessage).toContain("id 不匹配");
+  });
+
+  it("returns the invalid-response failure only after both attempts are invalid", async () => {
+    // 两次都返回结构无效的响应：最终 pass=false，detail 标记为无效响应而非 UI 结论
+    mockCreate.mockImplementation(async () => ({
+      choices: [{ message: { content: JSON.stringify({ checks: [{ id: 2, pass: true, detail: "id 乱序" }] }) } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+
+    const result = await judge({
+      ansiRaw: "screen",
+      criteria: ["expected criterion"],
+    });
+
+    expect(result.pass).toBe(false);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(result.checks[0]?.detail).toContain("Judge 返回无效 JSON 响应");
+  });
 });

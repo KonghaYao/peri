@@ -25,6 +25,7 @@ fn test_agent_run_params_deserializes_camel_case() {
         "runId": "r1",
         "agentId": 0,
         "prompt": "hello",
+        "model": "haiku",
         "maxTokens": 8192,
         "agentType": "general-purpose",
         "allowedTools": ["Read", "Grep"],
@@ -32,6 +33,7 @@ fn test_agent_run_params_deserializes_camel_case() {
     let params: AgentRunParams = serde_json::from_value(json).unwrap();
     assert_eq!(params.run_id, "r1");
     assert_eq!(params.agent_id, 0);
+    assert_eq!(params.model.as_deref(), Some("haiku"));
     assert_eq!(params.max_tokens, Some(8192));
     assert_eq!(params.agent_type.as_deref(), Some("general-purpose"));
 }

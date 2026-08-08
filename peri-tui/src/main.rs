@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -83,6 +85,12 @@ struct Cli {
     /// 加载额外 settings 文件或 JSON 字符串
     #[arg(long = "settings")]
     settings: Option<String>,
+    /// 全局配置文件路径（默认 ~/.peri/settings.json）
+    #[arg(long = "config-file", visible_alias = "configFile")]
+    config_file: Option<PathBuf>,
+    /// SQLite 会话数据库路径（默认 ~/.peri/threads/threads.db）
+    #[arg(long = "db-path", visible_alias = "dbPath")]
+    db_path: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -248,13 +256,12 @@ enum MarketplaceAction {
 
 /// 从 settings.json 读取 env 字段并注入进程环境变量
 /// 仅在进程环境变量不存在时设置（进程环境优先）
+/// 路径跟随 config_path()（支持 set_global_config_path 重定向）
 fn inject_env_from_settings() {
-    let path = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
-
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    inject_env_from_file(
+        &peri_tui::config::config_path(),
+        &[&["config", "env"], &["env"]],
+    );
 }
 
 /// 从 Claude Code 配置文件 ~/.claude/settings.json 读取 env 字段并注入进程环境变量。
@@ -347,6 +354,46 @@ fn inject_settings_override(source: &str) {
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────────────
 
+/// 轻量预扫描 argv，识别 `--config-file` / `--configFile`（gate 决策 Option A：
+/// env 注入前先按重定向路径执行，使 `--config-file` 文件内的 `env` 字段
+/// 注入进程——"该文件就是全局配置"语义）。
+///
+/// - 支持空格形式（下一 token 为值）与 `=` 形式（`--config-file=path`）。
+/// - 下一 token 以 `-` 开头视为缺值 → 返回 None（fail-open，交给 clap 报错）。
+/// - `--` 之后停止扫描；重复 flag 取最后一次（last-wins）。
+/// - 非 UTF-8 的 OsString 值直接构造 PathBuf，无需 utf8 转换。
+fn pre_scan_config_file(args: impl Iterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    let mut result: Option<PathBuf> = None;
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        let Some(s) = arg.to_str() else {
+            // 非 UTF-8 token 无法匹配 flag 前缀，跳过（fail-open）
+            continue;
+        };
+        if s == "--" {
+            break;
+        }
+        if let Some(value) = s.strip_prefix("--config-file=") {
+            result = Some(PathBuf::from(value));
+        } else if let Some(value) = s.strip_prefix("--configFile=") {
+            result = Some(PathBuf::from(value));
+        } else if s == "--config-file" || s == "--configFile" {
+            match args.peek() {
+                Some(next) if next.to_str().is_some_and(|n| n.starts_with('-')) => {
+                    // 下一 token 是 option-like → 缺值，fail-open 交给 clap 报错
+                    return None;
+                }
+                Some(next) => {
+                    result = Some(PathBuf::from(next));
+                    args.next();
+                }
+                None => return None,
+            }
+        }
+    }
+    result
+}
+
 /// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
@@ -364,6 +411,11 @@ fn main() -> Result<()> {
     // Must be the very first line — jemalloc reads these during init.
     peri_tui::alloc_config::init_alloc_conf();
 
+    // 预扫描 argv 重定向全局配置路径，必须在 env 注入之前（gate 决策 Option A）：
+    // --config-file 文件内的 env 字段需注入进程。fail-open：扫描不到时保持
+    // 默认路径，后续 clap 解析报错兜底。
+    peri_tui::config::set_global_config_path(pre_scan_config_file(std::env::args_os().skip(1)));
+
     // 最先注入环境变量（进程环境变量优先）
     // 优先级：进程环境 > 项目本地配置 > Peri 全局配置 > Claude Code 配置
     // 项目本地配置（./.peri/settings.json），项目覆盖全局
@@ -374,6 +426,9 @@ fn main() -> Result<()> {
     inject_env_from_claude_settings(); // ~/.claude/settings.json
 
     let cli = Cli::parse();
+
+    // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
+    peri_tui::config::set_global_config_path(cli.config_file.clone());
 
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
@@ -392,11 +447,12 @@ fn main() -> Result<()> {
             cli.disallowed_tools.unwrap_or_default(),
             cli.settings,
             None,
+            cli.db_path,
         ));
     }
 
     match cli.command {
-        None => run_tui(TuiOptions {
+        None => match run_tui(TuiOptions {
             approve: cli.approve,
             permission_mode: cli.permission_mode,
             skip_permissions: cli.skip_permissions,
@@ -409,7 +465,11 @@ fn main() -> Result<()> {
             settings: cli.settings,
             allowed_tools: cli.allowed_tools.unwrap_or_default(),
             disallowed_tools: cli.disallowed_tools.unwrap_or_default(),
-        }),
+            db_path: cli.db_path,
+        }) {
+            Ok(()) => Ok(()),
+            Err(_) => std::process::exit(1),
+        },
         Some(Commands::Acp {
             cwd,
             model: _,
@@ -427,6 +487,7 @@ fn main() -> Result<()> {
                     permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                         peri_acp_types::permission::PermissionMode::Bypass,
                     ),
+                    db_path: cli.db_path,
                 })
                 .await
             })
@@ -557,6 +618,7 @@ struct TuiOptions {
     settings: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
+    db_path: Option<PathBuf>,
 }
 
 fn run_tui(opts: TuiOptions) -> Result<()> {
@@ -592,6 +654,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
             settings: opts.settings.clone(),
             allowed_tools: opts.allowed_tools.clone(),
             disallowed_tools: opts.disallowed_tools.clone(),
+            db_path: opts.db_path.clone(),
         };
         peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
     });
@@ -602,6 +665,10 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
+        // 显式指定 --db-path 时数据库打开失败为致命错误：三路径一致的 exit 1（gate 决策）
+        if opts.db_path.is_some() {
+            return Err(e);
+        }
     }
 
     Ok(())

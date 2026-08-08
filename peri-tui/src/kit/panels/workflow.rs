@@ -9,6 +9,7 @@ use crate::kit::atoms::{ACP_CLIENT_HANDLE, LANG_VERSION, WORKFLOW_SNAPSHOT};
 use crate::kit::list_nav::{
     cycle_next, cycle_previous, previous_selection, scroll_start_for_selected,
 };
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -20,7 +21,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[component]
 pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -308,6 +309,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         };
         let tokens_padded = format!("{:>8}", abbreviate_count(agent.token_count.unwrap_or(0)));
         let tools_padded = format!("{:>4}", agent.tool_count.unwrap_or(0));
+        let model_cell_text = model_cell(agent.model.as_deref(), MODEL_COL_WIDTH);
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {
@@ -319,6 +321,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Span::styled(arrow, arrow_style),
             Span::styled(format!(" {emoji} "), emoji_color),
             Span::styled(format!("{name}{name_pad}"), name_style),
+            Span::styled(format!(" {model_cell_text}"), dim_style),
             Span::styled(format!(" {tokens_padded}"), dim_style),
             Span::styled(format!("  {tools_padded}"), dim_style),
         ]));
@@ -341,10 +344,19 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let phase_scroll = scroll_start_for_selected(sel_phase, phase_lines.len(), VISIBLE_ITEMS);
     let agent_scroll = scroll_start_for_selected(sel_agent, filtered_agents.len(), VISIBLE_ITEMS);
 
-    // Build phases Paragraph: header + visible slice
+    // Build phases Paragraph: header（含所选 run 总 agent 数）+ visible slice
     let mut phase_text: Vec<Line<'_>> = Vec::new();
     phase_text.push(Line::from(Span::styled(
-        " Phases",
+        format!(
+            " {}",
+            i18n::tr_args(
+                "workflow-phases-header",
+                &[(
+                    "count".into(),
+                    FluentValue::from(current_run.agents.len() as u64),
+                )],
+            )
+        ),
         Style::new().fg(theme.semantic.text.muted).bold(),
     )));
     phase_text.extend(
@@ -354,10 +366,14 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .take(VISIBLE_ITEMS),
     );
 
-    // Build agents Paragraph: header + visible slice
+    // Build agents Paragraph: header（新增 Model 列）+ visible slice
     let mut agent_text: Vec<Line<'_>> = Vec::new();
+    // Model header 按列宽补齐（zh "模型" 显示宽度 2，补齐后与 en 对齐）
+    let model_header = i18n::tr("workflow-model-header");
+    let model_header_pad =
+        " ".repeat(MODEL_COL_WIDTH.saturating_sub(UnicodeWidthStr::width(model_header.as_str())));
     agent_text.push(Line::from(Span::styled(
-        " Agents                 Tokens Tools",
+        format!(" Agents                 {model_header}{model_header_pad} Tokens    Tools"),
         Style::new().fg(theme.semantic.text.muted).bold(),
     )));
     agent_text.extend(
@@ -528,9 +544,45 @@ fn abbreviate_count(n: u64) -> String {
     }
 }
 
+/// Model 列显示宽度（终端列）。
+const MODEL_COL_WIDTH: usize = 12;
+
+/// Model 列单元格：缺失显示 '-'；超过列宽按显示宽度截断（Unicode 安全），
+/// 未超过则补齐到列宽。
+fn model_cell(model: Option<&str>, width: usize) -> String {
+    let s = model.unwrap_or("-");
+    let w = UnicodeWidthStr::width(s);
+    if w <= width {
+        format!("{s}{}", " ".repeat(width - w))
+    } else {
+        truncate_to_width(s, width)
+    }
+}
+
+/// 按终端显示宽度截断（Unicode 字符边界安全）：显示宽度超过 `width` 时
+/// 保留 `width - 1` 列并追加 '…'。
+fn truncate_to_width(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > keep {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::clamp_run_selection;
+    use super::{clamp_run_selection, model_cell, truncate_to_width};
 
     /// [回归测试] workflow 轮询快照收缩时，旧的选中 tab 不能越界。
     ///
@@ -541,5 +593,27 @@ mod tests {
         assert_eq!(clamp_run_selection(1, 1), 0);
         assert_eq!(clamp_run_selection(2, 3), 2);
         assert_eq!(clamp_run_selection(0, 0), 0);
+    }
+
+    /// [单测] Model 列 Unicode 宽度截断 helper：ASCII/CJK 均按终端显示宽度
+    /// 截断（CJK 每字符 2 列），超宽时以 '…'（1 列）收尾。
+    #[test]
+    fn test_truncate_to_width_unicode_safe() {
+        assert_eq!(truncate_to_width("short", 12), "short");
+        assert_eq!(truncate_to_width("claude-sonnet-4-5", 12), "claude-sonn…");
+        assert_eq!(truncate_to_width("中文模型名", 6), "中文…");
+        assert_eq!(truncate_to_width("ab", 1), "…");
+    }
+
+    /// [单测] Model 列单元格：缺失显示 '-'，未超宽补齐到列宽，超宽截断。
+    #[test]
+    fn test_model_cell_missing_padding_and_truncate() {
+        assert_eq!(model_cell(None, 12), format!("-{}", " ".repeat(11)));
+        assert_eq!(model_cell(Some("claude-haiku"), 12), "claude-haiku");
+        assert_eq!(
+            model_cell(Some("haiku"), 12),
+            format!("haiku{}", " ".repeat(7))
+        );
+        assert_eq!(model_cell(Some("claude-sonnet-4-5"), 12), "claude-sonn…");
     }
 }

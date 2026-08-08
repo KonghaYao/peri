@@ -454,3 +454,23 @@ async fn test_batcher_drop_new_increments_dropped_counter_during_slow_flush() {
     );
     drop(batcher);
 }
+
+#[test]
+fn test_try_add_drop_new_returns_queue_full_when_command_channel_is_full() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let batcher = Batcher {
+        tx,
+        backpressure: BackpressurePolicy::DropNew,
+        dropped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+
+    batcher
+        .try_add(create_test_event("first"))
+        .expect("first event fits");
+    let error = batcher
+        .try_add(create_test_event("second"))
+        .expect_err("full queue drops new event");
+
+    assert!(matches!(error, LangfuseError::QueueFull));
+    assert_eq!(batcher.dropped_count(), 1);
+}

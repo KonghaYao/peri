@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use peri_agent::agent::events::{
     CompactStrategy, CompactTrigger, ExecutorEvent, MiddlewareHook, Stage, StageStatus,
 };
-use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
+use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent, TurnErrorReason};
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
 use peri_model::TokenUsage;
@@ -130,10 +130,8 @@ pub enum UnifiedLangfuseEvent {
     },
     /// AI 推理内容块（v2 only）
     AiReasoningChunk { text: String },
-    /// Turn 错误（v2 only）：LLM 失败时携带完整错误消息
-    /// （reason.rs `TurnError { message }` = `e.to_string()`）。
-    /// 用于弥补 TurnEnded 只带 error_kind 枚举名的信息缺口。
-    TurnError { message: String },
+    /// Turn 错误（v2 only）：仅传递稳定的分类，绝不进入原始错误正文。
+    TurnError { reason: TurnErrorReason },
     /// 会话开始（v1 only）
     SessionStarted { frozen_summary: serde_json::Value },
     /// 中间件开始（v1 only）
@@ -563,8 +561,8 @@ impl UnifiedLangfuseEvent {
             ObserveEvent::AiReasoningChunk { text, .. } => {
                 Some(UnifiedLangfuseEvent::AiReasoningChunk { text })
             }
-            ObserveEvent::TurnError { message, .. } => {
-                Some(UnifiedLangfuseEvent::TurnError { message })
+            ObserveEvent::TurnError { reason, .. } => {
+                Some(UnifiedLangfuseEvent::TurnError { reason })
             }
             // v2 SubagentStart/Stop → Unified（C4）：子 agent 生命周期事件直达
             ObserveEvent::SubagentStart {
@@ -862,8 +860,8 @@ impl LangfuseBridge {
             UnifiedLangfuseEvent::AiReasoningChunk { text } => {
                 t.on_ai_reasoning_chunk(text);
             }
-            UnifiedLangfuseEvent::TurnError { message } => {
-                t.on_turn_error(message);
+            UnifiedLangfuseEvent::TurnError { reason } => {
+                t.on_turn_error(*reason);
             }
             UnifiedLangfuseEvent::SessionStarted { frozen_summary } => {
                 t.on_session_start(frozen_summary);

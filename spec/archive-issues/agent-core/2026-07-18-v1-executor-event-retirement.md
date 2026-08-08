@@ -1,6 +1,6 @@
 # v1 ExecutorEvent 全量下线——TUI 直连 v2 事件通道后物理删除
 
-**状态**：Partial
+**状态**：已归档（被当前 v2 事件链取代）
 **优先级**：高
 **创建日期**：2026-07-18
 **父 issue**：`spec/issues/residual-code-scan-20260718.md` (P0-1, P0-5, P2-3)

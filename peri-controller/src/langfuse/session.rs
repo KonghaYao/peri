@@ -7,6 +7,7 @@ use langfuse_client::{
 };
 
 use super::config::LangfuseConfig;
+use super::drop_telemetry::LangfuseDropRegistry;
 use super::session_like::LangfuseSessionLike;
 
 /// Langfuse 进程级共享连接状态。
@@ -18,6 +19,7 @@ use super::session_like::LangfuseSessionLike;
 pub struct LangfuseSession {
     pub client: Arc<LangfuseClient>,
     pub batcher: Arc<Batcher>,
+    pub drop_registry: LangfuseDropRegistry,
     pub session_id: String,
     pub config: LangfuseConfig,
 }
@@ -46,6 +48,7 @@ impl LangfuseSession {
         Some(Self {
             client,
             batcher: Arc::new(batcher),
+            drop_registry: LangfuseDropRegistry::default(),
             session_id,
             config,
         })
@@ -63,5 +66,9 @@ impl LangfuseSessionLike for LangfuseSession {
 
     fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    fn drop_registry(&self) -> &LangfuseDropRegistry {
+        &self.drop_registry
     }
 }

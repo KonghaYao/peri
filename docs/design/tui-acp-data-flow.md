@@ -1,10 +1,12 @@
-# TUI ↔ ACP 数据交互设计
+# TUI 与 ACP 数据流
+
+> 最后核对：2026-08-07
 
 ## 概述
 
 Peri TUI 是纯 ACP Client 前端，通过 `MpscTransport`（in-memory channel pair）与 `peri-acp` 服务层通信。TUI 不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径——所有 Agent 消息语义的转换在 ACP 层完成，TUI 只消费为屏幕渲染设计的视图结构。
 
-核心设计目标：**Agent 运行时完全不知道 ViewModel、渲染队列等前端概念的存在；TUI 完全不知道 ReAct 循环、Middleware、Prompt 构建等后端细节。ACP 层是系统唯一的"全知"层。**
+核心设计目标：**Agent 运行时完全不知道 ViewModel、渲染队列等前端概念的存在；TUI 完全不知道 ReAct 循环、Middleware、Prompt 构建等后端细节。ACP 层承担协议适配与事件映射**——执行与业务归属（Controller/Runtime/Agent）见 `docs/standards/architecture-contracts.md`（ARC-BOUNDARY-001）。
 
 ```mermaid
 graph TB
@@ -38,16 +40,16 @@ graph TB
     subgraph ACP["🌉 ACP 层 — peri-acp"]
         direction LR
         SESSION["Session Manager<br/>new / load / close / fork"]
-        EXEC["Executor<br/>execute_prompt +<br/>run_react_loop 驱动"]
-        EVMAP["Event Mapper<br/>ExecutorEvent → ACP<br/>session/update + peri/agent_event"]
+        EXEC["Executor<br/>协议化执行入口（执行本体在 Agent 层）"]
+        EVMAP["事件映射<br/>v2 事件 → session/update<br/>+ peri/agent_event"]
         TRANSPORT["MpscTransport<br/>in-memory channel pair<br/>TUI ↔ ACP 双向通信"]
     end
 
     subgraph AGENT["🤖 Agent 层 — peri-agent + peri-middlewares"]
         direction LR
-        REACT["ReAct Loop<br/>Compact → Receive →<br/>Reason → Act → End"]
-        MW["20 Middleware (15+5)<br/>FS / Terminal / SubAgent<br/>Todo / MCP / HITL / Skills"]
-        TOOLS["Tool System<br/>Core(12) / Meta(2)<br/>Deferred / Search"]
+        REACT["RCRA Loop<br/>Receive → Compact →<br/>Reason → Act"]
+        MW["Middleware 链<br/>装配事实源见 ARC-MIDDLEWARE-001"]
+        TOOLS["Tool System<br/>可见性见 ARC-TOOLS-001"]
     end
 
     %% TUI → ACP (用户输入)
@@ -61,7 +63,7 @@ graph TB
     MW --> TOOLS
 
     %% Agent → ACP (事件产出)
-    REACT -->|"ExecutorEvent"| EVMAP
+    REACT -->|"v2 事件（event_v2）"| EVMAP
     EXEC -->|"AcpNotification"| TRANSPORT
 
     %% ACP → TUI (事件消费)
@@ -136,23 +138,20 @@ sequenceDiagram
 
 ## 3. 全局状态 — Atoms 数据模型
 
-TUI 内所有跨 task 共享状态通过 `ratatui_kit::StoreState<T>`（简称 `Atom`）管理，零 channel 开销的响应式读取：
+TUI 内跨 task 的响应式状态由 `ratatui-kit` 的 `AtomStatic<T>` / `AtomState<T>` 管理；组件通过 hook 订阅，异步 consumer 在明确事件边界写入。
 
 ```rust
-// 类型别名
-pub type Atom<T> = ratatui_kit::prelude::StoreState<T>;
-
 // 消息流单一数据源
-pub static VIEW_MODELS: Atom<ViewModelsSnapshot>;
+pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot>;
 
 // UI 状态快照
-pub static ACP_STATE: Atom<AcpStateSnapshot>;
+pub static ACP_STATE: AtomStatic<AcpStateSnapshot>;
 
 // 上下文使用率（供 StatusBar 显示）
-pub static CONTEXT_USAGE: Atom<Option<(f64, u64)>>;  // (budget_pct, total_tokens)
+pub static CONTEXT_USAGE: AtomStatic<Option<(f64, u64)>>;
 
 // 瞬时通知（PluginActionResult / BgTaskCompleted 等，1.5-3s 自动消失）
-pub static NOTIFICATION: Atom<Option<Notification>>;
+pub static NOTIFICATION: AtomStatic<Option<Notification>>;
 ```
 
 ### 3.1 ViewModelsSnapshot — 消息流核心结构
@@ -167,7 +166,7 @@ pub struct ViewModelsSnapshot {
 }
 ```
 
-> **2026-07-08 重构**：原来的 `committed: Arc<[TuiRenderUnit]>` + `current_turn: Arc<[TuiRenderUnit]>` 分裂已删除。冻结线是 Agent 层概念，UI 不需要。详情见 `spec/issues/2026-07-08-viewmodels-flatten-refactor.md`。
+> **当前模型**：`BridgeState` 仍保留 `committed: im::Vector<TuiRenderUnit>` 与 `current_turn: CurrentTurn` 的分层；07-08 重构将旧 `Arc<[TuiRenderUnit]>` 容器替换为 `im::Vector + CurrentTurn`，并未删除分层。`TurnDone` 将 `current_turn` 归档到 `committed`。
 
 ### 3.2 TuiRenderUnit — 渲染单元枚举
 
@@ -217,15 +216,14 @@ pub struct BridgeState {
 ### 4.1 事件层次
 
 ```
-Agent 层产出        ACP 层路由                          TUI 层消费
-──────────        ──────────                          ─────────
-ExecutorEvent  →  MappedEvent                        →  AcpEventData
-                 session/update                      →  AcpNotification
-                 peri/agent_event                      →  AcpNotification
-                 AcpNotification::RequestPermission    →  HitlPending（HITL 审批）
-                 AcpNotification::PredictionReady      →  AcpEventData::Prediction
-                 AcpNotification::Elicitation          →  AcpEventData::AskUser
+Agent 层 v2 事件    ACP 事件映射/协议化                    TUI 层消费
+────────────────    ────────────────────                    ──────────
+event_v2         →  `session/update`                    →  AcpNotification → AcpEventData
+                 →  `peri/agent_event`                  →  AcpNotification → AcpEventData
+                 →  标准交互请求（HITL / Elicitation）   →  对应面板或审批状态
 ```
+
+事件完整链路、能力门控与终止事件约束以 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001 为事实源。
 
 ### 4.2 session/update 流式事件 — 标准 ACP 通道
 
@@ -256,14 +254,14 @@ ExecutorEvent  →  MappedEvent                        →  AcpEventData
 
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件已统一走 ACP 标准通道。`ask-user` 走 `Elicitation` 协议，`hitl-pending` 走 `AcpNotification::RequestPermission`（ACP 标准 HITL 审批协议），`rewind-preview` 等走 `peri/unstable-event`。
+> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`；rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
 
 | 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
 | `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING` + `PanelKind::AskUser` 面板（非弹窗） |
-| `rewind-preview` | ACP → TUI | `peri/unstable-event` | `REWIND_PREVIEW` |
-| `oauth-needed` | ACP → TUI | `peri/unstable-event` | `OAUTH_INFO` |
-| `budget-warning` | ACP → TUI | `peri/unstable-event` | ACP_STATE 写入 |
+| `rewind-preview` | ACP → TUI | `peri/agent_event` + `session/rewind*` RPC | `REWIND_PREVIEW` |
+| `oauth-needed` | ACP → TUI | ACP 通知 | `OAUTH_INFO` |
+| `budget-warning` | — | 当前无用户可见生产路径 | — |
 | `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → `HitlPending` | `HITL_PENDING` + `HITL_REQUEST_ID` |
 | `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 6 个 popup） |
 

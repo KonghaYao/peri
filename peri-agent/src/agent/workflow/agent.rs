@@ -41,8 +41,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::factory::{
-    WorkflowMiddlewareFactory, WorkflowModelFactory, WorkflowPublishHook,
-    WorkflowSystemPromptFallback,
+    WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory, WorkflowModelFactory,
+    WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
 use crate::agent::{
     model_bridge::AgentModelBridge,
@@ -109,6 +109,8 @@ pub struct WorkflowAgentContext {
     /// subagent v2 上下文构建器（None = 回退到
     /// `DefaultSubagentV2ContextBuilder`，与迁移前一致）。
     pub subagent_ctx_builder: Option<Arc<dyn SubagentV2ContextBuilder>>,
+    /// 指定 `agentType` 时渲染相同的 subagent prompt 覆盖。
+    pub agent_prompt_builder: WorkflowAgentPromptBuilder,
 
     // ── p1-wa 注入面（依赖反转，见模块头注释）────────────────────────────
     /// 模型工厂（ACP 宿主构造：alias 解析 + retry observer 烘焙）。
@@ -175,6 +177,7 @@ pub fn create_default_executor(
         thread_store: None,
         progress_tx: None,
         subagent_ctx_builder: None,
+        agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),
         model_factory,
         middleware_factory,
         system_prompt_fallback,
@@ -194,10 +197,45 @@ impl AgentExecutor for WorkflowAgentExecutor {
             phase = ?params.phase,
             prompt_len = params.prompt.len(),
             allowed_tools = ?params.allowed_tools,
+            agent_type = ?params.agent_type,
+            requested_model = ?params.model,
+            max_tokens = ?params.max_tokens,
             "Workflow agent: starting execution"
         );
 
         let started_at = std::time::Instant::now();
+
+        let agent_definition = match params.agent_type.as_deref() {
+            Some(agent_type) => match self
+                .ctx
+                .middleware_factory
+                .resolve_agent_definition(agent_type, &self.ctx.cwd)
+            {
+                Ok(definition) => Some(definition),
+                Err(detail) => {
+                    warn!(agent_type, %detail, "workflow agent: invalid agent type");
+                    return AgentRunResult::Dead {
+                        reason: Some("invalid-agent-type".into()),
+                        detail: Some(detail),
+                    };
+                }
+            },
+            None => None,
+        };
+        if params.max_tokens == Some(0) {
+            return AgentRunResult::Dead {
+                reason: Some("invalid-max-tokens".into()),
+                detail: Some("maxTokens must be greater than zero".into()),
+            };
+        }
+
+        // 请求的 model 显式覆盖 agent definition；否则使用 agent type 的模型档位。
+        let requested_model = params.model.as_deref().or_else(|| {
+            agent_definition
+                .as_ref()
+                .and_then(|definition| definition.model.as_deref())
+                .filter(|model| !model.is_empty() && *model != "inherit")
+        });
 
         // 0. GAP-08: Langfuse turn 开始钩子（注入面；迁移前 `langfuse_session`
         // 恒 None 未接线，None = 遥测禁用）。
@@ -234,8 +272,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
+                                model: None,
+                                token_count: Some(s.0),
+                                tool_count: Some(*tc),
                             }) {
                                 warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (ToolStart)");
                             }
@@ -271,8 +310,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 agent_id: agent_id_for_handler,
                                 label: None,
                                 phase: None,
-                                token_count: s.0,
-                                tool_count: *tc,
+                                model: None,
+                                token_count: Some(s.0),
+                                tool_count: Some(*tc),
                             }) {
                                 warn!(target: "workflow", run_id = %run_id_for_handler, agent_id = agent_id_for_handler, error = %e, "progress_tx.send failed (LlmCallEnd)");
                             }
@@ -312,50 +352,117 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // 模型构造（注入工厂）：compact 与 base 各一份实例（同一 provider 双实例，
         // 与迁移前 `compact_llm` / `base_model` 构造一致）。
         let compact_llm: Option<Arc<dyn peri_model::Model>> = if compact_config.is_some() {
-            Some((self.ctx.model_factory)(params.model.as_deref(), retry_observer.clone()).model)
+            Some(
+                (self.ctx.model_factory)(
+                    requested_model,
+                    params.max_tokens,
+                    retry_observer.clone(),
+                )
+                .model,
+            )
         } else {
             None
         };
-        let built_model = (self.ctx.model_factory)(params.model.as_deref(), retry_observer);
+        let built_model =
+            (self.ctx.model_factory)(requested_model, params.max_tokens, retry_observer);
         let base_model = built_model.model;
         // 有效模型名（alias 解析后；GitAttribution 装配用）。
         let model_name = built_model.model_name;
+
+        // 模型解析完成后尽早上报有效模型名（模型信息专用更新）：TUI 在
+        // 运行中即可显示 Model 列，不必等首个 LlmCallEnd。计数保持 None，避免
+        // 引擎重试同一 agent 时以 0 覆盖前一次尝试已累计的统计。
+        // reducer 仅在 Some 时覆盖 agent.model，后续 ToolStart/LlmCallEnd
+        // 进度（model: None）不会冲掉该值。
+        if let Some(ref tx) = self.ctx.progress_tx {
+            if let Err(e) = tx.send(ProgressEvent::AgentProgress {
+                run_id: params.run_id.clone(),
+                agent_id: params.agent_id,
+                label: None,
+                phase: None,
+                model: Some(model_name.clone()),
+                token_count: None,
+                tool_count: None,
+            }) {
+                warn!(target: "workflow", run_id = %params.run_id, agent_id = params.agent_id, error = %e, "progress_tx.send failed (model)");
+            }
+        }
 
         // 2. 注册工具（端口装配：fs/terminal/web/skills tools，仅 project-level
         // skills——workflow agent 无 plugin_skill_roots）。
         let mut tools = self.ctx.middleware_factory.build_tools(&self.ctx.cwd);
 
-        // 3. allowedTools 过滤
-        if let Some(ref allowed) = params.allowed_tools {
-            if !allowed.is_empty() {
-                tools.retain(|t| allowed.contains(&t.name().to_string()));
+        // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。
+        if let Some(definition) = agent_definition.as_ref() {
+            if let Some(allowed) = definition.allowed_tools.as_ref() {
+                tools.retain(|tool| tool_name_in(allowed, tool.name()));
+            }
+            if !definition.disallowed_tools.is_empty() {
+                tools.retain(|tool| !tool_name_in(&definition.disallowed_tools, tool.name()));
+            }
+            if !definition.allowed_write_dirs.is_empty()
+                && definition
+                    .allowed_tools
+                    .as_ref()
+                    .is_none_or(|allowed| !allowed.is_empty())
+                && !tool_name_in(&definition.disallowed_tools, "SandboxWrite")
+            {
+                if let Some(sandbox_write) = self
+                    .ctx
+                    .middleware_factory
+                    .build_sandbox_write_tool(&self.ctx.cwd, &definition.allowed_write_dirs)
+                {
+                    tools.push(sandbox_write);
+                }
             }
         }
+        if let Some(allowed) = params
+            .allowed_tools
+            .as_ref()
+            .filter(|allowed| !allowed.is_empty())
+        {
+            tools.retain(|tool| tool_name_in(allowed, tool.name()));
+        }
 
-        // 4. GAP-05: 使用标准 system prompt（复用 frozen 或注入 fallback 渲染；
-        // workflow agent 链不注册 WorkflowTool——无嵌套 workflow，fallback 渲染
-        // 关闭 workflow section，与工具注册一致，P2-2026-08-02）。
-        let system_prompt = self.ctx.system_prompt.clone().unwrap_or_else(|| {
-            (self.ctx.system_prompt_fallback)(
+        // 4. 指定 agent type 时按相同的 subagent overrides 渲染 prompt；否则
+        // 继续复用 session 冻结的默认 subagent prompt。
+        let system_prompt = if let Some(definition) = agent_definition.as_ref() {
+            (self.ctx.agent_prompt_builder)(
+                definition.prompt_overrides.as_ref(),
                 &self.ctx.cwd,
                 self.ctx.frozen_date.as_deref(),
                 self.ctx.frozen_language.as_deref(),
             )
-        });
+        } else {
+            self.ctx.system_prompt.clone().unwrap_or_else(|| {
+                (self.ctx.system_prompt_fallback)(
+                    &self.ctx.cwd,
+                    self.ctx.frozen_date.as_deref(),
+                    self.ctx.frozen_language.as_deref(),
+                )
+            })
+        };
 
         // 5. 构建中间件链（端口装配；frozen data / HITL 语义自 ctx 读取）
         let mut chain = MiddlewareChain::new();
-        for mw in self
-            .ctx
-            .middleware_factory
-            .build_middlewares(&self.ctx, &model_name)
-        {
+        for mw in self.ctx.middleware_factory.build_middlewares(
+            &self.ctx,
+            &model_name,
+            agent_definition
+                .as_ref()
+                .map(|definition| definition.skill_names.as_slice())
+                .unwrap_or_default(),
+        ) {
             chain.add(mw);
         }
 
         // 6. v2 stages 装配（替代 SubAgentBuilder）
         let cancel_token = self.ctx.cancel.clone().unwrap_or_default();
-        let max_iterations = 200;
+        let max_iterations = agent_definition
+            .as_ref()
+            .map(|definition| definition.max_iterations)
+            .filter(|max_iterations| *max_iterations > 0)
+            .unwrap_or(200);
 
         // tools: Vec<Box<dyn BaseTool>> → Vec<Arc<dyn BaseTool>>
         let tools_arc: Vec<Arc<dyn crate::tools::BaseTool>> = tools
@@ -458,9 +565,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
                     if tokens == 0 && !output_text.is_empty() {
                         tokens = (output_text.len() as u64 / 4).max(1);
                     }
-                    // P0 fallback: 如果事件从未 emit LlmCallEnd（如纯工具调用），
-                    // 回退到 Node 传入的 model 参数
-                    let model = s.1.clone().or_else(|| params.model.clone());
+                    // 如果事件从未 emit LlmCallEnd（如纯工具调用），仍应回传模型
+                    // 工厂解析后的有效模型名，而非 workflow 脚本中的 alias。
+                    let model = reported_model(s.1.clone(), &model_name);
                     (tokens, model)
                 };
 
@@ -535,6 +642,19 @@ impl AgentExecutor for WorkflowAgentExecutor {
     }
 }
 
+/// 工作流与 agent.md 的工具名匹配沿用 subagent 的大小写无关语义。
+/// 单独的 `*` 表示保留全部候选工具；随后仍由 disallowedTools 过滤。
+fn tool_name_in(names: &[String], tool_name: &str) -> bool {
+    matches!(names, [wildcard] if wildcard == "*")
+        || names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(tool_name))
+}
+
+fn reported_model(last_model: Option<String>, effective_model: &str) -> Option<String> {
+    last_model.or_else(|| Some(effective_model.to_string()))
+}
+
 /// JSON Schema 校验——基础类型 + required 字段检查。
 ///
 /// schema 为 None 或空 {} 时仅验证是合法 JSON（向后兼容）。
@@ -604,5 +724,29 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reported_model, tool_name_in};
+
+    #[test]
+    fn agent_type_tool_matching_is_case_insensitive() {
+        assert!(tool_name_in(&["Read".into(), "Grep".into()], "read"));
+        assert!(tool_name_in(&["*".into()], "Write"));
+        assert!(!tool_name_in(&["Read".into()], "Write"));
+    }
+
+    #[test]
+    fn result_model_falls_back_to_effective_model() {
+        assert_eq!(
+            reported_model(None, "claude-haiku-4-5"),
+            Some("claude-haiku-4-5".into())
+        );
+        assert_eq!(
+            reported_model(Some("provider-reported".into()), "claude-haiku-4-5"),
+            Some("provider-reported".into())
+        );
     }
 }

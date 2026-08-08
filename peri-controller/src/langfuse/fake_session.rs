@@ -4,10 +4,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use super::drop_telemetry::LangfuseDropRegistry;
 use super::session_like::LangfuseSessionLike;
 
 pub struct FakeLangfuseSession {
     events: Mutex<Vec<IngestionEvent>>,
+    drop_registry: LangfuseDropRegistry,
     session_id: String,
 }
 
@@ -15,6 +17,7 @@ impl FakeLangfuseSession {
     pub fn new(session_id: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             events: Mutex::new(Vec::new()),
+            drop_registry: LangfuseDropRegistry::default(),
             session_id: session_id.into(),
         })
     }
@@ -40,5 +43,9 @@ impl LangfuseSessionLike for FakeLangfuseSession {
 
     fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    fn drop_registry(&self) -> &LangfuseDropRegistry {
+        &self.drop_registry
     }
 }

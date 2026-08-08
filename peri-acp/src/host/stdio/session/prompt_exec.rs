@@ -114,6 +114,9 @@ pub(crate) async fn run(params: PromptExecParams) {
             thread_store: None,
             progress_tx: None,
             subagent_ctx_builder: None,
+            agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
+                Arc::clone(&ctx.skills),
+            ),
             model_factory: crate::host::workflow_agent::build_model_factory(
                 &ctx.provider,
                 &ctx.peri_config,

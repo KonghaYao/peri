@@ -112,6 +112,7 @@ flowchart BT
 - cli = 启动接口：装配 View 与 ACP 客户端，不承载业务
 - print = 同层轻量渲染客户端（无界面，输出文本）
 - 只经 ACP 拿数据，不触碰业务层
+- 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）进程级重定向全局配置文件与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径生效；thread store 实例化在装配面（`Resources::open_with` / agent 侧 `open_thread_store_with`），ACP 协议面不感知。已知边界：`peri sync` 与 middlewares 侧 skillsDir/MCP 全局配置仍读写默认 `~/.peri/settings.json`（不跟随重定向）
 
 9. 横切面
 

@@ -43,8 +43,9 @@ fn test_agent_lifecycle_started_progress_done() {
         agent_id: 0,
         label: None,
         phase: None,
-        token_count: 100,
-        tool_count: 2,
+        model: None,
+        token_count: Some(100),
+        tool_count: Some(2),
     });
     // agent 完成
     store.apply_event(&ProgressEvent::AgentDone {
@@ -103,8 +104,9 @@ fn test_concurrent_agents_no_race() {
         agent_id: 0,
         label: None,
         phase: None,
-        token_count: 200,
-        tool_count: 5,
+        model: None,
+        token_count: Some(200),
+        tool_count: Some(5),
     });
     // agent 1 进度
     store.apply_event(&ProgressEvent::AgentProgress {
@@ -112,8 +114,9 @@ fn test_concurrent_agents_no_race() {
         agent_id: 1,
         label: None,
         phase: None,
-        token_count: 50,
-        tool_count: 1,
+        model: None,
+        token_count: Some(50),
+        tool_count: Some(1),
     });
     // agent 1 完成（先完成）
     store.apply_event(&ProgressEvent::AgentDone {
@@ -302,4 +305,157 @@ fn test_run_done_unknown_run_is_noop() {
     });
     assert!(store.get_run("missing").is_none());
     assert!(store.list_runs().is_empty());
+}
+
+/// [回归测试] model 投影：AgentProgress 携带 model 时更新（运行中可见），
+/// None 不覆盖已设值；AgentDone 从 AgentRunResult::Ok.model 更新保证
+/// 完成快照正确。
+#[test]
+fn test_model_projection_via_progress_and_done() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "test".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: Some("coder".into()),
+        phase: Some("Implement".into()),
+    });
+
+    // 运行中：模型信息专用更新（agent 侧 model_name 解析后），不得修改统计。
+    store.apply_event(&ProgressEvent::AgentProgress {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        model: Some("claude-sonnet-4-5".into()),
+        token_count: None,
+        tool_count: None,
+    });
+    let agent = store
+        .get_run("r1")
+        .unwrap()
+        .agents
+        .get(&0)
+        .cloned()
+        .unwrap();
+    assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
+    assert!(matches!(agent.status, AgentStatus::Running));
+    assert_eq!(agent.token_count, None);
+    assert_eq!(agent.tool_count, None);
+
+    // 后续不带 model 的进度事件不得覆盖已设值
+    store.apply_event(&ProgressEvent::AgentProgress {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        model: None,
+        token_count: Some(10),
+        tool_count: Some(1),
+    });
+    let agent = store
+        .get_run("r1")
+        .unwrap()
+        .agents
+        .get(&0)
+        .cloned()
+        .unwrap();
+    assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
+    assert_eq!(agent.token_count, Some(10));
+    assert_eq!(agent.tool_count, Some(1));
+
+    // 引擎重试时第二次模型专用更新不得以 0 清空第一次尝试的统计。
+    store.apply_event(&ProgressEvent::AgentProgress {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        model: Some("claude-sonnet-4-5".into()),
+        token_count: None,
+        tool_count: None,
+    });
+    let agent = store
+        .get_run("r1")
+        .unwrap()
+        .agents
+        .get(&0)
+        .cloned()
+        .unwrap();
+    assert_eq!(agent.token_count, Some(10));
+    assert_eq!(agent.tool_count, Some(1));
+
+    // 完成快照：以 AgentRunResult::Ok.model 为准（provider 实际模型名）
+    store.apply_event(&ProgressEvent::AgentDone {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        result: AgentRunResult::Ok {
+            output: serde_json::json!("implemented"),
+            usage: Usage { output_tokens: 10 },
+            model: Some("provider-resolved-model".into()),
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
+        },
+    });
+    let agent = store
+        .get_run("r1")
+        .unwrap()
+        .agents
+        .get(&0)
+        .cloned()
+        .unwrap();
+    assert_eq!(agent.model.as_deref(), Some("provider-resolved-model"));
+    assert!(matches!(agent.status, AgentStatus::Done));
+}
+
+/// [回归测试] serde-optional：旧版 agent_progress JSON（无 model 字段）
+/// 必须能反序列化（model → None）；Some 序列化保留、None 序列化省略。
+#[test]
+fn test_agent_progress_model_serde_optional() {
+    let old_json = serde_json::json!({
+        "type": "agent_progress",
+        "runId": "r1",
+        "agentId": 0,
+        "tokenCount": 5,
+        "toolCount": 1,
+    });
+    let event: ProgressEvent = serde_json::from_value(old_json).unwrap();
+    match event {
+        ProgressEvent::AgentProgress { model, .. } => assert_eq!(model, None),
+        _ => panic!("expected AgentProgress"),
+    }
+
+    let with_model = ProgressEvent::AgentProgress {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        model: Some("claude-sonnet-4-5".into()),
+        token_count: None,
+        tool_count: None,
+    };
+    let json = serde_json::to_value(&with_model).unwrap();
+    assert_eq!(json["model"], "claude-sonnet-4-5");
+
+    let without_model = ProgressEvent::AgentProgress {
+        run_id: "r1".into(),
+        agent_id: 0,
+        label: None,
+        phase: None,
+        model: None,
+        token_count: Some(0),
+        tool_count: Some(0),
+    };
+    let json = serde_json::to_value(&without_model).unwrap();
+    assert!(
+        json.get("model").is_none(),
+        "None model 应省略，实际: {json}"
+    );
 }

@@ -11,6 +11,9 @@ pub enum LangfuseError {
     #[error("Ingestion API returned errors: {0}")]
     IngestionApi(String),
 
+    #[error("batch queue is full")]
+    QueueFull,
+
     #[error("Batch sender dropped, batcher is shut down")]
     ChannelClosed,
 

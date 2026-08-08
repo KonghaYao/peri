@@ -1,6 +1,6 @@
 # events_v2_mapper.rs 最终删除——v2→v1 桥接退役
 
-**状态**：Partial
+**状态**：已归档（被当前 v2 事件链取代）
 **优先级**：中
 **创建日期**：2026-07-18
 **前置依赖**：`spec/issues/2026-07-18-langfuse-v2-migration.md`

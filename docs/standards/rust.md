@@ -29,7 +29,7 @@
 ### RUST-TEXT-001
 
 - **Scope**：用户文本、终端布局与坐标。
-- **Rule**：Unicode/CJK 截断按字符边界处理；终端显示宽度用 `unicode_width`，不用字节长度；`u16` 坐标运算使用 `saturating_add`/`saturating_sub` 或等价边界处理。
+- **Rule**：用户文本与终端坐标必须按 Unicode 字符边界、显示宽度和饱和/显式边界计算处理；TUI 的具体实现约束与验证见 `docs/standards/tui.md` 的 TUI-TEXT-001。
 - **Verify**：`cargo test -p peri-tui --lib`；人工检查新增截断、列宽和坐标计算。
 
 ### RUST-DOC-001

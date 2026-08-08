@@ -26,7 +26,9 @@ fn test_on_llm_retrying_accumulates_attempts() {
     let end = t.on_llm_end("main", 0).expect("should return Some");
     assert!(end.retry_metadata.is_some());
     let meta = end.retry_metadata.unwrap();
-    assert!(meta.to_string().contains("timeout"));
+    assert_eq!(meta["retry_count"], 2);
+    assert_eq!(meta["retries"][0]["delay_ms"], 1000);
+    assert!(meta.get("error").is_none());
 }
 
 #[test]
@@ -55,8 +57,8 @@ fn test_interleaved_agents_keep_their_own_retries() {
         .expect("A end should return Some");
     let meta_a = end_a.retry_metadata.expect("A should carry its retries");
     assert_eq!(meta_a["retry_count"], 2);
-    assert!(meta_a.to_string().contains("a-timeout"));
-    assert!(!meta_a.to_string().contains("b-timeout"));
+    assert_eq!(meta_a["retries"][0]["delay_ms"], 500);
+    assert!(meta_a.get("error").is_none());
     // B 后 end：只应携带 B 自己的 retry
     t.on_llm_retrying("agent_b", 1, 1, 2, 800, "b-timeout");
     let end_b = t
@@ -64,9 +66,8 @@ fn test_interleaved_agents_keep_their_own_retries() {
         .expect("B end should return Some");
     let meta_b = end_b.retry_metadata.expect("B should carry its retries");
     assert_eq!(meta_b["retry_count"], 1);
-    assert!(meta_b.to_string().contains("b-timeout"));
-    // 且 A 的 retry 不应出现在 B 的 metadata 里
-    assert!(!meta_b.to_string().contains("a-timeout"));
+    assert_eq!(meta_b["retries"][0]["delay_ms"], 800);
+    assert!(meta_b.get("error").is_none());
 }
 
 #[test]

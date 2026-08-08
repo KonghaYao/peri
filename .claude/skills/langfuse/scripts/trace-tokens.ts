@@ -6,7 +6,7 @@
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>
  *   bun .claude/skills/langfuse/scripts/trace-tokens.ts --index <N> [--from/--to/--days/--tag/--user/--session/--name/--limit]
  */
-import { api, fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt, pct } from "./lib.ts";
+import { fetchObservations, fetchTracesFiltered, parseFilterArgs, parseTraceArg, genTokens, fmt, pct, fmtLatency, summarizeLatency, summarizeObservationLatency } from "./lib.ts";
 
 const args = process.argv.slice(2);
 
@@ -45,10 +45,7 @@ if (!traceId && index !== undefined) {
 
 if (!traceId) { console.error("Usage: bun trace-tokens.ts <traceId>  or  --index <N>"); process.exit(1); }
 
-const [trace, observations] = await Promise.all([
-  api(`/api/public/traces/${traceId}`),
-  fetchObservations(traceId),
-]);
+const observations = await fetchObservations(traceId);
 
 const generations = observations.filter((o: any) => o.type === "GENERATION");
 if (!generations.length) {
@@ -56,13 +53,8 @@ if (!generations.length) {
   process.exit(0);
 }
 
-// trace.input 是任意 JSON（chat 类为 string，其他可能为对象/数组），安全字符串化
-const traceLabel =
-  trace.name ||
-  (typeof trace.input === "string" ? trace.input : JSON.stringify(trace.input)) ||
-  trace.id;
-console.log(`## Trace: "${traceLabel.slice(0, 60)}"`);
-console.log(`   Latency: ${trace.latency}s | Generations: ${generations.length}\n`);
+console.log(`## Trace: ${traceId.slice(0, 12)}`);
+console.log(`   Latency: ${fmtLatency(summarizeLatency(observations))} | Generations: ${generations.length}\n`);
 
 // --- Token flow ---
 console.log("### Token Flow\n");
@@ -124,9 +116,9 @@ for (let i = 0; i < roundTokens.length; i++) {
   }
 
   // high latency
-  const g = generations[i];
-  if (g.latency > 60) {
-    console.log(`  🐌 Round ${i + 1}: Latency = ${g.latency.toFixed(1)}s (>60s)`);
+  const latency = summarizeObservationLatency(generations[i]);
+  if (latency !== null && latency > 60) {
+    console.log(`  🐌 Round ${i + 1}: Latency = ${latency.toFixed(1)}s (>60s)`);
     anomalies++;
   }
 }
