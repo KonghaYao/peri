@@ -1,0 +1,20 @@
+[package]
+name = "acp-hub-proto"
+version.workspace = true
+edition.workspace = true
+description = "acp-hub 共享协议 crate：帧定义、Action/Ack 信封、machine 协议类型、Y.Doc schema 类型镜像"
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+sha2 = { workspace = true }    # HMAC-SHA256（§9.2）
+hmac = { workspace = true }    # 0.12；Mac::verify_slice 自带常量时间比较
+hkdf = { workspace = true }    # 单连接密钥派生
+base64 = { workspace = true }  # RFC 4648 标准字母表
+rand = { workspace = true }    # challenge_nonce / session_context 生成（32B CSPRNG）
+
+[dev-dependencies]
+serial_test = { workspace = true }

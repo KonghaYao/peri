@@ -1,0 +1,345 @@
+//! 帧模型单元测试：§4.8 向量 6（帧集白名单的 parse 层面）+ round-trip + 判别。
+
+use crate::ack::{AckStatus, ActionAck, ActionError, ErrorCode};
+use crate::action::{
+    ActionEnvelope, CancelSessionPayload, CloseSessionPayload, CreateSessionPayload,
+    LoadSessionPayload, PermissionDecision, PromptSessionPayload, ResolvePermissionPayload,
+    SubscribeEventsPayload, UnsubscribeEventsPayload,
+};
+use crate::conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
+use crate::event::EventFrame;
+use crate::frame::{Frame, ProtoError};
+use crate::machine::{
+    BufferedFrame, MachineBufferSync, MachineEvent, MachineHeartbeat, MachineHello,
+    MachineKill, MachineKillAck, MachineProcessExit, MachineSpawn, MachineSpawnAck,
+};
+use crate::ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
+use std::collections::HashMap;
+use std::str::FromStr;
+
+/// 覆盖 §3.2 全表 25 帧的构造器（M1 + 保留类型 + machine/forward 系）。
+fn all_frames() -> Vec<Frame> {
+    let mut env = HashMap::new();
+    env.insert("PATH".to_string(), "/usr/bin".to_string());
+    let mut epochs = HashMap::new();
+    epochs.insert("s1".to_string(), 2u64);
+
+    vec![
+        // --- action 方法面（§4.3，含 M2/M3 保留类型） ---
+        Frame::Action(ActionEnvelope::Create {
+            command_id: "c1".into(),
+            payload: CreateSessionPayload {
+                machine_id: None,
+                cwd: Some("/tmp".into()),
+                title: Some("t".into()),
+            },
+        }),
+        Frame::Action(ActionEnvelope::Load {
+            command_id: "c2".into(),
+            payload: LoadSessionPayload {
+                session_id: "s1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::Close {
+            command_id: "c3".into(),
+            payload: CloseSessionPayload {
+                session_id: "s1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::Prompt {
+            command_id: "c4".into(),
+            payload: PromptSessionPayload {
+                session_id: "s1".into(),
+                message: "hi".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::Cancel {
+            command_id: "c5".into(),
+            payload: CancelSessionPayload {
+                session_id: "s1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::ResolvePermission {
+            command_id: "c6".into(),
+            payload: ResolvePermissionPayload {
+                session_id: "s1".into(),
+                permission_id: "p1".into(),
+                decision: PermissionDecision::Allow,
+            },
+        }),
+        Frame::Action(ActionEnvelope::SubscribeEvents {
+            command_id: "c7".into(),
+            payload: SubscribeEventsPayload {
+                session_id: Some("s1".into()),
+                from_seq: Some(3),
+            },
+        }),
+        Frame::Action(ActionEnvelope::UnsubscribeEvents {
+            command_id: "c8".into(),
+            payload: UnsubscribeEventsPayload {
+                session_id: None,
+            },
+        }),
+        // --- Ack 与错误 ---
+        Frame::ActionAck(ActionAck {
+            command_id: "c1".into(),
+            status: AckStatus::Committed,
+            turn_id: Some("t1".into()),
+            session_id: Some("s1".into()),
+            committed_projection_version: Some(7),
+        }),
+        Frame::ActionError(ActionError {
+            command_id: "c1".into(),
+            code: ErrorCode::AgentUnavailable,
+            message: "redacted".into(),
+            retryable: true,
+            retry_after_ms: Some(1000),
+        }),
+        // --- 连接生命周期 ---
+        Frame::Event(EventFrame {
+            session_id: "s1".into(),
+            seq: 5,
+            frame: serde_json::json!({"type": "agent_message_chunk", "text": "x"}),
+        }),
+        Frame::KeepAlive(KeepAlive {}),
+        Frame::Pong(Pong {}),
+        Frame::Ready(Ready {
+            projection_versions: {
+                let mut m = HashMap::new();
+                m.insert(DocId::chat("s1"), 7u32);
+                m.insert(DocId::REGISTRY, 2u32);
+                m
+            },
+        }),
+        Frame::Auth(Auth {
+            token: "tok".into(),
+        }),
+        Frame::AuthResponse(AuthResponse {
+            session_context: "AA==".into(),
+            hmac: "BQ==".into(),
+        }),
+        // --- y-sync ---
+        Frame::YsyncSubscribe(YsyncSubscribe {
+            docs: vec![DocId::chat("s1"), DocId::session("s1")],
+        }),
+        Frame::YsyncUnsubscribe(YsyncUnsubscribe {
+            docs: vec![DocId::chat("s1")],
+        }),
+        Frame::YsyncUpdate(YsyncUpdate {
+            doc: DocId::chat("s1"),
+            update: "AAAA".into(),
+            projection_version: Some(7),
+        }),
+        Frame::YsyncSync(YsyncSync {
+            msg: "AAAA".into(),
+        }),
+        Frame::YsyncAwareness(YsyncAwareness {
+            msg: "AAAA".into(),
+        }),
+        // --- machine 9 帧 ---
+        Frame::MachineHello(MachineHello {
+            token: "mt".into(),
+            hostname: "host1".into(),
+            caps: serde_json::json!({"acp": "1.4"}),
+            buffered: Some(true),
+            buffer_lost: None,
+            stream_epochs: Some(epochs.clone()),
+            nonce: "AAAA".into(),
+        }),
+        Frame::MachineHeartbeat(MachineHeartbeat {
+            load: 42,
+            alive_sessions: vec!["s1".into()],
+        }),
+        Frame::MachineEvent(MachineEvent {
+            session_id: "s1".into(),
+            epoch: 2,
+            seq: 9,
+            frame: serde_json::json!({"type": "agent_message_chunk"}),
+        }),
+        Frame::MachineBufferSync(MachineBufferSync {
+            session_id: "s1".into(),
+            epoch: 2,
+            from_seq: 7,
+            frames: vec![BufferedFrame {
+                seq: 7,
+                frame: serde_json::json!({"type": "agent_message_chunk"}),
+            }],
+        }),
+        Frame::MachineSpawn(MachineSpawn {
+            command_id: "c9".into(),
+            session_id: "s1".into(),
+            cmd: vec!["acp".into(), "--serve".into()],
+            cwd: "/tmp".into(),
+            env: Some(env),
+        }),
+        Frame::MachineKill(MachineKill {
+            command_id: "c10".into(),
+            session_id: "s1".into(),
+            grace: Some(500),
+        }),
+        Frame::MachineSpawnAck(MachineSpawnAck {
+            command_id: "c9".into(),
+            session_id: "s1".into(),
+            ok: true,
+            error: None,
+        }),
+        Frame::MachineKillAck(MachineKillAck {
+            command_id: "c10".into(),
+            session_id: "s1".into(),
+            ok: true,
+        }),
+        Frame::MachineProcessExit(MachineProcessExit {
+            session_id: "s1".into(),
+            code: 0,
+        }),
+    ]
+}
+
+/// 每类帧：序列化 → 解析 → 再序列化 → 再解析，语义稳定（§12.1「M1 全帧
+/// round-trip」）。含 `HashMap` 的帧（`ready` 等）JSON 键序不保证字节稳定，
+/// 断言改为解析相等性。
+#[test]
+fn all_frame_tags_roundtrip() {
+    for frame in all_frames() {
+        let raw = serde_json::to_string(&frame).expect("serialize");
+        let parsed = Frame::parse(&raw).expect("parse");
+        assert_eq!(parsed, frame, "roundtrip mismatch for tag {}", frame.tag());
+        let raw2 = serde_json::to_string(&parsed).expect("re-serialize");
+        let parsed2 = Frame::parse(&raw2).expect("re-parse");
+        assert_eq!(parsed2, parsed, "second roundtrip mismatch for tag {}", frame.tag());
+    }
+}
+
+/// 双层 internally tagged 序列化形态：`{"t":"action","commandId":…,"type":…,"payload":…}`（§4.3）。
+#[test]
+fn action_envelope_nested_tag_shape() {
+    let frame = Frame::Action(ActionEnvelope::Prompt {
+        command_id: "c4".into(),
+        payload: PromptSessionPayload {
+            session_id: "s1".into(),
+            message: "hi".into(),
+        },
+    });
+    let value: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+    assert_eq!(value["t"], "action");
+    assert_eq!(value["commandId"], "c4");
+    assert_eq!(value["type"], "session/prompt");
+    assert_eq!(value["payload"]["sessionId"], "s1");
+    assert_eq!(value["payload"]["message"], "hi");
+}
+
+/// payload 判别（§12.1）：`session/load` 与 `session/close` 同形 payload
+/// `{sessionId}` 经 envelope 层 `type` 判别无歧义。
+#[test]
+fn load_vs_close_discrimination() {
+    let load_raw = r#"{"t":"action","commandId":"c2","type":"session/load","payload":{"sessionId":"s1"}}"#;
+    let close_raw = r#"{"t":"action","commandId":"c3","type":"session/close","payload":{"sessionId":"s1"}}"#;
+
+    let load = Frame::parse(load_raw).unwrap();
+    let close = Frame::parse(close_raw).unwrap();
+    assert!(matches!(load, Frame::Action(ActionEnvelope::Load { .. })));
+    assert!(matches!(close, Frame::Action(ActionEnvelope::Close { .. })));
+    assert_ne!(load, close, "same-shape payloads must not collapse");
+}
+
+/// 未知 `t` → `Unsupported`（§4.8 向量 6）。
+#[test]
+fn unknown_tag_is_unsupported() {
+    for raw in [
+        r#"{"t":"foo"}"#,
+        r#"{"t":"ysync.foo"}"#,
+        r#"{"t":"machine/unknown"}"#,
+    ] {
+        match Frame::parse(raw) {
+            Err(ProtoError::Unsupported(_)) => {}
+            other => panic!("expected Unsupported for {raw}, got {other:?}"),
+        }
+    }
+    // 精确断言错误内容
+    assert_eq!(
+        Frame::parse(r#"{"t":"foo"}"#),
+        Err(ProtoError::Unsupported("foo".into()))
+    );
+}
+
+/// 畸形 JSON / 缺字段 → `Malformed`（不 panic，§12.1）。
+#[test]
+fn malformed_input_is_malformed() {
+    for raw in [
+        "not json",
+        "",
+        r#"{"t":42}"#,
+        r#"{"t":"action"}"#,                      // 缺 type/payload
+        r#"{"t":"machine/spawn"}"#,               // 缺必填字段
+        r#"{"t":"ysync.subscribe","docs":[1]}"#,  // 字段类型错误
+    ] {
+        match Frame::parse(raw) {
+            Err(ProtoError::Malformed(_)) => {}
+            other => panic!("expected Malformed for {raw:?}, got {other:?}"),
+        }
+    }
+}
+
+/// 已知 tag 但载荷畸形 → Malformed（区别于未知 tag 的 Unsupported）。
+#[test]
+fn known_tag_bad_payload_is_malformed_not_unsupported() {
+    assert!(matches!(
+        Frame::parse(r#"{"t":"action"}"#),
+        Err(ProtoError::Malformed(_))
+    ));
+}
+
+/// tag() 与 FRAME_TAGS 注册表一一对应。
+#[test]
+fn every_frame_tag_is_registered() {
+    let registered: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
+    assert_eq!(registered.len(), 25, "§3.2 全表应有 25 个 tag");
+    for frame in all_frames() {
+        assert!(
+            registered.contains(&frame.tag().0),
+            "tag {} missing from FRAME_TAGS",
+            frame.tag()
+        );
+    }
+}
+
+/// `ysync.update` 快照/增量投影版本（§4.6 步骤 3）：快照必带
+/// `projection_version`，增量不携带；序列化形态为可选字段。
+#[test]
+fn ysync_update_projection_version_shape() {
+    // 快照：携带投影版本
+    let snapshot = Frame::YsyncUpdate(YsyncUpdate {
+        doc: DocId::chat("s1"),
+        update: "AAAA".into(),
+        projection_version: Some(7),
+    });
+    let v: serde_json::Value = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(v["t"], "ysync.update");
+    assert_eq!(v["doc"], "chat:s1");
+    assert_eq!(v["update"], "AAAA");
+    assert_eq!(v["projectionVersion"], 7);
+    assert_eq!(Frame::parse(&serde_json::to_string(&snapshot).unwrap()).unwrap(), snapshot);
+
+    // 增量：不携带投影版本
+    let delta = Frame::YsyncUpdate(YsyncUpdate {
+        doc: DocId::chat("s1"),
+        update: "AAAA".into(),
+        projection_version: None,
+    });
+    let v: serde_json::Value = serde_json::to_value(&delta).unwrap();
+    assert!(v.get("projectionVersion").is_none(), "增量不携带投影版本");
+}
+
+/// `DocId::REGISTRY` 必须等于 `hub:registry`（§5.2 表），且与
+/// `FromStr` 解析结果一致——否则订阅/快照推送的键对不上。
+#[test]
+fn registry_doc_id_is_hub_registry() {
+    assert_eq!(DocId::REGISTRY.as_str(), "hub:registry");
+    assert_eq!(DocId::REGISTRY, DocId::from_str("hub:registry").unwrap());
+    let v = serde_json::to_value(&DocId::REGISTRY).unwrap();
+    assert_eq!(v, "hub:registry");
+    // 与 chat/session 形态互异
+    assert_ne!(DocId::REGISTRY, DocId::chat("registry"));
+    assert_ne!(DocId::REGISTRY, DocId::session("registry"));
+}

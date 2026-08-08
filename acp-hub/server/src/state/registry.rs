@@ -1,0 +1,412 @@
+//! Registry Doc 写入者（server 状态源单写接口，§5.2/§5.5/§17.2）。
+//!
+//! Registry Doc（`hub:registry`）是 TUI 会话列表与机器列表的**唯一权威源**：
+//! 活跃 session 摘要由 server 状态源单写（session 生命周期事件驱动：
+//! create/binding/终态/close 时更新），**不从 Session Doc 聚合**（§5.2 裁决）。
+//! 聚合器不直写 Registry Doc（gap 经上报路径，§9.4）。
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{mpsc, oneshot};
+use yrs::{Map, ReadTxn, Transact, WriteTxn};
+
+use acp_hub_proto::schema::{GlobalStatus, MachineStatus, MachineView, SessionSummary};
+
+use crate::state::doc_manager::DocCommand;
+use crate::state::factory::ROOT;
+
+/// Registry 写者命令（Registry Doc 无 session 维度：低频、无微批次、即到即写，
+/// §8.5【决策】路由到全局 registry 写者）。
+pub(crate) enum RegistryMsg {
+    /// 通用命令（§8.5 Registry 系）。
+    Command(DocCommand, oneshot::Sender<Result<(), RegistryError>>),
+    /// gap 写回（§9.4/§12.4）：`Some(count)` 置缺口、`None` 追平清除。
+    SetSessionGap {
+        session_id: String,
+        gap: Option<u64>,
+        reply: oneshot::Sender<Result<(), RegistryError>>,
+    },
+    /// session 状态迁移写回（§7.3/§7.6）。
+    SetSessionStatus {
+        session_id: String,
+        status: String,
+        reply: oneshot::Sender<Result<(), RegistryError>>,
+    },
+}
+
+/// Registry 操作错误。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RegistryError {
+    /// 写者已退出（channel closed）。
+    #[error("registry writer closed")]
+    ChannelClosed,
+    /// 目标条目不存在（如 set_machine_status 的 machine 未注册）。
+    #[error("registry entry not found: {0}")]
+    NotFound(String),
+}
+
+/// Degraded 判定输入（§17.2：任一触发 Degraded）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DegradeCause {
+    /// 落盘失败（F6 上报）。
+    PersistFailure,
+    /// 缓冲溢出丢弃（channel 层上报，§8.5）。
+    BufferDropped,
+    /// 任一存活 session 存在 gap（聚合器上报，§9.4）。
+    SessionGap,
+    /// 镜像失败（聚合器/writer task 异常，§17.2）。
+    ProjectionError,
+    /// 启动恢复不变量失败（§8.4.1，F6/恢复流程上报）。
+    RestoreInvariant,
+}
+
+impl DegradeCause {
+    fn label(self) -> &'static str {
+        match self {
+            DegradeCause::PersistFailure => "persist_failure",
+            DegradeCause::BufferDropped => "buffer_dropped",
+            DegradeCause::SessionGap => "session_gap",
+            DegradeCause::ProjectionError => "projection_error",
+            DegradeCause::RestoreInvariant => "restore_invariant",
+        }
+    }
+}
+
+/// Registry Doc 写入者（server 状态源单写接口，§5.2）。
+///
+/// 内部经 DocManager 全局 registry 写者执行（§8.5 命令路由）；调用方为
+/// channel 层（machine 生命周期，F7/F8）与恢复流程（F6）。
+#[derive(Clone)]
+pub struct RegistryState {
+    inner: Arc<RegistryInner>,
+}
+
+struct RegistryInner {
+    tx: mpsc::Sender<RegistryMsg>,
+    /// 活跃 degraded 条件集合（§12.3 判定集中）。
+    conditions: Mutex<HashSet<DegradeCause>>,
+    /// server 启动回放期标志（§8.4.1）。
+    restarting: AtomicBool,
+}
+
+impl RegistryState {
+    pub(crate) fn new(tx: mpsc::Sender<RegistryMsg>) -> Self {
+        RegistryState {
+            inner: Arc::new(RegistryInner {
+                tx,
+                conditions: Mutex::new(HashSet::new()),
+                restarting: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// machine 视图 upsert（hello 注册/心跳/offline；§7.1）。
+    pub async fn upsert_machine(&self, m: MachineView) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryUpsertMachine(m)).await
+    }
+
+    /// machine 状态更新（online/offline/unknown；心跳超时驱动）。
+    pub async fn set_machine_status(
+        &self,
+        machine_id: &str,
+        status: MachineStatus,
+    ) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistrySetMachineStatus {
+            machine_id: machine_id.to_string(),
+            status,
+        })
+        .await
+    }
+
+    /// 活跃 session 摘要 upsert（create/binding 建立/标题/终态/gap 同步）。
+    pub async fn upsert_session(&self, s: SessionSummary) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryUpsertSession(s)).await
+    }
+
+    /// 移除（session close 清理）。
+    pub async fn remove_session(&self, session_id: &str) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryRemoveSession {
+            session_id: session_id.to_string(),
+        })
+        .await
+    }
+
+    /// gap 写回（聚合器上报，§9.4）：`Some(count)` 置缺口、`None` 追平清除。
+    pub async fn set_session_gap(
+        &self,
+        session_id: &str,
+        gap: Option<u64>,
+    ) -> Result<(), RegistryError> {
+        let (reply, rx) = oneshot::channel();
+        self.inner
+            .tx
+            .send(RegistryMsg::SetSessionGap {
+                session_id: session_id.to_string(),
+                gap,
+                reply,
+            })
+            .await
+            .map_err(|_| RegistryError::ChannelClosed)?;
+        rx.await.map_err(|_| RegistryError::ChannelClosed)?
+    }
+
+    /// session 状态迁移（accepting/active/ended/closed/crashed + pending_close，
+    /// §7.3/§7.6）。
+    pub async fn set_session_status(
+        &self,
+        session_id: &str,
+        status: &str,
+    ) -> Result<(), RegistryError> {
+        let (reply, rx) = oneshot::channel();
+        self.inner
+            .tx
+            .send(RegistryMsg::SetSessionStatus {
+                session_id: session_id.to_string(),
+                status: status.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| RegistryError::ChannelClosed)?;
+        rx.await.map_err(|_| RegistryError::ChannelClosed)?
+    }
+
+    /// 全局状态（§17.2）：条件上报，任一 cause 活跃 → Degraded。
+    pub async fn report_condition(&self, cause: DegradeCause) -> Result<(), RegistryError> {
+        let was_empty = {
+            let mut conditions = self.inner.conditions.lock().unwrap();
+            let was_empty = conditions.is_empty();
+            conditions.insert(cause);
+            was_empty
+        };
+        if was_empty && !self.inner.restarting.load(Ordering::SeqCst) {
+            self.set_global(GlobalStatus::Degraded).await?;
+        }
+        tracing::warn!(
+            cause = cause.label(),
+            degraded = true,
+            "degraded condition reported"
+        );
+        Ok(())
+    }
+
+    /// 全局状态（§17.2）：条件清除；全部清除 → Healthy。
+    pub async fn clear_condition(&self, cause: DegradeCause) -> Result<(), RegistryError> {
+        let empty = {
+            let mut conditions = self.inner.conditions.lock().unwrap();
+            conditions.remove(&cause);
+            conditions.is_empty()
+        };
+        if empty && !self.inner.restarting.load(Ordering::SeqCst) {
+            self.set_global(GlobalStatus::Healthy).await?;
+        }
+        tracing::info!(cause = cause.label(), "degraded condition cleared");
+        Ok(())
+    }
+
+    /// 启动回放期置 Restarting（§8.4.1；恢复流程显式调用）。
+    pub async fn set_restarting(&self) -> Result<(), RegistryError> {
+        self.inner.restarting.store(true, Ordering::SeqCst);
+        self.set_global(GlobalStatus::Restarting).await
+    }
+
+    /// 恢复完成置出 Restarting（§8.4.1【决策】补充：设计稿 §12.2 仅有置入，
+    /// 「恢复不变量完成置 Healthy」需要置出接口）。
+    pub async fn clear_restarting(&self) -> Result<(), RegistryError> {
+        self.inner.restarting.store(false, Ordering::SeqCst);
+        let degraded = !self.inner.conditions.lock().unwrap().is_empty();
+        let status = if degraded {
+            GlobalStatus::Degraded
+        } else {
+            GlobalStatus::Healthy
+        };
+        self.set_global(status).await
+    }
+
+    /// 当前判定状态（读 Registry Doc global.status 的镜像；条件集合为空且非
+    /// restarting → Healthy，否则 Degraded）。供 F7 消费（拒绝新 committed）。
+    pub fn global_status(&self) -> GlobalStatus {
+        if self.inner.restarting.load(Ordering::SeqCst) {
+            return GlobalStatus::Restarting;
+        }
+        if self.inner.conditions.lock().unwrap().is_empty() {
+            GlobalStatus::Healthy
+        } else {
+            GlobalStatus::Degraded
+        }
+    }
+
+    async fn set_global(&self, status: GlobalStatus) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistrySetGlobal { status }).await
+    }
+
+    async fn send(&self, cmd: DocCommand) -> Result<(), RegistryError> {
+        let (reply, rx) = oneshot::channel();
+        self.inner
+            .tx
+            .send(RegistryMsg::Command(cmd, reply))
+            .await
+            .map_err(|_| RegistryError::ChannelClosed)?;
+        rx.await.map_err(|_| RegistryError::ChannelClosed)?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// registry 写者 task（DocManager spawn；唯一提交边界内的全局写者）
+// ---------------------------------------------------------------------------
+
+/// Registry Doc 写者执行体：应用命令到 Registry Doc。
+pub(crate) struct RegistryApplier {
+    pub(crate) doc: yrs::Doc,
+}
+
+impl RegistryApplier {
+    pub(crate) fn new(doc: yrs::Doc) -> Self {
+        RegistryApplier { doc }
+    }
+
+    /// 执行一条 registry 命令。
+    pub(crate) fn apply(&mut self, cmd: &DocCommand) -> Result<(), RegistryError> {
+        let mut txn = self.doc.transact_mut();
+        let root = txn.get_or_insert_map(ROOT);
+        match cmd {
+            DocCommand::RegistryUpsertMachine(m) => {
+                write_machine(&mut txn, &root, m);
+                Ok(())
+            }
+            DocCommand::RegistrySetMachineStatus {
+                machine_id,
+                status,
+            } => {
+                let machines = root.get_or_init::<_, yrs::MapRef>(&mut txn, "machines");
+                let Some(mm) = machines
+                    .get(&txn, machine_id)
+                    .and_then(|v| v.cast::<yrs::MapRef>().ok())
+                else {
+                    return Err(RegistryError::NotFound(machine_id.clone()));
+                };
+                mm.insert(&mut txn, "status", machine_status_str(*status));
+                Ok(())
+            }
+            DocCommand::RegistryUpsertSession(s) => {
+                write_session_summary(&mut txn, &root, s);
+                Ok(())
+            }
+            DocCommand::RegistryRemoveSession { session_id } => {
+                let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
+                sessions.remove(&mut txn, session_id);
+                Ok(())
+            }
+            DocCommand::RegistrySetGlobal { status } => {
+                let global = root.get_or_init::<_, yrs::MapRef>(&mut txn, "global");
+                global.insert(&mut txn, "status", global_status_str(*status));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// gap 写回（读现状改 gap 字段；§9.4/§12.4）。
+    pub(crate) fn set_session_gap(
+        &mut self,
+        session_id: &str,
+        gap: Option<u64>,
+    ) -> Result<(), RegistryError> {
+        let mut txn = self.doc.transact_mut();
+        let root = txn.get_or_insert_map(ROOT);
+        let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
+        let Some(sm) = sessions
+            .get(&txn, session_id)
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        else {
+            return Err(RegistryError::NotFound(session_id.to_string()));
+        };
+        match gap {
+            Some(count) => sm.insert(&mut txn, "gap", count as f64),
+            None => sm.insert(&mut txn, "gap", yrs::Any::Null),
+        };
+        Ok(())
+    }
+
+    /// session 状态迁移写回（读现状改 status；§7.3/§7.6）。
+    pub(crate) fn set_session_status(
+        &mut self,
+        session_id: &str,
+        status: &str,
+    ) -> Result<(), RegistryError> {
+        let mut txn = self.doc.transact_mut();
+        let root = txn.get_or_insert_map(ROOT);
+        let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
+        let Some(sm) = sessions
+            .get(&txn, session_id)
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        else {
+            return Err(RegistryError::NotFound(session_id.to_string()));
+        };
+        sm.insert(&mut txn, "status", status.to_string());
+        Ok(())
+    }
+}
+
+fn write_machine(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, m: &MachineView) {
+    let machines = root.get_or_init::<_, yrs::MapRef>(txn, "machines");
+    let mm = machines.get_or_init::<_, yrs::MapRef>(txn, m.id.as_str());
+    mm.insert(txn, "id", m.id.clone());
+    mm.insert(txn, "hostname", m.hostname.clone());
+    mm.insert(txn, "status", machine_status_str(m.status));
+    mm.insert(txn, "token_id", m.token_id.clone());
+    mm.insert(txn, "registered_at", m.registered_at.clone());
+    mm.insert(txn, "last_heartbeat", m.last_heartbeat.clone());
+    mm.insert(txn, "session_count", m.session_count as f64);
+}
+
+fn write_session_summary(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, s: &SessionSummary) {
+    let sessions = root.get_or_init::<_, yrs::MapRef>(txn, "sessions");
+    let sm = sessions.get_or_init::<_, yrs::MapRef>(txn, s.id.as_str());
+    sm.insert(txn, "id", s.id.clone());
+    sm.insert(txn, "machine_id", s.machine_id.clone());
+    sm.insert(txn, "title", s.title.clone());
+    sm.insert(txn, "status", s.status.clone());
+    match s.gap {
+        Some(count) => sm.insert(txn, "gap", count as f64),
+        None => sm.insert(txn, "gap", yrs::Any::Null),
+    };
+    sm.insert(txn, "updated_at", s.updated_at.clone());
+}
+
+pub(crate) fn machine_status_str(s: MachineStatus) -> &'static str {
+    match s {
+        MachineStatus::Online => "online",
+        MachineStatus::Offline => "offline",
+        MachineStatus::Unknown => "unknown",
+    }
+}
+
+pub(crate) fn global_status_str(s: GlobalStatus) -> &'static str {
+    match s {
+        GlobalStatus::Healthy => "healthy",
+        GlobalStatus::Degraded => "degraded",
+        GlobalStatus::Restarting => "restarting",
+    }
+}
+
+/// 读取 Registry Doc 的全局状态（读侧辅助；broadcaster/TUI 快照用）。
+#[allow(dead_code)] // 预留：F7 broadcaster 快照用
+pub(crate) fn read_global_status(doc: &yrs::Doc) -> GlobalStatus {
+    let txn = doc.transact();
+    let Some(root) = txn.get_map(ROOT) else {
+        return GlobalStatus::Healthy;
+    };
+    let status = root
+        .get(&txn, "global")
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        .and_then(|g| g.get(&txn, "status"))
+        .and_then(|s| s.cast::<String>().ok())
+        .unwrap_or_default();
+    match status.as_str() {
+        "degraded" => GlobalStatus::Degraded,
+        "restarting" => GlobalStatus::Restarting,
+        _ => GlobalStatus::Healthy,
+    }
+}

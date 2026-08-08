@@ -1,32 +1,74 @@
-[package]
-name = "acp-hub"
-version.workspace = true
-edition.workspace = true
+# acp-hub —— 独立 workspace（三个二进制 + 一个共享协议 crate）
+# 架构基准：docs/architecture.md §3.2/§12
 
-[[bin]]
-name = "acp-hub"
-path = "src/main.rs"
+[workspace]
+members = ["proto", "server", "machine"]
+resolver = "2"
 
-[[bin]]
-name = "test-child"
-path = "src/bin/test_child.rs"
-test = false  # 不是测试目标，是独立二进制
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
 
-[lib]
-name = "acp_hub"
-path = "src/lib.rs"
+# ============================================================================
+# Workspace-wide dependency declarations
+# 单一事实源 — 所有 crate 通过 `workspace = true` 引用
+# ============================================================================
 
-[dependencies]
-tokio = { workspace = true, features = ["full"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-clap = { version = "4", features = ["derive"] }
-anyhow = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+[workspace.dependencies]
+# --- Async runtime ---
+tokio = { version = "1", features = ["full", "test-util"] }  # test-util 供时间暂停测试（§12）
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# --- Serde ecosystem ---
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+
+# --- Logging ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+    "json",
+] }
+
+# --- CLI ---
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- Error handling ---
+anyhow = "1.0"
+thiserror = "2"
+
+# --- Utilities ---
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs-next = "2"
+
+# --- WebSocket (ws server + client) ---
+tokio-tungstenite = "0.29"
+
+# --- Crypto / 编码（§9.2 双向认证、§8.4 CRC） ---
+sha2 = "0.10"  # digest 0.10；hmac/hkdf 取 0.12 以保持 digest 大版本一致
+hmac = "0.12"
+hkdf = "0.12"
+base64 = "0.22"
+rand = "0.10"  # CSPRNG（默认 features 含 sys_rng）
+
+# --- Unix 进程组信号（machine 进程树 kill，§4.1） ---
+libc = "0.2"
+crc32fast = "1.5"
+
+# --- CRDT / 聚合层（§5 数据模型，server 侧 Y.Doc） ---
+yrs = "0.27"
+
+# --- Config / 解析 ---
+toml = "0.8"
+
+
+# --- ACP 协议 schema ---
 agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitation"] }
 
-[dev-dependencies]
-tempfile = { workspace = true }
+# --- Dev ---
+tempfile = "3"
+serial_test = "3"
