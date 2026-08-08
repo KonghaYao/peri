@@ -1,6 +1,6 @@
 # E2E: workflow 运行 5 分钟未出现完成状态
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：高
 **类型**：缺陷
 **创建日期**：2026-08-06
@@ -41,6 +41,7 @@ workflow 触发后应逐步显示运行态并最终出现完成文本 `completed
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-08-06 | — | Open | agent | E2E 全量运行失败，创建 issue |
+| 2026-08-08 | Open | Fixed | agent | 修复记录完整（downcast_arc 经 as_any 判定），两个 e2e 通过（55.5s/42.3s）；遗留项 McpPoolPort/ToolSearchPort downcast 同构 bug 于 2026-08-08 单独修复（ports.rs），状态未随修复同步更新，本次盘点闭环 |
 
 ## 修复记录
 

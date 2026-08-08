@@ -1,6 +1,6 @@
 # E2E: bg subagent 派发后 BgTaskArea 运行条目未出现
 
-**状态**：Open
+**状态**：Fixed
 **优先级**：中
 **类型**：缺陷
 **创建日期**：2026-08-06
@@ -38,6 +38,7 @@ bg subagent 派发后，BgTaskArea 应在 60s 内出现 `◎ agent` 运行条目
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-08-06 | — | Open | agent | E2E 全量运行失败，创建 issue |
+| 2026-08-08 | Open | Fixed | agent | 修复记录完整（stage_builder 工具注入时序），e2e bg-task-area 通过 119.3s；状态未随修复同步更新，本次盘点闭环 |
 
 ## 修复记录
 
