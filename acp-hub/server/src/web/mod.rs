@@ -1,42 +1,42 @@
-//! Web 验证台（静态资源）：非 ws 升级请求的 HTTP GET → 内嵌静态页。
+//! Web 前端（静态资源）：非 ws 升级请求的 HTTP GET → 内嵌静态页。
 //!
 //! 定位：gateway 在回环检查（§9.5）之后、配额注册（§8.6）之前分流
 //! （`channel/gateway.rs` 连接任务步骤 2）：头部含 `upgrade: websocket`
 //! 的请求原样走 `accept_async`（ws 时序不变，§4.6），其余普通 HTTP 一律
 //! 交给本模块——不进配额/注册表，不产生占位连接。
 //!
-//! 资源经 `include_str!` 编译期内嵌（零运行时文件 IO、零新依赖）；路由为
-//! 路径查表：验证台 `/`、`/index.html`、`/app.js`、`/ws.js`、`/style.css`，
-//! Web 面板（M3）`/panel.html`、`/protocol.js`、`/ws-client.js`、
-//! `/yjs-view.js`、`/ui.js`、`/main.js`，未知路径与非 GET 方法一律 404。
-//! Content-Type 按扩展名手工映射；响应固定
+//! 前端是独立 vite 工程（`web/`，SolidJS + Tailwind），Web 面板为唯一
+//! 页面（`/` 即面板入口）；构建产物 `web/dist/` 由 `build.rs` 在编译期
+//! 扫描并生成内嵌资源表（`assets.rs`，字节经 include_bytes! 引用，零
+//! 运行时文件 IO、零新依赖）。产物文件名带内容 hash，本模块按实际文件
+//! 清单做路径查表：`/`、`/index.html` 映射面板入口，`/panel.html` 为
+//! 旧链接兼容（同样指向面板），`/assets/*` 直接映射产物相对路径，未知
+//! 路径与非 GET 方法一律 404。Content-Type 按扩展名手工映射；响应固定
 //! `Connection: close` + `Content-Length`，写毕 `shutdown()`。
 //!
 //! 设计约束：最小实现（浏览器验证用），不做 URL 解码/query 处理——资源名
-//! 纯 ASCII，取请求行 path 段（去 query）即可；不支持任何动态端点，页面
-//! 的 ws 探测直连 hub 的 ws 时序（无 token 会被 1011 关闭，见 index.html
-//! 内的说明，如实展示，不造假）。
+//! 纯 ASCII（vite hash 文件名），取请求行 path 段（去 query）即可；不支
+//! 持任何动态端点，页面的 ws 探测直连 hub 的 ws 时序（无 token 会被 1011
+//! 关闭，见面板内连接逻辑，如实展示，不造假）。
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-/// 静态资源路由表（路径 → (资源名, 内嵌内容)）。
-pub(crate) fn route(path: &str) -> Option<(&'static str, &'static str)> {
-    let asset = match path {
-        "/" | "/index.html" => ("index.html", include_str!("index.html")),
-        "/app.js" => ("app.js", include_str!("app.js")),
-        "/ws.js" => ("ws.js", include_str!("ws.js")),
-        "/style.css" => ("style.css", include_str!("style.css")),
-        // Web 面板（M3，独立路径，与验证台并存）：纯静态登记，零业务逻辑。
-        "/panel.html" => ("panel.html", include_str!("panel.html")),
-        "/protocol.js" => ("protocol.js", include_str!("protocol.js")),
-        "/ws-client.js" => ("ws-client.js", include_str!("ws-client.js")),
-        "/yjs-view.js" => ("yjs-view.js", include_str!("yjs-view.js")),
-        "/ui.js" => ("ui.js", include_str!("ui.js")),
-        "/main.js" => ("main.js", include_str!("main.js")),
-        _ => return None,
+include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+
+/// 静态资源路由表：URL 路径 → 产物相对路径。`/`、`/index.html` 与旧链接
+/// `/panel.html` 均映射面板入口 `index.html`，`/assets/*` 直接对应 vite
+/// 产物文件名。返回 (资源名, Content-Type, 内容)；未知路径 → None。
+pub(crate) fn route(path: &str) -> Option<(&'static str, &'static str, &'static [u8])> {
+    let rel = match path {
+        // index.html 为唯一页面（`/` 即面板）；/panel.html 仅做旧链接兼容。
+        "/" | "/index.html" | "/panel.html" => "index.html",
+        other => other.trim_start_matches('/'),
     };
-    Some(asset)
+    ASSETS
+        .iter()
+        .find(|a| a.url == rel)
+        .map(|a| (a.url, content_type(a.url), a.bytes))
 }
 
 /// 按扩展名取 Content-Type（最小映射表；未识别回 octet-stream）。
@@ -47,6 +47,16 @@ pub(crate) fn content_type(name: &str) -> &'static str {
         "text/javascript; charset=utf-8"
     } else if name.ends_with(".css") {
         "text/css; charset=utf-8"
+    } else if name.ends_with(".svg") {
+        "image/svg+xml"
+    } else if name.ends_with(".png") {
+        "image/png"
+    } else if name.ends_with(".ico") {
+        "image/x-icon"
+    } else if name.ends_with(".woff2") {
+        "font/woff2"
+    } else if name.ends_with(".map") || name.ends_with(".json") {
+        "application/json"
     } else {
         "application/octet-stream"
     }
@@ -83,7 +93,7 @@ pub(crate) fn is_ws_upgrade(buf: &[u8]) -> bool {
 pub(crate) async fn serve(mut stream: TcpStream, head: &str) -> std::io::Result<()> {
     let (status, content_type, body): (&str, &str, &[u8]) = match request_path(head).and_then(route)
     {
-        Some((name, body)) => ("200 OK", content_type(name), body.as_bytes()),
+        Some((_, ct, bytes)) => ("200 OK", ct, bytes),
         None => ("404 Not Found", "text/plain; charset=utf-8", b"404 Not Found\n"),
     };
     let header = format!(

@@ -1,0 +1,24 @@
+{
+  "name": "acp-hub-web",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "description": "acp-hub 前端（验证台 + Web 面板）：SolidJS + Tailwind，vite 构建产物由 acp-hub-server 编译期内嵌静态部署",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1",
+    "yjs": "^13"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}

@@ -1,10 +1,14 @@
 //! web 静态分支测试：请求行解析、upgrade 判定、路由与 Content-Type 映射、
 //! 以及真实 socket 上的响应（TcpListener/TcpStream 直连，零新依赖）。
+//!
+//! 路由断言面向 vite 构建产物（web/dist，build.rs 编译期内嵌）：页面入口
+//! 固定（/、/panel.html），assets 文件名带内容 hash —— 测试遍历 ASSETS
+//! 表断言 js/css 存在，不硬编码 hash 文件名。
 
 use tokio::io::AsyncReadExt as _;
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::web::{content_type, header_end, is_ws_upgrade, request_path, route, serve};
+use crate::web::{content_type, header_end, is_ws_upgrade, request_path, route, serve, ASSETS};
 
 /// 请求行解析：常规 GET 路径。
 #[test]
@@ -14,8 +18,8 @@ fn request_path_get() {
         Some("/")
     );
     assert_eq!(
-        request_path("GET /app.js HTTP/1.1\r\nHost: test\r\n\r\n"),
-        Some("/app.js")
+        request_path("GET /assets/index-abc.js HTTP/1.1\r\nHost: test\r\n\r\n"),
+        Some("/assets/index-abc.js")
     );
 }
 
@@ -23,8 +27,8 @@ fn request_path_get() {
 #[test]
 fn request_path_strips_query() {
     assert_eq!(
-        request_path("GET /app.js?v=123 HTTP/1.1\r\nHost: test\r\n\r\n"),
-        Some("/app.js")
+        request_path("GET /panel.html?v=123 HTTP/1.1\r\nHost: test\r\n\r\n"),
+        Some("/panel.html")
     );
 }
 
@@ -57,26 +61,33 @@ fn ws_upgrade_detection() {
     assert!(!is_ws_upgrade(plain));
 }
 
-/// 路由表：首页与登记的静态资源可达，未知路径 404。
+/// 路由表：面板为唯一页面（/、/index.html、旧链接 /panel.html 同源），
+/// 资产表非空且含 js/css，未知路径 404。
 #[test]
 fn route_resolves_static_assets() {
-    let (name, index) = route("/").expect("/ → index.html");
+    // Web 面板入口：/、/index.html 与 /panel.html（旧链接兼容）同源。
+    let (name, ct, index) = route("/").expect("/ → index.html");
     assert_eq!(name, "index.html");
-    assert!(index.contains("acp-hub 验证台"));
-    assert!(index.contains("htmx"));
-    assert_eq!(route("/index.html").map(|(n, _)| n), Some("index.html"));
+    assert_eq!(ct, "text/html; charset=utf-8");
+    assert!(String::from_utf8_lossy(index).contains("acp-hub Web 面板"));
+    assert_eq!(route("/index.html").map(|(n, _, _)| n), Some("index.html"));
+    assert_eq!(route("/panel.html").map(|(n, _, _)| n), Some("index.html"));
+    let (_, _, compat) = route("/panel.html").expect("/panel.html 兼容映射");
+    assert_eq!(compat, index);
 
-    // 至少两个 JS 文件（验证台要求）各自可达。
-    let (name, app) = route("/app.js").expect("/app.js");
-    assert_eq!(name, "app.js");
-    assert!(app.contains("acpHubWsConnect"));
-    let (name, ws) = route("/ws.js").expect("/ws.js");
-    assert_eq!(name, "ws.js");
-    assert!(ws.contains("acpHubWsConnect"));
+    // vite 产物：至少一个 js、一个 css（hash 文件名，不硬编码）。
+    let js: Vec<_> = ASSETS.iter().filter(|a| a.url.ends_with(".js")).collect();
+    let css: Vec<_> = ASSETS.iter().filter(|a| a.url.ends_with(".css")).collect();
+    assert!(!js.is_empty(), "产物应含 js 资源");
+    assert!(!css.is_empty(), "产物应含 css 资源");
+    for a in js.iter().chain(css.iter()) {
+        assert!(!a.bytes.is_empty(), "{} 应为非空", a.url);
+    }
 
-    let (name, css) = route("/style.css").expect("/style.css");
-    assert_eq!(name, "style.css");
-    assert!(css.contains("acp-hub"));
+    // assets/ 前缀的产物路径可经 URL 命中（取第一个 js 走路由）。
+    let first_js = js[0].url;
+    let routed = route(&format!("/{}", first_js)).expect("assets 可经 URL 路由");
+    assert_eq!(routed.0, first_js);
 
     assert_eq!(route("/instance"), None);
     assert_eq!(route("/favicon.ico"), None);
@@ -86,8 +97,13 @@ fn route_resolves_static_assets() {
 #[test]
 fn content_type_by_extension() {
     assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
-    assert_eq!(content_type("app.js"), "text/javascript; charset=utf-8");
-    assert_eq!(content_type("style.css"), "text/css; charset=utf-8");
+    assert_eq!(content_type("assets/app.js"), "text/javascript; charset=utf-8");
+    assert_eq!(content_type("assets/style.css"), "text/css; charset=utf-8");
+    assert_eq!(content_type("icon.svg"), "image/svg+xml");
+    assert_eq!(content_type("icon.png"), "image/png");
+    assert_eq!(content_type("favicon.ico"), "image/x-icon");
+    assert_eq!(content_type("font.woff2"), "font/woff2");
+    assert_eq!(content_type("chunk.js.map"), "application/json");
     assert_eq!(content_type("blob.bin"), "application/octet-stream");
 }
 
@@ -109,8 +125,8 @@ async fn serve_returns_index() {
     let text = String::from_utf8(buf).unwrap();
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
     assert!(text.contains("Content-Type: text/html; charset=utf-8"), "{text:?}");
-    assert!(text.contains("acp-hub 验证台"), "{text:?}");
-    assert!(text.ends_with("</html>\n"), "{text:?}");
+    assert!(text.contains("acp-hub Web 面板"), "{text:?}");
+    assert!(text.contains("</html>"), "{text:?}");
 }
 
 /// socket 端到端：未知路径 → 404（含 Content-Length，体为纯文本）。
@@ -138,13 +154,14 @@ async fn serve_returns_404() {
 /// socket 端到端：query 路径同样命中（浏览器缓存失效参数）。
 #[tokio::test]
 async fn serve_handles_query() {
+    // 取资产表中第一个 js 作为探测目标（hash 文件名不硬编码）。
+    let js = ASSETS.iter().find(|a| a.url.ends_with(".js")).expect("有 js 产物");
+    let path = format!("/{}?t=1", js.url);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, "GET /ws.js?t=1 HTTP/1.1\r\nHost: test\r\n\r\n")
-            .await
-            .unwrap();
+        serve(stream, &format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n")).await.unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
@@ -154,4 +171,7 @@ async fn serve_handles_query() {
     let text = String::from_utf8(buf).unwrap();
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
     assert!(text.contains("Content-Type: text/javascript; charset=utf-8"), "{text:?}");
+    // 响应体与内嵌字节一致（Content-Length 精确匹配）。
+    let body_start = text.find("\r\n\r\n").map(|i| i + 4).expect("有头部结束符");
+    assert_eq!(&text.as_bytes()[body_start..], js.bytes);
 }

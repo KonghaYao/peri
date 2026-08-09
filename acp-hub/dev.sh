@@ -2,6 +2,7 @@
 # acp-hub 开发启动：同时拉起 acp-hub-server + acp-instance，Ctrl+C 一起退出。
 #
 # 流程：
+#   0. 检查前端构建产物（web/dist，vite 产物不提交 git；缺失时自动构建）
 #   1. 启动 server（cargo run，日志 .tmp/server.log）
 #   2. 等待 server bootstrap 生成 instance token（~/.config/acp-hub/tokens.toml）
 #   3. 提取 token → 写入 ~/.local/share/acp-hub/instance.token（0600）
@@ -12,6 +13,13 @@
 # `$VAR` 后紧跟全角字符（如 `）`）的解析有 bug，会吞掉变量名。
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# ---- 0. 前端构建产物检查（web/dist 缺失时先构建，否则 cargo build 失败） ----
+WEB_DIST="$(pwd)/web/dist"
+if [ ! -f "${WEB_DIST}/index.html" ]; then
+    echo "==> 前端构建产物缺失（${WEB_DIST}），先构建 web/ ..."
+    (cd web && bun install && bun run build)
+fi
 
 # ---- 路径（与 server 默认 XDG 语义一致，环境变量可覆盖） ----
 CONFIG_DIR="${ACP_HUB_CONFIG_DIR:-$HOME/.config/acp-hub}"

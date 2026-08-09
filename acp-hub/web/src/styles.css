@@ -1,0 +1,17 @@
+@import 'tailwindcss';
+
+/* acp-hub 前端全局样式（Tailwind v4 CSS-first；两页共用，具体样式以
+   utility class 为主，此处只放跨页的少量基础规则）。 */
+
+body {
+  @apply bg-slate-100 text-slate-800 antialiased;
+  font-family:
+    -apple-system,
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+}
+
+code {
+  @apply rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[0.85em];
+}
