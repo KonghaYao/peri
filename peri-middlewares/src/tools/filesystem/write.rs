@@ -1,7 +1,9 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::draft::{draft_hint_en, DraftStore};
 use super::resolve_path;
 
 const WRITE_FILE_DESCRIPTION: &str = include_str!("descriptions/write.md");
@@ -9,11 +11,73 @@ const WRITE_FILE_DESCRIPTION: &str = include_str!("descriptions/write.md");
 /// Write tool - 与 TypeScript write_tool 对齐
 pub struct WriteFileTool {
     pub cwd: String,
+    /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
+    drafts: Option<Arc<Mutex<DraftStore>>>,
 }
 
 impl WriteFileTool {
     pub fn new(cwd: impl Into<String>) -> Self {
-        Self { cwd: cwd.into() }
+        Self::with_draft(cwd, super::draft::draft_enabled())
+    }
+
+    /// 测试注入构造:enabled=false 时完全禁用草稿(不创建 store)
+    pub(crate) fn with_draft(cwd: impl Into<String>, enabled: bool) -> Self {
+        Self {
+            cwd: cwd.into(),
+            drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
+        }
+    }
+
+    /// 保存失败内容为草稿;禁用时返回 None
+    fn save_draft(&self, target: &str, content: &str, append: bool) -> Option<String> {
+        self.drafts.as_ref().map(|store| {
+            store
+                .lock()
+                .unwrap()
+                .save(target, content.to_string(), append)
+        })
+    }
+
+    /// 恢复前 peek + take:先校验 target 一致,不匹配则不消费草稿(LLM 可用原路径重试)
+    fn restore_draft(&self, draft_id: &str, target: &str) -> Result<(String, bool), String> {
+        let Some(store) = self.drafts.as_ref() else {
+            // 禁用 == 不存在,统一优雅降级
+            return Err(format!(
+                "Draft '{draft_id}' is unknown or no longer available. Please retry by providing the 'content' parameter directly."
+            ));
+        };
+        let verdict = {
+            let guard = store.lock().unwrap();
+            match guard.peek(draft_id) {
+                None => None,                                 // 未知/失效
+                Some(e) if e.target != target => Some(false), // 路径不符
+                Some(_) => Some(true),                        // 匹配
+            }
+        };
+        match verdict {
+            None => Err(format!(
+                "Draft '{draft_id}' is unknown or no longer available. Please retry by providing the 'content' parameter directly."
+            )),
+            Some(false) => Err(format!(
+                "Draft '{draft_id}' belongs to a different file_path. Provide the original file_path, or retry with the 'content' parameter directly."
+            )),
+            Some(true) => {
+                // peek 与 take 之间存在竞态窗口(同 draft_id 被并发恢复),优雅降级为 unknown
+                let Some(entry) = store.lock().unwrap().take(draft_id) else {
+                    return Err(format!(
+                        "Draft '{draft_id}' is unknown or no longer available. Please retry by providing the 'content' parameter directly."
+                    ));
+                };
+                Ok((entry.content, entry.append))
+            }
+        }
+    }
+
+    /// 成功写入后清理同 target 草稿(幂等;禁用时 no-op)
+    fn remove_draft(&self, target: &str) {
+        if let Some(store) = &self.drafts {
+            store.lock().unwrap().remove_by_target(target);
+        }
     }
 }
 
@@ -41,7 +105,11 @@ impl BaseTool for WriteFileTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The full content to write to the file"
+                    "description": "The full content to write to the file. Either 'content' or 'from_draft' must be provided."
+                },
+                "from_draft": {
+                    "type": "string",
+                    "description": "A draft id returned in a previous Write error message. Recover the failed write without resending content. Mutually exclusive with 'content'; reuse the original file_path."
                 },
                 "append": {
                     "type": "boolean",
@@ -49,7 +117,7 @@ impl BaseTool for WriteFileTool {
                     "default": false
                 }
             },
-            "required": ["file_path", "content"]
+            "required": ["file_path"]
         })
     }
 
@@ -65,14 +133,29 @@ impl BaseTool for WriteFileTool {
         let file_path = input["file_path"]
             .as_str()
             .ok_or("The 'file_path' parameter is required for the Write tool.")?;
-        let content = input["content"]
-            .as_str()
-            .ok_or("The 'content' parameter is required for the Write tool.")?;
 
-        let append = input["append"].as_bool().unwrap_or(false);
+        // resolve 提前到 timeout 闭包外(infallible,行为不变),供草稿/恢复使用
+        let resolved = resolve_path(&self.cwd, file_path);
+        let resolved_str = resolved.to_string_lossy().to_string();
+
+        let (content, append) = match (input["content"].as_str(), input["from_draft"].as_str()) {
+            (Some(c), None) => (c.to_string(), input["append"].as_bool().unwrap_or(false)),
+            (None, Some(id)) => self.restore_draft(id, &resolved_str)?,
+            (Some(_), Some(_)) => {
+                return Err(
+                    "The 'content' and 'from_draft' parameters are mutually exclusive. Provide only one."
+                        .into(),
+                )
+            }
+            (None, None) => {
+                return Err(
+                    "Either 'content' or 'from_draft' must be provided for the Write tool."
+                        .into(),
+                )
+            }
+        };
 
         let result = tokio::time::timeout(Duration::from_secs(120), async {
-            let resolved = resolve_path(&self.cwd, file_path);
             let line_count = content.lines().count();
 
             if let Some(parent) = resolved.parent() {
@@ -83,13 +166,28 @@ impl BaseTool for WriteFileTool {
 
             if append {
                 use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
+                let mut file = match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&resolved)
-                    .map_err(|e| format!("Error opening file for append: {e}"))?;
-                file.write_all(content.as_bytes())
-                    .map_err(|e| format!("Error appending to file: {e}"))?;
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        // append 分支仅在 append=true 时进入,草稿保留 append 语义
+                        let hint = self
+                            .save_draft(&resolved_str, &content, true)
+                            .map(|id| draft_hint_en(&id, &content))
+                            .unwrap_or_default();
+                        return Err(format!("Error opening file for append: {e}{hint}").into());
+                    }
+                };
+                if let Err(e) = file.write_all(content.as_bytes()) {
+                    let hint = self
+                        .save_draft(&resolved_str, &content, true)
+                        .map(|id| draft_hint_en(&id, &content))
+                        .unwrap_or_default();
+                    return Err(format!("Error appending to file: {e}{hint}").into());
+                }
                 drop(file); // 确保句柄关闭后再读取文件
 
                 let total_lines = std::fs::read_to_string(&resolved)
@@ -102,6 +200,7 @@ impl BaseTool for WriteFileTool {
                     .display()
                     .to_string();
                 let lines_label = if line_count == 1 { "line" } else { "lines" };
+                self.remove_draft(&resolved_str);
                 Ok::<String, Box<dyn std::error::Error + Send + Sync>>(format!(
                     "Appended {} {} to {} (file total: {} lines)",
                     line_count, lines_label, rel, total_lines
@@ -111,8 +210,12 @@ impl BaseTool for WriteFileTool {
                 // 使用随机后缀避免并发写入冲突
                 let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
                 let tmp_path = resolved.with_extension(tmp_ext);
-                if let Err(e) = std::fs::write(&tmp_path, content) {
-                    return Err(format!("Error writing file: {e}").into());
+                if let Err(e) = std::fs::write(&tmp_path, &content) {
+                    let hint = self
+                        .save_draft(&resolved_str, &content, false)
+                        .map(|id| draft_hint_en(&id, &content))
+                        .unwrap_or_default();
+                    return Err(format!("Error writing file: {e}{hint}").into());
                 }
                 // 恢复原文件的 Unix 权限位（含可执行位），防止原子写入后 +x 丢失
                 if let Ok(metadata) = std::fs::metadata(&resolved) {
@@ -131,11 +234,19 @@ impl BaseTool for WriteFileTool {
                             .display()
                             .to_string();
                         let lines_label = if line_count == 1 { "line" } else { "lines" };
+                        self.remove_draft(&resolved_str);
                         Ok(format!("Wrote {} {} {}", line_count, lines_label, rel))
                     }
                     Err(e) => {
+                        // 读 tmp 实际文本 → 存草稿 → 删 tmp(顺序固定,先读后删)
+                        let draft_content = std::fs::read_to_string(&tmp_path)
+                            .unwrap_or_else(|_| content.to_string());
+                        let hint = self
+                            .save_draft(&resolved_str, &draft_content, false)
+                            .map(|id| draft_hint_en(&id, &draft_content))
+                            .unwrap_or_default();
                         let _ = std::fs::remove_file(&tmp_path);
-                        Err(format!("Error renaming temp file: {e}").into())
+                        Err(format!("Error renaming temp file: {e}{hint}").into())
                     }
                 }
             }
@@ -144,12 +255,21 @@ impl BaseTool for WriteFileTool {
 
         match result {
             Ok(inner) => inner,
-            Err(_elapsed) => Err("Write operation timed out (exceeded 2 minutes).\
+            Err(_elapsed) => {
+                // 草稿 = content 原文,append 标记随原始调用;新 id 自洽(恢复写入超时存的是恢复出的内容)
+                let hint = self
+                    .save_draft(&resolved_str, &content, append)
+                    .map(|id| draft_hint_en(&id, &content))
+                    .unwrap_or_default();
+                Err(format!(
+                    "Write operation timed out (exceeded 2 minutes).{hint}\
                   \nFor large files, use the append=true parameter to write in chunks:\
                   \n1. First call Write without append to create the file with the initial content\
                   \n2. Then call Write with append=true to append the remaining content\
                   \nThis avoids timeouts caused by writing too much content in a single call."
-                .into()),
+                )
+                .into())
+            }
         }
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod draft;
 pub mod edit;
 pub mod folder;
 pub mod glob;

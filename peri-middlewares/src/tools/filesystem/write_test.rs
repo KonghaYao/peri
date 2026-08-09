@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// 从错误消息中提取 draft_id(消息中 draft 信息在开头,hint 内可能出现两次)
+fn extract_draft_id(err: &str) -> String {
+    let re = regex::Regex::new(r"draft_[0-9a-f-]+").unwrap();
+    re.find(err).unwrap().as_str().to_string()
+}
+
+/// 将目录权限改为只读(0o444),用于注入 tmp 写入失败
+#[cfg(unix)]
+fn make_readonly(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+}
+
+/// 将目录权限还原为可写(0o755)
+#[cfg(unix)]
+fn make_writable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[tokio::test]
 async fn test_write_file_creates_new() {
     let dir = tempfile::tempdir().unwrap();
@@ -261,4 +281,389 @@ async fn test_write_append_creates_parent_dirs() {
     .unwrap();
     let content = std::fs::read_to_string(dir.path().join("sub/dir/file.txt")).unwrap();
     assert_eq!(content, "deep\n");
+}
+
+// ===== 失败草稿恢复机制测试(决策 6) =====
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_tmp_failure_saves_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/f.txt", "content": "hello\nworld"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("A draft was saved"), "应含草稿提示: {err}");
+    assert!(err.contains("draft_"), "应含 draft_id: {err}");
+    assert!(err.contains("2 lines"), "应含行数: {err}");
+    assert!(err.contains("11 bytes"), "应含字节数: {err}");
+    assert!(!err.contains("hello"), "错误消息不应展示正文: {err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_rename_failure_saves_draft_and_cleans_tmp() {
+    let dir = tempfile::tempdir().unwrap();
+    // file_path 指向已存在目录 → tmp 写入成功但 rename 失败(macOS EISDIR)
+    std::fs::create_dir(dir.path().join("d")).unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "d", "content": "x\ny"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("draft_"), "rename 失败应存草稿: {err}");
+    // 无 d.tmp.* 残留
+    let tmp_files: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("d.tmp."))
+        .collect();
+    assert!(
+        tmp_files.is_empty(),
+        "tmp 文件应在存草稿后被清理: {:?}",
+        tmp_files
+    );
+    // 移除阻碍目录后 from_draft 恢复成功,内容 == tmp 实际文本
+    std::fs::remove_dir(dir.path().join("d")).unwrap();
+    let draft_id = extract_draft_id(&err);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "d", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "恢复应成功: {:?}", result.err());
+    let content = std::fs::read_to_string(dir.path().join("d")).unwrap();
+    assert_eq!(content, "x\ny", "草稿内容应为 tmp 实际文本");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_append_open_failure_saves_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("log.txt"), "keep\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        dir.path().join("log.txt"),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "log.txt", "content": "appended\n", "append": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    let draft_id = extract_draft_id(&err);
+    assert!(
+        err.contains("Error opening file for append"),
+        "错误前缀: {err}"
+    );
+    // 还原权限后 from_draft 恢复,append 语义保留(非覆盖)
+    std::fs::set_permissions(
+        dir.path().join("log.txt"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "log.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "恢复应成功: {:?}", result.err());
+    let content = std::fs::read_to_string(dir.path().join("log.txt")).unwrap();
+    assert_eq!(content, "keep\nappended\n", "append 语义应保留,非覆盖");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_from_draft_restores_after_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/f.txt", "content": "hello\nworld"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let draft_id = extract_draft_id(&err);
+    // 还原权限后 from_draft 恢复
+    make_writable(&readonly);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/f.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("Wrote 2 lines"), "恢复消息: {result}");
+    let content = std::fs::read_to_string(dir.path().join("readonly/f.txt")).unwrap();
+    assert_eq!(content, "hello\nworld");
+}
+
+#[tokio::test]
+async fn test_write_requires_content_or_from_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "f.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Either 'content' or 'from_draft' must be provided"),
+        "缺参数文案: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_write_content_and_from_draft_mutually_exclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "content": "x",
+                "from_draft": "draft_00000000-0000-7000-0000-000000000000"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("mutually exclusive"), "互斥文案: {err}");
+    assert!(
+        !dir.path().join("f.txt").exists(),
+        "互斥错误不应产生任何文件"
+    );
+}
+
+#[tokio::test]
+async fn test_write_from_draft_unknown_degrades_gracefully() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "from_draft": "draft_00000000-0000-7000-0000-000000000000"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown or no longer available"),
+        "未知草稿降级文案: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_from_draft_wrong_target_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "content": "payload"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let draft_id = extract_draft_id(&err);
+    // 用错误的 file_path 恢复 → 拒绝,且不产生文件
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "b.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("different file_path"), "路径不符文案: {err}");
+    assert!(!dir.path().join("b.txt").exists(), "B 不应产生文件");
+    // 草稿未被消费,原路径仍可恢复
+    make_writable(&readonly);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "原路径应仍可恢复: {:?}", result.err());
+    let content = std::fs::read_to_string(dir.path().join("readonly/a.txt")).unwrap();
+    assert_eq!(content, "payload");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_success_clears_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "content": "payload"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let draft_id = extract_draft_id(&err);
+    // 成功写入同 target 后草稿被清除
+    make_writable(&readonly);
+    tool.invoke(
+        serde_json::json!({"file_path": "readonly/a.txt", "content": "success"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown or no longer available"),
+        "成功写入后旧草稿应失效: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_draft_overwrite_invalidates_old_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    // 同 target 连续失败两次
+    let err1 = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "content": "first"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let id1 = extract_draft_id(&err1);
+    let err2 = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "content": "second"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let id2 = extract_draft_id(&err2);
+    assert_ne!(id1, id2, "两次失败应产生不同 draft_id");
+    // 旧 id 立即失效,新 id 可恢复
+    make_writable(&readonly);
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/a.txt", "from_draft": id1}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown or no longer available"),
+        "旧 draft_id 应失效: {err}"
+    );
+    tool.invoke(
+        serde_json::json!({"file_path": "readonly/a.txt", "from_draft": id2}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    let content = std::fs::read_to_string(dir.path().join("readonly/a.txt")).unwrap();
+    assert_eq!(content, "second");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_draft_disabled_saves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::with_draft(dir.path().to_str().unwrap(), false);
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/f.txt", "content": "hello"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("draft_"), "禁用时不应存草稿: {err}");
+    // from_draft 任意 id → unknown 降级文案
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "file_path": "f.txt",
+                "from_draft": "draft_00000000-0000-7000-0000-000000000000"
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown or no longer available"),
+        "禁用时恢复应降级: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_validation_failure_saves_no_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    // 内容未达文件系统层:create_dir_all 失败(只读目录 + 子目录路径)
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/sub/nope.txt", "content": "x"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("draft_"), "校验失败不应存草稿: {err}");
 }

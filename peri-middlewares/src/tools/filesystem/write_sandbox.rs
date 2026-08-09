@@ -7,6 +7,9 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use super::draft::{draft_hint_zh, DraftStore};
 
 const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file ONLY into your sandbox directories: ";
 
@@ -25,6 +28,8 @@ pub struct WriteSandboxTool {
     allowed_dirs: Vec<String>,
     /// 动态生成的 description
     description: String,
+    /// 失败草稿存储(进程级内存);None = PERI_WRITE_DRAFT=0 关闭
+    drafts: Option<Arc<Mutex<DraftStore>>>,
 }
 
 impl WriteSandboxTool {
@@ -35,6 +40,16 @@ impl WriteSandboxTool {
     pub fn new(
         cwd: impl Into<String>,
         allowed_dirs: Vec<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_draft(cwd, allowed_dirs, super::draft::draft_enabled())
+    }
+
+    /// 测试注入构造;全部现有构造逻辑(沙箱目录自动创建/canonicalize/description)原样保留。
+    /// `enabled=false` 时完全禁用草稿(不创建 store)。
+    pub(crate) fn with_draft(
+        cwd: impl Into<String>,
+        allowed_dirs: Vec<String>,
+        enabled: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let cwd_raw = cwd.into();
         // 构造时 canonicalize cwd，确保 strip_prefix 正确工作
@@ -73,7 +88,60 @@ impl WriteSandboxTool {
             sandbox_roots,
             allowed_dirs,
             description,
+            drafts: enabled.then(|| Arc::new(Mutex::new(DraftStore::new()))),
         })
+    }
+
+    /// 保存失败内容为草稿;禁用时返回 None
+    fn save_draft(&self, target: &str, content: &str, append: bool) -> Option<String> {
+        self.drafts.as_ref().map(|store| {
+            store
+                .lock()
+                .unwrap()
+                .save(target, content.to_string(), append)
+        })
+    }
+
+    /// 恢复前 peek + take:先校验 target 一致,不匹配则不消费草稿(LLM 可用原路径重试)
+    fn restore_draft(&self, draft_id: &str, target: &str) -> Result<(String, bool), String> {
+        let Some(store) = self.drafts.as_ref() else {
+            // 禁用 == 不存在,统一优雅降级
+            return Err(format!(
+                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+            ));
+        };
+        let verdict = {
+            let guard = store.lock().unwrap();
+            match guard.peek(draft_id) {
+                None => None,                                 // 未知/失效
+                Some(e) if e.target != target => Some(false), // 路径不符
+                Some(_) => Some(true),                        // 匹配
+            }
+        };
+        match verdict {
+            None => Err(format!(
+                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+            )),
+            Some(false) => Err(format!(
+                "WriteSandbox: 草稿 '{draft_id}' 属于其他路径,请使用原 file_path,或改用 'content' 参数重试"
+            )),
+            Some(true) => {
+                // peek 与 take 之间存在竞态窗口(同 draft_id 被并发恢复),优雅降级为 unknown
+                let Some(entry) = store.lock().unwrap().take(draft_id) else {
+                    return Err(format!(
+                        "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+                    ));
+                };
+                Ok((entry.content, entry.append))
+            }
+        }
+    }
+
+    /// 成功写入后清理同 target 草稿(幂等;禁用时 no-op)
+    fn remove_draft(&self, target: &str) {
+        if let Some(store) = &self.drafts {
+            store.lock().unwrap().remove_by_target(target);
+        }
     }
 
     /// 格式化允许的沙箱目录列表，用于错误信息。
@@ -232,10 +300,14 @@ impl BaseTool for WriteSandboxTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The full content to write to the file"
+                    "description": "The full content to write to the file. Either 'content' or 'from_draft' must be provided."
+                },
+                "from_draft": {
+                    "type": "string",
+                    "description": "A draft id returned in a previous SandboxWrite error message. Recover the failed write without resending content. Mutually exclusive with 'content'; reuse the original file_path."
                 }
             },
-            "required": ["file_path", "content"]
+            "required": ["file_path"]
         })
     }
 
@@ -251,12 +323,22 @@ impl BaseTool for WriteSandboxTool {
         let path = input["file_path"]
             .as_str()
             .ok_or("WriteSandbox: 'file_path' 参数必填")?;
-        let content = input["content"]
-            .as_str()
-            .ok_or("WriteSandbox: 'content' 参数必填")?;
 
-        // 安全校验
+        // 安全校验(仍在校验链最前——from_draft 恢复必须走完整校验链,
+        // 含绝对路径/穿越/symlink 逃逸/沙箱前缀;校验失败时草稿未被消费,可用正确路径重试)
         let target = self.validate_path(path)?;
+        let target_str = target.to_string_lossy().to_string();
+
+        let (content, _append) = match (input["content"].as_str(), input["from_draft"].as_str()) {
+            (Some(c), None) => (c.to_string(), false),
+            (None, Some(id)) => self.restore_draft(id, &target_str)?, // 恢复路径,SandboxWrite 无 append
+            (Some(_), Some(_)) => {
+                return Err("WriteSandbox: 'content' 与 'from_draft' 参数互斥,只能提供其一".into())
+            }
+            (None, None) => {
+                return Err("WriteSandbox: 必须提供 'content' 或 'from_draft' 参数之一".into())
+            }
+        };
 
         let line_count = content.lines().count();
 
@@ -265,8 +347,12 @@ impl BaseTool for WriteSandboxTool {
         let tmp_path = target.with_extension(tmp_ext);
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            if let Err(e) = std::fs::write(&tmp_path, content) {
-                return Err(format!("WriteSandbox: 写入失败: {}", e).into());
+            if let Err(e) = std::fs::write(&tmp_path, &content) {
+                let hint = self
+                    .save_draft(&target_str, &content, false)
+                    .map(|id| draft_hint_zh(&id, &content))
+                    .unwrap_or_default();
+                return Err(format!("WriteSandbox: 写入失败: {}{}", e, hint).into());
             }
 
             // 如果目标已存在，保留 Unix 权限位
@@ -287,11 +373,19 @@ impl BaseTool for WriteSandboxTool {
                         .display()
                         .to_string();
                     let lines_label = if line_count == 1 { "line" } else { "lines" };
+                    self.remove_draft(&target_str);
                     Ok(format!("Wrote {} {} {}", line_count, lines_label, rel))
                 }
                 Err(e) => {
+                    // 读 tmp 实际文本 → 存草稿 → 删 tmp(顺序固定,先读后删)
+                    let draft_content =
+                        std::fs::read_to_string(&tmp_path).unwrap_or_else(|_| content.to_string());
+                    let hint = self
+                        .save_draft(&target_str, &draft_content, false)
+                        .map(|id| draft_hint_zh(&id, &draft_content))
+                        .unwrap_or_default();
                     let _ = std::fs::remove_file(&tmp_path);
-                    Err(format!("WriteSandbox: rename 临时文件失败: {}", e).into())
+                    Err(format!("WriteSandbox: rename 临时文件失败: {}{}", e, hint).into())
                 }
             }
         })
@@ -299,7 +393,14 @@ impl BaseTool for WriteSandboxTool {
 
         match result {
             Ok(inner) => inner,
-            Err(_elapsed) => Err("WriteSandbox: 操作超时（超过 2 分钟）".into()),
+            Err(_elapsed) => {
+                // 草稿 = content 原文;新 id 自洽(恢复写入超时存的是恢复出的内容)
+                let hint = self
+                    .save_draft(&target_str, &content, false)
+                    .map(|id| draft_hint_zh(&id, &content))
+                    .unwrap_or_default();
+                Err(format!("WriteSandbox: 操作超时（超过 2 分钟）{}", hint).into())
+            }
         }
     }
 }
