@@ -84,33 +84,38 @@
 ```bash
 cd side-projects/agent-defect-analyzer
 
-# 全量分析
-bun src/main.ts
+# 工具调用的 token 消耗研究(全量主线程,输出 src/data/tool-token-consumption.json)
+bun run src/tool_token_consumption.ts
 
-# 单模块分析
-bun src/main.ts --focus errors       # 工具失败模式
-bun src/main.ts --focus efficiency   # 会话效率
-bun src/main.ts --focus strategy     # 策略质量
-bun src/main.ts --focus loops       # 死循环 / 重复调用检测
-bun src/main.ts --focus payload     # 超大入参/出参检测
+# 数据图(ECharts SVG → reports/tool-token-consumption.svg)
+bun run src/tool_token_chart.ts
+
+# 数据比例分析(输出 /tmp/ratio-analysis-calc.json)
+bun run src/ratio_analysis.ts
+
+# 闲逛模式:随机抽样长会话导出文本,供 subagent 深度研究
+bun run src/wander.ts
+
+# ultracode 提示词研究
+bun run src/ultracode_prompts.ts
 ```
 
-默认读取 `~/.peri/threads/threads.db`（只读，不写入）。
+默认读取 `~/.peri/threads/threads.db`（只读，不写入）；`tool_token_consumption.ts` 支持 `--db <path>` 传备份库复现其他窗口。
 
 ## 项目结构
 
 ```
 src/
-├── main.ts                    # 入口 + 综合报告聚合
-├── types.ts                   # 数据类型定义
-├── analyzers/
-│   ├── tool_errors.ts         # 工具失败模式分析
-│   ├── session_efficiency.ts  # 会话效率与生存分析
-│   ├── strategy_quality.ts    # 策略编排与重试检测
-│   ├── death_loops.ts         # 死循环 / 重复调用检测
-│   ├── payload_size.ts        # 超大入参/出参检测
-│   └── user_behavior.ts       # 用户行为信号分析
-└── utils/
-    ├── data_loader.ts         # 只读 SQLite 加载层（bun:sqlite）
-    └── report.ts              # 控制台报告渲染
+├── data/
+│   ├── loader.ts                # 只读 SQLite 加载层（bun:sqlite）
+│   └── tool-token-consumption.json  # 源数据输出（脚本生成，勿手改）
+├── lib/
+│   └── utils.ts                 # 统计函数 + 终端渲染
+├── tool_token_consumption.ts    # 工具调用 token 消耗研究（主分析）
+├── tool_token_chart.ts          # ECharts SVG 数据图
+├── ratio_analysis.ts            # 数据比例分析
+├── ultracode_prompts.ts         # ultracode 提示词研究
+└── wander.ts                    # 闲逛模式（随机抽样长会话）
 ```
+
+报告输出已并入站点文章(peri-cool/posts/research/);数据图脚本输出 SVG 至 `reports/`(运行自动重建)。历史 metrics 分析器已于 2026-08-09 清理(后续可能以 langfuse 事件数据重建)。

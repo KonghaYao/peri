@@ -3,19 +3,15 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "tool-reliability": "bun run src/metrics/tool_reliability.ts",
-    "session-efficiency": "bun run src/metrics/session_efficiency.ts",
-    "resource-consumption": "bun run src/metrics/resource_consumption.ts",
-    "feature-adoption": "bun run src/metrics/feature_adoption.ts",
-    "edit-quality": "bun run src/metrics/edit_quality.ts",
-    "subagent-collab": "bun run src/metrics/subagent_collab.ts",
-    "search-hygiene": "bun run src/metrics/search_hygiene.ts",
-    "web-fetch-errors": "bun run src/metrics/web_fetch_errors.ts",
-    "data-health": "bun run src/metrics/data_health.ts",
-    "all": "bun run src/metrics/tool_reliability.ts && bun run src/metrics/session_efficiency.ts && bun run src/metrics/resource_consumption.ts && bun run src/metrics/feature_adoption.ts && bun run src/metrics/edit_quality.ts && bun run src/metrics/subagent_collab.ts && bun run src/metrics/search_hygiene.ts && bun run src/metrics/web_fetch_errors.ts && bun run src/metrics/data_health.ts"
+    "ultracode-prompts": "bun run src/ultracode_prompts.ts",
+    "wander": "bun run src/wander.ts",
+    "tool-token-consumption": "bun run src/tool_token_consumption.ts",
+    "tool-token-chart": "bun run src/tool_token_chart.ts",
+    "ratio-analysis": "bun run src/ratio_analysis.ts"
   },
   "dependencies": {
-    "chalk": "^5.3.0"
+    "chalk": "^5.3.0",
+    "echarts": "^6.1.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
