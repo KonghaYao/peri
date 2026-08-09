@@ -7,15 +7,15 @@
 //!
 //! 1. 算法 `HMAC-SHA256`，输出 base64（RFC 4648 标准字母表 + padding）；
 //! 2. MAC 输入按**固定字节序（大端，u16 长度前缀）**拼接
-//!    （`challenge_nonce ‖ session_context ‖ protocol_version ‖ role`），
+//!    （`challenge_nonce ‖ connection_context ‖ protocol_version ‖ role`），
 //!    字段顺序即文档顺序，不得重排；
 //! 3. 比较常量时间（`hmac::Mac::verify_slice` 内建）；
 //! 4. 密钥经 HKDF-SHA256 派生（salt 空、info = `b"acp-hub-auth" ‖ role`），
 //!    **token 本体不出现在 MAC 输入**；
-//! 5. 协议级属性（状态在 server）：nonce 单次使用 + 30s 窗口、session_context
+//! 5. 协议级属性（状态在 server）：nonce 单次使用 + 30s 窗口、connection_context
 //!    连接绑定、角色/版本绑定、失败即断开（关闭码 4502）+ 审计计数。
 //!
-//! client（TUI）连接**无**双向认证（§9.2 仅覆盖 machine 连接）。
+//! client（TUI）连接**无**双向认证（§9.2 仅覆盖 instance 连接）。
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -29,8 +29,8 @@ use sha2::Sha256;
 /// challenge_nonce 长度：32B CSPRNG 原始字节（§9.2 顾问3）。
 pub const CHALLENGE_NONCE_LEN: usize = 32;
 
-/// session_context 长度：32B CSPRNG 原始字节（§9.2 顾问3）。
-pub const SESSION_CONTEXT_LEN: usize = 32;
+/// connection_context 长度：32B CSPRNG 原始字节（§9.2 顾问3）。
+pub const CONNECTION_CONTEXT_LEN: usize = 32;
 
 /// HMAC-SHA256 输出长度。
 pub const HMAC_OUTPUT_LEN: usize = 32;
@@ -65,39 +65,39 @@ pub fn generate_challenge_nonce() -> [u8; CHALLENGE_NONCE_LEN] {
     b
 }
 
-/// 生成连接级 session_context（32B CSPRNG）。
-pub fn generate_session_context() -> [u8; SESSION_CONTEXT_LEN] {
-    let mut b = [0u8; SESSION_CONTEXT_LEN];
+/// 生成连接级 connection_context（32B CSPRNG）。
+pub fn generate_connection_context() -> [u8; CONNECTION_CONTEXT_LEN] {
+    let mut b = [0u8; CONNECTION_CONTEXT_LEN];
     rand::rng().fill_bytes(&mut b);
     b
 }
 
 /// HKDF-SHA256 派生单连接密钥（§9.2 顾问3）。
 ///
-/// `ikm = machine_token`（32B）；salt = 空（RFC 5869 零串）；
+/// `ikm = instance_token`（32B）；salt = 空（RFC 5869 零串）；
 /// info = `b"acp-hub-auth" ‖ role_utf8`；输出 32B。派生上下文含 role，
 /// 防止跨角色重放；token 本体不出现在 MAC 输入。
-pub fn derive_mac_key(machine_token: &[u8; CHALLENGE_NONCE_LEN], role: &str) -> [u8; HMAC_OUTPUT_LEN] {
+pub fn derive_mac_key(instance_token: &[u8; CHALLENGE_NONCE_LEN], role: &str) -> [u8; HMAC_OUTPUT_LEN] {
     let mut info = Vec::with_capacity(DERIVE_INFO_PREFIX.len() + role.len());
     info.extend_from_slice(DERIVE_INFO_PREFIX);
     info.extend_from_slice(role.as_bytes());
 
-    let hk = Hkdf::<Sha256>::new(None, machine_token);
+    let hk = Hkdf::<Sha256>::new(None, instance_token);
     let mut okm = [0u8; HMAC_OUTPUT_LEN];
     hk.expand(&info, &mut okm)
         .expect("32-byte output is within HKDF-SHA256 limits");
     okm
 }
 
-/// MAC 输入规范化（§9.2 顾问3）：`challenge_nonce ‖ session_context ‖
+/// MAC 输入规范化（§9.2 顾问3）：`challenge_nonce ‖ connection_context ‖
 /// protocol_version ‖ role`，每字段 = **u16 大端长度前缀 + UTF-8 字节**。
 ///
-/// challenge/session_context 为 32B **原始字节**（非 base64）；protocol_version
-/// /role 用其 UTF-8 表示（如 `"1"`、`"machine"`）。字段顺序即文档顺序，
+/// challenge/connection_context 为 32B **原始字节**（非 base64）；protocol_version
+/// /role 用其 UTF-8 表示（如 `"1"`、`"instance"`）。字段顺序即文档顺序，
 /// 不得重排。
 pub fn mac_input(
     challenge: &[u8; CHALLENGE_NONCE_LEN],
-    context: &[u8; SESSION_CONTEXT_LEN],
+    context: &[u8; CONNECTION_CONTEXT_LEN],
     protocol_version: &str,
     role: &str,
 ) -> Vec<u8> {

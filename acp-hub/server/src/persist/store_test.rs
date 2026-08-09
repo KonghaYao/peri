@@ -1,7 +1,7 @@
 //! Store 集成测试（`docs/plans/f3-persist.md` §11：T7/T9/T10/T11 + 快照失效）。
 //!
 //! T7 compact 原子性（崩溃时序 A/B/C）；T9 磁盘预算；T10 恢复编排集成
-//! （多 session 混合状态 → RecoveryResult 聚合）；T11 目录权限（unix）。
+//! （多 chat 混合状态 → RecoveryResult 聚合）；T11 目录权限（unix）。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -33,23 +33,23 @@ fn chat_doc(sid: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
     (DocId::chat(&sid.to_string()), payload.to_vec())
 }
 
-/// 构造一个已 append 一条记录 + outbox 终态记录的 session（T9 候选构造）。
-async fn seed_session_with_terminal(store: &Store, sid: uuid::Uuid) {
-    let session = store.create_session(sid).unwrap();
+/// 构造一个已 append 一条记录 + outbox 终态记录的 chat（T9 候选构造）。
+async fn seed_chat_with_terminal(store: &Store, sid: uuid::Uuid) {
+    let chat = store.create_chat(sid).unwrap();
     let d = chat_doc(&sid, b"seed");
-    session
+    chat
         .append_update(1, 1, &[(d.0.clone(), &d.1)])
         .await
         .unwrap();
     let rec = crate::persist::outbox::NewOutboxRecord {
         command_id: uuid::Uuid::new_v4(),
-        session_id: sid,
+        chat_id: sid,
         command_type: CommandType::Prompt,
         turn_id: None,
         retryable_class: crate::persist::outbox::RetryableClass::NoAutoRedeliver,
     };
     {
-        let mut ob = session.outbox().lock().await;
+        let mut ob = chat.outbox().lock().await;
         ob.insert(rec.clone()).unwrap();
         ob.mark_accepted(rec.command_id).unwrap();
         ob.mark_intent_durable(rec.command_id).unwrap();
@@ -58,7 +58,7 @@ async fn seed_session_with_terminal(store: &Store, sid: uuid::Uuid) {
         ob.mark_projection_committed(rec.command_id).unwrap();
         ob.mark_completed(rec.command_id).unwrap();
     }
-    session.mark_closed(chrono::Utc::now());
+    chat.mark_closed(chrono::Utc::now());
 }
 
 /// T7-A：tmp 残留（rename 前崩溃）→ recover 删 tmp + 纯日志回放。
@@ -70,12 +70,12 @@ async fn t7_crash_a_tmp_leftover_cleaned() {
     let d = chat_doc(&sid, b"payload");
     {
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        session.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
+        let chat = store.create_chat(sid).unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
     }
     // 手动制造 tmp 残留（模拟 rename 前崩溃，旧日志完整）
-    let tmp = dir.path().join("sessions").join(sid.to_string()).join("updates.snapshot.tmp");
+    let tmp = dir.path().join("chats").join(sid.to_string()).join("updates.snapshot.tmp");
     std::fs::write(&tmp, b"stale").unwrap();
     let store = Store::open(&cfg).unwrap();
     let result = store.recover().await;
@@ -99,17 +99,17 @@ async fn t7_crash_b_snapshot_base_with_dup_log() {
     let d = chat_doc(&sid, b"payload");
     let snapshot_docs = {
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        session.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
-        session.append_update(1, 3, &[(d.0.clone(), &d.1)]).await.unwrap();
+        let chat = store.create_chat(sid).unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 3, &[(d.0.clone(), &d.1)]).await.unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
-        let mut lg = session.update_log().lock().await;
+        let mut lg = chat.update_log().lock().await;
         lg.compact(docs.clone()).await.unwrap();
         // 模拟 rename 后崩溃残留：追加一条 ≤ 快照点的重复记录（seq 2）
         let d_ref = (d.0.clone(), d.1.as_slice());
         drop(lg);
-        session.append_update(1, 2, &[d_ref]).await.unwrap();
+        chat.append_update(1, 2, &[d_ref]).await.unwrap();
         docs
     };
     let store = Store::open(&cfg).unwrap();
@@ -123,7 +123,7 @@ async fn t7_crash_b_snapshot_base_with_dup_log() {
     assert!(replay.records.is_empty(), "dup log truncated");
     let log_path = dir
         .path()
-        .join("sessions")
+        .join("chats")
         .join(sid.to_string())
         .join("updates.log");
     assert_eq!(std::fs::metadata(&log_path).unwrap().len(), 0, "log truncated");
@@ -138,11 +138,11 @@ async fn t7_crash_c_snapshot_only() {
     let d = chat_doc(&sid, b"payload");
     {
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        session.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
+        let chat = store.create_chat(sid).unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
-        let mut lg = session.update_log().lock().await;
+        let mut lg = chat.update_log().lock().await;
         lg.compact(docs).await.unwrap();
     }
     let store = Store::open(&cfg).unwrap();
@@ -164,10 +164,10 @@ async fn t7_maybe_compact_trigger() {
     let sid = uuid::Uuid::new_v4();
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
-    let session = store.create_session(sid).unwrap();
-    session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    let chat = store.create_chat(sid).unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
-    let mut lg = session.update_log().lock().await;
+    let mut lg = chat.update_log().lock().await;
     let triggered = lg.maybe_compact(docs.clone()).await.unwrap();
     assert!(triggered, "size threshold triggers");
     assert_eq!(lg.stats().records, 0, "log truncated after compact");
@@ -180,9 +180,9 @@ async fn t7_maybe_compact_trigger() {
     cfg2.compact_threshold_bytes = 64 * 1024 * 1024;
     cfg2.compact_interval = Duration::ZERO;
     let store2 = Store::open(&cfg2).unwrap();
-    let session2 = store2.create_session(uuid::Uuid::new_v4()).unwrap();
-    session2.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-    let mut lg2 = session2.update_log().lock().await;
+    let chat2 = store2.create_chat(uuid::Uuid::new_v4()).unwrap();
+    chat2.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    let mut lg2 = chat2.update_log().lock().await;
     let triggered3 = lg2
         .maybe_compact(std::collections::HashMap::from([(d.0, d.1)]))
         .await
@@ -200,20 +200,20 @@ async fn t7_invalid_snapshot_moved_to_corrupt() {
     let d = chat_doc(&sid, b"payload");
     {
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        let chat = store.create_chat(sid).unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
-        let mut lg = session.update_log().lock().await;
+        let mut lg = chat.update_log().lock().await;
         lg.compact(docs).await.unwrap();
         // compact 后补一条（纯日志回放的增量）
         let d_ref = (d.0.clone(), d.1.as_slice());
         drop(lg);
-        session.append_update(1, 2, &[d_ref]).await.unwrap();
+        chat.append_update(1, 2, &[d_ref]).await.unwrap();
     }
     // 破坏快照文件
     let snap = dir
         .path()
-        .join("sessions")
+        .join("chats")
         .join(sid.to_string())
         .join("updates.snapshot");
     std::fs::write(&snap, b"garbage").unwrap();
@@ -226,7 +226,7 @@ async fn t7_invalid_snapshot_moved_to_corrupt() {
         .any(|w| w.code == WarningCode::SnapshotInvalid));
     let corrupt_dir = dir
         .path()
-        .join("sessions")
+        .join("chats")
         .join(sid.to_string())
         .join("corrupt");
     let artifacts: Vec<String> = std::fs::read_dir(&corrupt_dir)
@@ -253,8 +253,8 @@ async fn t9_budget_exceeded_no_candidates_degrades() {
     let sid = uuid::Uuid::new_v4();
     let d = chat_doc(&sid, b"payload-01");
     let store = Store::open(&cfg).unwrap();
-    let session = store.create_session(sid).unwrap();
-    session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    let chat = store.create_chat(sid).unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     let report = store.enforce_budget();
     assert!(report.exceeded);
     assert!(report.used > 0);
@@ -262,7 +262,7 @@ async fn t9_budget_exceeded_no_candidates_degrades() {
     assert!(store.status().degraded, "no eviction candidate => degraded");
 }
 
-/// T9b：预算超限有候选（已关闭 session + 终态记录）→ 候选列出，不置 degraded。
+/// T9b：预算超限有候选（已关闭 chat + 终态记录）→ 候选列出，不置 degraded。
 #[tokio::test]
 async fn t9_budget_exceeded_with_candidates() {
     let dir = tempdir().unwrap();
@@ -270,14 +270,14 @@ async fn t9_budget_exceeded_with_candidates() {
     cfg.disk_budget = 64;
     let sid = uuid::Uuid::new_v4();
     let store = Store::open(&cfg).unwrap();
-    seed_session_with_terminal(&store, sid).await;
+    seed_chat_with_terminal(&store, sid).await;
     let report = store.enforce_budget();
     assert!(report.exceeded);
     assert!(report.eviction_candidates.contains(
-        &EvictionCandidate::ArchiveSession { session_id: sid }
+        &EvictionCandidate::ArchiveChat { chat_id: sid }
     ));
     assert!(report.eviction_candidates.iter().any(
-        |c| matches!(c, EvictionCandidate::OutboxTerminal { session_id: s, .. } if *s == sid)
+        |c| matches!(c, EvictionCandidate::OutboxTerminal { chat_id: s, .. } if *s == sid)
     ));
     assert!(
         !store.status().degraded,
@@ -285,7 +285,7 @@ async fn t9_budget_exceeded_with_candidates() {
     );
 }
 
-/// T10：恢复编排集成——多 session 混合状态（截断日志 + delivery_unknown +
+/// T10：恢复编排集成——多 chat 混合状态（截断日志 + delivery_unknown +
 /// 水位落后）→ RecoveryResult 汇总正确。
 #[tokio::test]
 async fn t10_recovery_orchestration_integration() {
@@ -297,14 +297,14 @@ async fn t10_recovery_orchestration_integration() {
     let d_b = chat_doc(&sid_b, b"payload-b");
     let unknown_cmd = {
         let store = Store::open(&cfg).unwrap();
-        // session A：3 条 update + outbox 到 delivery_unknown
-        let a = store.create_session(sid_a).unwrap();
+        // chat A：3 条 update + outbox 到 delivery_unknown
+        let a = store.create_chat(sid_a).unwrap();
         a.append_update(1, 1, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
         a.append_update(1, 2, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
         a.append_update(1, 3, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
         let rec = crate::persist::outbox::NewOutboxRecord {
             command_id: uuid::Uuid::new_v4(),
-            session_id: sid_a,
+            chat_id: sid_a,
             command_type: CommandType::Prompt,
             turn_id: None,
             retryable_class: crate::persist::outbox::RetryableClass::NoAutoRedeliver,
@@ -317,15 +317,15 @@ async fn t10_recovery_orchestration_integration() {
             ob.mark_dispatched(rec.command_id, chrono::Utc::now()).unwrap();
             ob.mark_delivery_unknown(rec.command_id).unwrap();
         }
-        // session B：正常 2 条
-        let b = store.create_session(sid_b).unwrap();
+        // chat B：正常 2 条
+        let b = store.create_chat(sid_b).unwrap();
         b.append_update(1, 1, &[(d_b.0.clone(), &d_b.1)]).await.unwrap();
         b.append_update(1, 2, &[(d_b.0.clone(), &d_b.1)]).await.unwrap();
         drop(store);
-        // 破坏 session A 的第 2 条 update 记录 payload
+        // 破坏 chat A 的第 2 条 update 记录 payload
         let log_path = dir
             .path()
-            .join("sessions")
+            .join("chats")
             .join(sid_a.to_string())
             .join("updates.log");
         let data = std::fs::read(&log_path).unwrap();
@@ -358,7 +358,7 @@ async fn t10_recovery_orchestration_integration() {
         "corrupt artifacts: {:?}",
         result.corrupt_artifacts
     );
-    // session A：截断后 1 条 + 水位对齐 min(3, 1) + SeqMismatch 告警
+    // chat A：截断后 1 条 + 水位对齐 min(3, 1) + SeqMismatch 告警
     let ra = store.replay_outcome(sid_a).unwrap();
     assert_eq!(ra.records.len(), 1);
     assert_eq!(ra.records[0].seq, 1);
@@ -367,15 +367,15 @@ async fn t10_recovery_orchestration_integration() {
         .warnings
         .iter()
         .any(|w| w.code == WarningCode::SeqMismatch));
-    // session A：outbox delivery_unknown 保留
-    let a = store.session(sid_a).unwrap();
+    // chat A：outbox delivery_unknown 保留
+    let a = store.chat(sid_a).unwrap();
     let cmd = a.outbox_get(unknown_cmd).await.unwrap();
     assert_eq!(
         cmd.status,
         crate::persist::outbox::OutboxStatus::DeliveryUnknown,
         "delivery_unknown survives restart"
     );
-    // session B：正常，无告警归属
+    // chat B：正常，无告警归属
     let rb = store.replay_outcome(sid_b).unwrap();
     assert_eq!(rb.records.len(), 2);
     assert_eq!(rb.watermark.last_seq, 2);
@@ -387,7 +387,7 @@ async fn t10_recovery_orchestration_integration() {
     // recover 完成信号已通知（is_recovered）
     assert!(store.is_recovered());
     // 非 uuid 目录被忽略（防御）
-    let junk = dir.path().join("sessions").join("not-a-uuid");
+    let junk = dir.path().join("chats").join("not-a-uuid");
     std::fs::create_dir_all(&junk).unwrap();
     let store3 = Store::open(&cfg).unwrap();
     let r3 = store3.recover().await;
@@ -403,13 +403,13 @@ async fn t10_watermark_corrupt_degrades() {
     let d = chat_doc(&sid, b"payload");
     {
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        let chat = store.create_chat(sid).unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     }
     // 破坏水位文件
     let wm_path = dir
         .path()
-        .join("sessions")
+        .join("chats")
         .join(sid.to_string())
         .join("watermark.json");
     std::fs::write(&wm_path, b"broken").unwrap();
@@ -437,26 +437,26 @@ async fn t10_archive_conditions() {
     let sid = uuid::Uuid::new_v4();
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
-    let session = store.create_session(sid).unwrap();
-    session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    let chat = store.create_chat(sid).unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     let now = chrono::Utc::now();
     // 未关闭 → 不归档
-    assert!(!store.archive_session(sid, now).unwrap());
-    session.mark_closed(now);
+    assert!(!store.archive_chat(sid, now).unwrap());
+    chat.mark_closed(now);
     // 保留期未届满 → 不归档
-    assert!(!store.archive_session(sid, now).unwrap());
+    assert!(!store.archive_chat(sid, now).unwrap());
     // 保留期届满（outbox 空 = 全终态真空）→ 归档
     assert!(store
-        .archive_session(sid, now + chrono::Duration::days(91))
+        .archive_chat(sid, now + chrono::Duration::days(91))
         .unwrap());
-    assert!(store.session(sid).is_none(), "session moved out of sessions map");
+    assert!(store.chat(sid).is_none(), "chat moved out of chats map");
     let archived = dir.path().join("archive").join(sid.to_string());
     assert!(archived.is_dir(), "directory moved to archive");
-    assert!(!dir.path().join("sessions").join(sid.to_string()).exists());
-    // 归档后 session 不存在 → SessionNotFound
+    assert!(!dir.path().join("chats").join(sid.to_string()).exists());
+    // 归档后 chat 不存在 → ChatNotFound
     assert!(matches!(
-        store.archive_session(sid, now),
-        Err(StoreError::SessionNotFound { .. })
+        store.archive_chat(sid, now),
+        Err(StoreError::ChatNotFound { .. })
     ));
 }
 
@@ -468,34 +468,34 @@ async fn t10_archive_blocked_by_open_outbox() {
     let sid = uuid::Uuid::new_v4();
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
-    let session = store.create_session(sid).unwrap();
-    session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    let chat = store.create_chat(sid).unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     let rec = crate::persist::outbox::NewOutboxRecord {
         command_id: uuid::Uuid::new_v4(),
-        session_id: sid,
+        chat_id: sid,
         command_type: CommandType::Cancel,
         turn_id: None,
         retryable_class: crate::persist::outbox::RetryableClass::NoAutoRedeliver,
     };
     {
-        let mut ob = session.outbox().lock().await;
+        let mut ob = chat.outbox().lock().await;
         ob.insert(rec.clone()).unwrap();
         ob.mark_accepted(rec.command_id).unwrap();
         ob.mark_intent_durable(rec.command_id).unwrap();
         ob.mark_dispatched(rec.command_id, chrono::Utc::now()).unwrap();
         ob.mark_delivery_unknown(rec.command_id).unwrap();
     }
-    session.mark_closed(chrono::Utc::now());
+    chat.mark_closed(chrono::Utc::now());
     let now = chrono::Utc::now() + chrono::Duration::days(91);
     // 未裁决 delivery_unknown 记录 → 不归档
-    assert!(!store.archive_session(sid, now).unwrap());
+    assert!(!store.archive_chat(sid, now).unwrap());
     // 裁决后 → 可归档
     {
-        let mut ob = session.outbox().lock().await;
+        let mut ob = chat.outbox().lock().await;
         ob.resolve_delivery_unknown(rec.command_id, DeliveryVerdict::ConfirmedNotDelivered)
             .unwrap();
     }
-    assert!(store.archive_session(sid, now).unwrap());
+    assert!(store.archive_chat(sid, now).unwrap());
 }
 
 /// T11：目录权限 0700 / 文件 0600（unix）。
@@ -509,24 +509,24 @@ async fn t11_dir_and_file_permissions() {
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
     assert_eq!(
-        std::fs::metadata(cfg.data_dir.join("sessions")).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(cfg.data_dir.join("chats")).unwrap().permissions().mode() & 0o777,
         0o700,
-        "sessions dir 0700"
+        "chats dir 0700"
     );
     assert_eq!(
         std::fs::metadata(cfg.data_dir.join("archive")).unwrap().permissions().mode() & 0o777,
         0o700,
         "archive dir 0700"
     );
-    let session = store.create_session(sid).unwrap();
+    let chat = store.create_chat(sid).unwrap();
     assert_eq!(
-        std::fs::metadata(session.dir()).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(chat.dir()).unwrap().permissions().mode() & 0o777,
         0o700,
-        "session dir 0700"
+        "chat dir 0700"
     );
-    session.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
     for f in ["updates.log", "watermark.json"] {
-        let p = session.dir().join(f);
+        let p = chat.dir().join(f);
         assert_eq!(
             std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o600,
@@ -535,17 +535,17 @@ async fn t11_dir_and_file_permissions() {
     }
     // outbox 文件 0600
     {
-        let mut ob = session.outbox().lock().await;
+        let mut ob = chat.outbox().lock().await;
         let rec = crate::persist::outbox::NewOutboxRecord {
             command_id: uuid::Uuid::new_v4(),
-            session_id: sid,
+            chat_id: sid,
             command_type: CommandType::Create,
             turn_id: None,
             retryable_class: crate::persist::outbox::RetryableClass::SafeToRedeliver,
         };
         ob.insert(rec).unwrap();
     }
-    let outbox_path = session.dir().join("outbox.log");
+    let outbox_path = chat.dir().join("outbox.log");
     assert_eq!(
         std::fs::metadata(&outbox_path).unwrap().permissions().mode() & 0o777,
         0o600,

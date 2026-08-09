@@ -8,22 +8,22 @@
 //!
 //! ```text
 //! <data_dir>/
-//! ├── sessions/<session_id>/
+//! ├── chats/<chat_id>/
 //! │   ├── updates.log        # 投影 update 追加日志（blob 记录）
 //! │   ├── updates.snapshot   # compact 全量快照（单条 blob 记录）
 //! │   ├── outbox.log         # command outbox 追加日志（blob+JSON 记录）
 //! │   ├── watermark.json     # (epoch, last_seq) 单条 blob 记录
 //! │   └── corrupt/           # 损坏段保留（诊断，§8.4）
-//! └── archive/<session_id>/  # 归档（§9.3，M1 简化）
+//! └── archive/<chat_id>/  # 归档（§9.3，M1 简化）
 //! ```
 //!
 //! 边界声明（不在本层实现）：提交点纪律编排（§4.4）属
 //! `channel/command-coordinator`；Doc 补齐（不变量 3）属 `state/doc-manager`；
-//! machine 对账后开门（不变量 4）属 `channel` + machine 注册表；`degraded` 的
+//! instance 对账后开门（不变量 4）属 `channel` + instance 注册表；`degraded` 的
 //! 对外呈现（Registry Doc `global.status`，§17.2）属 `state`。本层只提供数据
 //! 源与恢复完成信号。
 //!
-//! 脱敏纪律（§9.3/协作纪律）：日志字段只记 `session_id/epoch/seq/bytes/
+//! 脱敏纪律（§9.3/协作纪律）：日志字段只记 `chat_id/epoch/seq/bytes/
 //! elapsed_ms/error/command_id/verdict` 等元数据，**不记 yjs 字节、正文、
 //! token、密钥**。
 //!
@@ -59,7 +59,7 @@ pub fn default_data_dir() -> PathBuf {
 /// 持久化配置（§16 默认值；`data_dir` 默认 [`default_data_dir`]）。
 ///
 /// 由 `config::Config` 映射而来（`From<&Config>`），`outbox_retention`
-/// （§4.4「session 关闭后保留 7 天」）config 表暂无对应字段，取默认 7 天
+/// （§4.4「chat 关闭后保留 7 天」）config 表暂无对应字段，取默认 7 天
 /// 【决策：等待 F2 配置表增补后经 `From<&Config>` 接续】。
 #[derive(Debug, Clone)]
 pub struct PersistConfig {
@@ -144,11 +144,11 @@ pub enum StoreError {
         /// 已存在记录的状态。
         state: outbox::OutboxStatus,
     },
-    /// session 不存在（目录未建/未恢复）。
-    #[error("session {session_id} not found")]
-    SessionNotFound {
-        /// session id。
-        session_id: uuid::Uuid,
+    /// chat 不存在（目录未建/未恢复）。
+    #[error("chat {chat_id} not found")]
+    ChatNotFound {
+        /// chat id。
+        chat_id: uuid::Uuid,
     },
     /// outbox 记录不存在（迁移/查询目标 commandId 无记录）。
     /// 【决策】设计稿 §3.1 未列；迁移 API 的记录不存在场景需稳定表达，
@@ -222,7 +222,7 @@ pub struct PersistStatus {
     pub degraded: bool,
     /// degraded 原因（首个触发原因，脱敏）。
     pub reason: Option<String>,
-    /// 数据目录磁盘占用（sessions/ + archive/，§9.2 记账范围）。
+    /// 数据目录磁盘占用（chats/ + archive/，§9.2 记账范围）。
     pub disk_used: u64,
     /// 磁盘预算上限（§16，默认 2GB）。
     pub disk_limit: u64,
@@ -278,7 +278,7 @@ impl Default for DegradedFlag {
     }
 }
 
-pub use store::{BudgetReport, EvictionCandidate, SessionStore, Store};
+pub use store::{BudgetReport, EvictionCandidate, ChatStore, Store};
 pub use update_log::{
     CorruptionInfo, LogRecord, ReplayOutcome, Snapshot, UpdateLog, UpdateLogStats,
 };

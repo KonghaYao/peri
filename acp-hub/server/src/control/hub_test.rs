@@ -1,4 +1,4 @@
-//! Hub / StoreSink 单测（设计稿 §16 测试 31 的 fake machine 辅助 + 镜像
+//! Hub / StoreSink 单测（设计稿 §16 测试 31 的 fake instance 辅助 + 镜像
 //! 快照/落盘语义；全链路 e2e 在 gateway_test）。
 
 use std::sync::Arc;
@@ -31,8 +31,8 @@ async fn mirror_snapshot_rebuilds_from_log() {
     // 打开 session 并写入一条事件（聚合器投影 → sink 落盘 → 镜像）。
     // 控制类命令挂落盘应答（§8.2）→ 持久化前置：Store 目录须先建（StoreSink
     // 落盘按 session 目录路由）。
-    store.create_session(uuid::Uuid::parse_str(sid).unwrap()).unwrap();
-    doc.open_session(sid, "m1", Some("t")).await.unwrap();
+    store.create_chat(uuid::Uuid::parse_str(sid).unwrap()).unwrap();
+    doc.open_chat(sid, "m1", Some("t")).await.unwrap();
     // 先建立 active turn（§6.5 服务端单写）：MessageDelta 受终态守卫约束
     // （§6.3 无活动 turn → UnknownTurn 拒绝）。
     let reg = doc
@@ -52,7 +52,7 @@ async fn mirror_snapshot_rebuilds_from_log() {
         crate::state::doc_manager::SubmitResult::Applied(_)
     ));
     let ev = crate::state::normalized::NormalizedEvent {
-        session_id: sid.into(),
+        chat_id: sid.into(),
         seq: 1,
         epoch: 0,
         body: crate::state::normalized::EventBody::MessageDelta {
@@ -153,11 +153,11 @@ async fn persist_update_unknown_doc_rejected() {
 async fn broadcast_stream_delivers_updates() {
     let (_tmp, _store, sink, doc) = env().await;
     let mut rx = sink.subscribe().await;
-    doc.open_session("s2", "m1", None).await.unwrap();
-    // open_session 会先写 hub:registry 活跃摘要（§5.2 单写）；随后的事件
+    doc.open_chat("s2", "m1", None).await.unwrap();
+    // open_chat 会先写 hub:registry 活跃摘要（§5.2 单写）；随后的事件
     // 投影才写 s2 的 chat/session doc。跳 registry 帧，断言 s2 的 doc 到达。
     let ev = crate::state::normalized::NormalizedEvent {
-        session_id: "s2".into(),
+        chat_id: "s2".into(),
         seq: 1,
         epoch: 0,
         body: crate::state::normalized::EventBody::AgentStatus {
@@ -175,7 +175,7 @@ async fn broadcast_stream_delivers_updates() {
             break u;
         }
     };
-    assert!(update.doc == DocId::session("s2") || update.doc == DocId::chat("s2"));
+    assert!(update.doc == DocId::control("s2") || update.doc == DocId::chat("s2"));
     let _ = mpsc::unbounded_channel::<()>();
 }
 
@@ -300,8 +300,8 @@ async fn hub_assemble_smoke_ready_sequence() {
         other => panic!("expected ready, got {other:?}"),
     }
 
-    // Degraded 入口（§17.2 + §8.4.1 不变量 4）：装配后（machine 重连对账
-    // 前）Restarting 门禁——拒绝新 committed 承诺；machine 重连（hello）
+    // Degraded 入口（§17.2 + §8.4.1 不变量 4）：装配后（instance 重连对账
+    // 前）Restarting 门禁——拒绝新 committed 承诺；instance 重连（hello）
     // 对账后开门 → Healthy。
     assert!(!hub.can_accept_committed(), "Restarting 期间不得接受新 committed（§8.4.1 不变量 4）");
     hub.registry.clear_restarting().await.unwrap();
@@ -310,4 +310,40 @@ async fn hub_assemble_smoke_ready_sequence() {
     task.abort();
     drop(sink);
     let _ = stream;
+}
+
+/// 启动对账（§5.5 重启语义）：非终态会话（accepting/active/gap/
+/// pending_close）全部入选，终态（ended/closed/crashed）保持不变。
+#[test]
+fn enum_stale_registry_chats_filters_terminal() {
+    use crate::control::hub::Hub;
+    use yrs::{Map, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    let mut txn = doc.transact_mut();
+    let root = txn.get_or_insert_map("root");
+    let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chats");
+    for (sid, status) in [
+        ("s-accepting", "accepting"),
+        ("s-active", "active"),
+        ("s-gap", "gap"),
+        ("s-pending-close", "pending_close"),
+        ("s-ended", "ended"),
+        ("s-closed", "closed"),
+        ("s-crashed", "crashed"),
+    ] {
+        let sm = sessions.get_or_init::<_, yrs::MapRef>(&mut txn, sid);
+        sm.insert(&mut txn, "id", sid.to_string());
+        sm.insert(&mut txn, "status", status.to_string());
+    }
+    drop(txn);
+
+    let stale = Hub::enum_stale_registry_chats(&doc);
+    assert!(stale.contains(&"s-accepting".to_string()));
+    assert!(stale.contains(&"s-active".to_string()));
+    assert!(stale.contains(&"s-gap".to_string()));
+    assert!(stale.contains(&"s-pending-close".to_string()));
+    assert!(!stale.contains(&"s-ended".to_string()));
+    assert!(!stale.contains(&"s-closed".to_string()));
+    assert!(!stale.contains(&"s-crashed".to_string()));
+    assert_eq!(stale.len(), 4);
 }

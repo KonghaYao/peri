@@ -1,4 +1,4 @@
-//! 认证/授权模块（Feature F2）：token 模型、TokenStore、machine 双向认证
+//! 认证/授权模块（Feature F2）：token 模型、TokenStore、instance 双向认证
 //! （HMAC challenge-response，§9.2）、连接身份上下文（§9.5）。
 //!
 //! 复用 `acp-hub-proto` 密码原语（`hmac.rs`），不重复实现：nonce/session
@@ -28,9 +28,9 @@ use thiserror::Error;
 
 use acp_hub_proto::conn::{Auth, AuthResponse};
 use acp_hub_proto::hmac::{
-    compute_mac, derive_mac_key, generate_session_context, mac_input, CHALLENGE_NONCE_LEN,
+    compute_mac, derive_mac_key, generate_connection_context, mac_input, CHALLENGE_NONCE_LEN,
 };
-use acp_hub_proto::machine::MachineHello;
+use acp_hub_proto::instance::InstanceHello;
 use acp_hub_proto::version::PROTOCOL_VERSION;
 use acp_hub_proto::whitelist::Role;
 
@@ -49,8 +49,11 @@ pub const TOKEN_B64_LEN: usize = 44;
 /// 未知 token 无 id，需与已知 token 的失败区分呈现）。
 pub const UNKNOWN_TOKEN_ID: &str = "<unknown>";
 
-/// bootstrap 自动生成 machine token 的名称（§3.3【决策】）。
-pub const BOOTSTRAP_MACHINE_NAME: &str = "bootstrap-machine";
+/// bootstrap 自动生成 instance token 的名称（§3.3【决策】；§4.5 instance_id =
+/// token name）。必须与 `channel::DEFAULT_MACHINE_ID`（"local"）一致：本机
+/// bootstrap 机器即「缺省本机」路由目标（§4.3 P5），否则 client 不带
+/// instanceId 的 create 会命中 `UnknownInstance("local")`（E3 链路断点）。
+pub const BOOTSTRAP_INSTANCE_NAME: &str = "local";
 
 // ---------------------------------------------------------------------------
 // TokenRole（token 三级角色，§9.2.2 + §9.5）
@@ -58,14 +61,14 @@ pub const BOOTSTRAP_MACHINE_NAME: &str = "bootstrap-machine";
 
 /// token 三级角色。串行化为 kebab-case 字符串（tokens.toml / CLI）。
 ///
-/// 与线级 [`Role`]（`whitelist::Role { Client, Machine }`）的映射唯一入口是
+/// 与线级 [`Role`]（`whitelist::Role { Client, Instance }`）的映射唯一入口是
 /// [`TokenRole::wire_role`]——read-only 与 full 在线级同属 Client，其写权限
 /// 差异由 gateway 用 [`ConnectionCtx::can_send_action`] 在帧级强制（§5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TokenRole {
     /// 收 spawn/kill 指令、上报事件/心跳（§9.2，双向认证）。
-    Machine,
+    Instance,
     /// client：读全部 Doc + 发 Action（TUI）。
     Full,
     /// client：仅读 yjs 状态与订阅事件流（M3 Web 面板，M1 预留档位）。
@@ -73,24 +76,24 @@ pub enum TokenRole {
 }
 
 impl TokenRole {
-    /// 线级连接角色（`whitelist::Role`）：machine→Machine；full/read-only→Client。
+    /// 线级连接角色（`whitelist::Role`）：instance→Instance；full/read-only→Client。
     pub fn wire_role(self) -> Role {
         match self {
-            TokenRole::Machine => Role::Machine,
+            TokenRole::Instance => Role::Instance,
             TokenRole::Full | TokenRole::ReadOnly => Role::Client,
         }
     }
 
-    /// 是否可发 Action（machine/full 可；read-only 不可，M1 即强制，§9.2.2）。
+    /// 是否可发 Action（instance/full 可；read-only 不可，M1 即强制，§9.2.2）。
     pub fn can_send_action(self) -> bool {
         !matches!(self, TokenRole::ReadOnly)
     }
 
-    /// HMAC 派生 role 字符串（§9.2：仅 machine 走双向认证，取值恒为
-    /// `"machine"`）；CLI/toml 的 kebab-case 形态。
+    /// HMAC 派生 role 字符串（§9.2：仅 instance 走双向认证，取值恒为
+    /// `"instance"`）；CLI/toml 的 kebab-case 形态。
     pub fn as_str(self) -> &'static str {
         match self {
-            TokenRole::Machine => "machine",
+            TokenRole::Instance => "instance",
             TokenRole::Full => "full",
             TokenRole::ReadOnly => "read-only",
         }
@@ -108,11 +111,11 @@ impl std::str::FromStr for TokenRole {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "machine" => Ok(TokenRole::Machine),
+            "instance" => Ok(TokenRole::Instance),
             "full" => Ok(TokenRole::Full),
             "read-only" => Ok(TokenRole::ReadOnly),
             other => Err(format!(
-                "非法角色 {other:?}（可选 machine/full/read-only）"
+                "非法角色 {other:?}（可选 instance/full/read-only）"
             )),
         }
     }
@@ -130,7 +133,7 @@ pub struct TokenRecord {
     pub id: String,
     /// token 角色。
     pub role: TokenRole,
-    /// machine：hostname；client：运维命名（如「桌面 TUI」）。
+    /// instance：hostname；client：运维命名（如「桌面 TUI」）。
     pub name: String,
     /// 32B CSPRNG，base64（44 字符，§9.2.1「32B CSPRNG」）。
     pub token: String,
@@ -220,7 +223,7 @@ pub enum StoreError {
 /// **脱敏**：变体不携带 token 本体（token_id 非凭证材料，§9.2.1 视图对象即
 /// 暴露 token_id；携带它仅为审计计数，§4.8）。Display 不含任何凭证材料。
 ///
-/// **关闭码映射**（§4.5 失败语义）：任何失败 → 关闭连接，machine 用
+/// **关闭码映射**（§4.5 失败语义）：任何失败 → 关闭连接，instance 用
 /// `CLOSE_CONFIG_FATAL`(4502)；client 认证失败同用 4502（token 错误属配置性
 /// 永久失败，重连无益）。实际关闭由 F5 gateway 执行（本模块只产出错误）。
 #[derive(Debug, Error)]
@@ -243,7 +246,7 @@ pub enum AuthError {
         /// 吊销记录 id。
         token_id: String,
     },
-    /// 角色不匹配（如 machine/hello 提交 client token）。
+    /// 角色不匹配（如 instance/hello 提交 client token）。
     #[error("角色不匹配")]
     RoleMismatch {
         /// 匹配记录 id。
@@ -401,7 +404,7 @@ impl TokenStore {
         Err(AuthError::UnknownToken)
     }
 
-    /// client 认证校验（§4.6）：角色允许集 = Full | ReadOnly；Machine 角色
+    /// client 认证校验（§4.6）：角色允许集 = Full | ReadOnly；Instance 角色
     /// token 提交 client 认证 → [`AuthError::RoleMismatch`]（防 token 跨面复用）。
     pub fn validate_client(&mut self, candidate: &str) -> Result<TokenRecord, AuthError> {
         self.maybe_reload();
@@ -410,7 +413,7 @@ impl TokenStore {
                 continue;
             }
             if constant_time_eq(candidate, &r.token) {
-                if r.role == TokenRole::Machine {
+                if r.role == TokenRole::Instance {
                     return Err(AuthError::RoleMismatch {
                         token_id: r.id.clone(),
                     });
@@ -428,19 +431,19 @@ impl TokenStore {
         Err(AuthError::UnknownToken)
     }
 
-    /// §3.3/§4.3.4 启动 bootstrap：不存在任何未吊销 machine 角色 token 时
-    /// 自动生成一个（name = `"bootstrap-machine"`）。返回是否生成了新 token
+    /// §3.3/§4.3.4 启动 bootstrap：不存在任何未吊销 instance 角色 token 时
+    /// 自动生成一个（name = `"bootstrap-instance"`）。返回是否生成了新 token
     /// （打印与审计由装配方 main.rs 执行——token 本体只进终端一次，不进日志）。
-    pub fn ensure_machine_token(&mut self) -> Result<Option<TokenRecord>, StoreError> {
+    pub fn ensure_instance_token(&mut self) -> Result<Option<TokenRecord>, StoreError> {
         self.maybe_reload();
         if self
             .records
             .iter()
-            .any(|r| r.role == TokenRole::Machine && !r.revoked)
+            .any(|r| r.role == TokenRole::Instance && !r.revoked)
         {
             return Ok(None);
         }
-        let rec = self.generate(TokenRole::Machine, BOOTSTRAP_MACHINE_NAME)?;
+        let rec = self.generate(TokenRole::Instance, BOOTSTRAP_INSTANCE_NAME)?;
         Ok(Some(rec))
     }
 
@@ -637,7 +640,7 @@ impl AuthStats {
 }
 
 // ---------------------------------------------------------------------------
-// ConnectionCtx / MachineAuthOk / AuthService（§4.5–§4.7）
+// ConnectionCtx / InstanceAuthOk / AuthService（§4.5–§4.7）
 // ---------------------------------------------------------------------------
 
 /// 认证通过后的连接身份上下文（gateway F5 持有，贯穿连接生命周期）。
@@ -651,7 +654,7 @@ pub struct ConnectionCtx {
     pub name: String,
     /// 绑定信息：远端地址（非回环拒绝判定输入，§3.7）。
     pub peer: SocketAddr,
-    /// 绑定信息：machine 专属（hello.hostname）。
+    /// 绑定信息：instance 专属（hello.hostname）。
     pub hostname: Option<String>,
     /// 建立时间。
     pub established_at: DateTime<Utc>,
@@ -663,26 +666,26 @@ impl ConnectionCtx {
         self.role.wire_role()
     }
 
-    /// 是否可发 Action（machine/full 可；read-only 不可，M1 即强制，§9.2.2）。
+    /// 是否可发 Action（instance/full 可；read-only 不可，M1 即强制，§9.2.2）。
     pub fn can_send_action(&self) -> bool {
         self.role.can_send_action()
     }
 }
 
-/// machine 认证成功产物：连接上下文 + 待 gateway 下发的 auth_response。
+/// instance 认证成功产物：连接上下文 + 待 gateway 下发的 auth_response。
 #[derive(Debug, Clone)]
-pub struct MachineAuthOk {
+pub struct InstanceAuthOk {
     /// 连接身份上下文。
     pub ctx: ConnectionCtx,
-    /// `auth_response` 载荷（`{ session_context: b64, hmac: b64 }`，§9.2 步骤 2）。
+    /// `auth_response` 载荷（`{ connection_context: b64, hmac: b64 }`，§9.2 步骤 2）。
     pub response: AuthResponse,
 }
 
-/// 认证服务：machine 双向认证（§9.2）+ client 单向认证（§4.6）。
+/// 认证服务：instance 双向认证（§9.2）+ client 单向认证（§4.6）。
 ///
 /// 服务端时序（§4.5）：nonce 解码 → 防重放（**先于 token 校验**，认证失败
 /// 的 nonce 同样登记，防「失败后重放成功路径」）→ token 校验 → 生成
-/// session_context → HKDF 派生密钥 → 计算 MAC → 下发 auth_response。
+/// connection_context → HKDF 派生密钥 → 计算 MAC → 下发 auth_response。
 /// 权威时钟在 server（[`Instant`]）。
 pub struct AuthService {
     store: TokenStore,
@@ -715,28 +718,28 @@ impl AuthService {
         &mut self.nonces
     }
 
-    /// machine 连接认证（§9.2 步骤 1–2，服务端身份证明）。
+    /// instance 连接认证（§9.2 步骤 1–2，服务端身份证明）。
     ///
     /// 签名保持 async 与设计文档一致（F5 装配后可引入 IO）；当前实现无
     /// await 点。
     #[allow(clippy::unused_async)]
-    pub async fn authenticate_machine(
+    pub async fn authenticate_instance(
         &mut self,
-        hello: &MachineHello,
+        hello: &InstanceHello,
         peer: SocketAddr,
-    ) -> Result<MachineAuthOk, AuthError> {
+    ) -> Result<InstanceAuthOk, AuthError> {
         let start = Instant::now();
         // 1. nonce: base64 解码 → [u8; 32]（失败 → BadNonceEncoding）。
         let nonce = match decode_nonce(&hello.nonce) {
             Ok(n) => n,
-            Err(e) => return Err(self.fail_auth("auth.machine", None, e, start)),
+            Err(e) => return Err(self.fail_auth("auth.instance", None, e, start)),
         };
         // 2. 防重放（token 校验之前，§4.4）。
         match self.nonces.check_and_mark(&nonce, Instant::now()) {
             NonceVerdict::Accepted => {}
             NonceVerdict::Replay => {
                 return Err(self.fail_auth(
-                    "auth.machine",
+                    "auth.instance",
                     None,
                     AuthError::ReplayNonce,
                     start,
@@ -744,34 +747,34 @@ impl AuthService {
             }
             NonceVerdict::Expired => {
                 return Err(self.fail_auth(
-                    "auth.machine",
+                    "auth.instance",
                     None,
                     AuthError::ExpiredNonce,
                     start,
                 ))
             }
         }
-        // 3. token 校验（角色必须为 Machine）。
-        let record = match self.store.validate(&hello.token, TokenRole::Machine) {
+        // 3. token 校验（角色必须为 Instance）。
+        let record = match self.store.validate(&hello.token, TokenRole::Instance) {
             Ok(r) => r,
             Err(e) => {
                 let tid = e.token_id().map(ToOwned::to_owned);
-                return Err(self.fail_auth("auth.machine", tid.as_deref(), e, start));
+                return Err(self.fail_auth("auth.instance", tid.as_deref(), e, start));
             }
         };
-        // 4–7. session_context + 派生密钥 + MAC（复用 proto 原语）。
+        // 4–7. connection_context + 派生密钥 + MAC（复用 proto 原语）。
         let token_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
             .decode(&record.token)
             .expect("token 加载时已断言 44 字符 base64")
             .try_into()
             .expect("44 字符 base64 解码为 32B");
-        let context = generate_session_context();
-        let key = derive_mac_key(&token_bytes, TokenRole::Machine.as_str());
+        let context = generate_connection_context();
+        let key = derive_mac_key(&token_bytes, TokenRole::Instance.as_str());
         let input = mac_input(
             &nonce,
             &context,
             &PROTOCOL_VERSION.to_string(),
-            TokenRole::Machine.as_str(),
+            TokenRole::Instance.as_str(),
         );
         let hmac = compute_mac(&key, &input);
         let ctx = ConnectionCtx {
@@ -782,11 +785,11 @@ impl AuthService {
             hostname: Some(hello.hostname.clone()),
             established_at: Utc::now(),
         };
-        audit("auth.machine", None, Some(&record.id), "ok", start.elapsed(), None);
-        Ok(MachineAuthOk {
+        audit("auth.instance", None, Some(&record.id), "ok", start.elapsed(), None);
+        Ok(InstanceAuthOk {
             ctx,
             response: AuthResponse {
-                session_context: base64::engine::general_purpose::STANDARD.encode(context),
+                connection_context: base64::engine::general_purpose::STANDARD.encode(context),
                 hmac: base64::engine::general_purpose::STANDARD.encode(hmac),
             },
         })
@@ -794,7 +797,7 @@ impl AuthService {
 
     /// client 连接认证（单向，`auth` 帧，§4.6）。
     ///
-    /// client 无 HMAC（§9.2 明示仅覆盖 machine 连接）；read-only 的帧级写
+    /// client 无 HMAC（§9.2 明示仅覆盖 instance 连接）；read-only 的帧级写
     /// 限制由 gateway 用 [`ConnectionCtx::can_send_action`] 强制（§5）。
     #[allow(clippy::unused_async)]
     pub async fn authenticate_client(

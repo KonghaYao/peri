@@ -13,7 +13,7 @@
 //! |------|-----|--------|
 //! | received | accepted | coordinator 入队（两阶段 Ack 之 accepted） |
 //! | accepted | intent_durable | 意图落盘（§4.4 提交点纪律第一步） |
-//! | intent_durable | dispatched | 下发 machine（置 `dispatched_at`） |
+//! | intent_durable | dispatched | 下发 instance（置 `dispatched_at`） |
 //! | intent_durable | （tombstone） | retryable 失败（§4.4：清除允许重发） |
 //! | received / accepted / intent_durable | failed | 非 retryable 失败 |
 //! | dispatched | delivery_confirmed | L1+L2 达成（M1 合并） |
@@ -29,7 +29,7 @@
 //! **retryable** 失败 → 状态**回退**到 `intent_durable`（记录保留、去重索引
 //! 不删、`dispatched_at` 清除、状态标记可重发）；非 retryable 失败 →
 //! `failed`。retryable 分类以架构 §4.4 为准（`AGENT_UNAVAILABLE` /
-//! `MACHINE_OFFLINE`）。投递前（received/accepted/intent_durable）的
+//! `INSTANCE_OFFLINE`）。投递前（received/accepted/intent_durable）的
 //! retryable 失败 → tombstone 清除（允许重发重新执行，设计稿 §5.2 原语义）。
 
 use std::collections::HashMap;
@@ -63,17 +63,17 @@ pub const OUTBOX_JSON_VERSION: u8 = 0x01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandType {
-    /// `session/create`（以 session_id 为天然幂等键，§4.5）。
-    #[serde(rename = "session/create")]
+    /// `chat/create`（以 chat_id 为天然幂等键，§4.5）。
+    #[serde(rename = "chat/create")]
     Create,
-    /// `session/prompt`（非幂等，禁止盲重试）。
-    #[serde(rename = "session/prompt")]
+    /// `chat/prompt`（非幂等，禁止盲重试）。
+    #[serde(rename = "chat/prompt")]
     Prompt,
-    /// `session/cancel`（非幂等）。
-    #[serde(rename = "session/cancel")]
+    /// `chat/cancel`（非幂等）。
+    #[serde(rename = "chat/cancel")]
     Cancel,
-    /// `session/close`（以 session_id 为天然幂等键）。
-    #[serde(rename = "session/close")]
+    /// `chat/close`（以 chat_id 为天然幂等键）。
+    #[serde(rename = "chat/close")]
     Close,
     /// `permission/resolve`（非幂等）。
     #[serde(rename = "permission/resolve")]
@@ -98,7 +98,7 @@ impl CommandType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryableClass {
-    /// 可安全重发（以 session_id 等为天然幂等键）。
+    /// 可安全重发（以 chat_id 等为天然幂等键）。
     SafeToRedeliver,
     /// 禁止自动重发（非幂等，路径 B：仅可对账/人工裁决后重发，§5.3）。
     NoAutoRedeliver,
@@ -114,7 +114,7 @@ pub enum OutboxStatus {
     Accepted,
     /// 意图已落盘（§4.4 提交点纪律第一步）。
     IntentDurable,
-    /// 已下发 machine（置 `dispatched_at`）。
+    /// 已下发 instance（置 `dispatched_at`）。
     Dispatched,
     /// L1+L2 达成（M1 合并，§4.4）。
     DeliveryConfirmed,
@@ -158,7 +158,7 @@ impl std::fmt::Display for OutboxStatus {
 pub struct LastError {
     /// 稳定错误码（§4.4，如 `AGENT_UNAVAILABLE`；脱敏）。
     pub code: String,
-    /// 是否 retryable（架构 §4.4 分类：`AGENT_UNAVAILABLE`/`MACHINE_OFFLINE`）。
+    /// 是否 retryable（架构 §4.4 分类：`AGENT_UNAVAILABLE`/`INSTANCE_OFFLINE`）。
     pub retryable: bool,
     /// 失败时刻（server 时钟，§4.7）。
     pub at: DateTime<Utc>,
@@ -184,10 +184,10 @@ impl LastError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxRecord {
-    /// 命令 id（幂等键，同 session 唯一）。
+    /// 命令 id（幂等键，同 chat 唯一）。
     pub command_id: Uuid,
-    /// 所属 session。
-    pub session_id: Uuid,
+    /// 所属 chat。
+    pub chat_id: Uuid,
     /// 命令类型。
     pub command_type: CommandType,
     /// turn id（server 生成；同 commandId 重试复用，§4.4）。
@@ -213,8 +213,8 @@ pub struct OutboxRecord {
 pub struct NewOutboxRecord {
     /// 命令 id。
     pub command_id: Uuid,
-    /// 所属 session。
-    pub session_id: Uuid,
+    /// 所属 chat。
+    pub chat_id: Uuid,
     /// 命令类型。
     pub command_type: CommandType,
     /// turn id（可选，§4.4：重试复用同一 turnId）。
@@ -320,14 +320,14 @@ pub struct OutboxStore {
 }
 
 impl OutboxStore {
-    /// 打开（或创建）session 的 outbox 日志。
+    /// 打开（或创建）chat 的 outbox 日志。
     pub fn open(
-        session_dir: &Path,
+        chat_dir: &Path,
         fsync_mode: FsyncMode,
         retention: Duration,
         degraded: std::sync::Arc<DegradedFlag>,
     ) -> Result<Self, StoreError> {
-        let path = session_dir.join(OUTBOX_LOG_FILE);
+        let path = chat_dir.join(OUTBOX_LOG_FILE);
         let file = OpenOptions::new()
             .read(true)
             .create(true)
@@ -349,7 +349,7 @@ impl OutboxStore {
         }
         Ok(OutboxStore {
             path,
-            corrupt_dir: session_dir.join(CORRUPT_DIR),
+            corrupt_dir: chat_dir.join(CORRUPT_DIR),
             fsync_mode,
             retention,
             degraded,
@@ -371,7 +371,7 @@ impl OutboxStore {
         let now = Utc::now();
         let record = OutboxRecord {
             command_id: rec.command_id,
-            session_id: rec.session_id,
+            chat_id: rec.chat_id,
             command_type: rec.command_type,
             turn_id: rec.turn_id,
             status: OutboxStatus::Received,
@@ -397,7 +397,7 @@ impl OutboxStore {
         self.transition(id, OutboxStatus::IntentDurable, |_| {})
     }
 
-    /// `intent_durable → dispatched`（下发 machine；置 `dispatched_at`，
+    /// `intent_durable → dispatched`（下发 instance；置 `dispatched_at`，
     /// attempt_count +1）。此后崩溃 → 重发由 outbox 兜底返回 `duplicate`。
     pub fn mark_dispatched(&mut self, id: Uuid, at: DateTime<Utc>) -> Result<(), StoreError> {
         self.transition(id, OutboxStatus::Dispatched, |r| {
@@ -423,11 +423,11 @@ impl OutboxStore {
 
     /// 失败迁移（§5.2 + **H1 裁决**）：
     ///
-    /// - `err.retryable == false`（`INVALID_STATE`/`FORBIDDEN`/`SESSION_NOT_FOUND`
+    /// - `err.retryable == false`（`INVALID_STATE`/`FORBIDDEN`/`CHAT_NOT_FOUND`
     ///   ，§4.4）→ `failed`（终态）；来源状态为投递前（received/accepted/
     ///   intent_durable）或投递后（dispatched/delivery_confirmed/
     ///   projection_committed）。
-    /// - `err.retryable == true`（`AGENT_UNAVAILABLE`/`MACHINE_OFFLINE`）：
+    /// - `err.retryable == true`（`AGENT_UNAVAILABLE`/`INSTANCE_OFFLINE`）：
     ///   投递后（dispatched/delivery_confirmed/projection_committed）→
     ///   **回退**到 `intent_durable`（记录保留、去重索引不删、`dispatched_at`
     ///   清除、状态标记可重发）【H1 裁决】；投递前（received/accepted/
@@ -456,7 +456,7 @@ impl OutboxStore {
                     | OutboxStatus::ProjectionCommitted
             ) {
                 let mut record = self.index.get(&id).expect("checked").clone();
-                let session_id = record.session_id;
+                let chat_id = record.chat_id;
                 record.status = OutboxStatus::IntentDurable;
                 record.dispatched_at = None;
                 record.updated_at = err.at;
@@ -464,7 +464,7 @@ impl OutboxStore {
                 self.append_record(&record)?;
                 tracing::info!(
                     event = "outbox.retryable_fallback", command_id = %id,
-                    session_id = %session_id,
+                    chat_id = %chat_id,
                     "outbox record fell back to intent_durable for retry"
                 );
                 return Ok(());
@@ -503,7 +503,7 @@ impl OutboxStore {
             .get(&id)
             .map(|r| r.status)
             .ok_or_else(|| self.not_found(id))?;
-        let session_id = self.index.get(&id).expect("checked").session_id;
+        let chat_id = self.index.get(&id).expect("checked").chat_id;
         if from != OutboxStatus::DeliveryUnknown {
             return self.reject(id, from, match verdict {
                 DeliveryVerdict::ConfirmedDelivered => OutboxStatus::Completed,
@@ -513,7 +513,7 @@ impl OutboxStore {
             });
         }
         tracing::info!(
-            event = "outbox.resolve", command_id = %id, session_id = %session_id,
+            event = "outbox.resolve", command_id = %id, chat_id = %chat_id,
             verdict = ?verdict,
             "delivery_unknown resolved by operator"
         );
@@ -723,16 +723,16 @@ impl OutboxStore {
     }
 
     /// 清理策略（§5.5）：终态（completed/failed）记录自 `updated_at` 起保留
-    /// `retention`（默认 7 天），期满且 `session_closed` → tombstone + 物理
-    /// 压缩。`session_closed` 由 control 层在 close 完成时经
-    /// [`crate::persist::SessionStore::mark_closed`] 记录；machine 注销判断由
+    /// `retention`（默认 7 天），期满且 `chat_closed` → tombstone + 物理
+    /// 压缩。`chat_closed` 由 control 层在 close 完成时经
+    /// [`crate::persist::ChatStore::mark_closed`] 记录；instance 注销判断由
     /// 调用方保证（persist 只校验自己可校验的部分）。
     ///
     /// 压缩：重写 `outbox.log`（临时文件 → fsync → rename → 目录 fsync），
     /// 与 compact 同纪律（§8）；在 Mutex 内进行。
-    pub fn cleanup(&mut self, now: DateTime<Utc>, session_closed: bool) -> CleanupStats {
+    pub fn cleanup(&mut self, now: DateTime<Utc>, chat_closed: bool) -> CleanupStats {
         let mut stats = CleanupStats::default();
-        if !session_closed {
+        if !chat_closed {
             return stats;
         }
         let expired: Vec<Uuid> = self
@@ -824,7 +824,7 @@ impl OutboxStore {
                 source: e,
             });
         }
-        crate::persist::update_log::sync_dir(self.path.parent().expect("session dir"))?;
+        crate::persist::update_log::sync_dir(self.path.parent().expect("chat dir"))?;
         // 重建追加句柄（rename 后旧句柄指向已删除 inode）。
         let file = OpenOptions::new()
             .read(true)

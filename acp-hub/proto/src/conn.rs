@@ -20,19 +20,19 @@ pub struct Auth {
 
 /// `auth_response` 帧载荷：S→M server 身份证明（§9.2 步骤 2）。
 ///
-/// machine 校验通过前不执行任何 spawn/kill；校验失败即断开（关闭码 4502 +
+/// instance 校验通过前不执行任何 spawn/kill；校验失败即断开（关闭码 4502 +
 /// 审计计数）。`hmac` 为
 /// `HMAC-SHA256(derive_mac_key(token, role), mac_input(nonce, context, version, role))`
 /// 的 base64 输出（见 [`crate::hmac`]）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponse {
-    /// 连接级 `session_context`（32B CSPRNG，base64）。
+    /// 连接级 `connection_context`（32B CSPRNG，base64）。
     ///
-    /// 【决策】生成方为 server：随 auth_response 下发（machine 需其作为 MAC
+    /// 【决策】生成方为 server：随 auth_response 下发（instance 需其作为 MAC
     /// 输入）。文档仅规定「连接级随机 id」与「32B 原始字节」，未指定生成方/
     /// 传递帧——此为最小实现选择。
-    pub session_context: String,
+    pub connection_context: String,
     /// HMAC-SHA256 输出，base64（§10 hmac 模块）。
     pub hmac: String,
 }
@@ -57,9 +57,9 @@ pub struct KeepAlive {}
 #[serde(rename_all = "camelCase")]
 pub struct Pong {}
 
-/// Doc 名称 newtype（§5.2 表）：`chat:{sid}` / `session:{sid}` / `hub:registry`。
+/// Doc 名称 newtype（§5.2 表）：`chat:{cid}` / `control:{cid}` / `hub:registry`。
 ///
-/// 序列化为透明字符串（`ysync.subscribe` 的 `{ docs: ["chat:{sid}", ...] }`
+/// 序列化为透明字符串（`ysync.subscribe` 的 `{ docs: ["chat:{cid}", ...] }`
 /// 形态）。`FromStr` 校验 `{sid}` 段为合法标识符（ASCII 字母数字 +
 /// `-`/`_`/`.`，非空、不含 `:`），防止 doc 名注入。
 ///
@@ -76,20 +76,20 @@ pub struct DocId(Cow<'static, str>);
 pub struct DocIdError(pub String);
 
 impl DocId {
-    /// `chat:{sid}`——消息时间线 Doc（§5.2）。
-    pub fn chat(sid: &str) -> Self {
-        DocId(Cow::Owned(format!("chat:{sid}")))
+    /// `chat:{cid}`——消息时间线 Doc（§5.2）。
+    pub fn chat(cid: &str) -> Self {
+        DocId(Cow::Owned(format!("chat:{cid}")))
     }
 
-    /// `session:{sid}`——会话控制状态 Doc（§5.2）。
-    pub fn session(sid: &str) -> Self {
-        DocId(Cow::Owned(format!("session:{sid}")))
+    /// `control:{cid}`——会话控制状态 Doc（§5.2）。
+    pub fn control(cid: &str) -> Self {
+        DocId(Cow::Owned(format!("control:{cid}")))
     }
 
     /// `hub:registry`——机器 + 活跃会话摘要 Doc（§5.2）。
     pub const REGISTRY: DocId = DocId(Cow::Borrowed("hub:registry"));
 
-    /// 返回 doc 的完整名称（含前缀），如 `chat:{sid}`。
+    /// 返回 doc 的完整名称（含前缀），如 `chat:{cid}`。
     pub fn as_str(&self) -> &str {
         self.0.as_ref()
     }
@@ -114,7 +114,7 @@ impl FromStr for DocId {
         let (prefix, sid) = s
             .split_once(':')
             .ok_or_else(|| DocIdError(s.to_string()))?;
-        if prefix != "chat" && prefix != "session" && prefix != "hub" {
+        if prefix != "chat" && prefix != "control" && prefix != "hub" {
             return Err(DocIdError(s.to_string()));
         }
         if sid.is_empty()
@@ -133,12 +133,12 @@ impl FromStr for DocId {
 // ---------------------------------------------------------------------------
 
 /// 机器离线：停止自动重连，展示手动重试。
-pub const CLOSE_MACHINE_OFFLINE: u16 = 4500;
+pub const CLOSE_INSTANCE_OFFLINE: u16 = 4500;
 
 /// keep_alive 超时：不在后台自动重连。
 pub const CLOSE_KEEPALIVE_TIMEOUT: u16 = 4501;
 
-/// 配置性永久失败（spawn 配置错误、machine 认证失败 §9.2 步骤 3）：停止自动重连。
+/// 配置性永久失败（spawn 配置错误、instance 认证失败 §9.2 步骤 3）：停止自动重连。
 pub const CLOSE_CONFIG_FATAL: u16 = 4502;
 
 /// 通用失败：退避重连。

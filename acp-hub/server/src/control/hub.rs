@@ -2,15 +2,15 @@
 //!
 //! [`Hub`] 是**唯一装配点**：Store 恢复 → StoreSink（UpdateSink 薄 adapter +
 //! 快照镜像）→ DocManager → 注册表/协调器/广播器 → Gateway；后台周期任务
-//! （machine 离线 sweep + nonce sweep 合并单一 tick，设计稿决策 5）。
+//! （instance 离线 sweep + nonce sweep 合并单一 tick，设计稿决策 5）。
 //!
 //! [`StoreSink`]：F5 提供的 `UpdateSink` 生产实现（设计稿 §14 决策 5——F6
 //! 未提供时本 feature 装配薄 adapter）：
 //!
-//! - 落盘：chat/session update → `SessionStore::append_update`（水位同步推进）；
+//! - 落盘：chat/control update → `ChatStore::append_update`（水位同步推进）；
 //!   registry update → `<data_dir>/registry.log`（blob 格式，复用 persist
 //!   `read_blob`/`write_blob`）；
-//! - **快照镜像**：启动时从 `Store` 恢复产物（`SessionReplay`：快照 + 日志
+//! - **快照镜像**：启动时从 `Store` 恢复产物（`ChatReplay`：快照 + 日志
 //!   记录）重建 yrs 镜像，运行期 `persist_update` 时同步应用——gateway 快照
 //!   与 broadcaster 增量的**单一真相**（F4 DocManager 无启动重放 API，镜像
 //!   承担视图恢复；TUI 重连快照 = 完整历史，P1/P3）；
@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use acp_hub_proto::conn::DocId;
-use yrs::{Map, Transact};
+use yrs::{Map, ReadTxn, Transact};
 
 use crate::channel::Broadcaster;
 use crate::channel::CommandCoordinator;
@@ -37,8 +37,8 @@ use crate::channel::Gateway;
 use crate::channel::RelayEventHandler;
 use crate::channel::ChannelDeps;
 use crate::config::Config;
-use crate::control::MachineRegistry;
-use crate::control::SessionRegistry;
+use crate::control::ChatRegistry;
+use crate::control::InstanceRegistry;
 use crate::persist::update_log::{read_blob, write_blob};
 use crate::persist::Store;
 use crate::state::doc_manager::{BatchConfig, DocManager, DocUpdate, PersistError, UpdateSink};
@@ -46,7 +46,7 @@ use crate::state::factory::{DocKind, Factory};
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::view_store::encode_state_as_update;
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, CONTROL_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
 };
 
 /// registry 更新日志文件名（`<data_dir>/registry.log`，blob 格式；§8.4 同
@@ -77,12 +77,12 @@ pub struct Hub {
     pub doc: Arc<DocManager>,
     /// 命令协调器。
     pub coordinator: Arc<CommandCoordinator>,
-    /// machine 入站消费。
+    /// instance 入站消费。
     pub relay: Arc<RelayEventHandler>,
-    /// machine 注册表。
-    pub machine: Arc<MachineRegistry>,
-    /// session 注册表。
-    pub sessions: Arc<SessionRegistry>,
+    /// instance 注册表。
+    pub instance: Arc<InstanceRegistry>,
+    /// chat 注册表。
+    pub chats: Arc<ChatRegistry>,
     /// 连接注册表。
     pub conns: Arc<ConnectionRegistry>,
     /// 广播器。
@@ -109,7 +109,7 @@ impl Hub {
         let batch = BatchConfig {
             batch_window: cfg.microbatch_window,
             batch_bytes: 4096,
-            session_queue: cfg.command_queue_cap,
+            chat_queue: cfg.command_queue_cap,
         };
         let doc = Arc::new(DocManager::with_recovered_registry(
             batch,
@@ -118,25 +118,26 @@ impl Hub {
         ));
         let registry = doc.registry();
         // 3. 注册表/协调器/广播器。
-        let sessions = Arc::new(SessionRegistry::new(registry.clone()));
-        let machine = Arc::new(MachineRegistry::new(
+        let chats = Arc::new(ChatRegistry::new(registry.clone()));
+        let instance = Arc::new(InstanceRegistry::new(
             cfg.offline_timeout,
             cfg.spawn_timeout,
-            sessions.as_ref().clone(),
+            chats.as_ref().clone(),
         ));
         let relay = Arc::new(RelayEventHandler::new(
             doc.clone(),
-            sessions.as_ref().clone(),
-            machine.clone(),
+            chats.as_ref().clone(),
+            instance.clone(),
             registry.clone(),
         ));
         let coordinator = Arc::new(CommandCoordinator::new(
             store.clone(),
             doc.clone(),
-            machine.clone(),
-            sessions.as_ref().clone(),
+            instance.clone(),
+            chats.as_ref().clone(),
             relay.clone(),
             &batch,
+            cfg.acp_cmd.clone(),
             cfg.spawn_timeout,
             cfg.initialize_timeout,
             cfg.binding_timeout,
@@ -154,8 +155,8 @@ impl Hub {
         let deps = ChannelDeps {
             coordinator: coordinator.clone(),
             broadcast: broadcast.clone(),
-            machine: machine.clone(),
-            sessions: sessions.clone(),
+            instance: instance.clone(),
+            chats: chats.clone(),
             conns: conns.clone(),
         };
         let gateway = Gateway::new(
@@ -168,11 +169,33 @@ impl Hub {
             sink.clone(),
             registry.clone(),
         );
-        // §8.4.1 不变量 4：恢复期门禁——machine 重连（hello）对账完成前
+        // §8.4.1 不变量 4：恢复期门禁——instance 重连（hello）对账完成前
         // 不开门（gateway 在首次 hello 后 clear_restarting；Restarting 期间
         // 拒绝新 committed 承诺）。
         if let Err(e) = registry.set_restarting().await {
             warn!(error = ?e, "set_restarting failed (registry write)");
+        }
+        // 启动对账（§5.5 重启语义）：registry.log 重放的 chat 是历史 chat，其
+        // ACP 进程在重启时必然全部终止——非终态统一标记 ended（Ended =
+        // "ACP 进程退出（终态，视图保留）"），面板显示"已结束"而非误导为
+        // 可对话；终态（ended/closed/crashed）保持不变。清单在
+        // with_recovered_registry 之后独立重放提取（registry.log 每次调用
+        // 重新读文件重放，不与 writer 的异步写入共享状态）。
+        {
+            let stale = sink
+                .recovered_registry_doc()
+                .map(|d| Self::enum_stale_registry_chats(&d))
+                .unwrap_or_default();
+            let mut marked = 0usize;
+            for chat_id in stale {
+                match registry.set_chat_status(&chat_id, "ended").await {
+                    Ok(()) => marked += 1,
+                    Err(e) => warn!(chat_id = %chat_id, error = ?e, "startup reconcile failed"),
+                }
+            }
+            if marked > 0 {
+                info!(count = marked, "startup reconcile: stale chats marked ended");
+            }
         }
         Ok(Hub {
             store,
@@ -180,14 +203,44 @@ impl Hub {
             doc,
             coordinator,
             relay,
-            machine,
-            sessions,
+            instance,
+            chats,
             conns,
             broadcast,
             gateway,
             auth,
             registry,
         })
+    }
+
+    /// 启动对账辅助（§5.5 重启语义）：枚举 registry doc 中**非终态** chat。
+    /// 重启后这些 chat 的 ACP 进程必然已终止（instance 启动清理 + kill_on_drop），
+    /// 由 assemble 统一标记 ended（终态 ended/closed/crashed 保持不变）。
+    fn enum_stale_registry_chats(doc: &yrs::Doc) -> Vec<String> {
+        const TERMINAL: [&str; 3] = ["ended", "closed", "crashed"];
+        let txn = doc.transact();
+        let Some(root) = txn.get_map("root") else {
+            return Vec::new();
+        };
+        let Some(chats) = root
+            .get(&txn, "chats")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (chat_id, v) in chats.iter(&txn) {
+            let status = v
+                .cast::<yrs::MapRef>()
+                .ok()
+                .and_then(|m| m.get(&txn, "status"))
+                .and_then(|s| s.cast::<String>().ok())
+                .unwrap_or_default();
+            if !TERMINAL.contains(&status.as_str()) {
+                out.push(chat_id.to_string());
+            }
+        }
+        out
     }
 
     /// 运行入口（main `run_with` 调用）：绑定监听 → 周期任务 + gateway 并发
@@ -206,9 +259,9 @@ impl Hub {
             .map_err(HubError::Bind)?;
         info!(%addr, "acp-hub-server listening");
 
-        // 周期任务：machine 离线 sweep + nonce sweep（单一 tick，设计稿
+        // 周期任务：instance 离线 sweep + nonce sweep（单一 tick，设计稿
         // 决策 5；判定粒度 1s【决策】）。
-        let machine = self.machine.clone();
+        let instance = self.instance.clone();
         let relay = self.relay.clone();
         let auth = self.auth.clone();
         let maintenance = tokio::spawn(async move {
@@ -217,10 +270,10 @@ impl Hub {
             loop {
                 ticker.tick().await;
                 let now = std::time::Instant::now();
-                for machine_id in machine.sweep_offline(now).await {
+                for instance_id in instance.sweep_offline(now).await {
                     // §7.1 离线即刻生效（心跳超时路径）。
-                    if let Err(e) = relay.on_machine_disconnect(&machine_id).await {
-                        warn!(machine_id, error = ?e, "offline cleanup failed");
+                    if let Err(e) = relay.on_instance_disconnect(&instance_id).await {
+                        warn!(instance_id, error = ?e, "offline cleanup failed");
                     }
                 }
                 // nonce sweep（§9.2：30s 窗口过期清理）。
@@ -264,13 +317,13 @@ impl Hub {
 
 /// UpdateSink 生产实现（F5 薄 adapter）：落盘 + 快照镜像 + 广播流。
 ///
-/// 并发模型：chat/session 镜像按 DocId 索引（`RwLock<HashMap>`，每次
+/// 并发模型：chat/control 镜像按 DocId 索引（`RwLock<HashMap>`，每次
 /// `persist_update` 写锁；镜像 doc 为 yrs 句柄，`apply_update_v1` 需要
-/// 独占事务——DocManager writer 是每 session 单写者，天然串行）。
+/// 独占事务——DocManager writer 是每 chat 单写者，天然串行）。
 pub struct StoreSink {
     store: Arc<Store>,
     factory: Factory,
-    /// 镜像 doc（chat:{sid} / session:{sid} / hub:registry）。
+    /// 镜像 doc（chat:{cid} / control:{cid} / hub:registry）。
     docs: RwLock<HashMap<DocId, yrs::Doc>>,
     /// 镜像更新广播（broadcaster attach 消费）。
     broadcast: RwLock<Vec<mpsc::UnboundedSender<DocUpdate>>>,
@@ -316,7 +369,7 @@ impl StoreSink {
         Some(doc)
     }
 
-    /// 启动重建：逐 session 从 `SessionReplay`（快照 + 日志记录）应用；
+    /// 启动重建：逐 chat 从 `ChatReplay`（快照 + 日志记录）应用；
     /// registry 从独立日志重放。
     async fn rebuild_mirror(&self) -> Result<(), HubError> {
         let mut docs = self.docs.write().await;
@@ -334,15 +387,15 @@ impl StoreSink {
             docs.insert(DocId::REGISTRY, reg);
         }
         // 各 session：快照 + 日志记录。
-        for (sid, replay) in self.replay_by_session() {
+        for (sid, replay) in self.replay_by_chat() {
             let mut chat_updates: Vec<Vec<u8>> = Vec::new();
-            let mut session_updates: Vec<Vec<u8>> = Vec::new();
+            let mut control_updates: Vec<Vec<u8>> = Vec::new();
             if let Some(snap) = &replay.snapshot {
                 for (doc_id, bytes) in &snap.docs {
                     let target = if doc_id.as_str().starts_with("chat:") {
                         &mut chat_updates
                     } else {
-                        &mut session_updates
+                        &mut control_updates
                     };
                     target.push(bytes.clone());
                 }
@@ -352,29 +405,29 @@ impl StoreSink {
                     let target = if doc_id.as_str().starts_with("chat:") {
                         &mut chat_updates
                     } else {
-                        &mut session_updates
+                        &mut control_updates
                     };
                     target.push(bytes.clone());
                 }
             }
             let chat = create_mirror_doc(&self.factory, DocKind::Chat, &chat_updates);
-            let session = create_mirror_doc(&self.factory, DocKind::Session, &session_updates);
+            let control = create_mirror_doc(&self.factory, DocKind::Control, &control_updates);
             docs.insert(DocId::chat(&sid), chat);
-            docs.insert(DocId::session(&sid), session);
+            docs.insert(DocId::control(&sid), control);
             seq.insert(sid, (replay.watermark.epoch, replay.watermark.last_seq));
         }
         info!(
-            sessions = docs.len() / 2,
+            chats = docs.len() / 2,
             registry_records = registry_records.len(),
             "sink mirror rebuilt"
         );
         Ok(())
     }
 
-    /// Store 中已恢复 session 的重放产物（按目录名排序保证确定性，§7）。
-    fn replay_by_session(&self) -> Vec<(String, crate::persist::store::SessionReplay)> {
-        let mut out: Vec<(String, crate::persist::store::SessionReplay)> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(self.store.data_dir().join("sessions")) {
+    /// Store 中已恢复 chat 的重放产物（按目录名排序保证确定性，§7）。
+    fn replay_by_chat(&self) -> Vec<(String, crate::persist::store::ChatReplay)> {
+        let mut out: Vec<(String, crate::persist::store::ChatReplay)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.store.data_dir().join("chats")) {
             let mut dirs: Vec<PathBuf> = rd
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().is_dir())
@@ -388,8 +441,8 @@ impl StoreSink {
                 let Ok(sid) = uuid::Uuid::parse_str(name) else {
                     continue;
                 };
-                if let Some(session) = self.store.session(sid) {
-                    if let Some(replay) = session.replay_outcome() {
+                if let Some(chat) = self.store.chat(sid) {
+                    if let Some(replay) = chat.replay_outcome() {
                         out.push((sid.to_string(), replay));
                     }
                 }
@@ -426,11 +479,11 @@ impl UpdateSink for StoreSink {
         {
             let mut docs = self.docs.write().await;
             if docs.get(&doc).is_none() {
-                // doc 未打开（新 session 未重建/Registry 首写）：惰性创建
+                // doc 未打开（新 chat 未重建/Registry 首写）：惰性创建
                 // （先应用业务 update、后幂等补结构——见 [`create_mirror_doc`]）。
                 let kind = match doc.as_str() {
                     s if s.starts_with("chat:") => Some(DocKind::Chat),
-                    s if s.starts_with("session:") => Some(DocKind::Session),
+                    s if s.starts_with("control:") => Some(DocKind::Control),
                     "hub:registry" => Some(DocKind::Registry),
                     _ => None,
                 };
@@ -454,15 +507,15 @@ impl UpdateSink for StoreSink {
         }
         // 2. 落盘。
         let result = match doc.as_str() {
-            s if s.starts_with("chat:") || s.starts_with("session:") => {
+            s if s.starts_with("chat:") || s.starts_with("control:") => {
                 let Some(sid) = doc.as_str().split_once(':').map(|(_, s)| s) else {
                     return Err(PersistError("malformed doc id".into()));
                 };
                 let Some(sid_uuid) = uuid::Uuid::parse_str(sid).ok() else {
-                    return Err(PersistError("non-uuid session doc".into()));
+                    return Err(PersistError("non-uuid control doc".into()));
                 };
-                let Some(session) = self.store.session(sid_uuid) else {
-                    return Err(PersistError(format!("session not found: {sid}")));
+                let Some(chat) = self.store.chat(sid_uuid) else {
+                    return Err(PersistError(format!("chat not found: {sid}")));
                 };
                 // 水位推进（提交粒度，见结构文档）。
                 let (epoch, seq) = {
@@ -472,7 +525,7 @@ impl UpdateSink for StoreSink {
                     seqs.insert(sid.to_string(), next);
                     next
                 };
-                session
+                chat
                     .append_update(epoch, seq, &[(doc.clone(), update.as_slice())])
                     .await
                     .map_err(|e| PersistError(e.to_string()))
@@ -511,7 +564,7 @@ fn create_mirror_doc(
     }
     let version = match kind {
         DocKind::Chat => CHAT_DOC_SCHEMA_VERSION,
-        DocKind::Session => SESSION_DOC_SCHEMA_VERSION,
+        DocKind::Control => CONTROL_DOC_SCHEMA_VERSION,
         DocKind::Registry => REGISTRY_DOC_SCHEMA_VERSION,
     };
     {

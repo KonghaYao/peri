@@ -2,7 +2,7 @@
 //!
 //! server 每 `interval`（默认 5s）下发 `keep_alive`；pong 超时
 //! （`timeout`，默认 3×interval = 15s【决策】：文档仅定义「超时未回以 4501
-//! 关闭」，未给判定时长；与 machine 离线 30s 解耦——keep_alive 只测连接
+//! 关闭」，未给判定时长；与 instance 离线 30s 解耦——keep_alive 只测连接
 //! 活性，不判机器）→ 关闭码 4501。
 //!
 //! gateway 主循环以 [`HeartbeatDriver`] 状态机集成（select 循环内驱动，

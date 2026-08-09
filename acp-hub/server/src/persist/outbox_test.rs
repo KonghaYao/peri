@@ -22,10 +22,10 @@ fn test_outbox(dir: &Path, retention: Duration) -> OutboxStore {
     OutboxStore::open(dir, FsyncMode::PerCommit, retention, degraded).unwrap()
 }
 
-fn new_rec(session_id: uuid::Uuid, command_type: CommandType) -> NewOutboxRecord {
+fn new_rec(chat_id: uuid::Uuid, command_type: CommandType) -> NewOutboxRecord {
     NewOutboxRecord {
         command_id: uuid::Uuid::new_v4(),
-        session_id,
+        chat_id,
         command_type,
         turn_id: None,
         retryable_class: command_type.default_retryable_class(),
@@ -377,7 +377,7 @@ fn t5_restart_replay_rebuilds_index() {
     assert!(ob2.get(uuid::Uuid::nil()).is_none());
 }
 
-/// T8：清理策略——7 天保留期届满 + session_closed → 终态删除 + 压缩；
+/// T8：清理策略——7 天保留期届满 + chat_closed → 终态删除 + 压缩；
 /// 未过期/非终态/未关闭 → 保留。
 #[test]
 fn t8_cleanup_retention_and_compact() {
@@ -413,7 +413,7 @@ fn t8_cleanup_retention_and_compact() {
     ob.mark_dispatched(d.command_id, Utc::now()).unwrap();
     ob.mark_delivery_unknown(d.command_id).unwrap();
 
-    // session 未关闭 → 不清理
+    // chat 未关闭 → 不清理
     let stats = ob.cleanup(now + chrono::Duration::days(30), false);
     assert_eq!(stats.removed, 0);
     assert!(!stats.compressed);
@@ -447,7 +447,7 @@ fn t8_replay_entries_apply_in_order() {
     let id = uuid::Uuid::new_v4();
     let rec = |status: OutboxStatus| OutboxRecord {
         command_id: id,
-        session_id: sid,
+        chat_id: sid,
         command_type: CommandType::Prompt,
         turn_id: None,
         status,

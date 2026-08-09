@@ -1,7 +1,7 @@
 //! F7 进程级集成测试（一）：机器注册 / 客户端握手 / create / prompt / 幂等。
 //!
 //! 每个用例独立 temp 数据目录 + 随机端口，可并行重跑；用例总超时 60s；
-//! 子进程（server/machine/test-child）由 Drop guard 进程组清理。
+//! 子进程（server/instance/test-child）由 Drop guard 进程组清理。
 //!
 //! 输出约定：`T-<name>: START` / `T-<name>: PASS|FAIL <原因>`。
 
@@ -13,8 +13,8 @@ use acp_hub_proto::ack::AckStatus;
 use acp_hub_proto::Frame;
 
 use common::{
-    doc_from_snapshots, fetch_registry_snapshot, global_status, session_field, session_ids,
-    wait_terminal, MachineProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
+    doc_from_snapshots, fetch_registry_snapshot, global_status, chat_field, chat_ids,
+    wait_terminal, InstanceProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
 };
 
 fn t(name: &str, tag: &str, r: Result<(), String>) {
@@ -24,11 +24,11 @@ fn t(name: &str, tag: &str, r: Result<(), String>) {
     }
 }
 
-/// 标准场景装配：server + machine（token name=local）。
+/// 标准场景装配：server + instance（token name=local）。
 struct Stack {
     env: TestEnv,
     server: ServerProc,
-    machine: MachineProc,
+    instance: InstanceProc,
 }
 
 impl Stack {
@@ -36,41 +36,41 @@ impl Stack {
         let env = TestEnv::new();
         let server = ServerProc::start(&env, None);
         server.wait_ready().map_err(|e| e.to_string())?;
-        let machine = MachineProc::start(&env);
-        if !machine.wait_authenticated(Duration::from_secs(15)) {
-            machine.dump_log();
+        let instance = InstanceProc::start(&env);
+        if !instance.wait_authenticated(Duration::from_secs(15)) {
+            instance.dump_log();
             server.dump_log();
-            return Err("machine 未在 15s 内完成认证握手".to_string());
+            return Err("instance 未在 15s 内完成认证握手".to_string());
         }
         Ok(Stack {
             env,
             server,
-            machine,
+            instance,
         })
     }
 
-    /// 机器已注册可服务（server 侧已出现 machine connected）。
+    /// 机器已注册可服务（server 侧已出现 instance connected）。
     fn wait_connected(&self) -> bool {
-        self.server.log_contains("machine connected", Duration::from_secs(10))
+        self.server.log_contains("instance connected", Duration::from_secs(10))
     }
 }
 
 // ---------------------------------------------------------------------------
-// t01 machine 连接注册（§4.5 hello 双向认证 + §7.1 ONLINE）
+// t01 instance 连接注册（§4.5 hello 双向认证 + §7.1 ONLINE）
 // ---------------------------------------------------------------------------
 
 async fn t01_body() -> Result<(), String> {
     let stack = Stack::start()?;
 
-    // 1. hello 双向认证：machine 侧「认证通过」日志（HMAC 校验通过）。
+    // 1. hello 双向认证：instance 侧「认证通过」日志（HMAC 校验通过）。
     assert!(
-        stack.machine.log_contains("认证通过", Duration::from_secs(5)),
-        "machine 未确认 auth_response HMAC"
+        stack.instance.log_contains("认证通过", Duration::from_secs(5)),
+        "instance 未确认 auth_response HMAC"
     );
-    // server 侧注册日志（machine_id = token name = "local"）。
+    // server 侧注册日志（instance_id = token name = "local"）。
     assert!(
         stack.wait_connected(),
-        "server 未记录 machine connected"
+        "server 未记录 instance connected"
     );
 
     // 2. 对账开门：Registry 快照 global.status = healthy（§8.4.1 不变量 4：
@@ -82,15 +82,15 @@ async fn t01_body() -> Result<(), String> {
         "global.status 应为 healthy（hello 对账开门）"
     );
 
-    // 3. 机器级可服务性：client 发 session/create（默认 machine=local）→
-    //    machine 必须能收 spawn 并拉起 test-child（spawn_ack ok）；后续
-    //    initialize/session/new 经 machine/forward 下行（§4.4 L1+L2+L3）。
+    // 3. 机器级可服务性：client 发 session/create（默认 instance=local）→
+    //    instance 必须能收 spawn 并拉起 test-child（spawn_ack ok）；后续
+    //    initialize/session/new 经 instance/forward 下行（§4.4 L1+L2+L3）。
     let mut c = WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"]).await?;
     let command_id = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateSessionPayload {
-            machine_id: None,
+        payload: acp_hub_proto::action::CreateChatPayload {
+            instance_id: None,
             cwd: None,
             title: Some("t01".to_string()),
         },
@@ -110,12 +110,12 @@ async fn t01_body() -> Result<(), String> {
         }
         _ => unreachable!(),
     }
-    // machine 侧应拉起 test-child（spawn 指令到达 + spawn_ack ok）。
+    // instance 侧应拉起 test-child（spawn 指令到达 + spawn_ack ok）。
     assert!(
         stack
-            .machine
+            .instance
             .log_contains("ACP 进程启动", Duration::from_secs(10)),
-        "machine 应收到 machine/spawn 并拉起 ACP 进程"
+        "instance 应收到 instance/spawn 并拉起 ACP 进程"
     );
     // 后续终态：create 全链（spawn → initialize → session/new → binding →
     // committed）由 t03 承接；此处等其到达确认无挂起。
@@ -131,12 +131,12 @@ async fn t01_body() -> Result<(), String> {
 }
 
 #[tokio::test]
-async fn t01_machine_hello_register() {
-    println!("T-01-machine-register: START");
+async fn t01_instance_hello_register() {
+    println!("T-01-instance-register: START");
     let r = tokio::time::timeout(TEST_BUDGET, t01_body()).await;
     match r {
-        Ok(r) => t("01-machine-register", "", r),
-        Err(_) => println!("T-01-machine-register: FAIL 超时（60s 预算）"),
+        Ok(r) => t("01-instance-register", "", r),
+        Err(_) => println!("T-01-instance-register: FAIL 超时（60s 预算）"),
     }
 }
 
@@ -196,8 +196,8 @@ async fn t03_body() -> Result<(), String> {
     let command_id = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateSessionPayload {
-            machine_id: None,
+        payload: acp_hub_proto::action::CreateChatPayload {
+            instance_id: None,
             cwd: None,
             title: Some("t03".to_string()),
         },
@@ -207,17 +207,17 @@ async fn t03_body() -> Result<(), String> {
     let ack = wait_terminal(&mut c, Duration::from_secs(35)).await?;
     match ack {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            let sid = a.session_id.clone().unwrap_or_default();
+            let sid = a.chat_id.clone().unwrap_or_default();
             assert!(!sid.is_empty(), "committed 必须携带 sessionId");
             // Registry 活跃摘要应含该 session（§5.2）。
             let doc = fetch_registry_snapshot(stack.env.port, &stack.env.client_token).await?;
             assert!(
-                session_ids(&doc).contains(&sid),
+                chat_ids(&doc).contains(&sid),
                 "Registry sessions 应含新 session（got={:?} want={sid}）",
-                session_ids(&doc)
+                chat_ids(&doc)
             );
             assert_eq!(
-                session_field(&doc, &sid, "status").as_deref(),
+                chat_field(&doc, &sid, "status").as_deref(),
                 Some("accepting"),
                 "create committed 后 session 状态应为 accepting"
             );
@@ -253,17 +253,17 @@ async fn t04_body() -> Result<(), String> {
     let command_id = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id,
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     match wait_terminal(&mut c, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            let sid = a.session_id.unwrap_or_default();
+            let sid = a.chat_id.unwrap_or_default();
             let prompt_cid = uuid::Uuid::new_v4().to_string();
             c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Prompt {
                 command_id: prompt_cid.clone(),
-                payload: acp_hub_proto::action::PromptSessionPayload {
-                    session_id: sid.clone(),
+                payload: acp_hub_proto::action::PromptChatPayload {
+                    chat_id: sid.clone(),
                     message: "hello".to_string(),
                 },
             }))
@@ -309,7 +309,7 @@ async fn t05_body() -> Result<(), String> {
     ) -> Result<(), String> {
         c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
             command_id: command_id.to_string(),
-            payload: acp_hub_proto::action::CreateSessionPayload::default(),
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
         }))
         .await
     }
@@ -353,24 +353,24 @@ async fn t05_duplicate_command_id() {
 // ---------------------------------------------------------------------------
 
 async fn t06_body() -> Result<(), String> {
-    // 第一轮：server + machine，create session A。
+    // 第一轮：server + instance，create session A。
     let env = TestEnv::new();
     let mut server = ServerProc::start(&env, None);
     server.wait_ready().map_err(|e| e.to_string())?;
-    let mut machine = MachineProc::start(&env);
-    if !machine.wait_authenticated(Duration::from_secs(15)) {
-        return Err("第一轮 machine 未在 15s 内完成认证握手".to_string());
+    let mut instance = InstanceProc::start(&env);
+    if !instance.wait_authenticated(Duration::from_secs(15)) {
+        return Err("第一轮 instance 未在 15s 内完成认证握手".to_string());
     }
     let mut c = WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
     let cid_a = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: cid_a,
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     let sid_a = match wait_terminal(&mut c, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            a.session_id.unwrap_or_default()
+            a.chat_id.unwrap_or_default()
         }
         Frame::ActionError(e) => {
             return Err(format!("第一轮 create 失败: {:?} {}", e.code, e.message))
@@ -384,27 +384,27 @@ async fn t06_body() -> Result<(), String> {
     drop(c);
 
     // 杀进程（进程组 SIGKILL，模拟崩溃）。
-    machine.kill();
+    instance.kill();
     server.kill();
 
     // 第二轮：同一 data_dir 重启，create session B。
     let server2 = ServerProc::start(&env, None);
     server2.wait_ready().map_err(|e| e.to_string())?;
-    let machine2 = MachineProc::start(&env);
-    if !machine2.wait_authenticated(Duration::from_secs(15)) {
-        return Err("第二轮 machine 未在 15s 内完成认证握手".to_string());
+    let instance2 = InstanceProc::start(&env);
+    if !instance2.wait_authenticated(Duration::from_secs(15)) {
+        return Err("第二轮 instance 未在 15s 内完成认证握手".to_string());
     }
     let mut c2 =
         WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
     let cid_b = uuid::Uuid::new_v4().to_string();
     c2.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: cid_b,
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     let sid_b = match wait_terminal(&mut c2, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            a.session_id.unwrap_or_default()
+            a.chat_id.unwrap_or_default()
         }
         Frame::ActionError(e) => {
             return Err(format!("第二轮 create 失败: {:?} {}", e.code, e.message))
@@ -415,7 +415,7 @@ async fn t06_body() -> Result<(), String> {
 
     // registry 快照：应含 A（registry.log 重放）与 B（新写入）。
     let doc = fetch_registry_snapshot(env.port, &env.client_token).await?;
-    let ids = session_ids(&doc);
+    let ids = chat_ids(&doc);
     assert!(
         ids.contains(&sid_a),
         "重启后 registry 应保留 session A（registry.log 重放，got={ids:?}）"

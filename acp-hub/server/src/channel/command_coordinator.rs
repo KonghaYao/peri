@@ -1,4 +1,4 @@
-//! CommandCoordinator：每 session 串行命令队列 + commandId 去重 + 两阶段 Ack
+//! CommandCoordinator：每 chat 串行命令队列 + commandId 去重 + 两阶段 Ack
 //! （架构 §4.3/§4.4/§7.4，设计稿 `f5-channel-control.md` §7）。
 //!
 //! **核心纪律**（§7.4 规则 6 + §4.4）：commandId 去重检查、入队上限检查与
@@ -13,7 +13,7 @@
 //! （路径 B：非幂等禁止自动重发，§4.4）。
 //!
 //! create 序列（§6.2）：`spawn（10s）→ spawn_ack → initialize（10s）→
-//! session/new（30s binding）→ bind → committed(sessionId)`；任一步超时 →
+//! session/new（30s binding）→ bind → committed(chatId)`；任一步超时 →
 //! `AGENT_UNAVAILABLE`(retryable) + 清理半创建状态（补发 kill，§6.2）。
 
 use std::collections::HashMap;
@@ -26,28 +26,30 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use acp_hub_proto::ack::{AckStatus, ActionAck, ActionError, ErrorCode};
-use acp_hub_proto::action::{ActionEnvelope, CreateSessionPayload};
+use acp_hub_proto::action::{ActionEnvelope, CreateChatPayload};
 use acp_hub_proto::frame::Frame;
-use acp_hub_proto::machine::{MachineKill, MachineSpawn};
+use acp_hub_proto::instance::{InstanceKill, InstanceSpawn};
+use acp_hub_proto::schema::TurnStatus;
 
 use crate::auth::audit::audit;
 use crate::auth::ConnectionCtx;
 use crate::channel::broadcaster::OutboundMsg;
 use crate::channel::relay_event_handler::RelayEventHandler;
-use crate::control::{MachineError, MachineRegistry, SpawnOutcome};
-use crate::control::{SessionRegistry, SessionState};
+use crate::control::{InstanceError, InstanceRegistry, SpawnOutcome};
+use crate::control::{ChatRegistry, ChatState};
 use crate::persist::outbox::{CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass};
 use crate::persist::Store;
 use crate::protocol::{OutboundCtx, OutboundMessage, Translator};
 use crate::state::doc_manager::{DocCommand, DocManager, SubmitError, SubmitResult};
 use crate::state::doc_manager::BatchConfig;
 
-/// 默认 machine（§4.3 P5：machine_id 缺省 = 本机）。
-pub const DEFAULT_MACHINE_ID: &str = "local";
+/// 默认 instance（§4.3 P5：instance_id 缺省 = 本机）。
+pub const DEFAULT_INSTANCE_ID: &str = "local";
 
-/// 默认 ACP 启动命令（架构 §11「默认 `peri acp`，可配置」；§16 配置表暂无
-/// 对应项，M1 以常量承载【决策】）。
-pub const DEFAULT_ACP_CMD: &[&str] = &["peri", "acp"];
+/// 默认 ACP 启动命令（架构 §11「默认 `peri acp`，可配置」；M1 起经
+/// `Config::acp_cmd` 可配——config.toml `acp_cmd` 数组或
+/// `ACP_HUB_ACP_CMD` 空格拆分，见 `crate::config`）。
+pub use crate::config::DEFAULT_ACP_CMD;
 
 /// L3 确认超时（§4.4 路径 B：30s 无响应 → delivery_unknown）【决策：设计稿
 /// §16 测试 13 的 30s 常量，非 §16 配置表项】。
@@ -60,7 +62,7 @@ pub enum SubmitAck {
     Accepted { command_id: String },
     /// 已提交命令重发（§4.4）：duplicate + 原 turnId，**不重复调用 Agent**。
     Duplicate(ActionAck),
-    /// 同步失败（RATE_LIMITED/SESSION_NOT_FOUND/INVALID_STATE…）→ action_error。
+    /// 同步失败（RATE_LIMITED/CHAT_NOT_FOUND/INVALID_STATE…）→ action_error。
     Failed(ActionError),
 }
 
@@ -69,15 +71,15 @@ pub enum SubmitAck {
 pub struct ExecCmd {
     /// 客户端连接上下文（审计）。
     pub ctx: ConnectionCtx,
-    /// hub 侧 session_id（create：submit 时生成的新 id）。
-    pub session_id: String,
+    /// hub 侧 chat_id（create：submit 时生成的新 id）。
+    pub chat_id: String,
     /// 原始 Action。
     pub action: ActionEnvelope,
     /// 客户端连接发送队列（committed/error 回投）。
     pub tx: mpsc::Sender<OutboundMsg>,
 }
 
-/// 每 session 串行命令队列（上限 64，§7.4 规则 1）+ commandId 去重（§4.4）。
+/// 每 chat 串行命令队列（上限 64，§7.4 规则 1）+ commandId 去重（§4.4）。
 #[derive(Clone)]
 pub struct CommandCoordinator {
     inner: Arc<CoordInner>,
@@ -88,18 +90,18 @@ struct CoordInner {
     gate: Mutex<()>,
     store: Arc<Store>,
     doc: Arc<DocManager>,
-    machine: Arc<MachineRegistry>,
-    sessions: SessionRegistry,
+    instance: Arc<InstanceRegistry>,
+    chats: ChatRegistry,
     relay: Arc<RelayEventHandler>,
     translator: Translator,
     queue_cap: usize,
-    /// 每 session 执行器（串行消费；lazy spawn）。
+    /// 每 chat 执行器（串行消费；lazy spawn）。
     executors: RwLock<HashMap<String, mpsc::Sender<ExecCmd>>>,
-    /// 全局 create 执行器【决策】create 的 session_id 是新的、无既有队列；
+    /// 全局 create 执行器【决策】create 的 chat_id 是新的、无既有队列；
     /// 独立串行队列承担（M1 低频，单队列足够）。
     create_tx: RwLock<Option<mpsc::Sender<ExecCmd>>>,
-    /// create 全局去重索引（command_id → session_id，§4.4）：create 的
-    /// session_id 由 server 生成，客户端重发无法指定，故跨 session 按
+    /// create 全局去重索引（command_id → chat_id，§4.4）：create 的
+    /// chat_id 由 server 生成，客户端重发无法指定，故跨 chat 按
     /// commandId 查（启动时从 outbox 重建）。
     create_index: RwLock<HashMap<Uuid, Uuid>>,
     /// M1 默认目录 = server 进程工作目录（§4.3 裁决）。
@@ -115,21 +117,23 @@ struct CoordInner {
 }
 
 impl CommandCoordinator {
-    /// 装配（hub 调用；`default_cwd` = 进程工作目录，§4.3 裁决）。
+    /// 装配（hub 调用；`default_cwd` = 进程工作目录，§4.3 裁决；
+    /// `acp_cmd` = ACP 启动命令，默认 `["peri","acp"]`，§11）。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<Store>,
         doc: Arc<DocManager>,
-        machine: Arc<MachineRegistry>,
-        sessions: SessionRegistry,
+        instance: Arc<InstanceRegistry>,
+        chats: ChatRegistry,
         relay: Arc<RelayEventHandler>,
         cfg: &BatchConfig,
+        acp_cmd: Vec<String>,
         spawn_timeout: Duration,
         initialize_timeout: Duration,
         binding_timeout: Duration,
     ) -> Self {
         Self::with_l3_timeout(
-            store, doc, machine, sessions, relay, cfg,
+            store, doc, instance, chats, relay, cfg, acp_cmd,
             spawn_timeout, initialize_timeout, binding_timeout, L3_TIMEOUT,
         )
     }
@@ -139,10 +143,11 @@ impl CommandCoordinator {
     pub fn with_l3_timeout(
         store: Arc<Store>,
         doc: Arc<DocManager>,
-        machine: Arc<MachineRegistry>,
-        sessions: SessionRegistry,
+        instance: Arc<InstanceRegistry>,
+        chats: ChatRegistry,
         relay: Arc<RelayEventHandler>,
         cfg: &BatchConfig,
+        acp_cmd: Vec<String>,
         spawn_timeout: Duration,
         initialize_timeout: Duration,
         binding_timeout: Duration,
@@ -156,16 +161,16 @@ impl CommandCoordinator {
                 gate: Mutex::new(()),
                 store,
                 doc,
-                machine,
-                sessions,
+                instance,
+                chats,
                 relay,
                 translator: Translator::new(),
-                queue_cap: cfg.session_queue,
+                queue_cap: cfg.chat_queue,
                 executors: RwLock::new(HashMap::new()),
                 create_tx: RwLock::new(None),
                 create_index: RwLock::new(HashMap::new()),
                 default_cwd,
-                acp_cmd: DEFAULT_ACP_CMD.iter().map(|s| s.to_string()).collect(),
+                acp_cmd,
                 spawn_timeout,
                 initialize_timeout,
                 binding_timeout,
@@ -178,11 +183,11 @@ impl CommandCoordinator {
     /// 重放重建）。hub 装配时（store.recover 完成后）调用一次。
     pub async fn rebuild_create_index(&self) {
         let mut idx: HashMap<Uuid, Uuid> = HashMap::new();
-        for (sid, store) in self.inner.store.sessions_snapshot() {
+        for (cid, store) in self.inner.store.chats_snapshot() {
             let recs = store.outbox().lock().await.records().cloned().collect::<Vec<_>>();
             for rec in recs {
                 if rec.command_type == CommandType::Create {
-                    idx.insert(rec.command_id, sid);
+                    idx.insert(rec.command_id, cid);
                 }
             }
         }
@@ -227,12 +232,12 @@ impl CommandCoordinator {
         };
         let _guard = self.inner.gate.lock().await;
 
-        // ---- 1. session_id 解析 / create 前置（§6.2）----
-        let session_id: uuid::Uuid = match &action {
+        // ---- 1. chat_id 解析 / create 前置（§6.2）----
+        let chat_id: uuid::Uuid = match &action {
             ActionEnvelope::Create { payload, .. } => {
-                // create：server 生成新 session_id（§6.2 server 生成 id 的
+                // create：server 生成新 chat_id（§6.2 server 生成 id 的
                 // 唯一告知路径）。客户端重发同 commandId 时无法指定
-                // session_id——先按 commandId 全局去重（§4.4：committed →
+                // chat_id——先按 commandId 全局去重（§4.4：committed →
                 // duplicate，不重复调用 Agent；索引启动时从 outbox 重建，
                 // 跨 server 重启有效）。
                 if let Some(sid) = self
@@ -243,7 +248,7 @@ impl CommandCoordinator {
                     .get(&command_id)
                     .cloned()
                 {
-                    if let Some(s_store) = self.inner.store.session(sid) {
+                    if let Some(s_store) = self.inner.store.chat(sid) {
                         if let Some(rec) = s_store.outbox_get(command_id).await {
                             match dedup_verdict(&rec) {
                                 DedupVerdict::Duplicate => {
@@ -251,7 +256,7 @@ impl CommandCoordinator {
                                         command_id: command_id_str,
                                         status: AckStatus::Duplicate,
                                         turn_id: rec.turn_id.map(|t| t.to_string()),
-                                        session_id: Some(sid.to_string()),
+                                        chat_id: Some(sid.to_string()),
                                         committed_projection_version: None,
                                     })
                                 }
@@ -294,14 +299,14 @@ impl CommandCoordinator {
                     Err(ack) => return ack,
                 }
             }
-            other => match extract_session_id(other) {
+            other => match extract_chat_id(other) {
                 Some(sid) => match uuid::Uuid::parse_str(&sid) {
                     Ok(id) => id,
                     Err(_) => {
                         return SubmitAck::Failed(action_error(
                             command_id_str,
                             ErrorCode::InvalidState,
-                            "invalid sessionId (uuid expected)",
+                            "invalid chatId (uuid expected)",
                             false,
                         ))
                     }
@@ -310,21 +315,21 @@ impl CommandCoordinator {
                     return SubmitAck::Failed(action_error(
                         command_id_str,
                         ErrorCode::InvalidState,
-                        "missing sessionId",
+                        "missing chatId",
                         false,
                     ))
                 }
             },
         };
 
-        let session_id_str = session_id.to_string();
-        let store = match self.inner.store.session(session_id) {
+        let chat_id_str = chat_id.to_string();
+        let store = match self.inner.store.chat(chat_id) {
             Some(s) => s,
             None => {
                 return SubmitAck::Failed(action_error(
                     command_id_str,
-                    ErrorCode::SessionNotFound,
-                    "session not found",
+                    ErrorCode::ChatNotFound,
+                    "chat not found",
                     false,
                 ))
             }
@@ -338,7 +343,7 @@ impl CommandCoordinator {
                         command_id: command_id_str,
                         status: AckStatus::Duplicate,
                         turn_id: rec.turn_id.map(|t| t.to_string()),
-                        session_id: None,
+                        chat_id: None,
                         committed_projection_version: None,
                     })
                 }
@@ -367,7 +372,7 @@ impl CommandCoordinator {
         }
 
         // ---- 3. 入队上限（§7.4 规则 6：同一临界区）----
-        if !self.inner.doc.try_reserve(&session_id_str).await {
+        if !self.inner.doc.try_reserve(&chat_id_str).await {
             return SubmitAck::Failed(action_error(
                 command_id_str,
                 ErrorCode::RateLimited,
@@ -389,14 +394,14 @@ impl CommandCoordinator {
             .await
             .insert(NewOutboxRecord {
                 command_id,
-                session_id,
+                chat_id,
                 command_type,
                 turn_id,
                 retryable_class,
             })
         {
-            warn!(session_id = %session_id, command_id = %command_id, error = ?e, "outbox insert failed");
-            self.inner.doc.release_reserve(&session_id_str).await;
+            warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox insert failed");
+            self.inner.doc.release_reserve(&chat_id_str).await;
             return SubmitAck::Failed(action_error(
                 command_id_str,
                 ErrorCode::AgentUnavailable,
@@ -408,8 +413,8 @@ impl CommandCoordinator {
         // 与 outbox 状态机对齐（Received → Accepted → IntentDurable，§4.4；
         // 执行器 mark_intent_durable 要求前置 Accepted）。
         if let Err(e) = store.outbox().lock().await.mark_accepted(command_id) {
-            warn!(session_id = %session_id, command_id = %command_id, error = ?e, "outbox mark_accepted failed");
-            self.inner.doc.release_reserve(&session_id_str).await;
+            warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox mark_accepted failed");
+            self.inner.doc.release_reserve(&chat_id_str).await;
             return SubmitAck::Failed(action_error(
                 command_id_str,
                 ErrorCode::AgentUnavailable,
@@ -421,18 +426,18 @@ impl CommandCoordinator {
         // ---- 5. 入队执行器（accepted 立即返回，§4.4）----
         let cmd = ExecCmd {
             ctx: ctx.clone(),
-            session_id: session_id_str.clone(),
+            chat_id: chat_id_str.clone(),
             action,
             tx,
         };
         let queued = if command_type == CommandType::Create {
             self.enqueue_create(cmd).await
         } else {
-            self.enqueue(session_id_str.clone(), cmd).await
+            self.enqueue(chat_id_str.clone(), cmd).await
         };
         if !queued {
             // 入队失败（执行器已退出）：补偿释放名额（§7.4 reserve/release 配对）。
-            self.inner.doc.release_reserve(&session_id_str).await;
+            self.inner.doc.release_reserve(&chat_id_str).await;
             return SubmitAck::Failed(action_error(
                 command_id_str,
                 ErrorCode::RateLimited,
@@ -453,76 +458,83 @@ impl CommandCoordinator {
         }
     }
 
-    /// create 前置（临界区内）：生成 session_id + 建持久化目录 + 打开 doc +
-    /// 登记会话 + outbox 目录就绪。
+    /// create 前置（临界区内）：生成 chat_id + 建持久化目录 + 打开 doc +
+    /// 登记 chat + outbox 目录就绪。
     async fn prepare_create(
         &self,
         ctx: &ConnectionCtx,
-        payload: &CreateSessionPayload,
+        payload: &CreateChatPayload,
         command_id: &str,
     ) -> Result<uuid::Uuid, SubmitAck> {
-        let session_id = uuid::Uuid::new_v4();
-        let machine_id = payload
-            .machine_id
+        let chat_id = uuid::Uuid::new_v4();
+        let instance_id = payload
+            .instance_id
             .clone()
-            .unwrap_or_else(|| DEFAULT_MACHINE_ID.to_string());
-        if let Err(e) = self.inner.store.create_session(session_id) {
-            warn!(error = ?e, "create session store failed");
+            .unwrap_or_else(|| DEFAULT_INSTANCE_ID.to_string());
+        // 标题缺省（§6.5 服务端单写会话元数据）：前端 create 可不传 title，
+        // 缺省「会话 {短 id}」——列表不显示裸 id。
+        let title = payload
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("会话 {}", &chat_id.to_string()[..8]));
+        if let Err(e) = self.inner.store.create_chat(chat_id) {
+            warn!(error = ?e, "create chat store failed");
             return Err(SubmitAck::Failed(action_error(
                 command_id.to_string(),
                 ErrorCode::AgentUnavailable,
-                "session store create failed",
+                "chat store create failed",
                 true,
             )));
         }
         if let Err(e) = self
             .inner
             .doc
-            .open_session(&session_id.to_string(), &machine_id, payload.title.as_deref())
+            .open_chat(&chat_id.to_string(), &instance_id, Some(&title))
             .await
         {
-            warn!(session_id = %session_id, error = ?e, "open session failed");
+            warn!(chat_id = %chat_id, error = ?e, "open chat failed");
             return Err(SubmitAck::Failed(action_error(
                 command_id.to_string(),
                 ErrorCode::AgentUnavailable,
-                "session doc open failed",
+                "chat doc open failed",
                 true,
             )));
         }
         if let Err(e) = self
             .inner
-            .sessions
-            .register(&session_id.to_string(), &machine_id, payload.title.as_deref())
+            .chats
+            .register(&chat_id.to_string(), &instance_id, Some(&title))
             .await
         {
-            warn!(session_id = %session_id, error = ?e, "session register failed");
+            warn!(chat_id = %chat_id, error = ?e, "chat register failed");
             return Err(SubmitAck::Failed(action_error(
                 command_id.to_string(),
                 ErrorCode::AgentUnavailable,
-                "session register failed",
+                "chat register failed",
                 true,
             )));
         }
         let _ = ctx;
-        Ok(session_id)
+        Ok(chat_id)
     }
 
-    /// 入队到 per-session 执行器（lazy spawn，§7.4 规则 1 串行）。
-    async fn enqueue(&self, session_id: String, cmd: ExecCmd) -> bool {
+    /// 入队到 per-chat 执行器（lazy spawn，§7.4 规则 1 串行）。
+    async fn enqueue(&self, chat_id: String, cmd: ExecCmd) -> bool {
         let tx = {
             let executors = self.inner.executors.read().await;
-            executors.get(&session_id).cloned()
+            executors.get(&chat_id).cloned()
         };
         let tx = match tx {
             Some(tx) => tx,
             None => {
                 let (tx, rx) = mpsc::channel(self.inner.queue_cap);
                 let me = self.clone();
-                let sid = session_id.clone();
+                let sid = chat_id.clone();
                 tokio::spawn(async move {
                     me.executor_loop(sid, rx).await;
                 });
-                self.inner.executors.write().await.insert(session_id, tx.clone());
+                self.inner.executors.write().await.insert(chat_id, tx.clone());
                 tx
             }
         };
@@ -550,41 +562,41 @@ impl CommandCoordinator {
         tx.send(cmd).await.is_ok()
     }
 
-    /// 执行器循环（每 session 串行消费，§7.4 规则 1）。
-    async fn executor_loop(&self, session_id: String, mut rx: mpsc::Receiver<ExecCmd>) {
+    /// 执行器循环（每 chat 串行消费，§7.4 规则 1）。
+    async fn executor_loop(&self, chat_id: String, mut rx: mpsc::Receiver<ExecCmd>) {
         while let Some(cmd) = rx.recv().await {
             let started = std::time::Instant::now();
-            self.exec_command(&session_id, &cmd).await;
+            self.exec_command(&chat_id, &cmd).await;
             // 命令消费完成：释放 try_reserve 名额（§7.4 reserve/release 配对）。
-            self.inner.doc.release_reserve(&cmd.session_id).await;
+            self.inner.doc.release_reserve(&cmd.chat_id).await;
             debug!(
-                session_id, command_id = extract_command_id(&cmd.action).unwrap_or_default(),
+                chat_id, command_id = extract_command_id(&cmd.action).unwrap_or_default(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "command executed"
             );
         }
         // 通道关闭：清理表项（防御；正常关闭路径由 hub 统一清理）。
-        if session_id != "__create__" {
+        if chat_id != "__create__" {
             let mut executors = self.inner.executors.write().await;
-            if let Some(tx) = executors.get(&session_id) {
+            if let Some(tx) = executors.get(&chat_id) {
                 if tx.is_closed() {
-                    executors.remove(&session_id);
+                    executors.remove(&chat_id);
                 }
             }
         }
     }
 
     /// 命令分发（§7 方法面）。
-    async fn exec_command(&self, session_id: &str, cmd: &ExecCmd) {
+    async fn exec_command(&self, chat_id: &str, cmd: &ExecCmd) {
         match &cmd.action {
-            ActionEnvelope::Prompt { .. } => self.exec_prompt(session_id, cmd).await,
-            ActionEnvelope::Create { .. } => self.exec_create(session_id, cmd).await,
-            ActionEnvelope::Cancel { .. } => self.exec_forward(session_id, cmd).await,
-            ActionEnvelope::Close { .. } => self.exec_close(session_id, cmd).await,
-            ActionEnvelope::ResolvePermission { .. } => self.exec_resolve(session_id, cmd).await,
+            ActionEnvelope::Prompt { .. } => self.exec_prompt(chat_id, cmd).await,
+            ActionEnvelope::Create { .. } => self.exec_create(chat_id, cmd).await,
+            ActionEnvelope::Cancel { .. } => self.exec_forward(chat_id, cmd).await,
+            ActionEnvelope::Close { .. } => self.exec_close(chat_id, cmd).await,
+            ActionEnvelope::ResolvePermission { .. } => self.exec_resolve(chat_id, cmd).await,
             _ => {
                 // M1 action type 白名单外的 action（Load/SubscribeEvents/
-                // UnsubscribeEvents）已在 session_channel::dispatch_action
+                // UnsubscribeEvents）已在 chat_channel::dispatch_action
                 // 拦截（§4.8）；此处为防御路径。
                 self.send_error(
                     cmd,
@@ -598,7 +610,7 @@ impl CommandCoordinator {
     }
 
     /// prompt 执行（§4.4 提交点纪律 + §6.5 服务端单写）。
-    async fn exec_prompt(&self, session_id: &str, cmd: &ExecCmd) {
+    async fn exec_prompt(&self, chat_id: &str, cmd: &ExecCmd) {
         let command_id_str = extract_command_id(&cmd.action).unwrap_or_default();
         let payload = match &cmd.action {
             ActionEnvelope::Prompt { payload, .. } => payload,
@@ -607,7 +619,7 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
@@ -628,21 +640,21 @@ impl CommandCoordinator {
             .unwrap_or_else(uuid::Uuid::new_v4);
         // 1. intent durable（§4.4 提交点纪律第一步）。
         if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(session_id, error = ?e, "mark_intent_durable failed");
+            warn!(chat_id, error = ?e, "mark_intent_durable failed");
             return;
         }
         // 2. binding 校验 + 翻译（rpcId 登记，§4.4）。
-        let Some(entry) = self.inner.sessions.entry(session_id).await else {
-            self.send_error(cmd, ErrorCode::SessionNotFound, "session not found", false)
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
+            self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
                 .await;
             return;
         };
-        let Some(acp_session_id) = entry.acp_session_id.clone() else {
-            self.send_error(cmd, ErrorCode::InvalidState, "session binding not established", false)
+        let Some(acp_session_id) = entry.session_id.clone() else {
+            self.send_error(cmd, ErrorCode::InvalidState, "chat binding not established", false)
                 .await;
             return;
         };
-        let machine_id = entry.machine_id.clone();
+        let instance_id = entry.instance_id.clone();
         let msg = match self.inner.translator.translate(
             &cmd.action,
             &OutboundCtx {
@@ -670,13 +682,13 @@ impl CommandCoordinator {
             .register_rpc(&rpc_id, command_id_str.clone())
             .await;
         // 3. 下发（L1+L2：forward_ack = M1 转发确认，§4.4）。
-        if let Err(e) = self.inner.machine.forward_rpc(&machine_id, session_id, &msg).await {
-            self.fail_retryable(session_id, command_id, cmd, machine_error_code(&e), "forward failed")
+        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
+            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
                 .await;
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(session_id, error = ?e, "mark_dispatched failed");
+            warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
         // 4. 投影 user entry（L1+L2 后，§6.4 提交点纪律；服务端单写，§6.5）。
@@ -686,7 +698,7 @@ impl CommandCoordinator {
             .inner
             .doc
             .submit_command(
-                session_id,
+                chat_id,
                 DocCommand::RegisterUserEntry {
                     turn_id: turn_id.to_string(),
                     entry_id: entry_id.clone(),
@@ -697,19 +709,19 @@ impl CommandCoordinator {
             )
             .await
         {
-            SubmitResult::Rejected(SubmitError::SessionNotFound) => {
-                self.send_error(cmd, ErrorCode::SessionNotFound, "session not found", false)
+            SubmitResult::Rejected(SubmitError::ChatNotFound) => {
+                self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
                     .await;
                 return;
             }
             SubmitResult::PersistFailed => {
-                warn!(session_id, "user entry projection persist failed (degraded)");
+                warn!(chat_id, "user entry projection persist failed (degraded)");
             }
             _ => {}
         }
         self.inner
-            .sessions
-            .set_active_turn(session_id, &turn_id.to_string())
+            .chats
+            .set_active_turn(chat_id, &turn_id.to_string())
             .await;
         // 5. L3 等待（§4.4 路径 B；超时 → delivery_unknown）。
         match tokio::time::timeout(self.inner.l3_timeout, rx).await {
@@ -717,7 +729,7 @@ impl CommandCoordinator {
                 let is_error = response.get("error").is_some();
                 if is_error {
                     self.fail_terminal(
-                        session_id, command_id, cmd,
+                        chat_id, command_id, cmd,
                         ErrorCode::AgentUnavailable,
                         "agent rejected prompt (L3 error)",
                     )
@@ -725,18 +737,34 @@ impl CommandCoordinator {
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
-                    warn!(session_id, error = ?e, "mark_delivery_confirmed failed");
+                    warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
+                // 终态注入（§7.2 宿主驱动 turn 模型；照抄 @fenix/chat-channel
+                // acp-channel.ts：prompt 响应 `result.stopReason` → turn 终态，
+                // `cancelled` → Cancelled，其余 → Completed）。真实 peri 不发
+                // turn_complete 通知，唯一终态信号就是 prompt 的 L3 响应。
+                let stop_reason = response
+                    .get("result")
+                    .and_then(|r| r.get("stopReason"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let terminal_status = if stop_reason == "cancelled" {
+                    TurnStatus::Cancelled
+                } else {
+                    TurnStatus::Completed
+                };
+                self.inject_turn_terminal(chat_id, &turn_id.to_string(), terminal_status)
+                    .await;
                 if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
-                    warn!(session_id, error = ?e, "mark_projection_committed failed");
+                    warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
-                    warn!(session_id, error = ?e, "mark_completed failed");
+                    warn!(chat_id, error = ?e, "mark_completed failed");
                     return;
                 }
-                self.inner.sessions.clear_active_turn(session_id).await;
+                self.inner.chats.clear_active_turn(chat_id).await;
                 self.send_committed(cmd, Some(&turn_id.to_string()), None).await;
                 audit(
                     "command.committed",
@@ -752,7 +780,7 @@ impl CommandCoordinator {
                 // §4.4）。
                 self.inner.relay.cancel_rpc(&rpc_id).await;
                 if let Err(e) = store.outbox().lock().await.mark_delivery_unknown(command_id) {
-                    warn!(session_id, error = ?e, "mark_delivery_unknown failed");
+                    warn!(chat_id, error = ?e, "mark_delivery_unknown failed");
                     return;
                 }
                 self.send_error(
@@ -767,7 +795,7 @@ impl CommandCoordinator {
     }
 
     /// create 执行（§6.2 时序：spawn → initialize → session/new → binding）。
-    async fn exec_create(&self, _session_id: &str, cmd: &ExecCmd) {
+    async fn exec_create(&self, _chat_id: &str, cmd: &ExecCmd) {
         let command_id_str = extract_command_id(&cmd.action).unwrap_or_default();
         let command_id = match uuid::Uuid::parse_str(&command_id_str) {
             Ok(id) => id,
@@ -777,66 +805,66 @@ impl CommandCoordinator {
                 return;
             }
         };
-        // create 的真实 session_id 由 submit 生成并写入 `cmd.session_id`
-        // （§6.2 server 生成 id 的唯一告知路径）；executor 的 `session_id`
+        // create 的真实 chat_id 由 submit 生成并写入 `cmd.chat_id`
+        // （§6.2 server 生成 id 的唯一告知路径）；executor 的 `chat_id`
         // 参数是全局 create 执行器的 `__create__` 标记，遮蔽为真实 UUID。
-        let session_id = cmd.session_id.clone();
+        let chat_id = cmd.chat_id.clone();
         let payload = match &cmd.action {
             ActionEnvelope::Create { payload, .. } => payload,
             _ => unreachable!("dispatch guarantees create"),
         };
-        let machine_id = payload
-            .machine_id
+        let instance_id = payload
+            .instance_id
             .clone()
-            .unwrap_or_else(|| DEFAULT_MACHINE_ID.to_string());
+            .unwrap_or_else(|| DEFAULT_INSTANCE_ID.to_string());
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(&session_id).unwrap_or_default())
+            .chat(chat_uuid(&chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(session_id, error = ?e, "mark_intent_durable failed");
+            warn!(chat_id, error = ?e, "mark_intent_durable failed");
             return;
         }
         // 1. spawn（10s，§6.2）。
-        let spawn_cmd = MachineSpawn {
+        let spawn_cmd = InstanceSpawn {
             command_id: command_id_str.clone(),
-            session_id: session_id.to_string(),
+            chat_id: chat_id.to_string(),
             cmd: self.inner.acp_cmd.clone(),
             cwd: self.inner.default_cwd.clone(),
             env: None,
         };
-        let spawn = match tokio::time::timeout(self.inner.spawn_timeout, self.inner.machine.send_spawn(&machine_id, spawn_cmd)).await {
+        let spawn = match tokio::time::timeout(self.inner.spawn_timeout, self.inner.instance.send_spawn(&instance_id, spawn_cmd)).await {
             Ok(Ok(SpawnOutcome::Acked(a))) => Some(a),
             Ok(Err(e)) => {
-                self.fail_retryable(&session_id, command_id, cmd, machine_error_code(&e), "spawn failed")
+                self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), "spawn failed")
                     .await;
-                self.cleanup_create(&session_id, &machine_id).await;
+                self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
             Err(_) => {
-                self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "spawn timeout (10s)")
+                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "spawn timeout (10s)")
                     .await;
-                self.cleanup_create(&session_id, &machine_id).await;
+                self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
         };
         let spawn = spawn.expect("spawn outcome");
         if !spawn.ok {
-            self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent spawn failed")
+            self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent spawn failed")
                 .await;
-            self.cleanup_create(&session_id, &machine_id).await;
+            self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         // L1+L2（§4.4：create 的 delivery_confirmed 只要求 spawn_ack）。
         if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(session_id, error = ?e, "mark_dispatched failed");
+            warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
-            warn!(session_id, error = ?e, "mark_delivery_confirmed failed");
+            warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
             return;
         }
         // 2. initialize（10s）。
@@ -846,24 +874,24 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&init_rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.machine.forward_rpc(&machine_id, &session_id, &init_msg).await {
-            self.fail_retryable(&session_id, command_id, cmd, machine_error_code(&e), "initialize forward failed")
+        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, &chat_id, &init_msg).await {
+            self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), "initialize forward failed")
                 .await;
-            self.cleanup_create(&session_id, &machine_id).await;
+            self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         match tokio::time::timeout(self.inner.initialize_timeout, init_rx).await {
             Ok(Ok(r)) if r.get("error").is_none() => {}
             Ok(Ok(_)) => {
-                self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize rejected")
+                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize rejected")
                     .await;
-                self.cleanup_create(&session_id, &machine_id).await;
+                self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
             Ok(Err(_)) | Err(_) => {
-                self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize timeout (10s)")
+                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize timeout (10s)")
                     .await;
-                self.cleanup_create(&session_id, &machine_id).await;
+                self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
         }
@@ -877,45 +905,45 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&new_rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.machine.forward_rpc(&machine_id, &session_id, &new_msg).await {
-            self.fail_retryable(&session_id, command_id, cmd, machine_error_code(&e), "session/new forward failed")
+        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, &chat_id, &new_msg).await {
+            self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), "session/new forward failed")
                 .await;
-            self.cleanup_create(&session_id, &machine_id).await;
+            self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         let acp_session_id = match tokio::time::timeout(self.inner.binding_timeout, new_rx).await {
-            Ok(Ok(r)) => extract_acp_session_id(&r),
+            Ok(Ok(r)) => extract_session_id(&r),
             Ok(Err(_)) | Err(_) => None,
         };
         let Some(acp_session_id) = acp_session_id else {
-            self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "binding timeout (30s)")
+            self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "binding timeout (30s)")
                 .await;
-            self.cleanup_create(&session_id, &machine_id).await;
+            self.cleanup_create(&chat_id, &instance_id).await;
             return;
         };
         // 4. binding（§6.2）。
         if let Err(e) = self
             .inner
-            .sessions
-            .bind(&session_id, &acp_session_id)
+            .chats
+            .bind(&chat_id, &acp_session_id)
             .await
         {
-            warn!(session_id, error = ?e, "bind failed");
-            self.fail_retryable(&session_id, command_id, cmd, ErrorCode::AgentUnavailable, "bind failed")
+            warn!(chat_id, error = ?e, "bind failed");
+            self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "bind failed")
                 .await;
-            self.cleanup_create(&session_id, &machine_id).await;
+            self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         // 5. 终态（§4.4：projection_committed → completed → committed）。
         if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
-            warn!(session_id, error = ?e, "mark_projection_committed failed");
+            warn!(chat_id, error = ?e, "mark_projection_committed failed");
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
-            warn!(session_id, error = ?e, "mark_completed failed");
+            warn!(chat_id, error = ?e, "mark_completed failed");
             return;
         }
-        self.send_committed(cmd, None, Some(&session_id)).await;
+        self.send_committed(cmd, None, Some(&chat_id)).await;
         audit(
             "command.committed",
             Some(&command_id_str),
@@ -927,7 +955,7 @@ impl CommandCoordinator {
     }
 
     /// cancel 执行（§7.2）：L1+L2（send 成功）后等待 L3 确认。
-    async fn exec_forward(&self, session_id: &str, cmd: &ExecCmd) {
+    async fn exec_forward(&self, chat_id: &str, cmd: &ExecCmd) {
         let command_id_str = extract_command_id(&cmd.action).unwrap_or_default();
         let command_id = match uuid::Uuid::parse_str(&command_id_str) {
             Ok(id) => id,
@@ -940,25 +968,25 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(session_id, error = ?e, "mark_intent_durable failed");
+            warn!(chat_id, error = ?e, "mark_intent_durable failed");
             return;
         }
-        let Some(entry) = self.inner.sessions.entry(session_id).await else {
-            self.send_error(cmd, ErrorCode::SessionNotFound, "session not found", false)
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
+            self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
                 .await;
             return;
         };
-        let Some(acp_session_id) = entry.acp_session_id.clone() else {
-            self.send_error(cmd, ErrorCode::InvalidState, "session binding not established", false)
+        let Some(acp_session_id) = entry.session_id.clone() else {
+            self.send_error(cmd, ErrorCode::InvalidState, "chat binding not established", false)
                 .await;
             return;
         };
-        let machine_id = entry.machine_id.clone();
+        let instance_id = entry.instance_id.clone();
         let msg = match self.inner.translator.translate(
             &cmd.action,
             &OutboundCtx {
@@ -976,39 +1004,74 @@ impl CommandCoordinator {
             }
         };
         let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
+        // 无 id 帧 = notification（真实 peri session/cancel，§4.3 表 cancel 无
+        // turnId）：无 ack 路由，走 notification 透传（发送成功即 L1 完成）；
+        // 有 id 帧（resolve）走标准 forward_rpc + L3 等待。
+        let is_notification = rpc_id.is_empty();
+        let forward = if is_notification {
+            self.inner
+                .instance
+                .forward_notification(&instance_id, chat_id, &msg)
+                .await
+        } else {
+            self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await
+        };
+        if let Err(e) = forward {
+            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
+                .await;
+            return;
+        }
+        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+            warn!(chat_id, error = ?e, "mark_dispatched failed");
+            return;
+        }
+        if is_notification {
+            // notification：无响应帧可等——发送成功即 L3 等价确认（§7.2
+            // 注入 Cancelled 终态；active turn 不存在则无终态可注入，仅确认
+            // 命令）。
+            if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
+                return;
+            }
+            if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
+                self.inject_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
+                    .await;
+            }
+            if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                warn!(chat_id, error = ?e, "mark_projection_committed failed");
+                return;
+            }
+            if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
+                warn!(chat_id, error = ?e, "mark_completed failed");
+                return;
+            }
+            self.send_committed(cmd, None, None).await;
+            return;
+        }
+        // L3（resolve 的 ACP 确认，§4.4）。
         let rx = self
             .inner
             .relay
             .register_rpc(&rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.machine.forward_rpc(&machine_id, session_id, &msg).await {
-            self.fail_retryable(session_id, command_id, cmd, machine_error_code(&e), "forward failed")
-                .await;
-            return;
-        }
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(session_id, error = ?e, "mark_dispatched failed");
-            return;
-        }
-        // L3（cancel 的 ACP 确认，§4.4）。
         match tokio::time::timeout(self.inner.l3_timeout, rx).await {
             Ok(Ok(r)) if r.get("error").is_none() => {
                 if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
-                    warn!(session_id, error = ?e, "mark_delivery_confirmed failed");
+                    warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
-                    warn!(session_id, error = ?e, "mark_projection_committed failed");
+                    warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
-                    warn!(session_id, error = ?e, "mark_completed failed");
+                    warn!(chat_id, error = ?e, "mark_completed failed");
                     return;
                 }
                 self.send_committed(cmd, None, None).await;
             }
             Ok(Ok(_)) => {
-                self.fail_terminal(session_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent rejected command")
+                self.fail_terminal(chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent rejected command")
                     .await;
             }
             Ok(Err(_)) | Err(_) => {
@@ -1025,8 +1088,33 @@ impl CommandCoordinator {
         }
     }
 
+    /// 注入 turn 终态（§7.2）：控制面 DocCommand（不经聚合器 seq 水位——
+    /// 宿主注入无 instance 流 seq，事件路径 seq=0 会被判 SeqOutOfOrder 拒绝）。
+    /// 语义同聚合器 TurnTerminal 事件分支：active_turn 匹配且非终态 → 终态
+    /// 迁移 + assistant entry 迁移。真实 peri 无独立终态通知——prompt L3
+    /// 响应 stopReason / cancel 发送成功即触发。
+    async fn inject_turn_terminal(
+        &self,
+        chat_id: &str,
+        turn_id: &str,
+        status: TurnStatus,
+    ) {
+        let _ = self
+            .inner
+            .doc
+            .submit_command(
+                chat_id,
+                DocCommand::SetTurnTerminal {
+                    turn_id: turn_id.to_string(),
+                    status,
+                    completed_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .await;
+    }
+
     /// close 执行（§4.3「关闭并 kill 对应 ACP 进程」；offline 语义 §7.6）。
-    async fn exec_close(&self, session_id: &str, cmd: &ExecCmd) {
+    async fn exec_close(&self, chat_id: &str, cmd: &ExecCmd) {
         let command_id_str = extract_command_id(&cmd.action).unwrap_or_default();
         let command_id = match uuid::Uuid::parse_str(&command_id_str) {
             Ok(id) => id,
@@ -1039,57 +1127,57 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(session_id, error = ?e, "mark_intent_durable failed");
+            warn!(chat_id, error = ?e, "mark_intent_durable failed");
             return;
         }
-        let Some(entry) = self.inner.sessions.entry(session_id).await else {
-            self.send_error(cmd, ErrorCode::SessionNotFound, "session not found", false)
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
+            self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
                 .await;
             return;
         };
-        let machine_id = entry.machine_id.clone();
-        let kill = MachineKill {
+        let instance_id = entry.instance_id.clone();
+        let kill = InstanceKill {
             command_id: command_id_str.clone(),
-            session_id: session_id.to_string(),
+            chat_id: chat_id.to_string(),
             grace: None,
         };
         // kill_ack = L1+L2（§4.4：close 的 delivery_confirmed 只要求 L1+L2）。
-        let kill_ok = match self.inner.machine.send_kill(&machine_id, kill).await {
+        let kill_ok = match self.inner.instance.send_kill(&instance_id, kill).await {
             Ok(outcome) => match outcome {
                 crate::control::KillOutcome::Acked(a) => a.ok,
             },
             Err(e) => {
-                let code = machine_error_code(&e);
-                if code == ErrorCode::MachineOffline {
-                    // §7.6：offline 时 close → MACHINE_OFFLINE(retryable) +
+                let code = instance_error_code(&e);
+                if code == ErrorCode::InstanceOffline {
+                    // §7.6：offline 时 close → INSTANCE_OFFLINE(retryable) +
                     // pending_close 标记（重连自动补发 kill）。
                     let _ = self
                         .inner
-                        .sessions
-                        .request_close_offline(session_id)
+                        .chats
+                        .request_close_offline(chat_id)
                         .await;
                 }
-                self.fail_retryable(session_id, command_id, cmd, code, "kill failed")
+                self.fail_retryable(chat_id, command_id, cmd, code, "kill failed")
                     .await;
                 return;
             }
         };
         if !kill_ok {
-            self.fail_retryable(session_id, command_id, cmd, ErrorCode::AgentUnavailable, "kill rejected by machine")
+            self.fail_retryable(chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "kill rejected by instance")
                 .await;
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(session_id, error = ?e, "mark_dispatched failed");
+            warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
-            warn!(session_id, error = ?e, "mark_delivery_confirmed failed");
+            warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
             return;
         }
         // 投影 Closed 终态 + 提交（§7.3）。
@@ -1097,35 +1185,35 @@ impl CommandCoordinator {
             .inner
             .doc
             .submit_command(
-                session_id,
-                DocCommand::SetSessionTerminal {
-                    status: acp_hub_proto::schema::SessionStatus::Closed,
+                chat_id,
+                DocCommand::SetChatTerminal {
+                    status: acp_hub_proto::schema::ChatStatus::Closed,
                 },
             )
             .await
         {
-            warn!(session_id, "close projection persist failed");
+            warn!(chat_id, "close projection persist failed");
         }
         if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
-            warn!(session_id, error = ?e, "mark_projection_committed failed");
+            warn!(chat_id, error = ?e, "mark_projection_committed failed");
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
-            warn!(session_id, error = ?e, "mark_completed failed");
+            warn!(chat_id, error = ?e, "mark_completed failed");
             return;
         }
         let _ = self
             .inner
-            .sessions
-            .transition(session_id, SessionState::Closed)
+            .chats
+            .transition(chat_id, ChatState::Closed)
             .await;
         store.mark_closed(Utc::now());
-        let _ = self.inner.doc.close_session(session_id).await;
+        let _ = self.inner.doc.close_chat(chat_id).await;
         self.send_committed(cmd, None, None).await;
     }
 
     /// resolve 执行（§7.4 规则 4：CAS 迁移成功后才下发 ACP）。
-    async fn exec_resolve(&self, session_id: &str, cmd: &ExecCmd) {
+    async fn exec_resolve(&self, chat_id: &str, cmd: &ExecCmd) {
         let command_id_str = extract_command_id(&cmd.action).unwrap_or_default();
         let command_id = match uuid::Uuid::parse_str(&command_id_str) {
             Ok(id) => id,
@@ -1142,12 +1230,12 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(session_id, error = ?e, "mark_intent_durable failed");
+            warn!(chat_id, error = ?e, "mark_intent_durable failed");
             return;
         }
         // 1. CAS（§7.4 规则 4：pending → resolved 原子一次）。
@@ -1155,7 +1243,7 @@ impl CommandCoordinator {
             .inner
             .doc
             .submit_command(
-                session_id,
+                chat_id,
                 DocCommand::ResolvePermission {
                     permission_id: payload.permission_id.clone(),
                     decision: payload.decision,
@@ -1174,31 +1262,31 @@ impl CommandCoordinator {
                         command_id: command_id_str.clone(),
                         status: AckStatus::Duplicate,
                         turn_id: None,
-                        session_id: None,
+                        chat_id: None,
                         committed_projection_version: None,
                     })))
                     .await;
                 return;
             }
-            SubmitResult::Rejected(SubmitError::SessionNotFound) => {
-                self.send_error(cmd, ErrorCode::SessionNotFound, "session not found", false)
+            SubmitResult::Rejected(SubmitError::ChatNotFound) => {
+                self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
                     .await;
                 return;
             }
             SubmitResult::PersistFailed => {
-                warn!(session_id, "resolve CAS persist failed (degraded)");
+                warn!(chat_id, "resolve CAS persist failed (degraded)");
                 return;
             }
             _ => {}
         }
         // 2. 翻译 + 下发（L1+L2）。
-        let Some(entry) = self.inner.sessions.entry(session_id).await else {
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
             return;
         };
-        let Some(acp_session_id) = entry.acp_session_id.clone() else {
+        let Some(acp_session_id) = entry.session_id.clone() else {
             return;
         };
-        let machine_id = entry.machine_id.clone();
+        let instance_id = entry.instance_id.clone();
         let msg = match self.inner.translator.translate(
             &cmd.action,
             &OutboundCtx {
@@ -1221,28 +1309,28 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.machine.forward_rpc(&machine_id, session_id, &msg).await {
-            self.fail_retryable(session_id, command_id, cmd, machine_error_code(&e), "forward failed")
+        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
+            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
                 .await;
             return;
         }
         if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(session_id, error = ?e, "mark_dispatched failed");
+            warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
         // 3. L3。
         match tokio::time::timeout(self.inner.l3_timeout, rx).await {
             Ok(Ok(r)) if r.get("error").is_none() => {
                 if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
-                    warn!(session_id, error = ?e, "mark_delivery_confirmed failed");
+                    warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
-                    warn!(session_id, error = ?e, "mark_projection_committed failed");
+                    warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
-                    warn!(session_id, error = ?e, "mark_completed failed");
+                    warn!(chat_id, error = ?e, "mark_completed failed");
                     return;
                 }
                 self.send_committed(cmd, None, None).await;
@@ -1262,19 +1350,19 @@ impl CommandCoordinator {
     }
 
     /// 半创建状态清理（§6.2）：补发 kill + 关闭 doc/会话/持久化目录。
-    async fn cleanup_create(&self, session_id: &str, machine_id: &str) {
-        let kill = MachineKill {
+    async fn cleanup_create(&self, chat_id: &str, instance_id: &str) {
+        let kill = InstanceKill {
             command_id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
+            chat_id: chat_id.to_string(),
             grace: None,
         };
-        if let Err(e) = self.inner.machine.send_kill(machine_id, kill).await {
-            debug!(session_id, error = ?e, "cleanup kill failed (already gone)");
+        if let Err(e) = self.inner.instance.send_kill(instance_id, kill).await {
+            debug!(chat_id, error = ?e, "cleanup kill failed (already gone)");
         }
-        let _ = self.inner.doc.close_session(session_id).await;
-        let _ = self.inner.sessions.transition(session_id, SessionState::Closed).await;
-        if let Ok(sid) = uuid::Uuid::parse_str(session_id) {
-            let _ = self.inner.store.remove_session(sid);
+        let _ = self.inner.doc.close_chat(chat_id).await;
+        let _ = self.inner.chats.transition(chat_id, ChatState::Closed).await;
+        if let Ok(sid) = uuid::Uuid::parse_str(chat_id) {
+            let _ = self.inner.store.remove_chat(sid);
         }
     }
 
@@ -1282,7 +1370,7 @@ impl CommandCoordinator {
     /// action_error(retryable=true)。
     async fn fail_retryable(
         &self,
-        session_id: &str,
+        chat_id: &str,
         command_id: uuid::Uuid,
         cmd: &ExecCmd,
         code: ErrorCode,
@@ -1292,12 +1380,12 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
-            warn!(session_id, error = ?e, "mark_failed failed");
+            warn!(chat_id, error = ?e, "mark_failed failed");
         }
         let _ = store.outbox().lock().await.clear_for_retry(command_id);
         let retryable = code.default_retryable();
@@ -1308,7 +1396,7 @@ impl CommandCoordinator {
     /// action_error(retryable=false)。
     async fn fail_terminal(
         &self,
-        session_id: &str,
+        chat_id: &str,
         command_id: uuid::Uuid,
         cmd: &ExecCmd,
         code: ErrorCode,
@@ -1318,12 +1406,12 @@ impl CommandCoordinator {
         let Some(store) = self
             .inner
             .store
-            .session(session_uuid(session_id).unwrap_or_default())
+            .chat(chat_uuid(chat_id).unwrap_or_default())
         else {
             return;
         };
         if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
-            warn!(session_id, error = ?e, "mark_failed failed");
+            warn!(chat_id, error = ?e, "mark_failed failed");
         }
         self.send_error(cmd, code, message, false).await;
     }
@@ -1346,7 +1434,7 @@ impl CommandCoordinator {
             .await;
     }
 
-    async fn send_committed(&self, cmd: &ExecCmd, turn_id: Option<&str>, session_id: Option<&str>) {
+    async fn send_committed(&self, cmd: &ExecCmd, turn_id: Option<&str>, chat_id: Option<&str>) {
         let command_id = extract_command_id(&cmd.action).unwrap_or_default();
         let _ = cmd
             .tx
@@ -1354,7 +1442,7 @@ impl CommandCoordinator {
                 command_id,
                 status: AckStatus::Committed,
                 turn_id: turn_id.map(str::to_string),
-                session_id: session_id.map(str::to_string),
+                chat_id: chat_id.map(str::to_string),
                 committed_projection_version: None,
             })))
             .await;
@@ -1399,13 +1487,13 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     }
 }
 
-fn extract_session_id(action: &ActionEnvelope) -> Option<String> {
+fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
     match action {
-        ActionEnvelope::Prompt { payload, .. } => Some(payload.session_id.clone()),
-        ActionEnvelope::Cancel { payload, .. } => Some(payload.session_id.clone()),
-        ActionEnvelope::Close { payload, .. } => Some(payload.session_id.clone()),
-        ActionEnvelope::ResolvePermission { payload, .. } => Some(payload.session_id.clone()),
-        ActionEnvelope::Load { payload, .. } => Some(payload.session_id.clone()),
+        ActionEnvelope::Prompt { payload, .. } => Some(payload.chat_id.clone()),
+        ActionEnvelope::Cancel { payload, .. } => Some(payload.chat_id.clone()),
+        ActionEnvelope::Close { payload, .. } => Some(payload.chat_id.clone()),
+        ActionEnvelope::ResolvePermission { payload, .. } => Some(payload.chat_id.clone()),
+        ActionEnvelope::Load { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::Create { .. } => None,
         ActionEnvelope::SubscribeEvents { .. } | ActionEnvelope::UnsubscribeEvents { .. } => None,
     }
@@ -1436,20 +1524,20 @@ enum DedupVerdict {
     Proceed,
 }
 
-/// machine 错误 → 稳定错误码（§4.4 retryable 分类事实源）。
-fn machine_error_code(e: &MachineError) -> ErrorCode {
+/// instance 错误 → 稳定错误码（§4.4 retryable 分类事实源）。
+fn instance_error_code(e: &InstanceError) -> ErrorCode {
     match e {
-        MachineError::Offline => ErrorCode::MachineOffline,
-        MachineError::Timeout
-        | MachineError::ForwardRejected(_)
-        | MachineError::UnknownMachine(_)
-        | MachineError::ConnectionGone => ErrorCode::AgentUnavailable,
+        InstanceError::Offline => ErrorCode::InstanceOffline,
+        InstanceError::Timeout
+        | InstanceError::ForwardRejected(_)
+        | InstanceError::UnknownInstance(_)
+        | InstanceError::ConnectionGone => ErrorCode::AgentUnavailable,
     }
 }
 
-/// session_id（hub 侧，uuid 形态）→ Uuid。
-fn session_uuid(session_id: &str) -> Option<uuid::Uuid> {
-    uuid::Uuid::parse_str(session_id).ok()
+/// chat_id（hub 侧，uuid 形态）→ Uuid。
+fn chat_uuid(chat_id: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(chat_id).ok()
 }
 
 /// LastError.code（String，§4.4 稳定码）→ ErrorCode（脱敏映射；未知串 → 
@@ -1458,8 +1546,8 @@ fn error_code_from_str(s: &str) -> ErrorCode {
     match s {
         "UNAUTHENTICATED" => ErrorCode::Unauthenticated,
         "FORBIDDEN" => ErrorCode::Forbidden,
-        "SESSION_NOT_FOUND" => ErrorCode::SessionNotFound,
-        "MACHINE_OFFLINE" => ErrorCode::MachineOffline,
+        "CHAT_NOT_FOUND" => ErrorCode::ChatNotFound,
+        "INSTANCE_OFFLINE" => ErrorCode::InstanceOffline,
         "VERSION_CONFLICT" => ErrorCode::VersionConflict,
         "INVALID_STATE" => ErrorCode::InvalidState,
         "RATE_LIMITED" => ErrorCode::RateLimited,
@@ -1471,7 +1559,7 @@ fn error_code_from_str(s: &str) -> ErrorCode {
 
 /// session/new response 解析：`result.sessionId` / `result.session_id` / result
 /// 直接为字符串。
-fn extract_acp_session_id(response: &serde_json::Value) -> Option<String> {
+fn extract_session_id(response: &serde_json::Value) -> Option<String> {
     let result = response.get("result")?;
     if let Some(s) = result.get("sessionId").and_then(serde_json::Value::as_str) {
         return Some(s.to_string());

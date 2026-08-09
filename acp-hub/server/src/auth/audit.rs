@@ -7,7 +7,7 @@
 //! 密钥永不落日志。字段集合恒 ⊆ `{action, command_id, token_id, result,
 //! duration_ms, auth_failed_total}`（§6.2 T8 断言）。
 //!
-//! 触发点：`auth.machine` / `auth.client`（本模块）、`token.generate`（main.rs
+//! 触发点：`auth.instance` / `auth.client`（本模块）、`token.generate`（main.rs
 //! token 子命令）；`conn.open` / `conn.close`（F5 gateway 复用同一 helper）。
 
 use std::time::Duration;
@@ -15,7 +15,7 @@ use std::time::Duration;
 /// 审计最小集：动作类型 / commandId / token_id / 结果 / 耗时 /
 /// （可选）认证失败总数快照（§4.8：失败路径携带，结构化日志即聚合事实源）。
 ///
-/// `action` 取 `"auth.machine"` / `"auth.client"` / `"token.generate"` /
+/// `action` 取 `"auth.instance"` / `"auth.client"` / `"token.generate"` /
 /// `"conn.open"` / `"conn.close"` 等稳定枚举值；`result` 取 `"ok"` /
 /// `"unknown_token"` / `"replay"` 等短稳定串（不做自由文本，保持可聚合）。
 pub fn audit(

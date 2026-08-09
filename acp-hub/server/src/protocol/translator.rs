@@ -15,7 +15,7 @@ use serde_json::json;
 use acp_hub_proto::action::ActionEnvelope;
 
 /// 客户端 cwd 形态校验（§4.3 裁决）：绝对路径 + 无 NUL/控制字符 + ≤ 4KB。
-/// 存在性由 machine spawn 结果判定（失败走 `AGENT_UNAVAILABLE`）。
+/// 存在性由 instance spawn 结果判定（失败走 `AGENT_UNAVAILABLE`）。
 pub const CWD_MAX_BYTES: usize = 4096;
 
 /// 出站翻译错误。
@@ -40,7 +40,7 @@ pub struct OutboundCtx {
     /// binding 翻译后的 acp_session_id（hub session_id → 协议投递 id，§6.1）。
     pub acp_session_id: String,
     /// prompt 注入的 turnId（§4.4 生成规则：server 生成 uuid，同 commandId
-    /// 重试复用）。随 `session/prompt` 下发——machine 侧 ACP 会话沿用同一
+    /// 重试复用）。随 `session/prompt` 下发——instance 侧 ACP 会话沿用同一
     /// turnId，聚合器以 turnId 为幂等键（§6.3/§6.5），事件 turn_id 必须与
     /// 之一致；非 prompt 方法面不使用。
     pub turn_id: String,
@@ -87,24 +87,26 @@ impl Translator {
         match action {
             ActionEnvelope::Prompt { payload, .. } => {
                 validate_cwd(&ctx.cwd)?;
+                // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
+                // 序列（`prompt: [{type:"text",text}]`），非 message 字符串。
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
                     "id": rpc_id,
                     "method": "session/prompt",
                     "params": {
                         "sessionId": ctx.acp_session_id,
-                        "message": payload.message,
-                        // server 生成的 turnId（§4.4）：machine 侧 ACP 会话
-                        // 沿用同一 id，事件 turn_id 与聚合器幂等键对齐（§6.5）。
-                        "turnId": ctx.turn_id,
+                        "prompt": [
+                            { "type": "text", "text": payload.message },
+                        ],
                     },
                 })))
             }
             ActionEnvelope::Cancel { .. } => {
                 validate_cwd(&ctx.cwd)?;
+                // agent-client-protocol（peri acp 实测）：session/cancel 是
+                // **notification**（无 id、无响应帧），非 request。
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
-                    "id": rpc_id,
                     "method": "session/cancel",
                     "params": { "sessionId": ctx.acp_session_id },
                 })))
@@ -124,13 +126,13 @@ impl Translator {
                     },
                 })))
             }
-            // create/close 不走此入口（create 两段式；close = machine/kill，
-            // 由 coordinator 直接构造 MachineKill）。
+            // create/close 不走此入口（create 两段式；close = instance/kill，
+            // 由 coordinator 直接构造 InstanceKill）。
             ActionEnvelope::Create { .. } => {
                 Err(TranslateError::UnsupportedAction("session/create (two-phase)"))
             }
             ActionEnvelope::Close { .. } => {
-                Err(TranslateError::UnsupportedAction("session/close (machine/kill)"))
+                Err(TranslateError::UnsupportedAction("session/close (instance/kill)"))
             }
             ActionEnvelope::Load { .. } => Err(TranslateError::UnsupportedAction("session/load (M2)")),
             ActionEnvelope::SubscribeEvents { .. } => {
@@ -144,6 +146,9 @@ impl Translator {
 
     /// create 序列第一步：`initialize` JSON-RPC（§6.2；10s 超时由 coordinator
     /// 执行）。返回 `(rpc_id, 请求帧)`。
+    ///
+    /// `protocolVersion` 必填（agent-client-protocol / peri acp 实测：缺省
+    /// 即 `missing field protocolVersion`）。
     pub fn initialize_rpc(&self, cwd: &str) -> (String, serde_json::Value) {
         validate_cwd(cwd).expect("server-injected cwd must be valid");
         let rpc_id = self.alloc_rpc_id();
@@ -151,18 +156,22 @@ impl Translator {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "method": "initialize",
-            "params": { "cwd": cwd },
+            "params": { "cwd": cwd, "protocolVersion": 1 },
         });
         (rpc_id, msg)
     }
 
     /// create 序列第二步：`session/new`（M1 create 序列，§6.2；binding 30s
     /// 超时由 coordinator 执行）。返回 `(rpc_id, 请求帧)`。
+    ///
+    /// `mcpServers` 必填（agent-client-protocol / peri acp 实测：缺省即
+    /// `missing field mcpServers`；空数组 = 无 MCP）。
     pub fn session_new_rpc(&self, cwd: &str, title: Option<&str>) -> (String, serde_json::Value) {
         validate_cwd(cwd).expect("server-injected cwd must be valid");
         let rpc_id = self.alloc_rpc_id();
         let mut params = serde_json::Map::new();
         params.insert("cwd".to_string(), json!(cwd));
+        params.insert("mcpServers".to_string(), json!([]));
         if let Some(t) = title {
             params.insert("title".to_string(), json!(t));
         }

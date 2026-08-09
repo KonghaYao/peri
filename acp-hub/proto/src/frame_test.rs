@@ -2,22 +2,22 @@
 
 use crate::ack::{AckStatus, ActionAck, ActionError, ErrorCode};
 use crate::action::{
-    ActionEnvelope, CancelSessionPayload, CloseSessionPayload, CreateSessionPayload,
-    LoadSessionPayload, PermissionDecision, PromptSessionPayload, ResolvePermissionPayload,
+    ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChatPayload,
+    LoadChatPayload, PermissionDecision, PromptChatPayload, ResolvePermissionPayload,
     SubscribeEventsPayload, UnsubscribeEventsPayload,
 };
 use crate::conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 use crate::event::EventFrame;
 use crate::frame::{Frame, ProtoError};
-use crate::machine::{
-    BufferedFrame, MachineBufferSync, MachineEvent, MachineHeartbeat, MachineHello,
-    MachineKill, MachineKillAck, MachineProcessExit, MachineSpawn, MachineSpawnAck,
+use crate::instance::{
+    BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello,
+    InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
 use crate::ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// 覆盖 §3.2 全表 25 帧的构造器（M1 + 保留类型 + machine/forward 系）。
+/// 覆盖 §3.2 全表 25 帧的构造器（M1 + 保留类型 + instance/forward 系）。
 fn all_frames() -> Vec<Frame> {
     let mut env = HashMap::new();
     env.insert("PATH".to_string(), "/usr/bin".to_string());
@@ -28,41 +28,41 @@ fn all_frames() -> Vec<Frame> {
         // --- action 方法面（§4.3，含 M2/M3 保留类型） ---
         Frame::Action(ActionEnvelope::Create {
             command_id: "c1".into(),
-            payload: CreateSessionPayload {
-                machine_id: None,
+            payload: CreateChatPayload {
+                instance_id: None,
                 cwd: Some("/tmp".into()),
                 title: Some("t".into()),
             },
         }),
         Frame::Action(ActionEnvelope::Load {
             command_id: "c2".into(),
-            payload: LoadSessionPayload {
-                session_id: "s1".into(),
+            payload: LoadChatPayload {
+                chat_id: "s1".into(),
             },
         }),
         Frame::Action(ActionEnvelope::Close {
             command_id: "c3".into(),
-            payload: CloseSessionPayload {
-                session_id: "s1".into(),
+            payload: CloseChatPayload {
+                chat_id: "s1".into(),
             },
         }),
         Frame::Action(ActionEnvelope::Prompt {
             command_id: "c4".into(),
-            payload: PromptSessionPayload {
-                session_id: "s1".into(),
+            payload: PromptChatPayload {
+                chat_id: "s1".into(),
                 message: "hi".into(),
             },
         }),
         Frame::Action(ActionEnvelope::Cancel {
             command_id: "c5".into(),
-            payload: CancelSessionPayload {
-                session_id: "s1".into(),
+            payload: CancelChatPayload {
+                chat_id: "s1".into(),
             },
         }),
         Frame::Action(ActionEnvelope::ResolvePermission {
             command_id: "c6".into(),
             payload: ResolvePermissionPayload {
-                session_id: "s1".into(),
+                chat_id: "s1".into(),
                 permission_id: "p1".into(),
                 decision: PermissionDecision::Allow,
             },
@@ -70,14 +70,14 @@ fn all_frames() -> Vec<Frame> {
         Frame::Action(ActionEnvelope::SubscribeEvents {
             command_id: "c7".into(),
             payload: SubscribeEventsPayload {
-                session_id: Some("s1".into()),
+                chat_id: Some("s1".into()),
                 from_seq: Some(3),
             },
         }),
         Frame::Action(ActionEnvelope::UnsubscribeEvents {
             command_id: "c8".into(),
             payload: UnsubscribeEventsPayload {
-                session_id: None,
+                chat_id: None,
             },
         }),
         // --- Ack 与错误 ---
@@ -85,7 +85,7 @@ fn all_frames() -> Vec<Frame> {
             command_id: "c1".into(),
             status: AckStatus::Committed,
             turn_id: Some("t1".into()),
-            session_id: Some("s1".into()),
+            chat_id: Some("s1".into()),
             committed_projection_version: Some(7),
         }),
         Frame::ActionError(ActionError {
@@ -97,7 +97,7 @@ fn all_frames() -> Vec<Frame> {
         }),
         // --- 连接生命周期 ---
         Frame::Event(EventFrame {
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             seq: 5,
             frame: serde_json::json!({"type": "agent_message_chunk", "text": "x"}),
         }),
@@ -115,12 +115,12 @@ fn all_frames() -> Vec<Frame> {
             token: "tok".into(),
         }),
         Frame::AuthResponse(AuthResponse {
-            session_context: "AA==".into(),
+            connection_context: "AA==".into(),
             hmac: "BQ==".into(),
         }),
         // --- y-sync ---
         Frame::YsyncSubscribe(YsyncSubscribe {
-            docs: vec![DocId::chat("s1"), DocId::session("s1")],
+            docs: vec![DocId::chat("s1"), DocId::control("s1")],
         }),
         Frame::YsyncUnsubscribe(YsyncUnsubscribe {
             docs: vec![DocId::chat("s1")],
@@ -136,8 +136,8 @@ fn all_frames() -> Vec<Frame> {
         Frame::YsyncAwareness(YsyncAwareness {
             msg: "AAAA".into(),
         }),
-        // --- machine 9 帧 ---
-        Frame::MachineHello(MachineHello {
+        // --- instance 9 帧 ---
+        Frame::InstanceHello(InstanceHello {
             token: "mt".into(),
             hostname: "host1".into(),
             caps: serde_json::json!({"acp": "1.4"}),
@@ -146,18 +146,18 @@ fn all_frames() -> Vec<Frame> {
             stream_epochs: Some(epochs.clone()),
             nonce: "AAAA".into(),
         }),
-        Frame::MachineHeartbeat(MachineHeartbeat {
+        Frame::InstanceHeartbeat(InstanceHeartbeat {
             load: 42,
             alive_sessions: vec!["s1".into()],
         }),
-        Frame::MachineEvent(MachineEvent {
-            session_id: "s1".into(),
+        Frame::InstanceEvent(InstanceEvent {
+            chat_id: "s1".into(),
             epoch: 2,
             seq: 9,
             frame: serde_json::json!({"type": "agent_message_chunk"}),
         }),
-        Frame::MachineBufferSync(MachineBufferSync {
-            session_id: "s1".into(),
+        Frame::InstanceBufferSync(InstanceBufferSync {
+            chat_id: "s1".into(),
             epoch: 2,
             from_seq: 7,
             frames: vec![BufferedFrame {
@@ -165,31 +165,31 @@ fn all_frames() -> Vec<Frame> {
                 frame: serde_json::json!({"type": "agent_message_chunk"}),
             }],
         }),
-        Frame::MachineSpawn(MachineSpawn {
+        Frame::InstanceSpawn(InstanceSpawn {
             command_id: "c9".into(),
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             cmd: vec!["acp".into(), "--serve".into()],
             cwd: "/tmp".into(),
             env: Some(env),
         }),
-        Frame::MachineKill(MachineKill {
+        Frame::InstanceKill(InstanceKill {
             command_id: "c10".into(),
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             grace: Some(500),
         }),
-        Frame::MachineSpawnAck(MachineSpawnAck {
+        Frame::InstanceSpawnAck(InstanceSpawnAck {
             command_id: "c9".into(),
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             ok: true,
             error: None,
         }),
-        Frame::MachineKillAck(MachineKillAck {
+        Frame::InstanceKillAck(InstanceKillAck {
             command_id: "c10".into(),
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             ok: true,
         }),
-        Frame::MachineProcessExit(MachineProcessExit {
-            session_id: "s1".into(),
+        Frame::InstanceProcessExit(InstanceProcessExit {
+            chat_id: "s1".into(),
             code: 0,
         }),
     ]
@@ -215,8 +215,8 @@ fn all_frame_tags_roundtrip() {
 fn action_envelope_nested_tag_shape() {
     let frame = Frame::Action(ActionEnvelope::Prompt {
         command_id: "c4".into(),
-        payload: PromptSessionPayload {
-            session_id: "s1".into(),
+        payload: PromptChatPayload {
+            chat_id: "s1".into(),
             message: "hi".into(),
         },
     });
@@ -224,17 +224,17 @@ fn action_envelope_nested_tag_shape() {
         serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
     assert_eq!(value["t"], "action");
     assert_eq!(value["commandId"], "c4");
-    assert_eq!(value["type"], "session/prompt");
-    assert_eq!(value["payload"]["sessionId"], "s1");
+    assert_eq!(value["type"], "chat/prompt");
+    assert_eq!(value["payload"]["chatId"], "s1");
     assert_eq!(value["payload"]["message"], "hi");
 }
 
-/// payload 判别（§12.1）：`session/load` 与 `session/close` 同形 payload
-/// `{sessionId}` 经 envelope 层 `type` 判别无歧义。
+/// payload 判别（§12.1）：`chat/load` 与 `chat/close` 同形 payload
+/// `{chatId}` 经 envelope 层 `type` 判别无歧义。
 #[test]
 fn load_vs_close_discrimination() {
-    let load_raw = r#"{"t":"action","commandId":"c2","type":"session/load","payload":{"sessionId":"s1"}}"#;
-    let close_raw = r#"{"t":"action","commandId":"c3","type":"session/close","payload":{"sessionId":"s1"}}"#;
+    let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#;
+    let close_raw = r#"{"t":"action","commandId":"c3","type":"chat/close","payload":{"chatId":"s1"}}"#;
 
     let load = Frame::parse(load_raw).unwrap();
     let close = Frame::parse(close_raw).unwrap();
@@ -249,7 +249,7 @@ fn unknown_tag_is_unsupported() {
     for raw in [
         r#"{"t":"foo"}"#,
         r#"{"t":"ysync.foo"}"#,
-        r#"{"t":"machine/unknown"}"#,
+        r#"{"t":"instance/unknown"}"#,
     ] {
         match Frame::parse(raw) {
             Err(ProtoError::Unsupported(_)) => {}
@@ -271,7 +271,7 @@ fn malformed_input_is_malformed() {
         "",
         r#"{"t":42}"#,
         r#"{"t":"action"}"#,                      // 缺 type/payload
-        r#"{"t":"machine/spawn"}"#,               // 缺必填字段
+        r#"{"t":"instance/spawn"}"#,               // 缺必填字段
         r#"{"t":"ysync.subscribe","docs":[1]}"#,  // 字段类型错误
     ] {
         match Frame::parse(raw) {
@@ -339,7 +339,7 @@ fn registry_doc_id_is_hub_registry() {
     assert_eq!(DocId::REGISTRY, DocId::from_str("hub:registry").unwrap());
     let v = serde_json::to_value(&DocId::REGISTRY).unwrap();
     assert_eq!(v, "hub:registry");
-    // 与 chat/session 形态互异
+    // 与 chat/control 形态互异
     assert_ne!(DocId::REGISTRY, DocId::chat("registry"));
-    assert_ne!(DocId::REGISTRY, DocId::session("registry"));
+    assert_ne!(DocId::REGISTRY, DocId::control("registry"));
 }

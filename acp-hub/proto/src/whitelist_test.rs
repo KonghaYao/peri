@@ -53,7 +53,7 @@ fn client_uplink_ysync_update_rejected() {
 #[test]
 fn non_m1_frames_are_not_in_frame_set() {
     for tag in ["event", "ysync.sync", "ysync.awareness"] {
-        for role in [Role::Client, Role::Machine] {
+        for role in [Role::Client, Role::Instance] {
             for dir in [Direction::Inbound, Direction::Outbound] {
                 assert_eq!(
                     m1_check(FrameTag(tag), role, dir),
@@ -65,43 +65,43 @@ fn non_m1_frames_are_not_in_frame_set() {
     }
 }
 
-/// machine 面：M1 即全量 9 帧 + auth_response（§9.2 注）。
+/// instance 面：M1 即全量 9 帧 + auth_response（§9.2 注）。
 #[test]
-fn machine_m1_set() {
+fn instance_m1_set() {
     // M→S
     for tag in [
-        "machine/hello",
-        "machine/heartbeat",
-        "machine/event",
-        "machine/buffer_sync",
-        "machine/spawn_ack",
-        "machine/kill_ack",
-        "machine/process_exit",
+        "instance/hello",
+        "instance/heartbeat",
+        "instance/event",
+        "instance/buffer_sync",
+        "instance/spawn_ack",
+        "instance/kill_ack",
+        "instance/process_exit",
     ] {
         assert_eq!(
-            m1_check(FrameTag(tag), Role::Machine, Direction::Inbound),
+            m1_check(FrameTag(tag), Role::Instance, Direction::Inbound),
             M1Check::Allowed,
             "{tag} M→S 应允许"
         );
     }
     // S→M
-    for tag in ["machine/spawn", "machine/kill", "auth_response"] {
+    for tag in ["instance/spawn", "instance/kill", "auth_response"] {
         assert_eq!(
-            m1_check(FrameTag(tag), Role::Machine, Direction::Outbound),
+            m1_check(FrameTag(tag), Role::Instance, Direction::Outbound),
             M1Check::Allowed,
             "{tag} S→M 应允许"
         );
     }
 }
 
-/// machine 帧在 client 面一律拒绝（角色隔离）。
+/// instance 帧在 client 面一律拒绝（角色隔离）。
 #[test]
-fn machine_frames_rejected_on_client_role() {
+fn instance_frames_rejected_on_client_role() {
     for tag in [
-        "machine/hello",
-        "machine/spawn",
-        "machine/kill_ack",
-        "machine/process_exit",
+        "instance/hello",
+        "instance/spawn",
+        "instance/kill_ack",
+        "instance/process_exit",
     ] {
         for dir in [Direction::Inbound, Direction::Outbound] {
             assert_eq!(
@@ -113,15 +113,15 @@ fn machine_frames_rejected_on_client_role() {
     }
 }
 
-/// client 帧在 machine 面一律拒绝（角色隔离）。
+/// client 帧在 instance 面一律拒绝（角色隔离）。
 #[test]
-fn client_frames_rejected_on_machine_role() {
+fn client_frames_rejected_on_instance_role() {
     for tag in ["action", "action_ack", "pong", "ready", "ysync.subscribe"] {
         for dir in [Direction::Inbound, Direction::Outbound] {
             assert_eq!(
-                m1_check(FrameTag(tag), Role::Machine, dir),
+                m1_check(FrameTag(tag), Role::Instance, dir),
                 M1Check::DirectionRejected,
-                "{tag} machine 面应拒绝"
+                "{tag} instance 面应拒绝"
             );
         }
     }
@@ -131,22 +131,22 @@ fn client_frames_rejected_on_machine_role() {
 #[test]
 fn m1_action_type_subset() {
     for t in [
-        "session/create",
-        "session/prompt",
-        "session/cancel",
-        "session/close",
+        "chat/create",
+        "chat/prompt",
+        "chat/cancel",
+        "chat/close",
         "permission/resolve",
     ] {
         assert!(m1_allows_action_type(t), "{t} 应在 M1");
     }
-    for t in ["session/load", "events/subscribe", "events/unsubscribe"] {
+    for t in ["chat/load", "events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
     assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 5);
 }
 
 /// 全量注册表：25 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与
-/// machine/forward 系，冲突 1 裁决）。
+/// instance/forward 系，冲突 1 裁决）。
 #[test]
 fn frame_tag_registry_completeness() {
     let tags: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
@@ -166,17 +166,17 @@ fn frame_tag_registry_completeness() {
         "ysync.update",
         "ysync.sync",
         "ysync.awareness",
-        "machine/hello",
-        "machine/heartbeat",
-        "machine/event",
-        "machine/buffer_sync",
-        "machine/spawn",
-        "machine/kill",
-        "machine/forward",
-        "machine/spawn_ack",
-        "machine/kill_ack",
-        "machine/forward_ack",
-        "machine/process_exit",
+        "instance/hello",
+        "instance/heartbeat",
+        "instance/event",
+        "instance/buffer_sync",
+        "instance/spawn",
+        "instance/kill",
+        "instance/forward",
+        "instance/spawn_ack",
+        "instance/kill_ack",
+        "instance/forward_ack",
+        "instance/process_exit",
     ] {
         assert!(tags.contains(&expected), "缺少注册 tag {expected}");
     }

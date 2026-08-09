@@ -2,7 +2,7 @@
 name = "acp-hub-server"
 version.workspace = true
 edition.workspace = true
-description = "acp-hub 中心控制面：认证、控制面、ACPChannel 规范化、聚合器、DocManager、machine 注册表"
+description = "acp-hub 中心控制面：认证、控制面、ACPChannel 规范化、聚合器、DocManager、instance 注册表"
 
 [dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

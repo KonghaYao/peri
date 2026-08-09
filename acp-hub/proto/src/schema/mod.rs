@@ -1,6 +1,6 @@
 //! Y.Doc schema 的 Rust 类型镜像（§5.3 / §5.4 / §5.5）。
 //!
-//! 承载 Chat / Session / Registry 三 Doc 的类型，**字段与枚举严格照抄架构
+//! 承载 Chat / Control / Registry 三 Doc 的类型，**字段与枚举严格照抄架构
 //! 文档 §5.3–5.5**。定位：字段名/枚举/嵌套关系的事实源 + 测试与调试用 serde
 //! round-trip（镜像类型 derive Serialize/Deserialize，camelCase）；**不持有
 //! yrs 句柄**——实际 yrs 读写由 server 聚合器经本模块导出的类型与字段常量
@@ -12,17 +12,17 @@
 
 mod chat;
 mod registry;
-mod session;
+mod control;
 
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod schema_test;
 
 pub use chat::{ChatDocRoot, ChatEntry, ContentBlock, ToolCallProjection};
-pub use registry::{MachineView, RegistryDocRoot, RegistryGlobal, SessionSummary};
-pub use session::{
+pub use registry::{InstanceView, RegistryDocRoot, RegistryGlobal, ChatSummary};
+pub use control::{
     ActiveTurnProjection, AgentStatusProjection, PermissionProjection,
-    SessionDocRoot, SessionInfoProjection, SessionSummaryProjection,
+    ControlDocRoot, ChatInfoProjection, SessionSummaryProjection,
 };
 
 use serde::{Deserialize, Serialize};
@@ -121,11 +121,11 @@ pub enum TurnStatus {
     Failed,
 }
 
-/// Session 状态（§5.4 未展开，【决策】按架构 §7.3 session 生命周期定稿；
+/// Chat 状态（§5.4 未展开，【决策】按架构 §7.3 chat 生命周期定稿；
 /// gap 独立字段承载，不进 status 枚举）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum SessionStatus {
+pub enum ChatStatus {
     Accepting,
     Active,
     Ended,
@@ -133,10 +133,10 @@ pub enum SessionStatus {
     Crashed,
 }
 
-/// Machine 状态（§5.5）。
+/// Instance 状态（§5.5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum MachineStatus {
+pub enum InstanceStatus {
     Online,
     Offline,
     Unknown,

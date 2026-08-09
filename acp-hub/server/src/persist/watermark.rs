@@ -1,18 +1,18 @@
 //! (epoch, last_seq) 水位（§4.5.1/§6/§8.5）：补推起点。
 //!
-//! 每 session 独立小文件 `watermark.json`（§2 目录布局），单条 blob + JSON
+//! 每 chat 独立小文件 `watermark.json`（§2 目录布局），单条 blob + JSON
 //! 包裹（§4.1）。更新时机：每次 `UpdateLog::append` 成功后更新（epoch 相同只
 //! 推进 seq；epoch 变化则替换）——append 顺序 = 写日志记录 → fsync → 写水位
 //! → fsync → 返回（§4.3）。崩溃于两者之间 → 水位落后 → 对齐规则（[`align`]）
 //! 吸收。
 //!
 //! 加载与对齐规则（§8.4.1 不变量 2）：
-//! 1. 水位缺失（新 session/文件损坏）→ 以日志尾部为准；无日志 → `(0, 0)`
-//!    （从 1 开始补推，machine 环形滑窗 500 条兜底，§8.5）；
+//! 1. 水位缺失（新 chat/文件损坏）→ 以日志尾部为准；无日志 → `(0, 0)`
+//!    （从 1 开始补推，instance 环形滑窗 500 条兜底，§8.5）；
 //! 2. 水位与日志尾部 epoch 相同：`last_seq = min(水位, 日志)`，不等 →
 //!    `SeqMismatch` 告警；
 //! 3. epoch 不同：旧流 seq 空间作废（§4.5.1），以水位为准（水位为权威代际），
-//!    `EpochMismatch` 告警；是否判不可校准 gap 属上层（session 状态机）裁决。
+//!    `EpochMismatch` 告警；是否判不可校准 gap 属上层（chat 状态机）裁决。
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ struct WatermarkFile {
 /// (epoch, last_seq) 水位（§4.5.1/§6）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Watermark {
-    /// 流纪元（machine 侧 per-session 代际，§4.5.1）。
+    /// 流纪元（instance 侧 per-chat 代际，§4.5.1）。
     pub epoch: u32,
     /// 已落盘的最大帧 seq（§8.5：`from_seq = last_seq + 1`）。
     pub last_seq: u64,
@@ -66,7 +66,7 @@ pub enum AlignmentWarning {
     },
 }
 
-/// 水位存储（每 session 独立小文件，§6）。
+/// 水位存储（每 chat 独立小文件，§6）。
 ///
 /// 内部 `Mutex` 保护内存值（对齐结果）与 dirty 标记；文件 I/O 为同步小操作
 /// （设计稿 §10 并发模型）。写采用 tmp → fsync → rename → 目录 fsync（与
@@ -86,15 +86,15 @@ struct WatermarkState {
 }
 
 impl WatermarkStore {
-    /// 打开（或创建）session 的水位存储。
+    /// 打开（或创建）chat 的水位存储。
     pub fn open(
-        session_dir: &Path,
+        chat_dir: &Path,
         fsync_mode: FsyncMode,
         degraded: std::sync::Arc<DegradedFlag>,
     ) -> Self {
         WatermarkStore {
-            path: session_dir.join(WATERMARK_FILE),
-            tmp_path: session_dir.join(format!("{WATERMARK_FILE}.tmp")),
+            path: chat_dir.join(WATERMARK_FILE),
+            tmp_path: chat_dir.join(format!("{WATERMARK_FILE}.tmp")),
             fsync_mode,
             degraded,
             state: Mutex::new(WatermarkState {
@@ -246,7 +246,7 @@ impl WatermarkStore {
             }
         }
         crate::persist::update_log::sync_dir(
-            self.path.parent().expect("session dir"),
+            self.path.parent().expect("chat dir"),
         )?;
         Ok(())
     }

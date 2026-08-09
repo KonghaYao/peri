@@ -5,20 +5,20 @@
 //! 可验证（架构 §9.2 顾问3：「测试向量必须以字节级定义」）。
 
 use crate::hmac::{
-    compute_mac, derive_mac_key, generate_challenge_nonce, generate_session_context,
+    compute_mac, derive_mac_key, generate_challenge_nonce, generate_connection_context,
     mac_input, verify_mac, HmacError, SeenNonces, CHALLENGE_NONCE_LEN, HMAC_OUTPUT_LEN,
-    SESSION_CONTEXT_LEN,
+    CONNECTION_CONTEXT_LEN,
 };
 use base64::Engine as _;
 
-/// 测试专用固定 machine_token（32B）。
+/// 测试专用固定 instance_token（32B）。
 const TOKEN: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 /// 固定 challenge_nonce。
 const CHALLENGE: [u8; 32] = [0xAA; 32];
-/// 固定 session_context。
+/// 固定 connection_context。
 const CONTEXT: [u8; 32] = [0xBB; 32];
 const VERSION: &str = "1";
-const ROLE: &str = "machine";
+const ROLE: &str = "instance";
 
 /// 向量 12 主向量：固定输入 → 期望密钥/输入字节/MAC（固化值）。
 #[test]
@@ -27,29 +27,29 @@ fn hmac_byte_level_vector() {
     let key = derive_mac_key(&TOKEN, ROLE);
     assert_eq!(
         hex(&key),
-        "5cb74e37d930d41ff8c7a199c715af5a5527790b9ee4f917a917d18837c1a9b9"
+        "a8f589b9745ae5101cfa8a83bd9b20d6c4eb494b96d32c8b14ebff4581851152"
     );
 
     // MAC 输入规范化：字段顺序 challenge‖context‖version‖role，u16 BE 长度前缀
     let input = mac_input(&CHALLENGE, &CONTEXT, VERSION, ROLE);
-    assert_eq!(input.len(), 80, "2+32 + 2+32 + 2+1 + 2+7");
+    assert_eq!(input.len(), 81, "2+32 + 2+32 + 2+1 + 2+8");
     assert_eq!(
         hex(&input),
         concat!(
             "0020", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "0020", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "0001", "31",
-            "0007", "6d616368696e65",
+            "0008", "696e7374616e6365",
         )
     );
 
     // HMAC-SHA256 输出（base64，RFC 4648 标准字母表 + padding）
     let mac = compute_mac(&key, &input);
-    assert_eq!(b64(&mac), "zpu6t1CWDyExXI74bT4/p2PFdudXGAxR2oaOAaW0zZA=");
+    assert_eq!(b64(&mac), "5pS+WZkp9gV/NWS/wNmyB8TZHJrPjpNgHOwCrHzlIGY=");
 
     // 完整校验路径：Ok
     assert_eq!(
-        verify_mac(&key, &input, "zpu6t1CWDyExXI74bT4/p2PFdudXGAxR2oaOAaW0zZA="),
+        verify_mac(&key, &input, "5pS+WZkp9gV/NWS/wNmyB8TZHJrPjpNgHOwCrHzlIGY="),
         Ok(())
     );
 }
@@ -61,21 +61,21 @@ fn mac_input_field_layout() {
     let ctx = [0x02; 32];
 
     // 单字段结构：u16 BE 前缀 + 原始字节
-    let input = mac_input(&c, &ctx, "1", "machine");
+    let input = mac_input(&c, &ctx, "1", "instance");
     assert_eq!(&input[0..2], &0x0020u16.to_be_bytes());
     assert_eq!(&input[2..34], &c);
     assert_eq!(&input[34..36], &0x0020u16.to_be_bytes());
     assert_eq!(&input[36..68], &ctx);
     assert_eq!(&input[68..70], &0x0001u16.to_be_bytes());
     assert_eq!(&input[70..71], b"1");
-    assert_eq!(&input[71..73], &0x0007u16.to_be_bytes());
-    assert_eq!(&input[73..80], b"machine");
+    assert_eq!(&input[71..73], &0x0008u16.to_be_bytes());
+    assert_eq!(&input[73..81], b"instance");
 
     // 字段顺序即文档顺序（challenge 在前，role 在最后）：重排产物不同
-    let reordered = mac_input(&ctx, &c, "1", "machine");
+    let reordered = mac_input(&ctx, &c, "1", "instance");
     assert_ne!(input, reordered);
     // version/role 用其 UTF-8 表示
-    let v2 = mac_input(&c, &ctx, "2", "machine");
+    let v2 = mac_input(&c, &ctx, "2", "instance");
     assert_ne!(input, v2);
     let other_role = mac_input(&c, &ctx, "1", "client");
     assert_ne!(input, other_role);
@@ -122,16 +122,16 @@ fn verify_mac_bad_length() {
     );
 }
 
-/// 错误角色拒绝（§9.2 角色绑定）：用 `client` 角色派生的密钥校验 `machine`
+/// 错误角色拒绝（§9.2 角色绑定）：用 `client` 角色派生的密钥校验 `instance`
 /// 身份证明 → Mismatch。
 #[test]
 fn wrong_role_rejected() {
-    let machine_key = derive_mac_key(&TOKEN, "machine");
-    let input = mac_input(&CHALLENGE, &CONTEXT, VERSION, "machine");
-    let mac = compute_mac(&machine_key, &input);
+    let instance_key = derive_mac_key(&TOKEN, "instance");
+    let input = mac_input(&CHALLENGE, &CONTEXT, VERSION, "instance");
+    let mac = compute_mac(&instance_key, &input);
 
     let client_key = derive_mac_key(&TOKEN, "client");
-    assert_ne!(client_key, machine_key, "角色必须进入派生上下文");
+    assert_ne!(client_key, instance_key, "角色必须进入派生上下文");
     assert_eq!(
         verify_mac(&client_key, &input, &b64(&mac)),
         Err(HmacError::Mismatch)
@@ -206,11 +206,11 @@ fn constant_time_verify_paths() {
 fn generators_produce_distinct_32b() {
     let n1 = generate_challenge_nonce();
     let n2 = generate_challenge_nonce();
-    let c1 = generate_session_context();
+    let c1 = generate_connection_context();
     assert_eq!(n1.len(), CHALLENGE_NONCE_LEN);
-    assert_eq!(c1.len(), SESSION_CONTEXT_LEN);
+    assert_eq!(c1.len(), CONNECTION_CONTEXT_LEN);
     assert_ne!(n1, n2);
-    assert_ne!(c1, generate_session_context());
+    assert_ne!(c1, generate_connection_context());
 }
 
 fn hex(b: &[u8]) -> String {

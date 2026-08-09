@@ -2,13 +2,13 @@
 //!
 //! 覆盖：幂等重放（§4.8 向量 3）、user_message 幂等（§6.5）、终态守卫
 //! （§4.8 向量 4）、interrupted 校准恰一次（§6.3 例外）、gap 计数（§8.5）、
-//! session 终态（§8.2）、双 Doc 事务顺序（§7.4）。
+//! chat 终态（§8.2）、双 Doc 事务顺序（§7.4）。
 
 use serde_json::json;
 
 use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, BlockVisibility, PermissionOptions, SessionStatus, TurnStatus,
+    ActiveTurnProjection, BlockVisibility, PermissionOptions, ChatStatus, TurnStatus,
 };
 
 use yrs::{GetString, Map, Transact, WriteTxn};
@@ -24,9 +24,9 @@ fn pair() -> DocPair {
     Factory::new().create_chat_doc()
 }
 
-fn ev(session: &str, seq: u64, body: EventBody) -> NormalizedEvent {
+fn ev(chat: &str, seq: u64, body: EventBody) -> NormalizedEvent {
     NormalizedEvent {
-        session_id: session.to_string(),
+        chat_id: chat.to_string(),
         seq,
         epoch: 0,
         body,
@@ -103,7 +103,7 @@ fn tool_call_count(pair: &DocPair) -> usize {
 }
 
 fn permission_count(pair: &DocPair) -> usize {
-    let txn = pair.session.transact();
+    let txn = pair.control.transact();
     chat_writer::root_map_read(&txn)
         .and_then(|root| root.get(&txn, "pending_permissions"))
         .and_then(|v| v.cast::<yrs::MapRef>().ok())
@@ -112,7 +112,7 @@ fn permission_count(pair: &DocPair) -> usize {
 }
 
 fn active_turn_status(pair: &DocPair) -> Option<TurnStatus> {
-    let txn = pair.session.transact();
+    let txn = pair.control.transact();
     chat_writer::root_map_read(&txn)?
         .get(&txn, "active_turn")?
         .cast::<yrs::MapRef>()
@@ -239,7 +239,7 @@ fn cancelling_turn_drops_late_deltas() {
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
     // 手动置 cancelling（命令路径通常如此；此处直接写 active_turn）。
     {
-        let mut txn = p.session_txn();
+        let mut txn = p.control_txn();
         let root = txn.get_or_insert_map(ROOT);
         chat_writer::set_active_turn(
             &mut txn,
@@ -340,7 +340,7 @@ fn epoch_mismatch_marks_uncalibratable_and_rejects() {
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
     // 新纪元帧：EpochMismatch + uncalibratable。
     let e = NormalizedEvent {
-        session_id: "s1".into(),
+        chat_id: "s1".into(),
         seq: 2,
         epoch: 1,
         body: user_msg("t2", "t2:user", "b"),
@@ -353,7 +353,7 @@ fn epoch_mismatch_marks_uncalibratable_and_rejects() {
     let r = agg.apply(
         &mut p,
         &NormalizedEvent {
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             seq: 3,
             epoch: 1,
             body: user_msg("t3", "t3:user", "c"),
@@ -361,6 +361,63 @@ fn epoch_mismatch_marks_uncalibratable_and_rejects() {
     );
     assert_eq!(r.reason, Some(ApplyReason::UncalibratableGap));
     assert_eq!(entry_count(&p), 1);
+}
+
+/// 新 chat 首事件（instance 新开 chat epoch=1，§4.5.1）为基线采纳：
+/// 采纳 epoch、不置不可校准缺口、本帧正常应用；后续同 epoch 事件照常。
+/// （回归：真实 instance 的 epoch=1 首事件曾触发 uncalibratable 缺口，
+/// 导致 turn_terminal 等全部后续事件被永久拒绝——relay_event_handler_test
+/// 已知缺口注释记录的缺陷。）
+#[test]
+fn fresh_chat_first_event_adopts_epoch_baseline() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 命令路径先注册 active_turn（prompt committed 时 register_user_entry
+    // 置 accepting，§7.2）。
+    {
+        let mut txn = p.control_txn();
+        let root = txn.get_or_insert_map(ROOT);
+        chat_writer::set_active_turn(
+            &mut txn,
+            &root,
+            Some(&ActiveTurnProjection {
+                turn_id: "t1".into(),
+                turn_status: TurnStatus::Accepting,
+                updated_at: "2026-08-07T00:00:01Z".into(),
+            }),
+        );
+    }
+    // 首事件 epoch=1（instance 新开 chat 基线，流起点 epoch=0）→ 基线
+    // 采纳并应用本帧，不置不可校准缺口。
+    let r = agg.apply(
+        &mut p,
+        &NormalizedEvent {
+            chat_id: "s1".into(),
+            seq: 3,
+            epoch: 1,
+            body: msg_delta("t1", "t1:assistant", "b1", "chunk_1"),
+        },
+    );
+    assert!(r.applied, "首事件应基线采纳并应用，实际 reason={:?}", r.reason);
+    assert_eq!(p.stream.epoch, 1);
+    assert!(!p.stream.uncalibratable, "基线采纳不得置不可校准缺口");
+    assert_eq!(p.stream.last_seq, 3);
+    // 后续同 epoch 事件（含 turn_terminal）正常应用，不被 UncalibratableGap 拒绝。
+    let r = agg.apply(
+        &mut p,
+        &NormalizedEvent {
+            chat_id: "s1".into(),
+            seq: 5,
+            epoch: 1,
+            body: turn_terminal("t1", TurnStatus::Cancelled),
+        },
+    );
+    assert!(
+        r.applied,
+        "turn_terminal 应正常应用，实际 reason={:?}",
+        r.reason
+    );
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
 }
 
 #[test]
@@ -373,11 +430,11 @@ fn seq_out_of_order_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. session 终态（§8.2）：ended/closed/crashed 拒绝新事件
+// 6. chat 终态（§8.2）：ended/closed/crashed 拒绝新事件
 // ---------------------------------------------------------------------------
 
 #[test]
-fn closed_session_rejects_new_events() {
+fn closed_chat_rejects_new_events() {
     let mut p = pair();
     let mut agg = Aggregator;
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
@@ -387,13 +444,13 @@ fn closed_session_rejects_new_events() {
             &mut p,
             &ev("s1", 2, EventBody::SessionInfo {
                 title: None,
-                status: Some(SessionStatus::Closed),
+                status: Some(ChatStatus::Closed),
                 active_turn_id: None,
             })
         )
         .applied);
     let r = agg.apply(&mut p, &ev("s1", 3, user_msg("t2", "t2:user", "b")));
-    assert_eq!(r.reason, Some(ApplyReason::SessionClosed));
+    assert_eq!(r.reason, Some(ApplyReason::ChatClosed));
 }
 
 // ---------------------------------------------------------------------------
@@ -468,42 +525,42 @@ fn oversized_tool_result_truncated() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. 双 Doc 事务顺序（§7.4）：chat 先于 session
+// 9. 双 Doc 事务顺序（§7.4）：chat 先于 control
 // ---------------------------------------------------------------------------
 
 #[test]
-fn chat_transaction_precedes_session() {
+fn chat_transaction_precedes_control() {
     let mut p = pair();
     // 注册观察：记录 update 提交顺序（经观察回调，与 DocManager 同路径）。
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let doc_chat = p.chat.clone();
-    let doc_session = p.session.clone();
+    let doc_control = p.control.clone();
     let tx_chat = tx.clone();
-    let tx_session = tx;
+    let tx_control = tx;
     let _sub1 = doc_chat
         .observe_update_v1(move |_, e| {
             let _ = tx_chat.send(format!("chat:{}", e.update.len()));
         })
         .unwrap();
-    let _sub2 = doc_session
+    let _sub2 = doc_control
         .observe_update_v1(move |_, e| {
-            let _ = tx_session.send(format!("session:{}", e.update.len()));
+            let _ = tx_control.send(format!("control:{}", e.update.len()));
         })
         .unwrap();
 
     let mut agg = Aggregator;
-    // user_message 同时写 chat（entry）+ session（active_turn）。
+    // user_message 同时写 chat（entry）+ control（active_turn）。
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
-    // 顺序断言：chat update 先于 session update。
+    // 顺序断言：chat update 先于 control update。
     let mut seqs = Vec::new();
     while let Ok(s) = rx.try_recv() {
         seqs.push(s);
     }
     let chat_idx = seqs.iter().position(|s| s.starts_with("chat:")).unwrap();
-    let session_idx = seqs.iter().position(|s| s.starts_with("session:")).unwrap();
+    let control_idx = seqs.iter().position(|s| s.starts_with("control:")).unwrap();
     assert!(
-        chat_idx < session_idx,
-        "chat 事务必须先于 session 事务，got {seqs:?}"
+        chat_idx < control_idx,
+        "chat 事务必须先于 control 事务，got {seqs:?}"
     );
 }
 
@@ -639,7 +696,7 @@ fn session_list_full_sync_removes_stale() {
             })
         )
         .applied);
-    let txn = p.session.transact();
+    let txn = p.control.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
     let sessions = root.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().unwrap();
     let keys: std::collections::BTreeSet<&str> = sessions
@@ -678,6 +735,6 @@ fn projection_version_increments_per_apply() {
 
 #[test]
 fn session_status_str_matches_schema() {
-    assert_eq!(crate::state::aggregator::session_status_str(SessionStatus::Active), "active");
-    assert_eq!(crate::state::aggregator::session_status_str(SessionStatus::Crashed), "crashed");
+    assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Active), "active");
+    assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Crashed), "crashed");
 }

@@ -29,8 +29,8 @@ pub struct ActionAck {
     pub status: AckStatus,
     /// 重发 duplicate 时必带（§4.4：返回原 Ack 与 turnId）。
     pub turn_id: Option<String>,
-    /// `session/create` 的 committed 必须携带（server 生成 id 的唯一告知路径）。
-    pub session_id: Option<String>,
+    /// `chat/create` 的 committed 必须携带（server 生成 id 的唯一告知路径）。
+    pub chat_id: Option<String>,
     /// 字段预留（对齐 chat types.ts，乐观并发校验二期启用）。
     pub committed_projection_version: Option<u32>,
 }
@@ -60,12 +60,12 @@ pub struct ActionError {
 pub enum ErrorCode {
     /// 认证缺失/失败。
     Unauthenticated,
-    /// 无权限（如无权限 session 的订阅 → FORBIDDEN，§4.3.1）。
+    /// 无权限（如无权限 chat 的订阅 → FORBIDDEN，§4.3.1）。
     Forbidden,
-    /// session 不存在。
-    SessionNotFound,
-    /// 目标 machine 离线。
-    MachineOffline,
+    /// chat 不存在。
+    ChatNotFound,
+    /// 目标 instance 离线。
+    InstanceOffline,
     /// 乐观并发版本冲突（二期启用）。
     VersionConflict,
     /// 当前状态不允许该操作（如 spawn env 白名单外键 → INVALID_STATE，§9.6）。
@@ -81,16 +81,16 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// retryable 分类事实源（§4.4）：`AGENT_UNAVAILABLE`/`MACHINE_OFFLINE` →
-    /// `true`；`INVALID_STATE`/`FORBIDDEN`/`SESSION_NOT_FOUND` → `false`。
+    /// retryable 分类事实源（§4.4）：`AGENT_UNAVAILABLE`/`INSTANCE_OFFLINE` →
+    /// `true`；`INVALID_STATE`/`FORBIDDEN`/`CHAT_NOT_FOUND` → `false`。
     ///
     /// 供两端对齐（server 裁决 + 客户端提示），不做协议字段默认。
     pub fn default_retryable(self) -> bool {
         match self {
-            ErrorCode::AgentUnavailable | ErrorCode::MachineOffline => true,
+            ErrorCode::AgentUnavailable | ErrorCode::InstanceOffline => true,
             ErrorCode::Unauthenticated
             | ErrorCode::Forbidden
-            | ErrorCode::SessionNotFound
+            | ErrorCode::ChatNotFound
             | ErrorCode::VersionConflict
             | ErrorCode::InvalidState
             | ErrorCode::RateLimited

@@ -53,7 +53,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "acp-machine"
+name = "acp-instance"
 version = "0.2.0"
 dependencies = [
  "acp-hub-proto",

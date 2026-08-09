@@ -8,23 +8,27 @@ use serde::{Deserialize, Serialize};
 
 use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::schema::{
-    BlockVisibility, PermissionOptions, PublicError, SessionStatus, SessionSummaryProjection,
+    BlockVisibility, PermissionOptions, PublicError, ChatStatus, SessionSummaryProjection,
     TurnStatus,
 };
 
 /// 规范化事件（§6.1）：ACPChannel 产物的统一形态。
 ///
-/// envelope 携带路由与重放序依据：`(session_id, epoch, seq)` 是终态守卫
-/// （§6.3）与 gap 计数（§8.5）的输入；body 只含业务字段。事件按 session
-/// 路由到对应写者，聚合器校验 envelope.session_id 与自身 session 一致（防串）。
+/// envelope 携带路由与重放序依据：`(chat_id, epoch, seq)` 是终态守卫
+/// （§6.3）与 gap 计数（§8.5）的输入；body 只含业务字段。事件按 chat
+/// 路由到对应写者，聚合器校验 envelope.chat_id 与自身 chat 一致（防串）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedEvent {
-    /// hub 侧 session_id（经 binding 翻译，非原始 acp_session_id）。
-    pub session_id: String,
-    /// machine 侧单调 seq（同 epoch 内；§4.5.1）。
+    /// hub 侧 chat_id（经 binding 翻译，非原始 ACP 会话 session_id）。
+    ///
+    /// wire 信封字段名保持 `sessionId`（§4.5.1 信封契约：instance 透传
+    /// 帧以 `sessionId` 标记归属，其值即 server 下发的 chat_id 标签）。
+    #[serde(rename = "sessionId")]
+    pub chat_id: String,
+    /// instance 侧单调 seq（同 epoch 内；§4.5.1）。
     pub seq: u64,
-    /// stream_epoch（machine 侧流代际标识；epoch 变化 → 不可校准缺口）。
+    /// stream_epoch（instance 侧流代际标识；epoch 变化 → 不可校准缺口）。
     pub epoch: u64,
     pub body: EventBody,
 }
@@ -90,7 +94,7 @@ pub enum EventBody {
         result: Option<serde_json::Value>,
         public_error: Option<PublicError>,
     },
-    /// 权限请求 → Session Doc pending_permissions（按 permission_id upsert）。
+    /// 权限请求 → Control Doc pending_permissions（按 permission_id upsert）。
     PermissionRequested {
         permission_id: String,
         turn_id: String,
@@ -111,26 +115,26 @@ pub enum EventBody {
     /// 来源两条：ACP 事件流 / server 定时器（§4.7 判定性时间戳）——都落到
     /// 同一 CAS 原语。
     PermissionExpired { permission_id: String },
-    /// Agent 状态覆盖 → Session Doc agent.status/public_error（§6.3）。
+    /// Agent 状态覆盖 → Control Doc agent.status/public_error（§6.3）。
     /// 能力未确认前保持不可用（见 Capabilities）。
     AgentStatus {
         status: String,
         public_error: Option<PublicError>,
     },
-    /// 能力声明覆盖 → Session Doc agent.capabilities。
+    /// 能力声明覆盖 → Control Doc agent.capabilities。
     Capabilities { capabilities: Vec<String> },
-    /// Session 元信息覆盖 → Session Doc session（title/status/active_turn_id）。
+    /// Session 元信息覆盖 → Control Doc chat（title/status/active_turn_id）。
     /// 字段均 Option：缺省字段不覆盖（部分更新）。
     SessionInfo {
         title: Option<String>,
-        status: Option<SessionStatus>,
+        status: Option<ChatStatus>,
         active_turn_id: Option<String>,
     },
-    /// `session_list` 响应 → Session Doc sessions（agent 磁盘历史，全量同步投影，
+    /// `session_list` 响应 → Control Doc sessions（agent 磁盘历史，全量同步投影，
     /// §5.2 裁决：与 Registry 活跃会话语义不同、互不替代）。
     SessionListResponse { entries: Vec<SessionSummaryProjection> },
     /// Turn 终态（completed/failed/cancelled/interrupted）→ Chat Doc entry 终态
-    /// 迁移 + Session Doc active_turn 更新（§7.2）。终态立即写入；之后的同 turn
+    /// 迁移 + Control Doc active_turn 更新（§7.2）。终态立即写入；之后的同 turn
     /// 增量丢弃（interrupted 例外：带 envelope 重放序依据恰一次校准，§6.3）。
     TurnTerminal {
         turn_id: String,
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     fn serde_tag_and_envelope_shape() {
         let ev = NormalizedEvent {
-            session_id: "s1".into(),
+            chat_id: "s1".into(),
             seq: 3,
             epoch: 1,
             body: EventBody::MessageDelta {

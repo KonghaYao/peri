@@ -3,15 +3,15 @@
 //! **纯函数**：无 I/O、无日志副作用（脱敏日志由调用方在返回后统一打，§9.3/
 //! §12 测试前提）；可重入——同一事件流应用两次视图等价。
 //!
-//! 判定顺序（§9.2）：epoch 校验 → seq 水位/gap → uncalibratable → session
+//! 判定顺序（§9.2）：epoch 校验 → seq 水位/gap → uncalibratable → chat
 //! 终态 → 幂等键 → 终态守卫（interrupted 校准例外，§9.3）→ 关联检查 → 应用
-//! （chat 写入 → session 写入，事务顺序固定 chat → session，§6.4/§7.4）。
+//! （chat 写入 → control 写入，事务顺序固定 chat → control，§6.4/§7.4）。
 
 use yrs::{Array, Map, ReadTxn, Transact, WriteTxn};
 
 use acp_hub_proto::schema::{
     ActiveTurnProjection, EntryKind, EntryRole, EntryStatus, PermissionOptions, PermissionStatus, PublicError,
-    SessionStatus, ToolCallProjection, ToolCallStatus, TurnStatus,
+    ChatStatus, ToolCallProjection, ToolCallStatus, TurnStatus,
 };
 
 use crate::state::chat_writer::{self, ContentKind};
@@ -78,8 +78,8 @@ pub enum ApplyReason {
     EpochMismatch,
     /// 防御性：seq 回退（低于 last_seq；补推纪律下不应出现，§8.5）。
     SeqOutOfOrder,
-    /// session 已终态（ended/closed/crashed），拒绝新事件（§8.2）。
-    SessionClosed,
+    /// chat 已终态（ended/closed/crashed），拒绝新事件（§8.2）。
+    ChatClosed,
     /// 不可校准缺口存在时的补推事件（epoch 变化路径，§8.5）——拒绝除
     /// `session/load` 显式重建（F7 命令路径）外的一切投影。
     UncalibratableGap,
@@ -87,24 +87,24 @@ pub enum ApplyReason {
     InvalidTerminalStatus,
 }
 
-/// session doc 只读快照（批次内稳定：delta 不写 session）。
+/// control doc 只读快照（批次内稳定：delta 不写 control）。
 #[derive(Debug, Clone, Default)]
-struct SessionSnapshot {
-    /// session.status（ended/closed/crashed → 拒绝新事件，§8.2）。
-    session_closed: bool,
+struct ControlSnapshot {
+    /// chat.status（ended/closed/crashed → 拒绝新事件，§8.2）。
+    chat_closed: bool,
     /// active_turn 投影（终态守卫依据，§6.3）。
     active_turn: Option<ActiveTurnProjection>,
 }
 
 impl Aggregator {
-    /// 应用单个事件（纯函数）。自管理事务：chat 一次、session 一次，顺序固定
-    /// chat → session（§6.4/§7.4）；不涉及某 doc 时跳过该事务。
+    /// 应用单个事件（纯函数）。自管理事务：chat 一次、control 一次，顺序固定
+    /// chat → control（§6.4/§7.4）；不涉及某 doc 时跳过该事务。
     pub fn apply(&mut self, pair: &mut DocPair, ev: &NormalizedEvent) -> ApplyResult {
         // 判定（只读，含 stream 状态推进）。
         if let Err(reason) = self.judge(pair, ev) {
             return ApplyResult::rejected(reason);
         }
-        // 应用：chat → session。
+        // 应用：chat → control。
         self.write(pair, ev);
         ApplyResult::applied()
     }
@@ -135,12 +135,12 @@ impl Aggregator {
             {
                 end += 1;
             }
-            // 字段级拆分借用：chat 写事务与 session 只读快照并存（不同 doc，
+            // 字段级拆分借用：chat 写事务与 control 只读快照并存（不同 doc，
             // 无并发事务冲突，§7.4）。
             let chat = &mut pair.chat;
-            let session = &pair.session;
+            let control = &pair.control;
             let mut txn = chat.transact_mut();
-            let snapshot = self.read_session_snapshot(session);
+            let snapshot = self.read_control_snapshot(control);
             for ev in &evs[i..end] {
                 results.push(self.apply_delta_in_txn(&mut pair.stream, &mut txn, ev, &snapshot));
             }
@@ -151,24 +151,24 @@ impl Aggregator {
         results
     }
 
-    fn read_session_snapshot(&self, session: &yrs::Doc) -> SessionSnapshot {
-        let txn = session.transact();
-        let mut snap = SessionSnapshot::default();
+    fn read_control_snapshot(&self, control: &yrs::Doc) -> ControlSnapshot {
+        let txn = control.transact();
+        let mut snap = ControlSnapshot::default();
         let Some(root) = chat_writer::root_map_read(&txn) else {
             return snap;
         };
-        // session.status。
-        snap.session_closed = root
-            .get(&txn, "session")
+        // chat.status。
+        snap.chat_closed = root
+            .get(&txn, "chat")
             .and_then(|v| v.cast::<yrs::MapRef>().ok())
             .and_then(|m| m.get(&txn, "status"))
             .and_then(|s| s.cast::<String>().ok())
             .map(|s| {
-                session_status_from_str(&s)
+                chat_status_from_str(&s)
                     .map(|st| {
                         matches!(
                             st,
-                            SessionStatus::Ended | SessionStatus::Closed | SessionStatus::Crashed
+                            ChatStatus::Ended | ChatStatus::Closed | ChatStatus::Crashed
                         )
                     })
                     .unwrap_or(false)
@@ -200,15 +200,15 @@ impl Aggregator {
         stream: &mut StreamState,
         txn: &mut TransactionCtx<'_>,
         ev: &NormalizedEvent,
-        snapshot: &SessionSnapshot,
+        snapshot: &ControlSnapshot,
     ) -> ApplyResult {
         // 判定：epoch/seq/gap（步骤 1/2/3）。
         if let Err(reason) = self.judge_stream(stream, ev) {
             return ApplyResult::rejected(reason);
         }
-        // 判定：session 终态（步骤 4）。
-        if snapshot.session_closed {
-            return ApplyResult::rejected(ApplyReason::SessionClosed);
+        // 判定：chat 终态（步骤 4）。
+        if snapshot.chat_closed {
+            return ApplyResult::rejected(ApplyReason::ChatClosed);
         }
         // 判定：终态守卫（步骤 5）+ 关联检查（步骤 6，delta 自动建 entry）。
         if let Err(reason) = self.judge_turn_guard(snapshot.active_turn.as_ref(), &ev.body) {
@@ -223,16 +223,18 @@ impl Aggregator {
                 block_id,
                 text,
             } => {
+                let (turn_id, entry_id, block_id) =
+                    self.resolve_entry_ids_from_snapshot(snapshot, turn_id, entry_id, block_id, "text");
                 chat_writer::ensure_entry_with_blocks(
                     txn,
                     &root,
-                    entry_id,
+                    &entry_id,
                     EntryKind::Message,
                     EntryRole::Assistant,
-                    Some(turn_id),
+                    Some(&turn_id),
                     "",
                 );
-                chat_writer::append_text_delta(txn, &root, entry_id, block_id, text, ContentKind::Text);
+                chat_writer::append_text_delta(txn, &root, &entry_id, &block_id, text, ContentKind::Text);
                 chat_writer::bump_projection_version(txn, &root);
             }
             EventBody::ReasoningDelta {
@@ -242,24 +244,31 @@ impl Aggregator {
                 text,
                 visibility,
             } => {
+                let (turn_id, entry_id, block_id) = self.resolve_entry_ids_from_snapshot(
+                    snapshot,
+                    turn_id,
+                    entry_id,
+                    block_id,
+                    "reasoning",
+                );
                 chat_writer::ensure_entry_with_blocks(
                     txn,
                     &root,
-                    entry_id,
+                    &entry_id,
                     EntryKind::Message,
                     EntryRole::Assistant,
-                    Some(turn_id),
+                    Some(&turn_id),
                     "",
                 );
                 chat_writer::append_text_delta(
                     txn,
                     &root,
-                    entry_id,
-                    block_id,
+                    &entry_id,
+                    &block_id,
                     text,
                     ContentKind::Reasoning,
                 );
-                chat_writer::set_reasoning_visibility(txn, &root, block_id, *visibility);
+                chat_writer::set_reasoning_visibility(txn, &root, &block_id, *visibility);
                 chat_writer::bump_projection_version(txn, &root);
             }
             _ => unreachable!("batch 只含 delta（防御已过滤）"),
@@ -267,29 +276,56 @@ impl Aggregator {
         ApplyResult::applied()
     }
 
+    /// 批次快照路径的增量归位（同 [`Self::resolve_entry_ids`]，从批次快照的
+    /// active_turn 读取，避免重读 control doc）。
+    fn resolve_entry_ids_from_snapshot(
+        &self,
+        snapshot: &ControlSnapshot,
+        turn_id: &str,
+        entry_id: &str,
+        block_id: &str,
+        block_kind: &str,
+    ) -> (String, String, String) {
+        if !turn_id.is_empty() {
+            return (
+                turn_id.to_string(),
+                entry_id.to_string(),
+                block_id.to_string(),
+            );
+        }
+        match snapshot.active_turn.as_ref() {
+            Some(a) => (
+                a.turn_id.clone(),
+                format!("{}:assistant", a.turn_id),
+                block_kind.to_string(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        }
+    }
+
     /// 判定（§9.2 顺序）。只读 doc + 推进 pair.stream；返回拒绝原因。
     fn judge(&self, pair: &mut DocPair, ev: &NormalizedEvent) -> Result<(), ApplyReason> {
         // 1/2/3. epoch/seq/gap/uncalibratable。
         self.judge_stream(&mut pair.stream, ev)?;
-        // 4. session 终态（§8.2）：读 session doc session.status。
+        // 4. chat 终态（§8.2）：读 control doc chat.status。
         {
-            let txn = pair.session.transact();
+            let txn = pair.control.transact();
             if let Some(root) = chat_writer::root_map_read(&txn) {
                 let status = root
-                    .get(&txn, "session")
+                    .get(&txn, "chat")
                     .and_then(|v| v.cast::<yrs::MapRef>().ok())
                     .and_then(|m| m.get(&txn, "status"))
                     .and_then(|s| s.cast::<String>().ok());
                 if let Some(s) = status {
-                    if let Some(st) = session_status_from_str(&s) {
-                        if matches!(st, SessionStatus::Ended | SessionStatus::Closed | SessionStatus::Crashed) {
-                            return Err(ApplyReason::SessionClosed);
+                    if let Some(st) = chat_status_from_str(&s) {
+                        if matches!(st, ChatStatus::Ended | ChatStatus::Closed | ChatStatus::Crashed) {
+                            return Err(ApplyReason::ChatClosed);
                         }
                     }
                 }
             }
         }
-        // 5. 终态守卫（§6.3/§7.2/§9.3）：读 session doc active_turn。
+        // 5. 终态守卫（§6.3/§7.2/§9.3）：读 control doc active_turn。
         let active = self.read_active_turn(pair);
         // 6. 幂等键（§6.3）与关联检查（按事件体分派）。
         self.judge_body(pair, ev, active.as_ref())?;
@@ -301,12 +337,25 @@ impl Aggregator {
         // 1. epoch 校验（§4.5.1 防御；正常路径 hello 已对账）。
         if ev.epoch != stream.epoch {
             if ev.epoch > stream.epoch {
-                // 合法新纪元：采纳并置不可校准缺口（§8.5）。
+                // 新 chat 首事件（instance 新开 chat epoch=1，§4.5.1）
+                // 为**基线采纳**：流尚无任何事件（last_seq=0 且无既有 gap），
+                // 不存在缓冲丢失可能，采纳 epoch 后正常应用本帧，不置不可
+                // 校准缺口（hello 对账对新建 chat 的落点；修复
+                // relay_event_handler_test 已知缺口注释记录的「epoch=1 首
+                // 事件触发 uncalibratable 缺口」）。
+                let fresh_baseline =
+                    stream.last_seq == 0 && stream.gap_count == 0 && !stream.gap_dirty;
                 stream.epoch = ev.epoch;
-                stream.uncalibratable = true;
-                stream.gap_dirty = true;
+                if !fresh_baseline {
+                    // 既有流上的合法新纪元（daemon 重启/进程重建，§8.5）：
+                    // 置不可校准缺口并拒绝本帧（补推契约失效）。
+                    stream.uncalibratable = true;
+                    stream.gap_dirty = true;
+                    return Err(ApplyReason::EpochMismatch);
+                }
+            } else {
+                return Err(ApplyReason::EpochMismatch);
             }
-            return Err(ApplyReason::EpochMismatch);
         }
         // 2. seq 水位 + gap 计算（§8.5/§9.4）。
         if ev.seq <= stream.last_seq {
@@ -330,7 +379,7 @@ impl Aggregator {
     }
 
     fn read_active_turn(&self, pair: &DocPair) -> Option<ActiveTurnProjection> {
-        let txn = pair.session.transact();
+        let txn = pair.control.transact();
         let root = chat_writer::root_map_read(&txn)?;
         let am = root.get(&txn, "active_turn")?.cast::<yrs::MapRef>().ok()?;
         let str_or = |k: &str| -> Option<String> {
@@ -344,6 +393,37 @@ impl Aggregator {
                 .unwrap_or(TurnStatus::Accepting),
             updated_at: str_or("updated_at").unwrap_or_default(),
         })
+    }
+
+    /// 增量帧 id 归位（§7.2 宿主驱动 turn 模型）：帧携带 turn_id（acp-hub
+    /// 私有帧/test-child）原样使用；帧无 id（真实 peri agent_message_chunk /
+    /// agent_thought_chunk，无 turnId/entryId/blockId）按 active_turn 归位：
+    /// entry_id = `{active_turn}:assistant`（与 TurnTerminal 派生一致），
+    /// block_id = 内容块种类（text/reasoning，entry 内单块）。
+    fn resolve_entry_ids(
+        &self,
+        pair: &DocPair,
+        turn_id: &str,
+        entry_id: &str,
+        block_id: &str,
+        block_kind: &str,
+    ) -> (String, String, String) {
+        if !turn_id.is_empty() {
+            return (
+                turn_id.to_string(),
+                entry_id.to_string(),
+                block_id.to_string(),
+            );
+        }
+        let active = self.read_active_turn(pair);
+        match active {
+            Some(a) => (
+                a.turn_id.clone(),
+                format!("{}:assistant", a.turn_id),
+                block_kind.to_string(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        }
     }
 
     /// 幂等键 + 关联检查 + 终态守卫（步骤 5/6 合并：守卫依赖 active_turn）。
@@ -366,6 +446,12 @@ impl Aggregator {
                 entry_id,
                 ..
             } => {
+                // ACP 回显无 turn_id（真实 peri 不回声 user_message_chunk；
+                // 防御：空 id 不创建 entry）——用户消息由服务端单写注入
+                // （§6.5 RegisterUserEntry，携带 server 生成 turn_id）。
+                if turn_id.is_empty() || entry_id.is_empty() {
+                    return Err(ApplyReason::UnknownTurn);
+                }
                 // 幂等：同 turn_id/entry_id 的 user entry 已存在 → 跳过（§6.5）。
                 let txn = pair.chat.transact();
                 if chat_writer::entry_exists(&txn, entry_id)
@@ -404,21 +490,21 @@ impl Aggregator {
                 ..
             } => {
                 // 幂等：permission_id 已存在 → 跳过。
-                let txn = pair.session.transact();
+                let txn = pair.control.transact();
                 if self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::DuplicateIdempotent);
                 }
                 self.judge_turn_guard(active, &ev.body)
             }
             EventBody::PermissionResolved { permission_id, .. } => {
-                let txn = pair.session.transact();
+                let txn = pair.control.transact();
                 if !self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::UnknownPermission);
                 }
                 Ok(())
             }
             EventBody::PermissionExpired { permission_id } => {
-                let txn = pair.session.transact();
+                let txn = pair.control.transact();
                 if !self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::UnknownPermission);
                 }
@@ -467,7 +553,7 @@ impl Aggregator {
 
     /// 终态守卫（§6.3）：active_turn 非活动（cancelling/不可逆终态/interrupted）
     /// 时拒绝带 turn_id 的非终态事件；interrupted 时拒绝一切非终态事件。
-    /// 供批次快照路径（不重读 session doc）。
+    /// 供批次快照路径（不重读 control doc）。
     fn judge_turn_guard(
         &self,
         active: Option<&ActiveTurnProjection>,
@@ -485,6 +571,18 @@ impl Aggregator {
         match (active, turn_id) {
             // 事件不带 turn（AgentStatus/Capabilities/SessionInfo/...）：无守卫。
             (_, None) => Ok(()),
+            // 帧无 turn_id（真实 peri 增量，§7.2 宿主驱动 turn 模型；照抄
+            // @fenix/chat-channel canWriteToTurn）：按 active_turn 归位校验——
+            // 无活动 turn → 未知 turn；活动 turn 终态/cancelling → 拒绝。
+            (None, Some("")) => Err(ApplyReason::UnknownTurn),
+            (Some(a), Some("")) => match a.turn_status {
+                TurnStatus::Cancelling
+                | TurnStatus::Completed
+                | TurnStatus::Failed
+                | TurnStatus::Cancelled => Err(ApplyReason::TurnTerminalGuard),
+                TurnStatus::Interrupted => Err(ApplyReason::InterruptedGuard),
+                _ => Ok(()),
+            },
             // 带 turn 但无 active_turn：turn 未知（§9.2 步骤 6）。
             (None, Some(_)) => Err(ApplyReason::UnknownTurn),
             (Some(a), Some(tid)) if a.turn_id != tid => Err(ApplyReason::TurnTerminalGuard),
@@ -528,7 +626,7 @@ impl Aggregator {
             .unwrap_or(false)
     }
 
-    /// 应用（写入）：chat → session 顺序（§6.4）。
+    /// 应用（写入）：chat → control 顺序（§6.4）。
     ///
     /// 事务纪律：禁止跨 await 持有（§7.4）；同一 doc 的并发事务会 panic，
     /// 故预读（upsert 保留字段）在开写事务前完成，CAS 类写入自开事务。
@@ -542,64 +640,76 @@ impl Aggregator {
             }
             _ => None,
         };
+        // 预读：帧无 id（真实 peri 增量）按 active_turn 归位（§7.2；读
+        // control doc 须在 chat 写事务之前，§7.4 借位纪律）。
+        let resolved = match &ev.body {
+            EventBody::MessageDelta {
+                turn_id,
+                entry_id,
+                block_id,
+                ..
+            } => Some(self.resolve_entry_ids(pair, turn_id, entry_id, block_id, "text")),
+            EventBody::ReasoningDelta {
+                turn_id,
+                entry_id,
+                block_id,
+                ..
+            } => Some(self.resolve_entry_ids(pair, turn_id, entry_id, block_id, "reasoning")),
+            _ => None,
+        };
         // chat 侧写入（一次事务）。
         {
             let mut txn = pair.chat_txn();
             let root = txn.get_or_insert_map(ROOT);
             match &ev.body {
-                EventBody::MessageDelta {
-                    turn_id,
-                    entry_id,
-                    block_id,
-                    text,
-                } => {
+                EventBody::MessageDelta { text, .. } => {
+                    // 帧无 id（真实 peri 增量）：按 active_turn 归位（§7.2；
+                    // chat-channel ASSISTANT_ENTRY 派生规则）。
+                    let (turn_id, entry_id, block_id) = resolved.clone().unwrap();
                     chat_writer::ensure_entry_with_blocks(
                         &mut txn,
                         &root,
-                        entry_id,
+                        &entry_id,
                         EntryKind::Message,
                         EntryRole::Assistant,
-                        Some(turn_id),
+                        Some(&turn_id),
                         "",
                     );
                     chat_writer::append_text_delta(
                         &mut txn,
                         &root,
-                        entry_id,
-                        block_id,
+                        &entry_id,
+                        &block_id,
                         text,
                         ContentKind::Text,
                     );
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
                 EventBody::ReasoningDelta {
-                    turn_id,
-                    entry_id,
-                    block_id,
-                    text,
-                    visibility,
+                    text, visibility, ..
                 } => {
+                    let (turn_id, entry_id, block_id) = resolved.clone().unwrap();
                     chat_writer::ensure_entry_with_blocks(
                         &mut txn,
                         &root,
-                        entry_id,
+                        &entry_id,
                         EntryKind::Message,
                         EntryRole::Assistant,
-                        Some(turn_id),
+                        Some(&turn_id),
                         "",
                     );
                     chat_writer::append_text_delta(
                         &mut txn,
                         &root,
-                        entry_id,
-                        block_id,
+                        &entry_id,
+                        &block_id,
                         text,
                         ContentKind::Reasoning,
                     );
                     chat_writer::set_reasoning_visibility(
                         &mut txn,
                         &root,
-                        block_id,
+                        &block_id,
                         *visibility,
                     );
                     chat_writer::bump_projection_version(&mut txn, &root);
@@ -709,8 +819,8 @@ impl Aggregator {
                 | EventBody::SessionListResponse { .. } => {}
             }
         }
-        // session 侧写入：CAS 类自开事务（permission 原语内部管理），其余在
-        // 一次 session 事务内；须在 chat 事务 drop 后（§6.4 固定顺序）。
+        // control 侧写入：CAS 类自开事务（permission 原语内部管理），其余在
+        // 一次 control 事务内；须在 chat 事务 drop 后（§6.4 固定顺序）。
         match &ev.body {
             EventBody::PermissionResolved {
                 permission_id,
@@ -719,14 +829,14 @@ impl Aggregator {
                 // CAS：pending → resolved 原子一次（§7.4 规则 4）；Migrated 时
                 // 由原语写入 decision 与状态，聚合器补 bump。
                 if permission::resolve(pair, permission_id, *decision) == CasOutcome::Migrated {
-                    let mut txn = pair.session_txn();
+                    let mut txn = pair.control_txn();
                     let root = txn.get_or_insert_map(ROOT);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
             }
             EventBody::PermissionExpired { permission_id } => {
                 if permission::expire(pair, permission_id) == CasOutcome::Migrated {
-                    let mut txn = pair.session_txn();
+                    let mut txn = pair.control_txn();
                     let root = txn.get_or_insert_map(ROOT);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
@@ -734,7 +844,7 @@ impl Aggregator {
             EventBody::SessionListResponse { entries } => {
                 // 预读（写事务前完成，避免并发事务 panic，§7.4）。
                 let current = {
-                    let rt = pair.session.transact();
+                    let rt = pair.control.transact();
                     match chat_writer::root_map_read(&rt) {
                         Some(rr) => session_list::read_current(&rt, &rr),
                         None => std::collections::HashMap::new(),
@@ -742,14 +852,14 @@ impl Aggregator {
                 };
                 let d = session_list::diff(&current, entries);
                 if !d.upsert.is_empty() || !d.remove.is_empty() {
-                    let mut txn = pair.session_txn();
+                    let mut txn = pair.control_txn();
                     let root = txn.get_or_insert_map(ROOT);
                     session_list::apply_diff(&mut txn, &root, &d);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
             }
             _ => {
-                let mut txn = pair.session_txn();
+                let mut txn = pair.control_txn();
                 let root = txn.get_or_insert_map(ROOT);
                 match &ev.body {
                     EventBody::SessionListResponse { .. } => {
@@ -807,7 +917,7 @@ impl Aggregator {
                         status,
                         active_turn_id,
                     } => {
-                        write_session_info(
+                        write_chat_info(
                             &mut txn,
                             &root,
                             title.as_deref(),
@@ -837,7 +947,7 @@ impl Aggregator {
                     | EventBody::ToolCallCompleted { .. }
                     | EventBody::PermissionResolved { .. }
                     | EventBody::PermissionExpired { .. } => {
-                        // 纯 chat 事件或已单独处理：无 session 写入。
+                        // 纯 chat 事件或已单独处理：无 control 写入。
                     }
                 }
             }
@@ -859,7 +969,7 @@ fn default_tool_call() -> ToolCallProjection {
 }
 
 // ---------------------------------------------------------------------------
-// session 侧写入辅助
+// control 侧写入辅助
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)] // 与 doc_manager 提交面一致：字段摊开的写入原语
@@ -929,22 +1039,22 @@ fn write_capabilities(txn: &mut TransactionCtx<'_>, root: &yrs::MapRef, caps: &[
     }
 }
 
-fn write_session_info(
+fn write_chat_info(
     txn: &mut TransactionCtx<'_>,
     root: &yrs::MapRef,
     title: Option<&str>,
-    status: Option<SessionStatus>,
+    status: Option<ChatStatus>,
     active_turn_id: Option<&str>,
 ) {
-    let session = root.get_or_init::<_, yrs::MapRef>(txn, "session");
+    let chat = root.get_or_init::<_, yrs::MapRef>(txn, "chat");
     if let Some(t) = title {
-        session.insert(txn, "title", t.to_string());
+        chat.insert(txn, "title", t.to_string());
     }
     if let Some(s) = status {
-        session.insert(txn, "status", session_status_str(s));
+        chat.insert(txn, "status", chat_status_str(s));
     }
     if let Some(a) = active_turn_id {
-        session.insert(txn, "active_turn_id", a.to_string());
+        chat.insert(txn, "active_turn_id", a.to_string());
     }
 }
 
@@ -954,23 +1064,23 @@ fn write_public_error(txn: &mut TransactionCtx<'_>, map: &yrs::MapRef, e: &Publi
     em.insert(txn, "message", e.message.clone());
 }
 
-pub(crate) fn session_status_str(s: SessionStatus) -> &'static str {
+pub(crate) fn chat_status_str(s: ChatStatus) -> &'static str {
     match s {
-        SessionStatus::Accepting => "accepting",
-        SessionStatus::Active => "active",
-        SessionStatus::Ended => "ended",
-        SessionStatus::Closed => "closed",
-        SessionStatus::Crashed => "crashed",
+        ChatStatus::Accepting => "accepting",
+        ChatStatus::Active => "active",
+        ChatStatus::Ended => "ended",
+        ChatStatus::Closed => "closed",
+        ChatStatus::Crashed => "crashed",
     }
 }
 
-fn session_status_from_str(s: &str) -> Option<SessionStatus> {
+fn chat_status_from_str(s: &str) -> Option<ChatStatus> {
     match s {
-        "accepting" => Some(SessionStatus::Accepting),
-        "active" => Some(SessionStatus::Active),
-        "ended" => Some(SessionStatus::Ended),
-        "closed" => Some(SessionStatus::Closed),
-        "crashed" => Some(SessionStatus::Crashed),
+        "accepting" => Some(ChatStatus::Accepting),
+        "active" => Some(ChatStatus::Active),
+        "ended" => Some(ChatStatus::Ended),
+        "closed" => Some(ChatStatus::Closed),
+        "crashed" => Some(ChatStatus::Crashed),
         _ => None,
     }
 }

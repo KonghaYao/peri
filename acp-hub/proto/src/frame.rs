@@ -14,9 +14,9 @@ use crate::ack::{ActionAck, ActionError};
 use crate::action::ActionEnvelope;
 use crate::conn::{Auth, AuthResponse, KeepAlive, Pong, Ready};
 use crate::event::EventFrame;
-use crate::machine::{
-    MachineBufferSync, MachineEvent, MachineForward, MachineForwardAck, MachineHeartbeat,
-    MachineHello, MachineKill, MachineKillAck, MachineProcessExit, MachineSpawn, MachineSpawnAck,
+use crate::instance::{
+    InstanceBufferSync, InstanceEvent, InstanceForward, InstanceForwardAck, InstanceHeartbeat,
+    InstanceHello, InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
 use crate::whitelist::FRAME_TAGS;
 use crate::ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
@@ -47,7 +47,7 @@ impl std::fmt::Display for FrameTag {
 
 /// 全量帧枚举（§4.2 完整面 → M1 收窄见 [`crate::whitelist`]）。
 ///
-/// tag 值含 `.`（`ysync.*`）与 `/`（`machine/*`），无法由 `rename_all` 派生，
+/// tag 值含 `.`（`ysync.*`）与 `/`（`instance/*`），无法由 `rename_all` 派生，
 /// 逐变体显式 `#[serde(rename = ...)]`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
@@ -76,7 +76,7 @@ pub enum Frame {
     /// C→S 连接后第一帧；角色由 token 解析（§4.2）。
     #[serde(rename = "auth")]
     Auth(Auth),
-    /// S→M server 身份证明（§9.2 步骤 2；M1 machine 面）。
+    /// S→M server 身份证明（§9.2 步骤 2；M1 instance 面）。
     #[serde(rename = "auth_response")]
     AuthResponse(AuthResponse),
     /// C→S 订阅 Doc（§4.2）。
@@ -95,38 +95,38 @@ pub enum Frame {
     #[serde(rename = "ysync.awareness")]
     YsyncAwareness(YsyncAwareness),
     /// M→S 注册 + 重连握手（§4.5）。
-    #[serde(rename = "machine/hello")]
-    MachineHello(MachineHello),
+    #[serde(rename = "instance/hello")]
+    InstanceHello(InstanceHello),
     /// M→S 周期心跳（§4.5）。
-    #[serde(rename = "machine/heartbeat")]
-    MachineHeartbeat(MachineHeartbeat),
+    #[serde(rename = "instance/heartbeat")]
+    InstanceHeartbeat(InstanceHeartbeat),
     /// M→S 原始 ACP 帧转发（带 seq 与流纪元，§4.5.1）。
-    #[serde(rename = "machine/event")]
-    MachineEvent(MachineEvent),
+    #[serde(rename = "instance/event")]
+    InstanceEvent(InstanceEvent),
     /// M→S 断线缓冲补推（§4.5）。
-    #[serde(rename = "machine/buffer_sync")]
-    MachineBufferSync(MachineBufferSync),
+    #[serde(rename = "instance/buffer_sync")]
+    InstanceBufferSync(InstanceBufferSync),
     /// S→M 启动 ACP 进程（按 session_id 幂等，§4.5）。
-    #[serde(rename = "machine/spawn")]
-    MachineSpawn(MachineSpawn),
+    #[serde(rename = "instance/spawn")]
+    InstanceSpawn(InstanceSpawn),
     /// S→M 停止 ACP 进程（幂等，§4.5）。
-    #[serde(rename = "machine/kill")]
-    MachineKill(MachineKill),
+    #[serde(rename = "instance/kill")]
+    InstanceKill(InstanceKill),
     /// S→M 下行 ACP JSON-RPC 透传（L1+L2 确认，§4.5/§4.4）。
-    #[serde(rename = "machine/forward")]
-    MachineForward(MachineForward),
+    #[serde(rename = "instance/forward")]
+    InstanceForward(InstanceForward),
     /// M→S spawn 结果（§4.5）。
-    #[serde(rename = "machine/spawn_ack")]
-    MachineSpawnAck(MachineSpawnAck),
+    #[serde(rename = "instance/spawn_ack")]
+    InstanceSpawnAck(InstanceSpawnAck),
     /// M→S kill 结果（§4.5）。
-    #[serde(rename = "machine/kill_ack")]
-    MachineKillAck(MachineKillAck),
+    #[serde(rename = "instance/kill_ack")]
+    InstanceKillAck(InstanceKillAck),
     /// M→S 下行转发结果（L1+L2 合并确认，§4.4）。
-    #[serde(rename = "machine/forward_ack")]
-    MachineForwardAck(MachineForwardAck),
+    #[serde(rename = "instance/forward_ack")]
+    InstanceForwardAck(InstanceForwardAck),
     /// M→S ACP 进程退出事件（§4.5）。
-    #[serde(rename = "machine/process_exit")]
-    MachineProcessExit(MachineProcessExit),
+    #[serde(rename = "instance/process_exit")]
+    InstanceProcessExit(InstanceProcessExit),
 }
 
 impl Frame {
@@ -166,17 +166,17 @@ impl Frame {
             Frame::YsyncUpdate(_) => FrameTag("ysync.update"),
             Frame::YsyncSync(_) => FrameTag("ysync.sync"),
             Frame::YsyncAwareness(_) => FrameTag("ysync.awareness"),
-            Frame::MachineHello(_) => FrameTag("machine/hello"),
-            Frame::MachineHeartbeat(_) => FrameTag("machine/heartbeat"),
-            Frame::MachineEvent(_) => FrameTag("machine/event"),
-            Frame::MachineBufferSync(_) => FrameTag("machine/buffer_sync"),
-            Frame::MachineSpawn(_) => FrameTag("machine/spawn"),
-            Frame::MachineKill(_) => FrameTag("machine/kill"),
-            Frame::MachineForward(_) => FrameTag("machine/forward"),
-            Frame::MachineSpawnAck(_) => FrameTag("machine/spawn_ack"),
-            Frame::MachineKillAck(_) => FrameTag("machine/kill_ack"),
-            Frame::MachineForwardAck(_) => FrameTag("machine/forward_ack"),
-            Frame::MachineProcessExit(_) => FrameTag("machine/process_exit"),
+            Frame::InstanceHello(_) => FrameTag("instance/hello"),
+            Frame::InstanceHeartbeat(_) => FrameTag("instance/heartbeat"),
+            Frame::InstanceEvent(_) => FrameTag("instance/event"),
+            Frame::InstanceBufferSync(_) => FrameTag("instance/buffer_sync"),
+            Frame::InstanceSpawn(_) => FrameTag("instance/spawn"),
+            Frame::InstanceKill(_) => FrameTag("instance/kill"),
+            Frame::InstanceForward(_) => FrameTag("instance/forward"),
+            Frame::InstanceSpawnAck(_) => FrameTag("instance/spawn_ack"),
+            Frame::InstanceKillAck(_) => FrameTag("instance/kill_ack"),
+            Frame::InstanceForwardAck(_) => FrameTag("instance/forward_ack"),
+            Frame::InstanceProcessExit(_) => FrameTag("instance/process_exit"),
         }
     }
 }

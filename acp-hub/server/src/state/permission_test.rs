@@ -12,7 +12,7 @@ use crate::state::permission::{expire, resolve, CasOutcome};
 fn pair_with_permission(id: &str) -> DocPair {
     let mut p = Factory::new().create_chat_doc();
     // 直接写入 pending_permissions（模拟聚合器 PermissionRequested 投影后）。
-    let mut txn = p.session_txn();
+    let mut txn = p.control_txn();
     let root = txn.get_or_insert_map(ROOT);
     let perms = root.get_or_init::<_, yrs::MapRef>(&mut txn, "pending_permissions");
     let pm = perms.get_or_init::<_, yrs::MapRef>(&mut txn, id);
@@ -26,7 +26,7 @@ fn pair_with_permission(id: &str) -> DocPair {
 }
 
 fn read_status_and_decision(p: &DocPair, id: &str) -> (String, Option<yrs::Out>) {
-    let txn = p.session.transact();
+    let txn = p.control.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
     let perms = root.get(&txn, "pending_permissions").unwrap().cast::<yrs::MapRef>().unwrap();
     let pm = perms.get(&txn, id).unwrap().cast::<yrs::MapRef>().unwrap();

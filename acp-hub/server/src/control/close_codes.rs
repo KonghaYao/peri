@@ -3,12 +3,12 @@
 //! 关闭码决策：4500/4501/4502 为 acp-hub 专用码（1000–4999 为应用可用区），
 //! 1011/1013 为标准码。
 
-/// 机器离线（`MACHINE_OFFLINE`）：停止自动重连，展示手动重试（§4.7）。
+/// instance 离线（`INSTANCE_OFFLINE`）：停止自动重连，展示手动重试（§4.7）。
 ///
-/// 【决策】M1 单 machine 语义：client 连接上 action 分派遇 `MACHINE_OFFLINE`
-/// 且连接不再可服务时由 server 关闭；多 machine 时代改为仅 `action_error`
+/// 【决策】M1 单 instance 语义：client 连接上 action 分派遇 `INSTANCE_OFFLINE`
+/// 且连接不再可服务时由 server 关闭；多 instance 时代改为仅 `action_error`
 /// （设计稿保留策略表）。
-pub const CLOSE_MACHINE_OFFLINE: u16 = 4500;
+pub const CLOSE_INSTANCE_OFFLINE: u16 = 4500;
 
 /// keep_alive 超时：不在后台自动重连（§4.7）。
 pub const CLOSE_KEEPALIVE_TIMEOUT: u16 = 4501;
@@ -32,7 +32,7 @@ pub enum ReconnectPolicy {
 /// 关闭码 → 重连策略映射（§4.7 表；未列出的应用码默认 [`ReconnectPolicy::Backoff`]）。
 pub fn reconnect_policy(code: u16) -> ReconnectPolicy {
     match code {
-        CLOSE_MACHINE_OFFLINE => ReconnectPolicy::Stop,
+        CLOSE_INSTANCE_OFFLINE => ReconnectPolicy::Stop,
         CLOSE_KEEPALIVE_TIMEOUT => ReconnectPolicy::ManualOnly,
         CLOSE_CONFIG_FATAL => ReconnectPolicy::StopPermanent,
         _ => ReconnectPolicy::Backoff,

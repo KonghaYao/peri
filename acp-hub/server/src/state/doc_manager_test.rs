@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration as TokioDuration};
 
 use acp_hub_proto::conn::DocId;
-use acp_hub_proto::schema::SessionSummary;
+use acp_hub_proto::schema::ChatSummary;
 
 use crate::state::doc_manager::{
     BatchConfig, DocCommand, DocManager, PersistError, SubmitError, SubmitResult, UpdateSink,
@@ -65,13 +65,13 @@ fn cfg() -> BatchConfig {
     BatchConfig {
         batch_window: Duration::from_millis(16),
         batch_bytes: 4096,
-        session_queue: 64,
+        chat_queue: 64,
     }
 }
 
-fn delta(session: &str, seq: u64, turn: &str, text: &str) -> NormalizedEvent {
+fn delta(chat: &str, seq: u64, turn: &str, text: &str) -> NormalizedEvent {
     NormalizedEvent {
-        session_id: session.to_string(),
+        chat_id: chat.to_string(),
         seq,
         epoch: 0,
         body: EventBody::MessageDelta {
@@ -83,9 +83,9 @@ fn delta(session: &str, seq: u64, turn: &str, text: &str) -> NormalizedEvent {
     }
 }
 
-fn user_msg(session: &str, seq: u64, turn: &str) -> NormalizedEvent {
+fn user_msg(chat: &str, seq: u64, turn: &str) -> NormalizedEvent {
     NormalizedEvent {
-        session_id: session.to_string(),
+        chat_id: chat.to_string(),
         seq,
         epoch: 0,
         body: EventBody::UserMessage {
@@ -98,8 +98,8 @@ fn user_msg(session: &str, seq: u64, turn: &str) -> NormalizedEvent {
     }
 }
 
-async fn open(mgr: &DocManager, session: &str) {
-    mgr.open_session(session, "m1", Some("t")).await.unwrap();
+async fn open(mgr: &DocManager, chat: &str) {
+    mgr.open_chat(chat, "m1", Some("t")).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ async fn control_event_flushes_buffered_batch_first() {
     }
     // 控制类事件（tool_call 状态）到达 → 先 flush 已缓冲批次再立即写。
     let control = NormalizedEvent {
-        session_id: "s1".to_string(),
+        chat_id: "s1".to_string(),
         seq: 4,
         epoch: 0,
         body: EventBody::ToolCallStarted {
@@ -225,7 +225,7 @@ async fn concurrent_submits_no_panic_and_serial_equivalent() {
         handles.push(tokio::spawn(async move {
             let ev = if i % 4 == 0 {
                 NormalizedEvent {
-                    session_id: "s1".to_string(),
+                    chat_id: "s1".to_string(),
                     seq: 2 + i as u64,
                     epoch: 0,
                     body: EventBody::ToolCallStarted {
@@ -270,13 +270,13 @@ async fn concurrent_submits_no_panic_and_serial_equivalent() {
 #[tokio::test(start_paused = true)]
 async fn try_reserve_returns_false_when_queue_full() {
     let mut c = cfg();
-    c.session_queue = 2;
+    c.chat_queue = 2;
     let mgr = DocManager::new(c, Arc::new(MemSink::default()));
     open(&mgr, "s1").await;
     assert!(mgr.try_reserve("s1").await);
     assert!(mgr.try_reserve("s1").await);
     assert!(!mgr.try_reserve("s1").await, "队列满 → false");
-    assert!(!mgr.try_reserve("nope").await, "session 不存在 → false");
+    assert!(!mgr.try_reserve("nope").await, "chat 不存在 → false");
 }
 
 /// P1-1 回归：try_reserve 占用的名额必须可释放（release_reserve），
@@ -285,7 +285,7 @@ async fn try_reserve_returns_false_when_queue_full() {
 #[tokio::test(start_paused = true)]
 async fn try_reserve_slots_released_after_writer_consumes() {
     let mut c = cfg();
-    c.session_queue = 2;
+    c.chat_queue = 2;
     let mgr = DocManager::new(c, Arc::new(MemSink::default()));
     open(&mgr, "s1").await;
     assert!(mgr.try_reserve("s1").await);
@@ -298,7 +298,7 @@ async fn try_reserve_slots_released_after_writer_consumes() {
         mgr.try_reserve("s1").await,
         "P1-1: 释放后名额必须恢复"
     );
-    // 不存在的 session：no-op 不 panic。
+    // 不存在的 chat：no-op 不 panic。
     mgr.release_reserve("nope").await;
 }
 
@@ -333,7 +333,7 @@ async fn command_permission_resolve_cas() {
     assert!(matches!(r, SubmitResult::Applied(_)));
     // 再投影 permission request（事件路径）。
     let ev = NormalizedEvent {
-        session_id: "s1".to_string(),
+        chat_id: "s1".to_string(),
         seq: 2,
         epoch: 0,
         body: EventBody::PermissionRequested {
@@ -372,7 +372,7 @@ async fn command_permission_resolve_cas() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn command_update_title_and_session_terminal() {
+async fn command_update_title_and_chat_terminal() {
     let mgr = DocManager::new(cfg(), Arc::new(MemSink::default()));
     open(&mgr, "s1").await;
     let r = mgr
@@ -382,8 +382,8 @@ async fn command_update_title_and_session_terminal() {
     let r = mgr
         .submit_command(
             "s1",
-            DocCommand::SetSessionTerminal {
-                status: acp_hub_proto::schema::SessionStatus::Closed,
+            DocCommand::SetChatTerminal {
+                status: acp_hub_proto::schema::ChatStatus::Closed,
             },
         )
         .await;
@@ -401,9 +401,9 @@ async fn registry_commands_route_to_global_writer() {
     let r = mgr
         .submit_command(
             "s1",
-            DocCommand::RegistryUpsertSession(SessionSummary {
+            DocCommand::RegistryUpsertChat(ChatSummary {
                 id: "s1".into(),
-                machine_id: "m1".into(),
+                instance_id: "m1".into(),
                 title: "t".into(),
                 status: "accepting".into(),
                 gap: None,
@@ -428,15 +428,15 @@ async fn registry_commands_route_to_global_writer() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn open_session_idempotent_and_close_rejects_submit() {
+async fn open_chat_idempotent_and_close_rejects_submit() {
     let mgr = DocManager::new(cfg(), Arc::new(MemSink::default()));
     open(&mgr, "s1").await;
     // 重复打开幂等。
     open(&mgr, "s1").await;
-    mgr.close_session("s1").await.unwrap();
-    // close 后提交 → SessionNotFound。
+    mgr.close_chat("s1").await.unwrap();
+    // close 后提交 → ChatNotFound。
     let r = mgr.submit_event(user_msg("s1", 1, "t1")).await;
-    assert!(matches!(r, SubmitResult::Rejected(SubmitError::SessionNotFound)));
+    assert!(matches!(r, SubmitResult::Rejected(SubmitError::ChatNotFound)));
 }
 
 // ---------------------------------------------------------------------------
@@ -453,19 +453,19 @@ async fn broadcast_delivers_updates_to_subscribers() {
     tokio::task::yield_now().await;
     let mut got = 0;
     while let Ok(u) = rx.try_recv() {
-        if u.doc == DocId::chat("s1") || u.doc == DocId::session("s1") {
+        if u.doc == DocId::chat("s1") || u.doc == DocId::control("s1") {
             got += 1;
         }
     }
-    assert!(got >= 2, "chat + session update 应广播，got {got}");
+    assert!(got >= 2, "chat + control update 应广播，got {got}");
 }
 
 // ---------------------------------------------------------------------------
-// 双 Doc 事务顺序（§7.4）：chat update 先于 session update 落盘
+// 双 Doc 事务顺序（§7.4）：chat update 先于 control update 落盘
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn chat_persists_before_session() {
+async fn chat_persists_before_control() {
     let sink = MemSink::default();
     let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
     open(&mgr, "s1").await;
@@ -473,16 +473,16 @@ async fn chat_persists_before_session() {
     tokio::time::advance(TokioDuration::from_millis(20)).await;
     tokio::task::yield_now().await;
     let updates = sink.updates.lock().await;
-    // user_message 同时写 chat（entry）与 session（active_turn）：chat 先落盘。
+    // user_message 同时写 chat（entry）与 control（active_turn）：chat 先落盘。
     let chat_idx = updates
         .iter()
         .position(|(d, _)| *d == DocId::chat("s1"))
         .expect("chat update");
-    let session_idx = updates
+    let control_idx = updates
         .iter()
-        .position(|(d, _)| *d == DocId::session("s1"))
-        .expect("session update");
-    assert!(chat_idx < session_idx, "chat 必须先于 session 落盘");
+        .position(|(d, _)| *d == DocId::control("s1"))
+        .expect("control update");
+    assert!(chat_idx < control_idx, "chat 必须先于 control 落盘");
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +528,6 @@ async fn gap_reported_to_registry_on_seq_jump() {
             registry_updates.push(u.update);
         }
     }
-    // 至少有一次 registry 更新（open_session 摘要 + gap 写回）。
+    // 至少有一次 registry 更新（open_chat 摘要 + gap 写回）。
     assert!(!registry_updates.is_empty());
 }

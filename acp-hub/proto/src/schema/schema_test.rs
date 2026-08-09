@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use crate::action::PermissionDecision;
 use crate::schema::{
     ActiveTurnProjection, AgentStatusProjection, BlockVisibility, ChatDocRoot, ChatEntry,
-    ContentBlock, EntryKind, EntryRole, EntryStatus, GlobalStatus, MachineStatus,
-    MachineView, PermissionOptions, PermissionProjection, PermissionStatus, PublicError,
-    RegistryDocRoot, RegistryGlobal, SessionDocRoot, SessionInfoProjection,
-    SessionStatus, SessionSummary, SessionSummaryProjection, ToolCallProjection,
+    ContentBlock, EntryKind, EntryRole, EntryStatus, GlobalStatus, InstanceStatus,
+    InstanceView, PermissionOptions, PermissionProjection, PermissionStatus, PublicError,
+    RegistryDocRoot, RegistryGlobal, ControlDocRoot, ChatInfoProjection,
+    ChatStatus, ChatSummary, SessionSummaryProjection, ToolCallProjection,
     ToolCallStatus, TurnStatus,
 };
 
@@ -62,7 +62,7 @@ fn chat_root() -> ChatDocRoot {
     }
 }
 
-fn session_root() -> SessionDocRoot {
+fn control_root() -> ControlDocRoot {
     let mut pending = HashMap::new();
     pending.insert(
         "p1".into(),
@@ -78,8 +78,8 @@ fn session_root() -> SessionDocRoot {
             decision: None,
         },
     );
-    let mut sessions = HashMap::new();
-    sessions.insert(
+    let mut chats = HashMap::new();
+    chats.insert(
         "old1".into(),
         SessionSummaryProjection {
             session_id: "old1".into(),
@@ -88,20 +88,20 @@ fn session_root() -> SessionDocRoot {
             updated_at: "2026-08-06T00:00:00Z".into(),
         },
     );
-    SessionDocRoot {
-        schema_version: crate::version::SESSION_DOC_SCHEMA_VERSION,
+    ControlDocRoot {
+        schema_version: crate::version::CONTROL_DOC_SCHEMA_VERSION,
         projection_version: 2,
-        session: SessionInfoProjection {
-            session_id: "s1".into(),
+        chat: ChatInfoProjection {
+            chat_id: "s1".into(),
             title: "demo".into(),
-            status: SessionStatus::Active,
+            status: ChatStatus::Active,
             active_turn_id: Some("t1".into()),
             created_at: "2026-08-07T00:00:00Z".into(),
             updated_at: "2026-08-07T00:00:01Z".into(),
         },
         agent: AgentStatusProjection {
             instance_id: "i1".into(),
-            acp_session_id: "acp-1".into(),
+            session_id: "acp-1".into(),
             status: "running".into(),
             capabilities: vec!["bash".into()],
             last_activity_at: "2026-08-07T00:00:01Z".into(),
@@ -113,30 +113,30 @@ fn session_root() -> SessionDocRoot {
             updated_at: "2026-08-07T00:00:01Z".into(),
         }),
         pending_permissions: pending,
-        sessions,
+        sessions: chats,
     }
 }
 
 fn registry_root() -> RegistryDocRoot {
-    let mut machines = HashMap::new();
-    machines.insert(
-        "m1".into(),
-        MachineView {
-            id: "m1".into(),
+    let mut instances = HashMap::new();
+    instances.insert(
+        "i1".into(),
+        InstanceView {
+            id: "i1".into(),
             hostname: "host1".into(),
-            status: MachineStatus::Online,
+            status: InstanceStatus::Online,
             token_id: "tok1".into(),
             registered_at: "2026-08-01T00:00:00Z".into(),
             last_heartbeat: "2026-08-07T00:00:01Z".into(),
-            session_count: 2,
+            chat_count: 2,
         },
     );
-    let mut sessions = HashMap::new();
-    sessions.insert(
+    let mut chats = HashMap::new();
+    chats.insert(
         "s1".into(),
-        SessionSummary {
+        ChatSummary {
             id: "s1".into(),
-            machine_id: "m1".into(),
+            instance_id: "i1".into(),
             title: "demo".into(),
             status: "active".into(),
             gap: None,
@@ -145,8 +145,8 @@ fn registry_root() -> RegistryDocRoot {
     );
     RegistryDocRoot {
         schema_version: crate::version::REGISTRY_DOC_SCHEMA_VERSION,
-        machines,
-        sessions,
+        instances,
+        chats,
         global: RegistryGlobal {
             status: GlobalStatus::Healthy,
         },
@@ -163,18 +163,18 @@ fn doc_root_camel_case_field_names() {
     assert!(chat.get("entries").is_some());
     assert_eq!(chat["toolCalls"]["tc1"]["name"], "bash");
 
-    let session = serde_json::to_value(session_root()).unwrap();
-    assert_eq!(session["session"]["sessionId"], "s1");
-    assert_eq!(session["session"]["activeTurnId"], "t1");
-    assert_eq!(session["agent"]["acpSessionId"], "acp-1");
+    let session = serde_json::to_value(control_root()).unwrap();
+    assert_eq!(session["chat"]["chatId"], "s1");
+    assert_eq!(session["chat"]["activeTurnId"], "t1");
+    assert_eq!(session["agent"]["sessionId"], "acp-1");
     assert_eq!(session["activeTurn"]["turnStatus"], "running");
     assert_eq!(session["pendingPermissions"]["p1"]["options"][0], "allowOnce");
     assert!(session.get("sessions").is_some());
 
     let registry = serde_json::to_value(registry_root()).unwrap();
-    assert_eq!(registry["machines"]["m1"]["tokenId"], "tok1");
-    assert_eq!(registry["machines"]["m1"]["sessionCount"], 2);
-    assert_eq!(registry["sessions"]["s1"]["machineId"], "m1");
+    assert_eq!(registry["instances"]["i1"]["tokenId"], "tok1");
+    assert_eq!(registry["instances"]["i1"]["chatCount"], 2);
+    assert_eq!(registry["chats"]["s1"]["instanceId"], "i1");
     assert_eq!(registry["global"]["status"], "healthy");
 }
 
@@ -186,8 +186,8 @@ fn enum_serialized_shapes() {
     assert_eq!(serde_json::to_string(&EntryStatus::Streaming).unwrap(), "\"streaming\"");
     assert_eq!(serde_json::to_string(&ToolCallStatus::AwaitingPermission).unwrap(), "\"awaitingPermission\"");
     assert_eq!(serde_json::to_string(&TurnStatus::AwaitingPermission).unwrap(), "\"awaitingPermission\"");
-    assert_eq!(serde_json::to_string(&SessionStatus::Crashed).unwrap(), "\"crashed\"");
-    assert_eq!(serde_json::to_string(&MachineStatus::Offline).unwrap(), "\"offline\"");
+    assert_eq!(serde_json::to_string(&ChatStatus::Crashed).unwrap(), "\"crashed\"");
+    assert_eq!(serde_json::to_string(&InstanceStatus::Offline).unwrap(), "\"offline\"");
     assert_eq!(serde_json::to_string(&GlobalStatus::Degraded).unwrap(), "\"degraded\"");
     assert_eq!(serde_json::to_string(&PermissionOptions::AllowSession).unwrap(), "\"allowSession\"");
     assert_eq!(serde_json::to_string(&PermissionStatus::Expired).unwrap(), "\"expired\"");
@@ -245,8 +245,8 @@ fn schema_roots_full_roundtrip() {
         serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
     assert_eq!(back, chat);
 
-    let session = session_root();
-    let back: SessionDocRoot =
+    let session = control_root();
+    let back: ControlDocRoot =
         serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
     assert_eq!(back, session);
 

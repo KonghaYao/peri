@@ -1,8 +1,8 @@
 //! Registry Doc 写入者（server 状态源单写接口，§5.2/§5.5/§17.2）。
 //!
 //! Registry Doc（`hub:registry`）是 TUI 会话列表与机器列表的**唯一权威源**：
-//! 活跃 session 摘要由 server 状态源单写（session 生命周期事件驱动：
-//! create/binding/终态/close 时更新），**不从 Session Doc 聚合**（§5.2 裁决）。
+//! 活跃 chat 摘要由 server 状态源单写（chat 生命周期事件驱动：
+//! create/binding/终态/close 时更新），**不从 chat Doc 聚合**（§5.2 裁决）。
 //! 聚合器不直写 Registry Doc（gap 经上报路径，§9.4）。
 
 use std::collections::HashSet;
@@ -12,25 +12,25 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use yrs::{Map, ReadTxn, Transact, WriteTxn};
 
-use acp_hub_proto::schema::{GlobalStatus, MachineStatus, MachineView, SessionSummary};
+use acp_hub_proto::schema::{GlobalStatus, InstanceStatus, InstanceView, ChatSummary};
 
 use crate::state::doc_manager::DocCommand;
 use crate::state::factory::ROOT;
 
-/// Registry 写者命令（Registry Doc 无 session 维度：低频、无微批次、即到即写，
+/// Registry 写者命令（Registry Doc 无 chat 维度：低频、无微批次、即到即写，
 /// §8.5【决策】路由到全局 registry 写者）。
 pub(crate) enum RegistryMsg {
     /// 通用命令（§8.5 Registry 系）。
     Command(DocCommand, oneshot::Sender<Result<(), RegistryError>>),
     /// gap 写回（§9.4/§12.4）：`Some(count)` 置缺口、`None` 追平清除。
-    SetSessionGap {
-        session_id: String,
+    SetChatGap {
+        chat_id: String,
         gap: Option<u64>,
         reply: oneshot::Sender<Result<(), RegistryError>>,
     },
-    /// session 状态迁移写回（§7.3/§7.6）。
-    SetSessionStatus {
-        session_id: String,
+    /// chat 状态迁移写回（§7.3/§7.6）。
+    SetChatStatus {
+        chat_id: String,
         status: String,
         reply: oneshot::Sender<Result<(), RegistryError>>,
     },
@@ -42,7 +42,7 @@ pub enum RegistryError {
     /// 写者已退出（channel closed）。
     #[error("registry writer closed")]
     ChannelClosed,
-    /// 目标条目不存在（如 set_machine_status 的 machine 未注册）。
+    /// 目标条目不存在（如 set_instance_status 的 instance 未注册）。
     #[error("registry entry not found: {0}")]
     NotFound(String),
 }
@@ -54,8 +54,8 @@ pub enum DegradeCause {
     PersistFailure,
     /// 缓冲溢出丢弃（channel 层上报，§8.5）。
     BufferDropped,
-    /// 任一存活 session 存在 gap（聚合器上报，§9.4）。
-    SessionGap,
+    /// 任一存活 chat 存在 gap（聚合器上报，§9.4）。
+    ChatGap,
     /// 镜像失败（聚合器/writer task 异常，§17.2）。
     ProjectionError,
     /// 启动恢复不变量失败（§8.4.1，F6/恢复流程上报）。
@@ -67,7 +67,7 @@ impl DegradeCause {
         match self {
             DegradeCause::PersistFailure => "persist_failure",
             DegradeCause::BufferDropped => "buffer_dropped",
-            DegradeCause::SessionGap => "session_gap",
+            DegradeCause::ChatGap => "chat_gap",
             DegradeCause::ProjectionError => "projection_error",
             DegradeCause::RestoreInvariant => "restore_invariant",
         }
@@ -77,7 +77,7 @@ impl DegradeCause {
 /// Registry Doc 写入者（server 状态源单写接口，§5.2）。
 ///
 /// 内部经 DocManager 全局 registry 写者执行（§8.5 命令路由）；调用方为
-/// channel 层（machine 生命周期，F7/F8）与恢复流程（F6）。
+/// channel 层（instance 生命周期，F7/F8）与恢复流程（F6）。
 #[derive(Clone)]
 pub struct RegistryState {
     inner: Arc<RegistryInner>,
@@ -102,48 +102,48 @@ impl RegistryState {
         }
     }
 
-    /// machine 视图 upsert（hello 注册/心跳/offline；§7.1）。
-    pub async fn upsert_machine(&self, m: MachineView) -> Result<(), RegistryError> {
-        self.send(DocCommand::RegistryUpsertMachine(m)).await
+    /// instance 视图 upsert（hello 注册/心跳/offline；§7.1）。
+    pub async fn upsert_instance(&self, m: InstanceView) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryUpsertInstance(m)).await
     }
 
-    /// machine 状态更新（online/offline/unknown；心跳超时驱动）。
-    pub async fn set_machine_status(
+    /// instance 状态更新（online/offline/unknown；心跳超时驱动）。
+    pub async fn set_instance_status(
         &self,
-        machine_id: &str,
-        status: MachineStatus,
+        instance_id: &str,
+        status: InstanceStatus,
     ) -> Result<(), RegistryError> {
-        self.send(DocCommand::RegistrySetMachineStatus {
-            machine_id: machine_id.to_string(),
+        self.send(DocCommand::RegistrySetInstanceState {
+            instance_id: instance_id.to_string(),
             status,
         })
         .await
     }
 
-    /// 活跃 session 摘要 upsert（create/binding 建立/标题/终态/gap 同步）。
-    pub async fn upsert_session(&self, s: SessionSummary) -> Result<(), RegistryError> {
-        self.send(DocCommand::RegistryUpsertSession(s)).await
+    /// 活跃 chat 摘要 upsert（create/binding 建立/标题/终态/gap 同步）。
+    pub async fn upsert_chat(&self, s: ChatSummary) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryUpsertChat(s)).await
     }
 
-    /// 移除（session close 清理）。
-    pub async fn remove_session(&self, session_id: &str) -> Result<(), RegistryError> {
-        self.send(DocCommand::RegistryRemoveSession {
-            session_id: session_id.to_string(),
+    /// 移除（chat close 清理）。
+    pub async fn remove_chat(&self, chat_id: &str) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryRemoveChat {
+            chat_id: chat_id.to_string(),
         })
         .await
     }
 
     /// gap 写回（聚合器上报，§9.4）：`Some(count)` 置缺口、`None` 追平清除。
-    pub async fn set_session_gap(
+    pub async fn set_chat_gap(
         &self,
-        session_id: &str,
+        chat_id: &str,
         gap: Option<u64>,
     ) -> Result<(), RegistryError> {
         let (reply, rx) = oneshot::channel();
         self.inner
             .tx
-            .send(RegistryMsg::SetSessionGap {
-                session_id: session_id.to_string(),
+            .send(RegistryMsg::SetChatGap {
+                chat_id: chat_id.to_string(),
                 gap,
                 reply,
             })
@@ -152,18 +152,18 @@ impl RegistryState {
         rx.await.map_err(|_| RegistryError::ChannelClosed)?
     }
 
-    /// session 状态迁移（accepting/active/ended/closed/crashed + pending_close，
+    /// chat 状态迁移（accepting/active/ended/closed/crashed + pending_close，
     /// §7.3/§7.6）。
-    pub async fn set_session_status(
+    pub async fn set_chat_status(
         &self,
-        session_id: &str,
+        chat_id: &str,
         status: &str,
     ) -> Result<(), RegistryError> {
         let (reply, rx) = oneshot::channel();
         self.inner
             .tx
-            .send(RegistryMsg::SetSessionStatus {
-                session_id: session_id.to_string(),
+            .send(RegistryMsg::SetChatStatus {
+                chat_id: chat_id.to_string(),
                 status: status.to_string(),
                 reply,
             })
@@ -271,31 +271,31 @@ impl RegistryApplier {
         let mut txn = self.doc.transact_mut();
         let root = txn.get_or_insert_map(ROOT);
         match cmd {
-            DocCommand::RegistryUpsertMachine(m) => {
-                write_machine(&mut txn, &root, m);
+            DocCommand::RegistryUpsertInstance(m) => {
+                write_instance(&mut txn, &root, m);
                 Ok(())
             }
-            DocCommand::RegistrySetMachineStatus {
-                machine_id,
+            DocCommand::RegistrySetInstanceState {
+                instance_id,
                 status,
             } => {
-                let machines = root.get_or_init::<_, yrs::MapRef>(&mut txn, "machines");
-                let Some(mm) = machines
-                    .get(&txn, machine_id)
+                let instances = root.get_or_init::<_, yrs::MapRef>(&mut txn, "instances");
+                let Some(mm) = instances
+                    .get(&txn, instance_id)
                     .and_then(|v| v.cast::<yrs::MapRef>().ok())
                 else {
-                    return Err(RegistryError::NotFound(machine_id.clone()));
+                    return Err(RegistryError::NotFound(instance_id.clone()));
                 };
-                mm.insert(&mut txn, "status", machine_status_str(*status));
+                mm.insert(&mut txn, "status", instance_status_str(*status));
                 Ok(())
             }
-            DocCommand::RegistryUpsertSession(s) => {
-                write_session_summary(&mut txn, &root, s);
+            DocCommand::RegistryUpsertChat(s) => {
+                write_chat_summary(&mut txn, &root, s);
                 Ok(())
             }
-            DocCommand::RegistryRemoveSession { session_id } => {
-                let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
-                sessions.remove(&mut txn, session_id);
+            DocCommand::RegistryRemoveChat { chat_id } => {
+                let chats = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chats");
+                chats.remove(&mut txn, chat_id);
                 Ok(())
             }
             DocCommand::RegistrySetGlobal { status } => {
@@ -308,19 +308,19 @@ impl RegistryApplier {
     }
 
     /// gap 写回（读现状改 gap 字段；§9.4/§12.4）。
-    pub(crate) fn set_session_gap(
+    pub(crate) fn set_chat_gap(
         &mut self,
-        session_id: &str,
+        chat_id: &str,
         gap: Option<u64>,
     ) -> Result<(), RegistryError> {
         let mut txn = self.doc.transact_mut();
         let root = txn.get_or_insert_map(ROOT);
-        let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
-        let Some(sm) = sessions
-            .get(&txn, session_id)
+        let chats = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chats");
+        let Some(sm) = chats
+            .get(&txn, chat_id)
             .and_then(|v| v.cast::<yrs::MapRef>().ok())
         else {
-            return Err(RegistryError::NotFound(session_id.to_string()));
+            return Err(RegistryError::NotFound(chat_id.to_string()));
         };
         match gap {
             Some(count) => sm.insert(&mut txn, "gap", count as f64),
@@ -329,43 +329,52 @@ impl RegistryApplier {
         Ok(())
     }
 
-    /// session 状态迁移写回（读现状改 status；§7.3/§7.6）。
-    pub(crate) fn set_session_status(
+    /// chat 状态迁移写回（读现状改 status；§7.3/§7.6）。
+    pub(crate) fn set_chat_status(
         &mut self,
-        session_id: &str,
+        chat_id: &str,
         status: &str,
     ) -> Result<(), RegistryError> {
         let mut txn = self.doc.transact_mut();
         let root = txn.get_or_insert_map(ROOT);
-        let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
-        let Some(sm) = sessions
-            .get(&txn, session_id)
+        let chats = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chats");
+        let Some(sm) = chats
+            .get(&txn, chat_id)
             .and_then(|v| v.cast::<yrs::MapRef>().ok())
         else {
-            return Err(RegistryError::NotFound(session_id.to_string()));
+            return Err(RegistryError::NotFound(chat_id.to_string()));
         };
         sm.insert(&mut txn, "status", status.to_string());
         Ok(())
     }
 }
 
-fn write_machine(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, m: &MachineView) {
-    let machines = root.get_or_init::<_, yrs::MapRef>(txn, "machines");
-    let mm = machines.get_or_init::<_, yrs::MapRef>(txn, m.id.as_str());
+fn write_instance(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, m: &InstanceView) {
+    let instances = root.get_or_init::<_, yrs::MapRef>(txn, "instances");
+    let mm = instances.get_or_init::<_, yrs::MapRef>(txn, m.id.as_str());
     mm.insert(txn, "id", m.id.clone());
     mm.insert(txn, "hostname", m.hostname.clone());
-    mm.insert(txn, "status", machine_status_str(m.status));
+    mm.insert(txn, "status", instance_status_str(m.status));
     mm.insert(txn, "token_id", m.token_id.clone());
     mm.insert(txn, "registered_at", m.registered_at.clone());
     mm.insert(txn, "last_heartbeat", m.last_heartbeat.clone());
-    mm.insert(txn, "session_count", m.session_count as f64);
+    mm.insert(txn, "chat_count", m.chat_count as f64);
 }
 
-fn write_session_summary(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, s: &SessionSummary) {
-    let sessions = root.get_or_init::<_, yrs::MapRef>(txn, "sessions");
-    let sm = sessions.get_or_init::<_, yrs::MapRef>(txn, s.id.as_str());
+fn write_chat_summary(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, s: &ChatSummary) {
+    let chats = root.get_or_init::<_, yrs::MapRef>(txn, "chats");
+    let sm = chats.get_or_init::<_, yrs::MapRef>(txn, s.id.as_str());
+    // 重启语义（§5.5）：已存在条目（历史会话）不得被无条件覆盖——status
+    // 由 set_chat_status 权威管理（否则客户端订阅触发的 open_chat
+    // 会把启动对账标记的 ended 复活回 accepting，实测 836c8a3e）；title/
+    // instance_id 同理（重启后内存表为空，覆盖会抹掉历史标题）。upsert
+    // 收敛为：新条目全量写入；已存在条目仅刷新 updated_at（列表排序）。
+    if sm.get(txn, "status").is_some() {
+        sm.insert(txn, "updated_at", s.updated_at.clone());
+        return;
+    }
     sm.insert(txn, "id", s.id.clone());
-    sm.insert(txn, "machine_id", s.machine_id.clone());
+    sm.insert(txn, "instance_id", s.instance_id.clone());
     sm.insert(txn, "title", s.title.clone());
     sm.insert(txn, "status", s.status.clone());
     match s.gap {
@@ -375,11 +384,11 @@ fn write_session_summary(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, 
     sm.insert(txn, "updated_at", s.updated_at.clone());
 }
 
-pub(crate) fn machine_status_str(s: MachineStatus) -> &'static str {
+pub(crate) fn instance_status_str(s: InstanceStatus) -> &'static str {
     match s {
-        MachineStatus::Online => "online",
-        MachineStatus::Offline => "offline",
-        MachineStatus::Unknown => "unknown",
+        InstanceStatus::Online => "online",
+        InstanceStatus::Offline => "offline",
+        InstanceStatus::Unknown => "unknown",
     }
 }
 

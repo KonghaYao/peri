@@ -1,4 +1,4 @@
-//! F7 进程级集成测试（三）：machine 断线重连 / cancel-close / keep_alive
+//! F7 进程级集成测试（三）：instance 断线重连 / cancel-close / keep_alive
 //! 超时 4501（§7.1/§7.3/§7.6/§8.2/§4.7）。
 
 mod common;
@@ -9,8 +9,8 @@ use acp_hub_proto::ack::{AckStatus, ErrorCode};
 use acp_hub_proto::Frame;
 
 use common::{
-    fetch_registry_snapshot, fresh_token, global_status, session_field, session_ids, wait_terminal,
-    MachineProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
+    fetch_registry_snapshot, fresh_token, global_status, chat_field, chat_ids, wait_terminal,
+    InstanceProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
 };
 
 fn t(name: &str, tag: &str, r: Result<(), String>) {
@@ -20,39 +20,39 @@ fn t(name: &str, tag: &str, r: Result<(), String>) {
     }
 }
 
-/// 起 server + machine（同 t01 装配）。
-async fn start_stack() -> Result<(TestEnv, ServerProc, MachineProc), String> {
+/// 起 server + instance（同 t01 装配）。
+async fn start_stack() -> Result<(TestEnv, ServerProc, InstanceProc), String> {
     let env = TestEnv::new();
     let server = ServerProc::start(&env, None);
     server.wait_ready()?;
-    let machine = MachineProc::start(&env);
-    if !machine.wait_authenticated(Duration::from_secs(15)) {
-        machine.dump_log();
+    let instance = InstanceProc::start(&env);
+    if !instance.wait_authenticated(Duration::from_secs(15)) {
+        instance.dump_log();
         server.dump_log();
-        return Err("machine 未完成认证握手".to_string());
+        return Err("instance 未完成认证握手".to_string());
     }
-    Ok((env, server, machine))
+    Ok((env, server, instance))
 }
 
 // ---------------------------------------------------------------------------
-// t09 machine 断线 → MACHINE_OFFLINE；重启重连 → 恢复可服务
+// t09 instance 断线 → MACHINE_OFFLINE；重启重连 → 恢复可服务
 // （§8.2/§7.1；session 级 interrupted/gap/buffer_sync 受 create 缺陷阻断，
 // 本用例验证机器级语义）
 // ---------------------------------------------------------------------------
 
 async fn t09_body() -> Result<(), String> {
-    let (env, server, mut machine) = start_stack().await?;
+    let (env, server, mut instance) = start_stack().await?;
     let port = env.port;
 
-    // 1. 断线：kill machine 进程 → server 应判 OFFLINE（连接断开路径即时）。
-    machine.kill();
-    // 等 server 日志出现断链清理（machine disconnect cleanup）。
+    // 1. 断线：kill instance 进程 → server 应判 OFFLINE（连接断开路径即时）。
+    instance.kill();
+    // 等 server 日志出现断链清理（instance disconnect cleanup）。
     assert!(
         server.log_contains(
-            "machine disconnect cleanup complete",
+            "instance disconnect cleanup complete",
             Duration::from_secs(10)
         ),
-        "server 未感知 machine 断线"
+        "server 未感知 instance 断线"
     );
 
     // 2. OFFLINE 可观测：client create → action_error MACHINE_OFFLINE
@@ -63,7 +63,7 @@ async fn t09_body() -> Result<(), String> {
     let command_id = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     let err = wait_terminal(&mut c, RECV_TIMEOUT).await?;
@@ -77,7 +77,7 @@ async fn t09_body() -> Result<(), String> {
         Frame::ActionError(e) => {
             assert_eq!(
                 e.code,
-                ErrorCode::MachineOffline,
+                ErrorCode::InstanceOffline,
                 "断线时 create 应为 MACHINE_OFFLINE（实际 {:?}）",
                 e.code
             );
@@ -86,16 +86,16 @@ async fn t09_body() -> Result<(), String> {
         _ => unreachable!(),
     }
 
-    // 3. 重启 machine（同一 token/data-dir）→ 重连 hello（幂等替换）→
+    // 3. 重启 instance（同一 token/data-dir）→ 重连 hello（幂等替换）→
     //    心跳恢复 → 重新可服务（spawn 指令可送达）。
-    let machine2 = MachineProc::start(&env);
+    let instance2 = InstanceProc::start(&env);
     assert!(
-        machine2.wait_authenticated(Duration::from_secs(15)),
-        "machine 重启后未完成认证"
+        instance2.wait_authenticated(Duration::from_secs(15)),
+        "instance 重启后未完成认证"
     );
     // server 侧出现第二次 hello（fenced 或 re-register 日志）。
     assert!(
-        server.log_contains("machine connected", Duration::from_secs(10)),
+        server.log_contains("instance connected", Duration::from_secs(10)),
         "server 未记录重连 hello"
     );
     // 对账开门：Registry global 恢复 healthy。
@@ -113,12 +113,12 @@ async fn t09_body() -> Result<(), String> {
     assert!(ok.is_ok(), "重连后 Registry global.status 应恢复 healthy");
 
     // 4. 重新可服务：create 的 spawn 阶段应重新成功（initialize/session/new
-    //    经 machine/forward 下行，终态由后续收帧确认）。
+    //    经 instance/forward 下行，终态由后续收帧确认）。
     let mut c = WsClient::connect_client(port, &env.client_token, &["hub:registry"]).await?;
     let command_id = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     let _ = c
@@ -128,8 +128,8 @@ async fn t09_body() -> Result<(), String> {
         )
         .await?;
     assert!(
-        machine2.log_contains("ACP 进程启动", Duration::from_secs(10)),
-        "重连后 machine 应能接收 spawn 并拉起 ACP 进程"
+        instance2.log_contains("ACP 进程启动", Duration::from_secs(10)),
+        "重连后 instance 应能接收 spawn 并拉起 ACP 进程"
     );
     // 收掉 create 的终态。
     let _ = c
@@ -148,12 +148,12 @@ async fn t09_body() -> Result<(), String> {
 }
 
 #[tokio::test]
-async fn t09_machine_disconnect_reconnect() {
-    println!("T-09-machine-disconnect-reconnect: START");
+async fn t09_instance_disconnect_reconnect() {
+    println!("T-09-instance-disconnect-reconnect: START");
     let r = tokio::time::timeout(TEST_BUDGET, t09_body()).await;
     match r {
-        Ok(r) => t("09-machine-disconnect-reconnect", "", r),
-        Err(_) => println!("T-09-machine-disconnect-reconnect: FAIL 超时（60s 预算）"),
+        Ok(r) => t("09-instance-disconnect-reconnect", "", r),
+        Err(_) => println!("T-09-instance-disconnect-reconnect: FAIL 超时（60s 预算）"),
     }
 }
 
@@ -162,25 +162,25 @@ async fn t09_machine_disconnect_reconnect() {
 // ---------------------------------------------------------------------------
 
 async fn t10_body() -> Result<(), String> {
-    let (env, _server, machine) = start_stack().await?;
+    let (env, _server, instance) = start_stack().await?;
     let mut c = WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
 
     // 需要已 committed 的 session（binding 建立，§6.2 全时序）。
     let create_cid = uuid::Uuid::new_v4().to_string();
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
         command_id: create_cid,
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     }))
     .await?;
     match wait_terminal(&mut c, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            let sid = a.session_id.unwrap_or_default();
+            let sid = a.chat_id.unwrap_or_default();
             // cancel：转发 ACP session/cancel → L3 → committed（终态投影）。
             let cancel_cid = uuid::Uuid::new_v4().to_string();
             c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Cancel {
                 command_id: cancel_cid.clone(),
-                payload: acp_hub_proto::action::CancelSessionPayload {
-                    session_id: sid.clone(),
+                payload: acp_hub_proto::action::CancelChatPayload {
+                    chat_id: sid.clone(),
                 },
             }))
             .await?;
@@ -196,23 +196,23 @@ async fn t10_body() -> Result<(), String> {
             let close_cid = uuid::Uuid::new_v4().to_string();
             c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Close {
                 command_id: close_cid.clone(),
-                payload: acp_hub_proto::action::CloseSessionPayload {
-                    session_id: sid.clone(),
+                payload: acp_hub_proto::action::CloseChatPayload {
+                    chat_id: sid.clone(),
                 },
             }))
             .await?;
             let ack = wait_terminal(&mut c, RECV_TIMEOUT).await?;
             match ack {
                 Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-                    // test-child 应退出（machine kill）。
+                    // test-child 应退出（instance kill）。
                     assert!(
-                        machine.log_contains("kill 完成", Duration::from_secs(10)),
-                        "machine 应执行 kill"
+                        instance.log_contains("kill 完成", Duration::from_secs(10)),
+                        "instance 应执行 kill"
                     );
                     // Registry：session 状态 closed（或已从活跃摘要移除）。
                     let doc = fetch_registry_snapshot(env.port, &env.client_token).await?;
-                    let status = session_field(&doc, &sid, "status");
-                    if !session_ids(&doc).contains(&sid) {
+                    let status = chat_field(&doc, &sid, "status");
+                    if !chat_ids(&doc).contains(&sid) {
                         // 允许 close 后移除活跃摘要（§12.4 清理）。
                     } else {
                         assert_eq!(

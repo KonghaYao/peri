@@ -1,6 +1,6 @@
-//! 通道层（Feature F5）：gateway（ws 生命周期）、session-channel（客户端连接
+//! 通道层（Feature F5）：gateway（ws 生命周期）、chat-channel（客户端连接
 //! 归一化）、command-coordinator（串行队列 + commandId 去重持久化）、
-//! relay-event-handler（machine 入站消费与断链清理）、broadcaster（fan-out +
+//! relay-event-handler（instance 入站消费与断链清理）、broadcaster（fan-out +
 //! 背压）、connection-registry（配额）（架构 §12 目录结构）。
 //!
 //! 依赖方向（单向，防环）：`protocol`（纯函数）← `channel`（依赖 protocol +
@@ -11,17 +11,18 @@
 //! §4.2–§4.8、§6、§7.4、§8、§9。
 
 mod broadcaster;
+mod chat_channel;
 mod command_coordinator;
 mod connection_registry;
 mod gateway;
 mod relay_event_handler;
-mod session_channel;
 
 pub use broadcaster::{
     BackpressureAction, Broadcaster, OutboundMsg, SubError, decide_backpressure,
 };
 pub use command_coordinator::{CommandCoordinator, ExecCmd, SubmitAck};
+pub use command_coordinator::{DEFAULT_ACP_CMD, DEFAULT_INSTANCE_ID};
 pub use connection_registry::{ConnHandle, ConnId, ConnectionRegistry, RegistryFull};
 pub use gateway::{Gateway, GatewayError};
 pub use relay_event_handler::{ConsumeResult, PendingRpc, RelayError, RelayEventHandler};
-pub use session_channel::{ChannelDeps, DispatchOutcome, SessionChannel};
+pub use chat_channel::{ChannelDeps, DispatchOutcome, ChatChannel};

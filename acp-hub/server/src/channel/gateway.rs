@@ -1,18 +1,19 @@
 //! Gateway：ws 生命周期（架构 §4.6/§4.7/§9.2/§9.5，设计稿
 //! `f5-channel-control.md` §10）。
 //!
-//! ws 入口：accept → 配额/回环检查 → 认证 → 角色分派 → 快照时序（client）/
-//! 机器会话（machine）→ 心跳接线 → 断链清理。
+//! ws 入口：accept → 回环检查（§9.5）→ 静态分流（非 ws 的 HTTP GET 交
+//! `crate::web` 验证台，§web）→ 配额（§8.6）→ 认证 → 角色分派 → 快照时序
+//! （client）/机器会话（instance）→ 心跳接线 → 断链清理。
 //!
 //! 客户端时序（§4.6）：配额 → `auth` → 订阅（`ysync.subscribe`）→ 打开/恢复
-//! Doc（`DocManager::open_session` 幂等）→ 推全量快照（StoreSink 镜像，
+//! Doc（`DocManager::open_chat` 幂等）→ 推全量快照（StoreSink 镜像，
 //! 携带 `projection_version`）→ `ready` 握手 → `mark_ready` → flush 缓冲
 //! Action → 帧循环 + 心跳（`HeartbeatDriver`，pong 超时 4501）。
 //!
-//! machine 时序（§9.2/§4.5）：首帧 `machine/hello` → 双向认证 →
-//! `auth_response` 下发 → `MachineRegistry::on_hello`（fencing + 注册）→
+//! instance 时序（§9.2/§4.5）：首帧 `instance/hello` → 双向认证 →
+//! `auth_response` 下发 → `InstanceRegistry::on_hello`（fencing + 注册）→
 //! 帧循环（event/buffer_sync/heartbeat/ack/process_exit）→ 断开 →
-//! `on_disconnect` + `RelayEventHandler::on_machine_disconnect`（§8.2）。
+//! `on_disconnect` + `RelayEventHandler::on_instance_disconnect`（§8.2）。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,7 +32,8 @@ use acp_hub_proto::ack::{ActionError, ErrorCode};
 use acp_hub_proto::action::ActionEnvelope;
 use acp_hub_proto::conn::Auth;
 use acp_hub_proto::frame::{Frame, ProtoError};
-use acp_hub_proto::machine::MachineHello;
+use acp_hub_proto::instance::InstanceHello;
+use acp_hub_proto::schema::{InstanceStatus, InstanceView};
 use acp_hub_proto::whitelist::{Direction, Role, m1_allows_action_type, m1_check};
 
 use crate::auth::audit::audit;
@@ -39,17 +41,21 @@ use crate::auth::AuthService;
 use crate::channel::OutboundMsg;
 use crate::channel::{ConnectionRegistry, ConnId};
 use crate::channel::RelayEventHandler;
-use crate::channel::{ChannelDeps, DispatchOutcome, SessionChannel};
+use crate::channel::{ChannelDeps, DispatchOutcome, ChatChannel};
 use crate::config::Config;
 use crate::control::HeartbeatDriver;
 use crate::control::StoreSink;
-use crate::control::{MachineAck, MachineConn};
+use crate::control::{InstanceAck, InstanceConn};
 
 use crate::state::doc_manager::DocManager;
 use crate::state::registry::RegistryState;
 
 /// 首帧等待超时（§4.6 步骤 1 前：10s 无首帧断开）。
 pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// HTTP 头部窥探补齐上限（§web：首段未含 `\r\n\r\n` 时短等碎片；超过即按
+/// 非 ws 处理。正常 GET/升级请求首段即完整，该上限只兜底慢发包场景）。
+const HEAD_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 认证前占位 token_id（§5「认证前占位」；认证成功后 upgrade 替换）。
 const PENDING_TOKEN_ID: &str = "<pending-auth>";
@@ -144,7 +150,49 @@ impl Gateway {
             drop(stream);
             return;
         }
-        // 2. 配额检查（认证**前**占位，§8.6：防未认证连接占满配额）。
+        // 2. 静态分支（§web 验证台）：非 ws 升级请求 → 内嵌静态资源；ws 升级
+        //    请求原样走后续握手。窥探（peek 不消费数据，握手字节不受影响）
+        //    首段：定位 `\r\n\r\n` 后查 `upgrade: websocket`；头部碎片未齐时
+        //    短等补齐（HEAD_PROBE_TIMEOUT），避免把碎片到达的 ws 握手误判。
+        let mut peeked = [0u8; 4096];
+        let mut head_len;
+        let head_end = {
+            let deadline = tokio::time::Instant::now() + HEAD_PROBE_TIMEOUT;
+            loop {
+                head_len = match stream.peek(&mut peeked).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        debug!(peer = %peer, error = ?e, "peek failed");
+                        drop(stream);
+                        return;
+                    }
+                };
+                match crate::web::header_end(&peeked[..head_len]) {
+                    Some(end) => break Some(end),
+                    // EOF / 缓冲已满 / 超时仍未齐 → 按非 ws 处理（serve 兜底）。
+                    None if head_len == 0
+                        || head_len == peeked.len()
+                        || tokio::time::Instant::now() >= deadline =>
+                    {
+                        break None;
+                    }
+                    None => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        };
+        let head_text = String::from_utf8_lossy(&peeked[..head_len]);
+        let is_ws = match head_end {
+            Some(end) => crate::web::is_ws_upgrade(&peeked[..end]),
+            None => false,
+        };
+        if !is_ws {
+            // HTTP 静态分支：不进配额/注册表（§8.6 只面向 ws 连接）。
+            if let Err(e) = crate::web::serve(stream, &head_text).await {
+                debug!(peer = %peer, error = ?e, "static serve failed");
+            }
+            return;
+        }
+        // 3. 配额检查（认证**前**占位，§8.6：防未认证连接占满配额）。
         let pending_ctx = crate::auth::ConnectionCtx {
             token_id: PENDING_TOKEN_ID.to_string(),
             role: crate::auth::TokenRole::Full,
@@ -162,7 +210,7 @@ impl Gateway {
             }
         };
 
-        // 3. ws 握手。
+        // 4. ws 握手。
         let ws = match tokio_tungstenite::accept_async(stream).await {
             Ok(ws) => ws,
             Err(e) => {
@@ -173,7 +221,7 @@ impl Gateway {
         };
         let (mut ws_sink, mut ws_stream) = ws.split();
 
-        // 4. 首帧等待（10s 超时，§4.6）。
+        // 5. 首帧等待（10s 超时，§4.6）。
         let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, ws_stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => match Frame::parse(&text) {
                 Ok(f) => f,
@@ -200,18 +248,18 @@ impl Gateway {
             }
         };
 
-        // 5. 角色分派。
+        // 6. 角色分派。
         match first {
             Frame::Auth(auth) => {
                 self.handle_client_connection(conn_id, ws_sink, ws_stream, peer, auth)
                     .await;
             }
-            Frame::MachineHello(hello) => {
-                self.handle_machine_connection(conn_id, ws_sink, ws_stream, peer, hello)
+            Frame::InstanceHello(hello) => {
+                self.handle_instance_connection(conn_id, ws_sink, ws_stream, peer, hello)
                     .await;
             }
             _ => {
-                self.finish_connection(conn_id, &mut ws_sink, 1011, "first frame must be auth or machine/hello")
+                self.finish_connection(conn_id, &mut ws_sink, 1011, "first frame must be auth or instance/hello")
                     .await;
             }
         }
@@ -249,7 +297,7 @@ impl Gateway {
         audit("conn.open", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
         info!(conn_id, token_id = %ctx.token_id, peer = %peer, "client connected");
 
-        let mut channel = SessionChannel::new(ctx);
+        let mut channel = ChatChannel::new(ctx);
         let mut heartbeat = HeartbeatDriver::new(self.heartbeat_interval, self.heartbeat_timeout);
         let mut ticker = tokio::time::interval(self.heartbeat_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -391,7 +439,7 @@ impl Gateway {
     /// 返回 Some(close_code) = 连接需关闭。
     async fn apply_outcome(
         &self,
-        channel: &mut SessionChannel,
+        channel: &mut ChatChannel,
         out_tx: &mpsc::Sender<OutboundMsg>,
         conn_id: ConnId,
         outcome: DispatchOutcome,
@@ -408,15 +456,15 @@ impl Gateway {
             DispatchOutcome::Subscribe { docs, first } => {
                 let mut versions = std::collections::HashMap::new();
                 for doc in &docs {
-                    // 打开/恢复 Doc（§4.6 步骤 2：DocManager::open_session 幂等；
-                    // machine_id/title 来自 SessionRegistry，未登记 → 空值）。
-                    if let Some(sid) = doc_sid(doc) {
-                        let (machine_id, title) = match self.deps.sessions.entry(sid).await {
-                            Some(e) => (e.machine_id.clone(), e.title.clone()),
+                    // 打开/恢复 Doc（§4.6 步骤 2：DocManager::open_chat 幂等；
+                    // instance_id/title 来自 ChatRegistry，未登记 → 空值）。
+                    if let Some(cid) = doc_cid(doc) {
+                        let (instance_id, title) = match self.deps.chats.entry(cid).await {
+                            Some(e) => (e.instance_id.clone(), e.title.clone()),
                             None => (String::new(), String::new()),
                         };
-                        if let Err(e) = self.doc.open_session(sid, &machine_id, Some(&title)).await {
-                            warn!(conn_id, session_id = sid, error = ?e, "open session failed");
+                        if let Err(e) = self.doc.open_chat(cid, &instance_id, Some(&title)).await {
+                            warn!(conn_id, chat_id = cid, error = ?e, "open chat failed");
                         }
                     }
                     // 全量快照（§4.6 步骤 3：StoreSink 镜像 + projection_version）。
@@ -475,27 +523,27 @@ impl Gateway {
         }
     }
 
-    /// machine 连接：双向认证 → hello 注册 → 帧循环。
-    async fn handle_machine_connection(
+    /// instance 连接：双向认证 → hello 注册 → 帧循环。
+    async fn handle_instance_connection(
         &self,
         conn_id: ConnId,
         mut ws_sink: futures::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
         mut ws_stream: futures::stream::SplitStream<WebSocketStream<TcpStream>>,
         peer: SocketAddr,
-        hello: MachineHello,
+        hello: InstanceHello,
     ) {
         let (out_tx, mut out_rx) = mpsc::channel::<OutboundMsg>(256);
         // 双向认证（§9.2 步骤 1–2）。
         let (ctx, auth_response) = {
             let mut auth_service = self.auth.lock().await;
-            match auth_service.authenticate_machine(&hello, peer).await {
+            match auth_service.authenticate_instance(&hello, peer).await {
                 Ok(ok) => (ok.ctx, ok.response),
                 Err(e) => {
-                    warn!(peer = %peer, error = ?e, "machine auth failed");
+                    warn!(peer = %peer, error = ?e, "instance auth failed");
                     let _ = ws_sink
                         .send(Message::Close(Some(CloseFrame {
                             code: close_code(4502),
-                            reason: "machine authentication failed".into(),
+                            reason: "instance authentication failed".into(),
                         })))
                         .await;
                     self.conns.unregister(conn_id);
@@ -504,7 +552,7 @@ impl Gateway {
             }
         };
         self.conns.upgrade(conn_id, ctx.clone());
-        // 下发 auth_response（§9.2 步骤 2：server 身份证明；machine 校验通过
+        // 下发 auth_response（§9.2 步骤 2：server 身份证明；instance 校验通过
         // 前不执行任何 spawn/kill）。
         if send_frame(&mut ws_sink, &Frame::AuthResponse(auth_response))
             .await
@@ -514,30 +562,46 @@ impl Gateway {
             self.conns.unregister(conn_id);
             return;
         }
-        let machine_id = ctx.name.clone();
+        let instance_id = ctx.name.clone();
         // hello 注册（§4.5 幂等替换：fencing 旧连接）。
         let outcome = self
             .deps
-            .machine
+            .instance
             .on_hello(
-                &machine_id,
+                &instance_id,
                 &ctx.token_id,
-                MachineConn { tx: out_tx.clone() },
+                InstanceConn { tx: out_tx.clone() },
                 &hello,
             )
             .await;
-        audit("machine.hello", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
+        audit("instance.hello", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
         info!(
-            conn_id, machine_id = %machine_id, hostname = %hello.hostname,
+            conn_id, instance_id = %instance_id, hostname = %hello.hostname,
             fenced = outcome.fenced_previous,
-            "machine connected"
+            "instance connected"
         );
-        // 孤儿清理钩子（§7.5：已中断/终态但 machine 声称存活 → 补发 kill）。
-        self.deps.machine.cleanup_orphans(&machine_id, &outcome).await;
-        // §8.4.1 不变量 4：machine 重连（hello）对账后开门——Restarting →
+        // hello 注册成功 → Registry instances 视图 upsert（§7.1/§12.4：机器
+        // 列表唯一权威源；registered_at 以本次 hello 时刻为准，后续心跳
+        // 复用首值）。
+        let registered_at = chrono::Utc::now().to_rfc3339();
+        let view = InstanceView {
+            id: instance_id.clone(),
+            hostname: hello.hostname.clone(),
+            status: InstanceStatus::Online,
+            token_id: ctx.token_id.clone(),
+            registered_at: registered_at.clone(),
+            last_heartbeat: registered_at.clone(),
+            chat_count: 0,
+        };
+        if let Err(e) = self.registry.upsert_instance(view).await {
+            warn!(instance_id = %instance_id, error = ?e, "registry instance upsert failed (hello)");
+        }
+        // 孤儿清理钩子（§7.5：已中断/终态但 instance 声称存活 → 补发 kill）。
+        self.deps.instance.cleanup_orphans(&instance_id, &outcome).await;
+        // §8.4.1 不变量 4：instance 重连（hello）对账后开门——Restarting →
         // Healthy（或 Degraded，若其他条件仍活跃；幂等）。
         if let Err(e) = self.registry.clear_restarting().await {
-            warn!(machine_id = %machine_id, error = ?e, "clear_restarting failed (registry write)");
+            warn!(instance_id = %instance_id, error = ?e, "clear_restarting failed (registry write)");
         }
 
         let close_code = loop {
@@ -549,60 +613,76 @@ impl Gateway {
                             let frame = match Frame::parse(&text) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    warn!(machine_id = %machine_id, error = ?e, "malformed machine frame");
+                                    warn!(instance_id = %instance_id, error = ?e, "malformed instance frame");
                                     continue;
                                 }
                             };
-                            if !matches!(m1_check(frame.tag(), Role::Machine, Direction::Inbound),
+                            if !matches!(m1_check(frame.tag(), Role::Instance, Direction::Inbound),
                                 acp_hub_proto::whitelist::M1Check::Allowed)
                             {
-                                warn!(machine_id = %machine_id, tag = %frame.tag(),
-                                    "machine frame rejected (whitelist)");
+                                warn!(instance_id = %instance_id, tag = %frame.tag(),
+                                    "instance frame rejected (whitelist)");
                                 continue;
                             }
                             match frame {
-                                Frame::MachineEvent(ev) => {
-                                    let r = self.relay.on_machine_event(&machine_id, &ev).await;
+                                Frame::InstanceEvent(ev) => {
+                                    let r = self.relay.on_instance_event(&instance_id, &ev).await;
                                     trace_consume(&r);
                                 }
-                                Frame::MachineBufferSync(sync) => {
-                                    let r = self.relay.on_buffer_sync(&machine_id, &sync).await;
+                                Frame::InstanceBufferSync(sync) => {
+                                    let r = self.relay.on_buffer_sync(&instance_id, &sync).await;
                                     trace_consume(&r);
                                 }
-                                Frame::MachineHeartbeat(hb) => {
-                                    if let Err(e) = self.deps.machine.on_heartbeat(&machine_id, &hb).await {
-                                        debug!(machine_id = %machine_id, error = ?e, "heartbeat rejected");
+                                Frame::InstanceHeartbeat(hb) => {
+                                    if let Err(e) = self.deps.instance.on_heartbeat(&instance_id, &hb).await {
+                                        debug!(instance_id = %instance_id, error = ?e, "heartbeat rejected");
+                                    }
+                                    // 心跳 → Registry instances 视图更新（§4.5：
+                                    // last_heartbeat 刷新 + 存活会话计数；失败仅降级
+                                    // 记录，不打断帧循环）。
+                                    let now = chrono::Utc::now().to_rfc3339();
+                                    let view = InstanceView {
+                                        id: instance_id.clone(),
+                                        hostname: hello.hostname.clone(),
+                                        status: InstanceStatus::Online,
+                                        token_id: ctx.token_id.clone(),
+                                        registered_at: registered_at.clone(),
+                                        last_heartbeat: now,
+                                        chat_count: hb.alive_sessions.len() as u32,
+                                    };
+                                    if let Err(e) = self.registry.upsert_instance(view).await {
+                                        debug!(instance_id = %instance_id, error = ?e, "registry heartbeat upsert failed");
                                     }
                                 }
-                                Frame::MachineSpawnAck(ack) => {
+                                Frame::InstanceSpawnAck(ack) => {
                                     let cid = ack.command_id.clone();
-                                    self.deps.machine.on_ack(&machine_id, &cid,
-                                        MachineAck::Spawn(ack)).await;
+                                    self.deps.instance.on_ack(&instance_id, &cid,
+                                        InstanceAck::Spawn(ack)).await;
                                 }
-                                Frame::MachineKillAck(ack) => {
+                                Frame::InstanceKillAck(ack) => {
                                     let cid = ack.command_id.clone();
-                                    self.deps.machine.on_ack(&machine_id, &cid,
-                                        MachineAck::Kill(ack)).await;
+                                    self.deps.instance.on_ack(&instance_id, &cid,
+                                        InstanceAck::Kill(ack)).await;
                                 }
-                                Frame::MachineForwardAck(ack) => {
+                                Frame::InstanceForwardAck(ack) => {
                                     let cid = ack.command_id.clone();
-                                    self.deps.machine.on_ack(&machine_id, &cid,
-                                        MachineAck::Forward(ack)).await;
+                                    self.deps.instance.on_ack(&instance_id, &cid,
+                                        InstanceAck::Forward(ack)).await;
                                 }
-                                Frame::MachineProcessExit(exit) => {
-                                    let r = self.relay.on_process_exit(&machine_id, &exit).await;
+                                Frame::InstanceProcessExit(exit) => {
+                                    let r = self.relay.on_process_exit(&instance_id, &exit).await;
                                     trace_consume(&r);
                                 }
                                 _ => {
-                                    warn!(machine_id = %machine_id, tag = %frame.tag(),
-                                        "unexpected machine inbound frame");
+                                    warn!(instance_id = %instance_id, tag = %frame.tag(),
+                                        "unexpected instance inbound frame");
                                 }
                             }
                         }
                         Ok(Message::Close(_)) => break 1000,
                         Ok(_) => {}
                         Err(e) => {
-                            debug!(conn_id, error = ?e, "machine ws read error");
+                            debug!(conn_id, error = ?e, "instance ws read error");
                             break 1011;
                         }
                     }
@@ -616,7 +696,7 @@ impl Gateway {
                         }
                         Some(OutboundMsg::JsonRpc(v)) => {
                             // 透传 JSON-RPC（prompt/cancel/resolve/initialize/
-                            // session/new；machine 保持 dumb，§4.5）。
+                            // session/new；instance 保持 dumb，§4.5）。
                             let bytes = v.to_string().into();
                             if ws_sink.send(Message::Text(bytes)).await.is_err() {
                                 break 1011;
@@ -629,21 +709,21 @@ impl Gateway {
             }
         };
 
-        // 断链语义（§8.2 matrix machine 行）：立即 OFFLINE + 断链清理。
+        // 断链语义（§8.2 matrix instance 行）：立即 OFFLINE + 断链清理。
         // conn 句柄比对：hello fencing 后旧连接滞后断开不触碰新连接状态
         // （§4.5 幂等替换）。
         let was_online = self
             .deps
-            .machine
-            .on_disconnect(&machine_id, &MachineConn { tx: out_tx.clone() })
+            .instance
+            .on_disconnect(&instance_id, &InstanceConn { tx: out_tx.clone() })
             .await;
         if was_online {
-            if let Err(e) = self.relay.on_machine_disconnect(&machine_id).await {
-                warn!(machine_id = %machine_id, error = ?e, "machine disconnect cleanup failed");
+            if let Err(e) = self.relay.on_instance_disconnect(&instance_id).await {
+                warn!(instance_id = %instance_id, error = ?e, "instance disconnect cleanup failed");
             }
         }
         audit("conn.close", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
-        self.finish_connection(conn_id, &mut ws_sink, close_code, "machine connection closed")
+        self.finish_connection(conn_id, &mut ws_sink, close_code, "instance connection closed")
             .await;
     }
 
@@ -697,16 +777,16 @@ fn close_code(code: u16) -> tokio_tungstenite::tungstenite::protocol::frame::cod
     }
 }
 
-/// DocId → sid 提取（`chat:{sid}` / `session:{sid}`）。
+/// DocId → cid 提取（`chat:{cid}` / `control:{cid}`）。
 ///
-/// `hub:registry` 不是 session doc，不得提取 sid（否则订阅 registry 会误开
-/// 一个名为 "registry" 的假 session 并污染 Registry Doc）。
-fn doc_sid(doc: &acp_hub_proto::conn::DocId) -> Option<&str> {
+/// `hub:registry` 不是 chat doc，不得提取 cid（否则订阅 registry 会误开
+/// 一个名为 "registry" 的假 chat 并污染 Registry Doc）。
+fn doc_cid(doc: &acp_hub_proto::conn::DocId) -> Option<&str> {
     let s = doc.as_str();
-    if !(s.starts_with("chat:") || s.starts_with("session:")) {
+    if !(s.starts_with("chat:") || s.starts_with("control:")) {
         return None;
     }
-    s.split_once(':').map(|(_, sid)| sid)
+    s.split_once(':').map(|(_, cid)| cid)
 }
 
 /// Degraded/Restarting 期间拒绝新 committed 承诺（§17.2/§8.4：与落盘失败
@@ -751,16 +831,16 @@ fn trace_consume(r: &crate::channel::relay_event_handler::ConsumeResult) {
     use crate::channel::relay_event_handler::ConsumeResult as C;
     match r {
         C::Delivered {
-            session_id,
+            chat_id,
             kind,
             seq,
             applied,
-        } => debug!(session_id, kind, seq, applied, "machine event consumed"),
+        } => debug!(chat_id, kind, seq, applied, "instance event consumed"),
         C::RpcConfirmed { command_id, .. } => debug!(command_id, "rpc confirmed (L3)"),
         C::Dropped { reason } | C::BatchRejected { reason } => {
-            debug!(reason, "machine frame dropped")
+            debug!(reason, "instance frame dropped")
         }
-        C::PersistFailed { session_id } => warn!(session_id, "event persist failed (degraded)"),
+        C::PersistFailed { chat_id } => warn!(chat_id, "event persist failed (degraded)"),
     }
 }
 

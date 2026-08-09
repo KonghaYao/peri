@@ -10,3 +10,4 @@ pub mod control;
 pub mod persist;
 pub mod protocol;
 pub mod state;
+pub mod web;

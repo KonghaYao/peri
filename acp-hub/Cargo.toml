@@ -2,7 +2,7 @@
 # 架构基准：docs/architecture.md §3.2/§12
 
 [workspace]
-members = ["proto", "server", "machine"]
+members = ["proto", "server", "instance"]
 resolver = "2"
 
 [workspace.package]
@@ -55,7 +55,7 @@ hkdf = "0.12"
 base64 = "0.22"
 rand = "0.10"  # CSPRNG（默认 features 含 sys_rng）
 
-# --- Unix 进程组信号（machine 进程树 kill，§4.1） ---
+# --- Unix 进程组信号（instance 进程树 kill，§4.1） ---
 libc = "0.2"
 crc32fast = "1.5"
 

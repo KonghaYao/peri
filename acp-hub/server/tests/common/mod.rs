@@ -2,12 +2,12 @@
 //!
 //! 职责：
 //! - 二进制路径解析（`CARGO_BIN_EXE_acp-hub-server` 推导同 target 目录下的
-//!   `acp-machine` / `test-child`，需先 `cargo build --workspace`）；
+//!   `acp-instance` / `test-child`，需先 `cargo build --workspace`）；
 //! - 随机端口（bind :0 后读出）、独立 temp 数据/配置目录；
 //! - tokens.toml 直接构造（§9.2.1：TokenStore 文件格式，与 CLI `token
 //!   generate` 等价，避免污染用户 `~/.config/acp-hub`）；
-//! - server / machine / test-child 子进程 spawn 与 Drop 清理（进程组 SIGKILL，
-//!   防残留；machine 残留 ACP 进程经 watermark.json 的 pgid 清理）；
+//! - server / instance / test-child 子进程 spawn 与 Drop 清理（进程组 SIGKILL，
+//!   防残留；instance 残留 ACP 进程经 watermark.json 的 pgid 清理）；
 //! - ws 客户端 helper（tokio-tungstenite + 认证握手 + 读帧/发帧/自动 pong）；
 //! - yjs 快照解析 helper（base64 update → yrs::Doc）。
 //!
@@ -48,18 +48,18 @@ fn target_bin_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// machine daemon 二进制。
-pub fn machine_bin() -> PathBuf {
-    let p = target_bin_dir().join("acp-machine");
+/// instance daemon 二进制。
+pub fn instance_bin() -> PathBuf {
+    let p = target_bin_dir().join("acp-instance");
     assert!(
         p.exists(),
-        "acp-machine 未构建：请先 `cargo build --workspace`（期望路径 {}）",
+        "acp-instance 未构建：请先 `cargo build --workspace`（期望路径 {}）",
         p.display()
     );
     p
 }
 
-/// 假 ACP 进程二进制（machine 包的 test-child bin）。
+/// 假 ACP 进程二进制（instance 包的 test-child bin）。
 pub fn test_child_bin() -> PathBuf {
     let p = target_bin_dir().join("test-child");
     assert!(
@@ -95,14 +95,14 @@ pub struct TestEnv {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub port: u16,
-    /// machine token（name = "local"，与 server 默认 machine_id 对齐）。
-    pub machine_token: String,
+    /// instance token（name = "local"，与 server 默认 instance_id 对齐）。
+    pub instance_token: String,
     /// full 角色 client token。
     pub client_token: String,
     /// fake `peri` 所在目录（PATH 注入用）。
     pub fake_bin_dir: PathBuf,
-    /// machine 数据目录（水位/缓冲）。
-    pub machine_data_dir: PathBuf,
+    /// instance 数据目录（水位/缓冲）。
+    pub instance_data_dir: PathBuf,
 }
 
 impl TestEnv {
@@ -111,18 +111,18 @@ impl TestEnv {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let config_dir = tmp.path().join("config");
         let data_dir = tmp.path().join("data");
-        let machine_data_dir = tmp.path().join("machine-data");
+        let instance_data_dir = tmp.path().join("instance-data");
         fs::create_dir_all(&config_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
-        fs::create_dir_all(&machine_data_dir).unwrap();
+        fs::create_dir_all(&instance_data_dir).unwrap();
 
-        let machine_token = fresh_token();
+        let instance_token = fresh_token();
         let client_token = fresh_token();
         let read_only_token = fresh_token();
         write_tokens_file(
             &config_dir.join("tokens.toml"),
             &[
-                ("local".into(), "machine", machine_token.clone()),
+                ("local".into(), "instance", instance_token.clone()),
                 ("test-client".into(), "full", client_token.clone()),
                 ("ro-panel".into(), "read-only", read_only_token),
             ],
@@ -137,10 +137,10 @@ impl TestEnv {
             config_dir,
             data_dir,
             port: pick_free_port(),
-            machine_token,
+            instance_token,
             client_token,
             fake_bin_dir,
-            machine_data_dir,
+            instance_data_dir,
         }
     }
 
@@ -152,10 +152,10 @@ impl TestEnv {
         p
     }
 
-    /// 清理 machine 数据目录中水位记录的残留 ACP 进程组（§8 启动清理同源；
+    /// 清理 instance 数据目录中水位记录的残留 ACP 进程组（§8 启动清理同源；
     /// Drop 兜底）。
-    pub fn cleanup_machine_leftovers(&self) {
-        let wm = self.machine_data_dir.join("watermark.json");
+    pub fn cleanup_instance_leftovers(&self) {
+        let wm = self.instance_data_dir.join("watermark.json");
         if let Ok(content) = fs::read_to_string(&wm) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(sessions) = v.get("sessions").and_then(|s| s.as_object()) {
@@ -188,7 +188,7 @@ fn write_tokens_file(path: &Path, records: &[(String, &str, String)]) {
     fs::write(path, body).expect("write tokens.toml");
 }
 
-/// fake `peri`：server 默认 ACP 命令 `peri acp`（M1 常量），machine 经 PATH
+/// fake `peri`：server 默认 ACP 命令 `peri acp`（M1 常量），instance 经 PATH
 /// 查找；脚本 exec test-child（argv 透传，test-child 忽略未知参数）。
 fn write_fake_peri(dir: &Path, test_child: &Path) {
     let script = format!(
@@ -205,7 +205,7 @@ fn write_fake_peri(dir: &Path, test_child: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// Unix 进程组 kill（FFI 自声明 libc kill，machine/src/child.rs 同源做法）
+// Unix 进程组 kill（FFI 自声明 libc kill，instance/src/child.rs 同源做法）
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -344,38 +344,38 @@ impl Drop for ServerProc {
 }
 
 // ---------------------------------------------------------------------------
-// machine 子进程
+// instance 子进程
 // ---------------------------------------------------------------------------
 
-/// machine daemon 进程句柄（Drop = SIGKILL 进程组 + watermark 残留清理）。
-pub struct MachineProc {
+/// instance daemon 进程句柄（Drop = SIGKILL 进程组 + watermark 残留清理）。
+pub struct InstanceProc {
     child: Option<Child>,
     pub env_path: PathBuf,
     pub stderr_log: PathBuf,
 }
 
-impl MachineProc {
-    /// 启动 machine：`--server-url ws://127.0.0.1:<port>/machine --token-file
+impl InstanceProc {
+    /// 启动 instance：`--server-url ws://127.0.0.1:<port>/instance --token-file
     /// <f> --data-dir <d>`。PATH 注入 fake-bin（含 `peri`），HOSTNAME 固定。
-    pub fn start(env: &TestEnv) -> MachineProc {
-        let token_file = env.tmp.path().join("machine.token");
-        fs::write(&token_file, env.machine_token.clone()).unwrap();
-        let stderr_log = env.tmp.path().join("machine.stderr.log");
+    pub fn start(env: &TestEnv) -> InstanceProc {
+        let token_file = env.tmp.path().join("instance.token");
+        fs::write(&token_file, env.instance_token.clone()).unwrap();
+        let stderr_log = env.tmp.path().join("instance.stderr.log");
 
         let path = format!(
             "{}:{}",
             env.fake_bin_dir.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new(machine_bin());
+        let mut cmd = Command::new(instance_bin());
         cmd.args([
             "--server-url",
-            &format!("ws://127.0.0.1:{}/machine", env.port),
+            &format!("ws://127.0.0.1:{}/instance", env.port),
             "--token-file",
         ])
         .arg(&token_file)
         .args(["--data-dir"])
-        .arg(&env.machine_data_dir)
+        .arg(&env.instance_data_dir)
         .args(["--log-level", "debug"])
         .env("PATH", &path)
         .env("HOSTNAME", "it-host");
@@ -388,24 +388,24 @@ impl MachineProc {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(
-                fs::File::create(&stderr_log).expect("create machine log"),
+                fs::File::create(&stderr_log).expect("create instance log"),
             ))
             .spawn()
-            .expect("spawn acp-machine");
-        MachineProc {
+            .expect("spawn acp-instance");
+        InstanceProc {
             child: Some(child),
             env_path: env.fake_bin_dir.clone(),
             stderr_log,
         }
     }
 
-    /// 等待认证通过（machine stderr 出现「认证通过」或 server 侧「machine
+    /// 等待认证通过（instance stderr 出现「认证通过」或 server 侧「instance
     /// connected」由调用方轮询；这里轮询本进程日志）。
     pub fn wait_authenticated(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if let Ok(content) = fs::read_to_string(&self.stderr_log) {
-                if content.contains("认证通过") || content.contains("machine connected") {
+                if content.contains("认证通过") || content.contains("instance connected") {
                     return true;
                 }
             }
@@ -414,7 +414,7 @@ impl MachineProc {
         false
     }
 
-    /// machine stderr 是否含某子串（轮询）。
+    /// instance stderr 是否含某子串（轮询）。
     pub fn log_contains(&self, needle: &str, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
@@ -434,7 +434,7 @@ impl MachineProc {
             let lines: Vec<&str> = content.lines().collect();
             let tail = lines.len().saturating_sub(40);
             for l in lines.iter().skip(tail) {
-                eprintln!("[machine] {l}");
+                eprintln!("[instance] {l}");
             }
         }
     }
@@ -458,7 +458,7 @@ impl MachineProc {
     }
 }
 
-impl Drop for MachineProc {
+impl Drop for InstanceProc {
     fn drop(&mut self) {
         self.kill();
     }
@@ -734,30 +734,30 @@ pub fn root_str(doc: &yrs::Doc, key: &str) -> Option<String> {
         .and_then(|v| v.cast::<String>().ok())
 }
 
-/// root.machines/<machine_id>/<field> 字符串读取。
-pub fn machine_field(doc: &yrs::Doc, machine_id: &str, field: &str) -> Option<String> {
+/// root.instances/<instance_id>/<field> 字符串读取。
+pub fn instance_field(doc: &yrs::Doc, instance_id: &str, field: &str) -> Option<String> {
     let txn = doc.transact();
     let root = txn.get_map("root")?;
-    let machines = root.get(&txn, "machines")?.cast::<yrs::MapRef>().ok()?;
-    let m = machines.get(&txn, machine_id)?.cast::<yrs::MapRef>().ok()?;
+    let instances = root.get(&txn, "instances")?.cast::<yrs::MapRef>().ok()?;
+    let m = instances.get(&txn, instance_id)?.cast::<yrs::MapRef>().ok()?;
     m.get(&txn, field).and_then(|v| v.cast::<String>().ok())
 }
 
-/// root.sessions/<session_id>/<field> 字符串读取。
-pub fn session_field(doc: &yrs::Doc, session_id: &str, field: &str) -> Option<String> {
+/// root.chats/<chat_id>/<field> 字符串读取。
+pub fn chat_field(doc: &yrs::Doc, chat_id: &str, field: &str) -> Option<String> {
     let txn = doc.transact();
     let root = txn.get_map("root")?;
-    let sessions = root.get(&txn, "sessions")?.cast::<yrs::MapRef>().ok()?;
-    let s = sessions.get(&txn, session_id)?.cast::<yrs::MapRef>().ok()?;
+    let chats = root.get(&txn, "chats")?.cast::<yrs::MapRef>().ok()?;
+    let s = chats.get(&txn, chat_id)?.cast::<yrs::MapRef>().ok()?;
     s.get(&txn, field).and_then(|v| v.cast::<String>().ok())
 }
 
-/// root.sessions 的 session_id 集合。
-pub fn session_ids(doc: &yrs::Doc) -> Vec<String> {
+/// root.chats 的 chat_id 集合。
+pub fn chat_ids(doc: &yrs::Doc) -> Vec<String> {
     let txn = doc.transact();
     let mut out = Vec::new();
     if let Some(root) = txn.get_map("root") {
-        if let Some(m) = root.get(&txn, "sessions").and_then(|v| v.cast::<yrs::MapRef>().ok()) {
+        if let Some(m) = root.get(&txn, "chats").and_then(|v| v.cast::<yrs::MapRef>().ok()) {
             for k in m.keys(&txn) {
                 out.push(k.to_string());
             }

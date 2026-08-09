@@ -14,18 +14,18 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use acp_hub_proto::action::{
-    ActionEnvelope, CreateSessionPayload, PromptSessionPayload,
+    ActionEnvelope, CreateChatPayload, PromptChatPayload,
 };
 use acp_hub_proto::frame::Frame;
-use acp_hub_proto::machine::MachineForwardAck;
+use acp_hub_proto::instance::InstanceForwardAck;
 
 use crate::auth::{ConnectionCtx, TokenRole};
 use crate::channel::OutboundMsg;
-use crate::channel::{CommandCoordinator, SubmitAck};
+use crate::channel::{CommandCoordinator, DEFAULT_ACP_CMD, SubmitAck};
 use crate::channel::RelayEventHandler;
 use crate::control::StoreSink;
-use crate::control::{MachineAck, MachineConn, MachineRegistry};
-use crate::control::SessionRegistry;
+use crate::control::{InstanceAck, InstanceConn, InstanceRegistry};
+use crate::control::ChatRegistry;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager};
 
@@ -40,14 +40,14 @@ struct Env {
     _tmp: tempfile::TempDir,
     store: Arc<Store>,
     doc: Arc<DocManager>,
-    machine: Arc<MachineRegistry>,
-    sessions: SessionRegistry,
+    instance: Arc<InstanceRegistry>,
+    chats: ChatRegistry,
     relay: Arc<RelayEventHandler>,
     coordinator: Arc<CommandCoordinator>,
-    /// machine 连接发送侧（测试读下行帧）。
-    machine_rx: mpsc::Receiver<OutboundMsg>,
-    /// machine 连接发送句柄（on_disconnect 句柄比对用）。
-    machine_tx: mpsc::Sender<OutboundMsg>,
+    /// instance 连接发送侧（测试读下行帧）。
+    instance_rx: mpsc::Receiver<OutboundMsg>,
+    /// instance 连接发送句柄（on_disconnect 句柄比对用）。
+    instance_tx: mpsc::Sender<OutboundMsg>,
 }
 
 fn ctx(name: &str) -> ConnectionCtx {
@@ -72,38 +72,39 @@ async fn env() -> Env {
     let sink = Arc::new(StoreSink::new(store.clone()).await.unwrap());
     let doc = Arc::new(DocManager::new(BatchConfig::default(), sink.clone()));
     let registry = doc.registry();
-    let sessions = SessionRegistry::new(registry);
-    let machine = Arc::new(MachineRegistry::new(
+    let chats = ChatRegistry::new(registry);
+    let instance = Arc::new(InstanceRegistry::new(
         Duration::from_secs(30),
         Duration::from_millis(200),
-        sessions.clone(),
+        chats.clone(),
     ));
     let relay = Arc::new(RelayEventHandler::new(
         doc.clone(),
-        sessions.clone(),
-        machine.clone(),
+        chats.clone(),
+        instance.clone(),
         doc.registry(),
     ));
     let coordinator = Arc::new(CommandCoordinator::with_l3_timeout(
         store.clone(),
         doc.clone(),
-        machine.clone(),
-        sessions.clone(),
+        instance.clone(),
+        chats.clone(),
         relay.clone(),
         &BatchConfig::default(),
+        DEFAULT_ACP_CMD.iter().map(|s| s.to_string()).collect(),
         Duration::from_millis(500),
         Duration::from_millis(500),
         Duration::from_millis(500),
         Duration::from_millis(500),
     ));
-    // machine 上线（hello）。
-    let (machine_tx, machine_rx) = mpsc::channel(64);
-    machine
+    // instance 上线（hello）。
+    let (instance_tx, instance_rx) = mpsc::channel(64);
+    instance
         .on_hello(
             "local",
             "tok-m",
-            MachineConn { tx: machine_tx.clone() },
-            &acp_hub_proto::machine::MachineHello {
+            InstanceConn { tx: instance_tx.clone() },
+            &acp_hub_proto::instance::InstanceHello {
                 token: "tok".into(),
                 hostname: "local".into(),
                 caps: serde_json::json!({}),
@@ -118,12 +119,12 @@ async fn env() -> Env {
         _tmp: tmp,
         store,
         doc,
-        machine,
-        sessions,
+        instance,
+        chats,
         relay,
         coordinator,
-        machine_rx,
-        machine_tx,
+        instance_rx,
+        instance_tx,
     }
 }
 
@@ -131,17 +132,17 @@ async fn env() -> Env {
 /// Doc 打开 → Registry 登记 → binding，§6.2）。
 async fn bound_session(env: &Env, sid: &str, acp: &str) {
     let uuid = uuid::Uuid::parse_str(sid).expect("uuid session id");
-    env.store.create_session(uuid).unwrap();
-    env.doc.open_session(sid, "local", None).await.unwrap();
-    env.sessions.register(sid, "local", None).await.unwrap();
-    env.sessions.bind(sid, acp).await.unwrap();
+    env.store.create_chat(uuid).unwrap();
+    env.doc.open_chat(sid, "local", None).await.unwrap();
+    env.chats.register(sid, "local", None).await.unwrap();
+    env.chats.bind(sid, acp).await.unwrap();
 }
 
 fn prompt_action(cid: &str, sid: &str) -> ActionEnvelope {
     ActionEnvelope::Prompt {
         command_id: cid.into(),
-        payload: PromptSessionPayload {
-            session_id: sid.into(),
+        payload: PromptChatPayload {
+            chat_id: sid.into(),
             message: format!("msg-{cid}"),
         },
     }
@@ -200,20 +201,20 @@ async fn serial_execution_order() {
         let r = env.coordinator.submit(&ctx("c"), prompt_action(&cid, S3), tx.clone()).await;
         assert!(matches!(r, SubmitAck::Accepted { .. }));
     }
-    // machine 侧收到的 forward 顺序 = 提交顺序（§7.4 规则 1 串行）。
+    // instance 侧收到的 forward 顺序 = 提交顺序（§7.4 规则 1 串行）。
     // 每条 forward 帧回 ack（L1+L2 确认）否则 forward_rpc 阻塞 200ms 超时。
     let mut seen = Vec::new();
     for _ in 0..6 {
-        match tokio::time::timeout(Duration::from_secs(2), env.machine_rx.recv()).await {
-            Ok(Some(OutboundMsg::Frame(Frame::MachineForward(f)))) => {
+        match tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv()).await {
+            Ok(Some(OutboundMsg::Frame(Frame::InstanceForward(f)))) => {
                 seen.push(f.frame["id"].as_str().unwrap().to_string());
-                env.machine
+                env.instance
                     .on_ack(
                         "local",
                         &f.command_id,
-                        MachineAck::Forward(MachineForwardAck {
+                        InstanceAck::Forward(InstanceForwardAck {
                             command_id: f.command_id.clone(),
-                            session_id: f.session_id.clone(),
+                            chat_id: f.chat_id.clone(),
                             ok: true,
                             error: None,
                         }),
@@ -237,31 +238,31 @@ async fn spawn_failure_agent_unavailable() {
     let cid = uuid::Uuid::new_v4().to_string();
     let action = ActionEnvelope::Create {
         command_id: cid.clone(),
-        payload: CreateSessionPayload {
-            machine_id: Some("local".into()),
+        payload: CreateChatPayload {
+            instance_id: Some("local".into()),
             cwd: None,
             title: Some("t".into()),
         },
     };
     let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
     assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
-    // machine 收 spawn → 回 spawn_ack{ok:false}。
-    let spawn_frame = tokio::time::timeout(Duration::from_secs(2), env.machine_rx.recv())
+    // instance 收 spawn → 回 spawn_ack{ok:false}。
+    let spawn_frame = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
         .await
-        .expect("machine should receive spawn")
+        .expect("instance should receive spawn")
         .expect("rx alive");
-    let (spawn_cid, session_id) = match spawn_frame {
-        OutboundMsg::Frame(Frame::MachineSpawn(s)) => (s.command_id, s.session_id),
+    let (spawn_cid, chat_id) = match spawn_frame {
+        OutboundMsg::Frame(Frame::InstanceSpawn(s)) => (s.command_id, s.chat_id),
         other => panic!("expected spawn, got {other:?}"),
     };
     assert_eq!(spawn_cid, cid);
-    env.machine
+    env.instance
         .on_ack(
             "local",
             &cid,
-            crate::control::MachineAck::Spawn(acp_hub_proto::machine::MachineSpawnAck {
+            crate::control::InstanceAck::Spawn(acp_hub_proto::instance::InstanceSpawnAck {
                 command_id: cid.clone(),
-                session_id: session_id.clone(),
+                chat_id: chat_id.clone(),
                 ok: false,
                 error: Some("spawn failed".into()),
             }),
@@ -276,10 +277,10 @@ async fn spawn_failure_agent_unavailable() {
         other => panic!("expected action_error, got {other:?}"),
     }
     // 半创建清理：无幽灵视图（session 已移除；轮询等待异步清理完成）。
-    let sid_uuid = session_id.parse().unwrap();
+    let sid_uuid = chat_id.parse().unwrap();
     let mut removed = false;
     for _ in 0..40 {
-        if env.store.session(sid_uuid).is_none() {
+        if env.store.chat(sid_uuid).is_none() {
             removed = true;
             break;
         }
@@ -295,28 +296,28 @@ async fn create_timeout_cleanup_with_kill() {
     let cid = uuid::Uuid::new_v4().to_string();
     let action = ActionEnvelope::Create {
         command_id: cid.clone(),
-        payload: CreateSessionPayload::default(),
+        payload: CreateChatPayload::default(),
     };
     let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
     assert!(matches!(r, SubmitAck::Accepted { .. }));
-    // machine 收 spawn（不回 ack）→ spawn 超时（500ms）→ 清理 + 补发 kill。
-    let _spawn = tokio::time::timeout(Duration::from_secs(2), env.machine_rx.recv())
+    // instance 收 spawn（不回 ack）→ spawn 超时（500ms）→ 清理 + 补发 kill。
+    let _spawn = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
         .await
         .expect("spawn received");
     let mut saw_kill = false;
     for _ in 0..4 {
-        match tokio::time::timeout(Duration::from_secs(2), env.machine_rx.recv()).await {
-            Ok(Some(OutboundMsg::Frame(Frame::MachineKill(k)))) => {
+        match tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv()).await {
+            Ok(Some(OutboundMsg::Frame(Frame::InstanceKill(k)))) => {
                 saw_kill = true;
                 // 回 kill_ack（幂等清理路径）。
-                env.machine
+                env.instance
                     .on_ack(
                         "local",
                         &k.command_id,
-                        crate::control::MachineAck::Kill(
-                            acp_hub_proto::machine::MachineKillAck {
+                        crate::control::InstanceAck::Kill(
+                            acp_hub_proto::instance::InstanceKillAck {
                                 command_id: k.command_id.clone(),
-                                session_id: k.session_id.clone(),
+                                chat_id: k.chat_id.clone(),
                                 ok: true,
                             },
                         ),
@@ -363,45 +364,47 @@ async fn resolve_duplicate_and_unknown() {
         turn,
         crate::state::doc_manager::SubmitResult::Applied(_)
     ));
-    // 先投影一个 permission_request（epoch=0，聚合器接受）。
-    let ev = acp_hub_proto::machine::MachineEvent {
-        session_id: "acp-4".into(),
+    // 先投影一个 permission_request（epoch=0，聚合器接受）。信封 chat_id
+    // = 进程归属（hub id）；帧内 sessionId = acp id（binding 校验键）。
+    let ev = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S4.into(),
         epoch: 0,
         seq: 1,
         frame: serde_json::json!({
             "type": "permission_request",
+            "sessionId": "acp-4",
             "payload": {"permissionId": "p1", "turnId": "t1", "title": "run", "options": ["allow"]}
         }),
     };
-    let r = env.relay.on_machine_event("local", &ev).await;
+    let r = env.relay.on_instance_event("local", &ev).await;
     assert!(matches!(r, crate::channel::ConsumeResult::Delivered { applied: true, .. }));
     // 等待聚合器落盘（控制类事件挂 oneshot，已落盘）。
     let resolve = |cid: &str| ActionEnvelope::ResolvePermission {
         command_id: cid.into(),
         payload: acp_hub_proto::action::ResolvePermissionPayload {
-            session_id: S4.into(),
+            chat_id: S4.into(),
             permission_id: "p1".into(),
             decision: acp_hub_proto::action::PermissionDecision::Allow,
         },
     };
-    // 第一次 resolve：CAS Migrated → forward（machine 在线收 MachineForward）。
+    // 第一次 resolve：CAS Migrated → forward（instance 在线收 InstanceForward）。
     let cid1 = uuid::Uuid::new_v4().to_string();
     let r1 = env.coordinator.submit(&ctx("c"), resolve(&cid1), tx.clone()).await;
     assert!(matches!(r1, SubmitAck::Accepted { .. }), "r1 = {r1:?}");
-    let fwd = tokio::time::timeout(Duration::from_secs(2), env.machine_rx.recv())
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
         .await
         .expect("forward received")
         .expect("rx alive");
     let rpc_id = match &fwd {
-        OutboundMsg::Frame(Frame::MachineForward(f)) => {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
             // 回 forward_ack（L1+L2 确认；否则 forward_rpc 200ms 超时）。
-            env.machine
+            env.instance
                 .on_ack(
                     "local",
                     &f.command_id,
-                    MachineAck::Forward(MachineForwardAck {
+                    InstanceAck::Forward(InstanceForwardAck {
                         command_id: f.command_id.clone(),
-                        session_id: f.session_id.clone(),
+                        chat_id: f.chat_id.clone(),
                         ok: true,
                         error: None,
                     }),
@@ -411,9 +414,9 @@ async fn resolve_duplicate_and_unknown() {
         }
         other => panic!("expected forward frame, got {other:?}"),
     };
-    // L3：machine 回 JSON-RPC response（pending_rpc 匹配 → delivery_confirmed）。
-    let resp = acp_hub_proto::machine::MachineEvent {
-        session_id: "acp-4".into(),
+    // L3：instance 回 JSON-RPC response（pending_rpc 匹配 → delivery_confirmed）。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S4.into(),
         epoch: 0,
         seq: 2,
         frame: serde_json::json!({
@@ -422,7 +425,7 @@ async fn resolve_duplicate_and_unknown() {
             "result": {}
         }),
     };
-    let r = env.relay.on_machine_event("local", &resp).await;
+    let r = env.relay.on_instance_event("local", &resp).await;
     assert!(matches!(
         r,
         crate::channel::ConsumeResult::RpcConfirmed { .. }
@@ -458,7 +461,7 @@ async fn missing_session_rejected() {
         .await;
     match r {
         SubmitAck::Failed(e) => {
-            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::SessionNotFound)
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::ChatNotFound)
         }
         other => panic!("expected session not found, got {other:?}"),
     }
@@ -469,15 +472,15 @@ async fn close_offline_pending_close() {
     let env = env().await;
     bound_session(&env, S5, "acp-5").await;
     // 机器断开 → OFFLINE。
-    env.machine
-        .on_disconnect("local", &MachineConn { tx: env.machine_tx.clone() })
+    env.instance
+        .on_disconnect("local", &InstanceConn { tx: env.instance_tx.clone() })
         .await;
     let (tx, mut rx) = mpsc::channel(16);
     let cid = uuid::Uuid::new_v4().to_string();
     let action = ActionEnvelope::Close {
         command_id: cid.clone(),
-        payload: acp_hub_proto::action::CloseSessionPayload {
-            session_id: S5.into(),
+        payload: acp_hub_proto::action::CloseChatPayload {
+            chat_id: S5.into(),
         },
     };
     let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
@@ -485,10 +488,10 @@ async fn close_offline_pending_close() {
     // §7.6：offline close → MACHINE_OFFLINE(retryable) + pending_close 标记。
     match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
         Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
-            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::MachineOffline);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InstanceOffline);
             assert!(e.retryable);
         }
         other => panic!("expected action_error, got {other:?}"),
     }
-    assert!(env.sessions.pending_close_sessions().await.contains(&S5.to_string()));
+    assert!(env.chats.pending_close_chats().await.contains(&S5.to_string()));
 }

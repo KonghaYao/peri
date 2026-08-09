@@ -18,10 +18,10 @@
 //! ```text
 //! body = version:u8 | kind:u8 | epoch:u32 LE | seq:u64 LE | payload
 //! kind = 0x01 doc_commit（M1 唯一）
-//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=session）| len:u32 LE | yjs update 字节
+//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=control）| len:u32 LE | yjs update 字节
 //! ```
 //!
-//! 并发：写锁（`tokio::sync::Mutex`，由 [`crate::persist::SessionStore`] 持有）
+//! 并发：写锁（`tokio::sync::Mutex`，由 [`crate::persist::ChatStore`] 持有）
 //! 串行化 append 与 compact（§4.3/§8）。fsync 纪律（§8.4）：PerCommit 模式
 //! `sync_data()` per append；Batch 模式延迟到 [`UpdateLog::flush`]。
 
@@ -125,7 +125,7 @@ fn encode_doc_commit(epoch: u32, seq: u64, docs: &[(DocId, &[u8])]) -> Result<Ve
         let prefix = doc.as_str();
         let id = match prefix.strip_prefix("chat:") {
             Some(_) => 0u8,
-            None => match prefix.strip_prefix("session:") {
+            None => match prefix.strip_prefix("control:") {
                 Some(_) => 1u8,
                 None => {
                     return Err(StoreError::Corrupt {
@@ -151,7 +151,7 @@ fn encode_doc_commit(epoch: u32, seq: u64, docs: &[(DocId, &[u8])]) -> Result<Ve
 pub(crate) type DecodedCommit = (u32, u64, Vec<(DocId, Vec<u8>)>);
 
 /// 解码 doc_commit 记录体；返回 (epoch, seq, docs)。结构非法 → Err。
-fn decode_doc_commit(session_id: &uuid::Uuid, body: &[u8]) -> Result<DecodedCommit, String> {
+fn decode_doc_commit(chat_id: &uuid::Uuid, body: &[u8]) -> Result<DecodedCommit, String> {
     if body.len() < 14 {
         return Err("record body too short".into());
     }
@@ -177,8 +177,8 @@ fn decode_doc_commit(session_id: &uuid::Uuid, body: &[u8]) -> Result<DecodedComm
             .get(5..5 + len as usize)
             .ok_or_else(|| "doc segment len out of bounds".to_string())?;
         let doc = match id {
-            0 => DocId::chat(&session_id.to_string()),
-            1 => DocId::session(&session_id.to_string()),
+            0 => DocId::chat(&chat_id.to_string()),
+            1 => DocId::control(&chat_id.to_string()),
             other => return Err(format!("unsupported doc id byte {other}")),
         };
         docs.push((doc, payload.to_vec()));
@@ -194,7 +194,7 @@ pub struct LogRecord {
     pub epoch: u32,
     /// 本提交覆盖的最大帧 seq（§8.5）。
     pub seq: u64,
-    /// 双 Doc 段（chat/session）。
+    /// 双 Doc 段（chat/control）。
     pub docs: Vec<(DocId, Vec<u8>)>,
 }
 
@@ -230,7 +230,7 @@ pub struct Snapshot {
     pub last_epoch: u32,
     /// 快照点的最大帧 seq（边界，§8）。
     pub last_applied_seq: u64,
-    /// 双 Doc 全量 state update（chat/session）。
+    /// 双 Doc 全量 state update（chat/control）。
     pub docs: std::collections::HashMap<DocId, Vec<u8>>,
 }
 
@@ -267,7 +267,7 @@ pub struct UpdateLog {
     snapshot_path: PathBuf,
     tmp_snapshot_path: PathBuf,
     corrupt_dir: PathBuf,
-    session_id: uuid::Uuid,
+    chat_id: uuid::Uuid,
     watermark: std::sync::Arc<WatermarkStore>,
     fsync_mode: FsyncMode,
     compact_threshold_bytes: u64,
@@ -288,23 +288,23 @@ pub struct UpdateLog {
 }
 
 impl UpdateLog {
-    /// 打开（或创建）session 的 update 日志。`watermark` 供 append 成功后
+    /// 打开（或创建）chat 的 update 日志。`watermark` 供 append 成功后
     /// 更新水位（§6 更新时机，顺序 = 日志 fsync → 水位）。
     pub fn open(
-        session_dir: &Path,
-        session_id: uuid::Uuid,
+        chat_dir: &Path,
+        chat_id: uuid::Uuid,
         watermark: std::sync::Arc<WatermarkStore>,
         fsync_mode: FsyncMode,
         compact_threshold_bytes: u64,
         compact_interval: Duration,
         degraded: std::sync::Arc<DegradedFlag>,
     ) -> Result<Self, StoreError> {
-        let corrupt_dir = session_dir.join(CORRUPT_DIR);
+        let corrupt_dir = chat_dir.join(CORRUPT_DIR);
         fs::create_dir_all(&corrupt_dir).map_err(|e| StoreError::Io {
             path: corrupt_dir.clone(),
             source: e,
         })?;
-        let path = session_dir.join(UPDATES_LOG_FILE);
+        let path = chat_dir.join(UPDATES_LOG_FILE);
         let file = OpenOptions::new()
             .read(true)
             .create(true)
@@ -324,16 +324,16 @@ impl UpdateLog {
                 }
             })?;
         }
-        let snapshot_path = session_dir.join(UPDATES_SNAPSHOT_FILE);
+        let snapshot_path = chat_dir.join(UPDATES_SNAPSHOT_FILE);
         let last_compact_at = fs::metadata(&snapshot_path)
             .ok()
             .and_then(|m| m.modified().ok());
         let mut log = UpdateLog {
             path,
             snapshot_path,
-            tmp_snapshot_path: session_dir.join(UPDATES_SNAPSHOT_TMP_FILE),
+            tmp_snapshot_path: chat_dir.join(UPDATES_SNAPSHOT_TMP_FILE),
             corrupt_dir,
-            session_id,
+            chat_id,
             watermark,
             fsync_mode,
             compact_threshold_bytes,
@@ -351,7 +351,7 @@ impl UpdateLog {
         };
         // 打开时探测尾部，恢复内存计数（重启场景；损坏由 replay 处理）。
         if let Err(e) = log.probe_tail() {
-            warn!(session_id = %log.session_id, path = %log.path.display(), error = %e, "update log tail probe failed");
+            warn!(chat_id = %log.chat_id, path = %log.path.display(), error = %e, "update log tail probe failed");
             log.degraded.set(format!("update log tail probe failed: {e}"));
         }
         Ok(log)
@@ -395,7 +395,7 @@ impl UpdateLog {
                 self.tail_probe_corrupted = true;
                 break;
             }
-            match decode_doc_commit(&self.session_id, &body) {
+            match decode_doc_commit(&self.chat_id, &body) {
                 Ok((epoch, seq, _)) => {
                     self.bytes = pos + 8 + len as u64;
                     self.records += 1;
@@ -444,7 +444,7 @@ impl UpdateLog {
         if let Err(e) = write_blob(file, &body) {
             self.degraded.set(format!("update log append failed: {e}"));
             warn!(
-                session_id = %self.session_id, epoch, seq, error = %e,
+                chat_id = %self.chat_id, epoch, seq, error = %e,
                 "update log append io failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -456,7 +456,7 @@ impl UpdateLog {
             if let Err(e) = file.sync_data() {
                 self.degraded.set(format!("update log fsync failed: {e}"));
                 warn!(
-                    session_id = %self.session_id, epoch, seq, error = %e,
+                    chat_id = %self.chat_id, epoch, seq, error = %e,
                     "update log fsync failed; store degraded"
                 );
                 return Err(StoreError::Io {
@@ -469,7 +469,7 @@ impl UpdateLog {
         // §4.4）。
         if epoch == self.last_epoch && seq < self.last_seq {
             warn!(
-                session_id = %self.session_id, epoch, seq, last_seq = self.last_seq,
+                chat_id = %self.chat_id, epoch, seq, last_seq = self.last_seq,
                 "update log seq regressed within same epoch"
             );
         }
@@ -482,13 +482,13 @@ impl UpdateLog {
         if let Err(e) = self.watermark.write(&Watermark { epoch, last_seq: seq }) {
             self.degraded.set(format!("watermark write failed: {e}"));
             warn!(
-                session_id = %self.session_id, epoch, seq, error = %e,
+                chat_id = %self.chat_id, epoch, seq, error = %e,
                 "watermark write failed; store degraded"
             );
             return Err(e);
         }
         debug!(
-            session_id = %self.session_id, epoch, seq,
+            chat_id = %self.chat_id, epoch, seq,
             bytes = 8 + body.len(), elapsed_ms = started.elapsed().as_millis() as u64,
             "update log append ok"
         );
@@ -528,12 +528,12 @@ impl UpdateLog {
             match read_blob(&mut f) {
                 Ok(Some(body)) => {
                     let blob_len = 8 + body.len() as u64;
-                    match decode_doc_commit(&self.session_id, &body) {
+                    match decode_doc_commit(&self.chat_id, &body) {
                         Ok((epoch, seq, docs)) => {
                             if let Some((pe, ps)) = prev {
                                 if pe == epoch && seq < ps {
                                     warn!(
-                                        session_id = %self.session_id, epoch, seq, prev_seq = ps,
+                                        chat_id = %self.chat_id, epoch, seq, prev_seq = ps,
                                         "replay: seq non-monotonic within epoch"
                                     );
                                     outcome.warnings.push(
@@ -647,7 +647,7 @@ impl UpdateLog {
         })?;
         self.degraded.set(format!("update log tail truncated at {offset}: {detail}"));
         warn!(
-            session_id = %self.session_id, path = %path.display(),
+            chat_id = %self.chat_id, path = %path.display(),
             offset, bytes_kept, reason = detail,
             "update log tail truncated; corrupt segment preserved"
         );
@@ -681,7 +681,7 @@ impl UpdateLog {
                         self.snapshot_invalid = Some(reason.to_string());
                         self.degraded.set(reason);
                         warn!(
-                            session_id = %self.session_id, path = %path.display(),
+                            chat_id = %self.chat_id, path = %path.display(),
                             version = file.v,
                             "snapshot version mismatch; treating as invalid"
                         );
@@ -699,7 +699,7 @@ impl UpdateLog {
                     self.snapshot_invalid = Some(reason.clone());
                     self.degraded.set("snapshot json parse failed");
                     warn!(
-                        session_id = %self.session_id, path = %path.display(), error = %e,
+                        chat_id = %self.chat_id, path = %path.display(), error = %e,
                         "snapshot parse failed; treating as invalid"
                     );
                     self.move_snapshot_to_corrupt(&reason)?;
@@ -711,7 +711,7 @@ impl UpdateLog {
                 self.snapshot_invalid = Some(reason.to_string());
                 self.degraded.set(reason);
                 warn!(
-                    session_id = %self.session_id, path = %path.display(),
+                    chat_id = %self.chat_id, path = %path.display(),
                     "snapshot file empty; treating as invalid"
                 );
                 self.move_snapshot_to_corrupt(reason)?;
@@ -722,7 +722,7 @@ impl UpdateLog {
                 self.snapshot_invalid = Some(reason.clone());
                 self.degraded.set("snapshot crc failed");
                 warn!(
-                    session_id = %self.session_id, path = %path.display(), reason = detail,
+                    chat_id = %self.chat_id, path = %path.display(), reason = detail,
                     "snapshot crc failed; treating as invalid"
                 );
                 self.move_snapshot_to_corrupt(&reason)?;
@@ -765,7 +765,7 @@ impl UpdateLog {
             source: e,
         })?;
         debug!(
-            session_id = %self.session_id, artifact = %artifact.display(), reason,
+            chat_id = %self.chat_id, artifact = %artifact.display(), reason,
             "invalid snapshot moved to corrupt"
         );
         Ok(())
@@ -848,7 +848,7 @@ impl UpdateLog {
             if let Err(e) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
                 self.degraded.set(format!("snapshot tmp chmod failed: {e}"));
                 warn!(
-                    session_id = %self.session_id, error = %e,
+                    chat_id = %self.chat_id, error = %e,
                     "snapshot tmp chmod failed; store degraded"
                 );
                 return Err(StoreError::Io {
@@ -860,7 +860,7 @@ impl UpdateLog {
         if let Err(e) = write_blob(&mut tmp, &body) {
             self.degraded.set(format!("snapshot tmp write failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "snapshot tmp write failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -871,7 +871,7 @@ impl UpdateLog {
         if let Err(e) = tmp.sync_all() {
             self.degraded.set(format!("snapshot tmp fsync failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "snapshot tmp fsync failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -880,12 +880,12 @@ impl UpdateLog {
             });
         }
         drop(tmp);
-        sync_dir(self.path.parent().expect("session dir"))?;
+        sync_dir(self.path.parent().expect("chat dir"))?;
         // 原子点：rename。
         if let Err(e) = fs::rename(&tmp_path, &snapshot_path) {
             self.degraded.set(format!("snapshot rename failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "snapshot rename failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -893,7 +893,7 @@ impl UpdateLog {
                 source: e,
             });
         }
-        sync_dir(self.path.parent().expect("session dir"))?;
+        sync_dir(self.path.parent().expect("chat dir"))?;
         // truncate 旧日志。
         let file = self.file.as_mut().ok_or_else(|| StoreError::Io {
             path: self.path.clone(),
@@ -902,7 +902,7 @@ impl UpdateLog {
         if let Err(e) = file.set_len(0) {
             self.degraded.set(format!("log truncate failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "log truncate failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -913,7 +913,7 @@ impl UpdateLog {
         if let Err(e) = file.sync_data() {
             self.degraded.set(format!("log truncate fsync failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "log truncate fsync failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -925,7 +925,7 @@ impl UpdateLog {
         self.records = 0;
         self.last_compact_at = Some(SystemTime::now());
         debug!(
-            session_id = %self.session_id, epoch, last_applied_seq = s,
+            chat_id = %self.chat_id, epoch, last_applied_seq = s,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "update log compact ok"
         );
@@ -942,7 +942,7 @@ impl UpdateLog {
         if let Err(e) = file.sync_data() {
             degraded.set(format!("update log flush failed: {e}"));
             warn!(
-                session_id = %self.session_id, error = %e,
+                chat_id = %self.chat_id, error = %e,
                 "update log flush failed; store degraded"
             );
             return Err(StoreError::Io {
@@ -997,7 +997,7 @@ impl UpdateLog {
             path: self.path.clone(),
             source: e,
         })?;
-        sync_dir(self.path.parent().expect("session dir"))?;
+        sync_dir(self.path.parent().expect("chat dir"))?;
         self.bytes = 0;
         self.records = 0;
         Ok(())

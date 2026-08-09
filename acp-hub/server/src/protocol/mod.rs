@@ -1,6 +1,6 @@
 //! 协议层（Feature F5）：ACPChannel 入站规范化 + Translator 出站翻译（§6.1）。
 //!
-//! 定位：server 侧的**唯一协议边界**（架构 §6.1）。machine 透明转发原始 ACP
+//! 定位：server 侧的**唯一协议边界**（架构 §6.1）。instance 透明转发原始 ACP
 //! 帧，server 在此规范化为 [`NormalizedEvent`]（state 层定义），聚合层只消费
 //! 规范化事件；客户端 Action 经 [`Translator`] 翻译为 ACP JSON-RPC 下发。
 //!

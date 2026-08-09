@@ -63,7 +63,7 @@ fn apply_diff_writes_and_removes() {
     let mut pair = Factory::new().create_chat_doc();
     {
         // 预置 s2。
-        let mut txn = pair.session_txn();
+        let mut txn = pair.control_txn();
         let root = txn.get_or_insert_map(ROOT);
         let d = SessionListDiff {
             upsert: vec![sum("s2", "b", "t0")],
@@ -76,12 +76,12 @@ fn apply_diff_writes_and_removes() {
         remove: vec!["s2".to_string()],
     };
     {
-        let mut txn = pair.session_txn();
+        let mut txn = pair.control_txn();
         let root = txn.get_or_insert_map(ROOT);
         apply_diff(&mut txn, &root, &d);
     }
     // 断言 Map 与响应一致。
-    let txn = pair.session.transact();
+    let txn = pair.control.transact();
     let root = txn.get_map(ROOT).unwrap();
     let sessions = root.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().unwrap();
     assert_eq!(sessions.len(&txn), 1);
@@ -97,7 +97,7 @@ fn apply_diff_writes_and_removes() {
 fn read_current_roundtrip() {
     let mut pair = Factory::new().create_chat_doc();
     {
-        let mut txn = pair.session_txn();
+        let mut txn = pair.control_txn();
         let root = txn.get_or_insert_map(ROOT);
         let d = SessionListDiff {
             upsert: vec![sum("s1", "a", "t1")],
@@ -105,7 +105,7 @@ fn read_current_roundtrip() {
         };
         apply_diff(&mut txn, &root, &d);
     }
-    let txn = pair.session.transact();
+    let txn = pair.control.transact();
     let root = txn.get_map(ROOT).unwrap();
     let current = crate::state::session_list::read_current(&txn, &root);
     assert_eq!(current.len(), 1);

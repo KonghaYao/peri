@@ -40,7 +40,7 @@ pub fn resolve(
     permission_id: &str,
     decision: PermissionDecision,
 ) -> CasOutcome {
-    let mut txn = pair.session_txn();
+    let mut txn = pair.control_txn();
     let root = txn.get_or_insert_map(ROOT);
     cas_migrate(&mut txn, &root, permission_id, Some(decision))
 }
@@ -48,7 +48,7 @@ pub fn resolve(
 /// expire：仅 `pending → expired`，decision 保持 null（§5.4）。
 /// 已 resolved → `Duplicate`（不覆盖已裁决）；已 expired → `Duplicate`（幂等）。
 pub fn expire(pair: &mut DocPair, permission_id: &str) -> CasOutcome {
-    let mut txn = pair.session_txn();
+    let mut txn = pair.control_txn();
     let root = txn.get_or_insert_map(ROOT);
     cas_migrate(&mut txn, &root, permission_id, None)
 }

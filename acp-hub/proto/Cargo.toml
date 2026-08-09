@@ -2,7 +2,7 @@
 name = "acp-hub-proto"
 version.workspace = true
 edition.workspace = true
-description = "acp-hub 共享协议 crate：帧定义、Action/Ack 信封、machine 协议类型、Y.Doc schema 类型镜像"
+description = "acp-hub 共享协议 crate：帧定义、Action/Ack 信封、instance 协议类型、Y.Doc schema 类型镜像"
 
 [dependencies]
 serde = { workspace = true, features = ["derive", "rc"] }

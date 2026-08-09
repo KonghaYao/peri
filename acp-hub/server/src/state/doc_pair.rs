@@ -1,35 +1,35 @@
-//! 每 session 的双 Doc 组合 + 流状态（§5.2 / §8.5）。
+//! 每 chat 的双 Doc 组合 + 流状态（§5.2 / §8.5）。
 
 use yrs::Transact;
 
 use crate::state::view_store::TransactionCtx;
 
-/// 每 session 的双 Doc 组合 + 流状态（§5.2 / §8.5）。
+/// 每 chat 的双 Doc 组合 + 流状态（§5.2 / §8.5）。
 ///
-/// 由 [`crate::state::factory::Factory`] 创建；只允许被该 session 的单写者
+/// 由 [`crate::state::factory::Factory`] 创建；只允许被该 chat 的单写者
 /// writer task 独占（§7.4）。`&mut DocPair` 是聚合器纯函数
 /// [`crate::state::aggregator::Aggregator::apply`] 的载体（§12 测试前提：内存
 /// Y.Doc）。
 #[derive(Debug)]
 pub struct DocPair {
-    /// `chat:{session_id}`（§5.3，高频内容流）。
+    /// `chat:{chat_id}`（§5.3，高频内容流）。
     pub chat: yrs::Doc,
-    /// `session:{session_id}`（§5.4，低频控制状态）。
-    pub session: yrs::Doc,
+    /// `control:{chat_id}`（§5.4，低频控制状态）。
+    pub control: yrs::Doc,
     /// 聚合器流状态（不进 yrs：可丢弃镜像不承载校准事实，§8.1 原则 5）。
     pub stream: StreamState,
 }
 
 impl DocPair {
-    /// 打开 Chat Doc 写事务（chat → session 事务顺序的第一步；禁止跨 await
+    /// 打开 Chat Doc 写事务（chat → control 事务顺序的第一步；禁止跨 await
     /// 持有，§7.4）。
     pub fn chat_txn(&mut self) -> TransactionCtx<'_> {
         self.chat.transact_mut()
     }
 
-    /// 打开 Session Doc 写事务（须在 chat 事务 drop 后调用，§6.4 固定顺序）。
-    pub fn session_txn(&mut self) -> TransactionCtx<'_> {
-        self.session.transact_mut()
+    /// 打开 Control Doc 写事务（须在 chat 事务 drop 后调用，§6.4 固定顺序）。
+    pub fn control_txn(&mut self) -> TransactionCtx<'_> {
+        self.control.transact_mut()
     }
 }
 
@@ -39,7 +39,7 @@ impl DocPair {
 /// 与 update 日志落盘同步更新（随提交 flush 交给 persist）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamState {
-    /// 当前流纪元（§4.5.1）；与 machine/event 帧 epoch 不一致 → 帧丢弃并计数。
+    /// 当前流纪元（§4.5.1）；与 instance/event 帧 epoch 不一致 → 帧丢弃并计数。
     pub epoch: u64,
     /// 已应用的最大 seq（同 epoch 单调；校准与 gap 判定依据）。
     pub last_seq: u64,

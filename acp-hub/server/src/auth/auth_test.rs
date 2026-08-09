@@ -19,7 +19,7 @@ use acp_hub_proto::conn::Auth;
 use acp_hub_proto::hmac::{
     compute_mac, derive_mac_key, generate_challenge_nonce, mac_input, verify_mac, NONCE_TTL,
 };
-use acp_hub_proto::machine::MachineHello;
+use acp_hub_proto::instance::InstanceHello;
 use acp_hub_proto::version::PROTOCOL_VERSION;
 use acp_hub_proto::whitelist::Role;
 
@@ -35,8 +35,8 @@ fn peer() -> SocketAddr {
     "127.0.0.1:40000".parse().unwrap()
 }
 
-fn make_hello(token: &str, nonce_b64: &str) -> MachineHello {
-    MachineHello {
+fn make_hello(token: &str, nonce_b64: &str) -> InstanceHello {
+    InstanceHello {
         token: token.to_string(),
         hostname: "test-host".to_string(),
         caps: json!({}),
@@ -130,11 +130,11 @@ fn t1_generate() {
     let mut store = new_store(dir.path());
     assert!(store.is_empty());
 
-    let rec = store.generate(TokenRole::Machine, "desktop-01").unwrap();
+    let rec = store.generate(TokenRole::Instance, "desktop-01").unwrap();
     assert_eq!(rec.token.len(), 44, "32B→base64 应为 44 字符");
     assert!(!rec.revoked);
     assert!(!rec.id.is_empty());
-    assert_eq!(rec.role, TokenRole::Machine);
+    assert_eq!(rec.role, TokenRole::Instance);
     assert_eq!(rec.name, "desktop-01");
 
     let rec2 = store.generate(TokenRole::Full, "tui").unwrap();
@@ -145,7 +145,7 @@ fn t1_generate() {
     let reloaded = TokenStore::load(&dir.path().join("tokens.toml")).unwrap();
     assert_eq!(reloaded.len(), 2);
     let reloaded_rec = reloaded.list().into_iter().find(|i| i.id == rec.id).unwrap();
-    assert_eq!(reloaded_rec.role, TokenRole::Machine);
+    assert_eq!(reloaded_rec.role, TokenRole::Instance);
     assert_eq!(reloaded_rec.name, "desktop-01");
 }
 
@@ -156,22 +156,22 @@ fn t1_generate() {
 fn t2_validate() {
     let dir = tempdir().unwrap();
     let mut store = new_store(dir.path());
-    let rec = store.generate(TokenRole::Machine, "m1").unwrap();
+    let rec = store.generate(TokenRole::Instance, "m1").unwrap();
 
     // 正确 token 通过（返回记录）
-    let got = store.validate(&rec.token, TokenRole::Machine).unwrap();
+    let got = store.validate(&rec.token, TokenRole::Instance).unwrap();
     assert_eq!(got.id, rec.id);
 
     // 未知 → UnknownToken
     assert!(matches!(
-        store.validate("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", TokenRole::Machine),
+        store.validate("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", TokenRole::Instance),
         Err(AuthError::UnknownToken)
     ));
 
     // 吊销后 → RevokedToken
     store.revoke(&rec.id).unwrap();
     assert!(matches!(
-        store.validate(&rec.token, TokenRole::Machine),
+        store.validate(&rec.token, TokenRole::Instance),
         Err(AuthError::RevokedToken { token_id }) if token_id == rec.id
     ));
 }
@@ -183,18 +183,18 @@ fn t2_validate() {
 fn t3_grace_period_rotation() {
     let dir = tempdir().unwrap();
     let mut store = new_store(dir.path());
-    let old = store.generate(TokenRole::Machine, "old").unwrap();
+    let old = store.generate(TokenRole::Instance, "old").unwrap();
     // 宽限期：新旧并存均有效
-    let new = store.generate(TokenRole::Machine, "new").unwrap();
-    assert!(store.validate(&old.token, TokenRole::Machine).is_ok());
-    assert!(store.validate(&new.token, TokenRole::Machine).is_ok());
+    let new = store.generate(TokenRole::Instance, "new").unwrap();
+    assert!(store.validate(&old.token, TokenRole::Instance).is_ok());
+    assert!(store.validate(&new.token, TokenRole::Instance).is_ok());
     // 吊销旧 → 旧失效、新有效
     store.revoke(&old.id).unwrap();
     assert!(matches!(
-        store.validate(&old.token, TokenRole::Machine),
+        store.validate(&old.token, TokenRole::Instance),
         Err(AuthError::RevokedToken { .. })
     ));
-    assert!(store.validate(&new.token, TokenRole::Machine).is_ok());
+    assert!(store.validate(&new.token, TokenRole::Instance).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ fn t3_grace_period_rotation() {
 fn t4_atomic_write() {
     let dir = tempdir().unwrap();
     let mut store = new_store(dir.path());
-    store.generate(TokenRole::Machine, "m1").unwrap();
+    store.generate(TokenRole::Instance, "m1").unwrap();
     store.generate(TokenRole::Full, "tui").unwrap();
 
     // persist 后文件可解析
@@ -228,7 +228,7 @@ fn t4_atomic_write_failure_keeps_original() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("tokens.toml");
     let mut store = TokenStore::load(&path).unwrap();
-    let rec = store.generate(TokenRole::Machine, "m1").unwrap();
+    let rec = store.generate(TokenRole::Instance, "m1").unwrap();
 
     // 目录只读 → 下次写失败
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
@@ -253,12 +253,12 @@ fn t5_mtime_reload() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("tokens.toml");
     let mut store = TokenStore::load(&path).unwrap();
-    let rec = store.generate(TokenRole::Machine, "m1").unwrap();
-    assert!(store.validate(&rec.token, TokenRole::Machine).is_ok());
+    let rec = store.generate(TokenRole::Instance, "m1").unwrap();
+    assert!(store.validate(&rec.token, TokenRole::Instance).is_ok());
 
     // 外部（CLI）改写文件：revoked = true
     let content = format!(
-        "version = 1\n\n[[tokens]]\nid = \"{}\"\nrole = \"machine\"\nname = \"m1\"\ntoken = \"{}\"\ncreated_at = \"{}\"\nrevoked = true\n",
+        "version = 1\n\n[[tokens]]\nid = \"{}\"\nrole = \"instance\"\nname = \"m1\"\ntoken = \"{}\"\ncreated_at = \"{}\"\nrevoked = true\n",
         rec.id,
         rec.token,
         rec.created_at.to_rfc3339()
@@ -271,7 +271,7 @@ fn t5_mtime_reload() {
 
     // 下一次 validate 拒绝被吊销 token（mtime 变化触发重载）
     assert!(matches!(
-        store.validate(&rec.token, TokenRole::Machine),
+        store.validate(&rec.token, TokenRole::Instance),
         Err(AuthError::RevokedToken { .. })
     ));
 }
@@ -282,14 +282,14 @@ fn t5_mtime_reload_bad_file_keeps_old_state() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("tokens.toml");
     let mut store = TokenStore::load(&path).unwrap();
-    let rec = store.generate(TokenRole::Machine, "m1").unwrap();
+    let rec = store.generate(TokenRole::Instance, "m1").unwrap();
 
     std::fs::write(&path, "not valid toml {{{").unwrap();
     let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     f.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
     drop(f);
 
-    assert!(store.validate(&rec.token, TokenRole::Machine).is_ok(), "坏文件不应导致服务中断");
+    assert!(store.validate(&rec.token, TokenRole::Instance).is_ok(), "坏文件不应导致服务中断");
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ fn t5_mtime_reload_bad_file_keeps_old_state() {
 #[test]
 fn t6_role_mapping() {
     let cases = [
-        (TokenRole::Machine, Role::Machine, true),
+        (TokenRole::Instance, Role::Instance, true),
         (TokenRole::Full, Role::Client, true),
         (TokenRole::ReadOnly, Role::Client, false),
     ];
@@ -316,21 +316,21 @@ fn t6_role_mapping() {
 fn t7_constant_time_compare_semantics() {
     let dir = tempdir().unwrap();
     let mut store = new_store(dir.path());
-    let rec = store.generate(TokenRole::Machine, "m1").unwrap();
+    let rec = store.generate(TokenRole::Instance, "m1").unwrap();
 
     // 同 token 匹配
-    assert!(store.validate(&rec.token, TokenRole::Machine).is_ok());
+    assert!(store.validate(&rec.token, TokenRole::Instance).is_ok());
     // 异 token 不匹配（44 字符合法 base64，未登记）
     let foreign = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
     assert!(matches!(
-        store.validate(&foreign, TokenRole::Machine),
+        store.validate(&foreign, TokenRole::Instance),
         Err(AuthError::UnknownToken)
     ));
     // 等长前缀差异不匹配（改最后一个字符）
     let (head, last) = rec.token.split_at(rec.token.len() - 1);
     let mutated = format!("{head}{}", if last == "A" { "B" } else { "A" });
     assert!(matches!(
-        store.validate(&mutated, TokenRole::Machine),
+        store.validate(&mutated, TokenRole::Instance),
         Err(AuthError::UnknownToken)
     ));
 }
@@ -342,7 +342,7 @@ fn t7_bad_token_length_rejected_on_load() {
     let path = dir.path().join("tokens.toml");
     std::fs::write(
         &path,
-        "version = 1\n\n[[tokens]]\nid = \"x\"\nrole = \"machine\"\nname = \"bad\"\ntoken = \"short\"\ncreated_at = \"2026-08-07T00:00:00Z\"\nrevoked = false\n",
+        "version = 1\n\n[[tokens]]\nid = \"x\"\nrole = \"instance\"\nname = \"bad\"\ntoken = \"short\"\ncreated_at = \"2026-08-07T00:00:00Z\"\nrevoked = false\n",
     )
     .unwrap();
     assert!(matches!(
@@ -367,13 +367,13 @@ fn t8_redaction() {
     assert!(!info.to_string().contains(&token), "TokenInfo Display 泄露 token");
 
     // 2. AuthError Display 不含凭证材料
-    let err = store.validate(&token, TokenRole::Machine).unwrap_err();
+    let err = store.validate(&token, TokenRole::Instance).unwrap_err();
     assert!(!err.to_string().contains(&token), "AuthError Display 泄露 token");
 
     // 3. 审计事件（认证失败路径）字段 ⊆ 白名单且不含 token
     let mut svc = AuthService::new(store);
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello("totally-unknown-token-value", &new_nonce_b64()),
             peer(),
         ))
@@ -401,7 +401,7 @@ async fn failure_audit_carries_total_snapshot() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
     let (_, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello("totally-unknown-token-value", &new_nonce_b64()),
             peer(),
         ))
@@ -419,11 +419,11 @@ async fn failure_audit_carries_total_snapshot() {
 async fn h1_success_path() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let nonce_b64 = new_nonce_b64();
 
     let ok = svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await
         .unwrap();
 
@@ -433,20 +433,20 @@ async fn h1_success_path() {
     let nonce_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
         .decode(&nonce_b64).unwrap().try_into().unwrap();
     let ctx_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&ok.response.session_context).unwrap().try_into().unwrap();
+        .decode(&ok.response.connection_context).unwrap().try_into().unwrap();
 
-    let key = derive_mac_key(&token_bytes, "machine");
-    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "machine");
+    let key = derive_mac_key(&token_bytes, "instance");
+    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "instance");
     let expected = base64::engine::general_purpose::STANDARD.encode(compute_mac(&key, &input));
     assert_eq!(ok.response.hmac, expected, "auth_response.hmac 与独立重算一致");
     assert!(verify_mac(&key, &input, &ok.response.hmac).is_ok(), "verify_mac 常量时间路径通过");
 
     // ctx 绑定信息
     assert_eq!(ok.ctx.token_id, rec.id);
-    assert_eq!(ok.ctx.role, TokenRole::Machine);
+    assert_eq!(ok.ctx.role, TokenRole::Instance);
     assert_eq!(ok.ctx.hostname.as_deref(), Some("test-host"));
     assert_eq!(ok.ctx.peer, peer());
-    assert_eq!(ok.ctx.wire_role(), Role::Machine);
+    assert_eq!(ok.ctx.wire_role(), Role::Instance);
     assert!(ok.ctx.can_send_action());
 }
 
@@ -458,14 +458,14 @@ async fn h2_unknown_token() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello("totally-unknown-token-value", &new_nonce_b64()),
             peer(),
         ))
     });
     assert!(matches!(result, Err(AuthError::UnknownToken)));
     assert_audit_redacted(&log, &[]);
-    assert!(log.contains("auth.machine"), "应有 auth.machine 审计");
+    assert!(log.contains("auth.instance"), "应有 auth.instance 审计");
     assert!(log.contains("unknown_token"));
     assert_eq!(svc.stats().total_failures(), 1);
     assert_eq!(svc.stats().failures_for(UNKNOWN_TOKEN_ID), 1);
@@ -478,16 +478,16 @@ async fn h2_unknown_token() {
 async fn h3_replay_nonce() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let nonce_b64 = new_nonce_b64();
 
     assert!(svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await
         .is_ok());
     // 同 nonce 二次 hello → 重放拒绝（即使 token 正确）
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello(&rec.token, &nonce_b64),
             peer(),
         ))
@@ -505,16 +505,16 @@ async fn h3_replay_nonce() {
 async fn h3_failed_nonce_still_registered() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let nonce_b64 = new_nonce_b64();
 
     let bad = svc
-        .authenticate_machine(&make_hello("wrong-token", &nonce_b64), peer())
+        .authenticate_instance(&make_hello("wrong-token", &nonce_b64), peer())
         .await;
     assert!(matches!(bad, Err(AuthError::UnknownToken)));
 
     let replay = svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await;
     assert!(matches!(replay, Err(AuthError::ReplayNonce)));
 }
@@ -527,10 +527,10 @@ async fn h3_failed_nonce_still_registered() {
 async fn h4_expired_nonce_reaccepted() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let nonce_b64 = new_nonce_b64();
     assert!(svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await
         .is_ok());
 
@@ -541,7 +541,7 @@ async fn h4_expired_nonce_reaccepted() {
 
     // 同 nonce 重提 → 按新 nonce 接受（N2 新窗口语义的 AuthService 侧）
     let ok = svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await;
     assert!(ok.is_ok(), "过期后同 nonce 重提应按新 nonce 接受: {ok:?}");
 }
@@ -553,18 +553,18 @@ async fn h4_expired_nonce_reaccepted() {
 async fn h5_bad_nonce_encoding() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
 
     // 非 base64
     let bad1 = svc
-        .authenticate_machine(&make_hello(&rec.token, "!!!"), peer())
+        .authenticate_instance(&make_hello(&rec.token, "!!!"), peer())
         .await;
     assert!(matches!(bad1, Err(AuthError::BadNonceEncoding)));
 
     // 非 32B（base64 of 16B）
     let short = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
     let bad2 = svc
-        .authenticate_machine(&make_hello(&rec.token, &short), peer())
+        .authenticate_instance(&make_hello(&rec.token, &short), peer())
         .await;
     assert!(matches!(bad2, Err(AuthError::BadNonceEncoding)));
 }
@@ -577,10 +577,10 @@ async fn h6_role_mismatch() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
 
-    // client token 提交 machine/hello → RoleMismatch
+    // client token 提交 instance/hello → RoleMismatch
     let client = svc.store_mut().generate(TokenRole::Full, "tui").unwrap();
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello(&client.token, &new_nonce_b64()),
             peer(),
         ))
@@ -592,14 +592,14 @@ async fn h6_role_mismatch() {
     assert_audit_redacted(&log, &[]);
     assert_eq!(svc.stats().failures_for(&client.id), 1, "按 token_id 计数");
 
-    // machine token 提交 client 认证 → RoleMismatch
-    let machine = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    // instance token 提交 client 认证 → RoleMismatch
+    let instance = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let result = svc
-        .authenticate_client(&Auth { token: machine.token.clone() }, peer())
+        .authenticate_client(&Auth { token: instance.token.clone() }, peer())
         .await;
     assert!(matches!(
         result,
-        Err(AuthError::RoleMismatch { token_id }) if token_id == machine.id
+        Err(AuthError::RoleMismatch { token_id }) if token_id == instance.id
     ));
 
     // full token 通过 client 认证（含 read-only）
@@ -624,11 +624,11 @@ async fn h6_role_mismatch() {
 async fn h7_version_binding() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let nonce_b64 = new_nonce_b64();
 
     let ok = svc
-        .authenticate_machine(&make_hello(&rec.token, &nonce_b64), peer())
+        .authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer())
         .await
         .unwrap();
 
@@ -637,15 +637,15 @@ async fn h7_version_binding() {
     let nonce_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
         .decode(&nonce_b64).unwrap().try_into().unwrap();
     let ctx_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&ok.response.session_context).unwrap().try_into().unwrap();
-    let key = derive_mac_key(&token_bytes, "machine");
+        .decode(&ok.response.connection_context).unwrap().try_into().unwrap();
+    let key = derive_mac_key(&token_bytes, "instance");
 
     // 正确版本通过
-    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "machine");
+    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "instance");
     assert!(verify_mac(&key, &input, &ok.response.hmac).is_ok());
 
     // 错误版本 → Mismatch（版本绑定天然拒绝，§4.5）
-    let wrong_input = mac_input(&nonce_bytes, &ctx_bytes, "2", "machine");
+    let wrong_input = mac_input(&nonce_bytes, &ctx_bytes, "2", "instance");
     assert!(matches!(
         verify_mac(&key, &wrong_input, &ok.response.hmac),
         Err(acp_hub_proto::hmac::HmacError::Mismatch)
@@ -667,7 +667,7 @@ async fn h8_unknown_identity() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_machine(
+        block_on(svc.authenticate_instance(
             &make_hello("0000000000000000000000000000000000000000", &new_nonce_b64()),
             peer(),
         ))
@@ -684,10 +684,10 @@ async fn h8_unknown_identity() {
 async fn h9_failure_counting() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Machine, "m1").unwrap();
+    let rec = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let client = svc.store_mut().generate(TokenRole::Full, "tui").unwrap();
 
-    // 3 次未知 token 失败（machine + client 面）
+    // 3 次未知 token 失败（instance + client 面）
     for _ in 0..3 {
         let _ = svc
             .authenticate_client(&Auth { token: "no-such-token".into() }, peer())
@@ -697,14 +697,14 @@ async fn h9_failure_counting() {
 
     // 角色不匹配（已知 id）
     let _ = svc
-        .authenticate_machine(&make_hello(&client.token, &new_nonce_b64()), peer())
+        .authenticate_instance(&make_hello(&client.token, &new_nonce_b64()), peer())
         .await;
     assert_eq!(svc.stats().failures_for(&client.id), 1);
 
     // 吊销后失败（已知 id，与未知分开）
     svc.store_mut().revoke(&rec.id).unwrap();
     let _ = svc
-        .authenticate_machine(&make_hello(&rec.token, &new_nonce_b64()), peer())
+        .authenticate_instance(&make_hello(&rec.token, &new_nonce_b64()), peer())
         .await;
     assert_eq!(svc.stats().failures_for(&rec.id), 1, "吊销与未知分开计数");
     assert_eq!(svc.stats().failures_for(UNKNOWN_TOKEN_ID), 3, "未知计数不受影响");
@@ -725,21 +725,23 @@ fn h10_close_code() {
 // 补充：bootstrap（§4.3.4）
 // ---------------------------------------------------------------------------
 #[test]
-fn bootstrap_machine_token() {
+fn bootstrap_instance_token() {
     let dir = tempdir().unwrap();
     let mut store = new_store(dir.path());
-    // 空 store → 生成 bootstrap machine token
-    let rec = store.ensure_machine_token().unwrap().expect("应生成");
-    assert_eq!(rec.name, "bootstrap-machine");
-    assert_eq!(rec.role, TokenRole::Machine);
-    // 已存在 machine token → 不再生成
-    assert!(store.ensure_machine_token().unwrap().is_none());
-    // 只有 client token 时 → 仍生成 machine token
+    // 空 store → 生成 bootstrap instance token（name = 本机缺省 id "local"，
+    // 与 channel::DEFAULT_INSTANCE_ID 一致，§4.3 P5 缺省路由才可命中本机）
+    let rec = store.ensure_instance_token().unwrap().expect("应生成");
+    assert_eq!(rec.name, crate::channel::DEFAULT_INSTANCE_ID);
+    assert_eq!(rec.name, "local");
+    assert_eq!(rec.role, TokenRole::Instance);
+    // 已存在 instance token → 不再生成
+    assert!(store.ensure_instance_token().unwrap().is_none());
+    // 只有 client token 时 → 仍生成 instance token
     let mut store2 = new_store(&dir.path().join("sub"));
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     store2.generate(TokenRole::Full, "tui").unwrap();
-    let rec2 = store2.ensure_machine_token().unwrap().expect("应生成 machine token");
-    assert_eq!(rec2.role, TokenRole::Machine);
+    let rec2 = store2.ensure_instance_token().unwrap().expect("应生成 instance token");
+    assert_eq!(rec2.role, TokenRole::Instance);
 }
 
 // ---------------------------------------------------------------------------
@@ -773,8 +775,8 @@ fn ctx_delegates_to_role() {
         hostname: None,
         established_at: chrono::Utc::now(),
     };
-    assert_eq!(ctx(TokenRole::Machine).wire_role(), Role::Machine);
-    assert!(ctx(TokenRole::Machine).can_send_action());
+    assert_eq!(ctx(TokenRole::Instance).wire_role(), Role::Instance);
+    assert!(ctx(TokenRole::Instance).can_send_action());
     assert!(!ctx(TokenRole::ReadOnly).can_send_action());
 }
 

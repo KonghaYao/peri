@@ -35,17 +35,17 @@ pub static FRAME_TAGS: &[FrameTag] = &[
     FrameTag("ysync.update"),
     FrameTag("ysync.sync"),
     FrameTag("ysync.awareness"),
-    FrameTag("machine/hello"),
-    FrameTag("machine/heartbeat"),
-    FrameTag("machine/event"),
-    FrameTag("machine/buffer_sync"),
-    FrameTag("machine/spawn"),
-    FrameTag("machine/kill"),
-    FrameTag("machine/forward"),
-    FrameTag("machine/spawn_ack"),
-    FrameTag("machine/kill_ack"),
-    FrameTag("machine/forward_ack"),
-    FrameTag("machine/process_exit"),
+    FrameTag("instance/hello"),
+    FrameTag("instance/heartbeat"),
+    FrameTag("instance/event"),
+    FrameTag("instance/buffer_sync"),
+    FrameTag("instance/spawn"),
+    FrameTag("instance/kill"),
+    FrameTag("instance/forward"),
+    FrameTag("instance/spawn_ack"),
+    FrameTag("instance/kill_ack"),
+    FrameTag("instance/forward_ack"),
+    FrameTag("instance/process_exit"),
 ];
 
 /// 连接侧角色（由 token 解析，§9.5：token 即身份）。
@@ -53,14 +53,14 @@ pub static FRAME_TAGS: &[FrameTag] = &[
 pub enum Role {
     /// client（TUI/Web）连接。
     Client,
-    /// machine 连接。
-    Machine,
+    /// instance 连接。
+    Instance,
 }
 
 /// 相对 server 的方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// 对端 → server（client/machine 上行）。
+    /// 对端 → server（client/instance 上行）。
     Inbound,
     /// server → 对端（server 下行）。
     Outbound,
@@ -79,13 +79,13 @@ pub enum M1Check {
 
 /// M1 允许的 action `type` 子集（§4.8 收窄）。
 ///
-/// `session/load`（M2）、`events/subscribe`/`events/unsubscribe`（M3）类型
+/// `chat/load`（M2）、`events/subscribe`/`events/unsubscribe`（M3）类型
 /// 保留定义，白名单外。
 pub const M1_ACTION_TYPES: &[&str] = &[
-    "session/create",
-    "session/prompt",
-    "session/cancel",
-    "session/close",
+    "chat/create",
+    "chat/prompt",
+    "chat/cancel",
+    "chat/close",
     "permission/resolve",
 ];
 
@@ -107,7 +107,7 @@ pub fn m1_allows(tag: FrameTag, role: Role, dir: Direction) -> bool {
 /// 或 [`ProtoError::DirectionRejected`](crate::frame::ProtoError::DirectionRejected)。
 pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
     // M1 帧集全集（§9.2 收窄；含 auth_response——见设计文档 §9.2 注：
-    // §4.8 machine 帧表未列 auth_response，但 §9.2 步骤 2 要求 server 以 HMAC
+    // §4.8 instance 帧表未列 auth_response，但 §9.2 步骤 2 要求 server 以 HMAC
     // 响应证明身份，按 §9.2 处理）。
     let in_m1_frame_set = matches!(
         tag.0,
@@ -122,17 +122,17 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
             | "pong"
             | "auth"
             | "auth_response"
-            | "machine/hello"
-            | "machine/heartbeat"
-            | "machine/event"
-            | "machine/buffer_sync"
-            | "machine/spawn"
-            | "machine/kill"
-            | "machine/forward"
-            | "machine/spawn_ack"
-            | "machine/kill_ack"
-            | "machine/forward_ack"
-            | "machine/process_exit"
+            | "instance/hello"
+            | "instance/heartbeat"
+            | "instance/event"
+            | "instance/buffer_sync"
+            | "instance/spawn"
+            | "instance/kill"
+            | "instance/forward"
+            | "instance/spawn_ack"
+            | "instance/kill_ack"
+            | "instance/forward_ack"
+            | "instance/process_exit"
     );
     if !in_m1_frame_set {
         return M1Check::NotInM1;
@@ -149,21 +149,21 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
                 "action_ack" | "action_error" | "ysync.update" | "ready" | "keep_alive"
             ),
         },
-        Role::Machine => match dir {
+        Role::Instance => match dir {
             Direction::Inbound => matches!(
                 tag.0,
-                "machine/hello"
-                    | "machine/heartbeat"
-                    | "machine/event"
-                    | "machine/buffer_sync"
-                    | "machine/spawn_ack"
-                    | "machine/kill_ack"
-                    | "machine/forward_ack"
-                    | "machine/process_exit"
+                "instance/hello"
+                    | "instance/heartbeat"
+                    | "instance/event"
+                    | "instance/buffer_sync"
+                    | "instance/spawn_ack"
+                    | "instance/kill_ack"
+                    | "instance/forward_ack"
+                    | "instance/process_exit"
             ),
             Direction::Outbound => matches!(
                 tag.0,
-                "machine/spawn" | "machine/kill" | "machine/forward" | "auth_response"
+                "instance/spawn" | "instance/kill" | "instance/forward" | "auth_response"
             ),
         },
     };

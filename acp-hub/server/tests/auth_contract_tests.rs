@@ -20,7 +20,7 @@ fn t(name: &str, tag: &str, r: Result<(), String>) {
     }
 }
 
-/// server-only 场景（无 machine）。
+/// server-only 场景（无 instance）。
 struct ServerOnly {
     env: TestEnv,
     server: ServerProc,
@@ -218,8 +218,8 @@ async fn t12_body() -> Result<(), String> {
     let mut c = WsClient::connect_client(port, &s.env.client_token, &["hub:registry"]).await?;
     c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Load {
         command_id: uuid::Uuid::new_v4().to_string(),
-        payload: acp_hub_proto::action::LoadSessionPayload {
-            session_id: uuid::Uuid::new_v4().to_string(),
+        payload: acp_hub_proto::action::LoadChatPayload {
+            chat_id: uuid::Uuid::new_v4().to_string(),
         },
     }))
     .await?;
@@ -231,10 +231,10 @@ async fn t12_body() -> Result<(), String> {
         .await?;
     let _ = e;
 
-    // d. 角色不匹配（§4.8 向量 8 进程级）：machine/hello 提交 client token →
+    // d. 角色不匹配（§4.8 向量 8 进程级）：instance/hello 提交 client token →
     //    RoleMismatch → 4502（§9.2 失败语义）。
     let mut c = WsClient::connect(port).await?;
-    let hello = acp_hub_proto::machine::MachineHello {
+    let hello = acp_hub_proto::instance::InstanceHello {
         token: s.env.client_token.clone(),
         hostname: "bad-role".to_string(),
         caps: serde_json::json!({}),
@@ -244,13 +244,13 @@ async fn t12_body() -> Result<(), String> {
         nonce: base64::engine::general_purpose::STANDARD
             .encode([0u8; 32]),
     };
-    c.send(&Frame::MachineHello(hello)).await?;
+    c.send(&Frame::InstanceHello(hello)).await?;
     let code = c.recv_close(RECV_TIMEOUT).await?;
-    assert_eq!(code, 4502, "client token 冒充 machine hello 应为 4502");
+    assert_eq!(code, 4502, "client token 冒充 instance hello 应为 4502");
 
     // e. 未知 token 的 hello → 4502（向量 7 同源）。
     let mut c = WsClient::connect(port).await?;
-    let hello = acp_hub_proto::machine::MachineHello {
+    let hello = acp_hub_proto::instance::InstanceHello {
         token: fresh_token(),
         hostname: "unknown".to_string(),
         caps: serde_json::json!({}),
@@ -260,7 +260,7 @@ async fn t12_body() -> Result<(), String> {
         nonce: base64::engine::general_purpose::STANDARD
             .encode([1u8; 32]),
     };
-    c.send(&Frame::MachineHello(hello)).await?;
+    c.send(&Frame::InstanceHello(hello)).await?;
     let code = c.recv_close(RECV_TIMEOUT).await?;
     assert_eq!(code, 4502, "未知 token 的 hello 应为 4502");
 

@@ -361,7 +361,7 @@ fn c6_dir_and_token_file_permissions() {
     assert_eq!(mode(&cfg.data_dir), 0o700, "data 目录应为 0700");
 
     let mut store = TokenStore::load(&cfg.config_dir.join("tokens.toml")).unwrap();
-    store.generate(TokenRole::Machine, "m1").unwrap();
+    store.generate(TokenRole::Instance, "m1").unwrap();
     let token_path = cfg.config_dir.join("tokens.toml");
     assert_eq!(mode(&token_path), 0o600, "tokens.toml 应为 0600");
 

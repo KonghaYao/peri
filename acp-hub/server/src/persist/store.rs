@@ -1,7 +1,7 @@
-//! Store：目录初始化（0700/0600）、session 分片管理、恢复编排（recover）、
+//! Store：目录初始化（0700/0600）、chat 分片管理、恢复编排（recover）、
 //! 磁盘预算记账、degraded 汇聚、归档接口（§7/§9）。
 //!
-//! 恢复编排（§8.4.1 不变量 1-2，persist 内实现），逐 session（目录名排序
+//! 恢复编排（§8.4.1 不变量 1-2，persist 内实现），逐 chat（目录名排序
 //! 保证日志确定性）：
 //!
 //! 1. 清理残留：`updates.snapshot.tmp` 存在 → 删除（rename 未发生，旧日志
@@ -36,29 +36,29 @@ use crate::persist::{
     WarningCode,
 };
 
-/// sessions/ 目录名（§2 目录布局）。
-pub const SESSIONS_DIR: &str = "sessions";
+/// chats/ 目录名（§2 目录布局）。
+pub const CHATS_DIR: &str = "chats";
 /// archive/ 目录名（§2 目录布局）。
 pub const ARCHIVE_DIR: &str = "archive";
 
-/// 单 session 的持久化句柄集合（§10 并发模型：每存储独立锁）。
+/// 单 chat 的持久化句柄集合（§10 并发模型：每存储独立锁）。
 ///
 /// - `update_log` / `outbox`：`tokio::sync::Mutex`（异步锁；文件 I/O 为同步
 ///   小操作，M1 本机可接受）；
 /// - `watermark`：`Arc`（内部自锁，append/查询共享）。
-pub struct SessionStore {
-    session_id: Uuid,
+pub struct ChatStore {
+    chat_id: Uuid,
     dir: PathBuf,
     update_log: Mutex<UpdateLog>,
     outbox: Mutex<OutboxStore>,
     watermark: Arc<WatermarkStore>,
     closed_at: RwLock<Option<DateTime<Utc>>>,
-    replay: RwLock<Option<SessionReplay>>,
+    replay: RwLock<Option<ChatReplay>>,
 }
 
-/// session 恢复产物（不变量 3 数据源：doc-manager 应用回放记录）。
+/// chat 恢复产物（不变量 3 数据源：doc-manager 应用回放记录）。
 #[derive(Debug, Clone, Default)]
-pub struct SessionReplay {
+pub struct ChatReplay {
     /// compact 快照基线（§8；`None` = 纯日志回放）。
     pub snapshot: Option<crate::persist::update_log::Snapshot>,
     /// 日志回放记录（按序应用，重复段由聚合器幂等跳过，§4.4）。
@@ -67,13 +67,13 @@ pub struct SessionReplay {
     pub watermark: crate::persist::watermark::Watermark,
 }
 
-impl SessionStore {
-    /// session id。
-    pub fn session_id(&self) -> Uuid {
-        self.session_id
+impl ChatStore {
+    /// chat id。
+    pub fn chat_id(&self) -> Uuid {
+        self.chat_id
     }
 
-    /// session 数据目录。
+    /// chat 数据目录。
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -93,7 +93,7 @@ impl SessionStore {
         &self.watermark
     }
 
-    /// 记录 session 关闭时刻（§5.5：control 层在 close 完成时调用；
+    /// 记录 chat 关闭时刻（§5.5：control 层在 close 完成时调用；
     /// 清理/归档前置条件）。内存标记【决策：跨重启由 control 层重建】。
     pub fn mark_closed(&self, at: DateTime<Utc>) {
         *self.closed_at.write().expect("closed_at lock poisoned") = Some(at);
@@ -113,7 +113,7 @@ impl SessionStore {
     }
 
     /// 恢复产物（doc-manager 消费，§7 协作表）。
-    pub fn replay_outcome(&self) -> Option<SessionReplay> {
+    pub fn replay_outcome(&self) -> Option<ChatReplay> {
         self.replay.read().expect("replay lock poisoned").clone()
     }
 
@@ -136,7 +136,7 @@ impl SessionStore {
 /// 磁盘预算报告（§9.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetReport {
-    /// 已用字节（sessions/ + archive/ 全部文件，§9.2 记账范围）。
+    /// 已用字节（chats/ + archive/ 全部文件，§9.2 记账范围）。
     pub used: u64,
     /// 预算上限。
     pub limit: u64,
@@ -146,37 +146,37 @@ pub struct BudgetReport {
     pub eviction_candidates: Vec<EvictionCandidate>,
 }
 
-/// 淘汰候选（§9.2：最旧已关闭 session 归档候选 + outbox 最旧终态记录）。
+/// 淘汰候选（§9.2：最旧已关闭 chat 归档候选 + outbox 最旧终态记录）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvictionCandidate {
-    /// 最旧已关闭 session（归档候选，§9.3 条件检查）。
-    ArchiveSession {
-        /// session id。
-        session_id: Uuid,
+    /// 最旧已关闭 chat（归档候选，§9.3 条件检查）。
+    ArchiveChat {
+        /// chat id。
+        chat_id: Uuid,
     },
     /// outbox 最旧终态记录（§5.5 预算淘汰，仍受删除前置条件约束）。
     OutboxTerminal {
-        /// 所属 session。
-        session_id: Uuid,
+        /// 所属 chat。
+        chat_id: Uuid,
         /// 命令 id。
         command_id: Uuid,
     },
 }
 
-/// 持久化 Store（§7）：目录初始化、session 分片、恢复编排、预算、degraded
+/// 持久化 Store（§7）：目录初始化、chat 分片、恢复编排、预算、degraded
 /// 汇聚、归档。
 pub struct Store {
     data_dir: PathBuf,
     config: PersistConfig,
     degraded: Arc<DegradedFlag>,
-    sessions: RwLock<HashMap<Uuid, Arc<SessionStore>>>,
+    chats: RwLock<HashMap<Uuid, Arc<ChatStore>>>,
     recovered: AtomicBool,
     recover_signal: Arc<Notify>,
     last_result: RwLock<Option<RecoveryResult>>,
 }
 
 impl Store {
-    /// 打开数据目录（§9.1）：创建 `data_dir/sessions/archive`（0700），校验
+    /// 打开数据目录（§9.1）：创建 `data_dir/chats/archive`（0700），校验
     /// 并修复权限；失败 → `StoreError::Io`。不执行恢复（[`Store::recover`]）。
     pub fn open(config: &PersistConfig) -> Result<Self, StoreError> {
         let data_dir = config.data_dir.clone();
@@ -184,7 +184,7 @@ impl Store {
             path: data_dir.clone(),
             source: e,
         })?;
-        for sub in [SESSIONS_DIR, ARCHIVE_DIR] {
+        for sub in [CHATS_DIR, ARCHIVE_DIR] {
             let p = data_dir.join(sub);
             fs::create_dir_all(&p).map_err(|e| StoreError::Io {
                 path: p.clone(),
@@ -192,14 +192,14 @@ impl Store {
             })?;
         }
         set_dir_permissions(&data_dir)?;
-        set_dir_permissions(&data_dir.join(SESSIONS_DIR))?;
+        set_dir_permissions(&data_dir.join(CHATS_DIR))?;
         set_dir_permissions(&data_dir.join(ARCHIVE_DIR))?;
         let degraded = Arc::new(DegradedFlag::new());
         Ok(Store {
             data_dir,
             config: config.clone(),
             degraded,
-            sessions: RwLock::new(HashMap::new()),
+            chats: RwLock::new(HashMap::new()),
             recovered: AtomicBool::new(false),
             recover_signal: Arc::new(Notify::new()),
             last_result: RwLock::new(None),
@@ -225,19 +225,19 @@ impl Store {
         result
     }
 
-    /// 恢复编排实现（同步；逐 session 目录名排序保证日志确定性，§7）。
+    /// 恢复编排实现（同步；逐 chat 目录名排序保证日志确定性，§7）。
     fn recover_once(&self) -> RecoveryResult {
         let mut result = RecoveryResult::default();
-        let sessions_dir = self.data_dir.join(SESSIONS_DIR);
-        let mut dirs: Vec<PathBuf> = match fs::read_dir(&sessions_dir) {
+        let chats_dir = self.data_dir.join(CHATS_DIR);
+        let mut dirs: Vec<PathBuf> = match fs::read_dir(&chats_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().is_dir())
                 .map(|e| e.path())
                 .collect(),
             Err(e) => {
-                warn!(path = %sessions_dir.display(), error = %e, "sessions dir unreadable");
-                self.degraded.set(format!("sessions dir unreadable: {e}"));
+                warn!(path = %chats_dir.display(), error = %e, "chats dir unreadable");
+                self.degraded.set(format!("chats dir unreadable: {e}"));
                 result.degraded = true;
                 return result;
             }
@@ -247,37 +247,37 @@ impl Store {
             let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let Ok(session_id) = Uuid::parse_str(name) else {
+            let Ok(chat_id) = Uuid::parse_str(name) else {
                 // 非 uuid 目录：不参与恢复（防御；不告警以免噪音）。
                 continue;
             };
-            let session = match self.open_session(&dir, session_id, &mut result) {
+            let chat = match self.open_chat(&dir, chat_id, &mut result) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(
-                        session_id = %session_id, path = %dir.display(), error = %e,
-                        "session recover failed; store degraded"
+                        chat_id = %chat_id, path = %dir.display(), error = %e,
+                        "chat recover failed; store degraded"
                     );
-                    self.degraded.set(format!("session {session_id} recover failed: {e}"));
+                    self.degraded.set(format!("chat {chat_id} recover failed: {e}"));
                     result.degraded = true;
                     continue;
                 }
             };
-            self.sessions
+            self.chats
                 .write()
-                .expect("sessions lock poisoned")
-                .insert(session_id, session);
+                .expect("chats lock poisoned")
+                .insert(chat_id, chat);
         }
         result
     }
 
-    /// 打开并恢复单个 session（§7 步骤 1-5）。
-    fn open_session(
+    /// 打开并恢复单个 chat（§7 步骤 1-5）。
+    fn open_chat(
         &self,
         dir: &Path,
-        session_id: Uuid,
+        chat_id: Uuid,
         result: &mut RecoveryResult,
-    ) -> Result<Arc<SessionStore>, StoreError> {
+    ) -> Result<Arc<ChatStore>, StoreError> {
         set_dir_permissions(dir)?;
         // 1. 清理残留：updates.snapshot.tmp（rename 未发生 → 旧日志完整，
         //    §8 崩溃时序 A）与 outbox.log.tmp（物理压缩崩溃残留，§5.5）。
@@ -287,7 +287,7 @@ impl Store {
                 path: tmp_snapshot.clone(),
                 source: e,
             })?;
-            debug!(session_id = %session_id, "removed stale snapshot tmp");
+            debug!(chat_id = %chat_id, "removed stale snapshot tmp");
         }
         let tmp_outbox = dir.join(OUTBOX_LOG_TMP_FILE);
         if tmp_outbox.exists() {
@@ -295,7 +295,7 @@ impl Store {
                 path: tmp_outbox.clone(),
                 source: e,
             })?;
-            debug!(session_id = %session_id, "removed stale outbox tmp");
+            debug!(chat_id = %chat_id, "removed stale outbox tmp");
         }
         // 2. 水位先行加载（不变量 2 前提）。
         let watermark = Arc::new(WatermarkStore::open(
@@ -337,7 +337,7 @@ impl Store {
         // 4. update 日志回放（§4.4）：快照基线选择 + 尾部截断。
         let mut update_log = UpdateLog::open(
             dir,
-            session_id,
+            chat_id,
             watermark.clone(),
             self.config.fsync_mode,
             self.config.compact_threshold_bytes,
@@ -348,7 +348,7 @@ impl Store {
             Ok(s) => s,
             Err(e) => {
                 // 快照读取 I/O 失败 → 纯日志回放 + degraded。
-                warn!(session_id = %session_id, error = %e, "snapshot load failed");
+                warn!(chat_id = %chat_id, error = %e, "snapshot load failed");
                 self.degraded.set(format!("snapshot load failed: {e}"));
                 result.degraded = true;
                 None
@@ -375,7 +375,7 @@ impl Store {
             {
                 match update_log.truncate_after_snapshot() {
                     Ok(()) => {}
-                    Err(e) => warn!(session_id = %session_id, error = %e, "log truncate after snapshot failed"),
+                    Err(e) => warn!(chat_id = %chat_id, error = %e, "log truncate after snapshot failed"),
                 }
             }
         }
@@ -401,7 +401,7 @@ impl Store {
         // 日志尾部 = 回放最后一条；日志为空且快照存在时以快照点为等效尾部
         // （§8 崩溃时序 C：日志已被截断，快照携带 (last_epoch, last_applied_seq)
         // 边界；否则水位损坏/缺失时对齐到 (0,0)，补推起点与真实代际脱节，
-        // epoch 不匹配会被 machine 侧拒绝——§4.5.1）。
+        // epoch 不匹配会被 instance 侧拒绝——§4.5.1）。
         let log_tail = if replay.records.is_empty() {
             snapshot
                 .as_ref()
@@ -438,105 +438,105 @@ impl Store {
         if update_log.degraded() || watermark.degraded_is_set() || outbox.degraded_is_set() {
             result.degraded = true;
         }
-        let session_replay = SessionReplay {
+        let chat_replay = ChatReplay {
             snapshot,
             records: replay.records,
             watermark: aligned,
         };
-        let session = Arc::new(SessionStore {
-            session_id,
+        let chat = Arc::new(ChatStore {
+            chat_id,
             dir: dir.to_path_buf(),
             update_log: Mutex::new(update_log),
             outbox: Mutex::new(outbox),
             watermark,
             closed_at: RwLock::new(None),
-            replay: RwLock::new(Some(session_replay)),
+            replay: RwLock::new(Some(chat_replay)),
         });
-        Ok(session)
+        Ok(chat)
     }
 
-    /// 获取 session 句柄（已恢复/已创建）。
-    pub fn session(&self, session_id: Uuid) -> Option<Arc<SessionStore>> {
-        self.sessions
+    /// 获取 chat 句柄（已恢复/已创建）。
+    pub fn chat(&self, chat_id: Uuid) -> Option<Arc<ChatStore>> {
+        self.chats
             .read()
-            .expect("sessions lock poisoned")
-            .get(&session_id)
+            .expect("chats lock poisoned")
+            .get(&chat_id)
             .cloned()
     }
 
-    /// 全部 session 快照（`(session_id, 句柄)`；create 全局去重索引重建用，
-    /// §4.4：跨 session 按 commandId 查）。
-    pub fn sessions_snapshot(&self) -> Vec<(Uuid, Arc<SessionStore>)> {
-        self.sessions
+    /// 全部 chat 快照（`(chat_id, 句柄)`；create 全局去重索引重建用，
+    /// §4.4：跨 chat 按 commandId 查）。
+    pub fn chats_snapshot(&self) -> Vec<(Uuid, Arc<ChatStore>)> {
+        self.chats
             .read()
-            .expect("sessions lock poisoned")
+            .expect("chats lock poisoned")
             .iter()
             .map(|(id, s)| (*id, s.clone()))
             .collect()
     }
 
-    /// 新建 session（§4.4：server 生成 uuid；目录即持久化创建点）。
-    pub fn create_session(&self, session_id: Uuid) -> Result<Arc<SessionStore>, StoreError> {
-        let dir = self.data_dir.join(SESSIONS_DIR).join(session_id.to_string());
+    /// 新建 chat（§4.4：server 生成 uuid；目录即持久化创建点）。
+    pub fn create_chat(&self, chat_id: Uuid) -> Result<Arc<ChatStore>, StoreError> {
+        let dir = self.data_dir.join(CHATS_DIR).join(chat_id.to_string());
         fs::create_dir_all(&dir).map_err(|e| StoreError::Io {
             path: dir.clone(),
             source: e,
         })?;
         set_dir_permissions(&dir)?;
         let mut result = RecoveryResult::default();
-        let session = self.open_session(&dir, session_id, &mut result)?;
+        let chat = self.open_chat(&dir, chat_id, &mut result)?;
         if result.degraded {
             warn!(
-                session_id = %session_id, warnings = ?result.warnings,
-                "new session opened degraded"
+                chat_id = %chat_id, warnings = ?result.warnings,
+                "new chat opened degraded"
             );
         }
-        self.sessions
+        self.chats
             .write()
-            .expect("sessions lock poisoned")
-            .insert(session_id, session.clone());
-        info!(session_id = %session_id, "session persist store created");
-        Ok(session)
+            .expect("chats lock poisoned")
+            .insert(chat_id, chat.clone());
+        info!(chat_id = %chat_id, "chat persist store created");
+        Ok(chat)
     }
 
-    /// 移除 session 目录（close 后的最终清理；归档走
-    /// [`Store::archive_session`]）。调用方保证无在途写入。
-    pub fn remove_session(&self, session_id: Uuid) -> Result<(), StoreError> {
-        let dir = self.data_dir.join(SESSIONS_DIR).join(session_id.to_string());
+    /// 移除 chat 目录（close 后的最终清理；归档走
+    /// [`Store::archive_chat`]）。调用方保证无在途写入。
+    pub fn remove_chat(&self, chat_id: Uuid) -> Result<(), StoreError> {
+        let dir = self.data_dir.join(CHATS_DIR).join(chat_id.to_string());
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(|e| StoreError::Io {
                 path: dir.clone(),
                 source: e,
             })?;
         }
-        self.sessions
+        self.chats
             .write()
-            .expect("sessions lock poisoned")
-            .remove(&session_id);
-        info!(session_id = %session_id, "session persist store removed");
+            .expect("chats lock poisoned")
+            .remove(&chat_id);
+        info!(chat_id = %chat_id, "chat persist store removed");
         Ok(())
     }
 
-    /// 归档 session（§9.3）：条件检查——session 已关闭（`mark_closed`）+
+    /// 归档 chat（§9.3）：条件检查——chat 已关闭（`mark_closed`）+
     /// outbox 全终态 + `closed_at + archive_retention` 届满；满足则移动目录
-    /// 至 `archive/<session_id>` 并记录清单。M1 简化：自动触发由启动巡检 +
+    /// 至 `archive/<chat_id>` 并记录清单。M1 简化：自动触发由启动巡检 +
     /// 预算巡检调用（§9.3）；归档内容（压缩/导出）后置开放问题 3。
     ///
     /// 返回 `Ok(true)` = 已归档；`Ok(false)` = 条件不满足（原因经
     /// `tracing::debug!` 记录，不告警——未届满属正常时序）。
-    pub fn archive_session(
+    pub fn archive_chat(
         &self,
-        session_id: Uuid,
+        chat_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<bool, StoreError> {
-        let session = match self.session(session_id) {
+        let chat = match self.chat(chat_id) {
             Some(s) => s,
-            None => return Err(StoreError::SessionNotFound { session_id }),
+            None => return Err(StoreError::ChatNotFound { chat_id }),
         };
-        let closed_at = match session.closed_at() {
+        let closed_at = match chat.closed_at() {
             Some(t) => t,
             None => {
-                debug!(session_id = %session_id, "archive skipped: session not closed");
+                debug!(chat_id = %chat_id, "archive skipped: chat not closed");
                 return Ok(false);
             }
         };
@@ -545,20 +545,20 @@ impl Store {
                 .unwrap_or_default()
             > now
         {
-            debug!(session_id = %session_id, "archive skipped: retention not elapsed");
+            debug!(chat_id = %chat_id, "archive skipped: retention not elapsed");
             return Ok(false);
         }
-        let all_terminal = session
+        let all_terminal = chat
             .outbox
             .try_lock()
             .map(|o| o.records().all(|r| r.status.is_terminal()))
             .unwrap_or(false);
         if !all_terminal {
-            debug!(session_id = %session_id, "archive skipped: outbox not all terminal");
+            debug!(chat_id = %chat_id, "archive skipped: outbox not all terminal");
             return Ok(false);
         }
-        let src = self.data_dir.join(SESSIONS_DIR).join(session_id.to_string());
-        let dst = self.data_dir.join(ARCHIVE_DIR).join(session_id.to_string());
+        let src = self.data_dir.join(CHATS_DIR).join(chat_id.to_string());
+        let dst = self.data_dir.join(ARCHIVE_DIR).join(chat_id.to_string());
         fs::create_dir_all(dst.parent().expect("archive dir"))
             .map_err(|e| StoreError::Io {
                 path: dst.clone(),
@@ -568,13 +568,13 @@ impl Store {
             path: src.clone(),
             source: e,
         })?;
-        self.sessions
+        self.chats
             .write()
-            .expect("sessions lock poisoned")
-            .remove(&session_id);
+            .expect("chats lock poisoned")
+            .remove(&chat_id);
         info!(
-            session_id = %session_id, archive_path = %dst.display(),
-            "session archived"
+            chat_id = %chat_id, archive_path = %dst.display(),
+            "chat archived"
         );
         Ok(true)
     }
@@ -589,17 +589,17 @@ impl Store {
         }
     }
 
-    /// 磁盘占用（§9.2 记账范围：sessions/ + archive/ 全部文件，含 corrupt）。
+    /// 磁盘占用（§9.2 记账范围：chats/ + archive/ 全部文件，含 corrupt）。
     pub fn disk_used(&self) -> u64 {
         let mut total = 0u64;
-        for sub in [SESSIONS_DIR, ARCHIVE_DIR] {
+        for sub in [CHATS_DIR, ARCHIVE_DIR] {
             total += dir_size(&self.data_dir.join(sub));
         }
         total
     }
 
     /// 预算检查（§9.2 检查点：append / compact / cleanup 之后调用）：
-    /// 超限 → 告警（绝不静默）+ 淘汰候选（最旧已关闭 session + 最旧终态
+    /// 超限 → 告警（绝不静默）+ 淘汰候选（最旧已关闭 chat + 最旧终态
     /// outbox 记录）；持续超限且无可淘汰 → degraded（落盘失败语义同源）。
     ///
     /// M1 简化（§5.5/§9.2）：只告警 + 候选提示，不自动删除未满保留期记录；
@@ -632,25 +632,25 @@ impl Store {
         }
     }
 
-    /// 淘汰候选（§9.2）：最旧已关闭 session（归档候选）+ 各 session 最旧
+    /// 淘汰候选（§9.2）：最旧已关闭 chat（归档候选）+ 各 chat 最旧
     /// 终态 outbox 记录。不修改任何数据。
     fn budget_candidates(&self) -> Vec<EvictionCandidate> {
         let mut candidates = Vec::new();
-        let sessions = self.sessions.read().expect("sessions lock poisoned");
-        // 最旧已关闭 session（归档候选，§9.3 条件仍要满足）。
+        let chats = self.chats.read().expect("chats lock poisoned");
+        // 最旧已关闭 chat（归档候选，§9.3 条件仍要满足）。
         let mut oldest_closed: Option<(Uuid, DateTime<Utc>)> = None;
-        for session in sessions.values() {
-            if let Some(closed) = session.closed_at() {
+        for chat in chats.values() {
+            if let Some(closed) = chat.closed_at() {
                 if oldest_closed
                     .as_ref()
                     .map(|(_, t)| closed < *t)
                     .unwrap_or(true)
                 {
-                    oldest_closed = Some((session.session_id(), closed));
+                    oldest_closed = Some((chat.chat_id(), closed));
                 }
             }
             // 最旧终态记录（§5.5 预算淘汰：不受 7 天约束，仍受前置条件约束）。
-            if let Ok(outbox) = session.outbox.try_lock() {
+            if let Ok(outbox) = chat.outbox.try_lock() {
                 let mut oldest: Option<(&OutboxRecord, DateTime<Utc>)> = None;
                 for r in outbox.records() {
                     if r.status.is_terminal()
@@ -664,14 +664,14 @@ impl Store {
                 }
                 if let Some((r, _)) = oldest {
                     candidates.push(EvictionCandidate::OutboxTerminal {
-                        session_id: session.session_id(),
+                        chat_id: chat.chat_id(),
                         command_id: r.command_id,
                     });
                 }
             }
         }
-        if let Some((session_id, _)) = oldest_closed {
-            candidates.push(EvictionCandidate::ArchiveSession { session_id });
+        if let Some((chat_id, _)) = oldest_closed {
+            candidates.push(EvictionCandidate::ArchiveChat { chat_id });
         }
         candidates
     }
@@ -692,9 +692,9 @@ impl Store {
         self.last_result.read().expect("last_result lock poisoned").clone()
     }
 
-    /// session 回放产物（doc-manager 应用，不变量 3）。
-    pub fn replay_outcome(&self, session_id: Uuid) -> Option<SessionReplay> {
-        self.session(session_id)?.replay_outcome()
+    /// chat 回放产物（doc-manager 应用，不变量 3）。
+    pub fn replay_outcome(&self, chat_id: Uuid) -> Option<ChatReplay> {
+        self.chat(chat_id)?.replay_outcome()
     }
 
     /// 数据目录。
@@ -708,7 +708,7 @@ impl Store {
     }
 }
 
-impl SessionStore {
+impl ChatStore {
     /// 便捷：当前是否 degraded（任一路径）。
     pub fn degraded(&self) -> bool {
         self.watermark.degraded_is_set()

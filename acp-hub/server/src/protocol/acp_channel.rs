@@ -1,6 +1,6 @@
 //! ACPChannel：入站规范化（架构 §6.1，设计稿 `f5-channel-control.md` §3）。
 //!
-//! machine 透传的原始 ACP 帧（`{type,payload}` 或 JSON-RPC `session/update`
+//! instance 透传的原始 ACP 帧（`{type,payload}` 或 JSON-RPC `session/update`
 //! 包裹）在此规范化为 [`NormalizedEvent`]。**纯函数**：无 I/O、无日志副作用；
 //! binding 校验与持久化在调用方（RelayEventHandler）。
 //!
@@ -23,7 +23,7 @@ use chrono::DateTime;
 use serde_json::Value;
 
 use acp_hub_proto::action::PermissionDecision;
-use acp_hub_proto::schema::{BlockVisibility, PublicError, SessionStatus, TurnStatus};
+use acp_hub_proto::schema::{BlockVisibility, PublicError, ChatStatus, TurnStatus};
 
 use crate::state::normalized::{EventBody, NormalizedEvent};
 
@@ -96,13 +96,13 @@ impl Default for AcpChannel {
 impl AcpChannel {
     /// 主入口：原始 ACP 帧 → 规范化事件（§6.1）。
     ///
-    /// `session_id` 为 **hub 侧** id（调用方已按 binding 翻译与校验）；`epoch`/
-    /// `seq` 为 machine 侧流纪元与单调序号（§4.5.1，透传进 NormalizedEvent
+    /// `chat_id` 为 **hub 侧** id（调用方已按 binding 翻译与校验）；`epoch`/
+    /// `seq` 为 instance 侧流纪元与单调序号（§4.5.1，透传进 NormalizedEvent
     /// envelope）；`now_rfc3339` 为 server 权威时钟（§4.7——permission
-    /// expires_at 判定性时间戳由 server 生成，machine 只上报相对时序）。
+    /// expires_at 判定性时间戳由 server 生成，instance 只上报相对时序）。
     pub fn normalize(
         &self,
-        session_id: &str,
+        chat_id: &str,
         epoch: u64,
         seq: u64,
         now_rfc3339: &str,
@@ -110,7 +110,7 @@ impl AcpChannel {
     ) -> NormalizeOutcome {
         // 1. JSON-RPC 形态判定：有 "jsonrpc" 键 → 通知（method）/ response（id）。
         if frame.get("jsonrpc").is_some() {
-            return self.normalize_json_rpc(session_id, epoch, seq, now_rfc3339, frame);
+            return self.normalize_json_rpc(chat_id, epoch, seq, now_rfc3339, frame);
         }
         // 2. 原始 {type, payload} 形态。
         let Some(obj) = frame.as_object() else {
@@ -131,7 +131,7 @@ impl AcpChannel {
         };
         match self.map_raw(kind, &payload, now_rfc3339) {
             Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
-                session_id: session_id.to_string(),
+                chat_id: chat_id.to_string(),
                 seq,
                 epoch,
                 body,
@@ -144,7 +144,7 @@ impl AcpChannel {
     /// JSON-RPC 形态（§6.1 包裹格式）。
     fn normalize_json_rpc(
         &self,
-        session_id: &str,
+        chat_id: &str,
         epoch: u64,
         seq: u64,
         now_rfc3339: &str,
@@ -173,8 +173,29 @@ impl AcpChannel {
             Some(_) => return NormalizeOutcome::Dropped(DropReason::Malformed),
             None => serde_json::Map::new(),
         };
-        // session/update 通知：params 含 {type, payload}（ACP 事件包裹）。
+        // session/update 通知：params 两种形态——
+        //   a) ACP 包裹 `{type, payload}`（acp-hub 私有帧）；
+        //   b) agent-client-protocol `{sessionId, update: {sessionUpdate, ...}}`
+        //      （真实 peri 实测；照抄 @fenix/chat-channel acp-channel.ts 映射）。
         if method == "session/update" {
+            if let Some(update) = params.get("update").and_then(|v| v.as_object()) {
+                if update.get("sessionUpdate").is_some() {
+                    return match self.map_acp_update(update, now_rfc3339) {
+                        Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+                            chat_id: chat_id.to_string(),
+                            seq,
+                            epoch,
+                            body,
+                        }),
+                        Err(MapError::Unsupported) => {
+                            NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+                        }
+                        Err(MapError::MissingField) => {
+                            NormalizeOutcome::Dropped(DropReason::MissingField)
+                        }
+                    };
+                }
+            }
             let Some(kind) = params.get("type").and_then(Value::as_str) else {
                 return NormalizeOutcome::Dropped(DropReason::MissingField);
             };
@@ -185,7 +206,7 @@ impl AcpChannel {
             };
             return match self.map_raw(kind, &payload, now_rfc3339) {
                 Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
-                    session_id: session_id.to_string(),
+                    chat_id: chat_id.to_string(),
                     seq,
                     epoch,
                     body,
@@ -200,7 +221,7 @@ impl AcpChannel {
         // agent 状态通知（`agent/status`）。
         if method == "agent/status" {
             return NormalizeOutcome::Event(NormalizedEvent {
-                session_id: session_id.to_string(),
+                chat_id: chat_id.to_string(),
                 seq,
                 epoch,
                 body: EventBody::AgentStatus {
@@ -210,6 +231,120 @@ impl AcpChannel {
             });
         }
         NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+    }
+
+    /// agent-client-protocol `session/update` 的 `update` 对象 → EventBody。
+    ///
+    /// 照抄 @fenix/chat-channel `protocol/acp-channel.ts`（mapSessionUpdateType /
+    /// resolveToolCallType / extractContent / extractToolCallId 语义）：
+    /// 真实 peri 的增量帧**无 turnId/entryId/blockId**，本层产出空 id，
+    /// 由聚合器按 active_turn 归位（§7.2 宿主驱动 turn 模型）。
+    fn map_acp_update(
+        &self,
+        update: &serde_json::Map<String, Value>,
+        now_rfc3339: &str,
+    ) -> Result<EventBody, MapError> {
+        use EventBody as B;
+        let kind = string_field(update, "sessionUpdate", "sessionUpdate")
+            .ok_or(MapError::MissingField)?;
+        let content_text = || {
+            // extractContent：优先 update.content，回退 update.text。
+            update
+                .get("content")
+                .and_then(|v| v.get("text"))
+                .and_then(Value::as_str)
+                .map(truncate_text)
+                .unwrap_or_else(|| {
+                    truncate_text(&string_field(update, "text", "text").unwrap_or_default())
+                })
+        };
+        let body = match kind.as_str() {
+            "agent_message_chunk" => B::MessageDelta {
+                turn_id: String::new(),
+                entry_id: String::new(),
+                block_id: String::new(),
+                text: content_text(),
+            },
+            "agent_thought_chunk" => B::ReasoningDelta {
+                turn_id: String::new(),
+                entry_id: String::new(),
+                block_id: String::new(),
+                text: content_text(),
+                visibility: BlockVisibility::Summary,
+            },
+            "user_message_chunk" => B::UserMessage {
+                turn_id: String::new(),
+                entry_id: String::new(),
+                text: content_text(),
+                author_user_id: None,
+                created_at: now_rfc3339.to_string(),
+            },
+            // tool_call / tool_call_update 按 status 细分终态
+            // （resolveToolCallType：running→started；completed/complete/done→
+            // completed；error→failed；缺省 running）。
+            "tool_call" | "tool_call_update" => {
+                let tool_call_id = update
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        update
+                            .get("content")
+                            .and_then(|v| v.get("id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_default();
+                if tool_call_id.is_empty() {
+                    return Err(MapError::MissingField);
+                }
+                match string_field(update, "status", "status").as_deref() {
+                    Some("completed") | Some("complete") | Some("done") => {
+                        B::ToolCallCompleted {
+                            turn_id: String::new(),
+                            tool_call_id,
+                            result: update
+                                .get("rawOutput")
+                                .or_else(|| update.get("output"))
+                                .cloned(),
+                            public_error: None,
+                        }
+                    }
+                    Some("error") => B::ToolCallCompleted {
+                        turn_id: String::new(),
+                        tool_call_id,
+                        result: None,
+                        public_error: Some(PublicError {
+                            code: "agent_error".to_string(),
+                            message: string_field(update, "title", "title")
+                                .unwrap_or_else(|| "Tool call failed".to_string()),
+                        }),
+                    },
+                    _ => B::ToolCallStarted {
+                        turn_id: String::new(),
+                        tool_call_id,
+                        name: string_field(update, "title", "title")
+                            .or_else(|| string_field(update, "name", "name"))
+                            .unwrap_or_default(),
+                        arguments: update.get("rawInput").cloned(),
+                        created_at: now_rfc3339.to_string(),
+                    },
+                }
+            }
+            // session 元信息（title 等；peri 实测仅 updatedAt，其余缺省不覆盖）。
+            "session_info_update" | "session_update" => B::SessionInfo {
+                title: string_field(update, "title", "title"),
+                status: None,
+                active_turn_id: None,
+            },
+            // M1 无需投影的会话级元数据（命令菜单/模式/配置/用量/计划）。
+            "available_commands_update" | "current_mode_update" | "config_option_update"
+            | "usage_update" | "plan" | "plan_update" | "plan_removed" => {
+                return Err(MapError::Unsupported);
+            }
+            _ => return Err(MapError::Unsupported),
+        };
+        Ok(body)
     }
 
     /// §6.1 事件映射表核心：`{type,payload}` → EventBody（14 变体）。
@@ -340,11 +475,11 @@ impl AcpChannel {
                 title: string_field(payload, "title", "title"),
                 status: string_field(payload, "status", "status").as_deref().and_then(
                     |s| match s {
-                        "accepting" => Some(SessionStatus::Accepting),
-                        "active" => Some(SessionStatus::Active),
-                        "ended" => Some(SessionStatus::Ended),
-                        "closed" => Some(SessionStatus::Closed),
-                        "crashed" => Some(SessionStatus::Crashed),
+                        "accepting" => Some(ChatStatus::Accepting),
+                        "active" => Some(ChatStatus::Active),
+                        "ended" => Some(ChatStatus::Ended),
+                        "closed" => Some(ChatStatus::Closed),
+                        "crashed" => Some(ChatStatus::Crashed),
                         _ => None,
                     },
                 ),

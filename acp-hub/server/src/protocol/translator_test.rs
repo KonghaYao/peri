@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use acp_hub_proto::action::{
-    ActionEnvelope, CancelSessionPayload, PermissionDecision, PromptSessionPayload,
+    ActionEnvelope, CancelChatPayload, PermissionDecision, PromptChatPayload,
     ResolvePermissionPayload,
 };
 
@@ -22,8 +22,8 @@ fn prompt_translation() {
     let t = Translator::new();
     let action = ActionEnvelope::Prompt {
         command_id: "c1".into(),
-        payload: PromptSessionPayload {
-            session_id: "hub-s1".into(),
+        payload: PromptChatPayload {
+            chat_id: "hub-s1".into(),
             message: "hello".into(),
         },
     };
@@ -33,10 +33,11 @@ fn prompt_translation() {
             assert_eq!(v["jsonrpc"], json!("2.0"));
             assert_eq!(v["method"], json!("session/prompt"));
             assert_eq!(v["params"]["sessionId"], json!("acp-1"));
-            assert_eq!(v["params"]["message"], json!("hello"));
-            // turnId 由 server 注入（§4.4 生成规则）：machine 侧 ACP 会话
-            // 沿用同一 id，事件 turn_id 与聚合器幂等键对齐（§6.5）。
-            assert_eq!(v["params"]["turnId"], json!("turn-1"));
+            // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
+            // 序列，非 message 字符串；无 turnId（宿主侧归位，§7.2）。
+            assert_eq!(v["params"]["prompt"], json!([{ "type": "text", "text": "hello" }]));
+            assert!(v["params"].get("message").is_none());
+            assert!(v["params"].get("turnId").is_none());
             assert!(v["id"].as_str().unwrap().starts_with("hub-"));
             // id 必带（避免被当作 notification，§6.1）。
             assert!(v["id"].is_string());
@@ -50,14 +51,18 @@ fn cancel_translation() {
     let t = Translator::new();
     let action = ActionEnvelope::Cancel {
         command_id: "c2".into(),
-        payload: CancelSessionPayload {
-            session_id: "hub-s1".into(),
+        payload: CancelChatPayload {
+            chat_id: "hub-s1".into(),
         },
     };
     match t.translate(&action, &ctx()).unwrap() {
         OutboundMessage::JsonRpc(v) => {
             assert_eq!(v["method"], json!("session/cancel"));
             assert_eq!(v["params"]["sessionId"], json!("acp-1"));
+            // 真实 peri 实测：session/cancel 是 notification——无 id、必带
+            // jsonrpc 版本。
+            assert_eq!(v["jsonrpc"], json!("2.0"));
+            assert!(v.get("id").is_none());
         }
         _ => panic!("expected json rpc"),
     }
@@ -69,7 +74,7 @@ fn resolve_translation() {
     let action = ActionEnvelope::ResolvePermission {
         command_id: "c3".into(),
         payload: ResolvePermissionPayload {
-            session_id: "hub-s1".into(),
+            chat_id: "hub-s1".into(),
             permission_id: "p1".into(),
             decision: PermissionDecision::Allow,
         },
@@ -99,18 +104,18 @@ fn unsupported_actions() {
     let t = Translator::new();
     let load = ActionEnvelope::Load {
         command_id: "c".into(),
-        payload: acp_hub_proto::action::LoadSessionPayload {
-            session_id: "s".into(),
+        payload: acp_hub_proto::action::LoadChatPayload {
+            chat_id: "s".into(),
         },
     };
     assert!(matches!(
         t.translate(&load, &ctx()),
         Err(TranslateError::UnsupportedAction(_))
     ));
-    // create/close 不在此入口（两段式 / machine/kill）。
+    // create/close 不在此入口（两段式 / instance/kill）。
     let create = ActionEnvelope::Create {
         command_id: "c".into(),
-        payload: acp_hub_proto::action::CreateSessionPayload::default(),
+        payload: acp_hub_proto::action::CreateChatPayload::default(),
     };
     assert!(matches!(
         t.translate(&create, &ctx()),

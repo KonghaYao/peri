@@ -25,9 +25,14 @@ use crate::config::duration::{deserialize_opt_duration, serialize_opt_duration};
 /// 默认监听端口（§16）。
 pub const DEFAULT_LISTEN_PORT: u16 = 8456;
 
+/// 默认 ACP 启动命令（架构 §11「默认 `peri acp`，可配置」）。
+pub const DEFAULT_ACP_CMD: [&str; 2] = ["peri", "acp"];
+
 /// spawn.env 白名单基集（§9.6「如 PATH/HOME/LANG 示例」；`spawn_env_allowlist`
-/// 是**增补**集合，键名匹配大小写敏感）。
-pub const ENV_ALLOWLIST_BASE: [&str; 3] = ["PATH", "HOME", "LANG"];
+/// 是**增补**集合，键名匹配大小写敏感）。与 instance 侧基集
+/// （`instance/src/hub.rs` `ENV_BASE_ALLOWLIST`）保持**双端一致**
+/// （§9.6 双端校验对称，SHELL 为 §9.6 基集项）。
+pub const ENV_ALLOWLIST_BASE: [&str; 4] = ["PATH", "HOME", "LANG", "SHELL"];
 
 /// 默认配置文件相对路径（`~/.config/acp-hub/config.toml`，§16）。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -96,6 +101,10 @@ pub struct CliOverrides {
     /// 日志级别（trace/debug/info/warn/error；覆盖配置文件，RUST_LOG 仍优先）
     #[arg(long, env = "ACP_HUB_LOG_LEVEL")]
     pub log_level: Option<String>,
+    /// ACP 启动命令（空格拆分 argv；§11 默认 `peri acp`，M1 起可配置——
+    /// 无 peri 环境可用 test-child 等替身充当 ACP 进程做验收）
+    #[arg(long, env = "ACP_HUB_ACP_CMD")]
+    pub acp_cmd: Option<String>,
 }
 
 /// §16 全表项。字段一律 snake_case（配置文件为内部格式，非线协议，不强制
@@ -162,6 +171,9 @@ pub struct Config {
     pub spawn_env_allowlist: BTreeSet<String>,
     /// 非回环监听开关（§16/§9.5，默认 false——显式声明才接受非回环连接）。
     pub allow_non_loopback: bool,
+    /// ACP 启动命令（§11「默认 `peri acp`，可配置」：config.toml `acp_cmd`
+    /// 数组或 `ACP_HUB_ACP_CMD` 空格拆分；验收可用 test-child 替身）。
+    pub acp_cmd: Vec<String>,
     // ---- 日志（非 §16 表项，server 本地默认）----
     /// 日志级别，默认 "info"。
     pub log_level: String,
@@ -199,6 +211,7 @@ impl Config {
             archive_retention: Duration::from_secs(90 * 86_400),
             spawn_env_allowlist: BTreeSet::new(),
             allow_non_loopback: false,
+            acp_cmd: DEFAULT_ACP_CMD.iter().map(|s| s.to_string()).collect(),
             log_level: "info".to_string(),
         }
     }
@@ -334,6 +347,9 @@ impl Config {
         if let Some(v) = &f.spawn_env_allowlist {
             self.spawn_env_allowlist = v.clone();
         }
+        if let Some(v) = &f.acp_cmd {
+            self.acp_cmd = v.clone();
+        }
         if let Some(v) = f.allow_non_loopback {
             self.allow_non_loopback = v;
         }
@@ -357,6 +373,10 @@ impl Config {
         }
         if let Some(v) = &cli.log_level {
             self.log_level = v.clone();
+        }
+        if let Some(v) = &cli.acp_cmd {
+            // 空格拆分 argv（验收路径无空格；含空格路径请走 config.toml 数组）。
+            self.acp_cmd = v.split_whitespace().map(ToOwned::to_owned).collect();
         }
     }
 
@@ -404,6 +424,11 @@ impl Config {
         if self.config_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invariant(
                 "config_dir 不能为空（无法解析 HOME）".to_string(),
+            ));
+        }
+        if self.acp_cmd.is_empty() {
+            return Err(ConfigError::Invariant(
+                "acp_cmd 不能为空（至少一个可执行项）".to_string(),
             ));
         }
         Ok(())
@@ -499,6 +524,7 @@ struct FileConfig {
     archive_retention: Option<Duration>,
     spawn_env_allowlist: Option<BTreeSet<String>>,
     allow_non_loopback: Option<bool>,
+    acp_cmd: Option<Vec<String>>,
     log_level: Option<String>,
 }
 
@@ -567,7 +593,7 @@ fn ensure_dir_0700(path: &Path) -> Result<(), ConfigError> {
 ///
 /// 优先级：`RUST_LOG` env（`EnvFilter::try_from_default_env`）> CLI `--log-level`
 /// （已合并进 `cfg.log_level`）> 配置 `log_level` > `info`。输出到 stderr，
-/// fmt 或 json 形态与 machine/main.rs 一致。`try_init` 防测试双初始化。
+/// fmt 或 json 形态与 instance/main.rs 一致。`try_init` 防测试双初始化。
 ///
 /// 脱敏纪律（§9.3）：tracing 字段只记关联 ID/状态/耗时/大小，token/正文/
 /// 参数永不落日志（见 auth/audit.rs 与测试断言）。

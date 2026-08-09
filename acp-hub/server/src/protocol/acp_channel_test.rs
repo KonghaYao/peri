@@ -86,7 +86,7 @@ fn map_message_delta() {
     });
     match norm(f) {
         NormalizeOutcome::Event(ev) => {
-            assert_eq!(ev.session_id, "hub-s1");
+            assert_eq!(ev.chat_id, "hub-s1");
             assert_eq!(ev.seq, 7);
             assert_eq!(ev.epoch, 1);
             assert_eq!(

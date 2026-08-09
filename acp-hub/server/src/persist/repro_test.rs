@@ -13,8 +13,8 @@ use crate::persist::{DegradedFlag, StoreError};
 use crate::persist::update_log::UpdateLog;
 use crate::persist::watermark::WatermarkStore;
 
-fn chat_doc(session_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
-    (DocId::chat(&session_id.to_string()), payload.to_vec())
+fn chat_doc(chat_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
+    (DocId::chat(&chat_id.to_string()), payload.to_vec())
 }
 
 /// 疑点 1（P1）：快照存在 + 日志首条记录结构损坏 → 恢复编排必须报告
@@ -24,13 +24,13 @@ fn chat_doc(session_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
 async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
     use crate::persist::store::Store;
     use crate::persist::PersistConfig;
-    use crate::persist::store::SESSIONS_DIR;
+    use crate::persist::store::CHATS_DIR;
 
     let dir = tempdir().unwrap();
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"payload");
 
-    // 阶段 1：seed session（append 1..=3 + compact 快照点 3 + append 4..=6）
+    // 阶段 1：seed chat（append 1..=3 + compact 快照点 3 + append 4..=6）
     {
         let cfg = PersistConfig {
             data_dir: dir.path().to_path_buf(),
@@ -42,8 +42,8 @@ async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
             archive_retention: std::time::Duration::from_secs(90 * 86_400),
         };
         let store = Store::open(&cfg).unwrap();
-        let session = store.create_session(sid).unwrap();
-        let mut log = session.update_log().lock().await;
+        let chat = store.create_chat(sid).unwrap();
+        let mut log = chat.update_log().lock().await;
         for seq in 1..=3u64 {
             log.append(1, seq, &[(d1.0.clone(), &d1.1)]).await.unwrap();
         }
@@ -56,7 +56,7 @@ async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
         drop(log);
     }
     // 阶段 2：破坏日志首条记录的 len 字段（结构损坏）
-    let path = dir.path().join(SESSIONS_DIR).join(sid.to_string()).join("updates.log");
+    let path = dir.path().join(CHATS_DIR).join(sid.to_string()).join("updates.log");
     let data = std::fs::read(&path).unwrap();
     let mut corrupted = data.clone();
     corrupted[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -84,7 +84,7 @@ async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
         "BUG: corruption not reported: {result:?}"
     );
     // 快照点 3 之上的记录 4..=6 按尾部截断语义丢弃，但损坏必须可见
-    let corrupt_dir = dir.path().join(SESSIONS_DIR).join(sid.to_string()).join("corrupt");
+    let corrupt_dir = dir.path().join(CHATS_DIR).join(sid.to_string()).join("corrupt");
     let n = std::fs::read_dir(&corrupt_dir).map(|rd| rd.count()).unwrap_or(0);
     assert!(n >= 1, "corrupt segment should be preserved (got {n})");
     // 且日志应截断于损坏点（而非整日志清空后空文件）——日志保留损坏点前的
@@ -143,7 +143,7 @@ fn repro5b_outbox_compact_permissions_not_0600() {
     let sid = uuid::Uuid::new_v4();
     let cid = uuid::Uuid::new_v4();
     ob.insert(NewOutboxRecord {
-        command_id: cid, session_id: sid, command_type: CommandType::Create,
+        command_id: cid, chat_id: sid, command_type: CommandType::Create,
         turn_id: None, retryable_class: RetryableClass::SafeToRedeliver,
     }).unwrap();
     ob.mark_accepted(cid).unwrap();
@@ -255,7 +255,7 @@ fn repro6_projection_committed_to_failed_rejected() {
     outbox
         .insert(NewOutboxRecord {
             command_id: cid,
-            session_id: sid,
+            chat_id: sid,
             command_type: CommandType::Create,
             turn_id: None,
             retryable_class: RetryableClass::SafeToRedeliver,

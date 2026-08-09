@@ -44,14 +44,14 @@ pub enum SubError {
 
 /// 出站消息（gateway 连接发送队列的统一载荷）。
 ///
-/// broadcaster / coordinator / gateway / machine registry 都向连接发送队列
+/// broadcaster / coordinator / gateway / instance registry 都向连接发送队列
 /// 投递；`Close` 携带关闭码（§4.7），gateway 消费后以对应码关闭 ws。
 #[derive(Debug, Clone)]
 pub enum OutboundMsg {
     /// 业务帧（action_ack/action_error/ready/keep_alive/ysync.update/...）。
     Frame(Frame),
-    /// JSON-RPC 透传（machine 面出站：prompt/cancel/resolve/initialize/
-    /// session/new，§4.5 透传语义——machine 保持 dumb）。
+    /// JSON-RPC 透传（instance 面出站：prompt/cancel/resolve/initialize/
+    /// session/new，§4.5 透传语义——instance 保持 dumb）。
     JsonRpc(serde_json::Value),
     /// 连接关闭信号（背压硬阈值 1011 / 机器离线 4500 等）。
     Close(u16),
@@ -176,6 +176,7 @@ impl Broadcaster {
                 .map(|(id, _)| *id)
                 .collect()
         };
+        debug!(doc = %update.doc, conns = conns.len(), "broadcast fan_out");
         for conn_id in conns {
             self.deliver(conn_id, update.doc.clone(), update.update.clone())
                 .await;
@@ -195,6 +196,7 @@ impl Broadcaster {
         let action = {
             let mut subs = self.subs.write().await;
             let Some(sub) = subs.get_mut(&conn_id) else {
+                debug!(conn_id, doc = %doc, "deliver: sub absent");
                 return;
             };
             sub.pending.push_back((doc, update));

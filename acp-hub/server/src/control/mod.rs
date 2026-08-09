@@ -1,4 +1,4 @@
-//! 控制面（Feature F5）：machine 注册表（生命周期 + 指令下发）、session 注册表
+//! 控制面（Feature F5）：instance 注册表（生命周期 + 指令下发）、chat 注册表
 //! （状态机 + binding + 对账）、hub（装配 + 优雅关闭 + Degraded 入口）、
 //! heartbeat（keep_alive）、close_codes（关闭码）（架构 §12 目录结构）。
 //!
@@ -11,19 +11,19 @@
 mod close_codes;
 mod heartbeat;
 mod hub;
-mod machine_registry;
-mod session_registry;
+mod instance_registry;
+mod chat_registry;
 
 pub use close_codes::{
-    CLOSE_CONFIG_FATAL, CLOSE_KEEPALIVE_TIMEOUT, CLOSE_MACHINE_OFFLINE, ReconnectPolicy,
+    CLOSE_CONFIG_FATAL, CLOSE_KEEPALIVE_TIMEOUT, CLOSE_INSTANCE_OFFLINE, ReconnectPolicy,
     reconnect_policy,
 };
 pub use heartbeat::{Heartbeat, HeartbeatDriver, HeartbeatOutcome};
 pub use hub::{Hub, HubError, StoreSink};
-pub use machine_registry::{
-    HelloOutcome, KillOutcome, MachineAck, MachineConn, MachineError, MachineRegistry,
-    MachineState, SpawnOutcome,
+pub use instance_registry::{
+    HelloOutcome, KillOutcome, InstanceAck, InstanceConn, InstanceError, InstanceRegistry,
+    InstanceState, SpawnOutcome,
 };
-pub use session_registry::{
-    ReconciliationReport, SessionEntry, SessionError, SessionRegistry, SessionState,
+pub use chat_registry::{
+    ChatError, ChatRecord, ChatRegistry, ChatState, ReconciliationReport,
 };

@@ -1,18 +1,18 @@
-//! machine 入站事件消费与断链清理（架构 §4.5/§6.1/§8.2/§8.5，设计稿
+//! instance 入站事件消费与断链清理（架构 §4.5/§6.1/§8.2/§8.5，设计稿
 //! `f5-channel-control.md` §8）。
 //!
 //! 入站链路：epoch 校验（防御，§4.5.1）→ binding 校验（§6.1 规则 5）→
 //! ACPChannel 规范化 → `DocManager::submit_event`（F4 单写者 + 微批次 +
 //! 落盘）。`RpcResponse`（L3）经 pending_rpc 表匹配通知 coordinator（§4.4）。
 //!
-//! **持久化澄清**（设计稿 §8 注）：machine 入站事件**不进 outbox**（outbox
+//! **持久化澄清**（设计稿 §8 注）：instance 入站事件**不进 outbox**（outbox
 //! 是命令账本，§4.4）；入站事件的持久化 = 经 DocManager → UpdateSink 落
 //! update 日志 + `(epoch, last_seq)` 水位——此即补推起点事实源
 //! （`from_seq = last_seq + 1`，§8.5）。
 //!
-//! 断链清理（§8.2 matrix machine 行 + §7.1 离线即刻生效）：该 machine 全部
-//! 活 session → 活动 turn `MarkTurnInterrupted`、`registry.set_session_gap`
-//! 置标记（缺口数量由补推时聚合器精确计算）、session 状态 Gap。
+//! 断链清理（§8.2 matrix instance 行 + §7.1 离线即刻生效）：该 instance 全部
+//! 活 chat → 活动 turn `MarkTurnInterrupted`、`registry.set_chat_gap`
+//! 置标记（缺口数量由补推时聚合器精确计算）、chat 状态 Gap。
 //! **遗留**：pending 权限批量 expired（§7.1）需 F4 提供枚举/批量 CAS 命令
 //! （本模块无 Doc 读取接口），断链时保持 pending（gap 期间只读，补推/新事件
 //! 驱动），已记录输出。
@@ -24,16 +24,16 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, info, warn};
 
-use acp_hub_proto::machine::{MachineBufferSync, MachineEvent, MachineProcessExit};
+use acp_hub_proto::instance::{InstanceBufferSync, InstanceEvent, InstanceProcessExit};
 
-use crate::protocol::{AcpChannel, NormalizeOutcome};
+use crate::protocol::{AcpChannel, NormalizeOutcome, extract_session_id};
 use crate::state::doc_manager::{DocManager, SubmitError, SubmitResult};
 use crate::state::normalized::NormalizedEvent;
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::doc_manager::DocCommand;
 
-use crate::control::MachineRegistry;
-use crate::control::{SessionRegistry, SessionState};
+use crate::control::InstanceRegistry;
+use crate::control::{ChatRegistry, ChatState};
 
 /// 消费结果（gateway 记录日志/计数用；脱敏，不携带正文）。
 #[derive(Debug, Clone, PartialEq)]
@@ -41,11 +41,11 @@ pub enum ConsumeResult {
     /// 已投递聚合器（`applied=false` 表示聚合器拒绝——幂等/守卫/防御，按
     /// reason 计数，§6.3）。
     Delivered {
-        /// hub 侧 session_id。
-        session_id: String,
+        /// hub 侧 chat_id。
+        chat_id: String,
         /// 事件种类（脱敏）。
         kind: &'static str,
-        /// machine 侧 seq。
+        /// instance 侧 seq。
         seq: u64,
         /// 聚合器是否接受。
         applied: bool,
@@ -69,8 +69,8 @@ pub enum ConsumeResult {
     },
     /// 事件已投递但落盘失败（§17.2 degraded 输入）。
     PersistFailed {
-        /// hub 侧 session_id。
-        session_id: String,
+        /// hub 侧 chat_id。
+        chat_id: String,
     },
 }
 
@@ -80,7 +80,7 @@ pub enum RelayError {
     /// Registry 写回失败。
     #[error("registry write failed: {0}")]
     Registry(String),
-    /// DocManager 提交拒绝（session 不存在/已关闭）。
+    /// DocManager 提交拒绝（chat 不存在/已关闭）。
     #[error("submit rejected: {0}")]
     Submit(String),
 }
@@ -94,7 +94,7 @@ pub struct PendingRpc {
     notify: Option<oneshot::Sender<serde_json::Value>>,
 }
 
-/// machine 入站事件消费（§4.5）。
+/// instance 入站事件消费（§4.5）。
 #[derive(Clone)]
 pub struct RelayEventHandler {
     inner: Arc<RelayInner>,
@@ -102,8 +102,8 @@ pub struct RelayEventHandler {
 
 struct RelayInner {
     doc: Arc<DocManager>,
-    sessions: SessionRegistry,
-    machine: Arc<MachineRegistry>,
+    chats: ChatRegistry,
+    instance: Arc<InstanceRegistry>,
     registry: RegistryState,
     channel: AcpChannel,
     /// pending_rpc 表（rpc_id → command_id；L3 确认，§4.4）——与 coordinator
@@ -118,15 +118,15 @@ impl RelayEventHandler {
     /// 装配（hub 调用；`AcpChannel` 以默认权限超时 5min 构建，§16）。
     pub fn new(
         doc: Arc<DocManager>,
-        sessions: SessionRegistry,
-        machine: Arc<MachineRegistry>,
+        chats: ChatRegistry,
+        instance: Arc<InstanceRegistry>,
         registry: RegistryState,
     ) -> Self {
         RelayEventHandler {
             inner: Arc::new(RelayInner {
                 doc,
-                sessions,
-                machine,
+                chats,
+                instance,
                 registry,
                 channel: AcpChannel::default(),
                 pending_rpc: RwLock::new(HashMap::new()),
@@ -135,16 +135,18 @@ impl RelayEventHandler {
         }
     }
 
-    /// `machine/event` 消费（§4.5）。
+    /// `instance/event` 消费（§4.5）。
     ///
     /// 链路：epoch 校验（hello 上报的 stream_epochs；无记录 → 放行，聚合器
     /// 防御兜底）→ binding 校验（§6.1）→ normalize → submit_event。
-    pub async fn on_machine_event(&self, machine_id: &str, ev: &MachineEvent) -> ConsumeResult {
+    pub async fn on_instance_event(&self, instance_id: &str, ev: &InstanceEvent) -> ConsumeResult {
         // 1. epoch 校验（§4.5.1 防御；正常路径 hello 已对账）。
+        //    信封 chat_id = instance 进程归属（hub chat id，spawn 时
+        //    确立，§4.5.1）；instance hello 上报 stream_epochs 同为该键。
         if let Some(expected) = self
             .inner
-            .machine
-            .session_epoch(machine_id, &ev.session_id)
+            .instance
+            .chat_epoch(instance_id, &ev.chat_id)
             .await
         {
             if expected != ev.epoch {
@@ -154,12 +156,24 @@ impl RelayEventHandler {
                 };
             }
         }
-        // 2. binding 校验（§6.1 规则 5 / §6.5：binding 前帧一律丢弃）。
-        let Some(hub_session_id) = self.inner.sessions.resolve(&ev.session_id).await else {
-            // binding 缺失：**JSON-RPC response 例外**（§4.4 L3 确认不依赖
-            // binding）——create 序列 initialize/session/new 的响应在
-            // binding 建立前到达（§6.2），经 pending_rpc（rpc_id → command_id）
-            // 匹配，无 session 语义。其余帧按 §6.1 丢弃。
+        // 2. binding 校验（§6.1 规则 5 / §6.5 / §495）：**ACP 帧内携带的
+        //    sessionId**（acp_session_id，test-child/真实 ACP 自建 id）必须
+        //    命中可信 binding（acp_session_id → hub chat_id）且映射回本
+        //    信封 chat。信封本身是 instance 进程归属（dumb pipe 不翻译 id，
+        //    §3.3），不再作 binding 查询键。
+        //    JSON-RPC response 例外（§4.4 L3 确认不依赖 binding）：帧内无
+        //    sessionId 的 response（create 序列 initialize/session/new 与
+        //    prompt/cancel 的确认）经 pending_rpc（rpc_id → command_id）匹配，
+        //    无 session 语义。其余帧按 §6.1 丢弃。
+        let hub_chat_id = ev.chat_id.clone();
+        let binding_ok = match extract_session_id(&ev.frame) {
+            Some(acp_id) => matches!(
+                self.inner.chats.resolve(&acp_id).await,
+                Some(mapped) if mapped == hub_chat_id
+            ),
+            None => false,
+        };
+        if !binding_ok {
             let now = chrono::Utc::now().to_rfc3339();
             match self
                 .inner
@@ -176,16 +190,16 @@ impl RelayEventHandler {
                     };
                 }
             }
-        };
+        }
         // 3. 规范化（§6.1）。
         let now = chrono::Utc::now().to_rfc3339();
         match self
             .inner
             .channel
-            .normalize(&hub_session_id, ev.epoch, ev.seq, &now, &ev.frame)
+            .normalize(&hub_chat_id, ev.epoch, ev.seq, &now, &ev.frame)
         {
             NormalizeOutcome::Event(nev) => {
-                self.submit(&hub_session_id, nev).await
+                self.submit(&hub_chat_id, nev).await
             }
             NormalizeOutcome::RpcResponse { id, is_error } => {
                 self.confirm_rpc(&id, ev.frame.clone(), is_error).await
@@ -199,18 +213,18 @@ impl RelayEventHandler {
         }
     }
 
-    /// `machine/buffer_sync` 消费（§8.5 补推纪律）。
+    /// `instance/buffer_sync` 消费（§8.5 补推纪律）。
     ///
     /// epoch 校验（与 hello 上报的 stream_epochs 不一致 → 拒绝整批，§4.5.1）
     /// → 逐帧按 from_seq 连续性投递（乱序/重复丢弃计数——聚合器幂等兜底）→
     /// 排空完成判定（设计稿决策 4：server 不做额外结束帧；gap 的精确计数与
     /// 追平清除由 F4 聚合器 `judge_stream`/gap_dirty → registry 写回）。
-    pub async fn on_buffer_sync(&self, machine_id: &str, sync: &MachineBufferSync) -> ConsumeResult {
+    pub async fn on_buffer_sync(&self, instance_id: &str, sync: &InstanceBufferSync) -> ConsumeResult {
         // 1. epoch 校验（与 server 记录不一致即拒绝该批，§4.5.1）。
         if let Some(expected) = self
             .inner
-            .machine
-            .session_epoch(machine_id, &sync.session_id)
+            .instance
+            .chat_epoch(instance_id, &sync.chat_id)
             .await
         {
             if expected != sync.epoch {
@@ -220,13 +234,11 @@ impl RelayEventHandler {
                 };
             }
         }
-        // 2. binding 校验（§6.1）。
-        let Some(hub_session_id) = self.inner.sessions.resolve(&sync.session_id).await else {
-            self.count_dropped("binding_missing");
-            return ConsumeResult::BatchRejected {
-                reason: "binding_missing",
-            };
-        };
+        // 2. binding 校验（§6.1/§495）：信封 chat_id = instance 进程归属
+        //    （hub chat id，§4.5.1）；帧内 sessionId 逐帧对照可信 binding
+        //    （acp_session_id → hub chat_id），response 帧（无帧内 id）
+        //    走 L3 例外（§4.4）。
+        let hub_chat_id = sync.chat_id.clone();
         // 3. from_seq 连续性（乱序/重复 → 丢弃计数，§8.5 纪律）。
         let mut expected_seq = sync.from_seq;
         let mut delivered = 0usize;
@@ -239,13 +251,38 @@ impl RelayEventHandler {
                 continue;
             }
             expected_seq = bf.seq + 1;
+            let binding_ok = match extract_session_id(&bf.frame) {
+                Some(acp_id) => matches!(
+                    self.inner.chats.resolve(&acp_id).await,
+                    Some(mapped) if mapped == hub_chat_id
+                ),
+                None => false,
+            };
+            if !binding_ok {
+                let now = chrono::Utc::now().to_rfc3339();
+                match self
+                    .inner
+                    .channel
+                    .normalize("", sync.epoch, bf.seq, &now, &bf.frame)
+                {
+                    NormalizeOutcome::RpcResponse { id, is_error } => {
+                        self.confirm_rpc(&id, bf.frame.clone(), is_error).await;
+                        continue;
+                    }
+                    _ => {
+                        rejected += 1;
+                        self.count_dropped("binding_missing");
+                        continue;
+                    }
+                }
+            }
             match self
                 .inner
                 .channel
-                .normalize(&hub_session_id, sync.epoch, bf.seq, &now, &bf.frame)
+                .normalize(&hub_chat_id, sync.epoch, bf.seq, &now, &bf.frame)
             {
                 NormalizeOutcome::Event(nev) => {
-                    match self.submit(&hub_session_id, nev).await {
+                    match self.submit(&hub_chat_id, nev).await {
                         ConsumeResult::Delivered { .. } => delivered += 1,
                         ConsumeResult::Dropped { reason } => {
                             rejected += 1;
@@ -264,7 +301,7 @@ impl RelayEventHandler {
             }
         }
         debug!(
-            session_id = hub_session_id, epoch = sync.epoch, from_seq = sync.from_seq,
+            chat_id = hub_chat_id, epoch = sync.epoch, from_seq = sync.from_seq,
             delivered, rejected,
             "buffer_sync consumed"
         );
@@ -274,7 +311,7 @@ impl RelayEventHandler {
             }
         } else {
             ConsumeResult::Delivered {
-                session_id: hub_session_id,
+                chat_id: hub_chat_id,
                 kind: "buffer_sync",
                 seq: sync.from_seq,
                 applied: rejected == 0,
@@ -282,29 +319,29 @@ impl RelayEventHandler {
         }
     }
 
-    /// 断链清理（§8.2 matrix machine 行 + §7.1 离线即刻生效）：
-    /// 该 machine 全部活 session：活动 turn → `MarkTurnInterrupted`（DocCommand）、
-    /// session 置 gap 标记（registry；缺口数量由补推时聚合器精确计算）、
+    /// 断链清理（§8.2 matrix instance 行 + §7.1 离线即刻生效）：
+    /// 该 instance 全部活 chat：活动 turn → `MarkTurnInterrupted`（DocCommand）、
+    /// chat 置 gap 标记（registry；缺口数量由补推时聚合器精确计算）、
     /// 状态迁移 Gap。
-    pub async fn on_machine_disconnect(&self, machine_id: &str) -> Result<(), RelayError> {
-        let sessions = self
+    pub async fn on_instance_disconnect(&self, instance_id: &str) -> Result<(), RelayError> {
+        let chats = self
             .inner
-            .sessions
-            .sessions_for_machine(machine_id)
+            .chats
+            .chats_for_instance(instance_id)
             .await;
         let mut interrupted = 0usize;
         let mut gapped = 0usize;
-        for (session_id, state) in &sessions {
+        for (chat_id, state) in &chats {
             if state.is_terminal() {
                 continue;
             }
             // 活动 turn → interrupted（§7.1；turn_id 由 coordinator 登记）。
-            if let Some(turn_id) = self.inner.sessions.active_turn(session_id).await {
+            if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
                 let result = self
                     .inner
                     .doc
                     .submit_command(
-                        session_id,
+                        chat_id,
                         DocCommand::MarkTurnInterrupted {
                             turn_id: turn_id.clone(),
                         },
@@ -312,26 +349,26 @@ impl RelayEventHandler {
                     .await;
                 if matches!(result, SubmitResult::Applied(_)) {
                     interrupted += 1;
-                } else if matches!(result, SubmitResult::Rejected(SubmitError::SessionNotFound)) {
-                    // session writer 未打开：仅记录（视图缺失由 gap 呈现）。
-                    warn!(session_id, "turn interrupt skipped: session writer absent");
+                } else if matches!(result, SubmitResult::Rejected(SubmitError::ChatNotFound)) {
+                    // chat writer 未打开：仅记录（视图缺失由 gap 呈现）。
+                    warn!(chat_id, "turn interrupt skipped: chat writer absent");
                 }
             }
             // gap 标记（§8.2/§7.3：补推完成、seq 追平后清除）。
             let _ = self
                 .inner
                 .registry
-                .set_session_gap(session_id, Some(0))
+                .set_chat_gap(chat_id, Some(0))
                 .await;
             let _ = self
                 .inner
                 .registry
-                .report_condition(DegradeCause::SessionGap)
+                .report_condition(DegradeCause::ChatGap)
                 .await;
             if self
                 .inner
-                .sessions
-                .transition(session_id, SessionState::Gap)
+                .chats
+                .transition(chat_id, ChatState::Gap)
                 .await
                 .is_ok()
             {
@@ -339,45 +376,48 @@ impl RelayEventHandler {
             }
         }
         info!(
-            machine_id, sessions = sessions.len(), interrupted, gapped,
-            "machine disconnect cleanup complete"
+            instance_id, chats = chats.len(), interrupted, gapped,
+            "instance disconnect cleanup complete"
         );
         Ok(())
     }
 
-    /// `machine/process_exit` 消费（§4.5）：终态写视图（F4 `SetSessionTerminal`）、
-    /// session 状态迁移（ended/crashed，§7.3）；不再接受新事件（聚合器终态
+    /// `instance/process_exit` 消费（§4.5）：终态写视图（F4 `SetChatTerminal`）、
+    /// chat 状态迁移（ended/crashed，§7.3）；不再接受新事件（聚合器终态
     /// 守卫，§8.2）。
-    pub async fn on_process_exit(&self, machine_id: &str, exit: &MachineProcessExit) -> ConsumeResult {
-        let _ = machine_id;
-        let Some(hub_session_id) = self.inner.sessions.resolve(&exit.session_id).await else {
+    pub async fn on_process_exit(&self, instance_id: &str, exit: &InstanceProcessExit) -> ConsumeResult {
+        let _ = instance_id;
+        // 信封 chat_id = instance 进程归属（hub chat id，spawn 时确立，
+        // §4.5.1），无 binding 翻译（进程生命周期事件不携带 ACP 帧）。
+        let hub_chat_id = exit.chat_id.clone();
+        if self.inner.chats.entry(&hub_chat_id).await.is_none() {
             self.count_dropped("binding_missing");
             return ConsumeResult::Dropped {
                 reason: "binding_missing",
             };
-        };
+        }
         let status = if exit.code == 0 {
-            acp_hub_proto::schema::SessionStatus::Ended
+            acp_hub_proto::schema::ChatStatus::Ended
         } else {
-            acp_hub_proto::schema::SessionStatus::Crashed
+            acp_hub_proto::schema::ChatStatus::Crashed
         };
         let state = if exit.code == 0 {
-            SessionState::Ended
+            ChatState::Ended
         } else {
-            SessionState::Crashed
+            ChatState::Crashed
         };
         let _ = self
             .inner
             .doc
             .submit_command(
-                &hub_session_id,
-                DocCommand::SetSessionTerminal { status },
+                &hub_chat_id,
+                DocCommand::SetChatTerminal { status },
             )
             .await;
-        let _ = self.inner.sessions.transition(&hub_session_id, state).await;
-        self.inner.sessions.clear_active_turn(&hub_session_id).await;
+        let _ = self.inner.chats.transition(&hub_chat_id, state).await;
+        self.inner.chats.clear_active_turn(&hub_chat_id).await;
         ConsumeResult::Delivered {
-            session_id: hub_session_id,
+            chat_id: hub_chat_id,
             kind: "process_exit",
             seq: 0,
             applied: true,
@@ -448,12 +488,12 @@ impl RelayEventHandler {
     }
 
     /// 规范化事件投递（delta 类入队即返；控制类挂 oneshot 等落盘）。
-    async fn submit(&self, session_id: &str, nev: NormalizedEvent) -> ConsumeResult {
+    async fn submit(&self, chat_id: &str, nev: NormalizedEvent) -> ConsumeResult {
         let kind = nev.kind();
         let seq = nev.seq;
         match self.inner.doc.submit_event(nev).await {
             SubmitResult::Applied(r) => ConsumeResult::Delivered {
-                session_id: session_id.to_string(),
+                chat_id: chat_id.to_string(),
                 kind,
                 seq,
                 applied: r.applied,
@@ -462,7 +502,7 @@ impl RelayEventHandler {
                 reason: "submit_rejected",
             },
             SubmitResult::PersistFailed => ConsumeResult::PersistFailed {
-                session_id: session_id.to_string(),
+                chat_id: chat_id.to_string(),
             },
         }
     }

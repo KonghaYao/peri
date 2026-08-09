@@ -17,18 +17,18 @@ use crate::persist::update_log::{
 use crate::persist::watermark::WatermarkStore;
 use crate::persist::{DegradedFlag, StoreError};
 
-/// 测试辅助：构造 session 目录 + UpdateLog（PerCommit 默认）。
+/// 测试辅助：构造 chat 目录 + UpdateLog（PerCommit 默认）。
 fn test_log(
-    session_dir: &Path,
+    chat_dir: &Path,
     fsync_mode: FsyncMode,
 ) -> (UpdateLog, Arc<WatermarkStore>, Arc<DegradedFlag>) {
-    let session_id = uuid::Uuid::new_v4();
-    std::fs::create_dir_all(session_dir).unwrap();
+    let chat_id = uuid::Uuid::new_v4();
+    std::fs::create_dir_all(chat_dir).unwrap();
     let degraded = Arc::new(DegradedFlag::new());
-    let watermark = Arc::new(WatermarkStore::open(session_dir, fsync_mode, degraded.clone()));
+    let watermark = Arc::new(WatermarkStore::open(chat_dir, fsync_mode, degraded.clone()));
     let log = UpdateLog::open(
-        session_dir,
-        session_id,
+        chat_dir,
+        chat_id,
         watermark.clone(),
         fsync_mode,
         64 * 1024 * 1024, // 大阈值：单测不触发 compact
@@ -39,8 +39,8 @@ fn test_log(
     (log, watermark, degraded)
 }
 
-fn chat_doc(session_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
-    (DocId::chat(&session_id.to_string()), payload.to_vec())
+fn chat_doc(chat_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
+    (DocId::chat(&chat_id.to_string()), payload.to_vec())
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn t1_update_log_roundtrip_and_replay() {
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"update-a");
     let d2 = (
-        DocId::session(&sid.to_string()),
+        DocId::control(&sid.to_string()),
         b"update-b".to_vec(),
     );
     log.append(1, 1, &[(d1.0.clone(), &d1.1), (d2.0.clone(), &d2.1)]).await.unwrap();
