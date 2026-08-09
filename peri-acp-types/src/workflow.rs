@@ -125,6 +125,10 @@ pub enum ProgressEvent {
         /// 有效/解析后的模型名（serde-optional：旧版事件无此字段 → None）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// 请求的模型档位（alias，如 sonnet/haiku；alias 解析成功才有值，
+        /// 脚本传具体模型名时为 None）。TUI 面板优先显示档位而非解析后的模型名。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_tier: Option<String>,
         /// 进度事件可只更新模型；旧版引擎始终提供计数。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_count: Option<u64>,
@@ -233,6 +237,9 @@ pub struct AgentProgress {
     /// AgentRunResult::Ok.model 为准；旧版快照无此字段 → None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 请求的模型档位（alias，如 sonnet/haiku；alias 解析成功才有值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tier: Option<String>,
     pub status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_count: Option<u64>,

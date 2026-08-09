@@ -57,6 +57,10 @@ pub struct TuiAgentProgress {
     /// 有效/解析后的模型名（旧版快照无此字段 → None，面板渲染 '-'）。
     #[serde(default)]
     pub model: Option<String>,
+    /// 请求的模型档位（alias，如 sonnet/haiku；alias 解析成功才有值）。
+    /// 面板优先显示档位，缺失时回退 `model`。
+    #[serde(default)]
+    pub model_tier: Option<String>,
     pub status: String, // "pending" | "running" | "done" | "dead" | "skipped"
     #[serde(default)]
     pub token_count: Option<u64>,

@@ -309,7 +309,10 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         };
         let tokens_padded = format!("{:>8}", abbreviate_count(agent.token_count.unwrap_or(0)));
         let tools_padded = format!("{:>4}", agent.tool_count.unwrap_or(0));
-        let model_cell_text = model_cell(agent.model.as_deref(), MODEL_COL_WIDTH);
+        let model_cell_text = model_cell(
+            agent.model_tier.as_deref().or(agent.model.as_deref()),
+            MODEL_COL_WIDTH,
+        );
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {

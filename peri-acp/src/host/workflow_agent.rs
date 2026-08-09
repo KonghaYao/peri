@@ -58,14 +58,15 @@ pub(crate) fn build_model_factory(
             // 指定了 model 参数：
             //   1) 有 PeriConfig → 尝试 alias 解析（haiku/sonnet/opus → 真实模型名）
             //   2) 解析失败或无 PeriConfig → 替换 provider 的 model name 按字面量使用
-            let effective = {
+            // `tier` 仅在 alias 解析成功时有值（请求参数即档位名）。
+            let (effective, tier) = {
                 let provider_read = provider.read();
                 match model {
                     Some(m) => match LlmProvider::from_config_for_alias(&peri_config, m) {
-                        Some(p) => p,
-                        None => provider_read.with_model_name(m.to_string()),
+                        Some(p) => (p, Some(m.to_string())),
+                        None => (provider_read.with_model_name(m.to_string()), None),
                     },
-                    None => provider_read.clone(),
+                    None => (provider_read.clone(), None),
                 }
             };
             // `maxTokens` 是单次 workflow agent 调用的输出上限；提供时覆盖 profile，
@@ -77,6 +78,7 @@ pub(crate) fn build_model_factory(
             WorkflowModel {
                 model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
                 model_name,
+                tier,
             }
         },
     )

@@ -107,6 +107,9 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
 pub struct WorkflowModel {
     pub model: Arc<dyn peri_model::Model>,
     pub model_name: String,
+    /// 请求的模型档位（alias，如 sonnet/haiku）；请求参数是合法 alias 且
+    /// 解析成功时有值，否则 None。TUI 面板显示档位而非解析后的真实模型名。
+    pub tier: Option<String>,
 }
 
 /// Workflow agent 模型工厂（ACP 宿主构造：alias 解析 + `maxTokens` 覆盖 + retry

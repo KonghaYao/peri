@@ -44,6 +44,7 @@ fn test_agent_lifecycle_started_progress_done() {
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         token_count: Some(100),
         tool_count: Some(2),
     });
@@ -105,6 +106,7 @@ fn test_concurrent_agents_no_race() {
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         token_count: Some(200),
         tool_count: Some(5),
     });
@@ -115,6 +117,7 @@ fn test_concurrent_agents_no_race() {
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         token_count: Some(50),
         tool_count: Some(1),
     });
@@ -332,6 +335,7 @@ fn test_model_projection_via_progress_and_done() {
         label: None,
         phase: None,
         model: Some("claude-sonnet-4-5".into()),
+        model_tier: Some("sonnet".into()),
         token_count: None,
         tool_count: None,
     });
@@ -343,6 +347,7 @@ fn test_model_projection_via_progress_and_done() {
         .cloned()
         .unwrap();
     assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
+    assert_eq!(agent.model_tier.as_deref(), Some("sonnet"));
     assert!(matches!(agent.status, AgentStatus::Running));
     assert_eq!(agent.token_count, None);
     assert_eq!(agent.tool_count, None);
@@ -354,6 +359,7 @@ fn test_model_projection_via_progress_and_done() {
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         token_count: Some(10),
         tool_count: Some(1),
     });
@@ -365,6 +371,8 @@ fn test_model_projection_via_progress_and_done() {
         .cloned()
         .unwrap();
     assert_eq!(agent.model.as_deref(), Some("claude-sonnet-4-5"));
+    // 后续不带 model_tier 的进度事件不得覆盖已设档位
+    assert_eq!(agent.model_tier.as_deref(), Some("sonnet"));
     assert_eq!(agent.token_count, Some(10));
     assert_eq!(agent.tool_count, Some(1));
 
@@ -375,6 +383,7 @@ fn test_model_projection_via_progress_and_done() {
         label: None,
         phase: None,
         model: Some("claude-sonnet-4-5".into()),
+        model_tier: None,
         token_count: None,
         tool_count: None,
     });
@@ -387,6 +396,8 @@ fn test_model_projection_via_progress_and_done() {
         .unwrap();
     assert_eq!(agent.token_count, Some(10));
     assert_eq!(agent.tool_count, Some(1));
+    // model_tier 缺失不覆盖：重试更新不携带档位时保留首次解析的档位
+    assert_eq!(agent.model_tier.as_deref(), Some("sonnet"));
 
     // 完成快照：以 AgentRunResult::Ok.model 为准（provider 实际模型名）
     store.apply_event(&ProgressEvent::AgentDone {
@@ -428,7 +439,12 @@ fn test_agent_progress_model_serde_optional() {
     });
     let event: ProgressEvent = serde_json::from_value(old_json).unwrap();
     match event {
-        ProgressEvent::AgentProgress { model, .. } => assert_eq!(model, None),
+        ProgressEvent::AgentProgress {
+            model, model_tier, ..
+        } => {
+            assert_eq!(model, None);
+            assert_eq!(model_tier, None);
+        }
         _ => panic!("expected AgentProgress"),
     }
 
@@ -438,6 +454,7 @@ fn test_agent_progress_model_serde_optional() {
         label: None,
         phase: None,
         model: Some("claude-sonnet-4-5".into()),
+        model_tier: None,
         token_count: None,
         tool_count: None,
     };
@@ -450,6 +467,7 @@ fn test_agent_progress_model_serde_optional() {
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         token_count: Some(0),
         tool_count: Some(0),
     };

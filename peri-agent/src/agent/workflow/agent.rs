@@ -273,6 +273,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 label: None,
                                 phase: None,
                                 model: None,
+                                model_tier: None,
                                 token_count: Some(s.0),
                                 tool_count: Some(*tc),
                             }) {
@@ -311,6 +312,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                                 label: None,
                                 phase: None,
                                 model: None,
+                                model_tier: None,
                                 token_count: Some(s.0),
                                 tool_count: Some(*tc),
                             }) {
@@ -368,6 +370,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let base_model = built_model.model;
         // 有效模型名（alias 解析后；GitAttribution 装配用）。
         let model_name = built_model.model_name;
+        // 请求的模型档位（alias 解析成功才有值）；TUI 面板显示档位而非模型名。
+        let model_tier = built_model.tier;
 
         // 模型解析完成后尽早上报有效模型名（模型信息专用更新）：TUI 在
         // 运行中即可显示 Model 列，不必等首个 LlmCallEnd。计数保持 None，避免
@@ -381,6 +385,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 label: None,
                 phase: None,
                 model: Some(model_name.clone()),
+                model_tier: model_tier.clone(),
                 token_count: None,
                 tool_count: None,
             }) {

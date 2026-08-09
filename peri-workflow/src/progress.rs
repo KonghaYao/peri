@@ -104,6 +104,7 @@ impl WorkflowProgressStore {
             ProgressEvent::AgentProgress {
                 agent_id,
                 model,
+                model_tier,
                 token_count,
                 tool_count,
                 ..
@@ -114,6 +115,10 @@ impl WorkflowProgressStore {
                         // 的专用更新携带，后续不带 model 的进度事件不得覆盖。
                         if model.is_some() {
                             agent.model = model.clone();
+                        }
+                        // model_tier 同理（仅在 Some 时更新，保留已设的档位）。
+                        if model_tier.is_some() {
+                            agent.model_tier = model_tier.clone();
                         }
                         if let Some(token_count) = token_count {
                             agent.token_count = Some(*token_count);
@@ -233,6 +238,7 @@ where
         label: None,
         phase: None,
         model: None,
+        model_tier: None,
         status: AgentStatus::Pending,
         token_count: None,
         tool_count: None,
