@@ -255,6 +255,92 @@ pub struct SubagentSpawned {
     pub interrupted: bool,
 }
 
+// ─── resume 配置（统一恢复入口 [`resume_subagent`] 的输入） ─────────────────
+
+/// 子 agent 恢复意图 + 装配产物 + 运行时通道（[`SessionFactory::resume_subagent`] 的输入）。
+///
+/// 与 [`SubagentSpawnConfig`] 的字段差异（恢复语义禁止项，不提供）：
+/// - 无 `parent_messages` / `system_prompt` / `fork_directive_kind`（F4：已在旧
+///   transcript 中，重复注入会重复）；
+/// - 无 `skill_names`（R-H1：SkillPreload 重复注入——旧 transcript 已含首轮注入
+///   的 skill 内容，恢复时恒传空）；
+/// - `thread_store` 必填（恢复现场的唯一来源是磁盘 thread）。
+///
+/// 父侧数据（cwd / parent_thread_id / frozen 回退值）在 `parent` 存在时从 parent
+/// Session 读取，config 中对应字段仅作 parent 缺失时的回退（与 spawn 一致）。
+#[allow(clippy::type_complexity)]
+pub struct SubagentResumeConfig {
+    // ── 意图 ──
+    /// 要恢复的子线程 ID（thread_id 不变，可无限次恢复重入）
+    pub thread_id: String,
+    /// 追加指令（None = 隐式 continue，slice 4 处理）
+    pub prompt: Option<String>,
+    /// 子 agent 名（None 时从 meta.title 取）
+    pub agent_name: Option<String>,
+    /// 运行模式（恢复时由本次调用决定，issue 决策 8）
+    pub run_mode: SubagentRunMode,
+    /// 最大 ReAct 迭代次数
+    pub max_iterations: usize,
+    // ── 装配产物 ──
+    /// SubAgent LLM（ReactLLM 实现/装饰器）
+    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// 子 agent 中间件链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
+    pub chain_assembler: Arc<dyn SubagentChainAssembler>,
+    /// 过滤后的工具集（恢复路径由 tool 层按 title 重新应用过滤）
+    pub tools: Vec<Arc<dyn BaseTool>>,
+    /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
+    /// ExecuteExtraToolResolver 保持包装层语义）
+    pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
+    /// 错误感知建议注册表（可选）
+    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+    /// 工具注册表快照（None 用 default）
+    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+    /// auto-compact 阈值配置（None = 不启用）
+    pub compact_config: Option<CompactConfig>,
+    /// 上下文预算（None = 不追踪 token 使用率）
+    pub context_budget: Option<ContextBudget>,
+    /// Full Compact 专用 LLM（None 时 Full Compact 跳过）
+    pub compact_llm: Option<Arc<dyn peri_model::Model>>,
+    // ── 运行时通道 ──
+    /// 线程持久化存储（必填：恢复现场来源）
+    pub thread_store: Arc<dyn ThreadStore>,
+    /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
+    pub event_handler: Option<Arc<dyn AgentEventHandler>>,
+    /// bg 任务完成事件发送通道（bg pump）
+    pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
+    /// 后台任务管理器（Background 模式必填）
+    pub task_manager: Option<Arc<TaskManager>>,
+    /// bg 完成同步回调
+    pub on_bg_complete:
+        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    /// Langfuse bridge
+    pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
+    /// 生命周期 hook 触发闭包（middlewares 构造）
+    pub on_subagent_start: Option<SubagentLifecycleStart>,
+    /// 生命周期 hook 触发闭包（middlewares 构造）
+    pub on_subagent_stop: Option<SubagentLifecycleStop>,
+    /// 子 agent 启动注册回调
+    pub register_runtime: Option<RegisterRuntimeFn>,
+    /// 子 agent 结束注销回调
+    pub deregister_runtime: Option<DeregisterRuntimeFn>,
+    /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
+    /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
+    pub parent_agent_id: Option<AgentId>,
+    // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
+    /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
+    pub cancel_token: Option<CancellationToken>,
+    /// 工作目录
+    pub cwd: Option<String>,
+    /// Frozen CLAUDE.md main content（回退值）
+    pub frozen_claude_md: Option<String>,
+    /// Frozen CLAUDE.local.md content（父 session 无此字段，恒由上层注入）
+    pub frozen_claude_local_md: Option<String>,
+    /// Frozen skills summary（回退值）
+    pub frozen_skill_summary: Option<String>,
+    /// Frozen 日期 YYYY-MM-DD（回退值）
+    pub frozen_date: Option<String>,
+}
+
 // ─── 统一入口 ────────────────────────────────────────────────────────────────
 
 /// Agent 层 session 工厂（L3）：subagent 创建统一入口命名空间。
@@ -272,6 +358,18 @@ impl SessionFactory {
         config: SubagentSpawnConfig,
     ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
         spawn_subagent_impl(parent, config).await
+    }
+
+    /// 恢复子 agent（唯一恢复入口，见 [`resume_subagent_impl`] 的校验流程说明）。
+    ///
+    /// 主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id` 重新唤起被中断的
+    /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active / parent 链）
+    /// 后重建现场继续执行。thread_id 不变，可无限次恢复。
+    pub async fn resume_subagent(
+        parent: Option<&Arc<Session>>,
+        config: SubagentResumeConfig,
+    ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
+        resume_subagent_impl(parent, config).await
     }
 }
 
@@ -390,7 +488,10 @@ async fn spawn_subagent_impl(
             .map_err(|e| format!("Failed to create child thread: {}", e))?;
     }
 
-    // 5. 构造子 session：frozen 从父 copy（不重读磁盘），transcript 绑定存储
+    // 5. 构造子 session + 链装配 + v2_ctx（共享 helper [build_subagent_session_v2]：
+    //    frozen 从父 copy 不重读磁盘，transcript 绑定存储，ancestor 为空）
+    //    注入 parent_messages / system_prompt / prompt 留在本函数——spawn 与
+    //    resume 的消息注入差异大，不进 helper（D1）
     let frozen = FrozenContext {
         system_prompt: parent
             .map(|p| Arc::clone(&p.store().frozen.system_prompt))
@@ -409,24 +510,28 @@ async fn spawn_subagent_impl(
             .unwrap_or_default(),
         language: parent.and_then(|p| p.store().frozen.language.clone()),
     };
-    let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
-    // SubAgent 独立 MessageQueue（不与 main agent 共享）
-    let queue = MessageQueue::new();
-    let session = Session::new_with_cancel_and_queue(
-        Arc::from(cwd.as_str()),
+    let (session, v2_ctx) = build_subagent_session_v2(
+        cwd.clone(),
         frozen,
-        Some(child_thread_id.clone()),
-        cancel_arc,
-        queue,
+        cancel_token.clone(),
+        child_thread_id.clone(),
+        thread_store.clone(),
+        Vec::new(), // 无 ancestor（spawn 新建 thread，transcript 为空）
+        llm,
+        chain_assembler,
+        tools,
+        skill_names,
+        frozen_claude_md,
+        frozen_claude_local_md,
+        frozen_skill_summary,
+        tool_invocation_resolver,
+        error_suggest_registry,
+        tool_registry_snapshot,
+        compact_config,
+        context_budget,
+        compact_llm,
+        Some(agent_id_from_child_thread(&child_thread_id)),
     );
-
-    // transcript 绑定持久化（subagent 必有持久化 thread；thread_id = agent_id）
-    if let Some(ref store) = thread_store {
-        let transcript_arc = session.transcript();
-        let mut transcript = transcript_arc.write();
-        let old = std::mem::take(&mut *transcript);
-        *transcript = old.with_persistence(Arc::clone(store), child_thread_id.clone());
-    }
 
     let transcript = session.transcript();
 
@@ -449,33 +554,6 @@ async fn spawn_subagent_impl(
         let mut tx = transcript.write();
         tx.append(BaseMessage::system(sp));
     }
-
-    // 7. 子链装配（frozen 数据注入链上下文；链序由 assembler 实现方保持）
-    let chain = chain_assembler.assemble(&SubagentChainContext {
-        cwd: cwd.clone(),
-        skill_names,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-    });
-
-    // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
-    // 复用上面预创建的 session——transcript 已绑定持久化并注入父消息/system_prompt）
-    let v2_ctx = build_v2_subagent_context(
-        Some(session.clone()),
-        llm,
-        chain,
-        tools,
-        &cwd,
-        cancel_token.clone(),
-        tool_invocation_resolver,
-        error_suggest_registry,
-        tool_registry_snapshot,
-        compact_config,
-        context_budget,
-        compact_llm,
-        Some(agent_id_from_child_thread(&child_thread_id)),
-    );
 
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）
     let prompt_message = match fork_directive_kind {
@@ -549,6 +627,416 @@ async fn spawn_subagent_impl(
         }
     }
 }
+
+// ─── 共享 session 构造（spawn / resume 共用，D1） ───────────────────────────
+
+/// 构造子 session + 链装配 + v2_ctx（[`spawn_subagent_impl`] 与
+/// [`resume_subagent_impl`] 共用的装配块，纯 move 提取——spawn 行为不变）。
+///
+/// - session 以 `child_thread_id` 为 thread_id（subagent 必有持久化 thread；
+///   thread_id = agent_id）；
+/// - transcript 装载 `ancestor`（resume 的旧 transcript 重放；spawn 传空——
+///   `with_ancestor(vec![])` 为 no-op），再 `with_persistence` 绑定存储
+///   （**顺序不可反**：with_ancestor 只建 id_index、不触发持久化
+///   transcript.rs:158-169，append 会 send_persist 二次落库 :430-438）；
+/// - 链装配（skill_names / frozen 注入链上下文；链序由 assembler 实现方保持）；
+/// - `build_v2_subagent_context` 构造 StageContext。
+///
+/// 父侧解析 / cancel token / 消息注入（parent_messages / system_prompt /
+/// prompt）差异大，留在调用方（D1）。
+#[allow(clippy::too_many_arguments)]
+fn build_subagent_session_v2(
+    cwd: String,
+    frozen: FrozenContext,
+    cancel_token: CancellationToken,
+    child_thread_id: String,
+    thread_store: Option<Arc<dyn ThreadStore>>,
+    ancestor: Vec<BaseMessage>,
+    llm: Box<dyn ReactLLM + Send + Sync>,
+    chain_assembler: Arc<dyn SubagentChainAssembler>,
+    tools: Vec<Arc<dyn BaseTool>>,
+    skill_names: Vec<String>,
+    frozen_claude_md: Option<String>,
+    frozen_claude_local_md: Option<String>,
+    frozen_skill_summary: Option<String>,
+    tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
+    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
+    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
+    compact_config: Option<CompactConfig>,
+    context_budget: Option<ContextBudget>,
+    compact_llm: Option<Arc<dyn peri_model::Model>>,
+    agent_id: Option<AgentId>,
+) -> (Arc<Session>, V2SubagentContext) {
+    let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
+    // SubAgent 独立 MessageQueue（不与 main agent 共享）
+    let queue = MessageQueue::new();
+    let session = Session::new_with_cancel_and_queue(
+        Arc::from(cwd.as_str()),
+        frozen,
+        Some(child_thread_id.clone()),
+        cancel_arc,
+        queue,
+    );
+
+    // transcript 绑定（ancestor 先于 with_persistence，顺序不可反）
+    {
+        let transcript_arc = session.transcript();
+        let mut transcript = transcript_arc.write();
+        let old = std::mem::take(&mut *transcript);
+        let with_ancestor = old.with_ancestor(ancestor);
+        *transcript = match thread_store {
+            Some(ref store) => {
+                with_ancestor.with_persistence(Arc::clone(store), child_thread_id.clone())
+            }
+            None => with_ancestor,
+        };
+    }
+
+    // 子链装配（frozen 数据注入链上下文；链序由 assembler 实现方保持）
+    let chain = chain_assembler.assemble(&SubagentChainContext {
+        cwd: cwd.clone(),
+        skill_names,
+        frozen_claude_md,
+        frozen_claude_local_md,
+        frozen_skill_summary,
+    });
+
+    // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
+    // 复用上面预创建的 session——transcript 已装载 ancestor 并绑定持久化）
+    let v2_ctx = build_v2_subagent_context(
+        Some(session.clone()),
+        llm,
+        chain,
+        tools,
+        &cwd,
+        cancel_token,
+        tool_invocation_resolver,
+        error_suggest_registry,
+        tool_registry_snapshot,
+        compact_config,
+        context_budget,
+        compact_llm,
+        agent_id,
+    );
+
+    (session, v2_ctx)
+}
+
+// ─── 恢复（统一入口 resume_subagent） ───────────────────────────────────────
+
+/// resume 校验段互斥锁（R2-LOW-2）：static 全局单锁（`SessionFactory` 为 unit
+/// struct 无字段，锁表不能放 factory；放工具实例则多实例互斥失效）。
+///
+/// 锁内仅 load_meta + update_thread_status（无嵌套锁，tokio::sync::Mutex 跨 await
+/// 安全，无死锁）。resume 为低频操作，单锁即可。跨进程双 resume 仍可能双执行，
+/// 属已接受限制（缓解定位，与 issue 非目标「不自动恢复」一致）。
+static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 恢复子 agent（统一入口实现，slice 4：重建 + 执行）。
+///
+/// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
+/// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
+/// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
+/// 3. parent 链：`meta.parent_thread_id` 与 parent 的 `store().thread_id` 比对
+///    （parent 为 None 时仅校验存在性，不校验 parent 链——与 spawn 的 parent
+///    回退语义一致）
+///
+/// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
+/// 锁内仅 load_meta + update_thread_status（无嵌套锁，不 await run_react_loop）。
+/// 锁释放后重建：
+/// - `load_messages` 重放 transcript；**仅当末条**含未配对 tool_calls 的 AI 时
+///   pop（R2-MID-1：禁止从后往前找 AI；pop 后其后无消息，无孤儿 Tool 可清理）
+/// - cwd 取 `meta.cwd`（thread 创建时固化，进程重启后不得改用父 cwd）
+/// - frozen 从父 session copy（ARC-FROZEN-001；parent None 用 config 回退）
+/// - cancel token：meta.cancel_policy == Cascade 且 parent 存在 → 从父重新派生
+///   （重启后父是新 token 树）；否则用 config 注入的 token（缺省新建）
+/// - **不注入** parent_messages / identity System / skill_names（F4 / R-H1：
+///   旧 transcript 已含首轮注入内容，重复注入会重复）
+/// - prompt 入队：`Some(p)` 原样追加（不套 fork directive）；`None` 注入隐式
+///   continue 常量（issue 决策 9）
+/// - run mode 由本次调用决定（issue 决策 8）：Sync → `run_sync_subagent`；
+///   Background → 新 task_id + `spawn_background_subagent`
+///
+/// 重建/装配失败（load_messages 失败）时回滚 status 至原值（R-M1），防 thread
+/// 永久停留 active（R-M4 崩溃遗留的镜像问题）。执行开始后的失败走
+/// `run_sync_subagent` / bg 各自的收尾路径（error / cancelled），不回滚。
+async fn resume_subagent_impl(
+    parent: Option<&Arc<Session>>,
+    config: SubagentResumeConfig,
+) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
+    // 解构 config（cwd 不用于恢复——cwd 取 meta.cwd，thread 创建时固化）
+    let SubagentResumeConfig {
+        thread_id,
+        prompt,
+        agent_name: agent_name_cfg,
+        run_mode,
+        max_iterations,
+        llm,
+        chain_assembler,
+        tools,
+        tool_invocation_resolver,
+        error_suggest_registry,
+        tool_registry_snapshot,
+        compact_config,
+        context_budget,
+        compact_llm,
+        thread_store,
+        event_handler,
+        bg_event_sender,
+        task_manager,
+        on_bg_complete,
+        langfuse_bridge,
+        on_subagent_start,
+        on_subagent_stop,
+        register_runtime,
+        deregister_runtime,
+        parent_agent_id,
+        cancel_token: cancel_token_cfg,
+        cwd: _,
+        frozen_claude_md: frozen_claude_md_cfg,
+        frozen_claude_local_md: frozen_claude_local_md_cfg,
+        frozen_skill_summary: frozen_skill_summary_cfg,
+        frozen_date: frozen_date_cfg,
+    } = config;
+
+    // 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）
+    let guard = RESUME_LOCK.lock().await;
+
+    // 0. thread_id 格式校验（review low-1）：重建阶段 `agent_id_from_child_thread`
+    //    会对非 UUID 字符串 expect panic，入口统一拒绝
+    if uuid::Uuid::parse_str(&thread_id).is_err() {
+        return Err(format!("resume_subagent: invalid thread id: {}", thread_id).into());
+    }
+
+    // 1. 存在性校验（load_meta 失败/不存在统一映射为 not found）
+    let meta = thread_store
+        .load_meta(&thread_id)
+        .await
+        .map_err(|_| format!("resume_subagent: thread not found: {}", thread_id))?;
+
+    // 2. status 校验（R-M4：active = 未正常收尾，崩溃遗留需手动处理）
+    if meta.agent_status.is_active() {
+        return Err(format!(
+            "resume_subagent: thread {} is still active (可能未正常收尾);若确认无执行中任务,需手动处理",
+            thread_id
+        )
+        .into());
+    }
+    // 原值快照：重建失败时回滚（R-M1）
+    let previous_status = meta.agent_status;
+
+    // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
+    if let Some(p) = parent {
+        if meta.parent_thread_id != p.store().thread_id {
+            return Err(
+                format!("resume_subagent: parent thread mismatch for {}", thread_id).into(),
+            );
+        }
+    }
+
+    // 校验通过 → 锁内立即置 active（R-M1：置 active 与校验原子化，第二个并发
+    // resume 在锁内看到 active 被拒）；重建失败时下方回滚
+    thread_store
+        .update_thread_status(&thread_id, "active")
+        .await
+        .map_err(|e| {
+            format!(
+                "resume_subagent: failed to mark thread {} active: {}",
+                thread_id, e
+            )
+        })?;
+
+    // 释放锁：重建/执行不持锁（load_messages 与 run_react_loop 不在互斥段内）
+    drop(guard);
+
+    // ── 重建（失败回滚 status 至原值，防 thread 永久停留 active）──
+
+    // 1. 加载 transcript；末条含未配对 tool_calls 的 AI 则 pop（R2-MID-1：
+    //    仅末条规则，幂等——磁盘旧消息不删除，每次 resume 重截）
+    let mut loaded = match thread_store.load_messages(&thread_id).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            // R-M1 回滚：重建失败 → status 回滚至原值（不置 active 卡死）
+            let _ = thread_store
+                .update_thread_status(&thread_id, previous_status.as_str())
+                .await;
+            return Err(format!(
+                "resume_subagent: failed to load messages for {}: {}",
+                thread_id, e
+            )
+            .into());
+        }
+    };
+    if loaded.last().is_some_and(|m| m.has_tool_calls()) {
+        loaded.pop();
+    }
+
+    // 2. cwd 取 meta.cwd（thread 创建时固化的；进程重启后不得改用父 cwd）
+    let cwd = meta.cwd.clone();
+
+    // 3. frozen 从父 session copy（ARC-FROZEN-001：不重读磁盘；parent None 用
+    //    config 回退，与 spawn 的父侧解析一致）
+    let frozen_claude_md = parent
+        .map(|p| p.store().frozen.claude_md.to_string())
+        .or(frozen_claude_md_cfg);
+    let frozen_skill_summary = parent
+        .map(|p| p.store().frozen.skill_summary.to_string())
+        .or(frozen_skill_summary_cfg);
+    let frozen_date = parent
+        .map(|p| p.store().frozen.date.to_string())
+        .or(frozen_date_cfg);
+    let frozen = FrozenContext {
+        system_prompt: parent
+            .map(|p| Arc::clone(&p.store().frozen.system_prompt))
+            .unwrap_or_default(),
+        claude_md: frozen_claude_md
+            .as_ref()
+            .map(|s| Arc::from(s.as_str()))
+            .unwrap_or_default(),
+        skill_summary: frozen_skill_summary
+            .as_ref()
+            .map(|s| Arc::from(s.as_str()))
+            .unwrap_or_default(),
+        date: frozen_date
+            .as_ref()
+            .map(|s| Arc::from(s.as_str()))
+            .unwrap_or_default(),
+        language: parent.and_then(|p| p.store().frozen.language.clone()),
+    };
+
+    // 4. cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的
+    //    父 token；均缺失时新建——与 spawn 的 :466-472 完全对齐，review low-2），
+    //    Independent = 恒新建（忽略 config 注入的 token——复用会让父 cancel
+    //    波及 Independent 子任务，与 spawn :471 对齐，review low-1）
+    let cancel_token = if meta.cancel_policy == CancelPolicy::Cascade {
+        parent
+            .map(|p| p.config().cancel_token.child_token())
+            .or_else(|| cancel_token_cfg.map(|t| t.child_token()))
+            .unwrap_or_default()
+    } else {
+        CancellationToken::new()
+    };
+
+    // 5. agent_name：config 优先，回退 meta.title，最后兜底 "subagent"
+    let agent_name = agent_name_cfg
+        .or_else(|| meta.title.clone())
+        .unwrap_or_else(|| "subagent".to_string());
+
+    // 6. 重建 session（thread_id 固定 = config.thread_id；with_ancestor 装载
+    //    旧 transcript 重放 + with_persistence 绑定，顺序不可反——helper 内）
+    //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）
+    let (session, v2_ctx) = build_subagent_session_v2(
+        cwd.clone(),
+        frozen,
+        cancel_token.clone(),
+        thread_id.clone(),
+        Some(Arc::clone(&thread_store)),
+        loaded,
+        llm,
+        chain_assembler,
+        tools,
+        Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
+        frozen_claude_md,
+        frozen_claude_local_md_cfg,
+        frozen_skill_summary,
+        tool_invocation_resolver,
+        error_suggest_registry,
+        tool_registry_snapshot,
+        compact_config,
+        context_budget,
+        compact_llm,
+        Some(agent_id_from_child_thread(&thread_id)),
+    );
+
+    // 7. prompt 入队：Some(p) 原样追加（不套 fork directive——恢复目标仍是原
+    //    任务，直接追加指令）；None 注入隐式 continue 常量（issue 决策 9）
+    let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
+    v2_ctx.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human(prompt_text.clone()),
+    ));
+
+    // 8. 执行（run mode 由本次调用决定，issue 决策 8）
+    match run_mode {
+        SubagentRunMode::Sync => {
+            let interrupted = run_sync_subagent(
+                &thread_id,
+                &agent_name,
+                &cwd,
+                max_iterations,
+                event_handler,
+                on_subagent_start,
+                on_subagent_stop,
+                Some(Arc::clone(&thread_store)),
+                register_runtime,
+                deregister_runtime,
+                langfuse_bridge,
+                parent_agent_id,
+                v2_ctx,
+                session.clone(),
+            )
+            .await?;
+            Ok(SubagentSpawned {
+                child_thread_id: thread_id,
+                task_id: None,
+                session,
+                cancel_token,
+                interrupted,
+            })
+        }
+        SubagentRunMode::Background => {
+            // slice 5：后台恢复——生成新 task_id、TaskManager 注册（参数与 spawn
+            // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
+            // 仅用于 prompt_summary 展示，R2-LOW-3）
+            let task_id = format!("bg-{}", uuid::Uuid::now_v7());
+            match spawn_background_subagent(
+                task_id.clone(),
+                thread_id.clone(),
+                agent_name.clone(),
+                prompt_text,
+                cwd,
+                max_iterations,
+                bg_event_sender,
+                task_manager,
+                on_bg_complete,
+                langfuse_bridge,
+                Some(Arc::clone(&thread_store)),
+                deregister_runtime,
+                on_subagent_start,
+                on_subagent_stop,
+                register_runtime,
+                parent_agent_id,
+                cancel_token.clone(),
+                v2_ctx,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
+                    // register_with_kind 撞 per-kind 上限）时任务未执行——status
+                    // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
+                    // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
+                    let _ = thread_store
+                        .update_thread_status(&thread_id, previous_status.as_str())
+                        .await;
+                    return Err(format!("resume_subagent: thread {}: {}", thread_id, e).into());
+                }
+            }
+            Ok(SubagentSpawned {
+                child_thread_id: thread_id,
+                task_id: Some(task_id),
+                session,
+                cancel_token,
+                interrupted: false,
+            })
+        }
+    }
+}
+
+/// 隐式 continue 指令（prompt 缺省时注入，issue 决策 9）
+const IMPLICIT_CONTINUE_PROMPT: &str = "Continue your previous task where you left off.";
 
 // ─── 同步运行 ────────────────────────────────────────────────────────────────
 
@@ -646,6 +1134,9 @@ async fn run_sync_subagent(
             true,
         ),
     };
+    // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路。
+    // 恢复路径复用本 Stop 发射点（R-L4）：stop_result 不含 child_thread_id——
+    // issue 验收仅要求工具返回文本与 bg 通知文本携带 thread_id，事件侧不加。
     emit_subagent_stop_v2(
         &v2_ctx.event_bus,
         subagent_turn_id,
@@ -677,7 +1168,13 @@ async fn run_sync_subagent(
         }
         LoopResult::Interrupted => (String::new(), true),
         LoopResult::Error(e) => {
-            let error_summary = format!("{} execution failed: {}", agent_name, e);
+            // child_thread_id 前缀：错误路径（LLM 网络错误等）必须可恢复——主 agent
+            // 凭返回值中的 thread_id 找回执行现场（与 define.rs 成功路径
+            // `child_thread_id: {id}\n{result}` 格式一致，多行展示）
+            let error_summary = format!(
+                "child_thread_id: {}\n{} execution failed: {}",
+                child_thread_id, agent_name, e
+            );
             let error_result: String = error_summary.chars().take(500).collect();
             // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
             // 之后经 forward_subagent_stop_v1 发出）

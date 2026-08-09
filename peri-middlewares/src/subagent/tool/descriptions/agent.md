@@ -21,6 +21,7 @@ When to use:
 - For tasks requiring specialized persona or behavior defined in agent configuration files
 - For parallelizable sub-tasks that do not depend on each other's results
 - When you need to break a complex task into smaller, independently executable pieces
+- **When an Agent call returns an interrupted/error message or a background notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects
 
 Return format:
 - If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
@@ -31,3 +32,9 @@ Background execution (run_in_background: true):
 - Maximum 3 concurrent background tasks.
 - The main agent will be notified when the task completes via a system message.
 - **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
+
+Resume execution (resume_thread_id):
+- Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
+- The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
+- Mutually exclusive with `fork` and `subagent_type`; `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
+- Can be combined with `run_in_background: true` (the resumed execution follows that mode)

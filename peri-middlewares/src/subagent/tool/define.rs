@@ -425,11 +425,17 @@ impl BaseTool for SubAgentTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "required": ["prompt"],
+            // resume_thread_id 存在时 prompt 可缺省（隐式继续），故 required 恒空；
+            // 非 resume 路径缺 prompt 仍由 invoke 运行时校验兜底（语义不变）
+            "required": [],
             "properties": {
                 "prompt": {
                     "type": "string",
                     "description": "The task description to delegate to the sub-agent. Must be clear and self-contained, as the sub-agent has no access to the parent conversation history. Include all necessary context"
+                },
+                "resume_thread_id": {
+                    "type": "string",
+                    "description": "要恢复的被中断 subagent 的 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得）。提供时从磁盘 thread 恢复其现场继续执行，不创建新 subagent。要求：thread 状态非 active；与 fork / subagent_type 互斥；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）"
                 },
                 "description": {
                     "type": "string",
@@ -476,10 +482,16 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return Err("Error: missing required parameter prompt".into()),
-        };
+        let resume_thread_id = input
+            .get("resume_thread_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // prompt 改为 Option：resume 路径可缺省（缺省注入隐式 continue，issue 决策 9）；
+        // 非 resume 路径下方运行时校验兜底（required:[] 后语义不变）
+        let prompt = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
@@ -498,6 +510,33 @@ impl BaseTool for SubAgentTool {
             .to_string();
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
+
+        // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
+        let host = self.host();
+
+        // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
+        // 互斥校验放分支前：resume 与 fork / subagent_type 二选一
+        if resume_thread_id.is_some() && (is_fork || subagent_type.is_some()) {
+            return Err(
+                "Error: resume_thread_id is mutually exclusive with fork / subagent_type".into(),
+            );
+        }
+        // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
+        if resume_thread_id.is_some()
+            && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()
+        {
+            return Err("Error: resume_thread_id requires a thread store".into());
+        }
+        if let Some(thread_id) = resume_thread_id.as_ref() {
+            return self
+                .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)
+                .await;
+        }
+
+        // 非 resume 路径：prompt 必填（required:[] 后由运行时校验兜底）
+        let Some(prompt) = prompt else {
+            return Err("Error: missing required parameter prompt".into());
+        };
 
         // 优先读 _ctx.messages（工具调用当下的实时快照），为空时才回退到
         // self.parent_messages（SubAgentMiddleware::before_agent 时刻的旧快照）。
@@ -524,9 +563,13 @@ impl BaseTool for SubAgentTool {
             msgs
         };
 
-        // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）
-        let host = self.host();
-        if run_in_background && host.as_ref().and_then(|h| h.task_manager.clone()).is_some() {
+        // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
+        // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
+        // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
+        if resume_thread_id.is_none()
+            && run_in_background
+            && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
+        {
             return self
                 .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
                 .await;
@@ -585,9 +628,13 @@ impl BaseTool for SubAgentTool {
 
         let spawned = self.spawn(config).await?;
 
-        // Interrupted 语义与迁移前一致
+        // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
+        // 找回执行现场（thread_store 为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
         if spawned.interrupted {
-            return Ok("Sub-agent execution was interrupted".to_string());
+            return Ok(format!(
+                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
+                spawned.child_thread_id, spawned.child_thread_id
+            ));
         }
 
         if host.as_ref().and_then(|h| h.thread_store.clone()).is_some() {

@@ -110,7 +110,7 @@ impl BackgroundTaskResult {
     /// 格式化为注入到 LLM 消息流的通知文本
     pub fn to_notification(&self) -> String {
         let short_id = &self.task_id[..8.min(self.task_id.len())];
-        if self.success {
+        let mut text = if self.success {
             format!(
                 "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
                 short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
@@ -125,7 +125,16 @@ impl BackgroundTaskResult {
                 "[后台任务 {} 执行失败] Agent: {}\n错误:\n{}",
                 short_id, self.agent_name, self.output,
             )
+        };
+        // child_thread_id 存在时追加恢复提示行（success/timed_out/failure 三分支统一）：
+        // 主 agent 从 bg 完成/失败通知中得知被中断的 subagent 可凭 thread_id 恢复
+        if let Some(id) = &self.child_thread_id {
+            text.push_str(&format!(
+                "\nchild_thread_id: {} (resume with Agent(resume_thread_id: {}))",
+                id, id
+            ));
         }
+        text
     }
 }
 

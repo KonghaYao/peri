@@ -57,9 +57,12 @@ impl super::SubAgentTool {
 
         let spawned = self.spawn(config).await?;
 
-        // Interrupted 语义与迁移前一致
+        // Interrupted 语义与迁移前一致；文本携带 child_thread_id（主 agent 凭此恢复）
         if spawned.interrupted {
-            return Ok("Fork sub-agent execution was interrupted".to_string());
+            return Ok(format!(
+                "child_thread_id: {}\nFork sub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
+                spawned.child_thread_id, spawned.child_thread_id
+            ));
         }
 
         // 结果格式：thread_store 存在时带 child_thread_id 前缀（与迁移前一致）

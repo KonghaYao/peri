@@ -113,6 +113,7 @@ mod build_agent;
 mod define;
 mod execute_bg;
 mod execute_fork;
+mod execute_resume;
 pub use define::SubAgentTool;
 
 /// 子 agent 链装配器实现（L3）：经 [`SubagentChainAssembler`] trait 依赖反转，
