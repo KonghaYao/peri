@@ -34,3 +34,14 @@ Bash 工具同步路径超时后**无条件 promote 为后台任务续跑**（20
 - **涉及文件**：`peri-middlewares/src/middleware/terminal.rs`、`peri-middlewares/src/middleware/terminal_test.rs`、`peri-middlewares/src/middleware/descriptions/bash.md`、`peri-agent/src/agent/async_tasks.rs`
 - **验证状态**：`cargo test -p peri-middlewares --lib terminal`（26 passed）、`cargo test -p peri-agent --lib agent::async_tasks`（35 passed）、`cargo clippy -p peri-middlewares -p peri-agent --all-targets -- -D warnings` 与 fmt 全绿；用户场景 `/dev/null` 对照实测 34ms 退出。
 - **遗留说明**：当前运行中的 agent 进程仍为旧二进制，改动需重启后生效；超时分支保留 promote（避免误杀 cargo build 类静默启动的慢任务），仅文案如实分流。
+
+### 修复 #2（2026-08-10）：Did you mean 无关候选
+
+- **操作人**：agent
+- **修复内容**：`BashCommandSuggester` 的 fuzzy 建议无相似度阈值，`command not found` 时对 PATH 候选硬取 top3，给出毫不相关的 "Did you mean"（如 `xy` → `xylophone`、`carg` → `lli-child-target`）。实测 SkimMatcherV2 分数分布：丢字符类拼错（dockr→docker）≥ 91，短查询/泛化子序列噪声 ≤ 51，稀疏长串噪声可达 69（首字符不同）。
+  1. **阈值过滤**：`matcher.rs` 新增 `fuzzy_filter_min(candidates, query, min_score)`；suggester 用 `MIN_FUZZY_SCORE = 60`（91 vs 51 的分隔点）。
+  2. **首字符约束**：候选首字符必须与命令名一致——拼错时首字符几乎不会错，剔除 `carg`→`lli-child-target`(69) 类稀疏子序列噪声，不误杀真实拼错（dockr→docker、carg→cargo 首字符相同）。
+  3. **候选池配额修复**：`scan_path_executables` 原逻辑 500 全局截断会在循环中途 return，PATH 前部目录（系统 bin）占满池子，后部目录（~/.cargo/bin）被饿死（实测 has cargo: false）。改为每目录配额 100（去重后）+ 全局 3000，遍历全部目录。
+  4. **兜底文案增强**：无合格候选时不再点名任何命令，改为环境类诊断（"Verify it is installed... the environment (PATH / conda / venv) may not be activated"）——command not found 多数是环境问题而非拼写。
+- **涉及文件**：`peri-agent/src/error_suggest/matcher.rs`（+`fuzzy_filter_min`）、`peri-middlewares/src/error_suggest/suggesters/bash_command_suggester.rs`、`peri-agent/src/error_suggest/matcher_test.rs`（+2 阈值测试）、`peri-middlewares/src/error_suggest/suggesters/bash_command_suggester_test.rs`（+2：无候选兜底 / 真实拼错点名 cargo 且不含噪声候选）
+- **验证状态**：peri-agent error_suggest 14 tests、peri-middlewares error_suggest 28 tests 全绿；clippy `-D warnings` 与 fmt 干净。

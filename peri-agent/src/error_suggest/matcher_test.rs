@@ -1,4 +1,4 @@
-use crate::error_suggest::matcher::{fuzzy_filter, fuzzy_top_n};
+use crate::error_suggest::matcher::{fuzzy_filter, fuzzy_filter_min, fuzzy_top_n};
 
 #[test]
 fn test_fuzzy_top_n_returns_sorted_matches() {
@@ -40,4 +40,28 @@ fn test_fuzzy_filter_returns_owned_strings_sorted() {
     let result = fuzzy_filter(&candidates, "main");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0], "src/main.rs");
+}
+
+#[test]
+fn test_fuzzy_filter_min_keeps_typo_candidates_above_threshold() {
+    // 丢字符类拼错（dockr→docker）分数 ≥ 90，60 阈值下应保留
+    let candidates: Vec<String> = vec![
+        "docker".into(),
+        "docer".into(),
+        "dock".into(),
+        "xylophone".into(),
+    ];
+    let result = fuzzy_filter_min(&candidates, "dockr", 60);
+    assert!(
+        result.contains(&"docker".to_string()),
+        "高分拼错候选应保留: {result:?}"
+    );
+}
+
+#[test]
+fn test_fuzzy_filter_min_drops_noise_below_threshold() {
+    // 短查询泛化子序列（xy→xylophone）分数 ≤ 51，60 阈值下应剔除
+    let candidates: Vec<String> = vec!["xylophone".into(), "bash".into(), "ls".into()];
+    let result = fuzzy_filter_min(&candidates, "xy", 60);
+    assert!(result.is_empty(), "低分噪声候选应被阈值剔除: {result:?}");
 }
