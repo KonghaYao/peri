@@ -306,16 +306,17 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 
 ### 2.5.5 与 05_using_tools.md 的关系（全量迁移完成）
 
-05 段落仅保留**通用纪律**（文件头部的 batch/incremental 规则与 Bash discipline
-节，05_using_tools.md:3-4、6-13）；"Choosing the right tool" 小节已整体删除，
+05 段落保留**通用纪律**（文件头部的 batch/incremental 规则与 Bash discipline
+节，05_using_tools.md:3-4、6-13）与**通用工具选择原则骨架**（"Tool selection
+principles" 小节，2 行、不含工具名与逐工具细节）——骨架是 turn-1 与 SubAgent
+冻结 prompt 路径的兜底指引（声明段 turn-2+ 才可见，见 2.5.2 时序限制）。
 全部 14 个 Core + 3 个 Meta 工具的 `prompt_declaration()` 已就位——分组为
 `filesystem`（Read/Write/Edit/Glob/Grep/folder_operations）、`execution`（Bash）、
 `web`（WebFetch/WebSearch）、`interaction`（Agent/AskUserQuestion/TodoWrite）、
 `skills`（SkillTool/DiscoverSkillsTool）、`meta`（SearchExtraTools/ExecuteExtraTool/
 ArtifactTool）。声明段是工具选择指引的**单一事实源**（工具代码），05 不再维护
-任何工具条目；SubAgent 路径经 frozen prompt 不再获得 05 工具指引，该约束与
-SubAgent 链的声明装配一并记为未来项（见 2.5.2 时序限制）。迁移纪律由测试
-守护（2.5.6）：05 无工具条目残留 + 渲染输出与 05 剩余内容无逐字重复。
+任何工具条目；SubAgent 链的声明装配（声明段进入 subagent 冻结 prompt）记为未来项。
+迁移纪律由测试守护（2.5.6）：05 无工具条目残留 + 渲染输出与 05 剩余内容无逐字重复。
 
 ### 2.5.6 测试要求
 
@@ -324,5 +325,5 @@ SubAgent 链的声明装配一并记为未来项（见 2.5.2 时序限制）。�
 | 渲染完整性 | 所有 Core/Meta 工具声明渲染后无未识别占位符残留 |
 | 稳定性 | 同一工具集两次收集输出字节级相同（防排序/缓存回归） |
 | 排序 | namespace + name 字典序 |
-| 迁移守护 | 05 段落无工具条目残留；声明段渲染输出与 05 剩余内容无逐字重复（全量迁移完成态） |
+| 迁移守护 | 05 段落无工具条目残留（骨架小节不含工具名）；声明段渲染输出与 05 剩余内容无逐字重复（全量迁移完成态） |
 | 缓存保护 | 注入不同 cwd/date 断言声明段输出不变（不引用会话数据） |

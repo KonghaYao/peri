@@ -327,9 +327,9 @@ fn test_all_real_tool_declarations_byte_stable_across_calls() {
 
 /// [2.5.6-迁移守护] 声明段渲染输出与 05_using_tools.md 剩余内容无逐字重复行。
 ///
-/// 全量迁移完成态：05 仅保留通用纪律与 Bash discipline（"Choosing the right
-/// tool" 小节已删除），任何声明渲染行不得与 05 现有行逐字相同——工具选择
-/// 指引的单一事实源是声明段（工具代码）。
+/// 全量迁移完成态：05 保留通用纪律、Bash discipline 与工具选择原则骨架小节
+/// （"Tool selection principles"，不含工具名与逐工具细节），逐工具指引的
+/// 单一事实源是声明段（工具代码）。
 #[test]
 fn test_declarations_no_verbatim_line_overlap_with_05() {
     const SECTION_05: &str = include_str!(concat!(

@@ -1207,8 +1207,9 @@ fn test_detect_is_git_repo_non_repo() {
 /// [迁移守护] 05_using_tools.md 无工具条目残留（design v2 §2.5.5/2.5.6 全量迁移完成态）。
 ///
 /// 全量迁移语义：全部 14 Core + 3 Meta 工具的 `prompt_declaration` 已就位，
-/// 05 "Choosing the right tool" 小节整体删除——声明段是工具选择指引的单一
-/// 事实来源（工具代码），05 不再维护任何工具条目。
+/// 05 仅保留通用纪律、Bash discipline 与工具选择原则骨架小节（"Tool selection
+/// principles"，不含工具名）——声明段是工具选择指引的单一事实来源（工具代码），
+/// 05 不再维护任何工具条目。
 #[tokio::test]
 async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() {
     use std::collections::BTreeMap;
