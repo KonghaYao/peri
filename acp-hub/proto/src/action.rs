@@ -40,6 +40,14 @@ pub enum ActionEnvelope {
         command_id: String,
         payload: PromptChatPayload,
     },
+    /// 当前对话内新建 ACP 会话（§8.5 会话是进程内实体——不新建对话/进程，
+    /// 等价 create 序列的 `session/new` 一步；committed ack 可携带新
+    /// acpSessionId）。
+    #[serde(rename = "chat/session-new", rename_all = "camelCase")]
+    SessionNew {
+        command_id: String,
+        payload: SessionNewChatPayload,
+    },
     /// 转发 cancel（携带目标 chat_id，路由据此精确投递）。
     #[serde(rename = "chat/cancel", rename_all = "camelCase")]
     Cancel {
@@ -96,6 +104,7 @@ impl ActionEnvelope {
             ActionEnvelope::Load { .. } => "chat/load",
             ActionEnvelope::Close { .. } => "chat/close",
             ActionEnvelope::Prompt { .. } => "chat/prompt",
+            ActionEnvelope::SessionNew { .. } => "chat/session-new",
             ActionEnvelope::Cancel { .. } => "chat/cancel",
             ActionEnvelope::ResolvePermission { .. } => "permission/resolve",
             ActionEnvelope::SubscribeEvents { .. } => "events/subscribe",
@@ -152,6 +161,18 @@ pub struct CloseChatPayload {
 pub struct PromptChatPayload {
     pub chat_id: String,
     pub message: String,
+    /// 推理强度档位（low|medium|high，跨任务契约 §2）；缺省 = agent 默认。
+    pub effort: Option<String>,
+}
+
+/// `chat/session-new` payload：在当前对话（其 ACP 进程）内新建会话（§8.5）。
+///
+/// 会话是进程内实体——不新建对话/进程；服务端向 agent 侧发 `session/new`
+/// RPC，响应中的新 sessionId 更新当前 chat 的 binding。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNewChatPayload {
+    pub chat_id: String,
 }
 
 /// `chat/cancel` payload。

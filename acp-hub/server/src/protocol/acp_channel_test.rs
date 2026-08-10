@@ -338,19 +338,186 @@ fn map_agent_status_raw_and_jsonrpc() {
     let raw = json!({"type": "agent_status", "payload": {"status": "idle"}});
     match norm(raw) {
         NormalizeOutcome::Event(ev) => match ev.body {
-            EventBody::AgentStatus { status, .. } => assert_eq!(status, "idle"),
+            EventBody::AgentStatus {
+                status,
+                model,
+                context_window,
+                context_used,
+                ..
+            } => {
+                assert_eq!(status, "idle");
+                // 缺省字段 → None（不覆盖 agent map，§6.3 部分更新）。
+                assert_eq!(model, None);
+                assert_eq!(context_window, None);
+                assert_eq!(context_used, None);
+            }
             _ => panic!("expected agent status"),
         },
         other => panic!("expected event, got {other:?}"),
     }
-    let rpc = json!({"jsonrpc": "2.0", "method": "agent/status", "params": {"status": "busy"}});
+    let rpc = json!({
+        "jsonrpc": "2.0",
+        "method": "agent/status",
+        "params": {
+            "status": "busy",
+            "model": "claude-sonnet-4-5",
+            "contextWindow": 200000,
+            "contextUsed": 42000,
+        },
+    });
     match norm(rpc) {
         NormalizeOutcome::Event(ev) => match ev.body {
-            EventBody::AgentStatus { status, .. } => assert_eq!(status, "busy"),
+            EventBody::AgentStatus {
+                status,
+                model,
+                context_window,
+                context_used,
+                ..
+            } => {
+                assert_eq!(status, "busy");
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(context_window, Some(200_000));
+                assert_eq!(context_used, Some(42_000));
+            }
             _ => panic!("expected agent status"),
         },
         other => panic!("expected event, got {other:?}"),
     }
+    // snake_case 回退 + 负数/超上限 → None（缺省语义）。
+    let snake = json!({
+        "jsonrpc": "2.0",
+        "method": "agent/status",
+        "params": { "status": "error", "context_window": -1, "contextUsed": 99999999999u64 },
+    });
+    match norm(snake) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::AgentStatus {
+                context_window,
+                context_used,
+                ..
+            } => {
+                assert_eq!(context_window, None, "负数 → None");
+                assert_eq!(context_used, None, "超 u32 → None");
+            }
+            _ => panic!("expected agent status"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_config_option_update() {
+    // config_option_update（跨任务契约）：model 从 options 匹配项的
+    // name 提取括号内模型名；thinking_effort 取 currentValue。
+    let f = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {"id": "model", "name": "Model", "type": "select", "currentValue": "default",
+                     "options": [
+                         {"value": "default", "name": "default (claude-sonnet-4-5)"},
+                         {"value": "opus", "name": "opus (claude-opus-4-1)"}
+                     ], "category": "model"},
+                    {"id": "thinking_effort", "name": "Effort", "type": "select",
+                     "currentValue": "high", "options": [], "category": "reasoning"}
+                ]
+            }
+        }
+    });
+    match norm(f) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::AgentConfig { model, effort } => {
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            _ => panic!("expected agent config"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+    // name 无括号 → 回退整个 name。
+    let no_paren = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {"id": "model", "name": "Model", "type": "select", "currentValue": "default",
+                     "options": [{"value": "default", "name": "default"}],
+                     "category": "model"}
+                ]
+            }
+        }
+    });
+    match norm(no_paren) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::AgentConfig { model, effort } => {
+                assert_eq!(model.as_deref(), Some("default"));
+                assert_eq!(effort, None);
+            }
+            _ => panic!("expected agent config"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+    // 缺 configOptions / 无匹配 option → 字段 None（部分更新，不覆盖）。
+    let partial = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"sessionId": "acp-1", "update": {"sessionUpdate": "config_option_update"}}
+    });
+    match norm(partial) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::AgentConfig { model, effort } => {
+                assert_eq!(model, None);
+                assert_eq!(effort, None);
+            }
+            _ => panic!("expected agent config"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_usage_update() {
+    let f = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {"sessionUpdate": "usage_update", "used": 42000, "size": 200000}
+        }
+    });
+    match norm(f) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::AgentUsage {
+                context_window,
+                context_used,
+            } => {
+                assert_eq!(context_window, 200_000);
+                assert_eq!(context_used, 42_000);
+            }
+            _ => panic!("expected agent usage"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+    // 缺 used/size → MissingField（必填，§6.3 同源拒绝）。
+    let missing = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {"sessionUpdate": "usage_update", "used": 1}
+        }
+    });
+    assert!(matches!(
+        norm(missing),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
 }
 
 #[test]

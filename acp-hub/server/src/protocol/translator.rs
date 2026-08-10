@@ -89,19 +89,25 @@ impl Translator {
                 validate_cwd(&ctx.cwd)?;
                 // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
                 // 序列（`prompt: [{type:"text",text}]`），非 message 字符串。
+                let mut params = serde_json::Map::new();
+                params.insert("sessionId".to_string(), json!(ctx.acp_session_id));
+                // cwd 是 ACP 请求的严谨字段（agent-client-protocol）：
+                // 与 spawn/会话绑定目录一致（§6.3 workspace 扩展）。
+                params.insert("cwd".to_string(), json!(ctx.cwd));
+                params.insert(
+                    "prompt".to_string(),
+                    json!([{ "type": "text", "text": payload.message }]),
+                );
+                // 推理强度档位（跨任务契约 §2）：Some 才写入，None 不写
+                // （agent 默认档位）。
+                if let Some(e) = &payload.effort {
+                    params.insert("effort".to_string(), json!(e));
+                }
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
                     "id": rpc_id,
                     "method": "session/prompt",
-                    "params": {
-                        "sessionId": ctx.acp_session_id,
-                        // cwd 是 ACP 请求的严谨字段（agent-client-protocol）：
-                        // 与 spawn/会话绑定目录一致（§6.3 workspace 扩展）。
-                        "cwd": ctx.cwd,
-                        "prompt": [
-                            { "type": "text", "text": payload.message },
-                        ],
-                    },
+                    "params": params,
                 })))
             }
             ActionEnvelope::Cancel { .. } => {
@@ -129,6 +135,19 @@ impl Translator {
                         "cwd": ctx.cwd,
                     },
                 })))
+            }
+            // chat/session-new（§8.5 当前对话内新建会话）：等价 create 序列
+            // 的 `session/new` 一步——进程已存在，直接向目标会话发
+            // session/new；响应含新 sessionId（coordinator 据此更新 binding）。
+            ActionEnvelope::SessionNew { .. } => {
+                validate_cwd(&ctx.cwd)?;
+                // 复用 session_new_rpc 的帧构造（cwd/mcpServers 约定一致）；
+                // 帧 id 重写为本次 translate 分配的 rpc_id——coordinator 以
+                // 帧 id 为 register_rpc 键（§6.1），与 create 序列的两段式
+                // （自取返回 id）不同。
+                let (_, mut msg) = self.session_new_rpc(&ctx.cwd, None);
+                msg["id"] = json!(rpc_id);
+                Ok(OutboundMessage::JsonRpc(msg))
             }
             // create/close 不走此入口（create 两段式；close = instance/kill，
             // 由 coordinator 直接构造 InstanceKill）。

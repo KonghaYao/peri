@@ -165,6 +165,14 @@ pub enum DocCommand {
     /// 成功路径 `registry.forEachByRcsSession` 更新 acpSessionId 的等价物）。
     /// 用途：create 的 session/new 绑定建立后写入；load 失败恢复路径写回旧值。
     SetAgentSessionId { acp_session_id: String },
+    /// agent 投影的 model/effort 更新（§5.4 agent map；部分更新语义——
+    /// None 不覆盖）。来源：session/new 响应体 configOptions 提取
+    /// （handle_new 不发 config_option_update 通知，响应即唯一路径；
+    /// load 路径由通知送达，本命令幂等补写）。
+    SetAgentConfig {
+        model: Option<String>,
+        effort: Option<String>,
+    },
     /// 断链追平恢复（§7.3/§8.5）：relay 在补推/实时帧恢复投递成功后提交。
     /// writer 以聚合器事实源判定——**可校准**（非 uncalibratable）→ 置
     /// `gap_dirty` 触发上报（registry gap 清除 + degraded 条件解除）；
@@ -1078,6 +1086,24 @@ async fn apply_command(
                 reason: None,
             }
         }
+        DocCommand::SetAgentConfig { model, effort } => {
+            // agent 投影 model/effort（§5.4 agent map；部分更新——None
+            // 不覆盖，与 AgentConfig 事件投影语义一致）。
+            let mut txn = pair.session_txn();
+            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+            let am = root.get_or_init::<_, yrs::MapRef>(&mut txn, "agent");
+            if let Some(m) = model {
+                am.insert(&mut txn, "model", m.clone());
+            }
+            if let Some(e) = effort {
+                am.insert(&mut txn, "effort", e.clone());
+            }
+            chat_writer::bump_projection_version(&mut txn, &root);
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
         DocCommand::EndLoadReplay => {
             // 全部回放 turn 终态化（历史 agent 消息无 TurnTerminal 事件）+
             // 退出回放模式。
@@ -1242,6 +1268,7 @@ fn command_kind(cmd: &DocCommand) -> &'static str {
         DocCommand::SetChatTerminal { .. } => "set_chat_terminal",
         DocCommand::BeginLoadReplay { .. } => "begin_load_replay",
         DocCommand::SetAgentSessionId { .. } => "set_agent_session_id",
+        DocCommand::SetAgentConfig { .. } => "set_agent_config",
         DocCommand::ResumeAfterGap => "resume_after_gap",
         DocCommand::EndLoadReplay => "end_load_replay",
         _ => "registry",

@@ -25,6 +25,7 @@ fn prompt_translation() {
         payload: PromptChatPayload {
             chat_id: "hub-s1".into(),
             message: "hello".into(),
+            effort: None,
         },
     };
     let msg = t.translate(&action, &ctx()).unwrap();
@@ -41,9 +42,30 @@ fn prompt_translation() {
             assert_eq!(v["params"]["prompt"], json!([{ "type": "text", "text": "hello" }]));
             assert!(v["params"].get("message").is_none());
             assert!(v["params"].get("turnId").is_none());
+            // effort 缺省 → 不写入 params（agent 默认档位，跨任务契约 §2）。
+            assert!(v["params"].get("effort").is_none());
             assert!(v["id"].as_str().unwrap().starts_with("hub-"));
             // id 必带（避免被当作 notification，§6.1）。
             assert!(v["id"].is_string());
+        }
+        _ => panic!("expected json rpc"),
+    }
+}
+
+#[test]
+fn prompt_translation_effort() {
+    let t = Translator::new();
+    let action = ActionEnvelope::Prompt {
+        command_id: "c1".into(),
+        payload: PromptChatPayload {
+            chat_id: "hub-s1".into(),
+            message: "hi".into(),
+            effort: Some("high".into()),
+        },
+    };
+    match t.translate(&action, &ctx()).unwrap() {
+        OutboundMessage::JsonRpc(v) => {
+            assert_eq!(v["params"]["effort"], json!("high"));
         }
         _ => panic!("expected json rpc"),
     }
@@ -68,6 +90,33 @@ fn cancel_translation() {
             // jsonrpc 版本。
             assert_eq!(v["jsonrpc"], json!("2.0"));
             assert!(v.get("id").is_none());
+        }
+        _ => panic!("expected json rpc"),
+    }
+}
+
+#[test]
+fn session_new_translation() {
+    let t = Translator::new();
+    let action = ActionEnvelope::SessionNew {
+        command_id: "c2".into(),
+        payload: acp_hub_proto::action::SessionNewChatPayload {
+            chat_id: "hub-s1".into(),
+        },
+    };
+    match t.translate(&action, &ctx()).unwrap() {
+        OutboundMessage::JsonRpc(v) => {
+            assert_eq!(v["jsonrpc"], json!("2.0"));
+            assert_eq!(v["method"], json!("session/new"));
+            // cwd 由 server 注入（与 spawn/会话绑定目录一致，§6.3）。
+            assert_eq!(v["params"]["cwd"], json!("/srv/work"));
+            // mcpServers 必填（agent-client-protocol；空数组 = 无 MCP）。
+            assert_eq!(v["params"]["mcpServers"], json!([]));
+            // 带 id 的 request（非 notification）——coordinator 以帧 id 为
+            // register_rpc 键（§6.1）；id 为本次 translate 分配的 rpc_id。
+            assert!(v["id"].as_str().unwrap().starts_with("hub-"));
+            // 无 title（会话标题由后续 session_update/服务端单写补齐）。
+            assert!(v["params"].get("title").is_none());
         }
         _ => panic!("expected json rpc"),
     }

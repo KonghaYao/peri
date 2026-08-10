@@ -127,14 +127,16 @@ fn client_frames_rejected_on_instance_role() {
     }
 }
 
-/// action `type` 子集收窄（§9.2）：M1 共 9 种（含 workspace 管理面、
-/// session/list 按需查询与 §8.5 启用的 chat/load 会话切换）；M3 类型白名单外。
+/// action `type` 子集收窄（§9.2）：M1 共 10 种（含 workspace 管理面、
+/// session/list 按需查询、§8.5 启用的 chat/load 会话切换与 chat/session-new
+/// 当前对话内新建会话）；M3 类型白名单外。
 #[test]
 fn m1_action_type_subset() {
     for t in [
         "chat/create",
         "chat/load",
         "chat/prompt",
+        "chat/session-new",
         "chat/cancel",
         "chat/close",
         "permission/resolve",
@@ -147,7 +149,7 @@ fn m1_action_type_subset() {
     for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 9);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 10);
 }
 
 /// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与

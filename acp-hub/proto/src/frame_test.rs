@@ -54,6 +54,7 @@ fn all_frames() -> Vec<Frame> {
             payload: PromptChatPayload {
                 chat_id: "s1".into(),
                 message: "hi".into(),
+                effort: None,
             },
         }),
         Frame::Action(ActionEnvelope::Cancel {
@@ -89,6 +90,7 @@ fn all_frames() -> Vec<Frame> {
             status: AckStatus::Committed,
             turn_id: Some("t1".into()),
             chat_id: Some("s1".into()),
+            acp_session_id: None,
             committed_projection_version: Some(7),
         }),
         Frame::ActionError(ActionError {
@@ -221,6 +223,7 @@ fn action_envelope_nested_tag_shape() {
         payload: PromptChatPayload {
             chat_id: "s1".into(),
             message: "hi".into(),
+            effort: None,
         },
     });
     let value: serde_json::Value =

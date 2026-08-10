@@ -165,6 +165,9 @@ async fn broadcast_stream_delivers_updates() {
         body: crate::state::normalized::EventBody::AgentStatus {
             status: "idle".into(),
             public_error: None,
+            model: None,
+            context_window: None,
+            context_used: None,
         },
     };
     let _ = doc.submit_event(ev).await;

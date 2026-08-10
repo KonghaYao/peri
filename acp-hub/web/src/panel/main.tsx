@@ -7,7 +7,7 @@ import { render } from 'solid-js/web';
 import '../styles.css';
 import { ChatView } from './components/ChatView';
 import { ConnectCard } from './components/ConnectCard';
-import { InstanceList, ChatList, SessionList, WorkspaceList } from './components/Lists';
+import { InstanceList, ChatList, WorkspaceList } from './components/Lists';
 import { StatusRail } from './components/StatusRail';
 import { Toasts } from './components/Toasts';
 
@@ -27,7 +27,6 @@ function App() {
           <WorkspaceList />
           <InstanceList />
           <ChatList />
-          <SessionList />
         </aside>
 
         <main>

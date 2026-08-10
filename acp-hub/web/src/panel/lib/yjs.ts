@@ -92,6 +92,15 @@ function getStr(m: Y.Map<unknown> | null, key: string): string | null {
   return v === undefined || v === null ? null : String(v);
 }
 
+/** 数值兜底：yjs 数值字段直接取（serde 镜像为 number），缺失/非法 → null
+ *  （渲染侧以 — 兜底）。 */
+function getNum(m: Y.Map<unknown> | null, key: string): number | null {
+  const v = m ? m.get(key) : null;
+  if (v === undefined || v === null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ── 渲染结果类型 ────────────────────────────────────────────────────────
 
 export interface InstanceInfo {
@@ -194,6 +203,14 @@ export interface AgentInfo {
   status: string | null;
   lastActivityAt: string | null;
   capabilities: unknown[];
+  /** 模型名（server 从 agent 元信息写入；无 → null，UI 显示 —）。 */
+  model: string | null;
+  /** 推理强度（server 从 agent 元信息写入；无 → null，UI 显示 —）。 */
+  effort: string | null;
+  /** 上下文窗口大小（tokens）。 */
+  contextWindow: number | null;
+  /** 已占用上下文（tokens）。 */
+  contextUsed: number | null;
 }
 
 export interface ActiveTurnInfo {
@@ -476,6 +493,10 @@ export function renderControl(doc: Y.Doc): ControlView {
       status: getStr(agent, 'status'),
       lastActivityAt: getStr(agent, 'last_activity_at'),
       capabilities: caps ? caps.toArray() : [],
+      model: getStr(agent, 'model'),
+      effort: getStr(agent, 'effort'),
+      contextWindow: getNum(agent, 'context_window'),
+      contextUsed: getNum(agent, 'context_used'),
     };
   }
 

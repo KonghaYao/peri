@@ -575,6 +575,8 @@ impl Aggregator {
                 Ok(())
             }
             EventBody::AgentStatus { .. }
+            | EventBody::AgentConfig { .. }
+            | EventBody::AgentUsage { .. }
             | EventBody::Capabilities { .. }
             | EventBody::SessionInfo { .. }
             | EventBody::SessionListResponse { .. } => Ok(()),
@@ -924,6 +926,8 @@ impl Aggregator {
                 | EventBody::PermissionResolved { .. }
                 | EventBody::PermissionExpired { .. }
                 | EventBody::AgentStatus { .. }
+                | EventBody::AgentConfig { .. }
+                | EventBody::AgentUsage { .. }
                 | EventBody::Capabilities { .. }
                 | EventBody::SessionInfo { .. }
                 | EventBody::SessionListResponse { .. } => {}
@@ -1056,8 +1060,32 @@ impl Aggregator {
                     EventBody::AgentStatus {
                         status,
                         public_error,
+                        model,
+                        context_window,
+                        context_used,
                     } => {
-                        write_agent_status(&mut txn, &root, status, public_error.as_ref());
+                        write_agent_status(
+                            &mut txn,
+                            &root,
+                            status,
+                            public_error.as_ref(),
+                            model.as_deref(),
+                            *context_window,
+                            *context_used,
+                        );
+                        chat_writer::bump_projection_version(&mut txn, &root);
+                    }
+                    EventBody::AgentConfig { model, effort } => {
+                        // model/effort 部分更新（跨任务契约）：None 不覆盖。
+                        write_agent_config(&mut txn, &root, model.as_deref(), effort.as_deref());
+                        chat_writer::bump_projection_version(&mut txn, &root);
+                    }
+                    EventBody::AgentUsage {
+                        context_window,
+                        context_used,
+                    } => {
+                        // 用量快照覆盖（跨任务契约）：非 Option 字段无条件写入。
+                        write_agent_usage(&mut txn, &root, *context_window, *context_used);
                         chat_writer::bump_projection_version(&mut txn, &root);
                     }
                     EventBody::Capabilities { capabilities } => {
@@ -1181,6 +1209,9 @@ fn write_agent_status(
     root: &yrs::MapRef,
     status: &str,
     public_error: Option<&PublicError>,
+    model: Option<&str>,
+    context_window: Option<u32>,
+    context_used: Option<u32>,
 ) {
     let agent = root.get_or_init::<_, yrs::MapRef>(txn, "agent");
     agent.insert(txn, "status", status.to_string());
@@ -1190,6 +1221,47 @@ fn write_agent_status(
             agent.insert(txn, "public_error", yrs::Any::Null);
         }
     };
+    // model/context_window/context_used 部分更新（跨任务契约 §1）：None 不
+    // 覆盖既有值（同 SessionInfo 语义）——agent/status 通知可能只带状态。
+    if let Some(m) = model {
+        agent.insert(txn, "model", m.to_string());
+    }
+    if let Some(w) = context_window {
+        agent.insert(txn, "context_window", w);
+    }
+    if let Some(u) = context_used {
+        agent.insert(txn, "context_used", u);
+    }
+}
+
+/// agent map 部分更新：model/effort（config_option_update，跨任务契约 §1）；
+/// None 不覆盖既有值（同 SessionInfo/write_agent_status 语义）。
+fn write_agent_config(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    model: Option<&str>,
+    effort: Option<&str>,
+) {
+    let agent = root.get_or_init::<_, yrs::MapRef>(txn, "agent");
+    if let Some(m) = model {
+        agent.insert(txn, "model", m.to_string());
+    }
+    if let Some(e) = effort {
+        agent.insert(txn, "effort", e.to_string());
+    }
+}
+
+/// agent map 快照覆盖：context_window/context_used（usage_update，跨任务
+/// 契约 §1：每次 LLM 调用结束发送，全量覆盖）。
+fn write_agent_usage(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    context_window: u32,
+    context_used: u32,
+) {
+    let agent = root.get_or_init::<_, yrs::MapRef>(txn, "agent");
+    agent.insert(txn, "context_window", context_window);
+    agent.insert(txn, "context_used", context_used);
 }
 
 fn write_capabilities(txn: &mut TransactionCtx<'_>, root: &yrs::MapRef, caps: &[String]) {

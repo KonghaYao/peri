@@ -232,6 +232,10 @@ impl AcpChannel {
                 body: EventBody::AgentStatus {
                     status: string_field(&params, "status", "status").unwrap_or_default(),
                     public_error: public_error(&params),
+                    // 模型/上下文（跨任务契约 §1）：缺省 None（不覆盖 agent map）。
+                    model: string_field(&params, "model", "model"),
+                    context_window: number_field(&params, "contextWindow", "context_window"),
+                    context_used: number_field(&params, "contextUsed", "context_used"),
                 },
             }));
         }
@@ -342,9 +346,32 @@ impl AcpChannel {
                 status: None,
                 active_turn_id: None,
             },
-            // M1 无需投影的会话级元数据（命令菜单/模式/配置/用量/计划）。
-            "available_commands_update" | "current_mode_update" | "config_option_update"
-            | "usage_update" | "plan" | "plan_update" | "plan_removed" => {
+            // 模型/effort 配置（跨任务契约）：configOptions 中 id 为 model /
+            // thinking_effort 的 option；任一缺失对应字段 None（部分更新，
+            // 同 SessionInfo 语义）。model 取 options 匹配项（value ==
+            // currentValue）的 name 括号内模型名（`alias (模型名)`），无括号
+            // 回退整个 name。wire 字段名（schema v1.4.0）：SessionConfigSelect
+            // = currentValue/options，SessionConfigSelectOption = value/name。
+            "config_option_update" => {
+                let options = update
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let (model, effort) = extract_agent_config(options);
+                B::AgentConfig { model, effort }
+            }
+            // 上下文用量快照（跨任务契约）：used/size 必填（缺 → MissingField，
+            // 与 tool_call_id 同源拒绝，§6.3）。
+            "usage_update" => B::AgentUsage {
+                context_window: number_field(update, "size", "size")
+                    .ok_or(MapError::MissingField)?,
+                context_used: number_field(update, "used", "used")
+                    .ok_or(MapError::MissingField)?,
+            },
+            // M1 无需投影的会话级元数据（命令菜单/模式/计划）。
+            "available_commands_update" | "current_mode_update" | "plan" | "plan_update"
+            | "plan_removed" => {
                 return Err(MapError::Unsupported);
             }
             _ => return Err(MapError::Unsupported),
@@ -506,6 +533,9 @@ impl AcpChannel {
                 return Ok(EventBody::AgentStatus {
                     status: string_field(payload, "status", "status").unwrap_or_default(),
                     public_error: public_error(payload),
+                    model: string_field(payload, "model", "model"),
+                    context_window: number_field(payload, "contextWindow", "context_window"),
+                    context_used: number_field(payload, "contextUsed", "context_used"),
                 })
             }
             "session_list" => {
@@ -590,6 +620,19 @@ fn string_field(
     field(obj, &[camel, snake])
 }
 
+/// 非负整数提取（camelCase 优先，snake_case 回退）：负数/超 u32 上限 →
+/// None（缺省语义，不整体拒绝——§6.3 仅必填字段缺失才 MissingField）。
+fn number_field(
+    obj: &serde_json::Map<String, Value>,
+    camel: &str,
+    snake: &str,
+) -> Option<u32> {
+    [camel, snake]
+        .iter()
+        .find_map(|n| obj.get(*n).and_then(Value::as_u64))
+        .and_then(|n| u32::try_from(n).ok())
+}
+
 /// 必填字符串字段：缺失 → 整体 [`DropReason::MissingField`]（§6.3 同源拒绝）。
 fn required(
     obj: &serde_json::Map<String, Value>,
@@ -656,6 +699,65 @@ fn truncate_text(s: &str) -> String {
         end -= 1;
     }
     s[..end].to_string()
+}
+
+/// 从 `alias (模型名)` 形式 label 提取括号内模型名（config_option_update，
+/// 跨任务契约）；无括号/括号内为空 → 整个 label。
+fn extract_model_name(label: &str) -> String {
+    let Some(open) = label.rfind('(') else {
+        return label.to_string();
+    };
+    let Some(rel) = label[open..].find(')') else {
+        return label.to_string();
+    };
+    let inner = label[open + 1..open + rel].trim();
+    if inner.is_empty() {
+        label.to_string()
+    } else {
+        inner.to_string()
+    }
+}
+
+/// 从 ACP `configOptions` 数组提取 `(model, effort)`（跨任务契约）：id 为
+/// `model` 的 option → options 匹配项的 name 内模型名；id 为
+/// `thinking_effort` 的 option → currentValue。任一缺失 → None（部分更新
+/// 语义）。
+///
+/// wire 字段（agent-client-protocol schema v1）：option 顶层为
+/// `currentValue`/`options`（flatten 的 SessionConfigSelect，camelCase），
+/// options 元素为 `{ value, name }`。
+///
+/// 两条消费路径共用：`config_option_update` 通知（map_acp_update）与
+/// session/new 响应体（coordinator，handle_new 不发通知、响应即唯一路径）。
+pub fn extract_agent_config(
+    options: &[serde_json::Value],
+) -> (Option<String>, Option<String>) {
+    let model = options.iter().find_map(|o| {
+        let o = o.as_object()?;
+        if o.get("id").and_then(Value::as_str) != Some("model") {
+            return None;
+        }
+        let current = o.get("currentValue").and_then(Value::as_str)?;
+        let name = o
+            .get("options")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|s| s.as_object())
+            .find(|s| s.get("value").and_then(Value::as_str) == Some(current))?
+            .get("name")
+            .and_then(Value::as_str)?;
+        Some(extract_model_name(name))
+    });
+    let effort = options.iter().find_map(|o| {
+        let o = o.as_object()?;
+        if o.get("id").and_then(Value::as_str) != Some("thinking_effort") {
+            return None;
+        }
+        o.get("currentValue")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    (model, effort)
 }
 
 #[cfg(test)]

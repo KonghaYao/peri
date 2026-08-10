@@ -42,7 +42,9 @@ use crate::control::WorkspaceError;
 use crate::control::WorkspaceRegistry;
 use crate::persist::outbox::{CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass};
 use crate::persist::Store;
-use crate::protocol::{OutboundCtx, OutboundMessage, Translator, validate_cwd};
+use crate::protocol::{
+    OutboundCtx, OutboundMessage, Translator, extract_agent_config, validate_cwd,
+};
 use crate::state::doc_manager::{DocCommand, DocManager, SubmitError, SubmitResult};
 use crate::state::doc_manager::BatchConfig;
 
@@ -125,8 +127,10 @@ struct CoordInner {
     spawn_timeout: Duration,
     initialize_timeout: Duration,
     binding_timeout: Duration,
-    /// 同一 chat 同时只允许一个 session/load。load 的回放通知先于 RPC
-    /// 响应，若并发执行会让两个历史流写入同一个 Yjs Doc。
+    /// 同一 chat 同时只允许一个会话变更操作（session/load 与
+    /// chat/session-new 共享）：load 的回放通知先于 RPC 响应，若并发执行
+    /// 会让两个历史流写入同一个 Yjs Doc；session-new 同理（新会话通知
+    /// 与既有流交错）。
     loads_in_flight: StdMutex<HashSet<String>>,
     /// L3 确认超时（§4.4 路径 B 默认 30s；测试注入短值）。
     l3_timeout: Duration,
@@ -302,6 +306,15 @@ impl CommandCoordinator {
                 .await;
         }
 
+        // chat/session-new（§8.5）：当前对话内新建 ACP 会话——等价 create
+        // 序列的 `session/new` 一步（进程已存在，无 spawn/initialize）。
+        // 低频直通（同 load），不走 chat 队列。
+        if let ActionEnvelope::SessionNew { .. } = &action {
+            return self
+                .exec_session_new(ctx, &action, tx, &command_id_str)
+                .await;
+        }
+
         let _guard = self.inner.gate.lock().await;
 
         // ---- 1. chat_id 解析 / create 前置（§6.2）----
@@ -329,6 +342,7 @@ impl CommandCoordinator {
                                         status: AckStatus::Duplicate,
                                         turn_id: rec.turn_id.map(|t| t.to_string()),
                                         chat_id: Some(sid.to_string()),
+                                        acp_session_id: None,
                                         committed_projection_version: None,
                                     })
                                 }
@@ -416,6 +430,7 @@ impl CommandCoordinator {
                         status: AckStatus::Duplicate,
                         turn_id: rec.turn_id.map(|t| t.to_string()),
                         chat_id: None,
+                        acp_session_id: None,
                         committed_projection_version: None,
                     })
                 }
@@ -1181,6 +1196,7 @@ impl CommandCoordinator {
                             status: AckStatus::Committed,
                             turn_id: None,
                             chat_id: Some(chat_id),
+                            acp_session_id: None,
                             committed_projection_version: None,
                         })))
                         .await;
@@ -1263,6 +1279,307 @@ impl CommandCoordinator {
                 },
             )
             .await;
+    }
+
+    /// chat/session-new 执行（§8.5 当前对话内新建 ACP 会话）：不新建
+    /// chat/进程——进程已存在，等价 create 序列的 `session/new` 一步
+    /// （无 spawn/initialize）。
+    ///
+    /// 流程：chat record 解析 (instance_id, cwd) → translator 的 SessionNew
+    /// 分支构造 `session/new` JSON-RPC（cwd 与进程绑定目录一致）→ L3 匹配
+    /// （register_rpc + forward_rpc）→ 响应含新 sessionId → binding 更新
+    /// （registry `bind` + chat doc `SetAgentSessionId`，与 create 的
+    /// session/new 成功路径一致）→ committed ack（携带 acpSessionId，
+    /// 跨任务契约 §3）；RPC 失败/超时 → action_error（可重试，参照 load）。
+    /// 低频直通（同 load），不走 chat 队列/outbox；submit 层面返回
+    /// Accepted，终态帧异步回投。
+    async fn exec_session_new(
+        &self,
+        ctx: &ConnectionCtx,
+        action: &ActionEnvelope,
+        tx: mpsc::Sender<OutboundMsg>,
+        command_id: &str,
+    ) -> SubmitAck {
+        let payload = match action {
+            ActionEnvelope::SessionNew { payload, .. } => payload,
+            _ => unreachable!("dispatch guarantees chat/session-new"),
+        };
+        let Some(rec) = self.inner.chats.entry(&payload.chat_id).await else {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::ChatNotFound,
+                "chat not found",
+                false,
+            ));
+        };
+        if rec.state.is_terminal() {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::InvalidState,
+                "chat terminal; cannot create session",
+                false,
+            ));
+        }
+        if rec.session_id.is_none() {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::InvalidState,
+                "chat has no active ACP process",
+                false,
+            ));
+        }
+        if self.inner.chats.active_turn(&payload.chat_id).await.is_some() {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::InvalidState,
+                "chat has an active turn; cannot create session",
+                false,
+            ));
+        }
+        // 并发保护：与 session/load 共享 in_flight 集合——同一 chat 同时
+        // 只允许一个会话变更操作（load/session-new 交错会让绑定与新会话
+        // 通知串流）。
+        {
+            let mut ops = self
+                .inner
+                .loads_in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !ops.insert(payload.chat_id.clone()) {
+                return SubmitAck::Failed(action_error(
+                    command_id.to_string(),
+                    ErrorCode::RateLimited,
+                    "session operation already in progress",
+                    true,
+                ));
+            }
+        }
+        let op_guard = LoadFlightGuard {
+            inner: self.inner.clone(),
+            chat_id: payload.chat_id.clone(),
+        };
+        let instance_id = rec.instance_id.clone();
+        let cwd = rec.cwd.clone();
+        // 转发目标 = hub chat id（instance 进程表键，§6.2）。
+        let chat_id = payload.chat_id.clone();
+
+        let me = self.clone();
+        let cmd_id = command_id.to_string();
+        let token_id = ctx.token_id.clone();
+        let action = action.clone();
+        tokio::spawn(async move {
+            let _op_guard = op_guard;
+            let started = std::time::Instant::now();
+            // 1. 翻译（rpcId 由 translate 分配，帧 id 即 register_rpc 键，
+            //    §6.1）+ L3 匹配。acp_session_id 仅作 OutboundCtx 占位
+            //    （SessionNew 方法面不使用，§4.3 表）。
+            let msg = match me.inner.translator.translate(
+                &action,
+                &OutboundCtx {
+                    cwd: cwd.clone(),
+                    acp_session_id: String::new(),
+                    turn_id: String::new(),
+                },
+            ) {
+                Ok(OutboundMessage::JsonRpc(v)) => v,
+                _ => {
+                    audit(
+                        "chat.session_new",
+                        Some(&cmd_id),
+                        Some(&token_id),
+                        "translate_failed",
+                        started.elapsed(),
+                        None,
+                    );
+                    let _ = tx
+                        .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                            cmd_id,
+                            ErrorCode::InvalidState,
+                            "translate failed",
+                            false,
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
+            let rx = me
+                .inner
+                .relay
+                .register_rpc(&rpc_id, cmd_id.clone())
+                .await;
+            if let Err(e) = me
+                .inner
+                .instance
+                .forward_rpc(&instance_id, &chat_id, &msg)
+                .await
+            {
+                me.inner.relay.cancel_rpc(&rpc_id).await;
+                audit(
+                    "chat.session_new",
+                    Some(&cmd_id),
+                    Some(&token_id),
+                    "forward_failed",
+                    started.elapsed(),
+                    None,
+                );
+                let _ = tx
+                    .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                        cmd_id,
+                        ErrorCode::InstanceOffline,
+                        &format!("session new forward failed: {e}"),
+                        true,
+                    ))))
+                    .await;
+                return;
+            }
+            match tokio::time::timeout(me.inner.binding_timeout, rx).await {
+                Ok(Ok(r)) if r.get("error").is_none() => {
+                    // 2. 成功：解析新 sessionId；缺 sessionId → 视为失败。
+                    let Some(new_sid) = extract_session_id(&r) else {
+                        me.inner.relay.cancel_rpc(&rpc_id).await;
+                        audit(
+                            "chat.session_new",
+                            Some(&cmd_id),
+                            Some(&token_id),
+                            "missing_session_id",
+                            started.elapsed(),
+                            None,
+                        );
+                        let _ = tx
+                            .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                                cmd_id,
+                                ErrorCode::AgentUnavailable,
+                                "session/new response missing sessionId",
+                                true,
+                            ))))
+                            .await;
+                        return;
+                    };
+                    // 3. binding 更新（§5.4）：registry（bindings + chat
+                    //    record 当前会话）+ chat doc agent.acp_session_id。
+                    if let Err(e) = me.inner.chats.bind(&chat_id, &new_sid).await {
+                        let msg = match &e {
+                            ChatError::BindingConflict(existing) => format!(
+                                "该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）"
+                            ),
+                            other => format!("bind failed: {other}"),
+                        };
+                        audit(
+                            "chat.session_new",
+                            Some(&cmd_id),
+                            Some(&token_id),
+                            "bind_failed",
+                            started.elapsed(),
+                            None,
+                        );
+                        let _ = tx
+                            .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                                cmd_id,
+                                ErrorCode::InvalidState,
+                                &msg,
+                                false,
+                            ))))
+                            .await;
+                        return;
+                    }
+                    let _ = me
+                        .inner
+                        .doc
+                        .submit_command(
+                            &chat_id,
+                            DocCommand::SetAgentSessionId {
+                                acp_session_id: new_sid.clone(),
+                            },
+                        )
+                        .await;
+                    // 模型/effort 投影（§5.4）：handle_new 不发
+                    // config_option_update 通知，响应体 configOptions 即
+                    // model/effort 唯一路径（部分更新，任一缺失跳过）。
+                    if let Some(cfg) = r
+                        .get("result")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|o| o.get("configOptions"))
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        let (model, effort) = extract_agent_config(cfg);
+                        if model.is_some() || effort.is_some() {
+                            let _ = me
+                                .inner
+                                .doc
+                                .submit_command(
+                                    &chat_id,
+                                    DocCommand::SetAgentConfig { model, effort },
+                                )
+                                .await;
+                        }
+                    }
+                    audit(
+                        "chat.session_new",
+                        Some(&cmd_id),
+                        Some(&token_id),
+                        "ok",
+                        started.elapsed(),
+                        None,
+                    );
+                    // 4. committed ack（携带新 acpSessionId，前端据此刷新
+                    //    会话列表「当前」标记，跨任务契约 §3）。
+                    let _ = tx
+                        .send(OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+                            command_id: cmd_id,
+                            status: AckStatus::Committed,
+                            turn_id: None,
+                            chat_id: Some(chat_id),
+                            acp_session_id: Some(new_sid),
+                            committed_projection_version: None,
+                        })))
+                        .await;
+                }
+                Ok(Ok(_)) => {
+                    // L3 错误响应（如会话数超限）：可重试。binding 未变更
+                    // （新会话尚未建立，无残留）。
+                    me.inner.relay.cancel_rpc(&rpc_id).await;
+                    audit(
+                        "chat.session_new",
+                        Some(&cmd_id),
+                        Some(&token_id),
+                        "rejected",
+                        started.elapsed(),
+                        None,
+                    );
+                    let _ = tx
+                        .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                            cmd_id,
+                            ErrorCode::AgentUnavailable,
+                            "session/new rejected",
+                            true,
+                        ))))
+                        .await;
+                }
+                _ => {
+                    me.inner.relay.cancel_rpc(&rpc_id).await;
+                    audit(
+                        "chat.session_new",
+                        Some(&cmd_id),
+                        Some(&token_id),
+                        "timeout",
+                        started.elapsed(),
+                        None,
+                    );
+                    let _ = tx
+                        .send(OutboundMsg::Frame(Frame::ActionError(action_error(
+                            cmd_id,
+                            ErrorCode::AgentUnavailable,
+                            "session/new timeout",
+                            true,
+                        ))))
+                        .await;
+                }
+            }
+        });
+        SubmitAck::Accepted {
+            command_id: command_id.to_string(),
+        }
     }
 
     /// prompt 执行（§4.4 提交点纪律 + §6.5 服务端单写）。
@@ -1642,7 +1959,30 @@ impl CommandCoordinator {
                 Ok(Err(_)) | Err(_) => None,
             },
             None => match tokio::time::timeout(self.inner.binding_timeout, binding_rx).await {
-                Ok(Ok(r)) => extract_session_id(&r),
+                Ok(Ok(r)) => {
+                    let sid = extract_session_id(&r);
+                    // handle_new 不发 config_option_update 通知，响应体
+                    // configOptions 即 model/effort 唯一路径（§5.4）。
+                    if let Some(cfg) = r
+                        .get("result")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|o| o.get("configOptions"))
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        let (model, effort) = extract_agent_config(cfg);
+                        if model.is_some() || effort.is_some() {
+                            let _ = self
+                                .inner
+                                .doc
+                                .submit_command(
+                                    &chat_id,
+                                    DocCommand::SetAgentConfig { model, effort },
+                                )
+                                .await;
+                        }
+                    }
+                    sid
+                }
                 Ok(Err(_)) | Err(_) => None,
             },
         };
@@ -2041,6 +2381,7 @@ impl CommandCoordinator {
                         status: AckStatus::Duplicate,
                         turn_id: None,
                         chat_id: None,
+                        acp_session_id: None,
                         committed_projection_version: None,
                     })))
                     .await;
@@ -2221,6 +2562,7 @@ impl CommandCoordinator {
                 status: AckStatus::Committed,
                 turn_id: turn_id.map(str::to_string),
                 chat_id: chat_id.map(str::to_string),
+                acp_session_id: None,
                 committed_projection_version: None,
             })))
             .await;
@@ -2357,6 +2699,7 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }
+        | ActionEnvelope::SessionNew { command_id, .. }
         | ActionEnvelope::Cancel { command_id, .. }
         | ActionEnvelope::ResolvePermission { command_id, .. }
         | ActionEnvelope::SubscribeEvents { command_id, .. }
@@ -2374,6 +2717,7 @@ fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
         ActionEnvelope::Close { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::ResolvePermission { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::Load { payload, .. } => Some(payload.chat_id.clone()),
+        ActionEnvelope::SessionNew { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::Create { .. } => None,
         ActionEnvelope::SubscribeEvents { .. } | ActionEnvelope::UnsubscribeEvents { .. } => None,
         // workspace 管理命令 / session/list 按需查询：submit 层直接执行

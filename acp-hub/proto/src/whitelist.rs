@@ -87,6 +87,7 @@ pub const M1_ACTION_TYPES: &[&str] = &[
     "chat/create",
     "chat/load",
     "chat/prompt",
+    "chat/session-new",
     "chat/cancel",
     "chat/close",
     "permission/resolve",

@@ -125,6 +125,30 @@ pub enum EventBody {
     AgentStatus {
         status: String,
         public_error: Option<PublicError>,
+        /// 当前模型名（agent/status 通知可携带；None 不覆盖 agent map）。
+        model: Option<String>,
+        /// 上下文窗口大小（token 数）。
+        context_window: Option<u32>,
+        /// 当前已用上下文（token 数）。
+        context_used: Option<u32>,
+    },
+    /// Agent 配置部分更新 → Control Doc agent.model/effort（`config_option_update`
+    /// 通知；跨任务契约：None 不覆盖既有值，同 SessionInfo 语义）。
+    AgentConfig {
+        /// 当前模型名（从 configOptions 中 model 项的 options 匹配
+        /// currentValue 的 name 提取，`alias (模型名)` 括号内；无括号回退
+        /// 整个 name）。
+        model: Option<String>,
+        /// 当前 effort（low/medium/high/xhigh/max）。
+        effort: Option<String>,
+    },
+    /// Agent 上下文用量快照 → Control Doc agent.context_window/context_used
+    /// （`usage_update` 通知；每次 LLM 调用结束发送，全量覆盖）。
+    AgentUsage {
+        /// 上下文窗口大小（token 数）。
+        context_window: u32,
+        /// 当前已用上下文（token 数）。
+        context_used: u32,
     },
     /// 能力声明覆盖 → Control Doc agent.capabilities。
     Capabilities { capabilities: Vec<String> },
@@ -166,6 +190,8 @@ impl EventBody {
             EventBody::PermissionResolved { .. } => "permission_resolved",
             EventBody::PermissionExpired { .. } => "permission_expired",
             EventBody::AgentStatus { .. } => "agent_status",
+            EventBody::AgentConfig { .. } => "agent_config",
+            EventBody::AgentUsage { .. } => "agent_usage",
             EventBody::Capabilities { .. } => "capabilities",
             EventBody::SessionInfo { .. } => "session_info",
             EventBody::SessionListResponse { .. } => "session_list_response",
@@ -262,6 +288,17 @@ mod tests {
             EventBody::AgentStatus {
                 status: "running".into(),
                 public_error: None,
+                model: Some("claude-sonnet-4-5".into()),
+                context_window: Some(200_000),
+                context_used: Some(42_000),
+            },
+            EventBody::AgentConfig {
+                model: Some("claude-sonnet-4-5".into()),
+                effort: Some("high".into()),
+            },
+            EventBody::AgentUsage {
+                context_window: 200_000,
+                context_used: 42_000,
             },
             EventBody::Capabilities {
                 capabilities: vec!["ls".into()],

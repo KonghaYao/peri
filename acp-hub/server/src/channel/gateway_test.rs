@@ -625,6 +625,7 @@ async fn e2e_create_prompt_event_broadcast() {
                     payload: acp_hub_proto::action::PromptChatPayload {
                         chat_id: chat_id.clone(),
                         message: "hello e2e".into(),
+                        effort: None,
                     },
                 },
             ))

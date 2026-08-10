@@ -422,7 +422,7 @@ export function disconnect(): void {
 
 // ── 用户动作 → action ──────────────────────────────────────────────────
 
-export function sendMessage(text: string): void {
+export function sendMessage(text: string, effort?: string): void {
   if (!ready) {
     toast('连接未就绪，稍后再试');
     return;
@@ -436,8 +436,8 @@ export function sendMessage(text: string): void {
     return;
   }
   // 输入框已清空；用户消息气泡依赖 agent 回显（server 单写者，
-  // 本地不造假，保证多标签页一致性）。
-  sendAction(H.prompt(currentCid, text), 'prompt', (ack) => {
+  // 本地不造假，保证多标签页一致性）。effort 透传推理强度（若有）。
+  sendAction(H.prompt(currentCid, text, effort), 'prompt', (ack) => {
     if (ack.status === 'committed' && ack.turnId) {
       toast(`消息已提交，turn=${ack.turnId.slice(0, 8)}…`);
     }
@@ -478,6 +478,32 @@ export function openAcpSession(acpSessionId: string, title?: string): void {
   sendAction(H.loadChat(cid, acpSessionId), 'load', (ack) => {
     if (ack.status === 'committed') {
       toast(`已切换到会话 ${title || acpSessionId.slice(0, 8)}…`);
+      // 会话列表的「当前」标记已变化 → 重新查询一次。
+      querySessions(cid);
+    }
+  });
+}
+
+/** 当前对话内新建 ACP 会话（chat/session-new，§8.5）：会话是**进程内实体**——
+ *  不新建对话/进程。committed 后刷新会话列表（tooltip「当前」标记更新）；
+ *  错误由 onActionError 统一 toast。 */
+export function newSession(): void {
+  if (!ready) {
+    toast('连接未就绪，稍后再试');
+    return;
+  }
+  const cid = currentCid;
+  if (!cid) {
+    toast('请先选择对话（新会话在当前对话内创建）');
+    return;
+  }
+  if (isTerminal(chatStatusSignal()[cid])) {
+    toast('对话已结束，不能新建会话');
+    return;
+  }
+  sendAction(H.sessionNew(cid), 'session/new', (ack) => {
+    if (ack.status === 'committed') {
+      toast('新会话已创建');
       // 会话列表的「当前」标记已变化 → 重新查询一次。
       querySessions(cid);
     }

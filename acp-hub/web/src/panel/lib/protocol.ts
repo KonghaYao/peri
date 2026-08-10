@@ -82,12 +82,20 @@ export const sessionList = (chatId: string) => action('session/list', { chatId }
 export const loadChat = (chatId: string, acpSessionId: string) =>
   action('chat/load', { chatId, acpSessionId });
 
-/** 发送消息（两阶段 ack：accepted → committed）。 */
-export const prompt = (chatId: string, message: string) =>
-  action('chat/prompt', { chatId, message });
+/** 发送消息（两阶段 ack：accepted → committed）。effort 为可选推理强度
+ *  （low|medium|high），非空才写入 payload（跨任务契约 §2）。 */
+export const prompt = (chatId: string, message: string, effort?: string) => {
+  const payload: Record<string, unknown> = { chatId, message };
+  if (effort) payload.effort = effort;
+  return action('chat/prompt', payload);
+};
 
 /** 取消当前 turn。 */
 export const cancel = (chatId: string) => action('chat/cancel', { chatId });
+
+/** 当前对话内新建 ACP 会话（§8.5 会话是进程内实体，不新建对话/进程）。
+ *  committed ack 后前端应刷新会话列表（tooltip「当前」标记更新）。 */
+export const sessionNew = (chatId: string) => action('chat/session-new', { chatId });
 
 /** 关闭对话。 */
 export const close = (chatId: string) => action('chat/close', { chatId });

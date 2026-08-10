@@ -346,6 +346,7 @@ impl Gateway {
                                         | ActionEnvelope::Load { command_id, .. }
                                         | ActionEnvelope::Close { command_id, .. }
                                         | ActionEnvelope::Prompt { command_id, .. }
+                                        | ActionEnvelope::SessionNew { command_id, .. }
                                         | ActionEnvelope::Cancel { command_id, .. }
                                         | ActionEnvelope::ResolvePermission { command_id, .. }
                                         | ActionEnvelope::SubscribeEvents { command_id, .. }
@@ -800,6 +801,7 @@ fn action_error_committed_rejected(action: &ActionEnvelope) -> ActionError {
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }
+        | ActionEnvelope::SessionNew { command_id, .. }
         | ActionEnvelope::Cancel { command_id, .. }
         | ActionEnvelope::ResolvePermission { command_id, .. }
         | ActionEnvelope::SubscribeEvents { command_id, .. }

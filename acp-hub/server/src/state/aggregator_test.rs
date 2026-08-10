@@ -934,3 +934,93 @@ fn replay_first_delta_synthesizes_placeholder_turn() {
     assert!(r.applied);
     assert_eq!(entry_count(&p), 2, "同 turn 增量不重复合成");
 }
+
+// ---------------------------------------------------------------------------
+// 17. AgentConfig/AgentUsage → Control Doc agent map（跨任务契约 §1）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_config_partial_update_none_keeps_existing() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 首轮写入 model/effort。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 1, EventBody::AgentConfig {
+                model: Some("claude-sonnet-4-5".into()),
+                effort: Some("high".into()),
+            })
+        )
+        .applied);
+    // 部分更新：model 为 None 不覆盖既有值，effort 更新。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 2, EventBody::AgentConfig {
+                model: None,
+                effort: Some("low".into()),
+            })
+        )
+        .applied);
+    let txn = p.session.transact();
+    let root = chat_writer::root_map_read(&txn).unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
+        "claude-sonnet-4-5",
+        "None 不覆盖 model"
+    );
+    assert_eq!(
+        agent.get(&txn, "effort").unwrap().cast::<String>().unwrap(),
+        "low",
+        "effort 部分更新"
+    );
+    let _ = root;
+}
+
+#[test]
+fn agent_usage_snapshot_overwrites() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 先经 AgentStatus 写模型/用量，再被 usage_update 快照覆盖。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 1, EventBody::AgentStatus {
+                status: "running".into(),
+                public_error: None,
+                model: Some("claude-sonnet-4-5".into()),
+                context_window: Some(200_000),
+                context_used: Some(42_000),
+            })
+        )
+        .applied);
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 2, EventBody::AgentUsage {
+                context_window: 200_000,
+                context_used: 88_888,
+            })
+        )
+        .applied);
+    let txn = p.session.transact();
+    let root = chat_writer::root_map_read(&txn).unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
+        "claude-sonnet-4-5",
+        "usage_update 不动 model"
+    );
+    assert_eq!(
+        agent.get(&txn, "context_window").unwrap().cast::<u32>().unwrap(),
+        200_000
+    );
+    assert_eq!(
+        agent.get(&txn, "context_used").unwrap().cast::<u32>().unwrap(),
+        88_888,
+        "usage_update 全量覆盖 context_used"
+    );
+    let _ = root;
+}

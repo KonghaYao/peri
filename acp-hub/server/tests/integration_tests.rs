@@ -269,6 +269,7 @@ async fn t04_body() -> Result<(), String> {
                 payload: acp_hub_proto::action::PromptChatPayload {
                     chat_id: sid.clone(),
                     message: "hello".to_string(),
+                    effort: None,
                 },
             }))
             .await?;

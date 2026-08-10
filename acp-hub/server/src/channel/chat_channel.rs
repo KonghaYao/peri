@@ -204,6 +204,7 @@ impl ChatChannel {
                     status: AckStatus::Accepted,
                     turn_id: None,
                     chat_id: None,
+                    acp_session_id: None,
                     committed_projection_version: None,
                 })),
             ]),
@@ -240,6 +241,7 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }
+        | ActionEnvelope::SessionNew { command_id, .. }
         | ActionEnvelope::Cancel { command_id, .. }
         | ActionEnvelope::ResolvePermission { command_id, .. }
         | ActionEnvelope::SubscribeEvents { command_id, .. }

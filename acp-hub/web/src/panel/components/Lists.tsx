@@ -1,13 +1,19 @@
-// 左栏列表：工作区 + 实例 + 对话 + ACP 会话（原 panel.html 左栏 + ui.js renderInstances/renderChats）。
+// 左栏列表：工作区 + 实例 + 对话（原 panel.html 左栏 + ui.js
+// renderInstances/renderChats）。ACP 会话列表已迁入 ChatHeader title 的
+// tooltip（§6.3/§8.5），此处不再展示。对话操作（新建/新会话/取消/关闭）
+// 收敛在「对话」标题行右侧的 icon 按钮组。
 
 import { createSignal, For, Show } from 'solid-js';
 import {
+  cancelTurn,
+  chatStatusSignal,
   chats,
+  closeChat,
   createWorkspace,
-  currentSessions,
   instances,
-  openAcpSession,
-  refreshSessions,
+  isTerminal,
+  newChat,
+  newSession,
   removeWorkspace,
   selectChat,
   selectedCid,
@@ -20,15 +26,6 @@ import { Badge } from './Badge';
 function shortId(id: string | null | undefined): string {
   if (!id) return '—';
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
-}
-
-// ACP 会话 id 是 UUID v7：前 12 位 = 毫秒时间戳，同一批（秒级内）创建的
-// 会话前 8 位几乎必然相同（如 019fe6ee-* 一批）——短 id 必须带**尾部随机
-// 段**（v7 区分度在尾部）才有辨识度，否则视觉上像同一会话重复出现。
-function sessionShortId(id: string | null | undefined): string {
-  if (!id) return '—';
-  if (id.length <= 12) return id;
-  return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
 // ── 工作区（独立于 chat 的上层概念，§6.3）──────────────────────────────
@@ -183,10 +180,51 @@ export function ChatList() {
       .slice()
       .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
 
+  // 新会话/取消/关闭针对当前选中对话；未选中或对话已终态（进程退出）
+  // 时禁用。新建对话始终可用（创建后自动选中）。
+  const terminal = () => isTerminal(chatStatusSignal()[selectedCid() ?? '']);
+  const opsDisabled = () => !selectedCid() || terminal();
+  // icon 按钮样式（参照现有 icon 按钮：tooltip 刷新按钮/工作区删除按钮）。
+  const opBtnClass =
+    'flex h-5 w-5 items-center justify-center rounded border border-slate-300 text-xs leading-none text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-slate-500';
+
   return (
     <section class="mb-3 rounded-lg border border-slate-300 bg-white p-3">
-      <h2 class="mb-2 text-sm font-semibold">
+      <h2 class="mb-2 flex items-center gap-1.5 text-sm font-semibold">
         对话 <span class="font-normal text-slate-500">({active().length})</span>
+        <span class="ml-auto flex shrink-0 items-center gap-1">
+          <button
+            onClick={newChat}
+            title="新建对话"
+            class={opBtnClass}
+          >
+            ＋
+          </button>
+          <button
+            onClick={newSession}
+            disabled={opsDisabled()}
+            title="新会话（当前对话内创建）"
+            class={opBtnClass}
+          >
+            ↻
+          </button>
+          <button
+            onClick={cancelTurn}
+            disabled={opsDisabled()}
+            title="取消当前输出"
+            class={opBtnClass}
+          >
+            ⏹
+          </button>
+          <button
+            onClick={closeChat}
+            disabled={opsDisabled()}
+            title="关闭对话"
+            class={opBtnClass}
+          >
+            ✕
+          </button>
+        </span>
       </h2>
       <ul class="m-0 list-none p-0">
         <For each={list()}>
@@ -219,104 +257,4 @@ function shortTime(s: string | null): string {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleTimeString();
-}
-
-// ── ACP 会话（agent 磁盘历史）────────────────────────────────────────────
-
-// ACP 会话 ≠ hub 对话：前者是 ACP agent 的磁盘历史会话（agent 侧真实
-// 数据源，§6.3），后者是 hub 控制面的对话（Registry）。会话是**进程内
-// 实体**：一个对话（= 一个 ACP 进程）可先后持有多个会话，load 即切换
-// （§8.5）——点击历史会话 = 在当前对话内 load，**不新建对话/进程**。
-//
-// §6.3 按需查询：切换对话时向 agent 侧发 session/list（携带该对话 cwd），
-// 结果**按对话隔离缓存**（sessionsByChat）——SessionList 跟随当前选中
-// 对话显示；10s 定时刷新 + 手动刷新按钮。不再按工作区过滤投影数据。
-export function SessionList() {
-  const [busy, setBusy] = createSignal(false);
-  const refresh = () => {
-    setBusy(true);
-    refreshSessions();
-    setTimeout(() => setBusy(false), 300);
-  };
-  const sessions = () => currentSessions();
-
-  return (
-    <section class="mb-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-3">
-      <h2 class="mb-1 flex items-center text-sm font-semibold">
-        ACP 会话{' '}
-        <span class="font-normal text-slate-500">
-          ({sessions().length})
-          {selectedCid() !== null ? ' · 当前对话' : ''}
-        </span>
-        <Show when={selectedCid() !== null}>
-          <button
-            onClick={refresh}
-            disabled={busy()}
-            class="ml-auto shrink-0 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-            title="向 agent 侧重新查询（10s 自动刷新）"
-          >
-            刷新
-          </button>
-        </Show>
-      </h2>
-      <p class="mb-2 text-[11px] leading-4 text-slate-500">
-        agent 磁盘历史（真实数据源 · 切换对话时按需查询）· 点击历史会话 = 当前对话内切换
-      </p>
-      <Show
-        when={selectedCid() !== null}
-        fallback={<p class="text-xs text-slate-400">未选择对话（切换对话后按需查询）</p>}
-      >
-        <Show
-          when={sessions().length > 0}
-          fallback={<p class="text-xs text-slate-400">暂无 ACP 会话（10s 自动刷新）</p>}
-        >
-          <ul class="m-0 list-none p-0">
-            <For each={sessions()}>
-              {(s) => {
-                // §8.5 会话切换语义：会话是**进程内实体**——列表属于当前
-                // 对话（进程），boundChatId 标注该对话的**当前活跃会话**
-                // （标「当前」，点击无操作）；其余为历史会话，点击 = 在
-                // 当前对话内 load 切换（不新建对话/进程）。
-                const isCurrent = s.boundChatId === selectedCid();
-                const open = () => {
-                  if (isCurrent) return;
-                  openAcpSession(s.sessionId, s.title || undefined);
-                };
-                return (
-                <li
-                  onClick={open}
-                  class={`mb-1.5 cursor-pointer rounded bg-white px-1.5 py-1 ring-1 ring-slate-200 hover:bg-blue-50 hover:ring-blue-200 ${isCurrent ? 'ring-emerald-300 bg-emerald-50/60' : ''}`}
-                  title={isCurrent ? '当前会话' : '在当前对话内切换到此会话（不新建对话）'}
-                >
-                  <div class="flex items-center gap-1.5 text-sm">
-                    <Show
-                      when={s.title}
-                      fallback={<span class="italic text-slate-400">（无标题）</span>}
-                    >
-                      <span class="min-w-0 truncate" title={s.title || ''}>
-                        {s.title}
-                      </span>
-                    </Show>
-                    <Show when={s.status}>
-                      <Badge status={s.status} />
-                    </Show>
-                    <Show when={isCurrent}>
-                      <span class="ml-auto shrink-0 rounded bg-emerald-100 px-1 py-0.5 text-[10px] text-emerald-700">
-                        当前
-                      </span>
-                    </Show>
-                  </div>
-                  <div class="text-xs text-slate-500">
-                    {shortTime(s.updatedAt)} · {sessionShortId(s.sessionId)}
-                    {s.cwd ? ` · ${s.cwd}` : ''}
-                  </div>
-                </li>
-                );
-              }}
-            </For>
-          </ul>
-        </Show>
-      </Show>
-    </section>
-  );
 }
