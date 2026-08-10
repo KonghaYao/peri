@@ -483,13 +483,15 @@ async fn test_glob_literal_pattern_only_matches_exact_path() {
         )
         .await
         .unwrap();
+    // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
+    let normalized = result.replace('\\', "/");
     assert!(
-        result.contains("/Cargo.toml"),
-        "应命中根层 Cargo.toml: {result}"
+        normalized.contains("/Cargo.toml"),
+        "应命中根层 Cargo.toml: {normalized}"
     );
     assert!(
-        !result.contains("sub/Cargo.toml"),
-        "字面 pattern 只应命中根层: {result}"
+        !normalized.contains("sub/Cargo.toml"),
+        "字面 pattern 只应命中根层: {normalized}"
     );
 }
 
@@ -557,18 +559,23 @@ async fn test_glob_narrowed_walk_skips_unrelated_dirs() {
         )
         .await
         .unwrap();
-    assert!(result.contains("src/a.rs"), "应找到 src/a.rs: {result}");
+    // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
+    let normalized = result.replace('\\', "/");
     assert!(
-        result.contains("src/deep/b.rs"),
-        "应找到 src/deep/b.rs: {result}"
+        normalized.contains("src/a.rs"),
+        "应找到 src/a.rs: {normalized}"
     );
     assert!(
-        !result.contains("unrelated"),
-        "收窄后不得返回 unrelated 下任何路径: {result}"
+        normalized.contains("src/deep/b.rs"),
+        "应找到 src/deep/b.rs: {normalized}"
     );
     assert!(
-        !result.contains("evil.rs"),
-        "不得返回 unrelated/src/evil.rs: {result}"
+        !normalized.contains("unrelated"),
+        "收窄后不得返回 unrelated 下任何路径: {normalized}"
+    );
+    assert!(
+        !normalized.contains("evil.rs"),
+        "不得返回 unrelated/src/evil.rs: {normalized}"
     );
 }
 
@@ -676,10 +683,15 @@ async fn test_glob_narrowed_literal_multisegment() {
         )
         .await
         .unwrap();
-    assert!(result.contains("a/b/c.rs"), "应命中 a/b/c.rs: {result}");
+    // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
+    let normalized = result.replace('\\', "/");
     assert!(
-        !result.contains("other.rs"),
-        "字面 pattern 不应命中同层其他文件: {result}"
+        normalized.contains("a/b/c.rs"),
+        "应命中 a/b/c.rs: {normalized}"
+    );
+    assert!(
+        !normalized.contains("other.rs"),
+        "字面 pattern 不应命中同层其他文件: {normalized}"
     );
 }
 
@@ -699,14 +711,19 @@ async fn test_glob_narrowed_multisegment_prefix_matches() {
         )
         .await
         .unwrap();
-    assert!(result.contains("a/b/x.rs"), "应命中 a/b/x.rs: {result}");
+    // Windows 绝对路径使用 \ 分隔符，统一规范化为 / 再断言
+    let normalized = result.replace('\\', "/");
     assert!(
-        result.contains("a/b/deep/y.rs"),
-        "`*` 跨段应命中 deep/y.rs: {result}"
+        normalized.contains("a/b/x.rs"),
+        "应命中 a/b/x.rs: {normalized}"
     );
     assert!(
-        !result.contains("a/other.rs"),
-        "前缀链之外的路径不应返回: {result}"
+        normalized.contains("a/b/deep/y.rs"),
+        "`*` 跨段应命中 deep/y.rs: {normalized}"
+    );
+    assert!(
+        !normalized.contains("a/other.rs"),
+        "前缀链之外的路径不应返回: {normalized}"
     );
 }
 
@@ -854,9 +871,11 @@ async fn test_glob_truncation_sorted_and_stops_at_limit() {
     let seqs: Vec<u64> = body
         .iter()
         .map(|l| {
-            l.rsplit('/')
-                .next()
+            // 输出为平台绝对路径（Windows 用 \ 分隔），统一经 file_name 取文件名
+            Path::new(l)
+                .file_name()
                 .unwrap()
+                .to_string_lossy()
                 .trim_start_matches("file_")
                 .trim_end_matches(".rs")
                 .parse::<u64>()
