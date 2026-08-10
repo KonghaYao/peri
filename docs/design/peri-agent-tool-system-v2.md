@@ -248,12 +248,12 @@ stage 装配步骤 8：format!("{system_prompt}\n\n{contributions}") 追加到 s
 要点：
 
 - **声明入口**：`prompt_declaration()` 是工具对提示词层的唯一出口——05 段落
-  "Choosing the right tool" 条目的程序化来源（迁移见 2.5.5）。
+  工具条目的程序化来源（全量迁移后 05 仅保留通用纪律，见 2.5.5）。
 - **参与集 = LLM 可见集**：运行时集合为 `shared_tools` 中 `is_direct() = true`
-  的工具（14 Core + 3 Meta + SubAgentTool；SubAgentTool 默认不声明，无输出
-  差异）。与 `CORE_TOOL_NAMES` 白名单解耦——未来新增 direct 工具自动进入
-  声明段。Deferred 工具走 SearchExtraTools 索引（2.4），数量不可控，不进
-  声明段。
+  的工具（14 Core + 3 Meta + SubAgentTool；SubAgentTool 已声明，归入
+  `interaction` 分组）。与 `CORE_TOOL_NAMES` 白名单解耦——未来新增 direct
+  工具自动进入声明段。Deferred 工具走 SearchExtraTools 索引（2.4），数量不可
+  控，不进声明段。
 - **合并策略**：`cached_contribution` 原承载 deferred 工具列表（索引
   `cached_prompt()`），声明段与之**拼接共存**——deferred 列表在前、声明段在
   后，`\n\n` 分隔；任一段为空时只保留另一段。不得覆盖 deferred 列表
@@ -304,29 +304,18 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 - 声明段内容变更（工具描述修改）会使 contribution 变化，但 frozen 前缀不受影响——
   描述迭代不破坏缓存，符合"静态区域冻结、动态区域可演进"原则（peri-agent-system-prompt-v2 第 1 节）
 
-### 2.5.5 与 05_using_tools.md 的关系（渐进迁移）
+### 2.5.5 与 05_using_tools.md 的关系（全量迁移完成）
 
-- 05 段落保留**通用纪律**：文件头部的 batch/incremental 规则、Bash discipline
-  节等与具体工具无关的规则（05_using_tools.md:3-4、22-29）。"Choosing the
-  right tool" 节（05:6-20）**全部是工具条目**（13 条，Write+Edit 合一），
-  逐工具迁移。
-- "Choosing the right tool" 条目**逐工具迁移**：工具实现 `prompt_declaration()`
-  后，05 中对应手写条目删除——同一事实单一来源（工具代码）。
-- 迁移完成前：手写条目保留，工具不重复声明；迁移清单 = 14 个 Core 工具 +
-  3 个 Meta 工具（SearchExtraTools / ExecuteExtraTool / ArtifactTool）。
-  注意：Meta 工具在 05 中**无手写条目**，"删除手写条目"仅适用于 Core——
-  Meta 部分为纯新增，迁移时直接实现 `prompt_declaration()` 即可。
-- **迁移期缓存代价（一次性）**：05 位于 IMMUTABLE_SECTIONS（Anthropic 前缀
-  缓存命中区域），逐工具删除手写条目会使静态区字节变化 → 全量前缀缓存
-  失效。2.5.4 的"描述迭代不破坏缓存"仅对迁移完成后的声明段成立（声明段
-  已在动态区）。
-- **SubAgent 路径（迁移约束）**：SubAgent 的 system prompt 为 frozen prompt
-  （不含 middleware contributions），05 段作为 IMMUTABLE_SECTIONS 随 frozen
-  进入 SubAgent——迁移完成前 SubAgent 仍有手写工具指引。全部条目删除后
-  SubAgent 将失去工具选择指导，且不能简单把声明段并入 frozen（与 SubAgent
-  前缀一致性语义冲突）。本闭环未处理该路径，记为未来项；迁移时不得整体
-  删除 05 段，须先解决 SubAgent 链的声明装配。
-- 迁移纪律由测试守护（2.5.6），防止同一工具事实双份维护。
+05 段落仅保留**通用纪律**（文件头部的 batch/incremental 规则与 Bash discipline
+节，05_using_tools.md:3-4、6-13）；"Choosing the right tool" 小节已整体删除，
+全部 14 个 Core + 3 个 Meta 工具的 `prompt_declaration()` 已就位——分组为
+`filesystem`（Read/Write/Edit/Glob/Grep/folder_operations）、`execution`（Bash）、
+`web`（WebFetch/WebSearch）、`interaction`（Agent/AskUserQuestion/TodoWrite）、
+`skills`（SkillTool/DiscoverSkillsTool）、`meta`（SearchExtraTools/ExecuteExtraTool/
+ArtifactTool）。声明段是工具选择指引的**单一事实源**（工具代码），05 不再维护
+任何工具条目；SubAgent 路径经 frozen prompt 不再获得 05 工具指引，该约束与
+SubAgent 链的声明装配一并记为未来项（见 2.5.2 时序限制）。迁移纪律由测试
+守护（2.5.6）：05 无工具条目残留 + 渲染输出与 05 剩余内容无逐字重复。
 
 ### 2.5.6 测试要求
 
@@ -335,5 +324,5 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 | 渲染完整性 | 所有 Core/Meta 工具声明渲染后无未识别占位符残留 |
 | 稳定性 | 同一工具集两次收集输出字节级相同（防排序/缓存回归） |
 | 排序 | namespace + name 字典序 |
-| 迁移守护 | 05 段落手写条目与声明段不重复维护同一工具事实 |
+| 迁移守护 | 05 段落无工具条目残留；声明段渲染输出与 05 剩余内容无逐字重复（全量迁移完成态） |
 | 缓存保护 | 注入不同 cwd/date 断言声明段输出不变（不引用会话数据） |

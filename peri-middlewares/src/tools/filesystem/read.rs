@@ -86,7 +86,8 @@ impl BaseTool for ReadFileTool {
     ///
     /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导
     /// （"Read" → "Read"），验证缺省推导在真实工具上生效。
-    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    /// 全量迁移完成：声明段是工具选择指引的单一事实源，05 段落无对应条目
+    /// （守护测试断言渲染输出与 05 剩余内容无逐字重复）。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
             "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`."

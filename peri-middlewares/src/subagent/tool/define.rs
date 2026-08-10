@@ -418,6 +418,22 @@ impl BaseTool for SubAgentTool {
         true
     }
 
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：委派独立子任务/专业工作。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Hand off independent or specialized tasks → `{{name}}` ({{title}}). Agent types and usage live in the SubAgent docs."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         AGENT_DESCRIPTION
     }

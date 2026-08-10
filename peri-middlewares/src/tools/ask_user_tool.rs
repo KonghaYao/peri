@@ -87,6 +87,22 @@ impl BaseTool for AskUserTool {
         true
     }
 
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：向用户提问，含批量合并纪律。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Ask the user to decide → `{{name}}` ({{title}}): structured choices, 1 to 4 questions per call. Group every independent question into one call (3 questions in one call beats 3 separate calls; drop to 1 only when nothing else needs clarifying), and prefer `{{name}}` to free-text hedging or guessing."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         ask_user_tool_definition().description.leak()
     }

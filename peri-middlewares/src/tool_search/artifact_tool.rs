@@ -110,6 +110,22 @@ impl BaseTool for ArtifactTool {
         true
     }
 
+    /// Meta 工具统一分组（design v2 §2.5.1）。
+    fn namespace(&self) -> Option<&str> {
+        Some("meta")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：说明桥接用途——上传 HTML/Markdown
+    /// 生成共享链接（7d/30d 过期）。
+    /// title 不覆盖——走派生路径（"artifact" → "Artifact"）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Share generated HTML/Markdown as a public link → `{{name}}` ({{title}}). \
+             The link expires in 7 or 30 days; use for dashboards, reports, and prototypes you want to share."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         "Upload an HTML or Markdown file to a public URL with automatic expiry. \
          Markdown files (.md) are automatically converted to a styled HTML page \

@@ -159,6 +159,20 @@ impl BaseTool for BashTool {
         true
     }
 
+    /// 执行类工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("execution")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）。
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         BASH_DESCRIPTION
     }

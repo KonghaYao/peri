@@ -23,8 +23,8 @@ fn test_no_overrides_contains_all_sections() {
         "应包含 03_doing_tasks Ask Before Diving 段落"
     );
     assert!(
-        result.contains("prefer AskUserQuestion over continuing to guess"),
-        "应包含 05_using_tools AskUserQuestion 推测优先提问规则"
+        result.contains("Batch independent tool calls"),
+        "应包含 05_using_tools 通用工具纪律（工具条目已迁移至声明段）"
     );
     assert!(result.contains("<env>"), "应包含 07_env 段落");
     assert!(
@@ -1204,13 +1204,13 @@ fn test_detect_is_git_repo_non_repo() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// [迁移守护] 05_using_tools.md 手写条目与声明段不得逐字重复（design v2 §2.5.5/2.5.6）。
+/// [迁移守护] 05_using_tools.md 无工具条目残留（design v2 §2.5.5/2.5.6 全量迁移完成态）。
 ///
-/// 渐进迁移语义：工具实现 `prompt_declaration` 后，05 对应手写条目应删除
-/// ——同一事实单一来源（工具代码）。迁移完成前的过渡态以弱约束兜底：
-/// 声明段渲染结果不得与 05 中对应手写条目逐字重复。
+/// 全量迁移语义：全部 14 Core + 3 Meta 工具的 `prompt_declaration` 已就位，
+/// 05 "Choosing the right tool" 小节整体删除——声明段是工具选择指引的单一
+/// 事实来源（工具代码），05 不再维护任何工具条目。
 #[tokio::test]
-async fn test_declaration_segment_does_not_duplicate_05_handwritten_entry() {
+async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -1224,11 +1224,14 @@ async fn test_declaration_segment_does_not_duplicate_05_handwritten_entry() {
         env!("CARGO_MANIFEST_DIR"),
         "/prompts/sections/05_using_tools.md"
     ));
-    // 05_using_tools.md:10 的 Read 手写条目核心文本（过渡态前置条件）
-    let handwritten_read = "**Read a file** → `Read`. Do not use `Bash` with `cat`/`head`/`tail`.";
+    // 全量迁移完成态：05 无任何工具条目（"Choosing the right tool" 小节已删除）
     assert!(
-        section_05.contains(handwritten_read),
-        "05 应含 Read 手写条目（迁移完成前的过渡态）"
+        !section_05.contains("## Choosing the right tool"),
+        "05 不应残留工具条目小节（全量迁移完成）"
+    );
+    assert!(
+        !section_05.contains("**Read a file**"),
+        "05 不应残留 Read 手写条目（全量迁移完成）"
     );
 
     // 经真实装配面收集声明段：ToolSearchMiddleware.before_agent →
@@ -1250,17 +1253,13 @@ async fn test_declaration_segment_does_not_duplicate_05_handwritten_entry() {
         contribution.contains("Read a file → `Read` (Read). Use `Read` for file content"),
         "声明段应渲染 Read 模板（title 走 name 派生）：{contribution}"
     );
-    assert!(
-        !contribution.contains(handwritten_read),
-        "声明段不得与 05 手写 Read 条目逐字重复（同一事实单一来源）"
-    );
-    // 反向：05 手写条目不得包含声明段渲染行
+    // 反向：05 剩余内容不得包含声明段渲染行
     let decl_line = contribution
         .lines()
         .find(|l| l.starts_with("Read a file"))
         .unwrap();
     assert!(
         !section_05.contains(decl_line),
-        "05 手写条目不得与声明段渲染行逐字重复"
+        "05 不得与声明段渲染行逐字重复"
     );
 }

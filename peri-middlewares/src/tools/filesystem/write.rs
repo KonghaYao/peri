@@ -91,6 +91,21 @@ impl BaseTool for WriteFileTool {
         true
     }
 
+    /// 同类工具分组（design v2 §2.5.1）：filesystem 工具统一归组。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：对应 05 段落 "Write or edit a file"
+    /// 条目语义（选择指引 + 纪律约束），不逐字重复（守护测试断言）。
+    /// title 不覆盖——走 `tool_description` 默认推导路径。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Write a file → `{{name}}` (full contents). Use `{{name}}` for writing files, not `echo >`/`sed`/`awk`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         WRITE_FILE_DESCRIPTION
     }

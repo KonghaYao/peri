@@ -99,6 +99,22 @@ impl BaseTool for ExecuteExtraTool {
         true
     }
 
+    /// Meta 工具统一分组（design v2 §2.5.1）。
+    fn namespace(&self) -> Option<&str> {
+        Some("meta")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：说明桥接用途——按名称调用已注册
+    /// 的 Deferred 工具；Core 工具无需经此。
+    /// title 不覆盖——走派生路径（"ExecuteExtraTool" → "Execute Extra Tool"）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Invoke a registered deferred tool by name → `{{name}}` ({{title}}). \
+             Use this after SearchExtraTools returns a tool name; call core tools in your tool list directly."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

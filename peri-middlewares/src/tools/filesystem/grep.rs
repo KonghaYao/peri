@@ -230,6 +230,21 @@ impl BaseTool for GrepTool {
         true
     }
 
+    /// 同类工具分组（design v2 §2.5.1）：filesystem 工具统一归组。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：对应 05 段落 "File content search"
+    /// 条目语义（选择指引 + 纪律约束），不逐字重复（守护测试断言）。
+    /// title 不覆盖——走 `tool_description` 默认推导路径。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Search file contents → `{{name}}` (regex, fast, scoped). Use `{{name}}` for content search, not `grep`/`rg`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         GREP_DESCRIPTION
     }

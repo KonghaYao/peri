@@ -196,3 +196,166 @@ fn test_collect_declarations_empty_returns_none() {
     assert_eq!(collect_declarations(&[no_decl]), None);
     assert_eq!(collect_declarations(&[]), None);
 }
+
+// -- 全量渲染守护（design v2 §2.5.5/2.5.6：全量迁移完成态） ---------------------
+
+/// 真实装配面 direct 工具集：14 Core + 3 Meta。
+///
+/// 与 ToolSearchMiddleware.before_agent 的声明段数据源同构（shared_tools 中
+/// is_direct() = true 的工具；Meta 三件套与 Core 由同一装配面注册）。各工具
+/// 使用真实构造器，保证声明模板即线上模板。
+fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
+    use std::collections::BTreeMap;
+
+    use crate::middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware};
+    use crate::skills::tools::{DiscoverSkillsTool, SkillTool};
+    use crate::skills::SkillMetadata;
+    use crate::subagent::SubAgentTool;
+    use crate::tool_search::artifact_tool::ArtifactTool;
+    use crate::tool_search::{ExecuteExtraTool, SearchExtraTools, ToolSearchIndex};
+    use crate::tools::{AskUserTool, TodoWriteTool};
+    use parking_lot::RwLock as PLRwLock;
+    use peri_agent::agent::react::ReactLLM;
+    use peri_agent::interaction::{InteractionContext, InteractionResponse, UserInteractionBroker};
+
+    /// 声明测试不触发交互——request 永不调用。
+    struct NoopBroker;
+    #[async_trait::async_trait]
+    impl UserInteractionBroker for NoopBroker {
+        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+            unreachable!("声明测试不触发用户交互")
+        }
+    }
+
+    let mut tools: Vec<Arc<dyn BaseTool>> = Vec::new();
+    // 6 filesystem：Read/Write/Edit/Glob/Grep/folder_operations
+    for t in FilesystemMiddleware::build_tools("/tmp") {
+        tools.push(Arc::from(t));
+    }
+    // 1 execution：Bash
+    for t in TerminalMiddleware::build_tools("/tmp") {
+        tools.push(Arc::from(t));
+    }
+    // 2 web：WebFetch/WebSearch
+    for t in WebMiddleware::build_tools() {
+        tools.push(Arc::from(t));
+    }
+    // 3 interaction：Agent/AskUserQuestion/TodoWrite
+    tools.push(Arc::new(SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(|_: Option<&str>| -> Box<dyn ReactLLM + Send + Sync> {
+            unreachable!("声明测试不触发子 agent")
+        }),
+        "/tmp".to_string(),
+    )));
+    tools.push(Arc::new(AskUserTool::new(Arc::new(NoopBroker))));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<crate::tools::TodoItem>>(8);
+    tools.push(Arc::new(TodoWriteTool::new(tx)));
+    // 2 skills：SkillTool/DiscoverSkillsTool
+    let cached: Arc<std::sync::RwLock<Option<Vec<SkillMetadata>>>> =
+        Arc::new(std::sync::RwLock::new(None));
+    tools.push(Arc::new(SkillTool::new(Arc::clone(&cached))));
+    tools.push(Arc::new(DiscoverSkillsTool::new(cached)));
+    // 3 meta：SearchExtraTools/ExecuteExtraTool/ArtifactTool
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared: Arc<PLRwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
+        Arc::new(PLRwLock::new(BTreeMap::new()));
+    tools.push(Arc::new(SearchExtraTools::new(Arc::clone(&index))));
+    tools.push(Arc::new(ExecuteExtraTool::new(Arc::clone(&shared))));
+    tools.push(Arc::new(ArtifactTool::new("/tmp".to_string())));
+    tools
+}
+
+/// [2.5.6-全量渲染] 真实 direct 工具集（14 Core + 3 Meta）声明渲染后无
+/// 未识别占位符残留（含 `{{` 未闭合检测）。
+#[test]
+fn test_all_real_tool_declarations_render_without_placeholder_residue() {
+    use crate::tool_search::core_tools::{
+        EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME, TOOL_AGENT, TOOL_ASK_USER, TOOL_BASH,
+        TOOL_DISCOVER_SKILLS, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_GLOB, TOOL_GREP, TOOL_READ,
+        TOOL_SKILL, TOOL_TODO, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
+    };
+    let tools = build_real_direct_tools();
+
+    // 覆盖完整性：CORE_TOOL_NAMES 14 个 + 3 个 Meta 全部就位且全部声明
+    let expected: &[&str] = &[
+        TOOL_READ,
+        TOOL_WRITE,
+        TOOL_EDIT,
+        TOOL_GLOB,
+        TOOL_GREP,
+        TOOL_FOLDER_OPS,
+        TOOL_BASH,
+        TOOL_WEBFETCH,
+        TOOL_WEBSEARCH,
+        TOOL_AGENT,
+        TOOL_ASK_USER,
+        TOOL_TODO,
+        TOOL_SKILL,
+        TOOL_DISCOVER_SKILLS,
+        SEARCH_EXTRA_TOOLS_NAME,
+        EXECUTE_EXTRA_TOOL_NAME,
+        "artifact",
+    ];
+    for name in expected {
+        let tool = tools
+            .iter()
+            .find(|t| t.name() == *name)
+            .unwrap_or_else(|| panic!("direct 工具集缺少 {name}"));
+        assert!(
+            tool.prompt_declaration().is_some(),
+            "{name} 应实现 prompt_declaration（全量迁移完成）"
+        );
+    }
+
+    let rendered = collect_declarations(&tools).expect("真实工具集声明段非空");
+    assert!(
+        !rendered.contains("{{"),
+        "声明段不得残留占位符（含 {{ 未闭合）：\n{rendered}"
+    );
+}
+
+/// [2.5.6-全量稳定] 真实工具集两次收集字节级相同（防排序/缓存回归）。
+#[test]
+fn test_all_real_tool_declarations_byte_stable_across_calls() {
+    let tools = build_real_direct_tools();
+    let first = collect_declarations(&tools).unwrap();
+    let second = collect_declarations(&tools).unwrap();
+    assert_eq!(first, second);
+}
+
+/// [2.5.6-迁移守护] 声明段渲染输出与 05_using_tools.md 剩余内容无逐字重复行。
+///
+/// 全量迁移完成态：05 仅保留通用纪律与 Bash discipline（"Choosing the right
+/// tool" 小节已删除），任何声明渲染行不得与 05 现有行逐字相同——工具选择
+/// 指引的单一事实源是声明段（工具代码）。
+#[test]
+fn test_declarations_no_verbatim_line_overlap_with_05() {
+    const SECTION_05: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../peri-acp/prompts/sections/05_using_tools.md"
+    ));
+    // 05 无工具条目残留（删条守护）
+    assert!(
+        !SECTION_05.contains("## Choosing the right tool"),
+        "05 不应残留工具条目小节（全量迁移完成）"
+    );
+    assert!(
+        !SECTION_05.contains("**Read a file**"),
+        "05 不应残留 Read 手写条目（全量迁移完成）"
+    );
+
+    let rendered = collect_declarations(&build_real_direct_tools()).unwrap();
+    let decl_lines: Vec<&str> = rendered.lines().map(str::trim).collect();
+    for line in SECTION_05.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        assert!(
+            !decl_lines.contains(&trimmed),
+            "05 行与声明段逐字重复（同一事实双份维护）：{trimmed:?}"
+        );
+    }
+}
