@@ -1,6 +1,6 @@
 # SubAgent 恢复机制：主 agent 凭 thread_id 重新唤起被中断的 subagent
 
-**状态**：Ready for agent
+**状态**：Fixed
 **标签**：`ready-for-agent`、`subagent`、`resume`
 **优先级**：高
 **类型**：功能
@@ -97,8 +97,41 @@ subagent 在执行中可能因 LLM 网络中断或用户手动 interrupt 而中�
 - `peri-middlewares/src/subagent/tool/descriptions/agent.md` — resume 用法与恢复指引
 - 测试：`peri-agent/src/session/subagent_test.rs`、`peri-middlewares/src/subagent/tool/tool_test.rs`、`e2e/`
 
+## 症状详情（2026-08-10 使用实录）
+
+功能已实现并可用，但**恢复失败的错误文案不可读**。实录：并行派三个研究 subagent，一个中断后尝试恢复，两次失败：
+
+1. **互斥错误无用法指引**：`resume_thread_id` 与 `subagent_type` 同时传 → 报 `Error: resume_thread_id is mutually exclusive with fork / subagent_type`（define.rs 互斥校验）。错误只说"互斥"，没说怎么传才对（恢复时应只传 `resume_thread_id`，不传 `subagent_type` / `fork`）。
+2. **parent mismatch 无解释**：只传 `resume_thread_id` → 报 `resume_subagent: parent thread mismatch for <id>`（resume_subagent_impl parent 链校验）。用户不知道 parent thread 是什么、为什么并行派发的 subagent 报此错。
+3. **文案观感像安全错误**：错误文本形似密码学签名，用户无法判断是「权限问题」还是「用法问题」，无从排查。
+4. **后果**：两次失败后用户放弃恢复，重新派全新 agent 从头讲任务，token 和时间双倍消耗。
+
+## 修复要求（2026-08-10 补充，范围：仅 resume 相关错误）
+
+- 涉及文件：`peri-middlewares/src/subagent/tool/define.rs`（互斥错误文案）、`peri-agent/src/session/subagent.rs`（parent mismatch 校验文案，含 active 校验文案一并评估）、`peri-middlewares/src/subagent/tool/descriptions/agent.md`（resume 说明补「常见失败原因」）。
+- 错误文案改为「人话版原因 + 正确用法示例」，保留 thread_id 等关键信息：
+  - 互斥错误 → 给出正确用法（`Agent(resume_thread_id: <id>)`，勿与 subagent_type / fork 同传）；
+  - parent mismatch → 说明「该 thread 属于其他父 agent（并行兄弟上下文），本会话无权恢复」；
+  - active → 说明「thread 仍为运行态，确认无执行中任务后再恢复」。
+
 ## 状态变更记录
 
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-08-09 | — | Ready for agent | agent | 经访谈收敛 16 项设计决策后成文（入口形态/持久化边界/续跑语义/状态判定/生命周期/所有权/后台 run mode/隐式 continue/多次恢复/工具集/错误语义/ID 携带/测试/归因/描述文档） |
+| 2026-08-10 | Ready for agent | Ready for agent | 用户 | 补充使用反馈：恢复失败错误文案不可读（互斥无用法指引、parent mismatch 无解释、观感像安全错误）；新增「症状详情」「修复要求」，修复范围=仅 resume 相关错误文案 |
+| 2026-08-10 | Ready for agent | Fixed | agent | 修复：resume 错误文案改为人话版+用法示例（define.rs 互斥、subagent.rs parent mismatch/active、agent.md 补常见失败原因、测试断言同步） |
+
+## 修复记录
+
+### 修复 #1（2026-08-10）
+
+- **操作人**：agent
+- **用户原意**：resume 恢复失败的错误文案不可读（互斥无用法指引、parent mismatch 无解释、观感像安全错误）；失败时直接给「恢复用法示例」和「失败原因人话版」。
+- **修复内容**：
+  - `peri-middlewares/src/subagent/tool/define.rs`：互斥错误补正确用法示例（恢复只传 `resume_thread_id`，勿带 subagent_type / fork），保留 `mutually exclusive` 关键词；
+  - `peri-agent/src/session/subagent.rs`：parent mismatch 补中文人话解释（该 thread 属于其他父 agent，仅原父 agent 可恢复，或改传 subagent_type 新建）；active 错误补「仍在执行或异常未收尾」解释与新建替代用法；
+  - `peri-middlewares/src/subagent/tool/descriptions/agent.md`：Resume execution 段补「Common failures」三条（互斥 / parent mismatch / thread not found）；
+  - `peri-agent/src/session/subagent_test.rs`：两处精确错误文案断言同步更新。
+- **涉及 commit**：未提交（用户未要求 commit）
+- **验证状态**：待验证

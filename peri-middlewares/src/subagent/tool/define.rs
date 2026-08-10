@@ -534,7 +534,10 @@ impl BaseTool for SubAgentTool {
         // 互斥校验放分支前：resume 与 fork / subagent_type 二选一
         if resume_thread_id.is_some() && (is_fork || subagent_type.is_some()) {
             return Err(
-                "Error: resume_thread_id is mutually exclusive with fork / subagent_type".into(),
+                "Error: resume_thread_id is mutually exclusive with fork / subagent_type. \
+                To resume, call Agent(resume_thread_id: <id>) ONLY — pass neither subagent_type nor fork; \
+                the child_thread_id from the interrupted/error text is <id>"
+                    .into(),
             );
         }
         // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
