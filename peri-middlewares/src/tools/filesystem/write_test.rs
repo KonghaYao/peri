@@ -475,11 +475,13 @@ async fn test_write_requires_content_or_from_draft() {
     );
 }
 
+/// 回归（互斥劫持）：LLM 同时携带 content 与 from_draft 时，content 优先、
+/// 直接写入成功（原「互斥报错」会导致文件无法落盘、模型被迫重输出一遍内容）。
 #[tokio::test]
 async fn test_write_content_and_from_draft_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-    let err = tool
+    let result = tool
         .invoke(
             serde_json::json!({
                 "file_path": "f.txt",
@@ -489,12 +491,67 @@ async fn test_write_content_and_from_draft_mutually_exclusive() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
+        .unwrap();
+    assert!(result.contains("x"), "应以 content 优先写入: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "x",
+        "文件应落盘 content 内容"
+    );
+}
+
+/// 回归（占位符）：from_draft 填占位符（"" / "__omit__"）等同未提供，content 生效
+#[tokio::test]
+async fn test_write_from_draft_placeholder_uses_content() {
+    for placeholder in ["", "__omit__"] {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "file_path": "f.txt",
+                    "content": "real",
+                    "from_draft": placeholder,
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Wrote 1 line"),
+            "占位符 from_draft {:?} 应等同未提供并写入成功: {}",
+            placeholder,
+            result
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "real",
+            "占位符 from_draft {:?} 时文件应落盘 content 内容",
+            placeholder
+        );
+    }
+}
+
+/// content 为占位符、from_draft 也未提供 → 报缺参数（不把占位符当正文写入）
+#[tokio::test]
+async fn test_write_content_placeholder_without_from_draft_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let err = tool
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "content": "__omit__"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("mutually exclusive"), "互斥文案: {err}");
+    assert!(
+        err.contains("Either 'content' or 'from_draft' must be provided"),
+        "缺参数文案: {err}"
+    );
     assert!(
         !dir.path().join("f.txt").exists(),
-        "互斥错误不应产生任何文件"
+        "不应把占位符当正文写入文件"
     );
 }
 

@@ -329,15 +329,22 @@ impl BaseTool for WriteSandboxTool {
         let target = self.validate_path(path)?;
         let target_str = target.to_string_lossy().to_string();
 
-        let (content, _append) = match (input["content"].as_str(), input["from_draft"].as_str()) {
-            (Some(c), None) => (c.to_string(), false),
-            (None, Some(id)) => self.restore_draft(id, &target_str)?, // 恢复路径,SandboxWrite 无 append
-            (Some(_), Some(_)) => {
-                return Err("WriteSandbox: 'content' 与 'from_draft' 参数互斥,只能提供其一".into())
-            }
-            (None, None) => {
-                return Err("WriteSandbox: 必须提供 'content' 或 'from_draft' 参数之一".into())
-            }
+        // 宽容解析（与 Write 工具同构的容错）：LLM 常同时携带互斥参数，或用
+        // "" / "__omit__" 占位符表达「省略」——content 优先，from_draft 仅在
+        // content 未提供时使用，两者皆无才报缺参数（原「互斥报错」会让文件无法
+        // 落盘、模型被迫重输出一遍内容）。
+        let content = input["content"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && *s != "__omit__");
+        let from_draft = input["from_draft"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && *s != "__omit__");
+        let (content, _append) = if let Some(c) = content {
+            (c.to_string(), false)
+        } else if let Some(id) = from_draft {
+            self.restore_draft(id, &target_str)? // 恢复路径,SandboxWrite 无 append
+        } else {
+            return Err("WriteSandbox: 必须提供 'content' 或 'from_draft' 参数之一".into());
         };
 
         let line_count = content.lines().count();

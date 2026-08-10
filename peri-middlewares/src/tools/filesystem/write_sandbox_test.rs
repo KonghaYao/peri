@@ -371,12 +371,14 @@ async fn test_write_sandbox_requires_content_or_from_draft() {
     assert!(err.contains("必须提供"), "缺参数文案: {err}");
 }
 
+/// 回归（互斥劫持）：同时携带 content 与 from_draft 时 content 优先写入成功
+/// （原「互斥报错」导致文件无法落盘、模型被迫重输出一遍内容）。
 #[tokio::test]
 async fn test_write_sandbox_content_and_from_draft_mutually_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap().to_string();
     let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
-    let err = tool
+    let result = tool
         .invoke(
             serde_json::json!({
                 "file_path": "sandbox/f.txt",
@@ -386,13 +388,46 @@ async fn test_write_sandbox_content_and_from_draft_mutually_exclusive() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("互斥"), "互斥文案: {err}");
-    assert!(
-        !dir.path().join("sandbox/f.txt").exists(),
-        "互斥错误不应产生任何文件"
+        .unwrap();
+    assert!(result.contains("x"), "应以 content 优先写入: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sandbox/f.txt")).unwrap(),
+        "x",
+        "文件应落盘 content 内容"
     );
+}
+
+/// 回归（占位符）：from_draft 填占位符等同未提供，content 生效
+#[tokio::test]
+async fn test_write_sandbox_from_draft_placeholder_uses_content() {
+    for placeholder in ["", "__omit__"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap().to_string();
+        let tool = WriteSandboxTool::with_draft(cwd, vec!["sandbox".into()], true).unwrap();
+        let result = tool
+            .invoke(
+                serde_json::json!({
+                    "file_path": "sandbox/f.txt",
+                    "content": "real",
+                    "from_draft": placeholder,
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Wrote"),
+            "占位符 from_draft {:?} 应等同未提供并写入成功: {}",
+            placeholder,
+            result
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sandbox/f.txt")).unwrap(),
+            "real",
+            "占位符 from_draft {:?} 时文件应落盘 content 内容",
+            placeholder
+        );
+    }
 }
 
 #[tokio::test]
