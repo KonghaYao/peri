@@ -464,3 +464,91 @@ fn test_non_receive_stage_span_input_is_none() {
         "非 Receive 阶段的 input 应为 None，不应误填入 mq_counts"
     );
 }
+
+// ── 工具 TOOL observation 出入参完整性（回归：0c0a3313e 误删 input/output）──────
+
+#[tokio::test]
+async fn test_tool_observation_carries_input_and_output() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_stage_start(Stage::Reason, "turn_1");
+
+    t.on_tool_start(
+        "main",
+        "tc_read",
+        "Read",
+        &serde_json::json!({"path": "/tmp/a.txt"}),
+    );
+    t.on_tool_end("main", "tc_read", "file content: hello", false);
+
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let tool_obs = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::ObservationCreate { body, .. } = e {
+                (body.r#type == ObservationType::Tool && body.name.as_deref() == Some("Read"))
+                    .then_some(body)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_obs.len(), 1, "应有恰好 1 个 Read TOOL observation");
+
+    let obs = &tool_obs[0];
+    assert_eq!(
+        obs.input,
+        Some(serde_json::json!({"path": "/tmp/a.txt"})),
+        "TOOL observation 应携带工具输入参数"
+    );
+    assert_eq!(
+        obs.output,
+        Some(serde_json::json!("file content: hello")),
+        "TOOL observation 应携带工具执行结果"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_observation_error_marks_error_class() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_stage_start(Stage::Reason, "turn_1");
+
+    t.on_tool_start(
+        "main",
+        "tc_fail",
+        "Bash",
+        &serde_json::json!({"command": "exit 1"}),
+    );
+    t.on_tool_end("main", "tc_fail", "command failed", true);
+
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let tool_obs = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::ObservationCreate { body, .. } = e {
+                (body.r#type == ObservationType::Tool && body.name.as_deref() == Some("Bash"))
+                    .then_some(body)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_obs.len(), 1, "应有恰好 1 个 Bash TOOL observation");
+    assert_eq!(
+        tool_obs[0].input,
+        Some(serde_json::json!({"command": "exit 1"})),
+        "错误工具也应携带输入参数"
+    );
+    assert_eq!(
+        tool_obs[0].output,
+        Some(serde_json::json!({"error_class": "tool_failure"})),
+        "错误工具 output 应保留 error_class 标记"
+    );
+}

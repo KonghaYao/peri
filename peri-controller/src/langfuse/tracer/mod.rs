@@ -1560,10 +1560,12 @@ impl LangfuseTracer {
                     name: Some(tool.name.clone()),
                     start_time: Some(tool.start_time.clone()),
                     end_time: Some(tool.end_time.clone()),
-                    input: None,
-                    output: tool
-                        .is_error
-                        .then_some(serde_json::json!({"error_class": "tool_failure"})),
+                    input: Some(tool.input.clone()),
+                    output: Some(if tool.is_error {
+                        serde_json::json!({"error_class": "tool_failure"})
+                    } else {
+                        serde_json::json!(tool.output)
+                    }),
                     parent_observation_id: Some(batch.batch_span_id.clone()),
                     level,
                     version: Some(VERSION.to_string()),
