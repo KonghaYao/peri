@@ -3,6 +3,8 @@
 use super::*;
 
 /// 从错误消息中提取 draft_id(消息中 draft 信息在开头,hint 内可能出现两次)
+/// 仅被 #[cfg(unix)] 测试使用,需同步 cfg 以免非 unix 平台报 dead_code
+#[cfg(unix)]
 fn extract_draft_id(err: &str) -> String {
     let re = regex::Regex::new(r"draft_[0-9a-f-]+").unwrap();
     re.find(err).unwrap().as_str().to_string()

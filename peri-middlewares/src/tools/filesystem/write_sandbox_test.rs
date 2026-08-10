@@ -2,6 +2,8 @@ use super::WriteSandboxTool;
 use peri_agent::tools::BaseTool;
 
 /// 从错误消息中提取 draft_id
+/// 仅被 #[cfg(unix)] 测试使用,需同步 cfg 以免非 unix 平台报 dead_code
+#[cfg(unix)]
 fn extract_draft_id(err: &str) -> String {
     let re = regex::Regex::new(r"draft_[0-9a-f-]+").unwrap();
     re.find(err).unwrap().as_str().to_string()
