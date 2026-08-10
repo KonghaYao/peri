@@ -89,7 +89,7 @@ fn test_tool_name_is_Glob() {
 }
 
 #[tokio::test]
-async fn test_glob_truncation_persists_full_output() {
+async fn test_glob_truncation_persists_collected_output() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..1001 {
         std::fs::write(dir.path().join(format!("file_{:04}.rs", i)), "").unwrap();
@@ -310,4 +310,356 @@ async fn test_glob_invalid_pattern_returns_error() {
         err.contains("Pattern syntax error"),
         "错误应该提到 Pattern syntax error，实际: {err}"
     );
+}
+
+// ─── plan_walk：walk 边界规划（白盒纯函数）──────────────────────
+
+#[test]
+fn test_plan_walk_literal_pattern_is_single_level() {
+    // 无元字符的纯字面 pattern：只命中精确路径 → 单层扫描即可。
+    let plan = plan_walk("Cargo.toml");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, Some(0));
+}
+
+#[test]
+fn test_plan_walk_literal_pattern_narrows_to_parent_dirs() {
+    let plan = plan_walk("a/b.rs");
+    assert_eq!(plan.prefix_dirs, vec!["a"]);
+    assert_eq!(plan.max_depth, Some(1));
+    let plan = plan_walk("src/main.rs");
+    assert_eq!(plan.prefix_dirs, vec!["src"]);
+    // 1 个 `/`：`src/main.rs` 在 depth 2，其父目录 `src` 在 depth 1 不会被剪。
+    assert_eq!(plan.max_depth, Some(1));
+}
+
+#[test]
+fn test_plan_walk_metachar_pattern_has_no_depth_limit() {
+    // glob::Pattern::matches 默认 require_literal_separator=false：`*`/`?` 可跨 `/`，
+    // 含元字符的 pattern 可在任意深度命中 → 深度剪枝不安全，只保留前缀剪枝。
+    for pat in [
+        "*.rs",
+        "**/*.rs",
+        "src/**/*.rs",
+        "src/*.rs",
+        "a/b/*.rs",
+        "?x",
+    ] {
+        let plan = plan_walk(pat);
+        assert_eq!(plan.max_depth, None, "pattern {pat:?} 不应有深度上限");
+    }
+}
+
+#[test]
+fn test_plan_walk_static_prefix_narrows_walk() {
+    let plan = plan_walk("src/**/*.rs");
+    assert_eq!(plan.prefix_dirs, vec!["src"]);
+    let plan = plan_walk("src/*.rs");
+    assert_eq!(plan.prefix_dirs, vec!["src"]);
+    let plan = plan_walk("a/b/*.rs");
+    assert_eq!(plan.prefix_dirs, vec!["a", "b"]);
+}
+
+#[test]
+fn test_plan_walk_unsafe_segment_keeps_full_walk() {
+    // 元字符在段中 → 前缀不是完整目录链，不能提取
+    let plan = plan_walk("src*/*.rs");
+    assert!(plan.prefix_dirs.is_empty());
+    // 前导 `/` → 匹配绝对路径，相对路径永不命中 → 回退全遍历
+    let plan = plan_walk("/src/*.rs");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, None);
+    // 前缀含字面 `\`（glob 0.3.3 无转义，`\` 是普通字符）→ 目录名无法与原始名字比较，保守回退
+    let plan = plan_walk(r"\[x\]/*.rs");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, None);
+    // `\[a\]/b` 含字符类 `[a\]`，不是纯字面 → 无深度上限
+    let plan = plan_walk(r"\[a\]/b");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, None);
+    // 回归：`\` 后紧跟 `*` 时 `*` 仍是跨段元字符；若把 `\*` 当转义会误判为纯字面，
+    // max_depth 错误地钳制为单层，子目录中的命中（如 `\sub/x.rs`）被静默剪掉。
+    let plan = plan_walk(r"\*.rs");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, None);
+    // 无元字符的纯字面 pattern 含 `\`：仍可按 `/` 数钉死深度（整串精确匹配）
+    let plan = plan_walk(r"a\b");
+    assert!(plan.prefix_dirs.is_empty());
+    assert_eq!(plan.max_depth, Some(0));
+}
+
+// ─── 匹配语义锁定（黑盒）────────────────────────────────────────
+
+#[tokio::test]
+async fn test_glob_star_matches_files_at_any_depth() {
+    // 锁定当前 glob::Pattern::matches 语义：`*` 跨 `/`，`*.rs` 也会命中嵌套文件。
+    // 若未来改为 require_literal_separator=true（非跨段），此测试需随契约同步更新。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/b.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a.rs"));
+    assert!(
+        result.contains("b.rs"),
+        "`*` 跨 `/`，应命中 sub/b.rs: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_glob_literal_pattern_only_matches_exact_path() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/Cargo.toml"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "Cargo.toml"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("/Cargo.toml"),
+        "应命中根层 Cargo.toml: {result}"
+    );
+    assert!(
+        !result.contains("sub/Cargo.toml"),
+        "字面 pattern 只应命中根层: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_glob_prefix_narrowing_finds_nested_files() {
+    // 前缀剪枝（src/**/*.rs → 只下钻 src）不得改变结果集。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/deep")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+    std::fs::write(dir.path().join("src/deep/b.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "src/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a.rs"), "应找到 src/a.rs: {result}");
+    assert!(result.contains("b.rs"), "应找到 src/deep/b.rs: {result}");
+}
+
+#[tokio::test]
+async fn test_glob_skips_node_modules_deep_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::write(dir.path().join("node_modules/pkg/deep.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("main.rs"), "应找到 main.rs: {result}");
+    assert!(
+        !result.contains("deep.rs"),
+        "node_modules 副本不应被扫到: {result}"
+    );
+}
+
+// ─── symlink 边界（unix）────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_glob_does_not_follow_symlinked_dirs() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("real")).unwrap();
+    std::fs::write(dir.path().join("real/inner.rs"), "").unwrap();
+    // 指向树内目录的 symlink
+    symlink(dir.path().join("real"), dir.path().join("link_internal")).unwrap();
+    // 指向树外目录的 symlink（哨兵文件在 root 之外）
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.rs"), "").unwrap();
+    symlink(outside.path(), dir.path().join("link_outside")).unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("real/inner.rs"),
+        "应找到 real/inner.rs: {result}"
+    );
+    assert!(
+        !result.contains("link_internal"),
+        "不应跟随目录 symlink: {result}"
+    );
+    assert!(
+        !result.contains("outside.rs"),
+        "不应跟随树外 symlink: {result}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_glob_does_not_match_symlinked_files() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("real.rs"), "").unwrap();
+    symlink(dir.path().join("real.rs"), dir.path().join("alias.rs")).unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("real.rs"), "应找到 real.rs: {result}");
+    assert!(
+        !result.contains("alias.rs"),
+        "symlink 文件不应被匹配: {result}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_glob_symlink_loop_terminates() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    // 自指 symlink 环：walk 必须正常结束，不得挂死（防回归）。
+    symlink(dir.path(), dir.path().join("loop")).unwrap();
+    std::fs::write(dir.path().join("a.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a.rs"), "应找到 a.rs: {result}");
+}
+
+// ─── 排序与截断（确定性，显式 mtime，不依赖墙钟）────────────────
+
+#[tokio::test]
+async fn test_glob_results_sorted_by_mtime_descending() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, secs) in [
+        ("old.rs", 1_600_000_000i64),
+        ("mid.rs", 1_600_000_100i64),
+        ("new.rs", 1_600_000_200i64),
+    ] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, "").unwrap();
+        filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(secs, 0)).unwrap();
+    }
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+    assert_eq!(lines.len(), 3, "应返回 3 个文件: {result}");
+    assert!(lines[0].ends_with("new.rs"), "最新应排第一: {result}");
+    assert!(lines[1].ends_with("mid.rs"), "中间应排第二: {result}");
+    assert!(lines[2].ends_with("old.rs"), "最旧应排最后: {result}");
+}
+
+#[tokio::test]
+async fn test_glob_truncation_sorted_and_stops_at_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    // 2001 个文件，mtime 与序号单调递增（显式设置，不依赖墙钟）。
+    for i in 0..2001i64 {
+        let p = dir.path().join(format!("file_{i:04}.rs"));
+        std::fs::write(&p, "").unwrap();
+        filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(1_600_000_000 + i, 0))
+            .unwrap();
+    }
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.contains("Output truncated"),
+        "应显示截断信息: {result}"
+    );
+    assert!(
+        result.contains("collection stopped at the result limit"),
+        "应说明提前停止: {result}"
+    );
+    // 截断段之前恰好 1000 行，且按 mtime 降序（序号大 = mtime 新）。
+    // 注意 lines() 会把 notice 前的空行也吐出来，需过滤。
+    let body: Vec<&str> = result
+        .lines()
+        .take_while(|l| !l.contains("Output truncated"))
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(body.len(), 1000, "应恰好 1000 行: {result}");
+    let seqs: Vec<u64> = body
+        .iter()
+        .map(|l| {
+            l.rsplit('/')
+                .next()
+                .unwrap()
+                .trim_start_matches("file_")
+                .trim_end_matches(".rs")
+                .parse::<u64>()
+                .unwrap()
+        })
+        .collect();
+    for w in seqs.windows(2) {
+        assert!(w[0] > w[1], "应按 mtime 降序，实际 {} 在 {} 前", w[0], w[1]);
+    }
+}
+
+// ─── async 不阻塞（白盒 poll，零 wall-clock）────────────────────
+
+#[tokio::test]
+async fn test_glob_invoke_yields_before_scanning() {
+    let dir = tempfile::tempdir().unwrap();
+    // 扫描量需足够大（ms 级）：首次 poll 断言 Pending 存在理论竞态——若主线程在
+    // spawn_blocking 调度后被 OS 抢占、blocking 线程恰好先完成全部扫描，poll 会返回
+    // Ready。扫描量越大，主线程首次 poll 完成前被抢占超过扫描耗时的概率越可忽略。
+    for i in 0..3000 {
+        std::fs::write(dir.path().join(format!("f{i}.rs")), "").unwrap();
+    }
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let fut = tool.invoke(
+        serde_json::json!({"pattern": "**/*.rs"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    );
+    let mut fut = std::pin::pin!(fut);
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    // invoke 是 async_trait 方法，返回 boxed future；poll 方法来自 Future trait。
+    use futures::Future;
+    assert!(
+        matches!(fut.as_mut().poll(&mut cx), std::task::Poll::Pending),
+        "首次 poll 必须 Pending：扫描不得直接占用 async task（应移入 spawn_blocking）"
+    );
+    let result = fut.await;
+    assert!(result.is_ok(), "await 后应正常返回: {result:?}");
 }

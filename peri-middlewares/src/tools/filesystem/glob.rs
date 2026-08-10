@@ -1,7 +1,11 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
+use tokio::time::{timeout, Duration};
 
 use super::resolve_path;
 use super::should_skip_dir;
@@ -27,11 +31,14 @@ const HEAD_RESULTS_ON_BYTES_OVERFLOW: usize = 100;
 
 const GLOB_FILES_DESCRIPTION: &str = include_str!("descriptions/glob.md");
 
+/// 扫描超时：与 Grep 工具对齐，防止大目录树上长时间占用 blocking pool。
+const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Soft-warn pattern — still executes, but prepends a warning. A hit strongly suggests the caller actually wanted to list a directory.
 fn soft_warn_pattern(pattern: &str) -> Option<&'static str> {
     match pattern.trim() {
         "*" => Some(
-            "Bare `*` matches every entry in the current directory; use folder_operations or Bash ls to list a directory instead.",
+            "Bare `*` matches files at any depth (wildcards cross `/`); use folder_operations or Bash ls to list a directory instead.",
         ),
         "**" | "**/*" => Some(
             "`**/*` recursively expands the entire subtree (including every worktree/plugin copy); prefer folder_operations or a more specific pattern.",
@@ -40,34 +47,124 @@ fn soft_warn_pattern(pattern: &str) -> Option<&'static str> {
     }
 }
 
-fn glob_match(pattern: &str, path: &str) -> bool {
-    glob::Pattern::new(pattern)
-        .map(|p| p.matches(path))
-        .unwrap_or(false)
+/// 返回 pattern 中第一个元字符（`* ? [ {`）的字节下标。
+///
+/// 注意：glob 0.3.3 无反斜杠转义——`\` 是字面字符，`\*` 中 `*` 仍是元字符
+/// （`Pattern::escape` 用 `[x]` 包裹而非 `\`）。`{` 在 glob 0.3.3 中也没有
+/// 交替语义（按字面匹配），这里按保守集合识别：把 `{` 当作元字符只会让剪枝
+/// 更保守（回退全遍历），不影响正确性。若未来升级 glob 版本，需重审此集合。
+fn first_meta_index(pattern: &str) -> Option<usize> {
+    pattern
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '*' | '?' | '[' | '{').then_some(idx))
 }
 
-fn collect_files(base: &Path, pattern: &str, results: &mut Vec<String>) {
+/// Walk 边界规划：在不改变匹配结果的前提下，把遍历限制到模式约束的子树。
+struct WalkPlan {
+    /// 元字符之前的完整字面目录链（如 `src/**/*.rs` → ["src"]）：下钻时只有名字
+    /// 匹配的目录会被进入。任何命中路径都必须以这些目录为前缀，剪枝不会漏报。
+    prefix_dirs: Vec<String>,
+    /// 目录下钻的最大深度。仅对无元字符的纯字面 pattern 生效：
+    /// `glob::Pattern::matches` 默认 `require_literal_separator = false`，`*`/`?`
+    /// 可跨 `/`，含元字符的 pattern 可在任意深度命中，深度剪枝不安全。
+    max_depth: Option<usize>,
+}
+
+fn plan_walk(pattern: &str) -> WalkPlan {
+    let leading_slash = pattern.starts_with('/');
+    let meta_idx = first_meta_index(pattern);
+
+    let prefix_dirs: Vec<String> = if leading_slash {
+        // 前导 `/` 的 pattern 匹配绝对路径，相对路径永不命中；保守回退全遍历。
+        Vec::new()
+    } else {
+        let literal = meta_idx.map_or(pattern, |i| &pattern[..i]);
+        // 前缀必须是完整目录链（以 '/' 结尾）且不含转义；纯字面 pattern 整串作为前缀候选。
+        let usable = !literal.contains('\\') && (meta_idx.is_none() || literal.ends_with('/'));
+        if usable {
+            let mut segments: Vec<String> = literal
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if meta_idx.is_none() {
+                // 无元字符：最后一段是文件名而非目录。
+                segments.pop();
+            }
+            segments
+        } else {
+            Vec::new()
+        }
+    };
+
+    let max_depth = if leading_slash || meta_idx.is_some() {
+        None
+    } else {
+        Some(pattern.matches('/').count())
+    };
+
+    WalkPlan {
+        prefix_dirs,
+        max_depth,
+    }
+}
+
+/// 收集匹配文件（同步，在 spawn_blocking 中运行）。
+///
+/// 返回是否因超过 MAX_RESULTS 提前停止。`cancelled` 置位后最多再处理 256 个条目
+/// 即退出——spawn_blocking 无法强制中止，协作停止是超时后的兜底保护。
+fn collect_files(
+    base: &Path,
+    pattern: &glob::Pattern,
+    plan: &WalkPlan,
+    cancelled: &AtomicBool,
+    results: &mut Vec<(Option<SystemTime>, String)>,
+) -> bool {
     let walker = walkdir::WalkDir::new(base)
-        .follow_links(true)
+        .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
             if e.file_type().is_dir() {
                 let name = e.file_name().to_string_lossy();
-                !should_skip_dir(&name)
+                if !should_skip_dir(&name) {
+                    let depth = e.depth();
+                    if depth == 0 {
+                        // 根目录总是下钻（黑名单已检查，与既有行为一致）
+                        true
+                    } else if depth <= plan.prefix_dirs.len() {
+                        // 前缀层：只进入名字匹配的目录
+                        name.as_ref() == plan.prefix_dirs[depth - 1].as_str()
+                    } else {
+                        // 深度上限（仅纯字面 pattern 生效）
+                        plan.max_depth.is_none_or(|m| depth <= m)
+                    }
+                } else {
+                    false
+                }
             } else {
                 true
             }
         });
 
-    for entry in walker {
+    let mut early_stopped = false;
+    for (entries_seen, entry) in walker.enumerate() {
+        if entries_seen.is_multiple_of(256) && cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         match entry {
             Ok(e) => {
                 if e.file_type().is_file() {
                     let abs_path = e.path().to_string_lossy().to_string();
                     if let Ok(rel) = e.path().strip_prefix(base) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if glob_match(pattern, &rel_str) {
-                            results.push(abs_path);
+                        if pattern.matches(&rel_str) {
+                            // mtime 在收集时读取一次并缓存，排序阶段不再做任何 syscall。
+                            let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
+                            results.push((mtime, abs_path));
+                            if results.len() > MAX_RESULTS {
+                                early_stopped = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -75,6 +172,80 @@ fn collect_files(base: &Path, pattern: &str, results: &mut Vec<String>) {
             Err(e) => {
                 tracing::debug!(error = %e, "glob walk error (skipped)");
             }
+        }
+    }
+    early_stopped
+}
+
+/// 排序 + 组装输出（同步，与 collect_files 一起在 spawn_blocking 中运行）。
+fn run_glob(
+    base: &Path,
+    pattern: &glob::Pattern,
+    plan: &WalkPlan,
+    cancelled: &AtomicBool,
+) -> String {
+    let mut results: Vec<(Option<SystemTime>, String)> = Vec::new();
+    let early_stopped = collect_files(base, pattern, plan, cancelled, &mut results);
+
+    // 稳定降序：mtime 相同的文件保持遍历顺序（与既有行为一致）。
+    // 早停语义：超过 MAX_RESULTS 即停止收集，排序窗口 = 遍历中先收集到的
+    // MAX_RESULTS+1 条，而非全树全局最新 N 条——两者一致时无差异（glob.md 已说明）。
+    results.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+    if results.is_empty() {
+        return "No files found.".to_string();
+    }
+
+    if results.len() > MAX_RESULTS {
+        let full = results
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = &results[..MAX_RESULTS];
+        let persist_hint = persist_truncated_output(&full);
+        let stop_note = if early_stopped {
+            " (collection stopped at the result limit)"
+        } else {
+            ""
+        };
+        format!(
+            "{}\n\n[Output truncated: {} files total{}, showing first {}]{}",
+            truncated
+                .iter()
+                .map(|(_, p)| p.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            results.len(),
+            stop_note,
+            MAX_RESULTS,
+            persist_hint
+        )
+    } else {
+        let joined = results
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Byte guard: many short paths can still overflow by total byte size.
+        if joined.len() > MAX_OUTPUT_BYTES {
+            let persist_hint = persist_truncated_output(&joined);
+            let head_count = HEAD_RESULTS_ON_BYTES_OVERFLOW.min(results.len());
+            let head = &results[..head_count];
+            format!(
+                "{}\n\n[Output truncated: {} files total, {} bytes; showing first {} — exceeds {} byte limit]{}",
+                head.iter()
+                    .map(|(_, p)| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                results.len(),
+                joined.len(),
+                head_count,
+                MAX_OUTPUT_BYTES,
+                persist_hint
+            )
+        } else {
+            joined
         }
     }
 }
@@ -134,12 +305,10 @@ impl BaseTool for GlobFilesTool {
             .as_str()
             .ok_or("The 'pattern' parameter is required for the Glob tool.")?;
 
-        // Pattern syntax pre-validation: makes B3 suggester reliable.
-        // Without this, glob::Pattern::new silently returns false inside glob_match,
-        // and the LLM gets "No files found." instead of a syntax error.
-        if let Err(e) = glob::Pattern::new(pattern) {
-            return Err(format!("Error: Pattern syntax error in {pattern:?}: {e}").into());
-        }
+        // Pattern 语法预校验 + 只编译一次：collect_files 复用编译结果，
+        // 不再在逐文件热循环里重复 glob::Pattern::new。
+        let compiled = glob::Pattern::new(pattern)
+            .map_err(|e| format!("Error: Pattern syntax error in {pattern:?}: {e}"))?;
 
         // Pattern soft-warn — record the hint; we still execute so the LLM can see the output size and self-correct.
         let pattern_warn = soft_warn_pattern(pattern);
@@ -154,48 +323,29 @@ impl BaseTool for GlobFilesTool {
             return Err(format!("Error: Directory not found: {}", search_root.display()).into());
         }
 
-        let mut results = Vec::new();
-        collect_files(&search_root, pattern, &mut results);
+        let plan = plan_walk(pattern);
+        let cancelled = Arc::new(AtomicBool::new(false));
 
-        results.sort_by(|a, b| {
-            let ta = std::fs::metadata(a).and_then(|m| m.modified()).ok();
-            let tb = std::fs::metadata(b).and_then(|m| m.modified()).ok();
-            tb.cmp(&ta)
+        // 扫描是同步阻塞链（遍历 + 排序 + 落盘），必须移入 blocking pool，不能占用
+        // async runtime worker。超时后置位 cancelled，线程在下一个检查点协作退出
+        // （spawn_blocking 无法强制 kill，协作停止是真实保护）。
+        let scan = tokio::task::spawn_blocking({
+            let cancelled = Arc::clone(&cancelled);
+            move || run_glob(&search_root, &compiled, &plan, &cancelled)
         });
 
-        let body = if results.is_empty() {
-            "No files found.".to_string()
-        } else if results.len() > MAX_RESULTS {
-            // Count guard: more than 1000 results.
-            let full = results.join("\n");
-            let truncated = &results[..MAX_RESULTS];
-            let persist_hint = persist_truncated_output(&full);
-            format!(
-                "{}\n\n[Output truncated: {} files total, showing first {}]{}",
-                truncated.join("\n"),
-                results.len(),
-                MAX_RESULTS,
-                persist_hint
-            )
-        } else {
-            let joined = results.join("\n");
-            // Byte guard: many short paths can still overflow by total byte size.
-            if joined.len() > MAX_OUTPUT_BYTES {
-                let persist_hint = persist_truncated_output(&joined);
-                let head_count = HEAD_RESULTS_ON_BYTES_OVERFLOW.min(results.len());
-                let head = &results[..head_count];
-                format!(
-                    "{}\n\n[Output truncated: {} files total, {} bytes; showing first {} — exceeds {} byte limit]{}",
-                    head.join("\n"),
-                    results.len(),
-                    joined.len(),
-                    head_count,
-                    MAX_OUTPUT_BYTES,
-                    persist_hint
-                )
-            } else {
-                joined
+        let body = match timeout(SCAN_TIMEOUT, scan).await {
+            Err(_) => {
+                // 注意：超时与协作取消路径无法在确定性测试中覆盖（SCAN_TIMEOUT 为 15s，
+                // 测试中不可触发），该路径仅由代码审查保障，未经自动化验证。
+                cancelled.store(true, Ordering::Relaxed);
+                return Err(
+                    "Error: Search timed out after 15 seconds. Please use a more specific pattern."
+                        .into(),
+                );
             }
+            Ok(Err(e)) => return Err(format!("Error: {e}").into()),
+            Ok(Ok(body)) => body,
         };
 
         if let Some(warn) = pattern_warn {
