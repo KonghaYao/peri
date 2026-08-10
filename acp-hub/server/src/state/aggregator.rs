@@ -138,29 +138,48 @@ impl Aggregator {
             // 字段级拆分借用：chat 写事务与 control 只读快照并存（不同 doc，
             // 无并发事务冲突，§7.4）。
             let chat = &mut pair.chat;
-            let control = &pair.control;
+            let control = &pair.session;
             let mut txn = chat.transact_mut();
             let snapshot = self.read_control_snapshot(control);
+            let mut applied_in_segment = false;
             for ev in &evs[i..end] {
-                results.push(self.apply_delta_in_txn(&mut pair.stream, &mut txn, ev, &snapshot));
+                let r = self.apply_delta_in_txn(&mut pair.stream, &mut txn, ev, &snapshot);
+                if r.applied {
+                    applied_in_segment = true;
+                }
+                results.push(r);
             }
             // txn drop = 段批次单事务提交。
             drop(txn);
+            // §7.2 状态推进：内容增量到达 → accepting → running（参考实现：
+            // 首条内容增量即 turn 开始运行）。段内任一增量应用成功即推进；
+            // 回放模式跳过（回放 turn 由 EndLoadReplay 终态化）。共享一次
+            // session 事务。
+            if applied_in_segment && !pair.stream.replay_active {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(ROOT);
+                if chat_writer::set_active_turn_status_if(&mut txn, &root, "accepting", "running") {
+                    chat_writer::bump_projection_version(&mut txn, &root);
+                }
+            }
             i = end;
         }
         results
     }
 
-    fn read_control_snapshot(&self, control: &yrs::Doc) -> ControlSnapshot {
-        let txn = control.transact();
+    fn read_control_snapshot(&self, session: &yrs::Doc) -> ControlSnapshot {
+        let txn = session.transact();
         let mut snap = ControlSnapshot::default();
         let Some(root) = chat_writer::root_map_read(&txn) else {
             return snap;
         };
-        // chat.status。
-        snap.chat_closed = root
-            .get(&txn, "chat")
-            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        // session map：status（chat 终态）与 active turn 内嵌字段。
+        let sm = root
+            .get(&txn, "session")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok());
+        // status。
+        snap.chat_closed = sm
+            .as_ref()
             .and_then(|m| m.get(&txn, "status"))
             .and_then(|s| s.cast::<String>().ok())
             .map(|s| {
@@ -174,23 +193,20 @@ impl Aggregator {
                     .unwrap_or(false)
             })
             .unwrap_or(false);
-        // active_turn。
-        snap.active_turn = root
-            .get(&txn, "active_turn")
-            .and_then(|v| v.cast::<yrs::MapRef>().ok())
-            .and_then(|m| {
-                let str_or = |k: &str| -> Option<String> {
-                    m.get(&txn, k).and_then(|v| v.cast::<String>().ok())
-                };
-                Some(ActiveTurnProjection {
-                    turn_id: str_or("turn_id")?,
-                    turn_status: str_or("turn_status")
-                        .as_deref()
-                        .map(turn_status_from_str)
-                        .unwrap_or(TurnStatus::Accepting),
-                    updated_at: str_or("updated_at").unwrap_or_default(),
-                })
-            });
+        // active_turn（session map 内嵌：active_turn_id/status/updated_at）。
+        snap.active_turn = sm.as_ref().and_then(|m| {
+            let str_or = |k: &str| -> Option<String> {
+                m.get(&txn, k).and_then(|v| v.cast::<String>().ok())
+            };
+            Some(ActiveTurnProjection {
+                turn_id: str_or("active_turn_id")?,
+                turn_status: str_or("active_turn_status")
+                    .as_deref()
+                    .map(turn_status_from_str)
+                    .unwrap_or(TurnStatus::Accepting),
+                updated_at: str_or("active_turn_updated_at").unwrap_or_default(),
+            })
+        });
         snap
     }
 
@@ -220,6 +236,16 @@ impl Aggregator {
         }
         // 写入（chat doc，共享事务内）。
         let root = txn.get_or_insert_map(ROOT);
+        // 回放合成（§8.5 REPLAY_NEEDS_TURN）：历史首帧即为 agent 增量且无
+        // 活动回放 turn → 先合成空文本 user 占位 turn（参考实现规则；避免
+        // 空 id 垃圾条目）。合成后归位到该 turn。
+        if stream.replay_active && stream.replay_turn.is_none() {
+            let t = format!("load:{}", ev.seq);
+            stream.replay_turn = Some(t.clone());
+            stream.replay_turns.push(t.clone());
+            chat_writer::create_user_entry(txn, &root, &t, &format!("{t}:user"), "", None, &ev.ts);
+            chat_writer::bump_projection_version(txn, &root);
+        }
         match &ev.body {
             EventBody::MessageDelta {
                 turn_id,
@@ -321,12 +347,12 @@ impl Aggregator {
     fn judge(&self, pair: &mut DocPair, ev: &NormalizedEvent) -> Result<(), ApplyReason> {
         // 1/2/3. epoch/seq/gap/uncalibratable。
         self.judge_stream(&mut pair.stream, ev)?;
-        // 4. chat 终态（§8.2）：读 control doc chat.status。
+        // 4. chat 终态（§8.2）：读 session doc session map status。
         {
-            let txn = pair.control.transact();
+            let txn = pair.session.transact();
             if let Some(root) = chat_writer::root_map_read(&txn) {
                 let status = root
-                    .get(&txn, "chat")
+                    .get(&txn, "session")
                     .and_then(|v| v.cast::<yrs::MapRef>().ok())
                     .and_then(|m| m.get(&txn, "status"))
                     .and_then(|s| s.cast::<String>().ok());
@@ -393,19 +419,19 @@ impl Aggregator {
     }
 
     fn read_active_turn(&self, pair: &DocPair) -> Option<ActiveTurnProjection> {
-        let txn = pair.control.transact();
+        let txn = pair.session.transact();
         let root = chat_writer::root_map_read(&txn)?;
-        let am = root.get(&txn, "active_turn")?.cast::<yrs::MapRef>().ok()?;
+        let sm = root.get(&txn, "session")?.cast::<yrs::MapRef>().ok()?;
         let str_or = |k: &str| -> Option<String> {
-            am.get(&txn, k).and_then(|v| v.cast::<String>().ok())
+            sm.get(&txn, k).and_then(|v| v.cast::<String>().ok())
         };
         Some(ActiveTurnProjection {
-            turn_id: str_or("turn_id")?,
-            turn_status: str_or("turn_status")
+            turn_id: str_or("active_turn_id")?,
+            turn_status: str_or("active_turn_status")
                 .as_deref()
                 .map(turn_status_from_str)
                 .unwrap_or(TurnStatus::Accepting),
-            updated_at: str_or("updated_at").unwrap_or_default(),
+            updated_at: str_or("active_turn_updated_at").unwrap_or_default(),
         })
     }
 
@@ -528,21 +554,21 @@ impl Aggregator {
                 ..
             } => {
                 // 幂等：permission_id 已存在 → 跳过。
-                let txn = pair.control.transact();
+                let txn = pair.session.transact();
                 if self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::DuplicateIdempotent);
                 }
                 self.judge_turn_guard(active, &ev.body)
             }
             EventBody::PermissionResolved { permission_id, .. } => {
-                let txn = pair.control.transact();
+                let txn = pair.session.transact();
                 if !self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::UnknownPermission);
                 }
                 Ok(())
             }
             EventBody::PermissionExpired { permission_id } => {
-                let txn = pair.control.transact();
+                let txn = pair.session.transact();
                 if !self.permission_exists(&txn, permission_id) {
                     return Err(ApplyReason::UnknownPermission);
                 }
@@ -678,6 +704,25 @@ impl Aggregator {
             }
             _ => None,
         };
+        // 预读：回放合成（§8.5 REPLAY_NEEDS_TURN）——历史首帧即为 agent
+        // 增量（无 user 消息先行）时无 turn 可归位，先分配回放归位 turn
+        // （`load:{seq}`，seq 水位单调天然幂等）；user 占位 entry 在 chat
+        // 事务内创建（参考实现：合成一条空文本 user_message 回放 turn，
+        // 避免空 id 垃圾条目）。
+        let replay_active = pair.stream.replay_active;
+        let replay_synth = if replay_active
+            && pair.stream.replay_turn.is_none()
+            && matches!(
+                ev.body,
+                EventBody::MessageDelta { .. } | EventBody::ReasoningDelta { .. }
+            ) {
+            let t = format!("load:{}", ev.seq);
+            pair.stream.replay_turn = Some(t.clone());
+            pair.stream.replay_turns.push(t.clone());
+            Some((t.clone(), format!("{t}:user")))
+        } else {
+            None
+        };
         // 预读：帧无 id（真实 peri 增量）按 active_turn 归位（§7.2；读
         // control doc 须在 chat 写事务之前，§7.4 借位纪律）。
         let resolved = match &ev.body {
@@ -714,6 +759,11 @@ impl Aggregator {
         {
             let mut txn = pair.chat_txn();
             let root = txn.get_or_insert_map(ROOT);
+            // 回放合成占位 user entry（预读区已分配 turn，§8.5）。
+            if let Some((t, e)) = &replay_synth {
+                chat_writer::create_user_entry(&mut txn, &root, t, e, "", None, &ev.ts);
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
             match &ev.body {
                 EventBody::MessageDelta { text, .. } => {
                     // 帧无 id（真实 peri 增量）：按 active_turn 归位（§7.2；
@@ -889,22 +939,38 @@ impl Aggregator {
                 // CAS：pending → resolved 原子一次（§7.4 规则 4）；Migrated 时
                 // 由原语写入 decision 与状态，聚合器补 bump。
                 if permission::resolve(pair, permission_id, *decision) == CasOutcome::Migrated {
-                    let mut txn = pair.control_txn();
+                    // §7.2 状态推进：决议后无其他 pending → awaitingPermission
+                    // → running（参考实现 resolve(allow) 语义）。计数在写事务
+                    // 前完成（yrs 同 doc 事务互斥）。
+                    let no_pending_left = permission::pending_count(pair) == 0;
+                    let mut txn = pair.session_txn();
                     let root = txn.get_or_insert_map(ROOT);
+                    if no_pending_left {
+                        chat_writer::set_active_turn_status_if(&mut txn, &root, "awaitingPermission", "running");
+                    }
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
             }
             EventBody::PermissionExpired { permission_id } => {
                 if permission::expire(pair, permission_id) == CasOutcome::Migrated {
-                    let mut txn = pair.control_txn();
+                    // §7.2 状态推进：无其他 pending → awaitingPermission →
+                    // cancelled（参考实现 expire 语义：未决议权限过期即 turn
+                    // 取消）。
+                    let no_pending_left = permission::pending_count(pair) == 0;
+                    let mut txn = pair.session_txn();
                     let root = txn.get_or_insert_map(ROOT);
+                    if no_pending_left {
+                        // 未决议权限全部过期 → 该 turn 取消（参考实现 expire
+                        // 语义）；仅当状态仍为 awaitingPermission 时推进。
+                        chat_writer::set_active_turn_status_if(&mut txn, &root, "awaitingPermission", "cancelled");
+                    }
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
             }
             EventBody::SessionListResponse { entries } => {
                 // 预读（写事务前完成，避免并发事务 panic，§7.4）。
                 let current = {
-                    let rt = pair.control.transact();
+                    let rt = pair.session.transact();
                     match chat_writer::root_map_read(&rt) {
                         Some(rr) => session_list::read_current(&rt, &rr),
                         None => std::collections::HashMap::new(),
@@ -912,14 +978,14 @@ impl Aggregator {
                 };
                 let d = session_list::diff(&current, entries);
                 if !d.upsert.is_empty() || !d.remove.is_empty() {
-                    let mut txn = pair.control_txn();
+                    let mut txn = pair.session_txn();
                     let root = txn.get_or_insert_map(ROOT);
                     session_list::apply_diff(&mut txn, &root, &d);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
             }
             _ => {
-                let mut txn = pair.control_txn();
+                let mut txn = pair.session_txn();
                 let root = txn.get_or_insert_map(ROOT);
                 match &ev.body {
                     EventBody::SessionListResponse { .. } => {
@@ -959,6 +1025,32 @@ impl Aggregator {
                             options,
                             expires_at,
                         );
+                        // §7.2 状态推进：权限请求发出 → 宿主等待决议
+                        // （accepting/running → awaitingPermission；参考状态机
+                        // accepting → running ⇄ awaitingPermission）。仅当请求
+                        // 关联当前 active turn 时推进（防御：无关 turn 的请求
+                        // 不改状态）。
+                        let active_tid = root
+                            .get(&txn, "session")
+                            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+                            .and_then(|m| m.get(&txn, "active_turn_id"))
+                            .and_then(|t| t.cast::<String>().ok());
+                        if active_tid.as_deref() == Some(turn_id.as_str())
+                            && !chat_writer::set_active_turn_status_if(
+                                &mut txn,
+                                &root,
+                                "accepting",
+                                "awaitingPermission",
+                            )
+                            && !chat_writer::set_active_turn_status_if(
+                                &mut txn,
+                                &root,
+                                "running",
+                                "awaitingPermission",
+                            )
+                        {
+                            // 既非 accepting 也非 running：无状态推进（防御）。
+                        }
                         chat_writer::bump_projection_version(&mut txn, &root);
                     }
                     EventBody::AgentStatus {
@@ -1000,14 +1092,28 @@ impl Aggregator {
                         chat_writer::set_active_turn(&mut txn, &root, Some(&active));
                         chat_writer::bump_projection_version(&mut txn, &root);
                     }
-                    EventBody::MessageDelta { .. }
-                    | EventBody::ReasoningDelta { .. }
-                    | EventBody::ToolCallStarted { .. }
+                    EventBody::MessageDelta { .. } | EventBody::ReasoningDelta { .. } => {
+                        // §7.2 状态推进：内容增量到达 → accepting → running
+                        // （参考实现：首条内容增量即 turn 开始运行）。回放
+                        // 模式跳过（回放 turn 由 EndLoadReplay 终态化）。
+                        if !replay_active
+                            && chat_writer::set_active_turn_status_if(
+                                &mut txn,
+                                &root,
+                                "accepting",
+                                "running",
+                            )
+                        {
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                    EventBody::ToolCallStarted { .. }
                     | EventBody::ToolCallUpdated { .. }
                     | EventBody::ToolCallCompleted { .. }
                     | EventBody::PermissionResolved { .. }
                     | EventBody::PermissionExpired { .. } => {
-                        // 纯 chat 事件或已单独处理：无 control 写入。
+                        // 纯 chat 事件或已在外层单独处理（CAS）：无 control
+                        // 写入。
                     }
                 }
             }
@@ -1106,15 +1212,16 @@ fn write_chat_info(
     status: Option<ChatStatus>,
     active_turn_id: Option<&str>,
 ) {
-    let chat = root.get_or_init::<_, yrs::MapRef>(txn, "chat");
+    // Session Doc 会话面（对齐 Chat/Session 双 Doc）：写入根级 `session` map。
+    let sm = root.get_or_init::<_, yrs::MapRef>(txn, "session");
     if let Some(t) = title {
-        chat.insert(txn, "title", t.to_string());
+        sm.insert(txn, "title", t.to_string());
     }
     if let Some(s) = status {
-        chat.insert(txn, "status", chat_status_str(s));
+        sm.insert(txn, "status", chat_status_str(s));
     }
     if let Some(a) = active_turn_id {
-        chat.insert(txn, "active_turn_id", a.to_string());
+        sm.insert(txn, "active_turn_id", a.to_string());
     }
 }
 

@@ -22,7 +22,7 @@ pub use chat::{ChatDocRoot, ChatEntry, ContentBlock, ToolCallProjection};
 pub use registry::{InstanceView, RegistryDocRoot, RegistryGlobal, ChatSummary, WorkspaceSummary};
 pub use control::{
     ActiveTurnProjection, AgentStatusProjection, PermissionProjection,
-    ControlDocRoot, ChatInfoProjection, SessionSummaryProjection,
+    SessionDocRoot, ChatInfoProjection, SessionSummaryProjection,
 };
 
 use serde::{Deserialize, Serialize};

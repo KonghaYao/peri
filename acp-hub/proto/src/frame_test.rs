@@ -123,7 +123,7 @@ fn all_frames() -> Vec<Frame> {
         }),
         // --- y-sync ---
         Frame::YsyncSubscribe(YsyncSubscribe {
-            docs: vec![DocId::chat("s1"), DocId::control("s1")],
+            docs: vec![DocId::chat("s1"), DocId::session("s1")],
         }),
         Frame::YsyncUnsubscribe(YsyncUnsubscribe {
             docs: vec![DocId::chat("s1")],
@@ -346,5 +346,5 @@ fn registry_doc_id_is_hub_registry() {
     assert_eq!(v, "hub:registry");
     // 与 chat/control 形态互异
     assert_ne!(DocId::REGISTRY, DocId::chat("registry"));
-    assert_ne!(DocId::REGISTRY, DocId::control("registry"));
+    assert_ne!(DocId::REGISTRY, DocId::session("registry"));
 }

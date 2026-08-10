@@ -199,7 +199,15 @@ impl RelayEventHandler {
             .normalize(&hub_chat_id, ev.epoch, ev.seq, &now, &ev.frame)
         {
             NormalizeOutcome::Event(nev) => {
-                self.submit(&hub_chat_id, nev).await
+                let r = self.submit(&hub_chat_id, *nev).await;
+                // 断链追平恢复（§7.3/§8.5）：实时帧投递成功 → 尝试清除
+                // 断链置的 gap 标记并恢复 chat 可用。判定（可校准/不可
+                // 校准）在 writer 内以聚合器事实源进行——uncalibratable
+                // chat 的事件被聚合器拒绝（applied=false），不会误恢复。
+                if matches!(r, ConsumeResult::Delivered { applied: true, .. }) {
+                    self.recover_from_gap(&hub_chat_id).await;
+                }
+                r
             }
             NormalizeOutcome::RpcResponse { id, is_error } => {
                 self.confirm_rpc(&id, ev.frame.clone(), is_error).await
@@ -282,7 +290,7 @@ impl RelayEventHandler {
                 .normalize(&hub_chat_id, sync.epoch, bf.seq, &now, &bf.frame)
             {
                 NormalizeOutcome::Event(nev) => {
-                    match self.submit(&hub_chat_id, nev).await {
+                    match self.submit(&hub_chat_id, *nev).await {
                         ConsumeResult::Delivered { .. } => delivered += 1,
                         ConsumeResult::Dropped { reason } => {
                             rejected += 1;
@@ -305,6 +313,13 @@ impl RelayEventHandler {
             delivered, rejected,
             "buffer_sync consumed"
         );
+        // 补推追平（§7.3/§8.5）：缓冲完整（无乱序/重复丢弃）且至少一帧
+        // 投递 → 清除断链置的 gap 标记并恢复 chat 可用。`rejected > 0`
+        // 保留 gap——缓冲孔洞的真实缺口由聚合器在后续实时帧 seq 跳号时
+        // 精确计数上报（设计稿「缺口数量由补推时聚合器精确计算」）。
+        if rejected == 0 && delivered > 0 {
+            self.recover_from_gap(&hub_chat_id).await;
+        }
         if delivered == 0 && rejected > 0 {
             ConsumeResult::BatchRejected {
                 reason: "all_frames_rejected",
@@ -353,7 +368,16 @@ impl RelayEventHandler {
                     // chat writer 未打开：仅记录（视图缺失由 gap 呈现）。
                     warn!(chat_id, "turn interrupt skipped: chat writer absent");
                 }
+                // 表项清理（§7.2）：turn 已置 interrupted 终态，登记表不得
+                // 滞留——否则永久阻塞后续 load「有活动 turn」校验。
+                self.inner.chats.clear_active_turn(chat_id).await;
             }
+            // 断链时该 chat 全部 pending 权限批量 expired（对齐参考实现
+            // expireTurnPermissions：断链即会话失效，未决议权限全部过期）。
+            self.inner
+                .doc
+                .submit_command(chat_id, DocCommand::ExpirePendingPermissions)
+                .await;
             // gap 标记（§8.2/§7.3：补推完成、seq 追平后清除）。
             let _ = self
                 .inner
@@ -504,6 +528,44 @@ impl RelayEventHandler {
             SubmitResult::PersistFailed => ConsumeResult::PersistFailed {
                 chat_id: chat_id.to_string(),
             },
+        }
+    }
+
+    /// 断链追平恢复（§7.3/§8.5）：补推/实时帧恢复投递成功后调用——清除
+    /// 断链时置的 gap 标记（`set_chat_gap(Some(0))` 占位 → 追平清除）并
+    /// 迁移 ChatState Gap → Accepting（§7.3「Gap 清除 → 恢复可用、可开
+    /// 新 turn」）。
+    ///
+    /// 幂等：chat 非 Gap 状态直接返回（恢复后首帧即完成，后续帧跳过）；
+    /// 判定在 writer 内（[`DocCommand::ResumeAfterGap`]）：**不可校准**
+    /// （epoch 变化，§4.5.1）拒绝恢复——不可校准缺口只能经 `session/load`
+    /// 显式重建消除，不得误标为已追平（视图假装完整）。
+    async fn recover_from_gap(&self, chat_id: &str) {
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
+            return;
+        };
+        if entry.state != ChatState::Gap {
+            return;
+        }
+        match self
+            .inner
+            .doc
+            .submit_command(chat_id, DocCommand::ResumeAfterGap)
+            .await
+        {
+            SubmitResult::Applied(_)
+                if self
+                    .inner
+                    .chats
+                    .transition(chat_id, ChatState::Accepting)
+                    .await
+                    .is_ok() =>
+            {
+                info!(chat_id, "chat recovered from gap (stream caught up)");
+            }
+            _ => {
+                // 拒绝（uncalibratable / chat 已关闭）或迁移失败：保持 gap。
+            }
         }
     }
 }

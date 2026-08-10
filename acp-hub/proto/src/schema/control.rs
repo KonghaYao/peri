@@ -14,7 +14,7 @@ use crate::action::PermissionDecision;
 /// 旧快照恢复时以 `schema_version` 判空幂等补结构（§5.4）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ControlDocRoot {
+pub struct SessionDocRoot {
     /// == [`crate::version::SESSION_DOC_SCHEMA_VERSION`]。
     pub schema_version: u32,
     pub projection_version: u32,

@@ -57,7 +57,7 @@ pub struct KeepAlive {}
 #[serde(rename_all = "camelCase")]
 pub struct Pong {}
 
-/// Doc 名称 newtype（§5.2 表）：`chat:{cid}` / `control:{cid}` / `hub:registry`。
+/// Doc 名称 newtype（§5.2 表）：`chat:{cid}` / `session:{cid}` / `hub:registry`。
 ///
 /// 序列化为透明字符串（`ysync.subscribe` 的 `{ docs: ["chat:{cid}", ...] }`
 /// 形态）。`FromStr` 校验 `{sid}` 段为合法标识符（ASCII 字母数字 +
@@ -81,9 +81,9 @@ impl DocId {
         DocId(Cow::Owned(format!("chat:{cid}")))
     }
 
-    /// `control:{cid}`——会话控制状态 Doc（§5.2）。
-    pub fn control(cid: &str) -> Self {
-        DocId(Cow::Owned(format!("control:{cid}")))
+    /// `session:{cid}`——会话状态 Doc（§5.4；对齐 Chat/Session 双 Doc）。
+    pub fn session(cid: &str) -> Self {
+        DocId(Cow::Owned(format!("session:{cid}")))
     }
 
     /// `hub:registry`——机器 + 活跃会话摘要 Doc（§5.2）。

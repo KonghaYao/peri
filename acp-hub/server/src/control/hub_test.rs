@@ -55,6 +55,7 @@ async fn mirror_snapshot_rebuilds_from_log() {
         chat_id: sid.into(),
         seq: 1,
         epoch: 0,
+        ts: "2026-08-07T00:00:00Z".to_string(),
         body: crate::state::normalized::EventBody::MessageDelta {
             turn_id: "t1".into(),
             entry_id: "t1:assistant".into(),
@@ -160,6 +161,7 @@ async fn broadcast_stream_delivers_updates() {
         chat_id: "s2".into(),
         seq: 1,
         epoch: 0,
+        ts: "2026-08-07T00:00:00Z".to_string(),
         body: crate::state::normalized::EventBody::AgentStatus {
             status: "idle".into(),
             public_error: None,
@@ -175,7 +177,7 @@ async fn broadcast_stream_delivers_updates() {
             break u;
         }
     };
-    assert!(update.doc == DocId::control("s2") || update.doc == DocId::chat("s2"));
+    assert!(update.doc == DocId::session("s2") || update.doc == DocId::chat("s2"));
     let _ = mpsc::unbounded_channel::<()>();
 }
 

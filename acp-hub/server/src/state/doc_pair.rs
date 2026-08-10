@@ -14,8 +14,8 @@ use crate::state::view_store::TransactionCtx;
 pub struct DocPair {
     /// `chat:{chat_id}`（§5.3，高频内容流）。
     pub chat: yrs::Doc,
-    /// `control:{chat_id}`（§5.4，低频控制状态）。
-    pub control: yrs::Doc,
+    /// `session:{chat_id}`（§5.4，低频会话状态；对齐 Chat/Session 双 Doc）。
+    pub session: yrs::Doc,
     /// 聚合器流状态（不进 yrs：可丢弃镜像不承载校准事实，§8.1 原则 5）。
     pub stream: StreamState,
 }
@@ -27,9 +27,9 @@ impl DocPair {
         self.chat.transact_mut()
     }
 
-    /// 打开 Control Doc 写事务（须在 chat 事务 drop 后调用，§6.4 固定顺序）。
-    pub fn control_txn(&mut self) -> TransactionCtx<'_> {
-        self.control.transact_mut()
+    /// 打开 Session Doc 写事务（须在 chat 事务 drop 后调用，§6.4 固定顺序）。
+    pub fn session_txn(&mut self) -> TransactionCtx<'_> {
+        self.session.transact_mut()
     }
 }
 
@@ -54,21 +54,16 @@ pub struct StreamState {
     /// 归位 id（历史 chunk 无 turnId，按回放序归位，§7.2 宿主驱动模型的
     /// 回放例外）；`replay_turns` = 全部回放 turn（EndLoadReplay 逐个终态
     /// 化——历史 agent 消息无终态事件）。
+    ///
+    /// 复位语义（原 `reset`，已删除——无调用点）：不可校准缺口只能经
+    /// `session/load` 显式重建消除（BeginLoadReplay 清除 uncalibratable /
+    /// gap_count / 置 gap_dirty，见 §8.5）；**epoch/last_seq 水位必须保持**
+    /// ——instance 侧 per-chat seq 单调递增、load 不重置（进程重建才重置
+    /// 并伴 epoch+1），回放帧 seq 延续旧流，重置水位会把回放帧误判为
+    /// SeqOutOfOrder。
     pub replay_active: bool,
     /// 回放中最近一条 user 消息建立的归位 turn id。
     pub replay_turn: Option<String>,
     /// 本次回放建立的全部 turn id（按序；EndLoadReplay 消费）。
     pub replay_turns: Vec<String>,
-}
-
-impl StreamState {
-    /// 复位（`session/load` 显式重建路径，F7 命令调用；§8.5 不可校准只能经此
-    /// 消除）。
-    pub fn reset(&mut self, epoch: u64) {
-        self.epoch = epoch;
-        self.last_seq = 0;
-        self.gap_count = 0;
-        self.uncalibratable = false;
-        self.gap_dirty = false;
-    }
 }

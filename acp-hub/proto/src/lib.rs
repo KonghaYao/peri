@@ -52,7 +52,7 @@ pub use instance::{
 };
 pub use version::{
     CHAT_DOC_SCHEMA_VERSION, PROTOCOL_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
-    CONTROL_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,
+    SESSION_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,
 };
 pub use whitelist::{
     m1_allows, m1_allows_action_type, m1_check, Direction, M1Check, Role, M1_ACTION_TYPES,

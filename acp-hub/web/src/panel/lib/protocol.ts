@@ -15,7 +15,7 @@ export const DOC_REGISTRY = 'hub:registry';
 
 /** chat 派生 doc id（订阅字段透明字符串，前缀区分投影）。 */
 export const chatDoc = (sid: string): string => `chat:${sid}`;
-export const controlDoc = (sid: string): string => `control:${sid}`;
+export const sessionDoc = (sid: string): string => `session:${sid}`;
 
 /** action 幂等键：crypto.randomUUID（浏览器全局；localhost/https 下可用）。 */
 export const newCommandId = (): string => crypto.randomUUID();

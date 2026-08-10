@@ -46,7 +46,7 @@ use crate::state::factory::{DocKind, Factory};
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::view_store::encode_state_as_update;
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, CONTROL_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
 };
 
 /// registry 更新日志文件名（`<data_dir>/registry.log`，blob 格式；§8.4 同
@@ -417,9 +417,9 @@ impl StoreSink {
                 }
             }
             let chat = create_mirror_doc(&self.factory, DocKind::Chat, &chat_updates);
-            let control = create_mirror_doc(&self.factory, DocKind::Control, &control_updates);
+            let control = create_mirror_doc(&self.factory, DocKind::Session, &control_updates);
             docs.insert(DocId::chat(&sid), chat);
-            docs.insert(DocId::control(&sid), control);
+            docs.insert(DocId::session(&sid), control);
             seq.insert(sid, (replay.watermark.epoch, replay.watermark.last_seq));
         }
         info!(
@@ -489,7 +489,7 @@ impl UpdateSink for StoreSink {
                 // （先应用业务 update、后幂等补结构——见 [`create_mirror_doc`]）。
                 let kind = match doc.as_str() {
                     s if s.starts_with("chat:") => Some(DocKind::Chat),
-                    s if s.starts_with("control:") => Some(DocKind::Control),
+                    s if s.starts_with("session:") => Some(DocKind::Session),
                     "hub:registry" => Some(DocKind::Registry),
                     _ => None,
                 };
@@ -513,7 +513,7 @@ impl UpdateSink for StoreSink {
         }
         // 2. 落盘。
         let result = match doc.as_str() {
-            s if s.starts_with("chat:") || s.starts_with("control:") => {
+            s if s.starts_with("chat:") || s.starts_with("session:") => {
                 let Some(sid) = doc.as_str().split_once(':').map(|(_, s)| s) else {
                     return Err(PersistError("malformed doc id".into()));
                 };
@@ -570,7 +570,7 @@ fn create_mirror_doc(
     }
     let version = match kind {
         DocKind::Chat => CHAT_DOC_SCHEMA_VERSION,
-        DocKind::Control => CONTROL_DOC_SCHEMA_VERSION,
+        DocKind::Session => SESSION_DOC_SCHEMA_VERSION,
         DocKind::Registry => REGISTRY_DOC_SCHEMA_VERSION,
     };
     {

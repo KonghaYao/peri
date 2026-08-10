@@ -38,8 +38,9 @@ pub const TEXT_MAX_BYTES: usize = 4096;
 /// 规范化结果（§6.1 事件表 + RpcResponse 专门面）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum NormalizeOutcome {
-    /// 业务事件（投递 DocManager 聚合）。
-    Event(NormalizedEvent),
+    /// 业务事件（投递 DocManager 聚合；Box 消弭与 RpcResponse 的变体大小
+    /// 差异——NormalizedEvent 240B vs 响应面 ~40B）。
+    Event(Box<NormalizedEvent>),
     /// JSON-RPC response（`id` 匹配 pending_rpc → L3 确认，§4.4；不产生业务
     /// 事件）。`is_error` 区分成功/错误响应。
     RpcResponse {
@@ -130,12 +131,13 @@ impl AcpChannel {
             None => serde_json::Map::new(),
         };
         match self.map_raw(kind, &payload, now_rfc3339) {
-            Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+            Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                 chat_id: chat_id.to_string(),
                 seq,
                 epoch,
+                ts: now_rfc3339.to_string(),
                 body,
-            }),
+            })),
             Err(MapError::Unsupported) => NormalizeOutcome::Dropped(DropReason::UnsupportedFrame),
             Err(MapError::MissingField) => NormalizeOutcome::Dropped(DropReason::MissingField),
         }
@@ -181,12 +183,13 @@ impl AcpChannel {
             if let Some(update) = params.get("update").and_then(|v| v.as_object()) {
                 if update.get("sessionUpdate").is_some() {
                     return match self.map_acp_update(update, now_rfc3339) {
-                        Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+                        Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                             chat_id: chat_id.to_string(),
                             seq,
                             epoch,
+                            ts: now_rfc3339.to_string(),
                             body,
-                        }),
+                        })),
                         Err(MapError::Unsupported) => {
                             NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                         }
@@ -205,12 +208,13 @@ impl AcpChannel {
                 None => serde_json::Map::new(),
             };
             return match self.map_raw(kind, &payload, now_rfc3339) {
-                Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+                Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                     chat_id: chat_id.to_string(),
                     seq,
                     epoch,
+                    ts: now_rfc3339.to_string(),
                     body,
-                }),
+                })),
                 Err(MapError::Unsupported) => {
                     NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                 }
@@ -220,15 +224,16 @@ impl AcpChannel {
             };        }
         // agent 状态通知（`agent/status`）。
         if method == "agent/status" {
-            return NormalizeOutcome::Event(NormalizedEvent {
+            return NormalizeOutcome::Event(Box::new(NormalizedEvent {
                 chat_id: chat_id.to_string(),
                 seq,
                 epoch,
+                ts: now_rfc3339.to_string(),
                 body: EventBody::AgentStatus {
                     status: string_field(&params, "status", "status").unwrap_or_default(),
                     public_error: public_error(&params),
                 },
-            });
+            }));
         }
         NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
     }

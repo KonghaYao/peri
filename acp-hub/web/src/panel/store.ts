@@ -4,7 +4,7 @@
 //   1. 连接 → auth（ws-client 首帧纪律）→ ysync.subscribe ["hub:registry"]
 //      → 快照 + ready → UI 启用。
 //   2. registry 渲染 → 左栏实例/对话。
-//   3. 点击对话 → subscribe ["chat:{cid}","control:{cid}"] → 快照渲染历史
+//   3. 点击对话 → subscribe ["chat:{cid}","session:{cid}"] → 快照渲染历史
 //      → 增量实时更新（yjs 流式）。
 //   4. 发送消息 → chat/prompt（commandId 记入 pendingAcks）→ 输入框清空。
 //      用户消息气泡依赖 agent 回显（server 单写者，本地不造假）。
@@ -124,7 +124,7 @@ function desiredDocs(): string[] {
   const docs = [H.DOC_REGISTRY];
   if (currentCid) {
     docs.push(H.chatDoc(currentCid));
-    docs.push(H.controlDoc(currentCid));
+    docs.push(H.sessionDoc(currentCid));
   }
   return docs;
 }
@@ -150,7 +150,7 @@ export function selectChat(cid: string): void {
   }
   const previousCid = currentCid;
   if (previousCid && ws) {
-    ws.send(H.unsubscribe([H.chatDoc(previousCid), H.controlDoc(previousCid)]));
+    ws.send(H.unsubscribe([H.chatDoc(previousCid), H.sessionDoc(previousCid)]));
   }
   currentCid = cid;
   setSelectedCid(cid);
@@ -245,7 +245,7 @@ function onAck(ack: Ack): void {
     if (typeof pending.cb === 'function') pending.cb(ack);
   }
   // create 的 committed ack 携带 server 生成的 chatId —— 唯一告知
-  // 路径：自动补订阅 chat:{cid}/control:{cid} 并选中。§8.5 激活语义：
+  // 路径：自动补订阅 chat:{cid}/session:{cid} 并选中。§8.5 激活语义：
   // 点击已打开的历史会话时 server 同样回 committed + 既有 chatId——
   // 此处统一切换选中（不新建重复对话）。
   if (ack.status === 'committed' && ack.chatId && ack.chatId !== currentCid) {
@@ -308,7 +308,7 @@ store.onUpdate = (docId: string): void => {
     setChatEntries(conv.entries);
     return;
   }
-  if (currentCid && docId === H.controlDoc(currentCid)) {
+  if (currentCid && docId === H.sessionDoc(currentCid)) {
     const ctrl = renderControl(store.docFor(docId));
     setChatHead(ctrl);
     setPermissions(ctrl.pendingPermissions);

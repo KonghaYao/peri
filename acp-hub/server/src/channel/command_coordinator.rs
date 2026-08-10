@@ -1252,6 +1252,17 @@ impl CommandCoordinator {
         if let Err(e) = self.inner.chats.switch_session(chat_id, prev).await {
             warn!(chat_id, error = ?e, "load failure: restore session failed");
         }
+        // agent 投影恢复旧值（BeginLoadReplay 已把 acp_session_id 换成新值）。
+        let _ = self
+            .inner
+            .doc
+            .submit_command(
+                chat_id,
+                DocCommand::SetAgentSessionId {
+                    acp_session_id: prev.to_string(),
+                },
+            )
+            .await;
     }
 
     /// prompt 执行（§4.4 提交点纪律 + §6.5 服务端单写）。
@@ -1379,6 +1390,9 @@ impl CommandCoordinator {
                         "agent rejected prompt (L3 error)",
                     )
                     .await;
+                    // 活动 turn 清理：L3 error 也是 turn 的终结（§7.2 终态
+                    // 可逆性——不得让表项滞留阻塞后续 load「有活动 turn」校验）。
+                    self.inner.chats.clear_active_turn(chat_id).await;
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
@@ -1394,10 +1408,12 @@ impl CommandCoordinator {
                     .and_then(|r| r.get("stopReason"))
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let terminal_status = if stop_reason == "cancelled" {
-                    TurnStatus::Cancelled
-                } else {
-                    TurnStatus::Completed
+                // stopReason → turn 终态（对齐参考实现 turn_failed 语义：
+                // failed/error 不得视为正常 Completed）。
+                let terminal_status = match stop_reason {
+                    "cancelled" => TurnStatus::Cancelled,
+                    "failed" | "error" => TurnStatus::Failed,
+                    _ => TurnStatus::Completed,
                 };
                 self.inject_turn_terminal(chat_id, &turn_id.to_string(), terminal_status)
                     .await;
@@ -1428,6 +1444,9 @@ impl CommandCoordinator {
                     warn!(chat_id, error = ?e, "mark_delivery_unknown failed");
                     return;
                 }
+                // 活动 turn 清理：delivery_unknown 时 turn 无法终结（§7.2），
+                // 但不得阻塞后续 load——表项清除，投影保留（前端可见 pending）。
+                self.inner.chats.clear_active_turn(chat_id).await;
                 self.send_error(
                     cmd,
                     ErrorCode::AgentUnavailable,
@@ -1647,6 +1666,13 @@ impl CommandCoordinator {
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
+            // agent 投影写回（§5.4）：session/new 的绑定建立后
+            // agent.acp_session_id 落 doc（load 路径由 BeginLoadReplay 写）。
+            let _ = self
+                .inner
+                .doc
+                .submit_command(&chat_id, DocCommand::SetAgentSessionId { acp_session_id: acp_session_id.clone() })
+                .await;
         }
         // 5. 终态（§4.4：projection_committed → completed → committed）。
         if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
@@ -1730,6 +1756,22 @@ impl CommandCoordinator {
         // turnId）：无 ack 路由，走 notification 透传（发送成功即 L1 完成）；
         // 有 id 帧（resolve）走标准 forward_rpc + L3 等待。
         let is_notification = rpc_id.is_empty();
+        // §7.2 cancel 前置：取消请求转发前将活动 turn 置 cancelling（参考
+        // 实现 cancel 语义——取消发出即进入取消中；终态由 agent 的
+        // interrupted 事件或通知/超时路径注入）。登记表有活动 turn 才推进
+        // （无活动 turn 的 cancel 仅确认命令）。
+        if matches!(cmd.action, ActionEnvelope::Cancel { .. }) {
+            if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
+                let _ = self
+                    .inner
+                    .doc
+                    .submit_command(
+                        chat_id,
+                        DocCommand::MarkTurnCancelling { turn_id },
+                    )
+                    .await;
+            }
+        }
         let forward = if is_notification {
             self.inner
                 .instance
@@ -1758,6 +1800,9 @@ impl CommandCoordinator {
             if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
                 self.inject_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
                     .await;
+                // 活动 turn 清理：Cancelled 已注入（终态），表项须随终态
+                // 清除（§7.2）——否则滞留阻塞后续 load。
+                self.inner.chats.clear_active_turn(chat_id).await;
             }
             if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
                 warn!(chat_id, error = ?e, "mark_projection_committed failed");
@@ -1799,6 +1844,17 @@ impl CommandCoordinator {
             Ok(Err(_)) | Err(_) => {
                 self.inner.relay.cancel_rpc(&rpc_id).await;
                 let _ = store.outbox().lock().await.mark_delivery_unknown(command_id);
+                // §7.2 cancel 超时强制终态（参考实现 DEFAULT_CANCEL_TIMEOUT_MS
+                // 语义）：cancel 的确认超时后不得停留 cancelling——注入
+                // Cancelled 终态并清理登记表（agent 侧可能仍在取消中，但
+                // 视图/登记不得永久阻塞）。
+                if matches!(cmd.action, ActionEnvelope::Cancel { .. }) {
+                    if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
+                        self.inject_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
+                            .await;
+                        self.inner.chats.clear_active_turn(chat_id).await;
+                    }
+                }
                 self.send_error(
                     cmd,
                     ErrorCode::AgentUnavailable,

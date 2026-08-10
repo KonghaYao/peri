@@ -45,6 +45,8 @@ struct Env {
     chats: ChatRegistry,
     relay: Arc<RelayEventHandler>,
     coordinator: Arc<CommandCoordinator>,
+    /// 落盘 sink（session doc 镜像快照断言用）。
+    sink: Arc<StoreSink>,
     /// instance 连接发送侧（测试读下行帧）。
     instance_rx: mpsc::Receiver<OutboundMsg>,
     /// instance 连接发送句柄（on_disconnect 句柄比对用）。
@@ -124,6 +126,7 @@ async fn env() -> Env {
         chats,
         relay,
         coordinator,
+        sink,
         instance_rx,
         instance_tx,
     }
@@ -1151,4 +1154,282 @@ async fn load_chat_rejected_response_is_retryable_error() {
     }
     // chat 当前会话未被改动（切换失败不落地）。
     assert_eq!(env.chats.session_id(S1).await.as_deref(), Some("acp-1"));
+}
+
+// ---------------------------------------------------------------------------
+// prompt L3 响应 → turn 终态（§7.2 宿主驱动 turn 模型）：真实 peri 不发
+// turn_complete 通知，唯一终态信号是 prompt 的 L3 响应 result.stopReason
+// （acp-channel.ts 同源）：failed/error → Failed、cancelled → Cancelled、
+// 缺省 → Completed。同时断言活动 turn 表项清理（clear_active_turn——终态
+// 后表项不得滞留阻塞后续 load「有活动 turn」校验）。
+// ---------------------------------------------------------------------------
+
+/// 驱动一轮完整 prompt L3 链路：提交 → forward_ack（L1+L2）→ L3 response
+/// （`stop_reason` 缺省 = result 无 stopReason）→ committed ack。返回 session
+/// doc 镜像中 `active_turn_status`；断言活动 turn 表项已清理。
+async fn drive_prompt_l3(
+    env: &mut Env,
+    sid: &str,
+    acp: &str,
+    stop_reason: Option<&str>,
+) -> String {
+    bound_session(env, sid, acp).await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), prompt_action(&cid, sid), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+    // L3：JSON-RPC response（result.stopReason）。
+    let mut result = serde_json::Map::new();
+    if let Some(sr) = stop_reason {
+        result.insert("stopReason".into(), serde_json::Value::String(sr.into()));
+    }
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: sid.into(),
+        epoch: 0,
+        seq: 2,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": result,
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    // 活动 turn 表项清理（§7.2：终态后不得滞留阻塞 load）。
+    assert!(
+        env.chats.active_turn(sid).await.is_none(),
+        "终态后活动 turn 表项必须清理"
+    );
+    // session doc 镜像：active_turn_status。
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(sid))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let sm = root
+        .get(&txn, "session")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    sm.get(&txn, "active_turn_status")
+        .and_then(|v| v.cast::<String>().ok())
+        .unwrap_or_default()
+}
+
+/// stopReason → turn 终态三分支映射（§7.2）：failed → Failed、cancelled →
+/// Cancelled、缺省 → Completed。
+#[tokio::test]
+async fn prompt_l3_stop_reason_maps_turn_terminal() {
+    let mut env = env().await;
+    let failed = drive_prompt_l3(&mut env, S1, "acp-1", Some("failed")).await;
+    assert_eq!(failed, "failed", "stopReason=failed → turn 终态 Failed");
+    let cancelled = drive_prompt_l3(&mut env, S2, "acp-2", Some("cancelled")).await;
+    assert_eq!(cancelled, "cancelled", "stopReason=cancelled → turn 终态 Cancelled");
+    let completed = drive_prompt_l3(&mut env, S3, "acp-3", None).await;
+    assert_eq!(completed, "completed", "无 stopReason → turn 终态 Completed");
+}
+
+/// L3 error（agent 拒绝 prompt）→ error ack（AgentUnavailable，可重试）+
+/// 活动 turn 表项清理（§7.2：L3 error 也是 turn 的终结——表项滞留会阻塞
+/// 后续 load「有活动 turn」校验）。
+#[tokio::test]
+async fn prompt_l3_error_clears_active_turn() {
+    let mut env = env().await;
+    bound_session(&env, S4, "acp-4").await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), prompt_action(&cid, S4), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+    // executor 在 forward_ack 后继续执行（RegisterUserEntry → set_active_turn）；
+    // 轮询等待活动 turn 登记（避免 executor 调度时序竞态）。
+    let registered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if env.chats.active_turn(S4).await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(registered.is_ok(), "prompt 执行中登记活动 turn");
+    // L3 error。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S4.into(),
+        epoch: 0,
+        seq: 2,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": { "code": -32603, "message": "agent rejected" },
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.command_id, cid);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert!(!e.retryable, "L3 error 是终态失败（fail_terminal，不可重试）");
+        }
+        other => panic!("expected action_error, got {other:?}"),
+    }
+    assert!(
+        env.chats.active_turn(S4).await.is_none(),
+        "L3 error → 活动 turn 表项清理"
+    );
+}
+
+/// cancel（notification：无 id 帧，发送成功即 L3 等价确认）→ 注入 Cancelled
+/// 终态 + 活动 turn 表项清理（§7.2；表项滞留会阻塞后续 load）。
+#[tokio::test]
+async fn cancel_notification_injects_cancelled_and_clears_active_turn() {
+    let mut env = env().await;
+    bound_session(&env, S5, "acp-5").await;
+    // 投影活动 turn（session doc active_turn 建立；user_message 事件路径）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &acp_hub_proto::instance::InstanceEvent {
+                chat_id: S5.into(),
+                epoch: 0,
+                seq: 1,
+                frame: serde_json::json!({
+                    "type": "user_message_chunk",
+                    "sessionId": "acp-5",
+                    "payload": {"turnId": "t1", "entryId": "t1:user", "text": "hi"}
+                }),
+            },
+        )
+        .await;
+    assert!(matches!(r, crate::channel::ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S5, "t1").await;
+    // cancel（notification 路径）。
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::Cancel {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::CancelChatPayload { chat_id: S5.into() },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // forward notification 帧 + ack（L1+L2；notification 无 L3 响应）。
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            assert_eq!(f.frame["id"], serde_json::Value::Null, "cancel 为 notification（无 id）");
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    }
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    // 终态注入：session doc active_turn_status = cancelled + 表项清理。
+    assert!(
+        env.chats.active_turn(S5).await.is_none(),
+        "cancel 终态后活动 turn 表项清理"
+    );
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S5))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let sm = root
+        .get(&txn, "session")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(
+        sm.get(&txn, "active_turn_status").unwrap().cast::<String>().unwrap(),
+        "cancelled",
+        "cancel 发送成功 → turn 终态 Cancelled（§7.2）"
+    );
 }

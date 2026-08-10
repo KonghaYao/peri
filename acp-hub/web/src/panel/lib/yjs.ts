@@ -427,11 +427,13 @@ export function renderChat(doc: Y.Doc): ChatView {
   };
 }
 
-// ── renderControl：对话头部 + 权限请求（control:{cid} 投影，M3 §3.3）─────
+// ── renderControl：对话头部 + 权限请求（session:{cid} 投影，M3 §3.3）─────
 
-/** 根 Map：chat / agent / active_turn / pending_permissions。
+/** 根 Map：session / agent / pending_permissions（active turn 内嵌于
+ *  `session` map，对齐 Chat/Session 双 Doc 参考结构；旧根级 `chat`/
+ *  `active_turn` 键已随迁移移除）。
  *  权限条（allow/deny → permission/resolve）数据取自 pending_permissions。
- *  ACP 会话列表不在 control doc（instance 级数据 → Registry Doc sessions，
+ *  ACP 会话列表不在 session doc（instance 级数据 → Registry Doc sessions，
  *  §6.3）——经 renderRegistry 读取，不随 chat 切换销毁。 */
 export function renderControl(doc: Y.Doc): ControlView {
   const root = doc.getMap<unknown>('root');
@@ -442,19 +444,27 @@ export function renderControl(doc: Y.Doc): ControlView {
     pendingPermissions: [],
   };
 
-  const sess = asMap(root.get('chat'));
+  // `session` map：会话元信息 + active turn 内嵌字段（对齐参考 Session Doc：
+  // sessionId/title/status/activeTurnId/activeTurnStatus/activeTurnUpdatedAt）。
+  const sess = asMap(root.get('session'));
   if (sess) {
-    // chat_id 键 server 侧暂不写入（ChatInfoProjection 仅是 serde 镜像，
-    // 实际写入见 aggregator.rs write_chat_info），读空兜底 ''，避免 UI 层
-    // 对 undefined 取 slice 抛 TypeError。
     result.chat = {
-      chatId: getStr(sess, 'chat_id') || '',
+      chatId: getStr(sess, 'session_id') || '',
       title: getStr(sess, 'title'),
       status: getStr(sess, 'status'),
       activeTurnId: getStr(sess, 'active_turn_id'),
       createdAt: getStr(sess, 'created_at'),
       updatedAt: getStr(sess, 'updated_at'),
     };
+    const turnId = getStr(sess, 'active_turn_id');
+    const turnStatus = getStr(sess, 'active_turn_status');
+    if (turnId || turnStatus) {
+      result.activeTurn = {
+        turnId,
+        turnStatus,
+        updatedAt: getStr(sess, 'active_turn_updated_at'),
+      };
+    }
   }
 
   const agent = asMap(root.get('agent'));
@@ -462,19 +472,10 @@ export function renderControl(doc: Y.Doc): ControlView {
     const caps = asArray(agent.get('capabilities'));
     result.agent = {
       instanceId: getStr(agent, 'instance_id'),
-      sessionId: getStr(agent, 'session_id'),
+      sessionId: getStr(agent, 'acp_session_id') ?? getStr(agent, 'session_id'),
       status: getStr(agent, 'status'),
       lastActivityAt: getStr(agent, 'last_activity_at'),
       capabilities: caps ? caps.toArray() : [],
-    };
-  }
-
-  const turn = asMap(root.get('active_turn'));
-  if (turn) {
-    result.activeTurn = {
-      turnId: getStr(turn, 'turn_id'),
-      turnStatus: getStr(turn, 'turn_status'),
-      updatedAt: getStr(turn, 'updated_at'),
     };
   }
 
