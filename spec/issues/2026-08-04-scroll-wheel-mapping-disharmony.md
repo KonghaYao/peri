@@ -116,4 +116,4 @@
 4. **像素增量被上游吞掉**：crossterm 0.29 `EnableMouseCapture` 从不发 `?1016h`，ghostty 平滑滚动像素增量在第 4 参数被丢弃 → 应用永远只能离散跳、无法感知滚动意图。属上游限制，1016 可协商。
 5. **sticky +2 padding 与上滚即失跟**：`mod.rs:380-388` padding 使「滚到视觉底部 ≠ 恢复跟随」；3 行/格使一次误触即整轮失跟。
 6. **面板无节流**：`scroll_fps` 是唯一节流配置但仅消息区读取，面板在 ghostty/ssh 高频事件下每事件一次 draw，复现 07-05 已修复的卡顿病。
-7. **历史模式**：节流帧率改过 4 档（16ms→33ms→scroll_fps 60/30/20→默认 50ms），全部手动逃生舱、无环境自适应；文档 `peri-tui-message-pipeline-v2.md` §8 仍写 16ms/60fps，与实际脱节；`run_auto_follow` 5 分支零测试覆盖，7 个 proximity 测试是已废弃死代码。
+7. **历史模式**：节流帧率改过 4 档（16ms→33ms→scroll_fps 60/30/20→默认 50ms），全部手动逃生舱、无环境自适应；`run_auto_follow` 5 分支零测试覆盖，7 个 proximity 测试是已废弃死代码。（注：原引用文档 `peri-tui-message-pipeline-v2.md` 已合并入 `docs/design/tui-acp-data-flow.md` §10.3，其中滚动节流描述已修正为默认 50ms/20fps、可配置 `scroll_fps` / `PERI_SCROLL_THROTTLE_MS`，不再与实际脱节。）
