@@ -4,13 +4,13 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 根文件禁止复制模块 inventory、issue narrative、实现细节或规范正文。
 -->
 
-# CLAUDE.md — Perihelion
+# AGENTS.md — Perihelion
 
-终端 AI 编程助手, 人文交流、撰写文档以研究员风格为主，务实谨慎，不可过度营销；主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`。执行阶段与退出语义见 `peri-agent/CLAUDE.md`。
+终端 AI 编程助手, 人文交流、撰写文档以研究员风格为主，务实谨慎，不可过度营销；主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`。执行阶段与退出语义见 `peri-agent/AGENTS.md`。
 
 ## 先读什么
 
-信息优先级：代码/契约测试 > `docs/standards/` > 模块 `CLAUDE.md` > `docs/design/` > active spec > history；冲突服从更高项。`AgentsMdMiddleware` loader 不自动继承父目录：进入模块任务前，显式 Read 对应模块 `CLAUDE.md` 和适用 standard。
+信息优先级：代码/契约测试 > `docs/standards/` > 模块 `AGENTS.md` > `docs/design/` > active spec > history；冲突服从更高项。`AgentsMdMiddleware` loader 不自动继承父目录：进入模块任务前，显式 Read 对应模块 `AGENTS.md` 和适用 standard。
 
 - 标准入口：`docs/standards/index.md`；架构契约：`docs/standards/architecture-contracts.md`。
 - Rust：`docs/standards/rust.md`；TUI：`docs/standards/tui.md`；文档维护：`docs/standards/documentation.md`。
@@ -24,13 +24,13 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 
 | 任务 | 先读 | 稳定入口 |
 | --- | --- | --- |
-| Agent loop、Compact、provider、tools | `peri-agent/CLAUDE.md` + architecture/rust | `peri-agent/src/agent/`、`peri-agent/src/agent/compact_v2/`、`run_react_loop` |
-| session、prompt、event、caps、Langfuse、composition | `peri-acp/CLAUDE.md` + architecture/rust | `peri-acp/src/session/`、`peri-acp/src/prompt/`、`peri-acp/src/event/`、`peri-acp/src/langfuse/` |
-| MCP、plugin、skills、subagent、HITL、workflow、LSP | `peri-middlewares/CLAUDE.md` + architecture/rust | `peri-middlewares/src/` |
-| TUI | `peri-tui/CLAUDE.md` + tui/rust | `peri-tui/src/kit/`、`peri-tui/src/kit/acp_events/` |
-| E2E | `e2e/CLAUDE.md` + testing standards | `e2e/` |
-| 文档站 | `peri-cool/CLAUDE.md` + documentation | `peri-cool/`（submodule） |
-| Rust 通用、测试、CLAUDE 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
+| Agent loop、Compact、provider、tools | `peri-agent/AGENTS.md` + architecture/rust | `peri-agent/src/agent/`、`peri-agent/src/agent/compact_v2/`、`run_react_loop` |
+| session、prompt、event、caps、Langfuse、composition | `peri-acp/AGENTS.md` + architecture/rust | `peri-acp/src/session/`、`peri-acp/src/prompt/`、`peri-acp/src/event/`、`peri-acp/src/langfuse/` |
+| MCP、plugin、skills、subagent、HITL、workflow、LSP | `peri-middlewares/AGENTS.md` + architecture/rust | `peri-middlewares/src/` |
+| TUI | `peri-tui/AGENTS.md` + tui/rust | `peri-tui/src/kit/`、`peri-tui/src/kit/acp_events/` |
+| E2E | `e2e/AGENTS.md` + testing standards | `e2e/` |
+| 文档站 | `peri-cool/AGENTS.md` + documentation | `peri-cool/`（submodule） |
+| Rust 通用、测试、Codex 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
 
 Crate 拓扑：`peri-tui → peri-acp → peri-agent`；`peri-middlewares` 由 ACP 装配；其他 workspace crates 以 `Cargo.toml` 为事实源。
 
@@ -45,7 +45,7 @@ lefthook run pre-commit
 cargo clippy --workspace --all-targets -- -D warnings # 非常重要
 ```
 
-E2E 命令只在 `e2e/CLAUDE.md` 维护。
+E2E 命令只在 `e2e/AGENTS.md` 维护。
 
 ## 检查
 

@@ -218,3 +218,4 @@ skills-lock.json
 !.peri/theme/
 e2e/results
 __pycache__
+.codex
