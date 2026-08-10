@@ -12,6 +12,8 @@ fn contribution(mw: &ToolSearchMiddleware) -> Option<String> {
 struct MockTool {
     name_str: String,
     desc_str: String,
+    direct: bool,
+    decl: Option<String>,
 }
 
 impl MockTool {
@@ -19,7 +21,21 @@ impl MockTool {
         Self {
             name_str: name.to_string(),
             desc_str: desc.to_string(),
+            direct: false,
+            decl: None,
         }
+    }
+
+    /// 标记为 LLM 可见（direct）工具。
+    fn with_direct(mut self) -> Self {
+        self.direct = true;
+        self
+    }
+
+    /// 声明提示词层模板（design v2 §2.5.1 prompt_declaration）。
+    fn with_prompt_declaration(mut self, declaration: &str) -> Self {
+        self.decl = Some(declaration.to_string());
+        self
     }
 }
 
@@ -33,6 +49,12 @@ impl BaseTool for MockTool {
     }
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn is_direct(&self) -> bool {
+        self.direct
+    }
+    fn prompt_declaration(&self) -> Option<String> {
+        self.decl.clone()
     }
     async fn invoke(
         &self,
@@ -168,5 +190,91 @@ async fn test_workflow_not_discoverable_when_not_registered() {
     assert!(
         results.is_empty(),
         "未注册的 Workflow 不应被 SearchExtraTools 发现（print mode 语义）"
+    );
+}
+
+/// 构造含声明工具的测试组件：deferred（CronRegister/mcp） + direct（Read）。
+fn build_declaring_components() -> (
+    Arc<ToolSearchIndex>,
+    Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
+) {
+    let (index, shared) = build_test_components();
+    shared.write().insert(
+        "Read".to_string(),
+        Arc::new(
+            MockTool::new("Read", "Read a file")
+                .with_direct()
+                .with_prompt_declaration(
+                    "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`.",
+                ),
+        ) as Arc<dyn BaseTool>,
+    );
+    (index, shared)
+}
+
+/// [2.5.6-声明段] 声明段与 deferred 列表共存：deferred 在前、`\n\n` 分隔
+/// （design v2 §2.5.2 合并策略），既有 deferred 列表提示不回归。
+#[tokio::test]
+async fn test_before_agent_merges_deferred_list_and_declarations() {
+    let (index, shared) = build_declaring_components();
+    let mw = ToolSearchMiddleware::new(index, shared);
+
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    let contribution = contribution(&mw).unwrap();
+    // deferred 列表保留（既有行为回归，middleware_test.rs:85-104 语义）
+    assert!(
+        contribution.contains("CronRegister"),
+        "prompt 贡献应包含延迟工具列表"
+    );
+    // 声明段渲染：title 走 name 派生路径 → "Read"
+    assert!(
+        contribution.contains(
+            "Read a file → `Read` (Read). Use `Read` for file content, not `cat`/`head`/`tail`."
+        ),
+        "声明段应渲染占位符：{contribution}"
+    );
+    // 拼接顺序：deferred 列表在前、声明段在后
+    let list_pos = contribution.find("CronRegister").unwrap();
+    let decl_pos = contribution.find("Read a file").unwrap();
+    assert!(list_pos < decl_pos, "deferred 列表应位于声明段之前");
+}
+
+/// [2.5.6-缓存保护] 注入不同 cwd 断言声明段输出不变（不引用会话数据）。
+#[tokio::test]
+async fn test_declaration_output_independent_of_cwd() {
+    let (index, shared) = build_declaring_components();
+    let mw = ToolSearchMiddleware::new(index, shared);
+
+    let mut state1 = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state1).await.unwrap();
+    let first = contribution(&mw).unwrap();
+    assert!(first.contains("Read a file"), "首轮应包含声明段");
+
+    let mut state2 = peri_agent::agent::state::AgentState::new("/different");
+    mw.before_agent(&mut state2).await.unwrap();
+    assert_eq!(
+        contribution(&mw).unwrap(),
+        first,
+        "cwd 变化不得影响声明段输出（design v2 §2.5.4 静态字段纪律）"
+    );
+}
+
+/// [2.5.6-默认行为] 未实现 prompt_declaration 的工具不产生声明段；
+/// deferred-only 工具集下贡献与既有行为一致（仅列表，无追加分隔）。
+#[tokio::test]
+async fn test_before_agent_no_declarations_without_prompt_declaration() {
+    let (index, shared) = build_test_components(); // 全部 deferred，无声明
+    let mw = ToolSearchMiddleware::new(index, shared);
+
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    let contribution = contribution(&mw).unwrap();
+    assert!(contribution.contains("CronRegister"));
+    assert!(
+        !contribution.contains("Read a file"),
+        "未声明工具不得出现在声明段"
     );
 }

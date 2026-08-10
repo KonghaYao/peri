@@ -41,6 +41,73 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// 工具描述契约（design v2 §2.5.1，v1.4 新增）
+///
+/// 提示词层声明与 UI 展示使用的结构化描述。线上 LLM 投影仍为
+/// [`ToolDefinition`]（name/description/parameters）——`title`/`namespace`
+/// 仅存在于进程内契约与提示词层，不下发 API（OpenAI/Anthropic function
+/// calling 无对应字段）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolDescription {
+    /// 模型调用名（必填，与 `BaseTool::name()` 一致）
+    pub name: String,
+    /// 模型向完整描述（必填，进入 API tools 列表）
+    pub description: String,
+    /// 短显示名（提示词层声明与 UI 展示引用；缺省由 [`derive_title_from_name`] 推导）
+    pub title: Option<String>,
+    /// 分组（提示词层按组组织声明段；缺省不分组）
+    pub namespace: Option<String>,
+}
+
+/// 从工具名推导短显示名：CamelCase / snake_case 拆词、词首大写。
+///
+/// - `AskUserQuestion` → `Ask User Question`
+/// - `folder_operations` → `Folder Operations`
+/// - `Read` → `Read`
+///
+/// 仅处理 ASCII 字母数字与 `_`；连续大写/数字等超范围输入按最小规则尽力拆分
+/// （design v2 §2.5.1「缺省时由 name 推导」）。
+pub fn derive_title_from_name(name: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    // 前一个字符是否小写——camelCase 边界（小写 → 大写）据此切词
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c == '_' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+        } else if c.is_ascii_uppercase() && prev_lower {
+            words.push(std::mem::take(&mut current));
+            current.push(c);
+            prev_lower = false;
+        } else {
+            current.push(c);
+            prev_lower = c.is_ascii_lowercase();
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+        .into_iter()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut capitalized = String::with_capacity(word.len());
+                    capitalized.push(first.to_ascii_uppercase());
+                    capitalized.push_str(chars.as_str());
+                    capitalized
+                }
+                None => word,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 工具上下文保留策略（用于 Compact 决策；自 peri-agent 迁入，
 /// `peri-agent::tools::ContextRetention` 保留 re-export）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,4 +199,38 @@ pub trait BaseTool: Send + Sync {
     fn is_direct(&self) -> bool {
         false
     }
+
+    /// 短显示名（≤ 6 词，名词短语）。缺省时由 [`derive_title_from_name`] 推导。
+    fn title(&self) -> Option<&str> {
+        None
+    }
+
+    /// 工具分组（如 `filesystem`、`web`、`meta`）。缺省不分组。
+    fn namespace(&self) -> Option<&str> {
+        None
+    }
+
+    /// 结构化工具描述（design v2 §2.5.1）：组装 name/description/title/namespace，
+    /// title 缺省时由 name 推导。
+    fn tool_description(&self) -> ToolDescription {
+        ToolDescription {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            title: Some(
+                self.title()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| derive_title_from_name(self.name())),
+            ),
+            namespace: self.namespace().map(str::to_owned),
+        }
+    }
+
+    /// 提示词层声明模板；返回 `None` 表示不出现在提示词声明段（默认）。
+    fn prompt_declaration(&self) -> Option<String> {
+        None
+    }
 }
+
+#[cfg(test)]
+#[path = "tools_test.rs"]
+mod tests;

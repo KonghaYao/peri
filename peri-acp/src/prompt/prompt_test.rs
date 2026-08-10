@@ -1203,3 +1203,64 @@ fn test_detect_is_git_repo_non_repo() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// [迁移守护] 05_using_tools.md 手写条目与声明段不得逐字重复（design v2 §2.5.5/2.5.6）。
+///
+/// 渐进迁移语义：工具实现 `prompt_declaration` 后，05 对应手写条目应删除
+/// ——同一事实单一来源（工具代码）。迁移完成前的过渡态以弱约束兜底：
+/// 声明段渲染结果不得与 05 中对应手写条目逐字重复。
+#[tokio::test]
+async fn test_declaration_segment_does_not_duplicate_05_handwritten_entry() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use peri_agent::middleware::r#trait::Middleware;
+    use peri_agent::tools::BaseTool;
+    use peri_middlewares::tool_search::{ToolSearchIndex, ToolSearchMiddleware};
+    use peri_middlewares::tools::ReadFileTool;
+
+    let section_05 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/05_using_tools.md"
+    ));
+    // 05_using_tools.md:10 的 Read 手写条目核心文本（过渡态前置条件）
+    let handwritten_read = "**Read a file** → `Read`. Do not use `Bash` with `cat`/`head`/`tail`.";
+    assert!(
+        section_05.contains(handwritten_read),
+        "05 应含 Read 手写条目（迁移完成前的过渡态）"
+    );
+
+    // 经真实装配面收集声明段：ToolSearchMiddleware.before_agent →
+    // prompt_contribution()（与 stage_builder 步骤 8 同数据源）
+    let mut shared = BTreeMap::new();
+    shared.insert(
+        "Read".to_string(),
+        Arc::new(ReadFileTool::new("/tmp")) as Arc<dyn BaseTool>,
+    );
+    let mw = ToolSearchMiddleware::new(
+        Arc::new(ToolSearchIndex::new()),
+        Arc::new(RwLock::new(shared)),
+    );
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    let contribution = Middleware::prompt_contribution(&mw).unwrap();
+    assert!(
+        contribution.contains("Read a file → `Read` (Read). Use `Read` for file content"),
+        "声明段应渲染 Read 模板（title 走 name 派生）：{contribution}"
+    );
+    assert!(
+        !contribution.contains(handwritten_read),
+        "声明段不得与 05 手写 Read 条目逐字重复（同一事实单一来源）"
+    );
+    // 反向：05 手写条目不得包含声明段渲染行
+    let decl_line = contribution
+        .lines()
+        .find(|l| l.starts_with("Read a file"))
+        .unwrap();
+    assert!(
+        !section_05.contains(decl_line),
+        "05 手写条目不得与声明段渲染行逐字重复"
+    );
+}

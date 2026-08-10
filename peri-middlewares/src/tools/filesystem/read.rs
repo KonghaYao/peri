@@ -77,6 +77,23 @@ impl BaseTool for ReadFileTool {
         true
     }
 
+    /// 演示分组（design v2 §2.5.1 示例：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3 示例语义）。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导
+    /// （"Read" → "Read"），验证缺省推导在真实工具上生效。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         READ_FILE_DESCRIPTION
     }
