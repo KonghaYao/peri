@@ -86,6 +86,8 @@ fn control_root() -> ControlDocRoot {
             title: "old".into(),
             status: "ended".into(),
             updated_at: "2026-08-06T00:00:00Z".into(),
+            cwd: String::new(),
+            bound_chat_id: None,
         },
     );
     ControlDocRoot {
@@ -141,6 +143,8 @@ fn registry_root() -> RegistryDocRoot {
             status: "active".into(),
             gap: None,
             updated_at: "2026-08-07T00:00:01Z".into(),
+            cwd: "/".into(),
+            workspace_id: None,
         },
     );
     RegistryDocRoot {

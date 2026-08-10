@@ -65,8 +65,8 @@ async fn env() -> Env {
         .on_hello("local", "tok-m", InstanceConn { tx }, &hello)
         .await;
     // 打开 session + binding（relay 投递前提）。
-    doc.open_chat("s1", "local", Some("t")).await.unwrap();
-    chats.register("s1", "local", Some("t")).await.unwrap();
+    doc.open_chat("s1", "local", Some("t"), None, None).await.unwrap();
+    chats.register("s1", "local", Some("t"), "/", None).await.unwrap();
     chats.bind("s1", "acp-1").await.unwrap();
     Env {
         _tmp: tmp,

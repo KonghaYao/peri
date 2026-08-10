@@ -459,6 +459,8 @@ async fn e2e_create_prompt_event_broadcast() {
                         instance_id: Some("local".into()),
                         cwd: None,
                         title: Some("e2e".into()),
+                        acp_session_id: None,
+                        workspace_id: None,
                     },
                 },
             ))
@@ -789,8 +791,8 @@ async fn instance_disconnect_gaps_chat() {
     // 用 coordinator 直接登记一个 session（hub 内部句柄）。
     let hub = server._hub_keep.clone();
     let sid = uuid::Uuid::new_v4().to_string();
-    hub.chats.register(&sid, "local", Some("t")).await.unwrap();
-    hub.doc.open_chat(&sid, "local", Some("t")).await.unwrap();
+    hub.chats.register(&sid, "local", Some("t"), "/", None).await.unwrap();
+    hub.doc.open_chat(&sid, "local", Some("t"), None, None).await.unwrap();
     hub.chats.bind(&sid, "acp-disc").await.unwrap();
     hub.chats.set_active_turn(&sid, "t1").await;
     let _ = hub;

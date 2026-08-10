@@ -32,12 +32,15 @@ fn all_frames() -> Vec<Frame> {
                 instance_id: None,
                 cwd: Some("/tmp".into()),
                 title: Some("t".into()),
+                acp_session_id: None,
+                workspace_id: None,
             },
         }),
         Frame::Action(ActionEnvelope::Load {
             command_id: "c2".into(),
             payload: LoadChatPayload {
                 chat_id: "s1".into(),
+                acp_session_id: "acp-s1".into(),
             },
         }),
         Frame::Action(ActionEnvelope::Close {
@@ -229,11 +232,11 @@ fn action_envelope_nested_tag_shape() {
     assert_eq!(value["payload"]["message"], "hi");
 }
 
-/// payload 判别（§12.1）：`chat/load` 与 `chat/close` 同形 payload
-/// `{chatId}` 经 envelope 层 `type` 判别无歧义。
+/// payload 判别（§12.1 + §8.5）：`chat/load` 携带 `{chatId, acpSessionId}`，
+/// `chat/close` 仅 `{chatId}`——经 envelope 层 `type` 判别无歧义。
 #[test]
 fn load_vs_close_discrimination() {
-    let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#;
+    let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1","acpSessionId":"acp-1"}}"#;
     let close_raw = r#"{"t":"action","commandId":"c3","type":"chat/close","payload":{"chatId":"s1"}}"#;
 
     let load = Frame::parse(load_raw).unwrap();
@@ -241,6 +244,8 @@ fn load_vs_close_discrimination() {
     assert!(matches!(load, Frame::Action(ActionEnvelope::Load { .. })));
     assert!(matches!(close, Frame::Action(ActionEnvelope::Close { .. })));
     assert_ne!(load, close, "same-shape payloads must not collapse");
+    // §8.5：缺 acpSessionId 的 chat/load 视为畸形（目标会话必填）。
+    assert!(Frame::parse(r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#).is_err());
 }
 
 /// 未知 `t` → `Unsupported`（§4.8 向量 6）。
@@ -294,7 +299,7 @@ fn known_tag_bad_payload_is_malformed_not_unsupported() {
 #[test]
 fn every_frame_tag_is_registered() {
     let registered: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
-    assert_eq!(registered.len(), 25, "§3.2 全表应有 25 个 tag");
+    assert_eq!(registered.len(), 26, "§3.2 全表应有 26 个 tag");
     for frame in all_frames() {
         assert!(
             registered.contains(&frame.tag().0),

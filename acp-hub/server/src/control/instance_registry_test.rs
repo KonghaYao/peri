@@ -296,11 +296,11 @@ async fn cleanup_orphans_kill_decision() {
 
     // s1：终态（意外存活裁决目标，§7.5）；s2：pending_close（补发目标，
     // §7.6）；s3：正常存活（不 kill）。
-    chats.register("s1", "m1", None).await.unwrap();
+    chats.register("s1", "m1", None, "/", None).await.unwrap();
     chats.transition("s1", ChatState::Closed).await.unwrap();
-    chats.register("s2", "m1", None).await.unwrap();
+    chats.register("s2", "m1", None, "/", None).await.unwrap();
     chats.request_close_offline("s2").await.unwrap();
-    chats.register("s3", "m1", None).await.unwrap();
+    chats.register("s3", "m1", None, "/", None).await.unwrap();
 
     let outcome = HelloOutcome {
         fenced_previous: false,
@@ -521,9 +521,9 @@ async fn heartbeat_alive_sessions_reconciliation_kills() {
         .await;
 
     // s1：终态（意外存活，§7.5）；s2：pending_close（§7.6 补发）。
-    chats.register("s1", "m1", None).await.unwrap();
+    chats.register("s1", "m1", None, "/", None).await.unwrap();
     chats.transition("s1", ChatState::Closed).await.unwrap();
-    chats.register("s2", "m1", None).await.unwrap();
+    chats.register("s2", "m1", None, "/", None).await.unwrap();
     chats.request_close_offline("s2").await.unwrap();
 
     // 首次心跳带存活清单（变化）→ 触发对账 + kill（后台任务）。

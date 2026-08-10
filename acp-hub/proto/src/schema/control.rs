@@ -94,4 +94,13 @@ pub struct SessionSummaryProjection {
     pub status: String,
     /// RFC3339。
     pub updated_at: String,
+    /// 所属目录（session/list 查询时的 cwd）：不同 cwd 的会话互不相交，
+    /// 全量同步 diff 按 cwd 隔离（§6.3 workspace 扩展）。
+    pub cwd: String,
+    /// 当前绑定该会话的对话 chat_id（§8.5 激活语义）：已被某活跃对话打开
+    /// 时标注——前端展示「已在对话中」并支持直接切换（不再重复新建对话）；
+    /// 无绑定 → None。仅按需查询路径填写（轮询投影路径不写，避免 Registry
+    /// diff 抖动）。
+    #[serde(default)]
+    pub bound_chat_id: Option<String>,
 }

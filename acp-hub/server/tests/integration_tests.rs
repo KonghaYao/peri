@@ -93,7 +93,9 @@ async fn t01_body() -> Result<(), String> {
             instance_id: None,
             cwd: None,
             title: Some("t01".to_string()),
-        },
+            acp_session_id: None,
+                workspace_id: None,
+}
     }))
     .await?;
     // accepted ack 先到。
@@ -200,7 +202,9 @@ async fn t03_body() -> Result<(), String> {
             instance_id: None,
             cwd: None,
             title: Some("t03".to_string()),
-        },
+            acp_session_id: None,
+                workspace_id: None,
+}
     }))
     .await?;
     // accepted → committed（携带 sessionId；wait_terminal 跳过前置 accepted）。

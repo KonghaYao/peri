@@ -34,6 +34,7 @@ pub mod hmac;
 pub mod instance;
 pub mod protocol;
 pub mod schema;
+pub mod session;
 pub mod version;
 pub mod whitelist;
 pub mod ysync;
@@ -44,6 +45,7 @@ pub use action::{ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChat
 pub use conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 pub use event::EventFrame;
 pub use frame::{Frame, FrameTag, ProtoError};
+pub use session::SessionListFrame;
 pub use instance::{
     BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello,
     InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,

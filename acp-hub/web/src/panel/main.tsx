@@ -7,7 +7,7 @@ import { render } from 'solid-js/web';
 import '../styles.css';
 import { ChatView } from './components/ChatView';
 import { ConnectCard } from './components/ConnectCard';
-import { InstanceList, ChatList } from './components/Lists';
+import { InstanceList, ChatList, SessionList, WorkspaceList } from './components/Lists';
 import { StatusRail } from './components/StatusRail';
 import { Toasts } from './components/Toasts';
 
@@ -24,8 +24,10 @@ function App() {
       <div class="grid items-start gap-3 px-5 py-3 pb-5 md:grid-cols-[280px_1fr_280px] max-md:grid-cols-1">
         <aside>
           <ConnectCard />
+          <WorkspaceList />
           <InstanceList />
           <ChatList />
+          <SessionList />
         </aside>
 
         <main>

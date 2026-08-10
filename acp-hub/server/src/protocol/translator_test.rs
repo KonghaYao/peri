@@ -33,6 +33,9 @@ fn prompt_translation() {
             assert_eq!(v["jsonrpc"], json!("2.0"));
             assert_eq!(v["method"], json!("session/prompt"));
             assert_eq!(v["params"]["sessionId"], json!("acp-1"));
+            // cwd 是 ACP 请求的严谨字段：出站帧必须与 spawn/会话绑定目录
+            // 一致（§6.3 workspace 扩展）。
+            assert_eq!(v["params"]["cwd"], json!("/srv/work"));
             // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
             // 序列，非 message 字符串；无 turnId（宿主侧归位，§7.2）。
             assert_eq!(v["params"]["prompt"], json!([{ "type": "text", "text": "hello" }]));
@@ -59,6 +62,8 @@ fn cancel_translation() {
         OutboundMessage::JsonRpc(v) => {
             assert_eq!(v["method"], json!("session/cancel"));
             assert_eq!(v["params"]["sessionId"], json!("acp-1"));
+            // cancel 同带 cwd（ACP 请求字段一致性）。
+            assert_eq!(v["params"]["cwd"], json!("/srv/work"));
             // 真实 peri 实测：session/cancel 是 notification——无 id、必带
             // jsonrpc 版本。
             assert_eq!(v["jsonrpc"], json!("2.0"));
@@ -84,6 +89,8 @@ fn resolve_translation() {
             assert_eq!(v["method"], json!("permission.resolve"));
             assert_eq!(v["params"]["permissionId"], json!("p1"));
             assert_eq!(v["params"]["decision"], json!("allow"));
+            // resolve 同带 cwd（ACP 请求字段一致性）。
+            assert_eq!(v["params"]["cwd"], json!("/srv/work"));
         }
         _ => panic!("expected json rpc"),
     }
@@ -106,6 +113,7 @@ fn unsupported_actions() {
         command_id: "c".into(),
         payload: acp_hub_proto::action::LoadChatPayload {
             chat_id: "s".into(),
+            acp_session_id: "acp-s".into(),
         },
     };
     assert!(matches!(
@@ -137,6 +145,32 @@ fn create_two_phase_rpcs() {
     assert_eq!(new["params"]["title"], json!("my session"));
     assert_eq!(new["id"].as_str().unwrap(), new_id.as_str());
     assert_ne!(init_id, new_id);
+}
+
+#[test]
+fn session_load_rpc_frame_shape() {
+    let t = Translator::new();
+    let (load_id, load) = t.session_load_rpc("/srv/work", "019fe709-3097-7f23-8266-9e5ceda78f4b");
+    assert_eq!(load["jsonrpc"], json!("2.0"));
+    assert_eq!(load["method"], json!("session/load"));
+    // 目标会话 id 由请求参数携带（§8.5：load 响应体不含 sessionId，binding
+    // 以请求参数为准）。
+    assert_eq!(
+        load["params"]["sessionId"],
+        json!("019fe709-3097-7f23-8266-9e5ceda78f4b")
+    );
+    assert_eq!(load["params"]["cwd"], json!("/srv/work"));
+    // 带 id 的 request（非 notification）——rpcId 由 server 分配（§6.1）。
+    assert_eq!(load["id"].as_str().unwrap(), load_id.as_str());
+    assert_eq!(load_id, "hub-1", "同一 translator 内 rpcId 单调");
+}
+
+#[test]
+fn session_load_rpc_rejects_bad_cwd() {
+    let t = Translator::new();
+    // cwd 缺省/非法时 panic（server 注入路径的防御；同 initialize_rpc）。
+    let r = std::panic::catch_unwind(|| t.session_load_rpc("", "acp-1"));
+    assert!(r.is_err(), "空 cwd 应 panic（防御）");
 }
 
 // ---------------------------------------------------------------------------

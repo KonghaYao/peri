@@ -271,6 +271,8 @@ mod tests {
                     title: "x".into(),
                     status: "completed".into(),
                     updated_at: "2026-08-07T00:00:00Z".into(),
+                    cwd: String::new(),
+                    bound_chat_id: None,
                 }],
             },
             EventBody::TurnTerminal {

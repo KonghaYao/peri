@@ -349,7 +349,10 @@ impl Gateway {
                                         | ActionEnvelope::Cancel { command_id, .. }
                                         | ActionEnvelope::ResolvePermission { command_id, .. }
                                         | ActionEnvelope::SubscribeEvents { command_id, .. }
-                                        | ActionEnvelope::UnsubscribeEvents { command_id, .. } => {
+                                        | ActionEnvelope::UnsubscribeEvents { command_id, .. }
+                                        | ActionEnvelope::WorkspaceCreate { command_id, .. }
+                                        | ActionEnvelope::WorkspaceRemove { command_id, .. }
+                                        | ActionEnvelope::SessionList { command_id, .. } => {
                                             command_id.clone()
                                         }
                                     };
@@ -463,7 +466,7 @@ impl Gateway {
                             Some(e) => (e.instance_id.clone(), e.title.clone()),
                             None => (String::new(), String::new()),
                         };
-                        if let Err(e) = self.doc.open_chat(cid, &instance_id, Some(&title)).await {
+                        if let Err(e) = self.doc.open_chat(cid, &instance_id, Some(&title), None, None).await {
                             warn!(conn_id, chat_id = cid, error = ?e, "open chat failed");
                         }
                     }
@@ -800,7 +803,10 @@ fn action_error_committed_rejected(action: &ActionEnvelope) -> ActionError {
         | ActionEnvelope::Cancel { command_id, .. }
         | ActionEnvelope::ResolvePermission { command_id, .. }
         | ActionEnvelope::SubscribeEvents { command_id, .. }
-        | ActionEnvelope::UnsubscribeEvents { command_id, .. } => command_id.clone(),
+        | ActionEnvelope::UnsubscribeEvents { command_id, .. }
+        | ActionEnvelope::WorkspaceCreate { command_id, .. }
+        | ActionEnvelope::WorkspaceRemove { command_id, .. }
+        | ActionEnvelope::SessionList { command_id, .. } => command_id.clone(),
     };
     ActionError {
         command_id,

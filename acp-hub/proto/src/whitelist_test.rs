@@ -127,30 +127,35 @@ fn client_frames_rejected_on_instance_role() {
     }
 }
 
-/// action `type` 子集收窄（§9.2）：M1 仅 5 种；M2/M3 类型白名单外。
+/// action `type` 子集收窄（§9.2）：M1 共 9 种（含 workspace 管理面、
+/// session/list 按需查询与 §8.5 启用的 chat/load 会话切换）；M3 类型白名单外。
 #[test]
 fn m1_action_type_subset() {
     for t in [
         "chat/create",
+        "chat/load",
         "chat/prompt",
         "chat/cancel",
         "chat/close",
         "permission/resolve",
+        "workspace/create",
+        "workspace/remove",
+        "session/list",
     ] {
         assert!(m1_allows_action_type(t), "{t} 应在 M1");
     }
-    for t in ["chat/load", "events/subscribe", "events/unsubscribe"] {
+    for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 5);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 9);
 }
 
-/// 全量注册表：25 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与
+/// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与
 /// instance/forward 系，冲突 1 裁决）。
 #[test]
 fn frame_tag_registry_completeness() {
     let tags: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
-    assert_eq!(tags.len(), 25);
+    assert_eq!(tags.len(), 26);
     for expected in [
         "action",
         "action_ack",
@@ -177,6 +182,7 @@ fn frame_tag_registry_completeness() {
         "instance/kill_ack",
         "instance/forward_ack",
         "instance/process_exit",
+        "session_list",
     ] {
         assert!(tags.contains(&expected), "缺少注册 tag {expected}");
     }

@@ -98,8 +98,38 @@ fn user_msg(chat: &str, seq: u64, turn: &str) -> NormalizedEvent {
     }
 }
 
+/// `session/load` 回放事件（§8.5）：历史 chunk 无 turn_id（真实 peri 重放）。
+fn replay_user(chat: &str, seq: u64, text: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        chat_id: chat.to_string(),
+        seq,
+        epoch: 0,
+        body: EventBody::UserMessage {
+            turn_id: String::new(),
+            entry_id: String::new(),
+            text: text.to_string(),
+            author_user_id: None,
+            created_at: "2026-08-07T00:00:00Z".to_string(),
+        },
+    }
+}
+
+fn replay_delta(chat: &str, seq: u64, text: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        chat_id: chat.to_string(),
+        seq,
+        epoch: 0,
+        body: EventBody::MessageDelta {
+            turn_id: String::new(),
+            entry_id: String::new(),
+            block_id: String::new(),
+            text: text.to_string(),
+        },
+    }
+}
+
 async fn open(mgr: &DocManager, chat: &str) {
-    mgr.open_chat(chat, "m1", Some("t")).await.unwrap();
+    mgr.open_chat(chat, "m1", Some("t"), None, None).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +421,292 @@ async fn command_update_title_and_chat_terminal() {
 }
 
 // ---------------------------------------------------------------------------
+// RegistryApplySessions（§6.3）：instance 级 session 列表全量同步投影到
+// Registry Doc（幂等 diff + 自愈删除；不随 chat 销毁/重建）
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn command_apply_session_list_projects_idempotent_and_self_heals() {
+    use yrs::{Map, MapRef, ReadTxn, Transact};
+    use acp_hub_proto::schema::SessionSummaryProjection;
+
+    // 镜像从 MemSink 落盘记录重放（含 writer 启动基线——基线只走 sink，
+    // 不经广播通道；真实客户端经 gateway 快照获得同源基线）。
+    let sink = MemSink::default();
+    let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
+    open(&mgr, "s1").await;
+
+    let sum = |id: &str, title: &str, updated: &str| SessionSummaryProjection {
+        session_id: id.to_string(),
+        title: title.to_string(),
+        status: String::new(), // peri SessionInfo 无 status 字段 → 空串
+        updated_at: updated.to_string(),
+        cwd: String::new(),
+        bound_chat_id: None,
+    };
+
+    // 初始列表：两个条目。
+    let entries = vec![sum("a", "会话A", "t0"), sum("b", "会话B", "t1")];
+    let r = mgr
+        .submit_command("s1", DocCommand::RegistryApplySessions { entries })
+        .await;
+    assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
+
+    // 重放 control 更新（累积镜像）→ 校验 sessions Map。
+    let mirror = yrs::Doc::new();
+    async fn drain(sink: &MemSink, mirror: &yrs::Doc) {
+        use yrs::updates::decoder::Decode as _;
+        let updates = sink.updates.lock().await;
+        for (doc, update) in updates.iter() {
+            if *doc == DocId::REGISTRY {
+                let parsed = yrs::Update::decode_v1(update).unwrap();
+                let mut txn = mirror.transact_mut();
+                txn.apply_update(parsed).unwrap();
+            }
+        }
+    }
+    drain(&sink, &mirror).await;
+    {
+        let txn = mirror.transact();
+        let root = txn.get_map("root").expect("root map");
+        let sessions = root
+            .get(&txn, "sessions")
+            .expect("sessions map")
+            .cast::<MapRef>()
+            .unwrap();
+        assert_eq!(sessions.iter(&txn).count(), 2);
+        let a = sessions.get(&txn, "a").unwrap().cast::<MapRef>().unwrap();
+        assert_eq!(a.get(&txn, "title").unwrap().cast::<String>().unwrap(), "会话A");
+    }
+
+    // 幂等：同列表再提交 → 仍 Applied（diff 无变化，无额外写入）。
+    let r = mgr
+        .submit_command("s1", DocCommand::RegistryApplySessions {
+            entries: vec![sum("a", "会话A", "t0"), sum("b", "会话B", "t1")],
+        })
+        .await;
+    assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
+
+    // 全量同步：b 更新字段、a 不在响应中 → 旧条目删除（§6.3 自愈）。
+    let _ = mgr
+        .submit_command("s1", DocCommand::RegistryApplySessions {
+            entries: vec![sum("b", "会话B-改", "t2")],
+        })
+        .await;
+    drain(&sink, &mirror).await;
+    {
+        let txn = mirror.transact();
+        let root = txn.get_map("root").expect("root map");
+        let sessions = root
+            .get(&txn, "sessions")
+            .expect("sessions map")
+            .cast::<MapRef>()
+            .unwrap();
+        assert_eq!(sessions.iter(&txn).count(), 1, "响应中不存在的旧条目应删除");
+        assert!(sessions.get(&txn, "a").is_none());
+        let b = sessions.get(&txn, "b").unwrap().cast::<MapRef>().unwrap();
+        assert_eq!(b.get(&txn, "title").unwrap().cast::<String>().unwrap(), "会话B-改");
+    }
+}
+
+/// 孤儿 key 自愈（§6.3 全量同步）：历史遗留条目（map key ≠ 内部 session_id）
+/// 必须随一次全量同步删除——read_current 以真实 key 进投影，diff 按真实 key
+/// 收集 remove；否则孤儿 key 永存、渲染层按 key 逐条渲染 → 重复条目。
+#[test]
+fn session_list_orphan_key_removed_by_full_sync() {
+    use acp_hub_proto::schema::SessionSummaryProjection;
+    use crate::state::session_list;
+    use yrs::{Map, ReadTxn, Transact, WriteTxn};
+
+    let doc = yrs::Doc::new();
+    let sum = |id: &str, title: &str, updated: &str| SessionSummaryProjection {
+        session_id: id.to_string(),
+        title: title.to_string(),
+        status: String::new(),
+        updated_at: updated.to_string(),
+        cwd: String::new(),
+        bound_chat_id: None,
+    };
+
+    // 构造孤儿条目：map key = "old-key"，内部 session_id = "b"（与 incoming
+    // 相同的 id——最严场景：既需重建正常 key 条目，又需删除孤儿 key）。
+    {
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map("root");
+        let sessions = root.get_or_init::<_, yrs::MapRef>(&mut txn, "sessions");
+        let m = sessions.get_or_init::<_, yrs::MapRef>(&mut txn, "old-key");
+        m.insert(&mut txn, "session_id", "b");
+        m.insert(&mut txn, "title", "旧条目");
+        m.insert(&mut txn, "updated_at", "t0");
+    }
+
+    // 全量同步：响应只有 b（正常条目）。
+    let current = {
+        let txn = doc.transact();
+        let root = txn.get_map("root").unwrap();
+        session_list::read_current(&txn, &root)
+    };
+    assert_eq!(current.len(), 1);
+    assert!(
+        current.contains_key("old-key"),
+        "投影以 map 真实 key 为键（孤儿也进投影）"
+    );
+    let d = session_list::diff(&current, &[sum("b", "B", "t1")]);
+    assert!(
+        d.remove.contains(&"old-key".to_string()),
+        "孤儿 key 应被 remove 收集（真实 key）"
+    );
+    assert!(d.upsert.iter().any(|e| e.session_id == "b"));
+
+    // 应用 diff。
+    {
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map("root");
+        session_list::apply_diff(&mut txn, &root, &d);
+    }
+
+    // 结果：孤儿删除，正常条目写入（key = b，内容来自 incoming）。
+    let txn = doc.transact();
+    let root = txn.get_map("root").unwrap();
+    let sessions = root
+        .get(&txn, "sessions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(sessions.iter(&txn).count(), 1, "孤儿删除后只剩 1 条");
+    assert!(sessions.get(&txn, "old-key").is_none(), "孤儿 key 已删除");
+    let b = sessions.get(&txn, "b").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(b.get(&txn, "title").unwrap().cast::<String>().unwrap(), "B");
+}
+
+// ---------------------------------------------------------------------------
+// session/load 回放模式（§8.5 显式重建）：BeginLoadReplay → 历史 chunk 按
+// 回放序归位（load:{seq}）→ EndLoadReplay 全部终态化
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn load_replay_command_flow_projects_and_terminates_history() {
+    use yrs::{Array, GetString, Map, ReadTxn, Transact};
+    use yrs::updates::decoder::Decode as _;
+
+    // 镜像从 MemSink 落盘记录重放（含 writer 启动基线）。
+    let sink = MemSink::default();
+    let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
+    open(&mgr, "s1").await;
+
+    // 先写入当前会话内容；load 是替换当前会话，旧 Yjs 内容不得与回放混合。
+    let r = mgr
+        .submit_command(
+            "s1",
+            DocCommand::RegisterUserEntry {
+                turn_id: "old-turn".into(),
+                entry_id: "old-turn:user".into(),
+                text: "旧会话内容".into(),
+                author_user_id: None,
+                created_at: "2026-08-10T00:00:00Z".into(),
+            },
+        )
+        .await;
+    assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
+
+    // 回放模式开始（coordinator 在 session/load 请求前提交）。
+    let r = mgr
+        .submit_command("s1", DocCommand::BeginLoadReplay { acp_session_id: "acp-1".into() })
+        .await;
+    assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
+
+    // 历史回放流（真实 peri 重放形态：无 turnId 的 user/agent chunk）。
+    assert!(matches!(
+        mgr.submit_event(replay_user("s1", 1, "历史问题1")).await,
+        SubmitResult::Applied(_)
+    ));
+    assert!(matches!(
+        mgr.submit_event(replay_delta("s1", 2, "历史回答1")).await,
+        SubmitResult::Applied(_)
+    ));
+    assert!(matches!(
+        mgr.submit_event(replay_user("s1", 3, "历史问题2")).await,
+        SubmitResult::Applied(_)
+    ));
+    assert!(matches!(
+        mgr.submit_event(replay_delta("s1", 4, "历史回答2")).await,
+        SubmitResult::Applied(_)
+    ));
+
+    // 回放结束（load 响应到达后提交）：全部回放 turn 终态化。
+    let r = mgr
+        .submit_command("s1", DocCommand::EndLoadReplay)
+        .await;
+    assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
+
+    // 批次 flush（delta 类入队即返回，需推进批次窗口）。
+    tokio::time::advance(TokioDuration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+
+    // 重放落盘记录 → 镜像 chat doc，验证条目归位与终态。
+    let mirror = yrs::Doc::new();
+    let updates = sink.updates.lock().await;
+    for (doc, update) in updates.iter() {
+        if *doc == DocId::chat("s1") {
+            let parsed = yrs::Update::decode_v1(update).unwrap();
+            let mut txn = mirror.transact_mut();
+            txn.apply_update(parsed).unwrap();
+        }
+    }
+    drop(updates);
+    let txn = mirror.transact();
+    let root = txn.get_map("root").expect("root map");
+    let entries = root
+        .get(&txn, "entries")
+        .expect("entries map")
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(entries.iter(&txn).count(), 4, "2 user + 2 assistant");
+    // 文本在 entry 的 blocks map；block_id 约定：user 条目 `{entry_id}:text`
+    // （create_user_entry），assistant 回放条目 = 内容块种类（`text`，§7.2
+    // 归位）——统一按 block_order 首块读取。
+    let entry_text = |m: &yrs::MapRef| -> String {
+        let order = m
+            .get(&txn, "block_order")
+            .unwrap()
+            .cast::<yrs::ArrayRef>()
+            .unwrap();
+        let bid = order.get(&txn, 0).unwrap().cast::<String>().unwrap();
+        m.get(&txn, "blocks")
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap()
+            .get(&txn, &bid)
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap()
+            .get(&txn, "text")
+            .unwrap()
+            .cast::<yrs::TextRef>()
+            .unwrap()
+            .get_string(&txn)
+    };
+    let get_entry = |id: &str| {
+        entries
+            .get(&txn, id)
+            .unwrap_or_else(|| panic!("entry {id} missing"))
+            .cast::<yrs::MapRef>()
+            .unwrap()
+    };
+    // 归位 turn：load:1 / load:3（seq 水位驱动）。
+    let u1 = get_entry("load:1:user");
+    assert_eq!(entry_text(&u1), "历史问题1");
+    let a1 = get_entry("load:1:assistant");
+    assert_eq!(entry_text(&a1), "历史回答1");
+    assert_eq!(a1.get(&txn, "status").unwrap().cast::<String>().unwrap(), "completed");
+    let u2 = get_entry("load:3:user");
+    assert_eq!(entry_text(&u2), "历史问题2");
+    let a2 = get_entry("load:3:assistant");
+    assert_eq!(entry_text(&a2), "历史回答2");
+    assert_eq!(a2.get(&txn, "status").unwrap().cast::<String>().unwrap(), "completed");
+}
+
+// ---------------------------------------------------------------------------
 // Registry 命令路由（§8.5）与 gap 上报（§9.4/§12.4）
 // ---------------------------------------------------------------------------
 
@@ -408,6 +724,8 @@ async fn registry_commands_route_to_global_writer() {
                 status: "accepting".into(),
                 gap: None,
                 updated_at: "2026-08-07T00:00:00Z".into(),
+                cwd: String::new(),
+                workspace_id: None,
             }),
         )
         .await;

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use acp_hub_proto::ack::{ActionError, ErrorCode};
 use acp_hub_proto::action::{
     ActionEnvelope, CreateChatPayload, PromptChatPayload,
 };
@@ -133,8 +134,8 @@ async fn env() -> Env {
 async fn bound_session(env: &Env, sid: &str, acp: &str) {
     let uuid = uuid::Uuid::parse_str(sid).expect("uuid session id");
     env.store.create_chat(uuid).unwrap();
-    env.doc.open_chat(sid, "local", None).await.unwrap();
-    env.chats.register(sid, "local", None).await.unwrap();
+    env.doc.open_chat(sid, "local", None, None, None).await.unwrap();
+    env.chats.register(sid, "local", None, "/", None).await.unwrap();
     env.chats.bind(sid, acp).await.unwrap();
 }
 
@@ -242,6 +243,8 @@ async fn spawn_failure_agent_unavailable() {
             instance_id: Some("local".into()),
             cwd: None,
             title: Some("t".into()),
+            acp_session_id: None,
+            workspace_id: None,
         },
     };
     let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
@@ -494,4 +497,658 @@ async fn close_offline_pending_close() {
         other => panic!("expected action_error, got {other:?}"),
     }
     assert!(env.chats.pending_close_chats().await.contains(&S5.to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// session/list 响应解析（§6.3）：纯函数单测
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_session_list_response_accepts_camel_case_and_defaults_status() {
+    let resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "hub-1",
+        "result": {
+            "sessions": [
+                { "sessionId": "sess-1", "title": "会话A", "updatedAt": "2026-08-09T00:00:00Z" },
+                { "sessionId": "sess-2", "title": "会话B", "cwd": "/tmp" }
+            ]
+        }
+    });
+    let entries = crate::channel::command_coordinator::parse_session_list_response(&resp);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].session_id, "sess-1");
+    assert_eq!(entries[0].title, "会话A");
+    // peri SessionInfo 无 status 字段（agent-client-protocol-schema 1.4）→ 空串缺省。
+    assert_eq!(entries[0].status, "");
+    assert_eq!(entries[0].updated_at, "2026-08-09T00:00:00Z");
+    assert_eq!(entries[1].updated_at, "");
+}
+
+#[test]
+fn parse_session_list_response_handles_snake_case_and_drops_invalid() {
+    let resp = serde_json::json!({
+        "result": {
+            "sessions": [
+                { "session_id": "s1", "status": "completed" },
+                { "sessionId": "" }
+            ]
+        }
+    });
+    let entries = crate::channel::command_coordinator::parse_session_list_response(&resp);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].session_id, "s1");
+    assert_eq!(entries[0].status, "completed");
+}
+
+#[test]
+fn parse_session_list_response_error_and_missing_result_are_empty() {
+    assert!(
+        crate::channel::command_coordinator::parse_session_list_response(
+            &serde_json::json!({ "error": { "code": -32603, "message": "x" } })
+        )
+        .is_empty()
+    );
+    assert!(
+        crate::channel::command_coordinator::parse_session_list_response(
+            &serde_json::json!({ "result": {} })
+        )
+        .is_empty()
+    );
+    assert!(
+        crate::channel::command_coordinator::parse_session_list_response(
+            &serde_json::json!({ "result": { "sessions": null } })
+        )
+        .is_empty()
+    );
+}
+
+// ── workspace 管理命令（独立于 chat 的上层概念）────────────────────────
+
+#[tokio::test]
+async fn workspace_create_committed_and_registry_projected() {
+    let env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap().to_string();
+    let action = ActionEnvelope::WorkspaceCreate {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::WorkspaceCreatePayload {
+            name: "my-ws".into(),
+            cwd: path.clone(),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // client 收 committed Ack（管理面：accepted → committed 直通）。
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(a)))) => {
+            assert_eq!(a.command_id, cid);
+            assert_eq!(a.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    // 投影到 Registry Doc（create 的读取面）。
+    let list = env.chats.registry().list_workspaces().await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "my-ws");
+    assert_eq!(list[0].cwd, path);
+}
+
+#[tokio::test]
+async fn workspace_create_invalid_cwd_error() {
+    let env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::WorkspaceCreate {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::WorkspaceCreatePayload {
+            name: "w".into(),
+            cwd: "/no/such/dir-xyz-123".into(),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.command_id, cid);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InvalidState);
+            assert!(!e.retryable);
+        }
+        other => panic!("expected action_error, got {other:?}"),
+    }
+    // 未投影。
+    assert!(env.chats.registry().list_workspaces().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn workspace_remove_committed_and_removed() {
+    let env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let dir = tempfile::tempdir().unwrap();
+    // 先建。
+    let create_cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(
+            &ctx("c"),
+            ActionEnvelope::WorkspaceCreate {
+                command_id: create_cid.clone(),
+                payload: acp_hub_proto::action::WorkspaceCreatePayload {
+                    name: "w".into(),
+                    cwd: dir.path().to_str().unwrap().into(),
+                },
+            },
+            tx.clone(),
+        )
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // 消费 committed ack。
+    let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("create committed ack");
+    // 从 Registry Doc 读回 id。
+    let list = env.chats.registry().list_workspaces().await.unwrap();
+    assert_eq!(list.len(), 1);
+    let ws_id = list[0].id.clone();
+
+    // 删。
+    let remove_cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(
+            &ctx("c"),
+            ActionEnvelope::WorkspaceRemove {
+                command_id: remove_cid.clone(),
+                payload: acp_hub_proto::action::WorkspaceRemovePayload {
+                    workspace_id: ws_id.clone(),
+                },
+            },
+            tx.clone(),
+        )
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(a)))) => {
+            assert_eq!(a.command_id, remove_cid);
+            assert_eq!(a.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    assert!(env.chats.registry().list_workspaces().await.unwrap().is_empty());
+
+    // 删不存在的 → InvalidState。
+    let cid2 = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(
+            &ctx("c"),
+            ActionEnvelope::WorkspaceRemove {
+                command_id: cid2.clone(),
+                payload: acp_hub_proto::action::WorkspaceRemovePayload {
+                    workspace_id: ws_id.clone(),
+                },
+            },
+            tx.clone(),
+        )
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InvalidState);
+        }
+        other => panic!("expected action_error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_with_workspace_id_inherits_cwd() {
+    let mut env = env().await;
+    let (tx, _rx) = mpsc::channel(16);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap().to_string();
+    // 先建 workspace。
+    let ws_cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(
+            &ctx("c"),
+            ActionEnvelope::WorkspaceCreate {
+                command_id: ws_cid,
+                payload: acp_hub_proto::action::WorkspaceCreatePayload {
+                    name: "ws".into(),
+                    cwd: path.clone(),
+                },
+            },
+            tx.clone(),
+        )
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let list = env.chats.registry().list_workspaces().await.unwrap();
+    assert_eq!(list.len(), 1);
+    let ws_id = list[0].id.clone();
+
+    // workspace 下新建对话（不直传 cwd）→ spawn cwd = workspace.cwd。
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::Create {
+        command_id: cid.clone(),
+        payload: CreateChatPayload {
+            instance_id: Some("local".into()),
+            cwd: None,
+            title: Some("t".into()),
+            acp_session_id: None,
+            workspace_id: Some(ws_id),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // spawn 帧携带 workspace 的 cwd（§6.2：ACP 进程工作目录继承）。
+    let spawn_frame = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("instance should receive spawn")
+        .expect("rx alive");
+    match spawn_frame {
+        OutboundMsg::Frame(Frame::InstanceSpawn(s)) => {
+            assert_eq!(s.cwd, path);
+        }
+        other => panic!("expected spawn, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_with_unknown_workspace_fails_invalid_state() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::Create {
+        command_id: cid.clone(),
+        payload: CreateChatPayload {
+            instance_id: Some("local".into()),
+            cwd: None,
+            title: Some("t".into()),
+            acp_session_id: None,
+            workspace_id: Some(uuid::Uuid::new_v4().to_string()),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    match r {
+        SubmitAck::Failed(e) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InvalidState);
+            assert!(!e.retryable, "workspace 缺失不是瞬时故障");
+        }
+        other => panic!("expected failed, got {other:?}"),
+    }
+    // instance 不应收到任何帧（前置失败）。
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(env.instance_rx.try_recv().is_err(), "instance 不应收到 spawn");
+    // client 不应收到 ack/error（提交即失败，无异步终态）。
+    assert!(rx.try_recv().is_err(), "client 不应收到帧");
+}
+
+// ── session/list 按需查询（§6.3：agent 侧真实数据源）────────────────────
+
+/// 完整链路：bound chat → submit session/list → instance 侧收到 RPC 帧 →
+/// 回 forward ack + JSON-RPC 响应 → client 收 session_list 帧（条目带 cwd）。
+#[tokio::test]
+async fn session_list_queries_agent_and_returns_frame() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    bound_session(&env, S1, "acp-1").await;
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::SessionList {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::SessionListPayload {
+            chat_id: S1.into(),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+
+    // instance 侧收到 session/list RPC 帧（cwd 来自 chat record）。
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("instance should receive session/list RPC")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            assert_eq!(f.frame["method"], serde_json::json!("session/list"));
+            assert_eq!(f.frame["params"]["cwd"], serde_json::json!("/"));
+            // 转发目标必须是 hub chat id（instance 进程表键），不是 bound
+            // 的 acp session id（否则 instance 找不到进程 → stdin_write_failed）。
+            assert_eq!(f.chat_id, S1, "forward 目标须为 hub chat id");
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+
+    // L3：instance 回 JSON-RPC 响应（pending_rpc 匹配 → session_list 帧）。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S1.into(),
+        epoch: 0,
+        seq: 1,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": { "sessions": [
+                { "sessionId": "acp-1", "title": "已打开会话", "status": "active",
+                  "updatedAt": "2026-08-10T00:00:00Z" },
+                { "sessionId": "sess-b", "title": "", "status": "",
+                  "updatedAt": "" },
+            ]},
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+
+    // client 收 session_list 帧：command_id 回显 + 条目带 cwd（查询面）。
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::SessionList(s)))) => {
+            assert_eq!(s.command_id, cid);
+            assert_eq!(s.chat_id, S1);
+            assert_eq!(s.sessions.len(), 2);
+            // 已绑定会话（acp-1 → S1）：标注 bound_chat_id（§8.5 激活）。
+            assert_eq!(s.sessions[0].session_id, "acp-1");
+            assert_eq!(s.sessions[0].bound_chat_id.as_deref(), Some(S1));
+            assert_eq!(s.sessions[0].cwd, "/", "条目应标注查询面 cwd");
+            // 未绑定会话：bound_chat_id = None。
+            assert_eq!(s.sessions[1].bound_chat_id, None);
+            assert_eq!(s.sessions[1].cwd, "/");
+        }
+        other => panic!("expected session_list frame, got {other:?}"),
+    }
+}
+
+/// 未知 chat → CHAT_NOT_FOUND（同步失败，无 instance 帧）。
+#[tokio::test]
+async fn session_list_unknown_chat_fails_chat_not_found() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::SessionList {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::SessionListPayload {
+            chat_id: "ffffffff-ffff-ffff-ffff-ffffffffffff".into(),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    match r {
+        SubmitAck::Failed(e) => {
+            assert_eq!(e.command_id, cid);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::ChatNotFound);
+        }
+        other => panic!("expected failed, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(env.instance_rx.try_recv().is_err(), "instance 不应收到帧");
+    assert!(rx.try_recv().is_err(), "client 不应收到帧");
+}
+
+/// 终态 chat（ACP 进程已退出）→ INVALID_STATE（无查询面）。
+#[tokio::test]
+async fn session_list_terminal_chat_fails_invalid_state() {
+    let env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    bound_session(&env, S1, "acp-1").await;
+    // 置终态：进程退出事件。
+    let exit = acp_hub_proto::instance::InstanceProcessExit {
+        chat_id: S1.into(),
+        code: 0,
+    };
+    env.relay.on_process_exit("local", &exit).await;
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::SessionList {
+        command_id: cid.clone(),
+        payload: acp_hub_proto::action::SessionListPayload {
+            chat_id: S1.into(),
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), action, tx.clone()).await;
+    match r {
+        SubmitAck::Failed(e) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InvalidState);
+            assert!(!e.retryable, "终态 chat 不是瞬时故障");
+        }
+        other => panic!("expected failed, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "client 不应收到帧");
+}
+
+// ---------------------------------------------------------------------------
+// chat/load 会话切换（§8.5）：当前对话内 load，不新建 chat/进程
+// ---------------------------------------------------------------------------
+
+fn load_action(cid: &str, chat_id: &str, acp_session_id: &str) -> ActionEnvelope {
+    ActionEnvelope::Load {
+        command_id: cid.into(),
+        payload: acp_hub_proto::action::LoadChatPayload {
+            chat_id: chat_id.into(),
+            acp_session_id: acp_session_id.into(),
+        },
+    }
+}
+
+/// 成功路径：submit Accepted → instance 收 session/load RPC（转发目标 =
+/// hub chat id，不是 acp session id）→ L3 响应 → committed ack + chat
+/// 当前会话切换（bindings 新旧会话均指向本 chat，§8.5 进程内切换）。
+#[tokio::test]
+async fn load_chat_switches_session_in_place() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    bound_session(&env, S1, "acp-1").await;
+    // 目标会话曾在同一进程内加载过再切回。回归：`bind` 的幂等早退不会
+    // 更新当前 session，load 预绑定必须使用 `switch_session`。
+    env.chats.switch_session(S1, "acp-2").await.unwrap();
+    env.chats.switch_session(S1, "acp-1").await.unwrap();
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), load_action(&cid, S1, "acp-2"), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+
+    // instance 侧收到 session/load RPC 帧（cwd 来自 chat record）。
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("instance should receive session/load RPC")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            assert_eq!(f.frame["method"], serde_json::json!("session/load"));
+            assert_eq!(f.frame["params"]["cwd"], serde_json::json!("/"));
+            assert_eq!(f.frame["params"]["sessionId"], serde_json::json!("acp-2"));
+            // 转发目标必须是 hub chat id（instance 进程表键），不是 acp
+            // session id——与 session/list 同款（§6.2 spawn 时按 hub id 注册）。
+            assert_eq!(f.chat_id, S1, "forward 目标须为 hub chat id");
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+
+    // 预绑定先于响应生效（§8.5 修复）：ACP spec 强制 replay before
+    // response——回放帧先于 load 响应到达，binding 须先建立否则被 relay
+    // 以 binding_missing 丢弃（create 路径同款预绑定）。此处 L3 响应
+    // 尚未回投，binding 已命中。
+    assert_eq!(env.chats.resolve("acp-2").await.as_deref(), Some(S1));
+
+    // 第一条 load 完成前拒绝同 chat 的第二条 load，避免两组 replay 通知
+    // 写入同一个 Yjs Doc。
+    let concurrent_cid = uuid::Uuid::new_v4().to_string();
+    let concurrent = env
+        .coordinator
+        .submit(
+            &ctx("c"),
+            load_action(&concurrent_cid, S1, "acp-3"),
+            tx.clone(),
+        )
+        .await;
+    assert!(matches!(
+        concurrent,
+        SubmitAck::Failed(ActionError {
+            code: ErrorCode::RateLimited,
+            ..
+        })
+    ));
+
+    // L3：instance 回 session/load 响应。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S1.into(),
+        epoch: 0,
+        seq: 1,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": { "sessionId": "acp-2" },
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+
+    // client 收 committed ack（带 chat_id）。
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.command_id, cid);
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+            assert_eq!(ack.chat_id.as_deref(), Some(S1));
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    // chat 当前会话已切换（进程内）：entry.session_id = acp-2；新旧会话
+    // binding 均指向本 chat（relay 逐帧校验仍通过）。
+    assert_eq!(env.chats.session_id(S1).await.as_deref(), Some("acp-2"));
+    assert_eq!(env.chats.resolve("acp-1").await.as_deref(), Some(S1));
+    assert_eq!(env.chats.resolve("acp-2").await.as_deref(), Some(S1));
+}
+
+/// 未知 chat → CHAT_NOT_FOUND（同步失败，无 instance 帧）。
+#[tokio::test]
+async fn load_chat_unknown_chat_fails_chat_not_found() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), load_action(&cid, "ffffffff-ffff-ffff-ffff-ffffffffffff", "acp-x"), tx)
+        .await;
+    match r {
+        SubmitAck::Failed(e) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::ChatNotFound);
+        }
+        other => panic!("expected failed, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(env.instance_rx.try_recv().is_err(), "instance 不应收到帧");
+    assert!(rx.try_recv().is_err(), "client 不应收到帧");
+}
+
+/// 终态 chat（进程已退出）→ INVALID_STATE：load 是进程内操作，无进程
+/// 则无会话可切（§8.5）。
+#[tokio::test]
+async fn load_chat_terminal_chat_fails_invalid_state() {
+    let env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    bound_session(&env, S1, "acp-1").await;
+    let exit = acp_hub_proto::instance::InstanceProcessExit {
+        chat_id: S1.into(),
+        code: 0,
+    };
+    env.relay.on_process_exit("local", &exit).await;
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), load_action(&cid, S1, "acp-2"), tx.clone())
+        .await;
+    match r {
+        SubmitAck::Failed(e) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InvalidState);
+            assert!(!e.retryable);
+        }
+        other => panic!("expected failed, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "client 不应收到帧");
+}
+
+/// L3 错误响应（如目标会话不存在）→ action_error（可重试；会话切换
+/// 无副作用残留——回放窗口已开，但 load 拒绝时 agent 侧未切换，下次
+/// load 重开窗口覆盖）。
+#[tokio::test]
+async fn load_chat_rejected_response_is_retryable_error() {
+    let mut env = env().await;
+    let (tx, mut rx) = mpsc::channel(16);
+    bound_session(&env, S1, "acp-1").await;
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), load_action(&cid, S1, "ghost"), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("instance should receive session/load RPC")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+    // L3：JSON-RPC error（会话不存在）。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S1.into(),
+        epoch: 0,
+        seq: 1,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "error": { "code": -32602, "message": "session not found" },
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.command_id, cid);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert!(e.retryable);
+        }
+        other => panic!("expected action_error, got {other:?}"),
+    }
+    // chat 当前会话未被改动（切换失败不落地）。
+    assert_eq!(env.chats.session_id(S1).await.as_deref(), Some("acp-1"));
 }

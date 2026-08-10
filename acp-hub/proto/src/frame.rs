@@ -18,6 +18,7 @@ use crate::instance::{
     InstanceBufferSync, InstanceEvent, InstanceForward, InstanceForwardAck, InstanceHeartbeat,
     InstanceHello, InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
+use crate::session::SessionListFrame;
 use crate::whitelist::FRAME_TAGS;
 use crate::ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
 
@@ -124,6 +125,9 @@ pub enum Frame {
     /// M→S 下行转发结果（L1+L2 合并确认，§4.4）。
     #[serde(rename = "instance/forward_ack")]
     InstanceForwardAck(InstanceForwardAck),
+    /// S→C 按需会话列表查询结果（§6.3：agent 侧真实数据源，非轮询投影）。
+    #[serde(rename = "session_list")]
+    SessionList(SessionListFrame),
     /// M→S ACP 进程退出事件（§4.5）。
     #[serde(rename = "instance/process_exit")]
     InstanceProcessExit(InstanceProcessExit),
@@ -177,6 +181,7 @@ impl Frame {
             Frame::InstanceKillAck(_) => FrameTag("instance/kill_ack"),
             Frame::InstanceForwardAck(_) => FrameTag("instance/forward_ack"),
             Frame::InstanceProcessExit(_) => FrameTag("instance/process_exit"),
+            Frame::SessionList(_) => FrameTag("session_list"),
         }
     }
 }

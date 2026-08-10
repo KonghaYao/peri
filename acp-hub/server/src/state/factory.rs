@@ -167,6 +167,12 @@ impl Factory {
                 if root.get(txn, "chats").is_none() {
                     root.insert(txn, "chats", yrs::MapPrelim::default());
                 }
+                if root.get(txn, "workspaces").is_none() {
+                    root.insert(txn, "workspaces", yrs::MapPrelim::default());
+                }
+                if root.get(txn, "sessions").is_none() {
+                    root.insert(txn, "sessions", yrs::MapPrelim::default());
+                }
                 if root.get(txn, "global").is_none() {
                     root.insert(
                         txn,

@@ -95,6 +95,9 @@ impl Translator {
                     "method": "session/prompt",
                     "params": {
                         "sessionId": ctx.acp_session_id,
+                        // cwd 是 ACP 请求的严谨字段（agent-client-protocol）：
+                        // 与 spawn/会话绑定目录一致（§6.3 workspace 扩展）。
+                        "cwd": ctx.cwd,
                         "prompt": [
                             { "type": "text", "text": payload.message },
                         ],
@@ -108,7 +111,7 @@ impl Translator {
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
                     "method": "session/cancel",
-                    "params": { "sessionId": ctx.acp_session_id },
+                    "params": { "sessionId": ctx.acp_session_id, "cwd": ctx.cwd },
                 })))
             }
             ActionEnvelope::ResolvePermission { payload, .. } => {
@@ -123,6 +126,7 @@ impl Translator {
                             acp_hub_proto::action::PermissionDecision::Allow => "allow",
                             acp_hub_proto::action::PermissionDecision::Deny => "deny",
                         },
+                        "cwd": ctx.cwd,
                     },
                 })))
             }
@@ -140,6 +144,16 @@ impl Translator {
             }
             ActionEnvelope::UnsubscribeEvents { .. } => {
                 Err(TranslateError::UnsupportedAction("events/unsubscribe (M3)"))
+            }
+            // workspace 管理命令：submit 层直接执行（不经过出站翻译）。
+            ActionEnvelope::WorkspaceCreate { .. } => {
+                Err(TranslateError::UnsupportedAction("workspace/create (control-plane)"))
+            }
+            ActionEnvelope::WorkspaceRemove { .. } => {
+                Err(TranslateError::UnsupportedAction("workspace/remove (control-plane)"))
+            }
+            ActionEnvelope::SessionList { .. } => {
+                Err(TranslateError::UnsupportedAction("session/list (control-plane)"))
             }
         }
     }
@@ -180,6 +194,28 @@ impl Translator {
             "id": rpc_id,
             "method": "session/new",
             "params": params,
+        });
+        (rpc_id, msg)
+    }
+
+    /// create 序列第二步（历史会话恢复，§8.5）：`session/load`（M2，点击
+    /// ACP 历史会话条目进入）。返回 `(rpc_id, 请求帧)`。
+    ///
+    /// 与 `session/new` 不同：**目标会话 id 由请求参数携带**（来自
+    /// session/list 的 acp_session_id），load 响应体不含 sessionId——binding
+    /// 以请求参数为准（coordinator 预绑定，回放通知先于响应到达）。
+    ///
+    /// `mcpServers` 必填（agent-client-protocol `LoadSessionRequest` 该字段
+    /// 无 `#[serde(default)]`；缺省即 peri 反序列化失败 `-32602 missing field
+    /// mcpServers`，与 `session_new_rpc` 同规则——实测必填）。
+    pub fn session_load_rpc(&self, cwd: &str, session_id: &str) -> (String, serde_json::Value) {
+        validate_cwd(cwd).expect("server-injected cwd must be valid");
+        let rpc_id = self.alloc_rpc_id();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "method": "session/load",
+            "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] },
         });
         (rpc_id, msg)
     }

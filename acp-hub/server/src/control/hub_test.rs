@@ -32,7 +32,7 @@ async fn mirror_snapshot_rebuilds_from_log() {
     // 控制类命令挂落盘应答（§8.2）→ 持久化前置：Store 目录须先建（StoreSink
     // 落盘按 session 目录路由）。
     store.create_chat(uuid::Uuid::parse_str(sid).unwrap()).unwrap();
-    doc.open_chat(sid, "m1", Some("t")).await.unwrap();
+    doc.open_chat(sid, "m1", Some("t"), None, None).await.unwrap();
     // 先建立 active turn（§6.5 服务端单写）：MessageDelta 受终态守卫约束
     // （§6.3 无活动 turn → UnknownTurn 拒绝）。
     let reg = doc
@@ -153,7 +153,7 @@ async fn persist_update_unknown_doc_rejected() {
 async fn broadcast_stream_delivers_updates() {
     let (_tmp, _store, sink, doc) = env().await;
     let mut rx = sink.subscribe().await;
-    doc.open_chat("s2", "m1", None).await.unwrap();
+    doc.open_chat("s2", "m1", None, None, None).await.unwrap();
     // open_chat 会先写 hub:registry 活跃摘要（§5.2 单写）；随后的事件
     // 投影才写 s2 的 chat/session doc。跳 registry 帧，断言 s2 的 doc 到达。
     let ev = crate::state::normalized::NormalizedEvent {

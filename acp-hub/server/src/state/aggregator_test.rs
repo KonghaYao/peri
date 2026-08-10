@@ -677,6 +677,8 @@ fn session_list_full_sync_removes_stale() {
         title: title.to_string(),
         status: "completed".to_string(),
         updated_at: "2026-08-07T00:00:00Z".to_string(),
+        cwd: String::new(),
+        bound_chat_id: None,
     };
     // 第一轮：s1/s2。
     assert!(agg

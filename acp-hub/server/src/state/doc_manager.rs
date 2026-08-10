@@ -17,7 +17,8 @@ use tracing::{debug, trace, warn};
 
 use acp_hub_proto::conn::DocId;
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, EntryStatus, InstanceStatus, ChatStatus, ChatSummary, TurnStatus,
+    ActiveTurnProjection, EntryStatus, InstanceStatus, ChatStatus, ChatSummary,
+    SessionSummaryProjection, TurnStatus, WorkspaceSummary,
 };
 use yrs::{Map, ReadTxn, StateVector, Transact, WriteTxn};
 
@@ -149,6 +150,14 @@ pub enum DocCommand {
     },
     /// 标题更新（§7.4 规则 5：可独立排队，仍经服务端命令写入）。
     UpdateTitle { title: String },
+    /// `session/load` 回放开始（§8.5 显式重建）：置聚合器回放模式
+    /// （历史 chunk 无 turn_id，按回放序归位）。须先于回放通知进入
+    /// writer 队列（coordinator 在 forward_rpc 后立即提交）。
+    BeginLoadReplay { acp_session_id: String },
+    /// `session/load` 回放结束（§8.5）：回放 turn 置终态（completed），
+    /// 退出回放模式。load 响应（L3）到达后提交——回放通知先于响应，
+    /// writer 串行队列保证顺序。
+    EndLoadReplay,
     /// 旧 turn 未完成时新 prompt 的裁决（§6.4：旧 assistant entry 置 cancelled，
     /// 不发 ACP cancel）。
     CancelStaleAssistantEntry { turn_id: String, entry_id: String },
@@ -164,6 +173,16 @@ pub enum DocCommand {
         status: InstanceStatus,
     },
     RegistrySetGlobal { status: acp_hub_proto::schema::GlobalStatus },
+    /// Registry：ACP `session/list` 响应全量同步投影（§6.3：幂等，10s 轮询；
+    /// 响应中不存在的旧条目删除——自愈）。sessions 是 **instance 级数据**
+    /// （agent 磁盘历史），投影到全局 Registry Doc——不随 chat 销毁/重建，
+    /// 切换对话列表持续可用。走控制面（不经聚合器 seq 水位——宿主注入
+    /// 无 instance 流 seq，`SetTurnTerminal` 同源）。
+    RegistryApplySessions { entries: Vec<SessionSummaryProjection> },
+    /// Registry：工作区摘要 upsert/移除（独立于 chat 的上层概念：定义本地
+    /// 目录 cwd，其下新建对话继承；Registry Doc `workspaces` map）。
+    RegistryUpsertWorkspace(WorkspaceSummary),
+    RegistryRemoveWorkspace { workspace_id: String },
 }
 
 impl DocCommand {
@@ -176,6 +195,9 @@ impl DocCommand {
                 | DocCommand::RegistryUpsertInstance(_)
                 | DocCommand::RegistrySetInstanceState { .. }
                 | DocCommand::RegistrySetGlobal { .. }
+                | DocCommand::RegistryApplySessions { .. }
+                | DocCommand::RegistryUpsertWorkspace(_)
+                | DocCommand::RegistryRemoveWorkspace { .. }
         )
     }
 }
@@ -257,11 +279,17 @@ impl DocManager {
     /// 打开 chat：Factory 创建双 Doc + ensure_schema（补结构）→ spawn writer
     /// task → RegistryState 写活跃摘要（§12.4）。重复打开按幂等处理（返回现有
     /// 句柄）。
+    ///
+    /// `cwd`/`workspace_id`：ACP 进程工作目录与归属工作区（§6.3 workspace
+    /// 扩展）——registry 摘要随 doc 打开即写入（`write_chat_summary` 对已存在
+    /// 条目只刷新 updated_at，cwd 必须在首写带上）；调用方无信息时传 None。
     pub async fn open_chat(
         &self,
         chat_id: &str,
         instance_id: &str,
         title: Option<&str>,
+        cwd: Option<&str>,
+        workspace_id: Option<&str>,
     ) -> Result<(), DocManagerError> {
         {
             let chats = self.chats.read().await;
@@ -307,6 +335,8 @@ impl DocManager {
             status: "accepting".to_string(),
             gap: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            cwd: cwd.unwrap_or_default().to_string(),
+            workspace_id: workspace_id.map(str::to_string),
         };
         if let Err(e) = registry.upsert_chat(summary).await {
             tracing::warn!(chat_id, error = ?e, "registry upsert chat failed");
@@ -1008,6 +1038,71 @@ async fn apply_command(
                 reason: None,
             }
         }
+        DocCommand::EndLoadReplay => {
+            // 全部回放 turn 终态化（历史 agent 消息无 TurnTerminal 事件）+
+            // 退出回放模式。
+            let completed_at = chrono::Utc::now().to_rfc3339();
+            let turns = std::mem::take(&mut pair.stream.replay_turns);
+            if !turns.is_empty() {
+                let mut txn = pair.chat_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                for turn_id in &turns {
+                    chat_writer::migrate_entry_terminal(
+                        &mut txn,
+                        &root,
+                        &format!("{turn_id}:assistant"),
+                        EntryStatus::Completed,
+                        &completed_at,
+                        None,
+                    );
+                }
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            pair.stream.replay_active = false;
+            pair.stream.replay_turn = None;
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::BeginLoadReplay { acp_session_id } => {
+            if pair.stream.replay_active {
+                return SubmitResult::Rejected(SubmitError::QueueFull);
+            }
+            // §8.5 会话切换是替换当前视图，不是把目标历史追加到旧会话。
+            // 通过覆盖根结构键产生可同步的 Yjs 更新；所有写入仍在本 chat
+            // 单写者内，后续回放事件只会落入新结构。
+            {
+                let mut txn = pair.chat_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                root.insert(&mut txn, "entry_order", yrs::ArrayPrelim::default());
+                root.insert(&mut txn, "entries", yrs::MapPrelim::default());
+                root.insert(&mut txn, "tool_calls", yrs::MapPrelim::default());
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            {
+                let mut txn = pair.control_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                root.insert(&mut txn, "active_turn", yrs::Any::Null);
+                root.insert(
+                    &mut txn,
+                    "pending_permissions",
+                    yrs::MapPrelim::default(),
+                );
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+
+            // 流状态（seq 水位）保持：回放帧仍走正常判序。若已有回放 turn
+            // （异常重复 Begin），新一次切换覆盖其临时归位状态。
+            let _ = acp_session_id;
+            pair.stream.replay_active = true;
+            pair.stream.replay_turn = None;
+            pair.stream.replay_turns.clear();
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
         _ => unreachable!("registry 命令已路由到 registry 写者"),
     };
 
@@ -1038,6 +1133,8 @@ fn command_kind(cmd: &DocCommand) -> &'static str {
         DocCommand::UpdateTitle { .. } => "update_title",
         DocCommand::CancelStaleAssistantEntry { .. } => "cancel_stale_assistant_entry",
         DocCommand::SetChatTerminal { .. } => "set_chat_terminal",
+        DocCommand::BeginLoadReplay { .. } => "begin_load_replay",
+        DocCommand::EndLoadReplay => "end_load_replay",
         _ => "registry",
     }
 }
@@ -1110,6 +1207,9 @@ async fn registry_writer_loop(
                 let r = applier.set_chat_status(&chat_id, &status);
                 persist_registry_updates(&mut update_rx, &sink, &broadcast).await;
                 let _ = reply.send(r);
+            }
+            RegistryMsg::ListWorkspaces(reply) => {
+                let _ = reply.send(applier.list_workspaces());
             }
         }
     }

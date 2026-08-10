@@ -13,6 +13,7 @@ mod heartbeat;
 mod hub;
 mod instance_registry;
 mod chat_registry;
+mod workspace_registry;
 
 pub use close_codes::{
     CLOSE_CONFIG_FATAL, CLOSE_KEEPALIVE_TIMEOUT, CLOSE_INSTANCE_OFFLINE, ReconnectPolicy,
@@ -27,3 +28,4 @@ pub use instance_registry::{
 pub use chat_registry::{
     ChatError, ChatRecord, ChatRegistry, ChatState, ReconciliationReport,
 };
+pub use workspace_registry::{WorkspaceError, WorkspaceRecord, WorkspaceRegistry};

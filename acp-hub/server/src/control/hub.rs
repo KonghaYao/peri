@@ -145,6 +145,12 @@ impl Hub {
         // §4.4：create 全局去重索引（跨 server 重启有效）——store 已完成
         // recover（main 前置），从 outbox 重建后才接受连接。
         coordinator.rebuild_create_index().await;
+        // §6.3 workspace 扩展：工作区内存注册表从 Registry Doc 重建（跨
+        // 重启后 create 携带 workspace_id 仍能解析 cwd）。
+        coordinator.rebuild_workspaces().await;
+        // §6.3：session/list 轮询（10s 全量同步投影；server 侧，见
+        // CommandCoordinator::spawn_session_poller 决策注释）。
+        coordinator.spawn_session_poller();
         let broadcast = Arc::new(Broadcaster::new(
             cfg.backpressure_soft_bytes,
             cfg.backpressure_hard_bytes,

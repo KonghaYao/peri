@@ -523,6 +523,10 @@ impl AcpChannel {
                                     title,
                                     status,
                                     updated_at,
+                                    // control doc 侧无 cwd 面（poller 直连路径
+                                    // 由轮询侧标注，§6.3 workspace 扩展）。
+                                    cwd: String::new(),
+                                    bound_chat_id: None,
                                 })
                             })
                             .collect()

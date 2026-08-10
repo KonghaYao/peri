@@ -20,7 +20,7 @@
 'use strict';
 
 const RETRY_READY_MS = 15000;
-const RETRY_ACK_MS = 30000;
+const RETRY_ACK_MS = 60000;
 const RETRY_UPDATE_MS = 30000;
 const RETRY_KEEPALIVE_MS = 8000;
 
@@ -368,7 +368,7 @@ async function main() {
   // 注意：server 收到客户端 close 帧后正常处理（其审计日志记录 code=1000）
   // 但可能不回 close 帧直接关 TCP → 客户端侧表现为 1006；二者都视为干净
   // 关闭。4500/4501/4502 等 server 主动异常码仍严格失败。
-  send({ t: 'ysync.unsubscribe', docs: [chatDoc, sessionDoc] });
+  send({ t: 'ysync.unsubscribe', docs: [chatDoc, controlDoc] });
   await new Promise((r) => setTimeout(r, 300));
   ws.close(1000, 'verify done');
   const ev = await closedPromise;

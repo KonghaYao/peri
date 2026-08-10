@@ -111,11 +111,30 @@ export interface ChatInfo {
   status: string | null;
   gap: unknown;
   updatedAt: string | null;
+  /** ACP 进程工作目录（继承自 workspace 或 server 默认目录，§6.3）。 */
+  cwd: string | null;
+  /** 归属工作区（无 → null；工作区删除后已建对话保留此引用）。 */
+  workspaceId: string | null;
+}
+
+/** 工作区（独立于 chat 的上层概念，§6.3）：定义本地目录 cwd，其下新建
+ *  对话继承该目录。Registry Doc `workspaces` map。 */
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  cwd: string;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface RegistryView {
   instances: InstanceInfo[];
   chats: ChatInfo[];
+  /** ACP agent 磁盘历史会话（instance 级数据，§6.3：server 经 session/list
+   *  轮询投影到 Registry Doc `sessions` Map——全局共享，不随 chat 切换）。 */
+  sessions: SessionSummaryInfo[];
+  /** 工作区定义列表（§6.3 workspace 扩展）。 */
+  workspaces: WorkspaceInfo[];
   globalStatus: string;
   schemaVersion: unknown;
   projectionVersion: unknown;
@@ -194,6 +213,22 @@ export interface PendingPermission {
   decision: string | null;
 }
 
+/** ACP 会话摘要（agent 磁盘历史，§5.4）：与 hub 对话（控制面）语义不同。
+ *  server 经 session/list 轮询写入 **Registry Doc** `sessions` Map（instance
+ *  级数据，§6.3：全局共享，不随 chat 切换销毁/重建）。 */
+export interface SessionSummaryInfo {
+  sessionId: string;
+  title: string | null;
+  status: string | null;
+  updatedAt: string | null;
+  /** 会话所在 ACP 进程工作目录（§6.3 workspace 扩展：按 cwd 分面过滤）。 */
+  cwd: string | null;
+  /** §8.5 会话切换语义：会话是**进程内实体**——该会话是否为当前对话
+   *  的**当前活跃会话**（= 本对话 chat_id；前端标「当前」徽标，点击无
+   *  操作）。其余会话该字段为 null（历史会话，点击 = 当前对话内 load）。 */
+  boundChatId?: string | null;
+}
+
 export interface ControlView {
   chat: ChatHeadInfo | null;
   agent: AgentInfo | null;
@@ -203,12 +238,15 @@ export interface ControlView {
 
 // ── renderRegistry：实例列表（hub:registry 投影，M3 §2.1）──────────────
 
-/** 根 Map 字段：instances / chats / global / schema_version /
- *  projection_version。chats 是「活跃对话列表权威源」。 */
+/** 根 Map 字段：instances / chats / global / sessions / schema_version /
+ *  projection_version。chats 是「活跃对话列表权威源」；sessions 是 instance
+ *  级 ACP 历史会话（§6.3 轮询投影）。 */
 export function renderRegistry(doc: Y.Doc): RegistryView {
   const root = doc.getMap<unknown>('root');
   const instances: InstanceInfo[] = [];
   const chats: ChatInfo[] = [];
+  const sessions: SessionSummaryInfo[] = [];
+  const workspaces: WorkspaceInfo[] = [];
   let globalStatus = 'unknown';
 
   const m = asMap(root.get('instances'));
@@ -238,8 +276,29 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
         status: getStr(sm, 'status'), // "accepting"|"active"|"ended"|"closed"|"crashed"
         gap: sm ? sm.get('gap') : null,
         updatedAt: getStr(sm, 'updated_at'),
+        cwd: getStr(sm, 'cwd'),
+        workspaceId: getStr(sm, 'workspace_id'),
       });
     });
+  }
+
+  // 工作区（§6.3 workspace 扩展）：key = workspace_id（UUID v4）。
+  const wm = asMap(root.get('workspaces'));
+  if (wm) {
+    wm.forEach((v, id) => {
+      const sm = asMap(v);
+      workspaces.push({
+        id,
+        name: getStr(sm, 'name') || '',
+        cwd: getStr(sm, 'cwd') || '',
+        createdAt: getStr(sm, 'created_at'),
+        updatedAt: getStr(sm, 'updated_at'),
+      });
+    });
+    // 排序：最近创建在前。
+    workspaces.sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
+    );
   }
 
   const g = asMap(root.get('global'));
@@ -247,9 +306,37 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
     globalStatus = getStr(g, 'status') || 'unknown'; // healthy|degraded|restarting
   }
 
+  // ACP 会话（agent 磁盘历史，instance 级）：key = session_id。
+  const smap = asMap(root.get('sessions'));
+  if (smap) {
+    // 兜底去重：按 sessionId 去重（孤儿 key/客户端 doc 累积的残留可能
+    // 产生重复；server 侧全量同步自愈后此兜底保持渲染稳定）。
+    const seen = new Set<string>();
+    smap.forEach((v) => {
+      const sm = asMap(v);
+      if (!sm) return;
+      const sessionId = getStr(sm, 'session_id') || '';
+      if (!sessionId || seen.has(sessionId)) return;
+      seen.add(sessionId);
+      sessions.push({
+        sessionId,
+        title: getStr(sm, 'title'),
+        status: getStr(sm, 'status'),
+        updatedAt: getStr(sm, 'updated_at'),
+        cwd: getStr(sm, 'cwd'),
+      });
+    });
+    // 排序：最近更新在前。
+    sessions.sort((a, b) =>
+      String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
+    );
+  }
+
   return {
     instances,
     chats,
+    sessions,
+    workspaces,
     globalStatus,
     schemaVersion: root.get('schema_version'),
     projectionVersion: root.get('projection_version'),
@@ -342,8 +429,10 @@ export function renderChat(doc: Y.Doc): ChatView {
 
 // ── renderControl：对话头部 + 权限请求（control:{cid} 投影，M3 §3.3）─────
 
-/** 根 Map：chat / agent / active_turn / pending_permissions。权限条
- *  （allow/deny → permission/resolve）数据取自 pending_permissions。 */
+/** 根 Map：chat / agent / active_turn / pending_permissions。
+ *  权限条（allow/deny → permission/resolve）数据取自 pending_permissions。
+ *  ACP 会话列表不在 control doc（instance 级数据 → Registry Doc sessions，
+ *  §6.3）——经 renderRegistry 读取，不随 chat 切换销毁。 */
 export function renderControl(doc: Y.Doc): ControlView {
   const root = doc.getMap<unknown>('root');
   const result: ControlView = {

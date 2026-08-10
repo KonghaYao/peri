@@ -49,6 +49,16 @@ pub struct StreamState {
     pub uncalibratable: bool,
     /// 待上报的 gap 变化（上次上报后是否有 gap_count/uncalibratable 变化）。
     pub gap_dirty: bool,
+    /// `session/load` 回放模式（§8.5 显式重建）：`replay_active` = 回放中
+    /// （BeginLoadReplay → EndLoadReplay）；`replay_turn` = 当前回放 turn
+    /// 归位 id（历史 chunk 无 turnId，按回放序归位，§7.2 宿主驱动模型的
+    /// 回放例外）；`replay_turns` = 全部回放 turn（EndLoadReplay 逐个终态
+    /// 化——历史 agent 消息无终态事件）。
+    pub replay_active: bool,
+    /// 回放中最近一条 user 消息建立的归位 turn id。
+    pub replay_turn: Option<String>,
+    /// 本次回放建立的全部 turn id（按序；EndLoadReplay 消费）。
+    pub replay_turns: Vec<String>,
 }
 
 impl StreamState {

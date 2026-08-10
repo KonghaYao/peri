@@ -211,8 +211,12 @@ impl Aggregator {
             return ApplyResult::rejected(ApplyReason::ChatClosed);
         }
         // 判定：终态守卫（步骤 5）+ 关联检查（步骤 6，delta 自动建 entry）。
-        if let Err(reason) = self.judge_turn_guard(snapshot.active_turn.as_ref(), &ev.body) {
-            return ApplyResult::rejected(reason);
+        // 回放模式（§8.5）无宿主驱动 active_turn——守卫跳过（归位由
+        // resolve 按回放 turn 处理）。
+        if !stream.replay_active {
+            if let Err(reason) = self.judge_turn_guard(snapshot.active_turn.as_ref(), &ev.body) {
+                return ApplyResult::rejected(reason);
+            }
         }
         // 写入（chat doc，共享事务内）。
         let root = txn.get_or_insert_map(ROOT);
@@ -224,7 +228,7 @@ impl Aggregator {
                 text,
             } => {
                 let (turn_id, entry_id, block_id) =
-                    self.resolve_entry_ids_from_snapshot(snapshot, turn_id, entry_id, block_id, "text");
+                    self.resolve_entry_ids_from_snapshot(stream, snapshot, turn_id, entry_id, block_id, "text");
                 chat_writer::ensure_entry_with_blocks(
                     txn,
                     &root,
@@ -245,6 +249,7 @@ impl Aggregator {
                 visibility,
             } => {
                 let (turn_id, entry_id, block_id) = self.resolve_entry_ids_from_snapshot(
+                    stream,
                     snapshot,
                     turn_id,
                     entry_id,
@@ -277,9 +282,11 @@ impl Aggregator {
     }
 
     /// 批次快照路径的增量归位（同 [`Self::resolve_entry_ids`]，从批次快照的
-    /// active_turn 读取，避免重读 control doc）。
+    /// active_turn 读取，避免重读 control doc）。回放模式（§8.5）优先归位
+    /// 到回放 turn。
     fn resolve_entry_ids_from_snapshot(
         &self,
+        stream: &StreamState,
         snapshot: &ControlSnapshot,
         turn_id: &str,
         entry_id: &str,
@@ -291,6 +298,13 @@ impl Aggregator {
                 turn_id.to_string(),
                 entry_id.to_string(),
                 block_id.to_string(),
+            );
+        }
+        if let Some(rt) = stream.replay_turn.as_ref() {
+            return (
+                rt.clone(),
+                format!("{rt}:assistant"),
+                block_kind.to_string(),
             );
         }
         match snapshot.active_turn.as_ref() {
@@ -415,6 +429,14 @@ impl Aggregator {
                 block_id.to_string(),
             );
         }
+        // 回放模式（§8.5）：优先归位到回放 turn。
+        if let Some(rt) = pair.stream.replay_turn.as_ref() {
+            return (
+                rt.clone(),
+                format!("{rt}:assistant"),
+                block_kind.to_string(),
+            );
+        }
         let active = self.read_active_turn(pair);
         match active {
             Some(a) => (
@@ -436,7 +458,9 @@ impl Aggregator {
         match &ev.body {
             EventBody::MessageDelta { entry_id, .. }
             | EventBody::ReasoningDelta { entry_id, .. } => {
-                self.judge_turn_guard(active, &ev.body)?;
+                if !pair.stream.replay_active {
+                    self.judge_turn_guard(active, &ev.body)?;
+                }
                 // 关联：entry 未知自动建（§7 注释），不拒绝。
                 let _ = entry_id;
                 Ok(())
@@ -446,6 +470,13 @@ impl Aggregator {
                 entry_id,
                 ..
             } => {
+                // `session/load` 回放（§8.5）：历史 user 消息同样无 turn_id，
+                // 但回放是**显式重建**——聚合器按回放序生成 turn 归位
+                // （`load:{seq}`，seq 水位单调 → 天然幂等，见 write 分支），
+                // 不拒绝。
+                if pair.stream.replay_active {
+                    return Ok(());
+                }
                 // ACP 回显无 turn_id（真实 peri 不回声 user_message_chunk；
                 // 防御：空 id 不创建 entry）——用户消息由服务端单写注入
                 // （§6.5 RegisterUserEntry，携带 server 生成 turn_id）。
@@ -467,10 +498,15 @@ impl Aggregator {
                 if chat_writer::tool_call_exists(&txn, tool_call_id) {
                     return Err(ApplyReason::DuplicateIdempotent);
                 }
-                self.judge_turn_guard(active, &ev.body)
+                if !pair.stream.replay_active {
+                    self.judge_turn_guard(active, &ev.body)?;
+                }
+                Ok(())
             }
             EventBody::ToolCallUpdated { tool_call_id, .. } => {
-                self.judge_turn_guard(active, &ev.body)?;
+                if !pair.stream.replay_active {
+                    self.judge_turn_guard(active, &ev.body)?;
+                }
                 let txn = pair.chat.transact();
                 if !chat_writer::tool_call_exists(&txn, tool_call_id) {
                     return Err(ApplyReason::UnknownToolCall);
@@ -478,7 +514,9 @@ impl Aggregator {
                 Ok(())
             }
             EventBody::ToolCallCompleted { tool_call_id, .. } => {
-                self.judge_turn_guard(active, &ev.body)?;
+                if !pair.stream.replay_active {
+                    self.judge_turn_guard(active, &ev.body)?;
+                }
                 let txn = pair.chat.transact();
                 if !chat_writer::tool_call_exists(&txn, tool_call_id) {
                     return Err(ApplyReason::UnknownToolCall);
@@ -657,6 +695,21 @@ impl Aggregator {
             } => Some(self.resolve_entry_ids(pair, turn_id, entry_id, block_id, "reasoning")),
             _ => None,
         };
+        // 预读：回放模式（§8.5）历史 user 消息的归位 turn（chat 事务前
+        // 计算——事务借用与 stream 可变借用互斥，§7.4）。
+        let replay = if pair.stream.replay_active {
+            match &ev.body {
+                EventBody::UserMessage { .. } => {
+                    let t = format!("load:{}", ev.seq);
+                    pair.stream.replay_turn = Some(t.clone());
+                    pair.stream.replay_turns.push(t.clone());
+                    Some((t.clone(), format!("{t}:user")))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         // chat 侧写入（一次事务）。
         {
             let mut txn = pair.chat_txn();
@@ -721,11 +774,18 @@ impl Aggregator {
                     author_user_id,
                     created_at,
                 } => {
+                    // 回放模式（§8.5）：历史 user 消息无 turn_id——按回放序
+                    // 生成归位 turn（`load:{seq}`；seq 水位单调，天然幂等），
+                    // 后续 agent chunk 归位到该 turn。turn 在预读区计算。
+                    let (replay_turn, replay_entry) = match &replay {
+                        Some((t, e)) => (t.clone(), e.clone()),
+                        None => (turn_id.clone(), entry_id.clone()),
+                    };
                     chat_writer::create_user_entry(
                         &mut txn,
                         &root,
-                        turn_id,
-                        entry_id,
+                        &replay_turn,
+                        &replay_entry,
                         text,
                         author_user_id.as_deref(),
                         created_at,
