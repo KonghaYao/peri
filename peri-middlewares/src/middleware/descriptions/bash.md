@@ -18,6 +18,7 @@ Platform behavior:
 - Unix/macOS: uses bash -c to execute commands
 - On Unix, child processes run in their own process group; timeout/cancel kills the entire process group (shell and all descendants), so no orphaned children survive
 - On Windows, timeout only terminates the PowerShell wrapper process tree via taskkill; the process group semantics of Unix do not apply
+- The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead
 
 Output handling:
 - Output exceeding 2000 lines is truncated (head + tail preserved)

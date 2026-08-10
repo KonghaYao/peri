@@ -553,3 +553,111 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
     );
     let _ = std::fs::remove_file(path_str);
 }
+
+// ── stdin null + 超时诊断分流（issue: bash 错误原因定位）──────────────────────
+
+/// stdin 重定向为 /dev/null：read 立即 EOF 返回，不挂死到超时。
+/// 旧行为（stdin 继承终端）下该命令会永久阻塞等待输入。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_stdin_null_read_fails_fast() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let start = Instant::now();
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "read x; echo \"got:${x:-<eof>}\""}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 3,
+        "read 应立即 EOF 返回，实际 {:?}",
+        elapsed
+    );
+    assert!(
+        result.contains("got:<eof>"),
+        "stdin 为 null 时 read 应读到 EOF: {result}"
+    );
+}
+
+/// 同步超时 promote 且无输出：文案应如实说明"可能永不自行结束"而非承诺完成。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'sleep 2'", // 无输出
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("no output produced"),
+        "无输出分支应明确说明: {err}"
+    );
+    assert!(
+        err.contains("may never complete on its own"),
+        "应说明可能永不自行结束: {err}"
+    );
+    assert!(
+        err.contains("waiting for input"),
+        "应提示等待输入的可能原因: {err}"
+    );
+    assert!(
+        err.contains("Process state:"),
+        "应附进程状态快照用于定位: {err}"
+    );
+    assert!(
+        err.contains("run_in_background"),
+        "应提示服务/守护进程应用后台模式: {err}"
+    );
+    assert!(err.contains("kill"), "应说明 kill 方式: {err}");
+
+    // 等 promote 续跑任务收尾，避免残留注册
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}
+
+/// 同步超时 promote 且有输出：文案应如实说明"有进展、续跑合理"。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_with_output_notes_progress() {
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'echo progressing; sleep 2'",
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("producing output"),
+        "有输出分支应说明有进展: {err}"
+    );
+    assert!(
+        !err.contains("no output produced"),
+        "有输出分支不应走无输出文案: {err}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}

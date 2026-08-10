@@ -149,6 +149,31 @@ fn persist_partial_output(output: &str) -> String {
     }
 }
 
+/// 超时时刻采集进程状态快照（`ps -o pid,stat,etime,command`），供诊断定位。
+/// 非 Unix 或 ps 不可用时返回 None（降级：文案中省略该行）。
+fn process_status_snapshot(pid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "pid=,stat=,etime=,command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl BaseTool for BashTool {
     fn name(&self) -> &str {
@@ -274,6 +299,10 @@ impl BaseTool for BashTool {
 
         let mut cmd = shell_command(command, &[]);
         cmd.current_dir(&self.cwd)
+            // stdin 重定向为 null：Bash 工具是非交互执行，命令不应依赖终端输入。
+            // 否则读 stdin 的进程（交互式命令、stdio 服务）会永远阻塞等待 EOF，
+            // 表现为挂死到超时；null 使它们立即 EOF 快速失败，错误立刻可见。
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // 注意：不设 kill_on_drop——超时 promote 转后台时 child 不能被 drop 误杀
@@ -315,6 +344,11 @@ impl BaseTool for BashTool {
                     };
                     let partial = merge_output(&partial_stdout, &partial_stderr, None);
                     let partial_hint = persist_partial_output(&partial);
+                    // 诊断信号：进程是否产生过任何输出（区分"慢但活跃"与"挂起/无进展"）
+                    let has_output = !partial_stdout.is_empty() || !partial_stderr.is_empty();
+                    let ps_line = process_status_snapshot(pid)
+                        .map(|s| format!("Process state: {s}"))
+                        .unwrap_or_default();
 
                     if let Some(task_manager) = self.task_manager.as_ref() {
                         // ── 有 TaskManager：不杀进程，promote 为后台任务续跑 ──
@@ -369,8 +403,18 @@ impl BaseTool for BashTool {
                                         false,
                                     );
                                 });
+                                if has_output {
+                                    // 有部分输出：进程在产生进展，续跑是合理的
+                                    return Err(format!(
+                                        "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                        ms as f64 / 1000.0
+                                    )
+                                    .into());
+                                }
+                                // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
+                                // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
                                 return Err(format!(
-                                    "Command timed out after {:.1}s; the process is now running as a background task.\ntask_id: {task_id}\npid: {pid}\nThe process is now running as a background task; you will be notified when it completes.\n- Kill it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).\nIf it does not complete on its own, terminate it: run `kill {pid}` in another shell command (`kill -- -{pid}` kills the whole process group including child processes)\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
                                 )
                                 .into());
@@ -379,7 +423,7 @@ impl BaseTool for BashTool {
                                 // 注册失败（SHELL_LIMIT 满）→ 回退杀进程组路径
                                 kill_process_group_escalating(pid);
                                 return Err(format!(
-                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s and could not be promoted to a background task: {e}. The process group has been terminated.\n{ps_line}\n{partial_hint}\nCommand that timed out: {command}",
                                     ms as f64 / 1000.0
                                 )
                                 .into());
@@ -390,6 +434,7 @@ impl BaseTool for BashTool {
                         kill_process_group_escalating(pid);
                         return Err(format!(
                             "Command timed out after {:.1}s. The default timeout is deliberately short (15s) to encourage efficient commands.\n\
+                             {ps_line}\n\
                              Options:\n\
                              - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
                              - Increase timeout: set `timeout` parameter to a larger value (e.g. `timeout: 120000` for 2 minutes).\n\
