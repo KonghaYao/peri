@@ -451,7 +451,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "要恢复的被中断 subagent 的 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得）。提供时从磁盘 thread 恢复其现场继续执行，不创建新 subagent。要求：thread 状态非 active；与 fork / subagent_type 互斥；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）"
+                    "description": "要恢复的被中断 subagent 的 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得）。提供时从磁盘 thread 恢复其现场继续执行，不创建新 subagent，且优先于 subagent_type / fork（这两个字段会被忽略）。要求：thread 状态非 active；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）"
                 },
                 "description": {
                     "type": "string",
@@ -459,7 +459,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED unless fork=true. When not provided and fork is not set, the call will fail"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
                 },
                 "name": {
                     "type": "string",
@@ -531,15 +531,9 @@ impl BaseTool for SubAgentTool {
         let host = self.host();
 
         // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
-        // 互斥校验放分支前：resume 与 fork / subagent_type 二选一
-        if resume_thread_id.is_some() && (is_fork || subagent_type.is_some()) {
-            return Err(
-                "Error: resume_thread_id is mutually exclusive with fork / subagent_type. \
-                To resume, call Agent(resume_thread_id: <id>) ONLY — pass neither subagent_type nor fork; \
-                the child_thread_id from the interrupted/error text is <id>"
-                    .into(),
-            );
-        }
+        // 容错语义：resume_thread_id 存在时直接进入恢复分支，subagent_type / fork
+        // 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
+        // 宽容处理使恢复总是可成功，多余字段无副作用）。
         // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
         if resume_thread_id.is_some()
             && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()

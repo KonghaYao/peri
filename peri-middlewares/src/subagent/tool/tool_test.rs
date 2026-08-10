@@ -2831,51 +2831,74 @@ async fn preset_resumable_thread(
     store.update_thread_status(&id, "done").await.unwrap();
 }
 
-/// R-M2：resume_thread_id 与 fork 互斥 → Err（分支前校验，resume 不被 fork 吞掉）
+/// R-M2 容错：resume_thread_id 与 fork 同传 → fork 被忽略，恢复成功（不报错）
 #[tokio::test]
-async fn test_resume_thread_id_mutually_exclusive_with_fork() {
-    let dir = tempdir().unwrap();
-    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
-                "fork": true,
-                "prompt": "do it"
-            }),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("mutually exclusive"),
-        "resume+fork 应报互斥错误: {}",
-        err
-    );
-}
-
-/// R-M2：resume_thread_id 与 subagent_type 互斥 → Err
-#[tokio::test]
-async fn test_resume_thread_id_mutually_exclusive_with_subagent_type() {
+async fn test_resume_thread_id_ignores_fork_field() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
+    let store = make_fs_store(&dir);
+    let id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &id,
+        "test-agent",
+        None,
+        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
+    )
+    .await;
+
+    let t = make_subagent_tool(vec![]).with_thread_store(store);
     let result = t
         .invoke(
             serde_json::json!({
-                "resume_thread_id": uuid::Uuid::now_v7().to_string(),
-                "subagent_type": "test-agent",
-                "prompt": "do it",
+                "resume_thread_id": id.clone(),
+                "fork": true,
                 "cwd": dir.path().to_str().unwrap(),
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await;
-    let err = result.unwrap_err().to_string();
+        .await
+        .expect("resume+fork 应容错恢复而非报互斥错误");
     assert!(
-        err.contains("mutually exclusive"),
-        "resume+subagent_type 应报互斥错误: {}",
-        err
+        result.contains(&format!("child_thread_id: {}", id)),
+        "完成文本应带 child_thread_id: {}",
+        result
+    );
+}
+
+/// R-M2 容错：resume_thread_id 与 subagent_type 同传 → subagent_type 被忽略，
+/// 恢复成功（不报错）
+#[tokio::test]
+async fn test_resume_thread_id_ignores_subagent_type_field() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let store = make_fs_store(&dir);
+    let id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &id,
+        "test-agent",
+        None,
+        vec![BaseMessage::human("旧消息 1"), BaseMessage::ai("旧回答 1")],
+    )
+    .await;
+
+    let t = make_subagent_tool(vec![]).with_thread_store(store);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": id.clone(),
+                "subagent_type": "test-agent",
+                "cwd": dir.path().to_str().unwrap(),
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("resume+subagent_type 应容错恢复而非报互斥错误");
+    assert!(
+        result.contains(&format!("child_thread_id: {}", id)),
+        "完成文本应带 child_thread_id: {}",
+        result
     );
 }
 

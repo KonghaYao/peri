@@ -121,6 +121,7 @@ subagent 在执行中可能因 LLM 网络中断或用户手动 interrupt 而中�
 | 2026-08-09 | — | Ready for agent | agent | 经访谈收敛 16 项设计决策后成文（入口形态/持久化边界/续跑语义/状态判定/生命周期/所有权/后台 run mode/隐式 continue/多次恢复/工具集/错误语义/ID 携带/测试/归因/描述文档） |
 | 2026-08-10 | Ready for agent | Ready for agent | 用户 | 补充使用反馈：恢复失败错误文案不可读（互斥无用法指引、parent mismatch 无解释、观感像安全错误）；新增「症状详情」「修复要求」，修复范围=仅 resume 相关错误文案 |
 | 2026-08-10 | Ready for agent | Fixed | agent | 修复：resume 错误文案改为人话版+用法示例（define.rs 互斥、subagent.rs parent mismatch/active、agent.md 补常见失败原因、测试断言同步） |
+| 2026-08-10 | Fixed | Fixed | 用户 | 设计变更：互斥报错 → 容错模式。根因：subagent_type 参数声明 "REQUIRED" 与 resume 互斥契约矛盾，LLM 按 schema 惯性同传两字段，即使错误文案给了用法仍连续失败两次；决定 resume_thread_id 存在时静默忽略 subagent_type / fork，直接恢复 |
 
 ## 修复记录
 
@@ -133,5 +134,6 @@ subagent 在执行中可能因 LLM 网络中断或用户手动 interrupt 而中�
   - `peri-agent/src/session/subagent.rs`：parent mismatch 补中文人话解释（该 thread 属于其他父 agent，仅原父 agent 可恢复，或改传 subagent_type 新建）；active 错误补「仍在执行或异常未收尾」解释与新建替代用法；
   - `peri-middlewares/src/subagent/tool/descriptions/agent.md`：Resume execution 段补「Common failures」三条（互斥 / parent mismatch / thread not found）；
   - `peri-agent/src/session/subagent_test.rs`：两处精确错误文案断言同步更新。
-- **涉及 commit**：未提交（用户未要求 commit）
-- **验证状态**：待验证
+- **涉及 commit**：a03a2a66（错误文案修复）
+- **验证状态**：已验证（测试断言同步通过）
+- **后续设计变更（2026-08-10，容错模式）**：互斥报错移除——resume_thread_id 存在时 subagent_type / fork 被静默忽略，直接恢复。原因：LLM 按 schema "REQUIRED" 声明惯性同传两字段，报错 + 文案指引仍连续失败两次（信息源冲突时 LLM 倾向遵循 schema）；容错使恢复恒可成功。涉及 `define.rs`（删互斥校验、参数 description 改容错语义）、`agent.md`（Resume 段与 Common failures 更新）、`tool_test.rs`（两个互斥测试改为容错测试）。
