@@ -160,7 +160,15 @@ impl BaseTool for WriteFileTool {
 
             if let Some(parent) = resolved.parent() {
                 if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        // 文件系统层失败(与 tmp 写入失败同级):保存草稿,
+                        // 错误消息携带 from_draft 恢复提示,避免重试时重新输出 content
+                        let hint = self
+                            .save_draft(&resolved_str, &content, append)
+                            .map(|id| draft_hint_en(&id, &content))
+                            .unwrap_or_default();
+                        return Err(format!("Error creating parent directory: {e}{hint}").into());
+                    }
                 }
             }
 

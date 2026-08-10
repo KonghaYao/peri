@@ -311,6 +311,42 @@ async fn test_write_tmp_failure_saves_draft() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_write_create_dir_failure_saves_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    make_readonly(&readonly);
+    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/sub/f.txt", "content": "hello\nworld"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Error creating parent directory"),
+        "应含目录创建错误: {err}"
+    );
+    assert!(err.contains("A draft was saved"), "应含草稿提示: {err}");
+    assert!(err.contains("draft_"), "应含 draft_id: {err}");
+    assert!(!err.contains("hello"), "错误消息不应展示正文: {err}");
+    // 还原权限后 from_draft 恢复成功,内容 == content 原文
+    make_writable(&readonly);
+    let draft_id = extract_draft_id(&err);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "readonly/sub/f.txt", "from_draft": draft_id}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_ok(), "恢复应成功: {:?}", result.err());
+    let content = std::fs::read_to_string(dir.path().join("readonly/sub/f.txt")).unwrap();
+    assert_eq!(content, "hello\nworld", "草稿内容应为 content 原文");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_write_rename_failure_saves_draft_and_cleans_tmp() {
     let dir = tempfile::tempdir().unwrap();
     // file_path 指向已存在目录 → tmp 写入成功但 rename 失败(macOS EISDIR)
@@ -650,22 +686,18 @@ async fn test_write_draft_disabled_saves_nothing() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn test_write_validation_failure_saves_no_draft() {
     let dir = tempfile::tempdir().unwrap();
-    // 内容未达文件系统层:create_dir_all 失败(只读目录 + 子目录路径)
-    let readonly = dir.path().join("readonly");
-    std::fs::create_dir(&readonly).unwrap();
-    make_readonly(&readonly);
     let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+    // 参数错误(content 未提供)不落草稿:内容未达文件系统层,无内容可恢复
     let err = tool
         .invoke(
-            serde_json::json!({"file_path": "readonly/sub/nope.txt", "content": "x"}),
+            serde_json::json!({"file_path": "f.txt"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap_err()
         .to_string();
-    assert!(!err.contains("draft_"), "校验失败不应存草稿: {err}");
+    assert!(!err.contains("draft_"), "参数错误不应存草稿: {err}");
 }
