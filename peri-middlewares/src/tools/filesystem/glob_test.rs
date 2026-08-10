@@ -388,6 +388,62 @@ fn test_plan_walk_unsafe_segment_keeps_full_walk() {
     assert_eq!(plan.max_depth, Some(0));
 }
 
+// ─── walk root 收窄（narrow_root 白盒纯函数）────────────────────
+
+#[test]
+fn test_narrow_root_consumes_static_prefix() {
+    // 静态前缀目录链存在且安全时，root 直接收窄到 base+前缀，consumed = 前缀段数。
+    let base = Path::new("/repo");
+    let (root, consumed) = narrow_root(base, &plan_walk("src/**/*.rs")).unwrap();
+    assert_eq!(root, Path::new("/repo/src"));
+    assert_eq!(consumed, 1);
+    let (root, consumed) = narrow_root(base, &plan_walk("a/b/*.rs")).unwrap();
+    assert_eq!(root, Path::new("/repo/a/b"));
+    assert_eq!(consumed, 2);
+    // 纯字面 pattern 的前缀链同样收窄（`src/main.rs` → root=base/src）
+    let (root, consumed) = narrow_root(base, &plan_walk("src/main.rs")).unwrap();
+    assert_eq!(root, Path::new("/repo/src"));
+    assert_eq!(consumed, 1);
+}
+
+#[test]
+fn test_narrow_root_falls_back_to_full_walk() {
+    // 无静态前缀：`**`/`*.rs`/字面根层文件/前导 `/` → 不收窄
+    for pat in ["**/*.rs", "*.rs", "Cargo.toml", "/src/*.rs"] {
+        assert!(
+            narrow_root(Path::new("/repo"), &plan_walk(pat)).is_none(),
+            "pattern {pat:?} 不应收窄"
+        );
+    }
+    // 前缀链中段是被跳目录：收窄会让被跳目录子孙变为可遍历，行为反转
+    assert!(narrow_root(Path::new("/repo"), &plan_walk("node_modules/pkg/*.rs")).is_none());
+    // 任一段含 `.`/`..`：拼接会改变遍历范围，保守回退
+    assert!(narrow_root(Path::new("/repo"), &plan_walk("./src/*.rs")).is_none());
+    assert!(narrow_root(Path::new("/repo"), &plan_walk("../src/*.rs")).is_none());
+    assert!(narrow_root(Path::new("/repo"), &plan_walk("a/../*.rs")).is_none());
+}
+
+#[test]
+fn test_narrow_root_blacklisted_base_falls_back() {
+    // base 名黑名单保真：cwd=node_modules + `src/**/*.rs` 现状由 depth 0 黑名单
+    // 检查拒绝（No files found.）；收窄必须回退，否则漂移为返回文件。
+    let base = Path::new("/repo/node_modules");
+    assert!(narrow_root(base, &plan_walk("src/**/*.rs")).is_none());
+    // 非黑名单 base 名不受影响，照常收窄
+    let (root, _) = narrow_root(Path::new("/repo/src"), &plan_walk("deep/*.rs")).unwrap();
+    assert_eq!(root, Path::new("/repo/src/deep"));
+}
+
+#[test]
+fn test_narrow_root_blacklisted_tail_still_narrows() {
+    // 末段黑名单仍收窄：收窄后 filter 的 depth 0 黑名单检查自动拒绝，
+    // 行为与全遍历一致（坑 2 机制，无需回退）。
+    let base = Path::new("/repo");
+    let (root, consumed) = narrow_root(base, &plan_walk("target/**/*.rs")).unwrap();
+    assert_eq!(root, Path::new("/repo/target"));
+    assert_eq!(consumed, 1);
+}
+
 // ─── 匹配语义锁定（黑盒）────────────────────────────────────────
 
 #[tokio::test]
@@ -474,6 +530,183 @@ async fn test_glob_skips_node_modules_deep_copy() {
     assert!(
         !result.contains("deep.rs"),
         "node_modules 副本不应被扫到: {result}"
+    );
+}
+
+// ─── walk root 收窄（黑盒回归）──────────────────────────────────
+
+#[tokio::test]
+async fn test_glob_narrowed_walk_skips_unrelated_dirs() {
+    // 收窄后 WalkDir 从 base/src 起步：base 顶层 unrelated 目录（含大量文件）
+    // 完全不进入，结果只含 src 前缀路径。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/deep")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+    std::fs::write(dir.path().join("src/deep/b.rs"), "").unwrap();
+    // unrelated 里放大量文件 + 嵌套 src 目录，作为"被绕开"的哨兵
+    std::fs::create_dir_all(dir.path().join("unrelated/src")).unwrap();
+    for i in 0..200 {
+        std::fs::write(dir.path().join("unrelated").join(format!("u{i}.rs")), "").unwrap();
+    }
+    std::fs::write(dir.path().join("unrelated/src/evil.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "src/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("src/a.rs"), "应找到 src/a.rs: {result}");
+    assert!(
+        result.contains("src/deep/b.rs"),
+        "应找到 src/deep/b.rs: {result}"
+    );
+    assert!(
+        !result.contains("unrelated"),
+        "收窄后不得返回 unrelated 下任何路径: {result}"
+    );
+    assert!(
+        !result.contains("evil.rs"),
+        "不得返回 unrelated/src/evil.rs: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_root_missing_returns_no_files() {
+    // root=base/src 不存在：walkdir yield Err(NotFound)，Err 分支跳过 → 空结果，
+    // 与全遍历语义逐字节一致（"No files found." 而非报错）。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/x.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "src/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "No files found.");
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_root_blacklisted_skipped() {
+    // root 末段是被跳目录：收窄后 depth 0 黑名单检查拒绝整个遍历 → No files found.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("target")).unwrap();
+    std::fs::write(dir.path().join("target/x.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "target/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "No files found.");
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_mid_segment_blacklist_falls_back() {
+    // 前缀链中段是被跳目录：回退全遍历，depth 1 黑名单检查拒绝 → No files found.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::write(dir.path().join("node_modules/pkg/x.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "node_modules/pkg/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "No files found.");
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_root_is_file_returns_no_files() {
+    // base/src 是文件而非目录：收窄 root 为文件，walkdir 只 yield 该条目，
+    // rel="src" 不匹配 `src/**/*.rs` → No files found.（与全遍历一致）
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("src"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "src/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "No files found.");
+}
+
+#[tokio::test]
+async fn test_glob_blacklisted_base_keeps_no_files() {
+    // base 名黑名单保真：cwd=node_modules + `src/**/*.rs` 必须仍是 No files found.
+    // （若收窄不补查 base 名，会漂移为返回 node_modules/src 下的文件）
+    let dir = tempfile::tempdir().unwrap();
+    let nm = dir.path().join("node_modules");
+    std::fs::create_dir_all(nm.join("src")).unwrap();
+    std::fs::write(nm.join("src/a.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(nm.to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "src/**/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "No files found.");
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_literal_multisegment() {
+    // 纯字面多段 pattern：收窄 root=base/a/b，max_depth 相对化（2-2=0），
+    // 文件在 root 下第一层照常 yield。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+    std::fs::write(dir.path().join("a/b/c.rs"), "").unwrap();
+    std::fs::write(dir.path().join("a/b/other.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "a/b/c.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a/b/c.rs"), "应命中 a/b/c.rs: {result}");
+    assert!(
+        !result.contains("other.rs"),
+        "字面 pattern 不应命中同层其他文件: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_glob_narrowed_multisegment_prefix_matches() {
+    // 多段前缀收窄（root=base/a/b）后匹配语义不变：`*` 仍跨 `/` 命中深层文件。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a/b/deep")).unwrap();
+    std::fs::write(dir.path().join("a/b/x.rs"), "").unwrap();
+    std::fs::write(dir.path().join("a/b/deep/y.rs"), "").unwrap();
+    std::fs::write(dir.path().join("a/other.rs"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "a/b/*.rs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a/b/x.rs"), "应命中 a/b/x.rs: {result}");
+    assert!(
+        result.contains("a/b/deep/y.rs"),
+        "`*` 跨段应命中 deep/y.rs: {result}"
+    );
+    assert!(
+        !result.contains("a/other.rs"),
+        "前缀链之外的路径不应返回: {result}"
     );
 }
 

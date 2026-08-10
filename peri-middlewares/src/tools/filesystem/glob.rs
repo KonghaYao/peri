@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -109,18 +109,62 @@ fn plan_walk(pattern: &str) -> WalkPlan {
     }
 }
 
+/// 前缀目录链安全收窄为 walk root；不可收窄时返回 `None`（回退全遍历）。
+///
+/// 返回 `(root, consumed)`：`WalkDir` 直接从 `root` 起步，跳过 base 整层列举与
+/// stat。任何命中路径必以字面前缀开头，root 收窄不漏报；匹配与显示路径仍相对
+/// base（`strip_prefix(base)` 语义不变），收窄只影响遍历范围。`consumed` 只有
+/// 两种取值：收窄时恒等于 `prefix_dirs.len()`（消费全部前缀段），回退时恒为 0；
+/// 不存在中间状态，filter 索引公式见 `collect_files`。
+///
+/// 回退条件（任一命中即 `None`，保证与全遍历逐字节一致）：
+/// - 前缀为空（`**/*.rs`、`Cargo.toml` 等无静态目录链的 pattern）。
+/// - base 名本身是被跳目录：现状 filter 的 depth 0 黑名单检查会拒绝整个扫描，
+///   收窄后 depth 0 只查 root 名，不补查会漂移（cwd=node_modules + `src/**/*.rs`
+///   从 No files found 变为返回文件）。
+/// - 前缀链中段（末段除外）是被跳目录：收窄会让被跳目录的子孙变为可遍历，
+///   行为反转（如 `node_modules/pkg/*.rs` 现状返回 No files found）。
+///   末段不查：收窄后由 filter 的 depth 0 黑名单检查自动拒绝，行为不变。
+/// - 任一段为 `.`/`..`：walk 出的 rel 路径不含这两段，拼接只会改变遍历范围，
+///   保守回退。
+fn narrow_root(base: &Path, plan: &WalkPlan) -> Option<(PathBuf, usize)> {
+    let prefix_dirs = &plan.prefix_dirs;
+    if prefix_dirs.is_empty() {
+        return None;
+    }
+    if base
+        .file_name()
+        .is_some_and(|n| should_skip_dir(&n.to_string_lossy()))
+    {
+        return None;
+    }
+    let mut root = base.to_path_buf();
+    for (i, seg) in prefix_dirs.iter().enumerate() {
+        if seg == "." || seg == ".." {
+            return None;
+        }
+        if i + 1 < prefix_dirs.len() && should_skip_dir(seg) {
+            return None;
+        }
+        root.push(seg);
+    }
+    Some((root, prefix_dirs.len()))
+}
+
 /// 收集匹配文件（同步，在 spawn_blocking 中运行）。
 ///
 /// 返回是否因超过 MAX_RESULTS 提前停止。`cancelled` 置位后最多再处理 256 个条目
 /// 即退出——spawn_blocking 无法强制中止，协作停止是超时后的兜底保护。
 fn collect_files(
     base: &Path,
+    walk_root: &Path,
+    consumed: usize,
     pattern: &glob::Pattern,
     plan: &WalkPlan,
     cancelled: &AtomicBool,
     results: &mut Vec<(Option<SystemTime>, String)>,
 ) -> bool {
-    let walker = walkdir::WalkDir::new(base)
+    let walker = walkdir::WalkDir::new(walk_root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
@@ -131,12 +175,16 @@ fn collect_files(
                     if depth == 0 {
                         // 根目录总是下钻（黑名单已检查，与既有行为一致）
                         true
-                    } else if depth <= plan.prefix_dirs.len() {
-                        // 前缀层：只进入名字匹配的目录
-                        name.as_ref() == plan.prefix_dirs[depth - 1].as_str()
+                    } else if depth <= plan.prefix_dirs.len().saturating_sub(consumed) {
+                        // 前缀层：只进入名字匹配的目录。仅回退态（consumed=0）可达——
+                        // 收窄态 consumed == len 使 depth <= 0 恒 false（walkdir 目录
+                        // 深度 >= 1），直接走下方深度上限分支；索引 `consumed + depth - 1`
+                        // 在回退态退化为 `depth - 1`，与收窄前原逻辑一致。
+                        name.as_ref() == plan.prefix_dirs[consumed + depth - 1].as_str()
                     } else {
-                        // 深度上限（仅纯字面 pattern 生效）
-                        plan.max_depth.is_none_or(|m| depth <= m)
+                        // 深度上限（仅纯字面 pattern 生效）；收窄使相对深度减少 consumed 层
+                        plan.max_depth
+                            .is_none_or(|m| depth <= m.saturating_sub(consumed))
                     }
                 } else {
                     false
@@ -185,7 +233,18 @@ fn run_glob(
     cancelled: &AtomicBool,
 ) -> String {
     let mut results: Vec<(Option<SystemTime>, String)> = Vec::new();
-    let early_stopped = collect_files(base, pattern, plan, cancelled, &mut results);
+    // root 收窄：静态字面前缀目录链存在时直接从 base+前缀起步（如 `src/**/*.rs`
+    // → root=base/src），跳过 base 整层列举与 stat；不可收窄时退回全遍历。
+    let (walk_root, consumed) = narrow_root(base, plan).unwrap_or_else(|| (base.to_path_buf(), 0));
+    let early_stopped = collect_files(
+        base,
+        &walk_root,
+        consumed,
+        pattern,
+        plan,
+        cancelled,
+        &mut results,
+    );
 
     // 稳定降序：mtime 相同的文件保持遍历顺序（与既有行为一致）。
     // 早停语义：超过 MAX_RESULTS 即停止收集，排序窗口 = 遍历中先收集到的
