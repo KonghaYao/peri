@@ -170,6 +170,8 @@ fn process_status_snapshot(pid: u32) -> Option<String> {
     }
     #[cfg(not(unix))]
     {
+        // Windows 无 ps；显式消费 pid 消除 unused_variable（-D warnings）。
+        let _ = pid;
         None
     }
 }
