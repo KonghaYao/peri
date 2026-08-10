@@ -123,16 +123,18 @@ dispatch 函数是纯函数——接收输入参数，返回结果。不持有 s
 
 ### 2.4 Event 映射
 
-`ExecutorEvent` → `MappedEvent`（含 5 个布尔标志：`updates`/`forward_to_tui`/`hitl_pending`/`observable`/`source_agent_id`），五路分路：
+`ExecutorEvent` → `MappedEvent`（定义见 `peri-acp/src/event/mapper.rs:22`，仅 2 个字段：`updates`（标准 ACP `SessionUpdate` 列表）+ `source_agent_id`（SubAgent 路由提示）），按事件变体五路分路：
 
 | 路径 | 事件类型 | 消费者 | 转发方式 |
 |------|---------|--------|---------|
-| **① 标准 ACP** | TextChunk、AiReasoning（v2 内部 ThinkingChunk 经 mapper_v2 转换）、ToolStart、ToolEnd、TodoUpdate、LlmCallEnd(usage)、**MessageAdded**（合成用户消息如 bg agent 回调） | IDE / Stdio | SessionUpdate 序列化 |
+| **① 标准 ACP** | TextChunk、AiReasoning（v2 内部 ThinkingChunk 经事件映射函数转换）、ToolStart、ToolEnd、TodoUpdate、LlmCallEnd(usage)、**MessageAdded**（合成用户消息如 bg agent 回调） | IDE / Stdio | SessionUpdate 序列化 |
 | **② HITL 审批** | *(预留)* | 审批通道（TUI / Channel） | Multiplex Broker 广播 |
 | **③ TUI 专用** | StateSnapshot、StateSnapshotMeta、SubAgent 事件、Compact 事件（CompactStarted, CompactCompleted, CompactError）、ContextWarning / BudgetWarning、AiReasoningChunk、AgentExecutionFailed、TurnStarted/TurnEnded/StageStarted/StageEnded/MiddlewareStarted/MiddlewareEnded（langfuse v2 生命周期）、RewindCompleted、BackgroundTaskCompleted、BgToolStep、LspDiagnostics、MessageQueueDrained、WorkflowStarted/WorkflowEnded/WorkflowProgress | peri-tui | `peri/agent_event` 通知 |
 | **④ 观测层** | *(预留)* | 外部监听器 | broadcast 事件流 |
 | **⑤ unstable-event** | TurnSuspended | peri-tui | `peri/unstable-event`（通过 router.rs 投递） |
 | **过滤** | LlmCallStart、LlmCallEnd(usage:None)、LlmRequestPayload | — | 丢弃 |
+
+**事件出口（3.0 M-event-chain）**：Agent 层统一发射 v2 事件（EventBus），经 `Controller::publish_event`（`peri-controller/src/controller.rs:436`，Controller → Runtime 补打身份 → 弹出队列 + 订阅广播）后，协议化消费经 `Controller::subscribe` / `pop_events` 订阅（`controller.rs:463`/`:470`）。v1 `ExecutorEvent` 中间态已退役，仅保留为协议序列化面载体（见 `peri-acp/src/event/mod.rs:20` 注释与 `event/forwarder.rs`）。
 
 **关于 HITL 审批（Category ②）**：当前 `ExecutorEvent` 中无 `HitlPending` 变体。HITL 审批通过 `UserInteractionBroker`（含 MultiplexBroker 包装）的 `ask/confirm` 直接交互，不经过事件管道。Category ② 路由位已预留但未启用。
 
@@ -142,11 +144,11 @@ dispatch 函数是纯函数——接收输入参数，返回结果。不持有 s
 
 `ToolKind` 映射：工具名称 → ToolKind 枚举（用于 TUI 图标和简称显示）。
 
-#### v2 事件桥接（mapper_v2 + forwarder）
+#### v2 事件桥接（事件映射函数 + forwarder）
 
 v2 ReAct 循环产出三层事件（`RenderEvent`/`StateEvent`/`ObserveEvent`），经桥接层转换为统一的 `ExecutorEvent`：
 
-- **mapper_v2**（`peri_agent::agent::events_v2_mapper`，peri-acp re-export）：纯函数将 `RenderEvent`→`render_event_to_executor()`、`StateEvent`→`state_event_to_executor()`、`ObserveEvent`→`observe_event_to_executor()` 桥接为 ExecutorEvent
+- **v2 事件映射函数**（`peri-acp/src/event/mod.rs:28-30` re-export 自 `peri_acp_types::event_v2`）：`events_v2_mapper` 模块已退役（3.0 M-event-chain，见 `event/mod.rs:20` 注释），`render_event_to_executor()`、`state_event_to_executor()`、`observe_event_to_executor()` 三个纯函数保留，将 v2 三层事件（`RenderEvent`/`StateEvent`/`ObserveEvent`）桥接为 ExecutorEvent
 - **forwarder**（`event/forwarder.rs`）：封装 `EventBus` 转发器 task，消费三层 v2 事件 channel。使用 `biased select!` 保证 render 通道（含 TurnCompleted）先于 state 通道被消费，避免跨迭代事件乱序导致渲染错乱
 
 ### 2.5 Provider 配置
@@ -181,7 +183,7 @@ Provider 快照：`session/new` 时捕获当前 Provider 配置——会话内�
 
 ### 3.2 每轮构建
 
-每轮 `session/prompt` 构建的 `PromptExecutionContext`，按四层组织：
+原 `PromptExecutionContext` 已拆分（L5）：会话级共享上下文 `SessionContext`（`peri-agent/src/session/exec/executor.rs:281`，注释明确 Replaces `PromptExecutionContext`）、stage 装配输入 `StageBuildInput`（`peri-agent/src/session/exec/stage_builder.rs:67`，字段分"会话数据 + 注入面"两组）、以及中间件可见的 `AgentContext`（`peri-agent/src/agent/agent_context.rs:39`，`StageContext` 薄封装）。每轮 `session/prompt` 构建的装配数据按四层组织：
 
 **Session-level identity & transport**：
 - `provider`：当前 LLM provider 快照（每轮从 `Arc<RwLock<>>` 克隆）
@@ -218,19 +220,19 @@ Provider 快照：`session/new` 时捕获当前 Provider 配置——会话内�
 
 ### 3.3 异步事件续跑（AsyncRouter + SessionInbox）
 
-v2 通过 `AsyncRouter`（`session/async_router.rs`）统一路由后台异步结果到 Session inbox，替代 executor 直接操作 raw `v2_message_queue` 的方式。
+v2 通过 `AsyncRouter`（`peri-agent/src/session/async_router.rs:34`，L5 自 ACP 层物理迁入 peri-agent）统一路由后台异步结果到 Session inbox，替代 executor 直接操作 raw `v2_message_queue` 的方式。
 
 两条路由目标：
 - **Background SubAgent 结果**（`route_bg_result`）：`/bg` fork agent 完成通知，push 为 `Defer` + `MessageSource::SubAgentComplete`
 - **Workflow 事件**（`route_workflow_event`）：workflow middleware 订阅者的完成通知，push 为 `Defer` + `MessageSource::WorkflowComplete`
 
-`SessionInbox`（`peri_agent::agent::session::SessionInbox`）是 `AcpSession` 的 `session_inbox` 字段，lazy-init（首次通过 `SessionManager::session_inbox_for` 创建）。内部持有 `InboxHandle`（包装 `MessageQueue` + wake `Notify`），`AsyncRouter` 每次 route 调用后触发 wake，使 idle 的 `run_session_loop` 通过 `await_wake` 恢复执行。
+`SessionInbox`（类型定义已下沉 `peri-acp-types/src/session.rs:282`）是 `AcpSession` 的 `session_inbox` 字段，lazy-init（首次通过 `SessionManager::session_inbox_for` 创建）。内部持有 `InboxHandle`（包装 `MessageQueue` + wake `Notify`），`AsyncRouter` 每次 route 调用后触发 wake，使 idle 的 `run_session_loop` 通过 `await_wake` 恢复执行。
 
-`BackgroundTaskRegistry`（`session/mod.rs`）是 session 级后台任务注册中心（`Arc<BackgroundTaskRegistry>`），跨 prompt 存活，取代 per-prompt 创建。
+`BackgroundTaskRegistry`（`peri-agent/src/agent/async_tasks.rs:126`）是 session 级后台任务注册中心（`Arc<BackgroundTaskRegistry>`），跨 prompt 存活，取代 per-prompt 创建。
 
 ### 3.4 Goal 状态管理
 
-`GoalState`（`session/goal_state/mod.rs`）是并发安全的目标状态机（基于 `Arc<RwLock<GoalStateInner>>` + `parking_lot::RwLock`），提供：
+`GoalState`（`peri-acp/src/session/goal_state/mod.rs:59`，L5 迁入 peri-acp）是并发安全的目标状态机（基于 `Arc<RwLock<GoalStateInner>>` + `parking_lot::RwLock`），提供：
 - `set_goal` / `edit_goal` / `clear_goal` / `set_status` / `flush_progress`
 - 只读快照 `GoalSnapshot`（goal_id / objective / status / token_budget / tokens_used / time_used_seconds）
 - 实现 `GoalController` trait
@@ -245,7 +247,7 @@ v2 通过 `AsyncRouter`（`session/async_router.rs`）统一路由后台异步�
 |------|------|
 | **peri-agent** | ACP 是 agent 的唯一调用入口。`execute_prompt()` 接收 frozen 数据 + 可变配置，返回事件流 |
 | **Session** | v2 中 ACP 层持有 `AcpSession` 句柄并管理 session 级共享状态（`active_agents`、`goal_state`、`v2_message_queue`、`session_inbox`、`background_registry`、`permission_mode`、`thinking` 等），核心 agent 状态（transcript、frozen）委托给 `peri_agent::session::Session` |
-| **Transport** | `MpscEventSink` / `StdioEventSink` 将 ExecutorEvent 转换为协议帧后推送给客户端 |
+| **Transport** | `TransportEventSink`（`peri-acp/src/session/event_sink.rs:56`）/ `StdioEventSink`（`:392`）将 ExecutorEvent 转换为协议帧后推送给客户端 |
 | **Middleware** | 中间件链在 `build_agent()` 中构建，ACP 传入配置但不过问中间件内部 |
 | **LLM** | Provider 配置由 ACP 层管理，构建 `dyn Model` 后注入 agent |
 | **System Prompt** | `session/new` 时 ACP 调用 `build_system_prompt()`，产出 frozen_prompt |

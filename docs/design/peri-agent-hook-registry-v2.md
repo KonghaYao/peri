@@ -70,7 +70,7 @@
 
 **收集路径**：`MiddlewareChain::collect_prompt_contributions()`（`chain.rs:312`）按注册顺序收集所有中间件的贡献，拼接为单个 String。
 
-**合并点**：`peri-acp/src/agent/builder.rs:655` 在链构造完成后、构造 `AgentModelBridge` 前，将贡献拼接到 frozen system prompt 之后（`format!("{system_prompt}\n\n{contributions}")`）。
+**合并点**：`peri-agent/src/session/exec/stage_builder.rs:410`（L5 归位后，原 `peri-acp/src/agent/builder.rs` 已随装配迁入 agent 层）在链构造完成后、构造 `AgentModelBridge` 前，将贡献拼接到 frozen system prompt 之后（`format!("{system_prompt}\n\n{contributions}")`）。
 
 **设计意图**：保持 prompt cache 前缀稳定（不再通过 `prepend_message` 注入）。贡献中间件包括 AgentsMd / Skills / GitAttribution / ToolSearch 等。
 
@@ -78,7 +78,7 @@
 
 v2 stages 不直接调 `MiddlewareChain` 的 `run_*` 方法，而是通过 `peri-agent/src/agent/stages/middleware_runner.rs` 桥接。该模块提供辅助函数（`run_before_compact`/`run_after_compact` 等），内部将 `StageContext` 转换为 `&mut dyn MiddlewareState` 后委托给 chain。
 
-**Compact hook 调用路径**：`stages/compact.rs:26` 调 `middleware_runner::run_before_compact`，`:187` 调 `run_after_compact`——而非直接调 chain。这确保了 compact 作为 ReAct 一等步骤的同时，仍能触发中间件的 before_compact/after_compact hook。
+**Compact hook 调用路径**：`stages/compact.rs:28` 调 `middleware_runner::run_before_compact`，`:380` 调 `run_after_compact`——而非直接调 chain。这确保了 compact 作为 ReAct 一等步骤的同时，仍能触发中间件的 before_compact/after_compact hook。
 
 ## 4. ReAct 循环中的 hook 位置
 

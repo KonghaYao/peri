@@ -48,7 +48,7 @@ graph TB
 
 ### 2.1 BaseTool 契约
 
-所有工具的根 trait。定义工具对外暴露的接口，不约束内部实现。
+所有工具的根 trait（定义已下沉 `peri-acp-types/src/tools.rs:79`）。定义工具对外暴露的接口，不约束内部实现。
 
 - 工具向 LLM 暴露三要素：名称、描述、参数 Schema。LLM 依据这三要素决定是否调用及如何传参
 - 工具执行入口接收 LLM 生成的输入和只读上下文，返回执行结果
@@ -80,7 +80,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 | Meta | 始终可见 | 桥接 Deferred——搜索和按名执行 | 统一发现入口，LLM 知道"可搜索"即可 |
 | Deferred | LLM 不可直接见 | 低频或动态注册的工具 | 数量不可控，全部暴露浪费 token |
 
-**Meta 工具实际注册的工具**：ToolSearchMiddleware 的 `collect_tools()` 除注册 SearchExtraTools 和 ExecuteExtraTool 外，还注册 **ArtifactTool**（工具名 `"artifact"`，将本地 HTML 文件上传到 CCB Artifacts 服务，返回公开 URL，支持 7d/30d TTL）。虽然 ArtifactTool 本质上是 deferred tool（不在 `META_TOOLS` 常量集合中），但它由中间件直接注册到 LLM 可见列表中。
+**Meta 工具实际注册的工具**：ToolSearchMiddleware 的 `collect_tools()` 除注册 SearchExtraTools 和 ExecuteExtraTool 外，还注册 **ArtifactTool**（工具名 `"artifact"`，将本地 HTML 文件上传到 CCB Artifacts 服务，返回公开 URL，支持 7d/30d TTL）。虽然 ArtifactTool 本质上是 deferred tool（不在 `CORE_TOOL_NAMES` 常量列表中），但它由中间件直接注册到 LLM 可见列表中。
 
 **Deferred 工具来源**：Cron 定时任务、MCP 外部服务（`mcp__{server}__{tool}`）、LSP 语言服务、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具。各来源独立注册到 `shared_tools`，搜索时合并结果。
 
@@ -162,11 +162,11 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 
 #### 2.4.3 Core 列表与 Prompt Cache 保护
 
-`CORE_TOOLS` 使用 `LazyLock<HashSet<&'static str>>` 存储 12 个核心工具名。因为 `HashSet` 迭代序不稳定，通过 `core_tools_sorted_csv()` 生成字典序排列的逗号分隔字符串，用于动态嵌入 Meta 工具（SearchExtraTools）的 description 中。
+`CORE_TOOL_NAMES`（`peri-middlewares/src/tool_search/core_tools.rs:64-78`）是 `&[&str]` 常量数组，存储 14 个核心工具名（含 `SkillTool` / `DiscoverSkillsTool`）。通过 `core_tools_sorted_csv()` 生成字典序排列的逗号分隔字符串，用于动态嵌入 Meta 工具（SearchExtraTools）的 description 中。
 
 ```rust
-// core_tools_sorted_csv() 示例输出：
-// "Agent, AskUserQuestion, Bash, Edit, Glob, Grep, Read, TodoWrite, WebFetch, WebSearch, Write, folder_operations"
+// core_tools_sorted_csv() 示例输出（14 个工具，字典序）：
+// "Agent, AskUserQuestion, Bash, DiscoverSkillsTool, Edit, Glob, Grep, Read, SkillTool, TodoWrite, WebFetch, WebSearch, Write, folder_operations"
 ```
 
 排序保证跨调用的字符串前缀稳定，保护 LLM prompt cache 命中率。

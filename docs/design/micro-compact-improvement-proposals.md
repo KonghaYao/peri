@@ -59,8 +59,8 @@ graph TB
 | `compact_v2/projection.rs` | `render_llm_view()`——根据计划把 Transcript 渲染成 LLM 可见的消息列表（纯函数）。 |
 | `compact_v2/mod.rs` | `run_compact()`——串联 planner + 决策 + 应用。 |
 | `compact_v2/micro.rs` | `micro_compact()`——调用 planner 生成计划，然后应用 `truncated` 标记。只有 ~20 行。 |
-| `compact_v2/smart.rs` | `smart_compact()`——规则驱动的消息保留策略，同样通过 planner 生成计划。 |
-| `compact_v2/config.rs` | `CompactConfig`——新增 `target_headroom_tokens`、`shadow_mode_enabled`、`cache_aware_enabled`、`tool_retention_map`。 |
+| `compact_v2/smart.rs` | `smart_compact()`——规则驱动的消息保留策略，同样通过 planner 生成计划。已收缩为 `plan_micro` 兼容入口（带 deprecation warning，趋向 Micro Compact）。 |
+| `compact_v2/config.rs` | `CompactConfig` 纯数据契约已归位 `peri-acp-types::compact`（配置来源为外部配置文件，跨层共享），本文件仅保留 re-export 保兼容。 |
 | `stages/reason.rs` | Reason 阶段——调用 `render_llm_view()` 获取压缩后的消息列表，替代旧版 `truncated_content(100)`。 |
 | `stages/compact.rs` | Compact 阶段——构建 `ContextPressure`，调用 `run_compact()`，填充事件字段。 |
 
@@ -89,7 +89,7 @@ TurnGroup #2:
 
 ### 3.1 与 Micro 的关系
 
-`plan_micro()` 跳过最近 `micro_compact_stale_steps`（默认 5）个 TurnGroup——最近几轮对话通常还在活跃使用中，不需要压缩。更早的 TurnGroup 才会被逐一检查并生成压缩动作。
+`plan_micro()` 跳过最近 `micro_compact_stale_steps`（默认 3，`peri-acp-types/src/compact.rs:120`）个 TurnGroup——最近几轮对话通常还在活跃使用中，不需要压缩。更早的 TurnGroup 才会被逐一检查并生成压缩动作。
 
 ---
 

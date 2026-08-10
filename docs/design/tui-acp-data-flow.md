@@ -18,7 +18,7 @@ graph TB
         PANEL["Panel 层<br/>Tasks / Cron / Agent / Model"]
     end
 
-    subgraph KIT["🧩 kit 九链路（tokio task）"]
+    subgraph KIT["🧩 kit 十链路（tokio task）"]
         direction LR
         NOTIFIER["acp_notifier<br/>AcpNotification → AcpEventData"]
         BRIDGE["acp_bridge<br/>BridgeState → Atom 写入"]
@@ -29,6 +29,7 @@ graph TB
         ASK_USER_C["ask_user_consumer<br/>ASK_USER_RESPONSE_TX"]
         HITL_C["hitl_response_consumer<br/>HITL_RESPONSE_TX"]
         THREAD_LOAD["thread_load_consumer<br/>THREAD_LOAD_TX"]
+        WORKFLOW_POLL["workflow_poll<br/>workflow 运行状态轮询"]
     end
 
     subgraph ATOM["📦 全局状态（atoms）"]
@@ -90,16 +91,35 @@ graph TB
 
 数据依赖方向：**TUI → ACP → Agent/Middleware**。反向通过 EventBus 事件通道回流。
 
+### 1.1 屏幕概览
+
+用户打开 peri-tui 后看到五个视觉区域（自上而下）：消息区、后台 Agent 栏、输入区、状态栏；弹窗层覆盖在消息区之上。
+
+- **消息区** — 消息流渲染 + 滚动，直接消费 `VIEW_MODELS` atom（见 §10 渲染管道）。
+- **后台 Agent 栏** — 状态栏上方，仅当有后台子 Agent 运行时出现。通过 `BG_TASKS` / `BG_DISPLAY` / `BG_AGENT_IDS` 三个 Atom 管理后台任务状态。完成后进入 3 秒倒计时缓冲，到期后渲染层移除。
+- **输入区** — 固定在屏幕底部。多行文本输入框（自管 EditorState），上方有附件预览栏（粘贴图片时出现），@ 和 / 补全弹窗浮在输入框上方。Agent 完成后的输入预测以灰色占位符显示。
+- **状态栏** — 屏幕最底部，双行高度。Row1：权限模式 → cwd basename → provider/model → CPU% → MEM（`CONTEXT_USAGE` 显示上下文使用率）。Row2：快捷键 hints + 瞬时状态提示。
+- **弹窗层** — 面板或交互弹窗激活时覆盖消息区。面板半屏显示，消息区仍可滚动；交互弹窗居中显示，独占键盘输入。
+
+### 1.2 模块边界（Crate 依赖）
+
+自上而下，不反向：
+
+- **peri-tui** — Atom 响应式组件 + async consumer 任务 + ratatui-kit 渲染。类型依赖包括 `peri-acp` / `peri-acp-types`（DTO）、`ratatui-kit`（组件库）+ `peri-theme`（主题）；`peri-middlewares` / `peri-resources` 为 3.0 批 3 豁免清单中的宿主装配点（launch.rs / main.rs / cli_print.rs 构造用），属直接依赖。运行时通过 MpscTransport（进程内内存通道）与 peri-acp 通信。代码禁止 `use peri_agent::`（引用数为 0）——pre-commit 钩子阻断。TuiRenderUnit 定义在 `peri-tui/src/kit/tui_render_unit.rs`，是 TUI 内部类型。
+- **peri-acp** — 会话管理 + 事件路由器 + 配置快照。依赖 `peri-acp-types`、`peri-agent`、`peri-middlewares`。系统唯一的"全知"层。事件路由器将 ExecutorEvent 转换为 AcpNotification，TUI 侧 kit notifier 解码并写入 Atom。
+- **peri-agent** — Session → ReAct 循环 → 事件产出。不依赖 `peri-acp-types`。Agent 运行时完全不知道 ViewModel 等前端概念的存在。
+- **peri-acp-types** — DTO 定义层（实际依赖不止 serde，含 peri-model、tokio、chrono 等）。包含各事件对应的 data 结构体定义、各类摘要结构。不包含 ViewModel/TuiRenderUnit 类型（该类型定义在 peri-tui 内部）。不包含命令枚举——事件名是字符串，不需要类型化。TUI 和 ACP 的共同数据结构基础。
+
 ---
 
-## 2. kit 九链路 — TUI 核心数据管道
+## 2. kit 十链路 — TUI 核心数据管道
 
-TUI 通过 9 个独立 tokio task 组成完整数据管道，在 `run_kit_fullscreen` 中一并 spawn：
+TUI 通过 10 个独立 tokio task 组成完整数据管道，在 `run_kit_fullscreen` 中一并 spawn（另有 2 个心跳任务：5s 渲染心跳 + 100ms spinner tick）：
 
 | # | 链路 | 输入 → 输出 | 职责 |
 |---|------|------------|------|
 | 1 | **acp_notifier** | `AcpNotification` → `AcpEventData` | ACP 协议消息 → kit 内部事件 |
-| 2 | **acp_bridge** | `AcpEventData` → Atom 写入 | 事件分发 + BridgeState 状态维护 + 1s tick（spinner + running Bash 计时） |
+| 2 | **acp_bridge** | `AcpEventData` → Atom 写入 | 事件分发 + BridgeState 状态维护 + 1s tick（BRIDGE_RESET 检测 + running Bash 计时） |
 | 3 | **submit_consumer** | `SUBMIT_TX` → `acp_client.prompt()` | 用户输入 → ACP prompt 请求 |
 | 4 | **service_snapshot** | 2s tick → 快照 atoms | CPU/MEM/MCP/Cron 状态轮询 |
 | 5 | **cancel_consumer** | `CANCEL_TX` → 清理 + `BRIDGE_RESET_COUNTER` 递增 | Ctrl+C 中断时重置桥接状态 |
@@ -107,6 +127,7 @@ TUI 通过 9 个独立 tokio task 组成完整数据管道，在 `run_kit_fullsc
 | 7 | **ask_user_consumer** | `ASK_USER_RESPONSE_TX` → AskUser 回答 RPC | AskUser 表单提交回传 |
 | 8 | **hitl_response_consumer** | `HITL_RESPONSE_TX` → HITL 审批 RPC | HITL approve/reject 回传 |
 | 9 | **thread_load_consumer** | `THREAD_LOAD_TX` → `acp_client.load_session()` | ThreadBrowser 切线程加载 |
+| 10 | **workflow_poll** | 定期轮询 → workflow 快照 | Workflow 运行状态刷新（workflow_snapshot） |
 
 ```mermaid
 sequenceDiagram
@@ -204,6 +225,25 @@ pub struct BridgeState {
     pub compact_just_completed: bool,
     /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
     pub last_submitted_text: Option<String>,
+    // —— 2026-08-05 后新增（Issue 2026-08-05 stale turn 防护 + streaming_mode=block）——
+    /// streaming_mode=block 时追踪上次推送后主 agent 文本/推理字符数，
+    /// 作为 `has_md_block_boundary_since` 的比较基点。
+    pub last_pushed_text_len: usize,
+    pub last_pushed_reasoning_len: usize,
+    /// turn 代际计数器——每次用户可见提交（LocalUserBubble）递增。
+    /// 识别 stale turn 结束事件（Issue 2026-08-05）：新提交后旧 turn 的
+    /// TurnInterrupted 晚到时不删新气泡/不恢复旧文本/不清排队输入。
+    pub turn_generation: u64,
+    /// 最后一次已真正发出 prompt RPC（PromptSubmitted）时的代际快照。
+    /// `turn_generation > last_prompt_generation` = 存在"已显示气泡但未发请求"
+    /// 的更新提交——此时到达的 TurnInterrupted 属于旧 turn（stale）。
+    pub last_prompt_generation: u64,
+    /// 当前 turn 的 prompt requestId（submit_consumer 生成 uuid::now_v7，
+    /// 服务器经 turn 结束事件回带）。TurnInterrupted 携带 request_id 且与
+    /// 当前值不匹配 → stale（request_id 配对判定，与代际判定 OR 组合）。
+    pub current_request_id: Option<String>,
+    // TodoWrite 变更集字段（last_successful_todos / next_todo_sequence /
+    // todo_call_inputs）用于工具卡片增量，细节见代码。
 }
 ```
 
@@ -263,7 +303,7 @@ event_v2         →  `session/update`                    →  AcpNotification �
 | `oauth-needed` | ACP → TUI | ACP 通知 | `OAUTH_INFO` |
 | `budget-warning` | — | 当前无用户可见生产路径 | — |
 | `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → `HitlPending` | `HITL_PENDING` + `HITL_REQUEST_ID` |
-| `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 6 个 popup） |
+| `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 7 个 popup，PopupKind 共 7 种：Hitl/AskUser/Rewind/OAuth/Confirm/Download/ModelQuickSwitch） |
 
 ### 4.4 Background Tasks 事件
 
@@ -295,6 +335,8 @@ event_v2         →  `session/update`                    →  AcpNotification �
 | AcpEventData 变体 | 说明 |
 |-------------------|------|
 | `BgCallbackBubble { text }` | bg agent 完成回调：先 flush current_turn → committed，等待后续 `LocalUserBubble` 推送用户气泡 |
+| `CommittedAssistantText` | 直接 push 到 committed（compact replay 场景） |
+| `ReplayToolStarted` / `ReplayToolEnded` | 直接 push / 更新 committed 中的工具卡片（历史回放场景） |
 | `RewindCompleted { messages_json }` | Rewind 完成：反序列化 messages_json 替换 state.committed |
 | `StateSnapshotMeta` | `peri/agent_event` → 写入 `CONTEXT_USAGE` atom（budget_pct + total_tokens），不产生 AcpEventData |
 
@@ -358,6 +400,16 @@ start_tool(Bash)                      → flush: AssistantText{text_end:2, reaso
 > (2) `TurnSegment` 枚举 + `flush_text_segment()` → text 按边界分离，但 reasoning 仍全量塞入首段
 > (3) `AssistantText` 段增加 `reasoning_end_byte` → 每段气泡取自身推理切片，工具/消息边界后的 reasoning 归入对应气泡
 > **动机**：ACP 协议自带消息标识，变体推断是冗余的启发式。
+
+### 5.2.1 视图派生与增量 VM 缓存（sync_cache）
+
+`CurrentTurn::view_models()` 是统一 VM 入口（`&mut self`）：`cache_dirty` 时调用 `sync_cache()` 增量修补缓存，然后返回 `cached_view_models`。`sync_cache()` 从内部 segments / text / reasoning / tool_cards / subagents 对齐 `im::Vector<TuiRenderUnit>`：
+
+1. **遍历 segments**：按时序产生 `TuiAssistantBubble`（文本）、`TuiToolCard`（工具）、`TuiSubAgentGroup`（SubAgent）；冻结的 AssistantText 段只构建一次，未变化的元素直接复用缓存
+2. **Trailing 补丁**：segments 之后的残余文本/推理生成最终气泡（长度比对做 O(1) 变化检测）
+3. **后处理**：Agent 工具卡片的 `tool_calls_count` 与紧随的 SubAgent 组配对；顶层 turn 额外做折叠归一化（仅最后一个 reasoning 展开，与 push_view_models 折叠 pass 稳态一致）
+
+缓存语义为**增量修补**而非清除式重建：流式变更在 mutation 时 eager sync（不置 dirty），每 token 成本 O(变化量 + 段数扫描)；`invalidate_cache()`（如 acp_bridge 1s tick 刷新工具时长）置位后在下次调用时重同步。`im::Vector` 持久结构使 `cached_view_models` 可 O(1) 克隆共享（SubAgent 组、push_view_models 快照）。
 
 ### 5.3 流式增量渲染
 
@@ -753,17 +805,28 @@ graph TB
 `message_area` 的 `vm_caches` 通过两层检测避免全量重建：
 
 1. **content_hash 增量检测**：每个 VM 持有 `content_hash`（覆盖 text/reasoning.collapsed/tool duration 等可变字段），`vm_caches` 按 VM 粒度分片——仅 `content_hash` 变化的 VM 重新解析 markdown + 重建 wrap_map，未变更 VM 直接 `Arc::clone` 复用。流式单次成本从 O(N×W) 降至 O(W)。
-2. **acp_bridge 1s tick**：保活检测 `BRIDGE_RESET_COUNTER` 变更，若有 `has_running_bash_tool()` 则调用 `invalidate_cache()` + `push_view_models` 推送更新到 VIEW_MODELS（刷新 `Running(Ns)` 计时）。spinner 帧推进已解耦至 TUI 侧 50ms `RENDER_HEARTBEAT` tick，不再经由此路径。
+2. **acp_bridge 1s tick**：保活检测 `BRIDGE_RESET_COUNTER` 变更，若有 `has_running_bash_tool()` 则调用 `invalidate_cache()` + `push_view_models` 推送更新到 VIEW_MODELS（刷新 `Running(Ns)` 计时）。spinner 帧推进已解耦至 TUI 侧独立 100ms spinner tick（entry.rs，仅 loading 态驱动 `RENDER_HEARTBEAT`，原生帧率 10Hz），不再经由此路径。
 
 ### 10.2 视口裁剪
 
 `wrap_map` 为每条逻辑行的视觉行（含 wrap）建立索引。`message_area` 通过二分查找确定可见范围，仅渲染屏幕高度内的行，实现大消息流的高效滚动。
 
+### 10.3 滚动与视口交互（message_area/scroll.rs）
+
+| 组件 | 用途 |
+|------|------|
+| `ScrollThrottle` | 鼠标滚轮节流，键盘不节流。默认 **50ms（20fps）**，优先级：`TuiConfig.scroll_fps`（60→16ms / 30→33ms / 20→50ms）> `PERI_SCROLL_THROTTLE_MS` 环境变量 > 默认 50ms。面板滚轮仲裁（panel_scroll.rs）复用同一帧率配置 |
+| `ScrollbarDragState` | 滚动条 thumb 拖拽（锁定 thumb_offset 避免跳变） |
+| `DragThrottle` | 拖拽选中节流 |
+| 智能跟随 | VIEW_MODELS 变化时自动滚底；用户主动上滚时不抢夺滚动位，滚到视觉底部（扣除 `SCROLL_PADDING` 缓冲）即恢复跟随 |
+
+`flush_scroll_if_due` 由事件到达与渲染帧兜底双驱动，`pending_delta` 累积后一次性推入 scroll_state 并同步 follow。
+
 ---
 
 ## 11. Session 生命周期 — SessionPhase
 
-`SessionPhase` 枚举仅三种变体（定义于 `acp_events.rs`），控制 TUI 全局模式：
+`SessionPhase` 枚举仅三种变体（定义于 `peri-tui/src/kit/acp_events/` 目录），控制 TUI 全局模式：
 
 | 变体 | 进入时机 | 含义 |
 |------|---------|------|
@@ -782,6 +845,7 @@ stateDiagram-v2
     PromptRunning --> Idle: TurnSuspended → archive（不 drain）
     Idle --> ReplayingHistory: SessionReplayStarted
     ReplayingHistory --> Idle: SessionReplayDone
+```
 
 ### 11.1 BRIDGE_RESET_COUNTER — 跨 session 重置
 
@@ -841,8 +905,19 @@ INPUT_BUFFER 清空
 ## 13. 关键设计原则
 
 1. **Agent 不感知 UI**：Agent 运行时仅产出 `ExecutorEvent`，完全不知道 ViewModel、Atom、渲染队列的存在
-2. **TUI 不引入 Agent 类型**：TUI 只消费 `TuiRenderUnit`，代码禁止 `use peri_agent::` —— pre-commit hook 阻断
+2. **TUI 不引入 Agent 类型**：TUI 只消费 `TuiRenderUnit`，代码禁止 `use peri_agent::`（引用数为 0）—— pre-commit hook 阻断。注意 `peri-middlewares` / `peri-resources` 属 3.0 批 3 豁免清单的宿主装配点，不在此列
 3. **ACP 层是唯一全知层**：唯一同时依赖 `peri-agent` + `peri-middlewares` + `peri-tui` 的层，负责协议适配
 4. **All events → Atom → Render**：所有数据变更走统一事件渠道 → atom 写入 → 渲染消费者读取，禁止旁路
 5. **BridgeState 单一事实源**：`VIEW_MODELS` atom 仅通过 `push_view_models` 写入，所有状态变更必须经过 BridgeState
 6. **增量优于全量**：message_area 的 vm_caches 按 VM content_hash 分片增量渲染，流式单次成本从 O(N×W) 降至 O(W)
+
+**约束清单**（与上述原则配套的不变式）：
+
+- **TurnDone 归档用追加语义**——将 current_turn.view_models() 逐条 push_back 到 committed，然后 reset()。不存在 TUI 侧独立消息列表
+- **TurnInterrupted 零产出回滚**——current_turn 为空时移除 committed 最后一条用户气泡 + 恢复输入文本；stale 分支（request_id 配对 / 代际判定）只归档旧 turn 产出并复位，不删新气泡、不恢复文本，且复位后主动 drain 排队输入
+- **drain_input_buffer 仅在 turn 结束时触发**——TurnDone 与 stale 分支 drain；用户主动取消（非 stale）不自动续跑
+- **push_view_models 是唯一 atom 写入路径**——不存在分支或独立纯函数
+- **BRIDGE_RESET_COUNTER 必须递增**——/clear 和 thread 切换前必须递增，仅 Atom 重置不足；acp_bridge 检测变更后重置全部内部状态（committed / current_turn / generation / phase / popup_kind / 代际与 request_id / INPUT_BUFFER）
+- **VmCacheSlot 按 content_hash 分片**——流式期间仅最后一个气泡 hash 变化触发重建；content_hash 在折叠/展开 reasoning 或 tool duration 变化时必须 recompute
+- **CJK 截断用 chars().take(N)**——禁止 `&s[..N]`；u16 坐标用 saturating_add/sub，防止溢出
+- **render body 禁止写 Atom**——`write_no_update()` 除外；`use_*` 顺序必须一致，否则 "Hook type mismatch" panic

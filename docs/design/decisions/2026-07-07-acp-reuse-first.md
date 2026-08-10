@@ -73,4 +73,4 @@
 
 - `peri-acp-protocol.md`：§4.1 标注废弃，§4.2 移除 `view-commit`，移除 `hitl-pending`/`ask-user`
 - `ACP_COMPATIBLE.csv`：移除废弃事件行
-- `acp-feature-list.md`：同步更新
+- `acp-feature-list.md`：功能状态清单已并入 `peri-acp-protocol.md`（2026-08-10 删除该文档）
