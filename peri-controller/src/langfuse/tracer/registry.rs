@@ -75,6 +75,8 @@ pub(crate) struct ActiveSubagent {
     pub stop: Option<SubagentStopInfo>,
     /// 已绑定的 (parent_agent_id, tool_call_id)
     pub invocation_key: Option<(String, String)>,
+    /// 父 Agent 工具 input(join 时从 invocation 克隆;AGENT obs 的 input)
+    pub input: Option<serde_json::Value>,
 }
 
 /// Stop 载荷
@@ -156,6 +158,8 @@ pub(crate) struct AgentObsStart {
     pub parent_observation_id: String,
     pub start_time: String,
     pub agent_name: String,
+    /// 父 Agent 工具 input(AGENT obs 的 input)
+    pub input: Option<serde_json::Value>,
 }
 
 /// AGENT obs 关闭所需全部信息,tracer 据此发 ObservationUpdate + flush child tool_batch
@@ -164,6 +168,8 @@ pub(crate) struct ClosedSubagent {
     pub parent_observation_id: String,
     pub start_time: String,
     pub agent_name: String,
+    /// 父 Agent 工具 input(AGENT obs 的 input)
+    pub input: Option<serde_json::Value>,
     /// AGENT obs 的 output(优先 Stop result,空则取父工具 deferred_output)
     pub output: String,
     pub stop_time: String,
@@ -424,6 +430,7 @@ impl SubagentRegistry {
                 status: SubagentStatus::PendingInvocation,
                 stop: None,
                 invocation_key: None,
+                input: None,
             },
         );
         self.pending_starts.push_back(StartPending {
@@ -463,17 +470,26 @@ impl SubagentRegistry {
             .pending_starts
             .iter()
             .position(|sp| sp.child_agent_id == child_agent_id)?;
-        // 先找可绑定 invocation(不先移除 pending——join 失败时 Start 仍需等待)
+        // 先找可绑定 invocation(不先移除 pending——join 失败时 Start 仍需等待)。
+        // FIFO 配对语义:工具调用顺序 = subagent 启动顺序(同步路径),跨 forwarder
+        // 竞态只影响事件到达顺序,不影响 FIFO 相对顺序;因此只匹配同 parent 的
+        // 最旧**未绑定** invocation(已绑定的跳过,防两个 Start 绑同一 invocation),
+        // 无匹配返回 None(保持 pending,等后续 invocation 到达再 join)。
         let key = {
             let sp = &self.pending_starts[sp_pos];
-            match self
-                .unbounded_invocations
+            self.unbounded_invocations
                 .iter()
-                .find(|(p, _)| *p == sp.parent_agent_id)
-            {
-                Some(k) => k.clone(),
-                None => self.unbounded_invocations.front()?.clone(),
-            }
+                .find(|(p, c)| {
+                    *p == sp.parent_agent_id
+                        && self
+                            .invocations
+                            .get(&(p.clone(), c.clone()))
+                            .is_some_and(|i| i.bound_child.is_none())
+                })
+                .cloned()
+        };
+        let Some(key) = key else {
+            return None; // 无未绑定匹配:保持 pending,不跨 parent/不取已绑定项
         };
         // 找到后才正式移除 pending 与 unbounded 索引
         let sp = self.pending_starts.remove(sp_pos).unwrap();
@@ -484,6 +500,7 @@ impl SubagentRegistry {
             .get(&sp.child_agent_id)
             .map(|sa| sa.stop.is_some())
             .unwrap_or(false);
+        let input = Some(inv.input.clone());
         self.invocations.insert(key.clone(), inv);
 
         let obs = AgentObsStart {
@@ -495,6 +512,7 @@ impl SubagentRegistry {
                 .unwrap_or_default(),
             start_time: chrono::Utc::now().to_rfc3339(),
             agent_name: sp.agent_name.clone(),
+            input: input.clone(),
         };
         let sa = self.by_agent_id.get_mut(&sp.child_agent_id).unwrap();
         sa.observation_id = obs.observation_id.clone();
@@ -502,6 +520,7 @@ impl SubagentRegistry {
         sa.start_time = obs.start_time.clone();
         sa.agent_name = obs.agent_name.clone();
         sa.invocation_key = Some(key.clone());
+        sa.input = input;
         let had_stop = sa.stop.is_some();
         sa.status = if had_stop {
             SubagentStatus::StopReceived
@@ -559,6 +578,7 @@ impl SubagentRegistry {
         let child = inv.bound_child.clone();
         let deferred = inv.deferred_output.clone();
         self.invocations.remove(&key);
+        self.unbounded_invocations.retain(|k| k != &key);
         let child = child?;
         let sa = self.by_agent_id.get_mut(&child)?;
         if !matches!(
@@ -583,6 +603,7 @@ impl SubagentRegistry {
             parent_observation_id: sa.parent_observation_id.clone(),
             start_time: sa.start_time.clone(),
             agent_name: sa.agent_name.clone(),
+            input: sa.input.clone(),
             output,
             stop_time: stop.stop_time,
             is_error: stop.is_error,
@@ -699,6 +720,7 @@ impl SubagentRegistry {
             parent_observation_id: sa.parent_observation_id.clone(),
             start_time: sa.start_time.clone(),
             agent_name: sa.agent_name.clone(),
+            input: sa.input.clone(),
             output,
             stop_time: stop.stop_time,
             is_error: stop.is_error,
@@ -775,6 +797,7 @@ impl SubagentRegistry {
                 parent_observation_id: sa.parent_observation_id.clone(),
                 start_time: sa.start_time.clone(),
                 agent_name: sa.agent_name.clone(),
+                input: sa.input.clone(),
                 output,
                 stop_time: stop.stop_time,
                 is_error: stop.is_error,
@@ -806,6 +829,13 @@ impl SubagentRegistry {
         self.by_agent_id.get(agent_id).map(|sa| &sa.status)
     }
 
+    #[cfg(test)]
+    pub(crate) fn invocation_key_of(&self, agent_id: &str) -> Option<(String, String)> {
+        self.by_agent_id
+            .get(agent_id)
+            .and_then(|sa| sa.invocation_key.clone())
+    }
+
     pub(crate) fn incomplete_count(&self) -> u64 {
         self.incomplete_count
     }
@@ -835,6 +865,7 @@ impl SubagentRegistry {
                     status: SubagentStatus::Incomplete(reason.clone()),
                     stop: None,
                     invocation_key: None,
+                    input: None,
                 },
             );
         }

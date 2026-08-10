@@ -1400,9 +1400,14 @@ impl LangfuseTracer {
             end_time: None,
             completion_start_time: None,
             parent_observation_id: Some(obs.parent_observation_id.clone()),
-            input: None,
+            input: obs.input.clone(),
             output: None,
-            metadata: None,
+            // 与 ErrorTurn span 的 metadata 格式对齐(trace_id == turn_id)
+            metadata: Some(serde_json::json!({
+                "is_synthetic": false,
+                "was_sampled": true,
+                "turn_id": self.trace_id.clone(),
+            })),
             model: None,
             model_parameters: None,
             usage: None,
@@ -1436,7 +1441,17 @@ impl LangfuseTracer {
         } else {
             None
         };
-        let mut metadata = serde_json::json!({});
+        // 成功/失败统一写 text(成功不再丢 output);错误时附加 error_class
+        let mut output = serde_json::json!({"text": closed.output});
+        if closed.is_error {
+            output["error_class"] = serde_json::json!("subagent_failure");
+        }
+        // 与 ErrorTurn span 的 metadata 格式对齐(trace_id == turn_id)
+        let mut metadata = serde_json::json!({
+            "is_synthetic": false,
+            "was_sampled": true,
+            "turn_id": self.trace_id.clone(),
+        });
         if let Some(reason) = &closed.incomplete_reason {
             metadata["incomplete_reason"] = serde_json::json!(format!("{:?}", reason));
         }
@@ -1449,12 +1464,8 @@ impl LangfuseTracer {
             end_time: Some(closed.stop_time),
             completion_start_time: None,
             parent_observation_id: Some(closed.parent_observation_id),
-            input: None,
-            output: if closed.is_error {
-                Some(serde_json::json!({"error_class": "subagent_failure"}))
-            } else {
-                None
-            },
+            input: closed.input.clone(),
+            output: Some(output),
             metadata: Some(metadata),
             model: None,
             model_parameters: None,
