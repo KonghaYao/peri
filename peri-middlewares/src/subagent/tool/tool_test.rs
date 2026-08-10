@@ -2831,6 +2831,46 @@ async fn preset_resumable_thread(
     store.update_thread_status(&id, "done").await.unwrap();
 }
 
+/// 回归（占位符劫持）：LLM 表达「省略/意图」时会把 resume_thread_id 填成
+/// "" / "new" / "__omit__" 等非 UUID 占位符——必须忽略并走新建路径，
+/// 而不是进入 resume 分支报 invalid thread id（曾导致 subagent 高失败率死循环）。
+#[tokio::test]
+async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
+    for placeholder in ["", "new", "__omit__"] {
+        let dir = tempdir().unwrap();
+        write_test_agent(&dir);
+        let t = make_subagent_tool(vec![]).with_thread_store(make_fs_store(&dir));
+        let result = t
+            .invoke(
+                serde_json::json!({
+                    "resume_thread_id": placeholder,
+                    "subagent_type": "test-agent",
+                    "cwd": dir.path().to_str().unwrap(),
+                    "prompt": "do it",
+                }),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "占位符 resume_thread_id {:?} 应被忽略并走新建路径: {:?}",
+            placeholder,
+            result.err()
+        );
+        let result = result.unwrap();
+        assert!(
+            result.contains("child_thread_id:"),
+            "新建路径返回值应带 child_thread_id: {}",
+            result
+        );
+        assert!(
+            !result.contains("invalid thread id"),
+            "不应触发 invalid thread id: {}",
+            result
+        );
+    }
+}
+
 /// R-M2 容错：resume_thread_id 与 fork 同传 → fork 被忽略，恢复成功（不报错）
 #[tokio::test]
 async fn test_resume_thread_id_ignores_fork_field() {

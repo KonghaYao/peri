@@ -451,7 +451,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "要恢复的被中断 subagent 的 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得）。提供时从磁盘 thread 恢复其现场继续执行，不创建新 subagent，且优先于 subagent_type / fork（这两个字段会被忽略）。要求：thread 状态非 active；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）"
+                    "description": "可选，默认不填：不填即新建 subagent。仅当要恢复此前被中断/失败的 subagent 时才填：值为其 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得，恒为 UUID）。提供时从磁盘 thread 恢复现场继续执行，不创建新 subagent，且优先于 subagent_type / fork（两者被忽略）；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）。thread 状态须非 active"
                 },
                 "description": {
                     "type": "string",
@@ -498,9 +498,16 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // resume_thread_id 仅在值为有效 UUID 时才视为恢复意图（「不填 = 新建」语义）：
+        // LLM 表达「省略」时常用 "" / "new" / "__omit__" 等占位符（或把意图填进
+        // 该字段），若按 is_some 判断会被劫持进 resume 分支并触发 invalid thread id
+        // 失败——占位符一律忽略，走正常新建路径（subagent_type / fork / prompt）。
+        // 真实 child_thread_id 恒为 UUID（spawn 时 Uuid::now_v7 生成），过滤不损失语义。
         let resume_thread_id = input
             .get("resume_thread_id")
             .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && uuid::Uuid::parse_str(s).is_ok())
             .map(|s| s.to_string());
         // prompt 改为 Option：resume 路径可缺省（缺省注入隐式 continue，issue 决策 9）；
         // 非 resume 路径下方运行时校验兜底（required:[] 后语义不变）
@@ -531,9 +538,10 @@ impl BaseTool for SubAgentTool {
         let host = self.host();
 
         // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
-        // 容错语义：resume_thread_id 存在时直接进入恢复分支，subagent_type / fork
-        // 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
-        // 宽容处理使恢复总是可成功，多余字段无副作用）。
+        // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
+        // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
+        // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
+        // 过滤（见上），不会劫持新建路径。
         // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
         if resume_thread_id.is_some()
             && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()
