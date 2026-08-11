@@ -263,3 +263,11 @@ fn test_wrap_by_width_multiline_input() {
 fn test_wrap_by_width_zero_width_returns_original() {
     assert_eq!(wrap_by_width("x", 0), vec!["x"]);
 }
+
+#[test]
+fn test_wrap_by_width_empty_returns_single_empty_line() {
+    // render 侧（reasoning_visual_lines / render_user_bubble_lines）依赖 flat_map
+    // 后过滤 trim 空行——wrap 自身对空串产出单空行，不 panic。
+    assert_eq!(wrap_by_width("", 10), vec![""]);
+    assert_eq!(wrap_by_width("", 1), vec![""]);
+}

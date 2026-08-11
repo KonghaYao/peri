@@ -52,8 +52,6 @@ pub struct SymbolSet {
     pub queued: &'static str,
     /// user prompt
     pub user_prompt: &'static str,
-    /// focused entry 左缘 selection border（§9，U+258C LEFT HALF BLOCK）
-    pub focus_border: &'static str,
     /// todo change：Started（进行中）
     pub todo_started: &'static str,
     /// todo change：Reopened（重新打开）
@@ -71,7 +69,6 @@ const UNICODE_SYMBOLS: SymbolSet = SymbolSet {
     expanded: "\u{25be}",      // ▾
     queued: "\u{b7}",          // ·
     user_prompt: "\u{203a}",   // ›
-    focus_border: "\u{258c}",  // ▌
     todo_started: "\u{25b6}",  // ▶
     todo_reopened: "\u{21bb}", // ↻
     todo_edited: "\u{270e}",   // ✎
@@ -86,7 +83,6 @@ const ASCII_SYMBOLS: SymbolSet = SymbolSet {
     expanded: "v",
     queued: ".",
     user_prompt: ">",
-    focus_border: "|",
     todo_started: ">",
     todo_reopened: "~",
     todo_edited: "*",
@@ -247,7 +243,6 @@ mod tests {
         assert_eq!(s.queued, "·");
         assert_eq!(s.user_prompt, "›");
         // 辅助字形保持 Unicode 原形（§12 契约在 ascii 侧降级）
-        assert_eq!(s.focus_border, "▌");
         assert_eq!(s.todo_started, "▶");
         assert_eq!(s.todo_reopened, "↻");
         assert_eq!(s.todo_edited, "✎");
@@ -271,8 +266,7 @@ mod tests {
         assert_eq!(s.expanded, "v");
         assert_eq!(s.queued, ".");
         assert_eq!(s.user_prompt, ">");
-        // 辅助字形（§12 同一降级契约）：▌/▶/↻/✎ → |/>/~/*
-        assert_eq!(s.focus_border, "|");
+        // 辅助字形（§12 同一降级契约）：▶/↻/✎ → >/~/*
         assert_eq!(s.todo_started, ">");
         assert_eq!(s.todo_reopened, "~");
         assert_eq!(s.todo_edited, "*");
@@ -286,7 +280,6 @@ mod tests {
             s.expanded,
             s.queued,
             s.user_prompt,
-            s.focus_border,
             s.todo_started,
             s.todo_reopened,
             s.todo_edited,

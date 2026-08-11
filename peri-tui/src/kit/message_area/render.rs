@@ -13,7 +13,7 @@ use crate::kit::tui_render_unit::{
     TuiSystemNote, TuiTodoChangeKind, TuiTodoPresentation, TuiTodoSummary, TuiToolCard,
     TuiToolPresentation,
 };
-use crate::truncate::truncate_by_width;
+use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
@@ -749,11 +749,26 @@ fn emphasize_user_line(
 
 /// §6.3 Reasoning 三态视觉。
 ///
-/// - Running/Preview：`[◐][gap]Thinking…`（bold, status.running）+ elapsed（三档放置）
-///   + 最近 ≤4 行 tail（muted+italic，无 italic → dim；`│` 续行前缀与 md 正文一致）。
-/// - Completed/Collapsed：单行 `[▸][gap]Thought for 12s · 14 lines`。
-/// - Completed/Expanded：`[▾][gap]Thought for 12s · 14 lines` + 正文（≤100 行）。
+/// - Running/Preview：`[│][gap]Thinking…`（bold, status.running）+ elapsed（三档放置）
+///   + 最近 ≤4 个视觉行 tail（wrap 后取尾，长行显示尾部而非截断头部；muted+italic，
+///     无 italic → dim；`│` 续行前缀与 md 正文一致）。
+/// - Completed/Collapsed：单行 `[│][gap]Thought for 12s · N lines`（N = 视觉行总数）。
+/// - Completed/Expanded：`[│][gap]Thought for 12s · N lines` + 前 ≤100 个视觉行正文。
 /// - 空 reasoning 仍显示 `Thinking…`（不出现空白 block）。
+/// - 行数口径统一为视觉行：`reasoning_visual_lines` 一次 wrap 出视觉行序列，tail /
+///   摘要 N / Expanded 正文共用——渲染行数与滚动高度（build_wrap_map）天然一致。
+/// - [用户需求] 首行 icon 三态统一为竖线 `│`（与正文续行前缀同形，视觉连续）；
+///   状态感由颜色承担（Running=status.running / Completed=dim）。
+///
+/// §6.3 视觉行单一事实源：先按 `\n` 分行、逐行 wrap 成视觉行，再丢弃 trim 空行。
+/// tail / 摘要 N / Expanded 正文共用此序列——渲染行数与滚动高度天然一致。
+fn reasoning_visual_lines(text: &str, width: usize) -> Vec<String> {
+    text.lines()
+        .flat_map(|l| wrap_by_width(l, width))
+        .filter(|l| !l.trim().is_empty())
+        .collect()
+}
+
 fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
@@ -767,23 +782,18 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let line_count = reasoning
-        .text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count();
+    // 一次 wrap 出视觉行序列（tail / 摘要 N / Expanded 正文共用，§6.3 单一事实源）。
+    let visual_lines = reasoning_visual_lines(&reasoning.text, grid.content_width());
+    let line_count = visual_lines.len();
 
     if reasoning.is_running {
-        // Running（fold=Preview 或用户覆盖 Expanded）：⠋ Thinking… + elapsed + tail。
+        // Running（fold=Preview 或用户覆盖 Expanded）：│ Thinking… + elapsed + tail。
         // [Fix §6.3] 用户手动折叠（Collapsed）→ 仅活动状态行，不渲染 tail——
         // 「隐藏 reasoning 只影响 body；活动状态行仍需可见」（§7 running 默认
         // Preview，Collapsed 只能来自用户覆盖——Space 切换必须有视觉反馈）。
-        // running 符号为动态 braille 动画帧（§8.2）。
-        let mut spans = first_prefix(
-            grid,
-            &running_symbol(),
-            Style::default().fg(sem.status.running),
-        );
+        // 首行 icon 统一竖线（用户需求）；活动感由 running 色 + elapsed + tail
+        // 增长承担（§8.2 动画帧不再用于 reasoning）。
+        let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.status.running));
         // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
         // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
         // ◐（running 色）承担。
@@ -803,35 +813,18 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
             FoldState::Preview => 4, // §6.3：最近 2–4 个视觉行 tail
             FoldState::Collapsed => 0,
         };
-        for tail in reasoning
-            .text
-            .lines()
-            .rev()
-            .take(tail_max)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            if tail.trim().is_empty() {
-                continue;
-            }
+        for tail in visual_lines.iter().rev().take(tail_max).rev() {
             let mut spans = cont_prefix(grid, sem.accents.reasoning);
-            spans.push(Span::styled(
-                truncate_by_width(tail, grid.content_width()),
-                body_style,
-            ));
+            spans.push(Span::styled(tail.clone(), body_style));
             lines.push(Line::from(spans));
         }
     } else {
         // Completed：折叠单行 / 展开含正文。
+        // 首行 icon 统一竖线（用户需求）——折叠/展开差异由正文是否渲染承担，
+        // 不再用 ▸/▾ 箭头区分（与 Running 同形，视觉连续）。
         // [Fix LOW-6] Preview（§7 表 completed 只定义 Collapsed；Space 可从
-        // Collapsed 切到 Preview）映射到单行折叠视觉——`▾` 但无正文的
-        // 「假展开」箭头会误导（正文只在 Expanded 渲染）。
-        let symbol = if reasoning.fold == FoldState::Expanded {
-            sym().expanded
-        } else {
-            sym().collapsed
-        };
+        // Collapsed 切到 Preview）映射到单行折叠视觉——无正文即单行，无
+        // 「假展开」误导（正文只在 Expanded 渲染）。
         // 对齐工具卡片（§6.4 硬编码英文后缀口径）：`Thought for 12s · 26 lines`
         // / `Thought · 26 lines`（时长不可得降级）。语言对齐工具区域（避免中英
         // 混杂）；信息层级低于工具——整行 dim（icon + 摘要；工具主干为
@@ -845,20 +838,14 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
         } else {
             format!("Thought · {} lines", line_count)
         };
-        let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+        let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
         spans.push(Span::styled(summary, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
 
         if reasoning.fold == FoldState::Expanded {
-            for body_line in reasoning.text.lines().take(REASONING_BODY_MAX_LINES) {
-                if body_line.trim().is_empty() {
-                    continue;
-                }
+            for body_line in visual_lines.iter().take(REASONING_BODY_MAX_LINES) {
                 let mut spans = cont_prefix(grid, sem.accents.reasoning);
-                spans.push(Span::styled(
-                    truncate_by_width(body_line, grid.content_width()),
-                    body_style,
-                ));
+                spans.push(Span::styled(body_line.clone(), body_style));
                 lines.push(Line::from(spans));
             }
         }
@@ -1764,8 +1751,8 @@ fn render_divider_lines(data: &TuiDivider, grid: &GridSpec) -> Vec<Line<'static>
 
 /// §6.8 Interaction block（Slice 4 双轨）：pending 态 `! Approval required` /
 /// 问题摘要 / 选项行（横向 `[Allow once]  [Deny]`，Narrow 垂直排列）；
-/// completed 态收束为单行结果（§7 completed → Collapsed），展开时显示
-/// verb + question 与历史 items 问答对。
+/// completed 态完整展示（用户需求——不再自动收束）：结果行 + 问题 + 选项
+/// （选中项 ✓ 标记），仅用户手动折叠（Space → Collapsed）时收束为单行结果。
 ///
 /// 选项行的「当前项」高亮（selection bg + border + bold，§9）不在本函数
 /// 渲染——选项行样式依赖组件级 `use_state` 的 option_index（消息区焦点内部
@@ -1862,7 +1849,8 @@ fn render_ask_user_block_lines(
         return (lines, Some(layout));
     }
 
-    // ── 已答复（§7 completed → Collapsed 结果行；展开显示 verb + question）──
+    // ── 已答复（§6.8 完整展示：结果行 + 问题 + 选项（选中 ✓）+ 历史 items；
+    // 仅用户手动折叠（Collapsed）收束为单行结果）──
     let result = data.result.as_deref().unwrap_or("");
     let (symbol, color) = if data.is_error {
         (sym().error, sem.status.error)
@@ -1884,11 +1872,11 @@ fn render_ask_user_block_lines(
         ));
         spans
     }));
-    // Collapsed（§7 completed 默认）→ 单行结果；展开时附加摘要与历史问答对。
+    // Collapsed（仅来自用户手动 Space 折叠）→ 单行结果；默认 Expanded
+    // 完整展示问题 + 选项（选中项 ✓ 标记）+ 历史问答对。
     if data.fold == FoldState::Collapsed {
         return (lines, None);
     }
-    // 展开时附加 verb + question 行（用户手动展开后可见完整摘要）。
     if !data.question.is_empty() {
         let mut spans = cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
@@ -1896,6 +1884,54 @@ fn render_ask_user_block_lines(
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));
+    }
+    // 选项行（回答后状态可见：选中项 ✓ + success 色；横向/Narrow 布局与
+    // pending 同口径——completed 不可聚焦，不产出 InteractionLayout）。
+    if !data.options.is_empty() {
+        let chosen_idx = data
+            .result
+            .as_deref()
+            .and_then(|r| data.options.iter().position(|o| o == r));
+        if grid.is_narrow() || data.options.len() <= 1 {
+            for (i, label) in data.options.iter().enumerate() {
+                let mut spans = cont_prefix(grid, sem.text.dim);
+                let is_chosen = Some(i) == chosen_idx;
+                let text = if is_chosen {
+                    format!("[{} {label}]", sym().success)
+                } else {
+                    format!("[{label}]")
+                };
+                spans.push(Span::styled(
+                    truncate_by_width(&text, content),
+                    Style::default().fg(if is_chosen {
+                        sem.status.success
+                    } else {
+                        sem.text.primary
+                    }),
+                ));
+                lines.push(Line::from(spans));
+            }
+        } else {
+            let text = data
+                .options
+                .iter()
+                .enumerate()
+                .map(|(i, label)| {
+                    if Some(i) == chosen_idx {
+                        format!("[{} {label}]", sym().success)
+                    } else {
+                        format!("[{label}]")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            let mut spans = cont_prefix(grid, sem.text.dim);
+            spans.push(Span::styled(
+                truncate_by_width(&text, content),
+                Style::default().fg(sem.text.primary),
+            ));
+            lines.push(Line::from(spans));
+        }
     }
     // 历史 items 问答对（旧数据兼容；生产路径 items 恒空）。
     for item in &data.items {

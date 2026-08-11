@@ -110,9 +110,10 @@
   （COW）；不匹配 no-op（防御）。结果文案走双 FTL
   （`render-interaction-result-*`）。
 - **折叠表**：`fold_for_status(FoldTarget::Interaction)`——pending→Running→
-  Expanded（可聚焦）/ completed→Completed→Collapsed（结果行）/ error→
-  Expanded；`FoldKey::Interaction(request_id)` 同步进 `fold_key_of` /
-  `apply_fold_override` / 折叠 pass（render.rs:349-376，覆盖表优先）。
+  Expanded（可聚焦）/ completed→Completed→Expanded（答毕完整展示，用户需求
+  2026-08-11 调整；不再自动收束）/ error→Expanded；`FoldKey::Interaction
+  (request_id)` 同步进 `fold_key_of` / `apply_fold_override` / 折叠 pass
+  （render.rs:349-376，覆盖表优先——用户 Space 手动折叠仍生效）。
 
 ### 4b：选项焦点与提交（§6.8/§9/§11，已落地）
 

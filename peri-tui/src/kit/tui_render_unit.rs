@@ -183,9 +183,10 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
         // system：普通事件单行 divider，error 展开摘要
         (System, Running) | (System, Completed) => FoldState::Collapsed,
         (System, Error) => FoldState::Expanded,
-        // interaction：等待时 expanded 可聚焦，答毕收束为结果行
+        // interaction：等待时 expanded 可聚焦，答毕保持完整展示（问题 + 选项
+        // + 结果行始终可见，不自动收束；用户 Space 手动折叠仍生效）
         (Interaction, Running) => FoldState::Expanded,
-        (Interaction, Completed) => FoldState::Collapsed,
+        (Interaction, Completed) => FoldState::Expanded,
         (Interaction, Error) => FoldState::Expanded,
     }
 }
@@ -662,7 +663,7 @@ pub struct TuiAskUserBlock {
     /// 交互类型：Permission（HITL）或 AskUser 表单（§6.8）。
     pub kind: InteractionKind,
     /// 是否仍在等待用户响应。pending → 折叠表 Running（Expanded 可聚焦）；
-    /// 结果回写后 false → Completed（Collapsed 结果行）。
+    /// 结果回写后 false → Completed（Expanded 完整展示，不自动收束）。
     pub pending: bool,
     /// 动作动词（如 `Bash`；AskUser 恒 `AskUser`）。
     pub verb: String,

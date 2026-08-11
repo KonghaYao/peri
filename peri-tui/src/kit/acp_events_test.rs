@@ -3976,7 +3976,11 @@ fn test_interaction_resolved_writes_back_pending_block() {
     let block = ask_user_block_of(&snap, idx);
     assert!(!block.pending, "结果回写 → pending=false");
     assert_eq!(block.result.as_deref(), Some("Allowed once"));
-    assert_eq!(block.fold, FoldState::Collapsed, "§7 completed → Collapsed");
+    assert_eq!(
+        block.fold,
+        FoldState::Expanded,
+        "答毕保持 Expanded 完整展示（用户需求，不再自动收束）"
+    );
     assert_ne!(
         block.content_hash, hash_before,
         "结果回写必须重算 hash（触发分片缓存重建）"
@@ -4022,8 +4026,8 @@ fn test_interaction_resolved_mismatched_request_id_noop() {
     assert!(block.result.is_none());
 }
 
-/// 折叠 pass：pending → Running → Expanded（覆盖免疫）；结果回写后 Completed。
-/// 手动展开覆盖（FoldKey::Interaction）优先。
+/// 折叠 pass：pending → Running → Expanded（覆盖免疫）；结果回写后 Completed
+/// 默认 Expanded 完整展示（用户需求）；手动折叠覆盖（FoldKey::Interaction）优先。
 #[test]
 #[serial]
 fn test_fold_pass_interaction_pending_expanded_override_priority() {
@@ -4040,7 +4044,7 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
     let idx = snap.items.len() - 1;
     assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Expanded);
 
-    // 结果回写 → Completed → Collapsed
+    // 结果回写 → Completed → Expanded（不自动收束）
     dispatch_and_notify(
         &mut state,
         &AcpEventData::InteractionResolved {
@@ -4049,18 +4053,19 @@ fn test_fold_pass_interaction_pending_expanded_override_priority() {
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Collapsed);
+    assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Expanded);
 
-    // 手动展开覆盖：FOLD_OVERRIDES 写入 Interaction(rid) → 折叠 pass 恢复 Expanded
+    // 手动折叠覆盖：FOLD_OVERRIDES 写入 Interaction(rid) → 折叠 pass 恢复 Collapsed
+    //（默认策略已是 Expanded，覆盖必须优先）
     let rid = serde_json::to_string(&"hitl-1").unwrap();
     FOLD_OVERRIDES
         .state()
         .write()
-        .insert(FoldKey::Interaction(rid.clone()), FoldState::Expanded);
+        .insert(FoldKey::Interaction(rid.clone()), FoldState::Collapsed);
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     let block = ask_user_block_of(&snap, idx);
-    assert_eq!(block.fold, FoldState::Expanded, "用户覆盖优先于自动策略");
+    assert_eq!(block.fold, FoldState::Collapsed, "用户覆盖优先于自动策略");
     assert!(block.user_modified, "覆盖后 user_modified=true（免疫）");
 }
 

@@ -241,9 +241,9 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(fold_for_status(System, Running), Collapsed);
     assert_eq!(fold_for_status(System, Completed), Collapsed);
     assert_eq!(fold_for_status(System, Error), Expanded);
-    // interaction：Expanded → Collapsed result → Expanded
+    // interaction：Expanded → Expanded（答毕完整展示，用户需求）→ Expanded
     assert_eq!(fold_for_status(Interaction, Running), Expanded);
-    assert_eq!(fold_for_status(Interaction, Completed), Collapsed);
+    assert_eq!(fold_for_status(Interaction, Completed), Expanded);
     assert_eq!(fold_for_status(Interaction, Error), Expanded);
 }
 

@@ -1572,15 +1572,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
     // [Slice 3] §9 focus 视觉（G3：只作用于视口行，不写缓存/业务状态）：
-    // focused entry 左缘 selection border（outer 列，用 ▌ 字形——NO_COLOR 剥离后仍可见）。
+    // focused entry 左缘 selection border（outer 列，空格 + selection 背景
+    // 反色——整格填充色块，视觉为连续竖线；NO_COLOR 时退化为 `|` 字符，
+    // §12 状态不依赖颜色）。
     // [S2 单一事实源] 渲染读点——与仲裁同读 FOCUSED_ENTRY。
     let focus_slot = focused_entry_atom.read().as_ref().map(|f| f.slot);
-    let focus_border_style = Style::default().fg(sel_bg).add_modifier(Modifier::BOLD);
-    // [F3 §12] 焦点 border 字形走符号降级表（unicode 不足时 ▌ → |，
-    // 不输出原始 UTF-8 缺字盒）。
-    let focus_border_glyph =
-        crate::kit::terminal_caps::symbols(&crate::kit::atoms::TERMINAL_CAPS.state().read())
-            .focus_border;
+    let focus_caps = crate::kit::atoms::TERMINAL_CAPS.state();
+    let focus_border_glyph = if focus_caps.read().color { " " } else { "|" };
+    let focus_border_style = Style::default().bg(sel_bg);
     let core_len = total_logical_lines;
     let mut viewport_lines: Vec<Line<'static>> = Vec::with_capacity(
         (vp_core_end.saturating_sub(vp_core_start) + 1)
