@@ -124,19 +124,20 @@ fn first_prefix(grid: &GridSpec, symbol: &str, style: Style) -> Vec<Span<'static
     spans
 }
 
-/// 续行前缀：`[outer 空][dim 竖线][gap]`。
-fn cont_prefix(grid: &GridSpec) -> Vec<Span<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
+/// 续行前缀：`[outer 空][角色色竖线][gap]`——竖线按消息角色区分颜色：
+/// user/assistant/reasoning/tool 取 `semantic.accents` 角色色，其余场景
+/// （system note / ask user / subagent / divider）由调用方传 `text.dim`。
+fn cont_prefix(grid: &GridSpec, color: Color) -> Vec<Span<'static>> {
     vec![
         Span::raw(" "),
-        Span::styled("\u{2502}", Style::default().fg(sem.text.dim)),
+        Span::styled("\u{2502}", Style::default().fg(color)),
         Span::raw(" ".repeat(grid.gap as usize)),
     ]
 }
 
 /// 给一行套上续行前缀；Markdown 段落空行也保留 accent 竖线。
-fn prefixed_cont_line(grid: &GridSpec, line: Line<'static>) -> Line<'static> {
-    let mut spans = cont_prefix(grid);
+fn prefixed_cont_line(grid: &GridSpec, color: Color, line: Line<'static>) -> Line<'static> {
+    let mut spans = cont_prefix(grid, color);
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -483,6 +484,8 @@ pub(crate) fn vm_to_lines_cached(
                 let theme_guard = peri_theme::atoms::THEME_ATOM.state();
                 let theme = theme_guard.read();
                 let md_text_fg = theme.component.markdown.text;
+                // 正文续行竖线用 assistant 角色色（§4 accents 表）
+                let line_color = theme.semantic.accents.assistant;
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let segments = crate::kit::markdown::parse_markdown_cached(
@@ -495,12 +498,12 @@ pub(crate) fn vm_to_lines_cached(
                 for (seg_idx, seg) in segments.into_iter().enumerate() {
                     // segment 之间加空行（表格 ↔ 文本边界）
                     if seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()) {
-                        lines.push(prefixed_cont_line(grid, Line::default()));
+                        lines.push(prefixed_cont_line(grid, line_color, Line::default()));
                     }
                     match seg {
                         crate::kit::markdown::MarkdownSegment::Text(seg_lines) => {
                             for line in seg_lines {
-                                lines.push(prefixed_cont_line(grid, line));
+                                lines.push(prefixed_cont_line(grid, line_color, line));
                             }
                         }
                         crate::kit::markdown::MarkdownSegment::Table(data) => {
@@ -514,7 +517,7 @@ pub(crate) fn vm_to_lines_cached(
                                 grid.content_width(),
                             );
                             for tl in table_lines {
-                                lines.push(prefixed_cont_line(grid, tl));
+                                lines.push(prefixed_cont_line(grid, line_color, tl));
                             }
                         }
                     }
@@ -619,7 +622,7 @@ fn render_user_bubble_lines(
     let shown = total.min(USER_BODY_MAX_LINES);
     for raw in &visual_lines[..shown] {
         lines.push(Line::from({
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.accents.user);
             spans.extend(emphasize_user_line(raw, grid, &sem));
             spans
         }));
@@ -632,7 +635,7 @@ fn render_user_bubble_lines(
                 FluentValue::from((total - shown) as u64),
             )],
         );
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.accents.user);
         spans.push(Span::styled(more, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
     }
@@ -741,7 +744,7 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
             if tail.trim().is_empty() {
                 continue;
             }
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.accents.reasoning);
             spans.push(Span::styled(
                 truncate_by_width(tail, grid.content_width()),
                 body_style,
@@ -780,7 +783,7 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
                 if body_line.trim().is_empty() {
                     continue;
                 }
-                let mut spans = cont_prefix(grid);
+                let mut spans = cont_prefix(grid, sem.accents.reasoning);
                 spans.push(Span::styled(
                     truncate_by_width(body_line, grid.content_width()),
                     body_style,
@@ -810,7 +813,7 @@ fn render_reminder_condensed(
         spans
     })];
     if !info.summary.is_empty() {
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&info.summary, grid.content_width()),
             Style::default().fg(sem.text.muted),
@@ -848,6 +851,7 @@ fn with_prefix_lines(
     symbol_style: Style,
     content: Vec<Line<'static>>,
 ) -> Vec<Line<'static>> {
+    let sem = THEME_ATOM.state().read().semantic;
     let mut lines = Vec::with_capacity(content.len());
     for (i, line) in content.into_iter().enumerate() {
         let spans = if i == 0 {
@@ -855,7 +859,7 @@ fn with_prefix_lines(
             spans.extend(line.spans);
             spans
         } else {
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.accents.tool);
             spans.extend(line.spans);
             spans
         };
@@ -1052,7 +1056,7 @@ fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Li
 
     // Bash 展开：`$ command`（syntax.command）+ 分隔线 + 输出
     if bash_expanded {
-        let mut cmd_spans = cont_prefix(grid);
+        let mut cmd_spans = cont_prefix(grid, sem.accents.tool);
         cmd_spans.push(Span::styled(
             format!(
                 "$ {}",
@@ -1095,7 +1099,7 @@ fn render_generic_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Li
             sem.text.muted
         };
         for out_line in compact_output_lines(&output, max_lines, content) {
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.accents.tool);
             spans.push(Span::styled(out_line, Style::default().fg(output_color)));
             lines.push(Line::from(spans));
         }
@@ -1143,7 +1147,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         count_parts.push(format!("\u{2212}{dels}"));
     }
     let count_text = count_parts.join(" ");
-    let mut spans = cont_prefix(grid);
+    let mut spans = cont_prefix(grid, sem.accents.tool);
     if !diff.path.is_empty() {
         spans.push(Span::styled(
             truncate_by_width(
@@ -1169,7 +1173,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         return lines;
     };
     // hunk 头（dim）。
-    let mut hunk_header = cont_prefix(grid);
+    let mut hunk_header = cont_prefix(grid, sem.accents.tool);
     hunk_header.push(Span::styled(
         truncate_by_width(
             &format!("@@ {} {} @@", hunk.old_range, hunk.new_range),
@@ -1188,7 +1192,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
             TuiHunkLineKind::Del => (l.old_no, "-", sem.status.error),
             TuiHunkLineKind::Context => (l.old_no, " ", sem.text.muted),
         };
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.accents.tool);
         if show_gutter {
             let no = gutter
                 .map(|n| format!("{n:>gutter_width$}"))
@@ -1216,7 +1220,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     // 截断指示：本 hunk 截断 + 后续 hunk 的剩余 change 行（§6.5 `… +N more lines`）。
     let remaining = hunk.truncated_lines + diff.more_change_lines;
     if remaining > 0 {
-        let mut more = cont_prefix(grid);
+        let mut more = cont_prefix(grid, sem.accents.tool);
         more.push(Span::styled(
             format!("\u{2026} +{remaining} more lines"),
             Style::default().fg(sem.text.dim),
@@ -1261,10 +1265,11 @@ fn completed_header_suffix(data: &TuiToolCard) -> String {
     }
 }
 
-/// 内容列铺满的 dim 分隔线（`[outer ][│][gap][───…]`）——Bash 展开体分隔用。
+/// 内容列铺满的 dim 分隔线（`[outer ][│][gap][───…]`）——Bash 展开体分隔用
+/// （竖线随工具卡片取 tool 角色色）。
 fn divider_fill_line(grid: &GridSpec) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = cont_prefix(grid);
+    let mut spans = cont_prefix(grid, sem.accents.tool);
     spans.push(Span::styled(
         "\u{2500}".repeat(grid.content_width()),
         Style::default().fg(sem.text.dim),
@@ -1326,7 +1331,7 @@ fn render_note_lines(
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         } else {
-            cont_prefix(grid)
+            cont_prefix(grid, sem.text.dim)
         };
         let fg = if i == 0 { color } else { sem.text.muted };
         spans.push(Span::styled(
@@ -1421,7 +1426,7 @@ fn render_subagent_group_lines(data: &TuiSubAgentGroup, grid: &GridSpec) -> Vec<
         && let Some(reason) = summary.last_error
         && !reason.is_empty()
     {
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&reason, content),
             Style::default().fg(sem.text.muted),
@@ -1608,7 +1613,7 @@ fn render_ask_user_block_lines(
             spans
         }));
         if !data.question.is_empty() {
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
                 truncate_by_width(&data.question, content),
                 Style::default().fg(sem.text.muted),
@@ -1625,7 +1630,7 @@ fn render_ask_user_block_lines(
         if grid.is_narrow() || data.options.len() <= 1 {
             for label in &data.options {
                 let text = format!("[{label}]");
-                let mut spans = cont_prefix(grid);
+                let mut spans = cont_prefix(grid, sem.text.dim);
                 spans.push(Span::styled(
                     truncate_by_width(&text, content),
                     Style::default().fg(sem.text.primary),
@@ -1642,7 +1647,7 @@ fn render_ask_user_block_lines(
                 .map(|o| format!("[{o}]"))
                 .collect::<Vec<_>>()
                 .join("  ");
-            let mut spans = cont_prefix(grid);
+            let mut spans = cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
                 truncate_by_width(&text, content),
                 Style::default().fg(sem.text.primary),
@@ -1696,7 +1701,7 @@ fn render_ask_user_block_lines(
     }
     // 展开时附加 verb + question 行（用户手动展开后可见完整摘要）。
     if !data.question.is_empty() {
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&data.question, content),
             Style::default().fg(sem.text.muted),
@@ -1706,7 +1711,7 @@ fn render_ask_user_block_lines(
     // 历史 items 问答对（旧数据兼容；生产路径 items 恒空）。
     for item in &data.items {
         let text = format!("{} \u{2192} {}", item.header, item.answer);
-        let mut spans = cont_prefix(grid);
+        let mut spans = cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&text, content),
             Style::default().fg(sem.text.muted),

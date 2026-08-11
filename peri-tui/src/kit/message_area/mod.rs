@@ -43,7 +43,8 @@ mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
 mod selection;
-use footer::{KeepGoingLayout, build_footer_lines, hash_todo_items};
+pub(crate) use footer::hash_todo_items;
+use footer::{KeepGoingLayout, build_footer_lines};
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
@@ -419,6 +420,7 @@ struct InteractionOptionHit {
 
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    tracing::trace!(target: "frozen_diag", "MessageArea: update/body called");
     let view_models = hooks.use_atom(&VIEW_MODELS);
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
@@ -988,12 +990,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             // ── 命中 entry 首行：设焦点 + 折叠动作 ──
             // 与键盘 Alt+Up/Down 一致：焦点可落在任意 entry，FOCUSED_ENTRY_KEY
             // 仅 foldable 有值；重置 interaction option 到首项。
+            tracing::trace!(target: "frozen_diag", slot, "click: hit entry, setting focus");
             *entry_focus.write() = Some(slot);
             *interaction_option.write() = 0;
             // 持 VIEW_MODELS 写锁期间不再读其他可能被同一帧写入的 atom
             //（FOLD_OVERRIDES / SELECTED_SUBAGENT_ID 是独立锁）——键盘同模式。
+            tracing::trace!(target: "frozen_diag", slot, "click: acquiring VIEW_MODELS write lock");
             let vm_state_ref = VIEW_MODELS.state();
             let mut snapshot = vm_state_ref.write();
+            tracing::trace!(target: "frozen_diag", slot, "click: got VIEW_MODELS write lock");
             if slot >= snapshot.items.len() {
                 // 快照缩短（reset/rewind）——焦点失效，退出导航（键盘同模式）
                 *entry_focus.write() = None;
@@ -1013,7 +1018,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             }
             // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
             text_sel.write().clear();
-            apply_fold_toggle(&mut snapshot, slot, false)
+            let result = apply_fold_toggle(&mut snapshot, slot, false);
+            tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
+            result
         });
     }
 
@@ -1150,8 +1157,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     // 不再读其他可能被同一帧写入的 atom（FOLD_OVERRIDES 是独立锁）。
                     // [TRAP] state() 必须绑定变量——临时值在语句末释放会导致
                     // ReactiveMutRef::Drop 在借用期间运行（E0716）。
+                    tracing::trace!(target: "frozen_diag", "enter: acquiring VIEW_MODELS write lock");
                     let vm_state_ref = VIEW_MODELS.state();
                     let mut snapshot = vm_state_ref.write();
+                    tracing::trace!(target: "frozen_diag", "enter: got VIEW_MODELS write lock");
                     let cur_focus = *focus_state.read();
                     let Some(idx) = cur_focus else {
                         return EventResult::Consumed;
@@ -1173,9 +1182,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                         }
                         *focus_state.write() = None;
                         *FOCUSED_ENTRY_KEY.state().write() = None;
+                        tracing::trace!(target: "frozen_diag", "enter: interaction submit exit");
                         return EventResult::Consumed;
                     }
-                    apply_fold_toggle(&mut snapshot, idx, next_is_preview)
+                    let result = apply_fold_toggle(&mut snapshot, idx, next_is_preview);
+                    tracing::trace!(target: "frozen_diag", "enter: handler exit");
+                    result
                 }
                 _ => EventResult::Ignored,
             }

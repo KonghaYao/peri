@@ -6,10 +6,10 @@ use crate::kit::atoms::FOLD_OVERRIDES;
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldKey, FoldState, FoldTarget, TuiDivider, TuiRenderUnit, TuiTodoSummary,
-    TuiToolPresentation, fold_for_status,
+    TuiToolPresentation, fold_for_status, tui_hash_combine, tui_hash_str,
 };
 use fluent_bundle::FluentValue;
-use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// 将 BridgeState 中的 ViewModels 写入 VIEW_MODELS Atom。
 ///
@@ -77,8 +77,15 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         items,
         generation: state.generation,
     };
+    tracing::trace!(target: "frozen_diag", gen = state.generation, "bridge: acquiring VIEW_MODELS write lock");
     *VIEW_MODELS.state().write() = snapshot;
+    tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
 }
+
+/// [PERF] insert_todo_summary 摘要文本缓存——键 = (TODO_ITEMS 指纹, LANG_VERSION)。
+/// 普通文本 token 复用上次摘要文本，跳过 clone + 双扫描 + i18n 格式化。
+/// 纯 memoization：文本只依赖 (todos 内容, 语言版本)，命中即与重建等价。
+static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
 
 /// [§6.9] 从 `TODO_ITEMS` 派生活动 turn 的 todo 进度摘要行。
 ///
@@ -90,35 +97,52 @@ fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhas
     if phase != SessionPhase::PromptRunning {
         return;
     }
-    let todos = crate::kit::atoms::TODO_ITEMS.state().read().clone();
+    // 读引用代替 clone——无克隆只读扫描（hash 公式与 footer::hash_todo_items 一致）。
+    let todos_state = crate::kit::atoms::TODO_ITEMS.state();
+    let todos = todos_state.read();
     if todos.is_empty() {
         return;
     }
-    let total = todos.len();
-    let done = todos
-        .iter()
-        .filter(|t| t.status == TodoStatus::Completed)
-        .count();
-    let active = todos
-        .iter()
-        .find(|t| t.status == TodoStatus::InProgress)
-        .map(|t| t.content.clone());
-    let text = match active {
-        Some(a) => i18n::tr_args(
-            "render-todo-summary-active",
-            &[
-                ("done".to_string(), FluentValue::from(done as u64)),
-                ("total".to_string(), FluentValue::from(total as u64)),
-                ("active".to_string(), FluentValue::from(a)),
-            ],
-        ),
-        None => i18n::tr_args(
-            "render-todo-summary",
-            &[
-                ("done".to_string(), FluentValue::from(done as u64)),
-                ("total".to_string(), FluentValue::from(total as u64)),
-            ],
-        ),
+    let todos_hash = crate::kit::message_area::hash_todo_items(&todos);
+    let lang_version = crate::kit::atoms::LANG_VERSION.get();
+    // [PERF] 内容或语言版本变化才重建摘要行；普通 token 复用缓存文本。
+    let text = {
+        let mut cache = TODO_SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((h, v, t)) = cache.as_ref()
+            && *h == todos_hash
+            && *v == lang_version
+        {
+            t.clone()
+        } else {
+            let total = todos.len();
+            let done = todos
+                .iter()
+                .filter(|t| t.status == TodoStatus::Completed)
+                .count();
+            let active = todos
+                .iter()
+                .find(|t| t.status == TodoStatus::InProgress)
+                .map(|t| t.content.clone());
+            let text = match active {
+                Some(a) => i18n::tr_args(
+                    "render-todo-summary-active",
+                    &[
+                        ("done".to_string(), FluentValue::from(done as u64)),
+                        ("total".to_string(), FluentValue::from(total as u64)),
+                        ("active".to_string(), FluentValue::from(a)),
+                    ],
+                ),
+                None => i18n::tr_args(
+                    "render-todo-summary",
+                    &[
+                        ("done".to_string(), FluentValue::from(done as u64)),
+                        ("total".to_string(), FluentValue::from(total as u64)),
+                    ],
+                ),
+            };
+            *cache = Some((todos_hash, lang_version, text.clone()));
+            text
+        }
     };
     let summary = TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new(text));
     // trailing 最终回答 = 末元素 assistant bubble（流式或已冻结的 turn 尾部）
@@ -132,6 +156,86 @@ fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhas
         items.len()
     };
     items.insert(insert_at, summary);
+}
+
+/// [PERF] group_successful_tools 结果缓存（纯 memoization）。
+///
+/// 指纹覆盖全部影响分组结果的输入（段内条目、焦点键）；命中时复用上次分组
+/// 结果，普通文本 token 跳过全段深克隆重建（深克隆 = 每条目 String 复制 +
+/// format_tool_name 聚合 + items remove/insert 重排）。
+struct ToolGroupCache {
+    /// 输入指纹（见 [`group_input_fingerprint`]）。
+    fingerprint: u64,
+    /// 上次分组后的段结果——im::Vector clone 为 O(1) 引用计数共享，命中时
+    /// 零复制替换回 items。
+    grouped: im::Vector<TuiRenderUnit>,
+    /// 上次输入段末尾是否为 assistant bubble（流式 bubble 恒为段末元素——
+    /// sync_cache 布局保证：index = segments.len()；分组不移动它，命中时用
+    /// 当前末元素原位替换缓存副本，故流式内容不进指纹）。
+    has_trailing_bubble: bool,
+}
+
+/// 流式 bubble 的指纹身份标记（其内容不参与分组决策）。
+const TRAILING_BUBBLE_MARKER: u64 = 0x5EAB_1E5E;
+/// TuiToolCard 的指纹变体码。
+const TOOL_VARIANT_CODE: u64 = 3;
+
+static TOOL_GROUP_CACHE: Mutex<Option<ToolGroupCache>> = Mutex::new(None);
+
+/// 计算影响分组结果的输入指纹——只读扫描，无克隆无分配。
+///
+/// 逐条目组合（变体码 + content_hash；trailing 流式 bubble 只计身份标记），
+/// 末尾追加段长与焦点键。段长保证空段与任何非空段指纹必然区分；变体码 +
+/// 工具卡显式字段兜底手造条目 content_hash=0 的测试场景（生产路径
+/// content_hash 已覆盖全部显示字段，是渲染缓存的事实键）。
+fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut h: u64 = 0;
+    let last = segment.len().saturating_sub(1);
+    for (i, vm) in segment.iter().enumerate() {
+        let is_trailing_bubble = i == last && matches!(vm, TuiRenderUnit::TuiAssistantBubble(_));
+        h = if is_trailing_bubble {
+            tui_hash_combine(h, TRAILING_BUBBLE_MARKER)
+        } else {
+            match vm {
+                TuiRenderUnit::TuiToolCard(t) => {
+                    // 合并决策相关字段显式纳入（tool_id 参与焦点免疫比较、
+                    // tool_name 参与标题聚合、flags 决定可合并性）。
+                    let mut eh = tui_hash_combine(TOOL_VARIANT_CODE, vm.content_hash());
+                    eh = tui_hash_combine(eh, tui_hash_str(&t.tool_id));
+                    eh = tui_hash_combine(eh, tui_hash_str(&t.tool_name));
+                    let flags = u64::from(t.is_running)
+                        | (u64::from(t.is_error) << 1)
+                        | (u64::from(t.diff.is_some()) << 2)
+                        | (u64::from(t.user_modified) << 3)
+                        | (u64::from(matches!(t.presentation, TuiToolPresentation::Generic)) << 4);
+                    tui_hash_combine(eh, flags)
+                }
+                other => {
+                    let code = match other {
+                        TuiRenderUnit::TuiUserBubble(_) => 1,
+                        TuiRenderUnit::TuiAssistantBubble(_) => 2,
+                        TuiRenderUnit::TuiSystemNote(_) => 4,
+                        TuiRenderUnit::TuiSubAgentGroup(_) => 5,
+                        TuiRenderUnit::TuiCollapsedGroup(_) => 6,
+                        TuiRenderUnit::TuiDivider(_) => 7,
+                        TuiRenderUnit::TuiAskUserBlock(_) => 8,
+                        TuiRenderUnit::TuiTodoSummary(_) => 9,
+                        TuiRenderUnit::TuiToolCard(_) => unreachable!(),
+                    };
+                    tui_hash_combine(code, other.content_hash())
+                }
+            }
+        };
+    }
+    h = tui_hash_combine(h, segment.len() as u64);
+    // 焦点键——焦点工具免疫随焦点变化切换（命中/未命中必须一致覆盖）。
+    let mut fh = std::collections::hash_map::DefaultHasher::new();
+    let focus_state = crate::kit::atoms::FOCUSED_ENTRY_KEY.state();
+    focus_state.read().hash(&mut fh);
+    h = tui_hash_combine(h, fh.finish());
+    let has_trailing_bubble = matches!(segment.back(), Some(TuiRenderUnit::TuiAssistantBubble(_)));
+    (h, has_trailing_bubble)
 }
 
 /// [§7] 相邻、成功、低信息密度 tools 压成 `TuiCollapsedGroup`。
@@ -149,19 +253,53 @@ fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhas
 ///
 /// [Why 位置] 必须放在快照组装（push_view_models）而非 sync_cache：分组会删除
 /// cached_view_models 元素，破坏 segment↔cache 索引对齐；快照层是纯视觉变换。
+///
+/// [PERF] 快速路径：输入指纹与上次一致（工具卡无新增/状态/焦点/覆盖变化——
+/// 覆盖已由折叠 pass 复写到 user_modified，随卡片 hash 纳入指纹）时复用上次
+/// 分组结果，普通文本 token 跳过全段深克隆重建。命中即与重建等价（纯函数
+/// memoization），视觉行为不变。
 fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
     use crate::kit::tui_render_unit::TuiCollapsedGroup;
 
+    // 拆分 current_turn 段（O(log n)），快速路径在段上判定。
+    let mut segment = items.split_off(start);
+    let (fingerprint, has_trailing_bubble) = group_input_fingerprint(&segment);
+    let cache = TOOL_GROUP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = cache.as_ref()
+        && c.fingerprint == fingerprint
+        && c.has_trailing_bubble == has_trailing_bubble
+    {
+        let mut grouped = c.grouped.clone(); // O(1) 引用计数共享，零深拷贝
+        if has_trailing_bubble && !grouped.is_empty() {
+            // 流式 bubble 内容不进指纹：弹出现段末元素，原位替换缓存段末的
+            // 旧 bubble（分组从不移动 bubble——它是段末非工具条目，runs 到
+            // 它为止）。
+            if let Some(current_last) = segment.pop_back() {
+                grouped.set(grouped.len() - 1, current_last);
+            }
+        }
+        items.append(grouped);
+        return;
+    }
+    drop(cache);
+
     // [§7 免疫] 焦点所在 entry 的身份键——焦点工具不得被并入折叠组
     // （用户正与之交互；入组后焦点 index 落到组上、展开态丢失）。
-    let focused_key = crate::kit::atoms::FOCUSED_ENTRY_KEY.state().read().clone();
+    // 读引用代替 clone；按需取 Tool 变体的 id 字符串比较，免去逐卡克隆
+    // tool_id 构造 FoldKey。
+    let focus_state = crate::kit::atoms::FOCUSED_ENTRY_KEY.state();
+    let focused_key = focus_state.read();
+    let focused = focused_key.as_ref().and_then(|k| match k {
+        FoldKey::Tool(id) => Some(id.as_str()),
+        _ => None,
+    });
 
-    // 扫描 [start..] 的相邻可合并工具段。
+    // 扫描 segment 的相邻可合并工具段（split_off 后为相对索引，等价原 [start..]）。
     let mut runs: Vec<(usize, usize)> = Vec::new(); // (run_start, run_end_exclusive)
     let mut run_start: Option<usize> = None;
-    for i in start..items.len() {
+    for i in 0..segment.len() {
         let mergeable = matches!(
-            items.get(i),
+            segment.get(i),
             Some(TuiRenderUnit::TuiToolCard(t))
                 if !t.is_running && !t.is_error && t.diff.is_none()
                     && matches!(t.presentation, TuiToolPresentation::Generic)
@@ -169,7 +307,7 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
                     // 手动展开/折叠过的工具保持独立（覆盖键随折叠 pass 复写
                     // 到 user_modified，此处一并防 FOLD_OVERRIDES 残留）。
                     && !t.user_modified
-                    && focused_key.as_ref() != Some(&FoldKey::Tool(t.tool_id.clone()))
+                    && focused != Some(t.tool_id.as_str())
         );
         match (mergeable, run_start) {
             (true, None) => run_start = Some(i),
@@ -182,7 +320,7 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         }
     }
     if let Some(s) = run_start {
-        runs.push((s, items.len()));
+        runs.push((s, segment.len()));
     }
 
     // 逆序应用（删除后面的元素不影响前面的索引）。
@@ -193,12 +331,12 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         }
         // [D2] 失败数 = 从 run 结束位置向后扫描**连续相邻** error 工具计数。
         // error 工具不入组、不删除、保持展开（§7 表 error→Expanded + §15
-        // 「error 永不隐藏」优先）；扫描在删除 run 元素之前进行（items 索引
+        // 「error 永不隐藏」优先）；扫描在删除 run 元素之前进行（segment 索引
         // 仍指向原位置）。
         let mut failed_count: u32 = 0;
-        for i in run_end..items.len() {
+        for i in run_end..segment.len() {
             let is_error = matches!(
-                items.get(i),
+                segment.get(i),
                 Some(TuiRenderUnit::TuiToolCard(t)) if t.is_error
             );
             if is_error {
@@ -211,13 +349,13 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         let mut names: Vec<(String, u32)> = Vec::new();
         let mut hidden_vms: Vec<TuiRenderUnit> = Vec::with_capacity(run_len);
         for i in run_start..run_end {
-            if let Some(TuiRenderUnit::TuiToolCard(t)) = items.get(i) {
+            if let Some(TuiRenderUnit::TuiToolCard(t)) = segment.get(i) {
                 let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
                 match names.iter_mut().find(|(n, _)| *n == display) {
                     Some((_, c)) => *c += 1,
                     None => names.push((display, 1)),
                 }
-                hidden_vms.push(items.get(i).cloned().unwrap());
+                hidden_vms.push(segment.get(i).cloned().unwrap());
             }
         }
         let title = names
@@ -235,10 +373,18 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
         group.recompute_hash();
         // 删除 run 内元素（逆序删，索引稳定），再把组放到 run_start。
         for i in (run_start..run_end).rev() {
-            items.remove(i);
+            segment.remove(i);
         }
-        items.insert(run_start, TuiRenderUnit::TuiCollapsedGroup(group));
+        segment.insert(run_start, TuiRenderUnit::TuiCollapsedGroup(group));
     }
+
+    // [PERF] 缓存本次分组结果（clone = O(1) 引用计数共享）。
+    *TOOL_GROUP_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(ToolGroupCache {
+        fingerprint,
+        grouped: segment.clone(),
+        has_trailing_bubble,
+    });
+    items.append(segment);
 }
 
 /// [G2] 折叠状态机单点 pass——spec §7 折叠表 + FOLD_OVERRIDES 用户覆盖。
@@ -255,8 +401,12 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
 /// 是 O(N) 只读扫描，零写入。
 fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
     use TuiRenderUnit::*;
-    // 快照拷贝覆盖表——避免迭代期间持锁（表只被键盘 handler 低频写入）。
-    let overrides: HashMap<FoldKey, FoldState> = FOLD_OVERRIDES.state().read().clone();
+    // [PERF] 读引用代替快照克隆——表只被键盘 handler 低频写入，pass 本身
+    // 不写该表（迭代期只读 + 末尾 COW set，无嵌套锁获取），持读锁安全；
+    // 空表短路：热路径（无手动覆盖）跳过全部查表与 FoldKey 构造克隆。
+    let overrides_state = FOLD_OVERRIDES.state();
+    let overrides = overrides_state.read();
+    let has_overrides = !overrides.is_empty();
     let mut updates: Vec<(usize, TuiRenderUnit)> = Vec::new();
 
     for (i, vm) in items.iter().enumerate() {
@@ -281,10 +431,15 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                         status = EntryStatus::Completed;
                     }
                     // 用户手动展开（覆盖表中存在 Reasoning(message_id)）→ 覆盖优先。
-                    let override_fold = b
-                        .message_id
-                        .as_ref()
-                        .and_then(|id| overrides.get(&FoldKey::Reasoning(id.clone())).copied());
+                    // 空表短路：无手动覆盖时不构造 FoldKey（避免逐 token 克隆
+                    // message_id）。
+                    let override_fold = if has_overrides {
+                        b.message_id
+                            .as_ref()
+                            .and_then(|id| overrides.get(&FoldKey::Reasoning(id.clone())).copied())
+                    } else {
+                        None
+                    };
                     let target_fold = override_fold
                         .unwrap_or_else(|| fold_for_status(FoldTarget::Reasoning, status));
                     let fold_changed = r.fold != target_fold;
@@ -338,7 +493,11 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                 } else {
                     EntryStatus::Completed
                 };
-                let override_fold = overrides.get(&FoldKey::Tool(t.tool_id.clone())).copied();
+                let override_fold = if has_overrides {
+                    overrides.get(&FoldKey::Tool(t.tool_id.clone())).copied()
+                } else {
+                    None
+                };
                 let user_modified = override_fold.is_some() || t.user_modified;
                 let target_fold =
                     override_fold.unwrap_or_else(|| fold_for_status(FoldTarget::Tool, status));
@@ -356,9 +515,13 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                 } else {
                     EntryStatus::Completed
                 };
-                let override_fold = overrides
-                    .get(&FoldKey::SubAgent(g.agent_id.clone()))
-                    .copied();
+                let override_fold = if has_overrides {
+                    overrides
+                        .get(&FoldKey::SubAgent(g.agent_id.clone()))
+                        .copied()
+                } else {
+                    None
+                };
                 let user_modified = override_fold.is_some() || g.user_modified;
                 let target_fold =
                     override_fold.unwrap_or_else(|| fold_for_status(FoldTarget::SubAgent, status));
@@ -383,10 +546,13 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                     EntryStatus::Completed
                 };
                 // 用户手动展开过（覆盖表存在 Interaction(request_id)）→ 覆盖优先
-                let override_fold = a
-                    .request_id
-                    .as_ref()
-                    .and_then(|id| overrides.get(&FoldKey::Interaction(id.clone())).copied());
+                let override_fold = if has_overrides {
+                    a.request_id
+                        .as_ref()
+                        .and_then(|id| overrides.get(&FoldKey::Interaction(id.clone())).copied())
+                } else {
+                    None
+                };
                 let user_modified = override_fold.is_some() || a.user_modified;
                 let target_fold = override_fold
                     .unwrap_or_else(|| fold_for_status(FoldTarget::Interaction, status));

@@ -867,7 +867,7 @@ fn test_tool_error_splits_and_uses_error_color() {
         "错误详情独立成行，实际: {joined:?}"
     );
 
-    // 错误输出行 error 色（前缀竖线 dim 除外）
+    // 错误输出行 error 色（前缀竖线 tool 角色色除外）
     for line in lines.iter().skip(1) {
         for span in &line.spans {
             if span.content.trim().is_empty() || span.content == "\u{2502}" {

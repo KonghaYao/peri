@@ -26,7 +26,7 @@ pub struct TodoItem {
     pub content: String,
 }
 
-pub(super) fn hash_todo_items(items: &[TodoItem]) -> u64 {
+pub(crate) fn hash_todo_items(items: &[TodoItem]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for item in items {
         item.status.hash(&mut hasher);

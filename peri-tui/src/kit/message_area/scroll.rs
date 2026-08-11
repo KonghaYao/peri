@@ -801,8 +801,13 @@ pub(super) struct AutoFollowCtx {
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
-    // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题
-    tracing::info!(
+    // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题。
+    // [Perf] run_auto_follow 随 vm_generation 每 token 触发，info 级日志在默认
+    // filter 下逐 token 同步落盘（RollingFileAppender），多 Agent 并发时放大为每秒
+    // 数百次文件写。热路径诊断统一降为 trace 级，按需开启
+    // `RUST_LOG=...msg_scroll_diag=trace` 排查；低频事件（submit/thread_load 等
+    // consumer）仍保持 info。
+    tracing::trace!(
         target: "msg_scroll_diag",
         items_len = ctx.items_len,
         total_rows = ctx.total_visual_rows,
@@ -842,7 +847,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         && ctx.total_visual_rows > 0
         && ctx.vis_height > 0
     {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_vis,
             new_vis = ctx.vis_height,
@@ -859,7 +864,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_epoch = *ctx.prev_loading_epoch.read();
     *ctx.prev_loading_epoch.write() = ctx.loading_epoch;
     if ctx.loading_epoch != prev_epoch && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_epoch,
             new_epoch = ctx.loading_epoch,
@@ -878,7 +883,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_ctr = *ctx.prev_reset_counter.read();
     *ctx.prev_reset_counter.write() = ctx.bridge_reset_counter;
     if ctx.bridge_reset_counter != prev_ctr {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_ctr,
             new_ctr = ctx.bridge_reset_counter,
@@ -894,7 +899,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // ── 零内容保护 ──
     if ctx.total_visual_rows == 0 || ctx.vis_height == 0 {
         *ctx.prev_items_len.write() = ctx.items_len;
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
         return;
     }
 
@@ -903,7 +908,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 每批次都 force scroll + 再次将 prev_items_len 归零——直到 replay 结束，
     // generation 不再增长、effect 停发，prev==0 自然消弭。
     if prev == 0 && !ctx.is_loading && ctx.items_len > 0 {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             items_len = ctx.items_len,
             "auto_follow: prev==0 force-scroll (history replay batch) → scroll_to_bottom",
@@ -938,7 +943,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         if let Some(target) =
             anchor_scroll_target(scroll_y, ctx.vis_height as usize, anchor_end, max_scroll)
         {
-            tracing::info!(
+            tracing::trace!(
                 target: "msg_scroll_diag",
                 anchor_end,
                 scroll_y,
@@ -959,7 +964,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 增长时被吸回，反复拉锯；且内容单帧跳增超过阈值时跟随被拒绝，视口停在
     // 半空、spinner 消失——底部跳动。粘性语义下这两类问题都不存在。
     if !*ctx.follow_bottom.read() {
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: browsing (follow=false) → skip");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: browsing (follow=false) → skip");
         return;
     }
 
@@ -967,17 +972,17 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     if ctx.is_loading {
         if ctx.total_visual_rows > prev_lsa {
-            tracing::info!(target: "msg_scroll_diag", "auto_follow: loading → scroll_to_bottom");
+            tracing::trace!(target: "msg_scroll_diag", "auto_follow: loading → scroll_to_bottom");
             ctx.scroll_state.write().scroll_to_bottom();
             *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         } else {
-            tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
+            tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
         }
         return;
     }
 
     if ctx.items_len < prev {
-        tracing::info!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
+        tracing::trace!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
@@ -985,11 +990,11 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     }
 
     if ctx.total_visual_rows > prev_lsa {
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: non-loading growth → scroll_to_bottom");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: non-loading growth → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
     } else {
-        tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading → skip (total_rows not greater than prev_lsa)");
+        tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading → skip (total_rows not greater than prev_lsa)");
     }
 }
 
