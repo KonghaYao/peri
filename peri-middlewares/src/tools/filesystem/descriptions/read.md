@@ -4,8 +4,9 @@ Assume this tool is able to read all files on the machine. If the User provides 
 Usage:
 - The file_path parameter must be an absolute path, not a relative path
 - By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
-- The offset parameter is a 1-based line number: offset 1 is the first line, offset N starts reading at line N. To continue where a previous read left off, pass the last line shown plus 1
+- Omit offset by default. Set offset only when its 1-based line number is already known from Read/Grep output or was explicitly provided by the user
+- Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset
+- To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length
 - Any lines longer than 65536 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool reads files from the local filesystem; it cannot handle URLs
@@ -16,6 +17,6 @@ Usage:
 Error handling:
 - File not found: returns an error message indicating the path does not exist
 - Binary files: detected by extension and returns a message indicating the file cannot be displayed as text
-- Files exceeding 32 MB: returns an error suggesting use of offset/limit parameters
-- Offset exceeds file length: returns an error indicating the line range is invalid
+- Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool
+- Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning
 - Directories: detected and returns a listing of directory contents with a hint to use folder_operations for advanced folder operations

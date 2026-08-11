@@ -135,7 +135,7 @@ impl BaseTool for ReadFileTool {
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The 1-based line number to start reading from: offset 1 is the first line, offset N starts at line N. To continue after a previous read, pass last_line + 1. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
+                    "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
                 },
                 "limit": {
                     "type": "integer",
@@ -196,7 +196,7 @@ impl BaseTool for ReadFileTool {
         let content = match std::fs::metadata(&resolved) {
             Ok(meta) if meta.len() > MAX_FILE_SIZE => {
                 return Err(format!(
-                    "Error: File too large ({} bytes, max {} bytes). Use offset/limit to read portions.",
+                    "Error: File too large ({} bytes, max {} bytes). offset/limit cannot bypass the file-size limit; use Grep to locate content or another suitable file-processing tool.",
                     meta.len(),
                     MAX_FILE_SIZE
                 ).into());
@@ -227,8 +227,8 @@ impl BaseTool for ReadFileTool {
         let start = offset - 1;
         if start >= lines.len() {
             return Err(format!(
-                "Error: offset {} exceeds file length ({} lines)",
-                offset,
+                "Error: offset {offset} exceeds file length ({} lines). Valid offsets are 1..={}; omit offset to read from the beginning. Do not guess another offset or use offset to probe the file end.",
+                lines.len(),
                 lines.len()
             )
             .into());
