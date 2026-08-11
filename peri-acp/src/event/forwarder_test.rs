@@ -88,6 +88,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id: main_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "hello".to_string(),
     });
     bus.emit_render(RenderEvent::ToolEnded {
@@ -200,6 +201,7 @@ async fn test_forwarder_without_bridge_keeps_mapper_path() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "no-telemetry".to_string(),
     });
     drop(bus);

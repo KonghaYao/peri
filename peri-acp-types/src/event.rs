@@ -305,8 +305,9 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
-    /// AI 推理内容（reasoning/思考过程）
+    /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
     AiReasoning {
+        message_id: crate::messages::MessageId,
         text: String,
         source_agent_id: Option<String>,
     },

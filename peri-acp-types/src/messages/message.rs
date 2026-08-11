@@ -183,6 +183,18 @@ impl BaseMessage {
 
     // ── 访问器 ────────────────────────────────────────────────────────────────
 
+    /// 以指定 ID 替换消息身份（流式发射路径用：chunk 的 messageId 与
+    /// transcript 中定型消息的 ID 对齐，保证 wire 上 messageId 即规范消息 ID）。
+    pub fn with_message_id(mut self, id: MessageId) -> Self {
+        match &mut self {
+            Self::Human { id: mid, .. }
+            | Self::Ai { id: mid, .. }
+            | Self::System { id: mid, .. }
+            | Self::Tool { id: mid, .. } => *mid = id,
+        }
+        self
+    }
+
     /// 获取消息 ID
     pub fn id(&self) -> MessageId {
         match self {

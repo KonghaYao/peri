@@ -17,7 +17,8 @@ use crate::{
     },
     error::{AgentError, AgentResult},
     messages::{
-        BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
+        BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, MessageId,
+        ToolCallRequest,
     },
     tools::BaseTool,
 };
@@ -207,6 +208,11 @@ impl AgentModelBridge {
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let model_name = self.model_name();
+        // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
+        // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message
+        // 时对齐同一 ID（ACP 标准 messageId 语义——chunk 的 messageId 即规范
+        // 消息 ID，客户端据此判断消息边界/推理结束）。
+        let message_id = MessageId::new();
         let cancellation = streaming
             .as_ref()
             .map(|context| context.cancel.clone())
@@ -238,6 +244,7 @@ impl AgentModelBridge {
                         context.event_bus.emit_render(RenderEvent::TextChunk {
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
+                            message_id,
                             chunk: text,
                         });
                     }
@@ -254,6 +261,7 @@ impl AgentModelBridge {
                         context.event_bus.emit_render(RenderEvent::ThinkingChunk {
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
+                            message_id,
                             chunk: text.clone(),
                         });
                         context
@@ -269,6 +277,10 @@ impl AgentModelBridge {
                 Some(Ok(ModelStreamEvent::ToolCallDelta { .. } | ModelStreamEvent::Usage(_))) => {}
                 Some(Ok(ModelStreamEvent::Completed(response))) => {
                     let mut reasoning = Self::response_reasoning(response, streaming.is_some())?;
+                    // 流式 chunk 的 messageId 与定型消息 ID 对齐（标准语义）。
+                    if let Some(msg) = reasoning.source_message.take() {
+                        reasoning.source_message = Some(msg.with_message_id(message_id));
+                    }
                     reasoning.model = model_name;
                     return Ok(reasoning);
                 }

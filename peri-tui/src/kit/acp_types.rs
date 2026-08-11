@@ -100,6 +100,13 @@ pub struct CurrentTurn {
     /// 保持稳定。顶层 turn 恒 None。
     trailing_frozen: Option<(Option<u64>, Option<u64>)>,
 
+    /// 推理结束冻结标记（方案 1：文本到达 = 本消息 thinking 块结束——模型流中
+    /// thinking 必先于 text）。`Some(推理时长 ms)`：trailing 段推理块以
+    /// Completed 形态渲染（`◐ Thinking…` 停止，显示 `Thought for Ns`），正文
+    /// 继续流式；`None`：推理仍在进行。段切走（flush）时重置——新消息的推理
+    /// 重新计时。幂等：已冻结后不再更新。
+    trailing_reasoning_frozen_ms: Option<u64>,
+
     /// 增量 VM 缓存：索引 i 对应 `segments[i]` 的 VM，末尾元素为 trailing bubble。
     ///
     /// 使用 `im::Vector` 的原因：
@@ -134,6 +141,7 @@ impl Default for CurrentTurn {
             reasoning_started_at: None,
             text_started_at: None,
             trailing_frozen: None,
+            trailing_reasoning_frozen_ms: None,
             cached_view_models: im::Vector::new(),
             cache_dirty: false,
         }
@@ -207,6 +215,8 @@ impl CurrentTurn {
             self.last_reasoning_flush = current_reasoning;
             self.open_text_hash = 0;
             self.open_reasoning_hash = 0;
+            // 段切走后新消息的推理重新计时（幂等：无增长时 no-op 不重置）。
+            self.trailing_reasoning_frozen_ms = None;
         }
     }
 
@@ -224,12 +234,27 @@ impl CurrentTurn {
     /// If `message_id` differs from the previous chunk, a new assistant message
     /// has started — the pending text is flushed as a separate segment so the
     /// renderer can show it in its own bubble rather than merging it into one blob.
+    ///
+    /// 推理结束推断（方案 1）：模型流中 thinking block 必先于 text block——
+    /// 文本到达即意味着本消息的推理已结束。冻结 trailing 推理块（`◐ Thinking…`
+    /// 动画停止，显示 `Thought for Ns`），正文继续流式。与 messageId 变化
+    /// flush 互补：messageId 缺失时（v1 兼容路径）同样生效；幂等（已冻结后
+    /// no-op，连续文本块不重复冻结）。
     pub fn append_text(&mut self, t: &str, message_id: Option<&str>) {
         if let Some(prev_id) = &self.last_message_id
             && let Some(new_id) = message_id
             && prev_id != new_id
         {
             self.flush_text_segment();
+        }
+        if self.trailing_reasoning_frozen_ms.is_none()
+            && self.reasoning.len() > self.last_reasoning_flush
+        {
+            // 冻结推理时长（reasoning_started_at 仍存活：freeze_trailing/折叠 pass
+            // 的换算不依赖本字段被清除，两套机制互不干扰）。
+            self.trailing_reasoning_frozen_ms = self
+                .reasoning_started_at
+                .map(|t| t.elapsed().as_millis() as u64);
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
@@ -526,32 +551,36 @@ impl CurrentTurn {
     /// 值或冻结段存储值），组合公式与 [`TuiAssistantBubble::compute_hash`] 完全
     /// 一致——保证增量路径与从零重建（recompute_hash）产出相同的 hash。
     ///
-    /// `running`：true = trailing 流式段（status=Running、fold=Preview、
+    /// `reasoning_running`：true = trailing 流式段（status=Running、fold=Preview、
     /// started_at=推理起点）；false = 冻结段（status=Completed、fold=Collapsed、
     /// duration_ms=flush 时刻冻结值）。折叠 pass 在 phase 离开 PromptRunning 时
     /// 把 trailing 段翻转成 Completed。bubble 的 `message_id` 由调用方直接赋值
     /// （身份字段，不进 hash）。
     ///
+    /// 方案 1 混合形态：推理已结束而正文仍流式时，`reasoning_running=false`
+    /// 且 `text_started_at=Some`——推理块 Completed + 正文 Running（`◐ Thinking…`
+    /// 停止，正文继续增长）。冻结段两个标志恒为冻结态。
+    ///
     /// `text_started_at`：trailing 段的本 bubble 正文开始时刻——running 时写入
     /// `TuiAssistantBubble.started_at`；冻结段传 None（正文时长由折叠 pass 在
     /// 翻转点冻结，镜像 reasoning 机制）。
     ///
-    /// [§6.3] 空 reasoning：running 且 reasoning 为空时仍产出空文本的推理块
-    /// （`◐ Thinking…` 占位行，不出现空白 block）；`running == false` 的空
-    /// reasoning 返回 `None`（冻结段无占位，避免历史噪音）。
+    /// [§6.3] 空 reasoning：reasoning_running 且 reasoning 为空时仍产出空文本
+    /// 的推理块（`◐ Thinking…` 占位行，不出现空白 block）；`!reasoning_running`
+    /// 的空 reasoning 返回 `None`（冻结段无占位，避免历史噪音）。
     fn build_bubble_parts(
         reasoning: &str,
         text_hash: u64,
         reasoning_hash: u64,
-        running: bool,
+        reasoning_running: bool,
         reasoning_started_at: Option<Instant>,
         reasoning_duration_ms: Option<u64>,
         text_started_at: Option<Instant>,
     ) -> (Option<TuiReasoningBlock>, u64) {
-        let block = if reasoning.is_empty() && !running {
+        let block = if reasoning.is_empty() && !reasoning_running {
             None
         } else {
-            let status = if running {
+            let status = if reasoning_running {
                 EntryStatus::Running
             } else {
                 EntryStatus::Completed
@@ -560,9 +589,17 @@ impl CurrentTurn {
                 text: reasoning.to_string(),
                 fold: fold_for_status(FoldTarget::Reasoning, status),
                 status,
-                is_running: running,
-                started_at: if running { reasoning_started_at } else { None },
-                duration_ms: if running { None } else { reasoning_duration_ms },
+                is_running: reasoning_running,
+                started_at: if reasoning_running {
+                    reasoning_started_at
+                } else {
+                    None
+                },
+                duration_ms: if reasoning_running {
+                    None
+                } else {
+                    reasoning_duration_ms
+                },
             })
         };
         // [G1] 与 TuiAssistantBubble::compute_hash 同序同码——fold/status/is_running/
@@ -758,9 +795,10 @@ impl CurrentTurn {
                         reasoning_slice,
                         self.open_text_hash,
                         self.open_reasoning_hash,
-                        true,
+                        // 文本到达后推理已结束：推理块 Completed、正文继续 Running
+                        self.trailing_reasoning_frozen_ms.is_none(),
                         self.reasoning_started_at,
-                        None,
+                        self.trailing_reasoning_frozen_ms,
                         self.text_started_at,
                     );
                     TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {

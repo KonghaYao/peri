@@ -110,6 +110,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 final_answer.clone(),
             ))
         });
+        let ai_msg_id = ai_msg.id();
         ctx.session.transcript.write().append(ai_msg);
 
         // 非流式时 emit TextChunk（流式由 LLM 适配器直接 emit）
@@ -117,6 +118,8 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
             ctx.runtime.event_bus.emit_render(RenderEvent::TextChunk {
                 turn_id: ctx.turn_id(),
                 agent_id: ctx.session.agent_id,
+                // 与写入 transcript 的消息 ID 对齐（ACP 标准 messageId 语义）
+                message_id: ai_msg_id,
                 chunk: final_answer.clone(),
             });
         }

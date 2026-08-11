@@ -2897,7 +2897,8 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
         "Preview 经 collapsed() 访问器视为展开（body 可见）"
     );
 
-    // 追加文本 chunk——hash 变化触发分片缓存重建，折叠状态保持
+    // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
+    // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式。
     dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
@@ -2908,7 +2909,21 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
     );
     let snap = VIEW_MODELS.state().read().clone();
     let r = reasoning_of(&snap, 0);
-    assert_eq!(r.fold, FoldState::Preview, "流式期间保持 Preview");
+    assert_eq!(
+        r.status,
+        EntryStatus::Completed,
+        "文本到达后推理应冻结为 Completed"
+    );
+    assert!(!r.is_running, "文本到达后推理不再 running");
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "推理结束后自动收束为单行 Collapsed"
+    );
+    assert!(
+        r.duration_ms.is_some(),
+        "推理冻结时应携带时长（Thought for Ns）"
+    );
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();

@@ -127,6 +127,8 @@ pub async fn dispatch_tools(
         ctx.runtime.event_bus.emit_render(RenderEvent::TextChunk {
             turn_id,
             agent_id,
+            // 与 ai_msg（随后写入 transcript）的 ID 对齐（ACP 标准 messageId 语义）
+            message_id: ai_msg_id,
             chunk: reasoning.thought.clone(),
         });
     }

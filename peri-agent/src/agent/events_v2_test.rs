@@ -4,6 +4,7 @@ use super::*;
 
 use crate::session::turn::TurnId;
 use peri_acp_types::identity::AgentId;
+use peri_acp_types::messages::MessageId;
 
 // ─── 构造辅助 ──────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ fn test_render_event_text_chunk_id_extraction() {
     let event = RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hello".to_string(),
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -60,6 +62,7 @@ fn test_render_event_thinking_chunk_id_extraction() {
     let event = RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "thinking...".to_string(),
     };
     assert_eq!(event.turn_id(), turn_id);
@@ -306,6 +309,7 @@ fn test_event_unified_turn_id_extraction() {
     let render = Event::Render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hi".to_string(),
     });
     assert_eq!(render.turn_id(), turn_id);
@@ -368,6 +372,7 @@ async fn test_event_bus_emit_and_receive_render() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "hello".to_string(),
     });
 
@@ -512,12 +517,14 @@ async fn test_event_bus_render_channel_full_drops_event() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "first".to_string(),
     });
     // 第二个事件应被丢弃（不 panic）
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "second".to_string(),
     });
 
@@ -577,11 +584,13 @@ async fn test_event_bus_multiple_events_in_order() {
     bus.emit_render(RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "think".to_string(),
     });
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "answer".to_string(),
     });
     bus.emit_render(RenderEvent::ToolStarted {
@@ -622,6 +631,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
     bus.emit_render(RenderEvent::TextChunk {
         turn_id: turn1,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "iter1-text".to_string(),
     });
     bus.emit_render(RenderEvent::ToolStarted {
@@ -651,6 +661,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
     bus.emit_render(RenderEvent::TextChunk {
         turn_id: turn2,
         agent_id,
+        message_id: MessageId::new(),
         chunk: "iter2-text".to_string(),
     });
 

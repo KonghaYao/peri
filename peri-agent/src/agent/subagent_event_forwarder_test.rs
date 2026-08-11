@@ -101,6 +101,7 @@ async fn test_forwarder_injects_source_agent_id_for_text_chunk() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "hello".to_string(),
     });
 
@@ -136,6 +137,7 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
     bus.emit_render(RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "thinking".to_string(),
     });
 
@@ -145,9 +147,15 @@ async fn test_forwarder_injects_source_agent_id_for_reasoning_chunk() {
     match first_event {
         ExecutorEvent::AiReasoning {
             text,
+            message_id,
             source_agent_id,
         } => {
             assert_eq!(text, "thinking");
+            // message_id 随子 agent 事件透传（ACP 标准 messageId 语义）
+            assert!(
+                !message_id.as_uuid().is_nil(),
+                "message_id 必须透传非空 UUID"
+            );
             assert_eq!(source_agent_id.as_deref(), Some("child_reasoning"));
         }
         other => panic!("应为 AiReasoning，实际 {:?}", other),
@@ -172,6 +180,7 @@ async fn test_forwarder_propagates_all_event_layers() {
     bus.emit_render(RenderEvent::ThinkingChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "thinking".to_string(),
     });
 
@@ -205,8 +214,11 @@ async fn test_forwarder_propagates_all_event_layers() {
     let has_ai_reasoning = events_snapshot.iter().any(|e| {
         matches!(
             e,
-            ExecutorEvent::AiReasoning { text, source_agent_id }
-                if text == "thinking" && source_agent_id.as_deref() == Some("test_id")
+            ExecutorEvent::AiReasoning {
+                text,
+                message_id: _,
+                source_agent_id,
+            } if text == "thinking" && source_agent_id.as_deref() == Some("test_id")
         )
     });
     let has_llm_start = events_snapshot
@@ -354,6 +366,7 @@ async fn test_forwarder_filters_turn_committed() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "hello".to_string(),
     });
 
@@ -410,6 +423,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
+        message_id: peri_acp_types::messages::MessageId::new(),
         chunk: "read".to_string(),
     });
     bus.emit_render(RenderEvent::ToolStarted {
