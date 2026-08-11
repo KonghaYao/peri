@@ -27,6 +27,31 @@ const MAX_OUTPUT_CHARS: usize = 100_000;
 
 const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
 
+/// 解析 1-based 行号/行数参数（offset/limit）。
+///
+/// 语义与 schema 描述一致：offset 是 1-based 行号（1 = 首行），limit 是行数。
+/// 缺省时返回 `default`；显式传入非正整数（0、负数、小数、非数字）一律报错，
+/// 避免 `as_u64()` 对浮点静默回退为默认值、导致读到错误位置。
+fn parse_line_number(
+    value: &Value,
+    name: &str,
+    default: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    if value.is_null() {
+        return Ok(default);
+    }
+    let n = value
+        .as_f64()
+        .ok_or_else(|| format!("Error: '{name}' must be a positive integer, got {value}"))?;
+    if n.fract() != 0.0 || n < 1.0 {
+        return Err(format!(
+            "Error: '{name}' must be a positive integer (1-based line number), got {n}"
+        )
+        .into());
+    }
+    Ok(n as usize)
+}
+
 fn is_binary_extension(ext: &str) -> bool {
     matches!(
         ext,
@@ -108,11 +133,13 @@ impl BaseTool for ReadFileTool {
                     "description": "The absolute path to the file to read"
                 },
                 "offset": {
-                    "type": "number",
-                    "description": "The line number to start reading from. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The 1-based line number to start reading from: offset 1 is the first line, offset N starts at line N. To continue after a previous read, pass last_line + 1. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
                     "description": "The number of lines to read. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
                 },
                 "pages": {
@@ -137,8 +164,10 @@ impl BaseTool for ReadFileTool {
             .as_str()
             .ok_or("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.")?;
 
-        let offset = input["offset"].as_u64().unwrap_or(0) as usize;
-        let limit = input["limit"].as_u64().unwrap_or(MAX_LINES as u64) as usize;
+        // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
+        // 缺省 offset=1（读全文起点）、limit=2000。
+        let offset = parse_line_number(&input["offset"], "offset", 1)?;
+        let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
 
         let resolved = resolve_path(&self.cwd, file_path);
 
@@ -194,7 +223,9 @@ impl BaseTool for ReadFileTool {
         };
 
         let lines: Vec<&str> = content.split('\n').collect();
-        if offset >= lines.len() {
+        // 1-based 行号 → 0-based 切片索引
+        let start = offset - 1;
+        if start >= lines.len() {
             return Err(format!(
                 "Error: offset {} exceeds file length ({} lines)",
                 offset,
@@ -202,7 +233,6 @@ impl BaseTool for ReadFileTool {
             )
             .into());
         }
-        let start = offset;
         let end = (start + limit).min(lines.len());
         let selected = &lines[start..end];
 

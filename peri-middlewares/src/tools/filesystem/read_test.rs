@@ -55,11 +55,108 @@ async fn test_read_file_offset_limit() {
         )
         .await
         .unwrap();
-    // offset=2 → starts at index 2 (L3), limit=2 → L3 and L4
+    // offset 是 1-based 行号：offset=2 → 从第 2 行 L2 开始，limit=2 → L2 和 L3
+    assert!(result.contains("2\tL2"), "should contain line 2: {result}");
     assert!(result.contains("3\tL3"), "should contain line 3: {result}");
-    assert!(result.contains("4\tL4"), "should contain line 4: {result}");
     assert!(!result.contains("L1"), "should not contain L1");
+    assert!(!result.contains("L4"), "should not contain L4");
     assert!(!result.contains("L5"), "should not contain L5");
+}
+
+#[tokio::test]
+async fn test_read_file_offset_one_equals_full_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lines.txt");
+    std::fs::write(&path, "L1\nL2\nL3").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let full = tool
+        .invoke(
+            serde_json::json!({"file_path": "lines.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let from_one = tool
+        .invoke(
+            serde_json::json!({"file_path": "lines.txt", "offset": 1}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full, from_one, "offset=1 应与缺省读取结果一致");
+}
+
+#[tokio::test]
+async fn test_read_file_offset_last_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lines.txt");
+    std::fs::write(&path, "L1\nL2\nL3\nL4\nL5").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "lines.txt", "offset": 5}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("5\tL5"), "应能读取最后一行: {result}");
+    assert!(!result.contains("L4"), "不应包含前一行: {result}");
+}
+
+#[tokio::test]
+async fn test_read_file_offset_fraction_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "a\nb").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    for bad in [serde_json::json!(1.5), serde_json::json!(139.0000000001)] {
+        let result = tool
+            .invoke(
+                serde_json::json!({"file_path": "f.txt", "offset": bad}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("positive integer"),
+            "非整数 offset 应报错而非静默回退: {err_msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_read_file_offset_zero_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "a\nb").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "offset": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("positive integer"),
+        "offset=0 在 1-based 语义下应报错: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_read_file_limit_zero_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "a\nb").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "f.txt", "limit": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("positive integer"),
+        "limit=0 应报错而非静默输出空: {err_msg}"
+    );
 }
 
 #[tokio::test]

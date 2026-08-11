@@ -5,6 +5,7 @@ Usage:
 - The file_path parameter must be an absolute path, not a relative path
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- The offset parameter is a 1-based line number: offset 1 is the first line, offset N starts reading at line N. To continue where a previous read left off, pass the last line shown plus 1
 - Any lines longer than 65536 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool reads files from the local filesystem; it cannot handle URLs
