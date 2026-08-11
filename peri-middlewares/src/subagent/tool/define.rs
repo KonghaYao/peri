@@ -461,6 +461,10 @@ impl BaseTool for SubAgentTool {
                     "type": "string",
                     "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
                 },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume keeps the original execution context)"
+                },
                 "name": {
                     "type": "string",
                     "description": "A short alias for the sub-agent, used for UI identification"
@@ -518,6 +522,14 @@ impl BaseTool for SubAgentTool {
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // model 档位覆盖（仅新建定义型 subagent 消费；fork/resume 路径忽略，
+        // 与 resume 忽略 subagent_type/fork 的宽容语义一致）
+        let model = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let _description = input.get("description").and_then(|v| v.as_str());
         let _name = input.get("name").and_then(|v| v.as_str());
@@ -592,7 +604,14 @@ impl BaseTool for SubAgentTool {
             && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
         {
             return self
-                .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
+                .invoke_background(
+                    prompt,
+                    subagent_type,
+                    cwd,
+                    is_fork,
+                    current_messages,
+                    model.as_deref(),
+                )
                 .await;
         }
 
@@ -623,6 +642,7 @@ impl BaseTool for SubAgentTool {
                 peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                 false,
                 true,
+                model.as_deref(),
             )
             .await?;
 
