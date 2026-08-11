@@ -6,18 +6,26 @@ use super::*;
 
 /// 伪 LSP 服务器脚本：发出服务器发起请求 workspace/configuration (id=1)，
 /// 然后从 stdin 读客户端响应，校验为 -32601 MethodNotFound（exit 0），否则 exit 1。
-const FAKE_SERVER_SCRIPT: &str = r#"body='{"jsonrpc":"2.0","id":1,"method":"workspace/configuration","params":[]}'
-len=${#body}
-printf 'Content-Length: %d\r\n\r\n%s' "$len" "$body"
-IFS= read -r header
-len=${header#Content-Length: }
-len=${len%$'\r'}
-while IFS= read -r line && [ -n "${line%$'\r'}" ]; do :; done
-resp=$(dd bs=1 count=$len 2>/dev/null)
-case "$resp" in
-  *'"code":-32601'*) exit 0 ;;
-  *) exit 1 ;;
-esac
+/// 用 perl 实现以跨平台（Unix/macOS 预装，Windows 由 Git for Windows 提供；
+/// bash 脚本在 Windows Git Bash 下有 CRLF/管道字节语义差异，不可靠）。
+const FAKE_SERVER_SCRIPT: &str = r#"binmode STDOUT;
+select STDOUT;
+$| = 1;
+my $body = '{"jsonrpc":"2.0","id":1,"method":"workspace/configuration","params":[]}';
+print "Content-Length: " . length($body) . "\r\n\r\n" . $body;
+binmode STDIN;
+my $h = '';
+while (1) {
+    my $l = <STDIN>;
+    last unless defined $l;
+    last if $l =~ /^\r?\n$/;
+    $h .= $l;
+}
+my ($len) = $h =~ /Content-Length:\s*(\d+)/i;
+exit 1 unless defined $len;
+my $resp = '';
+read(STDIN, $resp, $len) == $len or exit 1;
+exit($resp =~ /"code"\s*:\s*-32601/ ? 0 : 1);
 "#;
 
 #[tokio::test]
@@ -25,8 +33,8 @@ async fn test_server_request_unknown_id_receives_method_not_found() {
     // 服务器发起的请求（id 未注册 pending）：必须回 -32601 响应，
     // 而不是静默丢弃——否则服务器同步等待，后续 textDocument 请求排队至超时
     let transport = LspTransport::spawn(
-        "bash",
-        &["-c".to_string(), FAKE_SERVER_SCRIPT.to_string()],
+        "perl",
+        &["-e".to_string(), FAKE_SERVER_SCRIPT.to_string()],
         &HashMap::new(),
     )
     .expect("启动伪服务器失败");
@@ -84,9 +92,20 @@ async fn test_cancel_request_removes_pending_entry() {
 #[tokio::test]
 async fn test_close_kills_child_process() {
     // sleep 伪进程：close() 必须先 kill 子进程再 abort read task，
-    // 否则 abort 路径跳过 child.kill()，子进程成为孤儿
-    let transport =
-        LspTransport::spawn("sleep", &["60".to_string()], &HashMap::new()).expect("启动失败");
+    // 否则 abort 路径跳过 child.kill()，子进程成为孤儿。
+    // Windows 无 sleep 命令，用 PowerShell 的 Start-Sleep 代替。
+    #[cfg(unix)]
+    let (command, args) = ("sleep", vec!["60".to_string()]);
+    #[cfg(windows)]
+    let (command, args) = (
+        "powershell",
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Seconds 60".to_string(),
+        ],
+    );
+    let transport = LspTransport::spawn(command, &args, &HashMap::new()).expect("启动失败");
     let (dispatcher, _rx) = MessageDispatcher::new(transport);
 
     dispatcher.close().await;
@@ -98,8 +117,10 @@ async fn test_close_kills_child_process() {
     .await
     .expect("close() 后子进程未在 5s 内退出（孤儿进程）")
     .expect("wait 子进程失败");
+    // Unix 上 kill 以信号终止（code() 为 None）；Windows 上 TerminateProcess
+    // 的退出码非 0——统一断言"非正常退出"以区分自然结束
     assert!(
-        status.code().is_none(),
-        "子进程应被 close() 的 kill 以信号终止，而非自然退出: {status:?}"
+        !status.success(),
+        "子进程应被 close() 的 kill 终止，而非自然退出: {status:?}"
     );
 }

@@ -275,14 +275,32 @@ fn make_fake_pool_with_pid(
     )
 }
 
-/// kill -0 检查进程存在。shutdown 路径经 transport.close → tokio Child::kill
-/// （start_kill + wait reap），进程表无僵尸残留，kill -0 失败即已退出。
+/// 探活：进程存在返回 true。
+/// Unix 用 kill -0；Windows 用 tasklist（/FO CSV /NH，精确匹配 PID 列）。
+/// shutdown 路径经 transport.close → tokio Child::kill（start_kill + wait reap），
+/// 进程表无僵尸残留，探活失败即已退出。
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .status()
         .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    let pid_str = pid.to_string();
+    let filter = format!("PID eq {pid}");
+    std::process::Command::new("tasklist")
+        .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                line.split(',').nth(1).map(|c| c.trim_matches('"')) == Some(pid_str.as_str())
+            })
+        })
         .unwrap_or(false)
 }
 

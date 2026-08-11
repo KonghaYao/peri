@@ -414,11 +414,13 @@ async fn test_restart_window_cooldown() {
 
 #[tokio::test]
 async fn test_restart_window_expiry_resets_count() {
-    // 窗口过后计数清零、冷却解除：再次重启成功
+    // 窗口过后计数清零、冷却解除：再次重启成功。
+    // 窗口不能设太短：Windows 上 spawn 子进程较慢，若单次重启耗时超过窗口，
+    // 计数会被提前清零（第 4 次重启意外成功）——2s 窗口保证 3 次重启落在同一窗口
     let dir = tempfile::tempdir().unwrap();
     let count_file = dir.path().join("spawn_count.txt");
     let mut client = make_fake_client(&count_file);
-    client.restart_window = std::time::Duration::from_millis(50);
+    client.restart_window = std::time::Duration::from_secs(2);
 
     client.start("file:///tmp").await.unwrap();
     for _ in 0..3 {
@@ -427,7 +429,8 @@ async fn test_restart_window_expiry_resets_count() {
     let err = client.try_restart("file:///tmp").await.unwrap_err();
     assert!(matches!(err, LspError::ServerCrashed { .. }));
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // 等待窗口过期（窗口 + 100ms 缓冲），冷却解除
+    tokio::time::sleep(client.restart_window + std::time::Duration::from_millis(100)).await;
     client.try_restart("file:///tmp").await.unwrap();
     assert!(client.is_ready(), "窗口过后冷却解除，应能重启成功");
 
@@ -485,7 +488,35 @@ async fn test_try_restart_clears_diagnostics() {
     client.shutdown().await;
 }
 
-/// 轮询等待子进程退出（kill -0 探活；close() 已 wait 回收，无 zombie 残留）。
+/// 探活：进程存在返回 true。
+/// Unix 用 kill -0；Windows 用 tasklist（/FO CSV /NH，精确匹配 PID 列）。
+fn process_alive(pid: &str) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        std::process::Command::new("tasklist")
+            .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|line| line.split(',').nth(1).map(|c| c.trim_matches('"')) == Some(pid))
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// 轮询等待子进程退出（探活；close() 已 wait 回收，无 zombie 残留）。
 /// pid_file 由伪服务器启动时写入自身 PID。
 async fn wait_for_child_exit(pid_file: &std::path::Path) {
     let mut last_pid = String::new();
@@ -495,14 +526,7 @@ async fn wait_for_child_exit(pid_file: &std::path::Path) {
             .unwrap_or_default();
         if !pid.is_empty() {
             last_pid = pid.clone();
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !alive {
+            if !process_alive(&pid) {
                 return;
             }
         }

@@ -6,9 +6,9 @@
  *   被摘要为 tool count，完成后痕迹保留
  * - sync-agents: 同步 subagent（sleep 10s）running 态活动摘要 + 完成态
  *
- * [Slice 3] 视觉同步：SubAgent 从 `● Agent (…)` 卡片 + 嵌套工具卡片改为
- * 单行摘要（§6.7）：`◐/✓ {Name}  {activity|result}  {N tools}`，
- * 嵌套工具不再内联铺入主时间轴；failed 追加原因行。
+ * [Slice 3 同步] 视觉同步：SubAgent 从 `● Agent (…)` 卡片 + 嵌套工具卡片改为
+ * 嵌套工具行（§6.7 重构后形态：Agent 头行 + 缩进子工具行，无单行摘要与
+ * `N tools` 计数），嵌套工具不再内联铺入主时间轴；failed 追加原因行。
  *
  * 一次会话 2 个顺序阶段，用 prompt 前缀定位当前 Agent turn。
  */
@@ -44,9 +44,14 @@ function currentAgentTurn(screen: string): AgentTurn | undefined {
   };
 }
 
-/** SubAgent 单行摘要已出现（含 tool count；§6.7 格式 `N tools`） */
-function hasSubagentRow(section: string): boolean {
-  return /\d+ (?:tools|次工具)/.test(section);
+/** SubAgent 痕迹已出现（§6.7 重构后：Agent 头行 + 嵌套子工具行——组渲染为
+ *  缩进工具行，无单行摘要与 `N tools` 计数）。嵌套行特征：工具名后 2 空格
+ *  （主时间线工具行 label 后仅 1 空格，不会误匹配）。 */
+function hasSubagentTrace(section: string): boolean {
+  return (
+    /[\u2800-\u28FF✓]\s+Agent\s/.test(section) &&
+    /(?:Shell|Bash|Grep|Read|Glob|Write|Edit)\s{2}\S/.test(section)
+  );
 }
 
 describe("subagent: sync agent rows (merged)", () => {
@@ -68,11 +73,11 @@ describe("subagent: sync agent rows (merged)", () => {
       const base = await tester.getScreenText();
       await sendPrompt(tester, STAGE.echo);
 
-      // 等 SubAgent 摘要行出现（含 ≥1 次工具计数——子工具已路由进组；
-      // echo 瞬间完成，抓拍可能已是完成态）
+      // 等 SubAgent 的嵌套工具行出现（echo 瞬间完成，抓拍可能已是完成态；
+      // prompt 回显为小写 "shell 命令"，不会误匹配）
       try {
         await tester.waitFor(
-          (screen) => /[1-9]\d* (?:tools|次工具)/.test(screen),
+          (screen) => /Shell\s{2}echo hello-subagent-internal/.test(screen),
           {
             timeout: 60_000,
             interval: 1000,
@@ -101,9 +106,9 @@ describe("subagent: sync agent rows (merged)", () => {
       const r1 = await judge({
         ansiRaw: runningCapture.raw,
         criteria: [
-          "消息区应出现 SubAgent 摘要行：包含 Agent 名称与工具计数（如 'N tools' / 'N 次工具'），表明内部工具调用已被摘要而非空壳",
-          "摘要行应包含活动/结果文本（如 echo 命令或 Shell 相关字样）或完成结果；刚启动瞬间只有名称 + 计数也可接受",
-          "SubAgent 摘要应出现在用户 prompt 之后的消息流中，而非散落在其他位置",
+          "消息区应出现 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-subagent-internal'），表明内部工具调用已渲染而非空壳",
+          "嵌套子工具行应包含活动文本（echo 命令 hello-subagent-internal 或 Shell 相关字样）",
+          "SubAgent 内容应出现在用户 prompt 之后的消息流中，而非散落在其他位置",
         ],
       });
       console.log("Judge (echo running):", JSON.stringify(r1, null, 2));
@@ -113,9 +118,9 @@ describe("subagent: sync agent rows (merged)", () => {
       const r2 = await judge({
         ansiRaw: echoDoneCapture.raw,
         criteria: [
-          "SubAgent 完成后，单行摘要应保留：成功符号 ✓ + Agent 名称 + 工具计数（如 'N tools' / 'N 次工具'），而非消失",
-          "SubAgent 完成后的结果应可见——在摘要行内（如 echo 输出 'hello-subagent-internal'）或紧随其后的文本行中，不应完全空白",
-          "子工具调用不应以完整卡片形式混入主时间轴（§6.7 单行摘要，不递归内联）",
+          "SubAgent 完成后，Agent 工具行（成功符号 ✓）与嵌套子工具行应保留，而非消失",
+          "SubAgent 完成后的结果应可见——在工具行内（如 echo 输出 'hello-subagent-internal'）或紧随其后的文本行中，不应完全空白",
+          "子工具调用不应以完整卡片形式混入主时间轴（§6.7 嵌套工具行缩进展示，不递归内联）",
         ],
       });
       console.log("Judge (echo done):", JSON.stringify(r2, null, 2));
@@ -124,14 +129,14 @@ describe("subagent: sync agent rows (merged)", () => {
       // ── 阶段 2：sleep 10s subagent —— running 活动摘要 + 完成态 ──
       await sendPrompt(tester, STAGE.sleep + "，但是它要先 sleep 10s");
 
-      // 等待 SubAgent 行出现（含 ≥1 次工具计数）。sleep 10s 期间 subagent 必然
-      // running 一段时间——抓拍窗口内大概率是 ◐；若恰好完成（✓）也可接受，
-      // judge 分别断言 running/完成两种状态。
+      // 等待 SubAgent 痕迹出现（Agent 头行 + 嵌套工具行）。sleep 10s 期间
+      // subagent 必然 running 一段时间——抓拍窗口内大概率是 braille 帧；
+      // 若恰好完成（✓）也可接受，judge 分别断言 running/完成两种状态。
       try {
         await tester.waitFor(
           (screen) => {
             const turn = currentAgentTurn(screen);
-            return turn !== undefined && hasSubagentRow(turn.section);
+            return turn !== undefined && hasSubagentTrace(turn.section);
           },
           {
             timeout: 120_000,
@@ -149,14 +154,14 @@ describe("subagent: sync agent rows (merged)", () => {
         "sync-subagent-sleep-running",
       );
 
-      // 完成态：footer 出现（主 turn 完成），且 SubAgent 行完成（✓ + 结果）
+      // 完成态：footer 出现（主 turn 完成），且 Agent 头行完成（✓）
       await tester.waitFor(
         (screen) => {
           const turn = currentAgentTurn(screen);
           return (
             turn !== undefined &&
             turn.completed &&
-            /✓ [^\n]*\d+ (?:tools|次工具)/.test(turn.section)
+            /✓ Agent/.test(turn.section)
           );
         },
         {
@@ -175,18 +180,19 @@ describe("subagent: sync agent rows (merged)", () => {
       expect(sleepDoneCapture.text.length).toBeGreaterThan(100);
 
       // 确定性断言（替代 judge——sleep 10s 抓拍时机不确定，judge 语义易 flaky）：
-      // 完成态必须包含 ✓ + 工具计数 + 结果文本，且不再有 ◐ 运行符号。
+      // 完成态必须包含 ✓ Agent 头行 + 结果文本，且不再有 ◐ / braille 运行符号。
       const doneText = sleepDoneCapture.text;
-      expect(doneText).toMatch(/[1-9]\d* (?:tools|次工具)/);
+      expect(doneText).toMatch(/✓ Agent/); // Agent 头行完成态
       expect(doneText).toContain("\u2713"); // ✓
-      expect(doneText).not.toContain("\u25d0"); // ◐
+      expect(doneText).not.toContain("\u25d0"); // ◐（仅 reasoning running 占位，完成态无）
+      expect(doneText).not.toMatch(/[\u2800-\u28FF]/); // braille 帧（仅 running 工具行，完成态无）
       expect(doneText).toMatch(/say hello|已等待|hello/);
 
       // Judge（信息性，不阻断）：sleep running 快照
       await judge({
         ansiRaw: sleepRunningCapture.raw,
         criteria: [
-          "消息区应有 SubAgent 摘要行（名称 + 工具计数 ≥1，如 'N tools' / 'N 次工具'）",
+          "消息区应有 SubAgent 痕迹（Agent 工具行 + 嵌套子工具行，如 'Shell sleep 10' 形态）",
           "系统应处于处理中状态（如底部有 Spinner、状态栏或时长指示），表明 subagent 仍在运行",
         ],
       });

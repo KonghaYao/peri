@@ -8,11 +8,12 @@
  *   子工具卡片渲染在 Agent 卡片上方，未嵌套在内部
  *
  * 验证：
- * - Agent 工具完成后的输出摘要可见（SubAgent 单行摘要 result + assistant 总结）
- * - 子工具不铺入主时间轴（§6.7：单行摘要 + tool count，停止递归内联）
+ * - Agent 工具完成后的输出摘要可见（SubAgent 工具行 result + assistant 总结）
+ * - 子工具不铺入主时间轴（§6.7：嵌套工具行缩进，停止递归内联）
  *
- * [Slice 3] 视觉同步：subagent 从 `● Agent (…)` 卡片 + 嵌套子工具改为单行摘要
- * `◐/✓ Agent {name}  {activity|result}  {N tools}`。
+ * [Slice 3 同步] 视觉同步：subagent 从 `● Agent (…)` 卡片 + 嵌套子工具改为
+ * 嵌套工具行（§6.7 重构后形态：Agent 头行 + 缩进子工具行，无单行摘要与
+ * `N tools` 计数）。
  *
  * 注意：explorer subagent 需要较长时间执行（30-60s），用长等待。
  */
@@ -54,13 +55,15 @@ function currentAgentTurn(screen: string): AgentTurn | undefined {
   };
 }
 
-/** SubAgent 行正处于**运行中**（行内含 ◐ 运行符号）。
+/** SubAgent 正处于**运行中**：Agent 工具头行带 braille 动画帧符号
+ *  （⠋⠙⠹…，§8.2；重构后 SubAgent 组渲染为嵌套工具行，running 符号为
+ *  braille 帧而非 ◐——◐ 仅用于 reasoning `◐ Thinking…`）。
  *  [Fix race] 旧版只等「行出现」——快速 subagent 完成时抓拍的是 ✓ 完成态，
- *  judge 的 ◐ 断言会闪红。运行态窗口内行符号必为 ◐。 */
+ *  judge 的 running 断言会闪红。运行态窗口内 Agent 头行符号必为 braille 帧。 */
 function runningSubagentRow(section: string): boolean {
   return section
     .split("\n")
-    .some((l) => /\d+ (?:tools|次工具)/.test(l) && l.includes("\u25d0"));
+    .some((l) => /[\u2800-\u28FF]\s+Agent\s/.test(l));
 }
 
 describe("tool-card: agent output and nested position", () => {
@@ -85,8 +88,8 @@ describe("tool-card: agent output and nested position", () => {
         "请使用同步 explorer subagent（quick thoroughness），仅在 peri-tui/src/kit 中用一次 Grep 搜索 TODO 注释；完成后立即用一句中文总结，不要做额外搜索或读取。",
       );
 
-      // 等待 SubAgent 单行摘要出现且处于**运行中**（◐ + tool count）——
-      // 完成后行符号翻转为 ✓，抓拍窗口必须落在运行态（judge 断言 ◐）。
+      // 等待 SubAgent 痕迹出现且处于**运行中**（Agent 头行 braille 帧）——
+      // 完成后头行符号翻转为 ✓，抓拍窗口必须落在运行态（judge 断言 running）。
       try {
         await tester.waitFor(
           (screen) => {
@@ -96,7 +99,7 @@ describe("tool-card: agent output and nested position", () => {
           {
             timeout: 60_000,
             interval: 500,
-            message: "等待 SubAgent 运行中摘要（◐ + N tools）超时",
+            message: "等待 SubAgent 运行中摘要（braille 帧 + Agent 头行）超时",
           },
         );
       } catch (e) {
@@ -135,8 +138,8 @@ describe("tool-card: agent output and nested position", () => {
       const r = await judge({
         ansiRaw: runningCapture.raw,
         criteria: [
-          "屏幕应显示 SubAgent 正在工作的痕迹（单行摘要：运行符号 ◐ + Agent 名称 + 活动摘要，如 '◐ Agent explorer  Inspecting …'）",
-          "SubAgent 行应包含工具计数（如 'N tools'），表明其内部有工具调用被摘要化而非空白",
+          "屏幕应显示 SubAgent 正在工作的痕迹（Agent 工具行 + 嵌套子工具行，如 '⠋ Agent explorer …' 与嵌套的 Grep 行）",
+          "SubAgent 内部应有嵌套子工具行（如 Grep 搜索行），表明其内部有工具调用被渲染而非空白",
           "SubAgent 相关内容应出现在用户 prompt 之后，而非上方历史消息中",
         ],
       });
@@ -147,9 +150,9 @@ describe("tool-card: agent output and nested position", () => {
       const r2 = await judge({
         ansiRaw: doneCapture.raw,
         criteria: [
-          "SubAgent 单行摘要应显示完成状态（成功符号 ✓）与结果摘要（如 Grep 搜索结果或 TODO 说明）",
+          "SubAgent 完成后应显示完成状态（Agent 工具行成功符号 ✓）与结果摘要（如 Grep 搜索结果或 TODO 说明）",
           "如果 SubAgent 已完成，应有关于 TODO 搜索结果的文字说明——而非空白内容",
-          "子工具调用不应以完整卡片形式铺入主时间轴（§6.7 停止递归内联）——它们应被摘要为工具计数或结果文本",
+          "子工具调用不应以完整卡片形式铺入主时间轴（§6.7 停止递归内联）——它们应显示为嵌套缩进工具行，而非主时间轴平铺卡片",
         ],
       });
       console.log("Judge (done):", JSON.stringify(r2, null, 2));

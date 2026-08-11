@@ -10,9 +10,11 @@
  * 时序设计（Slice 5 修复记录，对比旧版「turn 完成后才滚动」的空转断言）：
  * - 旧版在 turn 完成后滚动：内容已固定，「viewport 不动」是空真断言，
  *   不覆盖 §15 的「输出增长时视口不动」。新版在 streaming 中滚动。
- * - 加载信号：footer spinner 动词硬编码中文「思考中…」（idle 态是随机
- *   成语占位，不含该词）——locale 无关且只在 loading 期出现；加载期
- *   footer 常驻内容底部，始终可见。
+ * - 加载信号：首个 Bash 工具卡 header（`⠇  Shell sleep 1`）出现 = agent
+ *   思考结束、首批命令派发（工具卡在内容末尾，跟随态下必在视口内）。
+ *   footer spinner 行无可等固定动词：loading/idle 均显示动画帧 + 随机
+ *   成语占位（「思考中…」verb 无调用方渲染），elapsed 后缀 (Ns 值随
+ *   时间增长无法精确匹配。
  * - 等待 2.5s（agent 思考 + 首批命令派发）后 Ctrl+Up ×3 滚离底部：此时
  *   工具卡/回答仍在下方持续增长，视口停在 prompt/早期工具卡区。
  * - 终端 40×16（transcript 视口 7 行）：滚动后视口 = [5 行 core,
@@ -53,9 +55,12 @@ describe("scenario: browse history while streaming (new output indicator)", () =
         "请用 Bash 依次执行 5 条命令，每条都是 sleep 1 后 echo 一个标记（用 && 连接），全部执行完不要省略：第一条 sleep 1 && echo step-1，第二条 sleep 1 && echo step-2，第三条 sleep 1 && echo step-3，第四条 sleep 1 && echo step-4，第五条 sleep 1 && echo step-5",
       );
 
-      // 加载信号：footer spinner 动词「思考中…」（硬编码中文，locale 无关；
-      // idle 态为随机成语占位，不含该词；该行在 loading 期常驻 footer）。
-      await tester.waitForText("思考中", {
+      // 加载信号：首个 Bash 工具卡 header（`⠇  Shell sleep 1`）出现 = agent
+      // 思考结束、首批命令开始派发。注意不能用「Bash」——prompt 回显即含该词
+      // 会过早匹配；「Shell」是 Bash 工具卡独有文本（别名映射，§工具卡片）。
+      // footer spinner 行无固定动词可等：loading 期为动画帧 + 随机成语占位
+      // （idle 期同款成语，无法区分加载开始；「思考中…」verb 无调用方渲染）。
+      await tester.waitForText("Shell", {
         timeout: 60_000,
         interval: 500,
       });

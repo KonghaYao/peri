@@ -131,15 +131,16 @@ describe("tool-card: header suffix + error display", () => {
           "注意第二步必须用 Edit 工具（不能用 Write）",
       );
       // 等待 Write/Edit 变更摘要：独立行（`✓ Write path · +N` 计数后缀——
-      // §6.4 摘要文本含路径不重复拼接）或 §7 分组聚合行（`Write 1 · Edit 1`）
+      // §6.4 摘要文本含路径不重复拼接；符号后为网格 gap + 前导空格，用 `[ ]+`
+      // 容忍）或 §7 分组聚合行（`Write 1 · Edit 1`，含 diff 工具不合并、不分组）
       await tester.waitFor(
         (screen) => {
           const t = currentTurn(screen, STAGE.writeEdit);
           return (
             t !== undefined &&
             t.completed &&
-            /(?:✓ Write [^\n]*|Write \d+)/m.test(t.section) &&
-            /(?:✓ Edit [^\n]*|Edit \d+)/m.test(t.section)
+            /(?:✓[ ]+Write\b[^\n]*|Write \d+)/m.test(t.section) &&
+            /(?:✓[ ]+Edit\b[^\n]*|Edit \d+)/m.test(t.section)
           );
         },
         {

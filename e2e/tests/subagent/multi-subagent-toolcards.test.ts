@@ -11,13 +11,14 @@
  * (2) 旧版代码中工具事件直接丢弃，看不到任何工具调用
  * (3) 修复后 fallback 为普通 ToolCard，仍可见但不在 SubAgentGroup 内
  *
- * [Slice 3] 视觉同步：SubAgent 渲染为单行摘要（§6.7）`◐/✓ {Name}  {activity|result}  {N tools}`，
- * 工具调用以 tool count 摘要化；本测试验证两个 SubAgent 各占一行且计数非空壳。
+ * [Slice 3 同步] 视觉同步：SubAgentGroup 渲染为嵌套工具行（§6.7 重构后形态——
+ * Agent 头行 + 缩进子工具行，无单行摘要与 `N tools` 计数）；本测试验证两个
+ * SubAgent 各有一组可见工具行（非空壳），各占一行组。
  *
  * 本测试从三个维度验证：
- * A. 屏幕内容 — 两个 SubAgent 的摘要行都应出现（含 tool count）
+ * A. 屏幕内容 — 两个 SubAgent 的嵌套工具行都应出现（非空壳）
  * B. 日志诊断 — 检查 agent-tui.log 中是否出现 "NOT ROUTED" 警告
- * C. 完成后状态 — 两个 SubAgent 的摘要痕迹都应保留
+ * C. 完成后状态 — 两个 SubAgent 的工具行痕迹都应保留
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -73,9 +74,10 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         timeout: 60_000,
         interval: 1000,
       });
-      // 等第一个 SubAgent 工具计数行出现（echo 瞬间完成）
+      // 等第一个 SubAgent 的嵌套工具行出现（§6.7 重构后：`│    ✓ Shell  echo
+      // hello-agent-1`；prompt 回显为小写 "shell 命令"，不会误匹配）
       await tester.waitFor(
-        (screen) => /\d+ (?:tools|次工具)/.test(screen),
+        (screen) => /Shell\s{2}echo hello-agent-1/.test(screen),
         {
           timeout: 60_000,
           interval: 1000,
@@ -93,8 +95,8 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       const r = await judge({
         ansiRaw: capture1.raw,
         criteria: [
-          "消息区应出现第一个 SubAgent 摘要行：包含 Agent 名称与工具计数（如 'N tools'），不是空白或只有容器边框",
-          "摘要行应包含具体活动/结果文本（如 echo 命令 hello-agent-1 或 Shell 相关字样）",
+          "消息区应出现第一个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-1'），不是空白",
+          "嵌套子工具行应包含具体活动/结果文本（如 echo 命令 hello-agent-1 或 Shell 相关字样）",
         ],
       });
       console.log("Judge (phase1):", JSON.stringify(r, null, 2));
@@ -114,10 +116,10 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         await tester.sleep(2000);
       }
       expect(secondAgentSeen).toBe(true);
-      // 等第二个 SubAgent 的摘要行也出现（tools 计数 ≥2）
+      // 等第二个 SubAgent 的嵌套工具行也出现（hello-agent-2）
       try {
         await tester.waitFor(
-          (screen) => (screen.match(/\d+ (?:tools|次工具)/g) || []).length >= 2,
+          (screen) => /Shell\s{2}echo hello-agent-2/.test(screen),
           {
             timeout: 60_000,
             interval: 1000,
@@ -139,12 +141,12 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       const r2 = await judge({
         ansiRaw: capture2.raw,
         criteria: [
-          // 核心: 第二个 SubAgent 摘要行也要有工具计数（非空壳）
-          "消息区中应出现第二个 SubAgent 摘要行，且包含工具计数（如 'N tools'）或活动文本，不是空的外壳",
-          // 防御: 不应出现空的外壳——摘要行应有名称、活动/结果或计数中的至少两者
-          "每个 SubAgent 摘要行都应包含名称 + 活动/结果文本 + 工具计数中的实质内容",
+          // 核心: 第二个 SubAgent 也要有可见的嵌套工具行（非空壳）
+          "消息区中应出现第二个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-2'），不是空的外壳",
+          // 防御: 不应出现空的外壳——每个 SubAgent 应有 Agent 头行 + 嵌套工具行
+          "每个 SubAgent 都应展示 Agent 工具行与嵌套子工具行（含工具名与活动文本）",
           // 防混淆
-          "第二个 SubAgent 的摘要不应与第一个混为一行——两个 SubAgent 各占一行",
+          "第二个 SubAgent 不应与第一个混为一行——两个 SubAgent 各占一行",
         ],
       });
       console.log("Judge (phase2):", JSON.stringify(r2, null, 2));
@@ -162,8 +164,8 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       const r3 = await judge({
         ansiRaw: capture3.raw,
         criteria: [
-          "完成后消息区应保留两个 SubAgent 摘要行（成功符号 ✓ + 名称 + 工具计数），各自显示完成状态",
-          "两个 SubAgent 摘要行应包含工具调用结果摘要（如 echo 输出 hello-agent-1 / hello-agent-2 或文本总结）",
+          "完成后消息区应保留两个 SubAgent 的完成痕迹（成功符号 ✓ 的 Agent 工具行与嵌套子工具行），各自显示完成状态",
+          "两个 SubAgent 应包含工具调用结果摘要（如 echo 输出 hello-agent-1 / hello-agent-2 或文本总结）",
         ],
       });
       console.log("Judge (phase3):", JSON.stringify(r3, null, 2));

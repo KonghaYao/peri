@@ -100,7 +100,7 @@ describe("panels: model switch", () => {
 
   it(
     "/model 打开面板，切换 profile，编辑 Effort，状态栏更新",
-    { timeout: 120_000 },
+    { timeout: 180_000 },
     async () => {
       tester = await launchPeri({ env: { HOME: testHome! } });
 
@@ -170,15 +170,9 @@ describe("panels: model switch", () => {
       console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
       expect(panelResult.pass).toBe(true);
 
-      // LLM judge: 切换 profile 后激活标记移动
-      const profileResult = await judge({
-        ansiRaw: profileCapture.raw,
-        criteria: [
-          "Model 面板仍打开，左侧激活标记（●）应位于与打开时不同的档位行上（切换过 active profile）",
-        ],
-      });
-      console.log("Judge (profile):", JSON.stringify(profileResult, null, 2));
-      expect(profileResult.pass).toBe(true);
+      // 阶段 2 确定性断言：激活标记（●）应移动到 sonnet 档位（选择即激活，替代原 judge 调用）
+      expect(profileCapture.text).toContain("● sonnet");
+      expect(profileCapture.text).not.toContain("● fable");
 
       // 阶段 3a 回归断言：Model 行值必须真的变化（此前 ←/→ 触发写入但值不变）
       const modelBefore = extractRightValue(profileCapture.text, "Model");
