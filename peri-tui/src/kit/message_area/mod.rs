@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{
-    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY_KEY, FOLD_OVERRIDES, KEEPGOING_BLOCKED_UNTIL, LANG_VERSION,
-    LOADING_EPOCH, RENDER_HEARTBEAT, SELECTED_SUBAGENT_ID, SUBMIT_TX, VIEW_MODELS,
+    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, KEEPGOING_BLOCKED_UNTIL,
+    LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT, SELECTED_SUBAGENT_ID, SUBMIT_TX, VIEW_MODELS,
     ViewModelsSnapshot,
 };
 use crate::kit::focus_router;
@@ -49,7 +49,7 @@ pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 use render::vm_to_lines_cached;
-use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
+use scroll::{DragThrottle, GesturePending, ScrollThrottle, ScrollbarDragState};
 use selection::{
     WrappedLineInfo, build_wrap_map, concat_wrap_maps, copy_to_clipboard,
     highlight_line_in_selection, mark_copy_message, viewport_logical_range, visual_to_logical,
@@ -145,6 +145,57 @@ fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }
+        _ => None,
+    }
+}
+
+/// [S2 焦点单一事实源] 设 entry 焦点：一次写入 FOCUSED_ENTRY 完整表达导航
+/// 事实（slot + key）。
+/// [Why 锁内派生] 必须在持 VIEW_MODELS 写锁内调用——key 从锁内快照
+/// items[slot] 派生：foldable entry 有值；无折叠能力 entry / request_id 缺失
+/// 的 interaction 合法 `key: None`（slot 仍表达「焦点在消息区」）。桥线程
+/// 可并发写 VIEW_MODELS，锁外读快照会读到漂移索引（key 与索引一致性由
+/// 同一快照保证）。
+fn set_entry_focus(snapshot: &ViewModelsSnapshot, slot: usize) {
+    let key = snapshot
+        .items
+        .get(slot)
+        .and_then(fold_key_of)
+        .map(|(k, _)| k);
+    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot, key });
+}
+
+/// entry 单击结算判定（纯函数，S3 测试直调锁定）——单击 Up handler 中
+/// 被消费前的唯一判定路径。
+///
+/// 单击 = Down 冻结 + 手势从未升级（`gesture` 保持 Pending 到 Up）：
+/// `gesture` 为 Some 且冻结的 `entry_hit` 命中首行 `(slot, 0)` →
+/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非首行）。
+///
+/// [防御 Up 坐标] `mouse_row` 必须在 `area` 内且非滚动条列——防御检查
+/// 基于 Up 时点坐标，比 D2 设计表述（pending.screen）更严格（S1 review
+/// L4），提取时保持该语义。
+///
+/// [D3 权衡] 不做 Down/Up 坐标比较：升级判定的唯一时机是 Drag 事件
+/// （终端按住移动必发 Drag，Up 结算只看手势是否仍为 Pending）；无 Drag
+/// 事件的超容差 Up（坐标差 10 行）仍判单击——有意识决策，S3 锁定用例。
+fn entry_click_decision(
+    gesture: Option<&GesturePending>,
+    mouse_row: u16,
+    area: ratatui_kit::ratatui::layout::Rect,
+    is_scrollbar_col: bool,
+) -> Option<usize> {
+    // 防御检查基于 Up 坐标：行越界 / 滚动条列不参与 entry 点击
+    //（滚动条 Up 分支负责 thumb 释放）
+    if mouse_row < area.y || mouse_row >= area.y.saturating_add(area.height) {
+        return None;
+    }
+    if is_scrollbar_col {
+        return None;
+    }
+    let pending = gesture?;
+    match pending.entry_hit {
+        Some((slot, 0)) => Some(slot),
         _ => None,
     }
 }
@@ -502,9 +553,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
-    // ── 文本选区 ──
+    // ── 文本选区 + 左键手势状态机 ──
     let text_sel = hooks.use_state(TextSelection::default);
-    let selection_down_pos = hooks.use_state(|| Option::<(usize, u16)>::None);
+    // 手势中间状态（Pending）：Down 冻结 screen/visual/entry_hit；Drag 超
+    // 容差升级后置 None，Armed 由 text_sel.dragging 表达。
+    let gesture = hooks.use_state(|| Option::<scroll::GesturePending>::None);
     let drag_throttle = hooks.use_state(DragThrottle::default);
 
     // 滚动条 fields state（hook 通过引用读取，避免 borrow 冲突）
@@ -951,16 +1004,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [Why 注册顺序] 必须在 scroll handler 之前：scroll::handle_event 对消息区内
     // Up(Left) 也会消费（选区复制/清锚点），在其后注册收不到单击。放在
     // interaction option（Down）之后即可——两者事件类型不重叠。
-    // [语义] 单击（Down+Up 无 Drag、坐标容差内）落在 entry 首行 →
-    // 设置 entry 焦点 + 折叠切换：tool/reasoning/subagent/completed interaction
-    // toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent 打开详情面板；
-    // pending interaction 首行仅聚焦不提交（键盘 Enter 的提交是明确按键语义）。
-    // 未命中（拖拽释放/滚动条列/非首行/坐标外）→ Ignored，选区逻辑照常。
-    // entry_focus 声明必须在本 handler 之前（闭包捕获），hook 顺序每次渲染一致。
-    let entry_focus = hooks.use_state(|| Option::<usize>::None);
+    // [语义] 单击 = Down 冻结 + 手势从未升级（gesture 保持 Pending 到 Up）：
+    // Up 只消费 Down 时冻结的结果（entry_hit），不再做坐标换算与反查。命中
+    // entry 首行 → 设置 entry 焦点 + 折叠切换：tool/reasoning/subagent/completed
+    // interaction toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent
+    // 打开详情面板；pending interaction 首行仅聚焦不提交（键盘 Enter 的提交
+    // 是明确按键语义）。未命中（手势已升级/滚动条列/非首行/坐标外）→
+    // Ignored，选区逻辑照常。
+    // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
+    // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
+    let focused_entry_atom = hooks.use_atom(&FOCUSED_ENTRY);
     {
-        let wrap_map_for_click = Arc::clone(&concat_wrap_map_arc);
-        let slot_offsets_for_click = Arc::clone(&slot_offsets_arc);
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             let Event::Mouse(mouse) = event else {
                 return EventResult::Ignored;
@@ -975,48 +1029,33 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             let Some(area) = area_rect else {
                 return EventResult::Ignored;
             };
-            if mouse.row < area.y || mouse.row >= area.y.saturating_add(area.height) {
-                return EventResult::Ignored;
-            }
-            // 滚动条列：scrollbar Up 分支负责 thumb 释放，不参与 entry 点击
-            if scroll::is_scrollbar_column(mouse.column, area) {
-                return EventResult::Ignored;
-            }
-            // [Fix click] 单击判定只用 Down/Up 距离（is_click 容差），不检查
-            // text_sel.dragging：终端按下后任何微移都会报 Drag 事件（无阈值），
-            // start_drag 无条件置 dragging=true——若据此放行，手抖一次展开就
-            // 永不触发（用户体感"点击完全没反应"）。真实拖拽选择（距离超容差）
-            // 由下方 is_click=false 放行给 scroll::handle_event 的 Up 分支复制。
-            // 单击判定：Down 锚点 + 手抖容差（无 Drag = 未移动；容差防事件丢失）
-            let Some(down) = *selection_down_pos.read() else {
-                return EventResult::Ignored;
-            };
-            // [坐标空间] Down 锚点（scroll.rs Down 分支）以视觉坐标写入
-            // selection_down_pos：`row - area.y + scroll_y`。Up 必须以相同视觉
-            // 坐标构造后比较，否则滚动（scroll_y > 0）或网格前缀（area.x > 0）
-            // 下原地单击被误判为拖拽意图（容差仅 ±1 行/±2 列），展开永不触发。
-            // 视觉行同时复用于 entry_click_target（下方不再二次换算）。
-            let scroll_y = scroll_state.read().offset();
-            let up = (
-                usize::from(mouse.row).saturating_sub(usize::from(area.y)) + scroll_y,
-                mouse.column.saturating_sub(area.x),
-            );
-            if !scroll::is_click(down, up) {
-                return EventResult::Ignored;
-            }
-            let visual_row = up.0;
-            let Some((slot, 0)) = scroll::entry_click_target(
-                &wrap_map_for_click,
-                &slot_offsets_for_click,
-                visual_row,
+            // [单击判定] 判定收敛为纯函数 entry_click_decision（mod_test 直调
+            // 锁定）：单击 = Down 冻结 + 手势从未升级（gesture 保持 Pending
+            // 到 Up）——升级瞬间 scroll.rs Drag 分支已复位 gesture 并置
+            // text_sel.dragging（终端按下后任何微移都会报 Drag 事件，判定
+            // 前移到 Drag 分支后，手抖保持在容差内即 Pending 原样保留）。
+            // Up 只消费 Down 时冻结的 entry_hit，不再比较 Down/Up 坐标、不
+            // 读 text_sel.dragging、不做 entry_click_target 反查——滚动
+            // （scroll_y > 0）/ 网格前缀（area.x > 0）的坐标正确性由 Down
+            // 冻结保证。防御检查（area 行界 / 滚动条列）基于 Up 坐标，见
+            // 函数文档 [防御 Up 坐标]。
+            // [TRAP] gesture.read() 返回临时 guard，as_ref() 的借用只在语句
+            // 内有效——命中路径的写入（FOCUSED_ENTRY / gesture）发生在判定
+            // 返回之后（guard 已 drop），parking_lot 同线程 read+write 冲突
+            // 安全。
+            let Some(slot) = entry_click_decision(
+                gesture.read().as_ref(),
+                mouse.row,
+                area,
+                scroll::is_scrollbar_column(mouse.column, area),
             ) else {
                 return EventResult::Ignored;
             };
             // ── 命中 entry 首行：设焦点 + 折叠动作 ──
-            // 与键盘 Alt+Up/Down 一致：焦点可落在任意 entry，FOCUSED_ENTRY_KEY
-            // 仅 foldable 有值；重置 interaction option 到首项。
+            // 与键盘 Alt+Up/Down 一致：焦点可落在任意 entry，FOCUSED_ENTRY
+            // 的 key 仅 foldable 有值（无折叠能力 entry 合法 key: None）；
+            // 重置 interaction option 到首项。
             tracing::trace!(target: "frozen_diag", slot, "click: hit entry, setting focus");
-            *entry_focus.write() = Some(slot);
             *interaction_option.write() = 0;
             // 持 VIEW_MODELS 写锁期间不再读其他可能被同一帧写入的 atom
             //（FOLD_OVERRIDES / SELECTED_SUBAGENT_ID 是独立锁）——键盘同模式。
@@ -1026,23 +1065,24 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             tracing::trace!(target: "frozen_diag", slot, "click: got VIEW_MODELS write lock");
             if slot >= snapshot.items.len() {
                 // 快照缩短（reset/rewind）——焦点失效，退出导航（键盘同模式）
-                *entry_focus.write() = None;
-                *FOCUSED_ENTRY_KEY.state().write() = None;
+                *FOCUSED_ENTRY.state().write() = None;
+                // 手势已消费：所有命中 return 路径统一先复位 gesture
+                //（dispatch 顺序执行，Consumed 后 scroll.rs Up 分支不运行）
+                *gesture.write_no_update() = None;
                 return EventResult::Consumed;
             }
-            let focused_key = snapshot
-                .items
-                .get(slot)
-                .and_then(fold_key_of)
-                .map(|(k, _)| k);
-            *FOCUSED_ENTRY_KEY.state().write() = focused_key;
+            // 持写锁内派生 key（桥线程可并发写 VIEW_MODELS——锁外派生会读到
+            // 漂移索引；key 与索引一致性由同一快照保证）。
+            set_entry_focus(&snapshot, slot);
             // pending interaction：Enter 语义是提交 option（鼠标不承担）；
             // 首行点击仅聚焦，不提交不折叠。
             if pending_interaction_of(&snapshot.items[slot]).is_some() {
+                *gesture.write_no_update() = None;
                 return EventResult::Consumed;
             }
             // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
             text_sel.write().clear();
+            *gesture.write_no_update() = None;
             let result = apply_fold_toggle(&mut snapshot, slot, false);
             tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
             result
@@ -1070,7 +1110,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 &scroll_state,
                 &scroll_throttle,
                 &text_sel,
-                &selection_down_pos,
+                &gesture,
                 &drag_throttle,
                 &wrap_map_for_closure,
                 &slot_arcs_for_closure,
@@ -1092,7 +1132,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // Tab/←/→ 切换 pending interaction 选项、Enter 提交（§6.8）；
     // Esc 单层取消（退出导航）。仲裁见 focus_router::message_nav_accepts。
     {
-        let focus_state = entry_focus;
         let option_state = interaction_option;
         hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
             let Event::Key(key) = event else {
@@ -1106,45 +1145,47 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             }
             // Esc：仅焦点激活时消费（单层取消，退出导航）；未激活时放行给
             // root handler（双击 Esc → Rewind 等既有语义不受影响）。
+            // [TRAP] 判定用临时 read guard（语句末 drop）——同线程随后 write
+            // 同一 atom，parking_lot read+write 冲突会 panic。
             if key.code == KeyCode::Esc
-                && focus_state.read().is_some()
+                && FOCUSED_ENTRY.state().read().is_some()
                 && matches!(
                     focus_router::active_layer(),
                     focus_router::FocusLayer::Input
                 )
             {
-                *focus_state.write() = None;
-                // [§7 免疫] 焦点清除 → 免疫键同步清除（分组 pass 恢复自动合并）。
-                *FOCUSED_ENTRY_KEY.state().write() = None;
+                // [S2 单一事实源] 清除焦点事实源本身（slot+key 一次清除）；
+                // §7 免疫是读者派生行为——读者读 FOCUSED_ENTRY 的 key 消失
+                // 即恢复自动合并，无需在此同步清除。
+                *FOCUSED_ENTRY.state().write() = None;
                 return EventResult::Consumed;
             }
-            let focused = focus_state.read().is_some();
+            let focused = FOCUSED_ENTRY.state().read().is_some();
             if !focus_router::message_nav_accepts(&key, focused) {
                 return EventResult::Ignored;
             }
             let alt = key.modifiers.contains(KeyModifiers::ALT);
             match key.code {
                 KeyCode::Up | KeyCode::Down if alt => {
+                    // [TRAP] 先 copy 出值 drop guard 再 write——parking_lot
+                    // 同线程 read+write 冲突会 panic。
+                    let current = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
                     let items_len = VIEW_MODELS.state().read().items.len();
                     let next = move_entry_focus(
                         items_len,
-                        focus_state.read().as_ref().copied(),
+                        current,
                         if key.code == KeyCode::Up { -1 } else { 1 },
                     );
-                    *focus_state.write() = next;
-                    // [§7 免疫] 焦点移动 → 免疫键同步更新（身份键，非索引——
-                    // 快照重建后索引漂移不影响判定）。焦点落在无折叠能力
-                    // entry（user/assistant/group）时置 None（分组只涉及工具）。
-                    let focused_key = next.and_then(|i| {
-                        VIEW_MODELS
-                            .state()
-                            .read()
-                            .items
-                            .get(i)
-                            .and_then(fold_key_of)
-                            .map(|(k, _)| k)
-                    });
-                    *FOCUSED_ENTRY_KEY.state().write() = focused_key;
+                    // 持 VIEW_MODELS 写锁内派生 key（桥线程可并发写 VIEW_MODELS
+                    // ——锁外派生会读到漂移索引；key 与索引一致性由同一快照
+                    // 保证）。[§7 免疫] 焦点落在无折叠能力 entry（user/
+                    // assistant/group）时 key 为 None（分组只涉及工具）。
+                    let vm_state_ref = VIEW_MODELS.state();
+                    let snapshot = vm_state_ref.write();
+                    match next {
+                        Some(next_slot) => set_entry_focus(&snapshot, next_slot),
+                        None => *FOCUSED_ENTRY.state().write() = None,
+                    }
                     // 焦点移动到其他 entry——重置 interaction option 到首项
                     *option_state.write() = 0;
                     EventResult::Consumed
@@ -1156,9 +1197,11 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     if key.modifiers == KeyModifiers::NONE =>
                 {
                     // 读当前快照判断焦点 entry 类型（只读；无写锁）
+                    // [TRAP] 先 copy 出值 drop guard 再读 VIEW_MODELS（独立锁，
+                    // 顺序无冲突；保持先读后用的 guard 最小化）。
+                    let idx = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
                     let vm_guard = VIEW_MODELS.state();
                     let items = &vm_guard.read().items;
-                    let idx = *focus_state.read();
                     let block = idx
                         .and_then(|i| items.get(i))
                         .and_then(pending_interaction_of);
@@ -1186,14 +1229,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     let vm_state_ref = VIEW_MODELS.state();
                     let mut snapshot = vm_state_ref.write();
                     tracing::trace!(target: "frozen_diag", "enter: got VIEW_MODELS write lock");
-                    let cur_focus = *focus_state.read();
+                    // [TRAP] 先 copy 出值 drop guard 再 write——同线程随后写
+                    // FOCUSED_ENTRY，parking_lot read+write 冲突会 panic。
+                    let cur_focus = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
                     let Some(idx) = cur_focus else {
                         return EventResult::Consumed;
                     };
                     if idx >= snapshot.items.len() {
                         // 快照缩短（reset/rewind）——焦点失效，退出导航
-                        *focus_state.write() = None;
-                        *FOCUSED_ENTRY_KEY.state().write() = None;
+                        *FOCUSED_ENTRY.state().write() = None;
                         return EventResult::Consumed;
                     }
                     // [Slice 4 §6.8] 焦点在 pending interaction block 上：
@@ -1205,8 +1249,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                             let opt = *option_state.read();
                             submit_interaction_option(block, opt);
                         }
-                        *focus_state.write() = None;
-                        *FOCUSED_ENTRY_KEY.state().write() = None;
+                        *FOCUSED_ENTRY.state().write() = None;
                         tracing::trace!(target: "frozen_diag", "enter: interaction submit exit");
                         return EventResult::Consumed;
                     }
@@ -1219,34 +1262,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         });
     }
 
-    // ── 焦点同步：外部清除 FOCUSED_ENTRY_KEY（点击输入框回到输入态）→ 收敛
-    // 清除局部 entry_focus（索引轨道无法被外部组件直接写）。否则点击展开后
-    // 焦点回输入框，Enter 仍被消息区仲裁消费为折叠切换，输入框提交失效。
-    // [Why effect] 副作用写 use_state 放在 effect 边界（TUI-RENDER-001）；
-    // 订阅 atom 保证清除发生时本组件重渲染并执行 effect。
-    {
-        let focus_state = entry_focus;
-        let option_state = interaction_option;
-        let _focused_key_atom = hooks.use_atom(&FOCUSED_ENTRY_KEY);
-        // [Clone] Option<FoldKey> 非 Copy——read 引用 clone（FoldKey 身份键）。
-        let focused_key_now = _focused_key_atom.read().clone();
-        let prev_focused_key = hooks.use_state(|| focused_key_now.clone());
-        // 依赖（Some→None 边沿才执行）：FoldKey 非 Copy，依赖项独立 clone。
-        let deps = (focused_key_now.clone(),);
-        hooks.use_effect(
-            move || {
-                // Some→None 边沿（外部清除：点击输入框回到输入态）→ 退出导航
-                if focused_key_now.is_none() && prev_focused_key.read().is_some() {
-                    *focus_state.write() = None;
-                    *option_state.write() = 0;
-                    tracing::trace!(target: "frozen_diag", "focus sync: entry nav exited (input clicked)");
-                }
-                // 回写当帧值——use_state 非自动更新，不留存则边沿检测失效
-                *prev_focused_key.write() = focused_key_now.clone();
-            },
-            deps,
-        );
-    }
+    // [S2 单一事实源] 焦点同步已删除：外部清除（输入区点击 / session 复位）
+    // 在事件边界直接写 FOCUSED_ENTRY = None，仲裁与渲染同源读取——不再需要
+    // effect 收敛局部 entry_focus（旧双轨：仲裁读局部、清除只写共享 → 窗口期）。
 
     let prev_total_visual_rows = hooks.use_state(|| 0usize);
     // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
@@ -1454,7 +1472,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let interaction_highlight: Option<(usize, usize)> = {
         let mut hits: Vec<InteractionOptionHit> = Vec::new();
         let mut focused_interaction_row: Option<(usize, usize)> = None;
-        let focus_slot = *entry_focus.read();
+        // [S2 单一事实源] 渲染读点——与仲裁同读 FOCUSED_ENTRY（临时 guard
+        // 语句末 drop；interaction_option 仍是局部派生，不参与跨组件仲裁）。
+        let focus_slot = focused_entry_atom.read().as_ref().map(|f| f.slot);
         let cur_option = *interaction_option.read();
         if let Some(area) = area_rect {
             let vp_end = area.y.saturating_add(vis_height);
@@ -1553,7 +1573,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
     // [Slice 3] §9 focus 视觉（G3：只作用于视口行，不写缓存/业务状态）：
     // focused entry 左缘 selection border（outer 列，用 ▌ 字形——NO_COLOR 剥离后仍可见）。
-    let focus_slot = *entry_focus.read();
+    // [S2 单一事实源] 渲染读点——与仲裁同读 FOCUSED_ENTRY。
+    let focus_slot = focused_entry_atom.read().as_ref().map(|f| f.slot);
     let focus_border_style = Style::default().fg(sel_bg).add_modifier(Modifier::BOLD);
     // [F3 §12] 焦点 border 字形走符号降级表（unicode 不足时 ▌ → |，
     // 不输出原始 UTF-8 缺字盒）。

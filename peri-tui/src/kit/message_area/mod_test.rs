@@ -543,3 +543,168 @@ fn test_apply_fold_toggle_tool_writes_override() {
         Some(&FoldState::Expanded)
     );
 }
+
+// ── [S3] entry 单击结算判定（entry_click_decision 直调）────────────────────
+// [Why 直调] dispatch 不可注入、handle_event 不含单击结算（02-plan-review
+// Low 1）——单击 Up handler 的判定部分已提取为模块级纯函数，此处直调锁定
+// 全部结算场景。
+
+/// Pending + 冻结 entry_hit 命中首行 → 判单击返回 slot（主命中路径）。
+#[test]
+fn test_entry_click_decision_pending_header_hit_returns_slot() {
+    let area = Rect::new(6, 1, 80, 24); // 网格前缀 area.x=6
+    let p = GesturePending {
+        screen: (10, 6),
+        visual: (15, 4),
+        entry_hit: Some((3, 0)),
+    };
+    assert_eq!(entry_click_decision(Some(&p), 6, area, false), Some(3));
+    // 边界行有效：顶行（area.y）与底行（area.y + height - 1）都在 area 内
+    assert_eq!(entry_click_decision(Some(&p), 1, area, false), Some(3));
+    assert_eq!(entry_click_decision(Some(&p), 24, area, false), Some(3));
+}
+
+/// Up 结算三态：
+/// - Idle（gesture None）→ None；
+/// - Armed 由 text_sel.dragging 表达，gesture 已在升级瞬间复位为 None →
+///   判定自然 None（补断言锁定：判定函数不读 dragging，无 Armed 特判）；
+/// - Pending + 命中 → Some(slot)；Pending + 正文行（entry_hit None）→ None。
+#[test]
+fn test_entry_click_decision_up_settle_states() {
+    let area = Rect::new(0, 0, 80, 24);
+    // Idle：无 Pending 手势 → None。Armed 的"gesture 已复位为 None"由升级点
+    // （handle_event 内 drag_step Upgrade 分支，不可注入测试）保证——判定函数
+    // 结构上无法区分"Idle"与"Armed 但 gesture 未复位"；此处仅锁定
+    // Idle/Pending 两态 + 命中/正文行分流（S3 review L1 修正）。
+    assert_eq!(entry_click_decision(None, 5, area, false), None);
+    // Pending + 命中 header → 结算为单击
+    let hit = GesturePending {
+        screen: (10, 5),
+        visual: (5, 4),
+        entry_hit: Some((1, 0)),
+    };
+    assert_eq!(entry_click_decision(Some(&hit), 5, area, false), Some(1));
+    // Pending + 正文行（冻结 entry_hit 为 None）→ 不结算为 entry 单击
+    let body = GesturePending {
+        screen: (10, 6),
+        visual: (6, 4),
+        entry_hit: None,
+    };
+    assert_eq!(entry_click_decision(Some(&body), 6, area, false), None);
+}
+
+/// [D3/M3 权衡锁定] 无 Drag 事件超容差 Up = 单击：Down（gesture=Some
+/// Pending, entry_hit=Some）→ 直接 Up（坐标差 10 行，中间无 Drag 事件）→
+/// 判定函数仍返回 Some(slot)。
+/// [Why 有意识决策] 升级判定的唯一时机是 Drag 事件（crossterm 按住移动
+/// 必发 Drag，Up 结算不做坐标比较）；若未来有人把坐标比较恢复进 Up 判定
+/// 路径（设计 I2 明确取消），此测试变红。
+#[test]
+fn test_entry_click_decision_no_drag_overtolerance_up_is_click() {
+    let area = Rect::new(0, 1, 80, 24);
+    // Down：slot1 header 命中（visual 行 5 = 冻结值）
+    let p = GesturePending {
+        screen: (10, 6), // Down 屏幕坐标 (col, row)
+        visual: (5, 4),
+        entry_hit: Some((1, 0)),
+    };
+    // Up：row 16（与 Down 差 10 行，超容差），但无 Drag 事件 → 仍判单击
+    assert_eq!(
+        entry_click_decision(Some(&p), 16, area, false),
+        Some(1),
+        "无 Drag 事件的超容差 Up 必须判单击（升级判定唯一时机是 Drag 事件）"
+    );
+}
+
+/// area 防御（基于 Up 坐标，S1 review L4）：row 越界 → None。
+#[test]
+fn test_entry_click_decision_row_outside_area_returns_none() {
+    let area = Rect::new(6, 1, 80, 24);
+    let p = GesturePending {
+        screen: (10, 6),
+        visual: (15, 4),
+        entry_hit: Some((3, 0)),
+    };
+    assert_eq!(
+        entry_click_decision(Some(&p), 0, area, false),
+        None,
+        "area 上方"
+    );
+    assert_eq!(
+        entry_click_decision(Some(&p), 25, area, false),
+        None,
+        "area 下方"
+    );
+}
+
+/// 滚动条列防御：Up 落在滚动条列（drawer.area 最右 1 列）→ 不参与 entry
+/// 点击（scrollbar Up 分支负责 thumb 释放）。
+#[test]
+fn test_entry_click_decision_scrollbar_col_returns_none() {
+    let area = Rect::new(6, 1, 80, 24);
+    let p = GesturePending {
+        screen: (85, 6),
+        visual: (15, 4),
+        entry_hit: Some((3, 0)),
+    };
+    assert_eq!(entry_click_decision(Some(&p), 6, area, true), None);
+}
+
+// ── [S3, S2 review Low L2] set_entry_focus 的 key 派生 ────────────────────
+
+/// 无折叠能力 entry（user bubble）→ key 合法 None（slot 仍表达「焦点在
+/// 消息区」——焦点单一事实源允许 key: None）。
+#[test]
+#[serial]
+fn test_set_entry_focus_key_none_for_non_foldable_entry() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
+    let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
+    let snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![user]),
+        generation: 0,
+    };
+    set_entry_focus(&snapshot, 0);
+    assert_eq!(
+        *crate::kit::atoms::FOCUSED_ENTRY.state().read(),
+        Some(FocusedEntry { slot: 0, key: None }),
+        "无折叠能力 entry → key 派生为 None（非缺失——FocusedEntry 完整表达焦点）"
+    );
+}
+
+/// foldable entry（tool card）→ key 派生为 FoldKey::Tool（§7 免疫读者
+/// 依据 key 匹配工具）。
+#[test]
+#[serial]
+fn test_set_entry_focus_derives_key_for_foldable_entry() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
+    let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        tool_id: "tool-focus-1".into(),
+        tool_name: "Read".into(),
+        input_summary: String::new(),
+        output_summary: String::new(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Generic,
+        fold: FoldState::Collapsed,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    });
+    let snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![tool]),
+        generation: 0,
+    };
+    set_entry_focus(&snapshot, 0);
+    assert_eq!(
+        *crate::kit::atoms::FOCUSED_ENTRY.state().read(),
+        Some(FocusedEntry {
+            slot: 0,
+            key: Some(FoldKey::Tool("tool-focus-1".into()))
+        })
+    );
+}

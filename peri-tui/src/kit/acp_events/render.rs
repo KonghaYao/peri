@@ -229,10 +229,18 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
         };
     }
     h = tui_hash_combine(h, segment.len() as u64);
-    // 焦点键——焦点工具免疫随焦点变化切换（命中/未命中必须一致覆盖）。
+    // [S2 单一事实源] 焦点键——焦点工具免疫随焦点变化切换（命中/未命中必须
+    // 一致覆盖）。只 hash `f.key`（Option<FoldKey>），不 hash 整个 FocusedEntry
+    // ——含 slot 会使 key=None 的焦点移动（无折叠能力 entry 间导航）无谓失效
+    // TOOL_GROUP_CACHE 指纹。Option<&FoldKey> 与 Option<FoldKey> 的 Hash
+    // 逐位一致（引用 Hash 转发到底层值）。
     let mut fh = std::collections::hash_map::DefaultHasher::new();
-    let focus_state = crate::kit::atoms::FOCUSED_ENTRY_KEY.state();
-    focus_state.read().hash(&mut fh);
+    let focus_state = crate::kit::atoms::FOCUSED_ENTRY.state();
+    focus_state
+        .read()
+        .as_ref()
+        .and_then(|f| f.key.as_ref())
+        .hash(&mut fh);
     h = tui_hash_combine(h, fh.finish());
     let has_trailing_bubble = matches!(segment.back(), Some(TuiRenderUnit::TuiAssistantBubble(_)));
     (h, has_trailing_bubble)
@@ -243,10 +251,10 @@ fn group_input_fingerprint(segment: &im::Vector<TuiRenderUnit>) -> (u64, bool) {
 /// - 可合并：已完成（!running）、非 error、无 diff（diff-edit 不隐藏）、
 ///   Generic presentation（Skill/Todo 语义卡片保留）、未被用户手动操作
 ///   （`user_modified`——折叠 pass 已把 FOLD_OVERRIDES 复写到该标志）、
-///   非当前 selected entry（`FOCUSED_ENTRY_KEY` atom，消息区焦点导航写入）。
+///   非当前 selected entry（`FOCUSED_ENTRY` atom，消息区焦点导航写入）。
 /// - 不可合并：running、error、interaction、含 diff 的 edit（当前无生产 diff，
 ///   由 `diff.is_some()` 守卫未来 Slice 5 路径）、当前 selected entry（焦点在
-///   消息区侧，按身份键免疫——见 atoms.rs `FOCUSED_ENTRY_KEY` 注释）。
+///   消息区侧，按身份键免疫——见 atoms.rs `FOCUSED_ENTRY` 注释）。
 /// - 只扫描 `[start..]` 段（current_turn 部分），不跨 assistant 正文 /
 ///   system event / turn 边界。
 /// - 标题按工具名聚合成 `Read 3 · Glob 2` 形式（隐藏数随 title 展示）。
@@ -286,13 +294,17 @@ fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
     // [§7 免疫] 焦点所在 entry 的身份键——焦点工具不得被并入折叠组
     // （用户正与之交互；入组后焦点 index 落到组上、展开态丢失）。
     // 读引用代替 clone；按需取 Tool 变体的 id 字符串比较，免去逐卡克隆
-    // tool_id 构造 FoldKey。
-    let focus_state = crate::kit::atoms::FOCUSED_ENTRY_KEY.state();
-    let focused_key = focus_state.read();
-    let focused = focused_key.as_ref().and_then(|k| match k {
-        FoldKey::Tool(id) => Some(id.as_str()),
-        _ => None,
-    });
+    // tool_id 构造 FoldKey。[S2 单一事实源] 读 FOCUSED_ENTRY 的派生 key
+    //（guard 绑定变量——focused 借用 guard，生命周期须覆盖使用处）。
+    let focus_state = crate::kit::atoms::FOCUSED_ENTRY.state();
+    let focused_entry = focus_state.read();
+    let focused = focused_entry
+        .as_ref()
+        .and_then(|f| f.key.as_ref())
+        .and_then(|k| match k {
+            FoldKey::Tool(id) => Some(id.as_str()),
+            _ => None,
+        });
 
     // 扫描 segment 的相邻可合并工具段（split_off 后为相对索引，等价原 [start..]）。
     let mut runs: Vec<(usize, usize)> = Vec::new(); // (run_start, run_end_exclusive)
@@ -579,8 +591,9 @@ pub fn push_view_models_for_reset() {
     // [Slice 2] session 复位时清空折叠覆盖表——tool_id/message_id/agent_id
     // 跨 session 不保证唯一，残留覆盖会错误作用于新会话的同名 entry。
     FOLD_OVERRIDES.state().write().clear();
-    // [§7] 焦点免疫键同源清空（跨 session 身份不唯一）。
-    *crate::kit::atoms::FOCUSED_ENTRY_KEY.state().write() = None;
+    // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
+    // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,

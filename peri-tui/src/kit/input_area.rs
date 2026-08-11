@@ -34,7 +34,7 @@ use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
-    CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY_KEY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
+    CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
     LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS,
     POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
     SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
@@ -571,12 +571,16 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             && mouse.row < outer.y.saturating_add(outer.height)
                             && mouse.column >= text_x
                         {
-                            // 点击输入框 = 焦点回到输入态：清除消息区 entry 导航
-                            // 焦点（键盘 Enter 仲裁依据 FOCUSED_ENTRY_KEY + 消息区
-                            // 局部 entry_focus，后者由 message_area 的 effect 收敛
-                            // 同步清除）——否则点击展开后 Enter 仍被消息区消费为
-                            // 折叠切换，输入框无法提交。
-                            *FOCUSED_ENTRY_KEY.state().write() = None;
+                            // [S2 单一事实源] 点击输入框 = 焦点回到输入态：事件
+                            // 边界同步清除消息区 entry 导航焦点（消息区仲裁与
+                            // 渲染同读 FOCUSED_ENTRY，无需 effect 收敛）——
+                            // 否则点击展开后 Enter 仍被消息区消费为折叠切换，
+                            // 输入框无法提交。
+                            // [已知限制] Down handler 闭包不可注入测试（ratatui-kit
+                            // dispatch pub(crate)）；本行迁移正确性由全库 grep 旧
+                            // atom 名零残留 + focus_router_test 的
+                            // focused=false → Enter 放行语义覆盖（S3 review M1）。
+                            *FOCUSED_ENTRY.state().write() = None;
                             let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
                             let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();

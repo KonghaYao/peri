@@ -213,12 +213,20 @@ pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSna
 /// 并在每次快照重建后复写 fold（流式重建后手动选择依然生效）。
 /// session 复位（push_view_models_for_reset）时清空。
 pub static FOLD_OVERRIDES: AtomStatic<HashMap<FoldKey, FoldState>> = AtomStatic::new(HashMap::new);
-/// [Slice 3 §7] entry 焦点所在 entry 的折叠键（消息区键盘导航写入，焦点清除
-/// 时置 None）——`group_successful_tools` 据此实现「不得合并当前 selected
-/// entry」免疫（§7：焦点所在工具不得被压入折叠组，否则展开/交互被静默吞掉）。
-/// 键为身份（tool_id 等），与索引无关——快照重建（插入 divider/todo/分组）后
-/// 索引漂移不影响免疫判定。session 复位时清空。
-pub static FOCUSED_ENTRY_KEY: AtomStatic<Option<FoldKey>> = AtomStatic::new(|| None);
+/// [Slice 2 §3.4 焦点单一事实源] 消息区 entry 导航焦点——一次写入即完整表达
+/// 导航事实（slot + key），取代旧「局部 entry_focus + 共享折叠键 atom」
+/// 双轨（仲裁/渲染读局部、外部清除只写共享，收敛依赖下一帧 effect → 窗口期）。
+/// 所有设焦点/清除写点收口在 message_area（写锁内派生 key），外部组件（输入区
+/// 点击 / session 复位）事件边界同步清 None——无异步收敛。
+/// key 为派生值：foldable entry 有值；无折叠能力 entry / request_id 缺失的
+/// interaction 合法 `key: None`（slot 仍表达「焦点在消息区」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusedEntry {
+    pub slot: usize,
+    pub key: Option<FoldKey>,
+}
+
+pub static FOCUSED_ENTRY: AtomStatic<Option<FocusedEntry>> = AtomStatic::new(|| None);
 /// 终端能力（启动时由 entry.rs 探测一次写入；默认全能力——未探测场景不做剥离/降级）。
 /// 渲染层按此决定 NO_COLOR 剥离 pass 与符号/italic/truecolor 降级。
 pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =

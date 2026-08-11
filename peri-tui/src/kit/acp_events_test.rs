@@ -3205,12 +3205,23 @@ fn test_push_view_models_for_reset_clears_fold_overrides() {
         .write()
         .insert(FoldKey::Tool("t1".into()), FoldState::Expanded);
     assert!(!FOLD_OVERRIDES.state().read().is_empty());
+    // [S2 §3.4] 焦点单一事实源随 session 复位同步清空（slot/key 依赖旧会话
+    // 索引与身份，残留会让新会话焦点/免疫错误指向）。
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = Some(crate::kit::atoms::FocusedEntry {
+        slot: 0,
+        key: Some(FoldKey::Tool("t1".into())),
+    });
+    assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_some());
 
     push_view_models_for_reset();
 
     assert!(
         FOLD_OVERRIDES.state().read().is_empty(),
         "session 复位必须清空覆盖表（跨 session 身份不唯一）"
+    );
+    assert!(
+        crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none(),
+        "session 复位必须清空 entry 焦点"
     );
     assert!(VIEW_MODELS.state().read().items.is_empty());
 }
@@ -3524,7 +3535,7 @@ fn test_snapshot_group_excludes_semantic_cards() {
     );
 }
 
-/// [§7 免疫] 焦点所在工具（`FOCUSED_ENTRY_KEY`）完成也不得并入折叠组。
+/// [§7 免疫] 焦点所在工具（`FOCUSED_ENTRY` 的 key）完成也不得并入折叠组。
 ///
 /// 回归（review MED-2/F1）：用户 Alt+Down 聚焦运行中的工具，其完成后若被并入
 /// 组——焦点 index 落到组上、展开态丢失（组不可展开且每帧重建）。当前
@@ -3532,9 +3543,9 @@ fn test_snapshot_group_excludes_semantic_cards() {
 #[test]
 #[serial]
 fn test_snapshot_group_excludes_focused_tool() {
-    use crate::kit::atoms::FOCUSED_ENTRY_KEY;
+    use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry};
     let mut state = make_fold_test_state();
-    *FOCUSED_ENTRY_KEY.state().write() = None;
+    *FOCUSED_ENTRY.state().write() = None;
     let start_read = |st: &mut BridgeState, id: &str, path: &str| {
         dispatch_and_notify(
             st,
@@ -3561,8 +3572,12 @@ fn test_snapshot_group_excludes_focused_tool() {
 
     start_read(&mut state, "t1", "a.rs");
     // 用户 Alt+Down 聚焦运行中的 t1（§7：当前 selected entry 免疫）。
-    *FOCUSED_ENTRY_KEY.state().write() =
-        Some(crate::kit::tui_render_unit::FoldKey::Tool("t1".into()));
+    // 分组免疫只读 key（slot 不参与判定——含 slot 会使 key=None 的焦点
+    // 移动无谓失效 TOOL_GROUP_CACHE 指纹）。
+    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry {
+        slot: 0,
+        key: Some(crate::kit::tui_render_unit::FoldKey::Tool("t1".into())),
+    });
     end_tool(&mut state, "t1");
     start_read(&mut state, "t2", "b.rs");
     end_tool(&mut state, "t2");
@@ -3577,8 +3592,8 @@ fn test_snapshot_group_excludes_focused_tool() {
     assert!(matches!(&snap.items[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1"));
     assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2"));
 
-    // 焦点移走（Esc → 免疫键清除）→ 下一帧快照恢复自动合并。
-    *FOCUSED_ENTRY_KEY.state().write() = None;
+    // 焦点移走（Esc → 单一事实源清除）→ 下一帧快照恢复自动合并。
+    *FOCUSED_ENTRY.state().write() = None;
     dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
