@@ -5,6 +5,13 @@
 **类型**：Bug — Workflow 系统
 **创建日期**：2026-07-22
 **来源**：`issue-resolution-devflow` workflow 执行复盘
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+workflow 链路已随 3.0 重构（SessionFactory/exec 拆分）重构；但没有任何可静态证明「报告写盘一致性」的契约断言（journal 声称 vs git diff 校验），幻觉误报风险无法静态排除——**待运行时复测**。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

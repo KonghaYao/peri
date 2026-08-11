@@ -692,3 +692,233 @@ Peri Agent 的 ReAct 循环、工具系统、Context 管理、SubAgent 构建。
 **通用模式:** 非交互 spawn 一律 `stdin(Stdio::null())`；错误文案反映不确定性，不武断承诺。
 **涉及文件:** peri-middlewares/src/middleware/{terminal.rs,terminal_test.rs,descriptions/bash.md}, peri-agent/src/agent/async_tasks.rs, peri-agent/src/error_suggest/matcher.rs, bash_command_suggester.rs
 **CLAUDE.md 链接:** false
+
+### issue_2026-08-05-caps-negotiated-once-broken-second-session
+**摘要:** caps 协商值只消费一次——stdio 第 2+ 个 session 事件门控错乱
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** caps 协商, take 一次性消费, unwrap_or_default, 静默错误配置
+**问题本质:** `pending_caps` 被 `take()` 一次性取走，第 2+ session 取 None 走 unwrap_or_default（全 false）或 all_enabled（全 true）——同一客户端不同 session 门控行为不同。
+**通用模式:** 一次性消费的协商值只服务第一个消费者；"取到 None 走默认"= 静默错误配置，应克隆保留或显式报错。
+**涉及文件:** peri-acp/src/session/caps.rs（consume_pending_caps/ensure_session_caps），commits 1ff4a0ff/6e924c8b
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-25-compact-decay-full-fails-micro-skipped-no-fallback
+**摘要:** Compact 退化链——Micro 被跳过、Full 失败、无 fallback、计数器跨域污染
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 退化链, 多根因交织, fallback 缺失, 计数器隔离
+**问题本质:** 5 条根因（判定反转/预算窗口/回收目标/计数器污染/无兜底）交织成退化链：Micro 有效判定指标反转→跳过 Micro 直走 Full→Full 失败无 fallback。
+**通用模式:** 多根因交织缺陷用对抗验证收敛（6 agent 五维度）；退化链必须保留末级 fallback，计数器按作用域隔离。
+**涉及文件:** peri-agent/src/agent/compact_v2/{micro.rs,full.rs,config.rs,mod.rs}
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-25-has-changes-gate-blocks-compact-projection
+**摘要:** has_changes() 决策门控阻断 Compact 投影——三条根因汇合
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 决策门控, 投影失效, 估算膨胀, saved=0
+**问题本质:** estimate_tokens().max(50) 膨胀投影字符数 → estimated_tokens_saved=0 对短消息恒成立 → has_changes()=false 且 reclaim_target=0，truncated 标记对 LLM 实际可见内容完全无效。
+**通用模式:** 决策门控的判定与投影执行脱节时，用"LLM 实际可见内容"做验收基准而非内部指标。
+**涉及文件:** peri-agent/src/agent/compact_v2/{planner.rs,projection.rs}
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-25-micro-compact-treadmill-reclaim-target-zero
+**摘要:** Micro Compact 反复触发但压不住预算（跑步机效应 + reclaim_target=0）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 跑步机效应, reclaim_target, 指标恒 0, 假成功
+**问题本质:** reclaim_target 在 75%-93.5% 区间恒为 0，Micro 每次都"成功"（affected_count>0）但预算不降，Full 永不升级。
+**通用模式:** "执行成功但指标不动"= 回收目标计算失效；恒为 0 的中间量是假成功信号，需断言回收目标 > 0。
+**涉及文件:** peri-agent/src/agent/compact_v2/micro.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-27-rcra-simplify-agent-loop
+**摘要:** Agent Loop 五阶段 CRRAE 简化为四阶段 RCRA
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 循环阶段合并, 预消费冲突, 退出判断
+**问题本质:** Receive/End 职责重叠合并为 RCRA；修复 #1 处理了 loop 外预 drain 队列与 Receive 退出判断（consumed_count==0）的冲突——预消费使循环立即退出。
+**通用模式:** 循环重构时检查 loop 外部是否还有消费方预取同一队列；退出判断与消费点必须同域。
+**涉及文件:** peri-agent/src/agent/stages/mod.rs, peri-acp/src/session/executor_helpers.rs, workflow_agent.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-29-micro-compact-no-system-note
+**摘要:** Micro Compact 执行后 TUI 不显示 SystemNote
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** Debug 格式 vs 字面值, 事件链完整, 文案错配
+**问题本质:** 事件链（run_compact → MessagesCompacted → CompactCompleted → inject_system_note）完整无断裂，问题在 Debug 格式输出与预期文字面值错配。
+**通用模式:** "链路完整但 UI 无表现"时检查格式错配（Debug 序列化 vs 字面文案），而非先怀疑事件断裂。
+**涉及文件:** peri-agent/src/agent/compact_v2/、peri-tui/src/kit/acp_events/compact.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-cancel-misreported-as-llm-failure
+**摘要:** 用户取消被误报为 LLM 失败——reason.rs match 两分支完全相同
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** match 分支相同, 复制粘贴缺陷, Interrupted 被吞
+**问题本质:** `match &e { LlmHttpError|LlmError => LlmFailure, _ => LlmFailure }` 两个分支返回值相同，Interrupted 被吞成 LlmFailure。
+**通用模式:** match 中两个分支返回相同值是复制粘贴缺陷哨兵；错误分类要有穷尽性测试。
+**涉及文件:** peri-agent/src/agent/stages/reason.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-stage-ended-missing-on-error-path
+**摘要:** run_stage Err 路径不 emit StageEnded——Langfuse 悬挂 span 不对称
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** Start/End 成对, Err 路径不对称, 悬挂 span
+**问题本质:** StageStarted 无条件 emit、StageEnded 只在 Ok 分支 emit，LLM 失败/cancel/工具错误路径全部留下只有 Start 没有 End 的 span。
+**通用模式:** 成对生命周期事件必须在所有退出路径对称 emit；compact.rs 的 Skip 不 emit Start 是正确范例。
+**涉及文件:** peri-agent/src/agent/stages/mod.rs, compact.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-transcript-drop-loses-final-messages
+**摘要:** agent 正常结束时 transcript 最后一批消息丢失落库（Drop abort writer）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 批量写窗口, Drop abort, flush 缺失, 持久化不一致
+**问题本质:** transcript writer 用 ≤100ms 窗口批量落库，loop 退出前从不 flush_persistence，drop 时 abort() 丢弃 pending_appends——最终回答几乎总在窗口内未落库。
+**通用模式:** 批处理 writer 的 abort 会丢积压；所有正常退出路径必须显式 flush，不能依赖 Drop。
+**涉及文件:** peri-agent/src/agent/session/transcript.rs（flush_persistence）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-after-agent-failure-missing-turn-completed
+**摘要:** run_after_agent 失败：最终回答已写 transcript 但无 TurnCompleted
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** Err 路径不提交迭代边界, transcript 与 UI 不一致
+**问题本质:** act.rs 先 append(ai_msg) 后 run_after_agent，后者 Err 时 loop 直接结束，TurnCompleted 永不执行——TUI 与持久化/恢复视图不一致。
+**通用模式:** 失败路径也要提交迭代边界（从 transcript 读快照 emit TurnCompleted 再传播错误）；"Err 路径不提交边界"是系统性缺口清单项。
+**涉及文件:** peri-agent/src/agent/stages/act.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-25-event-identity-diverges-across-dual-delivery-paths
+**摘要:** 同一 Agent 事件经双轨投递后身份与语义可能不一致
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 双轨投递, 身份字段, mapper 临时补齐, 单事实源
+**问题本质:** v2 事件跨 Render/State/Observe 与 ACP transport 双路径时 message_id/source_agent_id 被替换为默认值或 None，两条路径各自维护 mapper 与 suppress 规则。
+**通用模式:** 双轨投递 → 收敛单链路；身份字段禁止由各 mapper 临时补齐，用类型契约（EventEnvelope/Seq）固化。
+**涉及文件:** peri-acp-types/identity.rs（UnstampedEvent/EventEnvelope），v2_bridge.rs 退役
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-25-stale-v2-events-bypass-session-filter
+**摘要:** 旧会话的 v2 直连事件可能写入当前 TUI
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 空 session_id, 过滤守卫缺口, 双轨退役
+**问题本质:** v2 直连路径 active_session_id 置空字符串，过滤逻辑只检查非空——旧 turn 事件绕过 stale-session 过滤写入当前 BridgeState。
+**通用模式:** 过滤守卫"空值跳过检查"= 缺口；事件身份必须不可为空（类型层面保证）。
+**涉及文件:** peri-tui/src/kit/v2_bridge.rs（删除），acp_bridge.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-31-extract-peri-model-protocol-crate
+**摘要:** 抽取 peri-model 标准模型协议 crate
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** provider 协议分层, 独立 crate, goose-providers 借鉴
+**问题本质:** 模型协议/厂商格式/HTTP-SSE/重试职责从 peri-agent 抽取为独立 peri-model crate，向上提供与 Agent 无关的标准协议。
+**通用模式:** 协议核心独立于运行时（Goose goose-providers 分层）；上层组合与应用配置留在调用 crate。
+**涉及文件:** peri-model/{protocol,runtime,transport,openai_compatible,anthropic}
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-prompt-security-runtime-contracts
+**摘要:** Prompt 安全边界与运行时契约收敛（PRD）
+**状态:** Closed
+**归档日期:** 2026-08-11
+**关键词:** prompt 分层, 单一事实源, prompt_mode full, 能力声明漂移
+**问题本质:** system prompt 将安全/工程/能力/状态/persona 拼成可整体替换文本，绝对性断言与运行时机制漂移；方案 = 五层模型（安全层不可移除）+ 能力声明与注册同一事实源 + tag 可信度边界。
+**通用模式:** prompt 是运行时机制的平行副本必然漂移；关键断言（审批/工具可见性/模式）由同一运行时数据或 feature gate 生成。
+**涉及文件:** peri-acp/prompts/sections/, prompt_test.rs, docs/design/prompt-sections-audit.md
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime
+**摘要:** Langfuse 上报中 subagent 内容整体错挂到主 agent——SubagentStack 生命周期错配
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** LIFO 栈归属, 消费顺序, 身份注册表, 空壳 observation
+**问题本质:** 归属依赖无身份的 SubagentStack 栈顶近似，栈顶 has_started 标志被无关事件污染、双 forwarder 消费顺序无保证 → subagent 内容错挂主 agent；重构为身份注册表按 agent_id 路由。
+**通用模式:** 归属/配对不能依赖消费顺序近似（栈/LIFO），用事件自带身份做注册表路由。
+**涉及文件:** peri-controller/src/langfuse/tracer/registry.rs（commit 8cadefbe）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-langfuse-batcher-drops-during-slow-flush
+**摘要:** Langfuse batcher 命令通道容量 = max_events + DropNew——慢 flush 期间静默丢事件
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** DropNew 静默丢, 通道容量耦合, 阻塞 select
+**问题本质:** 命令通道容量与 buffer 上限共用 max_events（默认 50），do_flush 阻塞在 select 内时 Add 命令被 DropNew 丢弃——子 span 静默丢失出现悬挂孤儿 span。
+**通用模式:** 控制通道容量与业务上限共用一个配置= 耦合缺陷；静默丢事件（DropNew）必须有观测计数。
+**涉及文件:** langfuse-client/src/batcher.rs, peri-acp（后迁 peri-controller）langfuse/session.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents
+**摘要:** Langfuse trace 中并行 subagent 的 step 顺序错乱
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 并行 step 顺序, 时间线错乱, 序号契约
+**问题本质:** 并行 subagent 下 step 编号重复、与时间顺序不一致、step-28 被渲染为最后——trace 结构依赖并发完成序。
+**通用模式:** 观测图的 step/span 顺序不能依赖并发完成序；需要显式序号/时间契约。
+**涉及文件:** langfuse tracer 相关（trace 渲染侧 + 事件发射侧）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-background-task-completed-event-dead-path
+**摘要:** BackgroundTaskCompleted 事件在 EventSink 无映射——注释声称的 Path A 是死路径
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 死路径, 注释声称, 冗余掩盖, 消费方验证
+**问题本质:** event_sink.rs match 落入 `_ => None`，两个生产 send 点白推；TUI 实际由 registry 通道通知，死路径被冗余掩盖。
+**通用模式:** "注释声称的路径"必须 grep 验证消费方；静默 `_ => None` 分支是死代码温床。
+**涉及文件:** peri-acp/src/session/event_sink.rs, executor.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-22-p1-3-unstructured-error-cleanup
+**摘要:** 非结构化错误清理——anyhow 自动转换绕过结构化变体
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** #[from] anyhow, 结构化错误, 裸字符串 Result
+**问题本质:** AgentError::Other(#[from] anyhow) 自动转换吸收一切错误；register_with_kind 返回 Result<(), String>。修复 = 高频错误提升独立变体（CompactNoLlm/CompactEmptyResponse/BackgroundRegistryError）。
+**通用模式:** `#[from] anyhow::Error` 是结构化错误的天敌；裸字符串 Result 无法分级处理。
+**涉及文件:** peri-agent/src/error.rs, peri-middlewares/src/subagent/background.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-01-model-profiles-independent-config
+**摘要:** Model Profile 独立配置——每档独立持有 provider/model/effort/max_tokens/context_1m
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** Profile 唯一事实源, 档位独立配置, 整体替换合并
+**问题本质:** 四档共享一套 thinking/context 配置改为每档独立 ProfileConfig，请求参数唯一事实源；merge_overrides 按 Profile 整体替换（不做字段级合并）。
+**通用模式:** 配置唯一事实源 + 按 Profile 整体替换，避免字段级合并的隐式优先级。
+**涉及文件:** peri-acp/src/provider/config.rs（Profiles/ProfileConfig）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-openai-compatible-empty-tool-arguments-rejected
+**摘要:** OpenAI-compatible 响应中空字符串工具参数导致整个响应被拒
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 宽松解析, 厂商差异, 空字符串参数
+**问题本质:** 部分 OpenAI-compatible provider 对无参数工具返回 `"arguments": ""`，serde_json::from_str("") 失败把本可成功的调用当协议错误。
+**通用模式:** 多厂商兼容解析对"空/缺失"边界取宽松语义（空串等价空对象），而非拒绝整个响应。
+**涉及文件:** peri-model/src/openai_compatible/
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-context-1m-missing-profile-silently-noop
+**摘要:** context_1m 在 active profile 缺失时静默 no-op 却上报"已持久化"
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 静默 no-op, 假成功上报, 配置校验
+**问题本质:** profiles.get_mut(&active_alias) 写入被静默跳过，仍调 persist_config 并打印成功——客户端看到陈旧值且无从得知失败。
+**通用模式:** 写操作被跳过时禁止上报成功；配置入口键（active_alias）合法性先于字段校验。
+**涉及文件:** peri-acp/src/host/requests.rs（configOption context_1m 分支）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-langfuse-ts-tooling-args-robustness
+**摘要:** langfuse TS 分析脚本参数健壮性五连修复（analyze-ts/lib-ts/prompt-breakdown/trace-messages/trace-tokens）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 参数解析, parseInt||1, 负索引, 成本下限
+**问题本质:** 五处 code-review Minor：--days 覆盖位置参数、cacheRead 超 input 负成本、--index 接受 0/负数/非数字（undefined.id 崩溃）、--detail 解析未使用。
+**通用模式:** `parseInt(x) || 1` 把 0/NaN 静默归一；负索引越界前必须显式校验；独立字段禁止同一表达式求差出负。纯工具脚本小 bug，无额外认知。
+**涉及文件:** langfuse 分析脚本（analyze.ts/lib.ts/prompt-breakdown.ts/trace-messages.ts/trace-tokens.ts）
+**CLAUDE.md 链接:** false

@@ -5,6 +5,13 @@
 **类型**：重构
 **创建日期**：2026-07-25
 **来源**：`docs/architecture-review-2026-07-24.md` A4
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+宽 middleware trait/no-op 能力仍在：`agent_context.rs:119/155` 对 `set_cwd()`/`set_current_step()` 仍为 no-op（v2 中由 TurnContext 管理），调用方可编译通过、mock 测试通过，但生产 v2 路径无效果，无编译期反馈。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

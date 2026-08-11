@@ -186,6 +186,16 @@ SetupWizard 是**根级全屏向导**（非弹窗）：`WIZARD_ACTIVE = true` �
 **涉及文件:** peri-acp-types/src/messages/content.rs, peri-acp/src/dispatch/rewind_candidates.rs, peri-tui/src/kit/acp_events/system.rs
 **CLAUDE.md 链接:** false
 
+### issue_2026-08-02-rewind-popup-hardening-quartet
+**摘要:** rewind 弹窗健壮性四连修复（测试口径/选择越界/错误事件复用/e2e 前置）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 测试对齐生产, 选择越界, 错误事件复用, e2e 前置校验
+**问题本质:** ① 单测以 AI 消息为回滚目标（生产只返回 Human）——测试覆盖不存在的场景；② 候选 >8 条时键盘选择移出渲染窗口（next_selection 无窗口钳制）；③ 目标缺失复用 CompactError 事件致 TUI 显示压缩错误文案；④ e2e 在 Write 未调用/目标文件缺失时静默通过。
+**通用模式:** 测试场景必须对齐生产口径（先确认生产可能值域）；选择索引钳制到渲染窗口；错误事件/文案按功能域独立，禁止复用他域事件；e2e 前置条件缺失 = 假绿。
+**涉及文件:** requests_test.rs, rewind popup（选择/渲染）, rewind_candidates.rs, e2e/tests/scenarios/rewind-v2.test.ts
+**CLAUDE.md 链接:** false
+
 ---
 
 > [返回总索引](tui-index.md)

@@ -184,6 +184,9 @@
 - [issue_2026-08-07-langfuse-v3-subagent-parent-chain-validation-memo v3 后线上 trace subagent 父链验证备忘——先立部署切点再采样](domains/agent.md#issue_2026-08-07-langfuse-v3-subagent-parent-chain-validation-memo) — langfuse
 - [issue_2026-08-02-langfuse-bridge-drops-provider-request-id bridge 事件转换用 `..` 丢弃 provider request_id](domains/agent.md#issue_2026-08-02-langfuse-bridge-drops-provider-request-id) — langfuse
 - [issue_2026-08-02-reason-rs-loses-request-id-without-usage usage=None 时 request_id 被 unwrap_or 替换一并丢弃](domains/agent.md#issue_2026-08-02-reason-rs-loses-request-id-without-usage) — langfuse
+- [issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime subagent 内容整体错挂主 agent——LIFO 栈归属改身份注册表](domains/agent.md#issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime) — langfuse
+- [issue_2026-08-05-langfuse-batcher-drops-during-slow-flush batcher 命令通道容量=max_events+DropNew——慢 flush 期间静默丢事件](domains/agent.md#issue_2026-08-05-langfuse-batcher-drops-during-slow-flush) — langfuse
+- [issue_2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents 并行 subagent 的 step 顺序错乱——观测图依赖并发完成序](domains/agent.md#issue_2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents) — langfuse
 
 ### Login 面板
 
@@ -246,6 +249,7 @@
 ### rewind
 
 - [issue_2026-08-06-e2e-rewind-input-not-refilled Rewind 回填文本被 <system-reminder> 注入块污染](domains/tui/tui-popups.md#issue_2026-08-06-e2e-rewind-input-not-refilled) — tui
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind 弹窗四连：测试口径/选择越界/错误事件复用/e2e 假绿](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
 
 ### RwLock 重入死锁
 
@@ -428,6 +432,9 @@
 - [Compact 效果在 v2 路径中跨 prompt 丢失——persist_tx 始终为 None](domains/agent.md#issue_2026-07-18-compact-effect-lost-between-prompts-v2) — compact
 - [Compact 标记（truncated/excluded）在 Session 恢复后丢失——DB 与 cached_context 双重遗漏](domains/agent.md#issue_2026-07-17-compact-flags-lost-on-session-restore) — compact
 - [issue_2026-07-25-micro-compact-silently-fails-within-turn Micro Compact 同 turn 内静默失效——dry-run 与投影双重职责冲突](domains/agent.md#issue_2026-07-25-micro-compact-silently-fails-within-turn) — compact
+- [issue_2026-07-25-compact-decay-full-fails-micro-skipped-no-fallback Compact 退化链——Micro 跳过/Full 失败/无 fallback/计数器跨域污染](domains/agent.md#issue_2026-07-25-compact-decay-full-fails-micro-skipped-no-fallback) — compact
+- [issue_2026-07-25-micro-compact-treadmill-reclaim-target-zero Micro Compact 跑步机效应——reclaim_target 恒 0，每次"成功"预算不降](domains/agent.md#issue_2026-07-25-micro-compact-treadmill-reclaim-target-zero) — compact
+- [issue_2026-07-29-micro-compact-no-system-note Micro Compact 无 SystemNote——Debug 格式 vs 文案字面值错配](domains/agent.md#issue_2026-07-29-micro-compact-no-system-note) — compact
 
 ### complete_workflow
 
@@ -513,6 +520,8 @@
 
 - [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
 - [主 agent 完成后 loading 不退——SubagentStopped 无条件设 phase=PromptRunning 覆盖了 TurnDone 清除的 loading](domains/tui/tui-rendering.md#issue_2026-07-13-main-agent-done-loading-persists-bg-still-running) — tui
+- [issue_2026-08-05-loading-stuck-after-transport-close transport 关闭后 is_loading 永久卡 true——pump 独占 sender 使"退出=关闭"](domains/tui/tui-events.md#issue_2026-08-05-loading-stuck-after-transport-close) — tui
+- [issue_2026-08-05-cancel-consumer-loading-phase-desync cancel 后 loading 闪回——is_loading 应从 phase 单一事实源派生](domains/tui/tui-events.md#issue_2026-08-05-cancel-consumer-loading-phase-desync) — tui
 
 ### message_count 过滤
 
@@ -990,6 +999,83 @@
 
 - [三维护审视识别 35 个待升级点（4 P0 + 13 P1 + 18 P2）](domains/agent.md#issue_2026-07-16-architecture-upgrade-checklist) — architecture
 
+### caps 协商
+
+- [issue_2026-08-05-caps-negotiated-once-broken-second-session caps 协商值 take() 一次性消费——第 2+ session 门控错乱](domains/agent.md#issue_2026-08-05-caps-negotiated-once-broken-second-session) — acp-protocol
+
+### turn 代际
+
+- [issue_2026-08-05-stale-turn-interrupted-overwrites-new-turn 旧 turn TurnInterrupted 污染新 turn——request_id 配对 + 代际兜底](domains/tui/tui-events.md#issue_2026-08-05-stale-turn-interrupted-overwrites-new-turn) — tui
+
+### 悬挂 span
+
+- [issue_2026-08-05-stage-ended-missing-on-error-path run_stage Err 路径不 emit StageEnded——成对事件全路径对称](domains/agent.md#issue_2026-08-05-stage-ended-missing-on-error-path) — agent
+
+### transcript 落库
+
+- [issue_2026-08-05-transcript-drop-loses-final-messages transcript Drop abort 丢积压——正常退出必须显式 flush](domains/agent.md#issue_2026-08-05-transcript-drop-loses-final-messages) — agent
+
+### 事件身份
+
+- [issue_2026-07-25-event-identity-diverges-across-dual-delivery-paths 同一事件双轨投递身份漂移——收敛单链路+类型契约](domains/agent.md#issue_2026-07-25-event-identity-diverges-across-dual-delivery-paths) — architecture
+- [issue_2026-07-25-stale-v2-events-bypass-session-filter 旧会话 v2 事件绕过 session 过滤——空 session_id 守卫缺口](domains/agent.md#issue_2026-07-25-stale-v2-events-bypass-session-filter) — architecture
+
+### 死路径
+
+- [issue_2026-08-05-background-task-completed-event-dead-path BackgroundTaskCompleted 事件无映射——注释声称的 Path A 是死代码](domains/agent.md#issue_2026-08-05-background-task-completed-event-dead-path) — subagent
+
+### 非结构化错误
+
+- [issue_2026-07-22-p1-3-unstructured-error-cleanup #[from] anyhow 吸收一切错误——高频错误提升独立变体](domains/agent.md#issue_2026-07-22-p1-3-unstructured-error-cleanup) — agent
+
+### prompt 分层
+
+- [issue_2026-08-02-prompt-security-runtime-contracts Prompt 安全边界与运行时契约——五层模型+单一事实源](domains/agent.md#issue_2026-08-02-prompt-security-runtime-contracts) — architecture
+
+### 粘性吸底
+
+- [issue_2026-07-14-auto-follow-loses-track-during-streaming 流式跳增误判上滚——follow_bottom 粘性语义替代距离阈值](domains/tui/tui-rendering.md#issue_2026-07-14-auto-follow-loses-track-during-streaming) — tui
+
+### 点击区域
+
+- [issue_2026-08-02-statusbar-model-quick-switch-click-fails 状态栏模型段点击失效——点击区域必须镜像折行算法](domains/tui/tui-rendering.md#issue_2026-08-02-statusbar-model-quick-switch-click-fails) — tui
+
+### 遮挡裁决
+
+- [issue_2026-08-01-tui-mouse-multi-layer-conflict 鼠标多层路由冲突——集中式 MouseRouter 遮挡裁决](domains/tui/tui-rendering.md#issue_2026-08-01-tui-mouse-multi-layer-conflict) — tui
+
+### 错误可见性
+
+- [issue_2026-07-22-llm-api-error-silently-swallowed-in-tui LLM API 报错 TUI 静默无提示——AgentExecutionFailed 事件契约](domains/tui/tui-rendering.md#issue_2026-07-22-llm-api-error-silently-swallowed-in-tui) — tui
+
+### Profile
+
+- [issue_2026-08-01-model-profiles-independent-config Model Profile 独立配置——每档独立持有请求参数，整体替换合并](domains/agent.md#issue_2026-08-01-model-profiles-independent-config) — llm-provider
+
+### peri-model
+
+- [issue_2026-07-31-extract-peri-model-protocol-crate 抽取 peri-model 标准模型协议 crate——协议核心独立于运行时](domains/agent.md#issue_2026-07-31-extract-peri-model-protocol-crate) — architecture
+
+### 硬编码索引
+
+- [issue_2026-08-02-config-panel-alias-fallback-points-to-opus active_alias 空值回退索引漂移——选项回退按名称查找](domains/tui/tui-panels.md#issue_2026-08-02-config-panel-alias-fallback-points-to-opus) — tui
+
+### 测试对齐生产
+
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind 单测以 AI 消息为目标——测试场景必须对齐生产口径](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
+
+### 假绿
+
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind e2e 前置条件缺失静默通过——Write 未调用/文件缺失仍绿](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
+
+### 取消误报
+
+- [issue_2026-08-05-cancel-misreported-as-llm-failure 用户取消被误报为 LLM 失败——match 两分支完全相同](domains/agent.md#issue_2026-08-05-cancel-misreported-as-llm-failure) — agent
+
+### RCRA
+
+- [issue_2026-07-27-rcra-simplify-agent-loop Agent Loop 五阶段 CRRAE 简化四阶段 RCRA——预消费与退出判断冲突](domains/agent.md#issue_2026-07-27-rcra-simplify-agent-loop) — agent
+
 ## 更新记录
 
 - 2026-07-06: 首次创建，归档 8 个 issue
@@ -999,3 +1085,4 @@
 - 2026-07-18: 归档 37 个 issue
 - 2026-07-30: 归档 15 个 issue，新增 9 个关键词，agent 领域新增 8 条经验
 - 2026-08-11: 归档 41 个 issue，新增 19 个关键词，agent 领域新增 29 条经验
+- 2026-08-11: 归档 58 个 issue（删除 10 份被取代文档），新增 16 个关键词段，agent 领域新增 23 条经验，TUI 各子域新增 17 条经验

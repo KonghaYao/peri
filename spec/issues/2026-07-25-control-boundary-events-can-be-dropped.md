@@ -5,6 +5,13 @@
 **类型**：Bug
 **创建日期**：2026-07-25
 **来源**：`docs/architecture-review-2026-07-24.md` A1
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+事件分类已落地：`EventDeliveryClass`（peri-acp-types/identity.rs，Critical/Broadcast）随 3.0-M 事件三层化生效，forwarder 按类投递；但底层有界 EventBus 的 `try_send` 满时仍可能丢弃事件，控制边界饱和语义缺少压力/回归测试。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

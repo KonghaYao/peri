@@ -4,6 +4,11 @@
 **创建日期**：2026-08-10
 **规格**：`docs/design/tui-chat-message-flow-style.md`（§6/§7/§8/§10/§11/§15）
 **前置**：`spec/archive-issues/tui-general/2026-08-10-chat-redesign-slice1-data-gates.md`（Closed，5 项数据门）
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+Slice 2-4 已落地（D1 定案、冻结机制定案、空 reasoning hash 契约、高度断点 Row1Only、D5/D6 双轨定案——落地代码引用见正文各节）；Slice 5（G-Diff parser 客户端解析 + G-Perf 报告）待做。保持 Active。
 
 本文件累计记录跨切片定案（D 系列冲突消解 + 落地引用），供后续编码切片引用；
 已落地项标注代码位置，代码与文档冲突时以代码为准并回写本文件。

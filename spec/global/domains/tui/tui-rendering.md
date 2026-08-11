@@ -991,6 +991,65 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 **涉及文件:** peri-agent/src/agent/model_bridge.rs, peri-tui/src/kit/acp_types.rs（append_text/start_tool/flush_text_segment/sync_cache）, acp_notifier.rs
 **CLAUDE.md 链接:** false
 
+### issue_2026-07-14-auto-follow-loses-track-during-streaming
+**摘要:** 流式输出期间自动跟踪中断——突发跳增误判为用户上滚
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 粘性吸底, follow_bottom, proximity 阈值, 流式跳增
+**问题本质:** 一次性推送大量 token 时 total_visual_rows 跳跃超过 vis_height/4，proximity 阈值误判为用户主动上滚而停止跟随；修复 = 粘性吸底（follow_bottom 状态，滚动落定后 offset>=max_scroll 才恢复跟随，75abcdcf）。
+**通用模式:** "距离阈值判断用户意图"会被内容跳增击穿；用粘性语义（明确跟随状态 + 真正到底判定）替代距离近似。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs（follow_bottom）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-22-llm-api-error-silently-swallowed-in-tui
+**摘要:** LLM API 报错时 TUI 消息区静默不显示错误
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 错误可见性, AgentExecutionFailed, 事件契约
+**问题本质:** v2 ReAct 路径 LLM 错误（5xx/429/401）只写 tracing 日志，TUI 无错误提示，agent 看起来"正常结束"；修复 = executor_helpers.rs 新增 AgentExecutionFailed emit。
+**通用模式:** 用户可见性契约：LLM/工具错误必须经事件链路到达 UI，日志不是用户可见通道。
+**涉及文件:** peri-acp/src/session/executor_helpers.rs, peri-tui/src/kit/acp_events/
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-01-tui-mouse-multi-layer-conflict
+**摘要:** TUI 鼠标事件多层布局路由冲突——集中式遮挡裁决（MouseRouter）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** MouseRouter, occluded 判定, 多层路由, 集中裁决
+**问题本质:** 弹窗/面板/消息区多层叠放，每个背景组件各自维护"是否被遮挡"判断且常漏判（面板打开时消息区抢滚轮、弹窗遮挡区误触背景）；收敛为集中式 MouseRouter 遮挡裁决。
+**通用模式:** 多层交互路由的遮挡判定集中单点（router），禁止各组件自维护；与 click-expand-broken 的焦点单事实源同构。
+**涉及文件:** peri-tui/src/kit/mouse_router.rs, message_area/scroll.rs, status_bar.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-message-area-drag-state-stale-after-popup
+**摘要:** 消息区被弹窗遮挡时提前返回，拖拽/滚动条状态残留
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** occluded 早退, 状态复位, 残留交互
+**问题本质:** scroll.rs 鼠标处理在 is_occluded() 时提前 return Ignored，跳过 scrollbar_drag.active/selection_down_pos/text_sel.dragging 复位——弹窗关闭后残留状态污染下一次交互。
+**通用模式:** 提前 return 的守卫分支必须同时执行状态复位（用 defer/统一收尾，或先复位再 return）。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-statusbar-model-quick-switch-click-fails
+**摘要:** 运行多轮后点击状态栏模型段无法弹出快速切换弹窗
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 点击区域, 词级折行, 命中测试, 渲染镜像
+**问题本质:** model_click_areas 按 span 粒度计算，模型段折行/跨行时用最后一个 span 行号判定点击 → 命中失效；修复 = 词级折行模拟（对齐 reflow.rs Wrap{trim:false}），每词一个点击区域 + 28 个 status_bar 测试（含逐位 ground-truth 渲染对比）。
+**通用模式:** 鼠标点击区域必须镜像实际渲染的折行算法（词级扫描而非 span 粒度）；CJK 宽字符按宽度计。
+**涉及文件:** peri-tui/src/kit/status_bar.rs（model_click_areas）, status_bar_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-session-title-stale-after-session-cleared
+**摘要:** 会话关闭（session id 置空）后状态栏标题残留上个会话
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 守卫跳过清空, 标题残留
+**问题本质:** service_snapshot 标题刷新有 `!session_id.is_empty()` 守卫，session 置空时整块跳过、current_title 保留旧值。纯 UI 小 bug，无额外认知；修复 = 置空分支显式清标题并写空标题。
+**涉及文件:** peri-tui/src/kit/service_snapshot.rs
+**CLAUDE.md 链接:** false
+
 
 ---
 

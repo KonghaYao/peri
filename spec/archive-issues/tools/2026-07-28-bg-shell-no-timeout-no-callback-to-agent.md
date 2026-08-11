@@ -59,7 +59,7 @@ bg shell（`Bash` 工具 `run_in_background: true`）目前存在三个核心缺
 | `peri-middlewares/src/subagent/tool/execute_bg.rs` | bg SubAgent 的 complete 流程（参考回调注入模式） |
 | `peri-acp/src/session/async_router.rs` | `route_bg_result()` 实现参考 |
 | `peri-acp/src/session/executor.rs:905-910` | `on_bg_complete` 注册模式参考 |
-| `spec/issues/2026-07-25-bg-agent-shell-no-response-after-invocation.md` | 已有相关 issue（侧重 bg agent 事件泵断裂），本 issue 独立覆盖 bg shell 链路 |
+| — | 已有相关 issue（侧重 bg agent 事件泵断裂，2026-08-11 已随归档清理删除），本 issue 独立覆盖 bg shell 链路 |
 
 ## 设计要点
 
