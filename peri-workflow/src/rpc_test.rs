@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
+    let pending = DashMap::new();
+    let (first_tx, mut first_rx) = oneshot::channel();
+    let (duplicate_tx, _duplicate_rx) = oneshot::channel();
+    let key = ("run-1".to_string(), 7);
+
+    assert!(insert_pending_agent(
+        &pending,
+        key.clone(),
+        PendingAgent {
+            rpc_id: Some(1),
+            cancel_tx: first_tx,
+        },
+    ));
+    assert!(!insert_pending_agent(
+        &pending,
+        key.clone(),
+        PendingAgent {
+            rpc_id: Some(2),
+            cancel_tx: duplicate_tx,
+        },
+    ));
+
+    let (_, original) = pending.remove(&key).unwrap();
+    original.cancel_tx.send(()).unwrap();
+    assert_eq!(first_rx.try_recv(), Ok(()));
+}
+
+#[test]
 fn test_parse_message_response() {
     let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
     let msg = parse_message(raw).unwrap();

@@ -84,13 +84,27 @@ pub enum IncomingMessage {
 
 // ─── RpcChannel ────────────────────────────────────────────
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 
 /// Pending agent tracking entry for single-agent kill (GAP-07).
 /// Holds the RPC id (to send error response to Node) and cancel channel.
 struct PendingAgent {
     rpc_id: Option<u64>,
     cancel_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+fn insert_pending_agent(
+    pending_agents: &DashMap<(String, u64), PendingAgent>,
+    key: (String, u64),
+    pending: PendingAgent,
+) -> bool {
+    match pending_agents.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(pending);
+            true
+        }
+        Entry::Occupied(_) => false,
+    }
 }
 
 pub struct RpcChannel {
@@ -244,7 +258,8 @@ impl RpcChannel {
 
     // ─── 单 agent kill 追踪（GAP-07）──────────────────────────
 
-    /// 注册一个活跃 agent，返回 cancel receiver。
+    /// 注册一个活跃 agent，返回 cancel receiver；同一 run 内重复的 active agent ID
+    /// 会被拒绝，避免覆盖已有任务的取消句柄。
     ///
     /// 在 `agent/run` 分支调用：spawn 的 task 持有 receiver，
     /// 通过 `select!` 与 `exec.execute()` 竞速。
@@ -254,13 +269,14 @@ impl RpcChannel {
         run_id: &str,
         agent_id: u64,
         rpc_id: Option<u64>,
-    ) -> oneshot::Receiver<()> {
+    ) -> Option<oneshot::Receiver<()>> {
         let (cancel_tx, cancel_rx) = oneshot::channel();
-        self.pending_agents.insert(
+        insert_pending_agent(
+            &self.pending_agents,
             (run_id.to_string(), agent_id),
             PendingAgent { rpc_id, cancel_tx },
-        );
-        cancel_rx
+        )
+        .then_some(cancel_rx)
     }
 
     /// 正常完成后注销 agent（kill_agent 已移除时 no-op）。

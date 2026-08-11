@@ -115,6 +115,18 @@ async fn ensure_workflow_install() {
 
 pub use peri_acp_types::workflow::AgentExecutor;
 
+fn parse_agent_run_params(
+    params: Option<Value>,
+    expected_run_id: &str,
+) -> Result<AgentRunParams, String> {
+    let params: AgentRunParams =
+        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|error| error.to_string())?;
+    if params.run_id != expected_run_id {
+        return Err("runId does not match the active workflow run".into());
+    }
+    Ok(params)
+}
+
 // ─── 公开类型 ──────────────────────────────────────────────────
 
 /// Workflow 输入参数
@@ -407,21 +419,26 @@ impl WorkflowRunner {
                     IncomingMessage::Request { id, method, params } => match method.as_str() {
                         "agent/run" => {
                             // Parse params, spawn agent execution
-                            let params: AgentRunParams = params
-                                .and_then(|p| serde_json::from_value(p).ok())
-                                .unwrap_or_else(|| AgentRunParams {
-                                    run_id: run_id_clone.clone(),
-                                    agent_id: 0,
-                                    prompt: String::new(),
-                                    schema: None,
-                                    model: None,
-                                    max_tokens: None,
-                                    agent_type: None,
-                                    isolation: None,
-                                    allowed_tools: None,
-                                    label: None,
-                                    phase: None,
-                                });
+                            let params = match parse_agent_run_params(params, &run_id_clone) {
+                                Ok(params) => params,
+                                Err(error) => {
+                                    warn!(
+                                        target: "workflow.rpc",
+                                        error = %error,
+                                        "agent/run rejected invalid params",
+                                    );
+                                    if let Some(id) = id {
+                                        let _ = channel_clone
+                                            .send_error(
+                                                id,
+                                                ERR_INVALID_PARAMS,
+                                                "invalid agent/run params",
+                                            )
+                                            .await;
+                                    }
+                                    continue;
+                                }
+                            };
                             // Extract run_id + agent_id for kill tracking before moving params
                             let agent_run_id = params.run_id.clone();
                             let agent_id_num = params.agent_id;
@@ -429,8 +446,29 @@ impl WorkflowRunner {
                             let ch = Arc::clone(&channel_clone);
                             let progress_for_agent = Arc::clone(&progress_store_clone);
                             tokio::spawn(async move {
-                                // Register agent for single-agent kill (GAP-07)
-                                let cancel_rx = ch.register_agent(&agent_run_id, agent_id_num, id);
+                                // Register agent for single-agent kill (GAP-07). Duplicate active
+                                // IDs are invalid because replacing the entry would orphan the
+                                // original task's cancellation handle.
+                                let Some(cancel_rx) =
+                                    ch.register_agent(&agent_run_id, agent_id_num, id)
+                                else {
+                                    warn!(
+                                        target: "workflow.rpc",
+                                        run_id = %agent_run_id,
+                                        agent_id = agent_id_num,
+                                        "agent/run rejected duplicate active agentId",
+                                    );
+                                    if let Some(id) = id {
+                                        let _ = ch
+                                            .send_error(
+                                                id,
+                                                ERR_INVALID_PARAMS,
+                                                "duplicate active agentId",
+                                            )
+                                            .await;
+                                    }
+                                    return;
+                                };
 
                                 // Execute with cancel support
                                 let result = tokio::select! {

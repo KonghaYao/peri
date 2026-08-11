@@ -1,6 +1,8 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
-use super::{workflow_local_dist_in, AgentExecutor, WorkflowInput, WorkflowRunner};
+use super::{
+    parse_agent_run_params, workflow_local_dist_in, AgentExecutor, WorkflowInput, WorkflowRunner,
+};
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
@@ -26,6 +28,59 @@ impl AgentExecutor for MockAgentExecutor {
             duration_ms: None,
         }
     }
+}
+
+#[test]
+fn test_agent_run_params_preserve_requested_model() {
+    let params = parse_agent_run_params(
+        Some(serde_json::json!({
+            "runId": "run-1",
+            "agentId": 7,
+            "prompt": "inspect",
+            "model": "sonnet"
+        })),
+        "run-1",
+    )
+    .unwrap();
+
+    assert_eq!(params.model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn test_agent_run_params_reject_invalid_model_type() {
+    let result = parse_agent_run_params(
+        Some(serde_json::json!({
+            "runId": "run-1",
+            "agentId": 7,
+            "prompt": "inspect",
+            "model": 42
+        })),
+        "run-1",
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_agent_run_params_reject_missing_params() {
+    assert!(parse_agent_run_params(None, "run-1").is_err());
+}
+
+#[test]
+fn test_agent_run_params_reject_cross_run_identity() {
+    let result = parse_agent_run_params(
+        Some(serde_json::json!({
+            "runId": "other-run",
+            "agentId": 7,
+            "prompt": "inspect"
+        })),
+        "run-1",
+    );
+
+    assert_eq!(
+        result.unwrap_err(),
+        "runId does not match the active workflow run"
+    );
 }
 
 #[test]
