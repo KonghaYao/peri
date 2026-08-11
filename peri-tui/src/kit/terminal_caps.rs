@@ -54,8 +54,6 @@ pub struct SymbolSet {
     pub user_prompt: &'static str,
     /// focused entry 左缘 selection border（§9，U+258C LEFT HALF BLOCK）
     pub focus_border: &'static str,
-    /// reasoning 续行前缀（§8.2 视觉独立 entry，U+23BF）
-    pub reasoning_cont: &'static str,
     /// todo change：Started（进行中）
     pub todo_started: &'static str,
     /// todo change：Reopened（重新打开）
@@ -69,15 +67,14 @@ const UNICODE_SYMBOLS: SymbolSet = SymbolSet {
     success: "\u{2713}", // ✓
     error: "\u{d7}",     // ×
     warning: "!",
-    collapsed: "\u{25b8}",      // ▸
-    expanded: "\u{25be}",       // ▾
-    queued: "\u{b7}",           // ·
-    user_prompt: "\u{203a}",    // ›
-    focus_border: "\u{258c}",   // ▌
-    reasoning_cont: "\u{23bf}", // ⏿
-    todo_started: "\u{25b6}",   // ▶
-    todo_reopened: "\u{21bb}",  // ↻
-    todo_edited: "\u{270e}",    // ✎
+    collapsed: "\u{25b8}",     // ▸
+    expanded: "\u{25be}",      // ▾
+    queued: "\u{b7}",          // ·
+    user_prompt: "\u{203a}",   // ›
+    focus_border: "\u{258c}",  // ▌
+    todo_started: "\u{25b6}",  // ▶
+    todo_reopened: "\u{21bb}", // ↻
+    todo_edited: "\u{270e}",   // ✎
 };
 
 const ASCII_SYMBOLS: SymbolSet = SymbolSet {
@@ -90,7 +87,6 @@ const ASCII_SYMBOLS: SymbolSet = SymbolSet {
     queued: ".",
     user_prompt: ">",
     focus_border: "|",
-    reasoning_cont: "-",
     todo_started: ">",
     todo_reopened: "~",
     todo_edited: "*",
@@ -252,7 +248,6 @@ mod tests {
         assert_eq!(s.user_prompt, "›");
         // 辅助字形保持 Unicode 原形（§12 契约在 ascii 侧降级）
         assert_eq!(s.focus_border, "▌");
-        assert_eq!(s.reasoning_cont, "\u{23bf}"); // 沿用历史码点（视觉 ⏿ 形）
         assert_eq!(s.todo_started, "▶");
         assert_eq!(s.todo_reopened, "↻");
         assert_eq!(s.todo_edited, "✎");
@@ -276,9 +271,8 @@ mod tests {
         assert_eq!(s.expanded, "v");
         assert_eq!(s.queued, ".");
         assert_eq!(s.user_prompt, ">");
-        // 辅助字形（§12 同一降级契约）：▌/⏿/▶/↻/✎ → |/-/>/~/*
+        // 辅助字形（§12 同一降级契约）：▌/▶/↻/✎ → |/>/~/*
         assert_eq!(s.focus_border, "|");
-        assert_eq!(s.reasoning_cont, "-");
         assert_eq!(s.todo_started, ">");
         assert_eq!(s.todo_reopened, "~");
         assert_eq!(s.todo_edited, "*");
@@ -293,7 +287,6 @@ mod tests {
             s.queued,
             s.user_prompt,
             s.focus_border,
-            s.reasoning_cont,
             s.todo_started,
             s.todo_reopened,
             s.todo_edited,

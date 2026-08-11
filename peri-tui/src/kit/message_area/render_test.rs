@@ -476,9 +476,15 @@ fn test_reasoning_running_header_elapsed_tail() {
     // tail ≤ 4 行（t3..t6），t1/t2 被截掉
     let tail_count = lines
         .iter()
-        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{23bf}"))
+        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{2502}"))
         .count();
     assert_eq!(tail_count, 4, "Preview tail 最多 4 行");
+
+    // running 块尾无空行——tail 即块尾，正文未到不预留间隔空行
+    assert!(
+        !lines.last().is_some_and(|l| l.spans.is_empty()),
+        "running 下 reasoning 块尾不应有空行"
+    );
 
     // 空 reasoning：仍渲染 Thinking… header，不出现空白 block
     let empty = TuiReasoningBlock {
@@ -524,8 +530,8 @@ fn test_reasoning_completed_single_line() {
         content_hash: 3,
     });
     let lines = vm_to_lines(&vm, &grid);
-    // 空行 + header 行 + 尾部空行 = 3 行（折叠单行，无 body）
-    assert_eq!(lines.len(), 3);
+    // 单行折叠摘要（无前导/尾部空行——与工具卡片紧凑布局一致）
+    assert_eq!(lines.len(), 1);
     let header = header_of(&lines);
     assert!(header.contains("12s"), "应含冻结时长 12s，实际 {header:?}");
     assert!(
@@ -563,6 +569,40 @@ fn test_reasoning_expanded_body_style() {
     assert!(line_text(&body).contains("body line"), "展开态应渲染正文");
 }
 
+/// Completed + duration_ms = None（历史恢复路径 `handle_committed_assistant_text`，
+/// 推理时长不可得）：摘要省略时长只显示行数——不渲染「思考了 0 秒」噪音。
+#[test]
+fn test_reasoning_completed_no_duration_omits_seconds() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let reasoning = TuiReasoningBlock {
+        text: "body line".to_string(),
+        fold: FoldState::Collapsed,
+        status: EntryStatus::Completed,
+        is_running: false,
+        started_at: None,
+        duration_ms: None,
+    };
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: None,
+        duration_ms: None,
+        text: String::new(),
+        reasoning: Some(reasoning),
+        message_id: None,
+        content_hash: 1,
+    });
+    let lines = vm_to_lines(&vm, &grid);
+    let header = header_of(&lines);
+    assert!(
+        header.contains("Thought ·") && !header.contains("0s"),
+        "无时长降级为 `Thought · 1 line`（不含 0s），实际 {header:?}"
+    );
+    assert!(
+        header.contains("1 lines"),
+        "仍显示行数（对齐工具硬编码 lines 口径），实际 {header:?}"
+    );
+}
+
 /// [Fix §6.3] running + Collapsed（用户 Space 手动折叠）：仅活动状态行
 /// （◐ Thinking…），不渲染 tail——「隐藏 reasoning 只影响 body；活动状态行
 /// 仍需可见」；Space 切换必须有视觉反馈（review F5）。
@@ -591,7 +631,7 @@ fn test_reasoning_running_collapsed_shows_status_line_only() {
     assert!(header.contains("Thinking"), "活动状态行仍可见");
     let tail_count = lines
         .iter()
-        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{23bf}"))
+        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{2502}"))
         .count();
     assert_eq!(
         tail_count, 0,
@@ -630,7 +670,7 @@ fn test_reasoning_completed_preview_maps_to_collapsed_symbol() {
     );
     let tail_count = lines
         .iter()
-        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{23bf}"))
+        .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{2502}"))
         .count();
     assert_eq!(tail_count, 0, "completed+Preview 不渲染正文");
 }

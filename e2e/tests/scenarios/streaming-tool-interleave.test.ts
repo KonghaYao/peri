@@ -11,6 +11,21 @@ import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from ".
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
+/**
+ * reasoning 是否处于展开态：展开时摘要行以 `▾`（U+25BE）开头（如
+ * `▾ Thought for 12s · 14 lines`）；折叠时以 `▸`（U+25B8）开头。摘要为
+ * 硬编码英文（对齐工具卡片口径，§6.4），匹配 `Thought`（含无时长变体
+ * `Thought · N lines`）；保留 zh 关键词匹配以兼容旧版本输出。
+ * 用符号判定而非「摘要后有无正文行」——折叠单行下方就是 md 正文（无空行分隔）。
+ */
+function hasExpandedReasoning(text: string): boolean {
+  return text.split("\n").some(
+    (l) =>
+      l.includes("\u{25be}") && // ▾
+      (l.includes("思考了") || l.includes("Thought")),
+  );
+}
+
 describe("scenarios: streaming + tool interleave", () => {
   let tester: TmuxTester;
 
@@ -71,20 +86,20 @@ describe("scenarios: streaming + tool interleave", () => {
       );
       await waitForStableScreen(tester, 180_000, base);
 
-      // Turn 完成后 reasoning 应按 §7 自动折叠为单行（无 ⏿ tail 前缀行）
+      // Turn 完成后 reasoning 应按 §7 自动折叠为单行（摘要行后无正文行）
       const afterTurn = await tester.getScreenText();
-      expect(afterTurn).not.toContain("\u{23bf}");
+      expect(hasExpandedReasoning(afterTurn)).toBe(false);
 
       // 手动展开：Alt+Up 逐条上移 entry 焦点（显式 CSI 序列 \e[1;3A，裁决 C3），
       // Enter 切换 Collapsed/Expanded。reasoning 可能不在末位 entry
-      // （工具交错时在中间 assistant bubble），循环直至 ⏿ 出现。
+      // （工具交错时在中间 assistant bubble），循环直至展开（摘要行后出现正文）。
       let expanded = false;
       for (let i = 0; i < 12; i++) {
         await tester.sendText("\u001b[1;3A"); // Alt+Up
         await tester.sleep(150);
         await tester.sendKey("enter");
         await tester.sleep(350);
-        if ((await tester.getScreenText()).includes("\u{23bf}")) {
+        if (hasExpandedReasoning(await tester.getScreenText())) {
           expanded = true;
           break;
         }
@@ -96,11 +111,11 @@ describe("scenarios: streaming + tool interleave", () => {
       await sendPrompt(tester, "再简单回答一句话即可。");
       await waitForStableScreen(tester, 180_000, base2);
 
-      // 滚回顶部检查第一轮的 reasoning 仍展开（body tail 的 ⏿ 前缀可见）
+      // 滚回顶部检查第一轮的 reasoning 仍展开（摘要行后正文可见）
       await tester.sendKey("home", { ctrl: true });
       await tester.sleep(400);
       const final = await tester.getScreenText();
-      expect(final).toContain("\u{23bf}");
+      expect(hasExpandedReasoning(final)).toBe(true);
     },
   );
 });

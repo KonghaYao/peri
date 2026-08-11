@@ -134,20 +134,6 @@ fn cont_prefix(grid: &GridSpec) -> Vec<Span<'static>> {
     ]
 }
 
-/// reasoning 续行前缀：`[outer 空][dim ⏿][gap]`。
-///
-/// 与普通块的 dim 竖线区分（§8.2「assistant 与 reasoning 分成视觉独立 entry」），
-/// 并延续历史 ⏿ 标记（E2E/用户肌肉记忆）。字形走符号降级表（§12：Unicode
-/// 能力不足时降级 ASCII，不输出原始 UTF-8 缺字盒）。
-fn reasoning_cont_prefix(grid: &GridSpec) -> Vec<Span<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
-    vec![
-        Span::raw(" "),
-        Span::styled(sym().reasoning_cont, Style::default().fg(sem.text.dim)),
-        Span::raw(" ".repeat(grid.gap as usize)),
-    ]
-}
-
 /// 给一行套上续行前缀；Markdown 段落空行也保留 accent 竖线。
 fn prefixed_cont_line(grid: &GridSpec, line: Line<'static>) -> Line<'static> {
     let mut spans = cont_prefix(grid);
@@ -478,17 +464,21 @@ pub(crate) fn vm_to_lines_cached(
             let mut lines: Vec<Line<'static>> = Vec::new();
 
             // §3.2 垂直节奏：assistant 最终回答与前一过程 entry 之间 1 个空行。
+            // 有 reasoning 时推理块作为过程 entry 紧跟前一 entry——无前导空行
+            // （与 tool activity 一致）；推理与正文之间保留 1 空行（正文权重最高）。
             // 空 bubble（无 text 无 reasoning）仍返回 0 行——沿用历史契约。
             if data.text.is_empty() && data.reasoning.is_none() {
                 return (lines, None, None);
             }
-            lines.push(Line::from(""));
+            if data.reasoning.is_none() {
+                lines.push(Line::from(""));
+            }
 
             // 推理块（§6.3）——视觉独立 entry
             if let Some(ref reasoning) = data.reasoning {
                 lines.extend(render_reasoning_block(reasoning, grid));
-                // 推理与正文之间 1 空行（§3.2 允许；正文权重最高）
-                lines.push(Line::from(""));
+                // 块尾不加空行（running/completed 一致）——与工具卡片紧凑布局
+                // 对齐；正文紧随其后，由 md 渲染自身节奏负责分段。
             }
 
             // Markdown 文本——wrap 在 content 列宽，行级再套统一前缀
@@ -681,7 +671,7 @@ fn emphasize_user_line(
 /// §6.3 Reasoning 三态视觉。
 ///
 /// - Running/Preview：`[◐][gap]Thinking…`（bold, status.running）+ elapsed（三档放置）
-///   + 最近 ≤4 行 tail（muted+italic，无 italic → dim；⏿ 前缀区分于普通块）。
+///   + 最近 ≤4 行 tail（muted+italic，无 italic → dim；`│` 续行前缀与 md 正文一致）。
 /// - Completed/Collapsed：单行 `[▸][gap]Thought for 12s · 14 lines`。
 /// - Completed/Expanded：`[▾][gap]Thought for 12s · 14 lines` + 正文（≤100 行）。
 /// - 空 reasoning 仍显示 `Thinking…`（不出现空白 block）。
@@ -710,11 +700,12 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
         // 「隐藏 reasoning 只影响 body；活动状态行仍需可见」（§7 running 默认
         // Preview，Collapsed 只能来自用户覆盖——Space 切换必须有视觉反馈）。
         let mut spans = first_prefix(grid, sym().running, Style::default().fg(sem.status.running));
+        // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
+        // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
+        // ◐（running 色）承担。
         spans.push(Span::styled(
-            i18n::tr("msg-thinking"),
-            Style::default()
-                .fg(sem.status.running)
-                .add_modifier(Modifier::BOLD),
+            "Thinking…",
+            Style::default().fg(sem.text.muted),
         ));
         let used: usize = spans.iter().map(|s| s.content.width()).sum();
         let elapsed = format!("{}s", reasoning.duration_secs());
@@ -740,7 +731,7 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
             if tail.trim().is_empty() {
                 continue;
             }
-            let mut spans = reasoning_cont_prefix(grid);
+            let mut spans = cont_prefix(grid);
             spans.push(Span::styled(
                 truncate_by_width(tail, grid.content_width()),
                 body_style,
@@ -757,18 +748,21 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
         } else {
             sym().collapsed
         };
-        let summary = i18n::tr_args(
-            "render-thought-completed",
-            &[
-                (
-                    "duration".to_string(),
-                    FluentValue::from(reasoning.duration_secs()),
-                ),
-                ("lines".to_string(), FluentValue::from(line_count as u64)),
-            ],
-        );
+        // 对齐工具卡片（§6.4 硬编码英文后缀口径）：`Thought for 12s · 26 lines`
+        // / `Thought · 26 lines`（时长不可得降级）。语言对齐工具区域（避免中英
+        // 混杂）；信息层级低于工具——整行 dim（icon + 摘要；工具主干为
+        // primary/syntax 色，dim 与其最低后缀级持平）。
+        let summary = if reasoning.duration_ms.is_some() {
+            format!(
+                "Thought for {}s · {} lines",
+                reasoning.duration_secs(),
+                line_count
+            )
+        } else {
+            format!("Thought · {} lines", line_count)
+        };
         let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
-        spans.push(Span::styled(summary, Style::default().fg(sem.text.muted)));
+        spans.push(Span::styled(summary, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
 
         if reasoning.fold == FoldState::Expanded {
@@ -776,7 +770,7 @@ fn render_reasoning_block(reasoning: &TuiReasoningBlock, grid: &GridSpec) -> Vec
                 if body_line.trim().is_empty() {
                     continue;
                 }
-                let mut spans = reasoning_cont_prefix(grid);
+                let mut spans = cont_prefix(grid);
                 spans.push(Span::styled(
                     truncate_by_width(body_line, grid.content_width()),
                     body_style,

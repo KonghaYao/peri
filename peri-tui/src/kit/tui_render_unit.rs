@@ -793,6 +793,9 @@ impl TuiReasoningBlock {
 
     /// [G1] 推理时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
     /// 触发按秒重建刷新时长文本），Completed 按冻结秒数（稳定）。
+    /// Completed 且 `duration_ms` 为 None（历史恢复路径，时长不可得）→ 特殊码
+    /// `u64::MAX`，与 `Some(0)` 区分——渲染层省略时长（`思考了 · N 行`），
+    /// 文本与 `思考了 0 秒 · N 行` 不同，hash 必须不同（防渲染缓存陈旧帧）。
     pub fn duration_code(&self) -> u64 {
         if self.is_running {
             let ms = self
@@ -801,7 +804,7 @@ impl TuiReasoningBlock {
                 .unwrap_or(0);
             ms / 1000
         } else {
-            self.duration_ms.unwrap_or(0) / 1000
+            self.duration_ms.map(|ms| ms / 1000).unwrap_or(u64::MAX)
         }
     }
 
