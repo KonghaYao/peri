@@ -97,6 +97,18 @@ impl TuiRenderUnit {
             Self::TuiTodoSummary(d) => d.content_hash,
         }
     }
+
+    /// 该 VM 是否渲染运行中动画符号（tool running / subagent running /
+    /// reasoning running，§8.2）——渲染缓存需按动画帧强制重建，使 braille
+    /// 动画随壁钟 tick 推进（hash 可能跨秒才变化，不足以驱动 10Hz 动画）。
+    pub fn is_animating(&self) -> bool {
+        match self {
+            Self::TuiToolCard(d) => d.is_running,
+            Self::TuiSubAgentGroup(d) => d.is_running,
+            Self::TuiAssistantBubble(d) => d.reasoning.as_ref().is_some_and(|r| r.is_running),
+            _ => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

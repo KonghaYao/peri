@@ -36,6 +36,9 @@ pub struct GridSpec {
     pub gap: u16,
     /// content 列宽（所有 entry 正文共享左起点；≤ 100）。
     pub content: u16,
+    /// 消息区总宽度（grid_for 传入的终端宽；with_content 为 content+2）——
+    /// metadata 右对齐到 `term_width - 1`（跳过滚动条列，§6.4 整行铺满）。
+    pub term_width: u16,
     /// 当前断点。
     pub bp: Breakpoint,
 }
@@ -68,14 +71,18 @@ impl GridSpec {
             accent: 1,
             gap,
             content,
+            term_width,
             bp,
         }
     }
 
     /// 直接指定 content 列宽的构造器（测试 / 嵌套渲染用），断点按宽度归类。
+    /// term_width 取 `content + 2`（outer 1 + 滚动条 1）——嵌套面板（subagent
+    /// 详情）的实际宽度即此值，metadata 右对齐到面板右缘。
     pub fn with_content(content: u16) -> Self {
         let mut g = Self::grid_for(content.saturating_add(6).max(7));
         g.content = content.max(1);
+        g.term_width = content.max(1).saturating_add(2);
         g
     }
 
@@ -147,6 +154,17 @@ mod tests {
         assert_eq!(GridSpec::grid_for(60).gap, 2);
         assert_eq!(GridSpec::grid_for(59).gap, 1);
         assert_eq!(GridSpec::grid_for(39).gap, 1);
+    }
+
+    /// term_width：grid_for 记录终端宽度（metadata 右对齐到 term_width - 1）；
+    /// with_content 按嵌套面板实际宽度（content + 2）记录。
+    #[test]
+    fn term_width_recorded() {
+        assert_eq!(GridSpec::grid_for(120).term_width, 120);
+        assert_eq!(GridSpec::grid_for(80).term_width, 80);
+        let nested = GridSpec::with_content(100);
+        assert_eq!(nested.term_width, 102, "嵌套面板宽 = content + 2");
+        assert_eq!(nested.content, 100);
     }
 
     /// 整行宽度（含前缀与滚动条列）不超过终端宽度——行渲染器按此保证不换行。

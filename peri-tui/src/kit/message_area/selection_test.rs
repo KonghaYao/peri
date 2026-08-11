@@ -458,7 +458,9 @@ fn sel_env(
     im::Vector<TuiRenderUnit>,
 ) {
     let lines = vm_to_lines(&vm, grid);
-    let (_, wm) = build_wrap_map(&lines, grid.total_width() as u16);
+    // 视宽与生产一致：消息区右缘（term_width - 1，跳过滚动条列）——metadata
+    // 右对齐到该列，宽于此值会在 wrap_map 二次折行。
+    let (_, wm) = build_wrap_map(&lines, grid.term_width.saturating_sub(1));
     let wm: Vec<WrappedLineInfo> = wm
         .into_iter()
         .map(|mut e| {

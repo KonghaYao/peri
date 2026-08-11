@@ -380,6 +380,9 @@ struct VmCacheSlot {
     /// 与列区间）。None = 非 pending interaction。rebuild 时随 lines 重建，
     /// 供视口 post-pass 应用「当前项」高亮与点击热区。
     interaction: Option<render::InteractionLayout>,
+    /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
+    /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
+    anim_frame: u64,
 }
 
 /// md 复制按钮的屏幕点击区域（每帧由渲染 body 构建，点击 handler 实时读取）。
@@ -543,6 +546,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // item_hashes 同一次扫描派生（原独立 O(N) 循环合并——每帧至多一次全量
     // 遍历；同一时刻至多一个 pending block（模态互斥），break 语义保留）。
     let mut anchor_slot: Option<usize> = None;
+    // §8.2 动画帧：100ms 粒度壁钟 tick——running 类 VM 每帧重建以推进
+    // braille 动画（与 render.rs anim_tick 同公式同源）。
+    let anim_frame = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64 / 100)
+        .unwrap_or(0);
+    // running 类 VM 标记（tool/subagent/reasoning running）——与 hash 同一次
+    // 扫描派生，rebuild 判定按帧强制重建这些 slot。
+    let mut running_flags: Vec<bool> = Vec::with_capacity(snapshot.items.len());
     let item_hashes: Vec<u64> = snapshot
         .items
         .iter()
@@ -552,6 +564,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             {
                 anchor_slot = Some(i);
             }
+            running_flags.push(vm.is_animating());
             vm.content_hash()
         })
         .collect();
@@ -584,6 +597,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     || slot.width != vis_width
                     || slot.palette_key != current_palette_key
                     || slot.lang_key != LANG_VERSION.get()
+                    // §8.2 running 类 VM 按动画帧强制重建（hash 可能跨秒才变）
+                    || (running_flags[i] && slot.anim_frame != anim_frame)
                 {
                     Some(i)
                 } else {
@@ -632,6 +647,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             slot.width = vis_width;
             slot.palette_key = current_palette_key;
             slot.lang_key = LANG_VERSION.get();
+            slot.anim_frame = anim_frame;
             slot.lines = lines;
             slot.wrap_map = Arc::new(wm);
             slot.visual_rows = visual_rows;
@@ -966,20 +982,29 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             if scroll::is_scrollbar_column(mouse.column, area) {
                 return EventResult::Ignored;
             }
-            // 拖拽释放（选区复制）放行给 scroll::handle_event 的 Up 分支
-            if text_sel.read().dragging {
-                return EventResult::Ignored;
-            }
+            // [Fix click] 单击判定只用 Down/Up 距离（is_click 容差），不检查
+            // text_sel.dragging：终端按下后任何微移都会报 Drag 事件（无阈值），
+            // start_drag 无条件置 dragging=true——若据此放行，手抖一次展开就
+            // 永不触发（用户体感"点击完全没反应"）。真实拖拽选择（距离超容差）
+            // 由下方 is_click=false 放行给 scroll::handle_event 的 Up 分支复制。
             // 单击判定：Down 锚点 + 手抖容差（无 Drag = 未移动；容差防事件丢失）
             let Some(down) = *selection_down_pos.read() else {
                 return EventResult::Ignored;
             };
-            let up = (usize::from(mouse.row), mouse.column);
+            // [坐标空间] Down 锚点（scroll.rs Down 分支）以视觉坐标写入
+            // selection_down_pos：`row - area.y + scroll_y`。Up 必须以相同视觉
+            // 坐标构造后比较，否则滚动（scroll_y > 0）或网格前缀（area.x > 0）
+            // 下原地单击被误判为拖拽意图（容差仅 ±1 行/±2 列），展开永不触发。
+            // 视觉行同时复用于 entry_click_target（下方不再二次换算）。
+            let scroll_y = scroll_state.read().offset();
+            let up = (
+                usize::from(mouse.row).saturating_sub(usize::from(area.y)) + scroll_y,
+                mouse.column.saturating_sub(area.x),
+            );
             if !scroll::is_click(down, up) {
                 return EventResult::Ignored;
             }
-            let scroll_y = scroll_state.read().offset();
-            let visual_row = up.0.saturating_sub(usize::from(area.y)) + scroll_y;
+            let visual_row = up.0;
             let Some((slot, 0)) = scroll::entry_click_target(
                 &wrap_map_for_click,
                 &slot_offsets_for_click,
@@ -1192,6 +1217,35 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 _ => EventResult::Ignored,
             }
         });
+    }
+
+    // ── 焦点同步：外部清除 FOCUSED_ENTRY_KEY（点击输入框回到输入态）→ 收敛
+    // 清除局部 entry_focus（索引轨道无法被外部组件直接写）。否则点击展开后
+    // 焦点回输入框，Enter 仍被消息区仲裁消费为折叠切换，输入框提交失效。
+    // [Why effect] 副作用写 use_state 放在 effect 边界（TUI-RENDER-001）；
+    // 订阅 atom 保证清除发生时本组件重渲染并执行 effect。
+    {
+        let focus_state = entry_focus;
+        let option_state = interaction_option;
+        let _focused_key_atom = hooks.use_atom(&FOCUSED_ENTRY_KEY);
+        // [Clone] Option<FoldKey> 非 Copy——read 引用 clone（FoldKey 身份键）。
+        let focused_key_now = _focused_key_atom.read().clone();
+        let prev_focused_key = hooks.use_state(|| focused_key_now.clone());
+        // 依赖（Some→None 边沿才执行）：FoldKey 非 Copy，依赖项独立 clone。
+        let deps = (focused_key_now.clone(),);
+        hooks.use_effect(
+            move || {
+                // Some→None 边沿（外部清除：点击输入框回到输入态）→ 退出导航
+                if focused_key_now.is_none() && prev_focused_key.read().is_some() {
+                    *focus_state.write() = None;
+                    *option_state.write() = 0;
+                    tracing::trace!(target: "frozen_diag", "focus sync: entry nav exited (input clicked)");
+                }
+                // 回写当帧值——use_state 非自动更新，不留存则边沿检测失效
+                *prev_focused_key.write() = focused_key_now.clone();
+            },
+            deps,
+        );
     }
 
     let prev_total_visual_rows = hooks.use_state(|| 0usize);

@@ -2,7 +2,8 @@
 //!
 //! 约定：
 //! - 渲染宽度一律用 `GridSpec::grid_for(term)`（content = term-6），wrap_map
-//!   以 `term` 为宽构建——行渲染器保证「行宽 ≤ content + 前缀 < term」，不折行。
+//!   以 `term` 为宽构建——行渲染器保证「行宽 ≤ term_width - 1 < term，
+//!   不折行」（metadata 右对齐到消息区右缘，§6.4）。
 //! - 前缀结构（§3.1）：首行 `[outer 空][accent 符号][gap]`，续行 `[outer 空][│][gap]`。
 
 use super::*;
@@ -43,6 +44,17 @@ fn nth_nonempty_line(lines: &[Line<'static>], n: usize) -> Line<'static> {
         .nth(n)
         .cloned()
         .unwrap_or_default()
+}
+
+/// running 符号帧判定：unicode 终端 braille 动画帧或 ASCII 降级 `*`（§8.2）。
+/// 动画帧由壁钟 tick 推进，测试不依赖具体帧值。
+fn is_running_frame(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(
+            c,
+            '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏' | '*'
+        )
+    })
 }
 
 /// 构造 reasoning 块（默认 completed + collapsed）。
@@ -272,6 +284,36 @@ fn test_prefix_structure_first_and_continuation() {
             .sum::<usize>(),
         grid.cont_prefix_width()
     );
+}
+
+/// 用户与 AI 正文左侧竖线分别使用次等色和主题色。
+#[test]
+fn test_message_line_colors_follow_role_tokens() {
+    let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
+
+    let user = vm_to_lines(
+        &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
+            "user message".into(),
+        )),
+        &grid,
+    );
+    assert_eq!(user[1].spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(user[1].spans[1].style.fg, Some(sem.text.secondary));
+
+    let assistant = vm_to_lines(
+        &TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "assistant message".into(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 1,
+        }),
+        &grid,
+    );
+    assert_eq!(assistant[1].spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(assistant[1].spans[1].style.fg, Some(sem.accent));
 }
 
 /// Narrow 断点：首行 accent 符号退化为 dim bullet（§11）。
@@ -783,7 +825,7 @@ fn test_reasoning_truncate_no_wrap() {
 
 // ── Tool activity 行（§6.4）────────────────────────────────────────────
 
-/// 完成工具：`✓ {Verb} {summary}` 单行；summary 用 syntax.path（Read 路径）。
+/// 完成工具：`✓ {Verb} {summary}` 单行；summary 用 muted 暗色（§6.4 不抢 label）。
 #[test]
 fn test_tool_completed_single_line_with_path_color() {
     let grid = GridSpec::grid_for(80);
@@ -801,12 +843,12 @@ fn test_tool_completed_single_line_with_path_color() {
         .expect("路径 span");
     assert_eq!(
         path_span.style.fg,
-        Some(sem.syntax.path),
-        "路径应使用 syntax.path"
+        Some(sem.text.muted),
+        "路径 summary 应使用 muted 暗色（不抢 label）"
     );
 }
 
-/// Bash 首行 command 用 syntax.command；展开态显示 `$ command` 行。
+/// Bash 首行 command summary 用 muted 暗色；展开态显示 `$ command` 行（syntax.command）。
 #[test]
 fn test_tool_bash_command_and_expanded_dollar_line() {
     let grid = GridSpec::grid_for(80);
@@ -821,8 +863,8 @@ fn test_tool_bash_command_and_expanded_dollar_line() {
         .expect("command span");
     assert_eq!(
         cmd_span.style.fg,
-        Some(sem.syntax.command),
-        "Bash command 应使用 syntax.command"
+        Some(sem.text.muted),
+        "Bash command summary 应使用 muted 暗色"
     );
 
     let expanded = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -883,12 +925,12 @@ fn test_tool_error_splits_and_uses_error_color() {
     }
 }
 
-/// duration 三档：Wide 右对齐 / Standard 紧跟 / Compact+Narrow 隐藏。
+/// duration 三档：Wide/Standard 右对齐到屏幕右缘 / Compact+Narrow 隐藏。
 #[test]
 fn test_tool_duration_three_tiers() {
     let card = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false)); // 37ms
 
-    // Wide（term=120, content=100）：右对齐 → 行末 = 时长，行宽 = content+前缀
+    // Wide（term=120, content=100）：右对齐 → 行末 = 时长，行宽铺满到右缘（term-1）
     let wide = GridSpec::grid_for(120);
     let lines = vm_to_lines(&card, &wide);
     let text = line_text(&lines[0]);
@@ -898,15 +940,18 @@ fn test_tool_duration_three_tiers() {
     );
     assert_eq!(
         lines[0].width(),
-        wide.first_prefix_width() + wide.content_width(),
-        "Wide 行应铺满 content 列"
+        wide.term_width.saturating_sub(1) as usize,
+        "Wide 行应铺满到消息区右缘（跳过滚动条列）"
     );
 
-    // Standard（term=80, content=74）：紧跟 summary
+    // Standard（term=80, content=74）：同样右对齐（不紧跟 summary）
     let std = GridSpec::grid_for(80);
     let lines = vm_to_lines(&card, &std);
     let text = line_text(&lines[0]);
-    assert!(text.contains("37ms"), "Standard 时长应紧跟，实际 {text:?}");
+    assert!(
+        text.trim_end().ends_with("37ms"),
+        "Standard 时长应右对齐在行尾，实际 {text:?}"
+    );
 
     // Compact（term=50）与 Narrow（term=30）：隐藏非关键 duration（§11）
     for term in [50u16, 30] {
@@ -919,14 +964,18 @@ fn test_tool_duration_three_tiers() {
     }
 }
 
-/// 运行中工具：◐ + 活动行（无输出 dump）。
+/// 运行中工具：braille 动画帧 + 活动行（无输出 dump）。
 #[test]
 fn test_tool_running_symbol_and_no_output() {
     let grid = GridSpec::grid_for(80);
     let vm = TuiRenderUnit::TuiToolCard(tool_card("Bash", "sleep 6", false, true));
     let lines = vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 1, "running 无输出 → 单活动行");
-    assert!(header_of(&lines).contains('\u{25d0}'), "running 符号 ◐");
+    assert!(
+        is_running_frame(&header_of(&lines)),
+        "running 符号应为 braille 动画帧（§8.2），实际 {:?}",
+        header_of(&lines)
+    );
 }
 
 /// [Fix F6 §11] Compact/Narrow 断点：tool 展开体最多 2 行（§11「tool summary
@@ -1031,49 +1080,209 @@ fn subagent_group(children: im::Vector<TuiRenderUnit>, is_running: bool) -> TuiR
     })
 }
 
-/// 子 agent 渲染为单行（不递归内联铺开），running 摘要更新不改前缀列。
+/// §6.7 running 子 agent：显示最近 ≤3 个子工具调用行（最新在前）。
+/// 工具行为嵌套从属弱化形态（设计文档 §3）：续行竖线 + 2 格缩进 + 无 bold label
+/// + dim 符号——与主时间轴 tool activity row（bold primary + 状态色）差异化。
 #[test]
-fn test_subagent_single_line_and_stable_prefix() {
+fn test_subagent_running_shows_recent_tool_lines() {
     let grid = GridSpec::grid_for(80);
+    let children = im::Vector::from(vec![
+        TuiRenderUnit::TuiToolCard(tool_card("Read", "file-a.rs", false, false)),
+        TuiRenderUnit::TuiToolCard(tool_card("Glob", "src/**/*.rs", false, false)),
+        TuiRenderUnit::TuiToolCard(tool_card("Bash", "cargo test", false, false)),
+        // 最新子工具仍在运行
+        TuiRenderUnit::TuiToolCard(tool_card("Read", "file-d.rs", false, true)),
+    ]);
+    let running = subagent_group(children, true);
+    let lines = vm_to_lines(&running, &grid);
 
-    let child_tool = |summary: &str, is_error: bool| {
-        TuiRenderUnit::TuiToolCard(tool_card("Read", summary, is_error, false))
-    };
-    let running = subagent_group(
-        im::Vector::from(vec![child_tool("Inspecting file A", false)]),
-        true,
-    );
-    let lines1 = vm_to_lines(&running, &grid);
-    assert_eq!(lines1.len(), 1, "子 agent = 单行，不内联嵌套消息");
-    let header1 = header_of(&lines1);
-    assert!(header1.contains("Agent explorer"), "名称可见");
-    assert!(header1.contains("Inspecting file A"), "activity 可见");
-    assert!(header1.contains("1 tools"), "tool 数可见，实际 {header1:?}");
-    assert!(!header1.contains("\u{2713}"), "running 不用 ✓");
-
-    // activity 变化：前缀（outer+符号+名称定宽）宽度不变
-    let lines2 = vm_to_lines(
-        &subagent_group(
-            im::Vector::from(vec![child_tool("Inspecting file B", false)]),
-            true,
-        ),
-        &grid,
-    );
-    let prefix_width = |l: &Line<'static>| -> usize {
-        l.spans
-            .iter()
-            .take_while(|s| !s.content.as_ref().contains("Inspecting"))
-            .map(|s| s.content.width())
-            .sum()
-    };
+    // 最多 3 行（SUBAGENT_TOOL_LINES），反向取最近工具，最新在前
     assert_eq!(
-        prefix_width(&lines1[0]),
-        prefix_width(&lines2[0]),
-        "running 摘要更新不应改变前缀列"
+        lines.len(),
+        3,
+        "最多显示最近 3 个工具行，实际 {}",
+        lines.len()
+    );
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    assert!(
+        texts[0].contains("file-d.rs") && texts[0].contains("Read"),
+        "最新工具在最前，实际 {texts:?}"
+    );
+    assert!(
+        texts[1].contains("cargo test") && texts[1].contains("Shell"),
+        "次新工具（Bash → Shell），实际 {texts:?}"
+    );
+    assert!(texts[2].contains("Glob"), "第三新工具，实际 {texts:?}");
+    assert!(
+        !texts[0].contains("file-a.rs"),
+        "超过 3 个的旧工具不显示，实际 {texts:?}"
+    );
+
+    // running 工具行用动画符号（braille 帧 / ASCII *）
+    assert!(
+        is_running_frame(&header_of(&lines)),
+        "running 工具行用动画符号，实际 {:?}",
+        texts[0]
+    );
+
+    // 首列结构：`[outer 空][│][gap][2 格缩进]`（设计文档 §11 层级结构）——
+    // 工具行永远不是独立 entry 首行（不再用 first_prefix），正文起点 = content + 2
+    let sem = THEME_ATOM.state().read().semantic;
+    let s = &lines[0].spans;
+    assert_eq!(s[0].content, " ", "outer 空列");
+    assert_eq!(s[1].content, "\u{2502}", "续行竖线");
+    assert_eq!(s[2].content, "  ", "gap（80 列 = 2）");
+    assert_eq!(s[3].content, "  ", "2 格缩进 SUBAGENT_TOOL_INDENT");
+    // 符号 span（符号 + 分隔空格）dim 色（P2 低显著，对照主时间线 status.running）
+    assert_eq!(
+        s[4].style.fg,
+        Some(sem.text.dim),
+        "running 符号 fg = text.dim，实际 {:?}",
+        s[4].style
+    );
+    // Verb span 无 BOLD（P2 权重弱化——bold 是主时间线工具的专属锚点）
+    let verb = lines[0]
+        .spans
+        .iter()
+        .find(|sp| sp.content == "Read")
+        .expect("Verb span");
+    assert!(
+        !verb.style.add_modifier.contains(Modifier::BOLD),
+        "label 无 bold，实际 {:?}",
+        verb.style
+    );
+
+    // completed 工具行 duration 右对齐在行尾
+    assert!(
+        texts[1].trim_end().ends_with("37ms"),
+        "completed 工具行 duration 在行尾，实际 {:?}",
+        texts[1]
     );
 }
 
-/// failed 子 agent：× + 原因行；completed：✓ + 结果摘要。
+/// §6.7 running 子 agent 但子工具尚未路由：回退单行 activity 摘要。
+#[test]
+fn test_subagent_running_no_tools_falls_back_to_summary() {
+    let grid = GridSpec::grid_for(80);
+    let running = subagent_group(im::Vector::new(), true);
+    let lines = vm_to_lines(&running, &grid);
+    assert_eq!(lines.len(), 1, "无工具 → 单行摘要");
+    let header = header_of(&lines);
+    assert!(
+        header.contains("Agent explorer"),
+        "名称可见，实际 {header:?}"
+    );
+    assert!(is_running_frame(&header), "running 符号为动画帧");
+}
+
+/// Narrow 断点：符号位省略（设计文档 §6 断点表）——`[outer][│][gap=1][2 格缩进]`
+/// 后直接是 Verb，无 braille/✓/× 字符；错误信号由错误词与原因行兜底。
+#[test]
+fn test_subagent_tool_line_narrow_omits_symbol() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(30); // Narrow: gap=1
+    let running = subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Read",
+            "src/main.rs",
+            false,
+            true,
+        ))]),
+        true,
+    );
+    let lines = vm_to_lines(&running, &grid);
+    assert_eq!(lines.len(), 1, "1 个工具行，实际 {}", lines.len());
+    let s = &lines[0].spans;
+    assert_eq!(s[0].content, " ", "outer 空列");
+    assert_eq!(s[1].content, "\u{2502}", "续行竖线");
+    assert_eq!(s[2].content, " ", "Narrow gap=1");
+    assert_eq!(s[3].content, "  ", "2 格缩进 SUBAGENT_TOOL_INDENT");
+    let text = line_text(&lines[0]);
+    assert!(
+        !is_running_frame(&text) && !text.contains('✓') && !text.contains('×'),
+        "Narrow 无符号位，实际 {text:?}"
+    );
+    assert!(
+        text.contains("Read") && text.contains("src/main.rs"),
+        "Verb + summary 保留，实际 {text:?}"
+    );
+    // 无 duration（§11 Compact/Narrow 隐藏非关键 duration——place_meta 既有行为）
+    assert!(
+        !text.trim_end().chars().any(|c| c.is_ascii_digit()),
+        "Narrow 无 duration，实际 {text:?}"
+    );
+}
+
+/// §6.7 running 子 agent 已有失败工具：工具行 + 原因行。
+/// error 工具行符号升级 status.error + ` — Failed` 错误词（P3 错误不弱化）；
+/// 原因行缩进与工具行同列对齐（设计文档 §5）。
+#[test]
+fn test_subagent_running_with_failed_tool_shows_reason() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
+    let children = im::Vector::from(vec![
+        TuiRenderUnit::TuiToolCard(tool_card("Grep", "src", true, false)),
+        TuiRenderUnit::TuiToolCard(tool_card("Read", "a.rs", false, true)),
+    ]);
+    let running = subagent_group(children, true);
+    let lines = vm_to_lines(&running, &grid);
+    // 行序：最近工具行（Read running）→ error 工具行（Grep）→ 原因行
+    assert_eq!(lines.len(), 3, "工具行 ×2 + 原因行，实际 {}", lines.len());
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    assert!(
+        texts[2].contains("Error: something went wrong"),
+        "失败原因行可见，实际 {texts:?}"
+    );
+
+    // error 工具行：× 符号 + ` — Failed` 错误词
+    let err_text = line_text(&lines[1]);
+    assert!(
+        err_text.contains('\u{d7}'),
+        "失败工具行用 × 符号，实际 {err_text:?}"
+    );
+    assert!(
+        err_text.contains(" \u{2014} Failed"),
+        "error 行含 ` — Failed` 错误词，实际 {err_text:?}"
+    );
+    // error 符号 span fg = status.error（P3 升级，对照 running/success 的 text.dim）
+    let sym_span = lines[1]
+        .spans
+        .iter()
+        .find(|sp| sp.content.contains('\u{d7}'))
+        .expect("error 符号 span");
+    assert_eq!(
+        sym_span.style.fg,
+        Some(sem.status.error),
+        "error 符号 fg = status.error，实际 {:?}",
+        sym_span.style
+    );
+    // 错误词 span：bold + error 色（§6.4 主时间线同款）
+    let failed_span = lines[1]
+        .spans
+        .iter()
+        .find(|sp| sp.content.contains("Failed"))
+        .expect("错误词 span");
+    assert_eq!(
+        failed_span.style.fg,
+        Some(sem.status.error),
+        "错误词 fg = status.error，实际 {:?}",
+        failed_span.style
+    );
+    assert!(
+        failed_span.style.add_modifier.contains(Modifier::BOLD),
+        "错误词 bold，实际 {:?}",
+        failed_span.style
+    );
+    // 原因行与工具行同列对齐（`[outer 空][│][gap][2 格缩进]` 前缀）
+    assert!(
+        texts[2].starts_with(" \u{2502}    "),
+        "原因行缩进与工具行对齐，实际 {:?}",
+        texts[2]
+    );
+}
+
+/// failed 子 agent：× + 原因行（缩进与工具行对齐）；completed：✓ + 结果摘要。
 #[test]
 fn test_subagent_failed_reason_line_and_completed() {
     let grid = GridSpec::grid_for(80);
@@ -1089,6 +1298,14 @@ fn test_subagent_failed_reason_line_and_completed() {
     assert!(
         text.contains("Error: something went wrong"),
         "failed 原因行可见"
+    );
+    // 原因行（非 running 分支同样走 cont_prefix + 2 格缩进，与工具行同列）
+    assert!(
+        text.lines()
+            .nth(1)
+            .unwrap_or("")
+            .starts_with(" \u{2502}    "),
+        "failed 原因行缩进对齐，实际 {text:?}"
     );
 
     let completed = subagent_group(
@@ -1578,11 +1795,8 @@ fn test_wide_aligned_meta_not_truncated_by_fit() {
         text.contains("1 \u{6b21}\u{5de5}\u{5177}") || text.contains("1 tools"),
         "Wide 下 tool count 不应被截断，实际 {text:?}"
     );
-    // 行宽 = 前缀 + content（右对齐铺满）
-    assert_eq!(
-        lines[0].width(),
-        wide.first_prefix_width() + wide.content_width()
-    );
+    // 行宽 = 消息区右缘（term_width - 1，右对齐铺满）
+    assert_eq!(lines[0].width(), wide.term_width.saturating_sub(1) as usize);
 }
 
 // ── Slice 1：空 reasoning 占位渲染（§6.3）+ assistant 时长（§6.2）────────
@@ -1667,7 +1881,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
         vm_to_lines(&vm, &GridSpec::grid_for(term))
     };
 
-    // Wide（120）：正文末行右对齐含 12.4s，行总宽 = 前缀 + content
+    // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到消息区右缘（term-1）
     let wide = mk(120);
     let last = wide.iter().rev().find(|l| !l.spans.is_empty()).unwrap();
     let text = line_text(last);
@@ -1675,11 +1889,11 @@ fn test_assistant_duration_meta_three_breakpoints() {
     let g = GridSpec::grid_for(120);
     assert_eq!(
         last.width(),
-        g.first_prefix_width() + g.content_width(),
-        "Wide 右对齐铺满 content 列"
+        g.term_width.saturating_sub(1) as usize,
+        "Wide 右对齐铺满到消息区右缘"
     );
 
-    // Standard（80）：duration 紧跟正文（` 12.4s`）
+    // Standard（80）：duration 也右对齐（不再紧跟正文）
     let std_lines = mk(80);
     let last = std_lines
         .iter()
@@ -1692,8 +1906,8 @@ fn test_assistant_duration_meta_three_breakpoints() {
         "Standard 应显示 12.4s，实际 {text:?}"
     );
     assert!(
-        text.ends_with("12.4s"),
-        "Standard 紧跟正文末尾，实际 {text:?}"
+        text.trim_end().ends_with("12.4s"),
+        "Standard 右对齐在行尾，实际 {text:?}"
     );
 
     // Compact（48）：隐藏非关键 duration
@@ -2129,6 +2343,67 @@ fn test_semantic_tool_header() {
     let vm = TuiRenderUnit::TuiToolCard(bash_expanded);
     let sem = sem_at(&vm, 0, &grid).expect("header 行");
     assert_eq!(sem, "Shell", "展开态 header 只留 label（显示名）");
+}
+
+/// §8 子 agent 工具行语义复制：`{Verb} {summary}`（与主时间线 tool header 同口径，
+/// 无符号、无 duration、无缩进/竖线）；原因行 → 纯错误正文（剥缩进）；顶层
+/// 单行摘要（非 running）走默认剥离。
+#[test]
+fn test_semantic_subagent_tool_line() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let children = im::Vector::from(vec![
+        TuiRenderUnit::TuiToolCard(tool_card("Grep", "pattern: x", true, false)),
+        TuiRenderUnit::TuiToolCard(tool_card("Bash", "cargo test", false, false)),
+        TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, true)),
+    ]);
+    let running = subagent_group(children, true);
+    // 行序：Read（running）/ Bash（completed）/ Grep（error）/ 原因行
+    // ——running 有工具时无顶层单行摘要（render_subagent_group_lines 早退）
+    let lines = vm_to_lines(&running, &grid);
+    assert_eq!(lines.len(), 4, "3 工具行 + 原因行，实际 {}", lines.len());
+
+    let sem_read = sem_at(&running, 0, &grid).expect("Read 工具行");
+    assert_eq!(sem_read, "Read src/main.rs", "实际: {sem_read:?}");
+    let sem_bash = sem_at(&running, 1, &grid).expect("Bash 工具行");
+    assert_eq!(
+        sem_bash, "Shell cargo test",
+        "Bash → Shell 本地化，实际: {sem_bash:?}"
+    );
+    let sem_grep = sem_at(&running, 2, &grid).expect("Grep 工具行");
+    assert_eq!(sem_grep, "Grep pattern: x", "实际: {sem_grep:?}");
+    // 原因行 → 纯错误正文（剥缩进）
+    let sem_reason = sem_at(&running, 3, &grid).expect("原因行");
+    assert_eq!(
+        sem_reason, "Error: something went wrong",
+        "实际: {sem_reason:?}"
+    );
+    // 语义不含 chrome：无 ✓/×/竖线、无前导空格（§11 语义复制要点）
+    for s in [&sem_read, &sem_bash, &sem_grep] {
+        assert!(
+            !s.contains('\u{2713}') && !s.contains('\u{d7}') && !s.contains('\u{2502}'),
+            "无符号/竖线 chrome，实际: {s:?}"
+        );
+        assert!(!s.starts_with(' '), "无前导空格，实际: {s:?}");
+    }
+
+    // 非 running（单行摘要 + 原因行）：顶层行默认剥离；原因行剥缩进
+    let failed = subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Grep", "src", true, false,
+        ))]),
+        false,
+    );
+    let sem_top = sem_at(&failed, 0, &grid).expect("顶层行");
+    assert!(
+        sem_top.contains("Agent explorer") && !sem_top.starts_with(' '),
+        "顶层行默认剥离，实际: {sem_top:?}"
+    );
+    let sem_failed_reason = sem_at(&failed, 1, &grid).expect("failed 原因行");
+    assert_eq!(
+        sem_failed_reason, "Error: something went wrong",
+        "非 running 原因行同样剥缩进，实际: {sem_failed_reason:?}"
+    );
 }
 
 /// Bash 展开 `$ cmd` 行保留 command（§9）。
