@@ -192,6 +192,8 @@ fn test_vm_to_lines_all_variants_width_1() {
         ))]),
         collapsed: false,
         is_running: false,
+        is_error: false,
+        error_reason: None,
         fold: FoldState::Collapsed,
         user_modified: false,
         content_hash: 49,
@@ -1361,13 +1363,20 @@ fn test_system_note_levels() {
 
 // ── SubAgent 单行（§6.7）───────────────────────────────────────────────
 
-fn subagent_group(children: im::Vector<TuiRenderUnit>, is_running: bool) -> TuiRenderUnit {
+fn subagent_group(
+    children: im::Vector<TuiRenderUnit>,
+    is_running: bool,
+    is_error: bool,
+    error_reason: Option<&str>,
+) -> TuiRenderUnit {
     TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
         agent_id: "agent-1".into(),
         agent_name: "Agent explorer".into(),
         view_models: children,
         collapsed: false,
         is_running,
+        is_error,
+        error_reason: error_reason.map(String::from),
         fold: FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,
@@ -1387,7 +1396,7 @@ fn test_subagent_running_shows_recent_tool_lines() {
         // 最新子工具仍在运行
         TuiRenderUnit::TuiToolCard(tool_card("Read", "file-d.rs", false, true)),
     ]);
-    let running = subagent_group(children, true);
+    let running = subagent_group(children, true, false, None);
     let lines = vm_to_lines(&running, &grid);
 
     // 最多 3 行（SUBAGENT_TOOL_LINES），反向取最近工具，最新在前
@@ -1454,19 +1463,17 @@ fn test_subagent_running_shows_recent_tool_lines() {
     );
 }
 
-/// §6.7 running 子 agent 但子工具尚未路由：回退单行 activity 摘要。
+/// §6.7 running 子 agent 但组内无任何工具调用：不渲染组头，整组留空。
 #[test]
-fn test_subagent_running_no_tools_falls_back_to_summary() {
+fn test_subagent_running_no_tools_renders_empty() {
     let grid = GridSpec::grid_for(80);
-    let running = subagent_group(im::Vector::new(), true);
+    let running = subagent_group(im::Vector::new(), true, false, None);
     let lines = vm_to_lines(&running, &grid);
-    assert_eq!(lines.len(), 1, "无工具 → 单行摘要");
-    let header = header_of(&lines);
     assert!(
-        header.contains("Agent explorer"),
-        "名称可见，实际 {header:?}"
+        lines.is_empty(),
+        "无工具 → 整组留空（不渲染组头），实际 {:?}",
+        all_text(&lines)
     );
-    assert!(is_running_frame(&header), "running 符号为动画帧");
 }
 
 /// Narrow 断点：符号位省略（设计文档 §6 断点表）——`[outer][│][gap=1][2 格缩进]`
@@ -1483,6 +1490,8 @@ fn test_subagent_tool_line_narrow_omits_symbol() {
             true,
         ))]),
         true,
+        false,
+        None,
     );
     let lines = vm_to_lines(&running, &grid);
     assert_eq!(lines.len(), 1, "1 个工具行，实际 {}", lines.len());
@@ -1519,7 +1528,7 @@ fn test_subagent_running_with_failed_tool_shows_reason() {
         TuiRenderUnit::TuiToolCard(tool_card("Grep", "src", true, false)),
         TuiRenderUnit::TuiToolCard(tool_card("Read", "a.rs", false, true)),
     ]);
-    let running = subagent_group(children, true);
+    let running = subagent_group(children, true, false, None);
     let lines = vm_to_lines(&running, &grid);
     // 行序：最近工具行（Read running）→ error 工具行（Grep）→ 原因行
     assert_eq!(lines.len(), 3, "工具行 ×2 + 原因行，实际 {}", lines.len());
@@ -1576,22 +1585,64 @@ fn test_subagent_running_with_failed_tool_shows_reason() {
     );
 }
 
-/// failed 子 agent：× + 原因行（缩进与工具行对齐）；completed：✓ + 结果摘要。
+/// subagent block 终态只由 canonical `is_error` 决定：
+/// - completed parent + 失败 child tool → ✓ 单行摘要，无 parent 原因行
+///   （bug 回归：child tool error 不再提升 block error；child 卡自身 error
+///   展示不变，nested detail 可见）；
+/// - genuine parent error（is_error=true）→ × + 原因行，canonical reason
+///   （error_reason）优先，空时回退 child last_error 兜底；
+/// - completed 无失败 → ✓ + 结果摘要（历史断言保留）。
 #[test]
 fn test_subagent_failed_reason_line_and_completed() {
     let grid = GridSpec::grid_for(80);
+
+    // completed parent（is_error=false）+ 失败 child tool → 工具行（×），
+    // 无原因行（completed 成功组不显示 nested error 原因，§6.7 语义）
+    let completed_with_failed_child = subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Grep", "src", true, false,
+        ))]),
+        false,
+        false,
+        None,
+    );
+    let lines = vm_to_lines(&completed_with_failed_child, &grid);
+    assert_eq!(
+        lines.len(),
+        1,
+        "completed + 1 工具 → 1 个工具行，实际 {:?}",
+        all_text(&lines)
+    );
+    assert!(
+        header_of(&lines).contains('\u{d7}'),
+        "child tool error 符号 ×，实际 {:?}",
+        header_of(&lines)
+    );
+
+    // genuine parent error + canonical reason → × + 原因行（canonical 优先，
+    // 不显示 child tool 的 last_error）
     let failed = subagent_group(
         im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
+        true,
+        Some("loop failed: llm error"),
     );
     let lines = vm_to_lines(&failed, &grid);
     let text = all_text(&lines);
     assert!(header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
     assert!(
-        text.contains("Error: something went wrong"),
-        "failed 原因行可见"
+        text.contains("loop failed: llm error"),
+        "canonical 原因行可见，实际 {text:?}"
+    );
+    // 原因行（第 2 行）必须是 canonical reason，而非 child tool 的 last_error
+    assert!(
+        text.lines()
+            .nth(1)
+            .unwrap_or("")
+            .contains("loop failed: llm error"),
+        "原因行优先 canonical reason，实际 {text:?}"
     );
     // 原因行（非 running 分支同样走 cont_prefix + 2 格缩进，与工具行同列）
     assert!(
@@ -1602,6 +1653,34 @@ fn test_subagent_failed_reason_line_and_completed() {
         "failed 原因行缩进对齐，实际 {text:?}"
     );
 
+    // genuine parent error 但 canonical reason 为空（error_reason=None）：
+    // 回退子工具 last_error 兜底（非空、可读，不渲染空行）
+    let fallback = subagent_group(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Grep", "src", true, false,
+        ))]),
+        false,
+        true,
+        None,
+    );
+    let lines = vm_to_lines(&fallback, &grid);
+    let text = all_text(&lines);
+    assert!(header_of(&lines).contains('\u{d7}'), "failed 符号 ×");
+    assert!(
+        text.contains("Error: something went wrong"),
+        "空 canonical reason 回退 child last_error，实际 {text:?}"
+    );
+
+    // genuine parent error 且无工具、无原因 → 整组留空（不渲染组头）
+    let no_tool_error = subagent_group(im::Vector::new(), false, true, None);
+    let lines = vm_to_lines(&no_tool_error, &grid);
+    assert!(
+        lines.is_empty(),
+        "无工具 error 且无原因 → 整组留空，实际 {:?}",
+        all_text(&lines)
+    );
+
+    // completed parent 无失败 → 只渲染工具行（无组头/结果摘要）
     let completed = subagent_group(
         im::Vector::from(vec![
             TuiRenderUnit::TuiToolCard(tool_card("Read", "a.rs", false, false)),
@@ -1616,42 +1695,84 @@ fn test_subagent_failed_reason_line_and_completed() {
             }),
         ]),
         false,
+        false,
+        None,
     );
     let lines = vm_to_lines(&completed, &grid);
-    let header = header_of(&lines);
-    assert!(header.contains('\u{2713}'), "completed 符号 ✓");
-    assert!(header.contains("Found 8 UI patterns"), "结果摘要可见");
+    assert_eq!(
+        lines.len(),
+        1,
+        "completed + 1 工具 → 1 个工具行，实际 {}",
+        lines.len()
+    );
+    let text = all_text(&lines);
+    assert!(
+        text.contains("Read") && text.contains("a.rs"),
+        "工具行可见，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("Found 8 UI patterns"),
+        "不渲染结果摘要（组头已取消），实际 {text:?}"
+    );
 }
 
 /// derive_subagent_summary 纯函数矩阵：status/tool_count/failed_count/result。
+/// parent status 只由 canonical is_error 决定（running 优先）；
+/// failed_count/last_error 仅作明细，不再决定 parent status。
 #[test]
 fn test_derive_subagent_summary_matrix() {
-    let mk = |view_models: im::Vector<TuiRenderUnit>, is_running: bool| {
-        SubAgentSummary::derive(&view_models, is_running)
+    let mk = |view_models: im::Vector<TuiRenderUnit>, is_running: bool, is_error: bool| {
+        SubAgentSummary::derive(&view_models, is_running, is_error)
     };
     // 空 children → 全默认
-    assert_eq!(mk(im::Vector::new(), true).status, EntryStatus::Running);
-    // running → Running，tool_count 统计
+    assert_eq!(
+        mk(im::Vector::new(), true, false).status,
+        EntryStatus::Running
+    );
+    // running → Running（即使预置 is_error，Running 仍优先——stop 未到达）
     let s = mk(
         im::Vector::from(vec![
             TuiRenderUnit::TuiToolCard(tool_card("Read", "a", false, false)),
             TuiRenderUnit::TuiToolCard(tool_card("Glob", "b", false, false)),
         ]),
         true,
+        true,
     );
     assert_eq!(s.status, EntryStatus::Running);
     assert_eq!(s.tool_count, 2);
     assert_eq!(s.failed_count, 0);
-    // completed + 有 error 子工具 → Error + failed_count + last_error
+    // completed + 有 error 子工具 + is_error=false → Completed（bug 回归：
+    // child tool error 不再提升 block error；failed_count/last_error 保留明细）
     let s = mk(
         im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Edit", "c", true, false,
         ))]),
         false,
+        false,
     );
-    assert_eq!(s.status, EntryStatus::Error);
+    assert_eq!(s.status, EntryStatus::Completed);
     assert_eq!(s.failed_count, 1);
     assert!(s.last_error.is_some());
+    // completed + 有 error 子工具 + is_error=true → Error（canonical）
+    let s = mk(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Edit", "c", true, false,
+        ))]),
+        false,
+        true,
+    );
+    assert_eq!(s.status, EntryStatus::Error);
+    // completed + 无失败子工具 + is_error=true → Error（loop-level 失败，
+    // 无 failed child 也显示 error——修复反向缺陷）
+    let s = mk(
+        im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
+            "Read", "a", false, false,
+        ))]),
+        false,
+        true,
+    );
+    assert_eq!(s.status, EntryStatus::Error);
+    assert_eq!(s.failed_count, 0);
     // completed 无 error → Completed + result 取最近文本首行
     let s = mk(
         im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(
@@ -1665,6 +1786,7 @@ fn test_derive_subagent_summary_matrix() {
                 content_hash: 8,
             },
         )]),
+        false,
         false,
     );
     assert_eq!(s.status, EntryStatus::Completed);
@@ -2062,11 +2184,11 @@ fn test_glob_grep_header_match_suffix() {
     }
 }
 
-/// Wide 右对齐 meta 不被 fit_summary_to_content 误截（回归：Wide 定位填充
-/// 计入总宽导致 subagent tool count 被截成 `N 次…`）。
+/// §6.7 completed 子 agent：组只渲染嵌套工具行（无单行组头/计数 meta），
+/// 工具行整体不越过消息区右缘（Wide 右对齐 duration 不被 fit 截断）。
 #[test]
-fn test_wide_aligned_meta_not_truncated_by_fit() {
-    // subagent 行：名称 + 长 activity + 右对齐 tool count（zh 格式 `N 次工具`）
+fn test_subagent_completed_shows_tool_lines_only() {
+    // subagent：completed + 1 个 Bash 工具 → 只渲染工具行
     let group = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
         agent_id: "a1".into(),
         agent_name: "general-purpose".into(),
@@ -2078,16 +2200,28 @@ fn test_wide_aligned_meta_not_truncated_by_fit() {
         ))]),
         collapsed: false,
         is_running: false,
+        is_error: false,
+        error_reason: None,
         fold: FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,
     });
     let wide = GridSpec::grid_for(120);
     let lines = vm_to_lines(&group, &wide);
+    assert_eq!(
+        lines.len(),
+        1,
+        "completed + 1 工具 → 1 个工具行，实际 {}",
+        lines.len()
+    );
     let text = line_text(&lines[0]);
     assert!(
-        text.contains("1 \u{6b21}\u{5de5}\u{5177}") || text.contains("1 tools"),
-        "Wide 下 tool count 不应被截断，实际 {text:?}"
+        text.contains("echo hello-subagent-internal") && text.contains("Shell"),
+        "工具行显示 Bash → Shell 与摘要，实际 {text:?}"
+    );
+    assert!(
+        !text.contains("general-purpose"),
+        "不再渲染单行组头（agent_name），实际 {text:?}"
     );
     // 行宽 = 消息区右缘（term_width - 1，右对齐铺满）
     assert_eq!(lines[0].width(), wide.term_width.saturating_sub(1) as usize);
@@ -2660,7 +2794,7 @@ fn test_semantic_subagent_tool_line() {
         TuiRenderUnit::TuiToolCard(tool_card("Bash", "cargo test", false, false)),
         TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, true)),
     ]);
-    let running = subagent_group(children, true);
+    let running = subagent_group(children, true, false, None);
     // 行序：Read（running）/ Bash（completed）/ Grep（error）/ 原因行
     // ——running 有工具时无顶层单行摘要（render_subagent_group_lines 早退）
     let lines = vm_to_lines(&running, &grid);
@@ -2690,17 +2824,22 @@ fn test_semantic_subagent_tool_line() {
         assert!(!s.starts_with(' '), "无前导空格，实际: {s:?}");
     }
 
-    // 非 running（单行摘要 + 原因行）：顶层行默认剥离；原因行剥缩进
+    // 非 running（工具行 + 原因行）：工具行语义 `{Verb} {summary}`；
+    // 原因行剥缩进。genuine parent error（is_error=true），canonical reason
+    // 为空时回退子工具 last_error 兜底。无顶层组头。
     let failed = subagent_group(
         im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Grep", "src", true, false,
         ))]),
         false,
+        true,
+        None,
     );
-    let sem_top = sem_at(&failed, 0, &grid).expect("顶层行");
+    let sem_tool = sem_at(&failed, 0, &grid).expect("工具行");
+    assert_eq!(sem_tool, "Grep src", "工具行语义，实际: {sem_tool:?}");
     assert!(
-        sem_top.contains("Agent explorer") && !sem_top.starts_with(' '),
-        "顶层行默认剥离，实际: {sem_top:?}"
+        !sem_tool.contains("Agent explorer"),
+        "无顶层组头（agent_name 不出现），实际: {sem_tool:?}"
     );
     let sem_failed_reason = sem_at(&failed, 1, &grid).expect("failed 原因行");
     assert_eq!(

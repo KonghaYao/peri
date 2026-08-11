@@ -27,8 +27,6 @@ const USER_BODY_MAX_LINES: usize = 6;
 const REASONING_BODY_MAX_LINES: usize = 100;
 /// 工具输出展开的最大行数（与历史 expanded 行为一致）。
 const TOOL_OUTPUT_MAX_LINES: usize = 4;
-/// 子 agent 名称定宽（§6.7 前缀宽度稳定——running 摘要更新不改前缀列）。
-const SUBAGENT_NAME_WIDTH: usize = 16;
 /// running 子 agent 最多展示的最近工具调用行数（§6.7 工具行展示）。
 const SUBAGENT_TOOL_LINES: usize = 3;
 /// 子 agent 工具行相对 content 列的固定缩进（设计文档 §3 ②——固定 2 格而非
@@ -351,9 +349,9 @@ pub(crate) fn semantic_line_text(
             // 子工具行/原因行是 cont_prefix + 2 格缩进形态（设计文档 §3）——
             // `[outer 空][│][gap][2 空格][符号] {Verb}  {summary}` /
             // `[outer 空][│][gap][2 空格]{错误正文}`；strip_visual_prefix 已剥
-            // `[outer][│][gap]`，剩余部分带缩进。running 有工具时**没有顶层行**
-            // （render_subagent_group_lines 早退），行序：最近工具最新在前 →
-            // 原因行；非 running 时 local_idx=0 是 first_prefix 单行摘要。
+            // `[outer][│][gap]`，剩余部分带缩进。组只渲染工具行/原因行，**没有
+            // 顶层组头**（render_subagent_group_lines 无工具时整组留空），行序：
+            // 最近工具最新在前 → 原因行。
             let recent_tool_lines = data
                 .view_models
                 .iter()
@@ -362,7 +360,7 @@ pub(crate) fn semantic_line_text(
                 .min(SUBAGENT_TOOL_LINES);
             // 工具行索引 [0, recent_tool_lines)：渲染行序 = view_models 反向工具序，
             // 所以第 local_idx 行对应反向第 local_idx 个工具（nth(local_idx)）。
-            if data.is_running && local_idx < recent_tool_lines {
+            if local_idx < recent_tool_lines {
                 // 工具行语义直接由 VM 数据构造 `{Verb} {summary}`（§8 与主时间线
                 // tool header 同口径，无符号/duration/缩进竖线）——不解析符号
                 // 字符集（ASCII 降级 `x`/`*` 与正文歧义），且与渲染截断无关。
@@ -384,8 +382,7 @@ pub(crate) fn semantic_line_text(
                     return Some(text);
                 }
             }
-            // 原因行：剥 2 格缩进 → 纯错误正文（§8）；顶层单行摘要（非 running /
-            // running 无工具）无缩进——strip_prefix 失败时保留默认剥离结果（§9）。
+            // 原因行：剥 2 格缩进 → 纯错误正文（§8）。
             Some(
                 stripped
                     .strip_prefix(&" ".repeat(SUBAGENT_TOOL_INDENT))
@@ -1424,94 +1421,61 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// §6.7 SubAgent：
-/// - running：显示最近 ≤3 个子工具调用行（braille 动画符号 + 工具名 + 摘要 +
-///   duration）——工具行比文本摘要直观；子工具尚未路由时回退单行 activity 摘要；
-/// - completed：单行 `[✓][gap]{Name 定宽}  {result}  {N tools}`；
-/// - error：单行 + 原因行（muted 正文，error 仅符号/accent）。
+/// §6.7 SubAgent：组只展示子工具调用（任意状态 running/completed/error 同款
+/// 工具行样式：最近 ≤3 个工具行 + 失败原因行）；组内无任何工具调用时不渲染
+/// 组头，整组留空（仅 genuine parent error 保留原因行）。
 ///
 /// 停止递归内联铺开——嵌套消息不进入主时间轴（Enter 打开详情面板）。
 fn render_subagent_group_lines(data: &TuiSubAgentGroup, grid: &GridSpec) -> Vec<Line<'static>> {
-    let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.content_width();
-    let summary = SubAgentSummary::derive(&data.view_models, data.is_running);
+    // parent 终态由 canonical is_error 决定（SubagentStopped.is_error）；
+    // nested child tool error 保持局部可见但不提升 block error。
+    let summary = SubAgentSummary::derive(&data.view_models, data.is_running, data.is_error);
 
-    // running 且有子工具调用：显示最近几个工具行（§6.7 工具行展示）
-    if data.is_running {
-        let recent: Vec<&TuiToolCard> = data
-            .view_models
-            .iter()
-            .rev()
-            .filter_map(|vm| match vm {
-                TuiRenderUnit::TuiToolCard(t) => Some(t),
-                _ => None,
-            })
-            .take(SUBAGENT_TOOL_LINES)
-            .collect();
-        if !recent.is_empty() {
-            let mut lines: Vec<Line<'static>> =
-                recent.iter().map(|t| subagent_tool_line(t, grid)).collect();
-            // running 中已失败的子工具：追加原因行（§6.7 failed 显示错误原因）
-            if let Some(reason) = summary.last_error
-                && !reason.is_empty()
-            {
-                lines.push(subagent_error_reason_line(grid, &reason));
+    // 组只展示子工具调用（任意状态同款样式，§6.7 工具行展示）：
+    // 最近几个工具行 + 失败原因行。
+    let recent: Vec<&TuiToolCard> = data
+        .view_models
+        .iter()
+        .rev()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(t) => Some(t),
+            _ => None,
+        })
+        .take(SUBAGENT_TOOL_LINES)
+        .collect();
+    if recent.is_empty() {
+        // 组内无任何工具调用：不渲染组头——仅 genuine parent error 保留原因行
+        // （错误信息不丢），其余整组留空（子 agent 纯文本/空跑不占消息区空间）。
+        if data.is_error {
+            let reason = data
+                .error_reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .or_else(|| summary.last_error.as_deref().filter(|r| !r.is_empty()));
+            if let Some(reason) = reason {
+                return vec![subagent_error_reason_line(grid, reason)];
             }
-            return lines;
         }
+        return Vec::new();
     }
-
-    // 无工具 running / completed / error：单行摘要 +（error）原因行
-    let (symbol, symbol_color) = match summary.status {
-        EntryStatus::Running => (running_symbol(), sem.status.running),
-        EntryStatus::Error => (sym().error.to_string(), sem.status.error),
-        EntryStatus::Completed => (sym().success.to_string(), sem.status.success),
+    let mut lines: Vec<Line<'static>> =
+        recent.iter().map(|t| subagent_tool_line(t, grid)).collect();
+    // 失败原因行（§6.7 failed 显示错误原因），优先级：canonical error_reason
+    // （SubagentStopped.result）→ 子工具 last_error 兜底。仅 running（实时
+    // 反馈）与 genuine parent error（终态）显示；completed 成功组即使有
+    // nested child tool error 也不显示（保持原 §6.7 语义）。
+    let reason = if data.is_error {
+        data.error_reason
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .or_else(|| summary.last_error.as_deref().filter(|r| !r.is_empty()))
+    } else if data.is_running {
+        summary.last_error.as_deref().filter(|r| !r.is_empty())
+    } else {
+        None
     };
-
-    let mut spans = first_prefix(grid, &symbol, Style::default().fg(symbol_color));
-    // 前缀宽度稳定：名称定宽截断（§6.7 running 摘要更新不改前缀列）
-    spans.push(Span::styled(
-        truncate_by_width(&data.agent_name, SUBAGENT_NAME_WIDTH),
-        Style::default()
-            .fg(sem.text.primary)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let activity = match summary.status {
-        EntryStatus::Running => summary.activity,
-        _ => summary.result,
-    };
-    if !activity.is_empty() {
-        let budget = content.saturating_sub(SUBAGENT_NAME_WIDTH + 6);
-        let act = truncate_by_width(&activity, budget.max(1));
-        spans.push(Span::styled(
-            format!("  {act}"),
-            Style::default().fg(sem.text.muted),
-        ));
-    }
-    let used: usize = spans.iter().map(|s| s.content.width()).sum();
-    // 工具计数只在有工具时显示（§6.7）——subagent 刚启动、子工具尚未路由时
-    // 显示 `0 次工具` 是空壳噪音；计数从 0→N 只出现在行尾 meta 位，前缀不变。
-    if summary.tool_count > 0 {
-        let tool_meta = i18n::tr_args(
-            "render-subagent-tools",
-            &[(
-                "count".to_string(),
-                FluentValue::from(summary.tool_count as u64),
-            )],
-        );
-        if let Some(meta) = place_meta(grid, used, &tool_meta, Style::default().fg(sem.text.dim)) {
-            spans.extend(meta);
-        }
-    }
-    fit_summary_to_content(&mut spans, grid);
-    let mut lines = vec![Line::from(spans)];
-
-    // failed 原因行（§6.7：failed 自动显示错误原因；正文保持可读，不整块染红）
-    if summary.status == EntryStatus::Error
-        && let Some(reason) = summary.last_error
-        && !reason.is_empty()
-    {
-        lines.push(subagent_error_reason_line(grid, &reason));
+    if let Some(reason) = reason {
+        lines.push(subagent_error_reason_line(grid, reason));
     }
     lines
 }
@@ -1614,7 +1578,9 @@ fn subagent_error_reason_line(grid: &GridSpec, reason: &str) -> Line<'static> {
 
 /// §6.7 从嵌套 VM 派生 SubAgent 单行摘要（确定性纯函数，测试覆盖矩阵）。
 ///
-/// - `status`：Running（is_running）→ Error（任一 child tool error）→ Completed；
+/// - `status`：Running（is_running）→ Error（canonical `is_error`，来自
+///   `SubagentStopped.is_error`）→ Completed；nested child tool error 只计入
+///   `failed_count`/`last_error`，不决定 parent status；
 /// - `activity`（running）：反向扫描最近的非空候选（工具 input_summary 或
 ///   文本首行）——摘要可更新但前缀稳定；
 /// - `result`（completed）：反向扫描最近的文本末行 / 工具输出 / 输入摘要；
@@ -1692,11 +1658,16 @@ pub(super) struct SubAgentSummary {
 
 impl SubAgentSummary {
     /// 完整推导（含 status）——供渲染与测试共用。
-    pub fn derive(view_models: &im::Vector<TuiRenderUnit>, is_running: bool) -> Self {
+    /// `is_error` 为 parent 终态唯一事实源（`SubagentStopped.is_error`）。
+    pub fn derive(
+        view_models: &im::Vector<TuiRenderUnit>,
+        is_running: bool,
+        is_error: bool,
+    ) -> Self {
         let mut s = derive_subagent_summary(view_models);
         s.status = if is_running {
             EntryStatus::Running
-        } else if s.failed_count > 0 {
+        } else if is_error {
             EntryStatus::Error
         } else {
             EntryStatus::Completed

@@ -658,7 +658,6 @@ render-tool-uses = · { $count } tool uses
 render-user-answered = User answered Peri's questions:
 render-thought-for = Thought for { $count } chars
 render-more-lines = … +{ $count } lines
-render-subagent-tools = { $count } tools
 render-todo-summary = { $done }/{ $total } tasks
 render-todo-summary-active = { $done }/{ $total } tasks · { $active }
 render-agent-header = Agent
