@@ -463,15 +463,11 @@ pub(crate) fn vm_to_lines_cached(
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
-            // §3.2 垂直节奏：assistant 最终回答与前一过程 entry 之间 1 个空行。
-            // 有 reasoning 时推理块作为过程 entry 紧跟前一 entry——无前导空行
-            // （与 tool activity 一致）；推理与正文之间保留 1 空行（正文权重最高）。
-            // 空 bubble（无 text 无 reasoning）仍返回 0 行——沿用历史契约。
+            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行。
+            // reasoning 是过程 entry，不自行增加空行；若后接正文，正文前导空行
+            // 负责分隔。空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
                 return (lines, None, None);
-            }
-            if data.reasoning.is_none() {
-                lines.push(Line::from(""));
             }
 
             // 推理块（§6.3）——视觉独立 entry
@@ -481,8 +477,9 @@ pub(crate) fn vm_to_lines_cached(
                 // 对齐；正文紧随其后，由 md 渲染自身节奏负责分段。
             }
 
-            // Markdown 文本——wrap 在 content 列宽，行级再套统一前缀
+            // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
             if !data.text.is_empty() {
+                lines.push(Line::default());
                 let theme_guard = peri_theme::atoms::THEME_ATOM.state();
                 let theme = theme_guard.read();
                 let md_text_fg = theme.component.markdown.text;
@@ -559,6 +556,10 @@ pub(crate) fn vm_to_lines_cached(
                 None
             };
 
+            if !data.text.is_empty() {
+                lines.push(Line::default());
+            }
+
             (lines, copy_button, None)
         }
         TuiRenderUnit::TuiUserBubble(data) => {
@@ -597,6 +598,12 @@ fn render_user_bubble_lines(
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
+    // 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role，
+    // 提取文本为空）→ 渲染 0 行——不产生 turn 节拍空行，避免 thinking
+    // 底下出现悬空空行（§3.2 节拍只属于真实 user prompt）。
+    if data.text.is_empty() {
+        return Vec::new();
+    }
     // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）。
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
 
@@ -629,6 +636,9 @@ fn render_user_bubble_lines(
         spans.push(Span::styled(more, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
     }
+    // §3.2：user 尾部 1 空行（turn 节拍对称）——分隔后续 thinking/tool；
+    // assistant 正文仍由自身前导空行建立正文块边界。
+    lines.push(Line::from(""));
     lines
 }
 

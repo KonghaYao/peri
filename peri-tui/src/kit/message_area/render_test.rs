@@ -334,7 +334,10 @@ fn test_content_column_aligned_across_entries() {
     assert_eq!(text_start(&assistant[1]), content_col, "assistant 正文起点");
 }
 
-// ── 垂直节奏（§3.2）────────────────────────────────────────────────────/// user prompt 前 1 空行；assistant 回答前 1 空行；turn 内过程 entry 无空行。
+// ── 垂直节奏（§3.2）────────────────────────────────────────────────────
+
+/// user 与 assistant 正文块前后各 1 空行；turn 内 tool 过程 entry 无空行；
+/// 空文本 user（thinking 回传建模）渲染 0 行。
 #[test]
 fn test_vertical_rhythm_blank_lines() {
     let grid = GridSpec::grid_for(80);
@@ -344,6 +347,10 @@ fn test_vertical_rhythm_blank_lines() {
         &grid,
     );
     assert!(user_lines[0].spans.is_empty(), "user 前应有 1 空行");
+    assert!(
+        user_lines.last().is_some_and(|l| l.spans.is_empty()),
+        "user 后应有 1 空行（turn 节拍对称）"
+    );
     let header = header_of(&user_lines);
     assert!(
         header.contains("hi"),
@@ -368,7 +375,13 @@ fn test_vertical_rhythm_blank_lines() {
     );
     assert!(
         assistant_lines[0].spans.is_empty(),
-        "assistant 前应有 1 空行"
+        "assistant 正文前应有 1 空行"
+    );
+    assert!(
+        assistant_lines
+            .last()
+            .is_some_and(|line| line.spans.is_empty()),
+        "assistant 正文后应有 1 空行"
     );
 
     // 工具行之间无空行：completed + expanded 展开体（首行 + 输出行）无内部空行
@@ -381,6 +394,49 @@ fn test_vertical_rhythm_blank_lines() {
     assert!(
         tool_lines.iter().all(|l| !l.spans.is_empty()),
         "工具块内部不应有空行"
+    );
+}
+
+/// 连续 tool 卡片保持紧凑：前一张卡片末尾和后一张卡片开头都不是空行。
+#[test]
+fn test_consecutive_tool_cards_have_no_gap() {
+    let grid = GridSpec::grid_for(80);
+    let first = vm_to_lines(
+        &TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false)),
+        &grid,
+    );
+    let second = vm_to_lines(
+        &TuiRenderUnit::TuiToolCard(tool_card("Grep", "needle", false, false)),
+        &grid,
+    );
+
+    assert!(first.last().is_some_and(|line| !line.spans.is_empty()));
+    assert!(second.first().is_some_and(|line| !line.spans.is_empty()));
+}
+
+/// 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role）→ 渲染
+/// 0 行——不产生 turn 节拍空行，thinking 底下不出现悬空空行。
+#[test]
+fn test_empty_user_bubble_renders_zero_lines() {
+    let grid = GridSpec::grid_for(80);
+    let empty_user = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
+        String::new(),
+    ));
+    let lines = vm_to_lines(&empty_user, &grid);
+    assert!(
+        lines.is_empty(),
+        "空 user 应渲染 0 行，实际 {} 行",
+        lines.len()
+    );
+
+    // 非空 user：前导空行 + 正文 + 尾部空行（turn 节拍对称）
+    let real_user =
+        TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into()));
+    let real_lines = vm_to_lines(&real_user, &grid);
+    assert!(real_lines[0].spans.is_empty(), "非空 user 前应有 1 空行");
+    assert!(
+        real_lines.last().is_some_and(|l| l.spans.is_empty()),
+        "非空 user 后应有 1 空行"
     );
 }
 
@@ -398,9 +454,13 @@ fn test_user_long_prompt_capped_at_six_lines() {
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(text));
     let lines = vm_to_lines(&vm, &grid);
 
-    // 1 空行 + 6 正文 + 1 `… +6 lines`（无 role label 行）
-    assert_eq!(lines.len(), 8, "6 行上限 + 省略行，其余截断");
-    let last = line_text(lines.last().unwrap());
+    // 1 空行 + 6 正文 + 1 `… +6 lines` + 1 尾部空行（无 role label 行）
+    assert_eq!(lines.len(), 9, "6 行上限 + 省略行 + 尾部空行，其余截断");
+    assert!(
+        lines.last().is_some_and(|l| l.spans.is_empty()),
+        "尾部空行（turn 节拍对称）"
+    );
+    let last = line_text(&lines[lines.len() - 2]);
     assert!(
         last.contains("+6 lines"),
         "省略行格式 `… +N lines`，实际 {last:?}"
@@ -1343,7 +1403,7 @@ fn assistant_bubble_with_text(text: &str, hash: u64) -> TuiRenderUnit {
 }
 
 /// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
-/// AssistantBubble 末尾追加复制按钮行（右对齐在 content 列右缘）。
+/// AssistantBubble 的正文后、尾随空行前追加复制按钮行（右对齐在 content 列右缘）。
 #[test]
 fn test_assistant_bubble_renders_copy_button() {
     crate::i18n::init(Some("en"));
@@ -1352,7 +1412,8 @@ fn test_assistant_bubble_renders_copy_button() {
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, btn, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
-    let btn_line = lines.last().unwrap();
+    let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
+    let btn_line = &lines[btn.logical_idx];
     let text: String = btn_line.spans.iter().map(|s| s.content.as_ref()).collect();
     let btn_width = 2 + crate::i18n::tr("msg-copy-md").width();
     let line_width = grid.first_prefix_width() + grid.content_width();
@@ -1362,8 +1423,11 @@ fn test_assistant_bubble_renders_copy_button() {
         "按钮行 = 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
     );
 
-    let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
-    assert_eq!(btn.logical_idx, lines.len() - 1, "按钮行是最后一逻辑行");
+    assert_eq!(
+        btn.logical_idx,
+        lines.len() - 2,
+        "按钮行位于正文与尾随空行之间"
+    );
     assert_eq!(
         btn.x_start,
         (line_width - btn_width) as u16,
@@ -1947,8 +2011,7 @@ fn test_semantic_plain_lines_strip_prefix() {
         message_id: None,
         content_hash: 0,
     });
-    // 行 0 = leading 空行；行 1 = 段落 1（cont_prefix）；行 2 = 段间空行；
-    // 行 3 = 段落 2
+    // 行 0 = 前导空行；行 1 = 段落 1；行 2 = 段间空行；行 3 = 段落 2
     let l1 = sem_at(&vm, 1, &grid).expect("段落 1");
     assert_eq!(l1, "第一行", "段落剥前缀，实际: {l1:?}");
     let l2 = sem_at(&vm, 3, &grid).expect("段落 2");
@@ -1961,7 +2024,7 @@ fn test_no_role_label_line_rendered() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
 
-    // assistant：行 0 = leading 空行；行 1 = 正文（无 `Perihelion` label）
+    // assistant：行 0 = 前导空行；行 1 = 正文（无 `Perihelion` label）
     let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
         started_at: None,
         duration_ms: None,
@@ -1979,7 +2042,7 @@ fn test_no_role_label_line_rendered() {
     assert_eq!(
         sem_at(&vm, 1, &grid).as_deref(),
         Some("hello"),
-        "正文从行 1 开始"
+        "正文从行 1 开始（前后各 1 空行）"
     );
 
     // user：行 0 = leading 空行；行 1 = 正文（无 `You` label）

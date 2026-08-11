@@ -66,10 +66,13 @@ outer  accent  gap   content                          gap  scroll
 
 ### 3.2 垂直节奏
 
-- 新 user prompt 前保留 1 个空行，定义 turn 节拍。
-- 同一 turn 内 entry 默认无空行，以 accent、bullet、label 分段。
-- assistant 最终回答与前一过程 entry 之间允许 1 个空行。
+- user prompt 与 assistant 最终正文块上下各保留 1 个空行；assistant 的
+  前导空行同时分隔前置 thinking/tool，尾随空行分隔后续 entry。
+- 相邻 tool 卡片之间不插入空行，保持连续工具调用的紧凑节奏。
+- 同一 turn 内其余 entry 默认无空行，以 accent、bullet、label 分段。
 - expanded diff/code block 自带内部 padding，不叠加 entry gap。
+- 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role）渲染
+  0 行，不产生节拍空行。
 
 ## 4. 视觉 token
 
