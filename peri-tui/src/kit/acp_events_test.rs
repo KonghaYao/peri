@@ -2868,6 +2868,51 @@ fn tool_card_of(
     }
 }
 
+/// [回归测试] 工具运行中取消 turn 后，归档卡片必须停止 loading 动画。
+///
+/// `TurnInterrupted` 不会再收到对应的 `ToolEnded`；归档路径必须根据 turn 已停止
+/// 的事实把在途工具渲染为非 running，否则最后一张工具卡会永久显示 spinner。
+#[test]
+#[serial]
+fn test_turn_interrupted_stops_running_tool_card_animation() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Bash".into(),
+            input_summary: "sleep 10".into(),
+            raw_input: serde_json::json!({"command": "sleep 10"}),
+            agent_id: None,
+        }),
+    );
+    let running = VIEW_MODELS.state().read().clone();
+    assert!(tool_card_of(&running, 0).is_running);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("r1".into()),
+        },
+    );
+
+    let interrupted = VIEW_MODELS.state().read().clone();
+    let tool = tool_card_of(&interrupted, 0);
+    assert!(!tool.is_running, "取消后工具卡不得继续显示 running");
+    assert!(
+        !interrupted.items[0].is_animating(),
+        "取消后工具卡不得继续驱动 spinner 动画"
+    );
+}
+
 /// §7 reasoning 行：流式（PromptRunning + trailing）→ Preview/Running；
 /// TurnDone 后 phase 离开 PromptRunning → 全 Completed → Collapsed 单行。
 #[test]

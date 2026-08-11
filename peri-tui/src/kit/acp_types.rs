@@ -720,7 +720,7 @@ impl CurrentTurn {
                             _ => true,
                         };
                         if needs_rebuild {
-                            let card = build_tool_card(t);
+                            let card = build_tool_card(t, self.active);
                             if self.cached_view_models.len() <= i {
                                 self.cached_view_models
                                     .push_back(TuiRenderUnit::TuiToolCard(card));
@@ -901,10 +901,12 @@ impl CurrentTurn {
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
 /// fold 按 spec §7 表取当前状态的目标值（running=Preview / error=Expanded /
-/// completed=Collapsed）；hash 由 [`TuiToolCard::recompute_hash`] 单点计算
-/// （含 fold + user_modified，duration 按秒取整避免每毫秒 hash 抖动）。
-fn build_tool_card(t: &ToolCardAccumulator) -> TuiToolCard {
-    let is_running = t.output_summary.is_none();
+/// completed=Collapsed）；工具只有在所属 turn 仍 active 且尚无输出时才是 running，
+/// 避免 turn 取消后缺失 `ToolEnded` 导致卡片永久显示 spinner。hash 由
+/// [`TuiToolCard::recompute_hash`] 单点计算（含 fold + user_modified，duration
+/// 按秒取整避免每毫秒 hash 抖动）。
+fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
+    let is_running = turn_active && t.output_summary.is_none();
     let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
     let status = if is_running {
         EntryStatus::Running
