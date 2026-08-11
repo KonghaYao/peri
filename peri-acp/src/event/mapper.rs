@@ -6,9 +6,9 @@
 //! - **Other variants**: no SessionUpdate output
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
-    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UsageUpdate,
+    ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    SessionUpdate, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind, UsageUpdate,
 };
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
@@ -53,26 +53,33 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // ── Category ①: Full SessionUpdate ─────────────────────────────────────────
         ExecutorEvent::TextChunk {
             chunk,
+            message_id,
             source_agent_id,
             ..
         } => {
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(chunk.clone())),
-                ))],
+                vec![SessionUpdate::AgentMessageChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(chunk.clone())))
+                        // ACP 标准 messageId 语义：同一消息的 chunk 共享 ID，
+                        // 变化即新消息（客户端据此做段边界与推理结束推断）。
+                        // v1 wire 上的 messageId 是字符串（规范消息 ID 的 UUID 串）。
+                        .message_id(MessageId::from(message_id.as_uuid().to_string())),
+                )],
                 source_agent_id.clone(),
             )]
         }
 
         ExecutorEvent::AiReasoning {
             text,
+            message_id,
             source_agent_id,
             ..
         } => {
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(text.clone())),
-                ))],
+                vec![SessionUpdate::AgentThoughtChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.clone())))
+                        .message_id(MessageId::from(message_id.as_uuid().to_string())),
+                )],
                 source_agent_id.clone(),
             )]
         }

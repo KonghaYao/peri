@@ -17,7 +17,8 @@ use crate::{
     },
     error::{AgentError, AgentResult},
     messages::{
-        BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
+        BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, MessageId,
+        ToolCallRequest,
     },
     tools::BaseTool,
 };
@@ -207,6 +208,11 @@ impl AgentModelBridge {
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let model_name = self.model_name();
+        // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
+        // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message
+        // 时对齐同一 ID（ACP 标准 messageId 语义——chunk 的 messageId 即规范
+        // 消息 ID，客户端据此判断消息边界/推理结束）。
+        let message_id = MessageId::new();
         let cancellation = streaming
             .as_ref()
             .map(|context| context.cancel.clone())
@@ -216,6 +222,16 @@ impl AgentModelBridge {
             .stream(request, cancellation.clone())
             .await
             .map_err(map_model_error)?;
+
+        // [Fix think-end] 本消息内是否已提前 emit ToolStarted：工具块开始
+        // （Anthropic `content_block_start`，即 thinking 结束）时首个带
+        // id/name 的 ToolCallDelta 到达，提前发 ToolStarted 让 TUI 立即冻结
+        // 推理动画——工具参数流式生成期间 TUI 收不到任何事件（无正文时
+        // "文本到达"推断永不触发），只能空转到 dispatch_tools 的正式
+        // ToolStarted（模型流结束后才发出）。参数尚未生成 → input 置 Null，
+        // 由 dispatch 路径同 id 的正式 ToolStarted 经 TUI start_tool 的
+        // 重复 id upsert 填充。
+        let mut tool_start_emitted = false;
 
         loop {
             let event = tokio::select! {
@@ -238,6 +254,7 @@ impl AgentModelBridge {
                         context.event_bus.emit_render(RenderEvent::TextChunk {
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
+                            message_id,
                             chunk: text,
                         });
                     }
@@ -254,6 +271,7 @@ impl AgentModelBridge {
                         context.event_bus.emit_render(RenderEvent::ThinkingChunk {
                             turn_id: context.turn_id,
                             agent_id: context.agent_id,
+                            message_id,
                             chunk: text.clone(),
                         });
                         context
@@ -266,9 +284,37 @@ impl AgentModelBridge {
                             });
                     }
                 }
-                Some(Ok(ModelStreamEvent::ToolCallDelta { .. } | ModelStreamEvent::Usage(_))) => {}
+                Some(Ok(ModelStreamEvent::ToolCallDelta { id, name, .. })) => {
+                    // [Fix think-end] 工具块开始 = 推理结束：首个带 id/name 的
+                    // delta 提前 emit ToolStarted（input 尚未生成 → Null）。
+                    // 多工具并行时仅首个 delta 发射，其余工具由 dispatch 正式发。
+                    if !tool_start_emitted {
+                        if let Some(context) = &streaming {
+                            if let (Some(id), Some(name)) = (id, name) {
+                                if context.cancel.is_cancelled() {
+                                    stream.abort();
+                                    return Err(AgentError::Interrupted);
+                                }
+                                tool_start_emitted = true;
+                                context.event_bus.emit_render(RenderEvent::ToolStarted {
+                                    turn_id: context.turn_id,
+                                    agent_id: context.agent_id,
+                                    tool_call_id: id.clone(),
+                                    name: name.clone(),
+                                    input: serde_json::Value::Null,
+                                });
+                            }
+                        }
+                    }
+                    // 工具参数流式细节 TUI 不消费（与 Usage 一致丢弃）。
+                }
+                Some(Ok(ModelStreamEvent::Usage(_))) => {}
                 Some(Ok(ModelStreamEvent::Completed(response))) => {
                     let mut reasoning = Self::response_reasoning(response, streaming.is_some())?;
+                    // 流式 chunk 的 messageId 与定型消息 ID 对齐（标准语义）。
+                    if let Some(msg) = reasoning.source_message.take() {
+                        reasoning.source_message = Some(msg.with_message_id(message_id));
+                    }
                     reasoning.model = model_name;
                     return Ok(reasoning);
                 }

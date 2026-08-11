@@ -13,7 +13,7 @@ use ratatui_kit::ratatui::layout::Rect;
 
 use super::props::{ScrollbarFields, mouse_in_area};
 use super::selection::{
-    WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message,
+    WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message, visual_to_logical,
 };
 
 // ── 滚动状态 ──────────────────────────────────────────────────────────────
@@ -165,8 +165,39 @@ impl Default for ScrollbarDragState {
 // ── 滚动条几何 + 反推 ─────────────────────────────────────────────────────
 
 /// 判断鼠标列是否落在滚动条列（drawer.area 最右 1 列）。
-fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
+pub(super) fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
     mouse_col == area.x.saturating_add(area.width).saturating_sub(1)
+}
+
+/// 单击判定：Down 与 Drag/Up 屏幕坐标差 ≤1 行、≤2 列（手抖容差）。
+///
+/// [Why] crossterm 按下后移动会发 `Drag` 事件，因此"无 Drag"本身已表明
+/// 未移动；容差是对事件丢失/平台差异的防御，超过即视为拖拽意图（升级为
+/// 文本拖拽，不触发点击动作）。
+/// 只比较屏幕坐标（`(column, row)`）——Down/Drag 天然都是屏幕坐标，判定
+/// 不再经过视觉换算，滚动偏移/网格前缀的坐标空间问题在判定路径上不复存在。
+/// 判定时机在 Drag 分支（升级判定先于节流闸门）；Up 结算不做坐标比较，
+/// 只看手势是否仍为 Pending（是否升级过）。
+pub(super) fn is_click(down: (u16, u16), cur: (u16, u16)) -> bool {
+    cur.0.abs_diff(down.0) <= 2 && cur.1.abs_diff(down.1) <= 1
+}
+
+/// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行属于
+/// entry 的逻辑首行（`local_idx == 0`，即 header/label 行）时命中。
+///
+/// [Why 仅首行] 正文行保留给文本选区/复制；展开动作只挂在 header 上，
+/// 与键盘 Enter（焦点在 entry 时切换）语义一致。wrap_map 越界
+/// （footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
+/// 均反查到同一逻辑行，全部命中。
+pub(super) fn entry_click_target(
+    wrap_map: &[WrappedLineInfo],
+    slot_offsets: &[usize],
+    visual_row: usize,
+) -> Option<(usize, usize)> {
+    let li = visual_to_logical(visual_row, wrap_map)?;
+    let slot = wrap_map.get(li)?.slot_index;
+    let local = li.saturating_sub(*slot_offsets.get(slot)?);
+    (local == 0).then_some((slot, 0))
 }
 
 /// ratatui Scrollbar 渲染所需的几何参数。源自 ratatui-widgets 0.3.2 的公式：
@@ -354,6 +385,128 @@ fn update_follow_on_scroll(follow_bottom: &State<bool>, max_scroll: usize, offse
     *follow_bottom.write_no_update() = should_follow_after_user_scroll(max_scroll, offset_y);
 }
 
+/// §8.1 `↓ New output` 指示器判定：浏览态（用户滚离底部，follow=false）且
+/// 视口未到**真实内容底**时显示。
+///
+/// [Why 内容底口径] `content_bottom` = core + footer 视觉行数（**不含**
+/// SCROLL_PADDING 缓冲——缓冲行不可见，滚到视觉底部即消失）。与粘性 follow
+/// 恢复（`should_follow_after_user_scroll` 同样扣缓冲）口径对齐：滚到底时
+/// follow 恢复 true 且指示器消失；浏览态中内容增长不移动 viewport，指示器
+/// 出现提示有未看的新输出。
+pub(super) fn new_output_indicator_active(
+    follow_bottom: bool,
+    scroll_y: usize,
+    vis_height: usize,
+    content_bottom: usize,
+) -> bool {
+    !follow_bottom && scroll_y + vis_height < content_bottom
+}
+
+/// [Slice 4 §6.8] Interaction block 锚定对齐目标：pending block 末行超出视口
+/// 时返回对齐偏移（block 底部对齐视口底部），否则 None（不调整）。
+///
+/// 纯函数——`run_auto_follow` 的 anchor 分支消费；浏览态与跟随态均生效
+/// （§6.8「等待时锚定此 block」，不得被新 streaming chunk 滚出视口）。
+pub(super) fn anchor_scroll_target(
+    scroll_y: usize,
+    vis_height: usize,
+    anchor_end: usize,
+    max_scroll: usize,
+) -> Option<usize> {
+    if scroll_y.saturating_add(vis_height) < anchor_end {
+        Some(anchor_end.saturating_sub(vis_height).min(max_scroll))
+    } else {
+        None
+    }
+}
+
+// ── 左键手势状态机（Pending → Armed → settled）────────────────────────
+
+/// 消息区内一次左键手势的中间状态（取代 `selection_down_pos` 的语义）。
+///
+/// 状态表达：`None` = Idle；`Some` = Pending（Down 已记录、未升级为拖拽）；
+/// Drag 超容差升级后置 `None`，由 `text_sel.dragging == true` 表达 Armed。
+///
+/// [Why 冻结] Down 时一次性换算并冻结内容坐标与 entry 命中——Up 结算只
+/// 消费冻结结果，不再二次换算（滚动偏移/网格前缀的坐标正确性由 Down 保证）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GesturePending {
+    /// 按下点屏幕坐标 `(column, row)`——唯一参与判定的坐标（`is_click` 比较）。
+    pub(super) screen: (u16, u16),
+    /// 按下点内容坐标（视觉行/列）——Down 时换算冻结，升级时作 `start_drag`
+    /// 起点（视觉行 = `row − area.y + scroll_y`，视觉列 = `column − area.x`）。
+    pub(super) visual: (usize, u16),
+    /// Down 时命中测试结果：entry header（可折叠行）或 None。
+    /// 冻结命中消除 Up 结算对 wrap_map 的二次反查。
+    pub(super) entry_hit: Option<(usize, usize)>, // (slot, local_idx)
+}
+
+// ── 手势状态机纯函数层 ───────────────────────────────────────────────
+// [Why 提取] ratatui-kit 未暴露 `State<T>`（SingleWaker）的构造 API
+// （`ReactiveHandle::new` 仅存在于 atom 的 WakerMap impl），handle_event 的
+// State 参数无法在测试中构造——状态机转移以纯函数表达，测试直调锁定。
+
+/// Down 冻结：记录 Pending 手势（屏幕坐标 + 一次性换算的内容坐标 +
+/// entry header 命中反查）。不改任何可视状态——真实拖动（Drag 超容差）
+/// 才升级为拖拽。
+pub(super) fn freeze_down(
+    screen: (u16, u16),
+    visual: (usize, u16),
+    wrap_map: &[WrappedLineInfo],
+    slot_offsets: &[usize],
+) -> GesturePending {
+    // [冻结命中] entry 命中在 Down 时反查冻结——Up 结算直接消费，不再二次
+    // 换算（滚动/网格前缀的坐标正确性由此时保证）。
+    GesturePending {
+        screen,
+        visual,
+        entry_hit: entry_click_target(wrap_map, slot_offsets, visual.0),
+    }
+}
+
+/// Drag 分支决策结果（纯函数 `drag_step` 的输出）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DragAction {
+    /// 超容差 → 升级为拖拽（Armed）：`start_drag(pending.visual)` +
+    /// `update_drag(当前视觉坐标)` + gesture → None。**升级瞬间不受节流**。
+    Upgrade(GesturePending),
+    /// 节流窗口内且未升级：零副作用（Pending 原样保留；事件丢失的
+    /// UpdateOnly 也被吞，与现状节流行为一致）。
+    Throttled,
+    /// 节流通过且无 Down 记录（如事件丢失）：`update_drag` 空转
+    /// （dragging=false 时 no-op；已升级后的拖拽延续则跟随鼠标）。
+    UpdateOnly,
+    /// 节流通过且容差内（手抖）：Pending 原样保留，零副作用。
+    KeepPending,
+}
+
+/// Drag 分支决策：**升级判定先于节流闸门**。
+///
+/// [Why 先于节流] 终端按下后任何微移都会报 Drag（无阈值）；若升级放在节流
+/// 之后，<50ms 的快速拖拽首个 Drag 被节流吞掉，升级永不发生 → Up 误判单击
+/// （误折叠 + 复制丢失）。容差内（手抖）手势保持 Pending，节流照常。
+pub(super) fn drag_step(
+    pending: Option<GesturePending>,
+    drag_screen: (u16, u16),
+    within_throttle_window: bool,
+) -> DragAction {
+    match pending {
+        Some(p) if !is_click(p.screen, drag_screen) => DragAction::Upgrade(p),
+        Some(_) if within_throttle_window => DragAction::Throttled,
+        Some(_) => DragAction::KeepPending,
+        None if within_throttle_window => DragAction::Throttled,
+        None => DragAction::UpdateOnly,
+    }
+}
+
+/// Up 结算分流：单击结算分工（依赖 dispatch 注册序——mod.rs 单击 handler
+/// 先消费 Pending 命中，未命中才落到 scroll.rs Up 分支）。
+/// 返回是否应复位 gesture：Pending 未命中（gesture 仍为 Some）→ 复位；
+/// Armed（dragging）→ 复制流程，gesture 已在升级瞬间复位为 None，无需再写。
+pub(super) fn settle_up(dragging: bool, gesture_pending: bool) -> bool {
+    !dragging && gesture_pending
+}
+
 // ── 鼠标事件处理 ─────────────────────────────────────────────────────────
 
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
@@ -367,7 +520,7 @@ pub(super) fn handle_event(
     scroll_state: &State<ScrollPos>,
     scroll_throttle: &State<ScrollThrottle>,
     text_sel: &State<TextSelection>,
-    selection_down_pos: &State<Option<(usize, u16)>>,
+    gesture: &State<Option<GesturePending>>,
     drag_throttle: &State<DragThrottle>,
     // 拼接后的全量 wrap_map（按 visual_start 升序）。mod.rs 渲染前已拼接好。
     wrap_map: &Arc<Vec<WrappedLineInfo>>,
@@ -377,6 +530,10 @@ pub(super) fn handle_event(
     scrollbar_fields: &State<ScrollbarFields>,
     scrollbar_drag: &State<ScrollbarDragState>,
     follow_bottom: &State<bool>,
+    // [D3 §9] 语义复制所需的快照 VM 列表与网格——事件时点由 mod.rs 闭包
+    // 传入（im::Vector clone O(1)）；None 时复制保持既有行为（无剥离）。
+    view_models: Option<&im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>>,
+    grid: Option<crate::kit::message_area::grid::GridSpec>,
 ) -> EventResult {
     if let Event::Key(key) = &event {
         let _ = focus_router::message_accepts_key(key);
@@ -386,12 +543,12 @@ pub(super) fn handle_event(
         // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗覆盖
         // 消息区时，点击行必须由弹窗消费，否则这里会先 Consumed 吃掉事件）。
         // [Why] 但拖拽残留状态必须在此清理：遮挡时下方 Up 分支（scrollbar_drag /
-        // selection_down_pos / text_sel 复位）永远不会执行，拖拽中途弹窗打开会
+        // gesture / text_sel 复位）永远不会执行，拖拽中途弹窗打开会
         // 残留 dragging 状态，弹窗关闭后下一次点击被误判为拖拽（误复制/点击错乱）。
         if mouse_router::is_occluded() {
-            // render 不依赖 active / selection_down_pos，用 write_no_update 避免 wake 噪音
+            // render 不依赖 active / gesture，用 write_no_update 避免 wake 噪音
             scrollbar_drag.write_no_update().active = false;
-            *selection_down_pos.write_no_update() = None;
+            *gesture.write_no_update() = None;
             // [TRAP] 先 copy 出 dragging 再 write——parking_lot 同 thread read+write
             // 冲突会 panic（与下方 Up 分支同一模式）。
             if text_sel.read().dragging {
@@ -468,8 +625,8 @@ pub(super) fn handle_event(
                                 s.thumb_offset = thumb_offset;
                                 s.last_flush = Instant::now();
                             }
-                            // 清除文本选区按下记录，防止 fallthrough 冲突
-                            *selection_down_pos.write_no_update() = None;
+                            // 清除手势按下记录，防止 fallthrough 冲突
+                            *gesture.write_no_update() = None;
                             return EventResult::Consumed;
                         }
                         MouseEventKind::Drag(MouseButton::Left) if drag_active => {
@@ -501,12 +658,20 @@ pub(super) fn handle_event(
                             if drag_active {
                                 scrollbar_drag.write_no_update().active = false;
                             }
+                            // [hygiene] 消息区内按下后拖到滚动条列释放的手势不会
+                            // 经过下方 Up 分支——这里收尾复位，避免 Pending 残留。
+                            *gesture.write_no_update() = None;
                             return EventResult::Consumed;
                         }
                         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                             // 滚轮在滚动条列也响应——fallthrough 到下面的滚动处理
                         }
-                        _ => return EventResult::Consumed,
+                        _ => {
+                            // [hygiene] 滚动条列上的其他左键事件（非 active 拖拽的
+                            // Drag 等）——复位手势，避免 Pending 残留被下一次 Up 消费。
+                            *gesture.write_no_update() = None;
+                            return EventResult::Consumed;
+                        }
                     }
                 } else if on_scrollbar_col
                     && matches!(
@@ -532,58 +697,103 @@ pub(super) fn handle_event(
             if in_area && !drag_select_disabled {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // 仅记录按下的位置，不启动选区——真实拖动才开始选中
-                        // [TRAP] selection_down_pos 只在事件处理器内读写，render
-                        // 不依赖它——用 write_no_update 避免 wake 噪音（render 不需要
-                        // 因为这个状态变化而重渲染，后续 Drag 才是真正的渲染触发点）。
+                        // 记录手势意图（Pending）：冻结屏幕坐标 + 一次性换算的
+                        // 内容坐标 + entry header 命中测试。不改任何可视状态——
+                        // 真实拖动（Drag 超容差）才升级为拖拽。
+                        // [TRAP] gesture 只在事件处理器内读写，render 不依赖
+                        // 它——用 write_no_update 避免 wake 噪音（render 不需要
+                        // 因为这个状态变化而重渲染，后续 Drag 升级才是真正的
+                        // 渲染触发点）。
                         let scroll_y = scroll_state.read().offset();
                         // [usize 视觉行] 滚动偏移 usize 化后，视觉行直接相加——
                         // 超长内容（>65535 视觉行）下选中中间行不再被 u16 clamp 截断错位。
                         let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
                         // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
                         let visual_col = mouse.column.saturating_sub(area.x);
-                        *selection_down_pos.write_no_update() = Some((visual_row, visual_col));
+                        let pending = freeze_down(
+                            (mouse.column, mouse.row),
+                            (visual_row, visual_col),
+                            wrap_map,
+                            slot_offsets,
+                        );
+                        *gesture.write_no_update() = Some(pending);
                         return EventResult::Consumed;
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        // Drag 节流（16ms），write_no_update 避免自激回路
+                        // [升级判定先于节流] 决策提取为纯函数 drag_step——
+                        // 升级瞬间不受节流：否则 <50ms 的快速拖拽首个 Drag 被
+                        // 节流吞掉，升级永不发生，Up 误判单击（误折叠 + 复制
+                        // 丢失）。容差内（手抖）手势保持 Pending，节流照常。
+                        // [TRAP] 先 copy 出 gesture 值 drop guard 再 write——
+                        // parking_lot 同 thread read+write 冲突会 panic。
+                        let pending = *gesture.read();
                         let now = Instant::now();
-                        {
+                        let within_throttle_window = {
                             let dt = drag_throttle.read();
-                            if dt.last_flush.elapsed() < Duration::from_millis(scroll_frame_ms()) {
+                            now.duration_since(dt.last_flush)
+                                < Duration::from_millis(scroll_frame_ms())
+                        };
+                        match drag_step(pending, (mouse.column, mouse.row), within_throttle_window)
+                        {
+                            DragAction::Upgrade(p) => {
+                                // ── 升级为拖拽（Armed）──
+                                let scroll_y = scroll_state.read().offset();
+                                // [usize 视觉行] 同 Down 分支：不做 u16 clamp，
+                                // 超长内容选区不错位。
+                                let visual_row =
+                                    mouse.row.saturating_sub(area.y) as usize + scroll_y;
+                                let visual_col = mouse.column.saturating_sub(area.x);
+                                // 单次 write guard，drop 时只 wake 一次（不是两次）
+                                // start_drag + update_drag 合并到同一 guard 内
+                                {
+                                    let mut sel_guard = text_sel.write();
+                                    // start 恒为 Down 冻结的 visual——升级判定
+                                    // 前移后 start_drag 只在升级瞬间调用一次
+                                    // （不受节流）。
+                                    sel_guard.start_drag(p.visual.0, p.visual.1);
+                                    sel_guard.update_drag(visual_row, visual_col);
+                                }
+                                // [Armed 表达] 升级后 gesture 复位（None）：
+                                // 拖拽状态归 TextSelection 所有（dragging=true
+                                // 即 Armed 指示），Up 结算只看 dragging。
+                                *gesture.write_no_update() = None;
+                                return EventResult::Consumed;
+                            }
+                            DragAction::Throttled => return EventResult::Consumed,
+                            DragAction::UpdateOnly => {
+                                // 节流通过（未升级）——刷新节流时间戳
+                                drag_throttle.write_no_update().last_flush = now;
+                                // gesture 为 None（无 Down 记录，如事件丢失）→
+                                // 现状行为：update_drag 空转（dragging=false 时
+                                // no-op；已升级后的拖拽延续则跟随鼠标）。
+                                let scroll_y = scroll_state.read().offset();
+                                let visual_row =
+                                    mouse.row.saturating_sub(area.y) as usize + scroll_y;
+                                let visual_col = mouse.column.saturating_sub(area.x);
+                                text_sel.write().update_drag(visual_row, visual_col);
+                                return EventResult::Consumed;
+                            }
+                            DragAction::KeepPending => {
+                                // 容差内（手抖）：Pending 原样保留，零副作用——
+                                // 仅刷新节流时间戳（与现状节流逻辑一致）。
+                                drag_throttle.write_no_update().last_flush = now;
                                 return EventResult::Consumed;
                             }
                         }
-                        drag_throttle.write_no_update().last_flush = now;
-
-                        let scroll_y = scroll_state.read().offset();
-                        // [usize 视觉行] 同 Down 分支：不做 u16 clamp，超长内容选区不错位。
-                        let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
-                        let visual_col = mouse.column.saturating_sub(area.x);
-
-                        // 单次 write guard，drop 时只 wake 一次（不是两次）
-                        // start_drag + update_drag 合并到同一 guard 内
-                        //
-                        // [TRAP] ratatui-kit 用 parking_lot::RwLock——同一 thread 同时
-                        // 持有 read + write 时 try_write 返回 Err → expect panic。
-                        // 必须先把 selection_down_pos.read() 的值 copy 出来 drop guard，
-                        // 再 write selection_down_pos。
-                        let down_pos = *selection_down_pos.read();
-                        {
-                            let mut sel_guard = text_sel.write();
-                            if let Some((dr, dc)) = down_pos {
-                                sel_guard.start_drag(dr, dc);
-                                *selection_down_pos.write_no_update() = None;
-                            }
-                            sel_guard.update_drag(visual_row, visual_col);
-                        }
-                        return EventResult::Consumed;
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        *selection_down_pos.write_no_update() = None;
+                        // 单击结算分工（依赖 dispatch 注册序）：mod.rs 单击 handler
+                        // 先消费 Pending 命中（Consumed）；未命中（Ignored）落到这里。
+                        // Armed（dragging）→ 复制流程；Pending 未命中 → 复位 gesture。
                         // [TRAP] 同 Drag 处理：必须 copy 出 text_sel 状态后再 write，
                         // 否则 read+write 同 thread 冲突 panic。
                         let dragging = text_sel.read().dragging;
+                        // 决策提取为纯函数 settle_up（可独立测试）：Pending 未命中
+                        // （gesture 仍为 Some）→ 复位，手势生命周期结束；Armed 时
+                        // gesture 已在升级瞬间复位为 None，无需再写。
+                        if settle_up(dragging, gesture.read().is_some()) {
+                            *gesture.write_no_update() = None;
+                        }
                         if !dragging {
                             return EventResult::Consumed;
                         }
@@ -597,6 +807,8 @@ pub(super) fn handle_event(
                                 (sr, sc),
                                 (er, ec),
                                 vis_width,
+                                view_models,
+                                grid,
                             )
                         } else {
                             None
@@ -623,13 +835,22 @@ pub(super) fn handle_event(
                 // 鼠标在消息区外
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        // 清除选区和按下记录
+                        // 清除选区和手势按下记录
                         *text_sel.write() = TextSelection::new();
-                        *selection_down_pos.write_no_update() = None;
+                        *gesture.write_no_update() = None;
                         return EventResult::Ignored;
                     }
                     _ => {
-                        if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                        // [S4 hygiene] 区域外 Up 顺手清 gesture——消息区内 Down
+                        // 拖出区域外释放是常见路径（拖选拖出窗口），gesture 残留
+                        // 至下一次 Down 虽必被覆盖，但"Down 事件丢失"场景下残留
+                        // entry_hit 会被 Up 误消费（S1 review L1）。
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Up(MouseButton::Left)
+                                | MouseEventKind::Drag(MouseButton::Left)
+                        ) {
+                            *gesture.write_no_update() = None;
                             return EventResult::Ignored;
                         }
                     }
@@ -722,13 +943,24 @@ pub(super) struct AutoFollowCtx {
     /// 触发「新会话首次批量加载」的强制滚底路径。
     pub bridge_reset_counter: u64,
     pub prev_reset_counter: State<u64>,
+    /// [Slice 4 §6.8]「等待时锚定此 block」：pending interaction block 的视觉
+    /// 行范围（core 行，含起点/终点）。有值时视口对齐到 block 底部（浏览态与
+    /// 跟随态均生效——§6.8：不得被新 streaming chunk 滚出视口）；block 完成
+    /// （结果回写 → 派生扫描不到 → None）后恢复原语义，不强制 follow
+    /// （§15「提交后转为只读结果行且不抢回 viewport」）。
+    pub anchor_visual_range: Option<(usize, usize)>,
 }
 
 /// 从 `use_effect` 闭包提取的吸底逻辑。
 /// 注意：use_effect body 不是 render body，所以 `write()` 是正确的（需要 wake 触发后续渲染）。
 pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
-    // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题
-    tracing::info!(
+    // [Diagnostic] 记录每次 effect 触发的关键参数——trace 历史/submit 两个滚动问题。
+    // [Perf] run_auto_follow 随 vm_generation 每 token 触发，info 级日志在默认
+    // filter 下逐 token 同步落盘（RollingFileAppender），多 Agent 并发时放大为每秒
+    // 数百次文件写。热路径诊断统一降为 trace 级，按需开启
+    // `RUST_LOG=...msg_scroll_diag=trace` 排查；低频事件（submit/thread_load 等
+    // consumer）仍保持 info。
+    tracing::trace!(
         target: "msg_scroll_diag",
         items_len = ctx.items_len,
         total_rows = ctx.total_visual_rows,
@@ -768,7 +1000,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
         && ctx.total_visual_rows > 0
         && ctx.vis_height > 0
     {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_vis,
             new_vis = ctx.vis_height,
@@ -785,7 +1017,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_epoch = *ctx.prev_loading_epoch.read();
     *ctx.prev_loading_epoch.write() = ctx.loading_epoch;
     if ctx.loading_epoch != prev_epoch && ctx.total_visual_rows > 0 && ctx.vis_height > 0 {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_epoch,
             new_epoch = ctx.loading_epoch,
@@ -804,7 +1036,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     let prev_ctr = *ctx.prev_reset_counter.read();
     *ctx.prev_reset_counter.write() = ctx.bridge_reset_counter;
     if ctx.bridge_reset_counter != prev_ctr {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             prev_ctr,
             new_ctr = ctx.bridge_reset_counter,
@@ -820,7 +1052,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // ── 零内容保护 ──
     if ctx.total_visual_rows == 0 || ctx.vis_height == 0 {
         *ctx.prev_items_len.write() = ctx.items_len;
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: early return (zero total or vis)");
         return;
     }
 
@@ -829,7 +1061,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 每批次都 force scroll + 再次将 prev_items_len 归零——直到 replay 结束，
     // generation 不再增长、effect 停发，prev==0 自然消弭。
     if prev == 0 && !ctx.is_loading && ctx.items_len > 0 {
-        tracing::info!(
+        tracing::trace!(
             target: "msg_scroll_diag",
             items_len = ctx.items_len,
             "auto_follow: prev==0 force-scroll (history replay batch) → scroll_to_bottom",
@@ -845,6 +1077,38 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // ── 正常路径：更新 prev_items_len ──
     *ctx.prev_items_len.write() = ctx.items_len;
 
+    // ── [Slice 4 §6.8] Interaction block 锚定 ──
+    // pending interaction block 存在时，block 末行超出视口 → 视口对齐到 block
+    // 底部。**仅跟随态生效**（§6.8 字面「等待时 follow mode 锚定此 block」）：
+    // 浏览态（用户滚离底部）下新内容不得移动 viewport（§8.1），锚定分支在
+    // `!follow_bottom` 早退之前——跟随态下锚定优先于粘性跟随判定；resize 后
+    // 按新快照重算（prev_vis_height 路径共存，anchor 分支在其后覆盖对齐目标）。
+    // block 完成（pending=false → 派生扫描不到 → None）后恢复原语义，不强制
+    // follow（§15）。[Fix] 浏览态下每帧被拉回 block 底部会打断用户阅读——
+    // 与 §8.1「浏览态新内容不得移动 viewport」相悖，改为浏览态跳过锚定。
+    if *ctx.follow_bottom.read()
+        && let Some((_anchor_start, anchor_end)) = ctx.anchor_visual_range
+    {
+        let max_scroll = ctx
+            .total_visual_rows
+            .saturating_sub(ctx.vis_height as usize);
+        let scroll_y = ctx.scroll_state.read().offset();
+        if let Some(target) =
+            anchor_scroll_target(scroll_y, ctx.vis_height as usize, anchor_end, max_scroll)
+        {
+            tracing::trace!(
+                target: "msg_scroll_diag",
+                anchor_end,
+                scroll_y,
+                target,
+                "auto_follow: interaction anchor → align viewport to block bottom",
+            );
+            ctx.scroll_state.write().set_offset(target);
+            *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        }
+        return;
+    }
+
     // ── 粘性跟随 guard ──
     // [Why] 用户一旦向上滚动（offset < max_scroll，update_follow_on_scroll 已置
     // false）即进入浏览模式：内容增长不再吸回，可自由翻看历史。
@@ -853,7 +1117,7 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 增长时被吸回，反复拉锯；且内容单帧跳增超过阈值时跟随被拒绝，视口停在
     // 半空、spinner 消失——底部跳动。粘性语义下这两类问题都不存在。
     if !*ctx.follow_bottom.read() {
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: browsing (follow=false) → skip");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: browsing (follow=false) → skip");
         return;
     }
 
@@ -861,17 +1125,17 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     if ctx.is_loading {
         if ctx.total_visual_rows > prev_lsa {
-            tracing::info!(target: "msg_scroll_diag", "auto_follow: loading → scroll_to_bottom");
+            tracing::trace!(target: "msg_scroll_diag", "auto_follow: loading → scroll_to_bottom");
             ctx.scroll_state.write().scroll_to_bottom();
             *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         } else {
-            tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
+            tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: loading → skip (total_rows not greater than prev_lsa)");
         }
         return;
     }
 
     if ctx.items_len < prev {
-        tracing::info!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
+        tracing::trace!(target: "msg_scroll_diag", items_len = ctx.items_len, prev, "auto_follow: shrink → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
         *ctx.follow_bottom.write() = true;
@@ -879,11 +1143,11 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
     }
 
     if ctx.total_visual_rows > prev_lsa {
-        tracing::info!(target: "msg_scroll_diag", "auto_follow: non-loading growth → scroll_to_bottom");
+        tracing::trace!(target: "msg_scroll_diag", "auto_follow: non-loading growth → scroll_to_bottom");
         ctx.scroll_state.write().scroll_to_bottom();
         *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
     } else {
-        tracing::info!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading → skip (total_rows not greater than prev_lsa)");
+        tracing::trace!(target: "msg_scroll_diag", total = ctx.total_visual_rows, prev_lsa, "auto_follow: non-loading → skip (total_rows not greater than prev_lsa)");
     }
 }
 

@@ -10,6 +10,8 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,
+        fold: crate::kit::tui_render_unit::FoldState::Collapsed,
+        user_modified: false,
         content_hash: 0,
     }
 }
@@ -27,6 +29,7 @@ fn test_collect_subagents_only_user_bubbles() {
             text: "hi".to_string(),
             content_hash: 0,
             reminder: None,
+            source: None,
         })]),
         generation: 0,
     };
@@ -69,6 +72,7 @@ fn test_collect_subagents_recurses_into_collapsed_group() {
     let collapsed = TuiCollapsedGroup {
         title: "batch".to_string(),
         count: 1,
+        failed_count: 0,
         view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
             "hidden", "Hidden",
         ))],

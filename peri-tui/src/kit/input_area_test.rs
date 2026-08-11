@@ -4,6 +4,7 @@ use super::*;
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
 use serial_test::serial;
+use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn test_apply_slash_selection_replaces_only_current_token() {
@@ -241,8 +242,193 @@ fn test_submit_text_loading_unknown_slash_buffers_agent_text() {
     ACP_STATE.state().write().is_loading = true;
     submit_text("/foo".to_string());
     assert_eq!(crate::kit::atoms::INPUT_HISTORY.state().read().len(), 1);
-    // UserBubble 通过 LOCAL_EVENT_TX 异步发送；assert INPUT_BUFFER 接收了文本
+    // Slice 3 D4（§10 queued 反转）：loading 提交只入队，**不**发本地气泡——
+    // transcript 不得提前出现 user bubble（drain 后才恰一次）。
     assert_eq!(INPUT_BUFFER.state().read().len(), 1);
+    assert!(
+        VIEW_MODELS.state().read().items.is_empty(),
+        "loading 提交不提前进 transcript（排队项显示在 composer 上方队列）"
+    );
+}
+
+/// Slice 3 D4：排队上限 32 条——超出时队首被挤出（VecDeque FIFO 上限）。
+#[test]
+#[serial]
+fn test_submit_text_loading_queue_caps_at_32() {
+    reset_submit_side_effect_state();
+    ACP_STATE.state().write().is_loading = true;
+    for i in 0..33 {
+        submit_text(format!("/c{i}"));
+    }
+    let state = INPUT_BUFFER.state();
+    let buf = state.read();
+    assert_eq!(buf.len(), 32, "排队上限 32 条");
+    assert_eq!(buf.front().unwrap(), "/c1", "超出上限时队首（最旧）被挤出");
+    assert_eq!(buf.back().unwrap(), "/c32");
+}
+
+/// Slice 3 D4：非 loading 提交路径不变——本地气泡 + AgentText 双发。
+#[test]
+#[serial]
+fn test_submit_text_not_loading_sends_bubble_and_agent_text() {
+    reset_submit_side_effect_state();
+    let recorder = make_submit_recorder();
+    dispatch_submit_request(parse_submit_request("/foo").unwrap(), false, |request| {
+        recorder.lock().push(request)
+    });
+    assert!(INPUT_BUFFER.state().read().is_empty(), "非 loading 不入队");
+    assert_eq!(
+        recorded_submit(&recorder),
+        Some(SubmitRequest::AgentText("/foo".to_string()))
+    );
+    // 本地气泡经 LOCAL_EVENT_TX 异步发送（send_local_user_bubble），
+    // transcript 由 acp_bridge 异步写入——本测试不直接断言 VIEW_MODELS
+    // （OnceLock 通道不可重置），由 acp_events_test 的 drain 测试覆盖。
+}
+
+/// Slice 3a：prompt 前缀宽度 = outer1 + accent1 + gap（§3.1 对齐）。
+/// gap=1（Compact/Narrow）→ 3 列；gap=2（Wide/Standard）→ 4 列；
+/// prompt_and_border_width 各加右预留 2 列。
+#[test]
+fn test_prompt_prefix_aligns_with_grid_content_start() {
+    crate::kit::atoms::init_atoms();
+    let narrow = GridSpec::grid_for(40); // Compact, gap=1
+    let wide = GridSpec::grid_for(120); // Wide, gap=2
+    assert_eq!(narrow.gap, 1);
+    assert_eq!(wide.gap, 2);
+    assert_eq!(prompt_and_border_width(narrow), 5);
+    assert_eq!(prompt_and_border_width(wide), 6);
+
+    // 正文起点 = 前缀宽度 = transcript first_prefix_width（outer+accent+gap）。
+    let lines = build_composer_lines(vec![Line::from("hi".to_string())], false, narrow);
+    let first = &lines[0].spans[0];
+    assert_eq!(first.content, " ❯ ", "gap=1：前缀 3 列（1 空 + ❯ + 1 空）");
+    assert_eq!(first.content.width(), narrow.first_prefix_width());
+
+    let lines = build_composer_lines(vec![Line::from("hi".to_string())], false, wide);
+    let first = &lines[0].spans[0];
+    assert_eq!(first.content, " ❯  ", "gap=2：前缀 4 列（1 空 + ❯ + 2 空）");
+    assert_eq!(first.content.width(), wide.first_prefix_width());
+
+    // 续行前缀与首行同宽（accent 位置留空）。
+    let multi = build_composer_lines(
+        vec![Line::from("a".to_string()), Line::from("b".to_string())],
+        false,
+        wide,
+    );
+    assert_eq!(multi[1].spans[0].content.width(), wide.first_prefix_width());
+}
+
+/// Slice 3b：composer 上方 queued 队列行——`· {text}` 截断 + `· · ·` 溢出行。
+/// 组件层先 take(QUEUE_VISIBLE_MAX=5) 再渲染：5 条 + 溢出标记 = 6 行。
+#[test]
+fn test_build_queue_lines_caps_at_five_and_more_row() {
+    crate::kit::atoms::init_atoms();
+    let items: Vec<String> = (0..5).map(|i| format!("prompt {i}")).collect();
+    let lines = build_queue_lines(&items, true, 40);
+    assert_eq!(lines.len(), 6, "5 条 + 1 行溢出标记");
+    assert!(lines[0].spans[0].content.starts_with('·'));
+    assert!(
+        lines[5].spans[0].content.contains("· · ·"),
+        "溢出行 `· · ·`"
+    );
+    // 无溢出标记时只有 items 行。
+    assert_eq!(build_queue_lines(&items, false, 40).len(), 5);
+    // 空队列 → 无行（不占高度）。
+    assert!(build_queue_lines(&[], false, 40).is_empty());
+    // 超长文本按宽度截断（truncate_by_width：正文预算 max_width + 省略号 1 列）。
+    let long = build_queue_lines(&["x".repeat(100)], false, 10);
+    assert_eq!(long[0].spans[1].content.width(), 11);
+}
+
+/// 渲染 Block 到 TestBackend，返回按行拼接的文本（titles 是私有字段，
+/// 经真实渲染验证标题行内容与降级组合）。
+fn render_block_text(block: &Block<'static>, w: u16, h: u16) -> Vec<String> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h))
+        .expect("TestBackend 可创建");
+    terminal
+        .draw(|f| {
+            f.render_widget(block.clone(), f.area());
+        })
+        .expect("渲染成功");
+    let buf = terminal.backend().buffer();
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// Slice 3a：composer 标题/footer 行（§10）——show_top/show_bottom 组合。
+#[test]
+fn test_build_composer_block_titles_and_degrades() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(None);
+    // 全显示：top 仅保留 session title；footer 左 files 右资源线（CPU·MEM·ctx）。
+    let full = build_composer_block(
+        false,
+        "session",
+        Some("@ 2 files"),
+        Some(Line::from(" CPU 75% · MEM 512MB · 42% ctx ")),
+        true,
+        true,
+        80,
+    );
+    let rows = render_block_text(&full, 80, 4);
+    assert!(
+        !rows[0].contains("Auto Mode") && !rows[0].contains("gpt-5"),
+        "title_top 不应重复显示状态栏已有的 mode/model：{:?}",
+        rows[0]
+    );
+    assert!(
+        rows[0].contains("session"),
+        "title_top 右侧保留 session title"
+    );
+    assert!(
+        rows[3].contains("@ 2 files"),
+        "title_bottom 左侧附件计数：{:?}",
+        rows[3]
+    );
+    assert!(
+        rows[3].contains("MEM 512MB") && rows[3].contains("42% ctx"),
+        "title_bottom 右侧资源线（MEM · ctx）：{:?}",
+        rows[3]
+    );
+
+    // h<12：隐藏 session title。
+    let no_top = build_composer_block(
+        false,
+        "session",
+        Some("f"),
+        Some(Line::from(" c ")),
+        false,
+        true,
+        80,
+    );
+    let rows = render_block_text(&no_top, 80, 4);
+    assert!(
+        !rows[0].contains("session") && !rows[0].contains("·"),
+        "h<12 隐藏 title_top 整行：{:?}",
+        rows[0]
+    );
+
+    // h<8：title_bottom 也隐藏。
+    let all_hidden = build_composer_block(
+        false,
+        "session",
+        Some("f"),
+        Some(Line::from(" c ")),
+        false,
+        false,
+        80,
+    );
+    let rows = render_block_text(&all_hidden, 80, 4);
+    assert!(
+        !rows[0].contains("session") && !rows[3].contains("files"),
+        "h<8 全部标题行隐藏"
+    );
 }
 
 #[test]

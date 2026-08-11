@@ -58,6 +58,40 @@ fn test_start_then_end_tool() {
 }
 
 #[test]
+fn test_start_tool_duplicate_id_upserts_input() {
+    // [Fix think-end] agent 侧提前 ToolStarted（工具块开始即发，参数尚未
+    // 流式生成 → raw_input=Null）与 dispatch 的正式 ToolStarted（参数完整）
+    // 同 id 先后到达：只升级 input，不重建卡片（保留 started_at/时长语义）。
+    let mut ct = CurrentTurn::new();
+    ct.append_reasoning("thinking...", None);
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        String::new(),
+        serde_json::Value::Null,
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1);
+    assert_eq!(ct.tool_cards[0].raw_input, serde_json::Value::Null);
+    assert!(ct.tool_cards[0].input_summary.is_empty());
+
+    // 正式发：同 id，input 完整 → upsert input
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        "path: foo.rs".into(),
+        serde_json::json!({"path": "foo.rs"}),
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1, "同 id 不应重复建卡");
+    assert_eq!(
+        ct.tool_cards[0].raw_input,
+        serde_json::json!({"path": "foo.rs"})
+    );
+    assert_eq!(ct.tool_cards[0].input_summary, "path: foo.rs");
+}
+
+#[test]
 fn test_end_tool_unknown_id_is_noop() {
     let mut ct = CurrentTurn::new();
     ct.start_tool(ToolCardAccumulator::new(
@@ -532,4 +566,46 @@ fn test_first_tool_in_batch_is_running_false_after_end() {
         }
         _ => panic!("vms[3] 应为 TuiToolCard"),
     }
+}
+#[test]
+fn test_flush_segment_rebuilds_cached_reasoning_status() {
+    // [Fix think-end] 回归测试：思考→工具（无正文）场景下，提前 ToolStarted
+    // 触发 flush 切段后，推理段必须以 Completed 形态构建（动画冻结）。
+    // 旧 bug：sync_cache 的 `len() <= i` 守卫复用 flush 前缓存的 trailing
+    // bubble（Running 形态），推理动画持续到 turn 结束才冻结。
+    let mut ct = CurrentTurn::new();
+    ct.append_reasoning("thinking...", None);
+    // 流式期间：缓存已构建 trailing bubble（推理块 Running）
+    let vm = ct.view_models();
+    assert_eq!(vm.len(), 1);
+    let TuiRenderUnit::TuiAssistantBubble(early) = &vm[0] else {
+        panic!("expected assistant bubble");
+    };
+    let early_reasoning = early.reasoning.as_ref().expect("推理块应存在");
+    assert_eq!(early_reasoning.status, EntryStatus::Running);
+
+    // 提前 ToolStarted（工具块开始 = 推理结束）→ flush 切段 + 建卡
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        String::new(),
+        serde_json::Value::Null,
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1);
+
+    // 段切走后：推理块必须转为 Completed（冻结），不再 Running
+    let vm = ct.view_models();
+    assert_eq!(vm.len(), 2, "段 + 工具卡片");
+    let TuiRenderUnit::TuiAssistantBubble(bubble) = &vm[0] else {
+        panic!("expected assistant bubble at index 0");
+    };
+    let reasoning = bubble.reasoning.as_ref().expect("推理块应存在");
+    assert_eq!(
+        reasoning.status,
+        EntryStatus::Completed,
+        "flush 切段后推理块必须 Completed（动画冻结）"
+    );
+    assert!(!reasoning.is_running, "冻结段不可处于 running");
+    assert_eq!(bubble.text, "", "思考→工具（无正文）场景正文为空");
 }

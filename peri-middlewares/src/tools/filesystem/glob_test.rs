@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// schema 的 pattern 描述必须说明 `*`/`?` 跨 `/`（与 glob crate 实现一致），
+/// 防止模型按 shell 直觉误以为 `*.rs` 只匹配当前目录
+#[test]
+fn test_glob_pattern_description_declares_cross_slash_semantics() {
+    let tool = GlobFilesTool::new("/tmp");
+    let params = tool.parameters();
+    let desc = params["properties"]["pattern"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        desc.contains("match across `/`"),
+        "pattern 描述应说明 `*`/`?` 跨 `/`，实际: {desc}"
+    );
+    assert!(
+        !desc.contains("Use ** for recursive matching"),
+        "描述不应暗示 `*` 不递归（实现中 `*` 已跨 `/`），实际: {desc}"
+    );
+}
+
 #[tokio::test]
 async fn test_glob_match_simple() {
     let dir = tempfile::tempdir().unwrap();

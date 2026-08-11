@@ -24,9 +24,9 @@
 │                                                                              │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ ❯ 输入你的任务...                                                        │ │
-│ │ @ mention files    / commands                                           │ │
+│ │ @ mention files    / commands          CPU 12% · MEM 430MB · 42% ctx     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
-│ Auto · perihelion · anthropic/claude-code-sonnet · CPU 12% · MEM 430MB        │
+│ Auto · perihelion · anthropic/claude-code-sonnet                             │
 │                 /::commands · Shift+Enter::newline · Ctrl+T::mode · Ctrl+O::diff│
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -35,7 +35,7 @@
 
 - 聚合展示对话、工具调用、工具结果、SubAgent、后台 Agent 状态、系统通知和当前 streaming turn。
 - 输入区支持多行编辑、历史、文件 mention、slash command、软换行、视口跟随、placeholder。
-- 状态栏持续暴露运行环境、权限模式、模型、资源占用和上下文快捷键。
+- 状态栏持续暴露运行环境、权限模式、模型与后台任务；CPU%/MEM/上下文使用率在 composer footer 右侧资源线。
 - BgTaskArea 展示后台 Agent（background subagent）的运行状态和耗时。
 
 ### 1.2 Setup Wizard 首次启动页
@@ -576,7 +576,7 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Auto · perihelion · anthropic/claude-code-sonnet · CPU 12% · MEM 430MB        │
+│ Auto · perihelion · anthropic/claude-code-sonnet                             │
 │                 /::commands · Shift+Enter::newline · Ctrl+T::mode · Ctrl+O::diff│
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -584,7 +584,8 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 能力：
 
-- 第 1 行显示 permission mode、cwd basename、provider/model、CPU、MEM。
+- 第 1 行显示 permission mode、cwd basename、provider/model、后台任务计数。
+- CPU%/MEM/上下文使用率显示在输入区 composer footer 右侧资源线（`input_area.rs` `footer_right`）。
 - 第 2 行根据状态切换 hints：
   - 默认：slash commands hint + 输入区快捷键
   - popup 激活：弹窗快捷键（Esc: close、Enter: confirm）

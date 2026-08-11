@@ -199,6 +199,7 @@ fn test_stop_reason_wire_format() {
 fn test_ai_reasoning_maps_to_session_update() {
     // AiReasoning → AgentThoughtChunk SessionUpdate
     let event = ExecutorEvent::AiReasoning {
+        message_id: peri_acp_types::messages::MessageId::new(),
         text: "let me think...".to_string(),
         source_agent_id: None,
     };
@@ -228,6 +229,7 @@ fn test_ai_reasoning_with_source_agent_id_forwards_to_notifier() {
     // SubAgent reasoning → 应携带 source_agent_id，使 TUI notifier
     // 的 agent_thought_chunk handler 正确路由到 SubAgentGroup
     let event = ExecutorEvent::AiReasoning {
+        message_id: peri_acp_types::messages::MessageId::new(),
         text: "subagent thinking...".to_string(),
         source_agent_id: Some("sa-1".to_string()),
     };

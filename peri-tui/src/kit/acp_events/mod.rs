@@ -23,7 +23,7 @@ pub(crate) use self::render::drain_input_buffer;
 pub use crate::kit::submit_request::SubmitRequest;
 pub use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUserBubble};
 
-use crate::kit::acp_types::{AcpEventData, CurrentTurn};
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms::*;
 use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_str};
 use std::collections::HashMap;
@@ -350,6 +350,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // ── §4.5 Interaction events ──
         HitlPending(hp) => system::handle_hitl_pending(state, hp),
         AskUser(au) => system::handle_ask_user(state, au),
+        // [Slice 4 §6.8] TUI 内部事件：interaction block 结果回写（本地，
+        // 不走 ACP 协议）。
+        InteractionResolved { request_id, result } => {
+            system::handle_interaction_resolved(state, request_id, result)
+        }
         // Rewind v2：rewind-preview 推送已退役（候选改由打开面板时实时查询），
         // 变体保留以向后兼容旧服务端。
         RewindPreview(_) => {}
@@ -442,6 +447,23 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
+
+/// [Slice 4 §6.8] 发送 `InteractionResolved` 本地事件（interaction block 结果
+/// 回写）。`ask_user_action` / `hitl_response` 消费者在**RPC 成功**后调用——
+/// 失败时 block 保持 pending，用户可在 inline block 上重试（双轨 D5）。
+/// bridge 扫描 committed 中 pending block 按 `request_id` 匹配原位回写。
+/// `LOCAL_EVENT_TX` 未初始化时静默丢弃（幂等）。
+pub(crate) fn emit_interaction_resolved(request_id: &str, result: &str) {
+    if let Some(tx) = LOCAL_EVENT_TX.get() {
+        let _ = tx.send(AcpEventWithEpoch {
+            event: AcpEventData::InteractionResolved {
+                request_id: request_id.to_string(),
+                result: result.to_string(),
+            },
+            active_session_id: String::new(),
+        });
+    }
+}
 
 /// 从 BaseMessage JSON 提取纯文本（H3 辅助函数）。
 ///

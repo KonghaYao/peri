@@ -10,7 +10,8 @@ use crate::component::{
 };
 use crate::palette::{BasePalette, DiffPalette, GrayPalette, Palette, StatePalette};
 use crate::semantic::{
-    BorderTokens, DiffTokens, SemanticTokens, StatusTokens, SurfaceTokens, TextTokens,
+    AccentTokens, BorderTokens, DiffTokens, SemanticTokens, StatusTokens, SurfaceTokens,
+    SyntaxTokens, TextTokens,
 };
 use crate::theme::{ThemeDefinition, ThemeMode};
 
@@ -53,6 +54,30 @@ const LIGHT_MODEL_ACCENT: Color = Color::Rgb(107, 114, 201); // #6B72C9
 const LIGHT_EFFORT: Color = Color::Rgb(176, 111, 46); // #B06F2E
 const LIGHT_TOKEN_CONTEXT: Color = Color::Rgb(62, 138, 184); // #3E8AB8
 
+// ── 消息流语义（§4 默认主题表，dark：Tokyo Night 方向）────────────────────
+const RUNNING: Color = Color::Rgb(125, 207, 255); // #7DCFFF 活动状态
+const ACCENT_USER: Color = Color::Rgb(122, 162, 247); // #7AA2F7 用户 prompt
+const ACCENT_ASSISTANT: Color = Color::Rgb(187, 154, 247); // #BB9AF7 assistant 回答
+const ACCENT_REASONING: Color = Color::Rgb(84, 92, 126); // #545C7E reasoning
+const ACCENT_TOOL: Color = Color::Rgb(115, 122, 162); // #737AA2 已完成的 tool
+const TEXT_SECONDARY: Color = Color::Rgb(169, 177, 214); // #A9B1D6 次级正文
+const SURFACE_RAISED: Color = Color::Rgb(41, 46, 66); // #292E42 composer / expanded tool body
+const SURFACE_SUNKEN: Color = Color::Rgb(26, 27, 38); // #1A1B26 code / terminal output
+const SYNTAX_COMMAND: Color = Color::Rgb(224, 175, 104); // #E0AF68 shell command
+const SYNTAX_PATH: Color = Color::Rgb(255, 158, 100); // #FF9E64 文件路径
+
+// ── 消息流语义（light 可读等值：同色相加深，保证浅底可读）────────────────
+const LIGHT_RUNNING: Color = Color::Rgb(30, 136, 200); // #1E88C8
+const LIGHT_ACCENT_USER: Color = Color::Rgb(46, 125, 224); // #2E7DE0
+const LIGHT_ACCENT_ASSISTANT: Color = Color::Rgb(122, 93, 199); // #7A5DC7
+const LIGHT_ACCENT_REASONING: Color = Color::Rgb(138, 147, 168); // #8A93A8
+const LIGHT_ACCENT_TOOL: Color = Color::Rgb(110, 118, 134); // #6E7686
+const LIGHT_TEXT_SECONDARY: Color = Color::Rgb(74, 74, 74); // #4A4A4A
+const LIGHT_SURFACE_RAISED: Color = Color::Rgb(255, 255, 255); // #FFFFFF
+const LIGHT_SURFACE_SUNKEN: Color = Color::Rgb(233, 233, 237); // #E9E9ED
+const LIGHT_SYNTAX_COMMAND: Color = Color::Rgb(154, 107, 0); // #9A6B00
+const LIGHT_SYNTAX_PATH: Color = Color::Rgb(177, 92, 0); // #B15C00
+
 /// 构建 peri-dark 完整主题定义。
 pub fn dark_theme() -> ThemeDefinition {
     ThemeDefinition {
@@ -86,8 +111,16 @@ pub fn dark_theme() -> ThemeDefinition {
             },
         },
         semantic: SemanticTokens {
+            accents: AccentTokens {
+                primary: ACCENT,
+                user: ACCENT_USER,
+                assistant: ACCENT_ASSISTANT,
+                reasoning: ACCENT_REASONING,
+                tool: ACCENT_TOOL,
+            },
             text: TextTokens {
                 primary: TEXT,
+                secondary: TEXT_SECONDARY,
                 muted: MUTED,
                 dim: DIM,
             },
@@ -97,13 +130,15 @@ pub fn dark_theme() -> ThemeDefinition {
                 dim: BORDER_DIM,
             },
             status: StatusTokens {
-                running: LOADING,
+                running: RUNNING,
                 success: SAGE,
                 warning: WARNING,
                 error: ERROR,
             },
             surface: SurfaceTokens {
                 default: Color::Rgb(0, 0, 0),
+                raised: SURFACE_RAISED,
+                sunken: SURFACE_SUNKEN,
                 user: USER_BG,
                 popup: POPUP_BG,
                 selection: SELECTION_BG,
@@ -117,6 +152,10 @@ pub fn dark_theme() -> ThemeDefinition {
                 remove_bg: Color::Rgb(55, 20, 18),
                 add_word_bg: Color::Rgb(26, 78, 36),
                 remove_word_bg: Color::Rgb(78, 28, 22),
+            },
+            syntax: SyntaxTokens {
+                command: SYNTAX_COMMAND,
+                path: SYNTAX_PATH,
             },
             loading: LOADING,
             thinking: THINKING,
@@ -241,8 +280,16 @@ pub fn light_theme() -> ThemeDefinition {
             },
         },
         semantic: SemanticTokens {
+            accents: AccentTokens {
+                primary: ACCENT,
+                user: LIGHT_ACCENT_USER,
+                assistant: LIGHT_ACCENT_ASSISTANT,
+                reasoning: LIGHT_ACCENT_REASONING,
+                tool: LIGHT_ACCENT_TOOL,
+            },
             text: TextTokens {
                 primary: light_text,
+                secondary: LIGHT_TEXT_SECONDARY,
                 muted: light_muted,
                 dim: light_dim,
             },
@@ -252,13 +299,15 @@ pub fn light_theme() -> ThemeDefinition {
                 dim: light_border_dim,
             },
             status: StatusTokens {
-                running: LOADING,
+                running: LIGHT_RUNNING,
                 success: SAGE,
                 warning: WARNING,
                 error: ERROR,
             },
             surface: SurfaceTokens {
                 default: light_surface,
+                raised: LIGHT_SURFACE_RAISED,
+                sunken: LIGHT_SURFACE_SUNKEN,
                 user: light_user_bg,
                 popup: light_bg,
                 selection: light_selection,
@@ -272,6 +321,10 @@ pub fn light_theme() -> ThemeDefinition {
                 remove_bg: Color::Rgb(245, 220, 220),
                 add_word_bg: Color::Rgb(200, 235, 200),
                 remove_word_bg: Color::Rgb(235, 200, 200),
+            },
+            syntax: SyntaxTokens {
+                command: LIGHT_SYNTAX_COMMAND,
+                path: LIGHT_SYNTAX_PATH,
             },
             loading: LOADING,
             thinking: THINKING,

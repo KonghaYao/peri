@@ -1,8 +1,9 @@
 //! ratatui-kit StatusBar component.
 //!
 //! S9：完整双行布局——
-//! - **Row 1**：权限模式 → cwd basename → provider/model → CPU% → MEM
+//! - **Row 1**：权限模式 → cwd basename → provider/model → bg tasks
 //!   全部从 SERVICE_SNAPSHOT atom 派生（S5 落地）；高亮计时器控制闪烁。
+//!   CPU%/MEM/ctx 已迁移 composer footer 资源线（input_area.rs）。
 //! - **Row 2**：状态相关的快捷键 hints（popup/mention/slash/默认 4 态切换）。
 
 use crate::i18n;
@@ -23,7 +24,8 @@ use ratatui_kit::{
 };
 use std::time::{Duration, Instant};
 
-/// 状态栏第 1 行：权限模式 · cwd · provider/model · CPU% · MEM · bg tasks
+/// 状态栏第 1 行：权限模式 · cwd · provider/model · bg tasks
+///（CPU%/MEM/ctx 已迁移 composer footer 资源线，见 input_area.rs）
 #[component]
 fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang = hooks.use_atom(&atoms::LANG_VERSION);
@@ -32,7 +34,6 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let provider_hl = hooks.use_atom(&atoms::PROVIDER_HIGHLIGHT_UNTIL);
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
-    let ctx_usage = hooks.use_atom(&atoms::CONTEXT_USAGE);
 
     let snap = snap.read().clone();
     let now = Instant::now();
@@ -92,23 +93,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         model_end = spans.len();
     }
 
-    // 4. CPU%（仅在超过 50% 时显示）
-    if snap.cpu_percent > 50.0 {
-        spans.push(separator());
-        spans.push(Span::styled(
-            format!("CPU {:.0}%", snap.cpu_percent),
-            Style::default().fg(resource_color_by_load(snap.cpu_percent as f64, 50.0, 100.0)),
-        ));
-    }
-
-    // 5. MEM
-    spans.push(separator());
-    spans.push(Span::styled(
-        format!("MEM {}MB", snap.memory_mb),
-        Style::default().fg(memory_color(snap.memory_mb)),
-    ));
-
-    // 6. 后台任务计数
+    // 4. 后台任务计数
     let bg = bg_tasks.read();
     let shell_c = bg.iter().filter(|t| t.kind == "shell").count();
     let agent_c = bg.iter().filter(|t| t.kind == "agent").count();
@@ -128,29 +113,6 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         spans.push(Span::styled(
             parts.join(" "),
             Style::default().fg(THEME_ATOM.state().read().semantic.loading),
-        ));
-    }
-
-    // 7. 上下文使用率（放最后，与旧架构 status_bar render_first_row 一致）
-    if let Some((pct, total)) = ctx_usage.read().as_ref() {
-        // pct 已经是百分比值（0-100），来自 StateSnapshotMeta.budget_pct（agent 侧 context_usage_percent）
-        let pct_display = *pct;
-        let total_display = if *total >= 1_000_000 {
-            format!("{:.0}M", *total as f64 / 1_000_000.0)
-        } else {
-            format!("{:.0}k", *total as f64 / 1000.0)
-        };
-        let color = if pct_display >= 85.0 {
-            statusbar().resource_bad
-        } else if pct_display >= 70.0 {
-            statusbar().resource_warn
-        } else {
-            statusbar().resource_good
-        };
-        spans.push(separator());
-        spans.push(Span::styled(
-            format!("{:.0}% {}", pct_display, total_display),
-            Style::default().fg(color),
         ));
     }
 
@@ -348,21 +310,51 @@ fn NotifRow(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )
 }
 
+#[derive(Default, Props)]
+pub struct StatusBarProps {
+    /// §11 高度降级：`h < 12` 时隐藏 Row2 key hints（Row1Only，高度 2）。
+    pub hide_hints: bool,
+    /// §11 高度降级：`h < 8` 时完全隐藏（高度 0，高度让给 transcript/composer）。
+    pub hidden: bool,
+}
+
 #[component]
-pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn StatusBar(props: &StatusBarProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang = hooks.use_atom(&atoms::LANG_VERSION);
+
+    // §11：h<8 完全隐藏；h<12 仅 Row1 + NotifRow（无 key hints / 缓冲行）。
+    // Row2 是独立组件，条件渲染不违反 hook 顺序（计划 Slice 1c 裁决）。
+    let height = if props.hidden {
+        0
+    } else if props.hide_hints {
+        2
+    } else {
+        4
+    };
 
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(4),
+            height: Constraint::Length(height),
         ) {
             StatusBarRow1()
-            StatusBarRow2()
-            NotifRow()
-            // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
-            Text(text: Paragraph::new(Line::from("")))
+            if !props.hidden && !props.hide_hints {
+                element!(StatusBarRow2())
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            }
+            if props.hidden {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            } else {
+                element!(NotifRow())
+            }
+            if !props.hidden && !props.hide_hints {
+                // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
+                element!(Text(text: Paragraph::new(Line::from(""))))
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            }
         }
     )
 }
@@ -531,28 +523,6 @@ fn cwd_basename(cwd: &str) -> String {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| cwd.to_string())
-}
-
-/// 通用阈值染色：>= high → ERROR，>= low → WARNING，else SAGE。
-fn resource_color_by_load(value: f64, low: f64, high: f64) -> ratatui::style::Color {
-    if value >= high {
-        statusbar().resource_bad
-    } else if value >= low {
-        statusbar().resource_warn
-    } else {
-        statusbar().resource_good
-    }
-}
-
-/// MEM 染色：>1024 ERROR，>512 WARNING，else SAGE（与 legacy status_bar 一致）。
-fn memory_color(mem_mb: u64) -> ratatui::style::Color {
-    if mem_mb > 1024 {
-        statusbar().resource_bad
-    } else if mem_mb > 512 {
-        statusbar().resource_warn
-    } else {
-        statusbar().resource_good
-    }
 }
 
 /// 状态栏模型段三段式 `alias model effort` 的组成部分。

@@ -34,6 +34,7 @@ pub mod memory;
 pub mod model;
 pub mod plugin;
 pub mod status;
+pub mod subagent_detail;
 pub mod tasks;
 pub mod theme;
 pub mod thread_browser;

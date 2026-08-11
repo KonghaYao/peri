@@ -656,6 +656,10 @@ render-status-done = 完成
 render-tool-uses = · { $count } 次工具调用
 render-user-answered = 用户回答了 Peri 的问题：
 render-thought-for = 思考了 { $count } 字符
+render-more-lines = … 还有 { $count } 行
+render-subagent-tools = { $count } 次工具
+render-todo-summary = { $done }/{ $total } 任务
+render-todo-summary-active = { $done }/{ $total } 任务 · { $active }
 render-agent-header = Agent
 
 # ---- 消息区 Spinner ----
@@ -666,6 +670,40 @@ msg-keepgoing = 继续
 msg-copy-md = 复制
 msg-tip-prefix =   ⎿  提示: 
 msg-todo-available =  (可开始)
+
+# ---- 消息条目状态后备文案（spec §4.1：符号的文本后备）----
+msg-status-running = 运行中
+msg-status-done = 完成
+msg-status-failed = 失败
+msg-status-needs-approval = 需要审批
+msg-status-collapsed = 已折叠
+msg-status-expanded = 已展开
+msg-status-queued = 排队中
+msg-user-prompt = 你
+msg-assistant-prompt = Perihelion
+msg-status-loading = 加载中
+msg-new-output = 新输出
+render-group-failed-count = { $count } 个失败
+
+# ---- Interaction block（§6.8，Slice 4）----
+# inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——
+# result 文案为纯文本（无符号），渲染层负责状态符号与颜色。
+
+render-interaction-title-permission = 需要批准
+render-interaction-title-ask-user = 询问用户
+render-interaction-question-permission = { $verb } 想要运行：{ $summary }
+render-interaction-tool-unknown = 未知工具
+render-interaction-allow-once = 允许一次
+render-interaction-deny = 拒绝
+render-interaction-result-allowed-once = 已允许一次
+render-interaction-result-denied = 已拒绝
+render-interaction-result-answered = 已回答
+render-interaction-result-rejected = 已拒绝
+
+# ---- Composer（§10）----
+
+composer-attachments = @ { $count } 个文件
+composer-context-usage = { $pct }% ctx
 
 # ---- 消息视图占位符 ----
 
@@ -757,6 +795,7 @@ panel-title-betas = Betas
 panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
+panel-title-subagent-detail = SubAgent 详情
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model 别名选择
@@ -775,6 +814,8 @@ panel-desc-betas = 功能开关
 panel-desc-workflow = Workflow 运行
 panel-desc-ask-user = Agent 用户提问（自动打开）
 panel-desc-theme = 配色方案选择
+panel-desc-subagent-detail = SubAgent 嵌套消息详情
+subagent-detail-not-found = 未找到该 SubAgent — 会话可能已重置。
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)

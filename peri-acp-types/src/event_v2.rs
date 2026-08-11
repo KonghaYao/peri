@@ -86,15 +86,23 @@ impl fmt::Display for TurnErrorReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderEvent {
     /// LLM 输出文本块（流式，可能拆分为多次）
+    ///
+    /// `message_id`：所属 AI 消息的稳定 ID（一次 LLM 调用的 assistant 输出）。
+    /// 同一消息的所有 chunk 共享该 ID；变化即新消息——TUI 据此做段边界与
+    /// 推理结束推断（ACP 标准 messageId 语义）。
     TextChunk {
         turn_id: TurnId,
         agent_id: AgentId,
+        message_id: crate::messages::MessageId,
         chunk: String,
     },
     /// LLM 推理/思考过程（thinking/reasoning）
+    ///
+    /// `message_id` 语义同 `TextChunk`：与同消息的文本块共享同一 ID。
     ThinkingChunk {
         turn_id: TurnId,
         agent_id: AgentId,
+        message_id: crate::messages::MessageId,
         chunk: String,
     },
     /// 工具调用开始
@@ -658,19 +666,25 @@ impl EventHandles {
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
         RenderEvent::TextChunk {
-            turn_id,
             agent_id,
+            message_id,
             chunk,
+            ..
         } => Some(ExecutorEvent::TextChunk {
-            // v2 chunk 事件无 message 级身份；以 turn_id 填充（同一 turn 的
-            // chunk 共享稳定归组键），不使用 Default::default() 伪装。
-            message_id: MessageId::from(turn_id.as_uuid()),
+            // v2 chunk 事件携带消息级身份（每次 LLM 调用一个稳定 message_id），
+            // 不再用 turn_id 填充——同一 turn 多次迭代的消息各自独立（ACP 标准
+            // messageId 语义：变化 = 新消息）。
+            message_id,
             chunk,
             source_agent_id: Some(agent_id.to_string()),
         }),
         RenderEvent::ThinkingChunk {
-            agent_id, chunk, ..
+            agent_id,
+            message_id,
+            chunk,
+            ..
         } => Some(ExecutorEvent::AiReasoning {
+            message_id,
             text: chunk,
             source_agent_id: Some(agent_id.to_string()),
         }),

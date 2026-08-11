@@ -76,6 +76,9 @@ pub enum TuiRenderUnit {
     TuiCollapsedGroup(TuiCollapsedGroup),
     TuiDivider(TuiDivider),
     TuiAskUserBlock(TuiAskUserBlock),
+    /// §6.9 活动 turn 的 todo 进度摘要行（`3/7 tasks · Running tests`），
+    /// 由 push_view_models 从 `TODO_ITEMS` 派生，插在最终回答之前。
+    TuiTodoSummary(TuiTodoSummary),
 }
 
 impl TuiRenderUnit {
@@ -91,27 +94,119 @@ impl TuiRenderUnit {
             Self::TuiCollapsedGroup(d) => d.content_hash,
             Self::TuiDivider(d) => d.content_hash,
             Self::TuiAskUserBlock(d) => d.content_hash,
+            Self::TuiTodoSummary(d) => d.content_hash,
+        }
+    }
+
+    /// 该 VM 是否渲染运行中动画符号（tool running / subagent running /
+    /// reasoning running，§8.2）——渲染缓存需按动画帧强制重建，使 braille
+    /// 动画随壁钟 tick 推进（hash 可能跨秒才变化，不足以驱动 10Hz 动画）。
+    pub fn is_animating(&self) -> bool {
+        match self {
+            Self::TuiToolCard(d) => d.is_running,
+            Self::TuiSubAgentGroup(d) => d.is_running,
+            Self::TuiAssistantBubble(d) => d.reasoning.as_ref().is_some_and(|r| r.is_running),
+            _ => false,
         }
     }
 }
 
-/// 折叠策略单点定义：「仅最后一个含 reasoning 的 assistant bubble 展开」。
+// ---------------------------------------------------------------------------
+// 折叠状态机（spec §7）——折叠策略的**唯一**定义点
+// ---------------------------------------------------------------------------
+
+/// 折叠三态（spec §7）——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FoldState {
+    #[default]
+    Collapsed,
+    Preview,
+    Expanded,
+}
+
+/// Entry 生命周期状态——折叠表按此选择默认 fold。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryStatus {
+    Running,
+    #[default]
+    Completed,
+    Error,
+}
+
+/// §7 折叠表的 entry 类型维度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldTarget {
+    User,
+    Assistant,
+    Reasoning,
+    Tool,
+    SubAgent,
+    System,
+    Interaction,
+}
+
+/// 折叠覆盖键——用户手动操作过的 entry 身份（spec §7「用户手动改变 fold state
+/// 后，本 turn 内不再被自动策略覆盖」）。按 ACP 身份字段键控：
+/// `Reasoning(message_id)` / `Tool(tool_id)` / `SubAgent(agent_id)` /
+/// `Interaction(request_id)`。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FoldKey {
+    Reasoning(String),
+    Tool(String),
+    SubAgent(String),
+    /// Interaction block 按本地 request_id 键控（生产创建点从
+    /// HITL_REQUEST_ID / ASK_USER_REQUEST_ID atom 克隆；测试构造为 None 时
+    /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
+    Interaction(String),
+}
+
+/// [G2] spec §7 折叠表——每个 entry 类型 × 状态的默认折叠目标。
 ///
-/// 返回最后一个含 reasoning 的 bubble 索引；列表中没有 reasoning 时返回 `None`。
-///
-/// [`CurrentTurn::normalize_collapsed`](crate::kit::acp_types::CurrentTurn) 与
-/// `acp_events/render.rs` 的折叠 pass 共用此目标选择——策略变更（如改为
-/// "最后两个展开"）只改这里，防止两处实现分叉破坏渲染缓存一致性。
-pub(crate) fn reasoning_collapse_target(vms: &im::Vector<TuiRenderUnit>) -> Option<usize> {
-    let mut last: Option<usize> = None;
-    for (i, vm) in vms.iter().enumerate() {
-        if let TuiRenderUnit::TuiAssistantBubble(b) = vm
-            && b.reasoning.is_some()
-        {
-            last = Some(i);
-        }
+/// 唯一折叠策略单点：`push_view_models` 的折叠 pass（以及未来所有消费者）
+/// 只能从这里取值，禁止在别处内联折叠决策。
+pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
+    use EntryStatus::*;
+    use FoldTarget::*;
+    match (target, status) {
+        // user / assistant 正文永远展开（user 长文折叠归 Slice 3 截断层）
+        (User, _) | (Assistant, _) => FoldState::Expanded,
+        // reasoning：running = tail preview，completed 自动收束为单行
+        (Reasoning, Running) | (Reasoning, Error) => FoldState::Preview,
+        (Reasoning, Completed) => FoldState::Collapsed,
+        // tool：running = tail preview，success 默认折叠，error 展开错误摘要
+        (Tool, Running) => FoldState::Preview,
+        (Tool, Completed) => FoldState::Collapsed,
+        (Tool, Error) => FoldState::Expanded,
+        // subagent：running = Collapsed + live summary（裁决 C4：按 spec §7 表）
+        (SubAgent, Running) | (SubAgent, Completed) => FoldState::Collapsed,
+        (SubAgent, Error) => FoldState::Expanded,
+        // system：普通事件单行 divider，error 展开摘要
+        (System, Running) | (System, Completed) => FoldState::Collapsed,
+        (System, Error) => FoldState::Expanded,
+        // interaction：等待时 expanded 可聚焦，答毕保持完整展示（问题 + 选项
+        // + 结果行始终可见，不自动收束；用户 Space 手动折叠仍生效）
+        (Interaction, Running) => FoldState::Expanded,
+        (Interaction, Completed) => FoldState::Expanded,
+        (Interaction, Error) => FoldState::Expanded,
     }
-    last
+}
+
+/// `FoldState` 的确定性 hash 代码——纳入 content_hash 公式（G1）。
+pub fn fold_state_code(f: FoldState) -> u64 {
+    match f {
+        FoldState::Collapsed => 1,
+        FoldState::Preview => 2,
+        FoldState::Expanded => 3,
+    }
+}
+
+/// `EntryStatus` 的确定性 hash 代码——纳入 content_hash 公式（G1）。
+pub fn entry_status_code(s: EntryStatus) -> u64 {
+    match s {
+        EntryStatus::Running => 1,
+        EntryStatus::Completed => 2,
+        EntryStatus::Error => 3,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,11 +274,16 @@ pub struct TuiUserBubble {
     /// 从文本中检测到的 system-reminder 信息。
     /// `None` 表示普通用户消息气泡。
     pub reminder: Option<ReminderInfo>,
+    /// 来源标记（§6.1 来源型消息 / §10 interjection 预留，G-Interjection）。
+    /// 协议无来源字段（零改动约束），生产构造点恒 `None`（普通提交）；
+    /// 渲染时 `Some` 才会在 label 追加 muted 来源。身份字段，不进 content_hash
+    /// （同 `message_id` 先例），进 partial_eq。
+    pub source: Option<String>,
 }
 
 impl TuiUserBubble {
     /// 构造函数——自动从文本中检测 `<system-reminder>` 标签并提取
-    /// [`ReminderInfo`]。
+    /// [`ReminderInfo`]；`source` 填充占位 `None`（协议无来源标记）。
     pub fn new(text: String) -> Self {
         let content_hash = tui_hash_str(&text);
         let reminder = detect_reminder(&text);
@@ -191,11 +291,12 @@ impl TuiUserBubble {
             text,
             content_hash,
             reminder,
+            source: None,
         }
     }
 }
 
-tui_impl_partial_eq!(TuiUserBubble: text, reminder);
+tui_impl_partial_eq!(TuiUserBubble: text, reminder, source);
 
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
@@ -207,34 +308,97 @@ pub struct TuiAssistantBubble {
     pub text: String,
     /// Optional reasoning / thinking block (Anthropic extended thinking etc.).
     pub reasoning: Option<TuiReasoningBlock>,
+    /// 身份字段——ACP `messageId`，折叠覆盖键 `FoldKey::Reasoning(message_id)` 用。
+    /// [G1] 不进 content_hash（同一消息内容变化不应因 id 失效），进 partial_eq。
+    pub message_id: Option<String>,
+    /// 本 bubble 文本流式开始的时刻（§6.2 `12.4s`）——仅 trailing 流式段有值；
+    /// 折叠 pass 在 phase 离开 PromptRunning 时冻结为 `duration_ms`（镜像
+    /// reasoning 的冻结机制），冻结后置 None。身份/时序字段，进 partial_eq。
+    pub started_at: Option<std::time::Instant>,
+    /// 已冻结的正文时长（毫秒）——仅完成后的 bubble 有值（折叠 pass 冻结，
+    /// 此后不再增长）；Running 中为 None。进 partial_eq。
+    pub duration_ms: Option<u64>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
 
 impl TuiAssistantBubble {
-    /// 计算包含 text + reasoning.text + reasoning.collapsed 的 hash。
-    /// sync_cache 的增量路径、折叠归一化与 push_view_models 的折叠 pass
-    /// 都用同一公式，保证修改 collapsed 后 hash 一致。
+    /// 计算包含以下内容的 hash：text、reasoning.text、
+    /// reasoning.fold/status/is_running/duration、
+    /// 正文时长（`duration_secs`，None→0，秒取整）、冻结判别位（`frozen`）。
+    ///
+    /// sync_cache 的增量路径（`build_bubble_parts`）与 push_view_models 的折叠
+    /// pass 都用同一公式，保证修改折叠状态后 hash 一致（G1 三单点）。
+    ///
+    /// `frozen`（= `started_at.is_none()`）：running→frozen 翻转在同一秒内落地
+    /// 时 `duration_secs` 数值可能不变，但渲染内容不同（§6.2 `12.4s` meta 从
+    /// 无到有）——hash 必须区分，否则按 hash 分片的渲染缓存持续供应运行中
+    /// （无 meta）的旧帧（回归：冻结翻转后 duration meta 缺失/闪烁）。
     ///
     /// 文本部分使用滚动哈希（[`tui_hash_roll`]）——流式追加时可由增量维护的
     /// 滚动值直接组合，避免每 token 对全量文本 format! + 哈希。
-    pub fn compute_hash(text: &str, reasoning: Option<&TuiReasoningBlock>) -> u64 {
+    /// `message_id` 是身份字段，不参与 hash。
+    pub fn compute_hash(
+        text: &str,
+        reasoning: Option<&TuiReasoningBlock>,
+        duration_secs: u64,
+        frozen: bool,
+    ) -> u64 {
         let mut h = tui_hash_roll(text);
         if let Some(r) = reasoning {
             h = tui_hash_combine(h, tui_hash_roll(&r.text));
-            h = tui_hash_combine(h, u64::from(r.collapsed));
+            h = tui_hash_combine(h, fold_state_code(r.fold));
+            h = tui_hash_combine(h, entry_status_code(r.status));
+            h = tui_hash_combine(h, u64::from(r.is_running));
+            h = tui_hash_combine(h, r.duration_code());
+        }
+        h = tui_hash_combine(h, duration_secs);
+        tui_hash_combine(h, u64::from(frozen))
+    }
+
+    /// [G1] 正文时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
+    /// 触发按秒重建），Completed 按冻结秒数（稳定）。与 `TuiReasoningBlock::duration_code`
+    /// 同语义。
+    pub fn duration_secs(&self) -> u64 {
+        if let Some(started) = self.started_at {
+            started.elapsed().as_secs()
+        } else {
+            self.duration_ms.unwrap_or(0) / 1000
+        }
+    }
+
+    /// 根据 text + reasoning + duration 当前值重算 content_hash。
+    /// 修改 reasoning.fold/status 或冻结 duration 后必须调用，否则按 hash 分片的
+    /// 渲染缓存会命中旧值。
+    pub fn recompute_hash(&mut self) {
+        self.content_hash = Self::compute_hash(
+            &self.text,
+            self.reasoning.as_ref(),
+            self.duration_secs(),
+            // [G1] 冻结判别位 = started_at 是否已清除（running 形态 ↔ 冻结形态）。
+            self.started_at.is_none(),
+        );
+    }
+
+    /// [LOW-5] 稳定身份 hash——排除时变 duration（正文/推理的秒数），供
+    /// 复制按钮点击校验使用：运行中 bubble 的 content_hash 每秒随 duration
+    /// 漂移，渲染帧与点击事件跨秒边界时按 content_hash 比对会偶发拒绝命中
+    /// （下一帧自愈，但点击丢失）。身份校验只关心文本与折叠/状态；
+    /// `message_id` 身份字段同样排除（与 compute_hash 口径一致）。
+    pub fn stable_identity_hash(text: &str, reasoning: Option<&TuiReasoningBlock>) -> u64 {
+        let mut h = tui_hash_roll(text);
+        if let Some(r) = reasoning {
+            h = tui_hash_combine(h, tui_hash_roll(&r.text));
+            h = tui_hash_combine(h, fold_state_code(r.fold));
+            h = tui_hash_combine(h, entry_status_code(r.status));
+            h = tui_hash_combine(h, u64::from(r.is_running));
+            // 不含 duration_code——时变，不属于身份。
         }
         h
     }
-
-    /// 根据 text + reasoning 当前值重算 content_hash。
-    /// 修改 reasoning.collapsed 后必须调用，否则按 hash 分片的渲染缓存会命中旧值。
-    pub fn recompute_hash(&mut self) {
-        self.content_hash = Self::compute_hash(&self.text, self.reasoning.as_ref());
-    }
 }
 
-tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning);
+tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, message_id, started_at, duration_ms);
 
 /// Tool invocation card -- name, summaries, optional diff.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -308,17 +472,70 @@ pub struct TuiToolCard {
     pub is_running: bool,
     /// Elapsed time in milliseconds for a running tool.
     pub running_duration_ms: Option<u64>,
+    /// 已完成的工具冻结时长（毫秒）——`end_tool` 时由同源 `started_at` 冻结
+    /// （G-started_at），完成行 `37ms`/`4.2s` 显示用；Running 中为 `None`。
+    pub completed_duration_ms: Option<u64>,
     /// Inline diff preview (Write / Edit tools).
     pub diff: Option<TuiDiffBlock>,
     /// 专属工具的用户语义展示；默认保持通用工具卡片。
     pub presentation: TuiToolPresentation,
+    /// 折叠状态——折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。
+    pub fold: FoldState,
+    /// 用户手动操作过折叠状态——自动策略免疫（spec §7）。
+    pub user_modified: bool,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
     /// Agent 工具专用的子工具调用计数（由 sync_cache 后处理 pair_agent_tool_cards 配对填充）。
     pub tool_calls_count: usize,
 }
 
-tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, diff, presentation);
+impl TuiToolCard {
+    /// [G1] 内容哈希公式单点——`build_tool_card` / replay 构造 / 折叠 pass 共用。
+    /// 包含 fold + user_modified：折叠状态变化必须触发按 hash 分片的渲染缓存重建。
+    /// duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致分片缓存频繁失效；
+    /// 同时保证 duration 文本每秒刷新。completed_duration_ms 是冻结值（秒级稳定）。
+    pub fn recompute_hash(&mut self) {
+        let duration_secs = self.running_duration_ms.map(|ms| ms / 1000);
+        let completed_secs = self.completed_duration_ms.map(|ms| ms / 1000);
+        let mut h = tui_hash_str(&format!(
+            "{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}",
+            self.tool_id,
+            self.tool_name,
+            self.input_summary,
+            self.output_summary,
+            self.is_error,
+            self.is_running,
+            duration_secs,
+            completed_secs,
+            self.presentation,
+            self.fold,
+            self.user_modified,
+        ));
+        // [G-Diff] diff 定型于 tool-ended，此后不变——稳定摘要纳入 hash 保证
+        // diff 变更（含路径/计数/截断）触发按 hash 分片的渲染缓存重建。
+        h = tui_hash_combine(h, self.diff_code());
+        self.content_hash = h;
+    }
+
+    /// [G-Diff] diff 的稳定摘要 hash：path + 总 change 数 + is_binary/is_too_large/
+    /// is_new_file + 截断信息。`None` → 0（普通工具卡无 diff 不改变 hash）。
+    pub fn diff_code(&self) -> u64 {
+        let Some(d) = &self.diff else {
+            return 0;
+        };
+        let (adds, dels) = diff_change_counts(d);
+        let mut h = tui_hash_combine(0, tui_hash_str(&d.path));
+        h = tui_hash_combine(h, adds as u64);
+        h = tui_hash_combine(h, dels as u64);
+        h = tui_hash_combine(h, d.more_change_lines as u64);
+        h = tui_hash_combine(h, u64::from(d.is_binary));
+        h = tui_hash_combine(h, u64::from(d.is_too_large));
+        h = tui_hash_combine(h, u64::from(d.is_new_file));
+        h
+    }
+}
+
+tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified);
 
 /// System notification -- centered banner for model switches, compact, etc.
 #[derive(Debug, Clone)]
@@ -348,15 +565,41 @@ pub struct TuiSubAgentGroup {
     pub agent_name: String,
     /// Nested view models produced by the sub-agent.
     pub view_models: im::Vector<TuiRenderUnit>,
-    /// Whether the group is currently collapsed.
+    /// Whether the group is currently collapsed（详情面板语义；消息区折叠由 fold 驱动）。
     pub collapsed: bool,
     /// Whether the sub-agent is still streaming.
     pub is_running: bool,
+    /// 折叠状态——折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。
+    pub fold: FoldState,
+    /// 用户手动操作过折叠状态——自动策略免疫（spec §7）。
+    pub user_modified: bool,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
 
-tui_impl_partial_eq!(TuiSubAgentGroup: agent_id, agent_name, view_models, collapsed, is_running);
+impl TuiSubAgentGroup {
+    /// [G1] 内容哈希公式单点——`SubAgentAccumulator::view_model` 构造与折叠 pass
+    /// 共用（含 fold + user_modified：状态变化必须触发分片渲染缓存重建）。
+    pub fn recompute_hash(&mut self) {
+        // 用 u64 组合累加每个 child VM 的 content_hash，确保 child 文本
+        // 变化时（即使 view_models.len() 不变）也能触发按 hash 分片的渲染缓存重建。
+        let mut child_hash_total: u64 = 0;
+        for vm in self.view_models.iter() {
+            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
+        }
+        let mut h = tui_hash_combine(0, tui_hash_str(&self.agent_id));
+        h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
+        h = tui_hash_combine(h, self.view_models.len() as u64);
+        h = tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
+        h = tui_hash_combine(h, u64::from(self.is_running));
+        h = tui_hash_combine(h, fold_state_code(self.fold));
+        h = tui_hash_combine(h, u64::from(self.user_modified));
+        h = tui_hash_combine(h, child_hash_total);
+        self.content_hash = h;
+    }
+}
+
+tui_impl_partial_eq!(TuiSubAgentGroup: agent_id, agent_name, view_models, collapsed, is_running, fold, user_modified);
 
 /// Generic collapsible group -- e.g. batched tool calls.
 #[derive(Debug, Clone)]
@@ -364,13 +607,34 @@ pub struct TuiCollapsedGroup {
     pub title: String,
     /// Number of items hidden when collapsed.
     pub count: u32,
+    /// 组后**连续相邻**的 error 工具数（D2：error 不入组、不删除、保持展开，
+    /// 标题追加 `· N failed`）。由 `group_successful_tools` 从 run 结束位置
+    /// 向后扫描连续相邻 error `TuiToolCard` 计入。
+    pub failed_count: u32,
     /// The view models inside the group (visible when expanded).
     pub view_models: Vec<TuiRenderUnit>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
 
-tui_impl_partial_eq!(TuiCollapsedGroup: title, count, view_models);
+impl TuiCollapsedGroup {
+    /// [G1] 内容哈希公式单点——`group_successful_tools` 构造时调用。
+    /// 成员变化（标题/数量/失败数/隐藏 VM）必须触发按 hash 分片的渲染缓存重建。
+    pub fn recompute_hash(&mut self) {
+        let mut child_hash_total: u64 = 0;
+        for vm in self.view_models.iter() {
+            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
+        }
+        let mut h = tui_hash_combine(0, tui_hash_str(&self.title));
+        h = tui_hash_combine(h, u64::from(self.count));
+        h = tui_hash_combine(h, u64::from(self.failed_count));
+        h = tui_hash_combine(h, self.view_models.len() as u64);
+        h = tui_hash_combine(h, child_hash_total);
+        self.content_hash = h;
+    }
+}
+
+tui_impl_partial_eq!(TuiCollapsedGroup: title, count, failed_count, view_models);
 
 /// Visual separator between iteration rounds.
 #[derive(Debug, Clone)]
@@ -384,17 +648,116 @@ pub struct TuiDivider {
 tui_impl_partial_eq!(TuiDivider: label);
 
 /// AskUser question-answer block — rendered after user responds to AskUserQuestion tool.
+///
+/// Slice 4（§6.8）双轨落地：production 创建点（`handle_ask_user` /
+/// `handle_hitl_pending`）push 到 `state.committed`（不进 CurrentTurn 缓存），
+/// 承担「可见 + 可聚焦 + 结果回写」；AskUser 面板 / HITL 弹窗保留为模态操作层
+/// （D5）。历史 items 字段保留（问答对渲染兼容旧数据），新路径以
+/// kind/pending/verb/question/options/result 为准。
 #[derive(Debug, Clone)]
 pub struct TuiAskUserBlock {
-    /// Question-answer pairs extracted from tool input/output.
+    /// Question-answer pairs extracted from tool input/output（历史字段）。
     pub items: Vec<TuiAskUserItem>,
     /// Whether any item indicates an error response.
     pub is_error: bool,
+    /// 交互类型：Permission（HITL）或 AskUser 表单（§6.8）。
+    pub kind: InteractionKind,
+    /// 是否仍在等待用户响应。pending → 折叠表 Running（Expanded 可聚焦）；
+    /// 结果回写后 false → Completed（Expanded 完整展示，不自动收束）。
+    pub pending: bool,
+    /// 动作动词（如 `Bash`；AskUser 恒 `AskUser`）。
+    pub verb: String,
+    /// 人类可读摘要（Permission：`Bash wants to run: cargo test`；
+    /// AskUser：首问 header/options 摘要）。
+    pub question: String,
+    /// 可选项 label 列表（Permission：[Allow once, Deny]，D6 协议依赖；
+    /// AskUser：首问 options labels）。
+    pub options: Vec<String>,
+    /// 提交结果（如 `Allowed once` / 用户选中 label）——仅 completed 有值；
+    /// 渲染层负责加状态符号与颜色。
+    pub result: Option<String>,
+    /// 本地 request_id（从 HITL_REQUEST_ID / ASK_USER_REQUEST_ID atom 克隆，
+    /// 即 serde_json 序列化的 RequestId 字符串）——InteractionResolved 事件
+    /// 按此匹配回写；同时是折叠覆盖键 `FoldKey::Interaction(id)` 的键控。
+    /// 身份字段，不进 content_hash（同 message_id/source 先例），进 partial_eq。
+    pub request_id: Option<String>,
+    /// 折叠状态——折叠 pass（spec §7 interaction 行）驱动；
+    /// 生产创建点 push 到 committed，折叠 pass 与用户覆盖共同驱动。
+    pub fold: FoldState,
+    /// 用户手动操作过折叠状态——自动策略免疫（spec §7）。
+    pub user_modified: bool,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
 
-tui_impl_partial_eq!(TuiAskUserBlock: items, is_error);
+/// §6.8 interaction block 类型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InteractionKind {
+    /// HITL RequestPermission 审批（`[Allow once] [Deny]`）。
+    Permission,
+    /// AskUser 表单（选项取首问 options labels）。
+    AskUser,
+}
+
+/// [G1] InteractionKind 对 hash 的确定性贡献。
+pub fn interaction_kind_code(k: &InteractionKind) -> u64 {
+    match k {
+        InteractionKind::Permission => 1,
+        InteractionKind::AskUser => 2,
+    }
+}
+
+impl TuiAskUserBlock {
+    /// [G1] 内容哈希公式单点——生产创建点 / 结果回写 / 折叠 pass 共用。
+    /// 包含 kind/pending/verb/question/options/result + fold/is_error/user_modified；
+    /// `request_id` 是身份字段不参与（同 message_id 先例）。result 秒级稳定
+    /// （提交后定型），pending 翻转与选项变化必须触发按 hash 分片的缓存重建。
+    pub fn recompute_hash(&mut self) {
+        let mut h = tui_hash_combine(0, interaction_kind_code(&self.kind));
+        h = tui_hash_combine(h, u64::from(self.pending));
+        h = tui_hash_combine(h, tui_hash_str(&self.verb));
+        h = tui_hash_combine(h, tui_hash_str(&self.question));
+        for opt in &self.options {
+            h = tui_hash_combine(h, tui_hash_str(opt));
+        }
+        h = tui_hash_combine(h, self.options.len() as u64);
+        h = tui_hash_combine(
+            h,
+            match &self.result {
+                Some(r) => tui_hash_str(r),
+                None => 0,
+            },
+        );
+        h = tui_hash_combine(h, fold_state_code(self.fold));
+        h = tui_hash_combine(h, u64::from(self.is_error));
+        h = tui_hash_combine(h, u64::from(self.user_modified));
+        self.content_hash = h;
+    }
+}
+
+tui_impl_partial_eq!(TuiAskUserBlock: items, is_error, kind, pending, verb, question, options, result, request_id, fold, user_modified);
+
+/// §6.9 活动 turn 的 todo 进度摘要——`3/7 tasks · Running tests`。
+///
+/// 由 `push_view_models` 从 `TODO_ITEMS` 派生（快照后处理，非 segment 缓存），
+/// 插在当前 turn 的最终回答之前；turn 结束后随 current_turn 一起消失。
+#[derive(Debug, Clone)]
+pub struct TuiTodoSummary {
+    /// 摘要文本（含完成数/总数与 in-progress 项内容）。
+    pub text: String,
+    /// 内容哈希——todo 内容变化时触发按 hash 分片的渲染缓存重建。
+    pub content_hash: u64,
+}
+
+impl TuiTodoSummary {
+    /// 从摘要文本构造（hash = f(text)）。
+    pub fn new(text: String) -> Self {
+        let content_hash = tui_hash_str(&text);
+        Self { text, content_hash }
+    }
+}
+
+tui_impl_partial_eq!(TuiTodoSummary: text);
 
 /// A single question-answer pair in an AskUser block.
 #[derive(Debug, Clone, PartialEq)]
@@ -409,12 +772,63 @@ pub struct TuiAskUserItem {
 // Shared helper types
 // ---------------------------------------------------------------------------
 
-/// Collapsible reasoning / thinking block.
+/// Collapsible reasoning / thinking block。
+///
+/// 折叠三态由 [`FoldState`] 表达（spec §7）；`collapsed()` 访问器映射
+/// `Collapsed → true`，供渲染层保持折叠/展开二元行为。
+///
+/// 时长（§6.3 `Thought for 12s`）：
+/// - Running 块：`started_at = Some(t0)`，渲染层按 `elapsed()` 显示秒数；
+///   hash 含按秒取整的 elapsed——流式期间时长文本随 token 重建刷新。
+/// - Completed 块：`duration_ms = Some(冻结值)`（segment flush 或折叠 pass
+///   在 phase 离开 PromptRunning 时冻结），hash 稳定。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuiReasoningBlock {
     pub text: String,
-    /// Whether the block is currently collapsed in the UI.
-    pub collapsed: bool,
+    /// 折叠状态——由折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。
+    pub fold: FoldState,
+    /// 生命周期状态——trailing 流式段 Running，冻结/完成后 Completed。
+    pub status: EntryStatus,
+    /// 是否仍在流式输出（status == Running 的冗余标志，供渲染层快速判断）。
+    pub is_running: bool,
+    /// 推理开始时间——仅 Running 块有值（渲染 elapsed；hash 按秒取整）。
+    pub started_at: Option<std::time::Instant>,
+    /// 已冻结的推理时长（毫秒）——仅 Completed 块有值（折叠 pass / segment
+    /// flush 时冻结，此后不再增长）。身份/时序字段，确定性参与 hash（G1）。
+    pub duration_ms: Option<u64>,
+}
+
+impl TuiReasoningBlock {
+    /// 折叠二元访问器——渲染层沿用现有语义：`Collapsed → true`。
+    pub fn collapsed(&self) -> bool {
+        self.fold == FoldState::Collapsed
+    }
+
+    /// [G1] 推理时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
+    /// 触发按秒重建刷新时长文本），Completed 按冻结秒数（稳定）。
+    /// Completed 且 `duration_ms` 为 None（历史恢复路径，时长不可得）→ 特殊码
+    /// `u64::MAX`，与 `Some(0)` 区分——渲染层省略时长（`思考了 · N 行`），
+    /// 文本与 `思考了 0 秒 · N 行` 不同，hash 必须不同（防渲染缓存陈旧帧）。
+    pub fn duration_code(&self) -> u64 {
+        if self.is_running {
+            let ms = self
+                .started_at
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            ms / 1000
+        } else {
+            self.duration_ms.map(|ms| ms / 1000).unwrap_or(u64::MAX)
+        }
+    }
+
+    /// 展示用时长（秒数）：Running 取当前已耗时，Completed 取冻结值。
+    pub fn duration_secs(&self) -> u64 {
+        if self.is_running {
+            self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+        } else {
+            self.duration_ms.unwrap_or(0) / 1000
+        }
+    }
 }
 
 /// Inline diff preview (for Write / Edit tool results).
@@ -429,6 +843,14 @@ pub struct TuiDiffBlock {
     pub is_too_large: bool,
     /// New file (Write, or Edit with empty old_string) -- cap at 6 lines.
     pub is_new_file: bool,
+    /// [G-Diff] 首个 hunk 之后所有未展示 hunk 的 change（`+`/`-`）行总数——
+    /// 渲染层在首个 hunk 后显示 `… +N more lines`（§6.5）。
+    pub more_change_lines: usize,
+    /// [G-Diff] 顶层 `+`/`-` 总计数（header `+N −M` 渲染与 hash 共用）：
+    /// unified diff 时 = 全部 hunk 内 change 行数；摘要解析
+    /// （`parse_edit_write_summary`，无 hunk）时 = 摘要提取的行数。
+    pub adds: usize,
+    pub dels: usize,
 }
 
 /// A single diff hunk.
@@ -439,6 +861,9 @@ pub struct TuiHunk {
     /// Header range string for the new side.
     pub new_range: String,
     pub lines: Vec<TuiHunkLine>,
+    /// [G-Diff] 本 hunk 内超出上限（§6.5「最多 8 个 change 行」）被截断的
+    /// change 行数——渲染层追加 `… +N more lines`。
+    pub truncated_lines: usize,
 }
 
 /// One line inside a diff hunk.
@@ -462,6 +887,13 @@ pub enum TuiHunkLineKind {
     Add,
     /// Deleted line.
     Del,
+}
+
+/// [G-Diff] diff 的 change 行计数（Add/Del 总数）——
+/// header `+N −M` 渲染与 [`TuiToolCard::diff_code`] hash 共用。
+/// 顶层字段由构造点填充（unified 解析 = hunk 内统计；摘要解析 = 文本计数）。
+pub fn diff_change_counts(diff: &TuiDiffBlock) -> (usize, usize) {
+    (diff.adds, diff.dels)
 }
 
 // ---------------------------------------------------------------------------

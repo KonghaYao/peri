@@ -42,8 +42,16 @@
   },
   "semantic": {
     "accent": "#D77757",
+    "accents": {
+      "primary": "$semantic.accent",
+      "user": "#2E7DE0",
+      "assistant": "#7A5DC7",
+      "reasoning": "#8A93A8",
+      "tool": "#6E7686"
+    },
     "text": {
       "primary": "#1E1E1E",
+      "secondary": "#4A4A4A",
       "muted": "#787878",
       "dim": "#C8C8C8"
     },
@@ -53,13 +61,15 @@
       "dim": "#E1E1E6"
     },
     "status": {
-      "running": "#93A5FF",
+      "running": "#1E88C8",
       "success": "#4EBA65",
       "warning": "#FFC107",
       "error": "#FF6B80"
     },
     "surface": {
       "default": "#F5F5F8",
+      "raised": "#FFFFFF",
+      "sunken": "#E9E9ED",
       "user": "#E6E6EB",
       "popup": "#FAFAFA",
       "selection": "#C8DCF5",
@@ -73,6 +83,10 @@
       "remove_bg": "#F5DCDC",
       "add_word_bg": "#C8EBC8",
       "remove_word_bg": "#EBC8C8"
+    },
+    "syntax": {
+      "command": "#9A6B00",
+      "path": "#B15C00"
     },
     "loading": "#93A5FF",
     "thinking": "#A2A9E4",

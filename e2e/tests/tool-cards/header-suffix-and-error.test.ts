@@ -4,13 +4,16 @@
  * 融合原 6 个测试（同源 issue 2026-07-20-e2e-tool-call-header-suffix-tests）：
  * - read-line-count:            Read 头行 "— N lines"
  * - glob-grep-match-count:      Glob/Grep 头行 "— N matches"
- * - edit-write-diff-summary:    Write/Edit 头行 diff 摘要（N lines changed · +N · -N）
+ * - edit-write-diff-summary:    Write/Edit 头行 diff 计数（· +N · -N）
  * - edit-diff-display:          同上（精确 turn 定位，保留更严格版本）
  * - tool-error-display:         Read 不存在文件 → 错误态强制展开、error 色
  * - tool-error-no-suffix:       错误态头行无 "— N lines" 后缀
  *
  * 一次会话 4 个顺序阶段。跨阶段文本（Read/Write 等）会留在历史中，
- * 因此每阶段用 prompt 前缀定位"当前 turn"区段（❯ 回显前缀 + 处理耗时边界）。
+ * 因此每阶段用 prompt 前缀定位"当前 turn"区段（› 回显前缀 + 处理耗时边界）。
+ *
+ * [Slice 3] 视觉同步：tool 行从 `● Read (path)` 卡片头改为统一网格单行
+ * `✓ Read  {path} — N lines`（§6.4：符号 + label + 摘要 + 后缀）。
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
@@ -107,11 +110,11 @@ describe("tool-card: header suffix + error display", () => {
       //（scroll.rs 键盘滚动：Global/High handler 放行 Ctrl+Home）。
       await tester.sendKey("Home", { ctrl: true });
       await tester.waitFor(
-        (screen) => screen.includes("● Glob ("),
+        (screen) => screen.includes("Glob"),
         {
           timeout: 10_000,
           interval: 500,
-          message: "滚动到顶部后 Glob 工具卡应可见",
+          message: "滚动到顶部后 Glob 工具行应可见",
         },
       );
       const globGrepCapture = await takePeriSnapshot(
@@ -127,16 +130,16 @@ describe("tool-card: header suffix + error display", () => {
           "第二步：用 Edit 工具修改该文件，把 'hello world' 改成 'hello peri e2e'\n" +
           "注意第二步必须用 Edit 工具（不能用 Write）",
       );
+      // 等待 Write/Edit 变更摘要：独立行（`✓ Write path · +N` 计数后缀——
+      // §6.4 摘要文本含路径不重复拼接）或 §7 分组聚合行（`Write 1 · Edit 1`）
       await tester.waitFor(
         (screen) => {
           const t = currentTurn(screen, STAGE.writeEdit);
           return (
             t !== undefined &&
             t.completed &&
-            /^\s*● Write \([^\n]+\) — Wrote \d+ lines?/m.test(t.section) &&
-            /^\s*● Edit \([^\n]+\) — (?:Replaced text|\d+ lines changed)/m.test(
-              t.section,
-            )
+            /(?:✓ Write [^\n]*|Write \d+)/m.test(t.section) &&
+            /(?:✓ Edit [^\n]*|Edit \d+)/m.test(t.section)
           );
         },
         {
@@ -164,7 +167,7 @@ describe("tool-card: header suffix + error display", () => {
       const r1 = await judge({
         ansiRaw: readCapture.raw,
         criteria: [
-          "Read 工具的头行应包含文件路径和行数摘要，格式如 'Read (Cargo.toml) — N lines'",
+          "Read 工具行应包含文件路径和行数摘要，格式如 'Read  Cargo.toml — N lines'（成功符号 + 工具名 + 路径 + 行数后缀）",
           "行数 N 应是一个合理的正整数（> 0），函数调用应成功读取并显示文件行数",
         ],
       });
@@ -175,32 +178,34 @@ describe("tool-card: header suffix + error display", () => {
       const r2 = await judge({
         ansiRaw: globGrepCapture.raw,
         criteria: [
-          "屏幕上应出现 Glob 和 Grep 两个工具调用的痕迹",
-          "Glob 工具头行应包含匹配数后缀，格式如 'Glob (pattern: ...) — N matches'",
-          "Grep 工具头行应包含匹配数后缀，格式如 'Grep (pattern: ...) — N matches'",
+          "屏幕上应出现 Glob 和 Grep 两个工具调用的痕迹（成功符号 + 工具名 + 搜索参数）",
+          "Glob 工具行应包含匹配数后缀，格式如 'Glob  pattern — N matches'",
+          "Grep 工具行应包含匹配数后缀，格式如 'Grep  pattern — N matches'",
           "匹配数 N 应为至少为 1 的正整数",
         ],
       });
       console.log("Judge (glob-grep):", JSON.stringify(r2, null, 2));
       expect(r2.pass).toBe(true);
 
-      // Judge: Write/Edit diff 摘要
+      // Judge: Write/Edit diff 摘要（独立变更行或 §7 分组聚合行均可）
       const r3 = await judge({
         ansiRaw: editCapture.raw,
         criteria: [
-          "屏幕上应出现 Write 和 Edit 两个工具调用的痕迹",
-          "Write 工具头行应包含变更摘要（如 '— Wrote N line(s)' 或 '— N lines changed'）",
-          "Edit 工具头行应包含 diff 增减统计或变更摘要（如 '— N lines changed · +N · -N' 或 '— Replaced text'）",
+          "屏幕上应出现 Write 和 Edit 两个工具调用的痕迹（成功符号 + 工具名，或 §7 分组行如 'Write 1 · Edit 1'）",
+          "Write/Edit 的变更摘要应可见——独立行形式（如 '· +N' 或 '· +N · -N' 计数后缀），或分组行中包含工具名与次数",
         ],
       });
       console.log("Judge (edit):", JSON.stringify(r3, null, 2));
       expect(r3.pass).toBe(true);
 
-      // 确定性断言：错误态头行无 "— N lines" 后缀 + 错误详情独立行可见
+      // 确定性断言：错误态头行无 "— N lines" 后缀 + 明确错误词 + 错误详情独立行可见
       const errLines = errorCapture.text.split("\n");
-      const errHeader = errLines.find((l) => l.includes("● Read (/nonexistent"));
+      const errHeader = errLines.find(
+        (l) => l.includes("Read") && l.includes("/nonexistent"),
+      );
       expect(errHeader).toBeDefined();
-      expect(errHeader!).not.toContain("—");
+      expect(errHeader!).not.toMatch(/—\s*\d+\s*lines/);
+      expect(errHeader!).toContain("Failed");
       expect(errorCapture.text).toContain("Tool execution failed");
       expect(errorCapture.text).toContain("not found");
 
@@ -208,7 +213,7 @@ describe("tool-card: header suffix + error display", () => {
       const r4 = await judge({
         ansiRaw: errorCapture.raw,
         criteria: [
-          "Read 工具的头行应只包含文件名参数（如 'Read (/nonexistent...)'），不应有 '— N lines' 等后缀",
+          "Read 工具行应只包含文件名参数与错误词（如 'Read  /nonexistent... — Failed'），不应有 '— N lines' 等行数后缀",
           "错误详细信息应在独立的输出行中可见（如 'Error:' 或 'not found' 或 'Tool execution failed'），错误信息不应被压缩消失",
           "agent 应感知到文件不存在（如 'not found'、'不存在' 等错误提示）",
         ],

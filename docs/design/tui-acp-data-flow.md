@@ -98,7 +98,7 @@ graph TB
 - **消息区** — 消息流渲染 + 滚动，直接消费 `VIEW_MODELS` atom（见 §10 渲染管道）。
 - **后台 Agent 栏** — 状态栏上方，仅当有后台子 Agent 运行时出现。通过 `BG_TASKS` / `BG_DISPLAY` / `BG_AGENT_IDS` 三个 Atom 管理后台任务状态。完成后进入 3 秒倒计时缓冲，到期后渲染层移除。
 - **输入区** — 固定在屏幕底部。多行文本输入框（自管 EditorState），上方有附件预览栏（粘贴图片时出现），@ 和 / 补全弹窗浮在输入框上方。Agent 完成后的输入预测以灰色占位符显示。
-- **状态栏** — 屏幕最底部，双行高度。Row1：权限模式 → cwd basename → provider/model → CPU% → MEM（`CONTEXT_USAGE` 显示上下文使用率）。Row2：快捷键 hints + 瞬时状态提示。
+- **状态栏** — 屏幕最底部，双行高度。Row1：权限模式 → cwd basename → provider/model → bg tasks。CPU%/MEM/上下文使用率显示在输入区 composer footer 右侧资源线（`input_area.rs` `footer_right`）。Row2：快捷键 hints + 瞬时状态提示。
 - **弹窗层** — 面板或交互弹窗激活时覆盖消息区。面板半屏显示，消息区仍可滚动；交互弹窗居中显示，独占键盘输入。
 
 ### 1.2 模块边界（Crate 依赖）
