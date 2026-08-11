@@ -22,8 +22,8 @@ const MAX_LINES: usize = 2000;
 const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
 /// 单行最大字符数（超过则截断）
 const MAX_CHARS_PER_LINE: usize = 65536;
-/// 输出最大字节数（兜底）
-const MAX_OUTPUT_CHARS: usize = 100_000;
+/// 输出最大字节数（超过后截断并落盘）
+const MAX_OUTPUT_BYTES: usize = 5_000;
 
 const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
 
@@ -208,10 +208,16 @@ impl BaseTool for ReadFileTool {
             Ok(meta) if meta.is_dir() => {
                 return list_folder(&resolved).map(|listing| {
                     format!(
-                        "[DIRECTORY DETECTED]\n\nThis path is a directory, not a file. Below are its contents:\n\n{}",
+                        "[DIRECTORY DETECTED]\n\nRead received a directory path and converted it to a directory listing. Use folder_operations with operation=\"list\" for explicit directory operations.\n\n{}",
                         listing
                     )
                 });
+            }
+            Ok(meta) if meta.len() == 0 => {
+                return Ok(format!(
+                    "[EMPTY FILE]\n\nFile path: {}\nThe file is empty (0 bytes).",
+                    resolved.display()
+                ));
             }
             _ => match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
@@ -239,12 +245,12 @@ impl BaseTool for ReadFileTool {
         let mut numbered: Vec<String> = Vec::new();
         for (i, line) in selected.iter().enumerate() {
             let line_num = start + i + 1;
-            // 单行超长按字符截断（与工具描述一致）
-            let content = if line.chars().count() > MAX_CHARS_PER_LINE {
+            // 将截断元数据放在内容前，确保后续输出级截断不会隐藏该信息。
+            let line_char_count = line.chars().count();
+            let content = if line_char_count > MAX_CHARS_PER_LINE {
                 format!(
-                    "{}... [line truncated at {} characters]",
-                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>(),
-                    MAX_CHARS_PER_LINE
+                    "[LINE TRUNCATED: {line_char_count} characters total; retained first {MAX_CHARS_PER_LINE} characters before output-level truncation] {}",
+                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>()
                 )
             } else {
                 (*line).to_string()
@@ -254,21 +260,17 @@ impl BaseTool for ReadFileTool {
 
         let mut output = numbered.join("\n");
 
-        // 字节级兜底：总输出超过上限时截断 + 落盘
-        if output.len() > MAX_OUTPUT_CHARS {
+        // 总输出超过上限时截断并落盘；提示保留原始大小和完整输出路径。
+        if output.len() > MAX_OUTPUT_BYTES {
+            let original_output_bytes = output.len();
             let persist_hint = persist_truncated_output(&output);
-            output = truncate_bytes(&output, MAX_OUTPUT_CHARS);
+            output = truncate_bytes(&output, MAX_OUTPUT_BYTES);
             output.push_str(&format!(
-                "\n[Output truncated: exceeds {} byte limit]{persist_hint}",
-                MAX_OUTPUT_CHARS
+                "\n[Output truncated: {original_output_bytes} bytes total; showing first {MAX_OUTPUT_BYTES} bytes]{persist_hint}"
             ));
         }
 
         Ok(output)
-    }
-
-    fn output_char_limit(&self) -> Option<usize> {
-        Some(5000)
     }
 
     fn prefers_persist(&self) -> bool {
