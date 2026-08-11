@@ -21,6 +21,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         recall_items: vec![],
         agent_pool: crate::session::agent_pool::AgentPool::new(),
         workflow_middleware: None,
+        lsp_pool: None,
         title: None,
         tags: vec![],
         continuation_armed: armed,

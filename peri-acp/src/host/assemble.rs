@@ -223,10 +223,16 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         .as_ref()
         .map(|pd| pd.all_agent_dirs.clone())
         .unwrap_or_default();
-    let plugin_lsp_servers = plugin_data
-        .as_ref()
-        .map(|pd| pd.all_lsp_servers.clone())
-        .unwrap_or_default();
+    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
+    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
+    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
+    let plugin_lsp_servers = peri_middlewares::assembly::load_merged_lsp_servers(
+        &crate::provider::config_path(),
+        plugin_data
+            .as_ref()
+            .map(|pd| pd.all_lsp_servers.clone())
+            .unwrap_or_default(),
+    );
     let plugin_hooks = plugin_data
         .as_ref()
         .map(|pd| pd.all_hooks.clone())

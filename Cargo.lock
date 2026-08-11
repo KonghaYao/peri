@@ -3745,7 +3745,7 @@ dependencies = [
 name = "peri-lsp"
 version = "0.2.0"
 dependencies = [
- "lru",
+ "async-trait",
  "lsp-types",
  "parking_lot",
  "peri-acp-types",

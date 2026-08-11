@@ -210,6 +210,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         tool_search_index: Arc::new(NoopToolSearch),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         lsp_servers: vec![],
+        lsp_pool: None,
         workflow_executor: None,
         skills: Arc::new(NoopSkills),
         workflow_middleware: None,

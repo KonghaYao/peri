@@ -29,6 +29,12 @@ pub fn expand_env_vars(config: &mut LspServerConfig) {
 }
 
 fn expand_var_string(s: &str) -> String {
+    expand_var_string_with(s, &HashMap::new())
+}
+
+/// 展开 s 中所有 ${VAR} 占位符：优先从 `extra` 映射取值（如注入的
+/// CLAUDE_PLUGIN_ROOT），其次进程环境；均未定义则原样保留。
+fn expand_var_string_with(s: &str, extra: &HashMap<String, String>) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -44,7 +50,11 @@ fn expand_var_string(s: &str) -> String {
                 chars.next();
             }
             if !var_name.is_empty() {
-                if let Ok(val) = std::env::var(&var_name) {
+                let value = extra
+                    .get(&var_name)
+                    .cloned()
+                    .or_else(|| std::env::var(&var_name).ok());
+                if let Some(val) = value {
                     result.push_str(&val);
                 } else {
                     result.push_str(&format!("${{{var_name}}}"));
@@ -81,6 +91,10 @@ pub fn load_global_lsp_config(settings_path: &Path) -> LspConfigFile {
         serde_json::from_value::<HashMap<String, LspServerConfig>>(lsp_servers.clone())
     {
         for (name, mut server_config) in servers {
+            // name 以 settings.json 的 key 为准（与 `lsp_config_from_plugin`
+            // 的 name 语义一致——name 即装配/池侧服务器标识，JSON 内显式
+            // name 字段与 key 不一致时以 key 为准，对齐 MCP key 即服务器名）。
+            server_config.name = name.clone();
             server_config.source = Some(LspConfigSource::Global(settings_path.to_path_buf()));
             expand_env_vars(&mut server_config);
             config.lsp_servers.insert(name, server_config);
@@ -90,7 +104,10 @@ pub fn load_global_lsp_config(settings_path: &Path) -> LspConfigFile {
     config
 }
 
-/// 从插件 LSP server 配置列表创建 LspServerConfig
+/// 从插件 LSP server 配置列表创建 LspServerConfig。
+///
+/// 注入 `CLAUDE_PLUGIN_ROOT`（插件安装根）到子进程环境，并按注入 env 展开
+/// command/args 中的 `${CLAUDE_PLUGIN_ROOT}` 占位符（进程环境未必有该变量）。
 pub fn lsp_config_from_plugin(
     plugin_name: &str,
     server_name: &str,
@@ -120,6 +137,15 @@ pub fn lsp_config_from_plugin(
         }),
     };
     expand_env_vars(&mut config);
+    // expand_env_vars 只查进程环境，而 CLAUDE_PLUGIN_ROOT 仅存在于注入 env，
+    // 这里补充按注入 env 展开 command/args（插件根相对命令依赖此语义）。
+    let injected_env = config.env.clone().unwrap_or_default();
+    config.command = expand_var_string_with(&config.command, &injected_env);
+    config.args = config
+        .args
+        .iter()
+        .map(|a| expand_var_string_with(a, &injected_env))
+        .collect();
     config
 }
 

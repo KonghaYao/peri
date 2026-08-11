@@ -4,7 +4,7 @@ use std::{
 };
 
 use gray_matter::{engine::YAML, Matter};
-use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
+use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -627,19 +627,15 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
             Some(
                 servers
                     .iter()
-                    .map(|s| LspServerConfig {
-                        name: s.name.clone(),
-                        command: s.command.clone(),
-                        args: s.args.clone(),
-                        env: None,
-                        extension_to_language: s.extension_to_language.clone(),
-                        initialization_options: None,
-                        disabled: None,
-                        max_restarts: None,
-                        startup_timeout: None,
-                        source: Some(LspConfigSource::Plugin {
-                            plugin_name: plugin.name.clone(),
-                        }),
+                    .map(|s| {
+                        lsp_config_from_plugin(
+                            &plugin.name,
+                            &s.name,
+                            &s.command,
+                            &s.args,
+                            &plugin.install_path,
+                            s.extension_to_language.clone(),
+                        )
                     })
                     .collect::<Vec<_>>(),
             )

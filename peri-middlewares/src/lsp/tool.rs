@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 use peri_resources::lsp::pool::LspServerPool;
+use peri_resources::lsp::uri::path_to_uri;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -95,10 +97,35 @@ impl LspTool {
     }
 
     fn file_to_uri(file_path: &str) -> String {
-        if file_path.starts_with("file://") {
-            file_path.to_string()
-        } else {
-            format!("file://{}", file_path)
+        path_to_uri(Path::new(file_path))
+    }
+
+    /// 查询前确保文件已 didOpen：读取文件内容并发送 didOpen 通知。
+    ///
+    /// client 侧维护 open_files 缓存，did_open 幂等（重复调用不再发通知，
+    /// 服务器 try_restart 后缓存清空）。文件读取失败或通知发送失败仅记
+    /// debug 日志，不阻塞后续查询。
+    async fn ensure_file_open(
+        &self,
+        server: &Arc<peri_resources::lsp::client::LspClient>,
+        file_path: &str,
+    ) {
+        let uri = Self::file_to_uri(file_path);
+        let text = match tokio::fs::read_to_string(file_path).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(
+                    target: "lsp",
+                    file = %file_path,
+                    error = %e,
+                    "LSP 查询前读取文件失败，跳过 didOpen"
+                );
+                return;
+            }
+        };
+        let language_id = peri_resources::lsp::client::LspClient::infer_language_id(&uri);
+        if let Err(e) = server.did_open(&uri, &language_id, &text).await {
+            tracing::debug!(target: "lsp", file = %file_path, error = %e, "LSP didOpen 失败");
         }
     }
 
@@ -126,8 +153,8 @@ impl LspTool {
                         file_path,
                         "LSP 服务器状态异常，尝试自动重启"
                     );
-                    let root_uri = format!("file://{}", self.pool.root_uri());
-                    match s.try_restart(&root_uri).await {
+                    let root_uri = self.pool.root_uri();
+                    match s.try_restart(root_uri).await {
                         Ok(()) => {
                             tracing::info!(target: "lsp", server = %s.name(), "LSP 服务器自动重启成功");
                             return Ok(s);
@@ -181,7 +208,7 @@ impl LspTool {
         }
 
         // 没有就绪的服务器——检查是否有崩溃的服务器需要重启
-        let root_uri = format!("file://{}", self.pool.root_uri());
+        let root_uri = self.pool.root_uri();
         let servers = self.pool.all_servers();
         for s in &servers {
             let state = s.state();
@@ -196,7 +223,7 @@ impl LspTool {
                     state = ?state,
                     "LSP 服务器状态异常，尝试自动重启（workspaceSymbol）"
                 );
-                match s.try_restart(&root_uri).await {
+                match s.try_restart(root_uri).await {
                     Ok(()) => {
                         tracing::info!(target: "lsp", server = %s.name(), "LSP 服务器自动重启成功");
                         return Ok(Arc::clone(s));
@@ -254,6 +281,8 @@ impl BaseTool for LspTool {
         if operation == "diagnostics" {
             let file_path = input.get("file_path").and_then(|v| v.as_str());
             let entries = if let Some(fp) = file_path {
+                let server = self.get_initialized_server(fp).await?;
+                self.ensure_file_open(&server, fp).await;
                 let uri = Self::file_to_uri(fp);
                 self.pool.diagnostics().get_for_file(&uri)
             } else {
@@ -287,6 +316,7 @@ impl BaseTool for LspTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| LspToolError::MissingParam("file_path".to_string()))?;
             let server = self.get_initialized_server(file_path).await?;
+            self.ensure_file_open(&server, file_path).await;
             let uri = Self::file_to_uri(file_path);
             let params = serde_json::json!({
                 "textDocument": { "uri": uri }
@@ -319,6 +349,7 @@ impl BaseTool for LspTool {
         }
 
         let server = self.get_initialized_server(file_path).await?;
+        self.ensure_file_open(&server, file_path).await;
 
         let uri = Self::file_to_uri(file_path);
         let lsp_line = line - 1;
@@ -454,3 +485,7 @@ impl BaseTool for LspTool {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tool_test.rs"]
+mod tests;

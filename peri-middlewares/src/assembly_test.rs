@@ -25,15 +25,15 @@ use peri_agent::{
     tools::BaseTool,
 };
 use peri_model::{Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream};
-use peri_resources::lsp::config::LspServerConfig;
+use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
 use peri_resources::workflow::runner::AgentExecutor;
 
 use crate::{
     agent_define::AgentOverrides,
     assembly::{
-        default_workflow_middleware_factory, AssemblyContext, OnBgCompleteFn,
-        ProductionChainAssembler, SystemPromptBuilder,
+        create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
+        AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
     hitl::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
@@ -162,6 +162,7 @@ fn base_context() -> AssemblyContext {
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
         lsp_servers: Vec::new(),
+        lsp_pool: None,
         workflow_executor: None,
         workflow_middleware: None,
         event_handler: Arc::new(FakeEventHandler),
@@ -432,6 +433,96 @@ fn conditional_registration_matrix() {
         names_goal.last().map(String::as_str),
         Some("GoalMiddleware")
     );
+}
+
+/// 会话级 LSP pool 端口注入 → 装配走 downcast 复用分支（H1），
+/// LspMiddleware 照常注册且位置不变（与临时实例路径一致）。
+#[test]
+fn lsp_pool_port_injected_registers_middleware() {
+    let mut ctx = base_context();
+    ctx.lsp_servers = vec![make_lsp_config()];
+    ctx.lsp_pool = create_session_lsp_pool("/tmp/contract-test", &ctx.lsp_servers);
+    assert!(ctx.lsp_pool.is_some(), "有配置时工厂应返回端口");
+
+    let names = assemble_names(&ctx);
+    let pos_lsp = names.iter().position(|n| n == "LspMiddleware").unwrap();
+    let pos_ts_lsp = names.iter().position(|n| n == "ToolSearch").unwrap();
+    assert!(pos_ts_lsp < pos_lsp, "LSP 位置错误: {names:?}");
+}
+
+/// 无 LSP 配置时工厂返回 None（不注册 LSP 中间件，条件注册语义一致）。
+#[test]
+fn lsp_pool_factory_empty_config_returns_none() {
+    assert!(create_session_lsp_pool("/tmp", &[]).is_none());
+}
+
+/// H5：无插件但全局 settings.json 存在 `config.lspServers` 时，合并结果
+/// 非空且 source 标记为 Global；装配级验证——会话级 pool 非空、
+/// 链上注册 LspMiddleware（此前无插件时 LSP 产品线静默不可用）。
+#[test]
+fn merged_lsp_servers_global_without_plugins_registers_middleware() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = temp.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"config":{"lspServers":{"rust-analyzer":{"command":"rust-analyzer"}}}}"#,
+    )
+    .unwrap();
+
+    let merged = load_merged_lsp_servers(&settings, Vec::new());
+    assert_eq!(merged.len(), 1, "全局配置应单独生效");
+    let server = &merged[0];
+    assert_eq!(server.name, "rust-analyzer");
+    assert!(
+        matches!(server.source, Some(LspConfigSource::Global(ref p)) if p == &settings),
+        "全局来源应标记 Global: {:?}",
+        server.source
+    );
+
+    // 装配级：合并结果 → 会话级 pool → 链上注册 LspMiddleware
+    let mut ctx = base_context();
+    ctx.lsp_servers = merged.clone();
+    ctx.lsp_pool = create_session_lsp_pool("/tmp/contract-test", &ctx.lsp_servers);
+    assert!(ctx.lsp_pool.is_some(), "全局配置存在时工厂应返回端口");
+    let names = assemble_names(&ctx);
+    assert!(
+        names.iter().any(|n| n == "LspMiddleware"),
+        "无插件但全局配置存在时 LspMiddleware 应注册: {names:?}"
+    );
+}
+
+/// H5：合并方向对齐 MCP（global < plugin）——同名 key 插件覆盖全局。
+#[test]
+fn merged_lsp_servers_plugin_overrides_global() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = temp.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"config":{"lspServers":{"same":{"command":"global-bin"}}}}"#,
+    )
+    .unwrap();
+
+    let plugin = LspServerConfig {
+        name: "same".to_string(),
+        command: "plugin-bin".to_string(),
+        ..make_lsp_config()
+    };
+    let merged = load_merged_lsp_servers(&settings, vec![plugin]);
+    assert_eq!(merged.len(), 1, "同名 key 应合并为一条");
+    assert_eq!(merged[0].command, "plugin-bin", "插件应覆盖全局");
+}
+
+/// H5：settings.json 不存在或无 `lspServers` 字段时返回空 Vec
+/// （装配处 `lsp_servers.is_empty()` 条件注册语义不变）。
+#[test]
+fn merged_lsp_servers_empty_without_global_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing.json");
+    assert!(load_merged_lsp_servers(&missing, Vec::new()).is_empty());
+
+    let no_lsp = temp.path().join("settings.json");
+    std::fs::write(&no_lsp, r#"{"config":{"mcpServers":{}}}"#).unwrap();
+    assert!(load_merged_lsp_servers(&no_lsp, Vec::new()).is_empty());
 }
 
 /// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + LSP + Goal）。

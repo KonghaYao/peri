@@ -5,6 +5,7 @@ pub mod error;
 pub mod jsonrpc;
 pub mod pool;
 pub mod protocol;
+pub mod uri;
 
 pub use client::{LspClient, ServerState};
 pub use config::{
@@ -15,3 +16,4 @@ pub use diagnostics::{
 };
 pub use error::LspError;
 pub use pool::LspServerPool;
+pub use uri::{path_to_uri, uri_to_path};

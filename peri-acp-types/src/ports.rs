@@ -145,6 +145,44 @@ impl dyn WorkflowMiddlewarePort {
     }
 }
 
+/// LSP 服务器池端口（`peri-lsp::pool::LspServerPool` 实现）。
+///
+/// per-session 实例；构造点（装配面宿主 `host/requests.rs` /
+/// `host/stdio/session/create.rs` 经 `peri_middlewares::assembly::create_session_lsp_pool`
+/// 创建）持有具体实现，协议面只持端口句柄。装配面（`assembly.rs`
+/// `ChainSlot::Lsp`）经 `downcast_arc` 还原具体类型复用同一 pool——
+/// 服务器进程、initialized 状态与诊断注册表跨 turn 存活（H1：
+/// 每 turn 重建 pool 导致冷启动与状态丢失）。宿主退出（`run_acp_server` /
+/// `run_acp_stdio` 返回）经 `shutdown` 优雅关闭全部服务器子进程。
+#[async_trait::async_trait]
+pub trait LspPoolPort: Send + Sync {
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面使用）。
+    fn as_any(&self) -> &dyn Any;
+
+    /// 优雅关闭全部服务器（发送 shutdown/exit 并终止子进程；幂等）。
+    async fn shutdown(&self);
+}
+
+impl dyn LspPoolPort {
+    /// 将 `Arc<dyn LspPoolPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: LspPoolPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+        let ptr = Arc::into_raw(self);
+        unsafe {
+            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
+            // `type_id()` 会命中 `Any` 的 blanket impl，返回
+            // `TypeId::of::<dyn LspPoolPort>()`（trait object 自身），
+            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
+            // 临时实例，会话级 pool 与装配产物分离（同构
+            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
+            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
+                Ok(Arc::from_raw(ptr as *const T))
+            } else {
+                Err(Arc::from_raw(ptr))
+            }
+        }
+    }
+}
+
 /// Skills 扫描端口：协议命令面（available-commands / skill 列表 / agent 列表）
 /// 经此访问 skills/agents 扫描业务，具体扫描逻辑留在 `peri-middlewares`
 /// （`SkillsMiddleware::resolve_roots_static` / `scan_skill_roots` /

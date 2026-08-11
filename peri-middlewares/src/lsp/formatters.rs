@@ -1,5 +1,6 @@
 use lsp_types::{Location, LocationLink, SymbolKind};
 use peri_resources::lsp::protocol::lsp_types;
+use peri_resources::lsp::uri::uri_to_path as lsp_uri_to_path;
 
 /// 将 LSP Location 转为 `path:line:col` 格式（1-based）
 fn format_location(loc: &Location) -> String {
@@ -9,12 +10,9 @@ fn format_location(loc: &Location) -> String {
     format!("{path}:{line}:{col}")
 }
 
-/// 将 file:// URI 转为文件路径
+/// 将 file:// URI 转为文件路径（percent-decode）
 fn uri_to_path(uri: &lsp_types::Uri) -> String {
-    let s = uri.to_string();
-    s.strip_prefix("file://")
-        .map(|s| s.to_string())
-        .unwrap_or(s)
+    lsp_uri_to_path(uri.as_str())
 }
 
 /// SymbolKind → 可读名称

@@ -79,7 +79,13 @@ pub(super) async fn init_stdio_context(
     let plugin_agent_dirs = plugin_data.all_agent_dirs;
     let plugin_hooks = plugin_data.all_hooks;
     let plugin_loaded = plugin_data.plugins;
-    let plugin_lsp_servers = plugin_data.all_lsp_servers;
+    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
+    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
+    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
+    let plugin_lsp_servers = peri_middlewares::assembly::load_merged_lsp_servers(
+        &crate::provider::config_path(),
+        plugin_data.all_lsp_servers,
+    );
 
     let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = {
         let scheduler = Arc::new(parking_lot::Mutex::new(
