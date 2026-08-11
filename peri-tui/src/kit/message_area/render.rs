@@ -1576,80 +1576,38 @@ fn subagent_error_reason_line(grid: &GridSpec, reason: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// §6.7 从嵌套 VM 派生 SubAgent 单行摘要（确定性纯函数，测试覆盖矩阵）。
+/// §6.7 从嵌套 VM 派生 SubAgent 摘要（确定性纯函数，测试覆盖矩阵）。
 ///
 /// - `status`：Running（is_running）→ Error（canonical `is_error`，来自
 ///   `SubagentStopped.is_error`）→ Completed；nested child tool error 只计入
-///   `failed_count`/`last_error`，不决定 parent status；
-/// - `activity`（running）：反向扫描最近的非空候选（工具 input_summary 或
-///   文本首行）——摘要可更新但前缀稳定；
-/// - `result`（completed）：反向扫描最近的文本末行 / 工具输出 / 输入摘要；
-/// - `last_error`：反向扫描第一个 error 工具的 output_summary。
+///   `failed_count`/`last_error`，不决定 parent status（见 [`SubAgentSummary::derive`]）；
+/// - `last_error`：第一个 error 工具的 output_summary 首行。
+///
+/// 注：`activity`/`result`（单行组头摘要）已随组头渲染取消而移除——组只展示
+/// 嵌套工具行，渲染层不再消费文本摘要。
 pub(super) fn derive_subagent_summary(view_models: &im::Vector<TuiRenderUnit>) -> SubAgentSummary {
     let mut summary = SubAgentSummary::default();
-    let mut seen_any = false;
     let mut last_error: Option<String> = None;
     for vm in view_models.iter() {
-        match vm {
-            TuiRenderUnit::TuiToolCard(t) => {
-                seen_any = true;
-                summary.tool_count += 1;
-                if t.is_error {
-                    summary.failed_count += 1;
-                    if last_error.is_none() {
-                        last_error = Some(first_line(&t.output_summary));
-                    }
+        if let TuiRenderUnit::TuiToolCard(t) = vm {
+            summary.tool_count += 1;
+            if t.is_error {
+                summary.failed_count += 1;
+                if last_error.is_none() {
+                    last_error = Some(first_line(&t.output_summary));
                 }
             }
-            TuiRenderUnit::TuiAssistantBubble(b) => {
-                seen_any = seen_any || !b.text.is_empty();
-            }
-            _ => {}
-        }
-    }
-    if !seen_any {
-        return summary;
-    }
-    // 反向扫描最新活动/结果
-    for vm in view_models.iter().rev() {
-        match vm {
-            TuiRenderUnit::TuiToolCard(t) => {
-                if summary.activity.is_empty() && !t.input_summary.is_empty() {
-                    summary.activity = first_line(&t.input_summary);
-                }
-                if summary.result.is_empty() {
-                    if !t.output_summary.is_empty() {
-                        summary.result = first_line(&t.output_summary);
-                    } else if summary.activity.is_empty() && !t.input_summary.is_empty() {
-                        summary.result = first_line(&t.input_summary);
-                    }
-                }
-            }
-            TuiRenderUnit::TuiAssistantBubble(b) if !b.text.is_empty() => {
-                let first = first_line(&b.text);
-                if summary.activity.is_empty() {
-                    summary.activity = first.clone();
-                }
-                if summary.result.is_empty() {
-                    summary.result = first;
-                }
-            }
-            _ => {}
         }
     }
     summary.last_error = last_error.filter(|s| !s.is_empty());
     summary
 }
 
-/// SubAgent 单行摘要（§6.7）——从嵌套 VM 派生，不进入 VM/hash（hash 已含
+/// SubAgent 摘要（§6.7）——从嵌套 VM 派生，不进入 VM/hash（hash 已含
 /// child VM 的 content_hash 组合，摘要完全由 children 决定）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct SubAgentSummary {
     pub status: EntryStatus,
-    /// running 摘要（最近工具/文本）。
-    pub activity: String,
-    /// 完成结果摘要（最近文本/输出）。
-    pub result: String,
     pub tool_count: usize,
     pub failed_count: usize,
     /// 首个 error 工具的输出首行。

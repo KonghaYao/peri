@@ -194,6 +194,21 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
         "TodoWrite" => String::new(),
         // ── task_id 截断 12 ──
         "AgentResult" => truncate_text(&str_val("task_id"), 12),
+        // ── Agent/Task（别名 task）：prompt 任务预览（截断 400，spec §6.4
+        //    任务预览摘要），description 兜底；空则回退通用兜底 ──
+        "Agent" | "Task" => {
+            let prompt = str_val("prompt");
+            if !prompt.is_empty() {
+                truncate_text(&prompt, 400)
+            } else {
+                let desc = str_val("description");
+                if desc.is_empty() {
+                    "(empty input)".to_string()
+                } else {
+                    truncate_text(&desc, 400)
+                }
+            }
+        }
         // ── file_path 不截断但精简 cwd 前缀 ──
         "artifact" => shorten_path(&str_val("file_path")),
         // ── operation 截断 40 ──

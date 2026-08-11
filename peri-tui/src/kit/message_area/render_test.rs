@@ -1716,7 +1716,7 @@ fn test_subagent_failed_reason_line_and_completed() {
     );
 }
 
-/// derive_subagent_summary 纯函数矩阵：status/tool_count/failed_count/result。
+/// derive_subagent_summary 纯函数矩阵：status/tool_count/failed_count/last_error。
 /// parent status 只由 canonical is_error 决定（running 优先）；
 /// failed_count/last_error 仅作明细，不再决定 parent status。
 #[test]
@@ -1773,7 +1773,8 @@ fn test_derive_subagent_summary_matrix() {
     );
     assert_eq!(s.status, EntryStatus::Error);
     assert_eq!(s.failed_count, 0);
-    // completed 无 error → Completed + result 取最近文本首行
+    // completed 无 error → Completed；纯文本 children 不产出文本摘要
+    // （activity/result 已随组头渲染取消移除）
     let s = mk(
         im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
@@ -1790,7 +1791,9 @@ fn test_derive_subagent_summary_matrix() {
         false,
     );
     assert_eq!(s.status, EntryStatus::Completed);
-    assert_eq!(s.result, "final answer line");
+    assert_eq!(s.tool_count, 0);
+    assert_eq!(s.failed_count, 0);
+    assert_eq!(s.last_error, None);
 }
 
 // ── 分组 / divider / todo（§6.6/§6.7/§6.9/§7）───────────────────────────
