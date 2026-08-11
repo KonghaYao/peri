@@ -8,8 +8,11 @@
  *   子工具卡片渲染在 Agent 卡片上方，未嵌套在内部
  *
  * 验证：
- * - Agent 工具完成后的 output_summary 非空（SubAgent 最终输出可见）
- * - 子工具调用卡片出现在 Agent 卡片下方（而非上方）
+ * - Agent 工具完成后的输出摘要可见（SubAgent 单行摘要 result + assistant 总结）
+ * - 子工具不铺入主时间轴（§6.7：单行摘要 + tool count，停止递归内联）
+ *
+ * [Slice 3] 视觉同步：subagent 从 `● Agent (…)` 卡片 + 嵌套子工具改为单行摘要
+ * `◐/✓ Agent {name}  {activity|result}  {N tools}`。
  *
  * 注意：explorer subagent 需要较长时间执行（30-60s），用长等待。
  */
@@ -18,34 +21,46 @@ import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js"
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
-const promptMarker = "❯ 请使用同步 explorer subagent（quick thoroughness）";
+/** prompt 文本（屏幕回显中的独有文本；不依赖 ❯ 前缀——Slice 3 用户回显为 › You） */
+const promptText = "请使用同步 explorer subagent（quick thoroughness）";
 
 interface AgentTurn {
   section: string;
   completed: boolean;
 }
 
-function currentAgentTurn(screen: string): AgentTurn | undefined {
-  const promptStart = screen.lastIndexOf(promptMarker);
-  const agentStart =
-    promptStart >= 0 ? screen.indexOf("● Agent (", promptStart) : -1;
-  if (agentStart < 0) {
-    return undefined;
-  }
+/** footer 区域标识（加载中 spinner 动词硬编码中文；完成后为处理耗时/Brewed for）。
+ *  加载期 spinner 动词行常驻 footer——`lastIndexOf` 取屏幕最后一行 footer 内容，
+ *  其上方即为当前 turn 区段（发送顺序执行保证 footer 必属当前 turn）。 */
+const LOADING_MARKERS = ["思考中", "执行工具", "正在生成回复"];
 
-  const turnEnd = screen.indexOf("处理耗时", agentStart);
+/** 当前 turn 区段：以全局 footer（加载 spinner / 处理耗时 / Brewed for）为边界。 */
+function currentAgentTurn(screen: string): AgentTurn | undefined {
+  let footerIdx = -1;
+  for (const m of LOADING_MARKERS) {
+    footerIdx = Math.max(footerIdx, screen.lastIndexOf(m));
+  }
+  footerIdx = Math.max(
+    footerIdx,
+    screen.lastIndexOf("处理耗时"),
+    screen.lastIndexOf("Brewed for"),
+  );
+  if (footerIdx < 0) return undefined;
+  const completed =
+    screen.lastIndexOf("处理耗时") >= 0 || screen.lastIndexOf("Brewed for") >= 0;
   return {
-    section: screen.slice(agentStart, turnEnd >= agentStart ? turnEnd : undefined),
-    completed: turnEnd >= agentStart,
+    section: screen.slice(0, footerIdx),
+    completed,
   };
 }
 
-function hasNestedGrep(section: string): boolean {
-  return /^\s*● Grep \([^\n]+\)/m.test(section);
-}
-
-function hasRunningAgent(section: string): boolean {
-  return /^\s*⎿ \d+ tool calls, running \d+s/m.test(section);
+/** SubAgent 行正处于**运行中**（行内含 ◐ 运行符号）。
+ *  [Fix race] 旧版只等「行出现」——快速 subagent 完成时抓拍的是 ✓ 完成态，
+ *  judge 的 ◐ 断言会闪红。运行态窗口内行符号必为 ◐。 */
+function runningSubagentRow(section: string): boolean {
+  return section
+    .split("\n")
+    .some((l) => /\d+ (?:tools|次工具)/.test(l) && l.includes("\u25d0"));
 }
 
 describe("tool-card: agent output and nested position", () => {
@@ -58,7 +73,7 @@ describe("tool-card: agent output and nested position", () => {
   });
 
   it(
-    "Agent 工具完成后有输出且子工具卡片处于正确位置",
+    "Agent 工具完成后有输出且子工具不铺入主时间轴",
     { timeout: 300_000 },
     async () => {
       tester = await launchPeri();
@@ -70,39 +85,35 @@ describe("tool-card: agent output and nested position", () => {
         "请使用同步 explorer subagent（quick thoroughness），仅在 peri-tui/src/kit 中用一次 Grep 搜索 TODO 注释；完成后立即用一句中文总结，不要做额外搜索或读取。",
       );
 
-      // 等待当前 prompt 对应的 Agent turn 中 Grep 实际嵌套出现，再抓运行态。
-      await tester.waitFor(
-        (screen) => {
-          const turn = currentAgentTurn(screen);
-          return (
-            turn !== undefined &&
-            !turn.completed &&
-            hasRunningAgent(turn.section) &&
-            hasNestedGrep(turn.section)
-          );
-        },
-        {
-          timeout: 60_000,
-          interval: 1000,
-          message: "等待 explorer Agent 的嵌套 Grep 运行态超时",
-        },
-      );
+      // 等待 SubAgent 单行摘要出现且处于**运行中**（◐ + tool count）——
+      // 完成后行符号翻转为 ✓，抓拍窗口必须落在运行态（judge 断言 ◐）。
+      try {
+        await tester.waitFor(
+          (screen) => {
+            const turn = currentAgentTurn(screen);
+            return turn !== undefined && runningSubagentRow(turn.section);
+          },
+          {
+            timeout: 60_000,
+            interval: 500,
+            message: "等待 SubAgent 运行中摘要（◐ + N tools）超时",
+          },
+        );
+      } catch (e) {
+        const diag = await tester.getScreenText();
+        throw new Error(`等待 SubAgent 运行中摘要超时。屏幕:\n${diag}`);
+      }
 
       const runningCapture = await takePeriSnapshot(
         tester,
         "agent-output-running",
       );
 
-      // 只有当前 prompt 对应的 Agent turn 完成后，才能检查 output_summary。
+      // 等待 turn 完成（footer 出现）后再检查输出摘要。
       await tester.waitFor(
         (screen) => {
           const turn = currentAgentTurn(screen);
-          return (
-            turn !== undefined &&
-            turn.completed &&
-            hasNestedGrep(turn.section) &&
-            !turn.section.includes("running")
-          );
+          return turn !== undefined && turn.completed;
         },
         {
           timeout: 180_000,
@@ -120,13 +131,13 @@ describe("tool-card: agent output and nested position", () => {
       expect(runningCapture.text.length).toBeGreaterThan(50);
       expect(doneCapture.text.length).toBeGreaterThan(50);
 
-      // Judge: 运行中 —— 子工具位置检查
+      // Judge: 运行中 —— SubAgent 活动摘要可见
       const r = await judge({
         ansiRaw: runningCapture.raw,
         criteria: [
-          "屏幕应显示 SubAgent 正在工作的痕迹（如工具调用卡片或加载指示器）",
-          "Agent 卡片内部应有具体的工具调用条目（如 ● Grep 或 ● Read，包含工具名称），而非仅展示空的 Agent 卡片外壳",
-          "SubAgent 相关的内容（工具调用或状态信息）应出现在 Agent 卡片下方，而非上方历史消息中",
+          "屏幕应显示 SubAgent 正在工作的痕迹（单行摘要：运行符号 ◐ + Agent 名称 + 活动摘要，如 '◐ Agent explorer  Inspecting …'）",
+          "SubAgent 行应包含工具计数（如 'N tools'），表明其内部有工具调用被摘要化而非空白",
+          "SubAgent 相关内容应出现在用户 prompt 之后，而非上方历史消息中",
         ],
       });
       console.log("Judge (running):", JSON.stringify(r, null, 2));
@@ -136,9 +147,9 @@ describe("tool-card: agent output and nested position", () => {
       const r2 = await judge({
         ansiRaw: doneCapture.raw,
         criteria: [
-          "Agent 工具卡片下方应有非空的输出摘要（output_summary），即 SubAgent 完成后的回复或搜索结论应可见",
+          "SubAgent 单行摘要应显示完成状态（成功符号 ✓）与结果摘要（如 Grep 搜索结果或 TODO 说明）",
           "如果 SubAgent 已完成，应有关于 TODO 搜索结果的文字说明——而非空白内容",
-          "消息区中不应出现子工具调用卡片飘到 Agent 卡片上方、混入更早历史消息的情况",
+          "子工具调用不应以完整卡片形式铺入主时间轴（§6.7 停止递归内联）——它们应被摘要为工具计数或结果文本",
         ],
       });
       console.log("Judge (done):", JSON.stringify(r2, null, 2));

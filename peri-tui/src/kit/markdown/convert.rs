@@ -3,6 +3,8 @@ use ratatui::{
     text::{Line, Span},
 };
 use ratatui_kit_markdown::{MarkdownTheme, ParsedBlock};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::code_block::code_block_lines;
 use super::heading::heading_line;
@@ -172,7 +174,10 @@ pub(crate) fn convert_to_segments_with_state(
 
         match block {
             ParsedBlock::Heading(level, line) => {
-                state.current_text.push(heading_line(level, line, theme));
+                state.current_text.extend(wrap_styled_line(
+                    &heading_line(level, line, theme),
+                    max_width,
+                ));
             }
             ParsedBlock::Paragraph(para_lines) => {
                 // 检测「可能是表头行」的 Paragraph：首行以 | 开头，
@@ -186,18 +191,24 @@ pub(crate) fn convert_to_segments_with_state(
                     state.has_potential_table_header = true;
                 }
                 for line in para_lines {
-                    state.current_text.push(style_line(line, theme, base_style));
+                    state.current_text.extend(wrap_styled_line(
+                        &style_line(line, theme, base_style),
+                        max_width,
+                    ));
                 }
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
-                state
-                    .current_text
-                    .extend(code_block_lines(lang, code_lines, theme));
+                for line in code_block_lines(lang, code_lines, theme) {
+                    state
+                        .current_text
+                        .extend(wrap_styled_line(&line, max_width));
+                }
             }
             ParsedBlock::ListItem(item) => {
-                state
-                    .current_text
-                    .push(list_item_line(item, theme, base_style));
+                state.current_text.extend(wrap_styled_line(
+                    &list_item_line(item, theme, base_style),
+                    max_width,
+                ));
             }
             ParsedBlock::Rule => {
                 let rule_char = "─".repeat(max_width.min(80));
@@ -255,4 +266,51 @@ fn trim_trailing_blanks(text: &mut Vec<Line<'static>>) {
 /// 通用段落行渲染。`base_style` 作为普通文本的兜底前景色。
 fn style_line(line: &Line<'static>, theme: &MarkdownTheme, base_style: Style) -> Line<'static> {
     Line::from(apply_span_styles(&line.spans, theme, Some(base_style)))
+}
+
+/// 按 display width 将带样式行折为多行（保留 span 样式）。
+///
+/// [Why] 渲染层（消息区 Paragraph）只在**视口宽度**处 wrap——convert 阶段不折行时，
+/// 超宽 md 行（长段落/标题/列表项/代码行）会被二次折行，折出的行丢失 `│` 竖线前缀
+/// （左侧竖线被打断）。在 convert 阶段折行后，`prefixed_cont_line` 会给每个折出行
+/// 统一套前缀，竖线保持连续，且每行宽 ≤ max_width（前缀 + 内容 ≤ 视口，不触发二次折行）。
+///
+/// 度量口径与 §12 一致：按 grapheme cluster + display width（CJK 双宽 / emoji ZWJ /
+/// combining mark 不被从中间切开），同 [`crate::truncate::wrap_by_width`]；超宽单词
+/// 按宽度切分，**不丢内容**。`max_width == 0`（极端窄屏）时原样返回单行。
+pub(super) fn wrap_styled_line(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 || line.width() <= max_width {
+        return vec![line.clone()];
+    }
+    let mut rows: Vec<Vec<(String, Style)>> = Vec::new();
+    let mut cur: Vec<(String, Style)> = Vec::new();
+    let mut cur_width = 0usize;
+    for span in &line.spans {
+        for g in span.content.graphemes(true) {
+            let w = g.width();
+            if !cur.is_empty() && cur_width + w > max_width {
+                rows.push(std::mem::take(&mut cur));
+                cur_width = 0;
+            }
+            // 单个 grapheme 即超宽（罕见）：独占一行也不丢内容
+            if w > max_width && cur.is_empty() {
+                rows.push(vec![(g.to_string(), span.style)]);
+                continue;
+            }
+            cur.push((g.to_string(), span.style));
+            cur_width += w;
+        }
+    }
+    if !cur.is_empty() || rows.is_empty() {
+        rows.push(cur);
+    }
+    rows.into_iter()
+        .map(|row| {
+            Line::from(
+                row.into_iter()
+                    .map(|(content, style)| Span::styled(content, style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }

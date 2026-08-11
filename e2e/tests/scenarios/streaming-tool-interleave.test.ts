@@ -56,4 +56,51 @@ describe("scenarios: streaming + tool interleave", () => {
       expect(result.pass).toBe(true);
     },
   );
+
+  it(
+    "手动展开 reasoning 后继续 streaming 不被自动折叠",
+    { timeout: 300_000 },
+    async () => {
+      tester = await launchPeri();
+      const base = await tester.getScreenText();
+
+      // 第一轮：产生 reasoning + 简短回答
+      await sendPrompt(
+        tester,
+        "请先思考（reasoning）再回答：读取 README.md 的第一行，然后用一句话回答你读到了什么。",
+      );
+      await waitForStableScreen(tester, 180_000, base);
+
+      // Turn 完成后 reasoning 应按 §7 自动折叠为单行（无 ⏿ tail 前缀行）
+      const afterTurn = await tester.getScreenText();
+      expect(afterTurn).not.toContain("\u{23bf}");
+
+      // 手动展开：Alt+Up 逐条上移 entry 焦点（显式 CSI 序列 \e[1;3A，裁决 C3），
+      // Enter 切换 Collapsed/Expanded。reasoning 可能不在末位 entry
+      // （工具交错时在中间 assistant bubble），循环直至 ⏿ 出现。
+      let expanded = false;
+      for (let i = 0; i < 12; i++) {
+        await tester.sendText("\u001b[1;3A"); // Alt+Up
+        await tester.sleep(150);
+        await tester.sendKey("enter");
+        await tester.sleep(350);
+        if ((await tester.getScreenText()).includes("\u{23bf}")) {
+          expanded = true;
+          break;
+        }
+      }
+      expect(expanded).toBe(true);
+
+      // 第二轮 streaming：手动展开的 reasoning 不得被自动折叠
+      const base2 = await tester.getScreenText();
+      await sendPrompt(tester, "再简单回答一句话即可。");
+      await waitForStableScreen(tester, 180_000, base2);
+
+      // 滚回顶部检查第一轮的 reasoning 仍展开（body tail 的 ⏿ 前缀可见）
+      await tester.sendKey("home", { ctrl: true });
+      await tester.sleep(400);
+      const final = await tester.getScreenText();
+      expect(final).toContain("\u{23bf}");
+    },
+  );
 });

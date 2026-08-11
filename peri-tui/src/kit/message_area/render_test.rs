@@ -2173,13 +2173,13 @@ fn test_assistant_md_paragraph_lines_stay_within_viewport() {
 #[test]
 fn test_assistant_md_all_block_types_stay_within_viewport() {
     let grid = GridSpec::grid_for(80);
-    let text = vec![
+    let text = [
         format!("# {}", "很长的标题".repeat(30)),
         format!("- {}", "列表项内容".repeat(40)),
         format!("段落正文 {}", "**加粗强调** ".repeat(30)),
-        "```",
+        "```".to_string(),
         format!("let long_code = {}", "x".repeat(200)),
-        "```",
+        "```".to_string(),
     ]
     .join("\n");
     let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
@@ -2205,10 +2205,13 @@ fn test_assistant_md_all_block_types_stay_within_viewport() {
             line_text(l)
         );
     }
-    // 折行不丢内容：长代码行拼接后仍含完整 x 串
+    // 折行不丢内容：代码行 x 总数守恒；`**` 强调文本仍完整
     let all = all_text(&lines);
-    assert!(all.contains(&"x".repeat(200)), "代码行折行不丢内容");
-    assert!(all.contains("加粗强调"), "段落折行不丢内容");
+    assert_eq!(all.matches('x').count(), 200, "代码行折行不丢内容");
+    assert!(
+        all.replace('*', "").contains("加粗强调"),
+        "段落折行不丢内容"
+    );
 }
 
 /// [Fix] 折行后的行语义复制仍剥离 `│ ` gutter——复制文本不含 UI chrome。
@@ -2229,7 +2232,7 @@ fn test_semantic_wrapped_md_line_strips_prefix() {
         .iter()
         .enumerate()
         .filter(|(_, l)| !l.spans.is_empty())
-        .map(|(idx, l)| sem_at(&vm, idx, &grid).unwrap_or_default())
+        .map(|(idx, _l)| sem_at(&vm, idx, &grid).unwrap_or_default())
         .collect();
     let joined = sem_lines.join("");
     assert!(
