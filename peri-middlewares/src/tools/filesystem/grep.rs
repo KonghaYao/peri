@@ -439,15 +439,18 @@ impl BaseTool for GrepTool {
                     "description": "Treat pattern as a literal string instead of regex, equivalent to grep -F (default: false)"
                 },
                 "max_depth": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Maximum directory depth to search. Limits how deep the search traverses into subdirectories"
                 },
                 "head_limit": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Limit output to first N matching lines (default 250). Pass 0 for unlimited. Use sparingly — large result sets waste context"
                 },
                 "offset": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Skip first N lines of output before applying head_limit"
                 }
             },
@@ -492,21 +495,30 @@ impl BaseTool for GrepTool {
                 .or_else(|| input.get("-i"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
-            context: input
-                .get("context")
-                .or_else(|| input.get("-C"))
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize),
-            before_context: input
-                .get("before_context")
-                .or_else(|| input.get("-B"))
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize),
-            after_context: input
-                .get("after_context")
-                .or_else(|| input.get("-A"))
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize),
+            context: crate::tools::parse_optional_u64(
+                input
+                    .get("context")
+                    .or_else(|| input.get("-C"))
+                    .unwrap_or(&Value::Null),
+                "context",
+            )?
+            .map(|n| n as usize),
+            before_context: crate::tools::parse_optional_u64(
+                input
+                    .get("before_context")
+                    .or_else(|| input.get("-B"))
+                    .unwrap_or(&Value::Null),
+                "before_context",
+            )?
+            .map(|n| n as usize),
+            after_context: crate::tools::parse_optional_u64(
+                input
+                    .get("after_context")
+                    .or_else(|| input.get("-A"))
+                    .unwrap_or(&Value::Null),
+                "after_context",
+            )?
+            .map(|n| n as usize),
             line_number: input
                 .get("show_line_numbers")
                 .or_else(|| input.get("-n"))
@@ -528,17 +540,14 @@ impl BaseTool for GrepTool {
                 .get("fixed_strings")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
-            head_limit: input
-                .get("head_limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(250) as usize,
-            offset: input
-                .get("offset")
-                .and_then(|v| v.as_u64())
+            head_limit: match crate::tools::parse_optional_u64(&input["head_limit"], "head_limit")?
+            {
+                Some(n) => n as usize,
+                None => 250,
+            },
+            offset: crate::tools::parse_optional_u64(&input["offset"], "offset")?
                 .map(|n| n as usize),
-            max_depth: input
-                .get("max_depth")
-                .and_then(|v| v.as_u64())
+            max_depth: crate::tools::parse_optional_u64(&input["max_depth"], "max_depth")?
                 .map(|n| n as usize),
         };
 

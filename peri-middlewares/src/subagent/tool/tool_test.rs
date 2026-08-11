@@ -97,6 +97,19 @@ fn test_agent_parameters_required_is_empty_for_resume() {
     );
 }
 
+#[test]
+fn test_agent_fork_description_declares_exclusivity_with_subagent_type() {
+    let t = make_subagent_tool(vec![]);
+    let params = t.parameters();
+    let fork_desc = params["properties"]["fork"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        fork_desc.contains("Mutually exclusive with subagent_type"),
+        "fork 描述应声明与 subagent_type 互斥，实际: {fork_desc}"
+    );
+}
+
 /// Verify error returned when prompt parameter is missing
 #[tokio::test]
 async fn test_agent_prompt_missing_returns_error() {

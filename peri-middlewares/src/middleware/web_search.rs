@@ -105,6 +105,8 @@ impl BaseTool for WebSearchTool {
                 },
                 "num_results": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
                     "description": "Number of results, default 10, max 20"
                 }
             },
@@ -124,7 +126,13 @@ impl BaseTool for WebSearchTool {
         let query = input["query"]
             .as_str()
             .ok_or("Missing required parameter: query")?;
-        let max_results = input["num_results"].as_u64().unwrap_or(10).clamp(1, 20) as usize;
+        // 非法类型（浮点/字符串/负数）显式报错，不再静默回退默认值；
+        // 合法整数越界按描述 clamp 到 [1, 20]
+        let max_results =
+            match crate::tools::parse_optional_u64(&input["num_results"], "num_results")? {
+                Some(n) => (n as usize).clamp(1, 20),
+                None => 10,
+            };
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))

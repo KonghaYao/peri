@@ -1042,3 +1042,31 @@ async fn test_grep_deterministic_order() {
     assert!(lines[2].contains("m.txt"), "应按路径字典序: {r1}");
     assert!(lines[3].contains("z.txt"), "应按路径字典序: {r1}");
 }
+
+/// 浮点 head_limit/offset 必须显式报错，不得被 as_u64() 静默吞掉回退默认值
+#[tokio::test]
+async fn test_grep_fractional_numeric_params_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "needle").unwrap();
+    let tool = GrepTool::new(dir.path().to_str().unwrap());
+    for (key, value) in [
+        ("head_limit", serde_json::json!(12.5)),
+        ("offset", serde_json::json!(3.5)),
+        ("max_depth", serde_json::json!(2.5)),
+        ("context", serde_json::json!(1.5)),
+        ("before_context", serde_json::json!(0.5)),
+        ("after_context", serde_json::json!(0.5)),
+    ] {
+        let result = tool
+            .invoke(
+                serde_json::json!({"pattern": "needle", key: value}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await;
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("non-negative integer"),
+            "浮点 {key}={value} 应报错而非静默回退: {err_msg}"
+        );
+    }
+}
