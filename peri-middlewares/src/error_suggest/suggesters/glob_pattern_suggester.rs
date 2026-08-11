@@ -14,7 +14,7 @@ impl ErrorSuggester for GlobPatternSuggester {
         }
 
         Some(Suggestion::new(
-            "Glob pattern 语法有误。合法示例：\n  • *.rs —— 当前目录所有 Rust 文件\n  • **/*.rs —— 递归所有子目录\n  • src/**/*.rs —— src 下所有 Rust 文件\n  • {foo,bar}.rs —— 枚举\n注意：方括号 [ 必须闭合，例如 [abc].rs",
+            "Invalid glob syntax. Examples: *.rs (current dir), **/*.rs (recursive), src/**/*.rs, {foo,bar}.rs (enum). Note: brackets like [abc] must be closed.",
         ))
     }
 }

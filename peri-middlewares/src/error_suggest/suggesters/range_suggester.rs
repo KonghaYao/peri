@@ -19,11 +19,11 @@ impl ErrorSuggester for RangeSuggester {
         });
         let caps = re.captures(ctx.error_message)?;
 
-        let requested: u64 = caps[1].parse().ok()?;
         let total: u64 = caps[2].parse().ok()?;
 
+        // 错误正文已含 "offset X exceeds file length (Y lines)"，此处只给修正方向
         Some(Suggestion::new(format!(
-            "请求的 offset {requested} 超出文件范围（文件共 {total} 行）。建议把 offset 改为 1（从头读）或小于 {total} 的值，配合 limit 控制读取范围。"
+            "Use offset 1 to read from the start, or any offset below {total}."
         )))
     }
 }

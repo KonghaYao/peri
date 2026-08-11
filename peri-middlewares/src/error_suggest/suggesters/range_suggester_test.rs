@@ -55,7 +55,7 @@ fn test_range_suggester_recognizes_offset_error() {
     let sug = result.unwrap();
     assert_eq!(
         sug.summary,
-        "请求的 offset 100 超出文件范围（文件共 50 行）。建议把 offset 改为 1（从头读）或小于 50 的值，配合 limit 控制读取范围。"
+        "Use offset 1 to read from the start, or any offset below 50."
     );
 }
 
