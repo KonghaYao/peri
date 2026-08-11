@@ -37,36 +37,6 @@ fn test_cwd_basename_empty() {
 }
 
 #[test]
-fn test_memory_color_thresholds() {
-    assert_eq!(memory_color(100), statusbar().resource_good);
-    assert_eq!(memory_color(512), statusbar().resource_good); // 512 不算超阈值
-    assert_eq!(memory_color(513), statusbar().resource_warn);
-    assert_eq!(memory_color(1024), statusbar().resource_warn); // 1024 不算超阈值
-    assert_eq!(memory_color(1025), statusbar().resource_bad);
-}
-
-#[test]
-fn test_resource_color_by_load() {
-    // low=50, high=100
-    assert_eq!(
-        resource_color_by_load(10.0, 50.0, 100.0),
-        statusbar().resource_good
-    );
-    assert_eq!(
-        resource_color_by_load(50.0, 50.0, 100.0),
-        statusbar().resource_warn
-    );
-    assert_eq!(
-        resource_color_by_load(75.0, 50.0, 100.0),
-        statusbar().resource_warn
-    );
-    assert_eq!(
-        resource_color_by_load(100.0, 50.0, 100.0),
-        statusbar().resource_bad
-    );
-}
-
-#[test]
 fn test_model_segment_parts_full() {
     // alias + model + effort 三段
     assert_eq!(
@@ -177,7 +147,8 @@ fn test_status_bar_handles_empty_provider_model() {
 //   opus → (0,27,32)（词首 x28）；claude-opus-4-20250514 → (0,32,55)（词首 x33）；
 //   high → (0,55,60)（词首 x56）
 
-/// 构造与 Row1 布局一致的 spans：模型段前后都有内容（MEM 无条件在模型段之后）。
+/// 构造与 Row1 布局一致的 spans：模型段前后都有内容（bg 任务在模型段之后；
+/// CPU%/MEM/ctx 已迁移 composer，不再出现在状态栏）。
 /// 返回 (spans, model_start, model_end)。
 fn row1_spans() -> (Vec<Span<'static>>, usize, usize) {
     let mut spans: Vec<Span<'static>> = vec![
@@ -190,13 +161,9 @@ fn row1_spans() -> (Vec<Span<'static>>, usize, usize) {
         Span::styled(" high", Style::default()),                       // effort
     ];
     let model_end = spans.len();
-    // 尾部：MEM 无条件 + bg 任务 + ctx usage（多轮运行后出现）
-    spans.push(separator());
-    spans.push(Span::styled("MEM 512MB", Style::default()));
+    // 尾部：bg 任务（模型段后紧跟一个 sep，折行边界与迁移前一致）
     spans.push(separator());
     spans.push(Span::styled("2 agent", Style::default()));
-    spans.push(separator());
-    spans.push(Span::styled("45% 123k", Style::default()));
     (spans, 4, model_end)
 }
 
@@ -217,7 +184,7 @@ fn test_model_click_areas_single_line_no_wrap() {
 fn test_model_click_areas_wrap_after_model_segment() {
     let (spans, start, end) = row1_spans();
     // 折行点落在模型段之后（窄终端 + 尾部内容变宽）：模型段完整在第 0 行，
-    // 尾部（MEM/bg/ctx）折到第 1 行。修复前 line_idx 取循环结束后的值（=1），
+    // 尾部（bg）折到第 1 行。修复前 line_idx 取循环结束后的值（=1），
     // 点击判定错位一行、模型文本点击永远落空。
     // area_w=61：high 结束于 x60（60 < 61 留在 line0），尾部 sep 触发折行到 line1。
     let areas = model_click_areas(&spans, 61, 2, start, end);

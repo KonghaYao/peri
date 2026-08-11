@@ -366,12 +366,12 @@ fn render_block_text(block: &Block<'static>, w: u16, h: u16) -> Vec<String> {
 fn test_build_composer_block_titles_and_degrades() {
     crate::kit::atoms::init_atoms();
     i18n::init(None);
-    // 全显示：top 仅保留 session title；footer 左 files 右 ctx。
+    // 全显示：top 仅保留 session title；footer 左 files 右资源线（CPU·MEM·ctx）。
     let full = build_composer_block(
         false,
         "session",
         Some("@ 2 files"),
-        Some("42% ctx"),
+        Some(Line::from(" CPU 75% · MEM 512MB · 42% ctx ")),
         true,
         true,
         80,
@@ -392,13 +392,21 @@ fn test_build_composer_block_titles_and_degrades() {
         rows[3]
     );
     assert!(
-        rows[3].contains("42% ctx"),
-        "title_bottom 右侧 ctx：{:?}",
+        rows[3].contains("MEM 512MB") && rows[3].contains("42% ctx"),
+        "title_bottom 右侧资源线（MEM · ctx）：{:?}",
         rows[3]
     );
 
     // h<12：隐藏 session title。
-    let no_top = build_composer_block(false, "session", Some("f"), Some("c"), false, true, 80);
+    let no_top = build_composer_block(
+        false,
+        "session",
+        Some("f"),
+        Some(Line::from(" c ")),
+        false,
+        true,
+        80,
+    );
     let rows = render_block_text(&no_top, 80, 4);
     assert!(
         !rows[0].contains("session") && !rows[0].contains("·"),
@@ -407,7 +415,15 @@ fn test_build_composer_block_titles_and_degrades() {
     );
 
     // h<8：title_bottom 也隐藏。
-    let all_hidden = build_composer_block(false, "session", Some("f"), Some("c"), false, false, 80);
+    let all_hidden = build_composer_block(
+        false,
+        "session",
+        Some("f"),
+        Some(Line::from(" c ")),
+        false,
+        false,
+        80,
+    );
     let rows = render_block_text(&all_hidden, 80, 4);
     assert!(
         !rows[0].contains("session") && !rows[3].contains("files"),

@@ -34,10 +34,10 @@ use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
-    CURRENT_SESSION_TITLE, FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION,
-    LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS, POPUP_KIND,
-    PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
-    WIZARD_ACTIVE,
+    CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY_KEY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
+    LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS,
+    POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
@@ -571,6 +571,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             && mouse.row < outer.y.saturating_add(outer.height)
                             && mouse.column >= text_x
                         {
+                            // 点击输入框 = 焦点回到输入态：清除消息区 entry 导航
+                            // 焦点（键盘 Enter 仲裁依据 FOCUSED_ENTRY_KEY + 消息区
+                            // 局部 entry_focus，后者由 message_area 的 effect 收敛
+                            // 同步清除）——否则点击展开后 Enter 仍被消息区消费为
+                            // 折叠切换，输入框无法提交。
+                            *FOCUSED_ENTRY_KEY.state().write() = None;
                             let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
                             let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();
@@ -766,7 +772,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     // §10 composer 标题/footer（Slice 3a）：
     // - title_top 右侧 session title；
-    // - title_bottom 左侧 `@ N files`（PENDING_ATTACHMENTS），右侧 `42% ctx`（CONTEXT_USAGE）。
+    // - title_bottom 左侧 `@ N files`（PENDING_ATTACHMENTS），右侧资源线
+    //   （CPU% · MEM · ctx，原状态栏 Row1 第 4/5/7 项迁移）。
     // 窄屏逐级隐藏：h<12（session_title_visible=false）隐藏 title_top 整行；
     // h<8（max_lines=Some(2)）再隐藏 title_bottom。
     let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
@@ -780,12 +787,38 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             )
         })
     };
-    let ctx_label = ctx_usage.read().as_ref().map(|(pct, _)| {
-        i18n::tr_args(
-            "composer-context-usage",
-            &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
-        )
-    });
+    // 右侧资源线：CPU%（>50 显示）→ MEM（恒显）→ ctx，保持原状态栏顺序；
+    // 全部 muted，不启用资源阈值色（与 composer footer 其余文本同色系）。
+    let sem = THEME_ATOM.state().read().semantic;
+    let footer_right: Option<Line<'static>> = {
+        let snap = hooks.use_atom(&SERVICE_SNAPSHOT).read().clone();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if snap.cpu_percent > 50.0 {
+            spans.push(Span::styled(
+                format!("CPU {:.0}%", snap.cpu_percent),
+                Style::default().fg(sem.text.muted),
+            ));
+        }
+        if !spans.is_empty() {
+            spans.push(footer_separator(sem.text.muted));
+        }
+        spans.push(Span::styled(
+            format!("MEM {}MB", snap.memory_mb),
+            Style::default().fg(sem.text.muted),
+        ));
+        if let Some((pct, _)) = ctx_usage.read().as_ref() {
+            spans.push(footer_separator(sem.text.muted));
+            let c = i18n::tr_args(
+                "composer-context-usage",
+                &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
+            );
+            spans.push(Span::styled(
+                format!(" {c} "),
+                Style::default().fg(sem.text.muted),
+            ));
+        }
+        (!spans.is_empty()).then(|| Line::from(spans))
+    };
     // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
     // （h<12，session_title_visible=false）时上边栏不渲染标签。
     let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
@@ -802,7 +835,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             loading,
             shown_session_title,
             files_label.as_deref(),
-            ctx_label.as_deref(),
+            footer_right,
             props.session_title_visible,
             props.max_lines.is_none(),
             composer_area.map(|a| a.width).unwrap_or(80),
@@ -906,15 +939,16 @@ fn input_tokens() -> peri_theme::component::InputTokens {
 }
 
 /// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧
-/// `@ N files` + 右侧 `42% ctx`。窄屏（§11）逐级隐藏：`show_top=false`
-///（h<12）隐藏 title_top 整行；`show_bottom=false`（h<8）隐藏 title_bottom。
+/// `@ N files` + 右侧资源线（`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
+/// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；
+/// `show_bottom=false`（h<8）隐藏 title_bottom。
 /// `max_width` = composer 区域宽度（`use_previous_size`，resize 后次帧收敛）。
 #[allow(clippy::too_many_arguments)] // 标题位/可见性/宽度参数同属一个边框语义，拆分反增复杂度
 fn build_composer_block(
     loading: bool,
     session_title: &str,
     files_label: Option<&str>,
-    ctx_label: Option<&str>,
+    footer_right: Option<Line<'static>>,
     show_top: bool,
     show_bottom: bool,
     max_width: u16,
@@ -937,24 +971,23 @@ fn build_composer_block(
         }
     }
     if show_bottom {
-        // 左侧附件计数 / 右侧上下文使用率（muted）
+        // 左侧附件计数 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
         if let Some(f) = files_label {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {f} "),
                 Style::default().fg(sem.text.muted),
             )));
         }
-        if let Some(c) = ctx_label {
-            block = block.title_bottom(
-                Line::from(Span::styled(
-                    format!(" {c} "),
-                    Style::default().fg(sem.text.muted),
-                ))
-                .right_aligned(),
-            );
+        if let Some(line) = footer_right {
+            block = block.title_bottom(line.right_aligned());
         }
     }
     block
+}
+
+/// 资源线分隔符：` · `（muted，与 composer footer 其余文本同色系）。
+fn footer_separator(color: Color) -> Span<'static> {
+    Span::styled(" · ", Style::default().fg(color))
 }
 
 /// §10 queued 队列行：`· {text}`（queued 符号 + muted），每行按 composer

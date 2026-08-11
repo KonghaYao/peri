@@ -4,7 +4,7 @@
 
 - 聚合展示对话、工具调用、工具结果、SubAgent、后台 Agent 状态、系统通知和当前 streaming turn。
 - 输入区支持多行编辑、历史、文件 mention、slash command、软换行、视口跟随、placeholder。
-- 状态栏持续暴露运行环境、权限模式、模型、资源占用和上下文快捷键。
+- 状态栏持续暴露运行环境、权限模式、模型与后台任务；CPU%/MEM/上下文使用率在 composer footer 右侧资源线。
 
 ---
 
