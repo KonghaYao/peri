@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 
 /// AskUser 用户操作——由 AskUserPopup 在 Enter/Esc 时通过 ASK_USER_RESPONSE_TX 发送。
 #[derive(Debug, Clone)]
@@ -79,6 +80,9 @@ pub fn spawn_ask_user_consumer(
 }
 
 /// 处理提交：构造 Accept response JSON，调用 send_response。
+/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
+/// （§6.8；失败保持 pending）。result = 首个非空答案（inline 快速回答的
+/// 选中 label），无答案时回退 `Answered`。
 async fn handle_submit(acp_client: &AcpTuiClient, request_id_str: &str, answers: &Value) {
     let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
         Ok(id) => id,
@@ -97,10 +101,23 @@ async fn handle_submit(acp_client: &AcpTuiClient, request_id_str: &str, answers:
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         error!(error = %e, "kit ask_user_consumer: send_response failed");
+        return;
     }
+    let result = answers
+        .as_object()
+        .and_then(|m| {
+            m.values()
+                .find(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+        })
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| i18n::tr("render-interaction-result-answered"));
+    crate::kit::acp_events::emit_interaction_resolved(request_id_str, &result);
 }
 
 /// 处理取消：构造 Cancel response JSON，调用 send_response。
+/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
+/// （§6.8；失败保持 pending）。
 async fn handle_cancel(acp_client: &AcpTuiClient, request_id_str: &str) {
     let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
         Ok(id) => id,
@@ -116,10 +133,17 @@ async fn handle_cancel(acp_client: &AcpTuiClient, request_id_str: &str) {
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         error!(error = %e, "kit ask_user_consumer: send_response (cancel) failed");
+        return;
     }
+    crate::kit::acp_events::emit_interaction_resolved(
+        request_id_str,
+        &i18n::tr("render-interaction-result-rejected"),
+    );
 }
 
 /// 处理拒绝：发送 decline response，告诉 Agent 用户明确拒绝了回答。
+/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
+/// （§6.8；失败保持 pending）。
 async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
     let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
         Ok(id) => id,
@@ -135,7 +159,12 @@ async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         tracing::error!(error = %e, "kit ask_user_consumer: send_response (reject) failed");
+        return;
     }
+    crate::kit::acp_events::emit_interaction_resolved(
+        request_id_str,
+        &i18n::tr("render-interaction-result-rejected"),
+    );
 }
 
 #[cfg(test)]

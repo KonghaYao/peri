@@ -174,19 +174,38 @@ pub(crate) fn code_block_lines(
     let lang_clean = lang.trim();
     let highlighted = highlight_code_block(lang_clean, raw_lines);
 
+    // [Slice 3] §6.2：code block 使用 surface.sunken 背景——所有行（前缀 + 代码）
+    // 统一加下沉背景，复制时背景不进入剪贴板（§9 由复制层剥离）。
+    let sunken_bg = peri_theme::atoms::THEME_ATOM
+        .state()
+        .read()
+        .semantic
+        .surface
+        .sunken;
+    let patch_bg = |style: Style| -> Style { style.bg(sunken_bg) };
+
     if raw_lines.len() == 1 {
         // 单行代码块：inline code style
         if let Some(hl_lines) = highlighted {
-            return hl_lines;
+            return hl_lines
+                .into_iter()
+                .map(|line| {
+                    let mut spans = Vec::with_capacity(line.spans.len());
+                    for span in line.spans {
+                        spans.push(Span::styled(span.content, patch_bg(span.style)));
+                    }
+                    Line::from(spans)
+                })
+                .collect();
         }
         return vec![Line::from(Span::styled(
             raw_lines[0].clone(),
-            theme.inline_code_style,
+            patch_bg(theme.inline_code_style),
         ))];
     }
 
     // 多行代码块：每行加 `│ ` 前缀
-    let prefix_style = theme.rule_style;
+    let prefix_style = patch_bg(theme.rule_style);
     let prefix = Span::styled("│ ", prefix_style);
 
     if let Some(hl_lines) = highlighted {
@@ -194,7 +213,9 @@ pub(crate) fn code_block_lines(
             .into_iter()
             .map(|line| {
                 let mut spans = vec![prefix.clone()];
-                spans.extend(line.spans);
+                for span in line.spans {
+                    spans.push(Span::styled(span.content, patch_bg(span.style)));
+                }
                 Line::from(spans)
             })
             .collect()
@@ -204,7 +225,7 @@ pub(crate) fn code_block_lines(
             .map(|raw| {
                 Line::from(vec![
                     prefix.clone(),
-                    Span::styled(raw.clone(), Style::default()),
+                    Span::styled(raw.clone(), Style::default().bg(sunken_bg)),
                 ])
             })
             .collect()

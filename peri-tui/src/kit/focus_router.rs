@@ -151,6 +151,42 @@ pub fn message_accepts_key(key: &KeyEvent) -> bool {
     ) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+/// 消息区 entry 导航仲裁（Slice 2 / Slice 4）：
+///
+/// - `Alt+Up/Down` 恒归属消息区（移动 entry 焦点）——Alt 方向键在输入区空闲
+///   （裁决 C3：`Ctrl+方向键` 已被消息区滚动独占，`Alt+Enter` 在输入区换行）；
+/// - `Enter`/`Space` 仅在 entry 焦点已激活（entry 导航模式）时归属消息区——
+///   输入态不被抢占（普通输入与发送照常，无需先退出导航）；
+/// - `Tab`/`←`/`→` 仅在 entry 焦点已激活时归属消息区（[Slice 4 §6.8]
+///   interaction option 切换；`Tab` 未被全局分类——`BackTab` 才是
+///   CyclePermissionMode）。消息区 handler 对非 pending interaction 的焦点
+///   entry 返回 Ignored 放行给输入区（Tab 不丢失）；
+/// - popup / inline-completion / panel 激活时不响应（active_layer 仲裁）。
+pub fn message_nav_accepts(key: &KeyEvent, entry_focused: bool) -> bool {
+    if !matches!(active_layer(), FocusLayer::Input) {
+        return false;
+    }
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Up | KeyCode::Down if alt => true,
+        // Enter/Space 仅无修饰（Shift+Enter 是输入区换行、Ctrl+ 组合归滚动/编辑）
+        KeyCode::Enter | KeyCode::Char(' ')
+            if entry_focused && key.modifiers == KeyModifiers::NONE =>
+        {
+            true
+        }
+        // [Slice 4] interaction option 导航：Tab/←/→ 无修饰 + entry 焦点激活。
+        // 消费与否由消息区 handler 按焦点 entry 类型决定（非 interaction →
+        // Ignored，Tab 继续传给输入区）。
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right
+            if entry_focused && key.modifiers == KeyModifiers::NONE =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn input_accepts_key(key: &KeyEvent) -> bool {
     if matches!(active_layer(), FocusLayer::Popup(_) | FocusLayer::Panel) {
         return false;

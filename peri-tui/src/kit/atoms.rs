@@ -11,12 +11,12 @@
 //! - REWIND_ACTION_TX: rewind popup → rewind_consumer
 //! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
-use crate::kit::tui_render_unit::TuiRenderUnit;
+use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit};
 use crate::kit::workflow_snapshot::WorkflowSnapshot;
 use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -201,9 +201,28 @@ pub struct PendingAttachment {
     pub base64_data: String,
 }
 
-pub static PENDING_ATTACHMENTS: OnceLock<Handle<Vec<PendingAttachment>>> = OnceLock::new();
+/// 待发送附件（§10 composer footer `@ N files` 消费）。
+/// 早期为 OnceLock<Handle<...>>（无消费方）；Slice 3 起输入区订阅显示计数，
+/// 改为 AtomStatic 以获得订阅唤醒（写入自动重渲染）。
+pub static PENDING_ATTACHMENTS: AtomStatic<Vec<PendingAttachment>> = AtomStatic::new(Vec::new);
 
 pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSnapshot::default);
+/// 用户手动折叠覆盖表（Slice 2）——key 为 entry 身份（message_id/tool_id/agent_id），
+/// value 为手动 fold 目标。存在即视为 `user_modified=true`：折叠 pass
+/// （`acp_events/render.rs::apply_fold_pass`）必须跳过这些 entry 的自动策略，
+/// 并在每次快照重建后复写 fold（流式重建后手动选择依然生效）。
+/// session 复位（push_view_models_for_reset）时清空。
+pub static FOLD_OVERRIDES: AtomStatic<HashMap<FoldKey, FoldState>> = AtomStatic::new(HashMap::new);
+/// [Slice 3 §7] entry 焦点所在 entry 的折叠键（消息区键盘导航写入，焦点清除
+/// 时置 None）——`group_successful_tools` 据此实现「不得合并当前 selected
+/// entry」免疫（§7：焦点所在工具不得被压入折叠组，否则展开/交互被静默吞掉）。
+/// 键为身份（tool_id 等），与索引无关——快照重建（插入 divider/todo/分组）后
+/// 索引漂移不影响免疫判定。session 复位时清空。
+pub static FOCUSED_ENTRY_KEY: AtomStatic<Option<FoldKey>> = AtomStatic::new(|| None);
+/// 终端能力（启动时由 entry.rs 探测一次写入；默认全能力——未探测场景不做剥离/降级）。
+/// 渲染层按此决定 NO_COLOR 剥离 pass 与符号/italic/truecolor 降级。
+pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =
+    AtomStatic::new(crate::kit::terminal_caps::TerminalCaps::default);
 /// loading 会话 epoch 计数器。每次 submit_consumer 发起新的 agent prompt 时递增。
 /// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
 /// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。
@@ -240,6 +259,10 @@ pub static TODO_ITEMS: AtomStatic<Vec<crate::kit::message_area::TodoItem>> =
 
 pub static OPEN_PANELS: AtomStatic<Vec<PanelKind>> = AtomStatic::new(Vec::new);
 pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None);
+/// §6.7 subagent 详情 pane 的选中 agent id——焦点在 `TuiSubAgentGroup` 上按
+/// Enter 时写入（mod.rs 焦点分派），SubAgentDetail 面板按此从 VIEW_MODELS
+/// 扫描嵌套 `view_models` 渲染。Esc 关闭面板后保留（重开仍显示同一 agent）。
+pub static SELECTED_SUBAGENT_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
 /// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
 /// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
@@ -541,6 +564,4 @@ pub struct DownloadProgressPayload {
 pub static DOWNLOAD_PROGRESS: AtomStatic<DownloadProgressPayload> =
     AtomStatic::new(DownloadProgressPayload::default);
 
-pub fn init_atoms() {
-    PENDING_ATTACHMENTS.get_or_init(|| Handle::new(Vec::new()));
-}
+pub fn init_atoms() {}

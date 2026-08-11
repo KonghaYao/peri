@@ -96,6 +96,39 @@ pub fn truncate_by_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Wrap text into lines of at most `max_width` terminal display columns.
+///
+/// 按 grapheme cluster + display width 折行（§12 口径：CJK 双宽 / emoji ZWJ /
+/// combining mark 不被从中间切开），与 [`truncate_by_width`] 同一度量；
+/// 超宽单词按宽度切分成多行，**不丢内容**（区别于 truncate 的省略号截断）。
+/// 用于 §6.1 用户 prompt 的「视觉行」计数——长行折行而非截断。
+pub fn wrap_by_width(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_width = 0usize;
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if !cur.is_empty() && cur_width + w > max_width {
+            lines.push(std::mem::take(&mut cur));
+            cur_width = 0;
+        }
+        // 单个 grapheme 即超宽（罕见）：独占一行也不丢内容
+        if w > max_width && cur.is_empty() {
+            lines.push(g.to_string());
+            continue;
+        }
+        cur.push_str(g);
+        cur_width += w;
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Produce a one-line summary of a tool's JSON input.
 ///
 /// 合并 router.rs 与 view_mapper.rs 的实现：

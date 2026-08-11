@@ -6,7 +6,9 @@ use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
 use crate::kit::atoms::BG_DISPLAY;
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
-use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolCard, tui_hash_str};
+use crate::kit::tui_render_unit::{
+    EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, fold_for_status,
+};
 
 pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) {
     if ts.tool_name == "TodoWrite" {
@@ -177,14 +179,20 @@ pub(super) fn handle_replay_tool_started(
         is_error: false,
         is_running: true,
         running_duration_ms: None,
-        diff: None,
+        completed_duration_ms: None,
+        // [G-Diff] replay 构造时无输出（is_running=true）——解析器按 skip 返回
+        // None；`ReplayToolEnded`（update_committed_tool_card）到达时再解析。
+        diff: super::super::acp_types::parse_tool_diff(tool_name, "", true, None),
         presentation: presentation.clone(),
+        // replay 构造的卡片按当前状态取表值（running → Preview）；
+        // [G1] hash 由 recompute_hash 单点计算。
+        fold: fold_for_status(FoldTarget::Tool, EntryStatus::Running),
+        user_modified: false,
         tool_calls_count: 0,
-        content_hash: tui_hash_str(&format!(
-            "{}|{}|{}||false|true|{:?}",
-            tool_id, tool_name, input_summary, presentation
-        )),
+        content_hash: 0,
     };
+    let mut card = card;
+    card.recompute_hash();
     state.committed.push_back(TuiRenderUnit::TuiToolCard(card));
     super::render::push_view_models(state);
     super::render::push_acp_state(state);
@@ -227,18 +235,26 @@ fn update_committed_tool_card(
                 is_error,
                 is_running: false,
                 running_duration_ms: None,
-                diff: card.diff.clone(),
-                presentation: card.presentation.clone(),
-                tool_calls_count: card.tool_calls_count,
-                content_hash: tui_hash_str(&format!(
-                    "{}|{}|{}|{}|{is_error}|false|{:?}",
-                    card.tool_id,
-                    card.tool_name,
-                    card.input_summary,
+                completed_duration_ms: card.completed_duration_ms,
+                // [G-Diff] ReplayToolEnded 是 replay 路径唯一有输出的点——
+                // 在此解析 diff（is_error 时解析器 skip；path hint 复用
+                // input_summary——Edit/Write 摘要即 file_path 口径）。
+                diff: super::super::acp_types::parse_tool_diff(
+                    &card.tool_name,
                     output_summary,
-                    card.presentation,
-                )),
+                    is_error,
+                    Some(card.input_summary.clone()),
+                ),
+                presentation: card.presentation.clone(),
+                // 保留既有折叠状态——折叠统一由 push_view_models 的 pass 按
+                // 新状态（completed/error）重算；用户覆盖由 FOLD_OVERRIDES 表接管。
+                fold: card.fold,
+                user_modified: card.user_modified,
+                tool_calls_count: card.tool_calls_count,
+                content_hash: 0,
             };
+            let mut updated = updated;
+            updated.recompute_hash();
             state.committed = state
                 .committed
                 .update(i, TuiRenderUnit::TuiToolCard(updated));

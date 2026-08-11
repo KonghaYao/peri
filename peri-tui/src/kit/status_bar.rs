@@ -348,21 +348,51 @@ fn NotifRow(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )
 }
 
+#[derive(Default, Props)]
+pub struct StatusBarProps {
+    /// §11 高度降级：`h < 12` 时隐藏 Row2 key hints（Row1Only，高度 2）。
+    pub hide_hints: bool,
+    /// §11 高度降级：`h < 8` 时完全隐藏（高度 0，高度让给 transcript/composer）。
+    pub hidden: bool,
+}
+
 #[component]
-pub fn StatusBar(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+pub fn StatusBar(props: &StatusBarProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang = hooks.use_atom(&atoms::LANG_VERSION);
+
+    // §11：h<8 完全隐藏；h<12 仅 Row1 + NotifRow（无 key hints / 缓冲行）。
+    // Row2 是独立组件，条件渲染不违反 hook 顺序（计划 Slice 1c 裁决）。
+    let height = if props.hidden {
+        0
+    } else if props.hide_hints {
+        2
+    } else {
+        4
+    };
 
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
-            height: Constraint::Length(4),
+            height: Constraint::Length(height),
         ) {
             StatusBarRow1()
-            StatusBarRow2()
-            NotifRow()
-            // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
-            Text(text: Paragraph::new(Line::from("")))
+            if !props.hidden && !props.hide_hints {
+                element!(StatusBarRow2())
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            }
+            if props.hidden {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            } else {
+                element!(NotifRow())
+            }
+            if !props.hidden && !props.hide_hints {
+                // 第 4 行留空（视觉缓冲，Row1 折行为双行时自动压缩此区域）
+                element!(Text(text: Paragraph::new(Line::from(""))))
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0)))
+            }
         }
     )
 }

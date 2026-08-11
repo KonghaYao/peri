@@ -13,8 +13,9 @@
 use crate::kit::stream_data::*;
 use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
 use crate::kit::tui_render_unit::{
-    TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiToolCard, TuiToolPresentation,
-    reasoning_collapse_target, tui_hash_combine, tui_hash_roll_update, tui_hash_str,
+    EntryStatus, FoldTarget, TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiToolCard,
+    TuiToolPresentation, entry_status_code, fold_for_status, fold_state_code, tui_hash_combine,
+    tui_hash_roll_update,
 };
 use peri_acp_types::event_data::*;
 use serde_json::Value;
@@ -82,6 +83,23 @@ pub struct CurrentTurn {
     /// 当前未冻结（trailing）推理区域的滚动哈希——`append_reasoning` 时增量维护。
     open_reasoning_hash: u64,
 
+    /// 本 turn 首次 `append_reasoning` 的时刻——推理块 `Thought for Ns` 时长的
+    /// 起点（running 块 elapsed、completed 块在 flush/折叠 pass 时冻结差值）。
+    /// 每次 `reset()` 清空。
+    reasoning_started_at: Option<Instant>,
+
+    /// 本 turn 首次 `append_text` 的时刻——assistant 正文 `12.4s` 时长的起点
+    /// （§6.2；G-Tokens 仅 duration）。trailing bubble 构造时写入 `started_at`，
+    /// 折叠 pass 在 phase 离开 PromptRunning 时冻结差值。每次 `reset()` 清空。
+    text_started_at: Option<Instant>,
+
+    /// [§6.7] 子 turn 专用冻结标记：`stop_subagent` 调用
+    /// [`CurrentTurn::freeze_trailing`] 后置 `Some((正文时长 ms, 推理时长 ms))`，
+    /// trailing 流式段以 Completed 形态构建（镜像顶层折叠 pass 的翻转点——
+    /// 子 turn 不经过快照 pass，冻结必须在此完成）。内容不再增长，构造后
+    /// 保持稳定。顶层 turn 恒 None。
+    trailing_frozen: Option<(Option<u64>, Option<u64>)>,
+
     /// 增量 VM 缓存：索引 i 对应 `segments[i]` 的 VM，末尾元素为 trailing bubble。
     ///
     /// 使用 `im::Vector` 的原因：
@@ -96,11 +114,6 @@ pub struct CurrentTurn {
     /// 缓存与 segments/内容失同步标记：`invalidate_cache` 置位，`view_models()`
     /// 时调用 `sync_cache` 重同步。流式变更走 eager sync（不置位）。
     cache_dirty: bool,
-
-    /// 折叠策略：true = 缓存内保持"仅最后一个 reasoning 展开"（顶层 turn，
-    /// 与 `push_view_models` 的折叠 pass 稳态一致，使该 pass 对 current_turn
-    /// 部分零翻转）；false = 全部展开（subagent 子 turn，保持历史渲染行为）。
-    collapse_non_last_reasoning: bool,
 }
 
 impl Default for CurrentTurn {
@@ -118,9 +131,11 @@ impl Default for CurrentTurn {
             last_message_id: None,
             open_text_hash: 0,
             open_reasoning_hash: 0,
+            reasoning_started_at: None,
+            text_started_at: None,
+            trailing_frozen: None,
             cached_view_models: im::Vector::new(),
             cache_dirty: false,
-            collapse_non_last_reasoning: true,
         }
     }
 }
@@ -138,6 +153,13 @@ enum TurnSegment {
         reasoning_end_byte: usize,
         text_hash: u64,
         reasoning_hash: u64,
+        /// 该段所属 ACP messageId（flush 时冻结）——折叠覆盖键
+        /// `FoldKey::Reasoning(message_id)` 用；身份字段，不进 hash。
+        message_id: Option<String>,
+        /// 本段推理区的冻结时长（毫秒）——flush 时刻距 `reasoning_started_at`
+        /// 的差值；completed 推理块 `Thought for Ns` 显示用（§6.3）。
+        /// 无推理的段为 `None`。
+        reasoning_duration_ms: Option<u64>,
     },
     /// Tool card reference to `CurrentTurn.tool_cards[tool_idx]`.
     Tool { tool_idx: usize },
@@ -163,15 +185,23 @@ impl CurrentTurn {
     ///
     /// 冻结时把当前 open 区域的滚动哈希存入段记录——此后该段内容不再变化，
     /// 缓存重建可直接 O(1) 取用，无需对冻结段重新哈希。
+    /// 推理时长同刻冻结（§6.3 `Thought for Ns`）——flush 后不再增长。
     fn flush_text_segment(&mut self) {
         let current_text = self.text.len();
         let current_reasoning = self.reasoning.len();
         if current_text > self.last_text_flush || current_reasoning > self.last_reasoning_flush {
+            let reasoning_duration_ms = self
+                .reasoning_started_at
+                .map(|t| t.elapsed().as_millis() as u64);
             self.segments.push(TurnSegment::AssistantText {
                 text_end_byte: current_text,
                 reasoning_end_byte: current_reasoning,
                 text_hash: self.open_text_hash,
                 reasoning_hash: self.open_reasoning_hash,
+                // flush 发生在 last_message_id 更新之前（append_text/append_reasoning
+                // 先 flush 旧段再换新 id）——此处记录的是本段自己的 message id。
+                message_id: self.last_message_id.clone(),
+                reasoning_duration_ms,
             });
             self.last_text_flush = current_text;
             self.last_reasoning_flush = current_reasoning;
@@ -204,6 +234,7 @@ impl CurrentTurn {
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
         self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
+        self.text_started_at.get_or_insert_with(Instant::now);
         self.active = true;
         self.sync_cache();
     }
@@ -223,6 +254,7 @@ impl CurrentTurn {
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
         self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
+        self.reasoning_started_at.get_or_insert_with(Instant::now);
         self.active = true;
         self.sync_cache();
     }
@@ -263,6 +295,9 @@ impl CurrentTurn {
         };
         t.output_summary = Some(output);
         t.is_error = is_error;
+        // [G-started_at] 完成时刻冻结时长——running→completed 不重建 accumulator，
+        // completed 显示用同源 started_at 的冻结差值（不再增长）。
+        t.completed_duration_ms = Some(t.started_at.elapsed().as_millis() as u64);
         self.sync_cache();
         true
     }
@@ -335,6 +370,11 @@ impl CurrentTurn {
     pub fn stop_subagent(&mut self, agent_id: &str) {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.is_running = false;
+            // [§6.7] 冻结子 turn 的 trailing 流式段——子 turn 不经过快照折叠
+            // pass，不冻结则 trailing bubble 保持 Running 形态（started_at
+            // 存活、elapsed 持续增长），详情面板对已完成 subagent 渲染永久的
+            // `◐ Thinking… Ns`。
+            s.child_turn.freeze_trailing();
             s.cached_view_model.replace(None);
             self.sync_cache();
         }
@@ -422,10 +462,36 @@ impl CurrentTurn {
         self.last_message_id = None;
         self.open_text_hash = 0;
         self.open_reasoning_hash = 0;
+        self.reasoning_started_at = None;
+        self.text_started_at = None;
+        self.trailing_frozen = None;
         self.cached_view_models = im::Vector::new();
         self.cache_dirty = false;
         self.active = false;
         self.committed = true;
+    }
+
+    /// [§6.7] 冻结 trailing 流式段（镜像顶层折叠 pass 的翻转点语义）。
+    ///
+    /// 顶层 turn 的冻结由 `apply_fold_pass` 在 phase 离开 PromptRunning 时对
+    /// 快照 VM 完成；子 turn（SubAgentAccumulator）不经过快照 pass，`stop_subagent`
+    /// 必须在此把 `text_started_at`/`reasoning_started_at` 一次性换算为冻结
+    /// 时长并清除——此后 trailing bubble 以 Completed/Collapsed 形态构建，
+    /// elapsed 不再增长（详情面板不再出现永久的 `◐ Thinking… Ns`）。
+    /// 无 trailing 内容时为 no-op（幂等：重复 stop 安全）。
+    pub(crate) fn freeze_trailing(&mut self) {
+        if self.text.len() > self.last_text_flush
+            || self.reasoning.len() > self.last_reasoning_flush
+        {
+            self.trailing_frozen = Some((
+                self.text_started_at.map(|t| t.elapsed().as_millis() as u64),
+                self.reasoning_started_at
+                    .map(|t| t.elapsed().as_millis() as u64),
+            ));
+        }
+        self.text_started_at = None;
+        self.reasoning_started_at = None;
+        self.cache_dirty = true;
     }
 
     /// Clear current turn without marking a canonical commit boundary.
@@ -459,25 +525,69 @@ impl CurrentTurn {
     /// `text_hash`/`reasoning_hash` 是文本/推理区域的滚动哈希（增量维护的 open
     /// 值或冻结段存储值），组合公式与 [`TuiAssistantBubble::compute_hash`] 完全
     /// 一致——保证增量路径与从零重建（recompute_hash）产出相同的 hash。
+    ///
+    /// `running`：true = trailing 流式段（status=Running、fold=Preview、
+    /// started_at=推理起点）；false = 冻结段（status=Completed、fold=Collapsed、
+    /// duration_ms=flush 时刻冻结值）。折叠 pass 在 phase 离开 PromptRunning 时
+    /// 把 trailing 段翻转成 Completed。bubble 的 `message_id` 由调用方直接赋值
+    /// （身份字段，不进 hash）。
+    ///
+    /// `text_started_at`：trailing 段的本 bubble 正文开始时刻——running 时写入
+    /// `TuiAssistantBubble.started_at`；冻结段传 None（正文时长由折叠 pass 在
+    /// 翻转点冻结，镜像 reasoning 机制）。
+    ///
+    /// [§6.3] 空 reasoning：running 且 reasoning 为空时仍产出空文本的推理块
+    /// （`◐ Thinking…` 占位行，不出现空白 block）；`running == false` 的空
+    /// reasoning 返回 `None`（冻结段无占位，避免历史噪音）。
     fn build_bubble_parts(
         reasoning: &str,
         text_hash: u64,
         reasoning_hash: u64,
+        running: bool,
+        reasoning_started_at: Option<Instant>,
+        reasoning_duration_ms: Option<u64>,
+        text_started_at: Option<Instant>,
     ) -> (Option<TuiReasoningBlock>, u64) {
-        let block = if reasoning.is_empty() {
+        let block = if reasoning.is_empty() && !running {
             None
         } else {
+            let status = if running {
+                EntryStatus::Running
+            } else {
+                EntryStatus::Completed
+            };
             Some(TuiReasoningBlock {
                 text: reasoning.to_string(),
-                collapsed: false,
+                fold: fold_for_status(FoldTarget::Reasoning, status),
+                status,
+                is_running: running,
+                started_at: if running { reasoning_started_at } else { None },
+                duration_ms: if running { None } else { reasoning_duration_ms },
             })
         };
+        // [G1] 与 TuiAssistantBubble::compute_hash 同序同码——fold/status/is_running/
+        // duration 逐项组合，末尾追加正文时长秒数（running 取 started_at 已耗时，
+        // 冻结段取 duration_ms/1000，均秒取整；None→0）与冻结判别位
+        // （`text_started_at.is_none()`，镜像 recompute_hash 的 started_at 口径），
+        // 保证增量路径与 recompute_hash 产出相同 hash。
+        let text_duration_secs = text_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let text_frozen = u64::from(text_started_at.is_none());
         let content_hash = match block.as_ref() {
-            Some(r) => tui_hash_combine(
-                tui_hash_combine(text_hash, reasoning_hash),
-                u64::from(r.collapsed),
-            ),
-            None => text_hash,
+            Some(r) => {
+                let mut h = tui_hash_combine(
+                    tui_hash_combine(text_hash, reasoning_hash),
+                    fold_state_code(r.fold),
+                );
+                h = tui_hash_combine(h, entry_status_code(r.status));
+                h = tui_hash_combine(h, u64::from(r.is_running));
+                h = tui_hash_combine(h, r.duration_code());
+                h = tui_hash_combine(h, text_duration_secs);
+                tui_hash_combine(h, text_frozen)
+            }
+            None => {
+                let h = tui_hash_combine(text_hash, text_duration_secs);
+                tui_hash_combine(h, text_frozen)
+            }
         };
         (block, content_hash)
     }
@@ -501,6 +611,8 @@ impl CurrentTurn {
                     reasoning_end_byte,
                     text_hash,
                     reasoning_hash,
+                    message_id,
+                    reasoning_duration_ms,
                 } => {
                     let text_end = (*text_end_byte).min(self.text.len());
                     let reason_end = (*reasoning_end_byte).min(self.reasoning.len());
@@ -508,12 +620,24 @@ impl CurrentTurn {
                     if self.cached_view_models.len() <= i {
                         let text_slice = &self.text[prev_text_end..text_end];
                         let reasoning_slice = &self.reasoning[prev_reasoning_end..reason_end];
-                        let (reasoning, content_hash) =
-                            Self::build_bubble_parts(reasoning_slice, *text_hash, *reasoning_hash);
+                        let (reasoning, content_hash) = Self::build_bubble_parts(
+                            reasoning_slice,
+                            *text_hash,
+                            *reasoning_hash,
+                            false,
+                            None,
+                            *reasoning_duration_ms,
+                            None,
+                        );
                         self.cached_view_models
                             .push_back(TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
                                 text: text_slice.to_string(),
                                 reasoning,
+                                message_id: message_id.clone(),
+                                // 冻结段无正文时长起点——时长由折叠 pass 在翻转点
+                                // 对 trailing bubble 冻结；此处恒 None（G-Tokens）。
+                                started_at: None,
+                                duration_ms: None,
                                 content_hash,
                             }));
                     }
@@ -593,32 +717,67 @@ impl CurrentTurn {
                 }
                 _ => true,
             };
-            if trailing_len_changed {
+            // [Fix §6.7] 冻结待消费（`freeze_trailing` 置位）：冻结只改 VM 形态
+            // （started_at→None / duration_ms→Some / running→completed），不改
+            // 文本长度——长度门控恒 false 会保留陈旧的 Running 形态 bubble
+            // （详情面板对已完成 subagent 永久 `◐ Thinking… Ns`）。take() 消费
+            // 后恢复长度门控（冻结重建恰一次，幂等）。
+            let pending_freeze = self.trailing_frozen.is_some();
+            if trailing_len_changed || pending_freeze {
                 let text_slice = &self.text[self.last_text_flush..];
                 let reasoning_slice = &self.reasoning[self.last_reasoning_flush..];
-                let (reasoning, content_hash) = Self::build_bubble_parts(
-                    reasoning_slice,
-                    self.open_text_hash,
-                    self.open_reasoning_hash,
-                );
-                let bubble = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-                    text: text_slice.to_string(),
-                    reasoning,
-                    content_hash,
-                });
-                if self.cached_view_models.len() <= trailing_idx {
-                    self.cached_view_models.push_back(bubble);
+                // [§6.7] 冻结形态（stop_subagent 后）：Completed / Collapsed /
+                // 冻结时长——`freeze_trailing` 已把 started_at 换算为 ms 并清除，
+                // 此处直接构建（不经过顶层折叠 pass）。
+                let trailing = if let Some((text_dur, reasoning_dur)) = self.trailing_frozen.take()
+                {
+                    let (reasoning, content_hash) = Self::build_bubble_parts(
+                        reasoning_slice,
+                        self.open_text_hash,
+                        self.open_reasoning_hash,
+                        false,
+                        None,
+                        reasoning_dur,
+                        None,
+                    );
+                    let mut bubble = TuiAssistantBubble {
+                        text: text_slice.to_string(),
+                        reasoning,
+                        message_id: self.last_message_id.clone(),
+                        started_at: None,
+                        duration_ms: text_dur,
+                        content_hash,
+                    };
+                    // [G1] 单点重算：与折叠 pass 冻结后 recompute_hash 公式一致
+                    // （build_bubble_parts 的 !running 路径 text_duration=0，
+                    // 不含冻结正文时长）。
+                    bubble.recompute_hash();
+                    TuiRenderUnit::TuiAssistantBubble(bubble)
                 } else {
-                    self.cached_view_models.set(trailing_idx, bubble);
+                    let (reasoning, content_hash) = Self::build_bubble_parts(
+                        reasoning_slice,
+                        self.open_text_hash,
+                        self.open_reasoning_hash,
+                        true,
+                        self.reasoning_started_at,
+                        None,
+                        self.text_started_at,
+                    );
+                    TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+                        text: text_slice.to_string(),
+                        reasoning,
+                        message_id: self.last_message_id.clone(),
+                        started_at: self.text_started_at,
+                        duration_ms: None,
+                        content_hash,
+                    })
+                };
+                if self.cached_view_models.len() <= trailing_idx {
+                    self.cached_view_models.push_back(trailing);
+                } else {
+                    self.cached_view_models.set(trailing_idx, trailing);
                 }
             }
-        }
-
-        // 折叠归一化：顶层 turn 保持"仅最后一个 reasoning 展开"——与
-        // push_view_models 的折叠 pass 稳态一致，使该 pass 对 current_turn
-        // 部分零翻转（每次翻转是一次 COW 元素克隆，避免每 token 重复发生）。
-        if self.collapse_non_last_reasoning {
-            self.normalize_collapsed();
         }
 
         // 后处理：将 Agent 工具卡片的 tool_calls_count 与紧随的 SubAgent 组配对。
@@ -628,41 +787,10 @@ impl CurrentTurn {
         self.cache_dirty = false;
     }
 
-    /// 折叠归一化：缓存中非最后一个 reasoning bubble 折叠（collapsed=true 并重算 hash）。
+    /// 折叠归一化已删除（Slice 2）：折叠策略收敛到 `push_view_models` 的
+    /// `apply_fold_pass` 单点（spec §7 表 + FOLD_OVERRIDES），缓存层不再内联
+    /// 折叠决策——`sync_cache` 只负责按内容构建 VM，折叠由快照 pass 统一驱动。
     ///
-    /// 目标选择与 `acp_events/render.rs` 的折叠 pass 共用
-    /// [`reasoning_collapse_target`] 单点定义——策略变更只改那一处，防止两处
-    /// 实现分叉破坏渲染缓存一致性。
-    fn normalize_collapsed(&mut self) {
-        let Some(last_idx) = reasoning_collapse_target(&self.cached_view_models) else {
-            return;
-        };
-
-        // 先收集再应用（避免迭代中修改）。
-        let mut flips: Vec<usize> = Vec::new();
-        for (i, vm) in self.cached_view_models.iter().enumerate() {
-            if i == last_idx {
-                continue;
-            }
-            if let TuiRenderUnit::TuiAssistantBubble(b) = vm
-                && let Some(r) = &b.reasoning
-                && !r.collapsed
-            {
-                flips.push(i);
-            }
-        }
-        for i in flips {
-            let vm = &self.cached_view_models[i];
-            if let TuiRenderUnit::TuiAssistantBubble(b) = vm {
-                let mut updated = b.clone();
-                updated.reasoning.as_mut().unwrap().collapsed = true;
-                updated.recompute_hash();
-                self.cached_view_models
-                    .set(i, TuiRenderUnit::TuiAssistantBubble(updated));
-            }
-        }
-    }
-
     /// Agent 工具卡片与紧随的 SubAgent 组配对（tool_calls_count）。
     fn pair_agent_tool_cards(&mut self) {
         let mut updates: Vec<(usize, usize)> = Vec::new(); // (index, tool_count)
@@ -706,16 +834,22 @@ impl CurrentTurn {
     }
 }
 
-/// 从 `ToolCardAccumulator` 派生 `TuiToolCard`（含按秒取整的 duration hash）。
+/// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
-/// duration 按秒取整后纳入 hash——避免每毫秒 hash 变化导致分片渲染缓存频繁
-/// 失效；同时保证 duration 文本每秒刷新。卡片字段均为短摘要，全量 format!/hash
-/// 成本可忽略，无需增量。
+/// fold 按 spec §7 表取当前状态的目标值（running=Preview / error=Expanded /
+/// completed=Collapsed）；hash 由 [`TuiToolCard::recompute_hash`] 单点计算
+/// （含 fold + user_modified，duration 按秒取整避免每毫秒 hash 抖动）。
 fn build_tool_card(t: &ToolCardAccumulator) -> TuiToolCard {
     let is_running = t.output_summary.is_none();
     let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
-    let duration_secs = running_duration_ms.map(|ms| ms / 1000);
-    TuiToolCard {
+    let status = if is_running {
+        EntryStatus::Running
+    } else if t.is_error {
+        EntryStatus::Error
+    } else {
+        EntryStatus::Completed
+    };
+    let mut card = TuiToolCard {
         tool_id: t.tool_id.clone(),
         tool_name: t.tool_name.clone(),
         input_summary: t.input_summary.clone(),
@@ -723,21 +857,60 @@ fn build_tool_card(t: &ToolCardAccumulator) -> TuiToolCard {
         is_error: t.is_error,
         is_running,
         running_duration_ms,
-        diff: None,
-        presentation: t.presentation.clone(),
-        tool_calls_count: 0,
-        content_hash: tui_hash_str(&format!(
-            "{}|{}|{}|{}|{}|{}|{:?}|{:?}",
-            t.tool_id,
-            t.tool_name,
-            t.input_summary,
+        // [G-started_at] completed 时长在 end_tool 时冻结（同源 started_at），
+        // 与 running 时长同一口径；hash 按秒取整（recompute_hash）。
+        completed_duration_ms: if is_running {
+            None
+        } else {
+            t.completed_duration_ms
+        },
+        // [G-Diff] Edit/Write 完成且非 error 时解析输出中的 unified diff——
+        // 解析失败（非法/二进制/超限）静默降级到 diff_change_summary 兜底；
+        // path_hint 取自原始输入的 file_path（Edit/Write 摘要口径）。
+        diff: parse_tool_diff(
+            &t.tool_name,
             t.output_summary.as_deref().unwrap_or(""),
-            t.is_error,
-            is_running,
-            duration_secs,
-            t.presentation,
-        )),
+            t.output_summary.is_none() || t.is_error,
+            tool_path_hint(&t.tool_name, &t.raw_input),
+        ),
+        presentation: t.presentation.clone(),
+        fold: fold_for_status(FoldTarget::Tool, status),
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    card.recompute_hash();
+    card
+}
+
+/// [G-Diff] 从工具原始输入提取 path hint（Edit/Write 的 `file_path`）。
+fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<String> {
+    if !matches!(tool_name, "Edit" | "Write") {
+        return None;
     }
+    raw_input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|p| !p.is_empty())
+}
+
+/// [G-Diff] 生产路径的 diff 解析入口：仅 Edit/Write 完成态（非 running、
+/// 非 error）尝试解析；其余场景恒 `None`（数据不可达省略，G-Tokens 同口径）。
+pub(crate) fn parse_tool_diff(
+    tool_name: &str,
+    output: &str,
+    skip: bool,
+    path_hint: Option<String>,
+) -> Option<crate::kit::tui_render_unit::TuiDiffBlock> {
+    if skip || !matches!(tool_name, "Edit" | "Write") {
+        return None;
+    }
+    // [Slice 5] 两段式：优先 unified diff（协议未来携带 diff 文本时自动接管），
+    // 失败后回退真实摘要文本（"Added 3 lines to P" 等——事件流中 Edit/Write
+    // 输出即摘要，unified diff 数据不可达）。
+    crate::kit::diff_parser::parse_unified_diff(output, path_hint.as_deref())
+        .or_else(|| crate::kit::diff_parser::parse_edit_write_summary(output, path_hint.as_deref()))
 }
 
 /// In-progress tool card accumulator.
@@ -759,6 +932,10 @@ pub struct ToolCardAccumulator {
     pub is_error: bool,
     /// When the tool started on the TUI side.
     pub started_at: Instant,
+    /// Completed 时长（毫秒）——`end_tool` 时由 `started_at` 冻结一次，
+    /// 之后不再增长（§6.4 完成行的 `37ms`/`4.2s`；G-started_at）。
+    /// Running 中为 `None`。
+    pub completed_duration_ms: Option<u64>,
     /// 是否已有 SubAgent segment 声明与此 ToolCard 关联。
     /// 防止多 Agent 场景下 SubAgent 段错配到错误的 ToolCard。
     pub claimed_by_subagent: bool,
@@ -788,6 +965,7 @@ impl ToolCardAccumulator {
             output_summary: None,
             is_error: false,
             started_at: Instant::now(),
+            completed_duration_ms: None,
             claimed_by_subagent: false,
         }
     }
@@ -806,10 +984,7 @@ pub struct SubAgentAccumulator {
 
 impl SubAgentAccumulator {
     pub fn new(agent_id: String, agent_name: String) -> Self {
-        let mut child_turn = CurrentTurn::new();
-        // 子 turn 的 reasoning 折叠保持全部展开（与历史渲染行为一致）——
-        // push_view_models 的折叠归一化只作用于顶层 items，不进入组内。
-        child_turn.collapse_non_last_reasoning = false;
+        let child_turn = CurrentTurn::new();
         Self {
             agent_id,
             agent_name,
@@ -856,27 +1031,25 @@ impl SubAgentAccumulator {
         // 对 child_turn 增加 invalidate 调用（如子工具时长刷新），这里会自动重同步，
         // 不会静默渲染陈旧内容。
         let child_vms = self.child_turn.view_models();
-        // M1: 用 u64 组合累加每个 child VM 的 content_hash，确保 child 文本
-        // 变化时（即使 child_vms.len() 不变）也能触发按 hash 分片的渲染缓存重建。
-        // 不再拼 String 再 format——直接对 u64 做确定性组合。
-        let mut child_hash_total: u64 = 0;
-        for vm in child_vms.iter() {
-            child_hash_total = tui_hash_combine(child_hash_total, vm.content_hash());
-        }
-        let mut h = tui_hash_combine(0, tui_hash_str(&self.agent_id));
-        h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
-        h = tui_hash_combine(h, child_vms.len() as u64);
-        h = tui_hash_combine(h, 0); // collapsed 恒为 false
-        h = tui_hash_combine(h, u64::from(self.is_running));
-        h = tui_hash_combine(h, child_hash_total);
-        let vm = TuiRenderUnit::TuiSubAgentGroup(crate::kit::tui_render_unit::TuiSubAgentGroup {
+        let status = if self.is_running {
+            EntryStatus::Running
+        } else {
+            EntryStatus::Completed
+        };
+        // [G1] hash 由 TuiSubAgentGroup::recompute_hash 单点计算（含 fold +
+        // user_modified + child hash 组合）——构造与折叠 pass 共用同一公式。
+        let mut group = crate::kit::tui_render_unit::TuiSubAgentGroup {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.clone(),
             collapsed: false,
             is_running: self.is_running,
-            content_hash: h,
-        });
+            fold: fold_for_status(FoldTarget::SubAgent, status),
+            user_modified: false,
+            content_hash: 0,
+        };
+        group.recompute_hash();
+        let vm = TuiRenderUnit::TuiSubAgentGroup(group);
         self.cached_view_model.replace(Some(vm.clone()));
         vm
     }
@@ -1018,6 +1191,14 @@ pub enum AcpEventData {
 
     /// `"ask-user"` -- multi-question form initiated by the agent.
     AskUser(AskUser),
+
+    /// TUI 内部事件（Slice 4 §6.8）：interaction block 结果回写。仅 TUI 内部
+    /// 使用，不走 ACP 协议——`ask_user_action` / `hitl_response` 消费者在
+    /// 提交/拒绝后发出，bridge 扫描 committed 中 pending 的 `TuiAskUserBlock`
+    /// 按 `request_id` 匹配，clone + `pending=false` + `result` + 重算 hash +
+    /// 原位 set（COW）。`result` 为渲染文案（纯文本，无符号——渲染层负责
+    /// 加状态符号与颜色）。
+    InteractionResolved { request_id: String, result: String },
 
     /// `"rewind-preview"` -- preview of changes that will be undone.
     RewindPreview(RewindPreview),

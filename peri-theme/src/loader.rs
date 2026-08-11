@@ -348,8 +348,23 @@ fn build_theme_from_flat(
 
     let semantic = SemanticTokens {
         accent: get_color("semantic.accent")?,
+        accents: {
+            // 旧版用户主题可能缺消息流新语义键，缺失时回退内置 dark 默认值
+            let defaults = crate::builtin::dark_theme().semantic.accents;
+            AccentTokens {
+                primary: get_color_opt("semantic.accents.primary")?.unwrap_or(defaults.primary),
+                user: get_color_opt("semantic.accents.user")?.unwrap_or(defaults.user),
+                assistant: get_color_opt("semantic.accents.assistant")?
+                    .unwrap_or(defaults.assistant),
+                reasoning: get_color_opt("semantic.accents.reasoning")?
+                    .unwrap_or(defaults.reasoning),
+                tool: get_color_opt("semantic.accents.tool")?.unwrap_or(defaults.tool),
+            }
+        },
         text: TextTokens {
             primary: get_color("semantic.text.primary")?,
+            secondary: get_color_opt("semantic.text.secondary")?
+                .unwrap_or(crate::builtin::dark_theme().semantic.text.secondary),
             muted: get_color("semantic.text.muted")?,
             dim: get_color("semantic.text.dim")?,
         },
@@ -366,6 +381,10 @@ fn build_theme_from_flat(
         },
         surface: SurfaceTokens {
             default: get_color("semantic.surface.default")?,
+            raised: get_color_opt("semantic.surface.raised")?
+                .unwrap_or(crate::builtin::dark_theme().semantic.surface.raised),
+            sunken: get_color_opt("semantic.surface.sunken")?
+                .unwrap_or(crate::builtin::dark_theme().semantic.surface.sunken),
             user: get_color("semantic.surface.user")?,
             popup: get_color("semantic.surface.popup")?,
             selection: get_color("semantic.surface.selection")?,
@@ -379,6 +398,12 @@ fn build_theme_from_flat(
             remove_bg: get_color("semantic.diff.remove_bg")?,
             add_word_bg: get_color("semantic.diff.add_word_bg")?,
             remove_word_bg: get_color("semantic.diff.remove_word_bg")?,
+        },
+        syntax: SyntaxTokens {
+            command: get_color_opt("semantic.syntax.command")?
+                .unwrap_or(crate::builtin::dark_theme().semantic.syntax.command),
+            path: get_color_opt("semantic.syntax.path")?
+                .unwrap_or(crate::builtin::dark_theme().semantic.syntax.path),
         },
         loading: get_color("semantic.loading")?,
         thinking: get_color("semantic.thinking")?,

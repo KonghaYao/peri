@@ -74,6 +74,29 @@ fn test_truncate_by_width_keeps_emoji_zwj_sequence() {
 }
 
 #[test]
+fn test_truncate_by_width_keeps_combining_marks() {
+    // combining mark（e + U+0301 组合重音）是单个 grapheme，宽度 1，
+    // 不会被从基字符与重音之间切开
+    let e_acute = "e\u{301}"; // é
+    let s = format!("{e_acute}{}", "a".repeat(29)); // 1 + 29 = 30 列
+    assert_eq!(truncate_by_width(&s, 30), s);
+    // 预算 30 恰好放不下第 30 个 a 之后的省略号场景：29 个 a + é 填满 30 列
+    assert_eq!(
+        truncate_by_width(&s, 30),
+        format!("{e_acute}{}", "a".repeat(29))
+    );
+    // 预算 25：重音序列作为一个整体保留，不被切开
+    let t = truncate_by_width(&s, 25);
+    assert!(
+        t.starts_with(e_acute),
+        "combining mark 不得从基字符处切断: {t:?}"
+    );
+    assert!(t.ends_with('…'));
+    use unicode_width::UnicodeWidthStr;
+    assert!(t.width() <= 26, "输出宽度不超预算+省略号");
+}
+
+#[test]
 fn test_summarize_input_grep_unified_quoted_format() {
     // 关键不变量：streaming 与 view-commit 通道共享此 helper，
     // 同一工具调用必须显示相同格式（带引号）
@@ -169,4 +192,74 @@ fn test_summarize_output_empty() {
 fn test_summarize_output_edit_long_collapses_to_line_count() {
     let output = "line1\nline2\nline3\nline4\nline5";
     assert_eq!(summarize_output("Edit", output), "5 lines changed");
+}
+
+// ── wrap_by_width（§6.1 用户 prompt 视觉行折行）──────────────────────────
+
+#[test]
+fn test_wrap_by_width_short_line_unchanged() {
+    assert_eq!(wrap_by_width("hello", 40), vec!["hello"]);
+    // 恰好等于宽度：单行不折
+    assert_eq!(wrap_by_width("hello", 5), vec!["hello"]);
+}
+
+#[test]
+fn test_wrap_by_width_cjk_double_width() {
+    // 20 个汉字 = 40 列；每行 5 个汉字（10 列）→ 4 行
+    let text = "测".repeat(20);
+    let lines = wrap_by_width(&text, 10);
+    assert_eq!(lines.len(), 4);
+    for l in &lines {
+        assert_eq!(l.chars().count(), 5, "每行 5 个汉字");
+    }
+    // 内容不丢：拼接还原
+    assert_eq!(lines.concat(), text);
+}
+
+#[test]
+fn test_wrap_by_width_emoji_zwj_not_split() {
+    // 👨‍👩‍👧‍👦 显示宽 2 列（ZWJ 序列），5 列一行放 2 个，3 个 → 2 行
+    let fam = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+    let text = format!("{fam}{fam}{fam}");
+    let lines = wrap_by_width(&text, 5);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].graphemes(true).count(), 2);
+    assert_eq!(lines[1].graphemes(true).count(), 1);
+    // 拼接还原（ZWJ 序列未被切开）
+    assert_eq!(lines.concat(), text);
+}
+
+#[test]
+fn test_wrap_by_width_combining_mark_kept_together() {
+    // e + combining acute = 1 列；宽度 3 → 每行 3 个字符
+    let text = "e\u{301}".repeat(10);
+    let lines = wrap_by_width(&text, 3);
+    assert_eq!(lines.len(), 4); // 10 个字符，每行 3 个 → 3+3+3+1
+    assert_eq!(lines[0], "e\u{301}e\u{301}e\u{301}");
+    assert_eq!(lines.concat(), text);
+}
+
+#[test]
+fn test_wrap_by_width_ascii_word_split_no_content_loss() {
+    let text = "a".repeat(100);
+    let lines = wrap_by_width(&text, 10);
+    assert_eq!(lines.len(), 10);
+    for l in &lines {
+        assert_eq!(l.len(), 10);
+    }
+    assert_eq!(lines.concat(), text);
+}
+
+#[test]
+fn test_wrap_by_width_multiline_input() {
+    // 调用方（render_user_bubble_lines）按 `\n` 分行后逐行 wrap——
+    // wrap 自身对换行符按 grapheme 处理（宽度 0），不拆两行。
+    let text = "ab\ncd";
+    let lines = wrap_by_width(text, 40);
+    assert_eq!(lines.len(), 1, "换行符保留在行内，由调用方分行");
+}
+
+#[test]
+fn test_wrap_by_width_zero_width_returns_original() {
+    assert_eq!(wrap_by_width("x", 0), vec!["x"]);
 }

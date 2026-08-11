@@ -190,8 +190,12 @@ async fn test_clear_request_bypasses_prompt() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
+                // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
+                started_at: None,
+                duration_ms: None,
                 text: "existing".into(),
                 reasoning: None,
+                message_id: None,
                 content_hash: tui_hash_str("existing|"),
             },
         )]),

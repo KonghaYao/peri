@@ -99,6 +99,11 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let palette_handle = hooks.use_atom(&PALETTE_ATOM);
     let palette = *palette_handle.read();
 
+    // [Slice 1c] 高度断点（§11）：纯函数 layout_plan 按终端高度推导降级计划，
+    // SessionColumn（session title / composer 钳制）与 StatusBar 消费结果。
+    let (_, term_h) = hooks.use_terminal_size();
+    let plan = crate::kit::layout::layout_plan(term_h);
+
     if wizard_active {
         element! {
             PaletteProvider(palette) {
@@ -123,8 +128,11 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         width: Constraint::Fill(1),
                         height: Constraint::Fill(1),
                     ) {
-                        SessionColumn()
-                        StatusBar()
+                        SessionColumn(plan: plan)
+                        StatusBar(
+                            hide_hints: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Row1Only),
+                            hidden: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Hidden),
+                        )
                         BgTaskArea()
                     }
                     PopupOverlay()

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::text_selection;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::widgets::{Paragraph, Wrap};
@@ -364,6 +365,14 @@ pub(super) fn mark_copy_message(char_count: usize) {
 /// 末尾，确保 footer 行的 visual_to_logical 不返回 None 导致整个提取失败。
 /// [Scheme D] 通过 slot_arcs + slot_offsets 按需从 slot 中解析行，不再依赖全量 lines 切片。
 /// vis_start/vis_end 为视觉坐标：行 usize（内容可超 65535 视觉行）、列 u16。
+///
+/// [D3 §9] 语义复制剥离：`view_models`/`grid` 提供时，对每行调用
+/// `render::semantic_line_text` 取语义文本（无前缀 chrome/符号/行号）——
+/// 完整行直接用语义全文；首/末部分选择行把列范围映射到语义文本上
+/// （`plain.find(semantic)` 定位；重建行（tool header）定位失败时回退原始
+/// 提取）。`view_models` 为 None 时保持既有行为（列模拟不侵入，剥离只发生
+/// 在提取层——wrap_byte_starts / 高亮列模型零改动）。
+#[allow(clippy::too_many_arguments)] // 选区提取参数组（与既有调用链签名一致）
 pub(super) fn extract_visual_range(
     slots: &[Arc<Vec<Line<'static>>>],
     slot_offsets: &[usize],
@@ -371,6 +380,8 @@ pub(super) fn extract_visual_range(
     vis_start: (usize, u16),
     vis_end: (usize, u16),
     width: u16,
+    view_models: Option<&im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>>,
+    grid: Option<GridSpec>,
 ) -> Option<String> {
     let ((sr, sc), (er, ec)) = if vis_start <= vis_end {
         (vis_start, vis_end)
@@ -395,6 +406,20 @@ pub(super) fn extract_visual_range(
         let local_idx = li.saturating_sub(slot_offsets.get(entry.slot_index).copied().unwrap_or(0));
         let line = slots.get(entry.slot_index)?.get(local_idx)?;
         let plain = text_selection::line_to_plain_text(line);
+        // [D3 §9] 语义文本（无 UI chrome）——仅提取层替换，列模拟仍基于 plain。
+        // [Fix §15] 传入已渲染行而非重渲染 VM：slot 行与渲染缓存同源，
+        // 避免 N 行选区 × N 次全量 markdown 解析（旧实现每行新建缓存重渲染）。
+        let semantic: Option<(String, usize)> = view_models
+            .and_then(|vms| vms.get(entry.slot_index))
+            .and_then(|vm| {
+                grid.and_then(|g| super::render::semantic_line_text(vm, local_idx, line, &g))
+            })
+            .map(|sem| {
+                // 语义文本在 plain 中的定位（重建行如 tool header 可能不是
+                // 连续子串——find 失败时映射回退原始提取）。
+                let p = plain.find(sem.as_str()).unwrap_or(0);
+                (sem, p)
+            });
         // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移
         let row_starts = wrap_byte_starts(line, &plain, width);
         // 把视觉行号 clamp 到 row_starts 索引范围内（防御：footer 区域等异常 sr/er）
@@ -411,25 +436,55 @@ pub(super) fn extract_visual_range(
             if b0 >= b1 {
                 continue;
             }
-            parts.push(plain[b0..b1].to_string());
+            parts.push(map_slice_to_semantic(&plain, b0, b1, &semantic));
         } else if li == first {
             // 首行：从 sr_off 行内的列 sc 到逻辑行末尾
             let s_row_byte = row_starts[sr_off];
             let b0 = row_start_byte(&plain, s_row_byte, sc);
-            parts.push(plain[b0..].to_string());
+            parts.push(map_slice_to_semantic(&plain, b0, plain.len(), &semantic));
         } else if li == last {
             // 末行：从逻辑行开头到 er_off 行内的列 ec
             let e_row_byte = row_starts[er_off];
             let b1 = row_end_byte(&plain, e_row_byte, ec);
-            parts.push(plain[..b1].to_string());
+            parts.push(map_slice_to_semantic(&plain, 0, b1, &semantic));
         } else {
-            parts.push(plain);
+            // 中间行（完整选择）：直接用语义全文
+            match &semantic {
+                Some((sem, _)) => parts.push(sem.clone()),
+                None => parts.push(plain),
+            }
         }
     }
     if parts.is_empty() {
         None
     } else {
         Some(parts.join("\n"))
+    }
+}
+
+/// [D3 §9] 把 plain 的 byte 片段 [b0..b1) 映射到语义文本上。
+///
+/// 语义文本是 plain 去掉前缀 chrome 的结果（连续子串）时偏移直接换算；
+/// 重建行（tool header）或定位失败时回退原始片段（部分选择边界场景）。
+fn map_slice_to_semantic(
+    plain: &str,
+    b0: usize,
+    b1: usize,
+    semantic: &Option<(String, usize)>,
+) -> String {
+    let Some((sem, p)) = semantic else {
+        return plain[b0..b1].to_string();
+    };
+    if *p == 0 && !plain.starts_with(sem.as_str()) && !sem.is_empty() {
+        // find 定位失败（semantic 非 plain 子串）——回退原始提取。
+        return plain[b0..b1].to_string();
+    }
+    let s0 = b0.saturating_sub(*p).min(sem.len());
+    let e0 = b1.saturating_sub(*p).min(sem.len());
+    if s0 >= e0 {
+        String::new()
+    } else {
+        sem[s0..e0].to_string()
     }
 }
 

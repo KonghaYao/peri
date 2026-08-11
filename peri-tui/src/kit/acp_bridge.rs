@@ -279,6 +279,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         FileSuggestions(_) => "FileSuggestions",
         HitlPending(_) => "HitlPending",
         AskUser(_) => "AskUser",
+        InteractionResolved { .. } => "InteractionResolved",
         RewindPreview(_) => "RewindPreview",
         OauthNeeded(_) => "OauthNeeded",
         SubagentStarted { .. } => "SubagentStarted",

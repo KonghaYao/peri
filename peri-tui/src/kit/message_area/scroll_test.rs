@@ -325,3 +325,170 @@ fn test_position_to_scroll_y_zero_max_scroll() {
     // max_scroll=0（content <= viewport）→ 总是 0
     assert_eq!(position_to_scroll_y(5, 100, 0), 0);
 }
+
+// ── §8.1 `↓ New output` 指示器（Slice 2）────────────────────────────────
+
+#[test]
+fn test_new_output_indicator_browsing_with_new_content() {
+    // 浏览态（follow=false）且视口未到真实内容底 → 显示
+    assert!(new_output_indicator_active(false, 5, 20, 40));
+}
+
+#[test]
+fn test_new_output_indicator_following_hides() {
+    // 跟随态恒不显示（滚底由 auto_follow 处理，无需指示）
+    assert!(!new_output_indicator_active(true, 5, 20, 40));
+    assert!(!new_output_indicator_active(true, 0, 20, 40));
+}
+
+#[test]
+fn test_new_output_indicator_at_bottom_hides() {
+    // 视口底 == 内容底（scroll_y + vis == content_bottom）→ 不显示
+    assert!(!new_output_indicator_active(false, 20, 20, 40));
+    // 超出底部（padding 缓冲区域）→ 不显示
+    assert!(!new_output_indicator_active(false, 22, 20, 40));
+}
+
+#[test]
+fn test_new_output_indicator_boundary_last_row() {
+    // 视口恰好露出内容末行（scroll_y + vis == content_bottom - 1）→ 显示
+    assert!(new_output_indicator_active(false, 19, 20, 40));
+}
+
+#[test]
+fn test_new_output_indicator_content_bottom_excludes_padding() {
+    // [口径] content_bottom 不含 SCROLL_PADDING 缓冲：max_scroll 含 padding 时，
+    // 滚到视觉底部（max_scroll - padding）指示器必须消失——与
+    // should_follow_after_user_scroll 的扣缓冲口径对齐。
+    let content_bottom = 38; // core+footer 实际行数
+    let total_visual = content_bottom + SCROLL_PADDING; // 含 2 行缓冲
+    let vis_height = 20;
+    let visual_bottom_scroll = total_visual.saturating_sub(vis_height) - SCROLL_PADDING;
+    assert_eq!(
+        visual_bottom_scroll + vis_height,
+        content_bottom,
+        "视觉底部 = scroll_y + vis_height == content_bottom"
+    );
+    assert!(
+        !new_output_indicator_active(false, visual_bottom_scroll, vis_height, content_bottom),
+        "滚到视觉底部即消失（缓冲行不可见，不算内容）"
+    );
+    // 上滚 1 行 → 显示
+    assert!(new_output_indicator_active(
+        false,
+        visual_bottom_scroll - 1,
+        vis_height,
+        content_bottom
+    ));
+}
+
+// ── [Slice 4 §6.8] Interaction block 锚定（anchor_scroll_target 矩阵）──
+
+/// block 末行超出视口 → 对齐到 block 底部（浏览态与跟随态均生效）。
+#[test]
+fn test_anchor_scroll_target_aligns_below_viewport() {
+    // 视口 10 行，scroll_y=5，block 末行在视觉行 20 → 对齐目标 = 20-10 = 10
+    assert_eq!(
+        super::anchor_scroll_target(5, 10, 20, 100),
+        Some(10),
+        "block 超出视口 → 对齐到 block 底部"
+    );
+}
+
+/// block 已完全在视口内 → 不调整（None）。
+#[test]
+fn test_anchor_scroll_target_in_viewport_noop() {
+    assert_eq!(
+        super::anchor_scroll_target(5, 10, 14, 100),
+        None,
+        "block 末行 ≤ 视口底 → 不动"
+    );
+    assert_eq!(
+        super::anchor_scroll_target(5, 10, 15, 100),
+        None,
+        "block 末行恰在视口底 → 不动（边界）"
+    );
+}
+
+/// 对齐目标钳制到 max_scroll（内容不足一屏 / block 接近内容底）。
+#[test]
+fn test_anchor_scroll_target_clamps_to_max_scroll() {
+    // max_scroll=8：对齐目标 10 被钳制到 8
+    assert_eq!(super::anchor_scroll_target(2, 10, 20, 8), Some(8));
+    // block 在视口内但 max_scroll 更小——先判定超出，再钳制
+    assert_eq!(super::anchor_scroll_target(0, 10, 12, 4), Some(2));
+}
+
+/// anchor=None（无 pending block）时锚定逻辑不介入——既有路径全绿由
+/// run_auto_follow 的既有测试矩阵覆盖（此处锁定纯函数 None 语义）。
+#[test]
+fn test_anchor_scroll_target_none_semantics() {
+    // 视口已覆盖 block → 不调整（等效 anchor 无效果）
+    assert_eq!(super::anchor_scroll_target(0, 20, 10, 30), None);
+}
+
+// ── entry 单击展开（header 行命中 + 手抖容差）────────────────────────────
+
+fn wm_entry(logical: usize, vstart: usize, vend: usize, slot: usize) -> WrappedLineInfo {
+    WrappedLineInfo {
+        logical_idx: logical,
+        visual_start: vstart,
+        visual_end: vend,
+        slot_index: slot,
+    }
+}
+
+/// 单击判定容差矩阵：≤1 行、≤2 列算单击；超过视为拖拽意图（不触发展开）。
+#[test]
+fn test_is_click_tolerance_matrix() {
+    let down = (10usize, 20u16);
+    assert!(is_click(down, (10, 20)), "原地 Up = 单击");
+    assert!(is_click(down, (11, 20)), "±1 行");
+    assert!(is_click(down, (9, 20)), "-1 行");
+    assert!(is_click(down, (10, 22)), "±2 列");
+    assert!(is_click(down, (10, 18)), "-2 列");
+    assert!(!is_click(down, (12, 20)), "2 行 = 拖拽意图");
+    assert!(!is_click(down, (10, 23)), "3 列 = 拖拽意图");
+    assert!(!is_click(down, (9, 17)), "组合超差");
+}
+
+/// 仅首行（header/label 行）可点：正文行（含 wrap 续行）不命中；
+/// footer 区域（wrap_map 外）不命中；多 slot 偏移换算正确。
+#[test]
+fn test_entry_click_target_header_line_only() {
+    // slot0：逻辑行 0（header，1 视觉行）+ 逻辑行 1（正文 wrap 成 2 视觉行）；
+    // slot1：逻辑行 2（header，1 视觉行，offsets 累加 = 2）
+    let wm = vec![
+        wm_entry(0, 0, 1, 0),
+        wm_entry(1, 1, 3, 0),
+        wm_entry(2, 3, 4, 1),
+    ];
+    let offsets = vec![0usize, 2usize];
+    assert_eq!(
+        entry_click_target(&wm, &offsets, 0),
+        Some((0, 0)),
+        "slot0 header"
+    );
+    assert_eq!(entry_click_target(&wm, &offsets, 1), None, "slot0 正文行");
+    assert_eq!(
+        entry_click_target(&wm, &offsets, 2),
+        None,
+        "slot0 正文 wrap 续行"
+    );
+    assert_eq!(
+        entry_click_target(&wm, &offsets, 3),
+        Some((1, 0)),
+        "slot1 header"
+    );
+    assert_eq!(entry_click_target(&wm, &offsets, 4), None, "footer 区域");
+    assert_eq!(entry_click_target(&[], &[], 0), None, "空 wrap_map");
+}
+
+/// header 换行成多视觉行：所属视觉行全部命中首行（都属于 header）。
+#[test]
+fn test_entry_click_target_wrapped_header_all_visual_rows_hit() {
+    let wm = vec![wm_entry(0, 0, 2, 0)];
+    let offsets = vec![0usize];
+    assert_eq!(entry_click_target(&wm, &offsets, 0), Some((0, 0)));
+    assert_eq!(entry_click_target(&wm, &offsets, 1), Some((0, 0)));
+}

@@ -13,7 +13,7 @@ use ratatui_kit::ratatui::layout::Rect;
 
 use super::props::{ScrollbarFields, mouse_in_area};
 use super::selection::{
-    WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message,
+    WrappedLineInfo, copy_to_clipboard, extract_visual_range, mark_copy_message, visual_to_logical,
 };
 
 // ── 滚动状态 ──────────────────────────────────────────────────────────────
@@ -165,8 +165,35 @@ impl Default for ScrollbarDragState {
 // ── 滚动条几何 + 反推 ─────────────────────────────────────────────────────
 
 /// 判断鼠标列是否落在滚动条列（drawer.area 最右 1 列）。
-fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
+pub(super) fn is_scrollbar_column(mouse_col: u16, area: Rect) -> bool {
     mouse_col == area.x.saturating_add(area.width).saturating_sub(1)
+}
+
+/// 单击判定：Down 与 Up 屏幕坐标差 ≤1 行、≤2 列（手抖容差）。
+///
+/// [Why] crossterm 按下后移动会发 `Drag` 事件，因此"无 Drag"本身已表明
+/// 未移动；容差是对事件丢失/平台差异的防御，超过即视为拖拽意图，不触发
+/// 点击动作（选区/复制逻辑照常）。
+pub(super) fn is_click(down: (usize, u16), up: (usize, u16)) -> bool {
+    up.0.abs_diff(down.0) <= 1 && up.1.abs_diff(down.1) <= 2
+}
+
+/// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行属于
+/// entry 的逻辑首行（`local_idx == 0`，即 header/label 行）时命中。
+///
+/// [Why 仅首行] 正文行保留给文本选区/复制；展开动作只挂在 header 上，
+/// 与键盘 Enter（焦点在 entry 时切换）语义一致。wrap_map 越界
+/// （footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
+/// 均反查到同一逻辑行，全部命中。
+pub(super) fn entry_click_target(
+    wrap_map: &[WrappedLineInfo],
+    slot_offsets: &[usize],
+    visual_row: usize,
+) -> Option<(usize, usize)> {
+    let li = visual_to_logical(visual_row, wrap_map)?;
+    let slot = wrap_map.get(li)?.slot_index;
+    let local = li.saturating_sub(*slot_offsets.get(slot)?);
+    (local == 0).then_some((slot, 0))
 }
 
 /// ratatui Scrollbar 渲染所需的几何参数。源自 ratatui-widgets 0.3.2 的公式：
@@ -354,6 +381,41 @@ fn update_follow_on_scroll(follow_bottom: &State<bool>, max_scroll: usize, offse
     *follow_bottom.write_no_update() = should_follow_after_user_scroll(max_scroll, offset_y);
 }
 
+/// §8.1 `↓ New output` 指示器判定：浏览态（用户滚离底部，follow=false）且
+/// 视口未到**真实内容底**时显示。
+///
+/// [Why 内容底口径] `content_bottom` = core + footer 视觉行数（**不含**
+/// SCROLL_PADDING 缓冲——缓冲行不可见，滚到视觉底部即消失）。与粘性 follow
+/// 恢复（`should_follow_after_user_scroll` 同样扣缓冲）口径对齐：滚到底时
+/// follow 恢复 true 且指示器消失；浏览态中内容增长不移动 viewport，指示器
+/// 出现提示有未看的新输出。
+pub(super) fn new_output_indicator_active(
+    follow_bottom: bool,
+    scroll_y: usize,
+    vis_height: usize,
+    content_bottom: usize,
+) -> bool {
+    !follow_bottom && scroll_y + vis_height < content_bottom
+}
+
+/// [Slice 4 §6.8] Interaction block 锚定对齐目标：pending block 末行超出视口
+/// 时返回对齐偏移（block 底部对齐视口底部），否则 None（不调整）。
+///
+/// 纯函数——`run_auto_follow` 的 anchor 分支消费；浏览态与跟随态均生效
+/// （§6.8「等待时锚定此 block」，不得被新 streaming chunk 滚出视口）。
+pub(super) fn anchor_scroll_target(
+    scroll_y: usize,
+    vis_height: usize,
+    anchor_end: usize,
+    max_scroll: usize,
+) -> Option<usize> {
+    if scroll_y.saturating_add(vis_height) < anchor_end {
+        Some(anchor_end.saturating_sub(vis_height).min(max_scroll))
+    } else {
+        None
+    }
+}
+
 // ── 鼠标事件处理 ─────────────────────────────────────────────────────────
 
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
@@ -377,6 +439,10 @@ pub(super) fn handle_event(
     scrollbar_fields: &State<ScrollbarFields>,
     scrollbar_drag: &State<ScrollbarDragState>,
     follow_bottom: &State<bool>,
+    // [D3 §9] 语义复制所需的快照 VM 列表与网格——事件时点由 mod.rs 闭包
+    // 传入（im::Vector clone O(1)）；None 时复制保持既有行为（无剥离）。
+    view_models: Option<&im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>>,
+    grid: Option<crate::kit::message_area::grid::GridSpec>,
 ) -> EventResult {
     if let Event::Key(key) = &event {
         let _ = focus_router::message_accepts_key(key);
@@ -597,6 +663,8 @@ pub(super) fn handle_event(
                                 (sr, sc),
                                 (er, ec),
                                 vis_width,
+                                view_models,
+                                grid,
                             )
                         } else {
                             None
@@ -722,6 +790,12 @@ pub(super) struct AutoFollowCtx {
     /// 触发「新会话首次批量加载」的强制滚底路径。
     pub bridge_reset_counter: u64,
     pub prev_reset_counter: State<u64>,
+    /// [Slice 4 §6.8]「等待时锚定此 block」：pending interaction block 的视觉
+    /// 行范围（core 行，含起点/终点）。有值时视口对齐到 block 底部（浏览态与
+    /// 跟随态均生效——§6.8：不得被新 streaming chunk 滚出视口）；block 完成
+    /// （结果回写 → 派生扫描不到 → None）后恢复原语义，不强制 follow
+    /// （§15「提交后转为只读结果行且不抢回 viewport」）。
+    pub anchor_visual_range: Option<(usize, usize)>,
 }
 
 /// 从 `use_effect` 闭包提取的吸底逻辑。
@@ -844,6 +918,38 @@ pub(super) fn run_auto_follow(ctx: &AutoFollowCtx) {
 
     // ── 正常路径：更新 prev_items_len ──
     *ctx.prev_items_len.write() = ctx.items_len;
+
+    // ── [Slice 4 §6.8] Interaction block 锚定 ──
+    // pending interaction block 存在时，block 末行超出视口 → 视口对齐到 block
+    // 底部。**仅跟随态生效**（§6.8 字面「等待时 follow mode 锚定此 block」）：
+    // 浏览态（用户滚离底部）下新内容不得移动 viewport（§8.1），锚定分支在
+    // `!follow_bottom` 早退之前——跟随态下锚定优先于粘性跟随判定；resize 后
+    // 按新快照重算（prev_vis_height 路径共存，anchor 分支在其后覆盖对齐目标）。
+    // block 完成（pending=false → 派生扫描不到 → None）后恢复原语义，不强制
+    // follow（§15）。[Fix] 浏览态下每帧被拉回 block 底部会打断用户阅读——
+    // 与 §8.1「浏览态新内容不得移动 viewport」相悖，改为浏览态跳过锚定。
+    if *ctx.follow_bottom.read()
+        && let Some((_anchor_start, anchor_end)) = ctx.anchor_visual_range
+    {
+        let max_scroll = ctx
+            .total_visual_rows
+            .saturating_sub(ctx.vis_height as usize);
+        let scroll_y = ctx.scroll_state.read().offset();
+        if let Some(target) =
+            anchor_scroll_target(scroll_y, ctx.vis_height as usize, anchor_end, max_scroll)
+        {
+            tracing::info!(
+                target: "msg_scroll_diag",
+                anchor_end,
+                scroll_y,
+                target,
+                "auto_follow: interaction anchor → align viewport to block bottom",
+            );
+            ctx.scroll_state.write().set_offset(target);
+            *ctx.last_scrolled_at.write() = ctx.total_visual_rows;
+        }
+        return;
+    }
 
     // ── 粘性跟随 guard ──
     // [Why] 用户一旦向上滚动（offset < max_scroll，update_follow_on_scroll 已置

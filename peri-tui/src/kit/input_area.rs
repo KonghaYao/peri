@@ -12,7 +12,7 @@
 #![allow(clippy::needless_update)]
 
 use crate::components::textarea::{TextAreaState, wrap_text};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -33,14 +33,16 @@ use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CURRENT_SESSION_TITLE,
-    FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX,
-    MENTION_SELECTED_INDEX, POPUP_KIND, PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
+    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
+    CURRENT_SESSION_TITLE, FILE_LIST, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION,
+    LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS, POPUP_KIND,
+    PREDICTION, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX,
+    WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
 use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
@@ -48,9 +50,8 @@ use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_sub
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
-/// 输入区域 prompt + border 占用的列宽常量。
-/// border 左右各 1 列，" ❯ " prompt 前缀占 3 列 → 共 5 列。
-const PROMPT_AND_BORDER_WIDTH: u16 = 5;
+/// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
+const QUEUE_VISIBLE_MAX: usize = 5;
 
 /// 在 post_component_draw 时修复 CJK 续接 cell 的 diff 不可见性。
 ///
@@ -113,6 +114,19 @@ impl Hook for AreaTracker {
 pub struct InputAreaProps {
     pub loading: bool,
     pub hidden: bool,
+    /// §11 高度降级：composer 编辑行数上限（`None` = 默认 10）。
+    /// h<8 时由 `layout_plan` 传 `Some(2)`，钳制 TextArea 行数。
+    pub max_lines: Option<u16>,
+    /// §11 高度降级：session title（composer 上边栏）是否可见。
+    /// h<12 时由 `layout_plan` 传 false 隐藏。
+    pub session_title_visible: bool,
+    /// [Fix §11] 输入区高度预算上限（SessionColumn = term_h - status - 3）：
+    /// queued 队列/弹出层超过预算时优先截断队列，保证 transcript ≥3 行。
+    /// `None` = 不限制（默认）。
+    pub max_total_height: Option<u16>,
+    /// §3.1/§10 水平网格（SessionColumn 传入）——composer prompt 前缀按
+    /// gap 对齐 transcript content 起点；标题/footer 行按断点降级。
+    pub grid: GridSpec,
 }
 
 #[component]
@@ -156,6 +170,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         );
     }
 
+    // [Slice 3a] §3.1/§10 对齐：光标上下视觉移动的宽度 = 区域宽 - 正文起点
+    // （prompt 前缀 + 右预留），随 grid gap 变化。
+    let grid_for_visual = props.grid;
     hooks.use_event_handler(
         EventScope::Current,
         EventPriority::Normal,
@@ -339,7 +356,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         tracing::info!(?key, "input area consumed up");
                         let tw = composer_area
                             .map(|a| {
-                                a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize
+                                a.width
+                                    .saturating_sub(prompt_and_border_width(grid_for_visual))
+                                    .max(1) as usize
                             })
                             .unwrap_or(80);
                         let moved = state.write().cursor_visual_up(tw);
@@ -355,7 +374,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         tracing::info!(?key, "input area consumed down");
                         let tw = composer_area
                             .map(|a| {
-                                a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize
+                                a.width
+                                    .saturating_sub(prompt_and_border_width(grid_for_visual))
+                                    .max(1) as usize
                             })
                             .unwrap_or(80);
                         let moved = state.write().cursor_visual_down(tw);
@@ -522,6 +543,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     {
         let state_cl = state;
         let overlay_height_cl = overlay_height.clone();
+        // [Slice 3a] §3.1/§10 对齐：正文起点 = prompt 前缀宽度（outer1+accent1+gap），
+        // 随 grid gap 变化（gap=1 → 3，gap=2 → 4）。
+        let grid_cl = props.grid;
         hooks.use_event_handler(
             ratatui_kit::prelude::EventScope::Global,
             ratatui_kit::prelude::EventPriority::High,
@@ -538,7 +562,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     if let Some(outer) = composer_area {
                         let ov_h = *overlay_height_cl.lock();
                         let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
-                        let text_x = outer.x.saturating_add(3);
+                        let text_x = outer.x.saturating_add(2 + grid_cl.gap);
                         // [FIX] 必须加上界：composer 下方是状态栏/通知行，行号同样 >= composer_top。
                         // 长文本（wrap > 10 行，editor_rows clamp 到 10）时 composer_height 不再
                         // 随文本增长，click_visual_row 可能落入 total_visual_rows 范围 → 误把
@@ -551,8 +575,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             let click_display_col = mouse.column.saturating_sub(text_x) as usize;
                             let s = state_cl.read();
                             if !s.text.is_empty() {
-                                let tw = outer.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1)
-                                    as usize;
+                                let tw = outer
+                                    .width
+                                    .saturating_sub(prompt_and_border_width(grid_cl))
+                                    .max(1) as usize;
                                 let wr = wrap_text(&s.text, s.cursor, tw);
                                 if click_visual_row < wr.total_visual_rows {
                                     let vl = &wr.visual_lines[click_visual_row];
@@ -645,11 +671,20 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
 
     // 计算 editor 视口高度（用于渲染窗口裁剪）
+    // [Slice 3a] §3.1/§10 对齐：prompt 前缀宽度随 grid gap 变化
+    // （outer1 + accent1 + gap），正文起点与 transcript content 起点一致。
     let text_width = composer_area
-        .map(|a| a.width.saturating_sub(PROMPT_AND_BORDER_WIDTH).max(1) as usize)
+        .map(|a| {
+            a.width
+                .saturating_sub(prompt_and_border_width(props.grid))
+                .max(1) as usize
+        })
         .unwrap_or(80);
     let wrap = crate::components::textarea::wrap_text(&text, cursor, text_width);
-    let editor_rows = (wrap.total_visual_rows as u16).clamp(1, 10);
+    // [Slice 1c] §11 高度降级：h<8 时钳制编辑行数上限（max_lines），
+    // 默认上限 10 保持不变。
+    let max_editor_rows = props.max_lines.unwrap_or(10);
+    let editor_rows = (wrap.total_visual_rows as u16).clamp(1, max_editor_rows);
 
     // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
     // viewport_height 传入实际显示行数，render 内部只渲染该窗口大小的行
@@ -694,21 +729,84 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     };
     let ov_height = slash_popup_height.max(mention_popup_height);
     *overlay_height.lock() = slash_popup_height.max(mention_popup_height);
+
+    // §10 queued（Slice 3 D4 反转）：loading 期间提交的 prompt 只入队
+    // INPUT_BUFFER，渲染在 composer 上方（最多 5 条 + `· · ·`），不提前进
+    // transcript；TurnDone/取消复位时 drain（本地气泡恰出现一次）。
+    // [Fix §11] 输入区高度预算（`max_total_height` = term_h - status - 3）
+    // 不足时**队列最先让位**——保证 transcript ≥3 行（40×8 + 排队场景不再
+    // 把 transcript 挤到 2 行）；剩余排队项在 drain 时仍会发送，只是不可见。
+    let input_buffer_handle = hooks.use_atom(&INPUT_BUFFER);
+    let queue_items: Vec<String> = input_buffer_handle
+        .read()
+        .iter()
+        .take(QUEUE_VISIBLE_MAX)
+        .cloned()
+        .collect();
+    let queue_has_more = input_buffer_handle.read().len() > QUEUE_VISIBLE_MAX;
+    let queue_lines = build_queue_lines(&queue_items, queue_has_more, text_width);
+    let queue_height = if hidden || queue_lines.is_empty() {
+        0
+    } else {
+        let n = queue_lines.len() as u16;
+        match props.max_total_height {
+            // 预算先保 composer + 弹出层，余量给队列；预算低于两者时队列隐藏。
+            Some(budget) => n.min(budget.saturating_sub(composer_height + ov_height)),
+            None => n,
+        }
+    };
+
     let total_height = if hidden {
         0
     } else {
-        composer_height + ov_height
+        composer_height + ov_height + queue_height
     };
 
-    let composer_lines = build_composer_lines(lines, loading);
+    let composer_lines = build_composer_lines(lines, loading, props.grid);
 
-    // 当前会话标题：service_snapshot 周期性派生；空标题时上边栏不渲染标签。
+    // §10 composer 标题/footer（Slice 3a）：
+    // - title_top 右侧 session title；
+    // - title_bottom 左侧 `@ N files`（PENDING_ATTACHMENTS），右侧 `42% ctx`（CONTEXT_USAGE）。
+    // 窄屏逐级隐藏：h<12（session_title_visible=false）隐藏 title_top 整行；
+    // h<8（max_lines=Some(2)）再隐藏 title_bottom。
+    let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
+    let attachments_handle = hooks.use_atom(&PENDING_ATTACHMENTS);
+    let files_label = {
+        let n = attachments_handle.read().len();
+        (n > 0).then(|| {
+            i18n::tr_args(
+                "composer-attachments",
+                &[("count".to_string(), FluentValue::from(n as u64))],
+            )
+        })
+    };
+    let ctx_label = ctx_usage.read().as_ref().map(|(pct, _)| {
+        i18n::tr_args(
+            "composer-context-usage",
+            &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
+        )
+    });
+    // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
+    // （h<12，session_title_visible=false）时上边栏不渲染标签。
     let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
+    let shown_session_title = if props.session_title_visible {
+        session_title.as_str()
+    } else {
+        ""
+    };
 
     // 显式背景色：防止 Paragraph 文本缩短时旧内容残留（ghosting）。
     // 未设背景时 ratatui 仅渲染文本 span，超出新文本的列保留终端原有像素。
     let composer_paragraph = Paragraph::new(composer_lines)
-        .block(build_composer_block(loading, &session_title))
+        .block(build_composer_block(
+            loading,
+            shown_session_title,
+            files_label.as_deref(),
+            ctx_label.as_deref(),
+            props.session_title_visible,
+            props.max_lines.is_none(),
+            composer_area.map(|a| a.width).unwrap_or(80),
+        ))
         .style(Style::default().bg(THEME_ATOM.state().read().semantic.surface.default));
 
     element!(
@@ -771,6 +869,21 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
             } }
+            { if !hidden && !queue_lines.is_empty() {
+                // §10 queued 队列（Slice 3b）：composer 边框上方的排队提示行，
+                // 不进 transcript/不参与滚动模型；drain 后本列表随 buffer 清空。
+                element!(
+                    View(
+                        flex_direction: Direction::Vertical,
+                        width: Constraint::Fill(1),
+                        height: Constraint::Length(queue_height),
+                    ) {
+                        Text(text: Paragraph::new(queue_lines))
+                    }
+                ).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
             { if !hidden {
                 element!(
                     View(
@@ -792,8 +905,22 @@ fn input_tokens() -> peri_theme::component::InputTokens {
     THEME_ATOM.state().read().component.input
 }
 
-fn build_composer_block(loading: bool, session_title: &str) -> Block<'static> {
+/// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧
+/// `@ N files` + 右侧 `42% ctx`。窄屏（§11）逐级隐藏：`show_top=false`
+///（h<12）隐藏 title_top 整行；`show_bottom=false`（h<8）隐藏 title_bottom。
+/// `max_width` = composer 区域宽度（`use_previous_size`，resize 后次帧收敛）。
+#[allow(clippy::too_many_arguments)] // 标题位/可见性/宽度参数同属一个边框语义，拆分反增复杂度
+fn build_composer_block(
+    loading: bool,
+    session_title: &str,
+    files_label: Option<&str>,
+    ctx_label: Option<&str>,
+    show_top: bool,
+    show_bottom: bool,
+    max_width: u16,
+) -> Block<'static> {
     let tokens = input_tokens();
+    let sem = THEME_ATOM.state().read().semantic;
     let border_color = if loading {
         tokens.border_loading
     } else {
@@ -803,11 +930,63 @@ fn build_composer_block(loading: bool, session_title: &str) -> Block<'static> {
     let mut block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color));
-    if !session_title.is_empty() {
-        // ratatui 0.30：title 直接用 Line，`right_aligned()` 对齐到上边框右侧
-        block = block.title_top(build_session_title_line(session_title).right_aligned());
+    if show_top && !session_title.is_empty() {
+        let title_width = session_title.width().min(32) + 2;
+        if title_width <= usize::from(max_width) {
+            block = block.title_top(build_session_title_line(session_title).right_aligned());
+        }
+    }
+    if show_bottom {
+        // 左侧附件计数 / 右侧上下文使用率（muted）
+        if let Some(f) = files_label {
+            block = block.title_bottom(Line::from(Span::styled(
+                format!(" {f} "),
+                Style::default().fg(sem.text.muted),
+            )));
+        }
+        if let Some(c) = ctx_label {
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    format!(" {c} "),
+                    Style::default().fg(sem.text.muted),
+                ))
+                .right_aligned(),
+            );
+        }
     }
     block
+}
+
+/// §10 queued 队列行：`· {text}`（queued 符号 + muted），每行按 composer
+/// 文本宽度截断；超过 [`QUEUE_VISIBLE_MAX`] 条时末行 `· · ·`。
+fn build_queue_lines(items: &[String], has_more: bool, max_width: usize) -> Vec<Line<'static>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let sem = THEME_ATOM.state().read().semantic;
+    let muted = Style::default().fg(sem.text.muted);
+    let sym = crate::kit::terminal_caps::symbols(&crate::kit::atoms::TERMINAL_CAPS.state().read());
+    let mut lines = Vec::with_capacity(items.len() + usize::from(has_more));
+    for text in items {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", sym.queued), muted),
+            Span::styled(crate::truncate::truncate_by_width(text, max_width), muted),
+        ]));
+    }
+    if has_more {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{} {} {}", sym.queued, sym.queued, sym.queued),
+            muted,
+        )]));
+    }
+    lines
+}
+
+/// §10 对齐：composer 正文起点 = prompt 前缀宽度（outer1 + accent1 + gap，
+/// 与 transcript `first_prefix_width` 一致）+ 右预留 2 列。gap=1 → 5；
+/// gap=2 → 6。
+fn prompt_and_border_width(grid: GridSpec) -> u16 {
+    (2 + grid.gap) + 2
 }
 
 /// 会话标题标签：hash 稳定底色 + 按亮度反色前景 + BOLD。
@@ -859,7 +1038,15 @@ fn readable_fg(bg: Color) -> Color {
     }
 }
 
-fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<Line<'static>> {
+/// §10/§3.1 对齐：prompt 前缀宽度 = outer(1) + accent(1) + gap ——与 transcript
+/// content 起点（`first_prefix_width`）一致。composer 无左右 border
+/// （`Borders::TOP|BOTTOM`），正文起点即前缀宽度：gap=1 → `" ❯ "`（3 列），
+/// gap=2 → `" ❯  "`（4 列）。续行前缀同宽（accent 位置留空）。
+fn build_composer_lines(
+    editor_lines: Vec<Line<'static>>,
+    loading: bool,
+    grid: GridSpec,
+) -> Vec<Line<'static>> {
     let tokens = input_tokens();
     let mut lines = Vec::with_capacity(editor_lines.len().max(1));
     let prompt_style = Style::default()
@@ -870,9 +1057,12 @@ fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<
         })
         .add_modifier(Modifier::BOLD);
 
+    let prompt_prefix = format!(" \u{276f}{}", " ".repeat(grid.gap as usize));
+    let cont_prefix = " ".repeat(grid.first_prefix_width());
+
     if editor_lines.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(" ❯ ", prompt_style),
+            Span::styled(prompt_prefix, prompt_style),
             Span::raw(""),
         ]));
         return lines;
@@ -881,10 +1071,10 @@ fn build_composer_lines(editor_lines: Vec<Line<'static>>, loading: bool) -> Vec<
     for (index, line) in editor_lines.into_iter().enumerate() {
         let mut spans = Vec::with_capacity(line.spans.len() + 1);
         if index == 0 {
-            spans.push(Span::styled(" ❯ ", prompt_style));
+            spans.push(Span::styled(prompt_prefix.clone(), prompt_style));
         } else {
             spans.push(Span::styled(
-                "   ",
+                cont_prefix.clone(),
                 Style::default().fg(tokens.continuation),
             ));
         }
@@ -924,10 +1114,11 @@ where
         SubmitRequest::AgentText(text) => {
             push_history(&text);
             reset_history_cursor();
-            // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
-            // 统一走 dispatch_and_notify → push_view_models 写入路径。
-            send_local_user_bubble(&text);
             if is_loading {
+                // §10 queued（Slice 3 D4 反转）：loading 期间**只入队**，不提前进
+                // transcript——排队项显示在 composer 上方队列；TurnDone/取消
+                // 复位时 drain（send_local_user_bubble + AgentText），气泡恰出现
+                // 一次。保留 32 条上限（防无限堆积）。
                 let input_buffer = INPUT_BUFFER.state();
                 let mut guard = input_buffer.write();
                 guard.push_back(text);
@@ -935,6 +1126,9 @@ where
                     guard.pop_front();
                 }
             } else {
+                // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
+                // 统一走 dispatch_and_notify → push_view_models 写入路径。
+                send_local_user_bubble(&text);
                 send_request(SubmitRequest::AgentText(text));
             }
         }
@@ -964,7 +1158,11 @@ fn show_submit_blocked_notification(request: &SubmitRequest) {
         .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
-fn send_local_user_bubble(text: &str) {
+/// 发送本地 user bubble 事件（`LocalUserBubble`）到 acp_bridge。
+///
+/// pub(crate)：非 loading 提交路径与 `acp_events::render::drain_input_buffer`
+/// （Slice 3 D4）共用——drain 排队项时镜像非 loading 路径，先本地气泡再提交。
+pub(crate) fn send_local_user_bubble(text: &str) {
     use crate::kit::acp_types::AcpEventData;
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
