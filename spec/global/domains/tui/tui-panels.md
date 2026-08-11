@@ -480,4 +480,28 @@ AskUser 面板是用户问答面板——当 agent 调用 AskUserQuestion 工具
 
 ---
 
+## Issue 经验附录
+
+### issue_2026-08-01-model-panel-profile-row-click-no-response
+**摘要:** Model 面板 profile 行点击无响应——click-as-enter 覆盖遗漏
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** click-as-enter, hit_test, 滚动偏移, 面板覆盖
+**问题本质:** a8d0ff79 "click as enter" 覆盖 8 面板唯独漏掉 model.rs；无鼠标 handler + occluded 让路导致点击落空。
+**通用模式:** 批量统一模式改造的"遗漏项"需核对覆盖清单；滚动后点击命中要读 ScrollView offset 防漂移。
+**涉及文件:** peri-tui/src/kit/panels/model.rs, panel_mouse.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-plugin-panel-uninstall-enter-freeze
+**摘要:** Plugin 面板卸载按 Enter 卡死——scrutinee 中 .read() 临时 guard 重入死锁
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** RwLock 重入死锁, 临时生命周期, scrutinee, parking_lot
+**问题本质:** match/if-let scrutinee 中 `.read()` 临时 guard 存活至整个表达式结束，分支内同 atom `.write()` 同线程重入死锁（5 处同型，均已修）。
+**通用模式:** 事件 handler 写 state 先 `let` 提取值再 match；scrutinee 含 `.read()` 时检查分支体是否对同 atom `.write()`——入 code review checklist。
+**涉及文件:** peri-tui/src/kit/panels/plugin.rs（5 处）
+**CLAUDE.md 链接:** false
+
+---
+
 > [返回总索引](tui-index.md)

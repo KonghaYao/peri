@@ -919,6 +919,78 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 **涉及文件:** peri-tui/src/kit/message_area/render.rs, peri-tui/src/kit/tui_render_unit.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
 **CLAUDE.md 链接:** false
 
+### issue_2026-07-31-tui-tool-card-absolute-path-too-long
+**摘要:** 工具卡头行绝对路径过长——仅显示层裁剪 cwd 前缀
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 路径精简, 工具卡片, 显示层, OnceLock
+**问题本质:** 工具卡头行显示绝对路径过长；仅在 TUI 显示层（`summarize_input`）对 cwd 前缀做裁剪，不动 ACP/agent 事件。
+**通用模式:** 显示优化限定消费层，非 cwd 路径保持原样，测试覆盖纯函数边界。
+**涉及文件:** peri-tui/src/truncate.rs, message_area/render.rs, app/mod.rs, tool_display.rs, truncate_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-multi-agent-concurrent-cpu-high
+**摘要:** 3 agent 并发 50% CPU——渲染路径每 token 全量重建
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 渲染风暴, 每 token 全量重建, 滚动哈希, 增量缓存
+**问题本质:** 3 agent 并发 50% CPU，根因在渲染路径（20Hz 心跳全树重绘 + 每 token 全量 VM 重建 + markdown 全量重解析）；对抗验证把 4-7 项降级 LOW。
+**通用模式:** 性能归因用对抗验证收敛；渲染路径优化三件套（帧序号条件写、增量缓存同步、尾块回滚重解析）。
+**涉及文件:** peri-tui/src/kit/entry.rs, acp_types.rs, acp_events/render.rs, markdown/{mod.rs,convert.rs}, tui_render_unit.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-04-spinner-footer-missing-after-restore-history
+**摘要:** 恢复历史后 spinner footer 消失——idle 早退点
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** footer 常驻, idle 占位, BRIDGE_RESET_COUNTER, 早退
+**问题本质:** build_footer_lines 对 `!is_loading && 空 todo && 无 summary` 提前返回空 → 恢复历史后 spinner 组件消失；组件语义应为常驻二态。
+**通用模式:** 组件"无内容即不渲染"与"常驻占位"语义冲突——idle 早退点即缺陷。
+**涉及文件:** peri-tui/src/kit/message_area/{footer.rs,mod.rs}, footer_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-04-tui-garbled-crash-after-agent-panic
+**摘要:** agent panic 后 TUI 乱码崩溃——span guard 跨线程 + panic hook 写 escape 序列
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** tracing span 跨线程, panic hook, ratatui, escape 序列
+**问题本质:** `span.enter()` guard 跨 await 持有，tokio multi-thread task 迁移线程后错误重置 thread-local current span → tracing `lookup_current` panic；ratatui panic hook 从非渲染线程写 escape 恢复序列 → 终端乱码。
+**通用模式:** 跨 await 的 span guard 改 `.instrument()`；UI 进程 panic hook 不得向 stdout 写终端控制序列。
+**架构影响:** 新增 peri-tui/src/kit/panic.rs 重装 hook + PANIC_NOTIFY 状态栏提示。
+**涉及文件:** peri-agent/src/agent/stages/tool_dispatch.rs, peri-tui/src/{main.rs,launch.rs}, kit/entry.rs, kit/panic.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-06-e2e-tmux-server-dies
+**摘要:** E2E 残留 tui-test-* session 干扰导致 tmux server 挂掉
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** tmux server, killTestSessions, 前缀命名空间, 测试清理
+**问题本质:** 残留 tui-test-* session 干扰导致 tmux server 挂掉；`killTestSessions` 匹配过宽（includes test-）改精确前缀 startsWith("tui-test-")。
+**通用模式:** 测试清理逻辑的匹配宽严 = 误伤 vs 残留的权衡；前缀命名空间约定。
+**涉及文件:** e2e/tests/setup.ts, e2e/CLAUDE.md
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-11-tui-click-expand-broken
+**摘要:** 单击展开失效三缺陷叠加——坐标空间不一致 + Drag 无阈值 + 焦点不回退
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 手势状态机, 焦点单一事实源, 坐标空间, drag 容差
+**问题本质:** 单击展开失效三缺陷叠加（坐标空间不一致、Drag 无阈值破坏锚点、点击输入框不回退 entry 焦点）；按高层设计（gesture 状态机 + FOCUSED_ENTRY atom）S1-S4 落地。
+**通用模式:** 鼠标单击判定"只认距离不认 dragging"；交互状态双轨（局部+共享）是漂移源，收敛单事实源。
+**架构影响:** GesturePending 状态机、FOCUSED_ENTRY atom、entry_click_decision 纯函数。
+**涉及文件:** peri-tui/src/kit/message_area/{scroll.rs,mod.rs}, kit/text_selection.rs, input_area.rs, acp_events/render.rs, focus_router.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-11-tui-think-end-messageid
+**摘要:** TUI 无"推理结束"信号——thinking 动画空转；sync_cache 缓存复用守卫陈旧
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** thinking 冻结, messageId, ToolStarted 提前发射, sync_cache 缓存复用
+**问题本质:** TUI 无"推理结束"信号 → 动画空转到 turn 结束；方案 2 = agent 层工具块开始提前发 ToolStarted；实测再失效根因 = sync_cache 缓存复用守卫跳过新段构建（陈旧 Running 缓存）。
+**通用模式:** 推理结束用工具块开始推断（模型层 content_block_stop 信号被丢弃，正文点名）；渲染缓存"复用"必须与 segment 索引对齐。
+**涉及文件:** peri-agent/src/agent/model_bridge.rs, peri-tui/src/kit/acp_types.rs（append_text/start_tool/flush_text_segment/sync_cache）, acp_notifier.rs
+**CLAUDE.md 链接:** false
+
 
 ---
 

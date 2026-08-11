@@ -3,7 +3,7 @@
 **状态**：Active（Slice 2-5 持续追加；各决策以代码事实为准）
 **创建日期**：2026-08-10
 **规格**：`docs/design/tui-chat-message-flow-style.md`（§6/§7/§8/§10/§11/§15）
-**前置**：`spec/issues/2026-08-10-chat-redesign-slice1-data-gates.md`（Closed，5 项数据门）
+**前置**：`spec/archive-issues/tui-general/2026-08-10-chat-redesign-slice1-data-gates.md`（Closed，5 项数据门）
 
 本文件累计记录跨切片定案（D 系列冲突消解 + 落地引用），供后续编码切片引用；
 已落地项标注代码位置，代码与文档冲突时以代码为准并回写本文件。

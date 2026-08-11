@@ -174,4 +174,18 @@ SetupWizard 是**根级全屏向导**（非弹窗）：`WIZARD_ACTIVE = true` �
 
 ---
 
+## Issue 经验附录
+
+### issue_2026-08-06-e2e-rewind-input-not-refilled
+**摘要:** Rewind 回填文本被 `<system-reminder>` 注入块污染
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 注入块剥离, strip_system_reminders, rewind 回填, 单一事实源
+**问题本质:** 回填文本被 `<system-reminder>` 注入块污染（Bypass 权限通知）；共享纯函数 `strip_system_reminders` 做两端剥离单一事实源。
+**通用模式:** 注入块与用户文本混存 → preview/回填需统一剥离口径。
+**涉及文件:** peri-acp-types/src/messages/content.rs, peri-acp/src/dispatch/rewind_candidates.rs, peri-tui/src/kit/acp_events/system.rs
+**CLAUDE.md 链接:** false
+
+---
+
 > [返回总索引](tui-index.md)

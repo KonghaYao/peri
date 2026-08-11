@@ -491,6 +491,27 @@ panel-payload                ← Panel 数据推送（计划）
 **涉及文件:** peri-tui/src/kit/acp_notifier.rs（is_session_replay 四级 fallback）, peri-tui/src/kit/acp_types.rs（CommittedAssistantText / ReplayToolStarted / ReplayToolEnded 变体）, peri-tui/src/kit/acp_events/turn.rs 与 tool.rs（原 acp_events.rs 拆分后的对应 handler）, peri-tui/src/kit/acp_bridge.rs（event_kind_short）, peri-acp/src/dispatch/session_replay.rs（replay_session_history 逐 content block 分发）
 **CLAUDE.md 链接:** false
 
+### issue_2026-08-10-chat-redesign-slice1-data-gates
+**摘要:** Chat redesign Slice 1——5 项数据门只读核验，为零消费方定案
+**状态:** Closed
+**归档日期:** 2026-08-11
+**关键词:** 数据门, 协议降级, 终端能力, 性能基线
+**问题本质:** Slice 1 以只读代码核验 5 项数据门（diff/tokens/interjection/started_at/render 时序），为 Slice 2-5 定案决策依据；纯新增、零消费方。
+**通用模式:** 大 redesign 前用"数据门"清单先行核验代码事实，行为降级显式化。
+**架构影响:** 不改 ACP 协议；Slice 5 客户端解析 diff。
+**涉及文件:** peri-tui acp_events/system.rs, stream_data.rs, tui_render_unit.rs, input_area.rs, acp_types.rs, message_area/mod.rs, kit/terminal_caps.rs, truncate.rs, themes/*.json
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-08-e2e-compact-command-screenshot-too-early
+**摘要:** /compact 完成 SystemNote 在 replay 后丢失 + e2e 截图时机过早双问题
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** SystemNote 跨 replay, PENDING_COMPACT_NOTE, waitFor 确定性信号, 读锁死锁
+**问题本质:** 阶段一：e2e 固定 sleep 截图，compact 摘要耗时 >3.5s 导致截图过早 flaky；阶段二：manual /compact 完成提示经 TurnDone 归档后，thread load 触发 bridge reset 清空 committed → SystemNote 跨 replay 丢失；且重注入块 `if let Some(x) = atom.read().clone()` 读锁 guard 存活至块结束，分支内写锁同线程死锁。
+**通用模式:** e2e 以"确定性信号（waitFor 完成提示）"替代固定 sleep；跨 replay 存活的状态用全局 atom 桥接（bridge reset 分支消费重建）；先以显式块提取值再进 if-let，防读锁 guard 存活导致写锁死锁。
+**涉及文件:** peri-tui/src/kit/atoms.rs（PENDING_COMPACT_NOTE）, acp_events/compact.rs, acp_bridge.rs, acp_events_test.rs, e2e/tests/scenarios/compact-command.test.ts
+**CLAUDE.md 链接:** false
+
 
 ---
 
