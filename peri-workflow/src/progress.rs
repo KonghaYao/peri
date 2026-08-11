@@ -3,7 +3,7 @@
 //! Key design: agentId EXACT matching (not LIFO stack) — concurrent agents interleave
 //! events, so `set_or_update_agent` finds by `agent_id` field, not the last element.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use parking_lot::RwLock;
@@ -41,12 +41,15 @@ pub use peri_acp_types::workflow::{
 
 pub struct WorkflowProgressStore {
     runs: RwLock<HashMap<String, RunProgress>>,
+    /// AgentStarted 仅由本次真实执行产生；resume cache-hit 只会收到 AgentDone。
+    started_agents: RwLock<HashSet<(String, u64)>>,
 }
 
 impl WorkflowProgressStore {
     pub fn new() -> Self {
         Self {
             runs: RwLock::new(HashMap::new()),
+            started_agents: RwLock::new(HashSet::new()),
         }
     }
 
@@ -62,6 +65,9 @@ impl WorkflowProgressStore {
 
         match event {
             ProgressEvent::RunStarted { workflow_name, .. } => {
+                self.started_agents
+                    .write()
+                    .retain(|(started_run_id, _)| started_run_id != &run_id);
                 let run = RunProgress {
                     run_id: run_id.clone(),
                     workflow_name: workflow_name.clone(),
@@ -89,6 +95,9 @@ impl WorkflowProgressStore {
                 phase,
                 ..
             } => {
+                self.started_agents
+                    .write()
+                    .insert((run_id.clone(), *agent_id));
                 if let Some(run) = runs.get_mut(&run_id) {
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
                         if label.is_some() {
@@ -131,8 +140,15 @@ impl WorkflowProgressStore {
                 }
             }
             ProgressEvent::AgentDone {
-                agent_id, result, ..
+                agent_id,
+                phase,
+                result,
+                ..
             } => {
+                let executed_in_this_run = self
+                    .started_agents
+                    .read()
+                    .contains(&(run_id.clone(), *agent_id));
                 if let Some(run) = runs.get_mut(&run_id) {
                     set_or_update_agent(&mut run.agents, *agent_id, |agent| {
                         agent.status = match result {
@@ -141,14 +157,20 @@ impl WorkflowProgressStore {
                             AgentRunResult::Dead { .. } => AgentStatus::Dead,
                         };
                         agent.result = Some(result.clone());
-                        // 从 AgentRunResult::Ok 提取 duration（P2 新增字段）
-                        agent.duration_ms = match result {
-                            AgentRunResult::Ok { duration_ms, .. } => *duration_ms,
-                            _ => None,
-                        };
-                        // 只在 result 携带 tool_count/token_count 时才更新，保留 AgentProgress 已设的值
-                        agent.tool_count = result.tool_count().or(agent.tool_count);
-                        agent.token_count = result.token_count().or(agent.token_count);
+                        if agent.phase.is_none() {
+                            agent.phase = phase.clone().or_else(|| match result {
+                                AgentRunResult::Ok { phase, .. } => phase.clone(),
+                                _ => None,
+                            });
+                        }
+                        if executed_in_this_run {
+                            agent.duration_ms = match result {
+                                AgentRunResult::Ok { duration_ms, .. } => *duration_ms,
+                                _ => None,
+                            };
+                            agent.tool_count = result.tool_count().or(agent.tool_count);
+                            agent.token_count = result.token_count().or(agent.token_count);
+                        }
                         // 完成快照模型名以 AgentRunResult::Ok.model 为准
                         // （仅在 Some 时更新，保留 AgentProgress 已设的值）
                         if let AgentRunResult::Ok { model: Some(m), .. } = result {
@@ -204,6 +226,14 @@ impl WorkflowProgressStore {
                 || r.completed_at
                     .map(|at| now.duration_since(at) < Self::COMPLETED_RETENTION)
                     .unwrap_or(true)
+        });
+        // 已清理 run 的执行标记一并释放（P2-2026-08-11：否则随
+        // 每个完成 workflow 的 agent marker 永久残留，长期运行无界增长）。
+        self.started_agents.write().retain(|(run_id, _)| {
+            self.runs
+                .read()
+                .get(run_id)
+                .is_some_and(|r| matches!(r.status, RunStatus::Running))
         });
     }
 }
@@ -302,33 +332,35 @@ impl WorkflowProgressStore {
         let Some(run) = runs.get(run_id) else {
             return Vec::new();
         };
+        let started_agents = self.started_agents.read();
         let mut phase_map: std::collections::HashMap<String, (usize, u64, u64)> =
             std::collections::HashMap::new();
         for agent in run.agents.values() {
-            let phase = agent.phase.as_deref().unwrap_or("(no phase)");
+            let phase = agent.phase.as_deref().unwrap_or(run.workflow_name.as_str());
             let entry = phase_map.entry(phase.to_string()).or_insert((0, 0, 0));
             entry.0 += 1;
-            entry.1 += agent
-                .token_count
-                .or_else(|| agent.result.as_ref().and_then(|r| r.token_count()))
-                .unwrap_or(0);
-            entry.2 += agent
-                .duration_ms
-                .or(
-                    if let Some(AgentRunResult::Ok {
-                        duration_ms: Some(d),
-                        ..
-                    }) = &agent.result
-                    {
-                        Some(*d)
-                    } else {
-                        None
-                    },
-                )
-                .unwrap_or(0);
+            if started_agents.contains(&(run_id.to_string(), agent.agent_id)) {
+                entry.1 += agent
+                    .token_count
+                    .or_else(|| agent.result.as_ref().and_then(|r| r.token_count()))
+                    .unwrap_or(0);
+                entry.2 += agent
+                    .duration_ms
+                    .or(
+                        if let Some(AgentRunResult::Ok {
+                            duration_ms: Some(d),
+                            ..
+                        }) = &agent.result
+                        {
+                            Some(*d)
+                        } else {
+                            None
+                        },
+                    )
+                    .unwrap_or(0);
+            }
         }
-        // 将 "(no phase)" 组排到最后
-        let mut summaries: Vec<PhaseSummary> = phase_map
+        phase_map
             .into_iter()
             .map(
                 |(name, (agent_count, token_count, duration_sum))| PhaseSummary {
@@ -342,9 +374,7 @@ impl WorkflowProgressStore {
                     },
                 },
             )
-            .collect();
-        summaries.sort_by_key(|s| if s.name == "(no phase)" { 1 } else { 0 });
-        summaries
+            .collect()
     }
 
     /// 获取指定 agent 的 phase（供 journal 注入）。

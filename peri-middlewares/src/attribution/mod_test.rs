@@ -20,3 +20,16 @@ fn test_git_attribution_reset_clears_pending() {
     mw.reset();
     assert!(mw.pending_old_content.lock().unwrap().is_empty());
 }
+
+#[test]
+fn test_branch_drift_reports_each_change_once() {
+    let mw = GitAttributionMiddleware::new("test-model");
+
+    assert_eq!(mw.observe_branch("main".to_string()), None);
+    assert_eq!(mw.observe_branch("main".to_string()), None);
+    assert_eq!(
+        mw.observe_branch("feature".to_string()),
+        Some(("main".to_string(), "feature".to_string()))
+    );
+    assert_eq!(mw.observe_branch("feature".to_string()), None);
+}
