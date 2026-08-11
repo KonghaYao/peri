@@ -112,7 +112,137 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
         first,
         RenderEvent::TextChunk { chunk, .. } if chunk == "answer"
     ));
-    // ToolCallDelta / Usage 不产生 Render 事件（ToolStarted 由工具分发阶段 emit）
+    // [Fix think-end] 首个带 id/name 的 ToolCallDelta 提前 emit ToolStarted
+    //（input=Null——参数尚未流式生成，由 dispatch 的正式 ToolStarted 经
+    // TUI start_tool 重复 id upsert 填充）
+    let started = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到提前的 RenderEvent::ToolStarted");
+    assert!(matches!(
+        started,
+        RenderEvent::ToolStarted {
+            tool_call_id,
+            name,
+            input,
+            ..
+        } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
+    ));
+    // Usage / Completed 不产生额外 Render 事件
+    assert!(
+        handles.render_rx.try_recv().is_err(),
+        "不应有额外 Render 事件"
+    );
+}
+
+/// 纯「思考 → 工具」（无正文）模型流：验证 thinking 结束后首个带 id/name 的
+/// ToolCallDelta 提前 emit ToolStarted（input=Null），且后续 delta 幂等不再发。
+struct ThinkingToolModel;
+
+#[async_trait]
+impl Model for ThinkingToolModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        let response = ModelResponse::new(
+            ModelMessage::assistant(
+                vec![peri_model::ContentBlock::Reasoning {
+                    text: "think".into(),
+                    signature: None,
+                }],
+                vec![ToolCall::new(
+                    "call_1",
+                    "shell",
+                    JsonObject::from_value(json!({"command": "pwd"})).unwrap(),
+                )],
+            ),
+            StopReason::ToolUse,
+            Some(TokenUsage::new(3, 5)),
+            Some("request_1".into()),
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![
+                Ok(ModelStreamEvent::ReasoningDelta {
+                    text: "think".into(),
+                }),
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".into()),
+                    name: Some("shell".into()),
+                    arguments_delta: r#"{"command":"pwd"}"#.into(),
+                }),
+                // 后续参数 delta 无 id/name：不应重复发 ToolStarted
+                Ok(ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    arguments_delta: String::new(),
+                }),
+                Ok(ModelStreamEvent::Usage(TokenUsage::new(3, 5))),
+                Ok(ModelStreamEvent::Completed(response)),
+            ]),
+            cancellation,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn bridge_emits_tool_started_on_first_tool_call_delta() {
+    // [Fix think-end] 思考完直接调工具（无正文）：首个带 id/name 的
+    // ToolCallDelta 到达即提前发 ToolStarted（工具块开始 = 推理结束），
+    // TUI 收到后立即冻结推理动画，不再空转到 dispatch_tools 的正式
+    // ToolStarted（模型流结束后才发出）。
+    let bridge = AgentModelBridge::from_arc(Arc::new(ThinkingToolModel));
+    let (bus, mut handles) = EventBus::new(EventBusConfig::default());
+    let streaming = StreamingContext {
+        event_bus: Arc::new(bus),
+        turn_id: TurnId::new(),
+        agent_id: AgentId::new(),
+        cancel: CancellationToken::new(),
+    };
+
+    let reasoning = bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], Some(streaming))
+        .await
+        .unwrap();
+    assert_eq!(reasoning.thought, "think");
+    assert_eq!(reasoning.tool_calls.len(), 1);
+    assert_eq!(reasoning.tool_calls[0].id, "call_1");
+
+    // 事件序：ThinkingChunk → ToolStarted（提前，input=Null）→ 无更多 Render
+    let first = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到 RenderEvent::ThinkingChunk");
+    assert!(matches!(
+        first,
+        RenderEvent::ThinkingChunk { chunk, .. } if chunk == "think"
+    ));
+    let started = handles
+        .render_rx
+        .try_recv()
+        .expect("应收到提前的 RenderEvent::ToolStarted");
+    assert!(matches!(
+        started,
+        RenderEvent::ToolStarted {
+            tool_call_id,
+            name,
+            input,
+            ..
+        } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
+    ));
+    // 第二个 ToolCallDelta（无 id/name）幂等：不再发；Usage/Completed 无 Render
     assert!(
         handles.render_rx.try_recv().is_err(),
         "不应有额外 Render 事件"

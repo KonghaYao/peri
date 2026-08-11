@@ -201,6 +201,14 @@ impl CurrentTurn {
             let reasoning_duration_ms = self
                 .reasoning_started_at
                 .map(|t| t.elapsed().as_millis() as u64);
+            // [Fix think-end] flush 把旧 trailing 变成新段：缓存尾部残留的是
+            // flush 前的 trailing bubble（推理块 Running 形态），索引错位后
+            // sync_cache 的 `len() <= i` 守卫会复用陈旧缓存——推理段恒 Running，
+            // 动画空转到 turn 结束折叠 pass 才冻结（思考→工具场景实测必现）。
+            // 段计数以 push 前的 segments.len() 为基准：缓存 = 段数（无 trailing）
+            // 或段数+1（有 trailing），flush 后缓存应回落到新段数。丢弃尾部
+            // 失效元素（flush 前 trailing 至多一个），保留历史冻结段。
+            let seg_len_before_push = self.segments.len();
             self.segments.push(TurnSegment::AssistantText {
                 text_end_byte: current_text,
                 reasoning_end_byte: current_reasoning,
@@ -211,6 +219,9 @@ impl CurrentTurn {
                 message_id: self.last_message_id.clone(),
                 reasoning_duration_ms,
             });
+            while self.cached_view_models.len() > seg_len_before_push {
+                self.cached_view_models.pop_back();
+            }
             self.last_text_flush = current_text;
             self.last_reasoning_flush = current_reasoning;
             self.open_text_hash = 0;
@@ -289,13 +300,28 @@ impl CurrentTurn {
     /// Flushes any pending text as a segment BEFORE pushing the tool,
     /// so text spoken before the tool call appears in its own bubble.
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
-        // 防御：相同 tool_id 不应重复 start（同一轮内 tool_id 唯一）
-        if self.tool_cards.iter().any(|t| t.tool_id == tool.tool_id) {
-            tracing::debug!(
-                tool_id = %tool.tool_id,
-                tool_name = %tool.tool_name,
-                "CurrentTurn::start_tool: 重复 tool_id，跳过"
-            );
+        // 防御：相同 tool_id 不应重复 start（同一轮内 tool_id 唯一）。
+        // [Fix think-end] agent 侧提前 ToolStarted（工具块开始即发，参数尚未
+        // 流式生成 → raw_input=Null）与 dispatch 的正式 ToolStarted（参数完整）
+        // 同 id 先后到达：只升级 input（raw_input/input_summary/presentation），
+        // 不重建卡片——保留 started_at/时长语义，TUI 侧冻结点由"工具卡片
+        // 出现"提前到"thinking 真实结束"。
+        if let Some(existing) = self
+            .tool_cards
+            .iter_mut()
+            .find(|t| t.tool_id == tool.tool_id)
+        {
+            if !tool.raw_input.is_null() && existing.raw_input.is_null() {
+                tracing::debug!(
+                    tool_id = %tool.tool_id,
+                    tool_name = %tool.tool_name,
+                    "CurrentTurn::start_tool: 提前 ToolStarted 升级 input"
+                );
+                existing.raw_input = tool.raw_input;
+                existing.input_summary = tool.input_summary;
+                existing.presentation = tool.presentation;
+                self.sync_cache();
+            }
             return;
         }
         self.flush_text_segment();
