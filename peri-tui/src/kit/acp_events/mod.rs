@@ -368,7 +368,11 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             agent_name,
             is_background,
         } => subagent::handle_subagent_started(state, agent_id, agent_name, *is_background),
-        SubagentStopped { agent_id } => subagent::handle_subagent_stopped(state, agent_id),
+        SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => subagent::handle_subagent_stopped(state, agent_id, result, *is_error),
 
         // ── §4.8 Agent Event Extensions ──
         TurnCommitted {

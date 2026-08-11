@@ -30,13 +30,19 @@ pub(super) fn handle_subagent_started(
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_subagent_stopped(state: &mut BridgeState, agent_id: &str) {
+pub(super) fn handle_subagent_stopped(
+    state: &mut BridgeState,
+    agent_id: &str,
+    result: &str,
+    is_error: bool,
+) {
     tracing::info!(
         target: "tui.acp_events",
         agent_id = %agent_id,
+        is_error = %is_error,
         "SubagentStopped: marking SubAgentGroup as done"
     );
-    state.current_turn.stop_subagent(agent_id);
+    state.current_turn.stop_subagent(agent_id, is_error, result);
     // 清理后台 agent_id 注册
     BG_AGENT_IDS.state().write().remove(agent_id);
     state.variant = 1;

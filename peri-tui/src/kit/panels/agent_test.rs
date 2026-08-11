@@ -10,6 +10,8 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,
+        is_error: false,
+        error_reason: None,
         fold: crate::kit::tui_render_unit::FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,

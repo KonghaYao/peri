@@ -96,8 +96,15 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             agent_name,
             is_background,
         }),
-        AcpEvent::SubagentStopped { instance_id, .. } => Some(AcpEventData::SubagentStopped {
+        AcpEvent::SubagentStopped {
+            instance_id,
+            result,
+            is_error,
+            ..
+        } => Some(AcpEventData::SubagentStopped {
             agent_id: instance_id,
+            result,
+            is_error,
         }),
         // ── §4.8 Agent Event Extensions (P1-5) ──
         AcpEvent::TurnCommitted {

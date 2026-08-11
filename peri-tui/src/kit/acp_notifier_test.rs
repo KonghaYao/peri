@@ -272,6 +272,74 @@ async fn test_agent_event_forwards_subagent_started() {
     shutdown.cancel();
 }
 
+/// SubagentStopped 必须全量透传 instance_id/result/is_error——parent 终态
+/// 唯一事实源在 TUI 边界不得丢弃（bug 回归：此前 `..` 吞掉 result/is_error，
+/// TUI 只能从 child tool error 反推 block error）。
+#[tokio::test]
+async fn test_agent_event_forwards_subagent_stopped() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    // genuine parent error：is_error=true + result
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::SubagentStopped {
+                agent_name: "explore".into(),
+                instance_id: "abc-123".into(),
+                result: "loop failed: llm error".into(),
+                is_error: true,
+            },
+        })
+        .unwrap();
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 SubagentStopped");
+    match bridge_event.event {
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "abc-123", "agent_id 应从 instance_id 映射");
+            assert_eq!(result, "loop failed: llm error", "result 应透传");
+            assert!(is_error, "is_error=true 应透传");
+        }
+        other => panic!("expected SubagentStopped, got {other:?}"),
+    }
+
+    // completed parent：is_error=false
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::SubagentStopped {
+                agent_name: "explore".into(),
+                instance_id: "abc-124".into(),
+                result: "done".into(),
+                is_error: false,
+            },
+        })
+        .unwrap();
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收 到第二个 SubagentStopped");
+    match bridge_event.event {
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "abc-124");
+            assert_eq!(result, "done");
+            assert!(!is_error, "is_error=false 应透传");
+        }
+        other => panic!("expected SubagentStopped, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 /// 验证未映射的 AcpEvent 变体被静默丢弃（防御性测试）。
 #[tokio::test]
 async fn test_agent_event_unknown_variant_dropped() {

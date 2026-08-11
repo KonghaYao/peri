@@ -418,9 +418,17 @@ impl CurrentTurn {
     }
 
     /// Mark a sub-agent group as done from `"subagent-stopped"`.
-    pub fn stop_subagent(&mut self, agent_id: &str) {
+    ///
+    /// `is_error` 是 parent 终态的唯一事实源（agent 层语义：Completed→false、
+    /// Interrupted/Error→true）；`result` 仅在 genuine error 且非空白（trim
+    /// 后非空）时保存为可见原因（`error_reason`），completed parent 即使有
+    /// 失败 child tool 也不携带 parent error。保存的是原始未 trim 的 result
+    /// （空白仅用于判缺，不修改展示文本）。
+    pub fn stop_subagent(&mut self, agent_id: &str, is_error: bool, result: &str) {
         if let Some(s) = self.subagents.iter_mut().find(|s| s.agent_id == agent_id) {
             s.is_running = false;
+            s.is_error = is_error;
+            s.error_reason = (is_error && !result.trim().is_empty()).then(|| result.to_string());
             // [§6.7] 冻结子 turn 的 trailing 流式段——子 turn 不经过快照折叠
             // pass，不冻结则 trailing bubble 保持 Running 形态（started_at
             // 存活、elapsed 持续增长），详情面板对已完成 subagent 渲染永久的
@@ -1043,6 +1051,12 @@ pub struct SubAgentAccumulator {
     pub agent_id: String,
     pub agent_name: String,
     pub is_running: bool,
+    /// Parent 终态唯一事实源——由 `SubagentStopped.is_error` 写入；
+    /// nested child tool error 不参与。
+    pub is_error: bool,
+    /// Genuine parent error 的可见原因（`SubagentStopped.result` 非空白时保存，
+    /// 原始文本未 trim）。
+    pub error_reason: Option<String>,
     pub child_turn: CurrentTurn,
     /// Cached view_model result, invalidated on any mutation.
     cached_view_model: std::cell::RefCell<Option<TuiRenderUnit>>,
@@ -1055,6 +1069,8 @@ impl SubAgentAccumulator {
             agent_id,
             agent_name,
             is_running: true,
+            is_error: false,
+            error_reason: None,
             child_turn,
             cached_view_model: std::cell::RefCell::new(None),
         }
@@ -1099,6 +1115,8 @@ impl SubAgentAccumulator {
         let child_vms = self.child_turn.view_models();
         let status = if self.is_running {
             EntryStatus::Running
+        } else if self.is_error {
+            EntryStatus::Error
         } else {
             EntryStatus::Completed
         };
@@ -1110,6 +1128,8 @@ impl SubAgentAccumulator {
             view_models: child_vms.clone(),
             collapsed: false,
             is_running: self.is_running,
+            is_error: self.is_error,
+            error_reason: self.error_reason.clone(),
             fold: fold_for_status(FoldTarget::SubAgent, status),
             user_modified: false,
             content_hash: 0,
@@ -1290,7 +1310,13 @@ pub enum AcpEventData {
     },
 
     /// `"subagent-stopped"` -- sub-agent exited, TUI closes the group.
-    SubagentStopped { agent_id: String },
+    /// `result` / `is_error` 为 parent 终态的唯一事实源（canonical）：
+    /// nested child tool error 不参与 parent 状态判定。
+    SubagentStopped {
+        agent_id: String,
+        result: String,
+        is_error: bool,
+    },
 
     /// Fallback for unknown / future event names.
     ///
@@ -1438,7 +1464,15 @@ impl AcpEventData {
             }
             "subagent-stopped" => {
                 let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
-                AcpEventData::SubagentStopped { agent_id }
+                // result/is_error 为可选字段——legacy 通道缺省空字符串/false，
+                // 保持向后兼容（canonical 主通道为 peri/agent_event）。
+                let result = data["result"].as_str().unwrap_or("").to_string();
+                let is_error = data["is_error"].as_bool().unwrap_or(false);
+                AcpEventData::SubagentStopped {
+                    agent_id,
+                    result,
+                    is_error,
+                }
             }
 
             // §4.7 Background Tasks

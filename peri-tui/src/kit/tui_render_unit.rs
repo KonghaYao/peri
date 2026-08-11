@@ -569,6 +569,12 @@ pub struct TuiSubAgentGroup {
     pub collapsed: bool,
     /// Whether the sub-agent is still streaming.
     pub is_running: bool,
+    /// Parent 终态唯一事实源——`SubagentStopped.is_error`；nested child tool
+    /// error 不提升 block error。参与 hash/PartialEq（终态变化必须刷新缓存）。
+    pub is_error: bool,
+    /// Genuine parent error 的可见原因（`SubagentStopped.result` 非空时保存）；
+    /// 不覆盖 header 的 result 摘要。参与 hash/PartialEq。
+    pub error_reason: Option<String>,
     /// 折叠状态——折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。
     pub fold: FoldState,
     /// 用户手动操作过折叠状态——自动策略免疫（spec §7）。
@@ -592,6 +598,11 @@ impl TuiSubAgentGroup {
         h = tui_hash_combine(h, self.view_models.len() as u64);
         h = tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
         h = tui_hash_combine(h, u64::from(self.is_running));
+        h = tui_hash_combine(h, u64::from(self.is_error));
+        h = tui_hash_combine(
+            h,
+            self.error_reason.as_deref().map(tui_hash_str).unwrap_or(0),
+        );
         h = tui_hash_combine(h, fold_state_code(self.fold));
         h = tui_hash_combine(h, u64::from(self.user_modified));
         h = tui_hash_combine(h, child_hash_total);
@@ -599,7 +610,7 @@ impl TuiSubAgentGroup {
     }
 }
 
-tui_impl_partial_eq!(TuiSubAgentGroup: agent_id, agent_name, view_models, collapsed, is_running, fold, user_modified);
+tui_impl_partial_eq!(TuiSubAgentGroup: agent_id, agent_name, view_models, collapsed, is_running, is_error, error_reason, fold, user_modified);
 
 /// Generic collapsible group -- e.g. batched tool calls.
 #[derive(Debug, Clone)]

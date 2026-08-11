@@ -491,6 +491,8 @@ fn test_tui_render_unit_subagent_group_construction() {
         view_models: im::Vector::from(vec![inner]),
         collapsed: true,
         is_running: false,
+        is_error: false,
+        error_reason: None,
         fold: FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,
@@ -503,6 +505,53 @@ fn test_tui_render_unit_subagent_group_construction() {
         }
         _ => panic!("expected TuiSubAgentGroup"),
     }
+}
+
+/// [G1/cache] parent `is_error` 与可见 `error_reason` 必须参与 recompute_hash
+/// 与 PartialEq——仅终态或错误文本变化也必须使按 hash 分片的渲染缓存失效。
+#[test]
+fn test_subagent_group_hash_and_eq_include_is_error_and_error_reason() {
+    fn mk(is_error: bool, error_reason: Option<&str>) -> TuiSubAgentGroup {
+        let mut g = TuiSubAgentGroup {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            view_models: im::Vector::new(),
+            collapsed: false,
+            is_running: false,
+            is_error,
+            error_reason: error_reason.map(String::from),
+            fold: FoldState::Collapsed,
+            user_modified: false,
+            content_hash: 0,
+        };
+        g.recompute_hash();
+        g
+    }
+
+    let ok = mk(false, None);
+    let err = mk(true, None);
+    let err_reasoned = mk(true, Some("loop failed"));
+    let err_reasoned2 = mk(true, Some("other reason"));
+
+    // is_error 参与 hash/eq
+    assert_ne!(ok.content_hash, err.content_hash, "is_error 必须改 hash");
+    assert_ne!(ok, err, "is_error 必须参与 PartialEq");
+    // error_reason 参与 hash/eq
+    assert_ne!(
+        err.content_hash, err_reasoned.content_hash,
+        "error_reason 必须改 hash"
+    );
+    assert_ne!(err, err_reasoned, "error_reason 必须参与 PartialEq");
+    assert_ne!(
+        err_reasoned.content_hash, err_reasoned2.content_hash,
+        "错误文本变化必须改 hash"
+    );
+    assert_ne!(
+        err_reasoned, err_reasoned2,
+        "错误文本变化必须参与 PartialEq"
+    );
+    // 同构 group 相等（hash 公式确定性）
+    assert_eq!(ok, mk(false, None));
 }
 
 #[test]

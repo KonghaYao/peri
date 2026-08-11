@@ -131,6 +131,8 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2135,6 +2137,8 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2188,6 +2192,8 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-2".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2250,6 +2256,8 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sync-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -3087,6 +3095,8 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -3094,6 +3104,155 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             assert!(!g.is_running);
             assert_eq!(g.fold, FoldState::Collapsed);
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// SubagentStopped(is_error=true) → parent 终态 Error：is_running=false、
+/// is_error=true、error_reason 保存 stop result；§7 表 (SubAgent, Error)
+/// => Expanded（与 tool error 展开语义一致）。
+#[test]
+#[serial]
+fn test_fold_pass_subagent_error_expanded() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "loop failed: llm error".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(g.is_error, "canonical is_error=true");
+            assert_eq!(
+                g.error_reason.as_deref(),
+                Some("loop failed: llm error"),
+                "error_reason 保存 stop result"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// whitespace-only `result` 不产生空白原因行：is_error=true 保持 parent Error
+/// （× + §7 Expanded），但 `error_reason=None`——渲染层不输出空白原因行。
+#[test]
+#[serial]
+fn test_subagent_error_whitespace_result_no_reason_line() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "   ".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(
+                g.is_error,
+                "whitespace-only result 不改变 canonical parent Error"
+            );
+            assert_eq!(
+                g.error_reason, None,
+                "whitespace-only result 视同无原因（渲染层不输出空白原因行）"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// 核心 bug 回归：nested child tool error 不提升 parent block error。
+/// 子工具失败 → parent 后续完成（SubagentStopped is_error=false）→
+/// group is_error=false + fold Collapsed；child tool card 保持自身 error。
+#[test]
+#[serial]
+fn test_subagent_completed_with_failed_child_tool_not_error() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    // 子工具启动（agent_id 路由到子 turn）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Grep".into(),
+            input_summary: "src".into(),
+            raw_input: serde_json::json!({"pattern": "x"}),
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // 子工具失败
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t1".into(),
+            output_summary: "Error: something went wrong".into(),
+            is_error: true,
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // parent 完成（is_error=false——subagent 整体成功，失败工具重试后继续）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running);
+            assert!(
+                !g.is_error,
+                "completed parent 不得因 child tool error 变 Error"
+            );
+            assert_eq!(g.error_reason, None, "completed parent 无 error_reason");
+            assert_eq!(g.fold, FoldState::Collapsed, "§7 completed → Collapsed");
+            // child tool card 保持自身 error 展示（局部可见，不提升 parent）
+            match &g.view_models[0] {
+                TuiRenderUnit::TuiToolCard(t) => {
+                    assert!(t.is_error, "child tool error 保持局部可见");
+                }
+                other => panic!("expected child TuiToolCard, got {other:?}"),
+            }
         }
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }

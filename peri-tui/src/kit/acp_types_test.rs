@@ -348,10 +348,38 @@ fn test_decode_subagent_started() {
 
 #[test]
 fn test_decode_subagent_stopped() {
+    // legacy 通道缺省：无 result/is_error 字段 → 空字符串 / false（向后兼容）
     let data = serde_json::json!({"agent_id": "sa-1"});
     let decoded = AcpEventData::decode("subagent-stopped", data);
     match decoded {
-        AcpEventData::SubagentStopped { agent_id } => assert_eq!(agent_id, "sa-1"),
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "sa-1");
+            assert_eq!(result, "", "legacy 缺省 result 应为空");
+            assert!(!is_error, "legacy 缺省 is_error 应为 false");
+        }
+        _ => panic!("expected SubagentStopped"),
+    }
+    // 显式字段（canonical 主通道 peri/agent_event）
+    let data = serde_json::json!({
+        "agent_id": "sa-2",
+        "result": "loop failed: llm error",
+        "is_error": true
+    });
+    let decoded = AcpEventData::decode("subagent-stopped", data);
+    match decoded {
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "sa-2");
+            assert_eq!(result, "loop failed: llm error");
+            assert!(is_error);
+        }
         _ => panic!("expected SubagentStopped"),
     }
 }
