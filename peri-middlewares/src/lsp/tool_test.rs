@@ -99,9 +99,11 @@ async fn query_document_symbol(tool: &LspTool, file_path: &str) {
 
 #[test]
 fn test_file_to_uri_absolute_with_space_and_chinese() {
-    // 空格与中文按 RFC 3986 percent-encode，保留 `/` 分隔符
+    // 空格与中文按 RFC 3986 percent-encode，保留 `/` 分隔符。
+    // Windows 上 /tmp 落到当前盘根（file:///D:/tmp/...），断言公共部分
     let uri = LspTool::file_to_uri("/tmp/my dir/源码.rs");
-    assert!(uri.starts_with("file:///tmp/my%20dir/"), "got {uri}");
+    assert!(uri.starts_with("file:///"), "got {uri}");
+    assert!(uri.contains("/tmp/my%20dir/"), "got {uri}");
     assert!(uri.contains("%E6%BA%90%E7%A0%81"), "got {uri}");
     assert!(!uri.contains(' '), "URI 不应包含未编码空格: {uri}");
 }
@@ -155,7 +157,13 @@ async fn test_first_query_triggers_did_open_with_content() {
         record.contains("\"languageId\":\"rust\""),
         "languageId 应按扩展名推断: {record}"
     );
-    assert!(record.contains(&path), "didOpen uri 应为文件路径: {record}");
+    // didOpen 的 uri 应包含文件路径（Windows 上 URI 为正斜杠形式，
+    // 原路径为反斜杠，统一用正斜杠比对）
+    let uri_path = path.replace('\\', "/");
+    assert!(
+        record.contains(&uri_path),
+        "didOpen uri 应为文件路径: {record}"
+    );
 }
 
 #[tokio::test]

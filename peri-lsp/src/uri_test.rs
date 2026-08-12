@@ -14,7 +14,8 @@ fn assert_abs_path_uri(path: &str, expect: &str) {
 #[cfg(windows)]
 fn assert_abs_path_uri(path: &str, expect: &str) {
     // Windows 上无盘符的 `/...` 会落到当前盘根，与 Unix 语义不同；
-    // 用盘符绝对路径验证同样的编码行为
+    // 用盘符绝对路径验证同样的编码行为。标准 file URI 形式：
+    // file:///C:/...（空 authority、正斜杠分隔）
     assert_eq!(path_to_uri(Path::new(path)), expect);
 }
 
@@ -23,7 +24,7 @@ fn test_path_to_uri_spaces() {
     #[cfg(unix)]
     assert_abs_path_uri("/Users/a b.rs", "file:///Users/a%20b.rs");
     #[cfg(windows)]
-    assert_abs_path_uri("C:\\Users\\a b.rs", "file://C%3A%5CUsers%5Ca%20b.rs");
+    assert_abs_path_uri("C:\\Users\\a b.rs", "file:///C:/Users/a%20b.rs");
 }
 
 #[test]
@@ -36,7 +37,7 @@ fn test_path_to_uri_chinese() {
     #[cfg(windows)]
     assert_abs_path_uri(
         "C:\\tmp\\中文 文件.rs",
-        "file://C%3A%5Ctmp%5C%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.rs",
+        "file:///C:/tmp/%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.rs",
     );
 }
 
@@ -45,7 +46,7 @@ fn test_path_to_uri_reserved_chars() {
     #[cfg(unix)]
     assert_abs_path_uri("/tmp/a#b?c%.rs", "file:///tmp/a%23b%3Fc%25.rs");
     #[cfg(windows)]
-    assert_abs_path_uri("C:\\tmp\\a#b?c%.rs", "file://C%3A%5Ctmp%5Ca%23b%3Fc%25.rs");
+    assert_abs_path_uri("C:\\tmp\\a#b?c%.rs", "file:///C:/tmp/a%23b%3Fc%25.rs");
 }
 
 #[test]

@@ -14,7 +14,10 @@ use std::path::Path;
 /// - 空格、非 ASCII、`#`、`?`、`%` 等字符按 RFC 3986 percent-encode，
 ///   保留 `/` 分隔符与 `-._~` unreserved 字符。
 ///
-/// 路径语义按 Unix 约定（`/` 分隔）；Windows drive letter 不在处理范围内。
+/// Windows：盘符绝对路径输出标准 file URI `file:///C:/a/b`（空 authority、
+/// 盘符后跟 `/`、分隔符转正斜杠），LSP 服务器（rust-analyzer 等）才能正确
+/// parse；`file://C%3A%5C...` 形式把 `C%3A%5C` 当作 authority，服务器端会
+/// 解析失败。UNC 前缀（`\\server\share`）不在处理范围内。
 pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     if s.starts_with("file://") {
@@ -27,16 +30,51 @@ pub fn path_to_uri(path: &Path) -> String {
         Err(_) => s.into_owned(),
     };
 
-    format!("file://{}", percent_encode(&abs))
+    #[cfg(windows)]
+    {
+        // 盘符路径 `D:\a\b` → `/D:/a/b`（encode 前补前导斜杠构成空 authority）
+        let norm = if is_drive_path(&abs) {
+            format!("/{}", abs.replace('\\', "/"))
+        } else {
+            abs
+        };
+        format!("file://{}", percent_encode(&norm))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("file://{}", percent_encode(&abs))
+    }
 }
 
 /// 将 `file://` URI 转换回文件系统路径：去除前缀 + percent-decode。
 ///
 /// 输入无 `file://` 前缀时原样返回。非法的 `%` 序列（不是 `%XX` 十六进制）
 /// 原样保留，不产生错误。
+///
+/// Windows：标准 file URI（`file:///C:/a/b`）解码为 `C:\a\b`（反斜杠分隔、
+/// 去前导斜杠），可直接用作文件系统路径；根相对形式（`/C:/...`）同样处理。
 pub fn uri_to_path(uri: &str) -> String {
     let rest = uri.strip_prefix("file://").unwrap_or(uri);
-    percent_decode(rest)
+    let decoded = percent_decode(rest);
+    #[cfg(windows)]
+    {
+        if is_drive_path(&decoded) {
+            return decoded.trim_start_matches('/').replace('/', "\\");
+        }
+    }
+    decoded
+}
+
+/// 是否为盘符绝对路径：`C:\...`（原生路径）/ `C:/...` / `/C:/...`
+/// （标准 file URI 的 path 段带前导斜杠）。
+#[cfg(windows)]
+fn is_drive_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    let start = usize::from(b.first() == Some(&b'/'));
+    b.len() > start + 2
+        && b[start].is_ascii_alphabetic()
+        && b[start + 1] == b':'
+        && (b[start + 2] == b'/' || b[start + 2] == b'\\')
 }
 
 /// RFC 3986 percent-encode：仅保留 unreserved 字符与 `/` 分隔符。

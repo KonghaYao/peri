@@ -216,8 +216,12 @@ fn test_uri_to_path_chinese_decoded() {
 
 #[test]
 fn test_uri_to_path_windows_drive() {
-    // Windows 盘符 file:///C:/ 形式：盘符保留，不丢失
+    // Windows 盘符 file:///C:/ 形式：盘符保留，不丢失。
+    // Unix 上保持正斜杠展示；Windows 上转反斜杠分隔（可直接用作文件路径）
     let uri: lsp_types::Uri = "file:///C:/Users/me/a.rs".parse().unwrap();
+    #[cfg(windows)]
+    assert_eq!(uri_to_path(&uri), "C:\\Users\\me\\a.rs");
+    #[cfg(not(windows))]
     assert_eq!(uri_to_path(&uri), "/C:/Users/me/a.rs");
 }
 

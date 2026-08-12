@@ -99,13 +99,15 @@ fn test_from_pool_reuses_pool_instance() {
 #[test]
 fn test_root_uri_normalized_no_double_prefix() {
     // pool.root_uri() 已是完整 file:// URI（绝对化 + percent-encode），
-    // 直接使用即可，不应出现 file://file:// 双重前缀
+    // 直接使用即可，不应出现 file://file:// 双重前缀。
+    // Windows 上 /tmp 落到当前盘根（file:///D:/tmp/...），断言公共前缀与编码
     let config = LspConfigFile {
         lsp_servers: HashMap::new(),
     };
     let mw = LspMiddleware::new("/tmp/my dir".to_string(), config);
     let root = mw.shared_pool().root_uri().to_string();
-    assert!(root.starts_with("file:///tmp/my%20dir"), "got {root}");
+    assert!(root.starts_with("file:///"), "got {root}");
+    assert!(root.contains("/tmp/my%20dir"), "got {root}");
     assert!(!root.starts_with("file://file://"), "双重前缀残留: {root}");
 }
 
