@@ -278,6 +278,148 @@ async fn rpc_response_confirms_coordinator() {
     assert_eq!(resp["id"], json!("hub-1"));
 }
 
+// ---------------------------------------------------------------------------
+// #1 官方 session/request_permission（权限机制官方化）：登记 pending 表 +
+// 投递投影（turn_id 从 active_turns 表注入，聚合器 aggregator.rs:1042 守卫）
+// ---------------------------------------------------------------------------
+
+/// 读 session doc 镜像 `pending_permissions`：返回 `(permission_id,
+/// turn_id)` 列表（镜像断言写法对齐 327-342 的 session map 读法）。
+async fn mirror_pending_permissions(env: &Env) -> Vec<(String, String)> {
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S1))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let Some(perms) = root.get(&txn, "pending_permissions") else {
+        return Vec::new();
+    };
+    let perms = perms.cast::<yrs::MapRef>().unwrap();
+    let mut out = Vec::new();
+    for (k, v) in perms.iter(&txn) {
+        let turn = v
+            .cast::<yrs::MapRef>()
+            .ok()
+            .and_then(|m| m.get(&txn, "turn_id"))
+            .and_then(|t| t.cast::<String>().ok())
+            .unwrap_or_default();
+        out.push((k.to_string(), turn));
+    }
+    out
+}
+
+/// 官方 request_permission 帧（sessionId=acp-1 命中 binding；id 为 number）。
+fn official_permission_frame() -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "acp-1",
+            "toolCall": {"toolCallId": "tc1", "title": "run cmd"},
+            "options": [
+                {"optionId": "allow-once", "name": "允许一次", "kind": "allow_once"}
+            ]
+        }
+    })
+}
+
+#[tokio::test]
+async fn request_permission_registered_and_delivered() {
+    let env = env().await;
+    // 建立 doc 侧活动 turn（聚合器守卫要求：PermissionRequested 关联检查
+    // 要求 turn 已知，aggregator judge_turn_guard）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // 官方 request → Delivered{applied:true} + pending_permissions 表登记
+    // （take 命中且 request_id/options 回读一致）。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    // 投影已写（pending_permissions 有条目；permission_id 由 server 生成）。
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1, "权限投影写入 control doc");
+    let pid = perms[0].0.clone();
+    // take 命中且回读一致；一次性 remove。
+    let taken = env
+        .relay
+        .take_pending_permission(&pid)
+        .await
+        .expect("take 命中");
+    assert_eq!(taken.request_id, json!(5), "agent request id 原样");
+    assert_eq!(taken.options.len(), 1);
+    assert_eq!(taken.options[0]["optionId"], json!("allow-once"));
+    assert_eq!(taken.chat_id, S1);
+    assert!(env.relay.take_pending_permission(&pid).await.is_none(), "一次性 remove");
+}
+
+#[tokio::test]
+async fn request_permission_turn_id_injected() {
+    let env = env().await;
+    // 建立 doc 侧活动 turn（user_message 事件 → 聚合器 active_turn 投影）
+    // + registry 表注入（relay 从 active_turns 表取 turn_id，官方帧无
+    // turnId 字段）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // 官方 request_permission 帧到达 → 镜像 pending_permissions 条目
+    // turn_id == "t1"（对齐 327-342 的镜像断言写法）。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1);
+    assert_eq!(perms[0].1, "t1", "turn_id 从 active_turns 表注入");
+}
+
+#[tokio::test]
+async fn request_permission_before_active_turn_empty_turn_id() {
+    let env = env().await;
+    // doc 侧活动 turn 已建立（聚合器守卫前提），但 registry active_turns 表
+    // 无登记（relay 注入源为空）→ 官方帧到达 → turn_id=="" 但权限仍投影、
+    // take 仍命中（评审 P2-c 固化：功能不丢）。守卫放行依据
+    // aggregator judge_turn_guard `(Some(a), Some(""))` → accepting 通过。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    // 注意：不调用 chats.set_active_turn——registry 表保持无登记。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1, "权限仍投影");
+    assert_eq!(perms[0].1, "", "registry 无 active turn → turn_id 空串");
+    assert!(
+        env.relay.take_pending_permission(&perms[0].0).await.is_some(),
+        "take 仍命中（功能不丢）"
+    );
+}
+
 #[tokio::test]
 async fn disconnect_cleanup_interrupts_turn_and_gaps() {
     let env = env().await;
@@ -444,6 +586,71 @@ async fn buffer_sync_after_disconnect_recovers_chat_from_gap() {
         Some(None),
         "追平 → registry gap 标记清除"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #5 binding 双端点（relay 侧）：无帧内 sessionId 的 JSON-RPC 形态帧按信封
+// 兜底投递（与 child.rs C1 同判据——有 jsonrpc 键）；原始形态仍拒
+// ---------------------------------------------------------------------------
+
+/// #5 无 sessionId 的 JSON-RPC 形态通知（agent/status，instance 级事件，
+/// §5.4 投影无 chat 归属）→ 信封兜底投递：Delivered{applied:true} + control
+/// doc 镜像 `agent.status` 投影（聚合器 write_agent_status）。
+#[tokio::test]
+async fn agent_status_without_session_id_delivered() {
+    let env = env().await;
+    let e = ev(
+        1,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "agent/status",
+            "params": {"status": "busy"}
+        }),
+    );
+    let r = env.relay.on_instance_event("local", &e).await;
+    match r {
+        ConsumeResult::Delivered { chat_id, applied, .. } => {
+            assert_eq!(chat_id, S1, "信封 chat 兜底归属");
+            assert!(applied, "agent/status 应投递（聚合器接受）");
+        }
+        other => panic!("expected delivered, got {other:?}"),
+    }
+    // control（session）doc 镜像：agent.status 投影已写（§5.4）。
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S1))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "busy",
+        "agent/status 投影写入 control doc"
+    );
+}
+
+/// #5 原始形态（无 jsonrpc 键、无 sessionId）→ 仍 binding_missing（relay
+/// 是 server 侧唯一防线；与 child.rs C1 判定对称——直接放行原始形态会让
+/// map_raw 命中 agent_status 而投递，安全边界不放宽）。
+#[tokio::test]
+async fn raw_frame_without_session_id_still_dropped() {
+    let env = env().await;
+    let e = ev(
+        2,
+        json!({"type": "agent_status", "payload": {"status": "busy"}}),
+    );
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped { reason: "binding_missing" }
+    ));
 }
 
 #[tokio::test]

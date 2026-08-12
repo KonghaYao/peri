@@ -17,7 +17,8 @@ mod acp_channel;
 mod translator;
 
 pub use acp_channel::{
-    AcpChannel, DropReason, NormalizeOutcome, extract_agent_config, extract_session_id,
+    AcpChannel, DropReason, NormalizeOutcome, PERMISSION_TIMEOUT, PermissionRequestFields,
+    extract_agent_config, extract_session_id,
 };
 pub use translator::{
     OutboundCtx, OutboundMessage, TranslateError, Translator, validate_cwd,

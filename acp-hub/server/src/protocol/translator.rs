@@ -33,17 +33,14 @@ pub enum TranslateError {
 }
 
 /// 出站上下文（server 按连接绑定注入；客户端字段不可覆盖 binding，§4.3）。
+/// turn_id 不入出站帧（#6 死字段清理）：turnId 由聚合器以事件序列归位，
+/// 宿主侧不随 prompt 下发（§7.2），translator 无需感知。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundCtx {
     /// 最终 cwd：已认证上下文默认目录（§4.3 裁决）。
     pub cwd: String,
     /// binding 翻译后的 acp_session_id（hub session_id → 协议投递 id，§6.1）。
     pub acp_session_id: String,
-    /// prompt 注入的 turnId（§4.4 生成规则：server 生成 uuid，同 commandId
-    /// 重试复用）。随 `session/prompt` 下发——instance 侧 ACP 会话沿用同一
-    /// turnId，聚合器以 turnId 为幂等键（§6.3/§6.5），事件 turn_id 必须与
-    /// 之一致；非 prompt 方法面不使用。
-    pub turn_id: String,
 }
 
 /// 出站产物。
@@ -89,20 +86,15 @@ impl Translator {
                 validate_cwd(&ctx.cwd)?;
                 // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
                 // 序列（`prompt: [{type:"text",text}]`），非 message 字符串。
+                // 官方 PromptRequest = {sessionId, prompt}（schema v1）——无
+                // cwd/effort（#7 非官方字段清理：cwd 已由 spawn/会话绑定目录
+                // 隐含，effort 由 agent 侧默认档位决定）。
                 let mut params = serde_json::Map::new();
                 params.insert("sessionId".to_string(), json!(ctx.acp_session_id));
-                // cwd 是 ACP 请求的严谨字段（agent-client-protocol）：
-                // 与 spawn/会话绑定目录一致（§6.3 workspace 扩展）。
-                params.insert("cwd".to_string(), json!(ctx.cwd));
                 params.insert(
                     "prompt".to_string(),
                     json!([{ "type": "text", "text": payload.message }]),
                 );
-                // 推理强度档位（跨任务契约 §2）：Some 才写入，None 不写
-                // （agent 默认档位）。
-                if let Some(e) = &payload.effort {
-                    params.insert("effort".to_string(), json!(e));
-                }
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
                     "id": rpc_id,
@@ -113,11 +105,12 @@ impl Translator {
             ActionEnvelope::Cancel { .. } => {
                 validate_cwd(&ctx.cwd)?;
                 // agent-client-protocol（peri acp 实测）：session/cancel 是
-                // **notification**（无 id、无响应帧），非 request。
+                // **notification**（无 id、无响应帧），非 request。官方
+                // CancelNotification = {sessionId}（schema v1）——无 cwd（#7）。
                 Ok(OutboundMessage::JsonRpc(json!({
                     "jsonrpc": "2.0",
                     "method": "session/cancel",
-                    "params": { "sessionId": ctx.acp_session_id, "cwd": ctx.cwd },
+                    "params": { "sessionId": ctx.acp_session_id },
                 })))
             }
             ActionEnvelope::ResolvePermission { payload, .. } => {
@@ -177,11 +170,61 @@ impl Translator {
         }
     }
 
+    /// 官方 `session/request_permission` 响应构造（schema v1，#1 权限机制
+    /// 官方化）：
+    /// result = `{ outcome: { outcome: "selected", optionId } | { outcome: "cancelled" } }`，
+    /// id = agent request id 原样回显。响应帧不回 L3（JSON-RPC response 无
+    /// 回执，§4.4 以 forward_ack 为确认点）。
+    ///
+    /// 选档规则：`Allow` → 第一个 `options[i].kind ∈ {allow_once, allow_always}`
+    /// 的 `optionId`（无匹配 → 第一个元素的 `optionId` 保底）；`Deny` → 第一
+    /// 个 `kind ∈ {reject_once, reject_always}` 的 `optionId`（有则
+    /// `selected`+optionId；无 → `cancelled`）。kind 兼容 camelCase 别名
+    /// （`allowOnce`/`allowSession`，对齐 relay 投影层 P2-e 兼容先例）。
+    pub fn permission_response_rpc(
+        &self,
+        request_id: &serde_json::Value,
+        decision: acp_hub_proto::action::PermissionDecision,
+        options: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let outcome = match decision {
+            acp_hub_proto::action::PermissionDecision::Allow => {
+                match pick_option_id(options, &["allow_once", "allow_always"])
+                    .or_else(|| first_option_id(options))
+                {
+                    Some(option_id) => {
+                        json!({ "outcome": "selected", "optionId": option_id })
+                    }
+                    // 入站校验允许空 options 数组（评审 P2-1）：无任何
+                    // optionId 可回显时不得写 `"optionId": null`（官方契约
+                    // selected 分支 optionId 必须为 string）——回落 cancelled，
+                    // 与 Deny 分支一致。
+                    None => json!({ "outcome": "cancelled" }),
+                }
+            }
+            acp_hub_proto::action::PermissionDecision::Deny => {
+                match pick_option_id(options, &["reject_once", "reject_always"]) {
+                    Some(option_id) => {
+                        json!({ "outcome": "selected", "optionId": option_id })
+                    }
+                    None => json!({ "outcome": "cancelled" }),
+                }
+            }
+        };
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "outcome": outcome },
+        })
+    }
+
     /// create 序列第一步：`initialize` JSON-RPC（§6.2；10s 超时由 coordinator
     /// 执行）。返回 `(rpc_id, 请求帧)`。
     ///
     /// `protocolVersion` 必填（agent-client-protocol / peri acp 实测：缺省
-    /// 即 `missing field protocolVersion`）。
+    /// 即 `missing field protocolVersion`）。官方 InitializeRequest =
+    /// `{protocolVersion, clientCapabilities?, clientInfo?}`（schema v1）——
+    /// 无 cwd（#7）；`protocolVersion` 官方为 integer，值 1 合法。
     pub fn initialize_rpc(&self, cwd: &str) -> (String, serde_json::Value) {
         validate_cwd(cwd).expect("server-injected cwd must be valid");
         let rpc_id = self.alloc_rpc_id();
@@ -189,7 +232,7 @@ impl Translator {
             "jsonrpc": "2.0",
             "id": rpc_id,
             "method": "initialize",
-            "params": { "cwd": cwd, "protocolVersion": 1 },
+            "params": { "protocolVersion": 1 },
         });
         (rpc_id, msg)
     }
@@ -237,6 +280,44 @@ impl Translator {
             "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] },
         });
         (rpc_id, msg)
+    }
+}
+
+/// 第一个 `options[i]` 的 `optionId`（保底选档；options 已在入站解析时
+/// 校验为 `{optionId,name,kind}` 对象数组）。
+fn first_option_id(options: &[serde_json::Value]) -> Option<String> {
+    options
+        .iter()
+        .find_map(|v| v.get("optionId").and_then(serde_json::Value::as_str).map(str::to_string))
+}
+
+/// 第一个 `kind` 命中 `kinds`（含 camelCase 别名）的 `optionId`。
+fn pick_option_id(options: &[serde_json::Value], kinds: &[&str]) -> Option<String> {
+    options.iter().find_map(|v| {
+        let obj = v.as_object()?;
+        let kind = obj.get("kind").and_then(serde_json::Value::as_str)?;
+        if kinds
+            .iter()
+            .any(|k| kind == *k || camel_of(k) == Some(kind))
+        {
+            obj.get("optionId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+/// kebab-case → camelCase 别名（`allow_once` → `allowOnce`；`reject_once`
+/// 官方无 camel 形态，防御性同兼容——评审 P2-e 先例）。
+fn camel_of(kebab: &str) -> Option<&'static str> {
+    match kebab {
+        "allow_once" => Some("allowOnce"),
+        "allow_always" => Some("allowSession"),
+        "reject_once" => Some("rejectOnce"),
+        "reject_always" => Some("rejectAlways"),
+        _ => None,
     }
 }
 

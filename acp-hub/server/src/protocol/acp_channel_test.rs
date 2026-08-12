@@ -304,6 +304,151 @@ fn map_permission_response_allow() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #1 官方 session/request_permission（权限机制官方化）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn map_request_permission_official() {
+    // 官方帧（id=5 number + toolCall + options）→ PermissionRequest：
+    // request_id 原样（number 不得丢弃）、permission_id server 生成、
+    // tool_call_id/title/options 透传。
+    let f = json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "acp-1",
+            "toolCall": {"toolCallId": "tc1", "title": "run cmd"},
+            "options": [
+                {"optionId": "allow-once", "name": "允许一次", "kind": "allow_once"},
+                {"optionId": "reject-once", "name": "拒绝一次", "kind": "reject_once"}
+            ]
+        }
+    });
+    match norm(f) {
+        NormalizeOutcome::PermissionRequest(req) => {
+            assert_eq!(req.request_id, json!(5), "agent request id 原样（number）");
+            assert!(!req.permission_id.is_empty(), "permission_id 由 server 生成");
+            assert_eq!(req.tool_call_id.as_deref(), Some("tc1"));
+            assert_eq!(req.title, "run cmd");
+            assert_eq!(req.description, None, "官方无 description 字段");
+            assert_eq!(req.options.len(), 2, "官方 options 原样保留");
+            assert_eq!(req.session_id, "acp-1");
+        }
+        other => panic!("expected permission request, got {other:?}"),
+    }
+    // string id 同样原样保留；title 回退 toolCallId。
+    let s = json!({
+        "jsonrpc": "2.0",
+        "id": "req-7",
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "acp-1",
+            "toolCall": {"toolCallId": "tc2"},
+            "options": [{"optionId": "o1", "name": "x", "kind": "allow_once"}]
+        }
+    });
+    match norm(s) {
+        NormalizeOutcome::PermissionRequest(req) => {
+            assert_eq!(req.request_id, json!("req-7"));
+            assert_eq!(req.title, "tc2", "title 回退 toolCall.toolCallId");
+            assert_eq!(req.tool_call_id.as_deref(), Some("tc2"));
+        }
+        other => panic!("expected permission request, got {other:?}"),
+    }
+}
+
+#[test]
+fn request_permission_missing_fields_dropped() {
+    // 缺 options / toolCallId / sessionId / option.optionId / id →
+    // MissingField（§6.3 同源拒绝；无 id 无法回响应，非 notification）。
+    let no_options = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "session/request_permission",
+        "params": {"sessionId": "acp-1", "toolCall": {"toolCallId": "tc1"}}
+    });
+    assert!(matches!(
+        norm(no_options),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
+    let no_tool_call_id = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "session/request_permission",
+        "params": {"sessionId": "acp-1", "toolCall": {"title": "x"},
+                   "options": [{"optionId": "o1", "name": "n", "kind": "allow_once"}]}
+    });
+    assert!(matches!(
+        norm(no_tool_call_id),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
+    let no_session = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "session/request_permission",
+        "params": {"toolCall": {"toolCallId": "tc1"},
+                   "options": [{"optionId": "o1", "name": "n", "kind": "allow_once"}]}
+    });
+    assert!(matches!(
+        norm(no_session),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
+    let bad_option = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "session/request_permission",
+        "params": {"sessionId": "acp-1", "toolCall": {"toolCallId": "tc1"},
+                   "options": [{"name": "n", "kind": "allow_once"}]}
+    });
+    assert!(matches!(
+        norm(bad_option),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
+    let no_id = json!({
+        "jsonrpc": "2.0", "method": "session/request_permission",
+        "params": {"sessionId": "acp-1", "toolCall": {"toolCallId": "tc1"},
+                   "options": [{"optionId": "o1", "name": "n", "kind": "allow_once"}]}
+    });
+    assert!(matches!(
+        norm(no_id),
+        NormalizeOutcome::Dropped(DropReason::MissingField)
+    ));
+}
+
+/// #2：官方 ToolCallStatus `failed` 终态映射（包裹格式）——同为
+/// ToolCallCompleted + public_error（code=agent_error，message 缺省
+/// "Tool call failed"）。
+#[test]
+fn map_tool_call_update_failed_terminal() {
+    let f = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc1", "status": "failed"}
+        }
+    });
+    match norm(f) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::ToolCallCompleted { result, public_error, .. } => {
+                assert_eq!(result, None);
+                let pe = public_error.unwrap();
+                assert_eq!(pe.code, "agent_error");
+                assert_eq!(pe.message, "Tool call failed");
+            }
+            _ => panic!("expected tool call completed"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+    // error 兼容别名回归（既有行为）。
+    let g = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc2", "status": "error"}
+        }
+    });
+    match norm(g) {
+        NormalizeOutcome::Event(ev) => assert_eq!(ev.body.kind(), "tool_call_completed"),
+        other => panic!("expected event, got {other:?}"),
+    }
+}
+
 #[test]
 fn map_session_update_partial() {
     let f = json!({"type": "session_update", "payload": {"title": "new title"}});

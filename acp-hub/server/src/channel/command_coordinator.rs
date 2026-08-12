@@ -9,8 +9,8 @@
 //! 提交点顺序（§4.4/§6.2 prompt 路径，由执行器保证）：
 //! `intent_durable → translate（rpcId 登记）→ forward_rpc → dispatched → 投影
 //! user entry → L3（JSON-RPC response 匹配 rpcId）→ delivery_confirmed →
-//! projection_committed → completed → committed Ack`；30s 无 L3 → delivery_unknown
-//! （路径 B：非幂等禁止自动重发，§4.4）。
+//! projection_committed → completed → committed Ack`；无增量窗口耗尽（issue
+//! #3：窗口内无事件投递）→ delivery_unknown（路径 B：非幂等禁止自动重发，§4.4）。
 //!
 //! create 序列（§6.2）：`spawn（10s）→ spawn_ack → initialize（10s）→
 //! session/new（30s binding）→ bind → committed(chatId)`；任一步超时 →
@@ -56,8 +56,9 @@ pub const DEFAULT_INSTANCE_ID: &str = "local";
 /// `ACP_HUB_ACP_CMD` 空格拆分，见 `crate::config`）。
 pub use crate::config::DEFAULT_ACP_CMD;
 
-/// L3 确认超时（§4.4 路径 B：30s 无响应 → delivery_unknown）【决策：设计稿
-/// §16 测试 13 的 30s 常量，非 §16 配置表项】。
+/// L3 确认超时（§4.4 路径 B：issue #3 增量窗口——窗口内该 chat 无事件投递
+/// → delivery_unknown；默认 30s，测试注入短值）【决策：设计稿 §16 测试 13
+/// 的 30s 常量，非 §16 配置表项】。
 pub const L3_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// session/list 轮询间隔（§6.3：10s 全量同步；幂等，响应中不存在的旧条目
@@ -1378,7 +1379,6 @@ impl CommandCoordinator {
                 &OutboundCtx {
                     cwd: cwd.clone(),
                     acp_session_id: String::new(),
-                    turn_id: String::new(),
                 },
             ) {
                 Ok(OutboundMessage::JsonRpc(v)) => v,
@@ -1633,7 +1633,6 @@ impl CommandCoordinator {
             &OutboundCtx {
                 cwd: entry.cwd.clone(),
                 acp_session_id,
-                turn_id: turn_id.to_string(),
             },
         ) {
             Ok(OutboundMessage::JsonRpc(v)) => v,
@@ -1649,7 +1648,7 @@ impl CommandCoordinator {
             }
         };
         let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
-        let rx = self
+        let mut rx = self
             .inner
             .relay
             .register_rpc(&rpc_id, command_id_str.clone())
@@ -1696,9 +1695,36 @@ impl CommandCoordinator {
             .chats
             .set_active_turn(chat_id, &turn_id.to_string())
             .await;
-        // 5. L3 等待（§4.4 路径 B；超时 → delivery_unknown）。
-        match tokio::time::timeout(self.inner.l3_timeout, rx).await {
-            Ok(Ok(response)) => {
+        // 5. L3 等待（§4.4 路径 B 变体；issue #3）：prompt 响应只在 turn
+        //    结束回——超时语义 = 「无增量窗口」：窗口（l3_timeout）内该
+        //    chat 无任何事件投递才判 delivery_unknown；有事件投递（relay
+        //    submit/补推成功 → touch_active_turn 续命）则继续等（长流式
+        //    turn 不得被 30s 硬超时误杀）。边界：LLM 静默思考（无任何
+        //    session/update 事件）> 窗口仍超时——与 issue 措辞一致。
+        let result = loop {
+            match tokio::time::timeout(self.inner.l3_timeout, &mut rx).await {
+                Ok(Ok(response)) => break Ok(response), // 终态路径（下方主体）
+                Ok(Err(_)) => break Err(()),            // 通道断（rx 全 drop）
+                Err(_elapsed) => {
+                    // 窗口到期：登记表已清理（断链/进程退出/他处终结）或该
+                    // chat 无增量投递 → delivery_unknown。**并入 Err(()) 主体，
+                    // 不得 return**（评审 P1-1：无终态 return 使命令卡
+                    // Dispatched，outbox 重放不回退 Dispatched → 客户端无
+                    // ack 不可重试；agent 崩溃是常见路径）。
+                    let active = self.inner.chats.active_turn(chat_id).await;
+                    if active != Some(turn_id.to_string()) {
+                        break Err(());
+                    }
+                    let idle = self.inner.chats.active_turn_idle(chat_id).await;
+                    if idle.is_none_or(|d| d > self.inner.l3_timeout) {
+                        break Err(()); // 无增量窗口耗尽 → delivery_unknown
+                    }
+                    // 有续命（窗口内有事件投递）：继续等（rx 未动，无状态泄漏）。
+                }
+            }
+        };
+        match result {
+            Ok(response) => {
                 let is_error = response.get("error").is_some();
                 if is_error {
                     self.fail_terminal(
@@ -1753,9 +1779,9 @@ impl CommandCoordinator {
                     None,
                 );
             }
-            Ok(Err(_)) | Err(_) => {
-                // 30s 无 L3 → delivery_unknown（路径 B：非幂等禁止自动重发，
-                // §4.4）。
+            Err(()) => {
+                // 无增量窗口耗尽（30s 无 L3 且无事件投递）→ delivery_unknown
+                // （路径 B：非幂等禁止自动重发，§4.4）。
                 self.inner.relay.cancel_rpc(&rpc_id).await;
                 if let Err(e) = store.outbox().lock().await.mark_delivery_unknown(command_id) {
                     warn!(chat_id, error = ?e, "mark_delivery_unknown failed");
@@ -2080,8 +2106,6 @@ impl CommandCoordinator {
             &OutboundCtx {
                 cwd: entry.cwd.clone(),
                 acp_session_id,
-                // cancel/resolve 方法面无 turnId（§4.3 表），占位不注入。
-                turn_id: String::new(),
             },
         ) {
             Ok(OutboundMessage::JsonRpc(v)) => v,
@@ -2373,6 +2397,9 @@ impl CommandCoordinator {
                 // 已裁决/已过期/未知 → 幂等 duplicate（§7.4 规则 4；§4.4
                 // duplicate ack），命令账本清除【决策：CAS 非 Migrated 的命令
                 // 未产生副作用，tombstone 释放 commandId】。
+                // #1：duplicate 不触发 take，官方表项滞留至断链——顺手移除
+                // （评审 P2-b；remove 幂等无害）。
+                self.inner.relay.remove_pending_permission(&payload.permission_id).await;
                 let _ = store.outbox().lock().await.clear_for_retry(command_id);
                 let _ = cmd
                     .tx
@@ -2398,48 +2425,44 @@ impl CommandCoordinator {
             }
             _ => {}
         }
-        // 2. 翻译 + 下发（L1+L2）。
+        // 2. 双轨（OQ7 裁决 / 评审 P0-1）：官方 `session/request_permission`
+        //    （take 命中）→ 官方响应帧（无 L3，JSON-RPC response 无回执，
+        //    §4.4 以 forward_ack 为确认点）；原始形态 `permission_request`
+        //    （map_raw:475 路径，未命中）→ 旧轨 translate + register_rpc +
+        //    L3（原样保留）。两轨共享 CAS 幂等，转发目标同为 entry 归属
+        //    instance。
+        let perm = self
+            .inner
+            .relay
+            .take_pending_permission(&payload.permission_id)
+            .await;
         let Some(entry) = self.inner.chats.entry(chat_id).await else {
             return;
         };
-        let Some(acp_session_id) = entry.session_id.clone() else {
-            return;
-        };
         let instance_id = entry.instance_id.clone();
-        let msg = match self.inner.translator.translate(
-            &cmd.action,
-            &OutboundCtx {
-                cwd: entry.cwd.clone(),
-                acp_session_id,
-                // cancel/resolve 方法面无 turnId（§4.3 表），占位不注入。
-                turn_id: String::new(),
-            },
-        ) {
-            Ok(OutboundMessage::JsonRpc(v)) => v,
-            _ => {
-                self.send_error(cmd, ErrorCode::InvalidState, "translate failed", false)
-                    .await;
-                return;
-            }
-        };
-        let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
-        let rx = self
-            .inner
-            .relay
-            .register_rpc(&rpc_id, command_id_str.clone())
-            .await;
-        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
-            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
-                .await;
-            return;
-        }
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
-            warn!(chat_id, error = ?e, "mark_dispatched failed");
-            return;
-        }
-        // 3. L3。
-        match tokio::time::timeout(self.inner.l3_timeout, rx).await {
-            Ok(Ok(r)) if r.get("error").is_none() => {
+        match perm {
+            Some(perm) => {
+                // 官方轨：响应帧构造不经 translate（评审 P0-1）；id = agent
+                // request id 原样回显（string/number 均合法，instance_registry
+                // forward_rpc 已放宽提取）。
+                let msg = self.inner.translator.permission_response_rpc(
+                    &perm.request_id,
+                    payload.decision,
+                    &perm.options,
+                );
+                // mark_dispatched 先行（评审 P2-a：outbox Dispatched→
+                // DeliveryConfirmed 强校验，漏写则 mark_delivery_confirmed
+                // 被拒、命令卡 IntentDurable）。
+                if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+                    warn!(chat_id, error = ?e, "mark_dispatched failed");
+                    return;
+                }
+                // L1+L2：forward_ack 即确认点（无 L3 等待）。
+                if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
+                    self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
+                        .await;
+                    return;
+                }
                 if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
@@ -2454,16 +2477,72 @@ impl CommandCoordinator {
                 }
                 self.send_committed(cmd, None, None).await;
             }
-            _ => {
-                self.inner.relay.cancel_rpc(&rpc_id).await;
-                let _ = store.outbox().lock().await.mark_delivery_unknown(command_id);
-                self.send_error(
-                    cmd,
-                    ErrorCode::AgentUnavailable,
-                    "delivery unknown; automatic retry not permitted (path B)",
-                    false,
-                )
-                .await;
+            None => {
+                // 原始轨（peri 私有 permission_request，map_raw:475 路径）：
+                // 现有 translate + register_rpc + L3 逻辑原样保留（评审
+                // P0-1：translate 的 ResolvePermission 分支原样保留，此轨
+                // 不变）。
+                let Some(acp_session_id) = entry.session_id.clone() else {
+                    return;
+                };
+                let msg = match self.inner.translator.translate(
+                    &cmd.action,
+                    &OutboundCtx {
+                        cwd: entry.cwd.clone(),
+                        acp_session_id,
+                    },
+                ) {
+                    Ok(OutboundMessage::JsonRpc(v)) => v,
+                    _ => {
+                        self.send_error(cmd, ErrorCode::InvalidState, "translate failed", false)
+                            .await;
+                        return;
+                    }
+                };
+                let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
+                let rx = self
+                    .inner
+                    .relay
+                    .register_rpc(&rpc_id, command_id_str.clone())
+                    .await;
+                if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
+                    self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
+                        .await;
+                    return;
+                }
+                if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+                    warn!(chat_id, error = ?e, "mark_dispatched failed");
+                    return;
+                }
+                // 3. L3。
+                match tokio::time::timeout(self.inner.l3_timeout, rx).await {
+                    Ok(Ok(r)) if r.get("error").is_none() => {
+                        if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                            warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
+                            return;
+                        }
+                        if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                            warn!(chat_id, error = ?e, "mark_projection_committed failed");
+                            return;
+                        }
+                        if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
+                            warn!(chat_id, error = ?e, "mark_completed failed");
+                            return;
+                        }
+                        self.send_committed(cmd, None, None).await;
+                    }
+                    _ => {
+                        self.inner.relay.cancel_rpc(&rpc_id).await;
+                        let _ = store.outbox().lock().await.mark_delivery_unknown(command_id);
+                        self.send_error(
+                            cmd,
+                            ErrorCode::AgentUnavailable,
+                            "delivery unknown; automatic retry not permitted (path B)",
+                            false,
+                        )
+                        .await;
+                    }
+                }
             }
         }
     }

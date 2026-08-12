@@ -781,13 +781,14 @@ fn close_code(code: u16) -> tokio_tungstenite::tungstenite::protocol::frame::cod
     }
 }
 
-/// DocId → cid 提取（`chat:{cid}` / `control:{cid}`）。
+/// DocId → cid 提取（`chat:{cid}` / `session:{cid}`）。
 ///
 /// `hub:registry` 不是 chat doc，不得提取 cid（否则订阅 registry 会误开
-/// 一个名为 "registry" 的假 chat 并污染 Registry Doc）。
+/// 一个名为 "registry" 的假 chat 并污染 Registry Doc）。`control:` 为死前缀
+/// （代码实际无 `DocId::control` 构造，#4 前缀面统一为 session:）。
 fn doc_cid(doc: &acp_hub_proto::conn::DocId) -> Option<&str> {
     let s = doc.as_str();
-    if !(s.starts_with("chat:") || s.starts_with("control:")) {
+    if !(s.starts_with("chat:") || s.starts_with("session:")) {
         return None;
     }
     s.split_once(':').map(|(_, cid)| cid)

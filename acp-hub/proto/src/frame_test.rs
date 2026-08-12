@@ -351,3 +351,23 @@ fn registry_doc_id_is_hub_registry() {
     assert_ne!(DocId::REGISTRY, DocId::chat("registry"));
     assert_ne!(DocId::REGISTRY, DocId::session("registry"));
 }
+
+/// #4 DocId 前缀面：`session:` 白名单注册（FromStr）+ roundtrip（§5.2 表
+/// `session:{cid}` 控制状态 Doc）；`control:` 死前缀不入白名单（代码实际
+/// 只有 chat/session/hub 三前缀——固化死前缀语义）。
+#[test]
+fn session_docid_fromstr_parses() {
+    let doc = DocId::from_str("session:s1").expect("session: 前缀应解析");
+    assert_eq!(doc.as_str(), "session:s1", "as_str() roundtrip");
+    assert_eq!(doc, DocId::session("s1"), "与构造器一致");
+    // chat/hub 白名单不受影响。
+    assert_eq!(DocId::from_str("chat:c1").unwrap().as_str(), "chat:c1");
+    assert_eq!(DocId::from_str("hub:registry").unwrap(), DocId::REGISTRY);
+    // control: 不入白名单（死前缀语义固化）。
+    assert!(
+        DocId::from_str("control:x").is_err(),
+        "control: 是死前缀（代码实际用 session:）"
+    );
+    // 空 sid 段仍拒绝（§5.2 防注入）。
+    assert!(DocId::from_str("session:").is_err(), "空 sid 仍拒绝");
+}

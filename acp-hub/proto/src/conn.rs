@@ -114,7 +114,7 @@ impl FromStr for DocId {
         let (prefix, sid) = s
             .split_once(':')
             .ok_or_else(|| DocIdError(s.to_string()))?;
-        if prefix != "chat" && prefix != "control" && prefix != "hub" {
+        if prefix != "chat" && prefix != "session" && prefix != "hub" {
             return Err(DocIdError(s.to_string()));
         }
         if sid.is_empty()

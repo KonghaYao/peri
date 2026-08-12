@@ -18,7 +18,7 @@
 //! ```text
 //! body = version:u8 | kind:u8 | epoch:u32 LE | seq:u64 LE | payload
 //! kind = 0x01 doc_commit（M1 唯一）
-//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=control）| len:u32 LE | yjs update 字节
+//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=session）| len:u32 LE | yjs update 字节
 //! ```
 //!
 //! 并发：写锁（`tokio::sync::Mutex`，由 [`crate::persist::ChatStore`] 持有）

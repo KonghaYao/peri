@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
@@ -104,6 +105,16 @@ pub struct ReconciliationReport {
     pub to_kill: Vec<String>,
 }
 
+/// 活动 turn 表条目（#3 增量窗口计时：turn 活跃期间的 last_activity 由
+/// relay 事件投递成功（[`ChatRegistry::touch_active_turn`]）续命；
+/// exec_prompt L3 窗口据此判定——仅对「无增量窗口」计时，§4.4 路径 B 变体）。
+#[derive(Debug, Clone)]
+struct ActiveTurnEntry {
+    turn_id: String,
+    /// 最近一次该 chat 事件投递时刻（单调时钟；relay touch 更新）。
+    last_activity: Instant,
+}
+
 /// chat 注册表（§7.3 状态机 + binding + pending_close + 对账）。
 #[derive(Clone)]
 pub struct ChatRegistry {
@@ -116,9 +127,10 @@ struct ChatInner {
     bindings: RwLock<HashMap<String, String>>,
     /// pending_close 补发集合（§7.6）。
     pending_close: RwLock<HashSet<String>>,
-    /// 活动 turn 登记（chat → turn_id；断链清理输入，§7.1「活动 turn →
-    /// interrupted」。coordinator 登记、断链清理消费）。
-    active_turns: RwLock<HashMap<String, String>>,
+    /// 活动 turn 登记（chat → turn 条目；断链清理输入，§7.1「活动 turn →
+    /// interrupted」。coordinator 登记、relay touch 续命、断链清理消费；
+    /// #3 last_activity 增量窗口计时）。
+    active_turns: RwLock<HashMap<String, ActiveTurnEntry>>,
     registry: RegistryState,
 }
 
@@ -429,12 +441,35 @@ impl ChatRegistry {
     }
 
     /// 活动 turn 登记（coordinator prompt 执行登记；§7.1 断链清理输入）。
+    /// last_activity 初始化为登记时刻（#3 增量窗口起点）。
     pub async fn set_active_turn(&self, chat_id: &str, turn_id: &str) {
+        self.inner.active_turns.write().await.insert(
+            chat_id.to_string(),
+            ActiveTurnEntry {
+                turn_id: turn_id.to_string(),
+                last_activity: Instant::now(),
+            },
+        );
+    }
+
+    /// 活动 turn 续命（#3）：relay 事件投递成功（聚合器接受）后调用——
+    /// 刷新 last_activity，exec_prompt L3 窗口据此判定「窗口内有增量」而
+    /// 续等。表项不存在（无活动 turn）→ 幂等无操作。
+    pub async fn touch_active_turn(&self, chat_id: &str) {
+        if let Some(entry) = self.inner.active_turns.write().await.get_mut(chat_id) {
+            entry.last_activity = Instant::now();
+        }
+    }
+
+    /// 活动 turn 空闲时长（#3）：`now - last_activity`；表项不存在 → None
+    /// （调用方按「无活动窗口」处理）。
+    pub async fn active_turn_idle(&self, chat_id: &str) -> Option<Duration> {
         self.inner
             .active_turns
-            .write()
+            .read()
             .await
-            .insert(chat_id.to_string(), turn_id.to_string());
+            .get(chat_id)
+            .map(|e| e.last_activity.elapsed())
     }
 
     /// 活动 turn 清除（turn 终态 / chat 关闭 / 断链清理后）。
@@ -444,7 +479,12 @@ impl ChatRegistry {
 
     /// 活动 turn 查询（断链清理：`MarkTurnInterrupted` 输入，§7.1）。
     pub async fn active_turn(&self, chat_id: &str) -> Option<String> {
-        self.inner.active_turns.read().await.get(chat_id).cloned()
+        self.inner
+            .active_turns
+            .read()
+            .await
+            .get(chat_id)
+            .map(|e| e.turn_id.clone())
     }
 }
 

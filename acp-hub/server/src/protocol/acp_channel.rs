@@ -35,6 +35,31 @@ pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// [`truncate_text`]）。
 pub const TEXT_MAX_BYTES: usize = 4096;
 
+/// 官方 `session/request_permission` request 解析产物（#1 权限机制官方化）。
+///
+/// agent→client 的 JSON-RPC **request**（带 id，须回响应）；字段按官方
+/// schema v1 提取（params = `{sessionId, toolCall, options}`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionRequestFields {
+    /// agent 的 request id（原样，响应帧 id 回显；JSON-RPC id 可为
+    /// string/number——`as_str` 失败不得丢弃，与 RpcResponse 分支的关键
+    /// 差异）。
+    pub request_id: serde_json::Value,
+    /// server 生成的 permission_id（uuid v4；聚合器投影键 §5.4）。
+    pub permission_id: String,
+    /// toolCall.toolCallId（透传 → 投影 tool_call_id）。
+    pub tool_call_id: Option<String>,
+    pub title: String,
+    /// 官方无 description 字段 → None。
+    pub description: Option<String>,
+    /// 官方 options 原样（`{optionId,name,kind}` 数组；响应须回显 optionId）。
+    pub options: Vec<serde_json::Value>,
+    /// 官方 params.sessionId（acp_session_id，binding 已校验；仅 relay
+    /// register 用，不写入 EventBody——PendingPermissionReq.chat_id 已承载
+    /// 归属，relay 侧不落表）。
+    pub session_id: String,
+}
+
 /// 规范化结果（§6.1 事件表 + RpcResponse 专门面）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum NormalizeOutcome {
@@ -49,6 +74,10 @@ pub enum NormalizeOutcome {
         /// 是否 JSON-RPC error 响应。
         is_error: bool,
     },
+    /// 官方 `session/request_permission` request（agent→client，带 id，须回
+    /// 响应；#1 权限机制官方化）。由 relay 登记 pending_permissions 表并
+    /// 投递 `PermissionRequested` 事件，coordinator resolve 时回官方响应帧。
+    PermissionRequest(PermissionRequestFields),
     /// 丢弃 + 原因（调用方计数，不 panic 不静默，§4.8 精神）。
     Dropped(DropReason),
 }
@@ -239,7 +268,71 @@ impl AcpChannel {
                 },
             }));
         }
+        // 官方 `session/request_permission` request（#1 权限机制官方化，
+        // schema v1）：agent→client 请求权限。带 id（须回响应，§4.4 响应
+        // 帧无回执、以 forward_ack 为确认点）；params 必含 sessionId/
+        // toolCall/options。
+        if method == "session/request_permission" {
+            let Some(id) = obj.get("id").filter(|v| !v.is_null()) else {
+                // 无 id → 无法回响应（官方为 request 形态，非 notification）。
+                return NormalizeOutcome::Dropped(DropReason::MissingField);
+            };
+            return match self.normalize_request_permission(id, &params) {
+                Ok(req) => NormalizeOutcome::PermissionRequest(req),
+                Err(MapError::MissingField) => {
+                    NormalizeOutcome::Dropped(DropReason::MissingField)
+                }
+                Err(MapError::Unsupported) => {
+                    NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+                }
+            };
+        }
         NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+    }
+
+    /// 官方 `session/request_permission` 解析（schema v1）：params =
+    /// `{sessionId(req), toolCall(req, ToolCallUpdate), options(req)}`。
+    ///
+    /// - `permission_id` 由 server 生成（uuid v4，§4.7 server 权威；官方
+    ///   request 无 permissionId 字段）；
+    /// - `title` = toolCall.title → toolCall.toolCallId → 空串回退；
+    /// - `description` 官方无字段 → None；
+    /// - `request_id` 帧顶层 id **原样保留** `serde_json::Value`
+    ///   （string/number 均合法；`as_str` 失败不得丢弃——这是与现有
+    ///   [`NormalizeOutcome::RpcResponse`] 分支 160-162 的关键差异）。
+    fn normalize_request_permission(
+        &self,
+        request_id: &Value,
+        params: &serde_json::Map<String, Value>,
+    ) -> Result<PermissionRequestFields, MapError> {
+        let session_id = required(params, "sessionId", "session_id")?;
+        let tool_call = params
+            .get("toolCall")
+            .and_then(Value::as_object)
+            .ok_or(MapError::MissingField)?;
+        let tool_call_id = string_field(tool_call, "toolCallId", "tool_call_id")
+            .ok_or(MapError::MissingField)?;
+        let options = params
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or(MapError::MissingField)?;
+        for o in options {
+            let obj = o.as_object().ok_or(MapError::MissingField)?;
+            if string_field(obj, "optionId", "option_id").is_none() {
+                return Err(MapError::MissingField);
+            }
+        }
+        let title = string_field(tool_call, "title", "title")
+            .unwrap_or_else(|| tool_call_id.clone());
+        Ok(PermissionRequestFields {
+            request_id: request_id.clone(),
+            permission_id: uuid::Uuid::new_v4().to_string(),
+            tool_call_id: Some(tool_call_id),
+            title,
+            description: None,
+            options: options.clone(),
+            session_id,
+        })
     }
 
     /// agent-client-protocol `session/update` 的 `update` 对象 → EventBody。
@@ -290,7 +383,9 @@ impl AcpChannel {
             },
             // tool_call / tool_call_update 按 status 细分终态
             // （resolveToolCallType：running→started；completed/complete/done→
-            // completed；error→failed；缺省 running）。
+            // completed；failed/error→failed；缺省 running。官方 ToolCallStatus
+            // 值域 pending/in_progress/completed/failed（#2），兼容别名
+            // complete/done/error；pending/in_progress 归入 started 非终态）。
             "tool_call" | "tool_call_update" => {
                 let tool_call_id = update
                     .get("toolCallId")
@@ -319,7 +414,10 @@ impl AcpChannel {
                             public_error: None,
                         }
                     }
-                    Some("error") => B::ToolCallCompleted {
+                    // #2：官方 failed 终态（ToolCallStatus 值域
+                    // pending/in_progress/completed/failed）；error 为兼容
+                    // 别名（同为 ToolCallCompleted + public_error）。
+                    Some("failed") | Some("error") => B::ToolCallCompleted {
                         turn_id: String::new(),
                         tool_call_id,
                         result: None,

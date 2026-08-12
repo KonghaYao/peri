@@ -291,7 +291,7 @@ async function main() {
 
   // (c) 订阅 chat + control → chat 快照帧（带 projectionVersion，合法 base64）
   const chatDoc = `chat:${sid}`;
-  const controlDoc = `control:${sid}`;
+  const controlDoc = `session:${sid}`;
   send({ t: 'ysync.subscribe', docs: [chatDoc, controlDoc] });
   const snapshot = await waitFor(
     `chat 快照 ${chatDoc}`,

@@ -17,7 +17,7 @@ use yrs::{Map, ReadTxn, Transact};
 
 use acp_hub_proto::ack::{ActionError, ErrorCode};
 use acp_hub_proto::action::{
-    ActionEnvelope, CreateChatPayload, PromptChatPayload,
+    ActionEnvelope, CreateChatPayload, PromptChatPayload, ResolvePermissionPayload,
 };
 use acp_hub_proto::frame::Frame;
 use acp_hub_proto::instance::InstanceForwardAck;
@@ -457,6 +457,200 @@ async fn resolve_duplicate_and_unknown() {
         }
         other => panic!("expected duplicate ack, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// #1 官方 session/request_permission resolve 双轨：官方轨（take 命中）→
+// 官方响应帧（无 L3，forward_ack 即确认点）；原始轨回归见
+// resolve_duplicate_and_unknown（保留原样）。
+// ---------------------------------------------------------------------------
+
+/// 官方 request_permission 帧（sessionId 命中 binding；id=5 number——
+/// agent 常为数字自增 id）。
+fn official_permission_frame(acp: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": acp,
+            "toolCall": {"toolCallId": "tc1", "title": "run cmd"},
+            "options": [
+                {"optionId": "allow-once", "name": "允许一次", "kind": "allow_once"}
+            ]
+        }
+    })
+}
+
+/// 读 session doc 镜像 `pending_permissions`：返回 `(permission_id,
+/// turn_id)` 列表（镜像读法对齐 drive_prompt_l3 1474-1494）。
+async fn mirror_pending_permissions(env: &Env, sid: &str) -> Vec<(String, String)> {
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(sid))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let Some(perms) = root.get(&txn, "pending_permissions") else {
+        return Vec::new();
+    };
+    let perms = perms.cast::<yrs::MapRef>().unwrap();
+    let mut out = Vec::new();
+    for (k, v) in perms.iter(&txn) {
+        let turn = v
+            .cast::<yrs::MapRef>()
+            .ok()
+            .and_then(|m| m.get(&txn, "turn_id"))
+            .and_then(|t| t.cast::<String>().ok())
+            .unwrap_or_default();
+        out.push((k.to_string(), turn));
+    }
+    out
+}
+
+/// 建立 doc 侧活动 turn（RegisterUserEntry → 聚合器 active_turn 投影，
+/// §6.5 服务端单写）+ registry 表注入（relay register_permission_request
+/// 的 turn_id 来源）。
+async fn setup_active_turn(env: &Env, sid: &str) {
+    let turn = env
+        .doc
+        .submit_command(
+            sid,
+            crate::state::doc_manager::DocCommand::RegisterUserEntry {
+                turn_id: "t1".into(),
+                entry_id: "t1:user".into(),
+                text: "hi".into(),
+                author_user_id: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        turn,
+        crate::state::doc_manager::SubmitResult::Applied(_)
+    ));
+    env.chats.set_active_turn(sid, "t1").await;
+}
+
+/// 官方 request_permission 入站（binding 命中）→ 投影 pending + 登记表；
+/// 返回 server 生成的 permission_id。
+async fn register_official_permission(env: &Env, sid: &str, acp: &str, seq: u64) -> String {
+    let ev = acp_hub_proto::instance::InstanceEvent {
+        chat_id: sid.into(),
+        epoch: 0,
+        seq,
+        frame: official_permission_frame(acp),
+    };
+    let r = env.relay.on_instance_event("local", &ev).await;
+    assert!(
+        matches!(r, crate::channel::ConsumeResult::Delivered { applied: true, .. }),
+        "{r:?}"
+    );
+    let perms = mirror_pending_permissions(env, sid).await;
+    assert_eq!(perms.len(), 1, "权限投影写入 control doc");
+    perms[0].0.clone()
+}
+
+/// 官方轨 resolve：take 命中 → 官方响应帧（id=5 原样回显、selected+
+/// optionId、无 method）→ forward_ack → Committed ack（不再等 L3 响应帧）。
+#[tokio::test]
+async fn resolve_official_permission_sends_response() {
+    let mut env = env().await;
+    bound_session(&env, S1, "acp-1").await;
+    setup_active_turn(&env, S1).await;
+    let pid = register_official_permission(&env, S1, "acp-1", 1).await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let resolve = ActionEnvelope::ResolvePermission {
+        command_id: cid.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S1.into(),
+            permission_id: pid,
+            decision: acp_hub_proto::action::PermissionDecision::Allow,
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), resolve, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // 官方轨：forward 官方响应帧。
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            assert_eq!(f.frame["id"], serde_json::json!(5), "agent request id 原样回显");
+            assert_eq!(
+                f.frame["result"]["outcome"]["outcome"],
+                serde_json::json!("selected")
+            );
+            assert_eq!(
+                f.frame["result"]["outcome"]["optionId"],
+                serde_json::json!("allow-once")
+            );
+            assert!(f.frame.get("method").is_none(), "响应帧无 method");
+            // 回 forward_ack（L1+L2；官方轨以 forward_ack 为确认点，无 L3）。
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    }
+    // Committed ack（无 L3 响应帧路径）。
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+}
+
+/// 官方轨 forward 失败（instance 离线）→ fail_retryable + 无 committed。
+#[tokio::test]
+async fn resolve_official_forward_failure_retryable() {
+    let mut env = env().await;
+    bound_session(&env, S2, "acp-2").await;
+    setup_active_turn(&env, S2).await;
+    let pid = register_official_permission(&env, S2, "acp-2", 1).await;
+    // instance 离线 → 官方轨 forward_rpc 返回 Offline。
+    env.instance
+        .on_disconnect("local", &InstanceConn { tx: env.instance_tx.clone() })
+        .await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let resolve = ActionEnvelope::ResolvePermission {
+        command_id: cid.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S2.into(),
+            permission_id: pid,
+            decision: acp_hub_proto::action::PermissionDecision::Allow,
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), resolve, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    // ActionError（InstanceOffline，retryable）+ 无 committed。
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::InstanceOffline);
+            assert!(e.retryable);
+        }
+        other => panic!("expected action_error, got {other:?}"),
+    }
+    assert!(env.instance_rx.try_recv().is_err(), "无 forward 帧（离线）");
 }
 
 #[tokio::test]
@@ -1670,5 +1864,138 @@ async fn cancel_notification_injects_cancelled_and_clears_active_turn() {
         sm.get(&txn, "active_turn_status").unwrap().cast::<String>().unwrap(),
         "cancelled",
         "cancel 发送成功 → turn 终态 Cancelled（§7.2）"
+    );
+}
+
+/// #3 增量窗口续命（issue #3）：L3 窗口（500ms）内 touch（relay 事件投递
+/// 等价）后续命——越过原窗口到期点投 L3 响应仍 Committed（长流式 turn
+/// 不误判 delivery_unknown）。
+#[tokio::test]
+async fn prompt_l3_no_timeout_while_active() {
+    let mut env = env().await;
+    bound_session(&env, S1, "acp-1").await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), prompt_action(&cid, S1), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    let rpc_id = match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            f.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    };
+    // 等活动 turn 登记（executor 在 forward_ack 后 set_active_turn，L3 窗口
+    // 自登记时刻起算；避免 executor 调度时序竞态）。
+    let registered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if env.chats.active_turn(S1).await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(registered.is_ok(), "prompt 执行中登记活动 turn");
+    // 模拟长流式 turn：窗口内投递一帧（touch 续命）→ 越过原窗口到期点
+    // （250ms + 400ms > 500ms 窗口）仍不超时。
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    env.chats.touch_active_turn(S1).await; // relay submit 成功路径等价
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // 投 L3 响应 → Committed（未被窗口误杀）。
+    let resp = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S1.into(),
+        epoch: 0,
+        seq: 2,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": { "stopReason": "end_turn" },
+        }),
+    };
+    let r = env.relay.on_instance_event("local", &resp).await;
+    assert!(matches!(r, crate::channel::ConsumeResult::RpcConfirmed { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+        }
+        other => panic!("expected committed ack, got {other:?}"),
+    }
+    assert!(
+        env.chats.active_turn(S1).await.is_none(),
+        "终态后活动 turn 表项清理"
+    );
+}
+
+/// #3 无增量窗口耗尽：L3 窗口（500ms）内无任何 touch → delivery_unknown
+/// （error AgentUnavailable "delivery unknown"，路径 B 不可重试）+ 活动 turn
+/// 表项清理（§7.2）。
+#[tokio::test]
+async fn prompt_l3_inactivity_timeout_delivery_unknown() {
+    let mut env = env().await;
+    bound_session(&env, S2, "acp-2").await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), prompt_action(&cid, S2), tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("rx alive");
+    match &fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+        }
+        other => panic!("expected forward frame, got {other:?}"),
+    }
+    // 无任何事件投递（touch）：窗口耗尽 → delivery_unknown error。
+    match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
+            assert_eq!(e.command_id, cid);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert!(
+                e.message.contains("delivery unknown"),
+                "错误消息应含 delivery unknown（got {}）",
+                e.message
+            );
+            assert!(!e.retryable, "路径 B：非幂等禁止自动重发");
+        }
+        other => panic!("expected action_error (delivery unknown), got {other:?}"),
+    }
+    assert!(
+        env.chats.active_turn(S2).await.is_none(),
+        "delivery_unknown → 活动 turn 表项清理"
     );
 }

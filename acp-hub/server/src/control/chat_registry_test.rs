@@ -1,6 +1,7 @@
 //! ChatRegistry 单测（设计稿 §16 测试 28–30）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::control::StoreSink;
 use crate::persist::{PersistConfig, Store};
@@ -171,6 +172,35 @@ async fn active_turn_tracking() {
     assert_eq!(reg.active_turn("s1").await.as_deref(), Some("t1"));
     reg.clear_active_turn("s1").await;
     assert_eq!(reg.active_turn("s1").await, None);
+}
+
+/// #3 增量窗口计时（issue #3）：touch_active_turn 续命 / active_turn_idle
+/// 空闲时长语义；无登记表项 → None（调用方按「无活动窗口」处理）。
+#[tokio::test]
+async fn active_turn_touch_and_idle() {
+    let (reg, _doc) = test_registry().await;
+    let reg = ChatRegistry::new(reg);
+    // 无登记 → idle None；touch 无登记表项 → 幂等无害。
+    assert_eq!(reg.active_turn_idle("s1").await, None);
+    reg.touch_active_turn("s1").await;
+    assert_eq!(reg.active_turn_idle("s1").await, None);
+    // 登记 → idle 为微小正时长（远小于 1s）。
+    reg.set_active_turn("s1", "t1").await;
+    let idle = reg.active_turn_idle("s1").await.expect("登记后有 idle");
+    assert!(idle < Duration::from_secs(1), "刚登记 idle 应微小（got {idle:?}）");
+    // touch 续命：sleep 30ms 后 touch → idle 重置回微小值（增量窗口续期）。
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    reg.touch_active_turn("s1").await;
+    let idle2 = reg.active_turn_idle("s1").await.expect("touch 后仍有 idle");
+    assert!(
+        idle2 < Duration::from_millis(30),
+        "touch 重置 idle 时钟（got {idle2:?}）"
+    );
+    // 语义保留：turn_id 查询/清除不受影响。
+    assert_eq!(reg.active_turn("s1").await.as_deref(), Some("t1"));
+    reg.clear_active_turn("s1").await;
+    assert_eq!(reg.active_turn("s1").await, None);
+    assert_eq!(reg.active_turn_idle("s1").await, None);
 }
 
 #[tokio::test]
