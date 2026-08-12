@@ -21,7 +21,7 @@ MCP 中间件在会话首次发送信息时，把 MCP 基础情况（服务器 +
 
 ### 注入时机
 
-- **首 turn 概览**：`executor_helpers.rs` Phase 6（Prompt push 之前）入队 Info 消息——`before_agent` 在首次 Receive 之后才执行、其产物要下个 turn 才可见，而 Phase 6 入队保证**同一 turn 首轮模型调用即可见**。判定：`is_first_turn = !req.continuation && req.history.is_empty()`。
+- **首 turn 概览**：`executor_helpers.rs` Phase 6.2（用户 Prompt push 之后）入队 Info 消息——`before_agent` 在首次 Receive 之后才执行、其产物要下个 turn 才可见，而 Phase 6 入队保证**同一 turn 首轮模型调用即可见**。**顺序语义**：Info 在 Prompt **之后**入队，Receive drain（FIFO）后模型看到 user 输入在前、`<system-reminder>` 紧随其后——"加入到 user prompt"语义，不抢在用户输入前（初版在 Prompt 前入队，导致 reminder 排在用户输入前面，2026-08-12 修复）。判定：`is_first_turn = !req.continuation && req.history.is_empty()`。
 - **运行中状态变化**：`McpMiddleware::before_model` 每轮迭代 drain 缓冲队列，逐条 push Info。变化发生在空闲期 → 下个 turn 首轮 Receive 消费即见；运行中 → 下轮迭代即见。延迟一轮可接受（"不抢风头"）。
 
 ### 状态机（`McpClientPool`）
@@ -65,6 +65,7 @@ MCP 中间件在会话首次发送信息时，把 MCP 基础情况（服务器 +
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-08-12 | — | 已修复 | agent | 设计拍板 + 实现 + 测试，随提交落地 |
+| 2026-08-12 | 已修复 | 已修复 | agent | 顺序修正：reminder 在用户输入**之后**入队（初版在 Prompt 前入队导致 system reminder 排在用户输入前面） |
 
 ## 修复记录
 
