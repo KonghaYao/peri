@@ -120,6 +120,13 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
     // mpsc channel: read_task → pump_task。None 哨兵表示 PTY EOF
     let (tx, mut rx) = mpsc::channel::<Option<Vec<u8>>>(16);
 
+    // Windows ConPTY 启动时 conhost 会向宿主发送 DSR 光标位置查询
+    // ESC[6n，宿主不回复 ESC[row;colR 则 conhost 挂起，不输出任何子进程
+    // 内容（也不正常收尾）。浏览器端 xterm.js 会自动回复，但其他客户端
+    // （SDK、测试、headless 场景）不会——此处由服务端自行响应，不依赖
+    // 客户端。writer 经 clone_writer 共享给读取线程。
+    let dsr_writer = session.clone_writer();
+
     // read_task：spawn_blocking 阻塞读 PTY。reader 直接 move 进闭包，无需 Arc<Mutex>
     // 跨读边界 UTF-8 残字节缓冲：多字节字符（中文/CJK、emoji、box-drawing）
     // 可能被 4096 字节缓冲区边界截断，from_utf8_lossy 会产生 �。此处将
@@ -128,6 +135,10 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
         let mut leftover: Vec<u8> = Vec::new();
+        // ESC[6n 可能跨 read 块，保留最近 3 字节用于拼接检测
+        let mut dsr_tail = [0u8; 3];
+        let mut dsr_len = 0usize;
+        let mut dsr_replied = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => {
@@ -140,6 +151,21 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
                     break;
                 }
                 Ok(n) => {
+                    // ConPTY DSR 查询：\x1b[6n → 回复 \x1b[1;1R（仅一次）
+                    if !dsr_replied {
+                        let mut probe = Vec::with_capacity(dsr_len + n);
+                        probe.extend_from_slice(&dsr_tail[..dsr_len]);
+                        probe.extend_from_slice(&buf[..n]);
+                        if probe.windows(4).any(|w| w == b"\x1b[6n") {
+                            if let Ok(mut w) = dsr_writer.lock() {
+                                let _ = w.write_all(b"\x1b[1;1R");
+                            }
+                            dsr_replied = true;
+                        }
+                        let keep = probe.len().min(3);
+                        dsr_tail[..keep].copy_from_slice(&probe[probe.len() - keep..]);
+                        dsr_len = keep;
+                    }
                     let data = if leftover.is_empty() {
                         buf[..n].to_vec()
                     } else {
