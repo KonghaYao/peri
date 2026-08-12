@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
+    AssertSqlSafe, SqlitePool,
 };
 
 use peri_acp_types::{
@@ -119,7 +119,8 @@ impl SqliteThreadStore {
         ];
         for sql in &alter_columns {
             // SQLite 返回 "duplicate column name" 时忽略
-            if let Err(e) = sqlx::query(sql).execute(&self.pool).await {
+            // 常量数组（'static str）仅含 DDL 列名，无动态输入；sqlx 0.9 需显式断言
+            if let Err(e) = sqlx::query(AssertSqlSafe(*sql)).execute(&self.pool).await {
                 let msg = e.to_string();
                 if !msg.contains("duplicate column name") {
                     return Err(e.into());
@@ -384,9 +385,9 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
-        ) = sqlx::query_as(&format!(
+        ) = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.id = ?1"
-        ))
+        )))
         .bind(id.as_str())
         .fetch_one(&self.pool)
         .await?;
@@ -437,9 +438,9 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
-        )> = sqlx::query_as(&format!(
+        )> = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
-        ))
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -562,9 +563,9 @@ impl ThreadStore for SqliteThreadStore {
     async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
         let rows: Vec<(String, Option<String>, String, String, String, i64, i64,
                        Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String)> =
-            sqlx::query_as(&format!(
+            sqlx::query_as(AssertSqlSafe(format!(
                 "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
-            ))
+            )))
             .bind(parent_id.as_str())
             .fetch_all(&self.pool)
             .await?;
@@ -595,7 +596,7 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             Option<String>,
             String,
-        )> = sqlx::query_as(&format!(
+        )> = sqlx::query_as(AssertSqlSafe(format!(
             "WITH RECURSIVE session_tree AS (
                     SELECT * FROM threads WHERE id = ?1
                     UNION ALL
@@ -603,7 +604,7 @@ impl ThreadStore for SqliteThreadStore {
                     INNER JOIN session_tree st ON t.parent_thread_id = st.id
                 )
                 SELECT {THREAD_META_COLUMNS} FROM session_tree t ORDER BY t.created_at ASC"
-        ))
+        )))
         .bind(root_id.as_str())
         .fetch_all(&self.pool)
         .await?;

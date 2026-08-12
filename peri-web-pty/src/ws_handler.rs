@@ -97,8 +97,8 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
             Err(e) => {
                 let msg = format!("\r\n[failed to spawn {shell_display}: {e}]\r\n");
                 warn!("PTY spawn 失败 shell={shell_display} err={e}");
-                let _ = socket.send(Message::Text(msg)).await;
-                let _ = socket.close().await;
+                let _ = socket.send(Message::Text(msg.into())).await;
+                let _ = socket.send(Message::Close(None)).await;
                 return;
             }
         };
@@ -186,7 +186,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if try_handle_resize(&text, &mut session) {
+                        if try_handle_resize(text.as_str(), &mut session) {
                             continue;
                         }
                         if let Err(e) = session.write(text.as_bytes()) {
@@ -223,7 +223,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
                 match bytes {
                     Some(Some(data)) => {
                         let text = String::from_utf8_lossy(&data).into_owned();
-                        if socket.send(Message::Text(text)).await.is_err() {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -253,7 +253,7 @@ async fn handle_socket(mut socket: WebSocket, q: WsQuery, state: SessionState) {
 
     read_task.abort();
     drop(session);
-    let _ = socket.close().await;
+    let _ = socket.send(Message::Close(None)).await;
     info!("PTY 连接结束 shell={shell_display}");
 }
 
@@ -287,5 +287,5 @@ async fn send_exit_message(socket: &mut WebSocket, session: &mut PtySession) {
         .map(|c| c.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let msg = format!("\r\n[process exited with code {display}]\r\n");
-    let _ = socket.send(Message::Text(msg)).await;
+    let _ = socket.send(Message::Text(msg.into())).await;
 }

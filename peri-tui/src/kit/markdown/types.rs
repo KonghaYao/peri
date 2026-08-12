@@ -1,4 +1,4 @@
-use pulldown_cmark::Alignment;
+use pulldown_cmark_012::Alignment;
 use ratatui::text::Span;
 
 /// Markdown 解析输出的一个段落。

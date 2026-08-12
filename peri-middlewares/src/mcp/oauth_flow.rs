@@ -125,15 +125,15 @@ impl OAuthFlowManager {
         let (callback_server, redirect_uri) = OAuthCallbackServer::bind().await?;
 
         // 4. 启动授权（DCR + PKCE + metadata 发现）
-        let scopes: Vec<&str> = oauth_config
-            .scopes
-            .as_ref()
-            .map(|s| s.iter().map(|ss| ss.as_str()).collect())
-            .unwrap_or_default();
+        // rmcp 3.x: start_authorization 参数收敛为 AuthorizationRequest 结构
+        let scopes: Vec<String> = oauth_config.scopes.clone().unwrap_or_default();
 
-        let client_name = Some("peri-mcp-client");
         state
-            .start_authorization(&scopes, &redirect_uri, client_name)
+            .start_authorization(
+                rmcp::transport::auth::AuthorizationRequest::new(redirect_uri)
+                    .with_scopes(scopes)
+                    .with_client_name("peri-mcp-client"),
+            )
             .await?;
 
         // 5. 获取授权 URL
