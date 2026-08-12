@@ -415,9 +415,17 @@ impl InstanceRegistry {
         chat_id: &str,
         msg: &serde_json::Value,
     ) -> Result<(), InstanceError> {
+        // #1 官方 request_permission 响应帧的 id = agent request id 原样回显
+        // （常为数字自增）——`as_str` 失败不得误判 ConnectionGone：string/
+        // number 均提取（字符串化仅用于 instance 内部 ack 路由 command_id，
+        // 不改变写 ACP stdin 的帧内容）。
         let command_id = msg
             .get("id")
-            .and_then(serde_json::Value::as_str)
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
             .ok_or(InstanceError::ConnectionGone)?;
         let frame = Frame::InstanceForward(acp_hub_proto::instance::InstanceForward {
             command_id: command_id.to_string(),

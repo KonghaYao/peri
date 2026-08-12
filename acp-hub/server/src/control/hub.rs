@@ -46,7 +46,7 @@ use crate::state::factory::{DocKind, Factory};
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::view_store::encode_state_as_update;
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, CONTROL_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
 };
 
 /// registry 更新日志文件名（`<data_dir>/registry.log`，blob 格式；§8.4 同
@@ -145,6 +145,12 @@ impl Hub {
         // §4.4：create 全局去重索引（跨 server 重启有效）——store 已完成
         // recover（main 前置），从 outbox 重建后才接受连接。
         coordinator.rebuild_create_index().await;
+        // §6.3 workspace 扩展：工作区内存注册表从 Registry Doc 重建（跨
+        // 重启后 create 携带 workspace_id 仍能解析 cwd）。
+        coordinator.rebuild_workspaces().await;
+        // §6.3：session/list 轮询（10s 全量同步投影；server 侧，见
+        // CommandCoordinator::spawn_session_poller 决策注释）。
+        coordinator.spawn_session_poller();
         let broadcast = Arc::new(Broadcaster::new(
             cfg.backpressure_soft_bytes,
             cfg.backpressure_hard_bytes,
@@ -411,9 +417,9 @@ impl StoreSink {
                 }
             }
             let chat = create_mirror_doc(&self.factory, DocKind::Chat, &chat_updates);
-            let control = create_mirror_doc(&self.factory, DocKind::Control, &control_updates);
+            let control = create_mirror_doc(&self.factory, DocKind::Session, &control_updates);
             docs.insert(DocId::chat(&sid), chat);
-            docs.insert(DocId::control(&sid), control);
+            docs.insert(DocId::session(&sid), control);
             seq.insert(sid, (replay.watermark.epoch, replay.watermark.last_seq));
         }
         info!(
@@ -483,7 +489,7 @@ impl UpdateSink for StoreSink {
                 // （先应用业务 update、后幂等补结构——见 [`create_mirror_doc`]）。
                 let kind = match doc.as_str() {
                     s if s.starts_with("chat:") => Some(DocKind::Chat),
-                    s if s.starts_with("control:") => Some(DocKind::Control),
+                    s if s.starts_with("session:") => Some(DocKind::Session),
                     "hub:registry" => Some(DocKind::Registry),
                     _ => None,
                 };
@@ -507,7 +513,7 @@ impl UpdateSink for StoreSink {
         }
         // 2. 落盘。
         let result = match doc.as_str() {
-            s if s.starts_with("chat:") || s.starts_with("control:") => {
+            s if s.starts_with("chat:") || s.starts_with("session:") => {
                 let Some(sid) = doc.as_str().split_once(':').map(|(_, s)| s) else {
                     return Err(PersistError("malformed doc id".into()));
                 };
@@ -564,7 +570,7 @@ fn create_mirror_doc(
     }
     let version = match kind {
         DocKind::Chat => CHAT_DOC_SCHEMA_VERSION,
-        DocKind::Control => CONTROL_DOC_SCHEMA_VERSION,
+        DocKind::Session => SESSION_DOC_SCHEMA_VERSION,
         DocKind::Registry => REGISTRY_DOC_SCHEMA_VERSION,
     };
     {

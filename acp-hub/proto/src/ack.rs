@@ -31,6 +31,10 @@ pub struct ActionAck {
     pub turn_id: Option<String>,
     /// `chat/create` 的 committed 必须携带（server 生成 id 的唯一告知路径）。
     pub chat_id: Option<String>,
+    /// 新建会话类 action（`chat/create`/`chat/session-new`）的 committed 可携带
+    /// 新 ACP 会话 id（session/new 响应）；前端据此刷新会话列表「当前」标记
+    /// （跨任务契约 §3）。其余 action 恒为 None。
+    pub acp_session_id: Option<String>,
     /// 字段预留（对齐 chat types.ts，乐观并发校验二期启用）。
     pub committed_projection_version: Option<u32>,
 }

@@ -35,11 +35,37 @@ pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// [`truncate_text`]）。
 pub const TEXT_MAX_BYTES: usize = 4096;
 
+/// 官方 `session/request_permission` request 解析产物（#1 权限机制官方化）。
+///
+/// agent→client 的 JSON-RPC **request**（带 id，须回响应）；字段按官方
+/// schema v1 提取（params = `{sessionId, toolCall, options}`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionRequestFields {
+    /// agent 的 request id（原样，响应帧 id 回显；JSON-RPC id 可为
+    /// string/number——`as_str` 失败不得丢弃，与 RpcResponse 分支的关键
+    /// 差异）。
+    pub request_id: serde_json::Value,
+    /// server 生成的 permission_id（uuid v4；聚合器投影键 §5.4）。
+    pub permission_id: String,
+    /// toolCall.toolCallId（透传 → 投影 tool_call_id）。
+    pub tool_call_id: Option<String>,
+    pub title: String,
+    /// 官方无 description 字段 → None。
+    pub description: Option<String>,
+    /// 官方 options 原样（`{optionId,name,kind}` 数组；响应须回显 optionId）。
+    pub options: Vec<serde_json::Value>,
+    /// 官方 params.sessionId（acp_session_id，binding 已校验；仅 relay
+    /// register 用，不写入 EventBody——PendingPermissionReq.chat_id 已承载
+    /// 归属，relay 侧不落表）。
+    pub session_id: String,
+}
+
 /// 规范化结果（§6.1 事件表 + RpcResponse 专门面）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum NormalizeOutcome {
-    /// 业务事件（投递 DocManager 聚合）。
-    Event(NormalizedEvent),
+    /// 业务事件（投递 DocManager 聚合；Box 消弭与 RpcResponse 的变体大小
+    /// 差异——NormalizedEvent 240B vs 响应面 ~40B）。
+    Event(Box<NormalizedEvent>),
     /// JSON-RPC response（`id` 匹配 pending_rpc → L3 确认，§4.4；不产生业务
     /// 事件）。`is_error` 区分成功/错误响应。
     RpcResponse {
@@ -48,6 +74,10 @@ pub enum NormalizeOutcome {
         /// 是否 JSON-RPC error 响应。
         is_error: bool,
     },
+    /// 官方 `session/request_permission` request（agent→client，带 id，须回
+    /// 响应；#1 权限机制官方化）。由 relay 登记 pending_permissions 表并
+    /// 投递 `PermissionRequested` 事件，coordinator resolve 时回官方响应帧。
+    PermissionRequest(PermissionRequestFields),
     /// 丢弃 + 原因（调用方计数，不 panic 不静默，§4.8 精神）。
     Dropped(DropReason),
 }
@@ -130,12 +160,13 @@ impl AcpChannel {
             None => serde_json::Map::new(),
         };
         match self.map_raw(kind, &payload, now_rfc3339) {
-            Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+            Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                 chat_id: chat_id.to_string(),
                 seq,
                 epoch,
+                ts: now_rfc3339.to_string(),
                 body,
-            }),
+            })),
             Err(MapError::Unsupported) => NormalizeOutcome::Dropped(DropReason::UnsupportedFrame),
             Err(MapError::MissingField) => NormalizeOutcome::Dropped(DropReason::MissingField),
         }
@@ -181,12 +212,13 @@ impl AcpChannel {
             if let Some(update) = params.get("update").and_then(|v| v.as_object()) {
                 if update.get("sessionUpdate").is_some() {
                     return match self.map_acp_update(update, now_rfc3339) {
-                        Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+                        Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                             chat_id: chat_id.to_string(),
                             seq,
                             epoch,
+                            ts: now_rfc3339.to_string(),
                             body,
-                        }),
+                        })),
                         Err(MapError::Unsupported) => {
                             NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                         }
@@ -205,12 +237,13 @@ impl AcpChannel {
                 None => serde_json::Map::new(),
             };
             return match self.map_raw(kind, &payload, now_rfc3339) {
-                Ok(body) => NormalizeOutcome::Event(NormalizedEvent {
+                Ok(body) => NormalizeOutcome::Event(Box::new(NormalizedEvent {
                     chat_id: chat_id.to_string(),
                     seq,
                     epoch,
+                    ts: now_rfc3339.to_string(),
                     body,
-                }),
+                })),
                 Err(MapError::Unsupported) => {
                     NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                 }
@@ -220,17 +253,86 @@ impl AcpChannel {
             };        }
         // agent 状态通知（`agent/status`）。
         if method == "agent/status" {
-            return NormalizeOutcome::Event(NormalizedEvent {
+            return NormalizeOutcome::Event(Box::new(NormalizedEvent {
                 chat_id: chat_id.to_string(),
                 seq,
                 epoch,
+                ts: now_rfc3339.to_string(),
                 body: EventBody::AgentStatus {
                     status: string_field(&params, "status", "status").unwrap_or_default(),
                     public_error: public_error(&params),
+                    // 模型/上下文（跨任务契约 §1）：缺省 None（不覆盖 agent map）。
+                    model: string_field(&params, "model", "model"),
+                    context_window: number_field(&params, "contextWindow", "context_window"),
+                    context_used: number_field(&params, "contextUsed", "context_used"),
                 },
-            });
+            }));
+        }
+        // 官方 `session/request_permission` request（#1 权限机制官方化，
+        // schema v1）：agent→client 请求权限。带 id（须回响应，§4.4 响应
+        // 帧无回执、以 forward_ack 为确认点）；params 必含 sessionId/
+        // toolCall/options。
+        if method == "session/request_permission" {
+            let Some(id) = obj.get("id").filter(|v| !v.is_null()) else {
+                // 无 id → 无法回响应（官方为 request 形态，非 notification）。
+                return NormalizeOutcome::Dropped(DropReason::MissingField);
+            };
+            return match self.normalize_request_permission(id, &params) {
+                Ok(req) => NormalizeOutcome::PermissionRequest(req),
+                Err(MapError::MissingField) => {
+                    NormalizeOutcome::Dropped(DropReason::MissingField)
+                }
+                Err(MapError::Unsupported) => {
+                    NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+                }
+            };
         }
         NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
+    }
+
+    /// 官方 `session/request_permission` 解析（schema v1）：params =
+    /// `{sessionId(req), toolCall(req, ToolCallUpdate), options(req)}`。
+    ///
+    /// - `permission_id` 由 server 生成（uuid v4，§4.7 server 权威；官方
+    ///   request 无 permissionId 字段）；
+    /// - `title` = toolCall.title → toolCall.toolCallId → 空串回退；
+    /// - `description` 官方无字段 → None；
+    /// - `request_id` 帧顶层 id **原样保留** `serde_json::Value`
+    ///   （string/number 均合法；`as_str` 失败不得丢弃——这是与现有
+    ///   [`NormalizeOutcome::RpcResponse`] 分支 160-162 的关键差异）。
+    fn normalize_request_permission(
+        &self,
+        request_id: &Value,
+        params: &serde_json::Map<String, Value>,
+    ) -> Result<PermissionRequestFields, MapError> {
+        let session_id = required(params, "sessionId", "session_id")?;
+        let tool_call = params
+            .get("toolCall")
+            .and_then(Value::as_object)
+            .ok_or(MapError::MissingField)?;
+        let tool_call_id = string_field(tool_call, "toolCallId", "tool_call_id")
+            .ok_or(MapError::MissingField)?;
+        let options = params
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or(MapError::MissingField)?;
+        for o in options {
+            let obj = o.as_object().ok_or(MapError::MissingField)?;
+            if string_field(obj, "optionId", "option_id").is_none() {
+                return Err(MapError::MissingField);
+            }
+        }
+        let title = string_field(tool_call, "title", "title")
+            .unwrap_or_else(|| tool_call_id.clone());
+        Ok(PermissionRequestFields {
+            request_id: request_id.clone(),
+            permission_id: uuid::Uuid::new_v4().to_string(),
+            tool_call_id: Some(tool_call_id),
+            title,
+            description: None,
+            options: options.clone(),
+            session_id,
+        })
     }
 
     /// agent-client-protocol `session/update` 的 `update` 对象 → EventBody。
@@ -281,7 +383,9 @@ impl AcpChannel {
             },
             // tool_call / tool_call_update 按 status 细分终态
             // （resolveToolCallType：running→started；completed/complete/done→
-            // completed；error→failed；缺省 running）。
+            // completed；failed/error→failed；缺省 running。官方 ToolCallStatus
+            // 值域 pending/in_progress/completed/failed（#2），兼容别名
+            // complete/done/error；pending/in_progress 归入 started 非终态）。
             "tool_call" | "tool_call_update" => {
                 let tool_call_id = update
                     .get("toolCallId")
@@ -310,7 +414,10 @@ impl AcpChannel {
                             public_error: None,
                         }
                     }
-                    Some("error") => B::ToolCallCompleted {
+                    // #2：官方 failed 终态（ToolCallStatus 值域
+                    // pending/in_progress/completed/failed）；error 为兼容
+                    // 别名（同为 ToolCallCompleted + public_error）。
+                    Some("failed") | Some("error") => B::ToolCallCompleted {
                         turn_id: String::new(),
                         tool_call_id,
                         result: None,
@@ -337,9 +444,32 @@ impl AcpChannel {
                 status: None,
                 active_turn_id: None,
             },
-            // M1 无需投影的会话级元数据（命令菜单/模式/配置/用量/计划）。
-            "available_commands_update" | "current_mode_update" | "config_option_update"
-            | "usage_update" | "plan" | "plan_update" | "plan_removed" => {
+            // 模型/effort 配置（跨任务契约）：configOptions 中 id 为 model /
+            // thinking_effort 的 option；任一缺失对应字段 None（部分更新，
+            // 同 SessionInfo 语义）。model 取 options 匹配项（value ==
+            // currentValue）的 name 括号内模型名（`alias (模型名)`），无括号
+            // 回退整个 name。wire 字段名（schema v1.4.0）：SessionConfigSelect
+            // = currentValue/options，SessionConfigSelectOption = value/name。
+            "config_option_update" => {
+                let options = update
+                    .get("configOptions")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let (model, effort) = extract_agent_config(options);
+                B::AgentConfig { model, effort }
+            }
+            // 上下文用量快照（跨任务契约）：used/size 必填（缺 → MissingField，
+            // 与 tool_call_id 同源拒绝，§6.3）。
+            "usage_update" => B::AgentUsage {
+                context_window: number_field(update, "size", "size")
+                    .ok_or(MapError::MissingField)?,
+                context_used: number_field(update, "used", "used")
+                    .ok_or(MapError::MissingField)?,
+            },
+            // M1 无需投影的会话级元数据（命令菜单/模式/计划）。
+            "available_commands_update" | "current_mode_update" | "plan" | "plan_update"
+            | "plan_removed" => {
                 return Err(MapError::Unsupported);
             }
             _ => return Err(MapError::Unsupported),
@@ -501,6 +631,9 @@ impl AcpChannel {
                 return Ok(EventBody::AgentStatus {
                     status: string_field(payload, "status", "status").unwrap_or_default(),
                     public_error: public_error(payload),
+                    model: string_field(payload, "model", "model"),
+                    context_window: number_field(payload, "contextWindow", "context_window"),
+                    context_used: number_field(payload, "contextUsed", "context_used"),
                 })
             }
             "session_list" => {
@@ -523,6 +656,10 @@ impl AcpChannel {
                                     title,
                                     status,
                                     updated_at,
+                                    // control doc 侧无 cwd 面（poller 直连路径
+                                    // 由轮询侧标注，§6.3 workspace 扩展）。
+                                    cwd: String::new(),
+                                    bound_chat_id: None,
                                 })
                             })
                             .collect()
@@ -579,6 +716,19 @@ fn string_field(
     snake: &str,
 ) -> Option<String> {
     field(obj, &[camel, snake])
+}
+
+/// 非负整数提取（camelCase 优先，snake_case 回退）：负数/超 u32 上限 →
+/// None（缺省语义，不整体拒绝——§6.3 仅必填字段缺失才 MissingField）。
+fn number_field(
+    obj: &serde_json::Map<String, Value>,
+    camel: &str,
+    snake: &str,
+) -> Option<u32> {
+    [camel, snake]
+        .iter()
+        .find_map(|n| obj.get(*n).and_then(Value::as_u64))
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 /// 必填字符串字段：缺失 → 整体 [`DropReason::MissingField`]（§6.3 同源拒绝）。
@@ -647,6 +797,65 @@ fn truncate_text(s: &str) -> String {
         end -= 1;
     }
     s[..end].to_string()
+}
+
+/// 从 `alias (模型名)` 形式 label 提取括号内模型名（config_option_update，
+/// 跨任务契约）；无括号/括号内为空 → 整个 label。
+fn extract_model_name(label: &str) -> String {
+    let Some(open) = label.rfind('(') else {
+        return label.to_string();
+    };
+    let Some(rel) = label[open..].find(')') else {
+        return label.to_string();
+    };
+    let inner = label[open + 1..open + rel].trim();
+    if inner.is_empty() {
+        label.to_string()
+    } else {
+        inner.to_string()
+    }
+}
+
+/// 从 ACP `configOptions` 数组提取 `(model, effort)`（跨任务契约）：id 为
+/// `model` 的 option → options 匹配项的 name 内模型名；id 为
+/// `thinking_effort` 的 option → currentValue。任一缺失 → None（部分更新
+/// 语义）。
+///
+/// wire 字段（agent-client-protocol schema v1）：option 顶层为
+/// `currentValue`/`options`（flatten 的 SessionConfigSelect，camelCase），
+/// options 元素为 `{ value, name }`。
+///
+/// 两条消费路径共用：`config_option_update` 通知（map_acp_update）与
+/// session/new 响应体（coordinator，handle_new 不发通知、响应即唯一路径）。
+pub fn extract_agent_config(
+    options: &[serde_json::Value],
+) -> (Option<String>, Option<String>) {
+    let model = options.iter().find_map(|o| {
+        let o = o.as_object()?;
+        if o.get("id").and_then(Value::as_str) != Some("model") {
+            return None;
+        }
+        let current = o.get("currentValue").and_then(Value::as_str)?;
+        let name = o
+            .get("options")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|s| s.as_object())
+            .find(|s| s.get("value").and_then(Value::as_str) == Some(current))?
+            .get("name")
+            .and_then(Value::as_str)?;
+        Some(extract_model_name(name))
+    });
+    let effort = options.iter().find_map(|o| {
+        let o = o.as_object()?;
+        if o.get("id").and_then(Value::as_str) != Some("thinking_effort") {
+            return None;
+        }
+        o.get("currentValue")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    (model, effort)
 }
 
 #[cfg(test)]

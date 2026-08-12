@@ -47,6 +47,25 @@ pub struct ChatSummary {
     pub gap: Option<u64>,
     /// RFC3339。
     pub updated_at: String,
+    /// ACP 进程工作目录（继承自 workspace 或 server 默认目录）。
+    pub cwd: String,
+    /// 归属工作区（无 → null；工作区删除后已建对话保留此引用）。
+    pub workspace_id: Option<String>,
+}
+
+/// 工作区摘要（独立于 chat 的上层概念：定义本地目录 cwd，其下新建对话
+/// 继承；Registry Doc `workspaces` map 值）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    /// 本地绝对目录（ACP 进程工作目录 / session/list 查询面）。
+    pub cwd: String,
+    /// RFC3339。
+    pub created_at: String,
+    /// RFC3339。
+    pub updated_at: String,
 }
 
 /// 全局状态（§5.5 `global: { status }`；Degraded 判定规则见架构 §17.2）。

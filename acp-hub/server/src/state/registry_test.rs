@@ -135,6 +135,8 @@ fn upsert_chat_does_not_resurrect_existing_entry() {
         status: "accepting".into(),
         gap: None,
         updated_at: "2026-08-01T00:00:00Z".into(),
+        cwd: "/".into(),
+        workspace_id: None,
     };
     applier
         .apply(&DocCommand::RegistryUpsertChat(summary.clone()))

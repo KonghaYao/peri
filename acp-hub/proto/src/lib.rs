@@ -34,6 +34,7 @@ pub mod hmac;
 pub mod instance;
 pub mod protocol;
 pub mod schema;
+pub mod session;
 pub mod version;
 pub mod whitelist;
 pub mod ysync;
@@ -44,13 +45,14 @@ pub use action::{ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChat
 pub use conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 pub use event::EventFrame;
 pub use frame::{Frame, FrameTag, ProtoError};
+pub use session::SessionListFrame;
 pub use instance::{
     BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello,
     InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
 pub use version::{
     CHAT_DOC_SCHEMA_VERSION, PROTOCOL_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
-    CONTROL_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,
+    SESSION_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,
 };
 pub use whitelist::{
     m1_allows, m1_allows_action_type, m1_check, Direction, M1Check, Role, M1_ACTION_TYPES,

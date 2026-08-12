@@ -43,7 +43,7 @@ async fn test_stdout_events_and_dropped_no_sid() {
     let (acp, mut rx) = spawn_child(&cmd, "s1").await;
 
     // initialize → test_child 回 JSON-RPC response（无 sessionId，§4.4 L3 靠
-    // rpcId 匹配）→ 兜底按 inner.session_id 转发（§6.1 is_json_rpc_response）。
+    // rpcId 匹配）→ 兜底按 inner.session_id 转发（#5：有 jsonrpc 键即兜底）。
     acp.write_line(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
         .await
         .unwrap();
@@ -103,20 +103,59 @@ async fn test_stdout_events_and_dropped_no_sid() {
 
     acp.kill(Duration::from_millis(200)).await.unwrap();
 
-    // 缺口计数路径：非 JSON-RPC、无 sessionId 的帧 → DroppedNoSessionId。
+    // 无 sessionId 帧的两类处置（#5 双端点统一，与 relay C2 同判据）：
+    // ① JSON-RPC 形态（有 jsonrpc 键，如 agent/status 通知）→ 按进程归属
+    //    兜底转发（ChildOutput::Frame，信封 session_id = inner.session_id）；
+    // ② 原始 {type,payload} 形态 → 仍 DroppedNoSessionId（缺口计数）。
     // （test_child 对任意输入都回 jsonrpc+id 响应，故用 sh 直接吐裸 JSON。）
     let (acp2, mut rx2) = spawn_child(
         &[
             "sh".to_string(),
             "-c".to_string(),
-            "echo '{\"foo\":\"bar\"}'".to_string(),
+            "echo '{\"jsonrpc\":\"2.0\",\"method\":\"agent/status\",\"params\":{\"status\":\"busy\"}}'".to_string(),
         ],
         "s2",
     )
     .await;
     let mut saw_dropped = false;
-    for _ in 0..4 {
+    let mut frames2 = Vec::new();
+    for _ in 0..6 {
         match tokio::time::timeout(Duration::from_secs(2), rx2.recv()).await {
+            Ok(Some(ChildOutput::DroppedNoSessionId)) => saw_dropped = true,
+            Ok(Some(ChildOutput::Frame(evt))) => frames2.push(evt),
+            Ok(Some(ChildOutput::Exit { .. })) | Ok(None) | Err(_) => break,
+        }
+        if !saw_dropped && !frames2.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        frames2.len(),
+        1,
+        "JSON-RPC 形态（有 jsonrpc 键）无 sessionId 应兜底转发（got={}）",
+        frames2.len()
+    );
+    assert_eq!(frames2[0].session_id, "s2", "信封 session_id = 进程归属");
+    assert_eq!(
+        frames2[0].frame["method"], serde_json::json!("agent/status"),
+        "原帧透传"
+    );
+    assert!(!saw_dropped, "JSON-RPC 形态不得缺口丢弃");
+    acp2.kill(Duration::from_millis(200)).await.unwrap();
+
+    // 原始形态（无 jsonrpc 键、无 sessionId）→ 仍 DroppedNoSessionId。
+    let (acp3, mut rx3) = spawn_child(
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo '{\"foo\":\"bar\"}'".to_string(),
+        ],
+        "s3",
+    )
+    .await;
+    let mut saw_dropped = false;
+    for _ in 0..4 {
+        match tokio::time::timeout(Duration::from_secs(2), rx3.recv()).await {
             Ok(Some(ChildOutput::DroppedNoSessionId)) => saw_dropped = true,
             Ok(Some(ChildOutput::Exit { .. })) | Ok(None) | Err(_) => break,
             _ => {}
@@ -127,9 +166,9 @@ async fn test_stdout_events_and_dropped_no_sid() {
     }
     assert!(
         saw_dropped,
-        "非响应且无 sessionId 的帧 → 缺口计数 DroppedNoSessionId"
+        "原始形态（无 jsonrpc 键）无 sessionId 帧 → 缺口计数 DroppedNoSessionId"
     );
-    acp2.kill(Duration::from_millis(200)).await.unwrap();
+    acp3.kill(Duration::from_millis(200)).await.unwrap();
 }
 
 #[tokio::test]
@@ -216,6 +255,50 @@ async fn test_write_line_after_exit_fails() {
         acp.write_line(&serde_json::json!({"x": 1})).await.is_err(),
         "进程已退出 → 写失败（hub 上报失败语义，§4.4 L2）"
     );
+}
+
+/// #1 官方 `session/request_permission`（JSON-RPC **request**：有 id+method，
+/// 无顶层 sessionId 字段）→ 按「有 jsonrpc 键」判据兜底转发（OQ6：解锁 #1
+/// 端到端——child.rs 放行后 server relay 才能收到官方 request）。
+#[tokio::test]
+async fn request_permission_request_forwarded() {
+    // 用 sh 直接吐裸 JSON（test_child 会对任意输入回 jsonrpc+id 响应，
+    // 会多出一帧 response 干扰「仅转发 1 帧」断言）。
+    let (acp, mut rx) = spawn_child(
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo '{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"session/request_permission\",\"params\":{\"toolCall\":{\"toolCallId\":\"tc1\",\"title\":\"run\"},\"options\":[{\"optionId\":\"o1\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}]}}'".to_string(),
+        ],
+        "s4",
+    )
+    .await;
+    let mut saw_dropped = false;
+    let mut frames = Vec::new();
+    for _ in 0..6 {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(ChildOutput::DroppedNoSessionId)) => saw_dropped = true,
+            Ok(Some(ChildOutput::Frame(evt))) => frames.push(evt),
+            Ok(Some(ChildOutput::Exit { .. })) | Ok(None) | Err(_) => break,
+        }
+        if !saw_dropped && !frames.is_empty() {
+            break;
+        }
+    }
+    assert!(!saw_dropped, "request 形态（有 jsonrpc 键）不得缺口丢弃");
+    assert_eq!(
+        frames.len(),
+        1,
+        "request_permission 应兜底转发（got={}）",
+        frames.len()
+    );
+    assert_eq!(frames[0].session_id, "s4", "信封 session_id = 进程归属");
+    assert_eq!(
+        frames[0].frame["method"], serde_json::json!("session/request_permission"),
+        "原帧透传"
+    );
+    assert_eq!(frames[0].frame["id"], serde_json::json!(5), "id 原样保留（number）");
+    acp.kill(Duration::from_millis(200)).await.unwrap();
 }
 
 /// kill_on_drop（§7.5 兜底语义）：runtime 销毁 → 子进程随 daemon 死亡。

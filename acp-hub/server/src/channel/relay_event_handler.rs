@@ -25,8 +25,12 @@ use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, info, warn};
 
 use acp_hub_proto::instance::{InstanceBufferSync, InstanceEvent, InstanceProcessExit};
+use acp_hub_proto::schema::PermissionOptions;
 
-use crate::protocol::{AcpChannel, NormalizeOutcome, extract_session_id};
+use crate::protocol::{
+    AcpChannel, NormalizeOutcome, PERMISSION_TIMEOUT, PermissionRequestFields,
+    extract_session_id,
+};
 use crate::state::doc_manager::{DocManager, SubmitError, SubmitResult};
 use crate::state::normalized::NormalizedEvent;
 use crate::state::registry::{DegradeCause, RegistryState};
@@ -94,6 +98,18 @@ pub struct PendingRpc {
     notify: Option<oneshot::Sender<serde_json::Value>>,
 }
 
+/// pending_permission 表条目（#1：官方 `session/request_permission` 响应回
+/// 投数据；key = server 生成 permission_id）。
+#[derive(Debug)]
+pub struct PendingPermissionReq {
+    /// agent 的 request id（响应帧 id 原样回显）。
+    pub request_id: serde_json::Value,
+    /// 官方 options 原样（响应 optionId 回显选档）。
+    pub options: Vec<serde_json::Value>,
+    /// 归属 chat（断链/进程退出清理用）。
+    pub chat_id: String,
+}
+
 /// instance 入站事件消费（§4.5）。
 #[derive(Clone)]
 pub struct RelayEventHandler {
@@ -110,6 +126,9 @@ struct RelayInner {
     /// 共享的 in-memory 表（设计稿【决策】放本模块，coordinator 登记、本模块
     /// 匹配）。
     pending_rpc: RwLock<HashMap<String, PendingRpc>>,
+    /// pending_permissions 表（permission_id → 官方 request 回投数据；#1，
+    /// 与 pending_rpc 并列，coordinator resolve 时一次性 take）。
+    pending_permissions: RwLock<HashMap<String, PendingPermissionReq>>,
     /// 丢弃计数（§17.1 指标；按原因）。
     dropped: AtomicU64,
 }
@@ -130,6 +149,7 @@ impl RelayEventHandler {
                 registry,
                 channel: AcpChannel::default(),
                 pending_rpc: RwLock::new(HashMap::new()),
+                pending_permissions: RwLock::new(HashMap::new()),
                 dropped: AtomicU64::new(0),
             }),
         }
@@ -161,10 +181,12 @@ impl RelayEventHandler {
         //    命中可信 binding（acp_session_id → hub chat_id）且映射回本
         //    信封 chat。信封本身是 instance 进程归属（dumb pipe 不翻译 id，
         //    §3.3），不再作 binding 查询键。
-        //    JSON-RPC response 例外（§4.4 L3 确认不依赖 binding）：帧内无
-        //    sessionId 的 response（create 序列 initialize/session/new 与
-        //    prompt/cancel 的确认）经 pending_rpc（rpc_id → command_id）匹配，
-        //    无 session 语义。其余帧按 §6.1 丢弃。
+        //    JSON-RPC 形态例外（#5，与 child.rs C1 同判据——有 jsonrpc 键
+        //    的 response/request/notification 无帧内 sessionId 语义）：
+        //    create 序列 initialize/session/new 的响应（§4.4 L3 经 pending_rpc
+        //    匹配）、官方 session/request_permission request（#1，params.
+        //    sessionId 必填但防御性统一）、agent/status 通知（instance 级
+        //    事件）按信封兜底投递；其余帧按 §6.1 丢弃。
         let hub_chat_id = ev.chat_id.clone();
         let binding_ok = match extract_session_id(&ev.frame) {
             Some(acp_id) => matches!(
@@ -174,22 +196,31 @@ impl RelayEventHandler {
             None => false,
         };
         if !binding_ok {
-            let now = chrono::Utc::now().to_rfc3339();
-            match self
-                .inner
-                .channel
-                .normalize("", ev.epoch, ev.seq, &now, &ev.frame)
-            {
-                NormalizeOutcome::RpcResponse { id, is_error } => {
-                    return self.confirm_rpc(&id, ev.frame.clone(), is_error).await;
-                }
-                _ => {
-                    self.count_dropped("binding_missing");
-                    return ConsumeResult::Dropped {
-                        reason: "binding_missing",
-                    };
-                }
+            // 无帧内 sessionId（或未命中 binding）：仅 JSON-RPC 形态（有
+            // jsonrpc 键，与 child.rs C1 同判据）按信封兜底投递。
+            if ev.frame.get("jsonrpc").is_none() {
+                self.count_dropped("binding_missing");
+                return ConsumeResult::Dropped {
+                    reason: "binding_missing",
+                };
             }
+            // 方法面帧（request/notification：官方 request_permission、
+            // agent/status 等）进入 chat 作用域投递（register_permission_
+            // request / submit），以「信封 chat 存在」为唯一校验——信封是
+            // spawn 时确立的进程归属（§4.5.1，客户端不可控）。JSON-RPC
+            // response 例外（§4.4 L3 经 pending_rpc 匹配，无 chat 语义，
+            // 历史行为保留：不要求信封 chat 登记）。
+            if ev.frame.get("method").is_some()
+                && self.inner.chats.entry(&hub_chat_id).await.is_none()
+            {
+                self.count_dropped("binding_missing");
+                return ConsumeResult::Dropped {
+                    reason: "binding_missing",
+                };
+            }
+            // 投递路径与下方 Some 分支合并（不再 normalize("") 兜底）：
+            // RpcResponse → confirm_rpc；PermissionRequest →
+            // register_permission_request；Event → submit；Dropped → 计数。
         }
         // 3. 规范化（§6.1）。
         let now = chrono::Utc::now().to_rfc3339();
@@ -199,7 +230,28 @@ impl RelayEventHandler {
             .normalize(&hub_chat_id, ev.epoch, ev.seq, &now, &ev.frame)
         {
             NormalizeOutcome::Event(nev) => {
-                self.submit(&hub_chat_id, nev).await
+                let r = self.submit(&hub_chat_id, *nev).await;
+                // 断链追平恢复（§7.3/§8.5）：实时帧投递成功 → 尝试清除
+                // 断链置的 gap 标记并恢复 chat 可用。判定（可校准/不可
+                // 校准）在 writer 内以聚合器事实源进行——uncalibratable
+                // chat 的事件被聚合器拒绝（applied=false），不会误恢复。
+                if matches!(r, ConsumeResult::Delivered { applied: true, .. }) {
+                    self.recover_from_gap(&hub_chat_id).await;
+                }
+                r
+            }
+            // #1 官方 request_permission：登记 pending 表 + 投递投影。
+            NormalizeOutcome::PermissionRequest(req) => {
+                let r = self
+                    .register_permission_request(&hub_chat_id, ev.epoch, ev.seq, &now, &req)
+                    .await;
+                // 断链追平恢复（评审 P2-2：与 Event 分支 227-229 对称）：
+                // 实时帧投递成功 → 尝试清除断链置的 gap 标记并恢复 chat
+                // 可用（判定在 writer 内，applied=false 不会误恢复）。
+                if matches!(r, ConsumeResult::Delivered { applied: true, .. }) {
+                    self.recover_from_gap(&hub_chat_id).await;
+                }
+                r
             }
             NormalizeOutcome::RpcResponse { id, is_error } => {
                 self.confirm_rpc(&id, ev.frame.clone(), is_error).await
@@ -236,8 +288,9 @@ impl RelayEventHandler {
         }
         // 2. binding 校验（§6.1/§495）：信封 chat_id = instance 进程归属
         //    （hub chat id，§4.5.1）；帧内 sessionId 逐帧对照可信 binding
-        //    （acp_session_id → hub chat_id），response 帧（无帧内 id）
-        //    走 L3 例外（§4.4）。
+        //    （acp_session_id → hub chat_id）。JSON-RPC 形态例外（#5，与
+        //    on_instance_event 同判据）按信封兜底（§4.4 L3 / #1 request /
+        //    agent/status 通知）。
         let hub_chat_id = sync.chat_id.clone();
         // 3. from_seq 连续性（乱序/重复 → 丢弃计数，§8.5 纪律）。
         let mut expected_seq = sync.from_seq;
@@ -259,21 +312,17 @@ impl RelayEventHandler {
                 None => false,
             };
             if !binding_ok {
-                let now = chrono::Utc::now().to_rfc3339();
-                match self
-                    .inner
-                    .channel
-                    .normalize("", sync.epoch, bf.seq, &now, &bf.frame)
+                // 同构（on_instance_event C2）：无帧内 sessionId 的 JSON-RPC
+                // 形态帧（有 jsonrpc 键）按信封兜底（投递路径与下方 Some
+                // 分支合并）；方法面帧另要求信封 chat 登记；原始形态仍拒
+                // （§6.1）。
+                if bf.frame.get("jsonrpc").is_none()
+                    || (bf.frame.get("method").is_some()
+                        && self.inner.chats.entry(&hub_chat_id).await.is_none())
                 {
-                    NormalizeOutcome::RpcResponse { id, is_error } => {
-                        self.confirm_rpc(&id, bf.frame.clone(), is_error).await;
-                        continue;
-                    }
-                    _ => {
-                        rejected += 1;
-                        self.count_dropped("binding_missing");
-                        continue;
-                    }
+                    rejected += 1;
+                    self.count_dropped("binding_missing");
+                    continue;
                 }
             }
             match self
@@ -282,7 +331,22 @@ impl RelayEventHandler {
                 .normalize(&hub_chat_id, sync.epoch, bf.seq, &now, &bf.frame)
             {
                 NormalizeOutcome::Event(nev) => {
-                    match self.submit(&hub_chat_id, nev).await {
+                    match self.submit(&hub_chat_id, *nev).await {
+                        ConsumeResult::Delivered { .. } => delivered += 1,
+                        ConsumeResult::Dropped { reason } => {
+                            rejected += 1;
+                            self.count_dropped(reason);
+                        }
+                        _ => {}
+                    }
+                }
+                // #1 官方 request_permission：登记 pending 表 + 投递投影
+                // （补推路径同构，与实时帧一致）。
+                NormalizeOutcome::PermissionRequest(req) => {
+                    match self
+                        .register_permission_request(&hub_chat_id, sync.epoch, bf.seq, &now, &req)
+                        .await
+                    {
                         ConsumeResult::Delivered { .. } => delivered += 1,
                         ConsumeResult::Dropped { reason } => {
                             rejected += 1;
@@ -300,11 +364,23 @@ impl RelayEventHandler {
                 }
             }
         }
+        // #3 增量窗口续命：补推投递成功同样刷新活动 turn 计时（断链补推
+        // 期间的长流式 turn 不因窗口到期误判 delivery_unknown）。
+        if delivered > 0 {
+            self.inner.chats.touch_active_turn(&hub_chat_id).await;
+        }
         debug!(
             chat_id = hub_chat_id, epoch = sync.epoch, from_seq = sync.from_seq,
             delivered, rejected,
             "buffer_sync consumed"
         );
+        // 补推追平（§7.3/§8.5）：缓冲完整（无乱序/重复丢弃）且至少一帧
+        // 投递 → 清除断链置的 gap 标记并恢复 chat 可用。`rejected > 0`
+        // 保留 gap——缓冲孔洞的真实缺口由聚合器在后续实时帧 seq 跳号时
+        // 精确计数上报（设计稿「缺口数量由补推时聚合器精确计算」）。
+        if rejected == 0 && delivered > 0 {
+            self.recover_from_gap(&hub_chat_id).await;
+        }
         if delivered == 0 && rejected > 0 {
             ConsumeResult::BatchRejected {
                 reason: "all_frames_rejected",
@@ -353,7 +429,23 @@ impl RelayEventHandler {
                     // chat writer 未打开：仅记录（视图缺失由 gap 呈现）。
                     warn!(chat_id, "turn interrupt skipped: chat writer absent");
                 }
+                // 表项清理（§7.2）：turn 已置 interrupted 终态，登记表不得
+                // 滞留——否则永久阻塞后续 load「有活动 turn」校验。
+                self.inner.chats.clear_active_turn(chat_id).await;
             }
+            // 断链时该 chat 全部 pending 权限批量 expired（对齐参考实现
+            // expireTurnPermissions：断链即会话失效，未决议权限全部过期）。
+            self.inner
+                .doc
+                .submit_command(chat_id, DocCommand::ExpirePendingPermissions)
+                .await;
+            // #1 官方 pending_permissions 表同源清理（§7.1 语义对齐：
+            // 断链即会话失效，回投数据不再有效）。
+            self.inner
+                .pending_permissions
+                .write()
+                .await
+                .retain(|_, v| v.chat_id != *chat_id);
             // gap 标记（§8.2/§7.3：补推完成、seq 追平后清除）。
             let _ = self
                 .inner
@@ -416,12 +508,75 @@ impl RelayEventHandler {
             .await;
         let _ = self.inner.chats.transition(&hub_chat_id, state).await;
         self.inner.chats.clear_active_turn(&hub_chat_id).await;
+        // #1 官方 pending_permissions 表清理（进程退出即会话失效）。
+        self.inner
+            .pending_permissions
+            .write()
+            .await
+            .retain(|_, v| v.chat_id != hub_chat_id);
         ConsumeResult::Delivered {
             chat_id: hub_chat_id,
             kind: "process_exit",
             seq: 0,
             applied: true,
         }
+    }
+
+    /// 登记官方 request_permission（#1）：记 pending_permissions 表 +
+    /// 投递 `PermissionRequested` 事件。
+    ///
+    /// turn_id 从 active_turns 表注入（官方帧无 turnId；聚合器
+    /// aggregator.rs:1042 要求 turn_id == control doc active_turn_id 才推进
+    /// awaitingPermission——必须注入）；无活动 turn → 空串（投影仍写，仅
+    /// 状态不推进，功能不丢）。
+    async fn register_permission_request(
+        &self,
+        chat_id: &str,
+        epoch: u64,
+        seq: u64,
+        now: &str,
+        req: &PermissionRequestFields,
+    ) -> ConsumeResult {
+        self.inner.pending_permissions.write().await.insert(
+            req.permission_id.clone(),
+            PendingPermissionReq {
+                request_id: req.request_id.clone(),
+                options: req.options.clone(),
+                chat_id: chat_id.to_string(),
+            },
+        );
+        let turn_id = self.inner.chats.active_turn(chat_id).await.unwrap_or_default();
+        let nev = NormalizedEvent {
+            chat_id: chat_id.to_string(),
+            seq,
+            epoch,
+            ts: now.to_string(),
+            body: crate::state::normalized::EventBody::PermissionRequested {
+                permission_id: req.permission_id.clone(),
+                turn_id,
+                tool_call_id: req.tool_call_id.clone(),
+                title: req.title.clone(),
+                description: req.description.clone(),
+                options: permission_option_kinds(&req.options),
+                expires_at: expires_at(now),
+            },
+        };
+        self.submit(chat_id, nev).await
+    }
+
+    /// resolve 取表（coordinator 出站响应；一次性 remove——官方轨唯一消费
+    /// 点，未命中 = 原始形态权限流，走旧轨）。
+    pub async fn take_pending_permission(
+        &self,
+        permission_id: &str,
+    ) -> Option<PendingPermissionReq> {
+        self.inner.pending_permissions.write().await.remove(permission_id)
+    }
+
+    /// 表项移除（CAS Duplicate 分支清理；幂等无害——duplicate 不触发
+    /// take，表项滞留至断链，remove 防泄漏）。
+    pub async fn remove_pending_permission(&self, permission_id: &str) {
+        self.inner.pending_permissions.write().await.remove(permission_id);
     }
 
     /// rpcId 登记（coordinator 调用；返回等待侧 oneshot）。
@@ -492,12 +647,21 @@ impl RelayEventHandler {
         let kind = nev.kind();
         let seq = nev.seq;
         match self.inner.doc.submit_event(nev).await {
-            SubmitResult::Applied(r) => ConsumeResult::Delivered {
-                chat_id: chat_id.to_string(),
-                kind,
-                seq,
-                applied: r.applied,
-            },
+            SubmitResult::Applied(r) => {
+                // #3 增量窗口续命（issue #3）：事件投递成功（聚合器接受）
+                // → 刷新该 chat 的活动 turn 计时——exec_prompt L3 以「窗口
+                // （l3_timeout）内无增量投递」判定 delivery_unknown，长流式
+                // turn 的事件回流不得被 30s 硬超时误杀。
+                if r.applied {
+                    self.inner.chats.touch_active_turn(chat_id).await;
+                }
+                ConsumeResult::Delivered {
+                    chat_id: chat_id.to_string(),
+                    kind,
+                    seq,
+                    applied: r.applied,
+                }
+            }
             SubmitResult::Rejected(_) => ConsumeResult::Dropped {
                 reason: "submit_rejected",
             },
@@ -505,6 +669,78 @@ impl RelayEventHandler {
                 chat_id: chat_id.to_string(),
             },
         }
+    }
+
+    /// 断链追平恢复（§7.3/§8.5）：补推/实时帧恢复投递成功后调用——清除
+    /// 断链时置的 gap 标记（`set_chat_gap(Some(0))` 占位 → 追平清除）并
+    /// 迁移 ChatState Gap → Accepting（§7.3「Gap 清除 → 恢复可用、可开
+    /// 新 turn」）。
+    ///
+    /// 幂等：chat 非 Gap 状态直接返回（恢复后首帧即完成，后续帧跳过）；
+    /// 判定在 writer 内（[`DocCommand::ResumeAfterGap`]）：**不可校准**
+    /// （epoch 变化，§4.5.1）拒绝恢复——不可校准缺口只能经 `session/load`
+    /// 显式重建消除，不得误标为已追平（视图假装完整）。
+    async fn recover_from_gap(&self, chat_id: &str) {
+        let Some(entry) = self.inner.chats.entry(chat_id).await else {
+            return;
+        };
+        if entry.state != ChatState::Gap {
+            return;
+        }
+        match self
+            .inner
+            .doc
+            .submit_command(chat_id, DocCommand::ResumeAfterGap)
+            .await
+        {
+            SubmitResult::Applied(_)
+                if self
+                    .inner
+                    .chats
+                    .transition(chat_id, ChatState::Accepting)
+                    .await
+                    .is_ok() =>
+            {
+                info!(chat_id, "chat recovered from gap (stream caught up)");
+            }
+            _ => {
+                // 拒绝（uncalibratable / chat 已关闭）或迁移失败：保持 gap。
+            }
+        }
+    }
+}
+
+/// 官方 options kind → 内部投影枚举（#1，3 值投影层；§5.4）。
+/// `allow_once→AllowOnce`、`allow_always→AllowSession`、
+/// `reject_once|reject_always→Deny`；兼容 camelCase 别名
+/// （`allowOnce`/`allowSession`，对齐 acp_channel.rs `permission_options`
+/// 的兼容先例；reject 类官方无 camel 形态，防御性同兼容）。
+/// 未识别 kind → 跳过（与 permission_options 同语义，§5.4 投影层宽容）。
+fn permission_option_kinds(options: &[serde_json::Value]) -> Vec<PermissionOptions> {
+    options
+        .iter()
+        .filter_map(|v| {
+            Some(match v.get("kind")?.as_str()? {
+                "allow_once" | "allowOnce" => PermissionOptions::AllowOnce,
+                "allow_always" | "allowSession" => PermissionOptions::AllowSession,
+                "reject_once" | "rejectOnce" | "reject_always" | "rejectAlways" => {
+                    PermissionOptions::Deny
+                }
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// 权限请求过期时刻（#1：#1 复用 acp_channel.rs `PERMISSION_TIMEOUT`（5min）
+/// 常量逻辑，与 map_raw permission_request 同源注入；server 权威时钟
+/// §4.7）。now 非 RFC3339 → 原样回退。
+fn expires_at(now: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(now) {
+        Ok(t) => (t + chrono::Duration::from_std(PERMISSION_TIMEOUT)
+            .unwrap_or(chrono::Duration::seconds(300)))
+        .to_rfc3339(),
+        Err(_) => now.to_string(),
     }
 }
 

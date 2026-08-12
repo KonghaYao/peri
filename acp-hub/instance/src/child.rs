@@ -7,8 +7,10 @@
 //!   （仅日志计数，防阻塞）；
 //! - **stdout 读取任务**：逐行读取（JSON-RPC 行协议）→ sessionId 提取（§3.3
 //!   双格式，见 [`crate::error::extract_session_id`]）→ [`ChildOutput::Frame`]；
-//!   无法提取 sessionId 的帧丢弃并上报 [`ChildOutput::DroppedNoSessionId`]
-//!   （本地缺口计数，§3.3）；不再做 pending/id 匹配（响应匹配归 server 侧）；
+//!   无 sessionId 的 JSON-RPC 形态帧（有 jsonrpc 键：response/request/
+//!   notification）按进程归属兜底转发（#5）；原始形态帧丢弃并上报
+//!   [`ChildOutput::DroppedNoSessionId`]（本地缺口计数，§3.3）；不再做
+//!   pending/id 匹配（响应匹配归 server 侧）；
 //! - **kill**：组级 `SIGTERM(-pgid)` → 宽限 `grace` → 组级 `SIGKILL(-pgid)`；
 //!   已退出 → 立即成功（幂等）；
 //! - **wait**：stdout EOF 后 `wait()` → 状态迁移 `Exited(code)` → 经通道上报
@@ -31,14 +33,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::error::extract_session_id;
-
-/// JSON-RPC response 判定（§6.1 同源：有 `id`、无 `method`）。
-///
-/// response 无 sessionId 字段，归属由 instance 已知（本进程唯一 hub session），
-/// 见 [`run_stdout_reader`] 的兜底分支。
-fn is_json_rpc_response(v: &serde_json::Value) -> bool {
-    v.get("jsonrpc").is_some() && v.get("id").is_some() && v.get("method").is_none()
-}
 
 // ---------------------------------------------------------------------------
 // 进程组 kill 原语（§4.1：libc::kill）
@@ -221,14 +215,22 @@ async fn run_stdout_reader(inner: Arc<AcpInner>, tx: mpsc::UnboundedSender<Child
                         }
                     }
                     None => {
-                        // JSON-RPC response（有 id、无 method，§6.1 判定）没有
-                        // sessionId 字段（L3 确认经 rpcId 匹配，§4.4；create 序列
-                        // initialize/session/new 的响应在 binding 建立前到达，
-                        // server 侧经 pending_rpc 匹配，§6.2）。本进程归属唯一
-                        // hub session（§4.5：spawn 时确立），以 inner.session_id
-                        // 兜底归属转发——否则 server 永远收不到 response（t03
-                        // initialize timeout 根因）。
-                        if is_json_rpc_response(&parsed) {
+                        // 无帧内 sessionId：JSON-RPC 形态（response/request/
+                        // notification，有 jsonrpc 键）一律按进程归属兜底转发
+                        // （#5 双端点统一，与 relay C2 同判据）：
+                        // - response：L3 确认经 rpcId 匹配（§4.4；create 序列
+                        //   initialize/session/new 的响应在 binding 建立前到达，
+                        //   server 侧经 pending_rpc 匹配，§6.2）；
+                        // - request：官方 session/request_permission（params.
+                        //   sessionId 必填，防御性统一，#1 OQ6）；
+                        // - notification：agent/status 为 instance 级事件，
+                        //   §5.4 投影无 chat 归属。
+                        // 本进程归属唯一 hub session（§4.5：spawn 时确立），
+                        // 以 inner.session_id 兜底——否则 server 永远收不到
+                        // response（t03 initialize timeout 根因）。
+                        // 原始 {type,payload} 形态无 sessionId → 仍
+                        // DroppedNoSessionId（本地缺口计数，§3.3）。
+                        if parsed.get("jsonrpc").is_some() {
                             if tx
                                 .send(ChildOutput::Frame(ChildEvent {
                                     session_id: inner.session_id.clone(),

@@ -12,7 +12,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const CHAT_DOC_SCHEMA_VERSION: u32 = 1;
 
 /// Control Doc 结构版本（§5.4 未给数值，【决策】取 1）。
-pub const CONTROL_DOC_SCHEMA_VERSION: u32 = 1;
+pub const SESSION_DOC_SCHEMA_VERSION: u32 = 1;
 
 /// Registry Doc 结构版本（§5.5 未给数值，【决策】取 1）。
 pub const REGISTRY_DOC_SCHEMA_VERSION: u32 = 1;

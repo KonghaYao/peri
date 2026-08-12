@@ -7,7 +7,7 @@ use crate::schema::{
     ActiveTurnProjection, AgentStatusProjection, BlockVisibility, ChatDocRoot, ChatEntry,
     ContentBlock, EntryKind, EntryRole, EntryStatus, GlobalStatus, InstanceStatus,
     InstanceView, PermissionOptions, PermissionProjection, PermissionStatus, PublicError,
-    RegistryDocRoot, RegistryGlobal, ControlDocRoot, ChatInfoProjection,
+    RegistryDocRoot, RegistryGlobal, SessionDocRoot, ChatInfoProjection,
     ChatStatus, ChatSummary, SessionSummaryProjection, ToolCallProjection,
     ToolCallStatus, TurnStatus,
 };
@@ -62,7 +62,7 @@ fn chat_root() -> ChatDocRoot {
     }
 }
 
-fn control_root() -> ControlDocRoot {
+fn control_root() -> SessionDocRoot {
     let mut pending = HashMap::new();
     pending.insert(
         "p1".into(),
@@ -86,10 +86,12 @@ fn control_root() -> ControlDocRoot {
             title: "old".into(),
             status: "ended".into(),
             updated_at: "2026-08-06T00:00:00Z".into(),
+            cwd: String::new(),
+            bound_chat_id: None,
         },
     );
-    ControlDocRoot {
-        schema_version: crate::version::CONTROL_DOC_SCHEMA_VERSION,
+    SessionDocRoot {
+        schema_version: crate::version::SESSION_DOC_SCHEMA_VERSION,
         projection_version: 2,
         chat: ChatInfoProjection {
             chat_id: "s1".into(),
@@ -141,6 +143,8 @@ fn registry_root() -> RegistryDocRoot {
             status: "active".into(),
             gap: None,
             updated_at: "2026-08-07T00:00:01Z".into(),
+            cwd: "/".into(),
+            workspace_id: None,
         },
     );
     RegistryDocRoot {
@@ -246,7 +250,7 @@ fn schema_roots_full_roundtrip() {
     assert_eq!(back, chat);
 
     let session = control_root();
-    let back: ControlDocRoot =
+    let back: SessionDocRoot =
         serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
     assert_eq!(back, session);
 

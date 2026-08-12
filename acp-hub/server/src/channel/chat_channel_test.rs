@@ -127,6 +127,7 @@ async fn action_buffered_before_ready_and_flushed() {
         payload: PromptChatPayload {
             chat_id: "s1".into(),
             message: "hi".into(),
+            effort: None,
         },
     });
     // ready 前：缓冲不处理。
@@ -159,6 +160,7 @@ async fn buffer_overflow_rate_limited() {
             payload: PromptChatPayload {
                 chat_id: "s1".into(),
                 message: format!("m{i}"),
+                effort: None,
             },
         });
         ch.dispatch(action, &deps, tx.clone()).await;
@@ -168,6 +170,7 @@ async fn buffer_overflow_rate_limited() {
         payload: PromptChatPayload {
             chat_id: "s1".into(),
             message: "overflow".into(),
+            effort: None,
         },
     });
     let o = ch.dispatch(overflow, &deps, tx.clone()).await;
@@ -298,6 +301,7 @@ async fn readonly_cannot_send_action() {
         payload: PromptChatPayload {
             chat_id: "s1".into(),
             message: "x".into(),
+            effort: None,
         },
     });
     let o = ch.dispatch(action, &deps, tx).await;

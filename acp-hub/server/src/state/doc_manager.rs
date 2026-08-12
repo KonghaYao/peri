@@ -17,7 +17,8 @@ use tracing::{debug, trace, warn};
 
 use acp_hub_proto::conn::DocId;
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, EntryStatus, InstanceStatus, ChatStatus, ChatSummary, TurnStatus,
+    ActiveTurnProjection, EntryStatus, InstanceStatus, ChatStatus, ChatSummary,
+    SessionSummaryProjection, TurnStatus, WorkspaceSummary,
 };
 use yrs::{Map, ReadTxn, StateVector, Transact, WriteTxn};
 
@@ -137,8 +138,15 @@ pub enum DocCommand {
     },
     /// 权限 CAS：expire（pending → expired；定时器路径，§4.7）。
     ExpirePermission { permission_id: String },
+    /// 断链清理：该 chat 全部 pending 权限批量 expired（§7.1；对齐参考实现
+    /// `expireTurnPermissions`——断链即会话失效，未决议权限全部过期）。
+    ExpirePendingPermissions,
     /// 断链 → 活动 turn 置 interrupted（§7.3 分区恢复；turn 级终态）。
     MarkTurnInterrupted { turn_id: String },
+    /// cancel 前置：活动 turn 置 cancelling（§7.2 状态机参考语义：取消请求
+    /// 发出即进入取消中；终态由 agent 的 interrupted 事件或控制面注入的
+    /// Cancelled 覆盖）。
+    MarkTurnCancelling { turn_id: String },
     /// 控制面 turn 终态（§7.2）：active_turn 匹配且非终态 → 终态迁移 +
     /// assistant entry 迁移。等价聚合器 TurnTerminal 事件分支，但走控制面
     /// （不经聚合器 seq 水位——宿主注入无 instance 流 seq）。
@@ -149,6 +157,33 @@ pub enum DocCommand {
     },
     /// 标题更新（§7.4 规则 5：可独立排队，仍经服务端命令写入）。
     UpdateTitle { title: String },
+    /// `session/load` 回放开始（§8.5 显式重建）：置聚合器回放模式
+    /// （历史 chunk 无 turn_id，按回放序归位）。须先于回放通知进入
+    /// writer 队列（coordinator 在 forward_rpc 后立即提交）。
+    BeginLoadReplay { acp_session_id: String },
+    /// agent 投影的 acp_session_id 更新（§5.4 agent map；参考实现 load/resume
+    /// 成功路径 `registry.forEachByRcsSession` 更新 acpSessionId 的等价物）。
+    /// 用途：create 的 session/new 绑定建立后写入；load 失败恢复路径写回旧值。
+    SetAgentSessionId { acp_session_id: String },
+    /// agent 投影的 model/effort 更新（§5.4 agent map；部分更新语义——
+    /// None 不覆盖）。来源：session/new 响应体 configOptions 提取
+    /// （handle_new 不发 config_option_update 通知，响应即唯一路径；
+    /// load 路径由通知送达，本命令幂等补写）。
+    SetAgentConfig {
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    /// 断链追平恢复（§7.3/§8.5）：relay 在补推/实时帧恢复投递成功后提交。
+    /// writer 以聚合器事实源判定——**可校准**（非 uncalibratable）→ 置
+    /// `gap_dirty` 触发上报（registry gap 清除 + degraded 条件解除）；
+    /// **不可校准**（epoch 变化，§4.5.1）→ 拒绝（保持 gap，只能经
+    /// `session/load` 显式重建消除——不得把不可校准 chat 误标为已追平）。
+    /// 调用方（relay）以 Applied 为信号迁移 ChatState Gap → Accepting。
+    ResumeAfterGap,
+    /// `session/load` 回放结束（§8.5）：回放 turn 置终态（completed），
+    /// 退出回放模式。load 响应（L3）到达后提交——回放通知先于响应，
+    /// writer 串行队列保证顺序。
+    EndLoadReplay,
     /// 旧 turn 未完成时新 prompt 的裁决（§6.4：旧 assistant entry 置 cancelled，
     /// 不发 ACP cancel）。
     CancelStaleAssistantEntry { turn_id: String, entry_id: String },
@@ -164,6 +199,16 @@ pub enum DocCommand {
         status: InstanceStatus,
     },
     RegistrySetGlobal { status: acp_hub_proto::schema::GlobalStatus },
+    /// Registry：ACP `session/list` 响应全量同步投影（§6.3：幂等，10s 轮询；
+    /// 响应中不存在的旧条目删除——自愈）。sessions 是 **instance 级数据**
+    /// （agent 磁盘历史），投影到全局 Registry Doc——不随 chat 销毁/重建，
+    /// 切换对话列表持续可用。走控制面（不经聚合器 seq 水位——宿主注入
+    /// 无 instance 流 seq，`SetTurnTerminal` 同源）。
+    RegistryApplySessions { entries: Vec<SessionSummaryProjection> },
+    /// Registry：工作区摘要 upsert/移除（独立于 chat 的上层概念：定义本地
+    /// 目录 cwd，其下新建对话继承；Registry Doc `workspaces` map）。
+    RegistryUpsertWorkspace(WorkspaceSummary),
+    RegistryRemoveWorkspace { workspace_id: String },
 }
 
 impl DocCommand {
@@ -176,6 +221,9 @@ impl DocCommand {
                 | DocCommand::RegistryUpsertInstance(_)
                 | DocCommand::RegistrySetInstanceState { .. }
                 | DocCommand::RegistrySetGlobal { .. }
+                | DocCommand::RegistryApplySessions { .. }
+                | DocCommand::RegistryUpsertWorkspace(_)
+                | DocCommand::RegistryRemoveWorkspace { .. }
         )
     }
 }
@@ -257,11 +305,17 @@ impl DocManager {
     /// 打开 chat：Factory 创建双 Doc + ensure_schema（补结构）→ spawn writer
     /// task → RegistryState 写活跃摘要（§12.4）。重复打开按幂等处理（返回现有
     /// 句柄）。
+    ///
+    /// `cwd`/`workspace_id`：ACP 进程工作目录与归属工作区（§6.3 workspace
+    /// 扩展）——registry 摘要随 doc 打开即写入（`write_chat_summary` 对已存在
+    /// 条目只刷新 updated_at，cwd 必须在首写带上）；调用方无信息时传 None。
     pub async fn open_chat(
         &self,
         chat_id: &str,
         instance_id: &str,
         title: Option<&str>,
+        cwd: Option<&str>,
+        workspace_id: Option<&str>,
     ) -> Result<(), DocManagerError> {
         {
             let chats = self.chats.read().await;
@@ -307,6 +361,8 @@ impl DocManager {
             status: "accepting".to_string(),
             gap: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            cwd: cwd.unwrap_or_default().to_string(),
+            workspace_id: workspace_id.map(str::to_string),
         };
         if let Err(e) = registry.upsert_chat(summary).await {
             tracing::warn!(chat_id, error = ?e, "registry upsert chat failed");
@@ -491,14 +547,14 @@ async fn chat_writer_loop(
             .unwrap_or_else(|e| panic!("chat observe_update failed: {e}")),
     ));
     let _sub_control = SendSubscription(Some(
-        pair.control
+        pair.session
             .observe_update_v1(move |_, e| {
                 let _ = control_update_tx.send(e.update.clone());
             })
             .unwrap_or_else(|e| panic!("control observe_update failed: {e}")),
     ));
 
-    // 初始化全量基线落盘（chat → control 顺序，§6.4）：Factory 结构初始化
+    // 初始化全量基线落盘（chat → session 顺序，§6.4）：Factory 结构初始化
     // 发生在 observe 订阅之前（open_chat），其 update 不会经回调产生——
     // 不下发则镜像（StoreSink）与 update 日志缺少 doc 基线，后续增量（pv
     // 覆盖写等带 origin 的更新）无法应用。全量基线 + 增量幂等（重复应用
@@ -511,12 +567,12 @@ async fn chat_writer_loop(
         if let Err(e) = sink.persist_update(DocId::chat(&chat_id), init_chat).await {
             warn!(chat_id, error = ?e, "chat init baseline persist failed");
         }
-        let init_control = pair
-            .control
+        let init_session = pair
+            .session
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        if let Err(e) = sink.persist_update(DocId::control(&chat_id), init_control).await {
-            warn!(chat_id, error = ?e, "control init baseline persist failed");
+        if let Err(e) = sink.persist_update(DocId::session(&chat_id), init_session).await {
+            warn!(chat_id, error = ?e, "session init baseline persist failed");
         }
     }
 
@@ -664,7 +720,7 @@ async fn persist_and_broadcast(
         broadcast_send(broadcast, DocUpdate { doc, update }).await;
     }
     while let Ok(update) = control_updates.try_recv() {
-        let doc = DocId::control(chat_id);
+        let doc = DocId::session(chat_id);
         if sink.persist_update(doc.clone(), update.clone()).await.is_err() {
             all_ok = false;
             let _ = registry.report_condition(DegradeCause::PersistFailure).await;
@@ -786,7 +842,7 @@ async fn apply_command(
             chat_writer::bump_projection_version(&mut txn, &root);
             drop(txn);
             // control 侧：active_turn 注册（§7.2 accepting）。
-            let mut txn = pair.control_txn();
+            let mut txn = pair.session_txn();
             let root = txn.get_or_insert_map(crate::state::factory::ROOT);
             let active = ActiveTurnProjection {
                 turn_id: turn_id.clone(),
@@ -844,32 +900,33 @@ async fn apply_command(
                 },
             }
         }
+        DocCommand::ExpirePendingPermissions => {
+            let migrated = permission::expire_all_pending(pair);
+            if migrated > 0 {
+                bump_control_projection(pair);
+                ApplyResult {
+                    applied: true,
+                    reason: None,
+                }
+            } else {
+                ApplyResult {
+                    applied: false,
+                    reason: None,
+                }
+            }
+        }
         DocCommand::MarkTurnInterrupted { turn_id } => {
             // 读 active_turn：匹配且非终态 → 置 interrupted（§7.3）。
-            let should_interrupt = {
-                let txn = pair.control.transact();
-                chat_writer::root_map_read(&txn)
-                    .and_then(|root| root.get(&txn, "active_turn"))
-                    .and_then(|v| v.cast::<yrs::MapRef>().ok())
-                    .map(|m| {
-                        let tid = m
-                            .get(&txn, "turn_id")
-                            .and_then(|t| t.cast::<String>().ok());
-                        let status = m
-                            .get(&txn, "turn_status")
-                            .and_then(|t| t.cast::<String>().ok())
-                            .unwrap_or_default();
-                        (tid.as_deref() == Some(turn_id.as_str())) && !is_terminal_turn(&status)
-                    })
-                    .unwrap_or(false)
-            };
+            let (active_tid, active_status) = read_session_active_turn(pair);
+            let should_interrupt =
+                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
             if !should_interrupt {
                 ApplyResult {
                     applied: false,
                     reason: Some(ApplyReason::TurnTerminalGuard),
                 }
             } else {
-                let mut txn = pair.control_txn();
+                let mut txn = pair.session_txn();
                 let root = txn.get_or_insert_map(crate::state::factory::ROOT);
                 let active = ActiveTurnProjection {
                     turn_id: turn_id.clone(),
@@ -897,29 +954,38 @@ async fn apply_command(
                 }
             }
         }
+        DocCommand::MarkTurnCancelling { turn_id } => {
+            // 读 active_turn：匹配且非终态 → 置 cancelling（§7.2）。仅改
+            // 状态字段（turn_id/updated_at 保持；终态由后续事件/命令覆盖）。
+            let (active_tid, active_status) = read_session_active_turn(pair);
+            let should_cancel =
+                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
+            if !should_cancel {
+                ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::TurnTerminalGuard),
+                }
+            } else {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                let sm = root.get_or_init::<_, yrs::MapRef>(&mut txn, "session");
+                sm.insert(&mut txn, "active_turn_status", "cancelling");
+                chat_writer::bump_projection_version(&mut txn, &root);
+                ApplyResult {
+                    applied: true,
+                    reason: None,
+                }
+            }
+        }
         DocCommand::SetTurnTerminal {
             turn_id,
             status,
             completed_at,
         } => {
             // 终态守卫（§7.2）：active_turn 存在、turn_id 匹配且非终态才迁移。
-            let should_terminate = {
-                let txn = pair.control.transact();
-                chat_writer::root_map_read(&txn)
-                    .and_then(|root| root.get(&txn, "active_turn"))
-                    .and_then(|v| v.cast::<yrs::MapRef>().ok())
-                    .map(|m| {
-                        let tid = m
-                            .get(&txn, "turn_id")
-                            .and_then(|t| t.cast::<String>().ok());
-                        let st = m
-                            .get(&txn, "turn_status")
-                            .and_then(|t| t.cast::<String>().ok())
-                            .unwrap_or_default();
-                        (tid.as_deref() == Some(turn_id.as_str())) && !is_terminal_turn(&st)
-                    })
-                    .unwrap_or(false)
-            };
+            let (active_tid, active_status) = read_session_active_turn(pair);
+            let should_terminate =
+                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
             if !should_terminate {
                 ApplyResult {
                     applied: false,
@@ -927,7 +993,7 @@ async fn apply_command(
                 }
             } else {
                 // control 侧：active_turn 终态迁移（§7.2）。
-                let mut txn = pair.control_txn();
+                let mut txn = pair.session_txn();
                 let root = txn.get_or_insert_map(crate::state::factory::ROOT);
                 let active = ActiveTurnProjection {
                     turn_id: turn_id.clone(),
@@ -962,10 +1028,10 @@ async fn apply_command(
             }
         }
         DocCommand::UpdateTitle { title } => {
-            let mut txn = pair.control_txn();
+            let mut txn = pair.session_txn();
             let root = txn.get_or_insert_map(crate::state::factory::ROOT);
-            let control = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chat");
-            control.insert(&mut txn, "title", title.clone());
+            let sm = root.get_or_init::<_, yrs::MapRef>(&mut txn, "session");
+            sm.insert(&mut txn, "title", title.clone());
             chat_writer::bump_projection_version(&mut txn, &root);
             ApplyResult {
                 applied: true,
@@ -994,7 +1060,7 @@ async fn apply_command(
             }
         }
         DocCommand::SetChatTerminal { status } => {
-            let mut txn = pair.control_txn();
+            let mut txn = pair.session_txn();
             let root = txn.get_or_insert_map(crate::state::factory::ROOT);
             let control = root.get_or_init::<_, yrs::MapRef>(&mut txn, "chat");
             control.insert(
@@ -1003,6 +1069,162 @@ async fn apply_command(
                 crate::state::aggregator::chat_status_str(*status),
             );
             chat_writer::bump_projection_version(&mut txn, &root);
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::SetAgentSessionId { acp_session_id } => {
+            // agent 投影写回（§5.4 agent map；binding 建立/恢复路径）。
+            let mut txn = pair.session_txn();
+            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+            let am = root.get_or_init::<_, yrs::MapRef>(&mut txn, "agent");
+            am.insert(&mut txn, "acp_session_id", acp_session_id.clone());
+            chat_writer::bump_projection_version(&mut txn, &root);
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::SetAgentConfig { model, effort } => {
+            // agent 投影 model/effort（§5.4 agent map；部分更新——None
+            // 不覆盖，与 AgentConfig 事件投影语义一致）。
+            let mut txn = pair.session_txn();
+            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+            let am = root.get_or_init::<_, yrs::MapRef>(&mut txn, "agent");
+            if let Some(m) = model {
+                am.insert(&mut txn, "model", m.clone());
+            }
+            if let Some(e) = effort {
+                am.insert(&mut txn, "effort", e.clone());
+            }
+            chat_writer::bump_projection_version(&mut txn, &root);
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::EndLoadReplay => {
+            // 全部回放 turn 终态化（历史 agent 消息无 TurnTerminal 事件）+
+            // 退出回放模式。
+            let completed_at = chrono::Utc::now().to_rfc3339();
+            let turns = std::mem::take(&mut pair.stream.replay_turns);
+            if !turns.is_empty() {
+                let mut txn = pair.chat_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                for turn_id in &turns {
+                    chat_writer::migrate_entry_terminal(
+                        &mut txn,
+                        &root,
+                        &format!("{turn_id}:assistant"),
+                        EntryStatus::Completed,
+                        &completed_at,
+                        None,
+                    );
+                }
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            pair.stream.replay_active = false;
+            pair.stream.replay_turn = None;
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::BeginLoadReplay { acp_session_id } => {
+            if pair.stream.replay_active {
+                return SubmitResult::Rejected(SubmitError::QueueFull);
+            }
+            // §8.5 会话切换是替换当前视图，不是把目标历史追加到旧会话。
+            // 通过覆盖根结构键产生可同步的 Yjs 更新；所有写入仍在本 chat
+            // 单写者内，后续回放事件只会落入新结构。
+            //
+            // 清空语义对齐 Chat/Session 双 Doc 参考实现（clearChatDocContent
+            // + clearSessionDocContent）：
+            // - chat doc：entries/tool_calls 覆盖空结构；
+            // - session doc：`session` map 换新（会话元信息与 active turn
+            //   清空，load 成功后由 SessionInfo/set_active_turn 重建）；
+            //   `agent` 保留（实例级状态 capabilities 不清——清空会永久丢）；
+            //   `pending_permissions` 换空；
+            //   `sessions` 保留（防侧边栏闪空）。
+            {
+                let mut txn = pair.chat_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                root.insert(&mut txn, "entry_order", yrs::ArrayPrelim::default());
+                root.insert(&mut txn, "entries", yrs::MapPrelim::default());
+                root.insert(&mut txn, "tool_calls", yrs::MapPrelim::default());
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                // session map 换新：清全部会话元信息 + active turn 内嵌字段。
+                let sm = root.get_or_init::<_, yrs::MapRef>(&mut txn, "session");
+                for key in [
+                    "session_id",
+                    "title",
+                    "status",
+                    "active_turn_id",
+                    "active_turn_status",
+                    "active_turn_updated_at",
+                    "created_at",
+                    "updated_at",
+                ] {
+                    sm.remove(&mut txn, key);
+                }
+                // agent 保留：仅删旧会话绑定（acp_session_id 在 load 成功后
+                // 由 switch_session 路径重建）。
+                if let Some(am) = root
+                    .get(&txn, "agent")
+                    .and_then(|v| v.cast::<yrs::MapRef>().ok())
+                {
+                    am.remove(&mut txn, "acp_session_id");
+                }
+                root.insert(
+                    &mut txn,
+                    "pending_permissions",
+                    yrs::MapPrelim::default(),
+                );
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+
+            // 流状态：清除不可校准缺口（§8.5「不可校准只能经 load 消除」）与
+            // 缺口计数——回放帧从新会话起点开始，旧流的缺口状态不再适用；
+            // epoch/last_seq 水位保持（回放帧仍走正常判序）。
+            pair.stream.uncalibratable = false;
+            pair.stream.gap_count = 0;
+            pair.stream.gap_dirty = true;
+
+            // 新会话绑定（§8.5）：agent 投影的 acp_session_id 随切换更新
+            // （参考实现 load 成功路径 `registry.forEachByRcsSession` 更新
+            // acpSessionId 的等价物——BeginLoadReplay 即切换提交点，与
+            // coordinator 的预绑定同步；load 失败由 restore_session 路径
+            // 恢复旧值）。
+            {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                let am = root.get_or_init::<_, yrs::MapRef>(&mut txn, "agent");
+                am.insert(&mut txn, "acp_session_id", acp_session_id.clone());
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            pair.stream.replay_active = true;
+            pair.stream.replay_turn = None;
+            pair.stream.replay_turns.clear();
+            ApplyResult {
+                applied: true,
+                reason: None,
+            }
+        }
+        DocCommand::ResumeAfterGap => {
+            // 聚合器事实源判定（§8.5）：不可校准缺口只能经 load 显式重建
+            // 消除——拒绝恢复（relay 不迁移 ChatState，chat 保持 gap 呈现，
+            // TUI 提示「载入以校准」）；可校准 → 置 gap_dirty，尾部 report_gap
+            // 清除 registry gap 标记并解除 ChatGap degraded 条件（断链置的
+            // `Some(0)` 占位在此被 None 覆盖，与聚合器追平语义一致）。
+            if pair.stream.uncalibratable {
+                return SubmitResult::Rejected(SubmitError::QueueFull);
+            }
+            pair.stream.gap_dirty = true;
             ApplyResult {
                 applied: true,
                 reason: None,
@@ -1020,6 +1242,10 @@ async fn apply_command(
         registry,
     )
     .await;
+    // gap 上报（§9.4）：与 apply_event/flush_batch 对齐——命令路径同样可能
+    // 置位 gap_dirty（BeginLoadReplay 显式重建、ResumeAfterGap 追平恢复），
+    // 须在本命令处理周期内写回 registry，不依赖后续事件到达。
+    report_gap(chat_id, pair, registry).await;
     trace!(chat_id, cmd = command_kind(&cmd), applied = result.applied, "command applied");
     if !ok {
         SubmitResult::PersistFailed
@@ -1033,11 +1259,18 @@ fn command_kind(cmd: &DocCommand) -> &'static str {
         DocCommand::RegisterUserEntry { .. } => "register_user_entry",
         DocCommand::ResolvePermission { .. } => "resolve_permission",
         DocCommand::ExpirePermission { .. } => "expire_permission",
+        DocCommand::ExpirePendingPermissions => "expire_pending_permissions",
         DocCommand::MarkTurnInterrupted { .. } => "mark_turn_interrupted",
+        DocCommand::MarkTurnCancelling { .. } => "mark_turn_cancelling",
         DocCommand::SetTurnTerminal { .. } => "set_turn_terminal",
         DocCommand::UpdateTitle { .. } => "update_title",
         DocCommand::CancelStaleAssistantEntry { .. } => "cancel_stale_assistant_entry",
         DocCommand::SetChatTerminal { .. } => "set_chat_terminal",
+        DocCommand::BeginLoadReplay { .. } => "begin_load_replay",
+        DocCommand::SetAgentSessionId { .. } => "set_agent_session_id",
+        DocCommand::SetAgentConfig { .. } => "set_agent_config",
+        DocCommand::ResumeAfterGap => "resume_after_gap",
+        DocCommand::EndLoadReplay => "end_load_replay",
         _ => "registry",
     }
 }
@@ -1049,8 +1282,34 @@ fn is_terminal_turn(status: &str) -> bool {
     )
 }
 
+/// 读 Session Doc `session` map 的 active turn 内嵌投影
+/// （`active_turn_id`/`active_turn_status`）。
+fn read_session_active_turn(pair: &DocPair) -> (Option<String>, String) {
+    let txn = pair.session.transact();
+    match chat_writer::root_map_read(&txn) {
+        Some(root) => {
+            let sm = root
+                .get(&txn, "session")
+                .and_then(|v| v.cast::<yrs::MapRef>().ok());
+            let tid = sm.as_ref().and_then(|m| {
+                m.get(&txn, "active_turn_id")
+                    .and_then(|t| t.cast::<String>().ok())
+            });
+            let status = sm
+                .as_ref()
+                .and_then(|m| {
+                    m.get(&txn, "active_turn_status")
+                        .and_then(|t| t.cast::<String>().ok())
+                })
+                .unwrap_or_default();
+            (tid, status)
+        }
+        None => (None, String::new()),
+    }
+}
+
 fn bump_control_projection(pair: &mut DocPair) {
-    let mut txn = pair.control_txn();
+    let mut txn = pair.session_txn();
     let root = txn.get_or_insert_map(crate::state::factory::ROOT);
     chat_writer::bump_projection_version(&mut txn, &root);
 }
@@ -1110,6 +1369,9 @@ async fn registry_writer_loop(
                 let r = applier.set_chat_status(&chat_id, &status);
                 persist_registry_updates(&mut update_rx, &sink, &broadcast).await;
                 let _ = reply.send(r);
+            }
+            RegistryMsg::ListWorkspaces(reply) => {
+                let _ = reply.send(applier.list_workspaces());
             }
         }
     }
