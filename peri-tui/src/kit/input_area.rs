@@ -53,6 +53,19 @@ use peri_theme::atoms::THEME_ATOM;
 /// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
 const QUEUE_VISIBLE_MAX: usize = 5;
 
+/// [S2 单一事实源] 输入内容变化 → 焦点回到输入态：同步清除消息区 entry
+/// 导航焦点（消息区仲裁与渲染同读 FOCUSED_ENTRY，无需 effect 收敛）。
+///
+/// [Why] 鼠标点击 chat entry 展开后 entry 导航焦点激活（FOCUSED_ENTRY =
+/// Some），此时直接键入，Enter 仍被消息区消费为折叠切换/option 提交，输入框
+/// 无法提交。鼠标点击输入框已在 Down handler 清除（见下方鼠标分支）；本函数
+/// 覆盖键盘路径——所有修改 buffer 内容的按键/粘贴在写 state 前调用。
+fn exit_entry_focus_on_edit() {
+    if FOCUSED_ENTRY.state().read().is_some() {
+        *FOCUSED_ENTRY.state().write() = None;
+    }
+}
+
 /// 在 post_component_draw 时修复 CJK 续接 cell 的 diff 不可见性。
 ///
 /// ratatui `set_stringn` 对双宽字符的续接 cell 始终 reset 到 `Cell::EMPTY`
@@ -198,6 +211,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 let result = match key.code {
                     // ── 提交 ──（仅在不激活 popup 时按 Enter 提交）
                     KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         let submitted = s.take_text();
                         drop(s);
@@ -211,6 +225,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
                     // Shift/Alt+Enter：换行（多行 buffer）
                     KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
+                        exit_entry_focus_on_edit();
                         state.write().insert_char('\n');
                         EventResult::Consumed
                     }
@@ -218,11 +233,13 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // ── 编辑快捷键 ──
                     KeyCode::Char('w') if is_ctrl => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         state.write().delete_word_backward();
                         EventResult::Consumed
                     }
                     KeyCode::Char('u') if is_ctrl => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         state.write().clear();
                         reset_mention_popup();
                         reset_slash_popup();
@@ -246,6 +263,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Char('h') if is_ctrl && !mention_active && !slash_active => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.backspace();
                         update_popup_prefix(&s);
@@ -253,6 +271,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Char('d') if is_ctrl && !mention_active && !slash_active => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.delete_forward();
                         update_popup_prefix(&s);
@@ -262,6 +281,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.undo();
                         update_popup_prefix(&s);
@@ -271,6 +291,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.redo();
                         update_popup_prefix(&s);
@@ -280,6 +301,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if is_ctrl && !is_alt && !mention_active && !slash_active =>
                     {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.paste_yank();
                         update_popup_prefix(&s);
@@ -299,6 +321,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Backspace if !mention_active && !slash_active => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_backward();
@@ -310,6 +333,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Backspace => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_backward();
@@ -321,6 +345,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     }
                     KeyCode::Delete if !mention_active && !slash_active => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         if is_alt {
                             s.delete_word_forward();
@@ -365,6 +390,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if !moved {
                             let current = state.read().all_text();
                             if let Some(historical) = history_up(Some(&current)) {
+                                exit_entry_focus_on_edit();
                                 state.write().replace_all_no_undo(historical);
                             }
                         }
@@ -381,6 +407,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                             .unwrap_or(80);
                         let moved = state.write().cursor_visual_down(tw);
                         if !moved && let Some(historical) = history_down() {
+                            exit_entry_focus_on_edit();
                             state.write().replace_all_no_undo(historical);
                         }
                         EventResult::Consumed
@@ -401,6 +428,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     // ── 字符输入 ──
                     KeyCode::Char(ch) if !is_ctrl && !is_alt => {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let mut s = state.write();
                         s.insert_char(ch);
                         update_popup_prefix(&s);
@@ -415,6 +443,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
                     {
                         exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
                         let state_clone = state;
                         std::thread::spawn(move || {
                             let Ok(mut cb) = arboard::Clipboard::new() else {
@@ -493,6 +522,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     KeyCode::Tab => {
                         let pred = PREDICTION.state();
                         if !pred.read().text.is_empty() {
+                            exit_entry_focus_on_edit();
                             let text = pred.read().text.clone();
                             *pred.write() = PredictionState::default();
                             exit_history_mode_if_active();
@@ -530,6 +560,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         "InputArea: paste 截断——超出 10K char 上限"
                     );
                 }
+                exit_entry_focus_on_edit();
                 let mut s = state.write();
                 s.insert_str(&truncated);
                 update_popup_prefix(&s);
