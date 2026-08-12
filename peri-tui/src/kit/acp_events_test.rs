@@ -2300,6 +2300,162 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
     BG_AGENT_IDS.state().write().clear();
 }
 
+/// [回归] Issue 2026-08-12：bg subagent 运行期流式事件（TextChunk / ReasoningChunk /
+/// ToolStarted / ToolEnded）不得把主 agent 的 phase 从 Idle 拉回 PromptRunning——
+/// 主 agent 派发 bg 后已完成回复（TurnSuspended），bg 仍在运行，loading 应保持退出，
+/// bg 运行状态由 BG 区域跟踪。主 agent 自身事件不受影响（对照组）。
+#[test]
+#[serial]
+fn test_bg_events_after_turn_suspended_keep_idle_loading() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_AGENT_IDS.state().write().clear();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+
+    // 前置：bg 启动（注册 BG_AGENT_IDS + SubAgentGroup）→ 主 turn 挂起
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-agent-1".into(),
+            agent_name: "researcher".into(),
+            is_background: true,
+        },
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "前置：TurnSuspended 后 phase 应为 Idle"
+    );
+
+    // bg 运行期流式事件全链路到达——phase 不得离开 Idle，is_loading 保持 false
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "bg text".into(),
+            message_id: None,
+            agent_id: Some("bg-agent-1".into()),
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "bg TextChunk 不得把 phase 拉回 PromptRunning"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "bg TextChunk 后 is_loading 应保持 false"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
+            text: "bg reasoning".into(),
+            message_id: None,
+            agent_id: Some("bg-agent-1".into()),
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "bg ReasoningChunk 不得把 phase 拉回 PromptRunning"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: Some("bg-agent-1".into()),
+            tool_name: "Bash".into(),
+            tool_id: "bg-tc-1".into(),
+            input_summary: "ls".into(),
+            raw_input: serde_json::Value::Null,
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "bg ToolStarted 不得把 phase 拉回 PromptRunning"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            agent_id: Some("bg-agent-1".into()),
+            tool_id: "bg-tc-1".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "bg ToolEnded 不得把 phase 拉回 PromptRunning"
+    );
+    assert!(
+        !ACP_STATE.state().read().is_loading,
+        "bg 全链路事件后 is_loading 应保持 false"
+    );
+
+    // 对照组 1：主 agent 自身 chunk 仍正常点亮 phase（从 Idle → PromptRunning）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "main reply".into(),
+            message_id: Some("m1".into()),
+            agent_id: Some("main-agent".into()),
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::PromptRunning,
+        "主 agent chunk 应恢复 PromptRunning（修复不得误伤主 agent 事件）"
+    );
+
+    // 对照组 2：sync subagent（不在 BG_AGENT_IDS）的 chunk 路由后仍保持
+    // PromptRunning——bg 判定不得误伤 sync subagent。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-1".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "sync text".into(),
+            message_id: None,
+            agent_id: Some("sync-1".into()),
+        }),
+    );
+    assert_eq!(
+        state.phase,
+        SessionPhase::PromptRunning,
+        "sync subagent chunk 应保持 PromptRunning（修复不得误伤 sync）"
+    );
+    BG_AGENT_IDS.state().write().clear();
+}
+
 /// SubagentStarted → SubagentStopped 路径（sync subagent）仍保持 loading。
 /// 同步 subagent 的 SubagentStarted 已设 phase=PromptRunning，
 /// SubagentStopped 不应破坏此状态。

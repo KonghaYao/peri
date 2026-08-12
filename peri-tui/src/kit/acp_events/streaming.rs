@@ -35,7 +35,17 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         .is_some_and(|agent_id| state.current_turn.append_subagent_text(agent_id, &tc.text));
     if routed_to_subagent {
         state.variant = 1;
-        state.phase = SessionPhase::PromptRunning;
+        // bg subagent 不触碰 phase（Issue 2026-08-12）：bg 生命周期跨越主 turn
+        // 边界，TurnSuspended 后 phase=Idle 不得被 bg 流式事件拉回 PromptRunning
+        // （loading 残留）。主 agent 推理期间 phase 由主 agent 自身事件维持，
+        // bg 事件无需参与。sync subagent 不在 BG_AGENT_IDS，维持原行为。
+        let is_bg = tc
+            .agent_id
+            .as_deref()
+            .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
+        if !is_bg {
+            state.phase = SessionPhase::PromptRunning;
+        }
         // SubAgent 文本：Streaming/Block→always push, None→skip
         // 不做块边界检测——subagent 输出相对短且不是主要闪烁来源。
         if super::current_streaming_mode() != super::StreamingMode::None {
@@ -47,10 +57,10 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) {
         .is_some_and(is_bg_agent_without_group)
     {
         // bg sub-agent：组已被 turn 边界清除（TurnSuspended/TurnInterrupted），
-        // 与 tool.rs 同口径——bg 文本不进主消息区，跳过。phase 仍维护为
-        // PromptRunning（bg 在运行），push_acp_state 由调用方统一完成。
+        // 与 tool.rs 同口径——bg 文本不进主消息区，跳过。phase 不得被拉回
+        // PromptRunning（Issue 2026-08-12：主 agent 已空闲时 bg 流式事件
+        // 不得重新点亮 loading）；push_acp_state 由调用方统一完成。
         state.variant = 1;
-        state.phase = SessionPhase::PromptRunning;
     } else {
         state
             .current_turn
@@ -89,7 +99,14 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
     });
     if routed_to_subagent {
         state.variant = 1;
-        state.phase = SessionPhase::PromptRunning;
+        // bg subagent 不触碰 phase（Issue 2026-08-12，同 handle_text_chunk）。
+        let is_bg = rc
+            .agent_id
+            .as_deref()
+            .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
+        if !is_bg {
+            state.phase = SessionPhase::PromptRunning;
+        }
         // SubAgent 推理：Streaming/Block→always push, None→skip
         if super::current_streaming_mode() != super::StreamingMode::None {
             super::render::push_view_models(state);
@@ -100,9 +117,9 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
         .is_some_and(is_bg_agent_without_group)
     {
         // bg sub-agent：组已被 turn 边界清除——推理不进主消息区，跳过（同
-        // handle_text_chunk 口径，防外溢到主 agent 推理块）。
+        // handle_text_chunk 口径，防外溢到主 agent 推理块）。phase 不得被
+        // 拉回 PromptRunning（Issue 2026-08-12）。
         state.variant = 1;
-        state.phase = SessionPhase::PromptRunning;
     } else {
         state
             .current_turn
