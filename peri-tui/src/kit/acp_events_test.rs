@@ -2203,6 +2203,103 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
     );
 }
 
+/// [回归] bg subagent 信息外溢：TurnSuspended 后 SubAgentAccumulator 被清除，
+/// bg 的 TextChunk/ReasoningChunk 不得回退到主 agent 分支（混入主回复气泡）——
+/// 与 tool.rs 的 BG_AGENT_IDS 兜底同口径，命中 bg 集合的 chunk 直接跳过。
+#[test]
+#[serial]
+fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    BG_AGENT_IDS.state().write().clear();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+
+    // bg subagent 启动（注册 BG_AGENT_IDS + current_turn 组）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-agent-1".into(),
+            agent_name: "researcher".into(),
+            is_background: true,
+        },
+    );
+    assert!(
+        BG_AGENT_IDS.state().read().contains("bg-agent-1"),
+        "bg SubagentStarted 应注册 BG_AGENT_IDS"
+    );
+
+    // 主 turn 挂起：current_turn.reset() 清除 SubAgentAccumulator（既有语义，
+    // flush_current_turn 的 running-subagent 守卫覆盖不到 TurnSuspended）
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert!(
+        state.current_turn.subagent_ids().is_empty(),
+        "TurnSuspended 后 current_turn 组应被清空（前置条件）"
+    );
+
+    // bg 继续流式输出——不得外溢到主文本/主推理
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "bg leaked text".into(),
+            message_id: None,
+            agent_id: Some("bg-agent-1".into()),
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(crate::kit::stream_data::TuiReasoningChunk {
+            text: "bg leaked reasoning".into(),
+            message_id: None,
+            agent_id: Some("bg-agent-1".into()),
+        }),
+    );
+    assert!(
+        state.current_turn.text.is_empty(),
+        "bg TextChunk 不得进入主 agent 文本（外溢）——实际: {:?}",
+        state.current_turn.text
+    );
+    assert!(
+        state.current_turn.reasoning.is_empty(),
+        "bg ReasoningChunk 不得进入主 agent 推理（外溢）——实际: {:?}",
+        state.current_turn.reasoning
+    );
+
+    // 对照组：无组且不在 BG_AGENT_IDS 的 chunk（主 agent 文本）仍正常回退
+    // 主分支——修复不得破坏主 agent 回复显示。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "main reply".into(),
+            message_id: Some("m1".into()),
+            agent_id: Some("main-agent".into()),
+        }),
+    );
+    assert_eq!(
+        state.current_turn.text, "main reply",
+        "主 agent 文本应正常回退主分支"
+    );
+    BG_AGENT_IDS.state().write().clear();
+}
+
 /// SubagentStarted → SubagentStopped 路径（sync subagent）仍保持 loading。
 /// 同步 subagent 的 SubagentStarted 已设 phase=PromptRunning，
 /// SubagentStopped 不应破坏此状态。
