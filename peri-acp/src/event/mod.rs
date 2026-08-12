@@ -169,6 +169,9 @@ pub enum AcpEvent {
     OauthCompleted { server_name: String },
     /// MCP OAuth 授权失败/取消/超时（`oauth-failed`）。
     OauthFailed { server_name: String, error: String },
+    /// MCP OAuth 凭证恢复成功（`oauth-restored`）——快速路径：磁盘已有
+    /// 有效凭证，无需重新授权；TUI 用于反馈「已使用已保存凭证连接」。
+    OauthRestored { server_name: String },
     /// LLM call retrying
     LlmRetrying {
         attempt: usize,

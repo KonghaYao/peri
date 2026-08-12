@@ -17,18 +17,20 @@ impl McpClientPool {
     /// 注入的 `oauth_event_callback` 转发给 TUI；授权成功后自动用
     /// `AuthorizationManager` 重建认证传输层并连接。
     ///
-    /// 无 `oauth_event_callback`（如 TUI 面板直读 pool，UI 无法交互）时
-    /// 不触发——授权统一由 host pool 执行，完成后各 pool 经共享
-    /// `FileCredentialStore` 恢复凭证。
+    /// 无 `oauth_event_callback`（TUI 面板池，UI 无法弹 popup）时降级为
+    /// 快速路径：仅尝试恢复磁盘凭证连接，不启动完整授权（不弹窗、不阻塞）；
+    /// 凭据缺失/失效时保持 `NeedsAuthorization`，由 host pool 授权完成后
+    /// 各 pool 经共享 `FileCredentialStore` 恢复。
     pub fn spawn_oauth_flow(self: &Arc<Self>, server_name: &str) {
         let pool = self.clone();
         let server_name = server_name.to_string();
         tokio::spawn(async move {
             if pool.oauth_event_callback().is_none() {
+                let _ = pool.start_oauth_flow(&server_name, true).await;
                 return;
             }
             Self::insert_needs_auth(&pool, &server_name, "OAuth 授权进行中".to_string());
-            match pool.start_oauth_flow(&server_name).await {
+            match pool.start_oauth_flow(&server_name, false).await {
                 Ok(()) => {}
                 Err(e) => {
                     // run_oauth_flow 内部已在取消/超时路径发 AuthorizationFailed；
@@ -45,7 +47,17 @@ impl McpClientPool {
         });
     }
 
-    pub async fn start_oauth_flow(self: &Arc<Self>, server_name: &str) -> Result<(), McpPoolError> {
+    /// 执行 OAuth 授权流程（异步，两轮尝试）。
+    ///
+    /// `quick_only=true`（面板池路径）：只跑第一轮「恢复磁盘凭证 → 连接」，
+    /// 凭据失效时不清除、不启动完整授权，直接返回错误（保持 NeedsAuthorization）。
+    /// `quick_only=false`（host pool 路径）：第一轮恢复失败/凭据失效时清除
+    /// 失效凭证，第二轮走完整授权（DCR + PKCE + AuthorizationNeeded 弹 popup）。
+    pub async fn start_oauth_flow(
+        self: &Arc<Self>,
+        server_name: &str,
+        quick_only: bool,
+    ) -> Result<(), McpPoolError> {
         let cfg = self
             .configs
             .read()
@@ -77,7 +89,9 @@ impl McpClientPool {
         // 两轮尝试：第一轮优先恢复磁盘凭证（可能已过期/被 revoke）；恢复后
         // 连接仍要求授权（401）时清除失效凭证，第二轮走完整授权流程（弹
         // popup 让用户重新授权）。第二轮再失败直接返回错误。
-        for attempt in 0..2u8 {
+        // quick_only（面板池路径）只跑第一轮：401 时不清除凭据、不完整授权。
+        let rounds: u8 = if quick_only { 1 } else { 2 };
+        for attempt in 0..rounds {
             let mut mgr = OAuthFlowManager::new_with_arc(ts.clone(), event_cb.clone());
             mgr.run_oauth_flow(server_name, &url, &oauth_cfg)
                 .await
@@ -148,7 +162,7 @@ impl McpClientPool {
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
                     if Self::is_auth_required_error(&err_str, true) {
-                        if attempt == 0 {
+                        if attempt == 0 && !quick_only {
                             // 磁盘凭证已失效（过期/被服务端 revoke）：清除后
                             // 第二轮走完整授权（弹 popup），保证用户可重新授权。
                             tracing::info!(server = %server_name, "恢复的 OAuth 凭证已失效，清除并重新授权");

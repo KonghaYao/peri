@@ -365,6 +365,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         OauthFailed { server_name, error } => {
             system::handle_oauth_failed(state, server_name, error)
         }
+        OauthRestored { server_name } => system::handle_oauth_restored(state, server_name),
 
         // ── §4.6 Structure events ──
         SubagentStarted {

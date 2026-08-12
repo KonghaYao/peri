@@ -377,6 +377,7 @@ mcp-action-enable = 启用
 # OAuth Messages
 mcp-oauth-completed = [i] OAuth 授权完成: { $server }
 mcp-oauth-failed = [i] OAuth 授权失败: { $server } - { $error }
+mcp-oauth-restored = [i] 已使用已保存凭证连接: { $server }
 mcp-clear-auth-ok = [i] OAuth 凭证已清除: { $server }
 mcp-clear-auth-failed = [i] 清除 OAuth 凭证失败: { $server }
 mcp-action-ok = [i] 操作完成: { $server }
@@ -597,8 +598,10 @@ oauth-callback-label = 授权码 >
 oauth-btn-open = 打开浏览器
 oauth-btn-copy = 复制链接
 oauth-btn-cancel = 取消
-popup-oauth-action-hint =   Tab: 切换按钮/输入框  |  ←→: 选择按钮  |  Enter: 激活  |  输入框内 Enter: 提交授权码
-oauth-copied-hint =   ✓ 授权链接已复制到剪贴板  |  Esc: 取消
+oauth-hint-btn-focus =   ←→: 选择按钮  |  Enter: 激活  |  Tab: 输入授权码  |  Esc: 取消
+oauth-hint-input-focus =   粘贴授权码后 Enter 提交  |  Tab: 切回按钮  |  Esc: 取消
+oauth-copied-hint =   ✓ 授权链接已复制（可在浏览器打开）
+oauth-opened-hint =   已在浏览器打开授权页（未弹出可复制链接）
 
 # ---- Login 面板 ----
 
@@ -849,7 +852,12 @@ panel-mcp-empty =   暂未配置 MCP 服务器
 panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
 panel-mcp-needs-auth =  [需要授权]
-panel-mcp-oauth-hint =   Enter: 发起 OAuth 授权  |  Esc: 关闭
+panel-mcp-oauth-hint =   Enter: 进入授权详情  |  Esc: 关闭
+# MCP 面板详情视图（OAuth 授权入口）
+panel-mcp-detail-url = URL:
+panel-mcp-detail-btn-auth = 授权
+panel-mcp-detail-btn-back = 返回
+panel-mcp-detail-hint =   Enter: 授权  |  Esc: 返回列表  |  ←→: 选择按钮
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯

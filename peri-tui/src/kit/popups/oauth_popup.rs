@@ -2,7 +2,8 @@
 //!
 //! OAuth 授权弹窗：从 `OAUTH_INFO` atom 读取真实授权信息（由 ACP server
 //! `OauthNeeded` 事件写入）。交互全部走按钮/导航键，不用快捷键：
-//! - **按钮行**（Tab 切入，←→ 选择，Enter 激活；鼠标左键直接点击按钮）：
+//! - **按钮行**（默认焦点；Tab 切到输入框，←→ 选择，Enter 激活；
+//!   鼠标左键直接点击按钮）：
 //!   - [ 打开浏览器 ]：调用系统 `open` 打开 `auth_url`（best-effort）
 //!   - [ 复制链接 ]：完整授权链接复制到系统剪贴板
 //!   - [ 取消 ]：`mcp/oauth_cancel` RPC + 关闭 popup
@@ -12,6 +13,9 @@
 //!   - 授权码为空时 Enter 关闭 popup（localhost 回调路径由后台自动收码）
 //! - **Esc**：取消授权 + 关闭
 //!
+//! 视觉契约：焦点区（按钮行或输入框）整行 selection 背景反转，非焦点区
+//! dim——焦点在哪一目了然；复制/打开浏览器等瞬时反馈 3 秒自动消失。
+//!
 //! 鼠标命中：`use_event_handler_with_options(..., EventOptions { hit_test: true })`
 //! 由 ratatui-kit 按组件绘制区域过滤区域外事件；行号反推用
 //! `panel_mouse::AreaTracker`（内容区在 TOP border 之下，内容行号 =
@@ -19,6 +23,8 @@
 //!
 //! I20-D：popup 展示 agent 实际触发的 server_name + 完整 auth_url（换行
 //! 展示不截断），用户能据此判断该不该授权。
+
+use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::OauthNeeded;
@@ -35,6 +41,7 @@ use crate::i18n;
 use crate::kit::atoms::{ACP_CLIENT_HANDLE, LANG_VERSION, OAUTH_INFO};
 use crate::kit::panel_mouse::{AreaTracker, left_down};
 use crate::kit::popup_overlay::close_popup;
+use crate::kit::text_util::wrap_text;
 use peri_theme::atoms::THEME_ATOM;
 
 /// 提交授权码（手动兜底路径）：`mcp/oauth_callback` RPC → host 侧投递到
@@ -91,28 +98,19 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
-/// 按字符宽度换行（长 URL 完整展示，不截断；字符级切片避免 CJK panic）。
-fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + width).min(chars.len());
-        out.push(chars[i..end].iter().collect());
-        i = end;
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
-
 /// 按钮行/输入框在内容区中的行号（渲染行序契约，鼠标命中反推用）。
 /// 内容区行号 0 起：空行、Server、空行、prompt、空行、URL×n、空行、按钮行、
 /// 空行、授权码行、空行、hint → 按钮行 = 6 + n，授权码行 = 8 + n。
 fn content_rows(auth_url: &str) -> (u16, u16) {
     let n = wrap_text(auth_url, 52).len() as u16;
     (6 + n, 8 + n)
+}
+
+/// 瞬时反馈提示（复制链接 / 打开浏览器），3 秒后自动消失。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OauthHint {
+    Copied,
+    BrowserOpened,
 }
 
 #[component]
@@ -127,12 +125,15 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 授权码输入框内容（手动兜底路径；终端粘贴直接进入）
     let code_input = hooks.use_state(String::new);
-    // 焦点在按钮行（false = 授权码输入框）
-    let btn_focus = hooks.use_state(|| false);
+    // 焦点在按钮行（false = 授权码输入框）。默认按钮行——用户第一动作是
+    // 打开浏览器/复制链接，授权码在浏览器里授权后才出现。
+    let btn_focus = hooks.use_state(|| true);
     // 按钮行选中项
     let btn_idx = hooks.use_state(|| 0usize);
-    // 复制链接成功提示（临时显示 "✓ copied"）
-    let copied = hooks.use_state(|| false);
+    // 瞬时反馈（复制/打开浏览器），Some 时优先于焦点提示显示
+    let hint = hooks.use_state(|| None::<OauthHint>);
+    // 反馈序号——防 3s 定时器清掉更新的提示（generation guard）
+    let hint_seq = hooks.use_state(|| 0u64);
     // 组件绘制区域（上一帧，绝对坐标）——鼠标命中反推行号
     let area = hooks.use_hook(AreaTracker::new).rect;
 
@@ -146,13 +147,32 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         EventPriority::High, // 与 rewind_popup 一致：根层 Esc 为 Normal，同优先级先注册先消费
         EventOptions { hit_test: true },
         move |event| {
+            // 写入瞬时反馈 + 3s 后自动清空（seq guard：旧定时器不干扰新提示）
+            let show_hint = |h: OauthHint| {
+                *hint.write() = Some(h);
+                *hint_seq.write() = *hint_seq.read() + 1;
+                let seq = *hint_seq.read();
+                // ReactiveHandle 是 Copy，直接复制句柄（非 move）
+                let h_copy = hint;
+                let s_copy = hint_seq;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if *s_copy.read() == seq {
+                        *h_copy.write() = None;
+                    }
+                });
+            };
+
             // 激活按钮（键盘 Enter / 鼠标左键点击共用）
             // 0 = 打开浏览器，1 = 复制链接，2 = 取消
             let activate = |idx: usize, info: &OauthNeeded| match idx {
-                0 => open_auth_url_in_browser(&info.auth_url),
+                0 => {
+                    open_auth_url_in_browser(&info.auth_url);
+                    show_hint(OauthHint::BrowserOpened);
+                }
                 1 => {
                     if copy_to_clipboard(&info.auth_url) {
-                        *copied.write() = true;
+                        show_hint(OauthHint::Copied);
                     }
                 }
                 _ => {
@@ -290,6 +310,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let popup_tokens = &theme_def.read().component.popup;
     let guard = theme_def.read();
     let semantic = &guard.semantic;
+    let sel_bg = semantic.surface.selection;
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &info {
@@ -320,16 +341,19 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             lines.push(Line::from(""));
 
-            // ── 按钮行：Tab 切入 / 鼠标点击，←→ 选择，Enter 激活 ──
+            // ── 按钮行：焦点区 selection 背景反转，非焦点区整体弱化 ──
             let btn_focused = *btn_focus.read();
             let sel = *btn_idx.read();
-            let btn_style = |i: usize, focused: bool| -> Style {
-                if focused && i == sel {
+            let btn_style = |i: usize| -> Style {
+                if btn_focused && i == sel {
                     Style::new()
-                        .fg(semantic.status.warning)
+                        .fg(semantic.text.primary)
+                        .bg(sel_bg)
                         .add_modifier(Modifier::BOLD)
-                } else {
+                } else if btn_focused {
                     Style::new().fg(semantic.text.primary)
+                } else {
+                    Style::new().fg(semantic.text.dim)
                 }
             };
             let labels = [
@@ -343,7 +367,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     btn_line.push(Span::raw("  "));
                 }
                 let text = format!("[ {label} ]");
-                btn_line.push(Span::styled(text, btn_style(i, btn_focused)));
+                btn_line.push(Span::styled(text, btn_style(i)));
             }
             lines.push(Line::from(btn_line));
             lines.push(Line::from(""));
@@ -356,23 +380,32 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let code_style = if code_focused {
                 Style::new()
                     .fg(semantic.text.primary)
+                    .bg(sel_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::new().fg(semantic.text.primary)
+                Style::new().fg(semantic.text.dim)
             };
             let code_line = if code_display.is_empty() {
                 format!("  {code_label} (empty)")
             } else {
                 format!("  {code_label}: {code_display}")
             };
+            // 输入框聚焦时行尾追加光标
+            let code_line = if code_focused {
+                format!("{code_line}▏")
+            } else {
+                code_line
+            };
             lines.push(Line::from(code_line).style(code_style));
             lines.push(Line::from(""));
-            let hint = if *copied.read() {
-                i18n::tr("oauth-copied-hint")
-            } else {
-                i18n::tr("popup-oauth-action-hint")
+            // 反馈提示优先，其次按焦点区显示操作指南
+            let hint_text = match *hint.read() {
+                Some(OauthHint::Copied) => i18n::tr("oauth-copied-hint"),
+                Some(OauthHint::BrowserOpened) => i18n::tr("oauth-opened-hint"),
+                None if btn_focused => i18n::tr("oauth-hint-btn-focus"),
+                None => i18n::tr("oauth-hint-input-focus"),
             };
-            lines.push(Line::from(hint).fg(semantic.text.dim));
+            lines.push(Line::from(hint_text).fg(semantic.text.dim));
         }
     }
 

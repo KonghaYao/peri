@@ -139,11 +139,19 @@ impl McpClientPool {
                         }
                     });
                     if oauth_cfg.is_some() {
-                        // 不主动触发授权（避免启动即弹 popup 打扰）：统一标记
-                        // NeedsAuthorization，由用户经 MCP 面板显式发起
-                        // （mcp/oauth_start RPC → host pool spawn_oauth_flow →
-                        // popup → 授权完成后各 pool 经共享凭证文件恢复）。
-                        Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                        if pool.oauth_event_callback().is_some() {
+                            // host pool：不主动触发授权（避免启动即弹 popup
+                            // 打扰），统一标记 NeedsAuthorization，由用户经
+                            // MCP 面板显式发起（mcp/oauth_start RPC →
+                            // spawn_oauth_flow → popup）。
+                            Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                            continue;
+                        }
+                        // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
+                        // 磁盘凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                        // NeedsAuthorization，由 host pool 授权后共享凭证文件
+                        // 恢复。异步执行不阻塞初始化。
+                        pool.spawn_oauth_flow(name);
                         continue;
                     } else {
                         if let Some(ref handler) = channel_handler {
@@ -364,11 +372,19 @@ impl McpClientPool {
                         }
                     });
                     if oauth_cfg.is_some() {
-                        // 不主动触发授权（避免启动即弹 popup 打扰）：统一标记
-                        // NeedsAuthorization，由用户经 MCP 面板显式发起
-                        // （mcp/oauth_start RPC → host pool spawn_oauth_flow →
-                        // popup → 授权完成后各 pool 经共享凭证文件恢复）。
-                        Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                        if pool.oauth_event_callback().is_some() {
+                            // host pool：不主动触发授权（避免启动即弹 popup
+                            // 打扰），统一标记 NeedsAuthorization，由用户经
+                            // MCP 面板显式发起（mcp/oauth_start RPC →
+                            // spawn_oauth_flow → popup）。
+                            Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                            continue;
+                        }
+                        // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
+                        // 磁盘凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                        // NeedsAuthorization，由 host pool 授权后共享凭证文件
+                        // 恢复。异步执行不阻塞初始化。
+                        pool.spawn_oauth_flow(name);
                         continue;
                     } else {
                         if let Some(ref handler) = channel_handler {

@@ -218,6 +218,9 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         AcpEvent::OauthFailed { server_name, error } => {
             Some(AcpEventData::OauthFailed { server_name, error })
         }
+        AcpEvent::OauthRestored { server_name } => {
+            Some(AcpEventData::OauthRestored { server_name })
+        }
         // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
         AcpEvent::StateSnapshotMeta {
             context_total_tokens,

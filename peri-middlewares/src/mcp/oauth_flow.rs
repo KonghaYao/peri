@@ -45,6 +45,12 @@ pub enum OAuthFlowEvent {
     AuthorizationCompleted { server_name: String },
     /// OAuth 授权失败
     AuthorizationFailed { server_name: String, error: String },
+    /// 从凭证存储恢复成功（快速路径：磁盘已有有效凭证，跳过浏览器授权）。
+    ///
+    /// 恢复 ≠ 用户本次完成授权——连接阶段仍会验证 token 有效性，失效时由
+    /// 调用方清除凭证并重新走完整授权。TUI 收到此事件用于反馈「已使用已
+    /// 保存凭证连接」并同步面板池状态。
+    AuthorizationRestored { server_name: String },
 }
 
 /// OAuth 流程编排器
@@ -121,6 +127,11 @@ impl OAuthFlowManager {
                 // 注意：不 emit AuthorizationCompleted——恢复凭证 ≠ 用户完成
                 // 授权；token 可能已过期/被 revoke，有效性由连接阶段验证，
                 // 失效时调用方清除凭证并重新走完整授权（弹 popup）。
+                // emit AuthorizationRestored：通知 TUI 走的是快速路径（凭据
+                // 已存在），供其反馈「已使用已保存凭证连接」并同步面板池。
+                (self.event_callback)(OAuthFlowEvent::AuthorizationRestored {
+                    server_name: server_name.to_string(),
+                });
                 return Ok(());
             }
         }

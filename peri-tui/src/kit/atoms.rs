@@ -162,6 +162,8 @@ pub struct McpServerSummary {
     /// OAuth 待授权标记（oauth_status == NeedsAuthorization）：面板据此
     /// 显示"授权"按钮（Enter 触发 mcp/oauth_start）。
     pub needs_auth: bool,
+    /// 服务器 URL（HTTP 传输），详情视图展示用。
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

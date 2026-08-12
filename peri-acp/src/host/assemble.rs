@@ -208,6 +208,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
                 OAuthFlowEvent::AuthorizationFailed { server_name, error } => {
                     let _ = cb_tx.send(crate::event::AcpEvent::OauthFailed { server_name, error });
                 }
+                OAuthFlowEvent::AuthorizationRestored { server_name } => {
+                    let _ = cb_tx.send(crate::event::AcpEvent::OauthRestored { server_name });
+                }
             }))
         };
         tokio::spawn(async move {

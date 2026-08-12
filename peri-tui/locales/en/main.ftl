@@ -378,6 +378,7 @@ mcp-action-enable = Enable
 # OAuth Messages
 mcp-oauth-completed = [i] OAuth authorization completed: { $server }
 mcp-oauth-failed = [i] OAuth authorization failed: { $server } - { $error }
+mcp-oauth-restored = [i] Connected with saved credentials: { $server }
 mcp-clear-auth-ok = [i] OAuth credentials cleared: { $server }
 mcp-clear-auth-failed = [i] Failed to clear OAuth credentials: { $server }
 mcp-action-ok = [i] Action completed: { $server }
@@ -598,8 +599,10 @@ oauth-callback-label = Authorization code >
 oauth-btn-open = Open browser
 oauth-btn-copy = Copy link
 oauth-btn-cancel = Cancel
-popup-oauth-action-hint =   Tab: switch button/input  |  ←→: select button  |  Enter: activate  |  Enter in input: submit code
-oauth-copied-hint =   ✓ Authorization link copied to clipboard  |  Esc: cancel
+oauth-hint-btn-focus =   ←→: select button  |  Enter: activate  |  Tab: type code  |  Esc: cancel
+oauth-hint-input-focus =   Paste authorization code, Enter to submit  |  Tab: buttons  |  Esc: cancel
+oauth-copied-hint =   ✓ Link copied (open it in your browser)
+oauth-opened-hint =   Browser opened — if not, copy the link and open manually
 
 # ---- Login Panel ----
 
@@ -851,7 +854,12 @@ panel-mcp-empty =   No MCP servers configured
 panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
 panel-mcp-needs-auth =  [needs auth]
-panel-mcp-oauth-hint =   Enter: start OAuth  |  Esc: close
+panel-mcp-oauth-hint =   Enter: open auth detail  |  Esc: close
+# MCP panel detail view (OAuth authorize entry)
+panel-mcp-detail-url = URL:
+panel-mcp-detail-btn-auth = Authorize
+panel-mcp-detail-btn-back = Back
+panel-mcp-detail-hint =   Enter: authorize  |  Esc: back to list  |  ←→: select button
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯

@@ -284,6 +284,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         OauthNeeded(_) => "OauthNeeded",
         OauthCompleted { .. } => "OauthCompleted",
         OauthFailed { .. } => "OauthFailed",
+        OauthRestored { .. } => "OauthRestored",
         SubagentStarted { .. } => "SubagentStarted",
         SubagentStopped { .. } => "SubagentStopped",
         Unknown { .. } => "Unknown",

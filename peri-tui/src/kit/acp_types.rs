@@ -1313,6 +1313,10 @@ pub enum AcpEventData {
     /// 由 AcpEvent::OauthFailed（peri/agent_event）转换而来。
     OauthFailed { server_name: String, error: String },
 
+    /// `"oauth-restored"` -- MCP OAuth 凭证恢复成功（快速路径：磁盘已有
+    /// 有效凭证，跳过浏览器授权）。由 AcpEvent::OauthRestored 转换而来。
+    OauthRestored { server_name: String },
+
     // -- §4.6 Structure (control message-area layout) ------------------------
     /// `"subagent-started"` -- sub-agent created, TUI opens a collapsible group.
     SubagentStarted {
@@ -1470,6 +1474,10 @@ impl AcpEventData {
                 let server_name = data["server_name"].as_str().unwrap_or("").to_string();
                 let error = data["error"].as_str().unwrap_or("").to_string();
                 AcpEventData::OauthFailed { server_name, error }
+            }
+            "oauth-restored" => {
+                let server_name = data["server_name"].as_str().unwrap_or("").to_string();
+                AcpEventData::OauthRestored { server_name }
             }
 
             // §4.6 Structure

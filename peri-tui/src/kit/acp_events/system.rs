@@ -446,6 +446,28 @@ pub(super) fn handle_oauth_failed(state: &mut BridgeState, server_name: &str, er
     super::render::push_acp_state(state);
 }
 
+pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) {
+    // 凭证恢复成功（快速路径）：用户主动发起授权但磁盘已有有效凭证，
+    // 不弹 popup；提示「已使用已保存凭证连接」并同步面板池状态。
+    let text = i18n::tr_args(
+        "mcp-oauth-restored",
+        &[("server".into(), FluentValue::from(server_name))],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Info);
+    super::render::push_acp_state(state);
+
+    // 同步 TUI 面板池（reconnect 走凭证快速路径，不重复弹授权）。
+    if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
+        let pool = pool.clone();
+        let name = server_name.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = pool.reconnect(&name, None).await {
+                tracing::warn!(server = %name, error = %e, "面板 MCP 凭证恢复后重连失败");
+            }
+        });
+    }
+}
+
 // ── §4.7 Background Tasks ──
 
 pub(super) fn handle_bg_task_snapshot(state: &mut BridgeState, tasks: &[BgTaskEntry]) {
