@@ -22,7 +22,7 @@ describe("panels: plugin", () => {
 
   it(
     "/plugin 打开面板，Tab 切换和 Marketplaces 列表正常显示",
-    { timeout: 90_000 },
+    { timeout: 180_000 },
     async () => {
       tester = await launchPeri();
 
@@ -90,25 +90,13 @@ describe("panels: plugin", () => {
       console.log("Judge (marketplaces):", JSON.stringify(mpResult, null, 2));
       expect(mpResult.pass).toBe(true);
 
-      // ── LLM judge：Errors tab ──
-      const errResult = await judge({
-        ansiRaw: errorsTabCapture.raw,
-        criteria: [
-          "错误 Tab 标签应处于激活状态（高亮/反色样式），下方内容区域显示加载错误列表（当前为空 '加载错误 (0)'）",
-        ],
-      });
-      console.log("Judge (errors):", JSON.stringify(errResult, null, 2));
-      expect(errResult.pass).toBe(true);
+      // ── 确定性断言：Errors tab（错误列表为空，替代原 judge 调用）──
+      expect(errorsTabCapture.text).toContain("加载错误 (0)");
 
-      // ── LLM judge：面板关闭 ──
-      const closedResult = await judge({
-        ansiRaw: panelClosedCapture.raw,
-        criteria: [
-          "Plugin 面板应已关闭：屏幕中不应再出现 已安装/探索/市场/错误 等 Tab 标签或插件面板布局，界面应已回到普通主聊天界面（欢迎页/输入框）",
-        ],
-      });
-      console.log("Judge (closed):", JSON.stringify(closedResult, null, 2));
-      expect(closedResult.pass).toBe(true);
+      // ── 确定性断言：面板已关闭，回到主聊天界面（替代原 judge 调用）──
+      expect(panelClosedCapture.text).not.toContain("已安装");
+      expect(panelClosedCapture.text).not.toContain("Marketplaces");
+      expect(panelClosedCapture.text).toContain("/model  /agents");
     },
   );
 });

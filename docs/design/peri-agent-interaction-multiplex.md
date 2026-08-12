@@ -21,7 +21,7 @@ MultiplexBroker 是 HITL 审批系统的多路复用器。当系统同时连接�
 
 #### UserInteractionBroker trait
 
-所有 broker 实现统一的 `UserInteractionBroker` trait（`peri-agent/src/interaction/mod.rs:98-101`），将 HITL（工具审批）和 AskUser（问答）两条路径统一为单一接口：
+所有 broker 实现统一的 `UserInteractionBroker` trait（定义已下沉 `peri-acp-types/src/interaction.rs:113`；`peri-agent/src/interaction/mod.rs` 仅 re-export），将 HITL（工具审批）和 AskUser（问答）两条路径统一为单一接口：
 
 ```rust
 #[async_trait]
@@ -34,14 +34,14 @@ pub trait UserInteractionBroker: Send + Sync {
 
 #### 统一交互类型
 
-`InteractionContext` 枚举（`peri-agent/src/interaction/mod.rs:37-43`）描述交互场景：
+`InteractionContext` 枚举（`peri-acp-types/src/interaction.rs:48`）描述交互场景：
 
 | 变体 | 含义 |
 |------|------|
 | `Approval { items: Vec<ApprovalItem> }` | 工具调用前审批（原 HITL BatchApprovalRequest） |
 | `Questions { requests: Vec<QuestionItem> }` | 向用户提问（原 AskUserBatchRequest） |
 
-`InteractionResponse` 枚举（`peri-agent/src/interaction/mod.rs:74-81`）描述响应结果：
+`InteractionResponse` 枚举（`peri-acp-types/src/interaction.rs:86`）描述响应结果：
 
 | 变体 | 含义 |
 |------|------|
@@ -60,7 +60,7 @@ pub trait UserInteractionBroker: Send + Sync {
 
 #### StdioBroker（stdio 自动审批 broker）
 
-`peri-tui/src/acp_stdio/context.rs:71-101` — stdio 传输模式下的默认 broker：
+`peri-acp/src/host/stdio/context.rs:85`（stdio 宿主随 L5 迁入 peri-acp，原 `peri-tui/src/acp_stdio/` 目录已不存在）— stdio 传输模式下的默认 broker：
 
 - 对所有 `Approval` 自动返回 `Approve`
 - 对 `Questions` 返回空答案
@@ -84,7 +84,7 @@ pub trait UserInteractionBroker: Send + Sync {
 
 ##### ChannelNotificationSender trait
 
-`peri-agent/src/interaction/mod.rs:106-114` — 发送 channel 通知的抽象，由 `McpClientPool` 实现：
+`peri-acp-types/src/interaction.rs:122` — 发送 channel 通知的抽象，由 `McpClientPool` 实现：
 
 ```rust
 #[async_trait]
@@ -113,11 +113,11 @@ pub trait ChannelNotificationSender: Send + Sync {
 
 ### 2.4 Builder 构造逻辑
 
-`peri-acp/src/agent/builder.rs:278-302`：
+`peri-middlewares/src/assembly.rs:158-178`（L5 后装配点自 `peri-acp/src/agent/builder.rs` 迁入，原文件不存在）：
 
 - 当 `channel_state` 和 `mcp_pool` 同时存在时，将 TUI broker（`AcpTransportBroker`）与 Channel broker 包装为 `MultiplexBroker`
 - 否则直接使用 TUI broker
-- `AskUserTool` 始终绕过 `MultiplexBroker`，使用原始 TUI broker（`permission_broker`），避免 Channel 空答案竞速胜出导致弹窗被绕过
+- `AskUserTool` 始终绕过 `MultiplexBroker`，使用原始 TUI broker（`assembly.rs:177-180`），避免 Channel 空答案竞速胜出导致弹窗被绕过
 
 ### 2.5 HITL 中间件增强
 

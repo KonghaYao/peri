@@ -41,6 +41,7 @@ pub async fn replay_session_history(
                 let update = SessionUpdate::UserMessageChunk(replay_chunk(
                     ContentBlock::Text(TextContent::new(extract_text(content))),
                     caps,
+                    msg.id(),
                 ));
                 let notif =
                     SessionNotification::new(SessionId::new(session_id.to_string()), update);
@@ -60,6 +61,7 @@ pub async fn replay_session_history(
                         let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                             ContentBlock::Text(TextContent::new(s.clone())),
                             caps,
+                            msg.id(),
                         ));
                         let notif = SessionNotification::new(
                             SessionId::new(session_id.to_string()),
@@ -91,6 +93,7 @@ pub async fn replay_session_history(
                             let update = SessionUpdate::AgentThoughtChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
+                                msg.id(),
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -102,6 +105,7 @@ pub async fn replay_session_history(
                             let update = SessionUpdate::AgentMessageChunk(replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
+                                msg.id(),
                             ));
                             let notif = SessionNotification::new(
                                 SessionId::new(session_id.to_string()),
@@ -170,8 +174,18 @@ pub async fn replay_session_history(
     Ok(())
 }
 
-fn replay_chunk(content: ContentBlock, caps: &PeriCaps) -> ContentChunk {
+fn replay_chunk(
+    content: ContentBlock,
+    caps: &PeriCaps,
+    message_id: peri_acp_types::messages::MessageId,
+) -> ContentChunk {
     let mut chunk = ContentChunk::new(content);
+    // ACP 标准 messageId 语义：replay 时携带消息真实 ID，与流式路径一致
+    // （同一消息的 reasoning/text chunk 共享 ID，客户端段边界行为一致）。
+    // v1 wire 上的 messageId 是字符串（规范消息 ID 的 UUID 串）。
+    chunk.message_id = Some(agent_client_protocol_schema::v1::MessageId::from(
+        message_id.as_uuid().to_string(),
+    ));
     if caps.replay {
         let mut meta = serde_json::Map::new();
         meta.insert("periReplay".to_string(), serde_json::Value::Bool(true));

@@ -4,7 +4,7 @@
 
 - 聚合展示对话、工具调用、工具结果、SubAgent、后台 Agent 状态、系统通知和当前 streaming turn。
 - 输入区支持多行编辑、历史、文件 mention、slash command、软换行、视口跟随、placeholder。
-- 状态栏持续暴露运行环境、权限模式、模型、资源占用和上下文快捷键。
+- 状态栏持续暴露运行环境、权限模式、模型与后台任务；CPU%/MEM/上下文使用率在 composer footer 右侧资源线。
 
 ---
 
@@ -301,6 +301,16 @@ FocusLayer 优先级（focus_router.rs，active_layer() 判定）：
 **问题本质:** `parse_submit_request` 调用 `panel_for_slash_command` 前缺少 `/` 前缀检查——`trim_start_matches('/')` 在无前缀时是 no-op，`"agent"` 也能匹配注册的 slash_command。
 **通用模式:** 命令归一化必须显式检查命令前缀；注册表匹配函数与调用方守卫职责分离（`panel_for_slash_command` 本身保持无前缀兼容，slash popup 的 on_select 传入命令名属合理场景）。
 **涉及文件:** peri-tui/src/kit/submit_request.rs（`command.starts_with('/')` 守卫）, peri-tui/src/kit/panel_registry.rs（panel_for_slash_command）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-prediction-metadata-only-clears-placeholder
+**摘要:** 仅元数据（SetTitle/AddTag）的 prediction 以空文本覆盖输入区占位内容
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** prediction 覆盖, 空文本语义, 占位保护
+**问题本质:** 服务端 prediction 只产出元数据动作（无 Placeholder）时 text 为空串，客户端 handle_prediction 用空文本覆盖已有占位（如 `!` 或上次输入）。
+**通用模式:** "空 text"应视为无内容而非清空指令；覆盖型写入先判空；仅元数据响应不得改动占位。
+**涉及文件:** peri-tui/src/kit/acp_events/（handle_prediction 路径）
 **CLAUDE.md 链接:** false
 
 

@@ -24,9 +24,9 @@
 │                                                                              │
 │ ┌──────────────────────────────────────────────────────────────────────────┐ │
 │ │ ❯ 输入你的任务...                                                        │ │
-│ │ @ mention files    / commands                                           │ │
+│ │ @ mention files    / commands          CPU 12% · MEM 430MB · 42% ctx     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
-│ Auto · perihelion · anthropic/claude-code-sonnet · CPU 12% · MEM 430MB        │
+│ Auto · perihelion · anthropic/claude-code-sonnet                             │
 │                 /::commands · Shift+Enter::newline · Ctrl+T::mode · Ctrl+O::diff│
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -35,7 +35,7 @@
 
 - 聚合展示对话、工具调用、工具结果、SubAgent、后台 Agent 状态、系统通知和当前 streaming turn。
 - 输入区支持多行编辑、历史、文件 mention、slash command、软换行、视口跟随、placeholder。
-- 状态栏持续暴露运行环境、权限模式、模型、资源占用和上下文快捷键。
+- 状态栏持续暴露运行环境、权限模式、模型与后台任务；CPU%/MEM/上下文使用率在 composer footer 右侧资源线。
 - BgTaskArea 展示后台 Agent（background subagent）的运行状态和耗时。
 
 ### 1.2 Setup Wizard 首次启动页
@@ -576,7 +576,7 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Auto · perihelion · anthropic/claude-code-sonnet · CPU 12% · MEM 430MB        │
+│ Auto · perihelion · anthropic/claude-code-sonnet                             │
 │                 /::commands · Shift+Enter::newline · Ctrl+T::mode · Ctrl+O::diff│
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -584,7 +584,8 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 
 能力：
 
-- 第 1 行显示 permission mode、cwd basename、provider/model、CPU、MEM。
+- 第 1 行显示 permission mode、cwd basename、provider/model、后台任务计数。
+- CPU%/MEM/上下文使用率显示在输入区 composer footer 右侧资源线（`input_area.rs` `footer_right`）。
 - 第 2 行根据状态切换 hints：
   - 默认：slash commands hint + 输入区快捷键
   - popup 激活：弹窗快捷键（Esc: close、Enter: confirm）
@@ -916,6 +917,137 @@ Spinner 帧颜色：`accent`（`#D77757` 暖橙）；辅助文本（elapsed、to
 **问题本质:** `render_system_note_lines` 颜色决策基于文本关键词（❌/⚠ 启发式）而非 `data.level`；`TuiNoteLevel` 已定义 Info/Warning/Error 三级但未被渲染使用（创建端 `acp_events` 多处已正确设置 level 字段）。
 **通用模式:** 已有语义枚举（level）时渲染必须消费枚举，文本启发式是信息丢失源；创建端已正确设置说明数据流是通的，问题只在消费端。
 **涉及文件:** peri-tui/src/kit/message_area/render.rs, peri-tui/src/kit/tui_render_unit.rs, peri-tui/src/kit/acp_events/（原 acp_events.rs，已目录化）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-31-tui-tool-card-absolute-path-too-long
+**摘要:** 工具卡头行绝对路径过长——仅显示层裁剪 cwd 前缀
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 路径精简, 工具卡片, 显示层, OnceLock
+**问题本质:** 工具卡头行显示绝对路径过长；仅在 TUI 显示层（`summarize_input`）对 cwd 前缀做裁剪，不动 ACP/agent 事件。
+**通用模式:** 显示优化限定消费层，非 cwd 路径保持原样，测试覆盖纯函数边界。
+**涉及文件:** peri-tui/src/truncate.rs, message_area/render.rs, app/mod.rs, tool_display.rs, truncate_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-multi-agent-concurrent-cpu-high
+**摘要:** 3 agent 并发 50% CPU——渲染路径每 token 全量重建
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 渲染风暴, 每 token 全量重建, 滚动哈希, 增量缓存
+**问题本质:** 3 agent 并发 50% CPU，根因在渲染路径（20Hz 心跳全树重绘 + 每 token 全量 VM 重建 + markdown 全量重解析）；对抗验证把 4-7 项降级 LOW。
+**通用模式:** 性能归因用对抗验证收敛；渲染路径优化三件套（帧序号条件写、增量缓存同步、尾块回滚重解析）。
+**涉及文件:** peri-tui/src/kit/entry.rs, acp_types.rs, acp_events/render.rs, markdown/{mod.rs,convert.rs}, tui_render_unit.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-04-spinner-footer-missing-after-restore-history
+**摘要:** 恢复历史后 spinner footer 消失——idle 早退点
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** footer 常驻, idle 占位, BRIDGE_RESET_COUNTER, 早退
+**问题本质:** build_footer_lines 对 `!is_loading && 空 todo && 无 summary` 提前返回空 → 恢复历史后 spinner 组件消失；组件语义应为常驻二态。
+**通用模式:** 组件"无内容即不渲染"与"常驻占位"语义冲突——idle 早退点即缺陷。
+**涉及文件:** peri-tui/src/kit/message_area/{footer.rs,mod.rs}, footer_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-04-tui-garbled-crash-after-agent-panic
+**摘要:** agent panic 后 TUI 乱码崩溃——span guard 跨线程 + panic hook 写 escape 序列
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** tracing span 跨线程, panic hook, ratatui, escape 序列
+**问题本质:** `span.enter()` guard 跨 await 持有，tokio multi-thread task 迁移线程后错误重置 thread-local current span → tracing `lookup_current` panic；ratatui panic hook 从非渲染线程写 escape 恢复序列 → 终端乱码。
+**通用模式:** 跨 await 的 span guard 改 `.instrument()`；UI 进程 panic hook 不得向 stdout 写终端控制序列。
+**架构影响:** 新增 peri-tui/src/kit/panic.rs 重装 hook + PANIC_NOTIFY 状态栏提示。
+**涉及文件:** peri-agent/src/agent/stages/tool_dispatch.rs, peri-tui/src/{main.rs,launch.rs}, kit/entry.rs, kit/panic.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-06-e2e-tmux-server-dies
+**摘要:** E2E 残留 tui-test-* session 干扰导致 tmux server 挂掉
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** tmux server, killTestSessions, 前缀命名空间, 测试清理
+**问题本质:** 残留 tui-test-* session 干扰导致 tmux server 挂掉；`killTestSessions` 匹配过宽（includes test-）改精确前缀 startsWith("tui-test-")。
+**通用模式:** 测试清理逻辑的匹配宽严 = 误伤 vs 残留的权衡；前缀命名空间约定。
+**涉及文件:** e2e/tests/setup.ts, e2e/CLAUDE.md
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-11-tui-click-expand-broken
+**摘要:** 单击展开失效三缺陷叠加——坐标空间不一致 + Drag 无阈值 + 焦点不回退
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 手势状态机, 焦点单一事实源, 坐标空间, drag 容差
+**问题本质:** 单击展开失效三缺陷叠加（坐标空间不一致、Drag 无阈值破坏锚点、点击输入框不回退 entry 焦点）；按高层设计（gesture 状态机 + FOCUSED_ENTRY atom）S1-S4 落地。
+**通用模式:** 鼠标单击判定"只认距离不认 dragging"；交互状态双轨（局部+共享）是漂移源，收敛单事实源。
+**架构影响:** GesturePending 状态机、FOCUSED_ENTRY atom、entry_click_decision 纯函数。
+**涉及文件:** peri-tui/src/kit/message_area/{scroll.rs,mod.rs}, kit/text_selection.rs, input_area.rs, acp_events/render.rs, focus_router.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-11-tui-think-end-messageid
+**摘要:** TUI 无"推理结束"信号——thinking 动画空转；sync_cache 缓存复用守卫陈旧
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** thinking 冻结, messageId, ToolStarted 提前发射, sync_cache 缓存复用
+**问题本质:** TUI 无"推理结束"信号 → 动画空转到 turn 结束；方案 2 = agent 层工具块开始提前发 ToolStarted；实测再失效根因 = sync_cache 缓存复用守卫跳过新段构建（陈旧 Running 缓存）。
+**通用模式:** 推理结束用工具块开始推断（模型层 content_block_stop 信号被丢弃，正文点名）；渲染缓存"复用"必须与 segment 索引对齐。
+**涉及文件:** peri-agent/src/agent/model_bridge.rs, peri-tui/src/kit/acp_types.rs（append_text/start_tool/flush_text_segment/sync_cache）, acp_notifier.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-14-auto-follow-loses-track-during-streaming
+**摘要:** 流式输出期间自动跟踪中断——突发跳增误判为用户上滚
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 粘性吸底, follow_bottom, proximity 阈值, 流式跳增
+**问题本质:** 一次性推送大量 token 时 total_visual_rows 跳跃超过 vis_height/4，proximity 阈值误判为用户主动上滚而停止跟随；修复 = 粘性吸底（follow_bottom 状态，滚动落定后 offset>=max_scroll 才恢复跟随，75abcdcf）。
+**通用模式:** "距离阈值判断用户意图"会被内容跳增击穿；用粘性语义（明确跟随状态 + 真正到底判定）替代距离近似。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs（follow_bottom）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-22-llm-api-error-silently-swallowed-in-tui
+**摘要:** LLM API 报错时 TUI 消息区静默不显示错误
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 错误可见性, AgentExecutionFailed, 事件契约
+**问题本质:** v2 ReAct 路径 LLM 错误（5xx/429/401）只写 tracing 日志，TUI 无错误提示，agent 看起来"正常结束"；修复 = executor_helpers.rs 新增 AgentExecutionFailed emit。
+**通用模式:** 用户可见性契约：LLM/工具错误必须经事件链路到达 UI，日志不是用户可见通道。
+**涉及文件:** peri-acp/src/session/executor_helpers.rs, peri-tui/src/kit/acp_events/
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-01-tui-mouse-multi-layer-conflict
+**摘要:** TUI 鼠标事件多层布局路由冲突——集中式遮挡裁决（MouseRouter）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** MouseRouter, occluded 判定, 多层路由, 集中裁决
+**问题本质:** 弹窗/面板/消息区多层叠放，每个背景组件各自维护"是否被遮挡"判断且常漏判（面板打开时消息区抢滚轮、弹窗遮挡区误触背景）；收敛为集中式 MouseRouter 遮挡裁决。
+**通用模式:** 多层交互路由的遮挡判定集中单点（router），禁止各组件自维护；与 click-expand-broken 的焦点单事实源同构。
+**涉及文件:** peri-tui/src/kit/mouse_router.rs, message_area/scroll.rs, status_bar.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-message-area-drag-state-stale-after-popup
+**摘要:** 消息区被弹窗遮挡时提前返回，拖拽/滚动条状态残留
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** occluded 早退, 状态复位, 残留交互
+**问题本质:** scroll.rs 鼠标处理在 is_occluded() 时提前 return Ignored，跳过 scrollbar_drag.active/selection_down_pos/text_sel.dragging 复位——弹窗关闭后残留状态污染下一次交互。
+**通用模式:** 提前 return 的守卫分支必须同时执行状态复位（用 defer/统一收尾，或先复位再 return）。
+**涉及文件:** peri-tui/src/kit/message_area/scroll.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-statusbar-model-quick-switch-click-fails
+**摘要:** 运行多轮后点击状态栏模型段无法弹出快速切换弹窗
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 点击区域, 词级折行, 命中测试, 渲染镜像
+**问题本质:** model_click_areas 按 span 粒度计算，模型段折行/跨行时用最后一个 span 行号判定点击 → 命中失效；修复 = 词级折行模拟（对齐 reflow.rs Wrap{trim:false}），每词一个点击区域 + 28 个 status_bar 测试（含逐位 ground-truth 渲染对比）。
+**通用模式:** 鼠标点击区域必须镜像实际渲染的折行算法（词级扫描而非 span 粒度）；CJK 宽字符按宽度计。
+**涉及文件:** peri-tui/src/kit/status_bar.rs（model_click_areas）, status_bar_test.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-session-title-stale-after-session-cleared
+**摘要:** 会话关闭（session id 置空）后状态栏标题残留上个会话
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 守卫跳过清空, 标题残留
+**问题本质:** service_snapshot 标题刷新有 `!session_id.is_empty()` 守卫，session 置空时整块跳过、current_title 保留旧值。纯 UI 小 bug，无额外认知；修复 = 置空分支显式清标题并写空标题。
+**涉及文件:** peri-tui/src/kit/service_snapshot.rs
 **CLAUDE.md 链接:** false
 
 

@@ -657,6 +657,9 @@ render-status-done = Done
 render-tool-uses = · { $count } tool uses
 render-user-answered = User answered Peri's questions:
 render-thought-for = Thought for { $count } chars
+render-more-lines = … +{ $count } lines
+render-todo-summary = { $done }/{ $total } tasks
+render-todo-summary-active = { $done }/{ $total } tasks · { $active }
 render-agent-header = Agent
 
 # ---- Message Area Spinner ----
@@ -667,6 +670,41 @@ msg-keepgoing = Keep Going
 msg-copy-md = Copy
 msg-tip-prefix =   ⎿  Tip: 
 msg-todo-available =  (available)
+
+# ---- Message Entry Status Fallbacks (spec §4.1: symbols' text fallbacks) ----
+# Unicode 能力不足时，状态由符号退化为明确文本；同时 serve as aria/语义后备。
+msg-status-running = Running
+msg-status-done = Done
+msg-status-failed = Failed
+msg-status-needs-approval = Needs approval
+msg-status-collapsed = collapsed
+msg-status-expanded = expanded
+msg-status-queued = Queued
+msg-user-prompt = You
+msg-assistant-prompt = Perihelion
+msg-status-loading = Loading
+msg-new-output = New output
+render-group-failed-count = { $count } failed
+
+# ---- Interaction block (spec §6.8, Slice 4) ----
+# inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——
+# result 文案为纯文本（无符号），渲染层负责状态符号与颜色。
+
+render-interaction-title-permission = Approval required
+render-interaction-title-ask-user = Ask User
+render-interaction-question-permission = { $verb } wants to run: { $summary }
+render-interaction-tool-unknown = unknown tool
+render-interaction-allow-once = Allow once
+render-interaction-deny = Deny
+render-interaction-result-allowed-once = Allowed once
+render-interaction-result-denied = Denied
+render-interaction-result-answered = Answered
+render-interaction-result-rejected = Rejected
+
+# ---- Composer (spec §10) ----
+
+composer-attachments = @ { $count } files
+composer-context-usage = { $pct }% ctx
 
 # ---- Message View Placeholders ----
 
@@ -758,6 +796,7 @@ panel-title-betas = Betas
 panel-title-workflow = Workflow
 panel-title-ask-user = Ask User
 panel-title-theme = Theme
+panel-title-subagent-detail = SubAgent Detail
 
 # ---- Panel Descriptions ----
 panel-desc-model = Model alias selection
@@ -776,6 +815,8 @@ panel-desc-betas = Feature flags
 panel-desc-workflow = Workflow runs
 panel-desc-ask-user = Agent user questions (auto-open)
 panel-desc-theme = Color theme selection
+panel-desc-subagent-detail = Subagent nested transcript detail
+subagent-detail-not-found = Subagent not found — the session may have been reset.
 
 # ---- Betas Panel ----
 panel-betas-readonly-hint =   (read-only — feature flags are configured at build time)

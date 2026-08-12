@@ -91,6 +91,21 @@ impl BaseTool for EditFileTool {
         true
     }
 
+    /// 同类工具分组（design v2 §2.5.1）：filesystem 工具统一归组。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：对应 05 段落 "Write or edit a file"
+    /// 条目语义（选择指引 + 纪律约束），不逐字重复（守护测试断言）。
+    /// title 不覆盖——走 `tool_description` 默认推导路径。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Edit a file → `{{name}}` (targeted diff). Use `{{name}}` for targeted edits, not `echo >`/`sed`/`awk`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         EDIT_FILE_DESCRIPTION
     }
@@ -159,7 +174,10 @@ impl BaseTool for EditFileTool {
             .display()
             .to_string();
 
-        // 构建行数变化描述
+        // 构建行数变化描述。行数不变（Equal）时仍报告被替换的行数
+        // （= old_string 行数，±0 也有变更量）——TUI 依赖摘要中的计数
+        // 展示 `· +N · -N` 后缀；旧文本 "Replaced text (same line count)"
+        // 无计数信息，TUI 无法展示变更摘要。
         let diff_desc = match line_diff.cmp(&0) {
             std::cmp::Ordering::Greater => format!(
                 "Added {} line{}",
@@ -171,7 +189,11 @@ impl BaseTool for EditFileTool {
                 -line_diff,
                 if -line_diff == 1 { "" } else { "s" }
             ),
-            std::cmp::Ordering::Equal => "Replaced text (same line count)".to_string(),
+            std::cmp::Ordering::Equal => format!(
+                "Replaced {} line{}",
+                old_lines,
+                if old_lines == 1 { "" } else { "s" }
+            ),
         };
 
         if replace_all {

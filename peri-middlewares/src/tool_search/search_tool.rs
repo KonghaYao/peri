@@ -41,6 +41,22 @@ impl BaseTool for SearchExtraTools {
         true
     }
 
+    /// Meta 工具统一分组（design v2 §2.5.1）。
+    fn namespace(&self) -> Option<&str> {
+        Some("meta")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：说明桥接用途——Deferred 工具
+    /// 对 LLM 不可直接见，必须先经此发现、再由 ExecuteExtraTool 调用。
+    /// title 不覆盖——走派生路径（"SearchExtraTools" → "Search Extra Tools"）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Discover deferred tools by name or keyword → `{{name}}` ({{title}}). \
+             Deferred tools are not directly visible to you; find them here, then invoke them via ExecuteExtraTool."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         &self.description
     }

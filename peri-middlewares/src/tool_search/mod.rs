@@ -6,6 +6,7 @@
 pub mod artifact_client;
 pub mod artifact_tool;
 pub mod core_tools;
+pub mod declaration;
 pub mod execute_tool;
 pub mod keyword_search;
 pub mod middleware;

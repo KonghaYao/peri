@@ -5,6 +5,13 @@
 **类型**：工具链改进
 **创建日期**：2026-07-22
 **来源**：架构成熟度评估 — 工程规范与测试维度
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+`lefthook.yml:33-38` 明确注释 doc-tests 不在 pre-commit 运行（cargo check/clippy 不编译 doc test），`cargo audit` 仍注释未启用——两项门禁均缺失，需产品/CI 决策后落地。
+
+**状态**：Open（保持）
 
 ## Problem Statement
 

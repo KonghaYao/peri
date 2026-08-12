@@ -1,5 +1,5 @@
 /**
- * 场景测试: 同 turn 多 SubAgent 时，第二个起的工具调用卡片可见性
+ * 场景测试: 同 turn 多 SubAgent 时，第二个起的工具调用可见性
  *
  * 回归测试 for issue: 同一个 turn 中主 agent 多次调用 Agent 工具，
  * 第一个 SubAgent 的工具卡片正常显示，但第二个只有容器外壳、内部为空。
@@ -11,10 +11,14 @@
  * (2) 旧版代码中工具事件直接丢弃，看不到任何工具调用
  * (3) 修复后 fallback 为普通 ToolCard，仍可见但不在 SubAgentGroup 内
  *
+ * [Slice 3 同步] 视觉同步：SubAgentGroup 渲染为嵌套工具行（§6.7 重构后形态——
+ * Agent 头行 + 缩进子工具行，无单行摘要与 `N tools` 计数）；本测试验证两个
+ * SubAgent 各有一组可见工具行（非空壳），各占一行组。
+ *
  * 本测试从三个维度验证：
- * A. 屏幕内容 — 两个 SubAgent 的执行过程中都应能看到工具调用条目
+ * A. 屏幕内容 — 两个 SubAgent 的嵌套工具行都应出现（非空壳）
  * B. 日志诊断 — 检查 agent-tui.log 中是否出现 "NOT ROUTED" 警告
- * C. 完成后状态 — 两个 SubAgent 的工具卡片痕迹都应保留
+ * C. 完成后状态 — 两个 SubAgent 的工具行痕迹都应保留
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -44,7 +48,7 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
   });
 
   it(
-    "同一 turn 内主 agent 两次调用 Agent 工具，两个 SubAgent 的内部工具条目都应可见",
+    "同一 turn 内主 agent 两次调用 Agent 工具，两个 SubAgent 的摘要行都应可见",
     { timeout: 240_000 },
     async () => {
       // ── Prepare: 记录测试前 NOT ROUTED 计数 ──
@@ -55,8 +59,8 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       // 记录提交前的屏幕（用于 waitForStableScreen 基准）
       const base = await tester.getScreenText();
 
-      // 使用 echo 让 subagent 瞬间完成任务——本测试观测的是两个 Agent 卡片的
-      // 工具条目渲染（非空壳回归），不需要耗时搜索；分两步触发两个独立 SubAgent。
+      // 使用 echo 让 subagent 瞬间完成任务——本测试观测的是两个 SubAgent 的
+      // 单行摘要渲染（非空壳回归），不需要耗时搜索；分两步触发两个独立 SubAgent。
       await sendPrompt(
         tester,
         "请分两步完成以下任务，每一步都必须使用 Agent 工具（不可直接执行 shell）：" +
@@ -65,18 +69,19 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         "\n\n关键：每一步都必须调用 Agent 工具，不能合并。",
       );
 
-      // ── Phase 1: 等第一个 SubAgent 的工具卡片出现 ──
+      // ── Phase 1: 等第一个 SubAgent 的摘要行出现 ──
       await tester.waitForText("Agent", {
         timeout: 60_000,
         interval: 1000,
       });
-      // 等第一个 SubAgent 执行工具（● Bash/● Shell 条目出现，echo 瞬间完成）
+      // 等第一个 SubAgent 的嵌套工具行出现（§6.7 重构后：`│    ✓ Shell  echo
+      // hello-agent-1`；prompt 回显为小写 "shell 命令"，不会误匹配）
       await tester.waitFor(
-        (screen) => /● (?:Bash|Shell)/.test(screen),
+        (screen) => /Shell\s{2}echo hello-agent-1/.test(screen),
         {
           timeout: 60_000,
           interval: 1000,
-          message: "等待第一个 SubAgent 的工具卡片出现超时",
+          message: "等待第一个 SubAgent 摘要行出现超时",
         },
       );
 
@@ -86,12 +91,12 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       );
       expect(capture1.text.length).toBeGreaterThan(50);
 
-      // 断言 A1: 第一个 SubAgent 运行时有内部工具卡片
+      // 断言 A1: 第一个 SubAgent 摘要行非空壳
       const r = await judge({
         ansiRaw: capture1.raw,
         criteria: [
-          "消息区应出现第一个 Agent 卡片（标题包含 'Agent'），其内部（缩进或子行）包含至少一个工具调用卡片",
-          "工具调用卡片应显示具体工具名（如 ● Bash / ● Shell / ● Grep），不是空白或只有容器边框",
+          "消息区应出现第一个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-1'），不是空白",
+          "嵌套子工具行应包含具体活动/结果文本（如 echo 命令 hello-agent-1 或 Shell 相关字样）",
         ],
       });
       console.log("Judge (phase1):", JSON.stringify(r, null, 2));
@@ -111,15 +116,20 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
         await tester.sleep(2000);
       }
       expect(secondAgentSeen).toBe(true);
-      // 等第二个 SubAgent 的工具条目也出现（● Bash/● Shell 共 ≥2 个）
-      await tester.waitFor(
-        (screen) => (screen.match(/● (?:Bash|Shell)/g) || []).length >= 2,
-        {
-          timeout: 60_000,
-          interval: 1000,
-          message: "等待第二个 SubAgent 的工具卡片出现超时",
-        },
-      );
+      // 等第二个 SubAgent 的嵌套工具行也出现（hello-agent-2）
+      try {
+        await tester.waitFor(
+          (screen) => /Shell\s{2}echo hello-agent-2/.test(screen),
+          {
+            timeout: 60_000,
+            interval: 1000,
+            message: "等待第二个 SubAgent 摘要行出现超时",
+          },
+        );
+      } catch (e) {
+        const diag = await tester.getScreenText();
+        throw new Error(`等待第二个 SubAgent 摘要行出现超时。屏幕:\n${diag}`);
+      }
 
       const capture2 = await takePeriSnapshot(
         tester,
@@ -127,16 +137,16 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       );
       expect(capture2.text.length).toBeGreaterThan(50);
 
-      // 断言 A2: 第二个 SubAgent 运行时/完成后也有工具调用 —— 核心断言
+      // 断言 A2: 第二个 SubAgent 也有工具计数 —— 核心断言
       const r2 = await judge({
         ansiRaw: capture2.raw,
         criteria: [
-          // 核心: 第二个 Agent 卡片内也要有工具调用条目
-          "消息区中应出现第二个 Agent 工具调用卡片，且其内部应有具体工具调用卡片（如 ● Bash 或 ● Shell 或 ● Grep）",
-          // 防御: 不应出现空的外壳——Agent 卡片的标签行下方应有实质内容
-          "如果 Agent 卡片显示 'running' 或 'Finished' 状态，其内部区域不应为空——至少有一个工具条目或工具计数说明",
+          // 核心: 第二个 SubAgent 也要有可见的嵌套工具行（非空壳）
+          "消息区中应出现第二个 SubAgent 的 Agent 工具行，其下嵌套子工具行（如 'Shell echo hello-agent-2'），不是空的外壳",
+          // 防御: 不应出现空的外壳——每个 SubAgent 应有 Agent 头行 + 嵌套工具行
+          "每个 SubAgent 都应展示 Agent 工具行与嵌套子工具行（含工具名与活动文本）",
           // 防混淆
-          "第二个 SubAgent 的工具卡片不应出现在第一个 Agent 卡片区域内",
+          "第二个 SubAgent 不应与第一个混为一行——两个 SubAgent 各占一行",
         ],
       });
       console.log("Judge (phase2):", JSON.stringify(r2, null, 2));
@@ -154,8 +164,8 @@ describe("subagent: multi-subagent tool cards visibility (regression)", () => {
       const r3 = await judge({
         ansiRaw: capture3.raw,
         criteria: [
-          "完成后消息区应保留两个 Agent 工具调用入口（两个 ● Agent 条目），各自显示完成状态",
-          "两个 Agent 卡片完成后的输出区域都应包含工具调用结果摘要",
+          "完成后消息区应保留两个 SubAgent 的完成痕迹（成功符号 ✓ 的 Agent 工具行与嵌套子工具行），各自显示完成状态",
+          "两个 SubAgent 应包含工具调用结果摘要（如 echo 输出 hello-agent-1 / hello-agent-2 或文本总结）",
         ],
       });
       console.log("Judge (phase3):", JSON.stringify(r3, null, 2));

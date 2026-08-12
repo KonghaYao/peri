@@ -967,6 +967,9 @@ impl TaskManager {
         // 同步 spawn：PID 必须在返回前确定，供工具层回显给 LLM 管理任务
         let mut cmd = shell_command(&command_owned, &[]);
         cmd.current_dir(&cwd)
+            // stdin 重定向为 null：后台任务同样不依赖终端输入（与 Bash 工具
+            // 同步路径一致），否则读 stdin 的进程会永远阻塞等待 EOF。
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

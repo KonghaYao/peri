@@ -58,6 +58,40 @@ fn test_start_then_end_tool() {
 }
 
 #[test]
+fn test_start_tool_duplicate_id_upserts_input() {
+    // [Fix think-end] agent 侧提前 ToolStarted（工具块开始即发，参数尚未
+    // 流式生成 → raw_input=Null）与 dispatch 的正式 ToolStarted（参数完整）
+    // 同 id 先后到达：只升级 input，不重建卡片（保留 started_at/时长语义）。
+    let mut ct = CurrentTurn::new();
+    ct.append_reasoning("thinking...", None);
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        String::new(),
+        serde_json::Value::Null,
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1);
+    assert_eq!(ct.tool_cards[0].raw_input, serde_json::Value::Null);
+    assert!(ct.tool_cards[0].input_summary.is_empty());
+
+    // 正式发：同 id，input 完整 → upsert input
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        "path: foo.rs".into(),
+        serde_json::json!({"path": "foo.rs"}),
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1, "同 id 不应重复建卡");
+    assert_eq!(
+        ct.tool_cards[0].raw_input,
+        serde_json::json!({"path": "foo.rs"})
+    );
+    assert_eq!(ct.tool_cards[0].input_summary, "path: foo.rs");
+}
+
+#[test]
 fn test_end_tool_unknown_id_is_noop() {
     let mut ct = CurrentTurn::new();
     ct.start_tool(ToolCardAccumulator::new(
@@ -183,6 +217,42 @@ fn test_current_turn_subagent_unknown_route_returns_false() {
     let mut ct = CurrentTurn::new();
     assert!(!ct.append_subagent_text("missing", "hello"));
     assert!(ct.view_models().is_empty());
+}
+
+/// [回归测试] ToolStarted 后无 ToolEnded 直接 SubagentStopped：
+/// stop_subagent 必须 deactivate child_turn，否则无 output_summary 的
+/// 工具卡保持 Running（is_running = turn_active && 无输出），渲染为永久进行中。
+#[test]
+fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
+    let mut ct = CurrentTurn::new();
+    ct.start_subagent("agent-1".into(), "researcher".into());
+    assert!(ct.start_subagent_tool(
+        "agent-1",
+        ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
+    ));
+    // 无 end_subagent_tool，直接 stop
+    ct.stop_subagent("agent-1", false, "");
+
+    let s = ct
+        .subagents
+        .iter_mut()
+        .find(|s| s.agent_id == "agent-1")
+        .expect("subagent 应存在");
+    assert!(
+        !s.child_turn.active,
+        "stop_subagent 后 child_turn 必须 deactivate（ToolStarted 无 ToolEnded 场景）"
+    );
+    let vms: Vec<_> = s.child_turn.view_models().iter().cloned().collect();
+    assert_eq!(vms.len(), 1, "child_turn 应仍保留工具卡");
+    match &vms[0] {
+        TuiRenderUnit::TuiToolCard(card) => {
+            assert!(
+                !card.is_running,
+                "ToolStarted 无 ToolEnded 时停止，tool card 不应保持 Running"
+            );
+        }
+        other => panic!("expected TuiToolCard, got {other:?}"),
+    }
 }
 
 #[test]
@@ -314,10 +384,38 @@ fn test_decode_subagent_started() {
 
 #[test]
 fn test_decode_subagent_stopped() {
+    // legacy 通道缺省：无 result/is_error 字段 → 空字符串 / false（向后兼容）
     let data = serde_json::json!({"agent_id": "sa-1"});
     let decoded = AcpEventData::decode("subagent-stopped", data);
     match decoded {
-        AcpEventData::SubagentStopped { agent_id } => assert_eq!(agent_id, "sa-1"),
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "sa-1");
+            assert_eq!(result, "", "legacy 缺省 result 应为空");
+            assert!(!is_error, "legacy 缺省 is_error 应为 false");
+        }
+        _ => panic!("expected SubagentStopped"),
+    }
+    // 显式字段（canonical 主通道 peri/agent_event）
+    let data = serde_json::json!({
+        "agent_id": "sa-2",
+        "result": "loop failed: llm error",
+        "is_error": true
+    });
+    let decoded = AcpEventData::decode("subagent-stopped", data);
+    match decoded {
+        AcpEventData::SubagentStopped {
+            agent_id,
+            result,
+            is_error,
+        } => {
+            assert_eq!(agent_id, "sa-2");
+            assert_eq!(result, "loop failed: llm error");
+            assert!(is_error);
+        }
         _ => panic!("expected SubagentStopped"),
     }
 }
@@ -532,4 +630,46 @@ fn test_first_tool_in_batch_is_running_false_after_end() {
         }
         _ => panic!("vms[3] 应为 TuiToolCard"),
     }
+}
+#[test]
+fn test_flush_segment_rebuilds_cached_reasoning_status() {
+    // [Fix think-end] 回归测试：思考→工具（无正文）场景下，提前 ToolStarted
+    // 触发 flush 切段后，推理段必须以 Completed 形态构建（动画冻结）。
+    // 旧 bug：sync_cache 的 `len() <= i` 守卫复用 flush 前缓存的 trailing
+    // bubble（Running 形态），推理动画持续到 turn 结束才冻结。
+    let mut ct = CurrentTurn::new();
+    ct.append_reasoning("thinking...", None);
+    // 流式期间：缓存已构建 trailing bubble（推理块 Running）
+    let vm = ct.view_models();
+    assert_eq!(vm.len(), 1);
+    let TuiRenderUnit::TuiAssistantBubble(early) = &vm[0] else {
+        panic!("expected assistant bubble");
+    };
+    let early_reasoning = early.reasoning.as_ref().expect("推理块应存在");
+    assert_eq!(early_reasoning.status, EntryStatus::Running);
+
+    // 提前 ToolStarted（工具块开始 = 推理结束）→ flush 切段 + 建卡
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-1".into(),
+        "Edit".into(),
+        String::new(),
+        serde_json::Value::Null,
+        None,
+    ));
+    assert_eq!(ct.tool_cards.len(), 1);
+
+    // 段切走后：推理块必须转为 Completed（冻结），不再 Running
+    let vm = ct.view_models();
+    assert_eq!(vm.len(), 2, "段 + 工具卡片");
+    let TuiRenderUnit::TuiAssistantBubble(bubble) = &vm[0] else {
+        panic!("expected assistant bubble at index 0");
+    };
+    let reasoning = bubble.reasoning.as_ref().expect("推理块应存在");
+    assert_eq!(
+        reasoning.status,
+        EntryStatus::Completed,
+        "flush 切段后推理块必须 Completed（动画冻结）"
+    );
+    assert!(!reasoning.is_running, "冻结段不可处于 running");
+    assert_eq!(bubble.text, "", "思考→工具（无正文）场景正文为空");
 }

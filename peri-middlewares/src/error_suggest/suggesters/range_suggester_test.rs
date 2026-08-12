@@ -55,7 +55,25 @@ fn test_range_suggester_recognizes_offset_error() {
     let sug = result.unwrap();
     assert_eq!(
         sug.summary,
-        "请求的 offset 100 超出文件范围（文件共 50 行）。建议把 offset 改为 1（从头读）或小于 50 的值，配合 limit 控制读取范围。"
+        "Omit offset to read from the beginning. If targeting a known location, use only an observed line number in 1..=50; do not guess."
+    );
+}
+
+#[test]
+fn test_range_suggester_does_not_duplicate_self_correcting_read_error() {
+    let holder = CtxHolder::new(serde_json::json!({
+        "file_path": "/tmp/foo.rs",
+        "offset": 100,
+    }));
+    let cwd = std::path::Path::new(".");
+    let ctx = holder.ctx(
+        "Read",
+        "Error: offset 100 exceeds file length (50 lines). Valid offsets are 1..=50; omit offset to read from the beginning. Do not guess another offset or use offset to probe the file end.",
+        cwd,
+    );
+    assert!(
+        RangeSuggester.suggest(&ctx).is_none(),
+        "新版 Read 错误已自带恢复动作，不应追加重复建议"
     );
 }
 

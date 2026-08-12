@@ -45,6 +45,22 @@ impl BaseTool for SkillTool {
         true
     }
 
+    /// 提示词层声明分组（design v2 §2.5.1）：skills 工具归入 `skills`。
+    fn namespace(&self) -> Option<&str> {
+        Some("skills")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：按名加载 skill 全文。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Load the full SKILL.md of a skill → `{{name}}` ({{title}}), by name — e.g. when a skill appears in your instructions and you need its full body. Matching is case-insensitive and supports namespace prefixes (e.g. 'ecc:plan')."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         "Load the full content of a skill by name. Use this tool when you need to know the detailed instructions of a skill mentioned in the system prompt. The skill name is case-insensitive and supports namespace prefix (e.g. 'ecc:plan' matches skill 'plan'). Returns the full SKILL.md content including frontmatter headers."
     }
@@ -112,6 +128,22 @@ impl BaseTool for DiscoverSkillsTool {
 
     fn is_direct(&self) -> bool {
         true
+    }
+
+    /// 提示词层声明分组（design v2 §2.5.1）：skills 工具归入 `skills`。
+    fn namespace(&self) -> Option<&str> {
+        Some("skills")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：按名称或描述搜索可用 skills。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Find available skills → `{{name}}` ({{title}}) by name/description; use it to see which skills exist in this workspace. Without a query it returns all skills."
+                .to_string(),
+        )
     }
 
     fn description(&self) -> &str {

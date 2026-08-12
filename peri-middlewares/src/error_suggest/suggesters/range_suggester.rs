@@ -12,18 +12,24 @@ impl ErrorSuggester for RangeSuggester {
             return None;
         }
 
-        // 识别 "offset X exceeds file length (Y lines)" 错误
+        // 新版 Read 错误已给出实际范围与确定恢复动作，不重复附加建议；
+        // 重复的 "try another offset" 会重新诱导模型猜测大值。
+        if ctx.error_message.contains("Do not guess") {
+            return None;
+        }
+
+        // 兼容识别旧版 "offset X exceeds file length (Y lines)" 错误
         static RE: OnceLock<Regex> = OnceLock::new();
         let re = RE.get_or_init(|| {
             Regex::new(r"offset\s+(\d+)\s+exceeds file length\s+\((\d+)\s+lines\)").unwrap()
         });
         let caps = re.captures(ctx.error_message)?;
 
-        let requested: u64 = caps[1].parse().ok()?;
         let total: u64 = caps[2].parse().ok()?;
 
+        // 旧版错误正文只有长度信息；给出确定恢复动作，不鼓励再猜一个数字。
         Some(Suggestion::new(format!(
-            "请求的 offset {requested} 超出文件范围（文件共 {total} 行）。建议把 offset 改为 1（从头读）或小于 {total} 的值，配合 limit 控制读取范围。"
+            "Omit offset to read from the beginning. If targeting a known location, use only an observed line number in 1..={total}; do not guess."
         )))
     }
 }

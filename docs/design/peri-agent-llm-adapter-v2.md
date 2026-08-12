@@ -61,12 +61,16 @@ Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通�
 核心职责：
 - **请求规范化为 ModelRequest**：将 MessageTranscript 的全量消息、ToolDefinition 列表、System Prompt 打包为统一的请求结构。所有 Provider 接受相同格式的输入。
 - **响应规范化为 ModelResponse**：将不同 Provider 的响应格式统一为 `StopReason`（结束原因）、`TokenUsage`（输入/输出/缓存 token 统计）。上层消费统一语义，不解析 Provider 特有字段。
-- **能力查询**：Provider 通过 trait 方法声明自身能力，上层据此自适应行为：
+- **能力查询**：Provider 通过 `Model::capabilities() -> ModelCapabilities` 字段声明自身能力（`peri-model/src/protocol/types.rs:484`），上层据此自适应行为：
 
-  | 能力 | 方法 | 说明 |
+  | 能力 | 字段 | 说明 |
   |------|------|------|
-  | 上下文窗口 | `context_window()` | TokenTracker 据此计算 compact 阈值，默认 200K |
-  | 流式支持 | `supports_streaming()` | Reason 阶段据此选择流式或非流式路径，默认 false |
+  | 流式支持 | `supports_streaming` | Reason 阶段据此选择流式或非流式路径，默认 false |
+  | 工具调用 | `supports_tools` | 模型是否支持工具调用 |
+  | 推理支持 | `supports_reasoning` | 扩展思考支持 |
+  | 视觉输入 | `supports_vision` | 图像输入支持 |
+
+  上下文窗口**不在** `ModelCapabilities` 中——由装配侧按 provider 快照计算（`effective_context_window`，`peri-agent/src/session/exec/executor.rs:292`，含 `context_1m` 调整），TokenTracker 据此计算 compact 阈值。
 
   其余 Provider 差异行为（扩展思考、Prompt 缓存、System 传递方式等）由各 Provider 构造器字段决定，不作为 trait 能力查询暴露：
   - **扩展思考**：`AnthropicModel.extended_thinking` + `thinking_budget` + `thinking_effort`；`OpenAiModel.reasoning_effort`（o1/o3 系列）+ `thinking_enabled`（deepseek-v4-pro）
@@ -120,8 +124,6 @@ Provider 的统一抽象。ReAct 循环不直接调用 Provider API——它通�
 | Reasoning | 透传（带 signature） | 发送时过滤，接收时回传 `reasoning_content` |
 | Unknown | 透传原始 JSON | 透传原始 JSON |
 
-**OpenAI 消息序列校验**：`validate_message_invariants` 在 OpenAI 请求构建后校验消息序列不变量——每段连续 tool 消息块之前必须有 assistant with tool_calls 消息。违反不变量时通过 `tracing::error` 记录日志，防止 API 400 错误。
-
 **System hoist**：system 角色消息不进入 messages 数组，独立传递。Anthropic 协议走顶层 `system` 字段；OpenAI 协议走 messages 首位 System 消息。这保证 frozen system prompt 独立于对话消息，且为 Anthropic 的 cache_control 提供确定的注入位置。
 
 Anthropic 适配器在 `messages_to_anthropic` 中处理 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 标记：含边界标记的 system prompt（来自 `build_system_prompt`）排在最前面（可缓存前缀），不含边界标记的 middleware 注入内容排在边界之后（动态段，不影响缓存）。边界标记处通过 `split_system_blocks` 拆分为静态块（`cache_control=true`）和动态块（`cache_control=false`），确保 middleware 内容变化不会破坏 Anthropic prompt cache 前缀。
@@ -140,7 +142,7 @@ Anthropic 适配器在 `messages_to_anthropic` 中处理 `__SYSTEM_PROMPT_DYNAMI
 - **指数退避 + 随机抖动**：base_delay × 2^(attempt+1)，上限封顶（默认 32000ms），附加 25% 抖动避免雷群效应。attempt 从 0 开始，首次重试（attempt=0）使用 base_delay × 2（默认 500 × 2 = 1000ms）
 - **错误分类**：可重试（429 限流、5xx 服务端错误、连接超时）→ 自动重试；不可重试（401/403 认证权限错误）→ 直接返回失败
 - **流式重试语义**：仅首次尝试走流式路径，重试时降级为非流式——避免同一 message_id 被双重流式发射。循环执行 `max_retries` 次（默认 5 次），每次失败若可重试则延迟后继续；循环结束后还有 1 次最终调用（不重试）。总计 `max_retries+1` 次调用（默认 6 次）。
-- **可观测**：重试发生时通过事件流通知外部（TUI 显示"正在重试…"）；同时通过 `metrics::emit` 发送 `llm.retry` 指标（含 attempt / max_attempts / model / error / delay_ms）
+- **可观测**：重试通过 `RetryObserver`（`peri-agent/src/session/retry_events.rs:31`，`retry_observer_for` 将 `AgentEventHandler` 包装为 observer）通知外部——每次重试触发 `ExecutorEvent::LlmRetrying { attempt, max_attempts, delay_ms, error }`，TUI 据此显示"正在重试…"。
 
 ### 2.5 流式输出
 
@@ -150,7 +152,7 @@ Anthropic 适配器在 `messages_to_anthropic` 中处理 `__SYSTEM_PROMPT_DYNAMI
 - **降级路径**：Provider 声明 `supports_streaming = false` 时，`invoke_streaming` 自动回退为 `invoke`——一次性请求、一次性返回
 - **中断保留**：流式生成被 cancel 时，已产出的内容保留并写入 Transcript，标记中断原因
 
-**SseParser 有状态解析器**（`llm/sse.rs`）：两个 Provider 的流式路径共用同一 SSE 解析器。实现要点：字节级拼接（`pending_bytes` 保留跨 chunk 不完整行，避免多字节 UTF-8 截断）、行协议边界检测（以 `\n` 为分隔符，先拆分再解码）、`[DONE]` 检测、event type 累积（支持 Anthropic `event: content_block_delta` 格式）。
+**SseParser 有状态解析器**（`peri-model/src/transport/sse.rs`）：两个 Provider 的流式路径共用同一 SSE 解析器。实现要点：字节级拼接（`pending_bytes` 保留跨 chunk 不完整行，避免多字节 UTF-8 截断）、行协议边界检测（以 `\n` 为分隔符，先拆分再解码）、`[DONE]` 检测、event type 累积（支持 Anthropic `event: content_block_delta` 格式）。
 
 ### 2.6 Thinking 块处理
 

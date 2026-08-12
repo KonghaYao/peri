@@ -77,6 +77,20 @@ impl BaseTool for WebSearchTool {
         true
     }
 
+    /// 网络工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("web")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）。
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Look up current information beyond your knowledge → `{{name}}` ({{title}}). Query the web for recent or external facts."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         WEBSEARCH_DESCRIPTION
     }
@@ -91,6 +105,8 @@ impl BaseTool for WebSearchTool {
                 },
                 "num_results": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
                     "description": "Number of results, default 10, max 20"
                 }
             },
@@ -110,7 +126,13 @@ impl BaseTool for WebSearchTool {
         let query = input["query"]
             .as_str()
             .ok_or("Missing required parameter: query")?;
-        let max_results = input["num_results"].as_u64().unwrap_or(10).clamp(1, 20) as usize;
+        // 非法类型（浮点/字符串/负数）显式报错，不再静默回退默认值；
+        // 合法整数越界按描述 clamp 到 [1, 20]
+        let max_results =
+            match crate::tools::parse_optional_u64(&input["num_results"], "num_results")? {
+                Some(n) => (n as usize).clamp(1, 20),
+                None => 10,
+            };
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))

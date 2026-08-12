@@ -4,6 +4,16 @@
 
 ## 关键词索引
 
+### 3.0 重构
+
+- [issue_2026-08-05-3.0-l1-bg-tasks-to-agent 3.0 L1——后台任务从中间件迁入 Agent 层 async_tasks](domains/agent.md#issue_2026-08-05-3.0-l1-bg-tasks-to-agent) — architecture
+- [issue_2026-08-05-3.0-l2-middleware-assembly-to-agent 3.0 L2——中间件装配迁入 SessionFactory](domains/agent.md#issue_2026-08-05-3.0-l2-middleware-assembly-to-agent) — architecture
+- [issue_2026-08-05-3.0-l3-subagent-factory-to-agent 3.0 L3——subagent 创建统一迁入 Agent 层](domains/agent.md#issue_2026-08-05-3.0-l3-subagent-factory-to-agent) — architecture
+- [issue_2026-08-05-3.0-l4-langfuse-bypass-consumer 3.0 L4——Langfuse 重构为 Controller 侧旁路消费者](domains/agent.md#issue_2026-08-05-3.0-l4-langfuse-bypass-consumer) — architecture
+- [issue_2026-08-05-3.0-l5-executor-split 3.0 L5——executor 薄壳化拆分到 session/exec/](domains/agent.md#issue_2026-08-05-3.0-l5-executor-split) — architecture
+- [issue_2026-08-05-3.0-m-event-chain-canonical 3.0 M——Agent 事件三通道收敛单链路、v2_tx 双轨退役](domains/agent.md#issue_2026-08-05-3.0-m-event-chain-canonical) — architecture
+- [issue_2026-08-05-3.0-m-resources-layer 3.0 M——新建 peri-resources 存储通道层](domains/agent.md#issue_2026-08-05-3.0-m-resources-layer) — architecture
+
 ### /clear
 
 - [/clear 后 Welcome 页滚动条仍然可见——ScrollbarFields 未重置](domains/tui/tui-rendering.md#issue_2026-07-13-clear-scrollbar-persists-at-welcome) — tui
@@ -48,6 +58,7 @@
 ### AskUserQuestion
 
 - [AskUserQuestion 面板多选交互缺失 + 文本超长不换行](domains/tui/tui-popups.md#issue_2026-07-14-ask-user-multiselect-tui-support) — tui
+- [issue_2026-08-02-agent-asks-user-too-late-in-ambiguous-env agent 在环境失败/症状不明时静态深挖不收敛，提问过晚](domains/agent.md#issue_2026-08-02-agent-asks-user-too-late-in-ambiguous-env) — agent
 
 ### BTreeMap
 
@@ -64,6 +75,10 @@
 ### BgTaskRegistry
 
 - [Workflow Tool 快速失败后任务条目永久卡在黄色——complete_workflow() 永不调用](domains/tui/tui-panels.md#issue_2026-07-13-workflow-tool-error-task-stuck-and-panel-freeze) — tui
+
+### Bash 超时
+
+- [issue_2026-08-10-bash-timeout-misdiagnosis-promotes-stalled-processes Bash 未设 stdin 致读 stdin 进程挂死被 promote 成永不结束后台任务](domains/agent.md#issue_2026-08-10-bash-timeout-misdiagnosis-promotes-stalled-processes) — tools
 
 ### Bracketed Paste
 
@@ -89,6 +104,10 @@
 
 - [issue_2026-07-12-message-area-copy-unicode-misalignment CJK 字符累积偏移——视觉坐标转逻辑偏移](domains/tui/tui-rendering.md#issue_2026-07-12-message-area-copy-unicode-misalignment) — tui
 
+### CLI 配置
+
+- [issue_2026-08-06-cli-config-db-path CLI 新增 --db-path/--config-file——配置重定向与 fallback 语义](domains/agent.md#issue_2026-08-06-cli-config-db-path) — agent
+
 ### COPY_MESSAGE_UNTIL
 
 - [issue_2026-07-06-message-area-copy-complex-content-crash 复制操作导致 TUI 卡死——status_bar render body 写 atom 自激回路](domains/tui/tui-rendering.md#issue_2026-07-06-message-area-copy-complex-content-crash) — tui
@@ -96,6 +115,11 @@
 ### CjkGhostFix
 
 - [issue_2026-07-05-input-unicode-cursor-misalignment 输入框 CJK 光标残影——CjkGhostFix: AlwaysUpdate 续接 cell](domains/tui/tui-input.md#issue_2026-07-05-input-unicode-cursor-misalignment) — tui
+
+### Cron
+
+- [issue_2026-08-04-cron-trigger-lost-after-turn-error Cron 触发在 turn 结束后静默丢失——bridge 绑定 per-turn V2Session](domains/agent.md#issue_2026-08-04-cron-trigger-lost-after-turn-error) — tools
+- [issue_2026-08-07-cron-tool-task-never-triggers Cron 工具注册到临时 scheduler——downcast 恒失败静默失效](domains/agent.md#issue_2026-08-07-cron-tool-task-never-triggers) — tools
 
 ### Ctrl+C回滚
 
@@ -105,9 +129,19 @@
 
 - [bg agent 完成后主 agent 永久卡死、合成消息未注入主消息区](domains/agent.md#issue_2026-07-07-bg-agent-complete-no-resume) — agent
 
+### downcast
+
+- [issue_2026-08-06-e2e-workflow-not-completing downcast_arc 对 trait object 调 type_id() 恒失败——完成通知无订阅者](domains/agent.md#issue_2026-08-06-e2e-workflow-not-completing) — workflow
+- [issue_2026-08-07-cron-tool-task-never-triggers CronSchedulerPort downcast 恒失败——cron 工具注册到临时实例](domains/agent.md#issue_2026-08-07-cron-tool-task-never-triggers) — tools
+
 ### Drag事件过滤
 
 - [issue_2026-07-11-message-area-mouse-selection-regression 消息区鼠标 Drag 事件穿透导致 CPU 暴涨](domains/tui/tui-rendering.md#issue_2026-07-11-message-area-mouse-selection-regression) — tui
+
+### E2E 测试
+
+- [issue_2026-08-06-e2e-glob-grep-match-suffix-missing E2E Judge 误判 Glob 卡缺匹配数后缀——卡片被挤出视口](domains/agent.md#issue_2026-08-06-e2e-glob-grep-match-suffix-missing) — tools
+- [issue_2026-08-06-e2e-tmux-server-dies E2E 残留 tui-test-* session 干扰导致 tmux server 挂掉](domains/tui/tui-rendering.md#issue_2026-08-06-e2e-tmux-server-dies) — tui
 
 ### ESC 卡死
 
@@ -145,6 +179,15 @@
 
 - [issue_2026-07-05-enter-clear-hook-mismatch-panic Enter 提交 & /clear 清屏触发 Hook type mismatch panic 导致 TUI 崩溃](domains/tui/tui-input.md#issue_2026-07-05-enter-clear-hook-mismatch-panic) — tui
 
+### Langfuse
+
+- [issue_2026-08-07-langfuse-v3-subagent-parent-chain-validation-memo v3 后线上 trace subagent 父链验证备忘——先立部署切点再采样](domains/agent.md#issue_2026-08-07-langfuse-v3-subagent-parent-chain-validation-memo) — langfuse
+- [issue_2026-08-02-langfuse-bridge-drops-provider-request-id bridge 事件转换用 `..` 丢弃 provider request_id](domains/agent.md#issue_2026-08-02-langfuse-bridge-drops-provider-request-id) — langfuse
+- [issue_2026-08-02-reason-rs-loses-request-id-without-usage usage=None 时 request_id 被 unwrap_or 替换一并丢弃](domains/agent.md#issue_2026-08-02-reason-rs-loses-request-id-without-usage) — langfuse
+- [issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime subagent 内容整体错挂主 agent——LIFO 栈归属改身份注册表](domains/agent.md#issue_2026-08-05-langfuse-subagent-attribution-stack-lifetime) — langfuse
+- [issue_2026-08-05-langfuse-batcher-drops-during-slow-flush batcher 命令通道容量=max_events+DropNew——慢 flush 期间静默丢事件](domains/agent.md#issue_2026-08-05-langfuse-batcher-drops-during-slow-flush) — langfuse
+- [issue_2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents 并行 subagent 的 step 顺序错乱——观测图依赖并发完成序](domains/agent.md#issue_2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents) — langfuse
+
 ### Login 面板
 
 - [Login 面板 Enter 选择 provider 后不关闭面板](domains/tui/tui-panels.md#issue_2026-07-13-login-panel-enter-does-not-close) — tui
@@ -178,6 +221,10 @@
 
 - [issue_2026-07-05-tool-call-ai-text-invisible-after-commit AI 消息文本在 ViewCommit 后消失——OpenAI stream.rs ToolUse 分支遗漏](domains/agent.md#issue_2026-07-05-tool-call-ai-text-invisible-after-commit) — agent
 
+### panic hook
+
+- [issue_2026-08-04-tui-garbled-crash-after-agent-panic agent panic 后 TUI 乱码崩溃——span guard 跨线程 + panic hook 写 escape 序列](domains/tui/tui-rendering.md#issue_2026-08-04-tui-garbled-crash-after-agent-panic) — tui
+
 ### Paste事件
 
 - [issue_2026-07-05-paste-newline-triggers-submit 输入框粘贴含换行文本时直接触发 Enter 提交](domains/tui/tui-input.md#issue_2026-07-05-paste-newline-triggers-submit) — tui
@@ -198,6 +245,16 @@
 ### RENDER_CACHE 同步
 
 - [issue_2026-07-05-message-flow-render-sync-freeze 消息流渲染同步问题——提交后用户输入不显示、loading 卡死、history 恢复异常](domains/tui/tui-events.md#issue_2026-07-05-message-flow-render-sync-freeze) — tui
+
+### rewind
+
+- [issue_2026-08-06-e2e-rewind-input-not-refilled Rewind 回填文本被 <system-reminder> 注入块污染](domains/tui/tui-popups.md#issue_2026-08-06-e2e-rewind-input-not-refilled) — tui
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind 弹窗四连：测试口径/选择越界/错误事件复用/e2e 假绿](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
+
+### RwLock 重入死锁
+
+- [issue_2026-08-02-plugin-panel-uninstall-enter-freeze Plugin 面板卸载按 Enter 卡死——scrutinee 中 .read() 临时 guard 重入死锁](domains/tui/tui-panels.md#issue_2026-08-02-plugin-panel-uninstall-enter-freeze) — tui
+- [issue_2026-08-08-e2e-compact-command-screenshot-too-early /compact 完成提示重注入块读锁 guard 存活致写锁死锁](domains/tui/tui-events.md#issue_2026-08-08-e2e-compact-command-screenshot-too-early) — tui
 
 ### ScrollThrottle
 
@@ -223,6 +280,8 @@
 
 - [SubAgent 沙箱写工具：让 readonly agent 能输出交接文件](domains/agent.md#issue_2026-07-18-subagent-write-sandbox-tool) — agent
 - [子 agent 工具包装器未透传 aliases()，resolve_tool() 找不到别名](domains/agent.md#issue_2026-07-16-subagent-tool-alias-not-resolved) — agent
+- [issue_2026-08-09-subagent-resume-mechanism subagent 中断后无法找回现场——resume_thread_id 恢复机制](domains/agent.md#issue_2026-08-09-subagent-resume-mechanism) — subagent
+- [issue_2026-08-06-e2e-bg-task-area-entry-missing L5 归位回归——工具注入早于 set_parent_session 致 bg 静默降级同步](domains/agent.md#issue_2026-08-06-e2e-bg-task-area-entry-missing) — subagent
 
 ### SubagentStarted
 
@@ -236,6 +295,11 @@
 
 - [SystemNote 的 Warning/Error 等级颜色未区分——渲染函数忽略 data.level 枚举](domains/tui/tui-rendering.md#issue_2026-07-17-system-note-level-color-not-rendered) — tui
 - [issue_2026-07-16-system-note-cache-warning-position-wrong Cache 警告 SystemNote 消息流位置错位](domains/tui/tui-rendering.md#issue_2026-07-16-system-note-cache-warning-position-wrong) — tui
+- [issue_2026-08-08-e2e-compact-command-screenshot-too-early /compact 完成 SystemNote 在 replay 后丢失——PENDING_COMPACT_NOTE 跨 replay 桥接](domains/tui/tui-events.md#issue_2026-08-08-e2e-compact-command-screenshot-too-early) — tui
+
+### thinking 渲染
+
+- [issue_2026-08-11-tui-think-end-messageid TUI 无"推理结束"信号——thinking 动画空转；sync_cache 缓存复用守卫陈旧](domains/tui/tui-rendering.md#issue_2026-08-11-tui-think-end-messageid) — tui
 
 ### TUI 交互
 
@@ -367,6 +431,10 @@
 
 - [Compact 效果在 v2 路径中跨 prompt 丢失——persist_tx 始终为 None](domains/agent.md#issue_2026-07-18-compact-effect-lost-between-prompts-v2) — compact
 - [Compact 标记（truncated/excluded）在 Session 恢复后丢失——DB 与 cached_context 双重遗漏](domains/agent.md#issue_2026-07-17-compact-flags-lost-on-session-restore) — compact
+- [issue_2026-07-25-micro-compact-silently-fails-within-turn Micro Compact 同 turn 内静默失效——dry-run 与投影双重职责冲突](domains/agent.md#issue_2026-07-25-micro-compact-silently-fails-within-turn) — compact
+- [issue_2026-07-25-compact-decay-full-fails-micro-skipped-no-fallback Compact 退化链——Micro 跳过/Full 失败/无 fallback/计数器跨域污染](domains/agent.md#issue_2026-07-25-compact-decay-full-fails-micro-skipped-no-fallback) — compact
+- [issue_2026-07-25-micro-compact-treadmill-reclaim-target-zero Micro Compact 跑步机效应——reclaim_target 恒 0，每次"成功"预算不降](domains/agent.md#issue_2026-07-25-micro-compact-treadmill-reclaim-target-zero) — compact
+- [issue_2026-07-29-micro-compact-no-system-note Micro Compact 无 SystemNote——Debug 格式 vs 文案字面值错配](domains/agent.md#issue_2026-07-29-micro-compact-no-system-note) — compact
 
 ### complete_workflow
 
@@ -399,6 +467,10 @@
 ### flush-then-push
 
 - [issue_2026-07-16-system-note-cache-warning-position-wrong 消息推 committed 前需先 flush current_turn](domains/tui/tui-rendering.md#issue_2026-07-16-system-note-cache-warning-position-wrong) — tui
+
+### footer 常驻
+
+- [issue_2026-08-04-spinner-footer-missing-after-restore-history 恢复历史后 spinner footer 消失——idle 早退点](domains/tui/tui-rendering.md#issue_2026-08-04-spinner-footer-missing-after-restore-history) — tui
 
 ### fork SubAgent
 
@@ -448,6 +520,8 @@
 
 - [issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn Agent background 模式启动后 loading 不停止](domains/agent.md#issue_2026-07-09-bg-agent-loading-never-stops-after-first-turn) — agent
 - [主 agent 完成后 loading 不退——SubagentStopped 无条件设 phase=PromptRunning 覆盖了 TurnDone 清除的 loading](domains/tui/tui-rendering.md#issue_2026-07-13-main-agent-done-loading-persists-bg-still-running) — tui
+- [issue_2026-08-05-loading-stuck-after-transport-close transport 关闭后 is_loading 永久卡 true——pump 独占 sender 使"退出=关闭"](domains/tui/tui-events.md#issue_2026-08-05-loading-stuck-after-transport-close) — tui
+- [issue_2026-08-05-cancel-consumer-loading-phase-desync cancel 后 loading 闪回——is_loading 应从 phase 单一事实源派生](domains/tui/tui-events.md#issue_2026-08-05-cancel-consumer-loading-phase-desync) — tui
 
 ### message_count 过滤
 
@@ -595,6 +669,10 @@
 
 - [长数据高速滚动卡顿——高频 write() 触发多次原子通知→多次 draw](domains/tui/tui-rendering.md#issue_2026-07-05-scroll-performance-lag) — tui
 
+### 参数归一化
+
+- [issue_2026-08-02-grep-glob-path-parameter-ignored Grep/Glob 的 path 参数被 normalize_params 静默重命名丢弃](domains/agent.md#issue_2026-08-02-grep-glob-path-parameter-ignored) — tools
+
 ### 下载
 
 - [下载完成后 Theme 面板未刷新新增主题——异步操作回调未通知面板](domains/tui/tui-panels.md#issue_2026-07-15-theme-panel-not-refreshed-after-download) — tui
@@ -647,9 +725,26 @@
 
 - [issue_2026-07-10-brewed-summary-missing-in-empty-state 状态读取在 mutation 前导致单帧延迟](domains/tui/tui-rendering.md#issue_2026-07-10-brewed-summary-missing-in-empty-state) — tui
 
+### 后台任务
+
+- [issue_2026-08-05-bg-cancel-abort-skips-cleanup Agent 类 bg 取消仅 abort 跳过收尾——active_agents 泄漏 + 子进程孤儿化](domains/agent.md#issue_2026-08-05-bg-cancel-abort-skips-cleanup) — tools
+- [issue_2026-08-05-bg-command-expect-panic-via-rpc BgCommand 两处 expect 可经公开 RPC 传 None 触发 panic](domains/agent.md#issue_2026-08-05-bg-command-expect-panic-via-rpc) — tools
+- [issue_2026-08-05-bg-task-over-limit-still-runs 超限后台任务仍实际运行——检查-注册竞态](domains/agent.md#issue_2026-08-05-bg-task-over-limit-still-runs) — tools
+- [issue_2026-08-05-bg-shell-task-id-collision bg shell task_id 截断 UUID v7 前缀——同毫秒碰撞静默吞 Completed](domains/agent.md#issue_2026-08-05-bg-shell-task-id-collision) — tools
+- [issue_2026-08-05-cancel-bg-task-workflow-kind-ineffective Workflow 注册固定 Kill(None)——cancel 只删条目 runner 继续跑](domains/agent.md#issue_2026-08-05-cancel-bg-task-workflow-kind-ineffective) — tools
+
 ### 双轨扇出
 
 - [流式输出时文本和工具调用卡片重复——render 事件双轨扇出到 VIEW_MODELS](domains/tui/tui-events.md#issue_2026-07-18-duplicate-streaming-text-and-tool-cards) — tui
+
+### 鼠标手势
+
+- [issue_2026-08-01-model-panel-profile-row-click-no-response Model 面板 profile 行点击无响应——click-as-enter 覆盖遗漏](domains/tui/tui-panels.md#issue_2026-08-01-model-panel-profile-row-click-no-response) — tui
+- [issue_2026-08-11-tui-click-expand-broken 单击展开失效三缺陷叠加——坐标空间不一致 + Drag 无阈值 + 焦点不回退](domains/tui/tui-rendering.md#issue_2026-08-11-tui-click-expand-broken) — tui
+
+### 数据门
+
+- [issue_2026-08-10-chat-redesign-slice1-data-gates Chat redesign Slice 1——5 项数据门只读核验为零消费方定案](domains/tui/tui-events.md#issue_2026-08-10-chat-redesign-slice1-data-gates) — tui
 
 ### 同步 SubAgent
 
@@ -694,6 +789,7 @@
 ### 工具超时
 
 - [issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks 统一 300s 超时导致 Agent/SubAgent 中断](domains/agent.md#issue_2026-07-13-agent-tool-300s-timeout-interrupts-normal-tasks) — agent
+- [issue_2026-08-02-background-task-15s-timeout-kills-and-misreports 后台任务受 15s 默认超时约束——只杀 wrapper 致孤儿进程 + 通知误报](domains/agent.md#issue_2026-08-02-background-task-15s-timeout-kills-and-misreports) — tools
 
 ### 差异化超时
 
@@ -723,6 +819,10 @@
 
 - [用户提交后消息区不自动跳转底部——is_loading=true 但 UserBubble 仍在飞行中](domains/tui/tui-rendering.md#issue_2026-07-13-submit-no-scroll-to-bottom) — tui
 
+### 图片输入
+
+- [issue_2026-07-29-image-input-support TUI→ACP→Agent 管线图片输入通道打通（@image 语法）](domains/agent.md#issue_2026-07-29-image-input-support) — agent
+
 ### 文本折行
 
 - [AskUserQuestion 面板宽终端下布局混乱——WRAP_WIDTH=80 固定换行不匹配](domains/tui/tui-popups.md#issue_2026-07-15-ask-user-panel-layout-wrong-wide-terminal) — tui
@@ -751,6 +851,10 @@
 ### 流式输出
 
 - [流式输出时文本和工具调用卡片重复——render 事件双轨扇出](domains/tui/tui-events.md#issue_2026-07-18-duplicate-streaming-text-and-tool-cards) — tui
+
+### 路径精简
+
+- [issue_2026-07-31-tui-tool-card-absolute-path-too-long 工具卡头行绝对路径过长——仅显示层裁剪 cwd 前缀](domains/tui/tui-rendering.md#issue_2026-07-31-tui-tool-card-absolute-path-too-long) — tui
 
 ### 消息边界推断
 
@@ -800,6 +904,10 @@
 ### 续跑
 
 - [bg agent 完成后主 agent 永久卡死——合成消息未注入 MessageQueue](domains/agent.md#issue_2026-07-07-bg-agent-complete-no-resume) — agent
+
+### 渲染风暴
+
+- [issue_2026-08-02-multi-agent-concurrent-cpu-high 3 agent 并发 50% CPU——每 token 全量重建渲染路径](domains/tui/tui-rendering.md#issue_2026-08-02-multi-agent-concurrent-cpu-high) — tui
 
 ### 缓存命中率
 
@@ -877,6 +985,7 @@
 
 - [Micro Compact 整体替换导致 Agent 必填参数缺失](domains/agent.md#issue_2026-07-29-micro-compact-loses-agent-tool-context) — compact
 - [Micro Compact 字段级压缩设计——Planner/Projection 分离、Unicode 安全截断](domains/agent.md#issue_2026-07-29-micro-compact-field-level-design) — compact
+- [issue_2026-08-01-micro-compact-invisible-no-trigger Micro Compact 无触发痕迹——field-level 重写后空 plan 跳过](domains/agent.md#issue_2026-08-01-micro-compact-invisible-no-trigger) — compact
 
 ### StageContext 拆分
 
@@ -890,6 +999,83 @@
 
 - [三维护审视识别 35 个待升级点（4 P0 + 13 P1 + 18 P2）](domains/agent.md#issue_2026-07-16-architecture-upgrade-checklist) — architecture
 
+### caps 协商
+
+- [issue_2026-08-05-caps-negotiated-once-broken-second-session caps 协商值 take() 一次性消费——第 2+ session 门控错乱](domains/agent.md#issue_2026-08-05-caps-negotiated-once-broken-second-session) — acp-protocol
+
+### turn 代际
+
+- [issue_2026-08-05-stale-turn-interrupted-overwrites-new-turn 旧 turn TurnInterrupted 污染新 turn——request_id 配对 + 代际兜底](domains/tui/tui-events.md#issue_2026-08-05-stale-turn-interrupted-overwrites-new-turn) — tui
+
+### 悬挂 span
+
+- [issue_2026-08-05-stage-ended-missing-on-error-path run_stage Err 路径不 emit StageEnded——成对事件全路径对称](domains/agent.md#issue_2026-08-05-stage-ended-missing-on-error-path) — agent
+
+### transcript 落库
+
+- [issue_2026-08-05-transcript-drop-loses-final-messages transcript Drop abort 丢积压——正常退出必须显式 flush](domains/agent.md#issue_2026-08-05-transcript-drop-loses-final-messages) — agent
+
+### 事件身份
+
+- [issue_2026-07-25-event-identity-diverges-across-dual-delivery-paths 同一事件双轨投递身份漂移——收敛单链路+类型契约](domains/agent.md#issue_2026-07-25-event-identity-diverges-across-dual-delivery-paths) — architecture
+- [issue_2026-07-25-stale-v2-events-bypass-session-filter 旧会话 v2 事件绕过 session 过滤——空 session_id 守卫缺口](domains/agent.md#issue_2026-07-25-stale-v2-events-bypass-session-filter) — architecture
+
+### 死路径
+
+- [issue_2026-08-05-background-task-completed-event-dead-path BackgroundTaskCompleted 事件无映射——注释声称的 Path A 是死代码](domains/agent.md#issue_2026-08-05-background-task-completed-event-dead-path) — subagent
+
+### 非结构化错误
+
+- [issue_2026-07-22-p1-3-unstructured-error-cleanup #[from] anyhow 吸收一切错误——高频错误提升独立变体](domains/agent.md#issue_2026-07-22-p1-3-unstructured-error-cleanup) — agent
+
+### prompt 分层
+
+- [issue_2026-08-02-prompt-security-runtime-contracts Prompt 安全边界与运行时契约——五层模型+单一事实源](domains/agent.md#issue_2026-08-02-prompt-security-runtime-contracts) — architecture
+
+### 粘性吸底
+
+- [issue_2026-07-14-auto-follow-loses-track-during-streaming 流式跳增误判上滚——follow_bottom 粘性语义替代距离阈值](domains/tui/tui-rendering.md#issue_2026-07-14-auto-follow-loses-track-during-streaming) — tui
+
+### 点击区域
+
+- [issue_2026-08-02-statusbar-model-quick-switch-click-fails 状态栏模型段点击失效——点击区域必须镜像折行算法](domains/tui/tui-rendering.md#issue_2026-08-02-statusbar-model-quick-switch-click-fails) — tui
+
+### 遮挡裁决
+
+- [issue_2026-08-01-tui-mouse-multi-layer-conflict 鼠标多层路由冲突——集中式 MouseRouter 遮挡裁决](domains/tui/tui-rendering.md#issue_2026-08-01-tui-mouse-multi-layer-conflict) — tui
+
+### 错误可见性
+
+- [issue_2026-07-22-llm-api-error-silently-swallowed-in-tui LLM API 报错 TUI 静默无提示——AgentExecutionFailed 事件契约](domains/tui/tui-rendering.md#issue_2026-07-22-llm-api-error-silently-swallowed-in-tui) — tui
+
+### Profile
+
+- [issue_2026-08-01-model-profiles-independent-config Model Profile 独立配置——每档独立持有请求参数，整体替换合并](domains/agent.md#issue_2026-08-01-model-profiles-independent-config) — llm-provider
+
+### peri-model
+
+- [issue_2026-07-31-extract-peri-model-protocol-crate 抽取 peri-model 标准模型协议 crate——协议核心独立于运行时](domains/agent.md#issue_2026-07-31-extract-peri-model-protocol-crate) — architecture
+
+### 硬编码索引
+
+- [issue_2026-08-02-config-panel-alias-fallback-points-to-opus active_alias 空值回退索引漂移——选项回退按名称查找](domains/tui/tui-panels.md#issue_2026-08-02-config-panel-alias-fallback-points-to-opus) — tui
+
+### 测试对齐生产
+
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind 单测以 AI 消息为目标——测试场景必须对齐生产口径](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
+
+### 假绿
+
+- [issue_2026-08-02-rewind-popup-hardening-quartet rewind e2e 前置条件缺失静默通过——Write 未调用/文件缺失仍绿](domains/tui/tui-popups.md#issue_2026-08-02-rewind-popup-hardening-quartet) — tui
+
+### 取消误报
+
+- [issue_2026-08-05-cancel-misreported-as-llm-failure 用户取消被误报为 LLM 失败——match 两分支完全相同](domains/agent.md#issue_2026-08-05-cancel-misreported-as-llm-failure) — agent
+
+### RCRA
+
+- [issue_2026-07-27-rcra-simplify-agent-loop Agent Loop 五阶段 CRRAE 简化四阶段 RCRA——预消费与退出判断冲突](domains/agent.md#issue_2026-07-27-rcra-simplify-agent-loop) — agent
+
 ## 更新记录
 
 - 2026-07-06: 首次创建，归档 8 个 issue
@@ -898,3 +1084,5 @@
 - 2026-07-17: 归档 16 个 issue，新增 35 个关键词
 - 2026-07-18: 归档 37 个 issue
 - 2026-07-30: 归档 15 个 issue，新增 9 个关键词，agent 领域新增 8 条经验
+- 2026-08-11: 归档 41 个 issue，新增 19 个关键词，agent 领域新增 29 条经验
+- 2026-08-11: 归档 58 个 issue（删除 10 份被取代文档），新增 16 个关键词段，agent 领域新增 23 条经验，TUI 各子域新增 17 条经验

@@ -107,7 +107,7 @@ fn test_dark_peri_colors_mapping() {
     assert_eq!(peri.surface_user, Color::Rgb(55, 55, 55));
     assert_eq!(peri.surface_popup, Color::Rgb(0, 0, 0));
     assert_eq!(peri.surface_cursor, Color::Rgb(38, 38, 38));
-    assert_eq!(peri.status_running, Color::Rgb(147, 165, 255));
+    assert_eq!(peri.status_running, Color::Rgb(125, 207, 255)); // #7DCFFF（§4 表）
     assert_eq!(peri.model_info, Color::Rgb(160, 130, 95));
     assert_eq!(peri.bash_border, Color::Rgb(253, 93, 177));
     assert_eq!(peri.selected_fg, Color::Rgb(178, 185, 249));

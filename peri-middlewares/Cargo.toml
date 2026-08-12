@@ -31,7 +31,6 @@ croner = "3"
 tracing.workspace = true
 parking_lot.workspace = true
 grep = "0.4"
-num_cpus = "1"
 rmcp = { version = "2", features = [
     "client",
     "transport-child-process",

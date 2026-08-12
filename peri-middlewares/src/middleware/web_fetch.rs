@@ -96,6 +96,20 @@ impl BaseTool for WebFetchTool {
         true
     }
 
+    /// 网络工具分组（design v2 §2.5.1：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("web")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）。
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Fetch a URL you have reason to trust → `{{name}}` ({{title}}). Retrieve URLs with `{{name}}`, never `curl` via Bash."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         WEB_FETCH_DESCRIPTION
     }

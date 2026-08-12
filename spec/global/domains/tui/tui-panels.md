@@ -480,4 +480,68 @@ AskUser 面板是用户问答面板——当 agent 调用 AskUserQuestion 工具
 
 ---
 
+## Issue 经验附录
+
+### issue_2026-08-01-model-panel-profile-row-click-no-response
+**摘要:** Model 面板 profile 行点击无响应——click-as-enter 覆盖遗漏
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** click-as-enter, hit_test, 滚动偏移, 面板覆盖
+**问题本质:** a8d0ff79 "click as enter" 覆盖 8 面板唯独漏掉 model.rs；无鼠标 handler + occluded 让路导致点击落空。
+**通用模式:** 批量统一模式改造的"遗漏项"需核对覆盖清单；滚动后点击命中要读 ScrollView offset 防漂移。
+**涉及文件:** peri-tui/src/kit/panels/model.rs, panel_mouse.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-plugin-panel-uninstall-enter-freeze
+**摘要:** Plugin 面板卸载按 Enter 卡死——scrutinee 中 .read() 临时 guard 重入死锁
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** RwLock 重入死锁, 临时生命周期, scrutinee, parking_lot
+**问题本质:** match/if-let scrutinee 中 `.read()` 临时 guard 存活至整个表达式结束，分支内同 atom `.write()` 同线程重入死锁（5 处同型，均已修）。
+**通用模式:** 事件 handler 写 state 先 `let` 提取值再 match；scrutinee 含 `.read()` 时检查分支体是否对同 atom `.write()`——入 code review checklist。
+**涉及文件:** peri-tui/src/kit/panels/plugin.rs（5 处）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-24-plugin-panel-crud-lifecycle-incomplete
+**摘要:** Plugin 面板 & CLI 交互闭环不完整——后端 API 完备但用户不可达
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** CRUD 闭环, 用户可达性, 实施清单
+**问题本质:** 安装/卸载/更新/启用/禁用后端已实现但大量未暴露 UI/CLI；5 阶段实施 21/25 修复项完成（+538/-20，587 tests passed），B4-full 实时订阅/E3 事务保护等延期登记。
+**通用模式:** "后端 API 完备 ≠ 用户可达"——CRUD 闭环要按用户操作路径逐条核对；延期项显式登记原因。
+**涉及文件:** peri-tui/src/kit/panels/plugin.rs, cli_plugin.rs, acp_server/requests.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-setup-wizard-browse-click-row-mismatch
+**摘要:** setup_wizard Browse 步骤鼠标点击行高与渲染不一致，后续项点击错位
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 点击反推行号, 渲染行数, 双事实源
+**问题本质:** wizard_click 按每 provider 5 行反推，render_browse 实际渲染 6 行——多 provider 时整体偏移一行，点击命中与所见不一致。
+**通用模式:** 点击命中行号与渲染行数必须同一事实源（共享行高常量/函数），两处各自维护必漂移。
+**涉及文件:** peri-tui/src/kit/popups/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-config-update-missing-active-alias-validation
+**摘要:** session/update_config 缺少 active_alias 合法性校验，非法别名持久化后静默失效
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 入口键校验, 静默失效, 配置持久化
+**问题本质:** 校验循环检查各 profile 引用的 provider，却不校验 active_alias 本身是否在 Profiles::ALL 固定键中——非法值被持久化后依赖它的处理器静默 no-op。
+**通用模式:** 配置校验的"循环检查字段"容易漏掉入口键本身；入口键合法性先于字段校验。
+**涉及文件:** peri-tui/src/acp_server/requests.rs（update_config）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-02-config-panel-alias-fallback-points-to-opus
+**摘要:** config 面板 active_alias 空值回退索引指向 opus 而非注释声称的 sonnet
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 硬编码索引, 选项列表漂移, 按名称查找
+**问题本质:** read_cycle_idx 硬编码返回索引 1（注释"default sonnet"），fable 加入 ALIAS_OPTS 首位后索引 1 变 opus；修复 = 按名称查找索引。
+**通用模式:** 循环选项的回退/默认禁止硬编码索引——选项列表会变化，按名称查索引（config.rs:338）。
+**涉及文件:** peri-tui/src/kit/panels/config.rs（read_cycle_idx）
+**CLAUDE.md 链接:** false
+
+---
+
 > [返回总索引](tui-index.md)

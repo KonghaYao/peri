@@ -15,7 +15,7 @@ fn setup_atoms() {
 }
 
 #[test]
-fn test_meta_all_15_panels_present() {
+fn test_meta_all_panels_present() {
     // 验证 PANELS 穷举所有 PanelKind
     for kind in ALL_PANEL_KINDS {
         assert!(
@@ -161,6 +161,38 @@ fn test_close_all_panels() {
     assert_eq!(*ACTIVE_PANEL.state().read(), None);
 }
 
+// ── §6.7 SubAgentDetail pane（Slice 2）───────────────────────────────────
+
+#[test]
+#[serial]
+fn test_subagent_detail_panel_registered() {
+    // 穷举矩阵：meta 存在、标题/描述 FTL key 存在、无快捷键（Enter 分派打开）
+    let m = meta(PanelKind::SubAgentDetail).expect("SubAgentDetail 必须注册");
+    assert_eq!(m.shortcut_letter, '\0', "详情 pane 无快捷键");
+    assert!(!panel_title(PanelKind::SubAgentDetail).trim().is_empty());
+    assert!(!panel_description(PanelKind::SubAgentDetail).is_empty());
+    assert_eq!(m.mutex_group, MutexGroup::Agent, "与 Agent 面板同互斥组");
+}
+
+#[test]
+#[serial]
+fn test_subagent_detail_opens_and_replaces_agent_group() {
+    setup_atoms();
+    open_panel(PanelKind::Agent);
+    // 与 Agent 同 MutexGroup：打开详情关闭 Agent 面板（栈顶唯一）
+    open_panel(PanelKind::SubAgentDetail);
+    let stack = OPEN_PANELS.state().read().clone();
+    assert_eq!(stack, vec![PanelKind::SubAgentDetail]);
+    assert_eq!(
+        *ACTIVE_PANEL.state().read(),
+        Some(PanelKind::SubAgentDetail)
+    );
+    // Esc 单层关闭（close_active_panel 弹栈）
+    let closed = close_active_panel();
+    assert_eq!(closed, Some(PanelKind::SubAgentDetail));
+    assert!(OPEN_PANELS.state().read().is_empty());
+}
+
 #[test]
 fn test_from_key_code_ctrl_m_maps_to_model() {
     assert_eq!(from_key_code(KeyCode::Char('m')), Some(PanelKind::Model));
@@ -180,6 +212,10 @@ fn test_from_key_code_unmapped_letter_returns_none() {
 fn test_slash_commands_unique() {
     let mut seen = std::collections::HashSet::new();
     for m in PANELS {
+        // 空命令 = 无 slash 入口（AskUser / SubAgentDetail 等 Enter 分派打开的面板）
+        if m.slash_command.is_empty() {
+            continue;
+        }
         assert!(
             seen.insert(m.slash_command),
             "duplicate slash command {} for {:?}",
@@ -271,6 +307,7 @@ const ALL_PANEL_KINDS: &[PanelKind] = &[
     PanelKind::Workflow,
     PanelKind::AskUser,
     PanelKind::Theme,
+    PanelKind::SubAgentDetail,
 ];
 
 /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

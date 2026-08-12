@@ -296,6 +296,54 @@ fn test_cleanup_completed_keeps_recently_killed_runs() {
     assert!(store.get_run("r1").is_some());
 }
 
+/// [回归测试] cleanup_completed 必须同步清理已回收 run 的执行标记
+/// （P2-2026-08-11：否则 started_agents 随完成 workflow 无界增长）。
+#[test]
+fn test_cleanup_completed_purges_started_agents_markers() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "done-run".into(),
+        workflow_name: "test".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: "done-run".into(),
+        agent_id: 7,
+        label: Some("work".into()),
+        phase: Some("Work".into()),
+    });
+    store.apply_event(&ProgressEvent::RunDone {
+        run_id: "done-run".into(),
+        status: "completed".into(),
+        return_value: None,
+        error: None,
+    });
+
+    // 运行中的 run 标记必须保留
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "running-run".into(),
+        workflow_name: "other".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: "running-run".into(),
+        agent_id: 9,
+        label: Some("active".into()),
+        phase: Some("Run".into()),
+    });
+
+    store.cleanup_completed();
+    let markers = store.started_agents.read();
+    assert!(
+        !markers.contains(&("done-run".to_string(), 7)),
+        "已完成 run 的标记应被清理"
+    );
+    assert!(
+        markers.contains(&("running-run".to_string(), 9)),
+        "运行中 run 的标记必须保留"
+    );
+}
+
 #[test]
 fn test_run_done_unknown_run_is_noop() {
     let store = make_store();
@@ -476,4 +524,90 @@ fn test_agent_progress_model_serde_optional() {
         json.get("model").is_none(),
         "None model 应省略，实际: {json}"
     );
+}
+
+/// [回归测试] completed run resume 的 cache-hit 只有 AgentDone，不应把历史消耗
+/// 计入本次运行；历史 result 中的 phase 仍应投影为可读分组。
+#[test]
+fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "resumed".into(),
+        workflow_name: "repair".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: "resumed".into(),
+        agent_id: 1,
+        label: Some("new-work".into()),
+        phase: Some("Fix".into()),
+    });
+    store.apply_event(&ProgressEvent::AgentDone {
+        run_id: "resumed".into(),
+        agent_id: 1,
+        label: None,
+        phase: None,
+        result: AgentRunResult::Ok {
+            output: serde_json::json!("new"),
+            usage: Usage { output_tokens: 10 },
+            model: None,
+            tool_count: Some(1),
+            token_count: Some(10),
+            phase: Some("Fix".into()),
+            duration_ms: Some(20),
+        },
+    });
+    store.apply_event(&ProgressEvent::AgentDone {
+        run_id: "resumed".into(),
+        agent_id: 2,
+        label: Some("cached-work".into()),
+        phase: None,
+        result: AgentRunResult::Ok {
+            output: serde_json::json!("cached"),
+            usage: Usage { output_tokens: 100 },
+            model: None,
+            tool_count: Some(4),
+            token_count: Some(100),
+            phase: Some("Fix".into()),
+            duration_ms: Some(200),
+        },
+    });
+    store.apply_event(&ProgressEvent::AgentDone {
+        run_id: "resumed".into(),
+        agent_id: 3,
+        label: Some("unphased-cache".into()),
+        phase: None,
+        result: AgentRunResult::Ok {
+            output: serde_json::json!("cached"),
+            usage: Usage { output_tokens: 50 },
+            model: None,
+            tool_count: None,
+            token_count: Some(50),
+            phase: None,
+            duration_ms: Some(80),
+        },
+    });
+
+    let run = store.get_run("resumed").unwrap();
+    let cached = run.agents.get(&2).unwrap();
+    assert_eq!(cached.phase.as_deref(), Some("Fix"));
+    assert_eq!(cached.token_count, None);
+    assert_eq!(cached.duration_ms, None);
+
+    let summaries = store.get_phase_summaries("resumed");
+    assert_eq!(summaries.len(), 2);
+    let fix = summaries
+        .iter()
+        .find(|summary| summary.name == "Fix")
+        .unwrap();
+    assert_eq!(fix.agent_count, 2);
+    assert_eq!(fix.token_count, 10);
+    assert_eq!(fix.duration_ms, Some(20));
+    let fallback = summaries
+        .iter()
+        .find(|summary| summary.name == "repair")
+        .unwrap();
+    assert_eq!(fallback.agent_count, 1);
+    assert_eq!(fallback.token_count, 0);
+    assert_eq!(fallback.duration_ms, None);
 }

@@ -40,7 +40,7 @@ fn test_glob_pattern_suggester_recognizes_syntax_error() {
     let result = GlobPatternSuggester.suggest(&ctx);
     assert!(result.is_some());
     let sug = result.unwrap();
-    assert!(sug.summary.contains("合法") || sug.summary.contains("示例"));
+    assert!(sug.summary.contains("Invalid glob syntax") && sug.summary.contains("Examples"));
 }
 
 #[test]

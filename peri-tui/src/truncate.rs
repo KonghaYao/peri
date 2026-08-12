@@ -96,6 +96,39 @@ pub fn truncate_by_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Wrap text into lines of at most `max_width` terminal display columns.
+///
+/// 按 grapheme cluster + display width 折行（§12 口径：CJK 双宽 / emoji ZWJ /
+/// combining mark 不被从中间切开），与 [`truncate_by_width`] 同一度量；
+/// 超宽单词按宽度切分成多行，**不丢内容**（区别于 truncate 的省略号截断）。
+/// 用于 §6.1 用户 prompt 的「视觉行」计数——长行折行而非截断。
+pub fn wrap_by_width(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_width = 0usize;
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if !cur.is_empty() && cur_width + w > max_width {
+            lines.push(std::mem::take(&mut cur));
+            cur_width = 0;
+        }
+        // 单个 grapheme 即超宽（罕见）：独占一行也不丢内容
+        if w > max_width && cur.is_empty() {
+            lines.push(g.to_string());
+            continue;
+        }
+        cur.push_str(g);
+        cur_width += w;
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Produce a one-line summary of a tool's JSON input.
 ///
 /// 合并 router.rs 与 view_mapper.rs 的实现：
@@ -161,6 +194,21 @@ pub fn summarize_input(name: &str, input: &serde_json::Value) -> String {
         "TodoWrite" => String::new(),
         // ── task_id 截断 12 ──
         "AgentResult" => truncate_text(&str_val("task_id"), 12),
+        // ── Agent/Task（别名 task）：prompt 任务预览（截断 400，spec §6.4
+        //    任务预览摘要），description 兜底；空则回退通用兜底 ──
+        "Agent" | "Task" => {
+            let prompt = str_val("prompt");
+            if !prompt.is_empty() {
+                truncate_text(&prompt, 400)
+            } else {
+                let desc = str_val("description");
+                if desc.is_empty() {
+                    "(empty input)".to_string()
+                } else {
+                    truncate_text(&desc, 400)
+                }
+            }
+        }
         // ── file_path 不截断但精简 cwd 前缀 ──
         "artifact" => shorten_path(&str_val("file_path")),
         // ── operation 截断 40 ──

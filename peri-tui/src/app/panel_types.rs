@@ -21,6 +21,9 @@ pub enum PanelKind {
     Workflow,
     AskUser,
     Theme,
+    /// §6.7 subagent 详情 pane——焦点在 subagent 行按 Enter 打开（嵌套消息
+    /// 不铺入主时间轴）。
+    SubAgentDetail,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

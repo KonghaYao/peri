@@ -35,6 +35,7 @@ use peri_controller::langfuse::tracer::stages::StageHandle;
 fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
     match event {
         ExecutorEvent::TextChunk { message_id, .. }
+        | ExecutorEvent::AiReasoning { message_id, .. }
         | ExecutorEvent::ToolStart { message_id, .. }
         | ExecutorEvent::ToolEnd { message_id, .. } => Some(message_id.as_uuid().to_string()),
         _ => None,

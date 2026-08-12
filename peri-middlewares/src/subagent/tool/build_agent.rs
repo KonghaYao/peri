@@ -14,6 +14,10 @@ use peri_agent::{
 use super::super::fork::allows_injected_tools;
 use crate::claude_agent_parser::ClaudeAgent;
 
+/// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
+/// `inherit` 单独处理，不在档位集合内）
+pub(crate) const MODEL_TIERS: [&str; 4] = peri_acp_types::agents::MODEL_TIERS;
+
 /// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
 pub(crate) struct AgentBuildResult {
     /// SubAgent LLM（ReactLLM 实现/装饰器）
@@ -31,6 +35,13 @@ pub(crate) struct AgentBuildResult {
 impl super::SubAgentTool {
     /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
     /// cancel token——统一入口 [`spawn_subagent`] 负责）。
+    ///
+    /// `model_override`（Agent 工具 `model` 参数，仅新建定义型 subagent 生效）：
+    /// - `None`（省略）→ 保持 agent 定义 frontmatter model（含空 / "inherit" → 父模型）
+    /// - `Some("inherit")` → 显式继承父模型（覆盖 frontmatter）
+    /// - `Some(档位)` → 校验通过后覆盖 frontmatter；未知档位直接报错，不静默回退
+    ///   （resume 路径恒传 `None`：恢复保持原定义，不允许调用参数覆盖）
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
@@ -39,6 +50,7 @@ impl super::SubAgentTool {
         _cancel_policy: SubagentCancelPolicy,
         _skip_events: bool,
         _setup_event_handler: bool,
+        model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools
         let mut filtered_tools = self.filter_tools(
@@ -95,12 +107,30 @@ impl super::SubAgentTool {
         );
 
         // 2. Model alias → LLM factory
-        let model_alias: Option<&str> = agent_def
-            .frontmatter
-            .model
-            .as_deref()
-            .filter(|m| !m.is_empty() && *m != "inherit");
-        let llm = (self.llm_factory)(model_alias);
+        // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感
+        //（档位均为 ASCII，`to_ascii_lowercase` 与 `Profiles::get` 的
+        // `to_lowercase` 对合法档位等价），未知档位拒绝——避免
+        // `from_config_for_alias` 解析失败后静默回退父模型。
+        let model_alias: Option<String> = match model_override {
+            Some(raw) if raw.eq_ignore_ascii_case("inherit") => None,
+            Some(raw) => {
+                let tier = raw.to_ascii_lowercase();
+                if !MODEL_TIERS.contains(&tier.as_str()) {
+                    return Err(format!(
+                        "Error: invalid model tier '{}' for subagent. Available: inherit, haiku, sonnet, opus, fable",
+                        raw
+                    )
+                    .into());
+                }
+                Some(tier)
+            }
+            None => agent_def
+                .frontmatter
+                .model
+                .clone()
+                .filter(|m| !m.is_empty() && *m != "inherit"),
+        };
+        let llm = (self.llm_factory)(model_alias.as_deref());
 
         // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);

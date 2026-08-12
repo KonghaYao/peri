@@ -1,5 +1,7 @@
 use tempfile::tempdir;
 
+use peri_resources::lsp::config::LspConfigSource;
+
 use super::*;
 use crate::plugin::types::{
     InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
@@ -1154,4 +1156,81 @@ fn test_load_enabled_plugins_missing_project() {
     let loaded = load_enabled_plugins(&claude_dir, None).unwrap();
     assert_eq!(loaded.len(), 1, "cwd=None 时行为不变，仅读用户 settings");
     assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_lsp_servers_aggregated_injects_plugin_root_env() {
+    // 插件 lspServers 经 lsp_config_from_plugin 转换：env 注入 CLAUDE_PLUGIN_ROOT，
+    // 插件根相对命令 ${CLAUDE_PLUGIN_ROOT}/bin/server 可解析（回归：曾手写构造 env: None）
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("lsp-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{
+            "name": "lsp-plugin",
+            "version": "1.0.0",
+            "lspServers": [
+                {
+                    "name": "my-server",
+                    "command": "${CLAUDE_PLUGIN_ROOT}/bin/server",
+                    "args": ["--stdio"],
+                    "extensionToLanguage": {".txt": "plaintext"}
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "lsp-plugin@test".into(),
+            name: "lsp-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+
+    let settings = r#"{"enabledPlugins":["lsp-plugin@test"]}"#;
+    std::fs::write(dir.path().join("settings.json"), settings).unwrap();
+
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
+    assert_eq!(result.all_lsp_servers.len(), 1);
+    let server = &result.all_lsp_servers[0];
+    // env 注入断言：配置含 CLAUDE_PLUGIN_ROOT（插件根）
+    let env = server.env.as_ref().expect("插件 LSP 配置应注入 env");
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_ROOT").map(|s| s.as_str()),
+        Some(plugin_dir.to_string_lossy().as_ref())
+    );
+    // 插件根相对命令按注入 env 展开
+    assert_eq!(
+        server.command,
+        format!("{}/bin/server", plugin_dir.display())
+    );
+    // manifest 字段映射保留（name 命名空间化、args、extensionToLanguage、source）
+    assert_eq!(server.name, "plugin:lsp-plugin:my-server");
+    assert_eq!(server.args, vec!["--stdio"]);
+    assert_eq!(
+        server.extension_to_language.get(".txt").unwrap(),
+        "plaintext"
+    );
+    assert_eq!(
+        server.source,
+        Some(LspConfigSource::Plugin {
+            plugin_name: "lsp-plugin".to_string()
+        })
+    );
 }

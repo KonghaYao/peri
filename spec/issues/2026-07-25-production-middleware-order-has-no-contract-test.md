@@ -5,6 +5,13 @@
 **类型**：技术债
 **创建日期**：2026-07-25
 **来源**：`docs/architecture-review-2026-07-24.md` A6
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+生产装配已随 3.0 L2 迁入 SessionFactory/assembly（`peri-agent/src/session/factory.rs`），middleware 注册点收敛；但仍无锁定生产链完整顺序（无条件 + 条件 middleware 各配置组合）的 contract test。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

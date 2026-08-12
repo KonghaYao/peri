@@ -10,11 +10,18 @@ Fork mode (fork: true):
 
 Usage:
 - Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
-- **subagent_type is REQUIRED** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent
+- **subagent_type is REQUIRED for NEW sub-agents** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent — **or resume** (when `resume_thread_id` is provided, `subagent_type` and `fork` are ignored: resume takes priority)
 - The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
 - **Authorization boundary**: approving the `Agent` tool grants the sub-agent the right to execute its inherited tools. Sub-agents do NOT run per-tool HITL approval — internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
 - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
 - The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
+
+Model selection (model):
+- Optional; only applies to NEW defined-type sub-agents (subagent_type path, including background). Overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used as-is
+- Available tiers: `inherit` (use the parent agent's model), `haiku` (fastest/cheapest, best for quick lookups and simple sub-tasks), `sonnet` (balanced default), `opus` (strongest reasoning), `fable` (flagship tier)
+- Unknown tiers are rejected with an error — never silently ignored
+- Does NOT apply to forks: `fork: true` always inherits the parent model, and `model` is ignored
+- Does NOT apply to resume: `resume_thread_id` restores the original execution context, and `model` is ignored
 
 When to use:
 - For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)
@@ -36,5 +43,6 @@ Background execution (run_in_background: true):
 Resume execution (resume_thread_id):
 - Resume an interrupted sub-agent from its persisted thread: the execution state (transcript) is replayed from disk and execution continues — **no new sub-agent is created**
 - The thread must not be active: interrupted or failed threads can be resumed; threads left active by a crash require manual handling
-- Mutually exclusive with `fork` and `subagent_type`; `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
+- Takes priority over `subagent_type` and `fork`: when `resume_thread_id` is provided, those fields are ignored (no error); `prompt` is optional — when omitted, the sub-agent implicitly continues where it left off, and you may also provide new instructions to adjust direction
 - Can be combined with `run_in_background: true` (the resumed execution follows that mode)
+- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) `parent thread mismatch` → the thread belongs to another parent agent (e.g. a sibling spawned in parallel); only its original parent can resume it — otherwise spawn a new sub-agent with `subagent_type`. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.

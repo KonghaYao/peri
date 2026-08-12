@@ -174,7 +174,7 @@ fn test_extract_cjk_same_visual_row_double_width_right_half() {
     let (_, wrap_map) = build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 3), 5);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 3), 5, None, None);
     assert_eq!(result.as_deref(), Some("好你"));
 }
 
@@ -185,7 +185,7 @@ fn test_extract_cjk_same_visual_row_left_half_excludes_char() {
     let (_, wrap_map) = build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 2), 5);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (1, 0), (1, 2), 5, None, None);
     assert_eq!(result.as_deref(), Some("好"));
 }
 
@@ -196,7 +196,7 @@ fn test_extract_cjk_first_row_partial() {
     let (_, wrap_map) = build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (0, 4), 5);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (0, 4), 5, None, None);
     assert_eq!(result.as_deref(), Some("abc你"));
 }
 
@@ -209,7 +209,7 @@ fn test_extract_cjk_cross_visual_row() {
     let (_, wrap_map) = build_wrap_map(&lines, 5);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 4), (1, 1), 5);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 4), (1, 1), 5, None, None);
     assert_eq!(result.as_deref(), Some("你好"));
 }
 
@@ -219,7 +219,7 @@ fn test_extract_ascii_same_row() {
     let (_, wrap_map) = build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (0, 3), 10);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (0, 3), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc"));
 }
 
@@ -230,7 +230,7 @@ fn test_extract_ascii_cross_visual_row() {
     let (_, wrap_map) = build_wrap_map(&lines, 3);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (1, 1), 3);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 2), (1, 1), 3, None, None);
     assert_eq!(result.as_deref(), Some("cd"));
 }
 
@@ -241,7 +241,7 @@ fn test_extract_cross_logical_row() {
     let (_, wrap_map) = build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (1, 2), 10);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 1), (1, 2), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc\nde"));
 }
 
@@ -252,7 +252,7 @@ fn test_extract_swapped_start_end_normalizes() {
     let (_, wrap_map) = build_wrap_map(&lines, 10);
     let slots = vec![Arc::new(lines)];
     let offsets = vec![0usize];
-    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 3), (0, 1), 10);
+    let result = extract_visual_range(&slots, &offsets, &wrap_map, (0, 3), (0, 1), 10, None, None);
     assert_eq!(result.as_deref(), Some("bc"));
 }
 
@@ -436,4 +436,268 @@ fn test_highlight_preserves_existing_span_style() {
         .expect("应有被高亮的 span");
     assert_eq!(highlighted_span.style.fg, Some(C::Red));
     assert_eq!(highlighted_span.content.as_ref(), "ab");
+}
+
+// ── [D3 §9] 语义复制：extract_visual_range 带 VM 列表时剥离 UI chrome ────
+
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::render::vm_to_lines;
+use crate::kit::tui_render_unit::{
+    TuiAssistantBubble, TuiRenderUnit, TuiToolCard, TuiToolPresentation,
+};
+
+/// 构造单 slot 选区环境：渲染 VM 行 + wrap_map + slots（视觉行 = 逻辑行）。
+#[allow(clippy::type_complexity)]
+fn sel_env(
+    vm: TuiRenderUnit,
+    grid: &GridSpec,
+) -> (
+    Vec<Arc<Vec<Line<'static>>>>,
+    Vec<usize>,
+    Vec<WrappedLineInfo>,
+    im::Vector<TuiRenderUnit>,
+) {
+    let lines = vm_to_lines(&vm, grid);
+    // 视宽与生产一致：消息区右缘（term_width - 1，跳过滚动条列）——metadata
+    // 右对齐到该列，宽于此值会在 wrap_map 二次折行。
+    let (_, wm) = build_wrap_map(&lines, grid.term_width.saturating_sub(1));
+    let wm: Vec<WrappedLineInfo> = wm
+        .into_iter()
+        .map(|mut e| {
+            e.slot_index = 0;
+            e
+        })
+        .collect();
+    let slots = vec![Arc::new(lines)];
+    let offsets = vec![0usize];
+    (slots, offsets, wm, im::Vector::from(vec![vm]))
+}
+
+/// 完整行选区（中间行）→ 语义全文（无 chrome）。
+#[test]
+fn test_extract_semantic_plain_middle_line() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: None,
+        duration_ms: None,
+        text: "第一段\n\n第二段 with 中文".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 0,
+    });
+    let (slots, offsets, wm, vms) = sel_env(vm, &grid);
+    let rendered_blank = crate::kit::text_selection::line_to_plain_text(&slots[0][2]);
+    assert!(
+        rendered_blank.contains('│'),
+        "Markdown 段落空行应继续显示 accent 竖线，实际: {rendered_blank:?}"
+    );
+    // 行 0 = leading 空行；行 1 = 段落 1；行 2 = 段间空行；行 3 = 段落 2——
+    // 完整选择（跨逻辑行选区，中间行）
+    let text = extract_visual_range(
+        &slots,
+        &offsets,
+        &wm,
+        (0, 0),
+        (3, 20),
+        grid.total_width() as u16,
+        Some(&vms),
+        Some(grid),
+    )
+    .expect("选区提取");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.contains(&"第一段"),
+        "段落 1 无前缀 chrome，实际: {text:?}"
+    );
+    assert!(
+        lines.contains(&"第二段 with 中文"),
+        "段落 2 无前缀 chrome，实际: {text:?}"
+    );
+    for l in lines {
+        assert!(
+            !l.contains('│') && !l.starts_with(' '),
+            "行无竖线/前缀空格，实际: {l:?}"
+        );
+    }
+}
+
+/// 跨行拖选：tool header 重建语义（label+summary）、`$ cmd` 保留。
+#[test]
+fn test_extract_semantic_tool_card_header_and_command() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let mut card = TuiToolCard {
+        tool_id: "tc-1".into(),
+        tool_name: "Bash".into(),
+        input_summary: "cargo test -p peri-tui".into(),
+        output_summary: "test result: ok. 895 passed".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: Some(37),
+        diff: None,
+        presentation: TuiToolPresentation::Generic,
+        fold: crate::kit::tui_render_unit::FoldState::Expanded,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    card.recompute_hash();
+    let vm = TuiRenderUnit::TuiToolCard(card);
+    let (slots, offsets, wm, vms) = sel_env(vm, &grid);
+    let text = extract_visual_range(
+        &slots,
+        &offsets,
+        &wm,
+        (0, 0),
+        (3, 40),
+        grid.total_width() as u16,
+        Some(&vms),
+        Some(grid),
+    )
+    .expect("选区提取");
+    assert!(
+        text.contains("Shell"),
+        "展开态 header 语义 = label（summary 在 `$` 行），实际: {text:?}"
+    );
+    assert!(
+        text.contains("$ cargo test -p peri-tui"),
+        "`$ cmd` 行保留 command，实际: {text:?}"
+    );
+    assert!(
+        text.contains("test result: ok. 895 passed"),
+        "输出行保留正文，实际: {text:?}"
+    );
+    assert!(
+        !text.contains('✓') && !text.contains('◐') && !text.contains('│'),
+        "无状态符号/竖线，实际: {text:?}"
+    );
+}
+
+/// diff 行：行号 gutter 剥离、patch 标记保留（§9）。
+#[test]
+fn test_extract_semantic_diff_strips_gutter_keeps_markers() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let diff_text = "\
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,2 +10,2 @@
+ fn main() {
+-    let x = 1;
++    let x = 2;
+}
+";
+    let mut card = TuiToolCard {
+        tool_id: "tc-e".into(),
+        tool_name: "Edit".into(),
+        input_summary: "src/main.rs".into(),
+        output_summary: diff_text.to_string(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: Some(20),
+        diff: crate::kit::diff_parser::parse_unified_diff(diff_text, Some("src/main.rs")),
+        presentation: TuiToolPresentation::Generic,
+        fold: crate::kit::tui_render_unit::FoldState::Expanded,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    card.recompute_hash();
+    let vm = TuiRenderUnit::TuiToolCard(card);
+    let (slots, offsets, wm, vms) = sel_env(vm, &grid);
+    let text = extract_visual_range(
+        &slots,
+        &offsets,
+        &wm,
+        (0, 0),
+        (20, 0),
+        grid.total_width() as u16,
+        Some(&vms),
+        Some(grid),
+    )
+    .expect("选区提取");
+    assert!(
+        text.contains("-     let x = 1;"),
+        "del 行保留 patch 标记（`- ` + 4 空格缩进），实际: {text:?}"
+    );
+    assert!(
+        text.contains("+     let x = 2;"),
+        "add 行保留 patch 标记，实际: {text:?}"
+    );
+    // 行号 gutter（" 11" 之类）不得出现
+    for line in text.lines() {
+        let t = line.trim_start();
+        assert!(
+            !t.starts_with("11 ") && !t.starts_with("10 "),
+            "行号 gutter 被剥离，实际行: {line:?}"
+        );
+    }
+}
+
+/// 部分行选择（选区从行中开始）：映射到语义文本（CJK 半字符边界兼容）。
+#[test]
+fn test_extract_semantic_partial_row_maps_to_semantic() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: None,
+        duration_ms: None,
+        text: "prefix 你好".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 0,
+    });
+    let (slots, offsets, wm, vms) = sel_env(vm, &grid);
+    // 行 0 = leading 空行；行 1 = 正文（cont_prefix）——选区列 [1, 5) → 语义映射
+    let text = extract_visual_range(
+        &slots,
+        &offsets,
+        &wm,
+        (1, 1),
+        (1, 5),
+        grid.total_width() as u16,
+        Some(&vms),
+        Some(grid),
+    )
+    .expect("选区提取");
+    assert!(
+        !text.starts_with(' '),
+        "部分选择不包含前缀列，实际: {text:?}"
+    );
+    assert!(!text.contains('│'), "无竖线，实际: {text:?}");
+}
+
+/// view_models=None 时保持既有行为（无剥离）——回归防线。
+#[test]
+fn test_extract_without_view_models_keeps_plain() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: None,
+        duration_ms: None,
+        text: "正文".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 0,
+    });
+    let (slots, offsets, wm, _vms) = sel_env(vm, &grid);
+    let text = extract_visual_range(
+        &slots,
+        &offsets,
+        &wm,
+        (0, 0),
+        (1, 10),
+        grid.total_width() as u16,
+        None,
+        None,
+    )
+    .expect("选区提取");
+    // 无剥离：行含前缀（空格/竖线）与状态符号
+    assert!(
+        text.contains('│') || text.contains(" \u{2502}"),
+        "无 VM 时保留 chrome，实际: {text:?}"
+    );
 }

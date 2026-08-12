@@ -12,7 +12,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 lsp-types = { workspace = true }
-lru = { workspace = true }
+async-trait = { workspace = true }
 peri-acp-types = { path = "../peri-acp-types" }
 
 [dev-dependencies]

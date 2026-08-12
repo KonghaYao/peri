@@ -1,9 +1,14 @@
 # cli_print 四个 CLI 参数被丢弃 & acp_stdio 缺失 12 个 ACP 方法
 
-**状态**：Open
+**状态**：Partial
 **优先级**：高
 **创建日期**：2026-07-25
 **类型**：Bug — Print/Stdio 模式
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+问题 2 已解决：acp_stdio 缺失的 12 个 ACP 方法已实现（命令面见 `peri-acp/src/host/stdio/` 的 commands/context/freeze/model/session）。问题 1 仍在：`cli_print.rs:91` 仍 `let _ = (effort_override, max_turns, allowed_tools, disallowed_tools)` 丢弃四个 CLI 参数。状态记录（2026-08-11）：Open → Partial。
 
 ## 问题描述
 
@@ -51,3 +56,4 @@ let _ = (effort_override, max_turns, allowed_tools, disallowed_tools);
 | 日期 | 从 | 到 | 操作人 | 说明 |
 |------|-----|-----|--------|------|
 | 2026-07-25 | — | Open | agent | 创建 |
+| 2026-08-11 | Open | Partial | agent | 12 个 ACP 方法已实现（peri-acp/src/host/stdio/）；cli_print.rs:91 仍丢弃 4 个 CLI 参数，见「最新情况」 |

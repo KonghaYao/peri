@@ -38,6 +38,7 @@ use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 pub struct GitAttributionMiddleware {
     state: Arc<Mutex<AttributionState>>,
     pending_old_content: Arc<Mutex<HashMap<String, String>>>,
+    branch_baseline: Arc<Mutex<Option<String>>>,
     /// Cached prompt contribution text.
     attribution_text: String,
 }
@@ -48,6 +49,7 @@ impl GitAttributionMiddleware {
         Self {
             state: Arc::new(Mutex::new(AttributionState::new(model_name.to_string()))),
             pending_old_content: Arc::new(Mutex::new(HashMap::new())),
+            branch_baseline: Arc::new(Mutex::new(None)),
             attribution_text,
         }
     }
@@ -65,6 +67,29 @@ impl GitAttributionMiddleware {
     /// Clear per-turn state for reuse across prompts.
     pub fn reset(&self) {
         self.pending_old_content.lock().unwrap().clear();
+    }
+
+    fn observe_branch(&self, current: String) -> Option<(String, String)> {
+        let mut baseline = self.branch_baseline.lock().unwrap();
+        match baseline.replace(current.clone()) {
+            Some(previous) if previous != current => Some((previous, current)),
+            _ => None,
+        }
+    }
+
+    async fn current_branch(cwd: &str) -> Option<String> {
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(cwd)
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let branch = String::from_utf8(output.stdout).ok()?;
+        let branch = branch.trim();
+        (!branch.is_empty()).then(|| branch.to_string())
     }
 }
 
@@ -134,7 +159,17 @@ impl Middleware for GitAttributionMiddleware {
         Ok(())
     }
 
-    async fn before_agent(&self, _state: &mut dyn MiddlewareState) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
+        if let Some(branch) = Self::current_branch(state.cwd()).await {
+            if let Some((previous_branch, current_branch)) = self.observe_branch(branch) {
+                tracing::info!(
+                    target: "git",
+                    previous_branch,
+                    current_branch,
+                    "Git branch changed during the session"
+                );
+            }
+        }
         // Attribution 指令已在 system prompt 中注入，无需再向消息历史写入。
         Ok(())
     }

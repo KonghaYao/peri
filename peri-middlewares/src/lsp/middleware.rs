@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
+use peri_resources::lsp::uri::path_to_uri;
 use peri_resources::lsp::{
     config::{LspConfigFile, LspServerConfig},
     pool::LspServerPool,
@@ -22,6 +24,12 @@ pub struct LspMiddleware {
 impl LspMiddleware {
     pub fn new(root_uri: String, config: LspConfigFile) -> Self {
         let pool = Arc::new(LspServerPool::new(&root_uri, config));
+        Self { pool }
+    }
+
+    /// 复用既有 pool 构造（会话级共享：H1 下服务器进程/initialized/诊断状态
+    /// 跨 turn 存活；由装配面从 `LspPoolPort` downcast 还原后注入）。
+    pub fn from_pool(pool: Arc<LspServerPool>) -> Self {
         Self { pool }
     }
 
@@ -70,7 +78,7 @@ impl Middleware for LspMiddleware {
             _ => return Ok(()),
         };
 
-        let uri = format!("file://{}", file_path);
+        let uri = path_to_uri(Path::new(&file_path));
         let text = match tokio::fs::read_to_string(&file_path).await {
             Ok(t) => t,
             Err(e) => {

@@ -224,3 +224,27 @@ fn _type_anchor(
 ) -> Arc<dyn WorkflowMiddlewarePort> {
     f.build_workflow_middleware(e, "cwd", n, p)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_model_factory_applies_concrete_model_name() {
+        let provider = Arc::new(RwLock::new(LlmProvider::OpenAi {
+            api_key: String::new(),
+            base_url: "http://localhost".into(),
+            model: "parent-model".into(),
+            effort: None,
+            max_tokens: 1024,
+            context_1m: false,
+            retry_observer: None,
+        }));
+        let config = RwLock::new(PeriConfig::default());
+        let factory = build_model_factory(&provider, &config);
+        let built = factory(Some("workflow-model"), None, Arc::new(|_| {}));
+
+        assert_eq!(built.model_name, "workflow-model");
+        assert_eq!(built.tier, None);
+    }
+}

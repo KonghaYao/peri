@@ -91,6 +91,21 @@ impl BaseTool for WriteFileTool {
         true
     }
 
+    /// 同类工具分组（design v2 §2.5.1）：filesystem 工具统一归组。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：对应 05 段落 "Write or edit a file"
+    /// 条目语义（选择指引 + 纪律约束），不逐字重复（守护测试断言）。
+    /// title 不覆盖——走 `tool_description` 默认推导路径。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Write a file → `{{name}}` (full contents). Use `{{name}}` for writing files, not `echo >`/`sed`/`awk`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         WRITE_FILE_DESCRIPTION
     }
@@ -138,21 +153,25 @@ impl BaseTool for WriteFileTool {
         let resolved = resolve_path(&self.cwd, file_path);
         let resolved_str = resolved.to_string_lossy().to_string();
 
-        let (content, append) = match (input["content"].as_str(), input["from_draft"].as_str()) {
-            (Some(c), None) => (c.to_string(), input["append"].as_bool().unwrap_or(false)),
-            (None, Some(id)) => self.restore_draft(id, &resolved_str)?,
-            (Some(_), Some(_)) => {
-                return Err(
-                    "The 'content' and 'from_draft' parameters are mutually exclusive. Provide only one."
-                        .into(),
-                )
-            }
-            (None, None) => {
-                return Err(
-                    "Either 'content' or 'from_draft' must be provided for the Write tool."
-                        .into(),
-                )
-            }
+        // 宽容解析（与 Agent 工具 resume_thread_id 同构的容错）：LLM 常同时携带
+        // 互斥参数，或用 "" / "__omit__" 等占位符表达「省略」——一律按语义处理而
+        // 不报错：content 优先（完整自足，直接写入成功，草稿随后清理）；from_draft
+        // 仅在 content 未提供时使用；两者皆无才报缺参数。原「互斥报错」会让文件
+        // 无法落盘、模型被迫重输出一遍 content，白白浪费已生成内容。
+        let content = input["content"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && *s != "__omit__");
+        let from_draft = input["from_draft"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && *s != "__omit__");
+        let (content, append) = if let Some(c) = content {
+            (c.to_string(), input["append"].as_bool().unwrap_or(false))
+        } else if let Some(id) = from_draft {
+            self.restore_draft(id, &resolved_str)?
+        } else {
+            return Err(
+                "Either 'content' or 'from_draft' must be provided for the Write tool.".into(),
+            );
         };
 
         let result = tokio::time::timeout(Duration::from_secs(120), async {
@@ -160,7 +179,15 @@ impl BaseTool for WriteFileTool {
 
             if let Some(parent) = resolved.parent() {
                 if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        // 文件系统层失败(与 tmp 写入失败同级):保存草稿,
+                        // 错误消息携带 from_draft 恢复提示,避免重试时重新输出 content
+                        let hint = self
+                            .save_draft(&resolved_str, &content, append)
+                            .map(|id| draft_hint_en(&id, &content))
+                            .unwrap_or_default();
+                        return Err(format!("Error creating parent directory: {e}{hint}").into());
+                    }
                 }
             }
 

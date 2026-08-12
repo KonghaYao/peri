@@ -12,3 +12,4 @@ pub use peri_lsp::error;
 pub use peri_lsp::jsonrpc;
 pub use peri_lsp::pool;
 pub use peri_lsp::protocol;
+pub use peri_lsp::uri;

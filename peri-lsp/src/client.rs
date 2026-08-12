@@ -25,6 +25,13 @@ pub enum ServerState {
     Error(String),
 }
 
+/// 重启退避窗口：窗口内重启计数不重置，超出 max_restarts 后进入冷却（拒绝重启），
+/// 窗口过后计数清零、冷却解除
+const RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 启动超时缺省值（毫秒）：`LspServerConfig.startup_timeout` 未配置时使用
+pub const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 30_000;
+
 /// 单个 LSP 服务器客户端
 pub struct LspClient {
     name: String,
@@ -33,12 +40,21 @@ pub struct LspClient {
     env: HashMap<String, String>,
     initialization_options: Option<Value>,
     state: Arc<RwLock<ServerState>>,
+    /// 启动互斥 — 并发 start/try_restart 只有一个执行 do_start；
+    /// tokio::sync::Mutex — guard 可以跨 .await 持有
+    start_lock: Arc<tokio::sync::Mutex<()>>,
     /// tokio::sync::Mutex — guard 可以跨 .await 持有
     dispatcher: Arc<tokio::sync::Mutex<Option<MessageDispatcher>>>,
     next_id: Arc<parking_lot::Mutex<i64>>,
     open_files: Arc<RwLock<HashMap<String, OpenFileInfo>>>,
     restart_count: Arc<parking_lot::Mutex<u32>>,
+    /// 当前重启窗口起点（None = 窗口外，下次重启开启新窗口）
+    restart_window_start: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
+    /// 重启计数窗口时长（测试可调短以验证窗口语义）
+    restart_window: std::time::Duration,
     max_restarts: u32,
+    /// initialize 请求超时（毫秒），来自 `LspServerConfig.startup_timeout`，缺省 30s
+    startup_timeout_ms: u64,
     diagnostics: Arc<DiagnosticsRegistry>,
 }
 
@@ -53,6 +69,7 @@ enum DidChangeAction {
 }
 
 impl LspClient {
+    #[allow(clippy::too_many_arguments)] // 配置透传面：字段逐项注入，与 LspServerConfig 一一对应
     pub fn new(
         name: String,
         command: String,
@@ -60,6 +77,7 @@ impl LspClient {
         env: HashMap<String, String>,
         initialization_options: Option<Value>,
         max_restarts: u32,
+        startup_timeout_ms: u64,
         diagnostics: Arc<DiagnosticsRegistry>,
     ) -> Self {
         Self {
@@ -69,23 +87,35 @@ impl LspClient {
             env,
             initialization_options,
             state: Arc::new(RwLock::new(ServerState::Stopped)),
+            start_lock: Arc::new(tokio::sync::Mutex::new(())),
             dispatcher: Arc::new(tokio::sync::Mutex::new(None)),
             next_id: Arc::new(parking_lot::Mutex::new(0)),
             open_files: Arc::new(RwLock::new(HashMap::new())),
             restart_count: Arc::new(parking_lot::Mutex::new(0)),
+            restart_window_start: Arc::new(parking_lot::Mutex::new(None)),
+            restart_window: RESTART_WINDOW,
             max_restarts,
+            startup_timeout_ms,
             diagnostics,
         }
     }
 
     /// 启动 LSP 服务器并完成 initialize/initialized 握手
+    ///
+    /// 并发调用安全：同时多个 start 时只有一个执行 do_start（spawn 子进程），
+    /// 其余在 start_lock 上等待，完成后检测到 Running 直接复用。
     pub async fn start(&self, root_uri: &str) -> Result<(), LspError> {
-        {
-            let state = self.state.read();
-            if *state == ServerState::Running {
-                return Ok(());
-            }
-            // 不设置 Starting 状态，直接在 do_start 中设置 Running
+        // 快速路径：已运行直接复用（不获取锁，避免无谓排队）
+        if *self.state.read() == ServerState::Running {
+            return Ok(());
+        }
+
+        // 原子化检查-启动：并发 start 只有一个进入 do_start
+        let _guard = self.start_lock.lock().await;
+
+        // 二次检查：等待锁期间可能已被其他调用者启动
+        if *self.state.read() == ServerState::Running {
+            return Ok(());
         }
 
         let result = self.do_start(root_uri).await;
@@ -163,8 +193,21 @@ impl LspClient {
         );
 
         let result = self
-            .request("initialize", Some(init_params), 30_000)
-            .await?;
+            .request("initialize", Some(init_params), self.startup_timeout_ms)
+            .await;
+        let result = match result {
+            Ok(v) => v,
+            Err(e) => {
+                // 启动失败：清理已 spawn 的子进程与 read task，避免孤儿进程
+                // （与 close() 语义一致：先 kill 子进程再 abort read task；
+                // 否则子进程永远等不到 shutdown/exit，stdin 未关不会 EOF）
+                if let Some(d) = self.dispatcher.lock().await.as_ref() {
+                    d.close().await;
+                }
+                *self.dispatcher.lock().await = None;
+                return Err(e);
+            }
+        };
 
         let _server_capabilities = result.get("capabilities").cloned();
         tracing::info!(
@@ -173,8 +216,17 @@ impl LspClient {
             "LSP 服务器初始化成功"
         );
 
-        self.notify("initialized", Some(Value::Object(Default::default())))
-            .await?;
+        if let Err(e) = self
+            .notify("initialized", Some(Value::Object(Default::default())))
+            .await
+        {
+            // 与 initialize 失败路径一致：清理子进程与 read task
+            if let Some(d) = self.dispatcher.lock().await.as_ref() {
+                d.close().await;
+            }
+            *self.dispatcher.lock().await = None;
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -226,6 +278,8 @@ impl LspClient {
                             error = %e,
                             "LSP 请求发送失败（服务器可能已崩溃）"
                         );
+                        // 发送失败：请求未发出，pending 注册同样成为孤儿，一并移除
+                        d.cancel_request(id);
                         return Err(e);
                     }
                 }
@@ -243,10 +297,17 @@ impl LspClient {
                 method: method.to_string(),
                 reason: "请求被取消".to_string(),
             }),
-            Err(_) => Err(LspError::RequestTimeout {
-                method: method.to_string(),
-                timeout_ms,
-            }),
+            Err(_) => {
+                // 超时：从 pending 移除，避免 oneshot sender 残留
+                // （此前仅在 transport EOF 时由 reject_all_pending 整体清理）
+                if let Some(d) = self.dispatcher.lock().await.as_ref() {
+                    d.cancel_request(id);
+                }
+                Err(LspError::RequestTimeout {
+                    method: method.to_string(),
+                    timeout_ms,
+                })
+            }
         }
     }
 
@@ -354,7 +415,7 @@ impl LspClient {
         &self.name
     }
 
-    fn infer_language_id(uri: &str) -> String {
+    pub fn infer_language_id(uri: &str) -> String {
         let ext = std::path::Path::new(uri)
             .extension()
             .and_then(|e| e.to_str())
@@ -390,9 +451,26 @@ impl LspClient {
         *self.state.write() = ServerState::Stopped;
     }
 
-    /// 检查重启次数限制并递增计数（同步操作，确保 parking_lot guard 不跨 await）
+    /// 检查重启次数限制并递增计数（同步操作，确保 parking_lot guard 不跨 await）。
+    ///
+    /// 时间窗退避：计数只在窗口内累计，窗口（默认 60s）过后清零重新累计；
+    /// 窗口内计数达到 max_restarts 后返回 ServerCrashed 并进入冷却，
+    /// 冷却期内拒绝重启，直到窗口结束。
     fn check_and_increment_restart(&self) -> Result<(), LspError> {
         let mut count = self.restart_count.lock();
+        let mut window_start = self.restart_window_start.lock();
+        let now = std::time::Instant::now();
+
+        // 窗口已过期：清零计数并开启新窗口；首次重启同样开启窗口
+        if let Some(start) = *window_start {
+            if now.duration_since(start) >= self.restart_window {
+                *count = 0;
+                *window_start = Some(now);
+            }
+        } else {
+            *window_start = Some(now);
+        }
+
         if *count >= self.max_restarts {
             return Err(LspError::ServerCrashed {
                 server: self.name.clone(),
@@ -407,6 +485,9 @@ impl LspClient {
     pub async fn try_restart(&self, root_uri: &str) -> Result<(), LspError> {
         self.check_and_increment_restart()?;
 
+        // 与 start 互斥：避免重启与并发启动时双重 spawn
+        let _guard = self.start_lock.lock().await;
+
         {
             let guard = self.dispatcher.lock().await;
             if let Some(d) = guard.as_ref() {
@@ -415,11 +496,12 @@ impl LspClient {
         }
         *self.dispatcher.lock().await = None;
         self.open_files.write().clear();
+        // 重启后清除旧诊断：服务器状态已重置，残留诊断属过期信息
+        self.diagnostics.clear_all();
 
         match self.do_start(root_uri).await {
             Ok(()) => {
                 *self.state.write() = ServerState::Running;
-                *self.restart_count.lock() = 0;
                 Ok(())
             }
             Err(e) => {
@@ -429,3 +511,7 @@ impl LspClient {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "client_test.rs"]
+mod tests;

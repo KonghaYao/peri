@@ -161,7 +161,7 @@ use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::{ChannelState, UserInteractionBroker};
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::plugin::LoadedPlugin;
-use peri_acp_types::ports::{McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 use peri_acp_types::tools::TodoItem;
@@ -269,6 +269,8 @@ pub struct AssemblyContext {
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     pub lsp_servers: Vec<LspServerConfig>,
+    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例；装配方 downcast 还原）
+    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口（复用，None = 构造临时实例）

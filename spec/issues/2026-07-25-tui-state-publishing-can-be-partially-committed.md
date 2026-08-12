@@ -5,6 +5,13 @@
 **类型**：技术债
 **创建日期**：2026-07-25
 **来源**：`docs/architecture-review-2026-07-24.md` A5
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+handler 仍直接调用 `push_view_models`/`push_acp_state`（`kit/acp_events/` 下 8 个文件），v2 路径还存在绕过 reducer 直写 atom；统一 reducer/单点一次性提交派生状态未落地，部分提交问题仍在。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

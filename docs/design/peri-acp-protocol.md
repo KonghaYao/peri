@@ -1,12 +1,12 @@
 # peri-acp 协议设计
 
-> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-07
+> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-10
 
 ## 1. 协议分层
 
 ACP 协议分为标准 ACP 方法（TUI → 服务）与 ACP 事件通知（服务 → TUI）。标准方法承载请求-响应和交互；事件经 ACP 的 v2 映射与协议化面投递给客户端。
 
-**标准 ACP（JSON-RPC 方法）**：TUI 调用，ACP 执行并返回。覆盖会话生命周期、prompt 提交、命令执行、交互应答、面板数据查询。请求-响应语义——发一个请求，收一个结果。
+**标准 ACP（JSON-RPC 方法）**：TUI 调用，ACP 执行并返回。覆盖会话生命周期、prompt 提交、配置/权限控制、插件管理、后台任务与工作流控制。请求-响应语义——发一个请求，收一个结果。
 
 **ACP 事件通知**：当前 TUI 的主事件面是标准 `session/update` 和 `peri/agent_event`。`peri/unstable-event` 只保留兼容或特定扩展用途，不作为通用 Agent → TUI 事件管道；完整链路见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
 
@@ -23,37 +23,57 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/new` | `{ cwd?, model?, permission_mode? }` | `{ session_id }` | 创建新会话 |
-| `session/load` | `{ session_id }` | `{ session_id, messages }` | 恢复历史会话 |
+| `session/load` | `{ session_id }` | `{ session_id }` | 恢复历史会话（历史经 `session/update` 重放） |
+| `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话（stdio 侧 `create.rs:186`） |
 | `session/close` | `{ session_id }` | `{}` | 关闭会话 |
 | `session/fork` | `{ source_session_id }` | `{ new_session_id }` | 复制当前会话到新线程 |
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
+| `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
 ### 2.2 交互
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults?, requestId? }` | `{}` | 提交用户输入（notification，sessionId 同时支持 `session_id` 别名；`requestId` 为可选的本轮 turn 标识，服务器随 `peri/agent_event_done` 回带，供 TUI stale 事件配对） |
+| `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults?, requestId? }` | `{ stopReason }` | 提交用户输入（**request-response**，响应携带 `StopReason`；sessionId 同时支持 `session_id` 别名；`requestId` 为可选的本轮 turn 标识，服务器随 `peri/agent_event_done` 回带，供 TUI stale 事件配对）。长耗时 prompt 在服务端 spawn 后台执行，避免阻塞 `session/cancel` 等后续消息 |
 | `session/cancel` | `{ sessionId }` | — | 中断当前 Agent（notification，非 request-response） |
-| `session/execute-command` | `{ session_id, command, args }` | `{}` | 执行 Slash 命令（HITL 审批和 AskUser 回答均走此方法） |
+| `session/execute-command` | — | — | **无生产调用者**。Slash 命令由 executor 入口的 `session/command/` 注册表（`CommandRegistry`）拦截处理，不走此 JSON-RPC 方法；HITL 审批和 AskUser 回答也不经过它（见 §2.3 注） |
 
 ### 2.3 查询与控制
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/switch-model` | `{ sessionId, modelId }` | `{}` | 切换模型（实际方法名 `session/set_model`） |
-| `session/switch-provider` | `{ session_id, provider_id }` | `{}` | 切换 Provider |
-| `session/set_config_option` | `{ sessionId?, configId, value }` | `{}` | 更新配置项（有 session 时用 request，无 session 时用 `session/config_update` notification） |
+| `session/set_mode` | `{ modeId?, sessionId? }` | `{}` | 切换**权限模式**（default / plan / acceptEdits 等） |
+| `session/set_config_option` | `{ sessionId?, configId, value }` | `{}` | 更新配置项；`configId` 支持 `mode` / `model`（模型切换）/ `thinking_effort` / `context_1m`（有 session 时用 request，无 session 时用 `session/config_update` notification） |
+| `session/update_config` | `{ sessionId?, config }` | `{ configOptions }` | 完整 `PeriConfig` 替换（校验 providers 非空与 profile→provider 引用），变更后推送 `config_option_update` 并 invalidate LLM 实例 |
+| `session/switch-model` | — | — | 无服务端注册；模型切换走 `session/set_config_option` 的 `configId="model"` 分支（`requests.rs:200`，stdio 侧 `session/config.rs:48`）。`session/set_model` 仅为 TUI `client.rs` 侧未使用的定义（死代码） |
+| `session/switch-provider` | — | — | 未实现，无服务端注册 |
 
-> **已移除方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批走 `HITL_RESPONSE_TX → session/execute-command`，AskUser 回答走 `ASK_USER_TX → session/execute-command`。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
+> **已移除/不存在方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批经 broker JSON-RPC `session/request_permission` 往返，TUI 通过 `send_response`（JSON-RPC response）回传审批结果（`hitl_response.rs`），AskUser 同理走 `elicitation/create` + `send_response`（`ask_user_action.rs`），均不走 execute-command。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
 
 ### 2.4 插件管理
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `plugin/search` | `{ query, sessionId? }` | `{}` | 搜索插件市场 |
-| `plugin/install` | `{ name, sessionId? }` | `{}` | 安装插件 |
+| `plugin/search` | `{ query, sessionId? }` | `{ results }` | 搜索插件市场 |
+| `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{}` | 安装插件 |
 | `plugin/uninstall` | `{ name, sessionId? }` | `{}` | 卸载插件 |
 | `plugin/toggle` | `{ name, enabled, sessionId? }` | `{}` | 启用/禁用插件 |
+| `plugin/update` | `{ pluginId, sessionId? }` | `{ success, plugin }` | 更新插件（结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知） |
+
+### 2.5 后台任务、工作流与 rewind
+
+> `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*` 与 `session/rewind*` 仅在 mpsc 传输路径（`host/requests.rs`）注册；stdio 模式（`host/stdio/`）只注册标准方法加 `session/update_config`，不注册本表方法。
+
+| 方法 | 参数 | 返回值 | 语义 |
+|------|------|--------|------|
+| `session/cancel-bg-task` | `{ sessionId, taskId }` | `{ success }` | 取消后台任务（会话不存在时如实报错） |
+| `workflow/list_runs` | `{ sessionId }` | `{ runs }` | 列出工作流运行快照 |
+| `workflow/kill_agent` | `{ sessionId, runId, agentId }` | `{ killed }` | 终止运行中的工作流 agent |
+| `workflow/kill_run` | `{ sessionId, runId }` | `{ killed }` | 终止整个工作流运行 |
+| `workflow/resume` | `{ sessionId, runId }` | `{ newRunId, resumedFrom }` | 恢复已暂停的工作流运行 |
+| `session/rewind-candidates` | `{ sessionId }` | 候选列表 | 回退候选查询 |
+| `session/rewind-preview` | `{ sessionId, ... }` | 预览 | 回退预览（FileChange + RewindMessage） |
+| `session/rewind` | `{ sessionId, ... }` | `{}` | 执行回退 |
 
 ---
 
@@ -69,6 +89,7 @@ v2 EventBus
 ACP 事件映射 / EventSink
     ├─ `session/update`：标准流式内容、工具与 usage 更新
     ├─ `peri/agent_event`：TUI 专用状态、结构与扩展事件
+    ├─ `peri/prediction_ready`：输入预测建议（受 caps.prediction 门控）
     ├─ 标准交互请求：HITL / Elicitation
     └─ `peri/agent_event_done`：turn 终止通知
 ```
@@ -90,7 +111,7 @@ ACP 事件映射 / EventSink
 1. **事件链路单一**：新增事件经 v2 EventBus、ACP 映射和协议化面到达 TUI，不恢复 v2_tx 或其他直连通道。
 2. **协议面类型化**：标准更新使用 ACP 类型，TUI 专用通知使用 `AcpEvent` DTO；两者的兼容性由映射层维护。
 3. **终止可观测**：每个 terminal 事件必须使客户端离开 loading 状态。
-4. **传输无关**：MpscTransport 与 StdioTransport 复用同一协议语义；transport 不解释 Agent 业务逻辑。
+4. **传输无关**：MpscTransport、`host/stdio/` SDK 模式（及保留的 StdioTransport）复用同一协议语义；transport 不解释 Agent 业务逻辑。
 
 ---
 
@@ -146,12 +167,13 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 | TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | 服务 → TUI 低频状态、结构与扩展事件 |
 | 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
 | 兼容/扩展 | `peri/unstable-event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
-| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stop_reason}}` | 服务 → 客户端 turn 完成 |
+| 输入预测 | `peri/prediction_ready` | `{method: "peri/prediction_ready", params: {sessionId, text, actions}}` | 服务 → 客户端输入预测建议 |
+| Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stopReason, requestId?}}` | 服务 → 客户端 turn 完成（wire 字段为 camelCase `stopReason`；`requestId` 可选，仅提交 prompt 时携带时回带） |
 
 ### 6.2 传输实现
 
 - **开发环境（TUI 内嵌 ACP）**：`MpscTransport`。同一进程内通过 tokio mpsc 通道传递消息。
-- **生产环境（IDE 插件、远程代理）**：`StdioTransport`。stdin/stdout 传递 JSON 消息。
+- **生产环境（IDE 插件、远程代理）**：`host/stdio/` 模式（`run_acp_stdio`），基于 agent-client-protocol SDK 与外部 IDE 客户端通信（`Stdio` 连接）。`StdioEventSink` 仅发标准 ACP `session/update` 通知，不支持 `peri/*` 自定义通知。`transport/stdio.rs` 的自研 `StdioTransport` 实现仍保留，但生产 stdio 路径已由 SDK 模式取代。
 
 传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。事件协议化与通道选择由 `peri-acp/src/event/` 的 EventSink 和映射层决定。
 

@@ -22,10 +22,35 @@ const MAX_LINES: usize = 2000;
 const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
 /// 单行最大字符数（超过则截断）
 const MAX_CHARS_PER_LINE: usize = 65536;
-/// 输出最大字节数（兜底）
-const MAX_OUTPUT_CHARS: usize = 100_000;
+/// 输出最大字节数（超过后截断并落盘）
+const MAX_OUTPUT_BYTES: usize = 5_000;
 
 const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
+
+/// 解析 1-based 行号/行数参数（offset/limit）。
+///
+/// 语义与 schema 描述一致：offset 是 1-based 行号（1 = 首行），limit 是行数。
+/// 缺省时返回 `default`；显式传入非正整数（0、负数、小数、非数字）一律报错，
+/// 避免 `as_u64()` 对浮点静默回退为默认值、导致读到错误位置。
+fn parse_line_number(
+    value: &Value,
+    name: &str,
+    default: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    if value.is_null() {
+        return Ok(default);
+    }
+    let n = value
+        .as_f64()
+        .ok_or_else(|| format!("Error: '{name}' must be a positive integer, got {value}"))?;
+    if n.fract() != 0.0 || n < 1.0 {
+        return Err(format!(
+            "Error: '{name}' must be a positive integer (1-based line number), got {n}"
+        )
+        .into());
+    }
+    Ok(n as usize)
+}
 
 fn is_binary_extension(ext: &str) -> bool {
     matches!(
@@ -77,6 +102,24 @@ impl BaseTool for ReadFileTool {
         true
     }
 
+    /// 演示分组（design v2 §2.5.1 示例：同类工具按 namespace 组织声明段）。
+    fn namespace(&self) -> Option<&str> {
+        Some("filesystem")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3 示例语义）。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导
+    /// （"Read" → "Read"），验证缺省推导在真实工具上生效。
+    /// 全量迁移完成：声明段是工具选择指引的单一事实源，05 段落无对应条目
+    /// （守护测试断言渲染输出与 05 剩余内容无逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         READ_FILE_DESCRIPTION
     }
@@ -90,11 +133,13 @@ impl BaseTool for ReadFileTool {
                     "description": "The absolute path to the file to read"
                 },
                 "offset": {
-                    "type": "number",
-                    "description": "The line number to start reading from. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
                     "description": "The number of lines to read. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
                 },
                 "pages": {
@@ -119,8 +164,10 @@ impl BaseTool for ReadFileTool {
             .as_str()
             .ok_or("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.")?;
 
-        let offset = input["offset"].as_u64().unwrap_or(0) as usize;
-        let limit = input["limit"].as_u64().unwrap_or(MAX_LINES as u64) as usize;
+        // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
+        // 缺省 offset=1（读全文起点）、limit=2000。
+        let offset = parse_line_number(&input["offset"], "offset", 1)?;
+        let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
 
         let resolved = resolve_path(&self.cwd, file_path);
 
@@ -149,7 +196,7 @@ impl BaseTool for ReadFileTool {
         let content = match std::fs::metadata(&resolved) {
             Ok(meta) if meta.len() > MAX_FILE_SIZE => {
                 return Err(format!(
-                    "Error: File too large ({} bytes, max {} bytes). Use offset/limit to read portions.",
+                    "Error: File too large ({} bytes, max {} bytes). offset/limit cannot bypass the file-size limit; use Grep to locate content or another suitable file-processing tool.",
                     meta.len(),
                     MAX_FILE_SIZE
                 ).into());
@@ -161,10 +208,16 @@ impl BaseTool for ReadFileTool {
             Ok(meta) if meta.is_dir() => {
                 return list_folder(&resolved).map(|listing| {
                     format!(
-                        "[DIRECTORY DETECTED]\n\nThis path is a directory, not a file. Below are its contents:\n\n{}",
+                        "[DIRECTORY DETECTED]\n\nRead received a directory path and converted it to a directory listing. Use folder_operations with operation=\"list\" for explicit directory operations.\n\n{}",
                         listing
                     )
                 });
+            }
+            Ok(meta) if meta.len() == 0 => {
+                return Ok(format!(
+                    "[EMPTY FILE]\n\nFile path: {}\nThe file is empty (0 bytes).",
+                    resolved.display()
+                ));
             }
             _ => match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
@@ -176,27 +229,28 @@ impl BaseTool for ReadFileTool {
         };
 
         let lines: Vec<&str> = content.split('\n').collect();
-        if offset >= lines.len() {
+        // 1-based 行号 → 0-based 切片索引
+        let start = offset - 1;
+        if start >= lines.len() {
             return Err(format!(
-                "Error: offset {} exceeds file length ({} lines)",
-                offset,
+                "Error: offset {offset} exceeds file length ({} lines). Valid offsets are 1..={}; omit offset to read from the beginning. Do not guess another offset or use offset to probe the file end.",
+                lines.len(),
                 lines.len()
             )
             .into());
         }
-        let start = offset;
         let end = (start + limit).min(lines.len());
         let selected = &lines[start..end];
 
         let mut numbered: Vec<String> = Vec::new();
         for (i, line) in selected.iter().enumerate() {
             let line_num = start + i + 1;
-            // 单行超长按字符截断（与工具描述一致）
-            let content = if line.chars().count() > MAX_CHARS_PER_LINE {
+            // 将截断元数据放在内容前，确保后续输出级截断不会隐藏该信息。
+            let line_char_count = line.chars().count();
+            let content = if line_char_count > MAX_CHARS_PER_LINE {
                 format!(
-                    "{}... [line truncated at {} characters]",
-                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>(),
-                    MAX_CHARS_PER_LINE
+                    "[LINE TRUNCATED: {line_char_count} characters total; retained first {MAX_CHARS_PER_LINE} characters before output-level truncation] {}",
+                    line.chars().take(MAX_CHARS_PER_LINE).collect::<String>()
                 )
             } else {
                 (*line).to_string()
@@ -206,21 +260,17 @@ impl BaseTool for ReadFileTool {
 
         let mut output = numbered.join("\n");
 
-        // 字节级兜底：总输出超过上限时截断 + 落盘
-        if output.len() > MAX_OUTPUT_CHARS {
+        // 总输出超过上限时截断并落盘；提示保留原始大小和完整输出路径。
+        if output.len() > MAX_OUTPUT_BYTES {
+            let original_output_bytes = output.len();
             let persist_hint = persist_truncated_output(&output);
-            output = truncate_bytes(&output, MAX_OUTPUT_CHARS);
+            output = truncate_bytes(&output, MAX_OUTPUT_BYTES);
             output.push_str(&format!(
-                "\n[Output truncated: exceeds {} byte limit]{persist_hint}",
-                MAX_OUTPUT_CHARS
+                "\n[Output truncated: {original_output_bytes} bytes total; showing first {MAX_OUTPUT_BYTES} bytes]{persist_hint}"
             ));
         }
 
         Ok(output)
-    }
-
-    fn output_char_limit(&self) -> Option<usize> {
-        Some(5000)
     }
 
     fn prefers_persist(&self) -> bool {

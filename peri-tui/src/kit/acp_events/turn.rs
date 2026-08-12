@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
-use crate::kit::atoms::{INPUT_BUFFER, RENDER_HEARTBEAT, THREAD_LOAD_TX};
+use crate::kit::atoms::{RENDER_HEARTBEAT, THREAD_LOAD_TX};
 use crate::kit::tui_render_unit::{
-    TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiUserBubble, tui_hash_str,
+    TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiUserBubble,
 };
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
@@ -125,7 +125,9 @@ pub(super) fn handle_turn_interrupted(
 
     // 零产出回滚：Agent 尚未产出任何 AI 内容时（current_turn 为空），
     // 撤销本次用户气泡 + 恢复文本到输入框。
-    // 仅当有 last_submitted_text 时才执行（正常情况下 LocalUserBubble 已到达）。
+    // 仅当有 last_submitted_text 时才执行（正常情况下 LocalUserBubble 已到达；
+    // [Slice 3] loading 提交只入队不发气泡，不设置 last_submitted_text——
+    // 回滚不会误恢复排队中的输入）。
     if state.current_turn.is_empty() && state.last_submitted_text.is_some() {
         let restore_text = state.last_submitted_text.take().unwrap();
         // 移除 committed 中最后一条用户气泡
@@ -140,8 +142,10 @@ pub(super) fn handle_turn_interrupted(
             crate::kit::atoms::INPUT_RESTORE_TEXT.get_or_init(|| parking_lot::Mutex::new(None));
         *mu.lock() = Some(restore_text);
         RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
-        // 清除排队输入缓冲——取消后不应继续处理排队的输入
-        INPUT_BUFFER.state().write().clear();
+        // [Slice 3 D4] 排队项是用户已提交的请求（composer 上方队列可见），
+        // 取消当前 turn 不吞排队项——复位后立即 drain 提交（与 stale 分支
+        // 行为对齐；stale 判定靠代际/request_id，不依赖本分支）。
+        super::render::drain_input_buffer();
         state.current_turn = CurrentTurn::new();
         state.last_pushed_text_len = 0;
         state.last_pushed_reasoning_len = 0;
@@ -159,10 +163,9 @@ pub(super) fn handle_turn_interrupted(
             state.committed.push_back(vm.clone());
         }
     }
-    // Issue 2026-08-05 次要项 (a)：归档分支同步清空 INPUT_BUFFER——本 turn 被
-    // 取消，loading 期间排队的输入作废；不清的话它们会在下一 TurnDone 被
-    // drain_input_buffer 意外提交（用户以为已取消，输入却在下轮自动发出）。
-    INPUT_BUFFER.state().write().clear();
+    // [Slice 3 D4] 归档分支同样 drain 排队项（不丢弃）：排队输入是用户已提交
+    // 的请求，取消本 turn 后继续按序发送，与 stale 分支行为一致。
+    super::render::drain_input_buffer();
     state.current_turn = CurrentTurn::new();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
@@ -291,16 +294,35 @@ pub(super) fn handle_committed_assistant_text(
     text: &str,
     reasoning: &Option<String>,
 ) {
+    // 完整消息（非流式）→ reasoning 视为已完成：按 §7 表折叠为单行。
+    // [G1] hash 统一走 TuiAssistantBubble::compute_hash（含 fold/status）。
     let reason_block = reasoning.as_ref().map(|r| TuiReasoningBlock {
         text: r.clone(),
-        collapsed: false,
+        fold: crate::kit::tui_render_unit::fold_for_status(
+            crate::kit::tui_render_unit::FoldTarget::Reasoning,
+            crate::kit::tui_render_unit::EntryStatus::Completed,
+        ),
+        status: crate::kit::tui_render_unit::EntryStatus::Completed,
+        is_running: false,
+        // 非流式通道无推理起始时间——完成时长不可得（G-Tokens 降级：
+        // 仅显示行数，省略 `Thought for Ns` 时长）。
+        started_at: None,
+        duration_ms: None,
     });
-    let content_hash = tui_hash_str(&format!("{}|{}", text, reasoning.as_deref().unwrap_or("")));
-    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+    let mut bubble = TuiAssistantBubble {
         text: text.to_string(),
         reasoning: reason_block,
-        content_hash,
-    });
+        // 非流式通道无 message_id 来源（重放/commit 路径）——不可作为
+        // FoldKey::Reasoning 覆盖目标，Slice 2 接受此限制。
+        message_id: None,
+        // 非流式通道无文本起始时刻——正文时长不可得（G-Tokens 降级：
+        // 不显示 `12.4s`）。
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
     state.committed.push_back(vm);
     super::render::push_view_models(state);
     super::render::push_acp_state(state);

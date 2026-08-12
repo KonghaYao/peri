@@ -30,7 +30,9 @@ use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{
+    LspPoolPort, McpPoolPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
+};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -75,6 +77,8 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
+    pub(crate) lsp_pool: Option<Arc<dyn LspPoolPort>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,
@@ -238,6 +242,18 @@ pub async fn run_acp_server(
             }
             IncomingMessage::Response { .. } => {
                 // Responses are routed internally by the transport's pending map.
+            }
+        }
+    }
+
+    // ── 宿主退出：优雅关闭所有会话的 LSP 服务器池（H1 shutdown 钩子）──
+    // transport 关闭 = 宿主退出。sessions 即将 drop；每 turn 装配复用的是
+    // 会话级 pool，此处显式 shutdown，避免 LSP 服务器子进程随进程残留。
+    {
+        let sessions = sessions.lock().await;
+        for state in sessions.values() {
+            if let Some(pool) = state.lsp_pool.as_ref() {
+                pool.shutdown().await;
             }
         }
     }

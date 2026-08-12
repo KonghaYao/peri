@@ -418,6 +418,22 @@ impl BaseTool for SubAgentTool {
         true
     }
 
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：委派独立子任务/专业工作。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Hand off independent or specialized tasks → `{{name}}` ({{title}}). Agent types and usage live in the SubAgent docs."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         AGENT_DESCRIPTION
     }
@@ -435,7 +451,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "要恢复的被中断 subagent 的 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得）。提供时从磁盘 thread 恢复其现场继续执行，不创建新 subagent。要求：thread 状态非 active；与 fork / subagent_type 互斥；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）"
+                    "description": "可选，默认不填：不填即新建 subagent。仅当要恢复此前被中断/失败的 subagent 时才填：值为其 child_thread_id（从之前 Agent 调用的返回/错误文本或 bg 通知中获得，恒为 UUID）。提供时从磁盘 thread 恢复现场继续执行，不创建新 subagent，且优先于 subagent_type / fork（两者被忽略）；prompt 可选（缺省隐式继续）；可与 run_in_background 组合（恢复后按此模式执行）。thread 状态须非 active"
                 },
                 "description": {
                     "type": "string",
@@ -443,7 +459,11 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED unless fork=true. When not provided and fork is not set, the call will fail"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume keeps the original execution context)"
                 },
                 "name": {
                     "type": "string",
@@ -463,7 +483,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "fork": {
                     "type": "boolean",
-                    "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation"
+                    "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation. Mutually exclusive with subagent_type: when fork=true, do NOT provide subagent_type (new sub-agents and forks are alternative modes)"
                 }
             }
         })
@@ -482,9 +502,16 @@ impl BaseTool for SubAgentTool {
         input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // resume_thread_id 仅在值为有效 UUID 时才视为恢复意图（「不填 = 新建」语义）：
+        // LLM 表达「省略」时常用 "" / "new" / "__omit__" 等占位符（或把意图填进
+        // 该字段），若按 is_some 判断会被劫持进 resume 分支并触发 invalid thread id
+        // 失败——占位符一律忽略，走正常新建路径（subagent_type / fork / prompt）。
+        // 真实 child_thread_id 恒为 UUID（spawn 时 Uuid::now_v7 生成），过滤不损失语义。
         let resume_thread_id = input
             .get("resume_thread_id")
             .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && uuid::Uuid::parse_str(s).is_ok())
             .map(|s| s.to_string());
         // prompt 改为 Option：resume 路径可缺省（缺省注入隐式 continue，issue 决策 9）；
         // 非 resume 路径下方运行时校验兜底（required:[] 后语义不变）
@@ -495,6 +522,14 @@ impl BaseTool for SubAgentTool {
         let subagent_type = input
             .get("subagent_type")
             .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // model 档位覆盖（仅新建定义型 subagent 消费；fork/resume 路径忽略，
+        // 与 resume 忽略 subagent_type/fork 的宽容语义一致）
+        let model = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let _description = input.get("description").and_then(|v| v.as_str());
         let _name = input.get("name").and_then(|v| v.as_str());
@@ -515,12 +550,10 @@ impl BaseTool for SubAgentTool {
         let host = self.host();
 
         // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
-        // 互斥校验放分支前：resume 与 fork / subagent_type 二选一
-        if resume_thread_id.is_some() && (is_fork || subagent_type.is_some()) {
-            return Err(
-                "Error: resume_thread_id is mutually exclusive with fork / subagent_type".into(),
-            );
-        }
+        // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
+        // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
+        // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
+        // 过滤（见上），不会劫持新建路径。
         // 恢复需要持久化现场：磁盘 thread 是恢复的唯一来源（无 thread_store 无法恢复）
         if resume_thread_id.is_some()
             && host.as_ref().and_then(|h| h.thread_store.clone()).is_none()
@@ -571,7 +604,14 @@ impl BaseTool for SubAgentTool {
             && host.as_ref().and_then(|h| h.task_manager.clone()).is_some()
         {
             return self
-                .invoke_background(prompt, subagent_type, cwd, is_fork, current_messages)
+                .invoke_background(
+                    prompt,
+                    subagent_type,
+                    cwd,
+                    is_fork,
+                    current_messages,
+                    model.as_deref(),
+                )
                 .await;
         }
 
@@ -602,6 +642,7 @@ impl BaseTool for SubAgentTool {
                 peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                 false,
                 true,
+                model.as_deref(),
             )
             .await?;
 

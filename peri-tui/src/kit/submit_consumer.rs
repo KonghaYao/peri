@@ -397,6 +397,7 @@ fn extract_vm_text(vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> String {
             format!("[Collapsed: {} ({} items)]", data.title, data.count)
         }
         TuiRenderUnit::TuiDivider(data) => data.label.as_deref().unwrap_or("---").to_string(),
+        TuiRenderUnit::TuiTodoSummary(data) => data.text.clone(),
         TuiRenderUnit::TuiAskUserBlock(data) => data
             .items
             .iter()

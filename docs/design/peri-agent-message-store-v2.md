@@ -8,10 +8,10 @@
 
 1. **永远 id 寻址**：每条消息拥有唯一 `MessageId`（UUID v7，时间有序）。所有外部操作——rewind、compact、持久化恢复——一律按 id 定位消息。禁止使用 Vec 下标定位——下标可因消息标记漂移而引入隐性错误。
 2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。保证 Prompt Cache 前缀稳定，LLM 请求构造路径简单无分支。Compact 是唯一例外——读取后重建新 Transcript，非增量追加。
-3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Compact 在重建 Transcript 时通过标记实现——Micro 标 `truncated`（LLM 请求时截断输出）、Full 标 `excluded`（LLM 请求时跳过）——标记不改变消息内容本身。（Smart Compact 尚未实现，见 §2.6）
+3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Compact 在重建 Transcript 时通过标记实现——Micro 标 `truncated`（LLM 请求时截断输出）、Full 标 `excluded`（LLM 请求时跳过）——标记不改变消息内容本身。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）
 4. **Transcript 为权威源**：Transcript 是会话全部消息的唯一真相源。持久化是 Transcript 的镜像——落后时以 Transcript 为准重建。不持久化 MessageQueue——Queue 是临时收件箱。
 5. **持久化不阻塞循环**：消息追加到 Transcript 后异步触发持久化。持久化失败不阻塞 Agent 循环——仅记录错误，内存 Transcript 始终可用。
-6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 尚未实现，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
+6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
 
 ---
 
@@ -33,7 +33,7 @@ graph TB
 
     subgraph COMPACT["Compact 例外操作"]
         MICRO["Micro<br/>标记 truncated"]
-        SMART["Smart（未实现）<br/>筛选保留 + system-reminder"]
+        SMART["Smart（兼容入口）<br/>plan_micro 计划 + projection"]
         FULL["Full<br/>追加摘要·标记 excluded"]
     end
 
@@ -74,24 +74,24 @@ graph TB
 
 消息按 Kind 分为三类，控制循环唤醒和消费行为：
 
-| Kind | 来源示例 | Receive 行为 | End 行为 | 唤醒新 turn |
-|------|---------|-------------|---------|------------|
-| `Prompt` | 用户输入、外部主动请求 | 消费（写入 Transcript） | 可唤醒 | ✅ |
-| `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 跳过（保留在队列中） | 消费 + 唤醒 | ✅ |
-| `Info` | SystemReminder、Hook 注入 | 消费（写入 Transcript） | 不唤醒 | ❌ |
+| Kind | 来源示例 | `drain_all` 行为 | 唤醒新 turn |
+|------|---------|----------------|------------|
+| `Prompt` | 用户输入、外部主动请求 | 消费（写入 Transcript） | ✅ |
+| `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 消费（写入 Transcript，emit `SyntheticUserMessage`） | ✅ |
+| `Info` | SystemReminder、Hook 注入 | 消费（写入 Transcript） | ❌ |
 
 #### MessageSource 九种来源
 
 每条 `QueuedMessage` 携带 `MessageSource` 标注来源，用于调试和事件追踪：`UserInput` / `SubAgentComplete` / `GoalSteering` / `CronTrigger` / `StopHookFeedback` / `ChannelMessage` / `SystemInjected` / `ToolFailureWarning` / `WorkflowComplete`。
 
-#### 双排空 API
+#### 排空 API（RCRA 重构后）
 
-- **`drain_for_receive()`**：Receive 阶段调用，消费所有 Prompt + Info（写入 Transcript），Defer 保留在队列中等待 End 阶段。
-- **`drain_for_end()`**：End 阶段调用，检查队列是否有能唤醒循环的消息（Prompt 或 Defer）。若有，取出全部 Prompt + Defer 返回 `Some(messages)` 激活新 turn；若无（队列空或仅有 Info），返回 `None`，循环退出。Info 永远不会被 End 阶段单独消费——必须被 Prompt 带出。
+- **`drain_all()`**（`peri-acp-types/src/session.rs:222`）：Receive 阶段一次性消费队列中全部消息（Prompt + Info + Defer），写入 Transcript。原 `drain_for_receive` / `drain_for_end` 双排空 API 已移除——RCRA 重构后 Receive 是唯一队列消费点，End 阶段不再单独消费 Defer（见 `peri-agent/src/agent/stages/receive.rs:12-16` 与 `agent/session/inbox.rs:11` 注释，二者仅剩注释提及）。
+- **`has_wake_up()`**（`session.rs:231`）：Receive 消费后队列空且无工具调用时，退出判断前检查队列是否还有可唤醒消息（Prompt 或 Defer）——有则继续循环，无则退出（见 `stages/mod.rs:649`）。Info 永远不会单独唤醒循环——必须被 Prompt 带出。
 
 ### 2.4 持久化
 
-ThreadStore 负责 Transcript 的完整持久化。代码位置：`peri-agent/src/thread/store.rs`。
+ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已下沉 `peri-acp-types/src/store.rs:41`，实现迁至 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`thread/mod.rs` 仅 re-export。
 
 #### ThreadStore trait 核心方法概览
 
@@ -108,7 +108,7 @@ ThreadStore 负责 Transcript 的完整持久化。代码位置：`peri-agent/sr
 
 - **触发时机**：消息追加到 Transcript 后**异步**触发持久化——Transcript 先更新，持久化随后跟进。不阻塞 Agent 循环。
 - **增量持久化**：仅持久化新消息（按 id 对比）。Transcript 中已持久化的消息跳过，只写增量。Compact 重建 Transcript 后，持久化层同步变更——标记变更 UPDATE、新增消息 INSERT。rewind 触发 DELETE。
-- **Compact 标记**：Micro 标记 `truncated`、Full 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT）。注意：Smart Compact 当前未实现（见 §2.6）。
+- **Compact 标记**：Micro 标记 `truncated`、Full 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT）。Smart Compact 为 planner 兼容入口，标记与 Micro 一致（见 §2.6）。
 - **崩溃保护**：Transcript 始终是权威源。恢复时检测 Transcript 与持久化的差异——Transcript 有而持久化无的消息从 Transcript 补写，持久化有而 Transcript 无的消息视为脏数据丢弃。
 
 ### 2.5 Rewind
@@ -127,10 +127,10 @@ Compact 不修改现有 Transcript，而是读取后**重建新 Transcript**。�
 |-------------|---------|-----------|
 | Micro | 保留全部消息，部分标 `truncated: true` | UPDATE 标记字段 |
 | Full | 追加新摘要消息，旧消息标 `excluded: true` | INSERT 摘要 + UPDATE 旧消息标记 |
-| Smart（未实现） | 枚举变体已定义，分支逻辑为 stub——计划：保留 LLM 选中的消息，未选中标 `excluded: true`，追加 system-reminder | UPDATE 标记 + INSERT system-reminder |
+| Smart（已实现为兼容入口） | 经 `plan_micro` 生成计划后应用，未选中消息标 `truncated` + projection directive | UPDATE 标记 + INSERT projection directive |
 
 - Micro 和 Full 两种已实现模式通过标记实现——Micro 标 `truncated`，Full 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
-- Smart Compact 计划追加 system-reminder 告知 LLM 被移除的内容概要，但当前分支逻辑为空（见 `peri-agent/src/agent/compact_v2.rs:57`）
+- Smart Compact 已实现为 planner 兼容入口（`peri-agent/src/agent/compact_v2/smart.rs`）：不再走独立 LLM 筛选分支，而是通过 `plan_micro` 生成计划再应用（`set_flags_projection` 统一持久化 directive），并带 deprecation warning（"will be removed, converging to Micro"）；`compact_v2` 已目录化（原 `compact_v2.rs:57` stub 位置不复存在）
 - Full 追加新 Human 消息（新 id），摘要和旧消息并存于新 Transcript
 
 ### 2.7 与 v2 其他模块的关系

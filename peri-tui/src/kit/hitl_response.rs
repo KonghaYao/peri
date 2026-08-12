@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 
 /// HITL 用户操作——由 HitlPopup 在 Enter/Esc 时通过 HITL_RESPONSE_TX 发送。
 #[derive(Debug, Clone)]
@@ -69,6 +70,8 @@ pub fn spawn_hitl_response_consumer(
 }
 
 /// 处理批准：构造 selected/allow_once response JSON，调用 send_response。
+/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
+/// （§6.8；失败保持 pending，用户可在 block 上重试——双轨 D5）。
 async fn handle_approve(acp_client: &AcpTuiClient, request_id_str: &str) {
     let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
         Ok(id) => id,
@@ -84,10 +87,17 @@ async fn handle_approve(acp_client: &AcpTuiClient, request_id_str: &str) {
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         error!(error = %e, "kit hitl_consumer: send_response (approve) failed");
+        return;
     }
+    crate::kit::acp_events::emit_interaction_resolved(
+        request_id_str,
+        &i18n::tr("render-interaction-result-allowed-once"),
+    );
 }
 
 /// 处理拒绝：构造 cancelled response JSON，调用 send_response。
+/// RPC 成功后发送 `InteractionResolved` 本地事件回写 inline interaction block
+/// （§6.8；失败保持 pending）。
 async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
     let id = match serde_json::from_str::<peri_acp::transport::types::RequestId>(request_id_str) {
         Ok(id) => id,
@@ -103,7 +113,12 @@ async fn handle_reject(acp_client: &AcpTuiClient, request_id_str: &str) {
 
     if let Err(e) = acp_client.send_response(id, Ok(response)).await {
         error!(error = %e, "kit hitl_consumer: send_response (reject) failed");
+        return;
     }
+    crate::kit::acp_events::emit_interaction_resolved(
+        request_id_str,
+        &i18n::tr("render-interaction-result-denied"),
+    );
 }
 
 #[cfg(test)]

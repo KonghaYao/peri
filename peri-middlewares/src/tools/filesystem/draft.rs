@@ -87,9 +87,11 @@ pub(crate) fn draft_hint_en(id: &str, content: &str) -> String {
 }
 
 /// 中文草稿提示后缀(SandboxWrite 工具)。同上,规避关键词。
+/// 格式与英文版对齐:`{id} ({n} 行,{m} 字节)`——id 与统计信息间保留空格,
+/// 便于按空白切分提取 draft_id。
 pub(crate) fn draft_hint_zh(id: &str, content: &str) -> String {
     format!(
-        " 内容草稿已保存: {id}({} 行,{} 字节)。可改用 from_draft={id} 重试。",
+        " 内容草稿已保存: {id} ({} 行,{} 字节)。可改用 from_draft={id} 重试。",
         content.lines().count(),
         content.len()
     )

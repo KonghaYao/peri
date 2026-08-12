@@ -14,8 +14,8 @@ use peri_agent::{
 };
 
 use super::{
-    artifact_tool::ArtifactTool, execute_tool::ExecuteExtraTool, search_tool::SearchExtraTools,
-    tool_index::ToolSearchIndex,
+    artifact_tool::ArtifactTool, declaration::collect_declarations, execute_tool::ExecuteExtraTool,
+    search_tool::SearchExtraTools, tool_index::ToolSearchIndex,
 };
 
 /// ToolSearch 中间件
@@ -63,10 +63,17 @@ impl Middleware for ToolSearchMiddleware {
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 检查 shared_tools 是否有变化（MCP 后续连接等场景）
+        // 一次加锁同时收集 deferred（搜索索引面）与 direct（LLM 可见面，
+        // 声明段数据源，design v2 §2.5.2）两个集合。
         let tools = self.shared_tools.read();
         let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
             .iter()
             .filter(|(_, tool)| !tool.is_direct())
+            .map(|(_, tool)| Arc::clone(tool))
+            .collect();
+        let direct_arcs: Vec<Arc<dyn BaseTool>> = tools
+            .iter()
+            .filter(|(_, tool)| tool.is_direct())
             .map(|(_, tool)| Arc::clone(tool))
             .collect();
         drop(tools);
@@ -99,8 +106,18 @@ impl Middleware for ToolSearchMiddleware {
             }
         }
 
-        // 缓存 prompt 贡献（由 prompt_contribution 同步返回）
-        *self.cached_contribution.write().unwrap() = self.tool_search_index.cached_prompt();
+        // 缓存 prompt 贡献（由 prompt_contribution 同步返回）。
+        // 合并策略（design v2 §2.5.2）：deferred 列表在前、声明段在后，`\n\n` 分隔；
+        // 任一段为空时只保留另一段。声明段不走索引 content_version 失效路径——
+        // 每轮 before_agent 独立重渲染，输出仅依赖工具静态字段。
+        let list = self.tool_search_index.cached_prompt();
+        let declarations = collect_declarations(&direct_arcs);
+        *self.cached_contribution.write().unwrap() = match (list, declarations) {
+            (Some(l), Some(d)) => Some(format!("{l}\n\n{d}")),
+            (Some(l), None) => Some(l),
+            (None, Some(d)) => Some(d),
+            (None, None) => None,
+        };
         Ok(())
     }
 }

@@ -9,14 +9,40 @@ use serde::{Deserialize, Serialize};
 /// 精简版 PeriColors：ratatui-kit Palette 未覆盖的特有语义色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeriColors {
-    // ── Surface 三层（Palette 只有 surface，Peri 有 3 层） ──
+    // ── Surface 五层（Palette 只有 surface，Peri 有 5 层） ──
     pub surface_user: Color,
     pub surface_popup: Color,
     pub surface_cursor: Color,
+    /// 抬升表面（composer、expanded tool body，§4 表）。
+    #[serde(default)]
+    pub surface_raised: Color,
+    /// 下沉表面（code、terminal output，§4 表）。
+    #[serde(default)]
+    pub surface_sunken: Color,
 
     // ── 状态扩展（Palette 只有 success/warning/error） ──
     pub status_running: Color,
     pub status_thinking: Color,
+
+    // ── 消息流角色强调色（§4 表）──
+    #[serde(default)]
+    pub accent_user: Color,
+    #[serde(default)]
+    pub accent_assistant: Color,
+    #[serde(default)]
+    pub accent_reasoning: Color,
+    #[serde(default)]
+    pub accent_tool: Color,
+
+    // ── 文字层级扩展 ──
+    #[serde(default)]
+    pub text_secondary: Color,
+
+    // ── 语法语义色（§4 表）──
+    #[serde(default)]
+    pub syntax_command: Color,
+    #[serde(default)]
+    pub syntax_path: Color,
 
     // ── 特殊语义 ──
     pub border_dim: Color,
@@ -49,8 +75,17 @@ impl Default for PeriColors {
             surface_user: Color::Reset,
             surface_popup: Color::Reset,
             surface_cursor: Color::Reset,
+            surface_raised: Color::Reset,
+            surface_sunken: Color::Reset,
             status_running: Color::Reset,
             status_thinking: Color::Reset,
+            accent_user: Color::Reset,
+            accent_assistant: Color::Reset,
+            accent_reasoning: Color::Reset,
+            accent_tool: Color::Reset,
+            text_secondary: Color::Reset,
+            syntax_command: Color::Reset,
+            syntax_path: Color::Reset,
             border_dim: Color::Reset,
             model_info: Color::Reset,
             bash_border: Color::Reset,

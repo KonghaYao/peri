@@ -1,5 +1,6 @@
 //! Props + 位置 Hook + 滚动条 Hook。
 
+use super::grid::GridSpec;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*; // Hook, ComponentDrawer, State, Props derive
 use ratatui_kit::ratatui::layout::Rect;
@@ -85,5 +86,6 @@ impl Hook for ScrollbarHook {
 
 #[derive(Default, Props)]
 pub struct MessageAreaProps {
-    pub width: usize,
+    /// Transcript 水平网格（§3.1）——由 SessionColumn 按终端宽度计算。
+    pub grid: GridSpec,
 }

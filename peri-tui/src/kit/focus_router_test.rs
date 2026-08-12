@@ -109,6 +109,98 @@ fn test_input_rejects_when_panel_or_popup_active() {
     )));
 }
 
+// ── Slice 2：entry 导航仲裁（message_nav_accepts）────────────────────────
+
+#[test]
+#[serial]
+fn test_message_nav_alt_up_down_always_claimed_in_input_layer() {
+    // Alt+方向键恒归属消息区（移 entry 焦点）——裁决 C3。
+    reset_focus_atoms();
+    assert!(message_nav_accepts(
+        &key(KeyCode::Up, KeyModifiers::ALT),
+        false
+    ));
+    assert!(message_nav_accepts(
+        &key(KeyCode::Down, KeyModifiers::ALT),
+        false
+    ));
+    // 焦点未激活时 Enter/Space 不归属消息区（输入态不抢占）
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Enter, KeyModifiers::NONE),
+        false
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Char(' '), KeyModifiers::NONE),
+        false
+    ));
+    // 非 Alt 方向键与 Ctrl 方向键（滚动）不归属导航
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Up, KeyModifiers::NONE),
+        false
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Up, KeyModifiers::CONTROL),
+        false
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Down, KeyModifiers::CONTROL),
+        false
+    ));
+}
+
+#[test]
+#[serial]
+fn test_message_nav_enter_space_claimed_when_entry_focused() {
+    // entry 焦点激活后 Enter/Space 归属消息区（切 Collapsed/Expanded / Preview）。
+    reset_focus_atoms();
+    assert!(message_nav_accepts(
+        &key(KeyCode::Enter, KeyModifiers::NONE),
+        true
+    ));
+    assert!(message_nav_accepts(
+        &key(KeyCode::Char(' '), KeyModifiers::NONE),
+        true
+    ));
+    // 带修饰符的 Enter/Space 不归属（Alt+Enter 是输入区换行）
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Enter, KeyModifiers::ALT),
+        true
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Enter, KeyModifiers::SHIFT),
+        true
+    ));
+}
+
+#[test]
+#[serial]
+fn test_message_nav_rejected_when_popup_or_panel_active() {
+    // popup / inline-completion / panel 激活时不响应（active_layer 仲裁）。
+    reset_focus_atoms();
+    *POPUP_KIND.state().write() = Some(PopupKind::Rewind);
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Up, KeyModifiers::ALT),
+        true
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Enter, KeyModifiers::NONE),
+        true
+    ));
+    *POPUP_KIND.state().write() = None;
+    *SLASH_HINT_ACTIVE.state().write() = true;
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Up, KeyModifiers::ALT),
+        true
+    ));
+    *SLASH_HINT_ACTIVE.state().write() = false;
+    open_panel(PanelKind::Model);
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Down, KeyModifiers::ALT),
+        true
+    ));
+    close_all_panels();
+}
+
 #[test]
 fn test_cycle_model_macos_alt_m() {
     let key = key(KeyCode::Char('µ'), KeyModifiers::NONE);
@@ -145,5 +237,58 @@ fn test_cycle_provider_macos_alt_shift_m() {
     assert_eq!(
         classify_global_shortcut(&key),
         Some(GlobalShortcut::CycleProvider)
+    );
+}
+
+/// [Slice 4 §6.8] entry 焦点激活时 Tab/←/→ 归属消息区（interaction option
+/// 切换）——Tab 未被全局分类（BackTab 才是 CyclePermissionMode）；焦点未激活
+/// 时不抢占（输入区 Tab 语义不受影响）。
+#[test]
+#[serial]
+fn test_message_nav_tab_arrows_claimed_when_entry_focused() {
+    reset_focus_atoms();
+    assert!(message_nav_accepts(
+        &key(KeyCode::Tab, KeyModifiers::NONE),
+        true
+    ));
+    assert!(message_nav_accepts(
+        &key(KeyCode::Left, KeyModifiers::NONE),
+        true
+    ));
+    assert!(message_nav_accepts(
+        &key(KeyCode::Right, KeyModifiers::NONE),
+        true
+    ));
+    // 焦点未激活 → 不归属（Tab 继续传给输入区）
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Tab, KeyModifiers::NONE),
+        false
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Left, KeyModifiers::NONE),
+        false
+    ));
+    // 带修饰符不归属（Shift+Tab=BackTab 是权限模式循环；Ctrl+方向键是滚动）
+    assert!(!message_nav_accepts(
+        &key(KeyCode::BackTab, KeyModifiers::NONE),
+        true
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Tab, KeyModifiers::SHIFT),
+        true
+    ));
+    assert!(!message_nav_accepts(
+        &key(KeyCode::Left, KeyModifiers::CONTROL),
+        true
+    ));
+}
+
+/// [Slice 4] 全局快捷键分类不吞 Tab（仅 BackTab 归类为权限模式循环）。
+#[test]
+fn test_classify_global_shortcut_tab_not_classified() {
+    assert!(classify_global_shortcut(&key(KeyCode::Tab, KeyModifiers::NONE)).is_none());
+    assert_eq!(
+        classify_global_shortcut(&key(KeyCode::BackTab, KeyModifiers::NONE)),
+        Some(GlobalShortcut::CyclePermissionMode)
     );
 }

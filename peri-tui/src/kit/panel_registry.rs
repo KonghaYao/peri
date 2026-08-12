@@ -27,8 +27,9 @@ use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, betas::BetasPanel, config::ConfigPanel,
     cron::CronPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
-    model::ModelPanel, plugin::PluginPanel, status::StatusPanel, tasks::TasksPanel,
-    theme::ThemePanel, thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
+    model::ModelPanel, plugin::PluginPanel, status::StatusPanel,
+    subagent_detail::SubAgentDetailPanel, tasks::TasksPanel, theme::ThemePanel,
+    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +146,10 @@ fn render_ask_user_panel() -> AnyElement<'static> {
 
 fn render_theme_panel() -> AnyElement<'static> {
     element!(ThemePanel()).into()
+}
+
+fn render_subagent_detail_panel() -> AnyElement<'static> {
+    element!(SubAgentDetailPanel()).into()
 }
 
 /// 所有 14 面板的元数据。
@@ -357,6 +362,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(50, 24),
         render: render_theme_panel,
     },
+    PanelMeta {
+        kind: PanelKind::SubAgentDetail,
+        title: "SubAgent Detail",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Subagent nested transcript detail",
+        priority: 16,
+        mutex_group: MutexGroup::Agent,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(90, 20),
+        render: render_subagent_detail_panel,
+    },
 ];
 
 pub fn slash_command_for_panel(kind: PanelKind) -> &'static str {
@@ -396,6 +413,7 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::Workflow => "panel-title-workflow",
         PanelKind::AskUser => "panel-title-ask-user",
         PanelKind::Theme => "panel-title-theme",
+        PanelKind::SubAgentDetail => "panel-title-subagent-detail",
     };
     format!(" {} ", i18n::tr(key))
 }
@@ -418,6 +436,7 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::Workflow => "panel-desc-workflow",
         PanelKind::AskUser => "panel-desc-ask-user",
         PanelKind::Theme => "panel-desc-theme",
+        PanelKind::SubAgentDetail => "panel-desc-subagent-detail",
     };
     i18n::tr(key)
 }

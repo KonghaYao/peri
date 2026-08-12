@@ -50,7 +50,7 @@ graph TB
 | 04 | `04_actions.md` | 静态 | 操作原则、Git 安全 | — |
 | 05 | `05_using_tools.md` | 静态 | 工具使用策略 | — |
 | 06 | `06_tone_style.md` | 静态 | 语气与风格 | — |
-| 16 | `16_workflow.md` | 静态 | Workflow 编排 | — |
+| 16 | `16_workflow.md` | 静态 | Workflow 编排 | `workflow_enabled` |
 | — | `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` | 边界 | 缓存放行分界 | — |
 | 07 | `07_env.md` | 动态 | 环境变量占位符 | — |
 | 14 | `14_system_reminder.md` | 动态 | System Reminder 协议 | — |
@@ -85,7 +85,7 @@ build_system_prompt(overrides, cwd, features, extra_agent_dirs, frozen_date, lan
 ├─ 5. 按序拼接动态段落
 │     ├─ 07_env（始终包含）
 │     ├─ 14_system_reminder（始终包含）
-│     └─ feature-gated：10/11/13/15（按 PromptFeatures 开关）
+│     └─ feature-gated：10/11/13/15/16（按 PromptFeatures 开关，16 由 workflow_enabled 门控）
 │
 ├─ 6. 注入 Language 指示（动态区域尾部）
 │
@@ -96,10 +96,10 @@ build_system_prompt(overrides, cwd, features, extra_agent_dirs, frozen_date, lan
 
 frozen_system_prompt 构建完成。
 
-> **步骤 8 不属于 `build_system_prompt()` 内部流程**，而是 `build_agent()` 中的独立步骤，
+> **步骤 8 不属于 `build_system_prompt()` 内部流程**，而是 stage 装配阶段（原 `build_agent()`，L5 迁入 peri-agent）中的独立步骤，
 > 发生在 `build_system_prompt()` 返回之后：
 
-├─ 8. 追加中间件切面贡献（build_agent() 中执行）
+├─ 8. 追加中间件切面贡献（`stage_builder.rs:410` 的 `chain.collect_prompt_contributions()`）
 │     └─ 遍历链中所有切面的 prompt_contribution 声明
 │        拼接后合并：format!("{system_prompt}\n\n{contributions}")
 │        如：CLAUDE.md 摘要、Skills 摘要、Git Co-Authored-By 行等
@@ -109,18 +109,20 @@ frozen_system_prompt 构建完成。
 
 ### 2.3 PromptFeatures
 
-控制 feature-gated 段落的注入，4 个布尔开关：
+控制 feature-gated 段落的注入，5 个布尔开关（`peri-acp/src/prompt/mod.rs:34-35`）：
 
 ```rust
 pub struct PromptFeatures {
-    pub hitl_enabled: bool,      // YOLO_MODE="false" 时启用（非 YOLO 模式）
+    pub hitl_enabled: bool,      // permission_mode != PermissionMode::Bypass 时启用（YOLO_MODE 已全库移除）
     pub subagent_enabled: bool,  // 始终 true
     pub skills_enabled: bool,    // 始终 true
-    pub channel_enabled: bool,   // 始终 true
+    pub channel_enabled: bool,   // 始终 false（ChannelOwner 未装配，P3-2026-08-02）
+    pub workflow_enabled: bool,  // workflow_executor.is_some()（print mode 等无 executor 场景关闭）
 }
 ```
 
-- `detect()`：检查环境变量 `YOLO_MODE`，当 `YOLO_MODE="false"` 时 `hitl_enabled=true`（即非 YOLO 模式时启用 HITL）
+- `detect(permission_mode, workflow_enabled)`（`prompt/mod.rs:42`）：根据权限模式与 workflow executor 可用性推断——`hitl_enabled = permission_mode != PermissionMode::Bypass`；`workflow_enabled` 必须来自运行时注册条件（`workflow_executor.is_some()`），与 builder 条件注册、ToolSearch 索引共用同一事实源
+- `detect_without_workflow(permission_mode)`（`prompt/mod.rs:60`）：子 agent / fork / workflow agent 的 capability snapshot——Workflow 恒不宣称可用（这些链不注册 WorkflowTool）
 - `none()`：测试用，全部关闭
 - 关闭的段落完全不出现在 System Prompt 中，节省上下文
 

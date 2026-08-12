@@ -6,7 +6,7 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 
 # CLAUDE.md — Perihelion
 
-终端 AI 编程助手；主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`。执行阶段与退出语义见 `peri-agent/CLAUDE.md`。
+终端 AI 编程助手, 人文交流、撰写文档以研究员风格为主，务实谨慎，不可过度营销；主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`。执行阶段与退出语义见 `peri-agent/CLAUDE.md`。
 
 ## 先读什么
 

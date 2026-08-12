@@ -185,6 +185,7 @@ pub(crate) fn build_stage_context(
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),
         lsp_servers: ctx.lsp_servers.clone(),
+        lsp_pool: ctx.lsp_pool.clone(),
         workflow_executor: ctx.workflow_executor.clone(),
         workflow_middleware: ctx.workflow_middleware.clone(),
         thread_store: ctx.thread_store.clone(),

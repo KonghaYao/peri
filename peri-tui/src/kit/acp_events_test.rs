@@ -1,8 +1,12 @@
 //! Tests for acp_events
 
 use super::*;
+use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::message_area::TodoStatus;
-use crate::kit::tui_render_unit::{TuiTodoChangeKind, TuiToolPresentation};
+use crate::kit::tui_render_unit::{
+    InteractionKind, TuiAskUserBlock, TuiTodoChangeKind, TuiToolPresentation,
+};
+use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
 use serde_json::json;
 use serial_test::serial;
 use tokio::sync::mpsc;
@@ -59,6 +63,97 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
         }
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }
+}
+
+/// [§6.7] `stop_subagent` 冻结子 turn 的 trailing 流式段（review MED-3 回归）：
+/// 子 bubble 的 `started_at` 清除、`duration_ms` 冻结——子 turn 不经过快照折叠
+/// pass，不冻结则 trailing bubble 保持 Running 形态（elapsed 持续增长），详情
+/// 面板对已完成 subagent 渲染永久的 `◐ Thinking… Ns`。
+#[test]
+#[serial]
+fn test_subagent_stopped_freezes_child_trailing_bubble() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "agent-1".into(),
+            agent_name: "researcher".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "child text".into(),
+            message_id: Some("c1".into()),
+            agent_id: Some("agent-1".into()),
+        }),
+    );
+
+    // 流式期间：子 turn trailing bubble 持有 started_at（Running 形态）。
+    let running_snap = VIEW_MODELS.state().read().clone();
+    let b = match &running_snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => match &g.view_models[0] {
+            TuiRenderUnit::TuiAssistantBubble(b) => b,
+            other => panic!("expected child TuiAssistantBubble, got {other:?}"),
+        },
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    };
+    assert!(
+        b.started_at.is_some(),
+        "子 turn 流式段应持有 started_at（Running 形态）"
+    );
+    assert_eq!(b.duration_ms, None, "流式期间无冻结值");
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "agent-1".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+
+    // stop 后：started_at 清除 + duration_ms 冻结（详情面板不再显示增长中的
+    // `◐ Thinking… Ns`）。
+    let snap = VIEW_MODELS.state().read().clone();
+    let b = match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => match &g.view_models[0] {
+            TuiRenderUnit::TuiAssistantBubble(b) => b,
+            other => panic!("expected child TuiAssistantBubble, got {other:?}"),
+        },
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    };
+    assert_eq!(
+        b.started_at, None,
+        "stop_subagent 后子 trailing 段 started_at 清除"
+    );
+    assert!(
+        b.duration_ms.is_some(),
+        "stop_subagent 后子 trailing 段 duration_ms 冻结"
+    );
 }
 
 /// C1 回归测试：drain_input_buffer 清空 INPUT_BUFFER 队列。
@@ -124,6 +219,71 @@ fn test_drain_input_buffer_no_submit_tx_safe() {
     drain_input_buffer();
     // SUBMIT_TX 已被前面测试 set 过，所以 drain 成功 → buffer 被清空
     // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
+}
+
+/// Slice 3 D4：drain 时**每条**排队文本先 `send_local_user_bubble`（本地气泡恰
+/// 出现一次，镜像非 loading 路径）再提交 AgentText——不依赖服务端回显。
+/// LOCAL_EVENT_TX 与 SUBMIT_TX 同为全局 OnceLock：本测试安装成功时（serial
+/// 首个）可观察两通道，验证 FIFO 顺序与气泡唯一性；已被占用时只断言
+/// buffer 清空（核心效应）。
+#[test]
+#[serial]
+fn test_drain_input_buffer_sends_local_user_bubble_once() {
+    crate::kit::atoms::init_atoms();
+    INPUT_BUFFER.state().write().clear();
+    // 安装可观察 channel；OnceLock 已占用则返回 None（跳过通道级断言）。
+    let (tx, rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let local_rx = match LOCAL_EVENT_TX.set(tx) {
+        Ok(()) => Some(rx),
+        Err(_) => None,
+    };
+    let mut submit_rx = ensure_submit_tx_observable();
+
+    // 入队两条
+    {
+        let state = INPUT_BUFFER.state();
+        let mut buf = state.write();
+        buf.push_back("first".into());
+        buf.push_back("second".into());
+    }
+
+    drain_input_buffer();
+
+    assert!(
+        INPUT_BUFFER.state().read().is_empty(),
+        "buffer should be empty after drain"
+    );
+    if let Some(mut rx) = local_rx {
+        // 恰一条 LocalUserBubble（FIFO 首条）
+        match rx.try_recv() {
+            Ok(ev) => match ev.event {
+                AcpEventData::LocalUserBubble { text } => {
+                    assert_eq!(text, "first", "drain 应先发首条排队项的气泡")
+                }
+                other => panic!("drain 应发 LocalUserBubble, got {other:?}"),
+            },
+            Err(e) => panic!("drain 应发出本地气泡, got {e:?}"),
+        }
+        // 第二条排队项的气泡
+        match rx.try_recv() {
+            Ok(ev) => match ev.event {
+                AcpEventData::LocalUserBubble { text } => assert_eq!(text, "second"),
+                other => panic!("drain 应发 LocalUserBubble, got {other:?}"),
+            },
+            Err(e) => panic!("drain 应发出第二条气泡, got {e:?}"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "drain 不应发出第三条事件（气泡恰一次）"
+        );
+    }
+    if let Some(mut rx) = submit_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "first"),
+            Ok(other) => panic!("drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("drain 应提交排队输入, got {e:?}"),
+        }
+    }
 }
 
 /// 确保全局 SUBMIT_TX 已初始化，并尽可能安装可观察的 receiver。
@@ -462,7 +622,8 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     );
 }
 
-/// 非 stale 的零产出回滚保持原行为：删气泡 + 恢复文本 + 清排队输入。
+/// 非 stale 的零产出回滚：删气泡 + 恢复文本；排队项（Slice 3 D4）不吞——
+/// 取消后立即 drain 提交（用户已提交的请求，composer 上方队列可见）。
 #[test]
 #[serial]
 fn test_turn_interrupted_zero_output_rollback_still_works() {
@@ -472,6 +633,9 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
+    // 确保 SUBMIT_TX 已初始化（drain 依赖）；若本次成功安装可观察 channel，
+    // 则顺带验证排队项确实被提交。
+    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -527,19 +691,28 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     );
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
-        "零产出回滚应清空排队输入"
+        "排队项应被 drain（取消不吞排队输入——Slice 3 D4）"
     );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("取消后 drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("取消后 drain 应发出排队输入, got {e:?}"),
+        }
+    }
     assert_eq!(state.phase, SessionPhase::Idle);
 }
 
-/// 次要项 (a)：TurnInterrupted 归档分支（current_turn 非空）同步清空
-/// INPUT_BUFFER——防止排队输入在下一 TurnDone 被 drain_input_buffer 意外提交。
+/// 次要项 (a)：TurnInterrupted 归档分支（current_turn 非空）drain 排队项——
+/// 排队输入是用户已提交的请求（Slice 3 D4），取消后立即提交而非丢弃
+/// （也不得滞留到下一 TurnDone 意外提交——drain 即时清空 buffer）。
 #[test]
 #[serial]
-fn test_turn_interrupted_archive_branch_clears_input_buffer() {
+fn test_turn_interrupted_archive_branch_drains_input_buffer() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     INPUT_BUFFER.state().write().clear();
+    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -595,8 +768,15 @@ fn test_turn_interrupted_archive_branch_clears_input_buffer() {
     );
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
-        "归档分支也应清空排队输入（取消后不得在下一 TurnDone 意外提交）"
+        "归档分支应 drain 排队项（取消不吞排队输入——Slice 3 D4）"
     );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("归档分支 drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("归档分支 drain 应发出排队输入, got {e:?}"),
+        }
+    }
     assert_eq!(state.phase, SessionPhase::Idle);
 }
 
@@ -955,7 +1135,8 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
 }
 
 /// Issue 2026-08-05 返工：正常取消（无新提交）时 request_id 精确配对
-/// （A1 == A1）→ 非 stale → 零产出回滚保持原行为。
+/// （A1 == A1）→ 非 stale → 零产出回滚保持原行为；排队项（Slice 3 D4）
+/// 不吞——取消后立即 drain 提交。
 #[test]
 #[serial]
 fn test_turn_interrupted_current_request_id_rollback() {
@@ -965,6 +1146,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
     if let Some(mu) = crate::kit::atoms::INPUT_RESTORE_TEXT.get() {
         mu.lock().take();
     }
+    let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
         variant: 0,
@@ -1007,7 +1189,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
         },
     );
 
-    // 非 stale → 正常零产出回滚：删 A 气泡 + 恢复文本 + 清排队输入
+    // 非 stale → 正常零产出回滚：删 A 气泡 + 恢复文本 + drain 排队项
     assert!(
         state.committed.is_empty(),
         "零产出回滚应删除本 turn 的用户气泡"
@@ -1022,8 +1204,15 @@ fn test_turn_interrupted_current_request_id_rollback() {
     );
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
-        "零产出回滚应清空排队输入"
+        "排队项应被 drain（取消不吞排队输入——Slice 3 D4）"
     );
+    if let Some(mut rx) = drain_rx.take() {
+        match rx.try_recv() {
+            Ok(SubmitRequest::AgentText(t)) => assert_eq!(t, "queued"),
+            Ok(other) => panic!("回滚后 drain 应提交 AgentText, got {other:?}"),
+            Err(e) => panic!("回滚后 drain 应发出排队输入, got {e:?}"),
+        }
+    }
     assert_eq!(state.phase, SessionPhase::Idle);
 }
 
@@ -1691,25 +1880,29 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     let snapshot = VIEW_MODELS.state().read().clone();
     assert_eq!(snapshot.items.len(), 4);
 
-    // Turn 1 reasoning 应折叠（collapsed = true）——中间块
-    match &snapshot.items[1] {
-        TuiRenderUnit::TuiAssistantBubble(d) => {
-            let r = d.reasoning.as_ref().unwrap();
-            assert!(r.collapsed, "Turn 1 reasoning 应折叠（collapsed=true）");
+    // [Slice 2] 折叠语义重定义：TurnDone 后 phase 离开 PromptRunning →
+    // 全部 reasoning 状态 Completed → spec §7 表折叠为单行（Collapsed）。
+    // 旧语义"仅最后一个 reasoning 展开"已由状态机取代。
+    for (idx, label) in [(1usize, "Turn 1"), (3usize, "Turn 2")] {
+        match &snapshot.items[idx] {
+            TuiRenderUnit::TuiAssistantBubble(d) => {
+                let r = d.reasoning.as_ref().unwrap();
+                assert_eq!(
+                    r.status,
+                    crate::kit::tui_render_unit::EntryStatus::Completed,
+                    "{label} reasoning 应已完成（Completed）"
+                );
+                assert!(
+                    !r.is_running,
+                    "{label} reasoning 不应再流式（is_running=false）"
+                );
+                assert!(
+                    r.collapsed(),
+                    "{label} reasoning 应折叠（fold=Collapsed，spec §7 completed 行）"
+                );
+            }
+            other => panic!("expected TuiAssistantBubble at snapshot[{idx}], got {other:?}"),
         }
-        other => panic!("expected TuiAssistantBubble at snapshot[1], got {other:?}"),
-    }
-
-    // Turn 2 reasoning 应展开（collapsed = false）——最后一个
-    match &snapshot.items[3] {
-        TuiRenderUnit::TuiAssistantBubble(d) => {
-            let r = d.reasoning.as_ref().unwrap();
-            assert!(
-                !r.collapsed,
-                "Turn 2 reasoning 应展开（collapsed=false）——最后一个"
-            );
-        }
-        other => panic!("expected TuiAssistantBubble at snapshot[3], got {other:?}"),
     }
 }
 
@@ -1944,6 +2137,8 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -1997,6 +2192,8 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-2".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2059,6 +2256,8 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sync-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2626,4 +2825,1767 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
         !ACP_STATE.state().read().is_loading,
         "取消后 loading 不得闪回"
     );
+}
+
+// ── Slice 2：折叠状态机（spec §7 表）经 push_view_models 单点 pass ──────────
+
+use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, TuiToolStarted};
+use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningBlock};
+
+fn make_fold_test_state() -> BridgeState {
+    crate::kit::atoms::init_atoms();
+    *FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+    BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    }
+}
+
+fn reasoning_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiReasoningBlock {
+    match &snapshot.items[idx] {
+        TuiRenderUnit::TuiAssistantBubble(b) => b.reasoning.as_ref().expect("应含 reasoning"),
+        other => panic!("expected TuiAssistantBubble at [{idx}], got {other:?}"),
+    }
+}
+
+fn tool_card_of(
+    snapshot: &ViewModelsSnapshot,
+    idx: usize,
+) -> &crate::kit::tui_render_unit::TuiToolCard {
+    match &snapshot.items[idx] {
+        TuiRenderUnit::TuiToolCard(t) => t,
+        other => panic!("expected TuiToolCard at [{idx}], got {other:?}"),
+    }
+}
+
+/// [回归测试] 工具运行中取消 turn 后，归档卡片必须停止 loading 动画。
+///
+/// `TurnInterrupted` 不会再收到对应的 `ToolEnded`；归档路径必须根据 turn 已停止
+/// 的事实把在途工具渲染为非 running，否则最后一张工具卡会永久显示 spinner。
+#[test]
+#[serial]
+fn test_turn_interrupted_stops_running_tool_card_animation() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Bash".into(),
+            input_summary: "sleep 10".into(),
+            raw_input: serde_json::json!({"command": "sleep 10"}),
+            agent_id: None,
+        }),
+    );
+    let running = VIEW_MODELS.state().read().clone();
+    assert!(tool_card_of(&running, 0).is_running);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("r1".into()),
+        },
+    );
+
+    let interrupted = VIEW_MODELS.state().read().clone();
+    let tool = tool_card_of(&interrupted, 0);
+    assert!(!tool.is_running, "取消后工具卡不得继续显示 running");
+    assert!(
+        !interrupted.items[0].is_animating(),
+        "取消后工具卡不得继续驱动 spinner 动画"
+    );
+}
+
+/// §7 reasoning 行：流式（PromptRunning + trailing）→ Preview/Running；
+/// TurnDone 后 phase 离开 PromptRunning → 全 Completed → Collapsed 单行。
+#[test]
+#[serial]
+fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "正在检查消息类型……".into(),
+            message_id: Some("msg_r1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.status,
+        EntryStatus::Running,
+        "流式中 reasoning 应为 Running"
+    );
+    assert!(r.is_running);
+    assert_eq!(r.fold, FoldState::Preview, "§7 running 行 → Preview");
+    assert!(
+        !r.collapsed(),
+        "Preview 经 collapsed() 访问器视为展开（body 可见）"
+    );
+
+    // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
+    // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "回复内容".into(),
+            message_id: Some("msg_r1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.status,
+        EntryStatus::Completed,
+        "文本到达后推理应冻结为 Completed"
+    );
+    assert!(!r.is_running, "文本到达后推理不再 running");
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "推理结束后自动收束为单行 Collapsed"
+    );
+    assert!(
+        r.duration_ms.is_some(),
+        "推理冻结时应携带时长（Thought for Ns）"
+    );
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.status,
+        EntryStatus::Completed,
+        "TurnDone 后 reasoning 应为 Completed"
+    );
+    assert!(!r.is_running);
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "§7 completed 行 → Collapsed（自动收束为单行）"
+    );
+    assert!(r.collapsed());
+}
+
+/// §7 tool 行：running → Preview；success → Collapsed；error → Expanded summary。
+#[test]
+#[serial]
+fn test_fold_pass_tool_preview_collapsed_error_expanded() {
+    let mut state = make_fold_test_state();
+
+    // running：ToolStarted
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Read".into(),
+            input_summary: "README.md".into(),
+            raw_input: serde_json::json!({"path": "README.md"}),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(tool_card_of(&snap, 0).fold, FoldState::Preview);
+    assert!(!tool_card_of(&snap, 0).user_modified);
+
+    // success：ToolEnded（is_error=false）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t1".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let t = tool_card_of(&snap, 0);
+    assert_eq!(
+        t.fold,
+        FoldState::Collapsed,
+        "§7 tool completed → Collapsed"
+    );
+    assert!(!t.is_running);
+
+    // error：新工具失败
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t2".into(),
+            tool_name: "Bash".into(),
+            input_summary: "false".into(),
+            raw_input: serde_json::json!({"command": "false"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t2".into(),
+            output_summary: "exit 1".into(),
+            is_error: true,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let t = tool_card_of(&snap, 1);
+    assert_eq!(
+        t.fold,
+        FoldState::Expanded,
+        "§7 tool error → Expanded summary（永不自动隐藏）"
+    );
+}
+
+/// §7 subagent 行：running 与 completed 均为 Collapsed（running 靠 live summary 表达）。
+#[test]
+#[serial]
+fn test_fold_pass_subagent_running_and_completed_collapsed() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(g.is_running);
+            assert_eq!(
+                g.fold,
+                FoldState::Collapsed,
+                "§7 subagent running → Collapsed + live summary"
+            );
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running);
+            assert_eq!(g.fold, FoldState::Collapsed);
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// SubagentStopped(is_error=true) → parent 终态 Error：is_running=false、
+/// is_error=true、error_reason 保存 stop result；§7 表 (SubAgent, Error)
+/// => Expanded（与 tool error 展开语义一致）。
+#[test]
+#[serial]
+fn test_fold_pass_subagent_error_expanded() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "loop failed: llm error".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(g.is_error, "canonical is_error=true");
+            assert_eq!(
+                g.error_reason.as_deref(),
+                Some("loop failed: llm error"),
+                "error_reason 保存 stop result"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// whitespace-only `result` 不产生空白原因行：is_error=true 保持 parent Error
+/// （× + §7 Expanded），但 `error_reason=None`——渲染层不输出空白原因行。
+#[test]
+#[serial]
+fn test_subagent_error_whitespace_result_no_reason_line() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "   ".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(
+                g.is_error,
+                "whitespace-only result 不改变 canonical parent Error"
+            );
+            assert_eq!(
+                g.error_reason, None,
+                "whitespace-only result 视同无原因（渲染层不输出空白原因行）"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// 核心 bug 回归：nested child tool error 不提升 parent block error。
+/// 子工具失败 → parent 后续完成（SubagentStopped is_error=false）→
+/// group is_error=false + fold Collapsed；child tool card 保持自身 error。
+#[test]
+#[serial]
+fn test_subagent_completed_with_failed_child_tool_not_error() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    // 子工具启动（agent_id 路由到子 turn）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Grep".into(),
+            input_summary: "src".into(),
+            raw_input: serde_json::json!({"pattern": "x"}),
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // 子工具失败
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t1".into(),
+            output_summary: "Error: something went wrong".into(),
+            is_error: true,
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // parent 完成（is_error=false——subagent 整体成功，失败工具重试后继续）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running);
+            assert!(
+                !g.is_error,
+                "completed parent 不得因 child tool error 变 Error"
+            );
+            assert_eq!(g.error_reason, None, "completed parent 无 error_reason");
+            assert_eq!(g.fold, FoldState::Collapsed, "§7 completed → Collapsed");
+            // child tool card 保持自身 error 展示（局部可见，不提升 parent）
+            match &g.view_models[0] {
+                TuiRenderUnit::TuiToolCard(t) => {
+                    assert!(t.is_error, "child tool error 保持局部可见");
+                }
+                other => panic!("expected child TuiToolCard, got {other:?}"),
+            }
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// 手动覆盖免疫：reasoning 完成折叠后用户展开（FOLD_OVERRIDES），
+/// 后续 push（新 turn 开始）不得重新折叠（spec §7「本 turn 内不再被自动策略覆盖」）。
+#[test]
+#[serial]
+fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "第一轮思考".into(),
+            message_id: Some("msg_r1".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "第一轮回复".into(),
+            message_id: Some("msg_r1".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert!(reasoning_of(&snap, 0).collapsed());
+
+    // 用户手动展开（键盘 handler 的持久化等价操作）
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Reasoning("msg_r1".into()), FoldState::Expanded);
+
+    // 新一轮开始——push 重建后手动展开必须保持
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "第二个问题".into(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    // items = [Assistant(msg_r1), UserBubble]——LocalUserBubble append 到 committed 尾部
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.fold,
+        FoldState::Expanded,
+        "手动展开后跨 turn 不得被自动折叠"
+    );
+}
+
+/// 手动覆盖免疫：running reasoning 被用户展开后，流式继续不得强制收回 Preview。
+#[test]
+#[serial]
+fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "思考中".into(),
+            message_id: Some("msg_r2".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(reasoning_of(&snap, 0).fold, FoldState::Preview);
+
+    // 用户手动展开（流式中）
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Reasoning("msg_r2".into()), FoldState::Expanded);
+
+    // 继续 streaming——不得收回 Preview
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "继续思考".into(),
+            message_id: Some("msg_r2".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        reasoning_of(&snap, 0).fold,
+        FoldState::Expanded,
+        "手动展开在流式期间免疫自动策略"
+    );
+}
+
+/// tool 覆盖：手动展开已完成工具后，重建（output 更新）仍保持 + user_modified 恢复。
+#[test]
+#[serial]
+fn test_fold_pass_tool_manual_override_restores_user_modified() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Read".into(),
+            input_summary: "a".into(),
+            raw_input: serde_json::json!({"path": "a"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t1".into(),
+            output_summary: "done".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(tool_card_of(&snap, 0).fold, FoldState::Collapsed);
+
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Tool("t1".into()), FoldState::Expanded);
+
+    // 新一轮 push（LocalUserBubble 触发 view_models 重建）——
+    // 卡片重建后覆盖与 user_modified 恢复
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "第二个问题".into(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    // items = [UserBubble, ToolCard]——工具卡在 current_turn，LocalUserBubble append 到 committed
+    let t = tool_card_of(&snap, 1);
+    assert_eq!(t.fold, FoldState::Expanded, "手动展开跨重建保持");
+    assert!(
+        t.user_modified,
+        "覆盖存在的 entry 恢复 user_modified=true（免疫自动策略）"
+    );
+}
+
+/// session 复位（BRIDGE_RESET_COUNTER → push_view_models_for_reset）清空覆盖表。
+#[test]
+#[serial]
+fn test_push_view_models_for_reset_clears_fold_overrides() {
+    make_fold_test_state();
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Tool("t1".into()), FoldState::Expanded);
+    assert!(!FOLD_OVERRIDES.state().read().is_empty());
+    // [S2 §3.4] 焦点单一事实源随 session 复位同步清空（slot/key 依赖旧会话
+    // 索引与身份，残留会让新会话焦点/免疫错误指向）。
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = Some(crate::kit::atoms::FocusedEntry {
+        slot: 0,
+        key: Some(FoldKey::Tool("t1".into())),
+    });
+    assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_some());
+
+    push_view_models_for_reset();
+
+    assert!(
+        FOLD_OVERRIDES.state().read().is_empty(),
+        "session 复位必须清空覆盖表（跨 session 身份不唯一）"
+    );
+    assert!(
+        crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none(),
+        "session 复位必须清空 entry 焦点"
+    );
+    assert!(VIEW_MODELS.state().read().items.is_empty());
+}
+
+// ── Slice 3：快照后处理流水线（turn divider / todo 摘要 / 工具分组）─────────
+
+/// §6.6 turn 边界 divider：上一 turn 结束后，新 turn 的 prompt 位于 committed
+/// 末尾——divider 插在 prompt 之前（committed|current_turn 边界本身是
+/// prompt↔回复 的同一 turn 内部，不能用）。
+#[test]
+#[serial]
+fn test_snapshot_turn_divider_before_new_user_prompt() {
+    let mut state = make_fold_test_state();
+
+    // Turn 1：user + answer → TurnDone（committed = [user1, answer1]）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q1".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a1".into(),
+            message_id: Some("m1".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+    // Turn 2 流式期间：committed = [user1, answer1, user2]
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q2".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a2".into(),
+            message_id: Some("m2".into()),
+            agent_id: None,
+        }),
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    // [user1, answer1, divider, user2, a2]
+    assert_eq!(snap.items.len(), 5);
+    match &snap.items[2] {
+        TuiRenderUnit::TuiDivider(d) => assert_eq!(d.label, None),
+        other => panic!("expected TuiDivider at [2], got {other:?}"),
+    }
+    assert!(
+        matches!(&snap.items[3], TuiRenderUnit::TuiUserBubble(_)),
+        "divider 应在新 prompt 之前"
+    );
+
+    // TurnDone 后 current_turn 清空 → divider 消失（仅流式期间存在）
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 4, "turn 完成后无 divider");
+}
+
+/// 首轮（committed 仅 1 个 prompt）不插 divider；同一 turn 内 prompt↔回复
+/// 之间不插 divider。
+#[test]
+#[serial]
+fn test_snapshot_no_divider_for_first_turn_or_inside_turn() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q1".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a1".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    // [user1, a1]——首轮无 divider
+    assert_eq!(snap.items.len(), 2);
+    assert!(
+        snap.items
+            .iter()
+            .all(|vm| !matches!(vm, TuiRenderUnit::TuiDivider(_))),
+        "首轮 prompt↔回复 之间不得有 divider"
+    );
+}
+
+/// §6.9 todo 摘要：活动 turn（PromptRunning）且 TODO_ITEMS 非空时，
+/// 摘要行插在 trailing 最终回答之前；回答后无 todo。
+#[test]
+#[serial]
+fn test_snapshot_todo_summary_before_final_answer() {
+    let mut state = make_fold_test_state();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = vec![
+        crate::kit::message_area::TodoItem {
+            status: crate::kit::message_area::TodoStatus::InProgress,
+            content: "Running tests".into(),
+        },
+        crate::kit::message_area::TodoItem {
+            status: crate::kit::message_area::TodoStatus::Completed,
+            content: "Setup".into(),
+        },
+    ];
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "final answer".into(),
+            message_id: Some("m1".into()),
+            agent_id: None,
+        }),
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    // [todo_summary, answer]——摘要位于最终回答之前
+    assert_eq!(snap.items.len(), 2);
+    match &snap.items[0] {
+        TuiRenderUnit::TuiTodoSummary(s) => {
+            assert!(
+                s.text.contains("1/2") && s.text.contains("Running tests"),
+                "摘要格式 `1/2 tasks · Running tests`，实际 {:?}",
+                s.text
+            );
+        }
+        other => panic!("expected TuiTodoSummary at [0], got {other:?}"),
+    }
+    assert!(
+        matches!(&snap.items[1], TuiRenderUnit::TuiAssistantBubble(_)),
+        "最终回答在摘要之后"
+    );
+
+    // TurnDone 后（current_turn 清空）→ 无 todo 摘要
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert!(
+        snap.items
+            .iter()
+            .all(|vm| !matches!(vm, TuiRenderUnit::TuiTodoSummary(_))),
+        "回答后无 todo 摘要"
+    );
+}
+
+/// §7 工具分组：相邻成功 Generic 工具压成 TuiCollapsedGroup（标题含隐藏数）；
+/// running/error/diff-edit 不合并；不跨越 assistant 正文。
+#[test]
+#[serial]
+fn test_snapshot_group_successful_tools() {
+    let mut state = make_fold_test_state();
+
+    let start_read = |st: &mut BridgeState, id: &str, path: &str| {
+        dispatch_and_notify(
+            st,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: id.into(),
+                tool_name: "Read".into(),
+                input_summary: path.into(),
+                raw_input: serde_json::json!({"path": path}),
+                agent_id: None,
+            }),
+        );
+    };
+    let end_tool = |st: &mut BridgeState, id: &str, is_error: bool| {
+        dispatch_and_notify(
+            st,
+            &AcpEventData::ToolEnded(TuiToolEnded {
+                tool_id: id.into(),
+                output_summary: "ok".into(),
+                is_error,
+                agent_id: None,
+            }),
+        );
+    };
+
+    // 相邻成功：Read t1, Read t2 → 分组
+    start_read(&mut state, "t1", "a.rs");
+    end_tool(&mut state, "t1", false);
+    start_read(&mut state, "t2", "b.rs");
+    end_tool(&mut state, "t2", false);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 1, "两个相邻成功工具 → 1 个分组");
+    match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            assert_eq!(g.count, 2);
+            assert!(
+                g.title.contains("Read 2"),
+                "标题含隐藏数，实际 {:?}",
+                g.title
+            );
+            assert_eq!(g.view_models.len(), 2, "隐藏 VM 保留在组内");
+        }
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    }
+
+    // running 工具不合并（新工具开始 → 分组与 running 分离）
+    start_read(&mut state, "t3", "c.rs");
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 2, "running 工具不得并入分组");
+    assert!(matches!(
+        &snap.items[0],
+        TuiRenderUnit::TuiCollapsedGroup(_)
+    ));
+    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.is_running));
+
+    // error 工具不合并——组后**连续相邻** error 计入 failed_count（D2）
+    end_tool(&mut state, "t3", true);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 2, "error 工具不得并入分组");
+    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.is_error));
+    match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            assert_eq!(
+                g.failed_count, 1,
+                "紧邻 error 工具计入失败数（error 仍独立展开，不入组）"
+            );
+            // [G1] failed_count 纳入 hash——变化必须触发分片缓存重建
+            assert_ne!(
+                g.content_hash, 0,
+                "组 hash 由 recompute_hash 计算（含 failed_count）"
+            );
+        }
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    }
+
+    // 正文打断相邻性：Read + text + Read → 不跨正文分组
+    let mut state2 = make_fold_test_state();
+    let start2 = |st: &mut BridgeState, id: &str| {
+        dispatch_and_notify(
+            st,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: id.into(),
+                tool_name: "Read".into(),
+                input_summary: "x".into(),
+                raw_input: serde_json::json!({"path": "x"}),
+                agent_id: None,
+            }),
+        );
+    };
+    start2(&mut state2, "s1");
+    dispatch_and_notify(
+        &mut state2,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "s1".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state2,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "中间正文".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    start2(&mut state2, "s2");
+    dispatch_and_notify(
+        &mut state2,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "s2".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 3, "正文打断 → 不跨正文分组");
+    assert!(matches!(&snap.items[0], TuiRenderUnit::TuiToolCard(_)));
+    assert!(matches!(
+        &snap.items[1],
+        TuiRenderUnit::TuiAssistantBubble(_)
+    ));
+    assert!(matches!(&snap.items[2], TuiRenderUnit::TuiToolCard(_)));
+}
+
+/// Skill/Todo 语义卡不分组（低信息密度才分组，语义卡保留）。
+#[test]
+#[serial]
+fn test_snapshot_group_excludes_semantic_cards() {
+    let mut state = make_fold_test_state();
+    for (i, name) in ["Skill", "TodoWrite"].iter().enumerate() {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: format!("k{i}"),
+                tool_name: name.to_string(),
+                input_summary: "x".into(),
+                raw_input: serde_json::json!({"skill": "s", "todos": []}),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(TuiToolEnded {
+                tool_id: format!("k{i}"),
+                output_summary: "ok".into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+    }
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(snap.items.len(), 2, "语义卡不参与分组");
+    assert!(
+        snap.items
+            .iter()
+            .all(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
+    );
+}
+
+/// [§7 免疫] 焦点所在工具（`FOCUSED_ENTRY` 的 key）完成也不得并入折叠组。
+///
+/// 回归（review MED-2/F1）：用户 Alt+Down 聚焦运行中的工具，其完成后若被并入
+/// 组——焦点 index 落到组上、展开态丢失（组不可展开且每帧重建）。当前
+/// selected entry 按身份键免疫；焦点移走（Esc/导航）后恢复自动合并。
+#[test]
+#[serial]
+fn test_snapshot_group_excludes_focused_tool() {
+    use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry};
+    let mut state = make_fold_test_state();
+    *FOCUSED_ENTRY.state().write() = None;
+    let start_read = |st: &mut BridgeState, id: &str, path: &str| {
+        dispatch_and_notify(
+            st,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: id.into(),
+                tool_name: "Read".into(),
+                input_summary: path.into(),
+                raw_input: serde_json::json!({"path": path}),
+                agent_id: None,
+            }),
+        );
+    };
+    let end_tool = |st: &mut BridgeState, id: &str| {
+        dispatch_and_notify(
+            st,
+            &AcpEventData::ToolEnded(TuiToolEnded {
+                tool_id: id.into(),
+                output_summary: "ok".into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+    };
+
+    start_read(&mut state, "t1", "a.rs");
+    // 用户 Alt+Down 聚焦运行中的 t1（§7：当前 selected entry 免疫）。
+    // 分组免疫只读 key（slot 不参与判定——含 slot 会使 key=None 的焦点
+    // 移动无谓失效 TOOL_GROUP_CACHE 指纹）。
+    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry {
+        slot: 0,
+        key: Some(crate::kit::tui_render_unit::FoldKey::Tool("t1".into())),
+    });
+    end_tool(&mut state, "t1");
+    start_read(&mut state, "t2", "b.rs");
+    end_tool(&mut state, "t2");
+
+    // t1 完成（焦点仍在其上）→ 不得并入分组：两个工具保持独立 entry。
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        snap.items.len(),
+        2,
+        "焦点工具免疫 → 保持独立 entry（不并入折叠组）"
+    );
+    assert!(matches!(&snap.items[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1"));
+    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2"));
+
+    // 焦点移走（Esc → 单一事实源清除）→ 下一帧快照恢复自动合并。
+    *FOCUSED_ENTRY.state().write() = None;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "总结".into(),
+            message_id: Some("m1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert!(
+        matches!(&snap.items[0], TuiRenderUnit::TuiCollapsedGroup(g) if g.count == 2),
+        "焦点清除后两个相邻成功工具应并入分组"
+    );
+}
+
+/// [Slice 3 探针] 真实 E2E 场景：两个相邻成功 Read + 尾部文本 → 应分组。
+#[test]
+#[serial]
+fn test_probe_two_reads_then_text_grouped() {
+    let mut state = make_fold_test_state();
+    for id in ["t1", "t2"] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: id.into(),
+                tool_name: "Read".into(),
+                input_summary: "Cargo.toml".into(),
+                raw_input: serde_json::json!({"path": "Cargo.toml"}),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(TuiToolEnded {
+                tool_id: id.into(),
+                output_summary: "line1\nline2".into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+    }
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "已使用 Read 工具读取 Cargo.toml。".into(),
+            message_id: Some("m1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let types: Vec<&str> = snap
+        .items
+        .iter()
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiCollapsedGroup(g) => {
+                eprintln!("GROUP: {:?} count={}", g.title, g.count);
+                "group"
+            }
+            TuiRenderUnit::TuiToolCard(_) => "tool",
+            TuiRenderUnit::TuiAssistantBubble(_) => "assistant",
+            _ => "other",
+        })
+        .collect();
+    eprintln!("SNAPSHOT: {types:?}");
+    assert!(
+        snap.items
+            .iter()
+            .any(|vm| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_))),
+        "两个相邻成功 Read + 尾部文本应分组，实际 {types:?}"
+    );
+}
+
+// ── Slice 1：空 reasoning 占位（§6.3）+ assistant 时长冻结（§6.2）────────
+
+fn assistant_of(
+    snapshot: &ViewModelsSnapshot,
+    idx: usize,
+) -> &crate::kit::tui_render_unit::TuiAssistantBubble {
+    match &snapshot.items[idx] {
+        TuiRenderUnit::TuiAssistantBubble(b) => b,
+        other => panic!("expected TuiAssistantBubble at [{idx}], got {other:?}"),
+    }
+}
+
+/// §6.3 空 reasoning 占位：仅文本（无 reasoning chunk）流式 → 占位块
+/// （text 空、Running、Preview）；TurnDone 后翻转 Completed + Collapsed 单行。
+#[test]
+#[serial]
+fn test_empty_reasoning_placeholder_streams_then_folds() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "回复内容".into(),
+            message_id: Some("msg_e1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.text, "",
+        "无 reasoning chunk → 空占位块（不出现空白 block）"
+    );
+    assert_eq!(r.status, EntryStatus::Running, "流式中占位块为 Running");
+    assert!(r.is_running);
+    assert_eq!(r.fold, FoldState::Preview, "§7 running 行 → Preview");
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    let r = reasoning_of(&snap, 0);
+    assert_eq!(
+        r.status,
+        EntryStatus::Completed,
+        "TurnDone 后空占位块翻转 Completed"
+    );
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "§7 completed 行 → Collapsed（收束为单行）"
+    );
+}
+
+/// [R6] 空占位块 hash 跨 rebuild 稳定：流式追加（bubble 重建）→ 状态翻转
+/// → 冻结后再次触发快照后处理，hash 保持稳定（秒级）。
+#[test]
+#[serial]
+fn test_empty_reasoning_placeholder_hash_stable_across_rebuild() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a".into(),
+            message_id: Some("msg_e2".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let running_hash = assistant_of(&snap, 0).content_hash;
+
+    // 流式追加文本——bubble 重建，hash 随内容变化
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "b".into(),
+            message_id: Some("msg_e2".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let grown_hash = assistant_of(&snap, 0).content_hash;
+    assert_ne!(grown_hash, running_hash, "内容变化 hash 必须变化");
+
+    // TurnDone 冻结（fold/status/duration 翻转）——hash 再变一次
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    let frozen_hash = assistant_of(&snap, 0).content_hash;
+    assert_ne!(frozen_hash, grown_hash, "状态翻转 hash 必须变化");
+
+    // 冻结后快照静态：再次触发快照后处理，hash 秒级稳定（R6）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnCommitted {
+            messages_json: "[]".into(),
+            steps: 1,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        assistant_of(&snap, 0).content_hash,
+        frozen_hash,
+        "冻结后跨 rebuild hash 稳定"
+    );
+}
+
+/// §6.2 `12.4s`：turn 完成时冻结 assistant 正文时长（镜像 reasoning 冻结
+/// 机制——apply_fold_pass 翻转点）；冻结后 hash 秒级稳定。
+#[test]
+#[serial]
+fn test_assistant_duration_frozen_on_turn_done() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "hello".into(),
+            message_id: Some("msg_d1".into()),
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let b = assistant_of(&snap, 0);
+    assert!(b.started_at.is_some(), "流式 trailing 段应持有 started_at");
+    assert_eq!(b.duration_ms, None, "流式期间无冻结值");
+    let running_hash = b.content_hash;
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    let b = assistant_of(&snap, 0);
+    assert!(
+        b.duration_ms.is_some(),
+        "TurnDone 后应冻结 duration_ms（G1：fold pass 翻转点）"
+    );
+    assert_eq!(b.started_at, None, "冻结后 started_at 置 None（不再增长）");
+    let frozen_hash = b.content_hash;
+    assert_ne!(
+        running_hash, frozen_hash,
+        "running→frozen 翻转必须改变 content_hash（frozen 判别位）——冻结落在同一秒时 \
+         duration_secs 数值不变，无判别位则按 hash 分片的渲染缓存持续供应无 meta 的旧帧"
+    );
+
+    // 冻结后快照静态：再次触发快照后处理，hash 秒级稳定
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnCommitted {
+            messages_json: "[]".into(),
+            steps: 1,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let b = assistant_of(&snap, 0);
+    assert_eq!(b.content_hash, frozen_hash, "冻结后 hash 稳定");
+}
+
+// ── [Slice 4 §6.8] Interaction block：生产创建点 + 结果回写 + 折叠表 ──
+
+fn make_interaction_state() -> BridgeState {
+    let st = make_fold_test_state();
+    // 模拟 acp_notifier 写入的 request_id atom（handle_* 创建 block 时克隆）
+    *crate::kit::atoms::HITL_REQUEST_ID.state().write() =
+        Some(serde_json::to_string(&"hitl-1").unwrap());
+    *crate::kit::atoms::ASK_USER_REQUEST_ID.state().write() =
+        Some(serde_json::to_string(&"ask-1").unwrap());
+    st
+}
+
+fn ask_user_block_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiAskUserBlock {
+    match &snapshot.items[idx] {
+        TuiRenderUnit::TuiAskUserBlock(a) => a,
+        other => panic!("expected TuiAskUserBlock at [{idx}], got {other:?}"),
+    }
+}
+
+/// HitlPending 到达 → block 按事件位置 push 到 committed（不进 CurrentTurn
+/// 缓存——sync_cache 段对齐不可破坏），pending + 选项 [Allow once, Deny]。
+#[test]
+#[serial]
+fn test_hitl_pending_injects_pending_permission_block() {
+    let mut state = make_interaction_state();
+    let hp = HitlPending {
+        tool_name: "Bash".into(),
+        tool_input: serde_json::json!({"command": "cargo test"}),
+        batch: None,
+    };
+    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp));
+
+    let snap = VIEW_MODELS.state().read().clone();
+    // committed 末尾是 interaction block（无 current_turn 内容 → 快照即 committed）
+    let block = ask_user_block_of(&snap, snap.items.len() - 1);
+    assert!(block.pending, "等待响应 → pending=true");
+    assert_eq!(block.kind, InteractionKind::Permission);
+    assert_eq!(block.verb, "Bash");
+    assert_eq!(block.question, "Bash wants to run: cargo test");
+    assert_eq!(block.options, vec!["Allow once", "Deny"], "D6：仅两项");
+    assert_eq!(
+        block.fold,
+        FoldState::Expanded,
+        "§7 interaction Running → Expanded（可聚焦）"
+    );
+    assert!(
+        block.request_id.as_deref() == Some(&serde_json::to_string(&"hitl-1").unwrap()),
+        "request_id 从 HITL_REQUEST_ID atom 克隆"
+    );
+    // 断言 request_id 与 atom 同源
+    assert_eq!(
+        block.request_id.as_deref(),
+        crate::kit::atoms::HITL_REQUEST_ID.state().read().as_deref()
+    );
+}
+
+/// [§6.8 模态互斥] 同 request_id 的 pending block 重复注入（事件重放/重连/重试
+/// 重复到达）→ 跳过第二次注入：重复 pending 块永远不会被 resolve（单响应
+/// 事件只匹配首个），会以「可聚焦假象」永久滞留 transcript（review TEST MEDIUM）。
+#[test]
+#[serial]
+fn test_hitl_pending_duplicate_request_id_not_reinjected() {
+    let mut state = make_interaction_state();
+    let hp = || HitlPending {
+        tool_name: "Bash".into(),
+        tool_input: serde_json::json!({"command": "cargo test"}),
+        batch: None,
+    };
+    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp()));
+    dispatch_and_notify(&mut state, &AcpEventData::HitlPending(hp()));
+
+    let snap = VIEW_MODELS.state().read().clone();
+    let pending = snap
+        .items
+        .iter()
+        .filter(|vm| matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending))
+        .count();
+    assert_eq!(snap.items.len(), 1, "重复 pending 事件不注入第二个 block");
+    assert_eq!(pending, 1, "transcript 至多一个 pending 块（模态互斥）");
+}
+
+/// AskUser 到达 → pending block 用首问 header/options 摘要（双轨 D5）。
+#[test]
+#[serial]
+fn test_ask_user_injects_pending_ask_user_block() {
+    let mut state = make_interaction_state();
+    let au = AskUser {
+        questions: vec![
+            Question {
+                id: "q1".into(),
+                header: "Pick a strategy".into(),
+                question: "How to proceed?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "Fast".into(),
+                        description: String::new(),
+                    },
+                    QuestionOption {
+                        label: "Careful".into(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: false,
+            },
+            Question {
+                id: "q2".into(),
+                header: "Second".into(),
+                question: "Second question".into(),
+                options: vec![],
+                multi_select: false,
+            },
+        ],
+    };
+    dispatch_and_notify(&mut state, &AcpEventData::AskUser(au));
+
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, snap.items.len() - 1);
+    assert!(block.pending);
+    assert_eq!(block.kind, InteractionKind::AskUser);
+    assert_eq!(block.question, "Pick a strategy", "首问 header 摘要");
+    assert_eq!(block.options, vec!["Fast", "Careful"]);
+    assert_eq!(block.fold, FoldState::Expanded);
+}
+
+/// 结果回写：InteractionResolved 按 request_id 匹配 pending block → clone +
+/// pending=false + result + 重算 hash + 原位 set（COW）；completed → Collapsed。
+#[test]
+#[serial]
+fn test_interaction_resolved_writes_back_pending_block() {
+    let mut state = make_interaction_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HitlPending(HitlPending {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "cargo test"}),
+            batch: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let idx = snap.items.len() - 1;
+    let before = ask_user_block_of(&snap, idx).clone();
+    let hash_before = before.content_hash;
+
+    let rid = serde_json::to_string(&"hitl-1").unwrap();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionResolved {
+            request_id: rid.clone(),
+            result: "Allowed once".into(),
+        },
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, idx);
+    assert!(!block.pending, "结果回写 → pending=false");
+    assert_eq!(block.result.as_deref(), Some("Allowed once"));
+    assert_eq!(
+        block.fold,
+        FoldState::Expanded,
+        "答毕保持 Expanded 完整展示（用户需求，不再自动收束）"
+    );
+    assert_ne!(
+        block.content_hash, hash_before,
+        "结果回写必须重算 hash（触发分片缓存重建）"
+    );
+
+    // 幂等：重复到达（迟到/重复事件）不改变结果（matched 条件 pending=false 不再命中）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionResolved {
+            request_id: rid,
+            result: "Allowed once".into(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, idx);
+    assert!(!block.pending);
+    assert_eq!(block.result.as_deref(), Some("Allowed once"));
+}
+
+/// request_id 不匹配的 InteractionResolved → no-op（防御）。
+#[test]
+#[serial]
+fn test_interaction_resolved_mismatched_request_id_noop() {
+    let mut state = make_interaction_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HitlPending(HitlPending {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            batch: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionResolved {
+            request_id: serde_json::to_string(&"other-rid").unwrap(),
+            result: "Denied".into(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, snap.items.len() - 1);
+    assert!(block.pending, "不匹配的 id 不回写");
+    assert!(block.result.is_none());
+}
+
+/// 折叠 pass：pending → Running → Expanded（覆盖免疫）；结果回写后 Completed
+/// 默认 Expanded 完整展示（用户需求）；手动折叠覆盖（FoldKey::Interaction）优先。
+#[test]
+#[serial]
+fn test_fold_pass_interaction_pending_expanded_override_priority() {
+    let mut state = make_interaction_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HitlPending(HitlPending {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "cargo test"}),
+            batch: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let idx = snap.items.len() - 1;
+    assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Expanded);
+
+    // 结果回写 → Completed → Expanded（不自动收束）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionResolved {
+            request_id: serde_json::to_string(&"hitl-1").unwrap(),
+            result: "Denied".into(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(ask_user_block_of(&snap, idx).fold, FoldState::Expanded);
+
+    // 手动折叠覆盖：FOLD_OVERRIDES 写入 Interaction(rid) → 折叠 pass 恢复 Collapsed
+    //（默认策略已是 Expanded，覆盖必须优先）
+    let rid = serde_json::to_string(&"hitl-1").unwrap();
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Interaction(rid.clone()), FoldState::Collapsed);
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    let block = ask_user_block_of(&snap, idx);
+    assert_eq!(block.fold, FoldState::Collapsed, "用户覆盖优先于自动策略");
+    assert!(block.user_modified, "覆盖后 user_modified=true（免疫）");
+}
+
+/// hitl_input_summary 提取矩阵：优先主要对象字段，fallback 紧凑 JSON。
+#[test]
+fn test_hitl_input_summary_extraction_matrix() {
+    use crate::kit::acp_events::system::hitl_input_summary;
+    assert_eq!(
+        hitl_input_summary(&serde_json::json!({"command": "cargo test"})),
+        "cargo test"
+    );
+    assert_eq!(
+        hitl_input_summary(&serde_json::json!({"path": "src/main.rs"})),
+        "src/main.rs"
+    );
+    assert_eq!(
+        hitl_input_summary(&serde_json::json!({"query": "fn main"})),
+        "fn main"
+    );
+    // 空字符串字段跳过，继续找下一个候选
+    assert_eq!(
+        hitl_input_summary(&serde_json::json!({"command": "", "path": "Cargo.toml"})),
+        "Cargo.toml"
+    );
+    // 无候选字段 → 紧凑 JSON
+    assert_eq!(
+        hitl_input_summary(&serde_json::json!({"a": 1, "b": true})),
+        r#"{"a":1,"b":true}"#
+    );
+    // null 输入 → 兜底文案
+    assert_eq!(
+        hitl_input_summary(&serde_json::Value::Null),
+        crate::i18n::tr("render-interaction-tool-unknown")
+    );
+}
+
+// ── [G-Diff] Slice 5：含 diff 的 Edit 不入组 + 生产路径 diff 解析 ─────────
+
+/// §7「不得合并含 diff 的 edit」：Edit 输出含 unified diff（解析成功）→
+/// 独立展开渲染，不并入 TuiCollapsedGroup（`group_successful_tools` 的
+/// `t.diff.is_none()` 守卫自动生效）。
+/// [Fix flaky] 与 `test_edit_plain_output_grouped_normally` 等共享全局
+/// VIEW_MODELS atom——非 serial 时并行写读交错会读到对方快照。
+#[test]
+#[serial]
+fn test_edit_with_diff_not_grouped() {
+    let mut state = make_fold_test_state();
+    let diff_text = "\
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,2 +1,2 @@
+-old line
++new line
+";
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "e1".into(),
+            tool_name: "Edit".into(),
+            input_summary: "src/main.rs".into(),
+            raw_input: serde_json::json!({"file_path": "src/main.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "e1".into(),
+            output_summary: diff_text.into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    // 相邻 Read 工具（可合并组）+ Edit 带 diff
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "r1".into(),
+            tool_name: "Read".into(),
+            input_summary: "b.rs".into(),
+            raw_input: serde_json::json!({"path": "b.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "r1".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    // Read 单独成组（run_len >= 2 才压缩——1 个 Read 不组）；Edit 保持独立卡片
+    let edit = snap
+        .items
+        .iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit" => Some(t),
+            _ => None,
+        })
+        .expect("Edit 卡片独立存在（未并入分组）");
+    assert!(
+        edit.diff.is_some(),
+        "Edit 输出中的 unified diff 被解析（G-Diff 生产路径）"
+    );
+    let diff = edit.diff.as_ref().unwrap();
+    assert_eq!(
+        diff.path, "src/main.rs",
+        "path hint 来自 raw_input.file_path"
+    );
+    assert_eq!(diff.hunks.len(), 1);
+    let change_lines: Vec<_> = diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter(|l| {
+            matches!(
+                l.kind,
+                crate::kit::tui_render_unit::TuiHunkLineKind::Add
+                    | crate::kit::tui_render_unit::TuiHunkLineKind::Del
+            )
+        })
+        .collect();
+    assert_eq!(change_lines.len(), 2, "+1 −1");
+    // 组内不得出现 Edit（含 diff 不合并）
+    for vm in snap.items.iter() {
+        if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
+            assert!(
+                g.view_models.iter().all(
+                    |inner| !matches!(inner, TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit")
+                ),
+                "含 diff 的 Edit 永不并入分组"
+            );
+        }
+    }
+}
+
+/// 非 diff 输出（Edit 结果不含 unified diff）→ diff=None → 可正常分组。
+/// [Fix flaky] 共享全局 VIEW_MODELS atom——非 serial 时与 serial 测试
+/// 并行写读交错（serial_test 只互斥 serial 测试之间）。
+#[test]
+#[serial]
+fn test_edit_plain_output_grouped_normally() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "e1".into(),
+            tool_name: "Edit".into(),
+            input_summary: "src/x.rs".into(),
+            raw_input: serde_json::json!({"file_path": "src/x.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "e1".into(),
+            output_summary: "Replaced text in src/x.rs".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "e2".into(),
+            tool_name: "Write".into(),
+            input_summary: "src/y.rs".into(),
+            raw_input: serde_json::json!({"file_path": "src/y.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "e2".into(),
+            output_summary: "Wrote 3 lines".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    // 两个无 diff 的相邻成功工具 → 分组（标题含 Edit/Write 计数）
+    assert_eq!(snap.items.len(), 1, "无 diff 的相邻工具仍正常分组");
+    match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            assert_eq!(g.count, 2);
+            assert!(
+                g.title.contains("Edit") || g.title.contains("Write"),
+                "标题含工具名，实际 {:?}",
+                g.title
+            );
+        }
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    }
+}
+
+/// [Slice 5] 真实摘要路径：Edit 输出 `Added 2 lines to P`（真实工具形态，
+/// 无 unified diff）→ 摘要 fallback 解析出 diff 块（adds=2）→ 不入组。
+#[test]
+#[serial]
+fn test_edit_with_real_summary_diff_not_grouped() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "s1".into(),
+            tool_name: "Edit".into(),
+            input_summary: "src/s.rs".into(),
+            raw_input: serde_json::json!({"file_path": "src/s.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "s1".into(),
+            output_summary: "Added 2 lines to src/s.rs".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let edit = match &snap.items[0] {
+        TuiRenderUnit::TuiToolCard(c) => c.clone(),
+        other => panic!("expected TuiToolCard, got {other:?}"),
+    };
+    let diff = edit
+        .diff
+        .expect("真实摘要应解析出 diff 块（G-Diff fallback）");
+    assert_eq!(diff.path, "src/s.rs", "path hint 来自 raw_input.file_path");
+    assert!(diff.hunks.is_empty(), "摘要块无 hunk 行");
+    let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(&diff);
+    assert_eq!((adds, dels), (2, 0), "摘要计数进入顶层字段");
+
+    // 相邻成功 Read（可合并）+ 带 diff 的 Edit → Edit 不入组
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "s2".into(),
+            tool_name: "Read".into(),
+            input_summary: "src/r.rs".into(),
+            raw_input: serde_json::json!({"file_path": "src/r.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "s2".into(),
+            output_summary: "line1\nline2".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    let has_edit_tool = snap.items.iter().any(
+        |vm| matches!(vm, TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit" && t.diff.is_some()),
+    );
+    assert!(has_edit_tool, "带 diff 的 Edit 保持独立展开渲染");
+    let has_group = snap
+        .items
+        .iter()
+        .any(|vm| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_)));
+    assert!(!has_group, "含 diff 的 Edit 不并入相邻 Read 组");
+}
+
+/// [Slice 5] 真实摘要同行数替换（`Replaced 1 line to P`，middleware 新形态）
+/// → 解析出 diff 块（adds=dels=1）→ 含 diff 工具不合并、不分组
+/// （§7：diff 工具独立展示变更摘要）。
+#[test]
+#[serial]
+fn test_edit_same_line_replacement_with_count_not_grouped() {
+    let mut state = make_fold_test_state();
+    for (id, output) in [
+        ("r1", "Replaced 1 line to src/a.rs"),
+        ("r2", "Replaced 1 line to src/b.rs"),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(TuiToolStarted {
+                tool_id: id.into(),
+                tool_name: "Edit".into(),
+                input_summary: format!("src/{}.rs", id),
+                raw_input: serde_json::json!({"file_path": format!("src/{}.rs", id)}),
+                agent_id: None,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(TuiToolEnded {
+                tool_id: id.into(),
+                output_summary: output.into(),
+                is_error: false,
+                agent_id: None,
+            }),
+        );
+    }
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        snap.items.len(),
+        2,
+        "带 diff 计数的相邻 Edit 各自独立，不并入折叠组"
+    );
+    for item in &snap.items {
+        match item {
+            TuiRenderUnit::TuiToolCard(c) => {
+                let diff = c.diff.as_ref().expect("同行数替换摘要应解析出 diff 块");
+                let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(diff);
+                assert_eq!((adds, dels), (1, 1), "替换 1 行 → +1 −1");
+            }
+            other => panic!("expected TuiToolCard, got {other:?}"),
+        }
+    }
 }

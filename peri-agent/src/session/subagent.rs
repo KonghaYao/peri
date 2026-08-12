@@ -817,7 +817,9 @@ async fn resume_subagent_impl(
     // 2. status 校验（R-M4：active = 未正常收尾，崩溃遗留需手动处理）
     if meta.agent_status.is_active() {
         return Err(format!(
-            "resume_subagent: thread {} is still active (可能未正常收尾);若确认无执行中任务,需手动处理",
+            "resume_subagent: thread {} is still active \
+            (thread 仍处于运行态: 可能仍在执行, 或上次异常退出未收尾; \
+            若确认无执行中任务, 可改用 Agent(subagent_type: ...) 新建)",
             thread_id
         )
         .into());
@@ -828,9 +830,13 @@ async fn resume_subagent_impl(
     // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
     if let Some(p) = parent {
         if meta.parent_thread_id != p.store().thread_id {
-            return Err(
-                format!("resume_subagent: parent thread mismatch for {}", thread_id).into(),
-            );
+            return Err(format!(
+                "resume_subagent: parent thread mismatch for {} \
+                (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
+                并行派发的兄弟 subagent 需由原父 agent 恢复, 或改传 subagent_type 新建)",
+                thread_id
+            )
+            .into());
         }
     }
 

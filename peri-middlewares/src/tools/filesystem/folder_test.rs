@@ -261,3 +261,22 @@ async fn test_deep_scan_nonexistent_folder() {
         "should report missing: {err_msg}"
     );
 }
+
+/// 浮点 max_depth 必须显式报错，不得被 as_u64() 静默吞掉回退默认值 3
+#[tokio::test]
+async fn test_deep_scan_fractional_max_depth_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("scanme")).unwrap();
+    let tool = FolderOperationsTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"operation": "deep_scan", "folder_path": "scanme", "max_depth": 2.5}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("non-negative integer"),
+        "浮点 max_depth 应报错而非静默回退: {err_msg}"
+    );
+}

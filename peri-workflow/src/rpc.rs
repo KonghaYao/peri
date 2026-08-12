@@ -84,13 +84,29 @@ pub enum IncomingMessage {
 
 // ─── RpcChannel ────────────────────────────────────────────
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 
 /// Pending agent tracking entry for single-agent kill (GAP-07).
-/// Holds the RPC id (to send error response to Node) and cancel channel.
+/// Holds the RPC id (to send error response to Node), cancel channel,
+/// and a registration token for ownership-verified deregistration.
 struct PendingAgent {
     rpc_id: Option<u64>,
     cancel_tx: tokio::sync::oneshot::Sender<()>,
+    token: u64,
+}
+
+fn insert_pending_agent(
+    pending_agents: &DashMap<(String, u64), PendingAgent>,
+    key: (String, u64),
+    pending: PendingAgent,
+) -> bool {
+    match pending_agents.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(pending);
+            true
+        }
+        Entry::Occupied(_) => false,
+    }
 }
 
 pub struct RpcChannel {
@@ -99,6 +115,9 @@ pub struct RpcChannel {
     /// Active workflow agents keyed by (run_id, agent_id) for single-agent kill (GAP-07).
     pending_agents: Arc<DashMap<(String, u64), PendingAgent>>,
     next_id: AtomicU64,
+    /// 单调递增注册 token：deregister 时校验所有权，防止旧注册误删同 key 的新实例
+    /// （kill 句柄被清空 → 后续 kill 漏杀）。
+    agent_token: AtomicU64,
 }
 
 impl RpcChannel {
@@ -108,6 +127,7 @@ impl RpcChannel {
             pending_requests: Arc::new(DashMap::new()),
             pending_agents: Arc::new(DashMap::new()),
             next_id: AtomicU64::new(1),
+            agent_token: AtomicU64::new(0),
         }
     }
 
@@ -244,28 +264,54 @@ impl RpcChannel {
 
     // ─── 单 agent kill 追踪（GAP-07）──────────────────────────
 
-    /// 注册一个活跃 agent，返回 cancel receiver。
+    /// 注册一个活跃 agent，返回 cancel receiver 与注册 token；同一 run 内重复的
+    /// active agent ID 会被拒绝，避免覆盖已有任务的取消句柄。
     ///
-    /// 在 `agent/run` 分支调用：spawn 的 task 持有 receiver，
-    /// 通过 `select!` 与 `exec.execute()` 竞速。
+    /// 必须在 `agent/run` 分支调用（spawn 之前）：kill_agent 与注册之间不再有
+    /// 空窗（此前注册在 spawn 内，kill 先到会漏杀且返回 false）。
+    /// spawn 的 task 持有 receiver，通过 `select!` 与 `exec.execute()` 竞速；
     /// `kill_agent()` 触发 cancel_tx → receiver 触发 → agent task 返回 Dead。
+    /// `token` 用于 [`Self::deregister_agent`] 的所有权校验。
     pub fn register_agent(
         &self,
         run_id: &str,
         agent_id: u64,
         rpc_id: Option<u64>,
-    ) -> oneshot::Receiver<()> {
+    ) -> Option<(oneshot::Receiver<()>, u64)> {
         let (cancel_tx, cancel_rx) = oneshot::channel();
-        self.pending_agents.insert(
+        let token = self.agent_token.fetch_add(1, Ordering::Relaxed);
+        insert_pending_agent(
+            &self.pending_agents,
             (run_id.to_string(), agent_id),
-            PendingAgent { rpc_id, cancel_tx },
-        );
-        cancel_rx
+            PendingAgent {
+                rpc_id,
+                cancel_tx,
+                token,
+            },
+        )
+        .then_some((cancel_rx, token))
     }
 
     /// 正常完成后注销 agent（kill_agent 已移除时 no-op）。
-    pub fn deregister_agent(&self, run_id: &str, agent_id: u64) {
-        self.pending_agents.remove(&(run_id.to_string(), agent_id));
+    ///
+    /// 仅当注册仍由本 task 持有（token 匹配、未被 kill_agent 取走）时才移除并
+    /// 返回 `true`。返回 `false` 表示条目已被 kill_agent 移除——此时 error
+    /// response 已由 kill 分支发送，本 task 不得再发送成功响应（防双重响应）。
+    pub fn deregister_agent(&self, run_id: &str, agent_id: u64, token: u64) -> bool {
+        let key = (run_id.to_string(), agent_id);
+        // 注意：get 的 Ref 必须在使用后立即释放（is_some_and 消费临时值），
+        // 不能在持有 Ref 的同时 remove —— DashMap 同 shard 先读后写会死锁
+        // （写者优先 RwLock：写锁等待本线程持有的读锁）。
+        let owned = self
+            .pending_agents
+            .get(&key)
+            .is_some_and(|e| e.token == token);
+        if owned {
+            self.pending_agents.remove(&key);
+            true
+        } else {
+            false
+        }
     }
 
     /// 杀死指定 agent：向 Node 发送 error response + 触发 cancel。
