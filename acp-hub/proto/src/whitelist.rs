@@ -46,6 +46,7 @@ pub static FRAME_TAGS: &[FrameTag] = &[
     FrameTag("instance/kill_ack"),
     FrameTag("instance/forward_ack"),
     FrameTag("instance/process_exit"),
+    FrameTag("session_list"),
 ];
 
 /// 连接侧角色（由 token 解析，§9.5：token 即身份）。
@@ -79,14 +80,20 @@ pub enum M1Check {
 
 /// M1 允许的 action `type` 子集（§4.8 收窄）。
 ///
-/// `chat/load`（M2）、`events/subscribe`/`events/unsubscribe`（M3）类型
-/// 保留定义，白名单外。
+/// `events/subscribe`/`events/unsubscribe`（M3）类型保留定义，白名单外。
+/// `chat/load`（原 M2 预留）于 §8.5 启用：当前对话内切换 ACP 会话
+/// （会话是进程内实体——load 不新建进程，无两阶段创建语义）。
 pub const M1_ACTION_TYPES: &[&str] = &[
     "chat/create",
+    "chat/load",
     "chat/prompt",
+    "chat/session-new",
     "chat/cancel",
     "chat/close",
     "permission/resolve",
+    "workspace/create",
+    "workspace/remove",
+    "session/list",
 ];
 
 /// `action` 帧的 `type` 子集是否在 M1 白名单内。

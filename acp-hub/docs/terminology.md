@@ -47,9 +47,9 @@
 | 旧 | 新 |
 | --- | --- |
 | `sessions/{sid}/` 目录 | `chats/{chat_id}/` 目录 |
-| `DocId::session` → `session:{sid}` | `DocId::control` → `control:{chat_id}`（控制状态 Doc） |
+| `DocId::session` → `session:{sid}` | `DocId::session` → `session:{chat_id}`（控制状态 Doc） |
 | `DocId::chat` → `chat:{sid}` | `chat:{chat_id}`（**前缀不变**，消息时间线 Doc） |
-| updates.log doc id 字节：`0=chat, 1=session` | `0=chat, 1=control` |
+| updates.log doc id 字节：`0=chat, 1=session` | `0=chat, 1=session` |
 | registry.log `sessions` map | `chats` map |
 | registry.log `machines` map / `machine_id` 字段 | `instances` map / `instance_id` 字段 |
 | `machine.token` 文件 | `instance.token` |

@@ -95,7 +95,7 @@ async fn t1_update_log_roundtrip_and_replay() {
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"update-a");
     let d2 = (
-        DocId::control(&sid.to_string()),
+        DocId::session(&sid.to_string()),
         b"update-b".to_vec(),
     );
     log.append(1, 1, &[(d1.0.clone(), &d1.1), (d2.0.clone(), &d2.1)]).await.unwrap();

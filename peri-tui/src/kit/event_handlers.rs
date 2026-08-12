@@ -27,7 +27,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, Notification, PopupKind,
+    ACTIVE_PANEL, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, Notification, POPUP_KIND, PopupKind,
 };
 use crate::kit::focus_router::{
     FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
@@ -78,6 +78,14 @@ pub fn register_global_handlers(hooks: &mut Hooks, mut exit: Handler<'static, ()
             return EventResult::Ignored;
         };
         if key.kind != KeyEventKind::Press {
+            return EventResult::Ignored;
+        }
+
+        // popup 模态优先：popup 激活时全局快捷键让路——popup 内的按键
+        // （如 OAuth popup 的 Ctrl+O 打开浏览器 / Ctrl+C 复制链接）由 popup
+        // 自己的 handler 处理；否则 Ctrl+O 被全局 ToggleDiff 抢占、Ctrl+C
+        // 直接触发退出。
+        if POPUP_KIND.state().read().is_some() {
             return EventResult::Ignored;
         }
 

@@ -122,6 +122,9 @@ impl App {
         // mcp/list 命令面，见批 3 tui-deps 未做项）
         let pool = std::sync::Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
         self.services.mcp_pool = Some(pool.clone());
+        // 面板直读句柄：OAuth 授权完成后（kit 层 OauthCompleted 事件）据此
+        // reconnect，从共享凭证文件恢复连接。
+        let _ = crate::kit::atoms::MCP_PANEL_POOL.set(pool.clone());
 
         let (init_tx, init_rx) =
             tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);

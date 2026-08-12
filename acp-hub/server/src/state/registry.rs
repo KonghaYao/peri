@@ -12,10 +12,14 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use yrs::{Map, ReadTxn, Transact, WriteTxn};
 
-use acp_hub_proto::schema::{GlobalStatus, InstanceStatus, InstanceView, ChatSummary};
+use acp_hub_proto::schema::{
+    ChatSummary, GlobalStatus, InstanceStatus, InstanceView, SessionSummaryProjection,
+    WorkspaceSummary,
+};
 
 use crate::state::doc_manager::DocCommand;
 use crate::state::factory::ROOT;
+use crate::state::session_list;
 
 /// Registry 写者命令（Registry Doc 无 chat 维度：低频、无微批次、即到即写，
 /// §8.5【决策】路由到全局 registry 写者）。
@@ -34,6 +38,8 @@ pub(crate) enum RegistryMsg {
         status: String,
         reply: oneshot::Sender<Result<(), RegistryError>>,
     },
+    /// workspace 全量查询（启动恢复：内存注册表从 Registry Doc 重建）。
+    ListWorkspaces(oneshot::Sender<Vec<WorkspaceSummary>>),
 }
 
 /// Registry 操作错误。
@@ -237,6 +243,41 @@ impl RegistryState {
         }
     }
 
+    /// ACP `session/list` 全量同步投影（§6.3，instance 级数据 → Registry
+    /// Doc `sessions` map；幂等 + 自愈删除）。轮询器每 instance 一轮调一次。
+    pub async fn apply_sessions(
+        &self,
+        entries: Vec<SessionSummaryProjection>,
+    ) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryApplySessions { entries })
+            .await
+    }
+
+    /// 工作区摘要 upsert（create/rename；Registry Doc `workspaces` map）。
+    pub async fn upsert_workspace(&self, w: WorkspaceSummary) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryUpsertWorkspace(w)).await
+    }
+
+    /// 工作区移除（Registry Doc `workspaces` map 删键；已建对话不受影响）。
+    pub async fn remove_workspace(&self, workspace_id: &str) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryRemoveWorkspace {
+            workspace_id: workspace_id.to_string(),
+        })
+        .await
+    }
+
+    /// 工作区全量查询（启动恢复用：workspace 内存注册表从 Registry Doc 重建，
+    /// 保证重启后 create 继承 cwd 仍可用）。
+    pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceSummary>, RegistryError> {
+        let (reply, rx) = oneshot::channel();
+        self.inner
+            .tx
+            .send(RegistryMsg::ListWorkspaces(reply))
+            .await
+            .map_err(|_| RegistryError::ChannelClosed)?;
+        rx.await.map_err(|_| RegistryError::ChannelClosed)
+    }
+
     async fn set_global(&self, status: GlobalStatus) -> Result<(), RegistryError> {
         self.send(DocCommand::RegistrySetGlobal { status }).await
     }
@@ -303,8 +344,62 @@ impl RegistryApplier {
                 global.insert(&mut txn, "status", global_status_str(*status));
                 Ok(())
             }
+            DocCommand::RegistryApplySessions { entries } => {
+                // 与 chat 控制面 SessionListResponse 同构（§6.3）：预读当前
+                // 投影 → diff → 有变化才写（幂等，无变化 no-op）。sessions
+                // 是 instance 级数据，投影到 Registry Doc `sessions` map。
+                let current = session_list::read_current(&txn, &root);
+                let d = session_list::diff(&current, entries);
+                if !d.upsert.is_empty() || !d.remove.is_empty() {
+                    session_list::apply_diff(&mut txn, &root, &d);
+                }
+                Ok(())
+            }
+            DocCommand::RegistryUpsertWorkspace(w) => {
+                write_workspace(&mut txn, &root, w);
+                Ok(())
+            }
+            DocCommand::RegistryRemoveWorkspace { workspace_id } => {
+                let workspaces = root.get_or_init::<_, yrs::MapRef>(&mut txn, "workspaces");
+                workspaces.remove(&mut txn, workspace_id);
+                Ok(())
+            }
             _ => Ok(()),
         }
+    }
+
+    /// workspace 全量读取（启动恢复：workspace 内存注册表重建；读 doc 快照，
+    /// 不经命令路径）。
+    pub(crate) fn list_workspaces(&self) -> Vec<WorkspaceSummary> {
+        let txn = self.doc.transact();
+        let root = match txn.get_map(ROOT) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let Some(ws) = root
+            .get(&txn, "workspaces")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        else {
+            return Vec::new();
+        };
+        let str_or = |m: &yrs::MapRef, k: &str| -> String {
+            m.get(&txn, k)
+                .and_then(|x| x.cast::<String>().ok())
+                .unwrap_or_default()
+        };
+        let mut out = Vec::new();
+        for (id, v) in ws.iter(&txn) {
+            if let Ok(m) = v.cast::<yrs::MapRef>() {
+                out.push(WorkspaceSummary {
+                    id: id.to_string(),
+                    name: str_or(&m, "name"),
+                    cwd: str_or(&m, "cwd"),
+                    created_at: str_or(&m, "created_at"),
+                    updated_at: str_or(&m, "updated_at"),
+                });
+            }
+        }
+        out
     }
 
     /// gap 写回（读现状改 gap 字段；§9.4/§12.4）。
@@ -382,6 +477,21 @@ fn write_chat_summary(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, s: 
         None => sm.insert(txn, "gap", yrs::Any::Null),
     };
     sm.insert(txn, "updated_at", s.updated_at.clone());
+    sm.insert(txn, "cwd", s.cwd.clone());
+    match &s.workspace_id {
+        Some(id) => sm.insert(txn, "workspace_id", id.clone()),
+        None => sm.insert(txn, "workspace_id", yrs::Any::Null),
+    };
+}
+
+fn write_workspace(txn: &mut yrs::TransactionMut<'_>, root: &yrs::MapRef, w: &WorkspaceSummary) {
+    let workspaces = root.get_or_init::<_, yrs::MapRef>(txn, "workspaces");
+    let wm = workspaces.get_or_init::<_, yrs::MapRef>(txn, w.id.as_str());
+    wm.insert(txn, "id", w.id.clone());
+    wm.insert(txn, "name", w.name.clone());
+    wm.insert(txn, "cwd", w.cwd.clone());
+    wm.insert(txn, "created_at", w.created_at.clone());
+    wm.insert(txn, "updated_at", w.updated_at.clone());
 }
 
 pub(crate) fn instance_status_str(s: InstanceStatus) -> &'static str {

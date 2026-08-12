@@ -499,13 +499,13 @@ async function runWsFlow({ base, clientToken, instance, server }) {
     fail('c', `create committed 但 instance 未记录 spawn 成功：${e.message}`);
   }
 
-  // (d) 订阅 chat:{sid} + control:{sid} → chat 快照帧（带 projectionVersion）
-  // control doc 在 create 后、prompt 前无任何 update（mirror 未创建）——
+  // (d) 订阅 chat:{sid} + session:{sid} → chat 快照帧（带 projectionVersion）
+  // session doc 在 create 后、prompt 前无任何 update（mirror 未创建）——
   // §4.6「空会话视图由客户端按空 doc 处理」，server 不推空快照（设计语义，
-  // 见 server/src/control/hub.rs snapshot 注释）；故 control 快照为可选。
+  // 见 server/src/control/hub.rs snapshot 注释）；故 session 快照为可选。
   const chatDoc = `chat:${sid}`;
-  const controlDoc = `control:${sid}`;
-  send({ t: 'ysync.subscribe', docs: [chatDoc, controlDoc] });
+  const sessionDoc = `session:${sid}`;
+  send({ t: 'ysync.subscribe', docs: [chatDoc, sessionDoc] });
   const chatSnap = await waitFor(
     `chat 快照 ${chatDoc}`,
     (f) => f.t === 'ysync.update' && f.doc === chatDoc && 'projectionVersion' in f,
@@ -518,14 +518,14 @@ async function runWsFlow({ base, clientToken, instance, server }) {
     pass('d', `chat:{sid} 快照投影 projectionVersion=${chatSnap.projectionVersion}（合法 base64）`);
   }
   try {
-    const controlSnap = await waitFor(
-      `control 快照 ${controlDoc}`,
-      (f) => f.t === 'ysync.update' && f.doc === controlDoc && 'projectionVersion' in f,
+    const sessionSnap = await waitFor(
+      `session 快照 ${sessionDoc}`,
+      (f) => f.t === 'ysync.update' && f.doc === sessionDoc && 'projectionVersion' in f,
       3000
     );
-    console.log(`      control:{sid} 快照 projectionVersion=${controlSnap.projectionVersion}`);
+    console.log(`      session:{sid} 快照 projectionVersion=${sessionSnap.projectionVersion}`);
   } catch {
-    console.log('      control:{sid} 无快照帧（doc 尚无 update，按空 doc 处理，§4.6 语义）');
+    console.log('      session:{sid} 无快照帧（doc 尚无 update，按空 doc 处理，§4.6 语义）');
   }
 
   // (e) prompt → accepted → committed → ACP delta 回流。
@@ -539,12 +539,12 @@ async function runWsFlow({ base, clientToken, instance, server }) {
     1,
     60000
   );
-  // control doc 增量累计收集：≥2 = active_turn 注册（prompt）+ turn 终态
+  // session doc 增量累计收集：≥2 = active_turn 注册（prompt）+ turn 终态
   // 投影（§7.2：终态由 prompt L3 stopReason 驱动注入，cancel 对已终态
   // turn 幂等——终态增量在 prompt 阶段已广播，必须累计式收集）。
-  const controlIncCollect = collectFrames(
-    'control:{sid} 增量帧 ≥2（active_turn 注册 + turn 终态投影）',
-    (f) => f.t === 'ysync.update' && f.doc === controlDoc && !('projectionVersion' in f),
+  const sessionIncCollect = collectFrames(
+    'session:{sid} 增量帧 ≥2（active_turn 注册 + turn 终态投影）',
+    (f) => f.t === 'ysync.update' && f.doc === sessionDoc && !('projectionVersion' in f),
     2,
     120000
   );
@@ -631,10 +631,10 @@ async function runWsFlow({ base, clientToken, instance, server }) {
   }
   pass('f', `chat/cancel → accepted → committed`);
   try {
-    const incs = await controlIncCollect;
-    pass('f', `cancel 生效：control doc 出现 turn 终态投影增量帧（共 ${incs.length} 个：active_turn 注册 + 终态）`);
+    const incs = await sessionIncCollect;
+    pass('f', `cancel 生效：session doc 出现 turn 终态投影增量帧（共 ${incs.length} 个：active_turn 注册 + 终态）`);
   } catch (e) {
-    fail('f', `control doc 未出现 turn 终态投影增量（prompt 终态注入或广播断点）：${e.message}`);
+    fail('f', `session doc 未出现 turn 终态投影增量（prompt 终态注入或广播断点）：${e.message}`);
   }
 
   // (g) chat/close → committed + server 日志 chat closed + instance kill

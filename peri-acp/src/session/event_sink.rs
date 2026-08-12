@@ -242,6 +242,32 @@ impl EventSink for TransportEventSink {
                 ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
                     message: message.clone(),
                 }),
+                // SystemNotification：MCP 上下线等连接状态变化经 peri/agent_event
+                // 通道送达 TUI（AcpEventData::SystemNotification → system-notification
+                // 通知显示）。
+                ExecutorEvent::SystemNotification { text, level } => {
+                    Some(AcpEvent::SystemNotification {
+                        text: text.clone(),
+                        level: level.clone(),
+                    })
+                }
+                // OAuth：MCP 授权流程事件经 host 装配面回调产生（初始化/重连
+                // 阶段无 session event_sink），此处分支覆盖运行中经 session 链
+                // 转发的场景；初始化阶段由 host 级通道（oauth_event_tx）直达。
+                ExecutorEvent::OauthNeeded {
+                    server_name,
+                    auth_url,
+                } => Some(AcpEvent::OauthNeeded {
+                    server_name: server_name.clone(),
+                    auth_url: auth_url.clone(),
+                }),
+                ExecutorEvent::OauthCompleted { server_name } => Some(AcpEvent::OauthCompleted {
+                    server_name: server_name.clone(),
+                }),
+                ExecutorEvent::OauthFailed { server_name, error } => Some(AcpEvent::OauthFailed {
+                    server_name: server_name.clone(),
+                    error: error.clone(),
+                }),
                 // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading）。
                 // v2 StateEvent::TurnSuspended 经 v1 兼容映射（events_v2::
                 // state_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-

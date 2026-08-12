@@ -5,8 +5,8 @@
 
 use agent_client_protocol_schema::v1::{
     AgentCapabilities, InitializeResponse, PromptCapabilities, SessionCapabilities,
-    SessionCloseCapabilities, SessionForkCapabilities, SessionListCapabilities,
-    SessionResumeCapabilities,
+    SessionCloseCapabilities, SessionDeleteCapabilities, SessionForkCapabilities,
+    SessionListCapabilities, SessionResumeCapabilities,
 };
 use agent_client_protocol_schema::ProtocolVersion;
 use peri_acp_types::PeriCaps;
@@ -27,7 +27,8 @@ pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
                 .list(SessionListCapabilities::new())
                 .close(SessionCloseCapabilities::new())
                 .resume(SessionResumeCapabilities::new())
-                .fork(SessionForkCapabilities::new()),
+                .fork(SessionForkCapabilities::new())
+                .delete(SessionDeleteCapabilities::new()),
         );
     let caps = caps.meta(peri_caps.to_agent_meta());
     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(caps)

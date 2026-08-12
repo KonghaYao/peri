@@ -31,7 +31,7 @@ croner = "3"
 tracing.workspace = true
 parking_lot.workspace = true
 grep = "0.4"
-rmcp = { version = "2", features = [
+rmcp = { version = "3.1.2", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
@@ -45,9 +45,9 @@ tar = "0.4"
 
 shellexpand = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-base64 = { version = "0.22", features = ["alloc"] }
+base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 peri-resources = { path = "../peri-resources" }
 lsp-types.workspace = true
 

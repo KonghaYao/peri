@@ -32,12 +32,15 @@ fn all_frames() -> Vec<Frame> {
                 instance_id: None,
                 cwd: Some("/tmp".into()),
                 title: Some("t".into()),
+                acp_session_id: None,
+                workspace_id: None,
             },
         }),
         Frame::Action(ActionEnvelope::Load {
             command_id: "c2".into(),
             payload: LoadChatPayload {
                 chat_id: "s1".into(),
+                acp_session_id: "acp-s1".into(),
             },
         }),
         Frame::Action(ActionEnvelope::Close {
@@ -51,6 +54,7 @@ fn all_frames() -> Vec<Frame> {
             payload: PromptChatPayload {
                 chat_id: "s1".into(),
                 message: "hi".into(),
+                effort: None,
             },
         }),
         Frame::Action(ActionEnvelope::Cancel {
@@ -86,6 +90,7 @@ fn all_frames() -> Vec<Frame> {
             status: AckStatus::Committed,
             turn_id: Some("t1".into()),
             chat_id: Some("s1".into()),
+            acp_session_id: None,
             committed_projection_version: Some(7),
         }),
         Frame::ActionError(ActionError {
@@ -120,7 +125,7 @@ fn all_frames() -> Vec<Frame> {
         }),
         // --- y-sync ---
         Frame::YsyncSubscribe(YsyncSubscribe {
-            docs: vec![DocId::chat("s1"), DocId::control("s1")],
+            docs: vec![DocId::chat("s1"), DocId::session("s1")],
         }),
         Frame::YsyncUnsubscribe(YsyncUnsubscribe {
             docs: vec![DocId::chat("s1")],
@@ -218,6 +223,7 @@ fn action_envelope_nested_tag_shape() {
         payload: PromptChatPayload {
             chat_id: "s1".into(),
             message: "hi".into(),
+            effort: None,
         },
     });
     let value: serde_json::Value =
@@ -229,11 +235,11 @@ fn action_envelope_nested_tag_shape() {
     assert_eq!(value["payload"]["message"], "hi");
 }
 
-/// payload 判别（§12.1）：`chat/load` 与 `chat/close` 同形 payload
-/// `{chatId}` 经 envelope 层 `type` 判别无歧义。
+/// payload 判别（§12.1 + §8.5）：`chat/load` 携带 `{chatId, acpSessionId}`，
+/// `chat/close` 仅 `{chatId}`——经 envelope 层 `type` 判别无歧义。
 #[test]
 fn load_vs_close_discrimination() {
-    let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#;
+    let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1","acpSessionId":"acp-1"}}"#;
     let close_raw = r#"{"t":"action","commandId":"c3","type":"chat/close","payload":{"chatId":"s1"}}"#;
 
     let load = Frame::parse(load_raw).unwrap();
@@ -241,6 +247,8 @@ fn load_vs_close_discrimination() {
     assert!(matches!(load, Frame::Action(ActionEnvelope::Load { .. })));
     assert!(matches!(close, Frame::Action(ActionEnvelope::Close { .. })));
     assert_ne!(load, close, "same-shape payloads must not collapse");
+    // §8.5：缺 acpSessionId 的 chat/load 视为畸形（目标会话必填）。
+    assert!(Frame::parse(r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#).is_err());
 }
 
 /// 未知 `t` → `Unsupported`（§4.8 向量 6）。
@@ -294,7 +302,7 @@ fn known_tag_bad_payload_is_malformed_not_unsupported() {
 #[test]
 fn every_frame_tag_is_registered() {
     let registered: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
-    assert_eq!(registered.len(), 25, "§3.2 全表应有 25 个 tag");
+    assert_eq!(registered.len(), 26, "§3.2 全表应有 26 个 tag");
     for frame in all_frames() {
         assert!(
             registered.contains(&frame.tag().0),
@@ -341,5 +349,25 @@ fn registry_doc_id_is_hub_registry() {
     assert_eq!(v, "hub:registry");
     // 与 chat/control 形态互异
     assert_ne!(DocId::REGISTRY, DocId::chat("registry"));
-    assert_ne!(DocId::REGISTRY, DocId::control("registry"));
+    assert_ne!(DocId::REGISTRY, DocId::session("registry"));
+}
+
+/// #4 DocId 前缀面：`session:` 白名单注册（FromStr）+ roundtrip（§5.2 表
+/// `session:{cid}` 控制状态 Doc）；`control:` 死前缀不入白名单（代码实际
+/// 只有 chat/session/hub 三前缀——固化死前缀语义）。
+#[test]
+fn session_docid_fromstr_parses() {
+    let doc = DocId::from_str("session:s1").expect("session: 前缀应解析");
+    assert_eq!(doc.as_str(), "session:s1", "as_str() roundtrip");
+    assert_eq!(doc, DocId::session("s1"), "与构造器一致");
+    // chat/hub 白名单不受影响。
+    assert_eq!(DocId::from_str("chat:c1").unwrap().as_str(), "chat:c1");
+    assert_eq!(DocId::from_str("hub:registry").unwrap(), DocId::REGISTRY);
+    // control: 不入白名单（死前缀语义固化）。
+    assert!(
+        DocId::from_str("control:x").is_err(),
+        "control: 是死前缀（代码实际用 session:）"
+    );
+    // 空 sid 段仍拒绝（§5.2 防注入）。
+    assert!(DocId::from_str("session:").is_err(), "空 sid 仍拒绝");
 }

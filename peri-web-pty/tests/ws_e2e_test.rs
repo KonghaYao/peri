@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use axum::{routing::get, Router};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use peri_web_pty::http_routes;
@@ -29,18 +29,12 @@ async fn spawn_server() -> u16 {
 }
 
 /// 跨平台获取测试 shell + 退出命令。
+///
+/// Windows 上用 cmd.exe（`cmd /C exit` 立即退出）而非 powershell.exe：
+/// PowerShell 5.1 在 ConPTY 下的启动/退出路径更复杂，cmd 是最稳的验证载体。
 fn exit_shell() -> (&'static str, Vec<&'static str>) {
     if cfg!(target_os = "windows") {
-        (
-            "powershell.exe",
-            vec![
-                "-NoProfile",
-                "-NoLogo",
-                "-NonInteractive",
-                "-Command",
-                "exit",
-            ],
-        )
+        ("cmd.exe", vec!["/C", "exit"])
     } else {
         ("bash", vec!["-c", "exit"])
     }
@@ -58,12 +52,17 @@ async fn test_ws_connection_receives_exit_message_on_child_exit() {
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     // 收消息直到看到 [process exited ...]
+    // 同时模拟 xterm.js 响应 ConPTY 的 DSR 查询（ESC[6n → ESC[1;1R），
+    // 服务端已自行响应，此处双保险。
     let mut saw_exit = false;
     for _ in 0..20 {
         match tokio::time::timeout(Duration::from_secs(3), ws.next()).await {
             Ok(Some(Ok(Message::Text(t)))) if t.contains("[process exited") => {
                 saw_exit = true;
                 break;
+            }
+            Ok(Some(Ok(Message::Text(t)))) if t.contains("\u{1b}[6n") => {
+                let _ = ws.send(Message::Text("\u{1b}[1;1R".into())).await;
             }
             Ok(Some(_)) => continue,
             _ => break,

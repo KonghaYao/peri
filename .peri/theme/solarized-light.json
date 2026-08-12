@@ -19,10 +19,10 @@
       "primary": "$semantic.accent"
     },
     "success": {
-      "primary": "#859900"
+      "primary": "#7C8E00"
     },
     "warning": {
-      "primary": "#B58900"
+      "primary": "#A87E00"
     },
     "danger": {
       "primary": "#DC322F"
@@ -31,9 +31,9 @@
       "primary": "$semantic.thinking"
     },
     "diff": {
-      "add": "#859900",
+      "add": "#7C8E00",
       "remove": "#DC322F",
-      "hunk": "#B58900",
+      "hunk": "#A87E00",
       "add_bg": "#E8F0D0",
       "remove_bg": "#F0DCD4",
       "add_word_bg": "#D8E8B8",
@@ -43,32 +43,32 @@
   "semantic": {
     "accent": "#268BD2",
     "text": {
-      "primary": "#073642",
+      "primary": "#49696D",
       "muted": "#586E75",
-      "dim": "#93A1A1"
+      "dim": "#7F9090"
     },
     "border": {
-      "default": "#93A1A1",
+      "default": "#7A8A8A",
       "active": "$semantic.accent",
       "dim": "#D5DED8"
     },
     "status": {
       "running": "#6C71C4",
-      "success": "#859900",
-      "warning": "#B58900",
+      "success": "#7C8E00",
+      "warning": "#A87E00",
       "error": "#DC322F"
     },
     "surface": {
       "default": "#FDF6E3",
-      "user": "#EEE8D5",
-      "popup": "#FDF6E3",
-      "selection": "#D5DED8",
-      "cursor": "#EEE8D5"
+      "user": "#E6DEC9",
+      "popup": "#FFFFFF",
+      "selection": "#C7DCEF",
+      "cursor": "#E6DEC9"
     },
     "diff": {
-      "add": "#859900",
+      "add": "#7C8E00",
       "remove": "#DC322F",
-      "hunk": "#B58900",
+      "hunk": "#A87E00",
       "add_bg": "#E8F0D0",
       "remove_bg": "#F0DCD4",
       "add_word_bg": "#D8E8B8",
@@ -82,9 +82,9 @@
   },
   "component": {
     "message": {
-      "user_bg": "#EEE8D5",
+      "user_bg": "#E6DEC9",
       "ai_prefix": "$semantic.text.primary",
-      "tool_indicator": "#859900",
+      "tool_indicator": "#7C8E00",
       "reasoning": "$semantic.thinking"
     },
     "input": {
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#FDF6E3",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -118,10 +118,10 @@
       "muted": "$semantic.text.muted",
       "dim": "$semantic.text.dim",
       "mode_accept_edit": "$semantic.thinking",
-      "mode_auto": "#B58900",
+      "mode_auto": "#A87E00",
       "mode_bypass": "#DC322F",
-      "resource_good": "#859900",
-      "resource_warn": "#B58900",
+      "resource_good": "#7C8E00",
+      "resource_warn": "#A87E00",
       "resource_bad": "#DC322F"
     },
     "markdown": {

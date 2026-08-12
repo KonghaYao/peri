@@ -213,13 +213,14 @@ async fn t12_body() -> Result<(), String> {
     let code = c.recv_close(RECV_TIMEOUT).await?;
     assert_eq!(code, 4502, "空 token 应为 4502");
 
-    // c. action 方法面白名单外（session/load，M2）→ UNSUPPORTED_FRAME
-    //    （§4.8 向量 6：白名单外不静默）。
+    // c. action 方法面白名单外（events/subscribe，M2 保留）→
+    //    UNSUPPORTED_FRAME（§4.8 向量 6：白名单外不静默）。
     let mut c = WsClient::connect_client(port, &s.env.client_token, &["hub:registry"]).await?;
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Load {
+    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::SubscribeEvents {
         command_id: uuid::Uuid::new_v4().to_string(),
-        payload: acp_hub_proto::action::LoadChatPayload {
-            chat_id: uuid::Uuid::new_v4().to_string(),
+        payload: acp_hub_proto::action::SubscribeEventsPayload {
+            chat_id: None,
+            from_seq: None,
         },
     }))
     .await?;

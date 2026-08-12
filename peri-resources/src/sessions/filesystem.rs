@@ -188,12 +188,23 @@ impl ThreadStore for FilesystemThreadStore {
     }
 
     async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
-        let dir = self.thread_dir(id);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).await?;
+        // 级联删除整个线程树：hidden 子 agent 线程沿 parent_thread_id 挂链，
+        // 若不递归删除会留下永远无法通过 UI/协议访问的孤儿数据。
+        let mut to_delete = vec![id.clone()];
+        let mut idx = 0;
+        while idx < to_delete.len() {
+            let children = self.list_child_threads(&to_delete[idx]).await?;
+            to_delete.extend(children.into_iter().map(|m| m.id));
+            idx += 1;
         }
         let mut metas = self.read_index().await?;
-        metas.retain(|m| m.id != *id);
+        for tid in &to_delete {
+            let dir = self.thread_dir(tid);
+            if dir.exists() {
+                fs::remove_dir_all(&dir).await?;
+            }
+        }
+        metas.retain(|m| !to_delete.contains(&m.id));
         self.write_index(&metas).await
     }
 

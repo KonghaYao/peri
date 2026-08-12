@@ -18,7 +18,7 @@
 //! ```text
 //! body = version:u8 | kind:u8 | epoch:u32 LE | seq:u64 LE | payload
 //! kind = 0x01 doc_commit（M1 唯一）
-//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=control）| len:u32 LE | yjs update 字节
+//! doc_commit payload = 重复段：doc_id:u8（0=chat,1=session）| len:u32 LE | yjs update 字节
 //! ```
 //!
 //! 并发：写锁（`tokio::sync::Mutex`，由 [`crate::persist::ChatStore`] 持有）
@@ -125,7 +125,7 @@ fn encode_doc_commit(epoch: u32, seq: u64, docs: &[(DocId, &[u8])]) -> Result<Ve
         let prefix = doc.as_str();
         let id = match prefix.strip_prefix("chat:") {
             Some(_) => 0u8,
-            None => match prefix.strip_prefix("control:") {
+            None => match prefix.strip_prefix("session:") {
                 Some(_) => 1u8,
                 None => {
                     return Err(StoreError::Corrupt {
@@ -178,7 +178,7 @@ fn decode_doc_commit(chat_id: &uuid::Uuid, body: &[u8]) -> Result<DecodedCommit,
             .ok_or_else(|| "doc segment len out of bounds".to_string())?;
         let doc = match id {
             0 => DocId::chat(&chat_id.to_string()),
-            1 => DocId::control(&chat_id.to_string()),
+            1 => DocId::session(&chat_id.to_string()),
             other => return Err(format!("unsupported doc id byte {other}")),
         };
         docs.push((doc, payload.to_vec()));

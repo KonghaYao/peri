@@ -9,6 +9,7 @@ use thiserror::Error;
 use super::{
     channel_handler::ChannelHandler,
     config::{ConfigSource, McpServerConfig},
+    oauth_flow::{OAuthCallbackResult, OAuthFlowEvent},
 };
 
 /// Wrapper for RunningService that can hold either handler type
@@ -142,6 +143,44 @@ pub struct McpClientPool {
     /// 命令面经 `McpPoolPort::snapshot` 读取；`run_initialize` 与外部
     /// `status_tx` 同步更新）。
     pub(crate) init_status: parking_lot::RwLock<McpInitStatus>,
+    /// 初始化是否已完成。完成前发生的状态写入**不**产生上下线通知——
+    /// 会话首 turn 的 `first_turn_reminder` 概览已覆盖初始连接结果，避免与
+    /// 逐台上线事件重复（初始化未完成时，迟到的连接成功自然成为运行中变化）。
+    pub(crate) initialized: std::sync::atomic::AtomicBool,
+    /// 运行中状态变化的待注入文本缓冲（McpMiddleware::before_model drain 后
+    /// 以 Info 消息推送进模型上下文；全局缓冲，任一会话消费一次即清空）。
+    pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
+    /// 状态变化通知回调（装配时注入；发布 system-notification 给 TUI 通知面）。
+    notifier: parking_lot::RwLock<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+    /// OAuth 流程事件回调（装配时注入；`AuthorizationNeeded` 需把
+    /// `callback_tx` 注册进 `pending_oauth_callbacks` 供授权码回传 RPC 投递，
+    /// 其余事件转发为 ACP `oauth-needed` / `oauth-completed` / `oauth-failed`）。
+    oauth_event_callback: parking_lot::RwLock<Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>>>,
+    /// 待完成 OAuth 授权的回调通道（key: server_name）。TUI 经
+    /// `mcp/oauth_callback` RPC 回传授权码时由 host 装配面查表投递。
+    pending_oauth_callbacks:
+        parking_lot::Mutex<HashMap<String, tokio::sync::oneshot::Sender<OAuthCallbackResult>>>,
+}
+
+/// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
+pub(crate) fn status_change_text(name: &str, status: &ClientStatus, tool_count: usize) -> String {
+    match status {
+        ClientStatus::Connected => {
+            format!("MCP: {name} connected ({tool_count} tools)")
+        }
+        ClientStatus::Failed(reason) => {
+            format!("MCP: {name} failed: {reason}")
+        }
+        ClientStatus::Disconnected => {
+            format!("MCP: {name} disconnected")
+        }
+        ClientStatus::Disabled => {
+            format!("MCP: {name} disabled")
+        }
+        ClientStatus::Uninitialized => {
+            format!("MCP: {name} uninitialized")
+        }
+    }
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -156,12 +195,69 @@ impl McpClientPool {
             configs: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
             init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
+            initialized: std::sync::atomic::AtomicBool::new(false),
+            pending_changes: parking_lot::Mutex::new(Vec::new()),
+            notifier: parking_lot::RwLock::new(None),
+            oauth_event_callback: parking_lot::RwLock::new(None),
+            pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
         Self::new_pending()
+    }
+
+    /// 注入 OAuth 流程事件回调（host 装配面在 `run_initialize` 前调用；
+    /// 回调负责把 `AuthorizationNeeded` 的 `callback_tx` 注册进
+    /// `pending_oauth_callbacks`，并将事件转发为 ACP 通知）。
+    pub fn set_oauth_event_callback<F>(&self, callback: F)
+    where
+        F: Fn(OAuthFlowEvent) + Send + Sync + 'static,
+    {
+        *self.oauth_event_callback.write() = Some(Arc::new(callback));
+    }
+
+    /// 读取 OAuth 流程事件回调（spawn 授权任务时克隆给 `OAuthFlowManager`）。
+    pub(crate) fn oauth_event_callback(&self) -> Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>> {
+        self.oauth_event_callback.read().clone()
+    }
+
+    /// 注册待完成 OAuth 授权的回调通道（`AuthorizationNeeded` 事件处理时调用）。
+    pub fn register_oauth_callback(
+        &self,
+        server_name: &str,
+        callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
+    ) {
+        self.pending_oauth_callbacks
+            .lock()
+            .insert(server_name.to_string(), callback_tx);
+    }
+
+    /// 投递授权码回传（`mcp/oauth_callback` RPC 调用）：查表取 `callback_tx`
+    /// 投递 `{code, state}`；无 pending 通道返回错误。
+    pub fn deliver_oauth_callback(
+        &self,
+        server_name: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        let tx = self
+            .pending_oauth_callbacks
+            .lock()
+            .remove(server_name)
+            .ok_or_else(|| format!("{server_name} 无进行中的 OAuth 授权"))?;
+        tx.send(OAuthCallbackResult { code, state })
+            .map_err(|_| format!("{server_name} OAuth 授权流程已结束"))
+    }
+
+    /// 取消进行中的 OAuth 授权（`mcp/oauth_cancel` RPC 调用）：移除 pending
+    /// 通道并 drop sender，后台 `run_oauth_flow` 收到 Cancelled 终止。
+    pub fn cancel_oauth_callback(&self, server_name: &str) -> bool {
+        self.pending_oauth_callbacks
+            .lock()
+            .remove(server_name)
+            .is_some()
     }
 
     /// 查询指定 server 的插件来源标识，非插件 server 返回 None
@@ -177,6 +273,7 @@ impl McpClientPool {
             .get(name)
             .map(|c| (c.source.clone(), c.url.clone()))
             .unwrap_or((None, None));
+        let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
         pool.clients.write().insert(
             name.to_string(),
             Arc::new(McpClientHandle {
@@ -191,6 +288,7 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+        pool.record_status_change(name, old_status.as_ref());
         peri_agent::metrics::emit(
             "mcp.error",
             serde_json::json!({
@@ -212,6 +310,7 @@ impl McpClientPool {
             .get(name)
             .map(|c| (c.source.clone(), c.url.clone()))
             .unwrap_or((None, None));
+        let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
         pool.clients.write().insert(
             name.to_string(),
             Arc::new(McpClientHandle {
@@ -226,6 +325,7 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+        pool.record_status_change(name, old_status.as_ref());
     }
 
     /// 检测错误是否为 HTTP 401 认证错误
@@ -400,6 +500,54 @@ impl McpClientPool {
         for (_name, mut svc) in self.services.lock().await.drain() {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+    }
+
+    // ── 状态变化统一出口（上下线通知） ──────────────────────────────────────
+
+    /// 标记初始化完成。此后发生的状态变化才产生上下线通知（初始化期间的
+    /// 连接结果由首 turn 概览覆盖，不逐条通知）。
+    pub fn mark_initialized(&self) {
+        self.initialized
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 记录一次状态变化（统一出口）。
+    ///
+    /// `old` 为调用方在修改客户端表**之前**捕获的旧状态；`None` 表示表内
+    /// 此前不存在（首次插入/重建，无"变化"语义，不通知）。调用方完成
+    /// 状态写入后调用本方法。
+    ///
+    /// 仅当：初始化已完成 + 表内存在且状态确实变化时，生成一行通知文本
+    /// （`status_change_text`）写入 `pending_changes` 缓冲（McpMiddleware
+    /// 经 before_model drain 后以 Info 消息推送进模型上下文），并调用
+    /// notifier 回调（发布 system-notification 给 TUI 通知面）。
+    pub(crate) fn record_status_change(&self, name: &str, old: Option<&ClientStatus>) {
+        if !self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(old) = old else { return };
+        let clients = self.clients.read();
+        let Some(handle) = clients.get(name) else {
+            return;
+        };
+        if &handle.status == old {
+            return;
+        }
+        let text = status_change_text(name, &handle.status, handle.tools.len());
+        self.pending_changes.lock().push(text.clone());
+        if let Some(notifier) = self.notifier.read().as_ref() {
+            notifier(&text);
+        }
+    }
+
+    /// 注入状态变化通知回调（发布 system-notification 事件；装配时调用）。
+    pub fn set_notifier(&self, notifier: Box<dyn Fn(&str) + Send + Sync>) {
+        *self.notifier.write() = Some(notifier);
+    }
+
+    /// 取出待注入的状态变化文本（McpMiddleware::before_model 调用；恰好一次）。
+    pub(crate) fn drain_pending_changes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_changes.lock())
     }
 }
 

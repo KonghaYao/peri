@@ -9,6 +9,7 @@ use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::thread::ThreadMeta;
 use peri_agent::thread::FilesystemThreadStore;
 use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
@@ -101,6 +102,8 @@ fn make_server_config(
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,
         mcp_pool: None,
+        oauth_event_tx: None,
+        oauth_event_rx: None,
         channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_agent_dirs: Vec::new(),
@@ -934,5 +937,227 @@ async fn test_resume_targets_requested_session() {
         err.message.contains("session not found"),
         "会话不存在应报 session not found，实际: {}",
         err.message
+    );
+}
+
+// ── session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）──
+
+/// 删除后：响应为空对象、线程从 store 移除（load_meta 报错）、活跃会话从
+/// sessions 表清理。
+#[tokio::test]
+async fn test_delete_removes_thread_and_active_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    // 真实创建线程（id 即 session id）
+    let thread_id = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .unwrap();
+    let sid = thread_id.clone();
+
+    // 活跃会话登记（与 session/new 后的内存态一致）
+    register_session_with_workflow(&mut sessions, &sid, cwd);
+
+    let resp = handle_request(
+        "session/delete",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/delete 应成功");
+
+    // 标准响应为空对象
+    assert_eq!(
+        resp,
+        serde_json::json!({}),
+        "标准 session/delete 响应为 {{}}"
+    );
+
+    // 活跃会话已清理
+    assert!(
+        !sessions.contains_key(&sid),
+        "删除后活跃会话应从 sessions 表移除"
+    );
+
+    // 线程已从 store 持久化删除（元数据不存在 + 列表不再包含）
+    assert!(
+        cfg.thread_store.load_meta(&sid).await.is_err(),
+        "删除后线程元数据不应存在"
+    );
+    let remaining = cfg.thread_store.list_threads().await.unwrap();
+    assert!(
+        !remaining.iter().any(|m| m.id == sid),
+        "删除后 session/list 不应再包含该线程"
+    );
+}
+
+/// 删除不存在的线程：幂等成功（存储层不报错，历史不存在视为已删除）。
+#[tokio::test]
+async fn test_delete_unknown_session_is_idempotent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+
+    let resp = handle_request(
+        "session/delete",
+        &json!({ "sessionId": "never-existed" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("删除不存在的会话应幂等成功");
+    assert_eq!(resp, serde_json::json!({}));
+}
+
+/// 缺失 sessionId → -32602 Invalid params。
+#[tokio::test]
+async fn test_delete_missing_session_id_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+
+    let err = handle_request(
+        "session/delete",
+        &json!({}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报 -32602，实际: {}",
+        err.message
+    );
+}
+
+// ── M2 回归：进程内 session/delete 必须 shutdown LSP pool ────────────────────
+
+/// 记录 shutdown 调用的 mock LSP pool。
+struct MockLspPool {
+    shutdown_calls: Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::LspPoolPort for MockLspPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    async fn shutdown(&self) {
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 删除活跃会话（带 lsp_pool）时必须在锁外 shutdown pool，与 stdio 路径一致，
+/// 避免 LSP 服务器子进程/read task 残留（M2；此前进程内路径直接丢弃 pool）。
+#[tokio::test]
+async fn test_delete_active_session_shuts_down_lsp_pool() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    // 真实创建线程（id 即 session id），与 delete 分支的 thread_store 删除对应
+    let sid = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .unwrap();
+
+    let shutdown_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let pool: Arc<dyn peri_acp_types::ports::LspPoolPort> = Arc::new(MockLspPool {
+        shutdown_calls: Arc::clone(&shutdown_calls),
+    });
+
+    // 构造带 lsp_pool 的活跃会话（其余字段与 register_session_with_workflow 一致）
+    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
+    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
+    let mw = Arc::new(WorkflowMiddleware::new(
+        executor,
+        cwd,
+        notification_tx,
+        None,
+    ));
+    sessions.insert(
+        sid.clone(),
+        SessionState {
+            session_id: sid.clone(),
+            thread_id: sid.clone(),
+            cwd: cwd.to_string(),
+            history: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
+            lsp_pool: Some(pool),
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            lease: crate::host::lease::WriterLease::acquired("default"),
+        },
+    );
+
+    let resp = handle_request(
+        "session/delete",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/delete 应成功");
+    assert_eq!(resp, serde_json::json!({}));
+    assert!(
+        !sessions.contains_key(&sid),
+        "删除后活跃会话应从 sessions 表移除"
+    );
+    assert_eq!(
+        shutdown_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "删除活跃会话必须 shutdown LSP pool（M2）"
     );
 }

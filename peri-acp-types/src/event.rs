@@ -305,6 +305,33 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
+    /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
+    /// 通道送达 TUI 显示为 system-notification 通知。
+    ///
+    /// 由 middlewares（如 McpMiddleware）通过 session 级事件发送端注入；
+    /// level 取值与 TUI `SystemNotification.level` 一致（info/warn/error）。
+    SystemNotification {
+        text: String,
+        #[serde(default)]
+        level: String,
+    },
+    /// MCP OAuth 授权需要用户交互（展示授权 URL / 弹 popup）。
+    ///
+    /// 由 McpClientPool 授权流程（`OAuthFlowManager`）经 host 装配面事件
+    /// 回调产生，经 peri/agent_event 通道送达 TUI 打开 OAuthPopup。
+    OauthNeeded {
+        server_name: String,
+        auth_url: String,
+    },
+    /// MCP OAuth 授权完成（服务器已成功重连或恢复凭证）。
+    OauthCompleted {
+        server_name: String,
+    },
+    /// MCP OAuth 授权失败/取消/超时。
+    OauthFailed {
+        server_name: String,
+        error: String,
+    },
     /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
     AiReasoning {
         message_id: crate::messages::MessageId,

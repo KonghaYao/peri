@@ -10,7 +10,7 @@ serde_json.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
-base64 = { version = "0.22", features = ["alloc"] }
+base64 = { version = "0.23.1", features = ["alloc"] }
 tracing.workspace = true
 
 [dev-dependencies]

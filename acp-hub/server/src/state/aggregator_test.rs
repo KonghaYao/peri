@@ -29,6 +29,7 @@ fn ev(chat: &str, seq: u64, body: EventBody) -> NormalizedEvent {
         chat_id: chat.to_string(),
         seq,
         epoch: 0,
+        ts: "2026-08-07T00:00:00Z".to_string(),
         body,
     }
 }
@@ -103,7 +104,7 @@ fn tool_call_count(pair: &DocPair) -> usize {
 }
 
 fn permission_count(pair: &DocPair) -> usize {
-    let txn = pair.control.transact();
+    let txn = pair.session.transact();
     chat_writer::root_map_read(&txn)
         .and_then(|root| root.get(&txn, "pending_permissions"))
         .and_then(|v| v.cast::<yrs::MapRef>().ok())
@@ -112,26 +113,23 @@ fn permission_count(pair: &DocPair) -> usize {
 }
 
 fn active_turn_status(pair: &DocPair) -> Option<TurnStatus> {
-    let txn = pair.control.transact();
-    chat_writer::root_map_read(&txn)?
-        .get(&txn, "active_turn")?
+    let txn = pair.session.transact();
+    let sm = chat_writer::root_map_read(&txn)?
+        .get(&txn, "session")?
         .cast::<yrs::MapRef>()
-        .ok()
-        .map(|m| {
-            m.get(&txn, "turn_status")
-                .and_then(|s| s.cast::<String>().ok())
-                .map(|s| match s.as_str() {
-                    "accepting" => TurnStatus::Accepting,
-                    "running" => TurnStatus::Running,
-                    "awaitingPermission" => TurnStatus::AwaitingPermission,
-                    "cancelling" => TurnStatus::Cancelling,
-                    "completed" => TurnStatus::Completed,
-                    "cancelled" => TurnStatus::Cancelled,
-                    "interrupted" => TurnStatus::Interrupted,
-                    "failed" => TurnStatus::Failed,
-                    _ => TurnStatus::Accepting,
-                })
-                .unwrap_or(TurnStatus::Accepting)
+        .ok()?;
+    sm.get(&txn, "active_turn_status")
+        .and_then(|s| s.cast::<String>().ok())
+        .map(|s| match s.as_str() {
+            "accepting" => TurnStatus::Accepting,
+            "running" => TurnStatus::Running,
+            "awaitingPermission" => TurnStatus::AwaitingPermission,
+            "cancelling" => TurnStatus::Cancelling,
+            "completed" => TurnStatus::Completed,
+            "cancelled" => TurnStatus::Cancelled,
+            "interrupted" => TurnStatus::Interrupted,
+            "failed" => TurnStatus::Failed,
+            _ => TurnStatus::Accepting,
         })
 }
 
@@ -239,7 +237,7 @@ fn cancelling_turn_drops_late_deltas() {
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
     // 手动置 cancelling（命令路径通常如此；此处直接写 active_turn）。
     {
-        let mut txn = p.control_txn();
+        let mut txn = p.session_txn();
         let root = txn.get_or_insert_map(ROOT);
         chat_writer::set_active_turn(
             &mut txn,
@@ -343,6 +341,7 @@ fn epoch_mismatch_marks_uncalibratable_and_rejects() {
         chat_id: "s1".into(),
         seq: 2,
         epoch: 1,
+        ts: "2026-08-07T00:00:00Z".to_string(),
         body: user_msg("t2", "t2:user", "b"),
     };
     let r = agg.apply(&mut p, &e);
@@ -356,6 +355,7 @@ fn epoch_mismatch_marks_uncalibratable_and_rejects() {
             chat_id: "s1".into(),
             seq: 3,
             epoch: 1,
+            ts: "2026-08-07T00:00:00Z".to_string(),
             body: user_msg("t3", "t3:user", "c"),
         },
     );
@@ -375,7 +375,7 @@ fn fresh_chat_first_event_adopts_epoch_baseline() {
     // 命令路径先注册 active_turn（prompt committed 时 register_user_entry
     // 置 accepting，§7.2）。
     {
-        let mut txn = p.control_txn();
+        let mut txn = p.session_txn();
         let root = txn.get_or_insert_map(ROOT);
         chat_writer::set_active_turn(
             &mut txn,
@@ -395,6 +395,7 @@ fn fresh_chat_first_event_adopts_epoch_baseline() {
             chat_id: "s1".into(),
             seq: 3,
             epoch: 1,
+            ts: "2026-08-07T00:00:00Z".to_string(),
             body: msg_delta("t1", "t1:assistant", "b1", "chunk_1"),
         },
     );
@@ -409,6 +410,7 @@ fn fresh_chat_first_event_adopts_epoch_baseline() {
             chat_id: "s1".into(),
             seq: 5,
             epoch: 1,
+            ts: "2026-08-07T00:00:00Z".to_string(),
             body: turn_terminal("t1", TurnStatus::Cancelled),
         },
     );
@@ -534,33 +536,33 @@ fn chat_transaction_precedes_control() {
     // 注册观察：记录 update 提交顺序（经观察回调，与 DocManager 同路径）。
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let doc_chat = p.chat.clone();
-    let doc_control = p.control.clone();
+    let doc_session = p.session.clone();
     let tx_chat = tx.clone();
-    let tx_control = tx;
+    let tx_session = tx;
     let _sub1 = doc_chat
         .observe_update_v1(move |_, e| {
             let _ = tx_chat.send(format!("chat:{}", e.update.len()));
         })
         .unwrap();
-    let _sub2 = doc_control
+    let _sub2 = doc_session
         .observe_update_v1(move |_, e| {
-            let _ = tx_control.send(format!("control:{}", e.update.len()));
+            let _ = tx_session.send(format!("session:{}", e.update.len()));
         })
         .unwrap();
 
     let mut agg = Aggregator;
-    // user_message 同时写 chat（entry）+ control（active_turn）。
+    // user_message 同时写 chat（entry）+ session（active_turn）。
     assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
-    // 顺序断言：chat update 先于 control update。
+    // 顺序断言：chat update 先于 session update。
     let mut seqs = Vec::new();
     while let Ok(s) = rx.try_recv() {
         seqs.push(s);
     }
     let chat_idx = seqs.iter().position(|s| s.starts_with("chat:")).unwrap();
-    let control_idx = seqs.iter().position(|s| s.starts_with("control:")).unwrap();
+    let control_idx = seqs.iter().position(|s| s.starts_with("session:")).unwrap();
     assert!(
         chat_idx < control_idx,
-        "chat 事务必须先于 control 事务，got {seqs:?}"
+        "chat 事务必须先于 session 事务，got {seqs:?}"
     );
 }
 
@@ -677,6 +679,8 @@ fn session_list_full_sync_removes_stale() {
         title: title.to_string(),
         status: "completed".to_string(),
         updated_at: "2026-08-07T00:00:00Z".to_string(),
+        cwd: String::new(),
+        bound_chat_id: None,
     };
     // 第一轮：s1/s2。
     assert!(agg
@@ -696,7 +700,7 @@ fn session_list_full_sync_removes_stale() {
             })
         )
         .applied);
-    let txn = p.control.transact();
+    let txn = p.session.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
     let sessions = root.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().unwrap();
     let keys: std::collections::BTreeSet<&str> = sessions
@@ -737,4 +741,286 @@ fn projection_version_increments_per_apply() {
 fn session_status_str_matches_schema() {
     assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Active), "active");
     assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Crashed), "crashed");
+}
+
+// ---------------------------------------------------------------------------
+// 15. 权限 → turn 状态推进（§7.2 状态机：accepting → running ⇄
+//     awaitingPermission → terminal；对齐参考实现 resolve/expire 语义）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn permission_requested_advances_turn_to_awaiting_permission() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Accepting));
+    // 权限请求发出 → 宿主等待决议（accepting → awaitingPermission）。
+    assert!(agg
+        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+        .applied);
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission)
+    );
+    // 无关 turn 的权限请求被拒绝（防御：judge 终态守卫按 active_turn 校验），
+    // 状态不受影响。
+    let r = agg.apply(&mut p, &ev("s1", 3, permission_requested("p9", "t9")));
+    assert!(!r.applied, "无关 turn 的权限请求应拒绝");
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission)
+    );
+}
+
+#[test]
+fn permission_resolved_last_pending_advances_turn_to_running() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(agg
+        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+        .applied);
+    assert!(agg
+        .apply(&mut p, &ev("s1", 3, permission_requested("p2", "t1")))
+        .applied);
+    assert_eq!(permission_count(&p), 2);
+    // 决议 p1：仍有 p2 pending → 保持 awaitingPermission。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 4, EventBody::PermissionResolved {
+            permission_id: "p1".into(),
+            decision: PermissionDecision::Allow,
+        }),
+    );
+    assert!(r.applied);
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission)
+    );
+    // 决议 p2：无 pending → awaitingPermission → running（参考实现
+    // resolve(allow) 语义）。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 5, EventBody::PermissionResolved {
+            permission_id: "p2".into(),
+            decision: PermissionDecision::Allow,
+        }),
+    );
+    assert!(r.applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
+    assert_eq!(permission_count(&p), 2, "已决议条目保留（幂等面）");
+}
+
+#[test]
+fn permission_expired_last_pending_cancels_turn() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(agg
+        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+        .applied);
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission)
+    );
+    // 未决议权限过期 → 该 turn 取消（参考实现 expire 语义）。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 3, EventBody::PermissionExpired {
+            permission_id: "p1".into(),
+        }),
+    );
+    assert!(r.applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
+    // 终态后晚到决议不再推进（守卫；状态已 cancelled，set_active_turn_status_if
+    // 条件不满足）。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 4, EventBody::PermissionResolved {
+            permission_id: "p1".into(),
+            decision: PermissionDecision::Allow,
+        }),
+    );
+    assert!(r.applied, "CAS 幂等：已 expired 的决议 applied（不迁移）");
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
+}
+
+#[test]
+fn content_delta_advances_turn_from_accepting_to_running() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Accepting));
+    // 首条内容增量 → accepting → running（参考实现：首条内容即 turn 开始
+    // 运行）。
+    assert!(agg
+        .apply(&mut p, &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "chunk")))
+        .applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
+    // 后续增量不再迁移（已 running，条件不满足；状态保持）。
+    assert!(agg
+        .apply(&mut p, &ev("s1", 3, msg_delta("t1", "t1:assistant", "b1", "more")))
+        .applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
+    // awaitingPermission 状态下增量到达不覆盖（等决议语义，§7.2）。
+    assert!(agg
+        .apply(&mut p, &ev("s1", 4, permission_requested("p1", "t1")))
+        .applied);
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission)
+    );
+    assert!(agg
+        .apply(&mut p, &ev("s1", 5, msg_delta("t1", "t1:assistant", "b1", "after-perm")))
+        .applied);
+    assert_eq!(
+        active_turn_status(&p),
+        Some(TurnStatus::AwaitingPermission),
+        "等待决议期间增量不推进状态"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. 回放合成（§8.5 REPLAY_NEEDS_TURN）：历史首帧即为 agent 增量时合成
+//     空文本 user 占位 turn，杜绝空 id 垃圾条目
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replay_first_delta_synthesizes_placeholder_turn() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 进入回放模式（BeginLoadReplay 命令路径的等价状态；聚合器测试直接
+    // 操作内存 stream）。
+    p.stream.replay_active = true;
+    p.stream.replay_turn = None;
+    p.stream.replay_turns.clear();
+    // 首事件即 agent 增量（无 user 先行）——按参考 REPLAY_NEEDS_TURN
+    // 合成空文本 user 占位 turn 后归位。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 1, EventBody::MessageDelta {
+            turn_id: String::new(),
+            entry_id: String::new(),
+            block_id: String::new(),
+            text: "chunk_1".into(),
+        }),
+    );
+    assert!(r.applied);
+    // 占位 turn 已建立：user 占位 + assistant 增量两条 entry，无空 id。
+    assert_eq!(entry_count(&p), 2);
+    let txn = p.chat.transact();
+    let entries = chat_writer::root_map_read(&txn)
+        .unwrap()
+        .get(&txn, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    for key in entries.keys(&txn) {
+        assert!(!key.is_empty(), "回放增量不得产生空 id 条目");
+    }
+    assert!(p.stream.replay_turn.is_some());
+    drop(txn);
+    // 后续同 turn 增量归位到同一占位 turn（不重复合成）。
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 2, EventBody::ReasoningDelta {
+            turn_id: String::new(),
+            entry_id: String::new(),
+            block_id: String::new(),
+            text: "thinking".into(),
+            visibility: BlockVisibility::Summary,
+        }),
+    );
+    assert!(r.applied);
+    assert_eq!(entry_count(&p), 2, "同 turn 增量不重复合成");
+}
+
+// ---------------------------------------------------------------------------
+// 17. AgentConfig/AgentUsage → Control Doc agent map（跨任务契约 §1）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_config_partial_update_none_keeps_existing() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 首轮写入 model/effort。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 1, EventBody::AgentConfig {
+                model: Some("claude-sonnet-4-5".into()),
+                effort: Some("high".into()),
+            })
+        )
+        .applied);
+    // 部分更新：model 为 None 不覆盖既有值，effort 更新。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 2, EventBody::AgentConfig {
+                model: None,
+                effort: Some("low".into()),
+            })
+        )
+        .applied);
+    let txn = p.session.transact();
+    let root = chat_writer::root_map_read(&txn).unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
+        "claude-sonnet-4-5",
+        "None 不覆盖 model"
+    );
+    assert_eq!(
+        agent.get(&txn, "effort").unwrap().cast::<String>().unwrap(),
+        "low",
+        "effort 部分更新"
+    );
+    let _ = root;
+}
+
+#[test]
+fn agent_usage_snapshot_overwrites() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    // 先经 AgentStatus 写模型/用量，再被 usage_update 快照覆盖。
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 1, EventBody::AgentStatus {
+                status: "running".into(),
+                public_error: None,
+                model: Some("claude-sonnet-4-5".into()),
+                context_window: Some(200_000),
+                context_used: Some(42_000),
+            })
+        )
+        .applied);
+    assert!(agg
+        .apply(
+            &mut p,
+            &ev("s1", 2, EventBody::AgentUsage {
+                context_window: 200_000,
+                context_used: 88_888,
+            })
+        )
+        .applied);
+    let txn = p.session.transact();
+    let root = chat_writer::root_map_read(&txn).unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
+        "claude-sonnet-4-5",
+        "usage_update 不动 model"
+    );
+    assert_eq!(
+        agent.get(&txn, "context_window").unwrap().cast::<u32>().unwrap(),
+        200_000
+    );
+    assert_eq!(
+        agent.get(&txn, "context_used").unwrap().cast::<u32>().unwrap(),
+        88_888,
+        "usage_update 全量覆盖 context_used"
+    );
+    let _ = root;
 }

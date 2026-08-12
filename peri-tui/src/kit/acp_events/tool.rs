@@ -27,7 +27,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
                 entry.current_tool = Some(ts.tool_name.clone());
             }
             state.variant = 1;
-            state.phase = SessionPhase::PromptRunning;
+            // bg 工具事件不触碰 phase（Issue 2026-08-12）：仅更新 BG_DISPLAY，
+            // 主 agent 已空闲（TurnSuspended → Idle）时不得拉回 loading。
             super::render::push_view_models(state);
             // block 模式：ToolStarted 时已推送缓冲文本到视图，
             // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
@@ -109,7 +110,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
                 entry.tool_count += 1;
             }
             state.variant = 1;
-            state.phase = SessionPhase::PromptRunning;
+            // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             super::render::push_view_models(state);
             state.last_pushed_text_len = state.current_turn.text.chars().count();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();

@@ -46,6 +46,7 @@ pub mod submit_consumer;
 pub mod submit_request;
 pub mod terminal_caps;
 pub mod text_selection;
+pub mod text_util;
 pub mod thread_load_consumer;
 pub mod tool_display;
 pub mod tool_semantics;

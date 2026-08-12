@@ -367,6 +367,10 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::AgentExecutionFailed { .. }
             | ExecutorEvent::RewindError { .. }
             | ExecutorEvent::TurnSuspended { .. }
+            | ExecutorEvent::SystemNotification { .. }
+            | ExecutorEvent::OauthNeeded { .. }
+            | ExecutorEvent::OauthCompleted { .. }
+            | ExecutorEvent::OauthFailed { .. }
             | ExecutorEvent::BgRegistryEvent(_) => None,
         }
     }

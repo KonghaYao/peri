@@ -33,7 +33,7 @@
     "diff": {
       "add": "#4a8c4a",
       "remove": "#c4554a",
-      "hunk": "#6b8fa3",
+      "hunk": "#5f8398",
       "add_bg": "#e6f2e0",
       "remove_bg": "#fce8e6",
       "add_word_bg": "#b8d8a8",
@@ -41,48 +41,48 @@
     }
   },
   "semantic": {
-    "accent": "#d97757",
+    "accent": "#c05a38",
     "text": {
-      "primary": "#3f3e3a",
+      "primary": "#666561",
       "muted": "#6b6a64",
-      "dim": "#9c9a92"
+      "dim": "#8f8d83"
     },
     "border": {
-      "default": "#dedcd1",
+      "default": "#a9a698",
       "active": "$semantic.accent",
       "dim": "#edece4"
     },
     "status": {
-      "running": "#6b8fa3",
+      "running": "#5f8398",
       "success": "#4a8c4a",
       "warning": "#c47d25",
       "error": "#c4554a"
     },
     "surface": {
       "default": "#faf9f5",
-      "user": "#f2f0ea",
-      "popup": "#faf9f5",
-      "selection": "#ccdbe8",
-      "cursor": "#f2f0ea"
+      "user": "#e6e2d8",
+      "popup": "#ffffff",
+      "selection": "#b9cfe4",
+      "cursor": "#e6e2d8"
     },
     "diff": {
       "add": "#4a8c4a",
       "remove": "#c4554a",
-      "hunk": "#6b8fa3",
+      "hunk": "#5f8398",
       "add_bg": "#e6f2e0",
       "remove_bg": "#fce8e6",
       "add_word_bg": "#b8d8a8",
       "remove_word_bg": "#f5c4c0"
     },
-    "loading": "#6b8fa3",
-    "thinking": "#6b8fa3",
-    "model_info": "#d97757",
+    "loading": "#5f8398",
+    "thinking": "#5f8398",
+    "model_info": "#c05a38",
     "bash_border": "#c4554a",
     "selected_fg": "#141413"
   },
   "component": {
     "message": {
-      "user_bg": "#f2f0ea",
+      "user_bg": "#e6e2d8",
       "ai_prefix": "$semantic.text.primary",
       "tool_indicator": "#4a8c4a",
       "reasoning": "$semantic.thinking"
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#faf9f5",
+      "bg": "#ffffff",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -126,7 +126,7 @@
     },
     "markdown": {
       "text": "$semantic.text.primary",
-      "code": "#d97757",
+      "code": "#c05a38",
       "quote": "$semantic.text.muted"
     },
     "scrollbar": {

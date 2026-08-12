@@ -67,6 +67,22 @@ pub trait Middleware: Send + Sync {
         Ok(())
     }
 
+    /// 首轮用户 turn 的一次性受控通知（可选实现）。
+    ///
+    /// Executor 仅在首个模型可见 turn（history 为空且非 continuation/keepgoing）
+    /// 的 Prompt 消息之前调用一次，收集所有中间件的非空文本并作为 Info 消息
+    /// （`<system-reminder>` 包裹）先行入队——首轮 Receive 即消费，模型首轮
+    /// 可见。
+    ///
+    /// 约定：文本应短小精炼（摘要级）；返回 `None` 表示无贡献。纯生成无记账——
+    /// 入队前失败/取消不产生副作用，下个首 turn 重新生成即可。
+    async fn first_turn_reminder(
+        &self,
+        _state: &mut dyn MiddlewareState,
+    ) -> AgentResult<Option<String>> {
+        Ok(None)
+    }
+
     /// 工具调用前调用
     /// 返回可能被修改的 ToolCall（用于参数注入、权限检查等）
     async fn before_tool(

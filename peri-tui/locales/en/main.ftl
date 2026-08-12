@@ -378,6 +378,7 @@ mcp-action-enable = Enable
 # OAuth Messages
 mcp-oauth-completed = [i] OAuth authorization completed: { $server }
 mcp-oauth-failed = [i] OAuth authorization failed: { $server } - { $error }
+mcp-oauth-restored = [i] Connected with saved credentials: { $server }
 mcp-clear-auth-ok = [i] OAuth credentials cleared: { $server }
 mcp-clear-auth-failed = [i] Failed to clear OAuth credentials: { $server }
 mcp-action-ok = [i] Action completed: { $server }
@@ -558,6 +559,8 @@ thread-browser-time-minutes = { $count } minute{ $suffix } ago
 thread-browser-time-hours = { $count } hour{ $suffix } ago
 thread-browser-time-days = { $count } day{ $suffix } ago
 panel-threads-header-hint =   Enter::open · Esc::close
+panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  d::delete  Esc::close
+panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind Popup ----
 
@@ -591,9 +594,15 @@ rewind-execute-failed = Rewind failed: { $error }
 # ---- OAuth Popup ----
 
 oauth-title =  OAuth Authorization — { $server } 
-oauth-prompt = Press Ctrl+O to open in browser, then paste callback URL:
-oauth-callback-label = Callback URL > 
-popup-oauth-action-hint =   Ctrl+O: open in browser  |  Enter: close  |  Esc: cancel
+oauth-prompt = Choose "Open browser" to authorize, then paste the authorization code into the input:
+oauth-callback-label = Authorization code > 
+oauth-btn-open = Open browser
+oauth-btn-copy = Copy link
+oauth-btn-cancel = Cancel
+oauth-hint-btn-focus =   ←→: select button  |  Enter: activate  |  Tab: type code  |  Esc: cancel
+oauth-hint-input-focus =   Paste authorization code, Enter to submit  |  Tab: buttons  |  Esc: cancel
+oauth-copied-hint =   ✓ Link copied (open it in your browser)
+oauth-opened-hint =   Browser opened — if not, copy the link and open manually
 
 # ---- Login Panel ----
 
@@ -844,6 +853,13 @@ panel-mcp-connected =    { $connected }/{ $total } connected
 panel-mcp-empty =   No MCP servers configured
 panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-needs-auth =  [needs auth]
+panel-mcp-oauth-hint =   Enter: open auth detail  |  Esc: close
+# MCP panel detail view (OAuth authorize entry)
+panel-mcp-detail-url = URL:
+panel-mcp-detail-btn-auth = Authorize
+panel-mcp-detail-btn-back = Back
+panel-mcp-detail-hint =   Enter: authorize  |  Esc: back to list  |  ←→: select button
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯

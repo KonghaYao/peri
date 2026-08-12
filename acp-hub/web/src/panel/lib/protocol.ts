@@ -15,7 +15,7 @@ export const DOC_REGISTRY = 'hub:registry';
 
 /** chat 派生 doc id（订阅字段透明字符串，前缀区分投影）。 */
 export const chatDoc = (sid: string): string => `chat:${sid}`;
-export const controlDoc = (sid: string): string => `control:${sid}`;
+export const sessionDoc = (sid: string): string => `session:${sid}`;
 
 /** action 幂等键：crypto.randomUUID（浏览器全局；localhost/https 下可用）。 */
 export const newCommandId = (): string => crypto.randomUUID();
@@ -48,19 +48,54 @@ export const action = (type: string, payload: Record<string, unknown>) => ({
 });
 
 /** 新建对话：三字段全可选（缺省 = 本机）。committed ack 携带的 chatId
- *  是 server 生成 id 的唯一告知路径 → main 据此自动补订阅并选中。 */
-export const createChat = (title?: string) => {
+ *  是 server 生成 id 的唯一告知路径 → main 据此自动补订阅并选中。
+ *
+ *  `acpSessionId`（ACP 历史会话 id，session/list 返回）：携带时 create 走
+ *  `session/load`（§8.5 历史恢复）——回放 ACP agent 磁盘会话内容到新对话。
+ *
+ *  `workspaceId`（归属工作区，§6.3 workspace 扩展）：携带时 cwd 继承自
+ *  workspace 定义（server 侧解析，不信任客户端直传 cwd）。 */
+export const createChat = (title?: string, acpSessionId?: string, workspaceId?: string) => {
   const payload: Record<string, unknown> = {};
   if (title) payload.title = title;
+  if (acpSessionId) payload.acpSessionId = acpSessionId;
+  if (workspaceId) payload.workspaceId = workspaceId;
   return action('chat/create', payload);
 };
 
-/** 发送消息（两阶段 ack：accepted → committed）。 */
-export const prompt = (chatId: string, message: string) =>
-  action('chat/prompt', { chatId, message });
+/** 新建工作区：定义本地目录 cwd，其下新建对话继承该目录（§6.3 workspace
+ *  扩展）。管理面命令（独立于 chat）：accepted → committed 直通，无队列。 */
+export const workspaceCreate = (name: string, cwd: string) =>
+  action('workspace/create', { name, cwd });
+
+/** 删除工作区定义（不影响已建对话/会话；仅移除 Registry Doc 条目）。 */
+export const workspaceRemove = (workspaceId: string) =>
+  action('workspace/remove', { workspaceId });
+
+/** 按需查询指定对话的 ACP 会话列表（§6.3）：server 从 chat record 解析
+ *  cwd 向 agent 侧发 session/list RPC，结果经 `session_list` 下行帧回投
+ *  （agent 侧是真实数据源，非轮询投影过滤）。 */
+export const sessionList = (chatId: string) => action('session/list', { chatId });
+
+/** §8.5 会话切换：在当前对话（其 ACP 进程）内 load 目标历史会话——
+ *  不新建对话/进程（会话是进程内实体；点击 SessionList 历史会话即切换）。 */
+export const loadChat = (chatId: string, acpSessionId: string) =>
+  action('chat/load', { chatId, acpSessionId });
+
+/** 发送消息（两阶段 ack：accepted → committed）。effort 为可选推理强度
+ *  （low|medium|high），非空才写入 payload（跨任务契约 §2）。 */
+export const prompt = (chatId: string, message: string, effort?: string) => {
+  const payload: Record<string, unknown> = { chatId, message };
+  if (effort) payload.effort = effort;
+  return action('chat/prompt', payload);
+};
 
 /** 取消当前 turn。 */
 export const cancel = (chatId: string) => action('chat/cancel', { chatId });
+
+/** 当前对话内新建 ACP 会话（§8.5 会话是进程内实体，不新建对话/进程）。
+ *  committed ack 后前端应刷新会话列表（tooltip「当前」标记更新）。 */
+export const sessionNew = (chatId: string) => action('chat/session-new', { chatId });
 
 /** 关闭对话。 */
 export const close = (chatId: string) => action('chat/close', { chatId });

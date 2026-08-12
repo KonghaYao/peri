@@ -1,5 +1,5 @@
 use peri_theme::atoms::THEME_ATOM;
-use pulldown_cmark::HeadingLevel;
+use pulldown_cmark_012::HeadingLevel;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui_kit_markdown::MarkdownTheme;

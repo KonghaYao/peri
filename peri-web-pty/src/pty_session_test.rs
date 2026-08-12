@@ -1,14 +1,19 @@
 #[cfg(target_os = "windows")]
 use super::pty_session::normalize_crlf;
 use super::pty_session::PtySession;
-use std::io::Read;
-use std::sync::mpsc;
+use std::io::{Read, Write};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 /// 跨平台获取测试用 shell。
+///
+/// Windows 上选用 cmd.exe 而非 powershell.exe：PowerShell 5.1 会对 stdout
+/// 做「是否重定向」检测，在 ConPTY 场景下输出编码/交互行为不稳定（历史 CI
+/// 上 3 个读取测试全部超时）。cmd.exe 的 echo/回显是纯字节流（OEM 编码下
+/// ASCII 内容不变形），是验证 ConPTY 读写链路的最稳 shell。
 fn test_shell() -> &'static str {
     if cfg!(target_os = "windows") {
-        "powershell.exe"
+        "cmd.exe"
     } else {
         std::env::var("SHELL")
             .unwrap_or_else(|_| "/bin/bash".to_string())
@@ -22,19 +27,45 @@ fn test_shell() -> &'static str {
 /// 颜色等），单次 read 往往只拿到 preamble 头部，读不到命令实际输出。
 /// 循环累积直到包含 `target`、EOF 或超时，才能稳定跨过 preamble。
 ///
+/// Windows 上 ConPTY（conhost）启动时会向宿主发送 DSR 光标位置查询
+/// `ESC[6n`，宿主不回复 `ESC[row;colR` 则 conhost 挂起，不输出任何子进程
+/// 内容（生产链路由 xterm.js 自动回复，测试需自行响应）。检测到该序列后
+/// 通过 `writer` 回复 `ESC[1;1R` 解除挂起。
+///
 /// 超时后读线程可能仍阻塞在 read 上，由测试进程退出时清理。
-fn drain_until(reader: Box<dyn Read + Send>, target: &str, timeout: Duration) -> String {
+/// 超时返回时，通过共享 buffer 带回已读到的部分数据，让断言消息能展示
+/// 真实输出内容（区分「完全无输出」与「读到数据但编码/内容不匹配」）。
+fn drain_until(
+    reader: Box<dyn Read + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    target: &str,
+    timeout: Duration,
+) -> String {
     let target = target.to_string();
     let (tx, rx) = mpsc::channel::<String>();
+    // 读线程与主线程共享累积结果：正常结束走 channel，超时路径从共享
+    // buffer 取 partial 输出，避免诊断信息在超时时丢失。
+    let shared = Arc::new(Mutex::new(String::new()));
+    let shared_task = shared.clone();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut accumulated = String::new();
+        let mut replied_dsr = false;
         let mut chunk = [0u8; 4096];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
-                    accumulated.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                    accumulated.push_str(&text);
+                    shared_task.lock().unwrap().push_str(&text);
+                    // ConPTY DSR 查询：\x1b[6n → 回复 \x1b[1;1R，仅启动时一次
+                    if !replied_dsr && accumulated.contains("\x1b[6n") {
+                        if let Ok(mut w) = writer.lock() {
+                            let _ = w.write_all(b"\x1b[1;1R");
+                        }
+                        replied_dsr = true;
+                    }
                     if accumulated.contains(&target) {
                         break;
                     }
@@ -44,7 +75,29 @@ fn drain_until(reader: Box<dyn Read + Send>, target: &str, timeout: Duration) ->
         }
         let _ = tx.send(accumulated);
     });
-    rx.recv_timeout(timeout).unwrap_or_default()
+    match rx.recv_timeout(timeout) {
+        Ok(s) => s,
+        Err(_) => shared.lock().unwrap().clone(),
+    }
+}
+
+/// 断言输出包含目标串；失败时附带 hex 预览。
+///
+/// UTF-16LE 等非 UTF-8 输出经 `from_utf8_lossy` 后字符间会夹 NUL 字节，
+/// `contains` 必然失败且字符串预览看不出原因，hex 预览可暴露真实字节。
+fn assert_contains(output: &str, target: &str, ctx: &str) {
+    assert!(
+        output.contains(target),
+        "{ctx}，实际: {output:?} (len={})\nhex 前 300 字节: {}",
+        output.len(),
+        output
+            .as_bytes()
+            .iter()
+            .take(300)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
 }
 
 #[test]
@@ -57,18 +110,9 @@ fn test_pty_session_spawn_returns_handles() {
 
 #[test]
 fn test_pty_session_read_receives_echo_output() {
-    // Windows: powershell -NoProfile -NoLogo -NonInteractive -Command "echo hello"
+    // Windows: cmd /C echo hello（cmd 输出为纯字节流，无 PowerShell 编码智能）
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        (
-            "powershell.exe",
-            vec![
-                "-NoProfile",
-                "-NoLogo",
-                "-NonInteractive",
-                "-Command",
-                "echo hello",
-            ],
-        )
+        ("cmd.exe", vec!["/C", "echo hello"])
     } else {
         ("bash", vec!["-c", "echo hello"])
     };
@@ -76,8 +120,9 @@ fn test_pty_session_read_receives_echo_output() {
     let (mut session, reader) =
         PtySession::spawn(shell, &args, 80, 24, None).expect("spawn 应成功");
 
-    let output = drain_until(reader, "hello", Duration::from_secs(10));
-    assert!(output.contains("hello"), "输出应包含 hello，实际: {output}");
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, "hello", Duration::from_secs(10));
+    assert_contains(&output, "hello", "输出应包含 hello");
 
     // 在 macOS 上 portable-pty 的 try_wait 需要等子进程被 waitpid 回收，
     // reader.read() 返回后进程未必已被回收，留出时间等待 reap
@@ -89,9 +134,9 @@ fn test_pty_session_read_receives_echo_output() {
 
 #[test]
 fn test_pty_session_write_feeds_stdin() {
-    // 用 cat / powershell 交互式回显
+    // 用 cat / cmd 交互式回显
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        ("powershell.exe", vec!["-NoProfile", "-NoLogo"])
+        ("cmd.exe", vec![])
     } else {
         ("cat", vec![])
     };
@@ -101,8 +146,9 @@ fn test_pty_session_write_feeds_stdin() {
 
     session.write(b"ping\n").expect("write 应成功");
 
-    let output = drain_until(reader, "ping", Duration::from_secs(10));
-    assert!(output.contains("ping"), "回显应包含 ping，实际: {output}");
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, "ping", Duration::from_secs(10));
+    assert_contains(&output, "ping", "回显应包含 ping");
 
     session.kill().expect("kill 应成功");
     drop(session);
@@ -127,16 +173,7 @@ fn test_pty_session_spawn_uses_cwd() {
         .expect("temp_dir 应有 file_name");
 
     let (shell, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
-        (
-            "powershell.exe",
-            vec![
-                "-NoProfile",
-                "-NoLogo",
-                "-NonInteractive",
-                "-Command",
-                "Get-Location",
-            ],
-        )
+        ("cmd.exe", vec!["/C", "cd"])
     } else {
         ("bash", vec!["-c", "pwd"])
     };
@@ -145,10 +182,12 @@ fn test_pty_session_spawn_uses_cwd() {
     let (session, reader) =
         PtySession::spawn(shell, &args, 80, 24, Some(&cwd_str)).expect("spawn 应成功");
 
-    let output = drain_until(reader, last_segment, Duration::from_secs(10));
-    assert!(
-        output.contains(last_segment),
-        "输出应包含 cwd 末段 {last_segment}，实际: {output}"
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, last_segment, Duration::from_secs(10));
+    assert_contains(
+        &output,
+        last_segment,
+        &format!("输出应包含 cwd 末段 {last_segment}"),
     );
 
     std::thread::sleep(Duration::from_millis(300));

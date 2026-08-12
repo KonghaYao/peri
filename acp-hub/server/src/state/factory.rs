@@ -4,7 +4,7 @@
 use yrs::{Map, Transact, WriteTxn};
 
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION, CONTROL_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION,
 };
 
 use crate::state::doc_pair::{DocPair, StreamState};
@@ -18,8 +18,8 @@ pub const ROOT: &str = "root";
 pub enum DocKind {
     /// Chat Doc（`chat:{chat_id}`，§5.3）。
     Chat,
-    /// Control Doc（`control:{chat_id}`，§5.4）。
-    Control,
+    /// Session Doc（`session:{chat_id}`，§5.4；Chat/Session 双 Doc 的会话面）。
+    Session,
     /// Registry Doc（`hub:registry`，§5.5）。
     Registry,
 }
@@ -41,7 +41,7 @@ pub enum FactoryError {
 pub struct Factory {
     /// 各 Doc 的当前 schema_version（proto 版本常量，§5.3/5.4/5.5）。
     chat_schema: u32,
-    control_schema: u32,
+    session_schema: u32,
     registry_schema: u32,
 }
 
@@ -50,22 +50,22 @@ impl Factory {
     pub fn new() -> Self {
         Factory {
             chat_schema: CHAT_DOC_SCHEMA_VERSION,
-            control_schema: CONTROL_DOC_SCHEMA_VERSION,
+            session_schema: SESSION_DOC_SCHEMA_VERSION,
             registry_schema: REGISTRY_DOC_SCHEMA_VERSION,
         }
     }
 
-    /// 创建空 Chat/Control Doc（M1 简化：直接建全结构，§6【决策】）。
+    /// 创建空 Chat/Session Doc（M1 简化：直接建全结构，§6【决策】）。
     pub fn create_chat_doc(&self) -> DocPair {
         let mut chat = yrs::Doc::new();
-        let mut control = yrs::Doc::new();
+        let mut session = yrs::Doc::new();
         self.ensure_schema(&mut chat, DocKind::Chat)
             .expect("create chat doc schema");
-        self.ensure_schema(&mut control, DocKind::Control)
-            .expect("create control doc schema");
+        self.ensure_schema(&mut session, DocKind::Session)
+            .expect("create session doc schema");
         DocPair {
             chat,
-            control,
+            session,
             stream: StreamState::default(),
         }
     }
@@ -116,7 +116,7 @@ impl Factory {
     fn version_for(&self, kind: DocKind) -> u32 {
         match kind {
             DocKind::Chat => self.chat_schema,
-            DocKind::Control => self.control_schema,
+            DocKind::Session => self.session_schema,
             DocKind::Registry => self.registry_schema,
         }
     }
@@ -143,15 +143,15 @@ impl Factory {
                     root.insert(txn, "tool_calls", yrs::MapPrelim::default());
                 }
             }
-            DocKind::Control => {
-                if root.get(txn, "chat").is_none() {
-                    root.insert(txn, "chat", yrs::MapPrelim::default());
+            DocKind::Session => {
+                // 会话面（对齐 Chat/Session 双 Doc 的 Session Doc 结构）：
+                // `session` map（会话元信息 + active turn 并入）、`agent` map、
+                // `pending_permissions`、`sessions`（agent 级会话列表投影）。
+                if root.get(txn, "session").is_none() {
+                    root.insert(txn, "session", yrs::MapPrelim::default());
                 }
                 if root.get(txn, "agent").is_none() {
                     root.insert(txn, "agent", yrs::MapPrelim::default());
-                }
-                if root.get(txn, "active_turn").is_none() {
-                    root.insert(txn, "active_turn", yrs::Any::Null);
                 }
                 if root.get(txn, "pending_permissions").is_none() {
                     root.insert(txn, "pending_permissions", yrs::MapPrelim::default());
@@ -166,6 +166,12 @@ impl Factory {
                 }
                 if root.get(txn, "chats").is_none() {
                     root.insert(txn, "chats", yrs::MapPrelim::default());
+                }
+                if root.get(txn, "workspaces").is_none() {
+                    root.insert(txn, "workspaces", yrs::MapPrelim::default());
+                }
+                if root.get(txn, "sessions").is_none() {
+                    root.insert(txn, "sessions", yrs::MapPrelim::default());
                 }
                 if root.get(txn, "global").is_none() {
                     root.insert(

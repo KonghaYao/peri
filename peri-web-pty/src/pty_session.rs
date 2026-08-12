@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use portable_pty::SlavePty;
@@ -9,9 +10,10 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 /// 持有 master（用于 resize）、writer（用于 write）、child（用于 kill/wait）。
 /// Windows 上额外持有 slave 避免 ConPTY 引用计数 bug（见 `_slave` 字段注释）。
 /// reader 在 `spawn` 时返回给调用方，由调用方在 `spawn_blocking` 中读取。
+/// writer 用 `Arc<Mutex<..>>` 包裹，允许独立线程（如响应 ConPTY 查询）共享写入。
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     /// Windows 上必须保活到 session 结束。ConPTY 的 slave 是 pseudoconsole
     /// 对象句柄，提前 drop 会破坏引用计数，导致 `try_clone_reader` 拿到的
@@ -106,7 +108,7 @@ impl PtySession {
         Ok((
             Self {
                 master: pair.master,
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
                 child,
                 #[cfg(target_os = "windows")]
                 _slave: Some(pair.slave),
@@ -122,12 +124,21 @@ impl PtySession {
     pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
         #[cfg(target_os = "windows")]
         {
-            self.writer.write_all(&normalize_crlf(data))
+            self.writer.lock().unwrap().write_all(&normalize_crlf(data))
         }
         #[cfg(not(target_os = "windows"))]
         {
-            self.writer.write_all(data)
+            self.writer.lock().unwrap().write_all(data)
         }
+    }
+
+    /// 返回 writer 的可共享句柄，供独立线程向 PTY 写入。
+    ///
+    /// 典型用途：Windows ConPTY 启动时 conhost 会向宿主发送 DSR 光标位置
+    /// 查询 `\x1b[6n`，宿主必须回复 `\x1b[row;colR` 才会继续输出子进程
+    /// 内容；读取线程可借此句柄直接回复，无需与调用方共享 `&mut self`。
+    pub fn clone_writer(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
+        self.writer.clone()
     }
 
     /// 调整 PTY 尺寸。

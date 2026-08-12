@@ -583,39 +583,66 @@ pub fn migrate_entry_terminal(
     true
 }
 
-/// active_turn 更新（Session Doc 侧；§7.2 权威投影）。
+/// active_turn 更新（Session Doc `session` map 内嵌字段；§7.2 权威投影）。
+///
+/// 对齐 Chat/Session 双 Doc：active turn 不是独立根键，而是 `session` map 的
+/// `active_turn_id`/`active_turn_status`/`active_turn_updated_at` 三字段
+/// （参考实现 Session Doc 形态）。`None` 清空三字段（终态后归位）。
 /// 返回是否写入（值与既有不同或新增）。
 pub fn set_active_turn(
     txn: &mut TransactionCtx<'_>,
     root: &yrs::MapRef,
     active: Option<&ActiveTurnProjection>,
 ) -> bool {
+    let sm = root.get_or_init::<_, yrs::MapRef>(txn, "session");
     match active {
         Some(a) => {
-            let changed = root
-                .get(txn, "active_turn")
-                .and_then(|v| v.cast::<yrs::MapRef>().ok())
-                .map(|m| {
-                    m.get(txn, "turn_id").and_then(|t| t.cast::<String>().ok()).as_deref()
-                        != Some(a.turn_id.as_str())
-                        || m.get(txn, "turn_status")
-                            .and_then(|t| t.cast::<String>().ok())
-                            != Some(turn_status_str(a.turn_status).to_string())
-                })
-                .unwrap_or(true);
+            let changed = sm
+                .get(txn, "active_turn_id")
+                .and_then(|t| t.cast::<String>().ok())
+                .as_deref()
+                != Some(a.turn_id.as_str())
+                || sm.get(txn, "active_turn_status")
+                    .and_then(|t| t.cast::<String>().ok())
+                    != Some(turn_status_str(a.turn_status).to_string());
             if changed {
-                let am = root.get_or_init::<_, yrs::MapRef>(txn, "active_turn");
-                am.insert(txn, "turn_id", a.turn_id.clone());
-                am.insert(txn, "turn_status", turn_status_str(a.turn_status));
-                am.insert(txn, "updated_at", a.updated_at.clone());
+                sm.insert(txn, "active_turn_id", a.turn_id.clone());
+                sm.insert(txn, "active_turn_status", turn_status_str(a.turn_status));
+                sm.insert(txn, "active_turn_updated_at", a.updated_at.clone());
             }
             changed
         }
         None => {
-            let was = root.get(txn, "active_turn").is_some();
-            root.insert(txn, "active_turn", yrs::Any::Null);
-            was
+            let had = sm.get(txn, "active_turn_id").is_some()
+                || sm.get(txn, "active_turn_status").is_some();
+            sm.remove(txn, "active_turn_id");
+            sm.remove(txn, "active_turn_status");
+            sm.remove(txn, "active_turn_updated_at");
+            had
         }
+    }
+}
+
+/// 条件更新 active_turn_status（Session Doc `session` map 内嵌字段）：
+/// 现值 == `expect` 时写 `new`（§7.2 状态推进——awaitingPermission →
+/// running/cancelled 只在状态仍为 awaitingPermission 时成立，避免
+/// 覆盖后续终态）。返回是否写入。
+pub fn set_active_turn_status_if(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    expect: &str,
+    new: &str,
+) -> bool {
+    let sm = root.get_or_init::<_, yrs::MapRef>(txn, "session");
+    let cur = sm
+        .get(txn, "active_turn_status")
+        .and_then(|s| s.cast::<String>().ok())
+        .unwrap_or_default();
+    if cur == expect {
+        sm.insert(txn, "active_turn_status", new.to_string());
+        true
+    } else {
+        false
     }
 }
 

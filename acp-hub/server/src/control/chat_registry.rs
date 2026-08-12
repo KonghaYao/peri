@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
@@ -65,6 +66,11 @@ pub struct ChatRecord {
     pub title: String,
     /// binding 建立后的 session_id（ACP 会话，§6.2）。
     pub session_id: Option<String>,
+    /// ACP 进程工作目录（继承自 workspace 或 server 默认目录，§6.3
+    /// workspace 扩展；session/list 轮询查询面）。
+    pub cwd: String,
+    /// 归属工作区（无 → None；工作区删除后已建对话保留此引用）。
+    pub workspace_id: Option<String>,
     /// 创建时刻（server 权威时钟，§4.7）。
     pub created_at: DateTime<Utc>,
     /// 最近变更时刻。
@@ -77,8 +83,8 @@ pub enum ChatError {
     /// chat 未登记。
     #[error("chat not found: {0}")]
     NotFound(String),
-    /// binding 冲突（session_id 已绑定到另一 chat）。
-    #[error("binding conflict: session {0} already bound")]
+    /// binding 冲突（session_id 已绑定到另一 chat；参数 = 已绑定的 chat_id）。
+    #[error("binding conflict: session already bound to chat {0}")]
     BindingConflict(String),
     /// Registry 状态写回失败。
     #[error("registry write failed: {0}")]
@@ -99,6 +105,16 @@ pub struct ReconciliationReport {
     pub to_kill: Vec<String>,
 }
 
+/// 活动 turn 表条目（#3 增量窗口计时：turn 活跃期间的 last_activity 由
+/// relay 事件投递成功（[`ChatRegistry::touch_active_turn`]）续命；
+/// exec_prompt L3 窗口据此判定——仅对「无增量窗口」计时，§4.4 路径 B 变体）。
+#[derive(Debug, Clone)]
+struct ActiveTurnEntry {
+    turn_id: String,
+    /// 最近一次该 chat 事件投递时刻（单调时钟；relay touch 更新）。
+    last_activity: Instant,
+}
+
 /// chat 注册表（§7.3 状态机 + binding + pending_close + 对账）。
 #[derive(Clone)]
 pub struct ChatRegistry {
@@ -111,9 +127,10 @@ struct ChatInner {
     bindings: RwLock<HashMap<String, String>>,
     /// pending_close 补发集合（§7.6）。
     pending_close: RwLock<HashSet<String>>,
-    /// 活动 turn 登记（chat → turn_id；断链清理输入，§7.1「活动 turn →
-    /// interrupted」。coordinator 登记、断链清理消费）。
-    active_turns: RwLock<HashMap<String, String>>,
+    /// 活动 turn 登记（chat → turn 条目；断链清理输入，§7.1「活动 turn →
+    /// interrupted」。coordinator 登记、relay touch 续命、断链清理消费；
+    /// #3 last_activity 增量窗口计时）。
+    active_turns: RwLock<HashMap<String, ActiveTurnEntry>>,
     registry: RegistryState,
 }
 
@@ -131,16 +148,26 @@ impl ChatRegistry {
         }
     }
 
+    /// Registry 状态源句柄（session/list 轮询投影等全局写入用）。
+    pub fn registry(&self) -> RegistryState {
+        self.inner.registry.clone()
+    }
+
     /// create 登记（coordinator create 流程调用；状态 = Accepting）。
     ///
     /// Registry Doc 写回顺序（§5.2 单写）：先 `upsert_chat` 建立条目
     /// （Registry 读侧/TUI 对话列表的权威源），再 `set_chat_status` 迁移
     /// 状态——`set_chat_status` 要求条目已存在（state 层 applier 契约）。
+    ///
+    /// `cwd`：ACP 进程工作目录（继承自 workspace 或 server 默认目录，
+    /// §6.3 workspace 扩展）；`workspace_id`：归属工作区（无 → None）。
     pub async fn register(
         &self,
         chat_id: &str,
         instance_id: &str,
         title: Option<&str>,
+        cwd: &str,
+        workspace_id: Option<&str>,
     ) -> Result<(), ChatError> {
         let now = Utc::now();
         let title = title.unwrap_or_default();
@@ -149,6 +176,8 @@ impl ChatRegistry {
             instance_id: instance_id.to_string(),
             title: title.to_string(),
             session_id: None,
+            cwd: cwd.to_string(),
+            workspace_id: workspace_id.map(str::to_string),
             created_at: now,
             updated_at: now,
         };
@@ -167,6 +196,8 @@ impl ChatRegistry {
                 status: ChatState::Accepting.as_str().to_string(),
                 gap: None,
                 updated_at: now.to_rfc3339(),
+                cwd: cwd.to_string(),
+                workspace_id: workspace_id.map(str::to_string),
             })
             .await?;
         self.inner
@@ -183,7 +214,7 @@ impl ChatRegistry {
         let mut bindings = self.inner.bindings.write().await;
         if let Some(existing) = bindings.get(session_id) {
             if existing != chat_id {
-                return Err(ChatError::BindingConflict(session_id.to_string()));
+                return Err(ChatError::BindingConflict(existing.clone()));
             }
             return Ok(()); // 幂等
         }
@@ -207,6 +238,31 @@ impl ChatRegistry {
             .await
             .get(session_id)
             .cloned()
+    }
+
+    /// 会话切换（§8.5 当前对话内 load）：把 chat 的**当前会话**切到
+    /// `session_id`（进程内切换，进程不重建）。新会话登记 binding
+    /// （relay 逐帧校验需要命中——load 后事件帧携带新 sessionId），
+    /// 旧会话 binding 保留（同 chat 映射无害，且旧会话可被切回——
+    /// switch 幂等更新 entry.session_id，与 [`ChatRegistry::bind`] 的
+    /// 幂等分支不同：bind 不更新已有绑定会话的 entry）。
+    pub async fn switch_session(&self, chat_id: &str, session_id: &str) -> Result<(), ChatError> {
+        {
+            let mut bindings = self.inner.bindings.write().await;
+            if let Some(existing) = bindings.get(session_id) {
+                if existing != chat_id {
+                    return Err(ChatError::BindingConflict(existing.clone()));
+                }
+            }
+            bindings.insert(session_id.to_string(), chat_id.to_string());
+        }
+        let mut chats = self.inner.chats.write().await;
+        if let Some(entry) = chats.get_mut(chat_id) {
+            entry.session_id = Some(session_id.to_string());
+            entry.updated_at = Utc::now();
+        }
+        info!(chat_id, session_id, "chat session switched (load)");
+        Ok(())
     }
 
     /// 会话条目查询。
@@ -260,7 +316,23 @@ impl ChatRegistry {
             // pending_close 完成：补发集合清除（§7.6）。
             self.inner.pending_close.write().await.remove(chat_id);
         }
+        // 终态前取走 session_id（drop 后不可用；仅终态需要）。
+        let bound_session = if state.is_terminal() {
+            entry.session_id.clone()
+        } else {
+            None
+        };
         drop(chats);
+        // 终态：释放 binding（§8.5 激活语义）——对话关闭/崩溃后其 ACP
+        // 会话不再被占用，可被再次激活/加载（否则 bindings 永不清理，
+        // 会话重启前永远冲突）。
+        if let Some(sid) = bound_session {
+            let mut bindings = self.inner.bindings.write().await;
+            if bindings.get(&sid).map(String::as_str) == Some(chat_id) {
+                bindings.remove(&sid);
+                debug!(chat_id, session_id = %sid, "binding released (terminal)");
+            }
+        }
         self.inner
             .registry
             .set_chat_status(chat_id, state.as_str())
@@ -278,6 +350,17 @@ impl ChatRegistry {
             .iter()
             .filter(|(_, e)| e.instance_id == instance_id)
             .map(|(id, e)| (id.clone(), e.state))
+            .collect()
+    }
+
+    /// 全部 chat 条目快照（session 轮询输入，§6.3；含终态，筛选由调用方）。
+    pub async fn all_chats(&self) -> Vec<(String, ChatRecord)> {
+        self.inner
+            .chats
+            .read()
+            .await
+            .iter()
+            .map(|(id, e)| (id.clone(), e.clone()))
             .collect()
     }
 
@@ -358,12 +441,35 @@ impl ChatRegistry {
     }
 
     /// 活动 turn 登记（coordinator prompt 执行登记；§7.1 断链清理输入）。
+    /// last_activity 初始化为登记时刻（#3 增量窗口起点）。
     pub async fn set_active_turn(&self, chat_id: &str, turn_id: &str) {
+        self.inner.active_turns.write().await.insert(
+            chat_id.to_string(),
+            ActiveTurnEntry {
+                turn_id: turn_id.to_string(),
+                last_activity: Instant::now(),
+            },
+        );
+    }
+
+    /// 活动 turn 续命（#3）：relay 事件投递成功（聚合器接受）后调用——
+    /// 刷新 last_activity，exec_prompt L3 窗口据此判定「窗口内有增量」而
+    /// 续等。表项不存在（无活动 turn）→ 幂等无操作。
+    pub async fn touch_active_turn(&self, chat_id: &str) {
+        if let Some(entry) = self.inner.active_turns.write().await.get_mut(chat_id) {
+            entry.last_activity = Instant::now();
+        }
+    }
+
+    /// 活动 turn 空闲时长（#3）：`now - last_activity`；表项不存在 → None
+    /// （调用方按「无活动窗口」处理）。
+    pub async fn active_turn_idle(&self, chat_id: &str) -> Option<Duration> {
         self.inner
             .active_turns
-            .write()
+            .read()
             .await
-            .insert(chat_id.to_string(), turn_id.to_string());
+            .get(chat_id)
+            .map(|e| e.last_activity.elapsed())
     }
 
     /// 活动 turn 清除（turn 终态 / chat 关闭 / 断链清理后）。
@@ -373,7 +479,12 @@ impl ChatRegistry {
 
     /// 活动 turn 查询（断链清理：`MarkTurnInterrupted` 输入，§7.1）。
     pub async fn active_turn(&self, chat_id: &str) -> Option<String> {
-        self.inner.active_turns.read().await.get(chat_id).cloned()
+        self.inner
+            .active_turns
+            .read()
+            .await
+            .get(chat_id)
+            .map(|e| e.turn_id.clone())
     }
 }
 

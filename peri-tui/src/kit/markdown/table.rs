@@ -1,4 +1,4 @@
-use pulldown_cmark::Alignment;
+use pulldown_cmark_012::Alignment;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment as RAlignment, Rect},

@@ -73,7 +73,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 parking_lot = "0.12"
 dirs-next = "2"
 url = "2"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
 lsp-types = "0.97"
 lru = "0.18"
@@ -91,9 +91,13 @@ semver = "1"
 sha2 = "0.10"
 
 # --- PTY server ---
-axum = { version = "0.7", features = ["ws"] }
-# Pin 到 0.8.1：0.9.0 在 Windows ConPTY 上 reader 读不到 PTY child 输出（短命令场景），
-# 0.8.1 据报告在该场景工作正常。详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
-portable-pty = "=0.8.1"
-tokio-tungstenite = "0.29"
-serial_test = "3"
+axum = { version = "0.8.9", features = ["ws"] }
+# 0.9.0：历史 pin（0.8.1）因 Windows ConPTY reader 短命令场景 bug 而设；
+# 2026-08-12 Batch 2b 解除 pin 升级后 Windows CI 上 3 个 pty_session 读取测试
+# 失败。排查确认 0.8.1/0.9.0 的 Windows 实现（conpty.rs）完全一致，失败与
+# 版本无关，实为 PowerShell 5.1 在 ConPTY 下的输出编码/交互行为问题——
+# 测试已改用 cmd.exe（纯字节流）规避，重新升级回 0.9.0 验证。
+# 详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
+portable-pty = "0.9"
+tokio-tungstenite = "0.30"
+serial_test = "4.0.1"

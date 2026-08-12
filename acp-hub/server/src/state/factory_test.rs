@@ -30,16 +30,15 @@ fn create_chat_doc_has_full_structure() {
     assert!(root_map.get(&txn, "entry_order").unwrap().cast::<yrs::ArrayRef>().is_ok());
     drop(txn);
 
-    let txn = pair.control.transact();
+    let txn = pair.session.transact();
     let root_map = root(&txn);
     let _ = &root_map;
     assert_eq!(
         root_map.get(&txn, "schema_version"),
         Some(yrs::Out::Any(1u32.into()))
     );
-    assert!(root_map.get(&txn, "chat").unwrap().cast::<yrs::MapRef>().is_ok());
+    assert!(root_map.get(&txn, "session").unwrap().cast::<yrs::MapRef>().is_ok());
     assert!(root_map.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "active_turn").is_some());
     assert!(root_map.get(&txn, "pending_permissions").unwrap().cast::<yrs::MapRef>().is_ok());
     assert!(root_map.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().is_ok());
 }
@@ -134,6 +133,6 @@ fn session_doc_future_schema_rejected() {
         let root = txn.get_or_insert_map(ROOT);
         root.insert(&mut txn, "schema_version", 7u32);
     }
-    let err = f.ensure_schema(&mut doc, DocKind::Control).unwrap_err();
+    let err = f.ensure_schema(&mut doc, DocKind::Session).unwrap_err();
     assert!(matches!(err, FactoryError::FutureSchema { found: 7, .. }));
 }

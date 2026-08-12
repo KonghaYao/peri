@@ -4,7 +4,7 @@
 //   1. 连接 → auth（ws-client 首帧纪律）→ ysync.subscribe ["hub:registry"]
 //      → 快照 + ready → UI 启用。
 //   2. registry 渲染 → 左栏实例/对话。
-//   3. 点击对话 → subscribe ["chat:{cid}","control:{cid}"] → 快照渲染历史
+//   3. 点击对话 → subscribe ["chat:{cid}","session:{cid}"] → 快照渲染历史
 //      → 增量实时更新（yjs 流式）。
 //   4. 发送消息 → chat/prompt（commandId 记入 pendingAcks）→ 输入框清空。
 //      用户消息气泡依赖 agent 回显（server 单写者，本地不造假）。
@@ -19,7 +19,7 @@ import { createSignal } from 'solid-js';
 import type { Setter } from 'solid-js';
 import * as H from './lib/protocol';
 import { DocStore, renderChat, renderControl, renderRegistry } from './lib/yjs';
-import type { ChatEntry, ChatInfo, ControlView, InstanceInfo } from './lib/yjs';
+import type { ChatEntry, ChatInfo, ControlView, InstanceInfo, SessionSummaryInfo, WorkspaceInfo } from './lib/yjs';
 import { WsClient } from './lib/ws-client';
 import type { ConnStatus, ConnDetail } from './lib/ws-client';
 
@@ -45,6 +45,19 @@ export const [selectedCid, setSelectedCid] = createSignal<string | null>(null);
 export const [chatEntries, setChatEntries] = createSignal<ChatEntry[]>([]);
 export const [chatHead, setChatHead] = createSignal<ControlView | null>(null);
 export const [permissions, setPermissions] = createSignal<ControlView['pendingPermissions']>([]);
+/** ACP 会话（§6.3 按需查询）：**按对话隔离缓存**——切换对话时向 agent 侧
+ *  发 session/list 查询（真实数据源），结果存 `chatId → 列表`；切回对话
+ *  复用缓存，10s 定时刷新当前对话。不再依赖 Registry Doc sessions 投影。 */
+export const [sessionsByChat, setSessionsByChat] = createSignal<Record<string, SessionSummaryInfo[]>>({});
+/** 当前选中对话的会话列表（跟随当前对话展示；未选对话 → []）。 */
+export const currentSessions = (): SessionSummaryInfo[] => {
+  const cid = selectedCid();
+  return cid ? sessionsByChat()[cid] ?? [] : [];
+};
+/** 工作区定义（Registry Doc workspaces，§6.3 workspace 扩展）。 */
+export const [workspaces, setWorkspaces] = createSignal<WorkspaceInfo[]>([]);
+/** 当前选中的工作区 id（null = 全部）：左栏对话/会话按此过滤。 */
+export const [selectedWsId, setSelectedWsId] = createSignal<string | null>(null);
 export const [chatStatusSignal, setChatStatusSignal] = createSignal<Record<string, string>>({});
 export const [toasts, setToasts] = createSignal<{ id: number; msg: string }[]>([]);
 
@@ -55,6 +68,9 @@ let ws: WsClient | null = null; // 当前 WsClient
 let currentCid: string | null = null; // 选中对话（重连后恢复订阅）
 let ready = false; // ready 门控：就绪后才发 action
 const pendingAcks = new Map<string, { label: string; cb?: (ack: Ack) => void; timer: ReturnType<typeof setTimeout> }>();
+// 每个 chat 只接受最近一次 session/list 响应，防止切换/load 后的旧响应
+// 晚到并覆盖「当前」标记。
+const latestSessionQueries = new Map<string, string>();
 
 interface Ack {
   commandId?: string;
@@ -108,7 +124,7 @@ function desiredDocs(): string[] {
   const docs = [H.DOC_REGISTRY];
   if (currentCid) {
     docs.push(H.chatDoc(currentCid));
-    docs.push(H.controlDoc(currentCid));
+    docs.push(H.sessionDoc(currentCid));
   }
   return docs;
 }
@@ -128,14 +144,53 @@ export function isTerminal(status: string | undefined): boolean {
 }
 
 export function selectChat(cid: string): void {
+  if (cid === currentCid) {
+    querySessions(cid);
+    return;
+  }
+  const previousCid = currentCid;
+  if (previousCid && ws) {
+    ws.send(H.unsubscribe([H.chatDoc(previousCid), H.sessionDoc(previousCid)]));
+  }
   currentCid = cid;
   setSelectedCid(cid);
-  sendSubscribe(); // 幂等；快照到达后由 onUpdate 渲染
-  // 对话切换：清空旧渲染，等快照到达后重新填充。
+  sendSubscribe(); // unsubscribe/subscribe 按 WebSocket 顺序生效，快照到达后渲染
+  // 对话切换：清空旧渲染，等快照到达后重新填充。ACP 会话（sessions）是
+  // **按对话隔离**的（§6.3）：切对话 → 立即按需查询该对话的会话列表 +
+  // 启动 10s 定时刷新（agent 侧真实数据源）。
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
   setSubscribedDocs('—'); // 订阅清单等下一帧 ready 刷新（简单置空亦可）
+  restartSessionPoll(cid);
+}
+
+// ── session/list 按需查询（§6.3）────────────────────────────────────────
+
+let sessionTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 切换对话时调用：立即查询一次 + 10s 定时刷新当前对话的会话列表。
+ *  定时器随对话切换重建（上一对话的刷新立即停止——会话按对话隔离）。 */
+function restartSessionPoll(cid: string): void {
+  if (sessionTimer) {
+    clearInterval(sessionTimer);
+    sessionTimer = null;
+  }
+  querySessions(cid);
+  sessionTimer = setInterval(() => querySessions(cid), 10000);
+}
+
+/** 发 session/list 查询（无副作用；结果经 session_list 帧更新缓存）。 */
+function querySessions(cid: string): void {
+  if (!ws) return;
+  const frame = H.sessionList(cid);
+  latestSessionQueries.set(cid, frame.commandId);
+  if (!ws.send(frame)) latestSessionQueries.delete(cid);
+}
+
+/** 手动刷新当前对话的会话列表（不重置定时器/订阅/渲染）。 */
+export function refreshSessions(): void {
+  if (currentCid) querySessions(currentCid);
 }
 
 // ── ack 表 ──────────────────────────────────────────────────────────────
@@ -167,6 +222,15 @@ function onFrame(frame: Record<string, unknown>): void {
     case 'action_error':
       onActionError(frame as ActionError);
       break;
+    case 'session_list': {
+      // 按需查询结果（§6.3）：更新该对话的会话缓存（按对话隔离）。
+      const f = frame as { commandId?: string; chatId?: string; sessions?: SessionSummaryInfo[] };
+      const chatId = f.chatId;
+      if (chatId && f.commandId === latestSessionQueries.get(chatId)) {
+        setSessionsByChat((prev) => ({ ...prev, [chatId]: f.sessions ?? [] }));
+      }
+      break;
+    }
     default:
       break; // 未知帧忽略（协议演进兼容）
   }
@@ -181,9 +245,11 @@ function onAck(ack: Ack): void {
     if (typeof pending.cb === 'function') pending.cb(ack);
   }
   // create 的 committed ack 携带 server 生成的 chatId —— 唯一告知
-  // 路径：自动补订阅 chat:{cid}/control:{cid} 并选中。
+  // 路径：自动补订阅 chat:{cid}/session:{cid} 并选中。§8.5 激活语义：
+  // 点击已打开的历史会话时 server 同样回 committed + 既有 chatId——
+  // 此处统一切换选中（不新建重复对话）。
   if (ack.status === 'committed' && ack.chatId && ack.chatId !== currentCid) {
-    toast(`对话已创建: ${ack.chatId.slice(0, 8)}…`);
+    toast(`已打开对话: ${ack.chatId.slice(0, 8)}…`);
     selectChat(ack.chatId);
   }
 }
@@ -230,6 +296,11 @@ store.onUpdate = (docId: string): void => {
     setInstances(reg.instances);
     setChats(reg.chats);
     setGlobalStatus(reg.globalStatus);
+    // 工作区定义（§6.3 workspace 扩展）：左栏过滤依据。
+    setWorkspaces(reg.workspaces);
+    // ACP 会话列表不再取 Registry Doc sessions 投影（§6.3 按需查询）：
+    // 切换对话时向 agent 侧发 session/list，结果按对话缓存（sessionsByChat）。
+    // server 轮询投影保留（不破坏既有消费方），前端展示以按需查询为准。
     return;
   }
   if (currentCid && docId === H.chatDoc(currentCid)) {
@@ -237,7 +308,7 @@ store.onUpdate = (docId: string): void => {
     setChatEntries(conv.entries);
     return;
   }
-  if (currentCid && docId === H.controlDoc(currentCid)) {
+  if (currentCid && docId === H.sessionDoc(currentCid)) {
     const ctrl = renderControl(store.docFor(docId));
     setChatHead(ctrl);
     setPermissions(ctrl.pendingPermissions);
@@ -267,6 +338,8 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
           ? Object.keys(detail.projectionVersions as Record<string, unknown>).join('、')
           : '—',
       );
+      // 重连后恢复当前对话的会话轮询（若之前有选中对话）。
+      if (currentCid) restartSessionPoll(currentCid);
       toast('连接就绪');
       break;
     case 'heartbeat':
@@ -280,6 +353,10 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       break;
     case 'fatal':
       ready = false;
+      if (sessionTimer) {
+        clearInterval(sessionTimer);
+        sessionTimer = null;
+      }
       // connect() 置 busy(true) 后无任何路径恢复（closed 仅由用户主动
       // disconnect 触发，那里已 setBusy(false)）→ 必须在此恢复按钮，
       // 否则 4500/4501/4502 后 connect/disconnect 双双 disabled 无法重连。
@@ -330,6 +407,10 @@ export function connect(token: string): void {
 }
 
 export function disconnect(): void {
+  if (sessionTimer) {
+    clearInterval(sessionTimer);
+    sessionTimer = null;
+  }
   if (ws) {
     ws.close();
     ws = null;
@@ -341,7 +422,7 @@ export function disconnect(): void {
 
 // ── 用户动作 → action ──────────────────────────────────────────────────
 
-export function sendMessage(text: string): void {
+export function sendMessage(text: string, effort?: string): void {
   if (!ready) {
     toast('连接未就绪，稍后再试');
     return;
@@ -355,8 +436,8 @@ export function sendMessage(text: string): void {
     return;
   }
   // 输入框已清空；用户消息气泡依赖 agent 回显（server 单写者，
-  // 本地不造假，保证多标签页一致性）。
-  sendAction(H.prompt(currentCid, text), 'prompt', (ack) => {
+  // 本地不造假，保证多标签页一致性）。effort 透传推理强度（若有）。
+  sendAction(H.prompt(currentCid, text, effort), 'prompt', (ack) => {
     if (ack.status === 'committed' && ack.turnId) {
       toast(`消息已提交，turn=${ack.turnId.slice(0, 8)}…`);
     }
@@ -368,10 +449,92 @@ export function newChat(): void {
     toast('连接未就绪，稍后再试');
     return;
   }
-  // instanceId/cwd 留空 = 本机（payload 三字段全可选）。
-  sendAction(H.createChat(), 'create', (ack) => {
+  // instanceId/cwd 留空 = 本机；选中 workspace 时携带 workspace_id →
+  // server 继承其 cwd（§6.3 workspace 扩展）。
+  const wsId = selectedWsId();
+  sendAction(H.createChat(undefined, undefined, wsId || undefined), 'create', (ack) => {
     // chatId 已在 onAck 里统一处理（自动订阅选中）
     if (!ack.chatId) toast('create committed 缺少 chatId');
+  });
+}
+
+/** 点击 ACP 历史会话（§8.5 会话切换）：会话是**进程内实体**——在当前
+ *  对话（其 ACP 进程）内 load 目标历史会话，**不新建对话/进程**。
+ *  需先选中一个活跃对话（终态对话的进程已退出，无法切换）。 */
+export function openAcpSession(acpSessionId: string, title?: string): void {
+  if (!ready) {
+    toast('连接未就绪，稍后再试');
+    return;
+  }
+  const cid = currentCid;
+  if (!cid) {
+    toast('请先选择对话（会话在当前对话内切换）');
+    return;
+  }
+  if (isTerminal(chatStatusSignal()[cid])) {
+    toast('对话已结束，不能切换会话');
+    return;
+  }
+  sendAction(H.loadChat(cid, acpSessionId), 'load', (ack) => {
+    if (ack.status === 'committed') {
+      toast(`已切换到会话 ${title || acpSessionId.slice(0, 8)}…`);
+      // 会话列表的「当前」标记已变化 → 重新查询一次。
+      querySessions(cid);
+    }
+  });
+}
+
+/** 当前对话内新建 ACP 会话（chat/session-new，§8.5）：会话是**进程内实体**——
+ *  不新建对话/进程。committed 后刷新会话列表（tooltip「当前」标记更新）；
+ *  错误由 onActionError 统一 toast。 */
+export function newSession(): void {
+  if (!ready) {
+    toast('连接未就绪，稍后再试');
+    return;
+  }
+  const cid = currentCid;
+  if (!cid) {
+    toast('请先选择对话（新会话在当前对话内创建）');
+    return;
+  }
+  if (isTerminal(chatStatusSignal()[cid])) {
+    toast('对话已结束，不能新建会话');
+    return;
+  }
+  sendAction(H.sessionNew(cid), 'session/new', (ack) => {
+    if (ack.status === 'committed') {
+      toast('新会话已创建');
+      // 会话列表的「当前」标记已变化 → 重新查询一次。
+      querySessions(cid);
+    }
+  });
+}
+
+/** 新建工作区（§6.3 workspace 扩展）：定义本地目录 cwd，其下新建对话继承。
+ *  cwd 须为已存在的绝对路径（server 校验：形态 + 目录存在性）。 */
+export function createWorkspace(name: string, cwd: string): void {
+  if (!ready) {
+    toast('连接未就绪，稍后再试');
+    return;
+  }
+  sendAction(H.workspaceCreate(name, cwd), 'workspace/create', (ack) => {
+    if (ack.status === 'committed') {
+      toast('工作区已创建');
+    }
+  });
+}
+
+/** 删除工作区定义（不影响已建对话/会话）。 */
+export function removeWorkspace(workspaceId: string): void {
+  if (!ready) {
+    toast('连接未就绪，稍后再试');
+    return;
+  }
+  sendAction(H.workspaceRemove(workspaceId), 'workspace/remove', (ack) => {
+    if (ack.status === 'committed') {
+      toast('工作区已删除');
+      if (selectedWsId() === workspaceId) setSelectedWsId(null);
+    }
   });
 }
 
@@ -435,3 +598,6 @@ function showActionError(err: ActionError): void {
 
 const initialToken = resolveToken();
 setTokenInput(initialToken);
+// 有 token 即自动连接（URL ?token= 或 sessionStorage 记忆），刷新/重开
+// 页面无需再手动点「连接」；无 token 时保持原手动连接入口。
+if (initialToken) connect(initialToken);

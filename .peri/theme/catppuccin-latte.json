@@ -19,10 +19,10 @@
       "primary": "$semantic.accent"
     },
     "success": {
-      "primary": "#40A02B"
+      "primary": "#3B8D26"
     },
     "warning": {
-      "primary": "#DF8E1D"
+      "primary": "#C46F08"
     },
     "danger": {
       "primary": "#D20F39"
@@ -31,7 +31,7 @@
       "primary": "$semantic.thinking"
     },
     "diff": {
-      "add": "#40A02B",
+      "add": "#3B8D26",
       "remove": "#D20F39",
       "hunk": "#8839EF",
       "add_bg": "#D8ECD0",
@@ -43,30 +43,30 @@
   "semantic": {
     "accent": "#1E66F5",
     "text": {
-      "primary": "#4C4F69",
-      "muted": "#8C8FA1",
-      "dim": "#BCC0CC"
+      "primary": "#5C5F77",
+      "muted": "#676A81",
+      "dim": "#7C7F93"
     },
     "border": {
-      "default": "#BCC0CC",
+      "default": "#8C8FA1",
       "active": "$semantic.accent",
       "dim": "#DCE0E8"
     },
     "status": {
       "running": "#8839EF",
-      "success": "#40A02B",
-      "warning": "#DF8E1D",
+      "success": "#3B8D26",
+      "warning": "#C46F08",
       "error": "#D20F39"
     },
     "surface": {
       "default": "#EFF1F5",
-      "user": "#E6E9EF",
-      "popup": "#EFF1F5",
-      "selection": "#CCD0DA",
-      "cursor": "#E6E9EF"
+      "user": "#D6DBE5",
+      "popup": "#FFFFFF",
+      "selection": "#B8C6F0",
+      "cursor": "#D6DBE5"
     },
     "diff": {
-      "add": "#40A02B",
+      "add": "#3B8D26",
       "remove": "#D20F39",
       "hunk": "#8839EF",
       "add_bg": "#D8ECD0",
@@ -78,13 +78,13 @@
     "thinking": "#8839EF",
     "model_info": "#D20F39",
     "bash_border": "#D20F39",
-    "selected_fg": "#4C4F69"
+    "selected_fg": "#262838"
   },
   "component": {
     "message": {
-      "user_bg": "#E6E9EF",
+      "user_bg": "#D6DBE5",
       "ai_prefix": "$semantic.text.primary",
-      "tool_indicator": "#40A02B",
+      "tool_indicator": "#3B8D26",
       "reasoning": "$semantic.thinking"
     },
     "input": {
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#EFF1F5",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -118,15 +118,15 @@
       "muted": "$semantic.text.muted",
       "dim": "$semantic.text.dim",
       "mode_accept_edit": "$semantic.thinking",
-      "mode_auto": "#DF8E1D",
+      "mode_auto": "#C46F08",
       "mode_bypass": "#D20F39",
-      "resource_good": "#40A02B",
-      "resource_warn": "#DF8E1D",
+      "resource_good": "#3B8D26",
+      "resource_warn": "#C46F08",
       "resource_bad": "#D20F39"
     },
     "markdown": {
       "text": "$semantic.text.primary",
-      "code": "#FE640B",
+      "code": "#D65B09",
       "quote": "$semantic.text.muted"
     },
     "scrollbar": {

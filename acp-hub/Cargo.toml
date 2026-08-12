@@ -46,13 +46,13 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs-next = "2"
 
 # --- WebSocket (ws server + client) ---
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 
 # --- Crypto / 编码（§9.2 双向认证、§8.4 CRC） ---
 sha2 = "0.10"  # digest 0.10；hmac/hkdf 取 0.12 以保持 digest 大版本一致
 hmac = "0.12"
 hkdf = "0.12"
-base64 = "0.22"
+base64 = "0.23.1"
 rand = "0.10"  # CSPRNG（默认 features 含 sys_rng）
 
 # --- Unix 进程组信号（instance 进程树 kill，§4.1） ---
@@ -71,4 +71,4 @@ agent-client-protocol-schema = { version = "1.4", features = ["unstable_elicitat
 
 # --- Dev ---
 tempfile = "3"
-serial_test = "3"
+serial_test = "4.0.1"

@@ -3,6 +3,7 @@
 //! Translates raw [`IncomingMessage`]s into [`AcpNotification`]s for the TUI event
 //! loop to consume. The notification pump runs as a background tokio task.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use peri_acp::event::AcpEvent;
@@ -72,6 +73,10 @@ pub enum AcpNotification {
 pub struct AcpTuiClient {
     transport: Arc<MpscClientTransport>,
     current_session_id: Arc<Mutex<Option<String>>>,
+    /// 已删除会话黑名单（M3）：`delete_session` 后该会话的延迟通知（in-flight
+    /// turn 被 cancel 后的残流）必须被丢弃。若不记录，`current_session_id`
+    /// 置 None 后会落入"首次连接放行"语义，已删除会话在 UI 上"幽灵播放"。
+    deleted_session_ids: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AcpTuiClient {
@@ -110,6 +115,7 @@ impl AcpTuiClient {
         let client = Self {
             transport: Arc::new(transport),
             current_session_id: Arc::new(Mutex::new(None)),
+            deleted_session_ids: Arc::new(Mutex::new(HashSet::new())),
         };
         (client, notification_tx, notification_rx)
     }
@@ -123,8 +129,15 @@ impl AcpTuiClient {
     pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
         let transport = self.transport.clone();
         let current_session_id = self.current_session_id.clone();
+        let deleted_session_ids = self.deleted_session_ids.clone();
         tokio::spawn(async move {
-            Self::run_pump(transport, notification_tx, current_session_id).await;
+            Self::run_pump(
+                transport,
+                notification_tx,
+                current_session_id,
+                deleted_session_ids,
+            )
+            .await;
         });
     }
 
@@ -133,10 +146,20 @@ impl AcpTuiClient {
     /// 当 `current_session_id` 为 `None`（首次连接、尚未创建会话）时返回 `true`，
     /// 确保 `AvailableCommandsUpdate` 等初始化通知不被丢弃。
     /// 当已设置会话后，严格按 session_id 过滤。
+    /// 已删除会话（黑名单）一律返回 `false`——优先级高于 None 放行语义（M3）。
     fn is_current_session(
         current_session_id: &Arc<Mutex<Option<String>>>,
+        deleted_session_ids: &Arc<Mutex<HashSet<String>>>,
         session_id: &str,
     ) -> bool {
+        // host 级事件（MCP OAuth 授权等）以空 sessionId 送达，不参与
+        // session 过滤——否则已建会话时 OAuth popup 事件被静默丢弃。
+        if session_id.is_empty() {
+            return true;
+        }
+        if deleted_session_ids.lock().unwrap().contains(session_id) {
+            return false;
+        }
         current_session_id
             .lock()
             .unwrap()
@@ -151,6 +174,7 @@ impl AcpTuiClient {
         transport: Arc<MpscClientTransport>,
         notification_tx: mpsc::UnboundedSender<AcpNotification>,
         current_session_id: Arc<Mutex<Option<String>>>,
+        deleted_session_ids: Arc<Mutex<HashSet<String>>>,
     ) {
         let mut event_count: u64 = 0;
         loop {
@@ -185,7 +209,11 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
-                                if !Self::is_current_session(&current_session_id, &session_id) {
+                                if !Self::is_current_session(
+                                    &current_session_id,
+                                    &deleted_session_ids,
+                                    &session_id,
+                                ) {
                                     debug!(session_id = %session_id, "ACP client pump: dropping stale agent_event");
                                     continue;
                                 }
@@ -209,7 +237,11 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        if !Self::is_current_session(&current_session_id, &session_id) {
+                        if !Self::is_current_session(
+                            &current_session_id,
+                            &deleted_session_ids,
+                            &session_id,
+                        ) {
                             debug!(session_id = %session_id, "ACP client pump: dropping stale session/update");
                             continue;
                         }
@@ -232,7 +264,11 @@ impl AcpTuiClient {
                             event = %event,
                             "ACP client pump: received unstable-event"
                         );
-                        if !Self::is_current_session(&current_session_id, &session_id) {
+                        if !Self::is_current_session(
+                            &current_session_id,
+                            &deleted_session_ids,
+                            &session_id,
+                        ) {
                             debug!(session_id = %session_id, event = %event, "ACP client pump: dropping stale unstable-event");
                             continue;
                         }
@@ -262,7 +298,11 @@ impl AcpTuiClient {
                             .get("requestId")
                             .and_then(|v| v.as_str())
                             .map(String::from);
-                        if !Self::is_current_session(&current_session_id, &session_id) {
+                        if !Self::is_current_session(
+                            &current_session_id,
+                            &deleted_session_ids,
+                            &session_id,
+                        ) {
                             debug!(session_id = %session_id, "ACP client pump: dropping stale agent_done");
                             continue;
                         }
@@ -288,7 +328,11 @@ impl AcpTuiClient {
                                 serde_json::from_value::<Vec<PredictionAction>>(v.clone()).ok()
                             })
                             .unwrap_or_default();
-                        if !Self::is_current_session(&current_session_id, &session_id) {
+                        if !Self::is_current_session(
+                            &current_session_id,
+                            &deleted_session_ids,
+                            &session_id,
+                        ) {
                             debug!(session_id = %session_id, "ACP client pump: dropping stale prediction_ready");
                             continue;
                         }
@@ -305,7 +349,11 @@ impl AcpTuiClient {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        if !Self::is_current_session(&current_session_id, &session_id) {
+                        if !Self::is_current_session(
+                            &current_session_id,
+                            &deleted_session_ids,
+                            &session_id,
+                        ) {
                             debug!(session_id = %session_id, method = %method, "ACP client pump: dropping stale peri notification");
                             continue;
                         }
@@ -398,6 +446,39 @@ impl AcpTuiClient {
         let params = json!({ "sessionId": session_id, "cwd": cwd, "model": model });
         self.transport.send_request("session/load", params).await?;
         Ok(session_id.to_string())
+    }
+
+    /// Delete a session from history (standard ACP `session/delete`).
+    ///
+    /// 遵守 agentclientprotocol.com/protocol/v1/session-delete：`{ sessionId }`
+    /// 请求、`{}` 响应；删除后会话不再出现在 `session/list` 中且无法
+    /// `session/load`。若删除的是当前活跃会话，本地事实源一并清空
+    /// （服务端会 cancel 该会话的 in-flight turn 并级联删除消息）。
+    ///
+    /// M3：删除的会话 id 记入黑名单，pump 过滤其延迟通知（`current_session_id`
+    /// 置 None 后"首次连接放行"语义会让已删除会话的事件回写 UI）。
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), AcpError> {
+        let params = json!({ "sessionId": session_id });
+        self.transport
+            .send_request("session/delete", params)
+            .await?;
+        let mut cur = self.current_session_id.lock().unwrap();
+        if cur.as_deref() == Some(session_id) {
+            *cur = None;
+        }
+        drop(cur);
+        // 黑名单有界：极端删除场景下清空重来（此时 current 已复位，仅可能
+        // 放行极旧的残流，可接受；warn 记录以便排查）
+        let mut deleted = self.deleted_session_ids.lock().unwrap();
+        if deleted.len() >= 128 {
+            deleted.clear();
+            warn!(
+                session_id = %session_id,
+                "deleted_session_ids 黑名单超限已清空"
+            );
+        }
+        deleted.insert(session_id.to_string());
+        Ok(())
     }
 
     /// Submit a user message to the current session.
@@ -671,6 +752,144 @@ mod tests {
                 assert_eq!(request_id, None);
             }
             other => panic!("expected AgentDone, got {other:?}"),
+        }
+    }
+
+    // ── M3 回归：已删除会话的延迟通知必须被过滤 ──────────────────────────────
+
+    /// 复现"幽灵播放"场景：current_session_id=None（删除当前会话后）时，
+    /// 黑名单中的会话事件必须被 drop——None 放行语义只服务于首次连接初始化。
+    #[tokio::test]
+    async fn test_pump_drops_events_from_deleted_session_when_current_none() {
+        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+
+        // 删除会话（模拟：current 置 None + 黑名单插入）
+        client
+            .deleted_session_ids
+            .lock()
+            .unwrap()
+            .insert("deleted-sess".to_string());
+
+        // 已删除会话的残流通知（agent_event / unstable-event / agent_done）
+        server_transport
+            .send_notification(
+                "peri/agent_event",
+                json!({ "sessionId": "deleted-sess", "event_json": serde_json::to_string(&AcpEvent::StateSnapshot { messages_json: "[]".to_string() }).unwrap() }),
+            )
+            .await
+            .unwrap();
+        server_transport
+            .send_notification(
+                "peri/agent_event_done",
+                json!({ "sessionId": "deleted-sess", "stopReason": "cancelled" }),
+            )
+            .await
+            .unwrap();
+
+        // 无事件应到达 UI
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            notification_rx.recv(),
+        )
+        .await
+        {
+            Err(_) => {} // 超时 = 全部被过滤 ✓
+            Ok(Some(other)) => panic!("已删除会话的事件不应回写 UI: {other:?}"),
+            Ok(None) => panic!("pump 意外退出"),
+        }
+    }
+
+    /// 黑名单不误伤：current=None 时未删除会话的初始化通知仍正常放行。
+    #[tokio::test]
+    async fn test_pump_still_forwards_init_notifications_when_current_none() {
+        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+
+        server_transport
+            .send_notification(
+                "session/update",
+                json!({ "sessionId": "s-init", "commands": [] }),
+            )
+            .await
+            .unwrap();
+
+        match notification_rx.recv().await.unwrap() {
+            AcpNotification::SessionUpdate { session_id, .. } => {
+                assert_eq!(session_id, "s-init");
+            }
+            other => panic!("初始化通知应放行, got {other:?}"),
+        }
+    }
+
+    /// delete_session 完整链路：服务端响应后，current 清空 + 黑名单记录，
+    /// 该会话后续事件被过滤。
+    #[tokio::test]
+    async fn test_delete_session_clears_current_and_blacklists() {
+        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+
+        // 先构造"当前会话"状态（等价于 new_session 成功后）
+        *client.current_session_id.lock().unwrap() = Some("sess-1".to_string());
+
+        // server 端响应 session/delete（标准空对象）
+        let server_transport = std::sync::Arc::new(server_transport);
+        let server_tx_for_task = server_transport.clone();
+        let server = tokio::spawn(async move {
+            let msg = server_tx_for_task.recv().await.unwrap();
+            let IncomingMessage::Request { id, method, params } = msg else {
+                panic!("expected request, got {msg:?}");
+            };
+            assert_eq!(method, "session/delete");
+            assert_eq!(
+                params.get("sessionId").and_then(|v| v.as_str()),
+                Some("sess-1")
+            );
+            server_tx_for_task
+                .send_response(id, Ok(serde_json::json!({})))
+                .await
+                .unwrap();
+        });
+
+        client
+            .delete_session("sess-1")
+            .await
+            .expect("delete 应成功");
+        server.await.unwrap();
+
+        assert!(
+            client.current_session_id.lock().unwrap().is_none(),
+            "删除当前会话后 current_session_id 应清空"
+        );
+        assert!(
+            client
+                .deleted_session_ids
+                .lock()
+                .unwrap()
+                .contains("sess-1"),
+            "删除的会话应记入黑名单"
+        );
+
+        // 已删除会话的残流被过滤
+        server_transport
+            .send_notification(
+                "peri/agent_event_done",
+                json!({ "sessionId": "sess-1", "stopReason": "cancelled" }),
+            )
+            .await
+            .unwrap();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            notification_rx.recv(),
+        )
+        .await
+        {
+            Err(_) => {}
+            Ok(Some(other)) => panic!("已删除会话的事件不应回写 UI: {other:?}"),
+            Ok(None) => panic!("pump 意外退出"),
         }
     }
 }

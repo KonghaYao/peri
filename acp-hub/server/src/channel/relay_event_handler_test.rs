@@ -20,10 +20,17 @@ use crate::control::ChatRegistry;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager};
 
+/// 测试 chat id（UUID 形态——StoreSink 落盘按 UUID 解析 chat 归属；非 UUID
+/// 的 chat id 在控制类事件落盘时返回 PersistFailed）。
+const S1: &str = "00000000-0000-0000-0000-000000000001";
+
 struct Env {
     _tmp: tempfile::TempDir,
     chats: ChatRegistry,
     relay: Arc<RelayEventHandler>,
+    sink: Arc<StoreSink>,
+    /// instance 注册表（uncalibratable 测试需重新 hello 对账 epoch）。
+    instance: Arc<InstanceRegistry>,
 }
 
 async fn env() -> Env {
@@ -35,7 +42,7 @@ async fn env() -> Env {
     let store = Arc::new(Store::open(&persist_cfg).unwrap());
     store.recover().await;
     let sink = Arc::new(StoreSink::new(store.clone()).await.unwrap());
-    let doc = Arc::new(DocManager::new(BatchConfig::default(), sink));
+    let doc = Arc::new(DocManager::new(BatchConfig::default(), sink.clone()));
     let registry = doc.registry();
     let chats = ChatRegistry::new(registry);
     let instance = Arc::new(InstanceRegistry::new(
@@ -57,21 +64,25 @@ async fn env() -> Env {
         caps: json!({}),
         buffered: None,
         buffer_lost: None,
-        stream_epochs: Some([("s1".to_string(), 0u64)].into_iter().collect()),
+        stream_epochs: Some([(S1.to_string(), 0u64)].into_iter().collect()),
         nonce: "AAAA".into(),
     };
     let (tx, _rx) = mpsc::channel(8);
     instance
         .on_hello("local", "tok-m", InstanceConn { tx }, &hello)
         .await;
-    // 打开 session + binding（relay 投递前提）。
-    doc.open_chat("s1", "local", Some("t")).await.unwrap();
-    chats.register("s1", "local", Some("t")).await.unwrap();
-    chats.bind("s1", "acp-1").await.unwrap();
+    // 打开 session + binding（relay 投递前提）。chat store 记录须存在
+    // （StoreSink 落盘按 chat 归属解析；生产中由 create 流程建立）。
+    let _ = store.create_chat(uuid::Uuid::parse_str(S1).unwrap());
+    doc.open_chat(S1, "local", Some("t"), None, None).await.unwrap();
+    chats.register(S1, "local", Some("t"), "/", None).await.unwrap();
+    chats.bind(S1, "acp-1").await.unwrap();
     Env {
         _tmp: tmp,
         chats,
         relay,
+        sink,
+        instance,
     }
 }
 
@@ -79,7 +90,7 @@ async fn env() -> Env {
 /// 帧内 sessionId = acp_session_id（binding 校验键，§495）。
 fn ev(seq: u64, frame: serde_json::Value) -> InstanceEvent {
     InstanceEvent {
-        chat_id: "s1".into(),
+        chat_id: S1.into(),
         epoch: 0,
         seq,
         frame,
@@ -144,7 +155,7 @@ async fn event_delivered_to_aggregator() {
     let r = env.relay.on_instance_event("local", &e).await;
     match r {
         ConsumeResult::Delivered { chat_id, kind, seq, applied } => {
-            assert_eq!(chat_id, "s1");
+            assert_eq!(chat_id, S1);
             assert_eq!(kind, "message_delta");
             assert_eq!(seq, 1);
             assert!(applied);
@@ -175,7 +186,7 @@ async fn unknown_frame_dropped_counted() {
 async fn buffer_sync_epoch_mismatch_rejects_batch() {
     let env = env().await;
     let sync = InstanceBufferSync {
-        chat_id: "s1".into(),
+        chat_id: S1.into(),
         epoch: 1, // hello 登记 0
         from_seq: 1,
         frames: vec![BufferedFrame {
@@ -196,7 +207,7 @@ async fn buffer_sync_out_of_order_frames_dropped() {
     let env = env().await;
     // from_seq=1，但帧 seq 从 2 开始（跳号）→ 乱序丢弃计数。
     let sync = InstanceBufferSync {
-        chat_id: "s1".into(),
+        chat_id: S1.into(),
         epoch: 0,
         from_seq: 1,
         frames: vec![BufferedFrame {
@@ -216,7 +227,7 @@ async fn buffer_sync_out_of_order_frames_dropped() {
 async fn buffer_sync_contiguous_delivered() {
     let env = env().await;
     let sync = InstanceBufferSync {
-        chat_id: "s1".into(),
+        chat_id: S1.into(),
         epoch: 0,
         from_seq: 5,
         frames: vec![
@@ -267,29 +278,454 @@ async fn rpc_response_confirms_coordinator() {
     assert_eq!(resp["id"], json!("hub-1"));
 }
 
+// ---------------------------------------------------------------------------
+// #1 官方 session/request_permission（权限机制官方化）：登记 pending 表 +
+// 投递投影（turn_id 从 active_turns 表注入，聚合器 aggregator.rs:1042 守卫）
+// ---------------------------------------------------------------------------
+
+/// 读 session doc 镜像 `pending_permissions`：返回 `(permission_id,
+/// turn_id)` 列表（镜像断言写法对齐 327-342 的 session map 读法）。
+async fn mirror_pending_permissions(env: &Env) -> Vec<(String, String)> {
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S1))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let Some(perms) = root.get(&txn, "pending_permissions") else {
+        return Vec::new();
+    };
+    let perms = perms.cast::<yrs::MapRef>().unwrap();
+    let mut out = Vec::new();
+    for (k, v) in perms.iter(&txn) {
+        let turn = v
+            .cast::<yrs::MapRef>()
+            .ok()
+            .and_then(|m| m.get(&txn, "turn_id"))
+            .and_then(|t| t.cast::<String>().ok())
+            .unwrap_or_default();
+        out.push((k.to_string(), turn));
+    }
+    out
+}
+
+/// 官方 request_permission 帧（sessionId=acp-1 命中 binding；id 为 number）。
+fn official_permission_frame() -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "acp-1",
+            "toolCall": {"toolCallId": "tc1", "title": "run cmd"},
+            "options": [
+                {"optionId": "allow-once", "name": "允许一次", "kind": "allow_once"}
+            ]
+        }
+    })
+}
+
+#[tokio::test]
+async fn request_permission_registered_and_delivered() {
+    let env = env().await;
+    // 建立 doc 侧活动 turn（聚合器守卫要求：PermissionRequested 关联检查
+    // 要求 turn 已知，aggregator judge_turn_guard）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // 官方 request → Delivered{applied:true} + pending_permissions 表登记
+    // （take 命中且 request_id/options 回读一致）。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    // 投影已写（pending_permissions 有条目；permission_id 由 server 生成）。
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1, "权限投影写入 control doc");
+    let pid = perms[0].0.clone();
+    // take 命中且回读一致；一次性 remove。
+    let taken = env
+        .relay
+        .take_pending_permission(&pid)
+        .await
+        .expect("take 命中");
+    assert_eq!(taken.request_id, json!(5), "agent request id 原样");
+    assert_eq!(taken.options.len(), 1);
+    assert_eq!(taken.options[0]["optionId"], json!("allow-once"));
+    assert_eq!(taken.chat_id, S1);
+    assert!(env.relay.take_pending_permission(&pid).await.is_none(), "一次性 remove");
+}
+
+#[tokio::test]
+async fn request_permission_turn_id_injected() {
+    let env = env().await;
+    // 建立 doc 侧活动 turn（user_message 事件 → 聚合器 active_turn 投影）
+    // + registry 表注入（relay 从 active_turns 表取 turn_id，官方帧无
+    // turnId 字段）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // 官方 request_permission 帧到达 → 镜像 pending_permissions 条目
+    // turn_id == "t1"（对齐 327-342 的镜像断言写法）。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1);
+    assert_eq!(perms[0].1, "t1", "turn_id 从 active_turns 表注入");
+}
+
+#[tokio::test]
+async fn request_permission_before_active_turn_empty_turn_id() {
+    let env = env().await;
+    // doc 侧活动 turn 已建立（聚合器守卫前提），但 registry active_turns 表
+    // 无登记（relay 注入源为空）→ 官方帧到达 → turn_id=="" 但权限仍投影、
+    // take 仍命中（评审 P2-c 固化：功能不丢）。守卫放行依据
+    // aggregator judge_turn_guard `(Some(a), Some(""))` → accepting 通过。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    // 注意：不调用 chats.set_active_turn——registry 表保持无登记。
+    let e = ev(2, official_permission_frame());
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    let perms = mirror_pending_permissions(&env).await;
+    assert_eq!(perms.len(), 1, "权限仍投影");
+    assert_eq!(perms[0].1, "", "registry 无 active turn → turn_id 空串");
+    assert!(
+        env.relay.take_pending_permission(&perms[0].0).await.is_some(),
+        "take 仍命中（功能不丢）"
+    );
+}
+
 #[tokio::test]
 async fn disconnect_cleanup_interrupts_turn_and_gaps() {
     let env = env().await;
+    // 投影活动 turn（session doc active_turn 建立：permission 关联检查前提）
+    // + 一条 pending 权限（断链清理输入，§7.1）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(2, json!({"type": "permission_request", "sessionId": "acp-1", "payload": {"permissionId": "p1", "turnId": "t1", "title": "允许执行", "options": ["allowOnce"]}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
     // 登记活动 turn（coordinator 路径行为）。
-    env.chats.set_active_turn("s1", "t1").await;
+    env.chats.set_active_turn(S1, "t1").await;
     env.relay.on_instance_disconnect("local").await.unwrap();
     // session 置 Gap（§8.2 matrix instance 行）。
-    let e = env.chats.entry("s1").await.unwrap();
+    let e = env.chats.entry(S1).await.unwrap();
     assert_eq!(e.state, crate::control::ChatState::Gap);
-    // 活动 turn 已 interrupted（DocManager 命令应用后视图不可直接读——
-    // 经镜像断言）。
-    let _ = env;
+    // 断链清理生效：活动 turn interrupted + pending 权限批量 expired
+    // （StoreSink 镜像快照 → 应用断言，与 doc_manager 测试同款 mirror）。
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S1))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let sm = root
+        .get(&txn, "session")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(
+        sm.get(&txn, "active_turn_status").unwrap().cast::<String>().unwrap(),
+        "interrupted",
+        "断链 → 活动 turn interrupted（§7.1）"
+    );
+    let perms = root
+        .get(&txn, "pending_permissions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let pm = perms.get(&txn, "p1").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        pm.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "expired",
+        "断链 → pending 权限批量过期（§7.1 expireTurnPermissions）"
+    );
 }
 
 #[tokio::test]
 async fn process_exit_sets_terminal() {
     let env = env().await;
     let exit = acp_hub_proto::instance::InstanceProcessExit {
-        chat_id: "s1".into(),
+        chat_id: S1.into(),
         code: 0,
     };
     let r = env.relay.on_process_exit("local", &exit).await;
     assert!(matches!(r, ConsumeResult::Delivered { kind: "process_exit", .. }));
-    let e = env.chats.entry("s1").await.unwrap();
+    let e = env.chats.entry(S1).await.unwrap();
     assert_eq!(e.state, crate::control::ChatState::Ended);
+}
+
+// ---------------------------------------------------------------------------
+// 断链追平恢复（§7.3/§8.5）：断链 → ChatState Gap + registry gap 占位 →
+// buffer_sync 补推 → 恢复 Accepting + gap 清除；不可校准（epoch 变化，
+// §4.5.1）→ 保持 Gap（只能经 session/load 显式重建消除）
+// ---------------------------------------------------------------------------
+
+/// 读取 Registry Doc 镜像中 `chats[S1].gap`：`Some(None)` = 追平（Null/
+/// 缺字段）、`Some(Some(n))` = 缺口占位/计数、`None` = chat 条目缺失。
+async fn registry_chat_gap(env: &Env) -> Option<Option<f64>> {
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::REGISTRY)
+        .await
+        .expect("registry 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let chats = root
+        .get(&txn, "chats")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let sm = chats.get(&txn, S1)?.cast::<yrs::MapRef>().ok()?;
+    match sm.get(&txn, "gap") {
+        None | Some(yrs::Out::Any(yrs::Any::Null)) => Some(None),
+        Some(yrs::Out::Any(yrs::Any::Number(n))) => Some(Some(n)),
+        other => panic!("unexpected gap value: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn buffer_sync_after_disconnect_recovers_chat_from_gap() {
+    let env = env().await;
+    // 活动 turn 基线（user_message 建立 active_turn；seq=1）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // 断链 → ChatState Gap + registry gap 占位 Some(0)（缺口数量由补推时
+    // 聚合器精确计算，§8.2/§7.3）。
+    env.relay.on_instance_disconnect("local").await.unwrap();
+    assert_eq!(
+        env.chats.entry(S1).await.unwrap().state,
+        crate::control::ChatState::Gap
+    );
+    assert_eq!(
+        registry_chat_gap(&env).await,
+        Some(Some(0.0)),
+        "断链 → registry gap 占位"
+    );
+    // 补推（from_seq = server last_seq + 1 = 2）：delta 帧——断链后
+    // active_turn 已 interrupted，聚合器拒该帧（applied=false）；relay
+    // 以投递成功计数（delta 入队即返），恢复判定在 writer 内以聚合器
+    // 事实源进行（ResumeAfterGap 可校准 → 追平）。
+    let sync = InstanceBufferSync {
+        chat_id: S1.into(),
+        epoch: 0,
+        from_seq: 2,
+        frames: vec![BufferedFrame {
+            seq: 2,
+            frame: json!({
+                "type": "agent_message_chunk",
+                "sessionId": "acp-1",
+                "payload": {"turnId": "t1", "entryId": "e", "blockId": "b", "text": "x"}
+            }),
+        }],
+    };
+    let r = env.relay.on_buffer_sync("local", &sync).await;
+    assert!(matches!(r, ConsumeResult::Delivered { .. }), "补推投递成功");
+    // 恢复：ChatState Gap → Accepting（可开新 turn）+ registry gap 清除。
+    assert_eq!(
+        env.chats.entry(S1).await.unwrap().state,
+        crate::control::ChatState::Accepting,
+        "补推追平 → 恢复 Accepting（§7.3）"
+    );
+    assert_eq!(
+        registry_chat_gap(&env).await,
+        Some(None),
+        "追平 → registry gap 标记清除"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5 binding 双端点（relay 侧）：无帧内 sessionId 的 JSON-RPC 形态帧按信封
+// 兜底投递（与 child.rs C1 同判据——有 jsonrpc 键）；原始形态仍拒
+// ---------------------------------------------------------------------------
+
+/// #5 无 sessionId 的 JSON-RPC 形态通知（agent/status，instance 级事件，
+/// §5.4 投影无 chat 归属）→ 信封兜底投递：Delivered{applied:true} + control
+/// doc 镜像 `agent.status` 投影（聚合器 write_agent_status）。
+#[tokio::test]
+async fn agent_status_without_session_id_delivered() {
+    let env = env().await;
+    let e = ev(
+        1,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "agent/status",
+            "params": {"status": "busy"}
+        }),
+    );
+    let r = env.relay.on_instance_event("local", &e).await;
+    match r {
+        ConsumeResult::Delivered { chat_id, applied, .. } => {
+            assert_eq!(chat_id, S1, "信封 chat 兜底归属");
+            assert!(applied, "agent/status 应投递（聚合器接受）");
+        }
+        other => panic!("expected delivered, got {other:?}"),
+    }
+    // control（session）doc 镜像：agent.status 投影已写（§5.4）。
+    let (snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::session(S1))
+        .await
+        .expect("session 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let mirror = yrs::Doc::new();
+    let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
+    mirror.transact_mut().apply_update(parsed).unwrap();
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert_eq!(
+        agent.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "busy",
+        "agent/status 投影写入 control doc"
+    );
+}
+
+/// #5 原始形态（无 jsonrpc 键、无 sessionId）→ 仍 binding_missing（relay
+/// 是 server 侧唯一防线；与 child.rs C1 判定对称——直接放行原始形态会让
+/// map_raw 命中 agent_status 而投递，安全边界不放宽）。
+#[tokio::test]
+async fn raw_frame_without_session_id_still_dropped() {
+    let env = env().await;
+    let e = ev(
+        2,
+        json!({"type": "agent_status", "payload": {"status": "busy"}}),
+    );
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped { reason: "binding_missing" }
+    ));
+}
+
+#[tokio::test]
+async fn buffer_sync_uncalibratable_keeps_gap() {
+    let env = env().await;
+    // 流基线（last_seq=1）。
+    let r = env
+        .relay
+        .on_instance_event(
+            "local",
+            &ev(1, json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t1", "entryId": "t1:user", "text": "你好"}})),
+        )
+        .await;
+    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }));
+    env.chats.set_active_turn(S1, "t1").await;
+    // daemon 重启：新 hello 幂等替换 chat_epochs（s1 → 1，§4.5.1）——
+    // relay epoch 校验放行 epoch=1 帧。
+    let hello = InstanceHello {
+        token: "tok".into(),
+        hostname: "local".into(),
+        caps: json!({}),
+        buffered: None,
+        buffer_lost: None,
+        stream_epochs: Some([(S1.to_string(), 1u64)].into_iter().collect()),
+        nonce: "BBBB".into(),
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    env.instance
+        .on_hello("local", "tok-m", InstanceConn { tx }, &hello)
+        .await;
+    // epoch 变化帧：聚合器置不可校准缺口并拒绝投影（§4.5.1；补推契约
+    // 失效——历史缓冲无法校准）。
+    let mut e = ev(
+        2,
+        json!({"type": "user_message_chunk", "sessionId": "acp-1", "payload": {"turnId": "t2", "entryId": "t2:user", "text": "hi"}}),
+    );
+    e.epoch = 1;
+    let r = env.relay.on_instance_event("local", &e).await;
+    assert!(
+        matches!(r, ConsumeResult::Delivered { applied: false, .. }),
+        "epoch 变化帧应被聚合器拒绝（uncalibratable）"
+    );
+    // 断链 → Gap + registry gap 占位。
+    env.relay.on_instance_disconnect("local").await.unwrap();
+    assert_eq!(
+        env.chats.entry(S1).await.unwrap().state,
+        crate::control::ChatState::Gap
+    );
+    // 补推（epoch=1, from_seq=2）：帧被聚合器拒（UncalibratableGap）——
+    // relay 以投递成功计数仍会尝试恢复，但 writer 内 ResumeAfterGap 检查
+    // stream.uncalibratable → Rejected → 不迁移、不误标追平。
+    let sync = InstanceBufferSync {
+        chat_id: S1.into(),
+        epoch: 1,
+        from_seq: 2,
+        frames: vec![BufferedFrame {
+            seq: 2,
+            frame: json!({
+                "type": "agent_message_chunk",
+                "sessionId": "acp-1",
+                "payload": {"turnId": "t2", "entryId": "e", "blockId": "b", "text": "x"}
+            }),
+        }],
+    };
+    let r = env.relay.on_buffer_sync("local", &sync).await;
+    assert!(matches!(r, ConsumeResult::Delivered { .. }), "补推帧投递（聚合器拒绝，relay 不感知）");
+    // 保持 Gap + gap 占位（不可校准缺口只能经 session/load 显式重建消除）。
+    assert_eq!(
+        env.chats.entry(S1).await.unwrap().state,
+        crate::control::ChatState::Gap,
+        "uncalibratable 拒绝恢复"
+    );
+    assert_eq!(
+        registry_chat_gap(&env).await,
+        Some(Some(0.0)),
+        "gap 标记保留（不得误标为已追平）"
+    );
 }

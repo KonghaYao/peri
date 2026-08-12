@@ -67,6 +67,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::agent::{
+    agent_context::AgentContext,
     async_tasks::TaskManager as AgentTaskManager,
     react::{AgentInput, ReactLLM},
     stages::{run_react_loop, LoopResult},
@@ -857,6 +858,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 
     // Phase 5: seed transcript（history 作为 ancestor 之外的自有消息）
+    // 首轮用户 turn 判定需在 history move 前捕获（Phase 5.9 使用）。
+    let is_first_user_turn = !req.continuation && req.history.is_empty();
     {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
@@ -905,6 +908,38 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         ));
         if let Some(booking) = &req.mode_notice_booking {
             mark_permission_mode_notified(&booking.last_notified, booking.mode);
+        }
+
+        // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
+        // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集
+        // middleware chain 的 `first_turn_reminder` 非空贡献，作为 Info 消息
+        // （`<system-reminder>` 包裹，见 append_messages_to_transcript）在用户
+        // Prompt **之后**入队——Receive drain 顺序为 user 输入在前、reminder
+        // 在后（"加入到 user prompt"语义，不抢在用户输入前）。
+        // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
+        if is_first_user_turn {
+            let mut cx = AgentContext::from_stage(&v2_out.context);
+            match v2_out
+                .context
+                .runtime
+                .middleware_chain
+                .run_first_turn_reminders(&mut cx)
+                .await
+            {
+                Ok(reminders) if !reminders.is_empty() => {
+                    for text in reminders {
+                        v2_out.context.session.queue.push(QueuedMessage::new(
+                            MessageKind::Info,
+                            V2MessageSource::SystemInjected,
+                            BaseMessage::human(text),
+                        ));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "[v2] first_turn_reminder hooks failed");
+                }
+            }
         }
     }
 

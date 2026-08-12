@@ -92,6 +92,15 @@ function getStr(m: Y.Map<unknown> | null, key: string): string | null {
   return v === undefined || v === null ? null : String(v);
 }
 
+/** 数值兜底：yjs 数值字段直接取（serde 镜像为 number），缺失/非法 → null
+ *  （渲染侧以 — 兜底）。 */
+function getNum(m: Y.Map<unknown> | null, key: string): number | null {
+  const v = m ? m.get(key) : null;
+  if (v === undefined || v === null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ── 渲染结果类型 ────────────────────────────────────────────────────────
 
 export interface InstanceInfo {
@@ -111,11 +120,30 @@ export interface ChatInfo {
   status: string | null;
   gap: unknown;
   updatedAt: string | null;
+  /** ACP 进程工作目录（继承自 workspace 或 server 默认目录，§6.3）。 */
+  cwd: string | null;
+  /** 归属工作区（无 → null；工作区删除后已建对话保留此引用）。 */
+  workspaceId: string | null;
+}
+
+/** 工作区（独立于 chat 的上层概念，§6.3）：定义本地目录 cwd，其下新建
+ *  对话继承该目录。Registry Doc `workspaces` map。 */
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  cwd: string;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface RegistryView {
   instances: InstanceInfo[];
   chats: ChatInfo[];
+  /** ACP agent 磁盘历史会话（instance 级数据，§6.3：server 经 session/list
+   *  轮询投影到 Registry Doc `sessions` Map——全局共享，不随 chat 切换）。 */
+  sessions: SessionSummaryInfo[];
+  /** 工作区定义列表（§6.3 workspace 扩展）。 */
+  workspaces: WorkspaceInfo[];
   globalStatus: string;
   schemaVersion: unknown;
   projectionVersion: unknown;
@@ -175,6 +203,14 @@ export interface AgentInfo {
   status: string | null;
   lastActivityAt: string | null;
   capabilities: unknown[];
+  /** 模型名（server 从 agent 元信息写入；无 → null，UI 显示 —）。 */
+  model: string | null;
+  /** 推理强度（server 从 agent 元信息写入；无 → null，UI 显示 —）。 */
+  effort: string | null;
+  /** 上下文窗口大小（tokens）。 */
+  contextWindow: number | null;
+  /** 已占用上下文（tokens）。 */
+  contextUsed: number | null;
 }
 
 export interface ActiveTurnInfo {
@@ -194,6 +230,22 @@ export interface PendingPermission {
   decision: string | null;
 }
 
+/** ACP 会话摘要（agent 磁盘历史，§5.4）：与 hub 对话（控制面）语义不同。
+ *  server 经 session/list 轮询写入 **Registry Doc** `sessions` Map（instance
+ *  级数据，§6.3：全局共享，不随 chat 切换销毁/重建）。 */
+export interface SessionSummaryInfo {
+  sessionId: string;
+  title: string | null;
+  status: string | null;
+  updatedAt: string | null;
+  /** 会话所在 ACP 进程工作目录（§6.3 workspace 扩展：按 cwd 分面过滤）。 */
+  cwd: string | null;
+  /** §8.5 会话切换语义：会话是**进程内实体**——该会话是否为当前对话
+   *  的**当前活跃会话**（= 本对话 chat_id；前端标「当前」徽标，点击无
+   *  操作）。其余会话该字段为 null（历史会话，点击 = 当前对话内 load）。 */
+  boundChatId?: string | null;
+}
+
 export interface ControlView {
   chat: ChatHeadInfo | null;
   agent: AgentInfo | null;
@@ -203,12 +255,15 @@ export interface ControlView {
 
 // ── renderRegistry：实例列表（hub:registry 投影，M3 §2.1）──────────────
 
-/** 根 Map 字段：instances / chats / global / schema_version /
- *  projection_version。chats 是「活跃对话列表权威源」。 */
+/** 根 Map 字段：instances / chats / global / sessions / schema_version /
+ *  projection_version。chats 是「活跃对话列表权威源」；sessions 是 instance
+ *  级 ACP 历史会话（§6.3 轮询投影）。 */
 export function renderRegistry(doc: Y.Doc): RegistryView {
   const root = doc.getMap<unknown>('root');
   const instances: InstanceInfo[] = [];
   const chats: ChatInfo[] = [];
+  const sessions: SessionSummaryInfo[] = [];
+  const workspaces: WorkspaceInfo[] = [];
   let globalStatus = 'unknown';
 
   const m = asMap(root.get('instances'));
@@ -238,8 +293,29 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
         status: getStr(sm, 'status'), // "accepting"|"active"|"ended"|"closed"|"crashed"
         gap: sm ? sm.get('gap') : null,
         updatedAt: getStr(sm, 'updated_at'),
+        cwd: getStr(sm, 'cwd'),
+        workspaceId: getStr(sm, 'workspace_id'),
       });
     });
+  }
+
+  // 工作区（§6.3 workspace 扩展）：key = workspace_id（UUID v4）。
+  const wm = asMap(root.get('workspaces'));
+  if (wm) {
+    wm.forEach((v, id) => {
+      const sm = asMap(v);
+      workspaces.push({
+        id,
+        name: getStr(sm, 'name') || '',
+        cwd: getStr(sm, 'cwd') || '',
+        createdAt: getStr(sm, 'created_at'),
+        updatedAt: getStr(sm, 'updated_at'),
+      });
+    });
+    // 排序：最近创建在前。
+    workspaces.sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
+    );
   }
 
   const g = asMap(root.get('global'));
@@ -247,9 +323,37 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
     globalStatus = getStr(g, 'status') || 'unknown'; // healthy|degraded|restarting
   }
 
+  // ACP 会话（agent 磁盘历史，instance 级）：key = session_id。
+  const smap = asMap(root.get('sessions'));
+  if (smap) {
+    // 兜底去重：按 sessionId 去重（孤儿 key/客户端 doc 累积的残留可能
+    // 产生重复；server 侧全量同步自愈后此兜底保持渲染稳定）。
+    const seen = new Set<string>();
+    smap.forEach((v) => {
+      const sm = asMap(v);
+      if (!sm) return;
+      const sessionId = getStr(sm, 'session_id') || '';
+      if (!sessionId || seen.has(sessionId)) return;
+      seen.add(sessionId);
+      sessions.push({
+        sessionId,
+        title: getStr(sm, 'title'),
+        status: getStr(sm, 'status'),
+        updatedAt: getStr(sm, 'updated_at'),
+        cwd: getStr(sm, 'cwd'),
+      });
+    });
+    // 排序：最近更新在前。
+    sessions.sort((a, b) =>
+      String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
+    );
+  }
+
   return {
     instances,
     chats,
+    sessions,
+    workspaces,
     globalStatus,
     schemaVersion: root.get('schema_version'),
     projectionVersion: root.get('projection_version'),
@@ -340,10 +444,14 @@ export function renderChat(doc: Y.Doc): ChatView {
   };
 }
 
-// ── renderControl：对话头部 + 权限请求（control:{cid} 投影，M3 §3.3）─────
+// ── renderControl：对话头部 + 权限请求（session:{cid} 投影，M3 §3.3）─────
 
-/** 根 Map：chat / agent / active_turn / pending_permissions。权限条
- *  （allow/deny → permission/resolve）数据取自 pending_permissions。 */
+/** 根 Map：session / agent / pending_permissions（active turn 内嵌于
+ *  `session` map，对齐 Chat/Session 双 Doc 参考结构；旧根级 `chat`/
+ *  `active_turn` 键已随迁移移除）。
+ *  权限条（allow/deny → permission/resolve）数据取自 pending_permissions。
+ *  ACP 会话列表不在 session doc（instance 级数据 → Registry Doc sessions，
+ *  §6.3）——经 renderRegistry 读取，不随 chat 切换销毁。 */
 export function renderControl(doc: Y.Doc): ControlView {
   const root = doc.getMap<unknown>('root');
   const result: ControlView = {
@@ -353,19 +461,27 @@ export function renderControl(doc: Y.Doc): ControlView {
     pendingPermissions: [],
   };
 
-  const sess = asMap(root.get('chat'));
+  // `session` map：会话元信息 + active turn 内嵌字段（对齐参考 Session Doc：
+  // sessionId/title/status/activeTurnId/activeTurnStatus/activeTurnUpdatedAt）。
+  const sess = asMap(root.get('session'));
   if (sess) {
-    // chat_id 键 server 侧暂不写入（ChatInfoProjection 仅是 serde 镜像，
-    // 实际写入见 aggregator.rs write_chat_info），读空兜底 ''，避免 UI 层
-    // 对 undefined 取 slice 抛 TypeError。
     result.chat = {
-      chatId: getStr(sess, 'chat_id') || '',
+      chatId: getStr(sess, 'session_id') || '',
       title: getStr(sess, 'title'),
       status: getStr(sess, 'status'),
       activeTurnId: getStr(sess, 'active_turn_id'),
       createdAt: getStr(sess, 'created_at'),
       updatedAt: getStr(sess, 'updated_at'),
     };
+    const turnId = getStr(sess, 'active_turn_id');
+    const turnStatus = getStr(sess, 'active_turn_status');
+    if (turnId || turnStatus) {
+      result.activeTurn = {
+        turnId,
+        turnStatus,
+        updatedAt: getStr(sess, 'active_turn_updated_at'),
+      };
+    }
   }
 
   const agent = asMap(root.get('agent'));
@@ -373,19 +489,14 @@ export function renderControl(doc: Y.Doc): ControlView {
     const caps = asArray(agent.get('capabilities'));
     result.agent = {
       instanceId: getStr(agent, 'instance_id'),
-      sessionId: getStr(agent, 'session_id'),
+      sessionId: getStr(agent, 'acp_session_id') ?? getStr(agent, 'session_id'),
       status: getStr(agent, 'status'),
       lastActivityAt: getStr(agent, 'last_activity_at'),
       capabilities: caps ? caps.toArray() : [],
-    };
-  }
-
-  const turn = asMap(root.get('active_turn'));
-  if (turn) {
-    result.activeTurn = {
-      turnId: getStr(turn, 'turn_id'),
-      turnStatus: getStr(turn, 'turn_status'),
-      updatedAt: getStr(turn, 'updated_at'),
+      model: getStr(agent, 'model'),
+      effort: getStr(agent, 'effort'),
+      contextWindow: getNum(agent, 'context_window'),
+      contextUsed: getNum(agent, 'context_used'),
     };
   }
 

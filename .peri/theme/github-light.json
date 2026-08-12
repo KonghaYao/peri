@@ -3,7 +3,7 @@
   "mode": "light",
   "palette": {
     "base": {
-      "bg": "#FFFFFF",
+      "bg": "#F6F8FA",
       "fg": "$semantic.text.primary"
     },
     "brand": {
@@ -43,12 +43,12 @@
   "semantic": {
     "accent": "#0969DA",
     "text": {
-      "primary": "#1F2328",
+      "primary": "#626569",
       "muted": "#656D76",
-      "dim": "#B9BBC1"
+      "dim": "#878F99"
     },
     "border": {
-      "default": "#B9BBC1",
+      "default": "#959DA6",
       "active": "$semantic.accent",
       "dim": "#D0D7DE"
     },
@@ -59,11 +59,11 @@
       "error": "#CF222E"
     },
     "surface": {
-      "default": "#FFFFFF",
-      "user": "#F6F8FA",
+      "default": "#F6F8FA",
+      "user": "#E1E6ED",
       "popup": "#FFFFFF",
-      "selection": "#D0D7DE",
-      "cursor": "#F6F8FA"
+      "selection": "#C4D4EE",
+      "cursor": "#E1E6ED"
     },
     "diff": {
       "add": "#1A7F37",
@@ -78,11 +78,11 @@
     "thinking": "#8250DF",
     "model_info": "#BF3989",
     "bash_border": "#CF222E",
-    "selected_fg": "#1F2328"
+    "selected_fg": "#0D1117"
   },
   "component": {
     "message": {
-      "user_bg": "#F6F8FA",
+      "user_bg": "#E1E6ED",
       "ai_prefix": "$semantic.text.primary",
       "tool_indicator": "#1A7F37",
       "reasoning": "$semantic.thinking"

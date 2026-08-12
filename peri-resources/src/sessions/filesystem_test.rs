@@ -132,6 +132,41 @@ async fn test_delete_thread() {
     assert!(list.is_empty());
 }
 
+/// [M1] delete_thread 必须级联删除 hidden 子 agent 线程树（孤儿数据防护）。
+#[tokio::test]
+async fn test_delete_thread_cascades_child_thread_tree() {
+    let dir = tempdir().unwrap();
+    let store = FilesystemThreadStore::new(dir.path());
+
+    // 父 → 子 → 孙 三层线程树（子 agent 链，hidden=true）
+    let parent_id = store.create_thread(make_meta("/test")).await.unwrap();
+    let mut child_meta = make_meta("/test");
+    child_meta.parent_thread_id = Some(parent_id.clone());
+    child_meta.hidden = true;
+    let child_id = store.create_thread(child_meta).await.unwrap();
+    let mut grand_meta = make_meta("/test");
+    grand_meta.parent_thread_id = Some(child_id.clone());
+    grand_meta.hidden = true;
+    let grand_id = store.create_thread(grand_meta).await.unwrap();
+
+    store.delete_thread(&parent_id).await.unwrap();
+
+    for tid in [&parent_id, &child_id, &grand_id] {
+        assert!(
+            store.load_meta(tid).await.is_err(),
+            "线程 {tid} 应随父线程级联删除"
+        );
+    }
+    // 文件系统目录应一并移除
+    let list = store.list_threads().await.unwrap();
+    assert!(
+        !list
+            .iter()
+            .any(|m| m.id == parent_id || m.id == child_id || m.id == grand_id),
+        "线程树删除后不应有任何残留"
+    );
+}
+
 #[tokio::test]
 async fn test_update_meta() {
     let dir = tempdir().unwrap();

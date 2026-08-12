@@ -43,12 +43,12 @@
   "semantic": {
     "accent": "#427B58",
     "text": {
-      "primary": "#3C3836",
-      "muted": "#7C6F64",
-      "dim": "#BDAE93"
+      "primary": "#656055",
+      "muted": "#6F6459",
+      "dim": "#91846C"
     },
     "border": {
-      "default": "#BDAE93",
+      "default": "#97896F",
       "active": "$semantic.accent",
       "dim": "#EBDDB2"
     },
@@ -60,10 +60,10 @@
     },
     "surface": {
       "default": "#FBF1C7",
-      "user": "#F2E5BC",
-      "popup": "#FBF1C7",
-      "selection": "#EBDDB2",
-      "cursor": "#F2E5BC"
+      "user": "#EAD9AA",
+      "popup": "#FFFFFF",
+      "selection": "#DBDEAE",
+      "cursor": "#EAD9AA"
     },
     "diff": {
       "add": "#79740E",
@@ -78,11 +78,11 @@
     "thinking": "#8F3F71",
     "model_info": "#B57614",
     "bash_border": "#9D0006",
-    "selected_fg": "#3C3836"
+    "selected_fg": "#2B2825"
   },
   "component": {
     "message": {
-      "user_bg": "#F2E5BC",
+      "user_bg": "#EAD9AA",
       "ai_prefix": "$semantic.text.primary",
       "tool_indicator": "#79740E",
       "reasoning": "$semantic.thinking"
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#FBF1C7",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",

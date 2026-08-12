@@ -159,6 +159,11 @@ pub struct McpServerSummary {
     pub status: String,
     pub transport: String,
     pub tools_count: usize,
+    /// OAuth 待授权标记（oauth_status == NeedsAuthorization）：面板据此
+    /// 显示"授权"按钮（Enter 触发 mcp/oauth_start）。
+    pub needs_auth: bool,
+    /// 服务器 URL（HTTP 传输），详情视图展示用。
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -386,6 +391,11 @@ pub static CRON_SCHEDULER_HANDLE: OnceLock<
 /// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
 /// 在 entry.rs 中 acp_client 就绪后 set。
 pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
+    OnceLock::new();
+/// TUI 面板直读的 MCP 连接池句柄（`spawn_mcp_init` 创建后 set，C 类豁免）。
+/// OAuth 授权完成后（`handle_oauth_completed`）据此触发 reconnect——
+/// 从共享凭证文件恢复连接，面板状态随之刷新。
+pub static MCP_PANEL_POOL: OnceLock<std::sync::Arc<peri_middlewares::mcp::McpClientPool>> =
     OnceLock::new();
 /// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。

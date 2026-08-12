@@ -167,6 +167,10 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     };
 
     // ── MCP 连接池（bare 时跳过；后台初始化不阻塞，迁移前 cli_print 语义）──
+    // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
+    // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
+    let (oauth_event_tx, oauth_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::event::AcpEvent>();
     let mcp_pool: Option<Arc<dyn McpPoolPort>> = if bare {
         None
     } else {
@@ -176,13 +180,46 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         let claude_home_clone = claude_dir.clone();
         let (init_tx, _init_rx) =
             tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+        // OAuth 事件回调：AuthorizationNeeded 时注册回传通道（TUI 经
+        // mcp/oauth_callback RPC 投递授权码）并转发 OauthNeeded；完成/失败
+        // 直接转发对应 AcpEvent。L5 装配面豁免全路径引用（import-exemptions
+        // ACP-biz-fullpath），不引入 use 语句。
+        type OAuthFlowEvent = peri_middlewares::mcp::oauth_flow::OAuthFlowEvent;
+        let oauth_event_callback: Option<
+            Box<dyn Fn(peri_middlewares::mcp::oauth_flow::OAuthFlowEvent) + Send + Sync>,
+        > = {
+            let cb_tx = oauth_event_tx.clone();
+            let cb_pool = pool.clone();
+            Some(Box::new(move |event: OAuthFlowEvent| match event {
+                OAuthFlowEvent::AuthorizationNeeded {
+                    server_name,
+                    authorization_url,
+                    callback_tx,
+                } => {
+                    cb_pool.register_oauth_callback(&server_name, callback_tx);
+                    let _ = cb_tx.send(crate::event::AcpEvent::OauthNeeded {
+                        server_name,
+                        auth_url: authorization_url,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationCompleted { server_name } => {
+                    let _ = cb_tx.send(crate::event::AcpEvent::OauthCompleted { server_name });
+                }
+                OAuthFlowEvent::AuthorizationFailed { server_name, error } => {
+                    let _ = cb_tx.send(crate::event::AcpEvent::OauthFailed { server_name, error });
+                }
+                OAuthFlowEvent::AuthorizationRestored { server_name } => {
+                    let _ = cb_tx.send(crate::event::AcpEvent::OauthRestored { server_name });
+                }
+            }))
+        };
         tokio::spawn(async move {
             peri_middlewares::mcp::McpClientPool::run_initialize(
                 pool_clone,
                 std::path::Path::new(&cwd_clone),
                 &claude_home_clone,
                 init_tx,
-                None,
+                oauth_event_callback,
                 None,
             )
             .await;
@@ -278,6 +315,8 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         permission_mode,
         cron_scheduler,
         mcp_pool,
+        oauth_event_tx: Some(oauth_event_tx),
+        oauth_event_rx: Some(oauth_event_rx),
         channel_state: None, // ServiceRegistry.channel_state 已删除
         plugin_skill_roots,
         plugin_agent_dirs,
