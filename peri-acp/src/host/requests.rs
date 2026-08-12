@@ -8,8 +8,8 @@ use crate::dispatch::config_update::make_config_options;
 use crate::dispatch::ReplaySender;
 use crate::{dispatch, transport::types::AcpError};
 use agent_client_protocol::schema::v1::{
-    CloseSessionResponse, ForkSessionResponse, ListSessionsResponse, LoadSessionResponse,
-    NewSessionResponse, ResumeSessionResponse, SessionId, SessionNotification,
+    CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
+    LoadSessionResponse, NewSessionResponse, ResumeSessionResponse, SessionId, SessionNotification,
     SetSessionConfigOptionResponse, SetSessionModeResponse,
 };
 use peri_acp_types::event_data::{
@@ -541,6 +541,37 @@ pub(crate) async fn handle_request(
             // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
             let _ = cfg.session_manager.close_session(req_session_id).await;
             let resp = CloseSessionResponse::new();
+            serde_json::to_value(resp)
+                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+        }
+
+        // session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）：
+        // 从 session history 中移除会话——先做与 session/close 相同的内存态清理，
+        // 再从 ThreadStore 持久化删除线程（消息级联删除）。存储层幂等：线程
+        // 不存在时不视为错误；真实 IO 失败仅记录日志（与 stdio 路径一致）。
+        "session/delete" => {
+            let req_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+
+            if let Some(state) = sessions.remove(req_session_id) {
+                if let Some(ref token) = state.cancel_token {
+                    token.cancel();
+                }
+                info!(session_id = %req_session_id, "Session removed on delete");
+            }
+            let _ = cfg.session_manager.close_session(req_session_id).await;
+            if let Err(e) = cfg
+                .thread_store
+                .delete_thread(&req_session_id.to_string())
+                .await
+            {
+                warn!(session_id = %req_session_id, error = %e, "session/delete: thread deletion failed");
+            } else {
+                info!(session_id = %req_session_id, "Session history deleted");
+            }
+            let resp = DeleteSessionResponse::new();
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }

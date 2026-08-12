@@ -1,4 +1,4 @@
-//! 会话控制：list / cancel / close。
+//! 会话控制：list / cancel / close / delete。
 
 use agent_client_protocol::schema::v1::{ListSessionsRequest, ListSessionsResponse};
 
@@ -53,4 +53,44 @@ pub(crate) async fn handle_close(ctx: &StdioContext, session_id: &str) {
     }
     // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
     let _ = ctx.session_manager.close_session(session_id).await;
+}
+
+/// session/delete 核心逻辑（标准 ACP：从 session history 中移除会话）。
+///
+/// 语义（agentclientprotocol.com/protocol/v1/session-delete）：删除后会话不再
+/// 出现在 `session/list` 中，`session/load` 亦无法再加载。实现分两步：
+/// 1. 若会话当前活跃，先执行与 `session/close` 相同的清理（cancel token、
+///    LSP pool shutdown、SessionManager 记录移除），避免子进程残留；
+/// 2. 从 ThreadStore 删除线程（消息级联删除）。
+///
+/// 注意：`handle_close` 只移除内存态、保留 history；`handle_delete` 是持久化
+/// 删除——调用方须确认用户意图，无恢复路径。
+pub(crate) async fn handle_delete(ctx: &StdioContext, session_id: &str) {
+    let lsp_pool = {
+        let mut sessions = ctx.sessions.write();
+        if let Some(s) = sessions.remove(session_id) {
+            if let Some(ref token) = s.cancel_token {
+                token.cancel();
+            }
+            tracing::info!(session_id = %session_id, "Session removed on delete");
+            s.lsp_pool
+        } else {
+            None
+        }
+    };
+    if let Some(pool) = lsp_pool {
+        pool.shutdown().await;
+    }
+    // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
+    let _ = ctx.session_manager.close_session(session_id).await;
+    // 持久化删除线程（消息级联删除）；线程不存在时（幂等）不视为错误
+    if let Err(e) = ctx
+        .thread_store
+        .delete_thread(&session_id.to_string())
+        .await
+    {
+        tracing::error!(session_id = %session_id, error = %e, "session/delete: thread deletion failed");
+    } else {
+        tracing::info!(session_id = %session_id, "Session history deleted");
+    }
 }

@@ -557,6 +557,8 @@ thread-browser-time-minutes = { $count } 分钟前
 thread-browser-time-hours = { $count } 小时前
 thread-browser-time-days = { $count } 天前
 panel-threads-header-hint =   Enter::打开 · Esc::关闭
+panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  d::delete  Esc::close
+panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind 弹窗 ----
 

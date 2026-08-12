@@ -9,7 +9,9 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary};
+use crate::kit::atoms::{
+    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_LIST, THREAD_LOAD_TX, ThreadSummary,
+};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use peri_theme::atoms::THEME_ATOM;
@@ -28,6 +30,8 @@ use ratatui_kit::{
 pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
+    // 确认删除模式（仿 Cron 面板）：d/Delete 进入，Enter 确认 / Esc 取消
+    let confirm_delete = hooks.use_state(|| false);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
     hooks.use_atom(&LANG_VERSION);
@@ -49,6 +53,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // panel 高度 18 - border 2 - header 3 = 12 行；每项 3 行 → 可见 4 个。
     const VISIBLE_ITEMS: usize = 4;
     let scroll_start = scroll_start_for_selected(*cursor.read(), item_count, VISIBLE_ITEMS);
+    let is_confirming = *confirm_delete.read();
 
     // ── 键盘 + 鼠标处理 ──
     hooks.use_event_handler_with_options(
@@ -58,8 +63,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         {
             move |event| {
                 // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+                // 确认删除模式下不触发 load（防止误删时顺手切会话）
                 if let Event::Mouse(mouse) = event {
-                    if let Some(area) = area
+                    if !is_confirming
+                        && let Some(area) = area
                         && !is_scrollbar_column(&mouse, area)
                         && let Some(idx) = hit_item(
                             &mouse,
@@ -96,6 +103,50 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if key.kind != KeyEventKind::Press {
                     return EventResult::Ignored;
                 }
+
+                // Confirm-delete mode（标准 session/delete，agentclientprotocol.com）：
+                // Enter 确认删除，Esc 取消，其他按键一律退出确认模式
+                if *confirm_delete.read() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let sel = *cursor.read();
+                            let threads_snap = THREAD_LIST.state().read().clone();
+                            if let Some(entry) = threads_snap.get(sel) {
+                                let sid = entry.id.clone();
+                                if let Some(client) = ACP_CLIENT_HANDLE.get() {
+                                    let client = client.clone();
+                                    tokio::spawn(async move {
+                                        match client.delete_session(&sid).await {
+                                            Ok(()) => tracing::info!(
+                                                session_id = %sid,
+                                                "thread browser: session deleted"
+                                            ),
+                                            Err(e) => tracing::warn!(
+                                                session_id = %sid,
+                                                error = %e,
+                                                "thread browser: session delete failed"
+                                            ),
+                                        }
+                                    });
+                                } else {
+                                    tracing::warn!(
+                                        target: "thread-browser",
+                                        "ACP_CLIENT_HANDLE not set, delete skipped"
+                                    );
+                                }
+                            }
+                            *confirm_delete.write() = false;
+                        }
+                        KeyCode::Esc => {
+                            *confirm_delete.write() = false;
+                        }
+                        _ => {
+                            *confirm_delete.write() = false;
+                        }
+                    }
+                    return EventResult::Consumed;
+                }
+
                 match key.code {
                     KeyCode::Up => {
                         let mut c = cursor.write();
@@ -114,6 +165,13 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             crate::kit::panel_registry::close_active_panel();
                         }
+                    }
+                    // d / Delete：进入确认删除模式（列表中无条目时不进入）
+                    KeyCode::Char('d') if item_count > 0 => {
+                        *confirm_delete.write() = true;
+                    }
+                    KeyCode::Delete if item_count > 0 => {
+                        *confirm_delete.write() = true;
                     }
                     _ => {}
                 }
@@ -205,11 +263,18 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    // footer
-    lines.push(Line::from(vec![Span::styled(
-        i18n::tr("common-nav-enter-close"),
-        muted_style,
-    )]));
+    // footer：确认删除模式显示确认提示，正常模式显示导航提示
+    if is_confirming {
+        lines.push(Line::from(vec![Span::styled(
+            i18n::tr("panel-threads-confirm-hint"),
+            Style::new().fg(theme_def.read().semantic.status.warning),
+        )]));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            i18n::tr("panel-threads-nav-hint"),
+            muted_style,
+        )]));
+    }
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 

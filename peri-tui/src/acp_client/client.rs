@@ -400,6 +400,24 @@ impl AcpTuiClient {
         Ok(session_id.to_string())
     }
 
+    /// Delete a session from history (standard ACP `session/delete`).
+    ///
+    /// 遵守 agentclientprotocol.com/protocol/v1/session-delete：`{ sessionId }`
+    /// 请求、`{}` 响应；删除后会话不再出现在 `session/list` 中且无法
+    /// `session/load`。若删除的是当前活跃会话，本地事实源一并清空
+    /// （服务端会 cancel 该会话的 in-flight turn 并级联删除消息）。
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), AcpError> {
+        let params = json!({ "sessionId": session_id });
+        self.transport
+            .send_request("session/delete", params)
+            .await?;
+        let mut cur = self.current_session_id.lock().unwrap();
+        if cur.as_deref() == Some(session_id) {
+            *cur = None;
+        }
+        Ok(())
+    }
+
     /// Submit a user message to the current session.
     /// Note: prompt() is called from the spawned async task that already
     /// has a session via new_session(), so current_session_id is guaranteed Some.

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     schema::v1::{
-        ForkSessionRequest, ForkSessionResponse, LoadSessionRequest, LoadSessionResponse,
-        ResumeSessionRequest, ResumeSessionResponse,
+        DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
+        LoadSessionRequest, LoadSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
     },
     Agent, Channel, Client, ConnectionTo,
 };
@@ -26,6 +26,7 @@ use peri_acp_types::store::ThreadStore;
 use peri_agent::thread::FilesystemThreadStore;
 
 use super::*;
+use crate::host::stdio::session::control;
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 use crate::session::SessionManager;
 
@@ -346,5 +347,60 @@ async fn test_load_without_lsp_config_has_no_pool() {
     assert!(
         info.lsp_pool.is_none(),
         "无 LSP 配置时不应创建池（与 new 分支一致）"
+    );
+}
+
+// ── session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）──
+
+/// 双端 builder 驱动：客户端发 DeleteSessionRequest，验证空响应 + 线程持久化删除。
+#[tokio::test]
+async fn test_delete_removes_thread_and_responds_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ctx = make_stdio_context(&tmp, Vec::new());
+    let (channel_a, channel_b) = Channel::duplex();
+
+    // 先创建线程（session/new 等价物），取得真实 thread id
+    let meta = peri_acp_types::thread::ThreadMeta::new(tmp.path().to_str().unwrap());
+    let thread_id = ctx.thread_store.create_thread(meta).await.unwrap();
+    let sid = thread_id.clone();
+
+    let ctx_for_handler = Arc::clone(&ctx);
+    let server = Agent
+        .builder()
+        .on_receive_request(
+            {
+                let ctx = ctx_for_handler;
+                async move |req: DeleteSessionRequest, responder, _cx: ConnectionTo<Client>| {
+                    control::handle_delete(&ctx, &req.session_id.0).await;
+                    let _ = responder.respond(DeleteSessionResponse::new());
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_to(channel_b);
+    let _server_task = tokio::spawn(server);
+
+    // 闭包外 clone：async move 会整体捕获 sid
+    let sid_for_req = sid.clone();
+    let result = Client
+        .builder()
+        .connect_with(
+            channel_a,
+            async move |cx: ConnectionTo<Agent>| -> Result<(), agent_client_protocol::Error> {
+                let _resp: DeleteSessionResponse = cx
+                    .send_request(DeleteSessionRequest::new(sid_for_req))
+                    .block_task()
+                    .await?;
+                Ok(())
+            },
+        )
+        .await;
+
+    assert!(result.is_ok(), "handle_delete 应成功: {result:?}");
+    // 线程已持久化删除（元数据消失）
+    assert!(
+        ctx.thread_store.load_meta(&sid).await.is_err(),
+        "删除后线程元数据不应存在"
     );
 }

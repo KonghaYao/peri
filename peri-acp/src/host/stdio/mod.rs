@@ -26,10 +26,10 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
 
     use agent_client_protocol::{
         schema::v1::{
-            CancelNotification, CloseSessionRequest, CloseSessionResponse, ForkSessionRequest,
-            InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-            PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
-            SetSessionModeRequest,
+            CancelNotification, CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest,
+            DeleteSessionResponse, ForkSessionRequest, InitializeRequest, ListSessionsRequest,
+            LoadSessionRequest, NewSessionRequest, PromptRequest, ResumeSessionRequest,
+            SetSessionConfigOptionRequest, SetSessionModeRequest,
         },
         Agent, Client, ConnectionTo, Stdio,
     };
@@ -152,6 +152,18 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
                 let ctx = ctx_clone.clone();
                 async move |req: ForkSessionRequest, responder, _cx: ConnectionTo<Client>| {
                     session::create::handle_fork(&ctx, req, responder, _cx).await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // ── session/delete（标准 ACP：从 session history 移除会话）──
+        .on_receive_request(
+            {
+                let ctx = ctx_clone.clone();
+                async move |req: DeleteSessionRequest, responder, _cx: ConnectionTo<Client>| {
+                    session::control::handle_delete(&ctx, &req.session_id.0).await;
+                    let _ = responder.respond(DeleteSessionResponse::new());
+                    Ok(())
                 }
             },
             agent_client_protocol::on_receive_request!(),

@@ -558,6 +558,8 @@ thread-browser-time-minutes = { $count } minute{ $suffix } ago
 thread-browser-time-hours = { $count } hour{ $suffix } ago
 thread-browser-time-days = { $count } day{ $suffix } ago
 panel-threads-header-hint =   Enter::open · Esc::close
+panel-threads-nav-hint =   ↑/↓::navigate  Enter::open  d::delete  Esc::close
+panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
 
 # ---- Rewind Popup ----
 
