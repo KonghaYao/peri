@@ -592,9 +592,13 @@ rewind-execute-failed = 回退执行失败: { $error }
 # ---- OAuth 弹窗 ----
 
 oauth-title =  OAuth 授权 — { $server } 
-oauth-prompt = 按 Ctrl+O 在浏览器中打开链接，完成后粘贴回调 URL：
-oauth-callback-label = 回调 URL > 
-popup-oauth-action-hint =   Ctrl+O: 浏览器打开  |  Enter: 关闭  |  Esc: 取消
+oauth-prompt = 选择「打开浏览器」开始授权，授权完成后将授权码粘贴到输入框提交：
+oauth-callback-label = 授权码 > 
+oauth-btn-open = 打开浏览器
+oauth-btn-copy = 复制链接
+oauth-btn-cancel = 取消
+popup-oauth-action-hint =   Tab: 切换按钮/输入框  |  ←→: 选择按钮  |  Enter: 激活  |  输入框内 Enter: 提交授权码
+oauth-copied-hint =   ✓ 授权链接已复制到剪贴板  |  Esc: 取消
 
 # ---- Login 面板 ----
 
@@ -844,6 +848,8 @@ panel-mcp-connected =    { $connected }/{ $total } 已连接
 panel-mcp-empty =   暂未配置 MCP 服务器
 panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-needs-auth =  [需要授权]
+panel-mcp-oauth-hint =   Enter: 发起 OAuth 授权  |  Esc: 关闭
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯

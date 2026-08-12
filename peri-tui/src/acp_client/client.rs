@@ -152,6 +152,11 @@ impl AcpTuiClient {
         deleted_session_ids: &Arc<Mutex<HashSet<String>>>,
         session_id: &str,
     ) -> bool {
+        // host 级事件（MCP OAuth 授权等）以空 sessionId 送达，不参与
+        // session 过滤——否则已建会话时 OAuth popup 事件被静默丢弃。
+        if session_id.is_empty() {
+            return true;
+        }
         if deleted_session_ids.lock().unwrap().contains(session_id) {
             return false;
         }

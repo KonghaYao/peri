@@ -155,6 +155,20 @@ pub enum AcpEvent {
     /// TUI 经 peri/agent_event 通道解码为 `AcpEventData::SystemNotification`
     /// 显示为系统通知；level: "info" | "warn" | "error"。
     SystemNotification { text: String, level: String },
+    /// MCP OAuth 授权需要用户交互（`oauth-needed`）。TUI 解码为
+    /// `AcpEventData::OauthNeeded` 打开 OAuthPopup（`OAUTH_INFO` atom）。
+    ///
+    /// 发射点：host 装配面 `oauth_event_callback`（`AuthorizationNeeded` 事件），
+    /// 非 agent 执行路径——经 host 级通道（`AcpServerConfig::oauth_event_tx`）
+    /// 直达 `peri/agent_event` 通知，不依赖 session event_sink。
+    OauthNeeded {
+        server_name: String,
+        auth_url: String,
+    },
+    /// MCP OAuth 授权完成（`oauth-completed`）。
+    OauthCompleted { server_name: String },
+    /// MCP OAuth 授权失败/取消/超时（`oauth-failed`）。
+    OauthFailed { server_name: String, error: String },
     /// LLM call retrying
     LlmRetrying {
         attempt: usize,

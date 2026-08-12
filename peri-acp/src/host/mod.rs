@@ -113,6 +113,12 @@ pub struct AcpServerConfig {
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
+    /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
+    /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
+    /// 消费者 task，以 `peri/agent_event` notification（sessionId 为空串，
+    /// host 级事件不做 session 过滤）送达 TUI。
+    pub oauth_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AcpEvent>>,
+    pub(crate) oauth_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::AcpEvent>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
@@ -171,9 +177,38 @@ pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::
 /// 相同的执行路径（pool / prompt lock / run_prompt 后处理）发起一次内部续跑。
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
-    cfg: AcpServerConfig,
+    mut cfg: AcpServerConfig,
 ) {
+    // OAuth 授权事件消费者：host 级事件（无 session 归属），以空 sessionId
+    // 的 peri/agent_event notification 送达 TUI（pump 侧对空 sessionId 放行）。
+    let oauth_event_rx = cfg.oauth_event_rx.take();
     let cfg = Arc::new(cfg);
+    if let Some(mut rx) = oauth_event_rx {
+        let oauth_transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let event_json = match serde_json::to_string(&event) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        tracing::error!(error = %e, "OAuth event serialize failed");
+                        continue;
+                    }
+                };
+                if let Err(e) = oauth_transport
+                    .send_notification(
+                        "peri/agent_event",
+                        serde_json::json!({
+                            "sessionId": "",
+                            "event_json": event_json,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::debug!(error = %e, "OAuth event notification send failed");
+                }
+            }
+        });
+    }
     let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     // Per-session prompt serialization lock: ensures that when a prompt completes
     // (state.history updated) the next prompt for the same session sees the updated history.

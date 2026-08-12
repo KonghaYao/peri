@@ -282,6 +282,8 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         InteractionResolved { .. } => "InteractionResolved",
         RewindPreview(_) => "RewindPreview",
         OauthNeeded(_) => "OauthNeeded",
+        OauthCompleted { .. } => "OauthCompleted",
+        OauthFailed { .. } => "OauthFailed",
         SubagentStarted { .. } => "SubagentStarted",
         SubagentStopped { .. } => "SubagentStopped",
         Unknown { .. } => "Unknown",

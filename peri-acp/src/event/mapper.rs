@@ -243,6 +243,9 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::WorkflowStarted { .. }
         | ExecutorEvent::WorkflowEnded { .. }
         | ExecutorEvent::SystemNotification { .. }
+        | ExecutorEvent::OauthNeeded { .. }
+        | ExecutorEvent::OauthCompleted { .. }
+        | ExecutorEvent::OauthFailed { .. }
         | ExecutorEvent::BgRegistryEvent(_) => {
             vec![MappedEvent::standard(vec![])]
         }

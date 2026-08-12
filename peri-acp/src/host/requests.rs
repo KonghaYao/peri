@@ -1200,6 +1200,73 @@ pub(crate) async fn handle_request(
             }
         }
 
+        // ── MCP OAuth 授权交互（手动兜底路径：TUI popup 收集授权码后回传）──
+        "mcp/oauth_start" => {
+            // 用户经 MCP 面板显式发起授权：host pool 异步执行 OAuth 流程
+            // （spawn_oauth_flow 内部标记 NeedsAuthorization → run_oauth_flow
+            // → AuthorizationNeeded 事件 → TUI 弹 popup）。不阻塞请求。
+            let server_name = params
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?
+                .to_string();
+            let pool = cfg
+                .mcp_pool
+                .clone()
+                .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
+            match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
+                Ok(p) => {
+                    p.spawn_oauth_flow(&server_name);
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
+            }
+        }
+        "mcp/oauth_callback" => {
+            let server_name = params
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?
+                .to_string();
+            let code = params
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let state = params
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pool = cfg
+                .mcp_pool
+                .clone()
+                .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
+            pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?
+                .deliver_oauth_callback(&server_name, code, state)
+                .map(|_| serde_json::json!({ "success": true }))
+                .map_err(|e| AcpError::new(-32603, e))
+        }
+        "mcp/oauth_cancel" => {
+            let server_name = params
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?
+                .to_string();
+            let pool = cfg
+                .mcp_pool
+                .clone()
+                .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
+            match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
+                Ok(p) => {
+                    p.cancel_oauth_callback(&server_name);
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
+            }
+        }
+
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
 }

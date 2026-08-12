@@ -593,9 +593,13 @@ rewind-execute-failed = Rewind failed: { $error }
 # ---- OAuth Popup ----
 
 oauth-title =  OAuth Authorization — { $server } 
-oauth-prompt = Press Ctrl+O to open in browser, then paste callback URL:
-oauth-callback-label = Callback URL > 
-popup-oauth-action-hint =   Ctrl+O: open in browser  |  Enter: close  |  Esc: cancel
+oauth-prompt = Choose "Open browser" to authorize, then paste the authorization code into the input:
+oauth-callback-label = Authorization code > 
+oauth-btn-open = Open browser
+oauth-btn-copy = Copy link
+oauth-btn-cancel = Cancel
+popup-oauth-action-hint =   Tab: switch button/input  |  ←→: select button  |  Enter: activate  |  Enter in input: submit code
+oauth-copied-hint =   ✓ Authorization link copied to clipboard  |  Esc: cancel
 
 # ---- Login Panel ----
 
@@ -846,6 +850,8 @@ panel-mcp-connected =    { $connected }/{ $total } connected
 panel-mcp-empty =   No MCP servers configured
 panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-needs-auth =  [needs auth]
+panel-mcp-oauth-hint =   Enter: start OAuth  |  Esc: close
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯

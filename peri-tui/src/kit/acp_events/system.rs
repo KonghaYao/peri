@@ -402,6 +402,50 @@ pub(super) fn handle_oauth_needed(state: &mut BridgeState, on: &OauthNeeded) {
     super::render::push_acp_state(state);
 }
 
+/// 关闭 OAuth popup 并清理 atom（Completed/Failed 共用）。
+fn close_oauth_popup(state: &mut BridgeState) {
+    state.popup_kind = None;
+    *crate::kit::atoms::OAUTH_INFO.state().write() = None;
+    super::render::push_popup_kind(state);
+}
+
+pub(super) fn handle_oauth_completed(state: &mut BridgeState, server_name: &str) {
+    // 授权完成：关闭 popup 并提示（MCP 面板状态由 pool 侧更新）
+    close_oauth_popup(state);
+    let text = i18n::tr_args(
+        "mcp-oauth-completed",
+        &[("server".into(), FluentValue::from(server_name))],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Info);
+    super::render::push_acp_state(state);
+
+    // TUI 面板直读 pool：授权凭证已落盘（host pool 完成），触发该 server
+    // reconnect 恢复连接（reconnect 内部走凭证快速路径，不重复弹授权）。
+    if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
+        let pool = pool.clone();
+        let name = server_name.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = pool.reconnect(&name, None).await {
+                tracing::warn!(server = %name, error = %e, "面板 MCP 授权后重连失败");
+            }
+        });
+    }
+}
+
+pub(super) fn handle_oauth_failed(state: &mut BridgeState, server_name: &str, error: &str) {
+    // 授权失败（超时/取消/服务端拒绝）：关闭 popup 并提示原因
+    close_oauth_popup(state);
+    let text = i18n::tr_args(
+        "mcp-oauth-failed",
+        &[
+            ("server".into(), FluentValue::from(server_name)),
+            ("error".into(), FluentValue::from(error)),
+        ],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Warning);
+    super::render::push_acp_state(state);
+}
+
 // ── §4.7 Background Tasks ──
 
 pub(super) fn handle_bg_task_snapshot(state: &mut BridgeState, tasks: &[BgTaskEntry]) {

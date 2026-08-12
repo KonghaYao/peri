@@ -56,8 +56,8 @@ pub struct OAuthFlowManager {
     token_store: Arc<FileCredentialStore>,
     /// 按 server_name 管理的 OAuth 状态机
     states: HashMap<String, OAuthState>,
-    /// 事件回调（由 client.rs 在创建时注入）
-    event_callback: Box<dyn Fn(OAuthFlowEvent) + Send + Sync>,
+    /// 事件回调（由 client.rs 在创建时注入；Arc 存储便于跨任务共享）
+    event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
 }
 
 impl OAuthFlowManager {
@@ -72,7 +72,19 @@ impl OAuthFlowManager {
         Self {
             token_store,
             states: HashMap::new(),
-            event_callback: Box::new(event_callback),
+            event_callback: Arc::new(event_callback),
+        }
+    }
+
+    /// 创建 OAuth 流程管理器（Arc 回调版本：跨任务共享的 `Arc<dyn Fn>` 回调）。
+    pub fn new_with_arc(
+        token_store: Arc<FileCredentialStore>,
+        event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
+    ) -> Self {
+        Self {
+            token_store,
+            states: HashMap::new(),
+            event_callback,
         }
     }
 
@@ -106,18 +118,15 @@ impl OAuthFlowManager {
             if has_creds {
                 info!(server = %server_name, "从存储恢复已有凭证，跳过浏览器授权");
                 self.states.insert(server_name.to_string(), state);
-                self.emit_event(OAuthFlowEvent::AuthorizationCompleted {
-                    server_name: server_name.to_string(),
-                });
+                // 注意：不 emit AuthorizationCompleted——恢复凭证 ≠ 用户完成
+                // 授权；token 可能已过期/被 revoke，有效性由连接阶段验证，
+                // 失效时调用方清除凭证并重新走完整授权（弹 popup）。
                 return Ok(());
             }
         }
         if let OAuthState::Authorized(_) = &state {
             info!(server = %server_name, "已处于授权状态，跳过浏览器授权");
             self.states.insert(server_name.to_string(), state);
-            self.emit_event(OAuthFlowEvent::AuthorizationCompleted {
-                server_name: server_name.to_string(),
-            });
             return Ok(());
         }
 
@@ -159,7 +168,15 @@ impl OAuthFlowManager {
             }
             result = callback_rx => {
                 match result {
-                    Ok(result) => Ok(result),
+                    Ok(mut result) => {
+                        // 手动粘贴路径：TUI 无法预知 PKCE state（rmcp 用它作
+                        // state_store 索引），从授权 URL 解析兜底，避免
+                        // "Authorization state not found"。
+                        if result.state.is_empty() {
+                            result.state = extract_state_from_url(&authorization_url);
+                        }
+                        Ok(result)
+                    }
                     Err(_) => Err(OAuthFlowError::Cancelled),
                 }
             }
@@ -231,6 +248,24 @@ impl OAuthFlowManager {
     fn emit_event(&self, event: OAuthFlowEvent) {
         (self.event_callback)(event);
     }
+}
+
+/// 从授权 URL 中提取 `state` 查询参数（RFC 6749 §4.1.1）。
+///
+/// 手动粘贴授权码路径下 TUI 无法预知 PKCE state（rmcp 用 state 作
+/// state_store 索引），授权 URL 由 rmcp 生成时必带 `state=`，此处解析兜底。
+fn extract_state_from_url(url: &str) -> String {
+    let Some((_, query)) = url.split_once('?') else {
+        return String::new();
+    };
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == "state" {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]

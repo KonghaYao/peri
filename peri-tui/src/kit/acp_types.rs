@@ -1305,6 +1305,14 @@ pub enum AcpEventData {
     /// `"oauth-needed"` -- MCP server authorization required.
     OauthNeeded(OauthNeeded),
 
+    /// `"oauth-completed"` -- MCP OAuth 授权完成（授权码流程走完/回调成功）。
+    /// 由 AcpEvent::OauthCompleted（peri/agent_event）转换而来。
+    OauthCompleted { server_name: String },
+
+    /// `"oauth-failed"` -- MCP OAuth 授权失败（超时/取消/服务端拒绝）。
+    /// 由 AcpEvent::OauthFailed（peri/agent_event）转换而来。
+    OauthFailed { server_name: String, error: String },
+
     // -- §4.6 Structure (control message-area layout) ------------------------
     /// `"subagent-started"` -- sub-agent created, TUI opens a collapsible group.
     SubagentStarted {
@@ -1454,6 +1462,15 @@ impl AcpEventData {
                 AcpEventData::RewindCompleted { messages_json }
             }
             "oauth-needed" => decode_or_unknown(event, data, AcpEventData::OauthNeeded),
+            "oauth-completed" => {
+                let server_name = data["server_name"].as_str().unwrap_or("").to_string();
+                AcpEventData::OauthCompleted { server_name }
+            }
+            "oauth-failed" => {
+                let server_name = data["server_name"].as_str().unwrap_or("").to_string();
+                let error = data["error"].as_str().unwrap_or("").to_string();
+                AcpEventData::OauthFailed { server_name, error }
+            }
 
             // §4.6 Structure
             "subagent-started" => {

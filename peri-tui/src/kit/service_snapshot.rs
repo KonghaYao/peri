@@ -523,6 +523,10 @@ fn derive_mcp_servers(
             status: format!("{:?}", info.status).to_lowercase(),
             transport: info.transport_type.clone(),
             tools_count: info.tool_count,
+            needs_auth: matches!(
+                info.oauth_status,
+                peri_middlewares::mcp::OAuthStatus::NeedsAuthorization
+            ),
         })
         .collect()
 }

@@ -9,6 +9,7 @@ use thiserror::Error;
 use super::{
     channel_handler::ChannelHandler,
     config::{ConfigSource, McpServerConfig},
+    oauth_flow::{OAuthCallbackResult, OAuthFlowEvent},
 };
 
 /// Wrapper for RunningService that can hold either handler type
@@ -151,6 +152,14 @@ pub struct McpClientPool {
     pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
     /// 状态变化通知回调（装配时注入；发布 system-notification 给 TUI 通知面）。
     notifier: parking_lot::RwLock<Option<Box<dyn Fn(&str) + Send + Sync>>>,
+    /// OAuth 流程事件回调（装配时注入；`AuthorizationNeeded` 需把
+    /// `callback_tx` 注册进 `pending_oauth_callbacks` 供授权码回传 RPC 投递，
+    /// 其余事件转发为 ACP `oauth-needed` / `oauth-completed` / `oauth-failed`）。
+    oauth_event_callback: parking_lot::RwLock<Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>>>,
+    /// 待完成 OAuth 授权的回调通道（key: server_name）。TUI 经
+    /// `mcp/oauth_callback` RPC 回传授权码时由 host 装配面查表投递。
+    pending_oauth_callbacks:
+        parking_lot::Mutex<HashMap<String, tokio::sync::oneshot::Sender<OAuthCallbackResult>>>,
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -189,12 +198,66 @@ impl McpClientPool {
             initialized: std::sync::atomic::AtomicBool::new(false),
             pending_changes: parking_lot::Mutex::new(Vec::new()),
             notifier: parking_lot::RwLock::new(None),
+            oauth_event_callback: parking_lot::RwLock::new(None),
+            pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
         Self::new_pending()
+    }
+
+    /// 注入 OAuth 流程事件回调（host 装配面在 `run_initialize` 前调用；
+    /// 回调负责把 `AuthorizationNeeded` 的 `callback_tx` 注册进
+    /// `pending_oauth_callbacks`，并将事件转发为 ACP 通知）。
+    pub fn set_oauth_event_callback<F>(&self, callback: F)
+    where
+        F: Fn(OAuthFlowEvent) + Send + Sync + 'static,
+    {
+        *self.oauth_event_callback.write() = Some(Arc::new(callback));
+    }
+
+    /// 读取 OAuth 流程事件回调（spawn 授权任务时克隆给 `OAuthFlowManager`）。
+    pub(crate) fn oauth_event_callback(&self) -> Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>> {
+        self.oauth_event_callback.read().clone()
+    }
+
+    /// 注册待完成 OAuth 授权的回调通道（`AuthorizationNeeded` 事件处理时调用）。
+    pub fn register_oauth_callback(
+        &self,
+        server_name: &str,
+        callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
+    ) {
+        self.pending_oauth_callbacks
+            .lock()
+            .insert(server_name.to_string(), callback_tx);
+    }
+
+    /// 投递授权码回传（`mcp/oauth_callback` RPC 调用）：查表取 `callback_tx`
+    /// 投递 `{code, state}`；无 pending 通道返回错误。
+    pub fn deliver_oauth_callback(
+        &self,
+        server_name: &str,
+        code: String,
+        state: String,
+    ) -> Result<(), String> {
+        let tx = self
+            .pending_oauth_callbacks
+            .lock()
+            .remove(server_name)
+            .ok_or_else(|| format!("{server_name} 无进行中的 OAuth 授权"))?;
+        tx.send(OAuthCallbackResult { code, state })
+            .map_err(|_| format!("{server_name} OAuth 授权流程已结束"))
+    }
+
+    /// 取消进行中的 OAuth 授权（`mcp/oauth_cancel` RPC 调用）：移除 pending
+    /// 通道并 drop sender，后台 `run_oauth_flow` 收到 Cancelled 终止。
+    pub fn cancel_oauth_callback(&self, server_name: &str) -> bool {
+        self.pending_oauth_callbacks
+            .lock()
+            .remove(server_name)
+            .is_some()
     }
 
     /// 查询指定 server 的插件来源标识，非插件 server 返回 None

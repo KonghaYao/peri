@@ -88,10 +88,15 @@ impl McpClientPool {
                         _ => None,
                     }
                 });
-                let has_oauth = oauth_cfg.is_some();
-                if let (Some(cfg), Some(cb)) = (oauth_cfg, oauth_event_callback) {
+                if let Some(cfg) = oauth_cfg {
+                    // callback 可空：优先调用方传入，其次 pool 级回调（host
+                    // 装配注入，事件转发 TUI popup），都没有则 no-op 静默授权。
+                    let cb: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync> = oauth_event_callback
+                        .map(Arc::from)
+                        .or_else(|| self.oauth_event_callback())
+                        .unwrap_or_else(|| Arc::new(|_| {}));
                     let ts = Arc::new(FileCredentialStore::new());
-                    let mut mgr = OAuthFlowManager::new(ts, cb);
+                    let mut mgr = OAuthFlowManager::new_with_arc(ts, cb);
                     match mgr.run_oauth_flow(server_name, url, &cfg).await {
                         Ok(()) => {
                             used_oauth = true;
@@ -124,14 +129,6 @@ impl McpClientPool {
                             .await
                         }
                     }
-                } else if has_oauth {
-                    // 有 OAuth 配置但没有 callback（非 TUI 场景），直接裸连接
-                    used_oauth = true;
-                    tokio::time::timeout(
-                        timeout,
-                        rmcp::service::serve_client((), build_http_transport(url, headers)),
-                    )
-                    .await
                 } else {
                     tokio::time::timeout(
                         timeout,

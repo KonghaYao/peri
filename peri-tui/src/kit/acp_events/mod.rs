@@ -361,6 +361,10 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         RewindCompleted { messages_json } => system::handle_rewind_completed(state, messages_json),
         RewindError { message } => system::handle_rewind_error(state, message),
         OauthNeeded(on) => system::handle_oauth_needed(state, on),
+        OauthCompleted { server_name } => system::handle_oauth_completed(state, server_name),
+        OauthFailed { server_name, error } => {
+            system::handle_oauth_failed(state, server_name, error)
+        }
 
         // ── §4.6 Structure events ──
         SubagentStarted {

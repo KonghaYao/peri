@@ -48,7 +48,21 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             match key.code {
                 KeyCode::Esc => close_panel(),
-                KeyCode::Enter => close_panel(),
+                KeyCode::Enter => {
+                    // 选中 OAuth 待授权 server：Enter = 授权按钮（触发
+                    // mcp/oauth_start RPC → host pool 异步授权 → popup 弹出）。
+                    // 其他状态保持原行为：关闭面板。
+                    let servers = MCP_SERVERS.state().read().clone();
+                    let sel = *selected.read();
+                    let is_needs_auth = servers.get(sel).map(|s| s.needs_auth).unwrap_or(false);
+                    if is_needs_auth {
+                        if let Some(name) = servers.get(sel).map(|s| s.name.clone()) {
+                            start_oauth(name);
+                        }
+                    } else {
+                        close_panel();
+                    }
+                }
                 KeyCode::Up => {
                     let mut s = selected.write();
                     *s = previous_selection(*s);
@@ -144,26 +158,44 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
                 Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
             ]));
-            lines.push(Line::from(vec![Span::styled(
-                i18n::tr_args(
-                    "panel-mcp-server-detail",
-                    &[
-                        (
-                            "transport".to_string(),
-                            FluentValue::from(s.transport.as_str()),
-                        ),
-                        ("count".to_string(), FluentValue::from(s.tools_count as i64)),
-                    ],
+            lines.push(Line::from(vec![
+                Span::styled(
+                    i18n::tr_args(
+                        "panel-mcp-server-detail",
+                        &[
+                            (
+                                "transport".to_string(),
+                                FluentValue::from(s.transport.as_str()),
+                            ),
+                            ("count".to_string(), FluentValue::from(s.tools_count as i64)),
+                        ],
+                    ),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
                 ),
-                Style::new().fg(theme_def.read().semantic.text.dim),
-            )]));
+                Span::styled(
+                    if s.needs_auth {
+                        i18n::tr("panel-mcp-needs-auth")
+                    } else {
+                        String::new()
+                    },
+                    Style::new().fg(theme_def.read().semantic.status.warning),
+                ),
+            ]));
         }
     }
 
     lines.push(Line::from(""));
-    lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
-    );
+    // 底部 hint：选中 OAuth 待授权 server 时提示 Enter 授权，否则提示 Enter 关闭
+    let sel_hint = servers.get(sel).map(|s| s.needs_auth).unwrap_or(false);
+    if sel_hint {
+        lines.push(
+            Line::from(i18n::tr("panel-mcp-oauth-hint")).fg(theme_def.read().semantic.text.dim),
+        );
+    } else {
+        lines.push(
+            Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
+        );
+    }
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -204,4 +236,20 @@ fn derive_status_style(status: &str) -> (String, ratatui::style::Color) {
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
+}
+
+/// 发起 OAuth 授权（MCP 面板授权按钮）：`mcp/oauth_start` RPC → host pool
+/// spawn_oauth_flow → OauthNeeded 事件 → TUI 弹出授权 popup。
+fn start_oauth(server_name: String) {
+    if let Some(client_handle) = crate::kit::atoms::ACP_CLIENT_HANDLE.get() {
+        let client = client_handle.clone();
+        tokio::spawn(async move {
+            let params = serde_json::json!({ "server_name": server_name });
+            if let Err(e) = client.send_raw_request("mcp/oauth_start", params).await {
+                tracing::warn!(error = %e, "mcp/oauth_start RPC failed");
+            }
+        });
+    } else {
+        tracing::warn!(target: "mcp-panel", "ACP_CLIENT_HANDLE not set, oauth_start skipped");
+    }
 }
