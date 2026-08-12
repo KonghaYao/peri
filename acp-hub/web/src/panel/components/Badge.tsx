@@ -1,4 +1,9 @@
-// 状态徽标（原 ui.js _badge/_badgeKind）：badge-ok 绿 / warn 黄 / err 红 / 默认灰蓝。
+// 状态徽标（原 ui.js _badge/_badgeKind）：badge-ok 绿 / warn 黄 / err 红 / 默认灰。
+// §3.8：高度 20px、padding 0 7px、圆角 999px、11px/500；语义色用对应 soft
+// 底 + 深色文字（token），不使用全彩实心底。
+// kind 为可选显式着色：StatusRail 连接行传 store 的 connState.kind（''/ok/
+// warn/err，badgeKind 无法从中文 text 推断）；不传时按 status 文本推断
+// （badgeKind 逻辑不变），既有调用点行为保持一致。
 
 const OK = ['online', 'healthy', 'completed', 'accepting', 'allow'];
 const WARN = ['degraded', 'active', 'streaming', 'pending', 'awaitingPermission', 'running', 'deny'];
@@ -13,17 +18,17 @@ export function badgeKind(status: string | null | undefined): string {
 }
 
 const KIND_CLASS: Record<string, string> = {
-  ok: 'bg-emerald-100 text-emerald-700',
-  warn: 'bg-amber-100 text-amber-700',
-  err: 'bg-red-100 text-red-700',
-  neutral: 'bg-slate-200 text-slate-600',
+  ok: 'bg-[var(--success-soft)] text-[var(--success)]',
+  warn: 'bg-[var(--warning-soft)] text-[var(--warning)]',
+  err: 'bg-[var(--danger-soft)] text-[var(--danger)]',
+  neutral: 'bg-[var(--surface-muted)] text-[var(--text-secondary)]',
 };
 
-export function Badge(props: { status: string | null | undefined }) {
-  const kind = () => badgeKind(props.status);
+export function Badge(props: { status: string | null | undefined; kind?: string }) {
+  const kind = () => props.kind || badgeKind(props.status);
   return (
     <span
-      class={`inline-block rounded px-1.5 py-0.5 align-middle text-[11px] leading-4 ${KIND_CLASS[kind()]}`}
+      class={`inline-flex h-5 items-center rounded-full px-[7px] text-[11px] font-medium ${KIND_CLASS[kind()] ?? KIND_CLASS.neutral}`}
     >
       {props.status}
     </span>

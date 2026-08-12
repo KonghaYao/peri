@@ -598,3 +598,6 @@ function showActionError(err: ActionError): void {
 
 const initialToken = resolveToken();
 setTokenInput(initialToken);
+// 有 token 即自动连接（URL ?token= 或 sessionStorage 记忆），刷新/重开
+// 页面无需再手动点「连接」；无 token 时保持原手动连接入口。
+if (initialToken) connect(initialToken);
