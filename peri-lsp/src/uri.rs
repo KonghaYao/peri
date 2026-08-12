@@ -77,12 +77,13 @@ fn is_drive_path(s: &str) -> bool {
         && (b[start + 2] == b'/' || b[start + 2] == b'\\')
 }
 
-/// RFC 3986 percent-encode：仅保留 unreserved 字符与 `/` 分隔符。
+/// RFC 3986 percent-encode：保留 unreserved 字符、`/` 分隔符与 `:`（pchar
+/// 合法字符，Windows 盘符 `file:///C:/...` 依赖它不被编码）。
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
                 out.push(b as char);
             }
             _ => out.push_str(&format!("%{:02X}", b)),
