@@ -380,7 +380,20 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
                 ChainSlot::Mcp => {
                     if let Some(pool) = mcp_pool_concrete.as_ref() {
-                        chain.add(Box::new(McpMiddleware::new(Arc::clone(pool))));
+                        let mw = McpMiddleware::new(Arc::clone(pool));
+                        // 注入状态变化通知：经 session 事件通道发布
+                        // system-notification（TUI 通知面显示）。pool 全局共享，
+                        // 多 session 时以最后装配的 session 通道为准。
+                        let tx = ctx.bg_event_tx.clone();
+                        pool.set_notifier(Box::new(move |text: &str| {
+                            let _ = tx.send(
+                                peri_agent::agent::events::ExecutorEvent::SystemNotification {
+                                    text: text.to_string(),
+                                    level: "info".to_string(),
+                                },
+                            );
+                        }));
+                        chain.add(Box::new(mw));
                     }
                 }
                 // Workflow 中间件（通过 collect_tools 注册 WorkflowTool 为 deferred tool）

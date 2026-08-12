@@ -59,6 +59,11 @@ impl McpClientPool {
         if let Some(mut svc) = self.services.lock().await.remove(server_name) {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        let old_status = self
+            .clients
+            .read()
+            .get(server_name)
+            .map(|c| c.status.clone());
         self.clients.write().remove(server_name);
 
         // 使用认证传输层重新连接
@@ -96,6 +101,7 @@ impl McpClientPool {
                     .lock()
                     .await
                     .insert(server_name.to_string(), McpServiceWrapper::Default(rs));
+                self.record_status_change(server_name, old_status.as_ref());
                 Ok(())
             }
             Ok(Err(e)) => {
@@ -133,6 +139,11 @@ impl McpClientPool {
         }
 
         // 3. 更新 handle 为 NeedsAuthorization
+        let old_status = self
+            .clients
+            .read()
+            .get(server_name)
+            .map(|c| c.status.clone());
         let (source, url) = self
             .configs
             .read()
@@ -153,6 +164,7 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+        self.record_status_change(server_name, old_status.as_ref());
 
         Ok(())
     }

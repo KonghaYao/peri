@@ -30,6 +30,14 @@ impl McpClientPool {
         if let Some(mut svc) = self.services.lock().await.remove(server_name) {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        // 重连前捕获旧状态：insert 覆盖后由 record_status_change 判定是否
+        // 构成上下线变化（Connected→Failed 等）；首次插入（旧状态不存在）
+        // 不产生通知（初始化阶段由首 turn 概览覆盖）。
+        let old_status = self
+            .clients
+            .read()
+            .get(server_name)
+            .map(|c| c.status.clone());
         self.clients.write().remove(server_name);
 
         let tc = TransportConfig::try_from(&server_config).map_err(|e| {
@@ -168,6 +176,7 @@ impl McpClientPool {
                     .lock()
                     .await
                     .insert(server_name.to_string(), McpServiceWrapper::Default(rs));
+                self.record_status_change(server_name, old_status.as_ref());
                 Ok(())
             }
             Ok(Err(e)) => {

@@ -191,6 +191,14 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
         AcpEvent::RewindError { message } => Some(AcpEventData::RewindError { message }),
+        // SystemNotification：MCP 上下线等连接状态变化（peri/agent_event 通道
+        // 送达），转换为 AcpEventData::SystemNotification 显示系统通知。
+        AcpEvent::SystemNotification { text, level } => {
+            Some(AcpEventData::SystemNotification(SystemNotification {
+                text,
+                level,
+            }))
+        }
         // TurnSuspended：bg agent/cron/workflow 挂起信号——归档 current_turn、
         // 停止 loading spinner。双轨下线后（2026-08-05-3.0-m-event-chain-canonical）
         // 此信号仅经 ACP peri/agent_event 通道送达。

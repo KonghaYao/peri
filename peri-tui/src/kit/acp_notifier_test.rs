@@ -369,6 +369,36 @@ async fn test_agent_event_unknown_variant_dropped() {
     shutdown.cancel();
 }
 
+/// SystemNotification（MCP 上下线等）必须透传 text/level 到系统通知面。
+#[tokio::test]
+async fn test_agent_event_forwards_system_notification() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::SystemNotification {
+                text: "MCP: github connected (23 tools)".into(),
+                level: "info".into(),
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 SystemNotification");
+    match bridge_event.event {
+        AcpEventData::SystemNotification(sn) => {
+            assert_eq!(sn.text, "MCP: github connected (23 tools)");
+            assert_eq!(sn.level, "info");
+        }
+        other => panic!("expected SystemNotification, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 #[tokio::test]
 async fn test_agent_done_forwards_turn_done_to_bridges() {
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();

@@ -242,6 +242,15 @@ impl EventSink for TransportEventSink {
                 ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
                     message: message.clone(),
                 }),
+                // SystemNotification：MCP 上下线等连接状态变化经 peri/agent_event
+                // 通道送达 TUI（AcpEventData::SystemNotification → system-notification
+                // 通知显示）。
+                ExecutorEvent::SystemNotification { text, level } => {
+                    Some(AcpEvent::SystemNotification {
+                        text: text.clone(),
+                        level: level.clone(),
+                    })
+                }
                 // TurnSuspended：TUI 挂起信号（归档 current_turn + 停止 loading）。
                 // v2 StateEvent::TurnSuspended 经 v1 兼容映射（events_v2::
                 // state_event_to_executor）到达此处；双轨下线（2026-08-05-3.0-m-

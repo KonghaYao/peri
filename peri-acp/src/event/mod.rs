@@ -150,6 +150,11 @@ pub enum AcpEvent {
         total_tokens: u64,
         percentage: f64,
     },
+    /// System-level notification text（MCP 上下线等连接状态变化）。
+    ///
+    /// TUI 经 peri/agent_event 通道解码为 `AcpEventData::SystemNotification`
+    /// 显示为系统通知；level: "info" | "warn" | "error"。
+    SystemNotification { text: String, level: String },
     /// LLM call retrying
     LlmRetrying {
         attempt: usize,

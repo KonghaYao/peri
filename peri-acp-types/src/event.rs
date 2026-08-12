@@ -305,6 +305,16 @@ pub enum MiddlewareHook {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExecutorEvent {
+    /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
+    /// 通道送达 TUI 显示为 system-notification 通知。
+    ///
+    /// 由 middlewares（如 McpMiddleware）通过 session 级事件发送端注入；
+    /// level 取值与 TUI `SystemNotification.level` 一致（info/warn/error）。
+    SystemNotification {
+        text: String,
+        #[serde(default)]
+        level: String,
+    },
     /// AI 推理内容（reasoning/思考过程），携带所属 AI 消息的 message_id
     AiReasoning {
         message_id: crate::messages::MessageId,

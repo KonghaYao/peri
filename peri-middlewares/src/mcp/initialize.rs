@@ -31,6 +31,7 @@ impl McpClientPool {
         if config.mcp_servers.is_empty() {
             let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
             *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
+            pool.mark_initialized();
             return;
         }
 
@@ -331,6 +332,9 @@ impl McpClientPool {
             let _ = status_tx.send(McpInitStatus::Ready { total: connected });
             *pool.init_status.write() = McpInitStatus::Ready { total: connected };
         }
+        // 初始化收口：此后状态变化才产生上下线通知（初始连接结果由
+        // 会话首 turn 的 first_turn_reminder 概览覆盖，不逐条推送）。
+        pool.mark_initialized();
     }
 
     pub async fn initialize(
@@ -339,8 +343,6 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
         channel_handler: Option<Arc<ChannelHandler>>,
     ) -> Self {
-        use std::collections::HashMap;
-
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
         let pool = Arc::new(Self::new_pending());
         *pool.plugin_sources.write() = plugin_sources;
@@ -579,13 +581,16 @@ impl McpClientPool {
 
         Arc::try_unwrap(pool).unwrap_or_else(|arc| {
             let p = arc.as_ref();
-            Self {
-                clients: parking_lot::RwLock::new(p.clients.read().clone()),
-                services: tokio::sync::Mutex::new(HashMap::new()),
-                configs: parking_lot::RwLock::new(p.configs.read().clone()),
-                plugin_sources: parking_lot::RwLock::new(p.plugin_sources.read().clone()),
-                init_status: parking_lot::RwLock::new(p.init_status.read().clone()),
-            }
+            let cloned = Self::new_pending();
+            *cloned.clients.write() = p.clients.read().clone();
+            *cloned.configs.write() = p.configs.read().clone();
+            *cloned.plugin_sources.write() = p.plugin_sources.read().clone();
+            *cloned.init_status.write() = p.init_status.read().clone();
+            cloned.initialized.store(
+                p.initialized.load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            cloned
         })
     }
 }

@@ -220,6 +220,25 @@ impl MiddlewareChain {
         Ok(())
     }
 
+    /// 顺序收集 first_turn_reminder 钩子的非空贡献（首轮用户 turn 一次性通知）。
+    ///
+    /// 顺序执行所有中间件；任一返回 Err 即中断（与其余 run_* 一致）。
+    /// 返回按链序收集的非空文本列表（`None`/空串跳过）。
+    pub async fn run_first_turn_reminders(
+        &self,
+        state: &mut dyn MiddlewareState,
+    ) -> AgentResult<Vec<String>> {
+        let mut out = Vec::new();
+        for middleware in &self.middlewares {
+            if let Some(text) = middleware.first_turn_reminder(state).await? {
+                if !text.trim().is_empty() {
+                    out.push(text);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // ── Compact ──
 
     /// 顺序执行 before_compact 钩子

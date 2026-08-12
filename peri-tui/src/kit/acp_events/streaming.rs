@@ -97,7 +97,7 @@ pub(super) fn handle_reasoning_chunk(state: &mut BridgeState, rc: &TuiReasoningC
     } else if rc
         .agent_id
         .as_deref()
-        .is_some_and(|agent_id| is_bg_agent_without_group(agent_id))
+        .is_some_and(is_bg_agent_without_group)
     {
         // bg sub-agent：组已被 turn 边界清除——推理不进主消息区，跳过（同
         // handle_text_chunk 口径，防外溢到主 agent 推理块）。
