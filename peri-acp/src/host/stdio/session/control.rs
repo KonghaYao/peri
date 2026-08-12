@@ -33,14 +33,23 @@ pub(crate) fn handle_cancel(ctx: &StdioContext, session_id: &str) {
 
 /// session/close 核心逻辑
 pub(crate) async fn handle_close(ctx: &StdioContext, session_id: &str) {
-    {
+    let lsp_pool = {
         let mut sessions = ctx.sessions.write();
         if let Some(s) = sessions.remove(session_id) {
             if let Some(ref token) = s.cancel_token {
                 token.cancel();
             }
             tracing::info!(session_id = %session_id, "Session closed");
+            s.lsp_pool
+        } else {
+            None
         }
+    };
+    // 关闭会话级 LSP pool：LspServerPool 无 Drop cleanup，不显式 shutdown 则
+    // LSP 服务器子进程与 read task 在 session/close 后残留（stdio 长驻宿主
+    // 下服务器进程无限累积）。shutdown 在写锁外执行（kill 子进程耗时）。
+    if let Some(pool) = lsp_pool {
+        pool.shutdown().await;
     }
     // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
     let _ = ctx.session_manager.close_session(session_id).await;

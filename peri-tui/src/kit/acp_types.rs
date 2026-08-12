@@ -434,6 +434,10 @@ impl CurrentTurn {
             // 存活、elapsed 持续增长），详情面板对已完成 subagent 渲染永久的
             // `◐ Thinking… Ns`。
             s.child_turn.freeze_trailing();
+            // 子 turn 必须同时 deactivate：ToolStarted 无 ToolEnded 直接停止时，
+            // active 残留 true 会让 build_tool_card 以 `turn_active` 把无
+            // output_summary 的工具卡保持 Running（is_running = active && 无输出）。
+            s.child_turn.deactivate();
             s.cached_view_model.replace(None);
             self.sync_cache();
         }

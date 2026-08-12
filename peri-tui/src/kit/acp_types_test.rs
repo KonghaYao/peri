@@ -219,6 +219,42 @@ fn test_current_turn_subagent_unknown_route_returns_false() {
     assert!(ct.view_models().is_empty());
 }
 
+/// [回归测试] ToolStarted 后无 ToolEnded 直接 SubagentStopped：
+/// stop_subagent 必须 deactivate child_turn，否则无 output_summary 的
+/// 工具卡保持 Running（is_running = turn_active && 无输出），渲染为永久进行中。
+#[test]
+fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
+    let mut ct = CurrentTurn::new();
+    ct.start_subagent("agent-1".into(), "researcher".into());
+    assert!(ct.start_subagent_tool(
+        "agent-1",
+        ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
+    ));
+    // 无 end_subagent_tool，直接 stop
+    ct.stop_subagent("agent-1", false, "");
+
+    let s = ct
+        .subagents
+        .iter_mut()
+        .find(|s| s.agent_id == "agent-1")
+        .expect("subagent 应存在");
+    assert!(
+        !s.child_turn.active,
+        "stop_subagent 后 child_turn 必须 deactivate（ToolStarted 无 ToolEnded 场景）"
+    );
+    let vms: Vec<_> = s.child_turn.view_models().iter().cloned().collect();
+    assert_eq!(vms.len(), 1, "child_turn 应仍保留工具卡");
+    match &vms[0] {
+        TuiRenderUnit::TuiToolCard(card) => {
+            assert!(
+                !card.is_running,
+                "ToolStarted 无 ToolEnded 时停止，tool card 不应保持 Running"
+            );
+        }
+        other => panic!("expected TuiToolCard, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_decode_turn_done() {
     let decoded = AcpEventData::decode("turn-done", serde_json::json!({}));
