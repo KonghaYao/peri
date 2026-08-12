@@ -22,7 +22,7 @@
       "primary": "#587C0C"
     },
     "warning": {
-      "primary": "#B48E00"
+      "primary": "#9C7A00"
     },
     "danger": {
       "primary": "#BF616A"
@@ -43,27 +43,27 @@
   "semantic": {
     "accent": "#5E81AC",
     "text": {
-      "primary": "#2E3440",
-      "muted": "#7B88A1",
-      "dim": "#B0B9C8"
+      "primary": "#5A5F6A",
+      "muted": "#616A7C",
+      "dim": "#75829C"
     },
     "border": {
-      "default": "#B0B9C8",
+      "default": "#8A94A6",
       "active": "$semantic.accent",
       "dim": "#D8DEE9"
     },
     "status": {
-      "running": "#B48EAD",
+      "running": "#9E6B98",
       "success": "#587C0C",
-      "warning": "#B48E00",
+      "warning": "#9C7A00",
       "error": "#BF616A"
     },
     "surface": {
       "default": "#ECEFF4",
-      "user": "#E5E9F0",
-      "popup": "#ECEFF4",
-      "selection": "#D8DEE9",
-      "cursor": "#E5E9F0"
+      "user": "#D8DEE9",
+      "popup": "#FFFFFF",
+      "selection": "#C4D3E8",
+      "cursor": "#D8DEE9"
     },
     "diff": {
       "add": "#587C0C",
@@ -74,15 +74,15 @@
       "add_word_bg": "#C8D4B0",
       "remove_word_bg": "#E8C8C8"
     },
-    "loading": "#B48EAD",
-    "thinking": "#B48EAD",
+    "loading": "#9E6B98",
+    "thinking": "#9E6B98",
     "model_info": "#D08770",
     "bash_border": "#BF616A",
-    "selected_fg": "#2E3440"
+    "selected_fg": "#242A38"
   },
   "component": {
     "message": {
-      "user_bg": "#E5E9F0",
+      "user_bg": "#D8DEE9",
       "ai_prefix": "$semantic.text.primary",
       "tool_indicator": "#587C0C",
       "reasoning": "$semantic.thinking"
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#ECEFF4",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -118,15 +118,15 @@
       "muted": "$semantic.text.muted",
       "dim": "$semantic.text.dim",
       "mode_accept_edit": "$semantic.thinking",
-      "mode_auto": "#B48E00",
+      "mode_auto": "#9C7A00",
       "mode_bypass": "#BF616A",
       "resource_good": "#587C0C",
-      "resource_warn": "#B48E00",
+      "resource_warn": "#9C7A00",
       "resource_bad": "#BF616A"
     },
     "markdown": {
       "text": "$semantic.text.primary",
-      "code": "#D08770",
+      "code": "#BC5B3C",
       "quote": "$semantic.text.muted"
     },
     "scrollbar": {

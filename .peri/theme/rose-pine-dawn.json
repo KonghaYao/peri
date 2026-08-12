@@ -19,10 +19,10 @@
       "primary": "$semantic.accent"
     },
     "success": {
-      "primary": "#56949F"
+      "primary": "#4B8792"
     },
     "warning": {
-      "primary": "#EA9D34"
+      "primary": "#B5750E"
     },
     "danger": {
       "primary": "#B4637A"
@@ -31,7 +31,7 @@
       "primary": "$semantic.thinking"
     },
     "diff": {
-      "add": "#56949F",
+      "add": "#4B8792",
       "remove": "#B4637A",
       "hunk": "#907AA9",
       "add_bg": "#D0E8EC",
@@ -43,30 +43,30 @@
   "semantic": {
     "accent": "#286983",
     "text": {
-      "primary": "#575279",
-      "muted": "#797593",
-      "dim": "#C4BCC8"
+      "primary": "#645F7D",
+      "muted": "#6B6782",
+      "dim": "#8F8597"
     },
     "border": {
-      "default": "#C4BCC8",
+      "default": "#A096A4",
       "active": "$semantic.accent",
       "dim": "#E8DFE3"
     },
     "status": {
       "running": "#907AA9",
-      "success": "#56949F",
-      "warning": "#EA9D34",
+      "success": "#4B8792",
+      "warning": "#B5750E",
       "error": "#B4637A"
     },
     "surface": {
       "default": "#FAF4ED",
-      "user": "#F2E9E1",
-      "popup": "#FAF4ED",
-      "selection": "#E8DFE3",
-      "cursor": "#F2E9E1"
+      "user": "#E8DDD3",
+      "popup": "#FFFFFF",
+      "selection": "#E7D5DE",
+      "cursor": "#E8DDD3"
     },
     "diff": {
-      "add": "#56949F",
+      "add": "#4B8792",
       "remove": "#B4637A",
       "hunk": "#907AA9",
       "add_bg": "#D0E8EC",
@@ -76,22 +76,22 @@
     },
     "loading": "#907AA9",
     "thinking": "#907AA9",
-    "model_info": "#D7827E",
+    "model_info": "#CE6F68",
     "bash_border": "#B4637A",
-    "selected_fg": "#575279"
+    "selected_fg": "#3B3752"
   },
   "component": {
     "message": {
-      "user_bg": "#F2E9E1",
+      "user_bg": "#E8DDD3",
       "ai_prefix": "$semantic.text.primary",
-      "tool_indicator": "#56949F",
+      "tool_indicator": "#4B8792",
       "reasoning": "$semantic.thinking"
     },
     "input": {
       "border": "$semantic.text.muted",
       "border_loading": "$semantic.text.muted",
       "cursor_fg": "#FAF4ED",
-      "cursor_bg": "#575279",
+      "cursor_bg": "#524D6F",
       "prompt": "$semantic.text.muted",
       "prompt_loading": "$semantic.text.muted",
       "continuation": "$semantic.text.dim",
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#FAF4ED",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -118,15 +118,15 @@
       "muted": "$semantic.text.muted",
       "dim": "$semantic.text.dim",
       "mode_accept_edit": "$semantic.thinking",
-      "mode_auto": "#EA9D34",
+      "mode_auto": "#B5750E",
       "mode_bypass": "#B4637A",
-      "resource_good": "#56949F",
-      "resource_warn": "#EA9D34",
+      "resource_good": "#4B8792",
+      "resource_warn": "#B5750E",
       "resource_bad": "#B4637A"
     },
     "markdown": {
       "text": "$semantic.text.primary",
-      "code": "#D7827E",
+      "code": "#CE6F68",
       "quote": "$semantic.text.muted"
     },
     "scrollbar": {

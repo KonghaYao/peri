@@ -19,7 +19,7 @@
       "primary": "$semantic.accent"
     },
     "success": {
-      "primary": "#50A14F"
+      "primary": "#4C9449"
     },
     "warning": {
       "primary": "#C18401"
@@ -31,8 +31,8 @@
       "primary": "$semantic.thinking"
     },
     "diff": {
-      "add": "#50A14F",
-      "remove": "#E45649",
+      "add": "#4C9449",
+      "remove": "#D9483B",
       "hunk": "#A626A4",
       "add_bg": "#DCF0DC",
       "remove_bg": "#F5DCDB",
@@ -43,31 +43,31 @@
   "semantic": {
     "accent": "#4078F2",
     "text": {
-      "primary": "#383A42",
+      "primary": "#64656C",
       "muted": "#696C77",
-      "dim": "#A0A1A7"
+      "dim": "#84858E"
     },
     "border": {
-      "default": "#A0A1A7",
+      "default": "#898A93",
       "active": "$semantic.accent",
       "dim": "#DFDFE2"
     },
     "status": {
       "running": "#A626A4",
-      "success": "#50A14F",
+      "success": "#4C9449",
       "warning": "#C18401",
       "error": "#E45649"
     },
     "surface": {
       "default": "#FAFAFA",
-      "user": "#F0F0F0",
-      "popup": "#FAFAFA",
-      "selection": "#DFDFE2",
-      "cursor": "#F0F0F0"
+      "user": "#E4E4E9",
+      "popup": "#FFFFFF",
+      "selection": "#C9D6F2",
+      "cursor": "#E4E4E9"
     },
     "diff": {
-      "add": "#50A14F",
-      "remove": "#E45649",
+      "add": "#4C9449",
+      "remove": "#D9483B",
       "hunk": "#A626A4",
       "add_bg": "#DCF0DC",
       "remove_bg": "#F5DCDB",
@@ -78,13 +78,13 @@
     "thinking": "#A626A4",
     "model_info": "#986801",
     "bash_border": "#E45649",
-    "selected_fg": "#383A42"
+    "selected_fg": "#2A2B33"
   },
   "component": {
     "message": {
-      "user_bg": "#F0F0F0",
+      "user_bg": "#E4E4E9",
       "ai_prefix": "$semantic.text.primary",
-      "tool_indicator": "#50A14F",
+      "tool_indicator": "#4C9449",
       "reasoning": "$semantic.thinking"
     },
     "input": {
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#FAFAFA",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
@@ -120,7 +120,7 @@
       "mode_accept_edit": "$semantic.thinking",
       "mode_auto": "#C18401",
       "mode_bypass": "#E45649",
-      "resource_good": "#50A14F",
+      "resource_good": "#4C9449",
       "resource_warn": "#C18401",
       "resource_bad": "#E45649"
     },

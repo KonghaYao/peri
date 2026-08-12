@@ -3,7 +3,7 @@
   "mode": "light",
   "palette": {
     "base": {
-      "bg": "#CBCCD1",
+      "bg": "#E1E2E7",
       "fg": "$semantic.text.primary"
     },
     "brand": {
@@ -43,12 +43,12 @@
   "semantic": {
     "accent": "#2E6B8C",
     "text": {
-      "primary": "#343B59",
-      "muted": "#6F7384",
-      "dim": "#A8AAB5"
+      "primary": "#515771",
+      "muted": "#5A5F70",
+      "dim": "#7C8190"
     },
     "border": {
-      "default": "#A8AAB5",
+      "default": "#848996",
       "active": "$semantic.accent",
       "dim": "#D9DBE0"
     },
@@ -59,10 +59,10 @@
       "error": "#8C4351"
     },
     "surface": {
-      "default": "#CBCCD1",
+      "default": "#E1E2E7",
       "user": "#C0C1C8",
-      "popup": "#CBCCD1",
-      "selection": "#D9DBE0",
+      "popup": "#FFFFFF",
+      "selection": "#C7D3E8",
       "cursor": "#C0C1C8"
     },
     "diff": {
@@ -78,7 +78,7 @@
     "thinking": "#5A4A78",
     "model_info": "#8C6C3E",
     "bash_border": "#8C4351",
-    "selected_fg": "#343B59"
+    "selected_fg": "#2A3049"
   },
   "component": {
     "message": {
@@ -90,7 +90,7 @@
     "input": {
       "border": "$semantic.text.muted",
       "border_loading": "$semantic.text.muted",
-      "cursor_fg": "#CBCCD1",
+      "cursor_fg": "#E1E2E7",
       "cursor_bg": "#343B59",
       "prompt": "$semantic.text.muted",
       "prompt_loading": "$semantic.text.muted",
@@ -105,7 +105,7 @@
       "max_height": "28"
     },
     "popup": {
-      "bg": "#CBCCD1",
+      "bg": "#FFFFFF",
       "border": "$semantic.thinking",
       "action_primary": "$semantic.accent",
       "selected_fg": "$semantic.selected_fg",
