@@ -109,6 +109,55 @@ async fn test_delete_thread_cascade() {
     assert!(meta_result.is_err());
 }
 
+/// [M1] delete_thread 必须级联删除 hidden 子 agent 线程树（孤儿数据防护）。
+#[tokio::test]
+async fn test_delete_thread_cascades_child_thread_tree() {
+    let (store, _dir) = make_store().await;
+
+    // 父 → 子 → 孙 三层线程树（子 agent 链，hidden=true）
+    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let mut child_meta = ThreadMeta::new("/tmp");
+    child_meta.parent_thread_id = Some(parent_id.clone());
+    child_meta.hidden = true;
+    let child_id = store.create_thread(child_meta).await.unwrap();
+    let mut grand_meta = ThreadMeta::new("/tmp");
+    grand_meta.parent_thread_id = Some(child_id.clone());
+    grand_meta.hidden = true;
+    let grand_id = store.create_thread(grand_meta).await.unwrap();
+
+    // 父/子线程各写入消息
+    store
+        .append_messages(&parent_id, &[BaseMessage::human("parent msg")])
+        .await
+        .unwrap();
+    store
+        .append_messages(&child_id, &[BaseMessage::human("child msg")])
+        .await
+        .unwrap();
+
+    store.delete_thread(&parent_id).await.unwrap();
+
+    for tid in [&parent_id, &child_id, &grand_id] {
+        assert!(
+            store.load_meta(tid).await.is_err(),
+            "线程 {tid} 应随父线程级联删除"
+        );
+    }
+    // 消息随 threads 行 FK ON DELETE CASCADE 一并清除
+    assert!(
+        store.load_messages(&child_id).await.unwrap().is_empty(),
+        "子线程消息应级联删除"
+    );
+    // list_threads 不再含任何残留
+    let remaining = store.list_threads().await.unwrap();
+    assert!(
+        !remaining
+            .iter()
+            .any(|m| m.id == parent_id || m.id == child_id || m.id == grand_id),
+        "线程树删除后不应有任何残留"
+    );
+}
+
 #[tokio::test]
 async fn test_message_order_after_multiple_appends() {
     let (store, _dir) = make_store().await;

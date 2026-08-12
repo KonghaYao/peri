@@ -455,10 +455,26 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn delete_thread(&self, id: &ThreadId) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM threads WHERE id = ?1")
-            .bind(id.as_str())
-            .execute(&mut *tx)
-            .await?;
+        // 级联删除整个线程树：hidden 子 agent 线程沿 parent_thread_id 挂链，
+        // 若不递归删除会留下永远无法通过 UI/协议访问的孤儿数据（messages 表
+        // 依赖 threads 行 FK ON DELETE CASCADE 一并清除）。
+        let mut to_delete = vec![id.as_str().to_string()];
+        let mut idx = 0;
+        while idx < to_delete.len() {
+            let children: Vec<(String,)> =
+                sqlx::query_as("SELECT id FROM threads WHERE parent_thread_id = ?1")
+                    .bind(&to_delete[idx])
+                    .fetch_all(&mut *tx)
+                    .await?;
+            to_delete.extend(children.into_iter().map(|(cid,)| cid));
+            idx += 1;
+        }
+        for tid in &to_delete {
+            sqlx::query("DELETE FROM threads WHERE id = ?1")
+                .bind(tid)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }

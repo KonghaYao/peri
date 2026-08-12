@@ -555,11 +555,21 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
 
-            if let Some(state) = sessions.remove(req_session_id) {
-                if let Some(ref token) = state.cancel_token {
-                    token.cancel();
+            // 与 stdio 路径（handle_delete）一致：锁外 shutdown LSP pool，
+            // 避免删除活跃会话后 LSP 服务器子进程/read task 残留（M2）
+            let lsp_pool = {
+                if let Some(state) = sessions.remove(req_session_id) {
+                    if let Some(ref token) = state.cancel_token {
+                        token.cancel();
+                    }
+                    info!(session_id = %req_session_id, "Session removed on delete");
+                    state.lsp_pool
+                } else {
+                    None
                 }
-                info!(session_id = %req_session_id, "Session removed on delete");
+            };
+            if let Some(pool) = lsp_pool {
+                pool.shutdown().await;
             }
             let _ = cfg.session_manager.close_session(req_session_id).await;
             if let Err(e) = cfg

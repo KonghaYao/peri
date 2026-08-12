@@ -1060,3 +1060,102 @@ async fn test_delete_missing_session_id_returns_error() {
         err.message
     );
 }
+
+// ── M2 回归：进程内 session/delete 必须 shutdown LSP pool ────────────────────
+
+/// 记录 shutdown 调用的 mock LSP pool。
+struct MockLspPool {
+    shutdown_calls: Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::LspPoolPort for MockLspPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    async fn shutdown(&self) {
+        self.shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 删除活跃会话（带 lsp_pool）时必须在锁外 shutdown pool，与 stdio 路径一致，
+/// 避免 LSP 服务器子进程/read task 残留（M2；此前进程内路径直接丢弃 pool）。
+#[tokio::test]
+async fn test_delete_active_session_shuts_down_lsp_pool() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let cwd = tmp.path().to_str().unwrap();
+
+    // 真实创建线程（id 即 session id），与 delete 分支的 thread_store 删除对应
+    let sid = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .unwrap();
+
+    let shutdown_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let pool: Arc<dyn peri_acp_types::ports::LspPoolPort> = Arc::new(MockLspPool {
+        shutdown_calls: Arc::clone(&shutdown_calls),
+    });
+
+    // 构造带 lsp_pool 的活跃会话（其余字段与 register_session_with_workflow 一致）
+    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
+    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
+    let mw = Arc::new(WorkflowMiddleware::new(
+        executor,
+        cwd,
+        notification_tx,
+        None,
+    ));
+    sessions.insert(
+        sid.clone(),
+        SessionState {
+            session_id: sid.clone(),
+            thread_id: sid.clone(),
+            cwd: cwd.to_string(),
+            history: Vec::new(),
+            cancel_token: None,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
+            lsp_pool: Some(pool),
+            title: None,
+            tags: Vec::new(),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            lease: crate::host::lease::WriterLease::acquired("default"),
+        },
+    );
+
+    let resp = handle_request(
+        "session/delete",
+        &json!({ "sessionId": sid }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/delete 应成功");
+    assert_eq!(resp, serde_json::json!({}));
+    assert!(
+        !sessions.contains_key(&sid),
+        "删除后活跃会话应从 sessions 表移除"
+    );
+    assert_eq!(
+        shutdown_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "删除活跃会话必须 shutdown LSP pool（M2）"
+    );
+}
