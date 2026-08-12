@@ -18,11 +18,11 @@
 //! # 双入口（Slice 5 真实数据适配）
 //!
 //! 事件流中 Edit/Write 的 `output_summary` 是**摘要文本**（`Added 3 lines to
-//! P` / `Wrote 2 lines to P`），不含 unified diff——`parse_unified_diff` 对真实
-//! 摘要恒返回 `None`。故 `parse_tool_diff` 在 unified 解析失败后回退到
-//! [`parse_edit_write_summary`]：从摘要提取 `+N`/`−M` 计数（无 hunk 行），
-//! 展开态仅展示 header `path +N −M`。协议未来若携带完整 diff 文本，
-//! unified 路径自动接管（hunk 渲染），两入口行为无冲突。
+//! P` / `Wrote 2 lines to P` / `Replaced 1 line to P`），不含 unified diff——
+//! `parse_unified_diff` 对真实摘要恒返回 `None`。故 `parse_tool_diff` 在 unified
+//! 解析失败后回退到 [`parse_edit_write_summary`]：从摘要提取 `+N`/`−M` 计数
+//! （无 hunk 行），展开态仅展示 header `path +N −M`。协议未来若携带完整
+//! diff 文本，unified 路径自动接管（hunk 渲染），两入口行为无冲突。
 
 use crate::kit::tui_render_unit::{TuiDiffBlock, TuiHunk, TuiHunkLine, TuiHunkLineKind};
 
@@ -234,7 +234,8 @@ pub fn parse_unified_diff(text: &str, path_hint: Option<&str>) -> Option<TuiDiff
 /// Wrote 3 lines /tmp/x              → +3（Write 实际无 `to` 分隔）
 /// Added 1 line to src/x.rs          → +1
 /// Removed 2 lines to src/y.rs       → −2
-/// Replaced text (same line count)   → None（±0 无计数信息，保持可合并）
+/// Replaced 1 line to src/x.rs       → +1 −1（同行数内容替换，middleware 新形态）
+/// Replaced text (same line count)   → None（旧格式无计数，兼容降级）
 /// ```
 ///
 /// 返回无 hunk 的 [`TuiDiffBlock`]（渲染层仅展示 header `path +N −M`）。
@@ -249,8 +250,10 @@ pub fn parse_edit_write_summary(text: &str, path_hint: Option<&str>) -> Option<T
         (SummaryKind::Added, r)
     } else if let Some(r) = trimmed.strip_prefix("Removed ") {
         (SummaryKind::Removed, r)
+    } else if let Some(r) = trimmed.strip_prefix("Replaced ") {
+        (SummaryKind::Replaced, r)
     } else {
-        // Replaced text (same line count) 及其余文本——无计数信息。
+        // 旧格式 "Replaced text (same line count)" 及其余文本——无计数信息。
         return None;
     };
     // 行数数字（`1 line` / `3 lines`）。
@@ -280,6 +283,8 @@ pub fn parse_edit_write_summary(text: &str, path_hint: Option<&str>) -> Option<T
     let (adds, dels) = match kind {
         SummaryKind::Wrote | SummaryKind::Added => (count, 0),
         SummaryKind::Removed => (0, count),
+        // 同行数替换：被替换的 N 行既删又增（`· +N · -N`）。
+        SummaryKind::Replaced => (count, count),
     };
     Some(TuiDiffBlock {
         path,
@@ -299,6 +304,7 @@ enum SummaryKind {
     Wrote,
     Added,
     Removed,
+    Replaced,
 }
 
 /// 从 `+++ b/xxx` / `diff --git a/xxx b/xxx` 头提取路径（剥 `a/`/`b/` 前缀）。

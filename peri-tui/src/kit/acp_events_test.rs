@@ -4541,15 +4541,16 @@ fn test_edit_with_real_summary_diff_not_grouped() {
     assert!(!has_group, "含 diff 的 Edit 不并入相邻 Read 组");
 }
 
-/// [Slice 5] 真实摘要 ±0（`Replaced text (same line count)`）→ 无 diff 块，
-/// 保持可合并（回归防线：同行数替换 Edit 仍可入组）。
+/// [Slice 5] 真实摘要同行数替换（`Replaced 1 line to P`，middleware 新形态）
+/// → 解析出 diff 块（adds=dels=1）→ 含 diff 工具不合并、不分组
+/// （§7：diff 工具独立展示变更摘要）。
 #[test]
 #[serial]
-fn test_edit_same_line_replacement_still_grouped() {
+fn test_edit_same_line_replacement_with_count_not_grouped() {
     let mut state = make_fold_test_state();
     for (id, output) in [
-        ("r1", "Replaced text (same line count) to src/a.rs"),
-        ("r2", "Replaced text (same line count) to src/b.rs"),
+        ("r1", "Replaced 1 line to src/a.rs"),
+        ("r2", "Replaced 1 line to src/b.rs"),
     ] {
         dispatch_and_notify(
             &mut state,
@@ -4574,7 +4575,17 @@ fn test_edit_same_line_replacement_still_grouped() {
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
         snap.items.len(),
-        1,
-        "±0 摘要无 diff → 相邻成功 Edit 正常分组"
+        2,
+        "带 diff 计数的相邻 Edit 各自独立，不并入折叠组"
     );
+    for item in &snap.items {
+        match item {
+            TuiRenderUnit::TuiToolCard(c) => {
+                let diff = c.diff.as_ref().expect("同行数替换摘要应解析出 diff 块");
+                let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(diff);
+                assert_eq!((adds, dels), (1, 1), "替换 1 行 → +1 −1");
+            }
+            other => panic!("expected TuiToolCard, got {other:?}"),
+        }
+    }
 }

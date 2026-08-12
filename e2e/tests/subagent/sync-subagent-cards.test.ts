@@ -154,14 +154,16 @@ describe("subagent: sync agent rows (merged)", () => {
         "sync-subagent-sleep-running",
       );
 
-      // 完成态：footer 出现（主 turn 完成），且 Agent 头行完成（✓）
+      // 完成态：footer 出现（主 turn 完成），且 Agent 头行完成（✓）。
+      // 屏幕渲染为 '✓  Agent ...'（✓ 后双空格：符号后网格 gap 空格 + summary 前导
+      // 空格），用 \s+ 容忍 gap 空格，不能用单空格字面量。
       await tester.waitFor(
         (screen) => {
           const turn = currentAgentTurn(screen);
           return (
             turn !== undefined &&
             turn.completed &&
-            /✓ Agent/.test(turn.section)
+            /✓\s+Agent/.test(turn.section)
           );
         },
         {
@@ -182,7 +184,7 @@ describe("subagent: sync agent rows (merged)", () => {
       // 确定性断言（替代 judge——sleep 10s 抓拍时机不确定，judge 语义易 flaky）：
       // 完成态必须包含 ✓ Agent 头行 + 结果文本，且不再有 ◐ / braille 运行符号。
       const doneText = sleepDoneCapture.text;
-      expect(doneText).toMatch(/✓ Agent/); // Agent 头行完成态
+      expect(doneText).toMatch(/✓\s+Agent/); // Agent 头行完成态（✓ 后双空格 gap）
       expect(doneText).toContain("\u2713"); // ✓
       expect(doneText).not.toContain("\u25d0"); // ◐（仅 reasoning running 占位，完成态无）
       expect(doneText).not.toMatch(/[\u2800-\u28FF]/); // braille 帧（仅 running 工具行，完成态无）

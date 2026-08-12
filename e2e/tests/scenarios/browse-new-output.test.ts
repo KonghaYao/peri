@@ -24,7 +24,7 @@
  *   只改符号列，不构成「viewport 移动」（内容列完全一致）。
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
@@ -94,20 +94,15 @@ describe("scenario: browse history while streaming (new output indicator)", () =
         `浏览态底部显示 ↓ New output：${during.text.slice(-200)}`,
       ).toBe(true);
 
-      // 等待 turn 完成（footer 处理耗时出现 = 内容固定；期间剩余命令 +
-      // 最终回答继续在视口下方增长）
-      try {
-        await tester.waitForText("处理耗时", {
-          timeout: 150_000,
-          interval: 1000,
-        });
-      } catch {
-        await tester.waitForText("Brewed for", {
-          timeout: 60_000,
-          interval: 1000,
-        });
-      }
-      await tester.sleep(800);
+      // 等待视口稳定：浏览态（滚离底部）下 footer 不渲染——视口裁剪只在
+      // 贴底时附加 footer 行（mod.rs viewport_has_footer：scroll_y + vp_height
+      // > core_total_visual_rows），「处理耗时/Brewed for」文本在浏览态不可见，
+      // 不能作 turn 完成信号。§15 断言也不依赖 turn 完成：
+      // - after 对比（视口不动）发生在 streaming 中抓取，验证的正是「输出
+      //   增长时视口不动」（非空真断言）；
+      // - 「↓ New output」指示器消失取决于贴底跟随（follow_bottom），与
+      //   turn 是否完成无关。
+      await waitForStableScreen(tester, 120_000);
 
       // viewport 不动：streaming 期间滚离底部后，内容增长（剩余命令 +
       // 最终回答）不得移动视口——top-3 行保持（剥离网格前缀列后比对）

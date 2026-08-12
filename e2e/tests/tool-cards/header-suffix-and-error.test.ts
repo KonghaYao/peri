@@ -199,14 +199,21 @@ describe("tool-card: header suffix + error display", () => {
       console.log("Judge (edit):", JSON.stringify(r3, null, 2));
       expect(r3.pass).toBe(true);
 
-      // 确定性断言：错误态头行无 "— N lines" 后缀 + 明确错误词 + 错误详情独立行可见
+      // 确定性断言：错误态头行无 "— N lines" 后缀 + 明确错误词 + 错误详情独立行可见。
+      // 选择器必须命中**工具卡错误行**而非 prompt 回显——回显行
+      // （`请使用 Read 工具读取文件 /nonexistent/...`）同样含 "Read" 与路径，
+      // 用错误符号 ×（§8.2 错误态符号）限定。
       const errLines = errorCapture.text.split("\n");
       const errHeader = errLines.find(
-        (l) => l.includes("Read") && l.includes("/nonexistent"),
+        (l) => l.includes("×") && l.includes("/nonexistent"),
       );
       expect(errHeader).toBeDefined();
       expect(errHeader!).not.toMatch(/—\s*\d+\s*lines/);
-      expect(errHeader!).toContain("Failed");
+      // 错误词为 i18n 本地化（msg-status-failed：zh-CN「— 失败」/ en「— Failed」）
+      expect(
+        errHeader!.includes("失败") || errHeader!.includes("Failed"),
+        `错误态头行含错误词：${errHeader}`,
+      ).toBe(true);
       expect(errorCapture.text).toContain("Tool execution failed");
       expect(errorCapture.text).toContain("not found");
 

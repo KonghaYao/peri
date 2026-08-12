@@ -30,27 +30,22 @@ interface AgentTurn {
   completed: boolean;
 }
 
-/** footer 区域标识（加载中 spinner 动词硬编码中文；完成后为处理耗时/Brewed for）。
- *  加载期 spinner 动词行常驻 footer——`lastIndexOf` 取屏幕最后一行 footer 内容，
- *  其上方即为当前 turn 区段（发送顺序执行保证 footer 必属当前 turn）。 */
-const LOADING_MARKERS = ["思考中", "执行工具", "正在生成回复"];
+/** footer 区域标识：加载期为 spinner 动画帧 + 随机成语行（verb 随机抽取，
+ *  内容不可预测，见 peri-tui/src/components/spinner/verb.rs），完成后为
+ *  处理耗时/Brewed for。两种 footer 都位于屏幕底部状态栏（权限模式 · cwd · 模型）
+ *  之上——状态栏是固定渲染行，以其为稳定边界切 section，不依赖不可预测的成语。 */
+const STATUS_BAR_MARKER = "Bypass · perihelion";
 
-/** 当前 turn 区段：以全局 footer（加载 spinner / 处理耗时 / Brewed for）为边界。 */
+/** 当前 turn 区段：以状态栏（屏幕底部固定行）为边界，其上方为消息区 + footer
+ *  （加载成语行 / 处理耗时行）。completed 以 footer summary 行（处理耗时/Brewed
+ *  for）是否出现判定。 */
 function currentAgentTurn(screen: string): AgentTurn | undefined {
-  let footerIdx = -1;
-  for (const m of LOADING_MARKERS) {
-    footerIdx = Math.max(footerIdx, screen.lastIndexOf(m));
-  }
-  footerIdx = Math.max(
-    footerIdx,
-    screen.lastIndexOf("处理耗时"),
-    screen.lastIndexOf("Brewed for"),
-  );
-  if (footerIdx < 0) return undefined;
+  const statusIdx = screen.lastIndexOf(STATUS_BAR_MARKER);
+  if (statusIdx < 0) return undefined;
   const completed =
     screen.lastIndexOf("处理耗时") >= 0 || screen.lastIndexOf("Brewed for") >= 0;
   return {
-    section: screen.slice(0, footerIdx),
+    section: screen.slice(0, statusIdx),
     completed,
   };
 }
@@ -59,11 +54,18 @@ function currentAgentTurn(screen: string): AgentTurn | undefined {
  *  （⠋⠙⠹…，§8.2；重构后 SubAgent 组渲染为嵌套工具行，running 符号为
  *  braille 帧而非 ◐——◐ 仅用于 reasoning `◐ Thinking…`）。
  *  [Fix race] 旧版只等「行出现」——快速 subagent 完成时抓拍的是 ✓ 完成态，
- *  judge 的 running 断言会闪红。运行态窗口内 Agent 头行符号必为 braille 帧。 */
+ *  judge 的 running 断言会闪红。运行态窗口内 Agent 头行符号必为 braille 帧。
+ *  [Fix race 2] 只等 Agent 头行仍不够：头行出现瞬间 input_summary 尚未填充
+ *  （渲染为 `⠴ Agent null`），嵌套子工具行也未出现，judge 的「嵌套 Grep 行」
+ *  断言会失败。必须等 Agent 头行 + 至少一个嵌套子工具行（缩进 + 符号 + 工具名，
+ *  §6.7 嵌套行特征）同时出现。 */
 function runningSubagentRow(section: string): boolean {
-  return section
-    .split("\n")
-    .some((l) => /[\u2800-\u28FF]\s+Agent\s/.test(l));
+  const lines = section.split("\n");
+  const hasAgentHeader = lines.some((l) => /[\u2800-\u28FF]\s+Agent\s/.test(l));
+  const hasNestedToolRow = lines.some((l) =>
+    /│\s+[\u2800-\u28FF✓]\s+[A-Z]\w+\s{2}/.test(l),
+  );
+  return hasAgentHeader && hasNestedToolRow;
 }
 
 describe("tool-card: agent output and nested position", () => {

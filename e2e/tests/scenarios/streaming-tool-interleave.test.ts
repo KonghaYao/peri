@@ -115,6 +115,14 @@ describe("scenarios: streaming + tool interleave", () => {
 
       // 第二轮 streaming：手动展开的 reasoning 不得被自动折叠
       const base2 = await tester.getScreenText();
+      // [Fix] Alt+Up 循环后 entry 焦点仍激活（FOCUSED_ENTRY 非空）——此时
+      // Enter 被消息区仲裁为折叠切换（focus_router::message_nav_accepts，
+      // 「entry 导航模式」设计语义），sendPrompt 的提交 Enter 会被抢走、
+      // prompt 不提交；waitForStableScreen 会把「折叠变化 + 稳定」误判为
+      // turn 完成，滚顶后第一轮 reasoning 已被折叠、断言必失败。
+      // 先 Esc 退出导航（清 FOCUSED_ENTRY）再提交。
+      await tester.sendKey("escape");
+      await tester.sleep(150);
       await sendPrompt(tester, "再简单回答一句话即可。");
       await waitForStableScreen(tester, 180_000, base2);
 
