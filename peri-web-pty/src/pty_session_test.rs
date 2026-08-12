@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
 use super::pty_session::normalize_crlf;
 use super::pty_session::PtySession;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -27,10 +27,20 @@ fn test_shell() -> &'static str {
 /// 颜色等），单次 read 往往只拿到 preamble 头部，读不到命令实际输出。
 /// 循环累积直到包含 `target`、EOF 或超时，才能稳定跨过 preamble。
 ///
+/// Windows 上 ConPTY（conhost）启动时会向宿主发送 DSR 光标位置查询
+/// `ESC[6n`，宿主不回复 `ESC[row;colR` 则 conhost 挂起，不输出任何子进程
+/// 内容（生产链路由 xterm.js 自动回复，测试需自行响应）。检测到该序列后
+/// 通过 `writer` 回复 `ESC[1;1R` 解除挂起。
+///
 /// 超时后读线程可能仍阻塞在 read 上，由测试进程退出时清理。
 /// 超时返回时，通过共享 buffer 带回已读到的部分数据，让断言消息能展示
 /// 真实输出内容（区分「完全无输出」与「读到数据但编码/内容不匹配」）。
-fn drain_until(reader: Box<dyn Read + Send>, target: &str, timeout: Duration) -> String {
+fn drain_until(
+    reader: Box<dyn Read + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    target: &str,
+    timeout: Duration,
+) -> String {
     let target = target.to_string();
     let (tx, rx) = mpsc::channel::<String>();
     // 读线程与主线程共享累积结果：正常结束走 channel，超时路径从共享
@@ -40,6 +50,7 @@ fn drain_until(reader: Box<dyn Read + Send>, target: &str, timeout: Duration) ->
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut accumulated = String::new();
+        let mut replied_dsr = false;
         let mut chunk = [0u8; 4096];
         loop {
             match reader.read(&mut chunk) {
@@ -48,6 +59,13 @@ fn drain_until(reader: Box<dyn Read + Send>, target: &str, timeout: Duration) ->
                     let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
                     accumulated.push_str(&text);
                     shared_task.lock().unwrap().push_str(&text);
+                    // ConPTY DSR 查询：\x1b[6n → 回复 \x1b[1;1R，仅启动时一次
+                    if !replied_dsr && accumulated.contains("\x1b[6n") {
+                        if let Ok(mut w) = writer.lock() {
+                            let _ = w.write_all(b"\x1b[1;1R");
+                        }
+                        replied_dsr = true;
+                    }
                     if accumulated.contains(&target) {
                         break;
                     }
@@ -102,7 +120,8 @@ fn test_pty_session_read_receives_echo_output() {
     let (mut session, reader) =
         PtySession::spawn(shell, &args, 80, 24, None).expect("spawn 应成功");
 
-    let output = drain_until(reader, "hello", Duration::from_secs(10));
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, "hello", Duration::from_secs(10));
     assert_contains(&output, "hello", "输出应包含 hello");
 
     // 在 macOS 上 portable-pty 的 try_wait 需要等子进程被 waitpid 回收，
@@ -127,7 +146,8 @@ fn test_pty_session_write_feeds_stdin() {
 
     session.write(b"ping\n").expect("write 应成功");
 
-    let output = drain_until(reader, "ping", Duration::from_secs(10));
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, "ping", Duration::from_secs(10));
     assert_contains(&output, "ping", "回显应包含 ping");
 
     session.kill().expect("kill 应成功");
@@ -162,7 +182,8 @@ fn test_pty_session_spawn_uses_cwd() {
     let (session, reader) =
         PtySession::spawn(shell, &args, 80, 24, Some(&cwd_str)).expect("spawn 应成功");
 
-    let output = drain_until(reader, last_segment, Duration::from_secs(10));
+    let writer = session.clone_writer();
+    let output = drain_until(reader, writer, last_segment, Duration::from_secs(10));
     assert_contains(
         &output,
         last_segment,
