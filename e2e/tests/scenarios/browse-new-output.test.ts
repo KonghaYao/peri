@@ -10,9 +10,11 @@
  * 时序设计（Slice 5 修复记录，对比旧版「turn 完成后才滚动」的空转断言）：
  * - 旧版在 turn 完成后滚动：内容已固定，「viewport 不动」是空真断言，
  *   不覆盖 §15 的「输出增长时视口不动」。新版在 streaming 中滚动。
- * - 加载信号：footer spinner 动词硬编码中文「思考中…」（idle 态是随机
- *   成语占位，不含该词）——locale 无关且只在 loading 期出现；加载期
- *   footer 常驻内容底部，始终可见。
+ * - 加载信号：首个 Bash 工具卡 header（`⠇  Shell sleep 1`）出现 = agent
+ *   思考结束、首批命令派发（工具卡在内容末尾，跟随态下必在视口内）。
+ *   footer spinner 行无可等固定动词：loading/idle 均显示动画帧 + 随机
+ *   成语占位（「思考中…」verb 无调用方渲染），elapsed 后缀 (Ns 值随
+ *   时间增长无法精确匹配。
  * - 等待 2.5s（agent 思考 + 首批命令派发）后 Ctrl+Up ×3 滚离底部：此时
  *   工具卡/回答仍在下方持续增长，视口停在 prompt/早期工具卡区。
  * - 终端 40×16（transcript 视口 7 行）：滚动后视口 = [5 行 core,
@@ -22,7 +24,7 @@
  *   只改符号列，不构成「viewport 移动」（内容列完全一致）。
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
@@ -53,9 +55,12 @@ describe("scenario: browse history while streaming (new output indicator)", () =
         "请用 Bash 依次执行 5 条命令，每条都是 sleep 1 后 echo 一个标记（用 && 连接），全部执行完不要省略：第一条 sleep 1 && echo step-1，第二条 sleep 1 && echo step-2，第三条 sleep 1 && echo step-3，第四条 sleep 1 && echo step-4，第五条 sleep 1 && echo step-5",
       );
 
-      // 加载信号：footer spinner 动词「思考中…」（硬编码中文，locale 无关；
-      // idle 态为随机成语占位，不含该词；该行在 loading 期常驻 footer）。
-      await tester.waitForText("思考中", {
+      // 加载信号：首个 Bash 工具卡 header（`⠇  Shell sleep 1`）出现 = agent
+      // 思考结束、首批命令开始派发。注意不能用「Bash」——prompt 回显即含该词
+      // 会过早匹配；「Shell」是 Bash 工具卡独有文本（别名映射，§工具卡片）。
+      // footer spinner 行无固定动词可等：loading 期为动画帧 + 随机成语占位
+      // （idle 期同款成语，无法区分加载开始；「思考中…」verb 无调用方渲染）。
+      await tester.waitForText("Shell", {
         timeout: 60_000,
         interval: 500,
       });
@@ -89,20 +94,15 @@ describe("scenario: browse history while streaming (new output indicator)", () =
         `浏览态底部显示 ↓ New output：${during.text.slice(-200)}`,
       ).toBe(true);
 
-      // 等待 turn 完成（footer 处理耗时出现 = 内容固定；期间剩余命令 +
-      // 最终回答继续在视口下方增长）
-      try {
-        await tester.waitForText("处理耗时", {
-          timeout: 150_000,
-          interval: 1000,
-        });
-      } catch {
-        await tester.waitForText("Brewed for", {
-          timeout: 60_000,
-          interval: 1000,
-        });
-      }
-      await tester.sleep(800);
+      // 等待视口稳定：浏览态（滚离底部）下 footer 不渲染——视口裁剪只在
+      // 贴底时附加 footer 行（mod.rs viewport_has_footer：scroll_y + vp_height
+      // > core_total_visual_rows），「处理耗时/Brewed for」文本在浏览态不可见，
+      // 不能作 turn 完成信号。§15 断言也不依赖 turn 完成：
+      // - after 对比（视口不动）发生在 streaming 中抓取，验证的正是「输出
+      //   增长时视口不动」（非空真断言）；
+      // - 「↓ New output」指示器消失取决于贴底跟随（follow_bottom），与
+      //   turn 是否完成无关。
+      await waitForStableScreen(tester, 120_000);
 
       // viewport 不动：streaming 期间滚离底部后，内容增长（剩余命令 +
       // 最终回答）不得移动视口——top-3 行保持（剥离网格前缀列后比对）

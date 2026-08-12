@@ -342,6 +342,8 @@ pub struct SessionContext {
         parking_lot::RwLock<std::collections::BTreeMap<String, Arc<dyn crate::tools::BaseTool>>>,
     >,
     pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
+    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）。
+    pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 
     // ── workflow: workflow agents ──────────────────────────────────────────
     pub workflow_executor: Option<Arc<dyn peri_acp_types::workflow::AgentExecutor>>,

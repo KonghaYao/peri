@@ -657,7 +657,6 @@ render-tool-uses = · { $count } 次工具调用
 render-user-answered = 用户回答了 Peri 的问题：
 render-thought-for = 思考了 { $count } 字符
 render-more-lines = … 还有 { $count } 行
-render-subagent-tools = { $count } 次工具
 render-todo-summary = { $done }/{ $total } 任务
 render-todo-summary-active = { $done }/{ $total } 任务 · { $active }
 render-agent-header = Agent

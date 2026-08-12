@@ -16,9 +16,14 @@ pub async fn encode_message(
     Ok(())
 }
 
+/// 单帧 body 大小上限：防异常/恶意 Content-Length 声明触发大分配
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Content-Length 分帧解码
 ///
 /// 读取 `"Content-Length: {N}\r\n\r\n"` 头部行，然后读取 N 字节 body。
+/// 头部字段名大小写不敏感（RFC 7230）：小写 `content-length:` 不应丢帧。
+/// body 声明超过 `MAX_MESSAGE_BYTES` 时直接报错，不做对应大小的分配。
 /// 返回 None 表示 EOF。
 pub async fn decode_message(
     reader: &mut (impl AsyncBufReadExt + Unpin),
@@ -35,7 +40,9 @@ pub async fn decode_message(
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(content_length_str) = trimmed.strip_prefix("Content-Length:") {
+        if let Some(content_length_str) =
+            trimmed.to_ascii_lowercase().strip_prefix("content-length:")
+        {
             let content_length: usize =
                 content_length_str
                     .trim()
@@ -44,6 +51,16 @@ pub async fn decode_message(
                         code: -32700,
                         message: format!("Invalid Content-Length: {e}"),
                     })?;
+
+            // 上限防护：超限报错而非按声明长度分配内存
+            if content_length > MAX_MESSAGE_BYTES {
+                return Err(LspError::JsonRpcError {
+                    code: -32700,
+                    message: format!(
+                        "Content-Length {content_length} exceeds limit {MAX_MESSAGE_BYTES}"
+                    ),
+                });
+            }
 
             // 读取剩余的头部行直到空行
             loop {

@@ -188,6 +188,23 @@ pub fn create_default_executor(
     }))
 }
 
+fn requested_model<'a>(
+    request_model: Option<&'a str>,
+    agent_definition: Option<&'a super::factory::WorkflowAgentDefinition>,
+) -> Option<&'a str> {
+    fn normalize(model: &str) -> Option<&str> {
+        let model = model.trim();
+        (!model.is_empty() && !model.eq_ignore_ascii_case("inherit")).then_some(model)
+    }
+
+    match request_model {
+        Some(model) => normalize(model),
+        None => agent_definition
+            .and_then(|definition| definition.model.as_deref())
+            .and_then(normalize),
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentExecutor for WorkflowAgentExecutor {
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult {
@@ -229,13 +246,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             };
         }
 
-        // 请求的 model 显式覆盖 agent definition；否则使用 agent type 的模型档位。
-        let requested_model = params.model.as_deref().or_else(|| {
-            agent_definition
-                .as_ref()
-                .and_then(|definition| definition.model.as_deref())
-                .filter(|model| !model.is_empty() && *model != "inherit")
-        });
+        // 请求的 model 显式覆盖 agent definition；空值 / inherit 表示使用父 provider。
+        let requested_model = requested_model(params.model.as_deref(), agent_definition.as_ref());
 
         // 0. GAP-08: Langfuse turn 开始钩子（注入面；迁移前 `langfuse_session`
         // 恒 None 未接线，None = 遥测禁用）。
@@ -734,13 +746,55 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{reported_model, tool_name_in};
+    use super::{reported_model, requested_model, tool_name_in};
+    use crate::agent::workflow::WorkflowAgentDefinition;
 
     #[test]
     fn agent_type_tool_matching_is_case_insensitive() {
         assert!(tool_name_in(&["Read".into(), "Grep".into()], "read"));
         assert!(tool_name_in(&["*".into()], "Write"));
         assert!(!tool_name_in(&["Read".into()], "Write"));
+    }
+
+    #[test]
+    fn requested_model_prefers_workflow_value() {
+        let definition = WorkflowAgentDefinition {
+            model: Some("haiku".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            requested_model(Some("sonnet"), Some(&definition)),
+            Some("sonnet")
+        );
+    }
+
+    #[test]
+    fn requested_model_inherit_overrides_agent_definition() {
+        let definition = WorkflowAgentDefinition {
+            model: Some("haiku".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(requested_model(Some("inherit"), Some(&definition)), None);
+    }
+
+    #[test]
+    fn requested_model_trims_concrete_model_name() {
+        assert_eq!(
+            requested_model(Some("  claude-sonnet-4-5  "), None),
+            Some("claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn requested_model_uses_agent_definition_when_omitted() {
+        let definition = WorkflowAgentDefinition {
+            model: Some("haiku".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(requested_model(None, Some(&definition)), Some("haiku"));
     }
 
     #[test]

@@ -384,7 +384,22 @@ fn summary_singular_plural_units() {
     assert_eq!(adds, 10);
 }
 
-/// 同行数替换（±0）→ None：无计数信息，保持可合并（回归防线）。
+/// Edit 同行数替换（middleware 新形态）：`Replaced N lines to P` → +N −N
+/// （被替换的 N 行既删又增，header 展示 `· +N · -N`）。
+#[test]
+fn summary_edit_replaced() {
+    let block = parse_edit_write_summary("Replaced 1 line to src/x.rs", None).unwrap();
+    assert!(!block.is_new_file);
+    let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(&block);
+    assert_eq!((adds, dels), (1, 1));
+
+    let multi = parse_edit_write_summary("Replaced 3 lines to src/x.rs", None).unwrap();
+    let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(&multi);
+    assert_eq!((adds, dels), (3, 3));
+}
+
+/// 旧格式 "Replaced text (same line count)"（无计数）→ None：保持兼容降级
+/// （回放老会话摘要仍不解析；回归防线）。
 #[test]
 fn summary_same_line_count_is_none() {
     assert_eq!(

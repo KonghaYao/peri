@@ -522,8 +522,13 @@ fn apply_fold_pass(items: &mut im::Vector<TuiRenderUnit>, phase: SessionPhase) {
                 }
             }
             TuiSubAgentGroup(g) => {
+                // parent 终态由 canonical is_error 决定（nested child tool
+                // error 不提升 block error）；Error → §7 表 (SubAgent, Error)
+                // => Expanded（与 tool error 展开语义一致）。
                 let status = if g.is_running {
                     EntryStatus::Running
+                } else if g.is_error {
+                    EntryStatus::Error
                 } else {
                     EntryStatus::Completed
                 };

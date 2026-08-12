@@ -26,6 +26,13 @@ impl AgentOverrides {
     }
 }
 
+/// agent 可调度的模型档位集合（与 `peri-acp` `Profiles::ALL` 内容一致；
+/// `inherit` 是工具参数语义而非档位，不在此集合内）。
+///
+/// 单一事实源：Agent 工具 `model` 参数白名单与 subagent catalog 展示均引用
+/// 此常量，避免跨 crate 硬编码漂移。顺序（弱 → 强）用于展示，无调度语义。
+pub const MODEL_TIERS: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
+
 /// agent 能力标签（subagent catalog 检索依据；由 agent.md 推断）。
 ///
 /// - 能否并行执行（readonly agent 可安全并发）
@@ -36,7 +43,7 @@ impl AgentOverrides {
 /// 的并行决策（见审计 prompt-sections-audit.md P1-8 修正后判定）。
 #[derive(Debug, Clone)]
 pub struct AgentCapability {
-    /// 模型级别：`haiku` / `sonnet` / `opus` / `inherit`
+    /// 模型级别：`haiku` / `sonnet` / `opus` / `fable` / `inherit`
     pub model_tier: String,
     /// 该 agent 是否会修改项目代码（保守推断，D5）。
     /// 只有能根据最终注册工具集合证明无项目写能力时才为 false：

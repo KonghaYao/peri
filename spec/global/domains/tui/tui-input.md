@@ -303,6 +303,16 @@ FocusLayer 优先级（focus_router.rs，active_layer() 判定）：
 **涉及文件:** peri-tui/src/kit/submit_request.rs（`command.starts_with('/')` 守卫）, peri-tui/src/kit/panel_registry.rs（panel_for_slash_command）
 **CLAUDE.md 链接:** false
 
+### issue_2026-08-02-prediction-metadata-only-clears-placeholder
+**摘要:** 仅元数据（SetTitle/AddTag）的 prediction 以空文本覆盖输入区占位内容
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** prediction 覆盖, 空文本语义, 占位保护
+**问题本质:** 服务端 prediction 只产出元数据动作（无 Placeholder）时 text 为空串，客户端 handle_prediction 用空文本覆盖已有占位（如 `!` 或上次输入）。
+**通用模式:** "空 text"应视为无内容而非清空指令；覆盖型写入先判空；仅元数据响应不得改动占位。
+**涉及文件:** peri-tui/src/kit/acp_events/（handle_prediction 路径）
+**CLAUDE.md 链接:** false
+
 
 ---
 

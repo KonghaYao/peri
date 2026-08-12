@@ -3,6 +3,13 @@
 **状态**：Open
 **优先级**：中
 **创建日期**：2026-07-05
+**最后核查**：2026-08-11
+
+## 最新情况（2026-08-11）
+
+旧 `peri-widgets/`（含 render_bridge.rs）已随 ratatui-kit 迁移删除；scope 收窄为自研渲染残留清理：`peri-tui/src/kit/markdown/`（自行实现 ParsedBlock → Line 转换以适配 RENDER_CACHE 管线，mod.rs:4）、`kit/text_selection.rs` 仍在，未改用框架原生 Markdown 组件。
+
+**状态**：Open（保持）
 
 ## 问题描述
 

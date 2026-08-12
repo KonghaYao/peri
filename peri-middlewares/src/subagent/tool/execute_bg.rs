@@ -23,6 +23,7 @@ impl super::SubAgentTool {
         cwd: String,
         is_fork: bool,
         parent_messages: Vec<BaseMessage>,
+        model: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // task_manager 必填（后台任务注册）；来自 parent_session 的 host 或 tool host 回退
         let host = self.host();
@@ -39,7 +40,8 @@ impl super::SubAgentTool {
         }
 
         let spawned = if is_fork {
-            // fork 路径（bg fork）：父消息注入 + fork directive 包装
+            // fork 路径（bg fork）：父消息注入 + fork directive 包装；
+            // model 参数忽略——fork 恒继承父模型（与同步 fork 路径一致）
             let llm = (self.llm_factory)(None);
             let system_prompt = host
                 .as_ref()
@@ -85,6 +87,7 @@ impl super::SubAgentTool {
                     SubagentCancelPolicy::Independent,
                     true,  // skip_events
                     false, // don't setup event handler
+                    model,
                 )
                 .await?;
 

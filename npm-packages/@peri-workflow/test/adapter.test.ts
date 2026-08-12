@@ -49,7 +49,14 @@ describe('rpcAdapter.run', () => {
   test('ok 路径：透传宿主结果并带上 runId/agentId', async () => {
     capture()
     const p = rpcAdapter.run(
-      { prompt: 'hello', agentType: 'web-researcher', phase: 'fix' },
+      {
+        prompt: 'hello',
+        model: 'sonnet',
+        maxTokens: 4096,
+        agentType: 'web-researcher',
+        allowedTools: ['WebSearch'],
+        phase: 'fix',
+      },
       ctx
     )
     const req = waitAgentReq()
@@ -57,7 +64,10 @@ describe('rpcAdapter.run', () => {
       runId: 'run-1',
       agentId: 3,
       prompt: 'hello',
+      model: 'sonnet',
+      maxTokens: 4096,
       agentType: 'web-researcher',
+      allowedTools: ['WebSearch'],
       phase: 'fix',
     })
     respond(req, { kind: 'ok', output: 'mock result', usage: { outputTokens: 7 } })

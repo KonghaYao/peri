@@ -491,6 +491,77 @@ panel-payload                ← Panel 数据推送（计划）
 **涉及文件:** peri-tui/src/kit/acp_notifier.rs（is_session_replay 四级 fallback）, peri-tui/src/kit/acp_types.rs（CommittedAssistantText / ReplayToolStarted / ReplayToolEnded 变体）, peri-tui/src/kit/acp_events/turn.rs 与 tool.rs（原 acp_events.rs 拆分后的对应 handler）, peri-tui/src/kit/acp_bridge.rs（event_kind_short）, peri-acp/src/dispatch/session_replay.rs（replay_session_history 逐 content block 分发）
 **CLAUDE.md 链接:** false
 
+### issue_2026-08-10-chat-redesign-slice1-data-gates
+**摘要:** Chat redesign Slice 1——5 项数据门只读核验，为零消费方定案
+**状态:** Closed
+**归档日期:** 2026-08-11
+**关键词:** 数据门, 协议降级, 终端能力, 性能基线
+**问题本质:** Slice 1 以只读代码核验 5 项数据门（diff/tokens/interjection/started_at/render 时序），为 Slice 2-5 定案决策依据；纯新增、零消费方。
+**通用模式:** 大 redesign 前用"数据门"清单先行核验代码事实，行为降级显式化。
+**架构影响:** 不改 ACP 协议；Slice 5 客户端解析 diff。
+**涉及文件:** peri-tui acp_events/system.rs, stream_data.rs, tui_render_unit.rs, input_area.rs, acp_types.rs, message_area/mod.rs, kit/terminal_caps.rs, truncate.rs, themes/*.json
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-08-e2e-compact-command-screenshot-too-early
+**摘要:** /compact 完成 SystemNote 在 replay 后丢失 + e2e 截图时机过早双问题
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** SystemNote 跨 replay, PENDING_COMPACT_NOTE, waitFor 确定性信号, 读锁死锁
+**问题本质:** 阶段一：e2e 固定 sleep 截图，compact 摘要耗时 >3.5s 导致截图过早 flaky；阶段二：manual /compact 完成提示经 TurnDone 归档后，thread load 触发 bridge reset 清空 committed → SystemNote 跨 replay 丢失；且重注入块 `if let Some(x) = atom.read().clone()` 读锁 guard 存活至块结束，分支内写锁同线程死锁。
+**通用模式:** e2e 以"确定性信号（waitFor 完成提示）"替代固定 sleep；跨 replay 存活的状态用全局 atom 桥接（bridge reset 分支消费重建）；先以显式块提取值再进 if-let，防读锁 guard 存活导致写锁死锁。
+**涉及文件:** peri-tui/src/kit/atoms.rs（PENDING_COMPACT_NOTE）, acp_events/compact.rs, acp_bridge.rs, acp_events_test.rs, e2e/tests/scenarios/compact-command.test.ts
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-loading-stuck-after-transport-close
+**摘要:** transport 关闭后 is_loading 永久卡 true——无看门狗，cancel 无法解卡
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** loading 看门狗, 通道关闭兜底死代码, pump 独占 sender, 软锁死
+**问题本质:** transport 死亡后无事件到达，is_loading 无兜底复位路径（Ctrl+C/退出/清屏全被 loading 门禁拦截）；v1 方案"notifier channel-close 兜底"是死代码——生产 wiring 下 notification_tx 有多个永活 sender，recv() 永不返回 None；终版 = pump 独占 sender，pump 退出即 drop → channel 关闭 → 兜底复活。
+**通用模式:** "通道关闭兜底"在多 sender wiring 下是死代码；让发送方独占 sender 使"退出=关闭"成为可测事实；loading 需看门狗或幂等复位路径。
+**涉及文件:** peri-tui/src/kit/client.rs（spawn_pump 按值移交 sender）, launch.rs, acp_notifier.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-stale-turn-interrupted-overwrites-new-turn
+**摘要:** 新 turn 的 loading/输入状态被旧 turn 的 TurnInterrupted 事件污染
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** turn 代际防护, request_id 配对, 事件乱序, 主导排序
+**问题本质:** 旧 turn 的 TurnInterrupted 与新 turn 本地事件同 channel 乱序到达，按 session 过滤不够；v1 代际判定漏掉"主导排序"（RPC 往返数百 ms）；终版 = 提交时生成 uuid v7 request_id 随 RPC 透传，TurnInterrupted 回带，`stale = id 不匹配 || 代际` 双保险。
+**通用模式:** 跨 turn 事件防护要配对"请求-响应"身份（request_id），仅靠到达顺序/本地代际不够；乱序场景先想主导排序。
+**涉及文件:** peri-tui/src/kit/acp_bridge.rs, acp_events/turn.rs, submit_consumer.rs, peri-acp 协议层（SessionContext→SpawnPumpRequest 透传）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-cancel-consumer-loading-phase-desync
+**摘要:** cancel_consumer 直接写 ACP_STATE 与 bridge phase 派生不同步（loading 闪回）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 双写不同步, phase 派生, loading 闪回, 单一事实源
+**问题本质:** cancel 只写 ACP_STATE.is_loading=false，bridge 内 phase 仍为 PromptRunning，后续任意事件重算 is_loading=true——loading 闪回且提交判定竞态。
+**通用模式:** 同一派生状态禁止两个写入点各写一半；is_loading 应从 phase 单一事实源派生，取消路径同步 phase。
+**涉及文件:** peri-tui/src/kit/submit_consumer.rs（clear_loading_state）, acp_events/render.rs（push_acp_state）
+**CLAUDE.md 链接:** false
+
+### issue_2026-08-05-auto-compact-triggers-spurious-session-reload
+**摘要:** auto-compact 后 TurnDone 误触发 session/load 重放（compact 区分判定失效）
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 判定顺序, flush 抹平, compact_just_completed, 守卫失效
+**问题本质:** handle_turn_done 先 flush_current_turn()（结尾无条件 reset），之后才评估 `compact_just_completed && current_turn.is_empty()`——判定时 current_turn 恒空，守卫失去区分能力；且 CompactCompleted 事件不含 trigger 字段，命令标志无处置位。
+**通用模式:** 守卫评估必须发生在状态被重置之前；"先 flush 后判定"的顺序错误让条件恒真/恒假；事件缺区分字段时补字段而非猜标志。
+**涉及文件:** peri-tui/src/kit/acp_events/turn.rs, message_area/mod.rs（flush_current_turn）, event/mod.rs（CompactCompleted）
+**CLAUDE.md 链接:** false
+
+### issue_2026-07-22-p1-1-acp-events-giant-dispatch-split
+**摘要:** acp_events.rs 巨型 dispatch（934 行 match）拆分为 9 子模块
+**状态:** Fixed
+**归档日期:** 2026-08-11
+**关键词:** 巨型 match, 事件分发拆分, 子模块化
+**问题本质:** dispatch_and_notify 单函数 934 行，新增事件变体冲突概率高；按事件领域拆为 acp_events/{agent,compact,render,streaming,subagent,system,tool,turn}.rs。
+**通用模式:** 事件分发的巨型 match 按领域拆子模块（可并行演进、冲突收敛）；acp_events/ 子模块拆分已落地。
+**涉及文件:** peri-tui/src/kit/acp_events/（9 子模块）
+**CLAUDE.md 链接:** false
+
 
 ---
 

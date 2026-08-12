@@ -131,6 +131,8 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2135,6 +2137,8 @@ fn test_subagent_stopped_after_turn_done_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2188,6 +2192,8 @@ fn test_subagent_stopped_after_turn_suspended_does_not_set_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "bg-agent-2".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2250,6 +2256,8 @@ fn test_subagent_stopped_after_subagent_started_keeps_loading() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sync-agent-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
 
@@ -2868,6 +2876,51 @@ fn tool_card_of(
     }
 }
 
+/// [回归测试] 工具运行中取消 turn 后，归档卡片必须停止 loading 动画。
+///
+/// `TurnInterrupted` 不会再收到对应的 `ToolEnded`；归档路径必须根据 turn 已停止
+/// 的事实把在途工具渲染为非 running，否则最后一张工具卡会永久显示 spinner。
+#[test]
+#[serial]
+fn test_turn_interrupted_stops_running_tool_card_animation() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Bash".into(),
+            input_summary: "sleep 10".into(),
+            raw_input: serde_json::json!({"command": "sleep 10"}),
+            agent_id: None,
+        }),
+    );
+    let running = VIEW_MODELS.state().read().clone();
+    assert!(tool_card_of(&running, 0).is_running);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("r1".into()),
+        },
+    );
+
+    let interrupted = VIEW_MODELS.state().read().clone();
+    let tool = tool_card_of(&interrupted, 0);
+    assert!(!tool.is_running, "取消后工具卡不得继续显示 running");
+    assert!(
+        !interrupted.items[0].is_animating(),
+        "取消后工具卡不得继续驱动 spinner 动画"
+    );
+}
+
 /// §7 reasoning 行：流式（PromptRunning + trailing）→ Preview/Running；
 /// TurnDone 后 phase 离开 PromptRunning → 全 Completed → Collapsed 单行。
 #[test]
@@ -3042,6 +3095,8 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "sa-1".into(),
+            result: String::new(),
+            is_error: false,
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -3049,6 +3104,155 @@ fn test_fold_pass_subagent_running_and_completed_collapsed() {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             assert!(!g.is_running);
             assert_eq!(g.fold, FoldState::Collapsed);
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// SubagentStopped(is_error=true) → parent 终态 Error：is_running=false、
+/// is_error=true、error_reason 保存 stop result；§7 表 (SubAgent, Error)
+/// => Expanded（与 tool error 展开语义一致）。
+#[test]
+#[serial]
+fn test_fold_pass_subagent_error_expanded() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "loop failed: llm error".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(g.is_error, "canonical is_error=true");
+            assert_eq!(
+                g.error_reason.as_deref(),
+                Some("loop failed: llm error"),
+                "error_reason 保存 stop result"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// whitespace-only `result` 不产生空白原因行：is_error=true 保持 parent Error
+/// （× + §7 Expanded），但 `error_reason=None`——渲染层不输出空白原因行。
+#[test]
+#[serial]
+fn test_subagent_error_whitespace_result_no_reason_line() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "   ".into(),
+            is_error: true,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running, "stop 后不得再 running");
+            assert!(
+                g.is_error,
+                "whitespace-only result 不改变 canonical parent Error"
+            );
+            assert_eq!(
+                g.error_reason, None,
+                "whitespace-only result 视同无原因（渲染层不输出空白原因行）"
+            );
+            assert_eq!(g.fold, FoldState::Expanded, "§7 subagent Error → Expanded");
+        }
+        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
+    }
+}
+
+/// 核心 bug 回归：nested child tool error 不提升 parent block error。
+/// 子工具失败 → parent 后续完成（SubagentStopped is_error=false）→
+/// group is_error=false + fold Collapsed；child tool card 保持自身 error。
+#[test]
+#[serial]
+fn test_subagent_completed_with_failed_child_tool_not_error() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sa-1".into(),
+            agent_name: "explorer".into(),
+            is_background: false,
+        },
+    );
+    // 子工具启动（agent_id 路由到子 turn）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "t1".into(),
+            tool_name: "Grep".into(),
+            input_summary: "src".into(),
+            raw_input: serde_json::json!({"pattern": "x"}),
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // 子工具失败
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "t1".into(),
+            output_summary: "Error: something went wrong".into(),
+            is_error: true,
+            agent_id: Some("sa-1".into()),
+        }),
+    );
+    // parent 完成（is_error=false——subagent 整体成功，失败工具重试后继续）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sa-1".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    match &snap.items[0] {
+        TuiRenderUnit::TuiSubAgentGroup(g) => {
+            assert!(!g.is_running);
+            assert!(
+                !g.is_error,
+                "completed parent 不得因 child tool error 变 Error"
+            );
+            assert_eq!(g.error_reason, None, "completed parent 无 error_reason");
+            assert_eq!(g.fold, FoldState::Collapsed, "§7 completed → Collapsed");
+            // child tool card 保持自身 error 展示（局部可见，不提升 parent）
+            match &g.view_models[0] {
+                TuiRenderUnit::TuiToolCard(t) => {
+                    assert!(t.is_error, "child tool error 保持局部可见");
+                }
+                other => panic!("expected child TuiToolCard, got {other:?}"),
+            }
         }
         other => panic!("expected TuiSubAgentGroup, got {other:?}"),
     }
@@ -4337,15 +4541,16 @@ fn test_edit_with_real_summary_diff_not_grouped() {
     assert!(!has_group, "含 diff 的 Edit 不并入相邻 Read 组");
 }
 
-/// [Slice 5] 真实摘要 ±0（`Replaced text (same line count)`）→ 无 diff 块，
-/// 保持可合并（回归防线：同行数替换 Edit 仍可入组）。
+/// [Slice 5] 真实摘要同行数替换（`Replaced 1 line to P`，middleware 新形态）
+/// → 解析出 diff 块（adds=dels=1）→ 含 diff 工具不合并、不分组
+/// （§7：diff 工具独立展示变更摘要）。
 #[test]
 #[serial]
-fn test_edit_same_line_replacement_still_grouped() {
+fn test_edit_same_line_replacement_with_count_not_grouped() {
     let mut state = make_fold_test_state();
     for (id, output) in [
-        ("r1", "Replaced text (same line count) to src/a.rs"),
-        ("r2", "Replaced text (same line count) to src/b.rs"),
+        ("r1", "Replaced 1 line to src/a.rs"),
+        ("r2", "Replaced 1 line to src/b.rs"),
     ] {
         dispatch_and_notify(
             &mut state,
@@ -4370,7 +4575,17 @@ fn test_edit_same_line_replacement_still_grouped() {
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
         snap.items.len(),
-        1,
-        "±0 摘要无 diff → 相邻成功 Edit 正常分组"
+        2,
+        "带 diff 计数的相邻 Edit 各自独立，不并入折叠组"
     );
+    for item in &snap.items {
+        match item {
+            TuiRenderUnit::TuiToolCard(c) => {
+                let diff = c.diff.as_ref().expect("同行数替换摘要应解析出 diff 块");
+                let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(diff);
+                assert_eq!((adds, dels), (1, 1), "替换 1 行 → +1 −1");
+            }
+            other => panic!("expected TuiToolCard, got {other:?}"),
+        }
+    }
 }

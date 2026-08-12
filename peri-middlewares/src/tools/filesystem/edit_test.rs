@@ -14,8 +14,8 @@ async fn test_edit_file_single_replace() {
         )
         .await
         .unwrap();
-    // "foo" → "bar": same line count, one occurrence
-    assert!(result.contains("Replaced text"), "unexpected: {result}");
+    // "foo" → "bar": same line count (1 line replaced), one occurrence
+    assert!(result.contains("Replaced 1 line"), "unexpected: {result}");
     let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
     assert_eq!(content, "hello bar world");
 }

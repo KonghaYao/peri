@@ -137,11 +137,14 @@ pub(crate) async fn run(params: PromptExecParams) {
     );
 
     // Read session-scoped workflow_middleware from SessionInfo
-    let workflow_middleware = {
+    let (workflow_middleware, lsp_pool) = {
         let sessions = ctx.sessions.read();
-        sessions
-            .get(&sid)
-            .and_then(|s| s.workflow_middleware.clone())
+        (
+            sessions
+                .get(&sid)
+                .and_then(|s| s.workflow_middleware.clone()),
+            sessions.get(&sid).and_then(|s| s.lsp_pool.clone()),
+        )
     };
 
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_access.v2_message_queue
@@ -384,6 +387,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         skills: ctx.skills.clone(),
         shared_tools: ctx.shared_tools.clone(),
         lsp_servers: ctx.plugin_lsp_servers.clone(),
+        lsp_pool,
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
         event_publisher,

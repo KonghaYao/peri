@@ -170,5 +170,19 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
         )
         .connect_to(Stdio::new().with_debug(transport::cancel_debug_hook(ctx_clone.clone())))
         .await
-        .map_err(|e| anyhow::anyhow!("ACP error: {e}"))
+        .map_err(|e| anyhow::anyhow!("ACP error: {e}"))?;
+
+    // ── 宿主退出：优雅关闭所有会话的 LSP 服务器池（H1 shutdown 钩子）──
+    // stdin EOF / 传输关闭 = 宿主退出。sessions 即将 drop；此处显式 shutdown，
+    // 避免 LSP 服务器子进程随进程残留。（先收集端口再 await，不跨 await 持锁）
+    let lsp_pools: Vec<_> = ctx
+        .sessions
+        .read()
+        .values()
+        .filter_map(|info| info.lsp_pool.clone())
+        .collect();
+    for pool in lsp_pools {
+        pool.shutdown().await;
+    }
+    Ok(())
 }

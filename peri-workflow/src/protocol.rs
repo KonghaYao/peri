@@ -93,6 +93,7 @@ pub struct JsonRpcResponse {
 /// JSON-RPC error codes
 pub const ERR_ABORTED: i32 = -32000;
 pub const ERR_INTERNAL: i32 = -32603;
+pub const ERR_INVALID_PARAMS: i32 = -32602;
 pub const ERR_METHOD_NOT_FOUND: i32 = -32601;
 
 #[cfg(test)]

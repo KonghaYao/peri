@@ -43,6 +43,8 @@ pub(super) struct SessionInfo {
     pub(super) agent_pool: AgentPool,
     /// Session 级 WorkflowMiddleware。
     pub(super) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
+    pub(super) lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 }
 
 /// Stdio 传输环境的共享上下文

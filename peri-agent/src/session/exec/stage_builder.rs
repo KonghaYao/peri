@@ -28,7 +28,7 @@ use peri_acp_types::{
     interaction::{ChannelState, UserInteractionBroker},
     lsp::LspServerConfig,
     plugin::LoadedPlugin,
-    ports::{McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
+    ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
     session::{CronOwner, MessageQueue, SessionInbox},
     skills::SkillRoot,
     store::ThreadStore,
@@ -96,6 +96,8 @@ pub struct StageBuildInput {
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     /// LSP 服务器配置
     pub lsp_servers: Vec<LspServerConfig>,
+    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）
+    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口
@@ -381,6 +383,7 @@ pub(crate) fn build_agent(
             tool_search_index,
             shared_tools: shared_tools.clone(),
             lsp_servers,
+            lsp_pool: input.lsp_pool.clone(),
             workflow_executor: workflow_executor.clone(),
             workflow_middleware,
             event_handler: Arc::clone(&event_handler),

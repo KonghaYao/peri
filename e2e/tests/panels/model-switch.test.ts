@@ -18,7 +18,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
-import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 /** 测试专用临时 HOME（含预置 settings.json），afterAll 清理 */
@@ -100,7 +99,7 @@ describe("panels: model switch", () => {
 
   it(
     "/model 打开面板，切换 profile，编辑 Effort，状态栏更新",
-    { timeout: 120_000 },
+    { timeout: 180_000 },
     async () => {
       tester = await launchPeri({ env: { HOME: testHome! } });
 
@@ -159,26 +158,40 @@ describe("panels: model switch", () => {
       expect(panelCapture.text).toContain("Model");
       expect(capture.text.length).toBeGreaterThan(50);
 
-      // LLM judge: 面板打开阶段——左右分栏结构
-      const panelResult = await judge({
-        ansiRaw: panelCapture.raw,
-        criteria: [
-          "屏幕中应有 Model 面板，左侧是 4 个固定档位列表（fable、opus、sonnet、haiku），每档含 provider 与模型名",
-          "左侧应有当前激活档位的选中标记（如 ● 与 ○ 区分），右侧应有 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）",
-        ],
-      });
-      console.log("Judge (panel):", JSON.stringify(panelResult, null, 2));
-      expect(panelResult.pass).toBe(true);
+      // 阶段 1 确定性断言（替代原 LLM judge——judge 每次 35-70s，180s 预算含 2 次必超时）：
+      // 面板左右分栏结构在纯文本中完全可断言。
+      // 左侧 4 档固定档位 + ●/○ 激活标记（●/○ 仅出现在左侧列表，文本唯一）。
+      // 初始 active=fable，因此 fable 应为 ●，其余 3 档为 ○。
+      for (const alias of ["opus", "sonnet", "haiku"]) {
+        expect(panelCapture.text).toContain(`○ ${alias}`);
+      }
+      expect(panelCapture.text).toContain("● fable");
+      expect(panelCapture.text).not.toContain("○ fable");
+      // 每档含 provider（· test）与模型名（test-model-*）
+      for (const model of [
+        "test-model-fable",
+        "test-model-opus",
+        "test-model-sonnet",
+        "test-model-haiku",
+      ]) {
+        expect(panelCapture.text).toContain(model);
+      }
+      // 右侧 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）逐字段带值
+      expect(extractRightValue(panelCapture.text, "Provider")).toBe("test");
+      expect(extractRightValue(panelCapture.text, "Model")).toBe("test-model-fable");
+      expect(extractRightValue(panelCapture.text, "Effort")).toBe("max");
+      expect(extractRightValue(panelCapture.text, "Max tokens")).toBe("32000");
+      expect(extractRightValue(panelCapture.text, "1m enable")).toBe("off");
+      // 状态栏三段式（<mode> · <cwd> · alias model effort）：初始 active=fable
+      expect(panelCapture.text).toContain("Bypass · perihelion · fable test-model-fable max");
 
-      // LLM judge: 切换 profile 后激活标记移动
-      const profileResult = await judge({
-        ansiRaw: profileCapture.raw,
-        criteria: [
-          "Model 面板仍打开，左侧激活标记（●）应位于与打开时不同的档位行上（切换过 active profile）",
-        ],
-      });
-      console.log("Judge (profile):", JSON.stringify(profileResult, null, 2));
-      expect(profileResult.pass).toBe(true);
+      // 阶段 2 确定性断言：激活标记（●）应移动到 sonnet 档位（选择即激活，替代原 judge 调用）
+      expect(profileCapture.text).toContain("● sonnet");
+      expect(profileCapture.text).not.toContain("● fable");
+      // 状态栏随 active profile 更新（alias/effort 均切到 sonnet 档位）
+      expect(profileCapture.text).toContain(
+        "Bypass · perihelion · sonnet test-model-sonnet medium",
+      );
 
       // 阶段 3a 回归断言：Model 行值必须真的变化（此前 ←/→ 触发写入但值不变）
       const modelBefore = extractRightValue(profileCapture.text, "Model");
@@ -187,6 +200,10 @@ describe("panels: model switch", () => {
       expect(modelBefore).not.toBeNull();
       expect(modelAfter).not.toBeNull();
       expect(modelAfter).not.toBe(modelBefore);
+      // 状态栏 Model 段同步更新（候选序 opus→sonnet→haiku→fable，→ 一次：sonnet→haiku）
+      expect(modelCapture.text).toContain(
+        "Bypass · perihelion · sonnet test-model-haiku medium",
+      );
 
       // 阶段 3b 回归断言：Effort 行值必须真的变化（与 Model 同理，确定性断言不依赖 LLM judge）
       const effortBefore = extractRightValue(modelCapture.text, "Effort");
@@ -195,17 +212,13 @@ describe("panels: model switch", () => {
       expect(effortBefore).not.toBeNull();
       expect(effortAfter).not.toBeNull();
       expect(effortAfter).not.toBe(effortBefore);
+      // 状态栏 Effort 段同步更新（EFFORT_LEVELS low→medium→high→xhigh→max，→ 一次：medium→high）
+      expect(editCapture.text).toContain("Bypass · perihelion · sonnet test-model-haiku high");
 
-      // LLM judge: 关闭后状态栏验证（正向断言：状态栏反映切换后的 alias/model/effort）
-      const doneResult = await judge({
-        ansiRaw: capture.raw,
-        criteria: [
-          "屏幕底部状态栏应显示 'alias model effort' 三段式信息（如 'opus xxx high' 或 'sonnet xxx medium' 格式，alias 为 fable/opus/sonnet/haiku 之一）",
-          "状态栏的 alias 部分应与切换后的 active profile 一致，不应仍是默认值",
-        ],
-      });
-      console.log("Judge (done):", JSON.stringify(doneResult, null, 2));
-      expect(doneResult.pass).toBe(true);
+      // 确定性断言（替代原 LLM judge）：面板已关闭（回到主界面）+ 状态栏三段式
+      // 与最终配置一致（alias=sonnet ≠ 初始 fable，model/effort 为循环后终值）
+      expect(capture.text).not.toContain("Select model");
+      expect(capture.text).toContain("Bypass · perihelion · sonnet test-model-haiku high");
     },
   );
 });

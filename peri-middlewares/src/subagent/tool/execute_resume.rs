@@ -93,6 +93,11 @@ impl super::SubAgentTool {
                     SubagentCancelPolicy::Cascade,
                     false,
                     true,
+                    // 恢复路径不允许 model 覆盖：LLM 按 thread title 选中的
+                    // agent 定义（当前磁盘 frontmatter model）重建，与工具过滤
+                    // 的权限漂移防护同构；调用参数 model 与 subagent_type/fork
+                    // 一样被忽略
+                    None,
                 )
                 .await?;
             let llm = build_result.llm;

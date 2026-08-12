@@ -589,3 +589,29 @@ fn test_build_session_title_line_has_palette_bg() {
     assert!(span.content.starts_with(' '));
     assert!(span.content.ends_with(' '));
 }
+
+// ── 焦点回退：输入内容变化 → 清除消息区 entry 导航焦点 ──────────────────────
+
+/// 点击 chat entry 展开后直接键入：清除 FOCUSED_ENTRY，Enter 才能回到提交语义。
+#[test]
+#[serial]
+fn test_exit_entry_focus_on_edit_clears_focused_entry() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() =
+        Some(crate::kit::atoms::FocusedEntry { slot: 0, key: None });
+    exit_entry_focus_on_edit();
+    assert!(
+        crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none(),
+        "输入内容变化后 entry 导航焦点必须清除（焦点回到输入态）"
+    );
+}
+
+/// 无 entry 焦点时零副作用（保持 None，不产生无谓 wake 写入）。
+#[test]
+#[serial]
+fn test_exit_entry_focus_on_edit_noop_when_no_focus() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
+    exit_entry_focus_on_edit();
+    assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none());
+}

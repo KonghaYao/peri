@@ -58,7 +58,7 @@
 **机制上线分界（直接观测）**：
 - 7/21 前创建的长会话（24 个）：**全部**无 excluded/truncated/projection 痕迹。
 - 7/21 及之后创建（18 个）：全部有 compact 痕迹（12 个 excluded>0，6 个 projection>0，8 个 truncated>0）。
-- 与仓库 spec 时间线吻合：`2026-07-18-smart-compact.md`、`2026-07-22-p2-2-smart-compact-implementation.md`。
+- 与仓库 spec 时间线吻合：smart-compact 设计与实现 issue（2026-07-18 设计与 2026-07-22 实现，2026-08-11 已随归档清理删除，现由 compact_v2 策略实现承担）。
 
 **上下文规模对比（机制推演 → 已用数据验证）**：
 

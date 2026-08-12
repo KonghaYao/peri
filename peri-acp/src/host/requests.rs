@@ -61,6 +61,18 @@ fn create_session_workflow_middleware(
     )
 }
 
+/// 创建 session 级 LSP 服务器池（session/new / load / resume / fork 共用，H1）。
+///
+/// 会话级实例跨 turn 复用（服务器进程 / initialized / 诊断状态不丢），
+/// 宿主退出（`run_acp_server` 返回）时经端口 `shutdown` 优雅关闭。
+/// 无 LSP 配置时返回 None（不注册 LSP 中间件）。
+fn create_session_lsp_pool(
+    cfg: &AcpServerConfig,
+    cwd: &str,
+) -> Option<Arc<dyn peri_acp_types::ports::LspPoolPort>> {
+    peri_middlewares::assembly::create_session_lsp_pool(cwd, &cfg.plugin_lsp_servers)
+}
+
 pub(crate) async fn handle_request(
     method: &str,
     params: &Value,
@@ -121,6 +133,8 @@ pub(crate) async fn handle_request(
             // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
+            // Create session-scoped LspServerPool at session/new（H1：跨 turn 复用）
+            let lsp_pool = create_session_lsp_pool(cfg, &cwd);
 
             sessions.insert(
                 session_id.clone(),
@@ -134,6 +148,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     workflow_middleware,
+                    lsp_pool,
                     title: None,
                     tags: Vec::new(),
                     continuation_armed: false,
@@ -288,6 +303,7 @@ pub(crate) async fn handle_request(
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             // Insert into sessions if not already present
             if let Some(state) = sessions.get_mut(req_session_id) {
@@ -299,6 +315,9 @@ pub(crate) async fn handle_request(
                 }
                 if state.workflow_middleware.is_none() {
                     state.workflow_middleware = workflow_middleware;
+                }
+                if state.lsp_pool.is_none() {
+                    state.lsp_pool = lsp_pool;
                 }
             } else {
                 sessions.insert(
@@ -313,6 +332,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         workflow_middleware,
+                        lsp_pool,
                         title: None,
                         tags: Vec::new(),
                         continuation_armed: false,
@@ -547,6 +567,7 @@ pub(crate) async fn handle_request(
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             if !sessions.contains_key(req_session_id) {
                 sessions.insert(
@@ -561,6 +582,7 @@ pub(crate) async fn handle_request(
                         recall_items: Vec::new(),
                         agent_pool: crate::session::agent_pool::AgentPool::new(),
                         workflow_middleware,
+                        lsp_pool,
                         title: None,
                         tags: Vec::new(),
                         continuation_armed: false,
@@ -581,6 +603,9 @@ pub(crate) async fn handle_request(
                     }
                     if s.workflow_middleware.is_none() {
                         s.workflow_middleware = workflow_middleware;
+                    }
+                    if s.lsp_pool.is_none() {
+                        s.lsp_pool = lsp_pool;
                     }
                 }
                 info!(session_id = %req_session_id, "Session resumed (existing)");
@@ -623,6 +648,7 @@ pub(crate) async fn handle_request(
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
+            let lsp_pool = create_session_lsp_pool(cfg, cwd);
 
             sessions.insert(
                 new_session_id.clone(),
@@ -636,6 +662,7 @@ pub(crate) async fn handle_request(
                     recall_items: Vec::new(),
                     agent_pool: crate::session::agent_pool::AgentPool::new(),
                     workflow_middleware,
+                    lsp_pool,
                     title: None,
                     tags: Vec::new(),
                     continuation_armed: false,

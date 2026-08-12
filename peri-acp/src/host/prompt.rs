@@ -109,7 +109,16 @@ pub(crate) async fn run_prompt(
     }
 
     // Read session data under lock, then release immediately.
-    let (cwd, history, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
+    let (
+        cwd,
+        history,
+        is_empty,
+        thread_id,
+        frozen,
+        incoming_recalls,
+        workflow_middleware,
+        lsp_pool,
+    ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&session_id)
@@ -125,6 +134,7 @@ pub(crate) async fn run_prompt(
             // 也不注入（见 executor::run_session_loop 的 continuation 分支）。
             take_recall_for_turn(&mut state.recall_items, continuation),
             state.workflow_middleware.clone(),
+            state.lsp_pool.clone(),
         )
     };
     let history_len = history.len();
@@ -446,6 +456,7 @@ pub(crate) async fn run_prompt(
         skills,
         shared_tools,
         lsp_servers: plugin_lsp_servers.to_vec(),
+        lsp_pool,
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
         event_publisher,
