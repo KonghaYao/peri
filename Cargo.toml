@@ -93,8 +93,11 @@ sha2 = "0.10"
 # --- PTY server ---
 axum = { version = "0.8.9", features = ["ws"] }
 # 0.9.0：历史 pin（0.8.1）因 Windows ConPTY reader 短命令场景 bug 而设；
-# 2026-08-12 Batch 2b 解除 pin 升级，Windows 场景需回归验证
-# （docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md）
+# 2026-08-12 Batch 2b 解除 pin 升级后 Windows CI 上 3 个 pty_session 读取测试
+# 失败。排查确认 0.8.1/0.9.0 的 Windows 实现（conpty.rs）完全一致，失败与
+# 版本无关，实为 PowerShell 5.1 在 ConPTY 下的输出编码/交互行为问题——
+# 测试已改用 cmd.exe（纯字节流）规避，重新升级回 0.9.0 验证。
+# 详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
 portable-pty = "0.9"
 tokio-tungstenite = "0.30"
 serial_test = "4.0.1"
