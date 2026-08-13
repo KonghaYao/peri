@@ -136,10 +136,19 @@ export const resolvePermission = (chatId: string, permissionId: string, decision
 
 // ── 下行解析 ────────────────────────────────────────────────────────────
 
-/** 解析下行文本帧为对象；非 JSON → null（调用方记日志即可，不抛异常）。 */
+/** Parse one downstream envelope without trusting JSON shape.
+ *
+ * Unknown string tags remain valid so newer server frames can be ignored by an
+ * older browser. JSON primitives, arrays and missing/empty tags are malformed:
+ * letting `null` through would make ws-client's `frame.t` access throw inside
+ * the browser message callback and silently stop processing that delivery. */
 export const parse = (text: string): Record<string, unknown> | null => {
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const frame = value as Record<string, unknown>;
+    if (typeof frame.t !== 'string' || !frame.t.trim()) return null;
+    return frame;
   } catch {
     return null;
   }

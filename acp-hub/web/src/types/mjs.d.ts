@@ -2,24 +2,21 @@ declare module '*.mjs' {
   type SubmissionState = { commandId: string; phase: string; detail: string | null; retryable: boolean };
   type MarkdownInlineToken = { type: string; text?: string; href?: string; children?: MarkdownInlineToken[] };
   type MarkdownBlockToken = { type: string; level?: number; language?: string; text?: string; children?: MarkdownInlineToken[] | MarkdownBlockToken[]; ordered?: boolean; items?: MarkdownInlineToken[][] };
-  export function beginOpen(commandId: string, sessionId: string, previousSessionId: string | null, previousChatId: string | null): { commandId: string; sessionId: string; previousSessionId: string | null; previousChatId: string | null };
-  export function matchesOpening(opening: { commandId: string } | null, commandId?: string): boolean;
-  export function terminalCanCommit(opening: { commandId: string } | null, ack: { commandId?: string; status?: string; chatId?: string }): boolean;
-  export function shouldIgnoreLateAck(ids: Set<string>, ack: { commandId?: string; status?: string }): boolean;
   export function unimportedSessions<T extends { sessionId: string }>(sessions: T[], projectSessions: Array<{ acpSessionId?: string | null }>): T[];
   export function importCandidates<T extends { cwd?: string | null }>(sessions: T[], cwd: string): T[];
-  export function beginMessageSubmission(commandId: string, text: string): { commandId: string; text: string; phase: string; detail: string | null; retryable: boolean };
+  export function beginMessageSubmission(commandId: string, text: string, sessionId?: string | null, chatId?: string | null): { commandId: string; text: string; sessionId: string | null; chatId: string | null; phase: string; detail: string | null; retryable: boolean };
   export function acceptMessageSubmission<T extends SubmissionState | null>(current: T, commandId: string): T;
   export function markMessageUncertain<T extends SubmissionState | null>(current: T, commandId: string): T;
   export function failMessageSubmission<T extends SubmissionState | null>(current: T, commandId: string, detail: string, retryable?: boolean): T;
   export function completesMessageSubmission(current: unknown, ack: unknown): boolean;
   export function isTurnActive(activeTurn: unknown): boolean;
-  export function lockPermissionDecision(decisions: Map<string, string>, permissionId: string, decision: string): Map<string, string>;
-  export function unlockPermissionDecision(decisions: Map<string, string>, permissionId: string): Map<string, string>;
+  type PermissionDecisionState = { decision: string; phase: 'pending' | 'uncertain' };
+  export function lockPermissionDecision(decisions: Map<string, PermissionDecisionState>, permissionId: string, decision: string): Map<string, PermissionDecisionState>;
+  export function markPermissionDecisionUncertain(decisions: Map<string, PermissionDecisionState>, permissionId: string): Map<string, PermissionDecisionState>;
+  export function unlockPermissionDecision(decisions: Map<string, PermissionDecisionState>, permissionId: string): Map<string, PermissionDecisionState>;
   export function beginQuickStart(commandId: string, projectId: string, text: string): { commandId: string; projectId: string; text: string; phase: string; detail: string | null; retryable: boolean };
   export function updateQuickStart<T extends SubmissionState | null>(current: T, commandId: string, phase: string, detail?: string | null, retryable?: boolean): T;
   export function quickStartCanActivate(current: unknown, ack: unknown): boolean;
-  export function chooseRestorableSession<T extends { id: string; lifecycle: string }>(preferredId: string | null, sessions: T[]): T | null;
   export function retainLiveRuntimeHints<T extends { activeChatId: string | null }>(sessions: T[], chats: Array<{ id: string; status: string | null }>): T[];
   export function cleanSessionTitle(title?: string | null): string;
   export function formatRelativeTime(value?: string | null, now?: number): string;
@@ -37,5 +34,5 @@ declare module '*.mjs' {
   export function activeOverlayCount(): number;
   export function authFeedback(status: number, phase?: 'status' | 'login'): { kind: string; message: string; retryable: boolean } | null;
   export function searchProjectSessions<T, P>(query: string, projects: P[], sessions: T[]): Array<T & { project: P | null }>;
-  export function runtimeState(input: { hasSession: boolean; lifecycle?: string; isOpening: boolean; hasRuntime: boolean; chatStatus?: string | null; hasPendingPermission: boolean; turnActive: boolean }): { label: string; tone: 'idle' | 'ready' | 'busy' | 'attention' | 'danger' };
+  export function runtimeState(input: { hasSession: boolean; lifecycle?: string; isOpening: boolean; hasRuntime: boolean; isHydrated?: boolean; chatStatus?: string | null; hasPendingPermission: boolean; turnActive: boolean }): { label: string; tone: 'idle' | 'ready' | 'busy' | 'attention' | 'danger' };
 }

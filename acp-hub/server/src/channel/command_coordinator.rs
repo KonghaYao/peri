@@ -3081,7 +3081,7 @@ impl CommandCoordinator {
             &cmd.action,
             &OutboundCtx {
                 cwd: entry.cwd.clone(),
-                acp_session_id,
+                acp_session_id: acp_session_id.clone(),
             },
         ) {
             Ok(OutboundMessage::JsonRpc(v)) => v,
@@ -3170,6 +3170,18 @@ impl CommandCoordinator {
             .chats
             .set_active_turn(chat_id, &turn_id.to_string())
             .await;
+        // The prompt has crossed the ACP dispatch boundary and the server has
+        // attempted its authoritative user-entry projection. Seed only the
+        // Hub-owned navigation fallback; failure must not change prompt
+        // delivery semantics or masquerade as an ACP rename.
+        if let Some(projects) = self.inner.projects.read().await.clone() {
+            if let Err(error) = projects
+                .seed_prompt_title(&acp_session_id, &payload.message)
+                .await
+            {
+                warn!(chat_id, error = ?error, "prompt title projection failed");
+            }
+        }
         // 5. L3 等待（§4.4 路径 B 变体；issue #3）：prompt 响应只在 turn
         //    结束回——超时语义 = 「无增量窗口」：窗口（l3_timeout）内该
         //    chat 无任何事件投递才判 delivery_unknown；有事件投递（relay

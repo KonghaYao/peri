@@ -55,7 +55,9 @@ pub const UNKNOWN_TOKEN_ID: &str = "<unknown>";
 /// instanceId 的 create 会命中 `UnknownInstance("local")`（E3 链路断点）。
 pub const BOOTSTRAP_INSTANCE_NAME: &str = "local";
 pub const BROWSER_COOKIE: &str = "acp_hub_session";
-const BROWSER_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(8 * 3600);
+pub(crate) const BROWSER_SESSION_TTL_SECS: u64 = 8 * 3600;
+const BROWSER_SESSION_TTL: std::time::Duration =
+    std::time::Duration::from_secs(BROWSER_SESSION_TTL_SECS);
 const BROWSER_SESSION_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------

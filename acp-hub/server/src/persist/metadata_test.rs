@@ -1,6 +1,44 @@
+use sqlx::{Connection, Executor};
 use tempfile::tempdir;
 
 use super::metadata::{payload_hash, BeginCommand, MetadataError, MetadataStore, NewSession};
+
+#[tokio::test]
+async fn v2_catalog_migrates_additively_to_hub_title() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let mut connection =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+    connection
+        .execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        .await
+        .unwrap();
+    connection
+        .execute("INSERT INTO schema_migrations VALUES(1,'t'),(2,'t')")
+        .await
+        .unwrap();
+    connection
+        .execute(
+            "CREATE TABLE project_sessions(\
+             id TEXT PRIMARY KEY,project_id TEXT NOT NULL,acp_session_id TEXT UNIQUE,\
+             acp_title TEXT,custom_name TEXT,lifecycle TEXT NOT NULL,created_at TEXT NOT NULL,\
+             updated_at TEXT NOT NULL,last_opened_at TEXT,last_chat_id TEXT,failure_code TEXT,\
+             origin TEXT NOT NULL DEFAULT 'legacy_hidden')",
+        )
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    assert!(
+        !store.seed_hub_title("unknown", "Title").await.unwrap(),
+        "the additive column must be queryable without rebuilding user data"
+    );
+}
 
 #[tokio::test]
 async fn fresh_open_reopen_and_crud() {
@@ -123,6 +161,62 @@ async fn acp_title_refresh_is_exact_idempotent_and_preserves_user_alias() {
         0
     );
     assert_eq!(store.generation().await.unwrap().0, generation_before + 1);
+}
+
+#[tokio::test]
+async fn hub_prompt_title_is_one_shot_and_never_outranks_owned_titles() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .begin_command_with_activation(
+            "c1",
+            "session/create",
+            "h1",
+            Some("p1"),
+            Some("s1"),
+            Some(NewSession {
+                id: "s1",
+                project_id: "p1",
+                title: None,
+            }),
+            Some("s1"),
+        )
+        .await
+        .unwrap();
+    store
+        .activation_phase("s1", "acp_id_durable", Some("chat1"), Some("acp1"))
+        .await
+        .unwrap();
+    store
+        .finalize_session_and_command("c1", "s1", "p1", "acp1", None, "chat1")
+        .await
+        .unwrap();
+
+    assert!(store.seed_hub_title("acp1", "First task").await.unwrap());
+    assert!(!store.seed_hub_title("acp1", "Second task").await.unwrap());
+    assert_eq!(
+        store.session("s1").await.unwrap().unwrap().display_title(),
+        "First task"
+    );
+
+    store.update_acp_title("acp1", "ACP title").await.unwrap();
+    assert_eq!(
+        store.session("s1").await.unwrap().unwrap().display_title(),
+        "ACP title"
+    );
+    store.rename_session("s1", "My alias").await.unwrap();
+    assert_eq!(
+        store.session("s1").await.unwrap().unwrap().display_title(),
+        "My alias"
+    );
+    assert!(
+        !store.seed_hub_title("missing", "Ignored").await.unwrap(),
+        "unknown and imported ACP ids must not create navigation facts"
+    );
 }
 
 #[tokio::test]

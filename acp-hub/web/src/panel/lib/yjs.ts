@@ -635,6 +635,16 @@ export function renderControl(doc: Y.Doc): ControlView {
       });
     });
   }
+  result.pendingPermissions.sort((left, right) => {
+    const leftExpiry = Date.parse(left.expiresAt || '');
+    const rightExpiry = Date.parse(right.expiresAt || '');
+    const expiryOrder = (Number.isFinite(leftExpiry) ? leftExpiry : Number.POSITIVE_INFINITY)
+      - (Number.isFinite(rightExpiry) ? rightExpiry : Number.POSITIVE_INFINITY);
+    if (expiryOrder) return expiryOrder;
+    const leftId = left.permissionId || '';
+    const rightId = right.permissionId || '';
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
 
   return result;
 }

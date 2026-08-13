@@ -10,7 +10,7 @@ const store = vi.hoisted(() => ({
   creatingSessionProjectId: vi.fn(() => null as string | null),
   importableSessions: vi.fn(() => []),
   importProjectSession: vi.fn(),
-  openProjectSession: vi.fn(),
+  navigateProjectSession: vi.fn(),
   openingSessionId: vi.fn(() => null as string | null),
   permissions: vi.fn(() => []),
   projects: vi.fn(() => [{
@@ -33,12 +33,12 @@ const store = vi.hoisted(() => ({
     acpSessionId: 'acp-12345678',
   }]),
   readOnly: vi.fn(() => false),
+  runtimeDocsHydrated: vi.fn(() => true),
   renameProject: vi.fn(),
   renameProjectSession: vi.fn(),
   restoreProject: vi.fn(),
   selectedCid: vi.fn(() => null as string | null),
   selectedSessionId: vi.fn(() => null as string | null),
-  selectPersistedSessionLocally: vi.fn(),
   turnActive: vi.fn(() => false),
 }));
 
@@ -53,8 +53,7 @@ function sessionButton() {
 
 describe('ProjectSidebar session navigation', () => {
   beforeEach(() => {
-    store.openProjectSession.mockReset();
-    store.selectPersistedSessionLocally.mockReset();
+    store.navigateProjectSession.mockReset();
     store.openingSessionId.mockReturnValue(null);
     store.readOnly.mockReturnValue(false);
     store.projectSessions.mockReturnValue([{
@@ -72,7 +71,7 @@ describe('ProjectSidebar session navigation', () => {
   it('waits for the exact open command to commit before navigating', () => {
     const navigate = vi.fn();
     let callbacks: { onCommitted?: () => void; onFailed?: (message: string) => void } = {};
-    store.openProjectSession.mockImplementation((_sessionId, value) => {
+    store.navigateProjectSession.mockImplementation((_sessionId, value) => {
       callbacks = value;
       return true;
     });
@@ -80,7 +79,7 @@ describe('ProjectSidebar session navigation', () => {
     render(() => <ProjectSidebar onNavigate={navigate} />);
     fireEvent.click(sessionButton());
 
-    expect(store.openProjectSession).toHaveBeenCalledWith('hub-abcdef12', expect.any(Object));
+    expect(store.navigateProjectSession).toHaveBeenCalledWith('hub-abcdef12', expect.any(Object));
     expect(navigate).not.toHaveBeenCalled();
     callbacks.onCommitted?.();
     expect(navigate).toHaveBeenCalledOnce();
@@ -88,7 +87,7 @@ describe('ProjectSidebar session navigation', () => {
 
   it('keeps the current navigation context when opening fails', () => {
     const navigate = vi.fn();
-    store.openProjectSession.mockImplementation((_sessionId, callbacks) => {
+    store.navigateProjectSession.mockImplementation((_sessionId, callbacks) => {
       callbacks.onFailed?.('ACP instance offline');
       return true;
     });
@@ -116,8 +115,7 @@ describe('ProjectSidebar session navigation', () => {
     render(() => <ProjectSidebar onNavigate={navigate} />);
     fireEvent.click(sessionButton());
 
-    expect(store.selectPersistedSessionLocally).toHaveBeenCalledWith('hub-abcdef12', 'chat-live');
-    expect(store.openProjectSession).not.toHaveBeenCalled();
+    expect(store.navigateProjectSession).toHaveBeenCalledWith('hub-abcdef12');
     expect(navigate).toHaveBeenCalledOnce();
   });
 });

@@ -469,6 +469,92 @@ fn prompt_action(cid: &str, sid: &str) -> ActionEnvelope {
 }
 
 #[tokio::test]
+async fn first_dispatched_prompt_seeds_the_hub_catalog_title() {
+    let mut env = env().await;
+    env.metadata
+        .create_project("p1", "Demo", "/", "local")
+        .await
+        .unwrap();
+    env.metadata
+        .begin_command_with_activation(
+            "create-1",
+            "session/create",
+            "hash",
+            Some("p1"),
+            Some("logical-1"),
+            Some(crate::persist::metadata::NewSession {
+                id: "logical-1",
+                project_id: "p1",
+                title: None,
+            }),
+            Some("logical-1"),
+        )
+        .await
+        .unwrap();
+    env.metadata
+        .activation_phase("logical-1", "acp_id_durable", Some(S1), Some("acp-1"))
+        .await
+        .unwrap();
+    env.metadata
+        .finalize_session_and_command("create-1", "logical-1", "p1", "acp-1", None, S1)
+        .await
+        .unwrap();
+    bound_session(&env, S1, "acp-1").await;
+
+    let (tx, _rx) = mpsc::channel(8);
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::Prompt {
+        command_id,
+        payload: PromptChatPayload {
+            chat_id: S1.into(),
+            message: "  修复   session catalog 标题  \n后续细节".into(),
+            effort: None,
+        },
+    };
+    assert!(matches!(
+        env.coordinator.submit(&ctx("c"), action, tx).await,
+        SubmitAck::Accepted { .. }
+    ));
+
+    let forward = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let OutboundMsg::Frame(Frame::InstanceForward(forward)) = forward else {
+        panic!("expected prompt forward")
+    };
+    env.instance
+        .on_ack(
+            "local",
+            &forward.command_id,
+            InstanceAck::Forward(InstanceForwardAck {
+                command_id: forward.command_id.clone(),
+                chat_id: forward.chat_id,
+                ok: true,
+                error: None,
+            }),
+        )
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if env
+                .metadata
+                .session("logical-1")
+                .await
+                .unwrap()
+                .is_some_and(|session| session.display_title() == "修复 session catalog 标题")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("prompt title should be projected after forward acknowledgement");
+}
+
+#[tokio::test]
 async fn dedup_duplicate_ack() {
     let env = env().await;
     bound_session(&env, S1, "acp-1").await;

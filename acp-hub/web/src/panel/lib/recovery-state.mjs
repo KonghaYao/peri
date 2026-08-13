@@ -1,9 +1,3 @@
-export const chooseRestorableSession = (preferredId, sessions) => {
-  if (!preferredId) return null;
-  const session = sessions.find((item) => item.id === preferredId);
-  return session?.lifecycle === 'ready' ? session : null;
-};
-
 const TERMINAL_RUNTIME = new Set(['ended', 'closed', 'crashed']);
 
 export const retainLiveRuntimeHints = (sessions, chats) => {

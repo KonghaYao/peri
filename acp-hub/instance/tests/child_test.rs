@@ -180,6 +180,72 @@ async fn test_stdout_events_and_dropped_no_sid() {
 }
 
 #[tokio::test]
+async fn test_session_load_restores_notification_identity() {
+    let audit = tempfile::NamedTempFile::new().unwrap();
+    let cmd = vec![
+        test_child(),
+        "--audit-file".into(),
+        audit.path().display().to_string(),
+        "--crash-after".into(),
+        "100".into(),
+    ];
+    let (acp, mut rx) = spawn_child(&cmd, "hub-runtime-chat").await;
+
+    acp.write_line(&serde_json::json!({
+        "jsonrpc":"2.0",
+        "id":1,
+        "method":"session/load",
+        "params":{"sessionId":"durable-acp-session"}
+    }))
+    .await
+    .unwrap();
+    acp.write_line(&serde_json::json!({
+        "jsonrpc":"2.0",
+        "id":2,
+        "method":"session/prompt",
+        "params":{"sessionId":"durable-acp-session","messages":[]}
+    }))
+    .await
+    .unwrap();
+
+    let mut frames = Vec::new();
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(ChildOutput::Frame(evt))) => frames.push(evt),
+            Ok(Some(ChildOutput::Exit { .. })) | Ok(None) | Err(_) => break,
+            Ok(Some(ChildOutput::DroppedNoSessionId)) => {}
+        }
+        if frames
+            .iter()
+            .any(|evt| evt.frame.get("method") == Some(&serde_json::json!("session/update")))
+        {
+            break;
+        }
+    }
+
+    assert!(
+        frames.iter().any(|evt| {
+            evt.frame.get("id") == Some(&serde_json::json!(1))
+                && evt.frame["result"]["loaded"] == serde_json::json!(true)
+        }),
+        "session/load should acknowledge the exact durable session"
+    );
+    assert!(
+        frames.iter().any(|evt| {
+            evt.frame.get("method") == Some(&serde_json::json!("session/update"))
+                && evt.frame["params"]["sessionId"] == serde_json::json!("durable-acp-session")
+        }),
+        "prompt updates after load must keep the restored ACP session identity"
+    );
+    let audit_body = std::fs::read_to_string(audit.path()).unwrap();
+    let audit_record: serde_json::Value = serde_json::from_str(audit_body.trim()).unwrap();
+    assert_eq!(audit_record["method"], "session/load");
+    assert_eq!(audit_record["sessionId"], "durable-acp-session");
+
+    acp.kill(Duration::from_millis(200)).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_kill_idempotent_and_exit_event() {
     let cmd = vec![test_child(), "--crash-after".into(), "100".into()];
     let (acp, mut rx) = spawn_child(&cmd, "s1").await;

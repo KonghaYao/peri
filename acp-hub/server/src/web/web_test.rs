@@ -5,11 +5,59 @@
 //! 固定（/、/panel.html），assets 文件名带内容 hash —— 测试遍历 ASSETS
 //! 表断言 js/css 存在，不硬编码 hash 文件名。
 
-use tokio::io::AsyncReadExt as _;
-use tokio::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 
+use tempfile::tempdir;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+
+use crate::auth::{AuthService, TokenStore};
+use crate::web::{
+    cache_headers_for_static, cookie_value, is_json_content_type, serve_http, valid_loopback_host,
+};
 use crate::web::{content_type, header_end, is_ws_upgrade, request_path, route, serve, ASSETS};
-use crate::web::{cookie_value, valid_loopback_host};
+
+async fn auth_socket_response(request: &str) -> String {
+    let dir = tempdir().unwrap();
+    let auth = Arc::new(Mutex::new(AuthService::new(
+        TokenStore::load(&dir.path().join("tokens.toml")).unwrap(),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        serve_http(stream, peer, auth).await.unwrap();
+    });
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    client.read_to_end(&mut buf).await.unwrap();
+    server.await.unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+async fn auth_socket_response_fragments(parts: &[&[u8]]) -> String {
+    let dir = tempdir().unwrap();
+    let auth = Arc::new(Mutex::new(AuthService::new(
+        TokenStore::load(&dir.path().join("tokens.toml")).unwrap(),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        serve_http(stream, peer, auth).await.unwrap();
+    });
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    for part in parts {
+        client.write_all(part).await.unwrap();
+        tokio::task::yield_now().await;
+    }
+    let mut buf = Vec::new();
+    client.read_to_end(&mut buf).await.unwrap();
+    server.await.unwrap();
+    String::from_utf8(buf).unwrap()
+}
 
 /// 请求行解析：常规 GET 路径。
 #[test]
@@ -74,6 +122,162 @@ fn auth_contract_host_and_cookie_parsing() {
     );
 }
 
+#[test]
+fn auth_json_content_type_is_closed() {
+    assert!(is_json_content_type("application/json"));
+    assert!(is_json_content_type("Application/JSON; charset=utf-8"));
+    assert!(!is_json_content_type("text/plain"));
+    assert!(!is_json_content_type("application/json; charset=latin1"));
+    assert!(!is_json_content_type("application/json; boundary=x"));
+    assert!(!is_json_content_type(
+        "application/json; charset=utf-8; charset=utf-8"
+    ));
+}
+
+#[tokio::test]
+async fn auth_http_rejects_ambiguous_request_framing() {
+    let host = "127.0.0.1:8456";
+    let origin = format!("http://{host}");
+    let cases = [
+        (
+            "missing content type",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "415 Unsupported Media Type",
+        ),
+        (
+            "form content type",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 3\r\n\r\na=b"
+            ),
+            "415 Unsupported Media Type",
+        ),
+        (
+            "chunked body",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "duplicate content length",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "duplicate host",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "obs-fold style header",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\n Origin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "http 1.0",
+            format!(
+                "POST /api/auth/session HTTP/1.0\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "declared body shorter than bytes",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}extra"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "get body",
+            format!(
+                "GET /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Length: 2\r\n\r\n{{}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "invalid json",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n{{"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "unknown login field",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 23\r\n\r\n{{\"token\":\"x\",\"admin\":1}}"
+            ),
+            "400 Bad Request",
+        ),
+        (
+            "oversized declared body",
+            format!(
+                "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: 4097\r\n\r\n"
+            ),
+            "413 Payload Too Large",
+        ),
+    ];
+
+    for (name, request, expected) in cases {
+        let response = auth_socket_response(&request).await;
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {expected}\r\n")),
+            "{name}: {response:?}"
+        );
+        assert!(response.contains("Cache-Control: no-store\r\n"), "{name}");
+        assert!(response.contains("Pragma: no-cache\r\n"), "{name}");
+        assert!(
+            response.contains("X-Content-Type-Options: nosniff\r\n"),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn auth_http_accepts_fragmented_header_and_body_reads() {
+    let body = b"{\"token\":\"invalid-but-well-formed\"}";
+    let head = format!(
+        "POST /api/auth/session HTTP/1.1\r\nHost: 127.0.0.1:8456\r\nOrigin: http://127.0.0.1:8456\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let split = head.len() - 2;
+    let response = auth_socket_response_fragments(&[
+        &head.as_bytes()[..split],
+        &head.as_bytes()[split..],
+        &body[..5],
+        &body[5..],
+    ])
+    .await;
+    assert!(
+        response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "合法分片请求应到达凭据裁决：{response:?}"
+    );
+}
+
+#[tokio::test]
+async fn auth_http_requires_origin_for_state_changes() {
+    let host = "127.0.0.1:8456";
+    for request in [
+        format!(
+            "POST /api/auth/session HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+        ),
+        format!("DELETE /api/auth/session HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n"),
+    ] {
+        let response = auth_socket_response(&request).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "{response:?}"
+        );
+    }
+}
+
 /// 路由表：面板为唯一页面（/、/index.html、旧链接 /panel.html 同源），
 /// 资产表非空且含 js/css，未知路径 404。
 #[test]
@@ -121,6 +325,110 @@ fn content_type_by_extension() {
     assert_eq!(content_type("font.woff2"), "font/woff2");
     assert_eq!(content_type("chunk.js.map"), "application/json");
     assert_eq!(content_type("blob.bin"), "application/octet-stream");
+}
+
+#[test]
+fn static_cache_policy_separates_entry_documents_from_hashed_assets() {
+    for path in ["/", "/index.html", "/panel.html", "/missing"] {
+        assert_eq!(
+            cache_headers_for_static(path, route(path).map(|(name, _, _)| name)),
+            vec![("Cache-Control".into(), "no-store".into())],
+            "entry/error path must be revalidated: {path}"
+        );
+    }
+    let asset = ASSETS
+        .iter()
+        .find(|asset| asset.url.starts_with("assets/"))
+        .expect("vite build should emit an asset");
+    assert_eq!(
+        cache_headers_for_static(&format!("/{}", asset.url), Some(asset.url)),
+        vec![(
+            "Cache-Control".into(),
+            "public, max-age=31536000, immutable".into()
+        )]
+    );
+    assert_eq!(
+        cache_headers_for_static("/assets/missing.js", None),
+        vec![("Cache-Control".into(), "no-store".into())]
+    );
+    for unhashed in ["assets/logo.svg", "assets/index-short.js", "public/app.css"] {
+        assert_eq!(
+            cache_headers_for_static(&format!("/{unhashed}"), Some(unhashed)),
+            vec![("Cache-Control".into(), "no-store".into())],
+            "fixed-name assets must remain upgrade-safe: {unhashed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn static_http_emits_upgrade_safe_cache_headers() {
+    let entry = auth_socket_response("GET / HTTP/1.1\r\nHost: 127.0.0.1:8456\r\n\r\n").await;
+    assert!(entry.starts_with("HTTP/1.1 200 OK\r\n"), "{entry:?}");
+    assert!(entry.contains("Cache-Control: no-store\r\n"), "{entry:?}");
+    assert!(
+        entry.contains("X-Content-Type-Options: nosniff\r\n"),
+        "{entry:?}"
+    );
+
+    let asset = ASSETS
+        .iter()
+        .find(|asset| asset.url.ends_with(".js"))
+        .unwrap();
+    let response = auth_socket_response(&format!(
+        "GET /{} HTTP/1.1\r\nHost: 127.0.0.1:8456\r\n\r\n",
+        asset.url
+    ))
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(
+        response.contains("Cache-Control: public, max-age=31536000, immutable\r\n"),
+        "{response:?}"
+    );
+
+    let missing =
+        auth_socket_response("GET /assets/missing.js HTTP/1.1\r\nHost: 127.0.0.1:8456\r\n\r\n")
+            .await;
+    assert!(
+        missing.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{missing:?}"
+    );
+    assert!(
+        missing.contains("Cache-Control: no-store\r\n"),
+        "{missing:?}"
+    );
+}
+
+#[tokio::test]
+async fn static_head_mirrors_get_headers_without_a_body() {
+    let index = route("/").unwrap().2;
+    let response = auth_socket_response("HEAD / HTTP/1.1\r\nHost: 127.0.0.1:8456\r\n\r\n").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+    assert!(
+        response.contains(&format!("Content-Length: {}\r\n", index.len())),
+        "{response:?}"
+    );
+    assert!(
+        response.contains("Cache-Control: no-store\r\n"),
+        "{response:?}"
+    );
+    assert!(
+        response.ends_with("\r\n\r\n"),
+        "HEAD must not emit a body: {response:?}"
+    );
+
+    let asset = ASSETS
+        .iter()
+        .find(|asset| asset.url.ends_with(".css"))
+        .unwrap();
+    let asset_response = auth_socket_response(&format!(
+        "HEAD /{} HTTP/1.1\r\nHost: 127.0.0.1:8456\r\n\r\n",
+        asset.url
+    ))
+    .await;
+    assert!(asset_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(asset_response.contains(&format!("Content-Length: {}\r\n", asset.bytes.len())));
+    assert!(asset_response.contains("Cache-Control: public, max-age=31536000, immutable\r\n"));
+    assert!(asset_response.ends_with("\r\n\r\n"));
 }
 
 /// socket 端到端：GET / → 200 + html Content-Type + 首页内容（read_to_end

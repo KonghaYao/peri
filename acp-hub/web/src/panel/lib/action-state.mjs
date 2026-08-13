@@ -1,6 +1,8 @@
-export const beginMessageSubmission = (commandId, text) => ({
+export const beginMessageSubmission = (commandId, text, sessionId = null, chatId = null) => ({
   commandId,
   text,
+  sessionId,
+  chatId,
   phase: 'sending',
   detail: null,
   retryable: true,
@@ -41,7 +43,15 @@ export const unlockPermission = (ids, permissionId) => {
 export const lockPermissionDecision = (decisions, permissionId, decision) => {
   if (decisions.has(permissionId)) return decisions;
   const next = new Map(decisions);
-  next.set(permissionId, decision);
+  next.set(permissionId, { decision, phase: 'pending' });
+  return next;
+};
+
+export const markPermissionDecisionUncertain = (decisions, permissionId) => {
+  const current = decisions.get(permissionId);
+  if (!current || current.phase === 'uncertain') return decisions;
+  const next = new Map(decisions);
+  next.set(permissionId, { ...current, phase: 'uncertain' });
   return next;
 };
 
