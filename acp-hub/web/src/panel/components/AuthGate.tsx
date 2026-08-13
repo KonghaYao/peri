@@ -1,7 +1,8 @@
 import { createContext, createEffect, createSignal, onMount, Show, useContext, type JSX } from 'solid-js';
-import { authInvalidated, clearUiSession, connectWithCookie, installPrincipalRole } from '../store';
+import { clearUiSession, connectWithCookie } from '../store';
 import { parsePrincipal } from '../lib/auth-role';
 import { authFeedback } from '../lib/auth-feedback.mjs';
+import { authInvalidation, clearAuthInvalidation, installPrincipalRole } from '../lib/auth-state';
 import { Button, TextField } from '../../ui';
 
 type AuthState = 'checking' | 'signed-out' | 'signed-in';
@@ -14,27 +15,41 @@ export function AuthGate(props: { children: JSX.Element }) {
   const [token, setToken] = createSignal('');
   const [problem, setProblem] = createSignal<AuthProblem>(null);
   const [submitting, setSubmitting] = createSignal(false);
+  let requestEpoch = 0;
 
   async function status() {
+    const epoch = ++requestEpoch;
     setProblem(null);
     try {
       const res = await fetch('/api/auth/session', { credentials: 'same-origin', cache: 'no-store' });
+      if (epoch !== requestEpoch) return;
       if (!res.ok) {
         installPrincipalRole(null);
         setProblem(authFeedback(res.status, 'status'));
         return setState('signed-out');
       }
-      installPrincipalRole(parsePrincipal(await res.json()));
+      const role = parsePrincipal(await res.json());
+      if (epoch !== requestEpoch) return;
+      if (!role) {
+        installPrincipalRole(null);
+        setProblem({ kind: 'server', message: 'server 返回了无法识别的访问角色，已阻止进入应用。', retryable: true });
+        return setState('signed-out');
+      }
+      installPrincipalRole(role);
+      clearAuthInvalidation();
       setState('signed-in');
       connectWithCookie();
     } catch {
-      setProblem(authFeedback(0, 'status'));
-      setState('signed-out');
+      if (epoch === requestEpoch) {
+        setProblem(authFeedback(0, 'status'));
+        setState('signed-out');
+      }
     }
   }
 
   async function signIn(e: SubmitEvent) {
     e.preventDefault();
+    const epoch = ++requestEpoch;
     setSubmitting(true);
     setProblem(null);
     try {
@@ -44,29 +59,51 @@ export function AuthGate(props: { children: JSX.Element }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ token: token().trim() }),
       });
+      if (epoch !== requestEpoch) return;
       if (!res.ok) {
         setProblem(authFeedback(res.status, 'login'));
         return;
       }
-      installPrincipalRole(parsePrincipal(await res.json()));
+      const role = parsePrincipal(await res.json());
+      if (epoch !== requestEpoch) return;
+      if (!role) {
+        installPrincipalRole(null);
+        setProblem({ kind: 'server', message: 'server 返回了无法识别的访问角色，已阻止登录。', retryable: true });
+        return;
+      }
+      installPrincipalRole(role);
+      clearAuthInvalidation();
       setToken('');
       setState('signed-in');
       connectWithCookie();
     } catch {
-      setProblem(authFeedback(0, 'login'));
+      if (epoch === requestEpoch) setProblem(authFeedback(0, 'login'));
     } finally {
-      setSubmitting(false);
+      if (epoch === requestEpoch) setSubmitting(false);
     }
   }
 
   onMount(status);
-  createEffect(() => { if (authInvalidated() > 0) setState('signed-out'); });
+  createEffect(() => {
+    const event = authInvalidation();
+    if (!event) return;
+    requestEpoch += 1;
+    setSubmitting(false);
+    setProblem({ kind: 'credential', message: event.reason, retryable: false });
+    setState('signed-out');
+  });
 
   async function logout() {
+    requestEpoch += 1;
     clearUiSession();
+    clearAuthInvalidation();
     installPrincipalRole(null);
     setState('signed-out');
-    await fetch('/api/auth/session', { method: 'DELETE', credentials: 'same-origin' });
+    try {
+      await fetch('/api/auth/session', { method: 'DELETE', credentials: 'same-origin' });
+    } catch {
+      setProblem({ kind: 'network', message: '本地界面已退出，但 server 未确认注销。恢复连接后请重新检查登录状态。', retryable: true });
+    }
   }
 
   return (

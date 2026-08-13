@@ -1,6 +1,8 @@
 import { createEffect, createSignal, For, Show } from 'solid-js';
 import { Button, SelectField, Textarea } from '../../ui';
-import { createSessionWithFirstMessage, creatingSessionProjectId, dismissFailedQuickStart, quickStartSubmission, readOnly, retryQuickStart } from '../store';
+import { createSessionWithFirstMessage, creatingSessionProjectId, retryQuickStart } from '../store';
+import { readOnly } from '../lib/auth-state';
+import { dismissFailedQuickStart, quickStartSubmission } from '../lib/quick-start-delivery';
 
 export function QuickStartComposer(props: { projects: Array<{ id: string; name: string }>; initialProjectId?: string }) {
   const [draft, setDraft] = createSignal('');

@@ -913,9 +913,9 @@ async fn apply_command(
             let context = permission::context(pair, permission_id);
             if context
                 .as_ref()
-                .is_some_and(|(status, _)| status == "pending")
+                .is_some_and(|(status, _, _)| status == "pending")
             {
-                let linked_tool = context.as_ref().and_then(|(_, id)| id.as_deref());
+                let linked_tool = context.as_ref().and_then(|(_, id, _)| id.as_deref());
                 migrate_permission_tool(
                     pair,
                     linked_tool,
@@ -962,7 +962,13 @@ async fn apply_command(
                 }
                 CasOutcome::Duplicate => ApplyResult {
                     applied: false,
-                    reason: Some(ApplyReason::DuplicateIdempotent),
+                    reason: Some(
+                        if context.as_ref().and_then(|(_, _, stored)| *stored) == Some(*decision) {
+                            ApplyReason::PermissionDecisionReplay
+                        } else {
+                            ApplyReason::DuplicateIdempotent
+                        },
+                    ),
                 },
                 CasOutcome::Expired => ApplyResult {
                     applied: false,
@@ -978,11 +984,11 @@ async fn apply_command(
             let context = permission::context(pair, permission_id);
             if context
                 .as_ref()
-                .is_some_and(|(status, _)| status == "pending")
+                .is_some_and(|(status, _, _)| status == "pending")
             {
                 migrate_permission_tool(
                     pair,
-                    context.as_ref().and_then(|(_, id)| id.as_deref()),
+                    context.as_ref().and_then(|(_, id, _)| id.as_deref()),
                     ToolCallStatus::Cancelled,
                 );
             }

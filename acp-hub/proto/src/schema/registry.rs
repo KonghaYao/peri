@@ -45,6 +45,8 @@ pub struct ProjectSessionSummary {
     pub updated_at: String,
     pub last_opened_at: Option<String>,
     pub active_chat_id: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
 }
 
 /// 实例视图（§5.5）。

@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import { archiveProject, chatStatusSignal, connState, createProject, createProjectSession, creatingSessionProjectId, importableSessions, importProjectSession, navigateProjectSession, openingSessionId, permissions, projects, projectSessions, readOnly, renameProject, renameProjectSession, restoreProject, runtimeDocsHydrated, selectedCid, selectedSessionId, turnActive } from '../store';
+import { archiveProject, archiveProjectSession, chatStatusSignal, connState, createProject, createProjectSession, creatingSessionProjectId, discoverProjectSessions, discoveringSessionsProjectId, importableSessions, importProjectSession, isTerminal, navigateProjectSession, openingSessionId, permissions, projects, projectSessions, renameProject, renameProjectSession, restoreProject, restoreProjectSession, runtimeDocsHydrated, selectedCid, selectedSessionId, turnActive } from '../store';
+import { readOnly } from '../lib/auth-state';
 import { Button, Dialog, Icon, IconButton, Menu, MenuItem, primaryShortcut, Status, TextField } from '../../ui';
 import { useAuthActions } from './AuthGate';
 import { SessionSearch } from './SessionSearch';
@@ -7,6 +8,7 @@ import { SessionImportDialog } from './SessionImportDialog';
 import { ProjectSessionRow } from './ProjectSessionRow';
 import { runConfirmedMutation } from '../lib/form-mutation';
 import { runtimeState } from '../lib/runtime-state.mjs';
+import { sessionDisplayTitle } from '../lib/recovery-state.mjs';
 
 function PlusIcon() { return <Icon><path d="M10 4v12M4 10h12" /></Icon>; }
 function ImportIcon() { return <Icon><path d="M10 3v9m0 0 3-3m-3 3L7 9M4 14.5h12v2H4z" /></Icon>; }
@@ -20,6 +22,10 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
   const [name, setName] = createSignal('');
   const [cwd, setCwd] = createSignal('');
   const [editing, setEditing] = createSignal<string | null>(null);
+  const [sessionMenu, setSessionMenu] = createSignal<string | null>(null);
+  const [archiveSessionCandidate, setArchiveSessionCandidate] = createSignal<string | null>(null);
+  const [sessionLifecycleBusy, setSessionLifecycleBusy] = createSignal<string | null>(null);
+  const [archivedSessionsOpen, setArchivedSessionsOpen] = createSignal(new Set<string>());
   const [importingProject, setImportingProject] = createSignal<string | null>(null);
   const [collapsedProjects, setCollapsedProjects] = createSignal(new Set<string>());
   const [projectMenu, setProjectMenu] = createSignal<string | null>(null);
@@ -32,8 +38,17 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
   const [projectRenameSubmitting, setProjectRenameSubmitting] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const auth = useAuthActions();
-  const projectHasRunningSession = (projectId: string) => projectSessions().some((session) => session.projectId === projectId && !!session.activeChatId);
+  const sessionHasRunningRuntime = (session: { id: string; activeChatId?: string | null }) => {
+    if (!session.activeChatId) return false;
+    return session.id !== selectedSessionId() || !isTerminal(chatStatusSignal()[session.activeChatId]);
+  };
+  const projectHasRunningSession = (projectId: string) => projectSessions().some((session) => session.projectId === projectId && sessionHasRunningRuntime(session));
   const toggleProject = (projectId: string) => setCollapsedProjects((current) => {
+    const next = new Set(current);
+    if (next.has(projectId)) next.delete(projectId); else next.add(projectId);
+    return next;
+  });
+  const toggleArchivedSessions = (projectId: string) => setArchivedSessionsOpen((current) => {
     const next = new Set(current);
     if (next.has(projectId)) next.delete(projectId); else next.add(projectId);
     return next;
@@ -87,7 +102,8 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
       <div class="project-scroll">
         <Show when={projects().length} fallback={<p class="sidebar-empty">创建一个项目，然后从右侧 + 开始新会话。</p>}>
           <For each={projects().filter((p) => !p.archivedAt)}>{(project) => {
-            const sessions = () => projectSessions().filter((s) => s.projectId === project.id);
+            const sessions = () => projectSessions().filter((s) => s.projectId === project.id && !s.archivedAt);
+            const archivedSessions = () => projectSessions().filter((s) => s.projectId === project.id && !!s.archivedAt);
             const collapsed = () => collapsedProjects().has(project.id);
             const projectMenuId = `project-menu-${project.id}`;
             let projectMenuTrigger: HTMLButtonElement | undefined;
@@ -111,6 +127,7 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
                       lifecycle: session.lifecycle,
                       isOpening: openingSessionId() === session.id,
                       hasRuntime: !!session.activeChatId,
+                      isSelected: selected(),
                       isHydrated: selected() ? runtimeDocsHydrated() : undefined,
                       chatStatus: selected() ? chatStatusSignal()[selectedCid() ?? ''] : null,
                       hasPendingPermission: selected() && permissions().some((permission) => permission.status === 'pending'),
@@ -124,16 +141,24 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
                       navigationBusy={!!openingSessionId()}
                       readOnly={readOnly()}
                       renameOpen={editing() === session.id}
+                      menuOpen={sessionMenu() === session.id}
+                      runtimeActive={sessionHasRunningRuntime(session)}
                       replacementBusy={creatingSessionProjectId() === project.id}
                       onNavigate={() => props.onNavigate?.()}
                       onOpen={(sessionId, onCommitted) => { navigateProjectSession(sessionId, { onCommitted }); }}
                       onSelectRuntime={(sessionId) => { navigateProjectSession(sessionId); }}
                       onRenameOpenChange={(open) => setEditing(open ? session.id : null)}
+                      onMenuOpenChange={(open) => setSessionMenu(open ? session.id : null)}
                       onRename={renameProjectSession}
                       onCreateReplacement={(title) => { createProjectSession(project.id, title); }}
+                      onArchiveRequest={setArchiveSessionCandidate}
                     />;
                   }}
                 </For>
+                <Show when={archivedSessions().length > 0}>
+                  <button type="button" class="archived-sessions__toggle" aria-expanded={archivedSessionsOpen().has(project.id)} aria-controls={`archived-sessions-${project.id}`} onClick={() => toggleArchivedSessions(project.id)}><ChevronIcon /><span>已归档会话</span><small>{archivedSessions().length}</small></button>
+                  <Show when={archivedSessionsOpen().has(project.id)}><div id={`archived-sessions-${project.id}`} class="archived-session-list"><For each={archivedSessions()}>{(session) => <div class="archived-session-row"><span><strong>{sessionDisplayTitle(session.title, session.acpSessionId || session.id)}</strong><small>{session.lifecycle === 'ready' ? '会话已保存' : session.lifecycle}</small></span><Button size="compact" busy={sessionLifecycleBusy() === session.id} disabled={readOnly() || !!sessionLifecycleBusy()} onClick={() => runConfirmedMutation(() => setSessionLifecycleBusy(session.id), () => setSessionLifecycleBusy(null), (committed, failed) => restoreProjectSession(session.id, committed, failed), () => {})}>恢复</Button></div>}</For></div></Show>
+                </Show>
               </div>
             </section>;
           }}</For>
@@ -149,6 +174,8 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
         open={!!importingProject()}
         project={projects().find((item) => item.id === importingProject()) || null}
         sessions={importableSessions()}
+        discovering={discoveringSessionsProjectId() === importingProject()}
+        onDiscover={discoverProjectSessions}
         onClose={() => setImportingProject(null)}
         onImport={importProjectSession}
       />
@@ -165,6 +192,14 @@ export function ProjectSidebar(props: { onNavigate?: () => void; intent?: { kind
           const count = () => projectSessions().filter((session) => session.projectId === archiveCandidate()).length;
           const running = () => !!archiveCandidate() && projectHasRunningSession(archiveCandidate()!);
           return <div class="runtime-dialog"><span class="dialog-eyebrow">项目管理</span><h2>归档“{project()?.name}”？</h2><p>项目会从侧边栏隐藏，{count()} 个已保存会话不会被删除。此操作不会删除工作目录中的任何文件。</p><Show when={running()}><p class="runtime-dialog__warning">此项目仍有运行实例。请先在对应会话的菜单中关闭运行实例，再归档项目。</p></Show><div class="form-actions"><Button disabled={archiveSubmitting()} onClick={() => setArchiveCandidate(null)}>取消</Button><Button variant="danger" busy={archiveSubmitting()} disabled={running()} onClick={() => { const id = archiveCandidate(); if (!id) return; runConfirmedMutation(() => setArchiveSubmitting(true), () => setArchiveSubmitting(false), (committed, failed) => archiveProject(id, committed, failed), () => setArchiveCandidate(null)); }}>归档项目</Button></div></div>;
+        })()}
+      </Dialog>
+      <Dialog open={!!archiveSessionCandidate()} title="归档会话" dismissible={!sessionLifecycleBusy()} onClose={() => setArchiveSessionCandidate(null)}>
+        {(() => {
+          const session = () => projectSessions().find((item) => item.id === archiveSessionCandidate());
+          const displayTitle = () => sessionDisplayTitle(session()?.title, session()?.acpSessionId || session()?.id);
+          const running = () => !!session() && sessionHasRunningRuntime(session()!);
+          return <div class="runtime-dialog"><span class="dialog-eyebrow">会话整理</span><h2>归档“{displayTitle()}”？</h2><p>会话会从当前项目列表隐藏，但 ACP thread、消息历史和本地项目文件都不会删除。之后可以在“已归档会话”中恢复。</p><Show when={running()}><p class="runtime-dialog__warning">此会话仍有运行实例。请先在会话顶部菜单中关闭运行实例。</p></Show><div class="form-actions"><Button disabled={!!sessionLifecycleBusy()} onClick={() => setArchiveSessionCandidate(null)}>取消</Button><Button variant="danger" busy={!!sessionLifecycleBusy()} disabled={running()} onClick={() => { const id = archiveSessionCandidate(); if (!id) return; runConfirmedMutation(() => setSessionLifecycleBusy(id), () => setSessionLifecycleBusy(null), (committed, failed) => archiveProjectSession(id, committed, failed), () => setArchiveSessionCandidate(null)); }}>归档会话</Button></div></div>;
         })()}
       </Dialog>
       <div class="sidebar-footer"><Status tone={connState().kind || 'idle'}>{connState().text}</Status><Button size="compact" onClick={auth?.logout}>退出登录</Button></div>

@@ -74,11 +74,29 @@ fn all_frames() -> Vec<Frame> {
                 name: "renamed".into(),
             },
         }),
+        Frame::Action(ActionEnvelope::PersistedSessionArchive {
+            command_id: "sa1".into(),
+            payload: PersistedSessionOpenPayload {
+                session_id: "hs1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionRestore {
+            command_id: "srestore1".into(),
+            payload: PersistedSessionOpenPayload {
+                session_id: "hs1".into(),
+            },
+        }),
         Frame::Action(ActionEnvelope::PersistedSessionImport {
             command_id: "si1".into(),
             payload: PersistedSessionImportPayload {
                 project_id: "p1".into(),
                 acp_session_id: "acp-s1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionDiscover {
+            command_id: "sd1".into(),
+            payload: ProjectArchivePayload {
+                project_id: "p1".into(),
             },
         }),
         // --- action 方法面（§4.3，含 M2/M3 保留类型） ---

@@ -12,8 +12,8 @@ use tempfile::tempdir;
 
 use crate::config::FsyncMode;
 use crate::persist::outbox::{
-    CommandType, DeliveryVerdict, LastError, NewOutboxRecord, OutboxLogEntry, OutboxRecord,
-    OutboxStatus, OutboxStore, RetryableClass,
+    CommandRecovery, CommandType, DeliveryVerdict, LastError, NewOutboxRecord, OutboxLogEntry,
+    OutboxRecord, OutboxStatus, OutboxStore, RetryableClass,
 };
 use crate::persist::{DegradedFlag, StoreError};
 
@@ -159,6 +159,94 @@ fn t4_legal_transitions_all_green() {
     ob.mark_intent_durable(rec6.command_id).unwrap();
     ob.clear_for_retry(rec6.command_id).unwrap();
     assert!(ob.get(rec6.command_id).is_none());
+}
+
+#[test]
+fn permission_recovery_survives_reopen_and_clears_after_delivery() {
+    let dir = tempdir().unwrap();
+    let sid = uuid::Uuid::new_v4();
+    let rec = new_rec(sid, CommandType::Resolve);
+    let evidence = CommandRecovery::PermissionResponse {
+        permission_id: "permission-1".into(),
+        request_id: serde_json::json!(42),
+        options: vec![serde_json::json!({"optionId":"allow-once","kind":"allow_once"})],
+        decision: acp_hub_proto::action::PermissionDecision::Allow,
+    };
+    {
+        let mut ob = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+        ob.insert(rec.clone()).unwrap();
+        ob.mark_accepted(rec.command_id).unwrap();
+        ob.mark_intent_durable(rec.command_id).unwrap();
+        ob.set_recovery(rec.command_id, evidence.clone()).unwrap();
+        ob.mark_dispatched(rec.command_id, Utc::now()).unwrap();
+        ob.mark_failed(rec.command_id, retryable_err()).unwrap();
+        assert_eq!(
+            ob.get(rec.command_id).unwrap().status,
+            OutboxStatus::IntentDurable
+        );
+    }
+
+    let mut recovered = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+    let result = recovered.replay_from_disk().unwrap();
+    assert!(!result.degraded);
+    let record = recovered.get(rec.command_id).unwrap();
+    assert_eq!(record.status, OutboxStatus::IntentDurable);
+    assert_eq!(record.recovery.as_deref(), Some(&evidence));
+
+    assert_eq!(recovered.reconcile_recovery_after_restart().unwrap(), 1);
+    assert_eq!(
+        recovered.get(rec.command_id).unwrap().status,
+        OutboxStatus::DeliveryUnknown
+    );
+    assert_eq!(
+        recovered.get(rec.command_id).unwrap().recovery.as_deref(),
+        Some(&evidence)
+    );
+}
+
+#[test]
+fn permission_recovery_clears_after_confirmed_delivery() {
+    let dir = tempdir().unwrap();
+    let sid = uuid::Uuid::new_v4();
+    let rec = new_rec(sid, CommandType::Resolve);
+    let evidence = CommandRecovery::PermissionResponse {
+        permission_id: "permission-1".into(),
+        request_id: serde_json::json!(42),
+        options: vec![],
+        decision: acp_hub_proto::action::PermissionDecision::Deny,
+    };
+    let mut ob = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+    ob.insert(rec.clone()).unwrap();
+    ob.mark_accepted(rec.command_id).unwrap();
+    ob.mark_intent_durable(rec.command_id).unwrap();
+    ob.set_recovery(rec.command_id, evidence).unwrap();
+    ob.mark_dispatched(rec.command_id, Utc::now()).unwrap();
+    ob.mark_delivery_confirmed(rec.command_id).unwrap();
+    ob.clear_recovery(rec.command_id).unwrap();
+    assert!(ob.get(rec.command_id).unwrap().recovery.is_none());
+}
+
+#[test]
+fn legacy_outbox_record_without_recovery_field_still_decodes() {
+    let command_id = uuid::Uuid::new_v4();
+    let chat_id = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let legacy = serde_json::json!({
+        "commandId": command_id,
+        "chatId": chat_id,
+        "commandType": "chat/prompt",
+        "turnId": null,
+        "status": "completed",
+        "retryableClass": "no_auto_redeliver",
+        "dispatchedAt": now,
+        "createdAt": now,
+        "updatedAt": now,
+        "lastError": null,
+        "attemptCount": 1
+    });
+    let record: OutboxRecord = serde_json::from_value(legacy).unwrap();
+    assert_eq!(record.command_id, command_id);
+    assert!(record.recovery.is_none());
 }
 
 /// T4b：非法迁移拒绝 + 文件无新增记录。
@@ -488,6 +576,7 @@ fn t8_replay_entries_apply_in_order() {
         updated_at: Utc::now(),
         last_error: None,
         attempt_count: 1,
+        recovery: None,
     };
     let stats = ob.replay([
         OutboxLogEntry::Record(rec(OutboxStatus::Accepted)),

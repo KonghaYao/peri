@@ -44,6 +44,8 @@ use tracing::warn;
 
 use uuid::Uuid;
 
+use acp_hub_proto::action::PermissionDecision;
+
 use crate::config::FsyncMode;
 
 use crate::persist::update_log::{read_blob, write_blob, BlobReadError, CORRUPT_DIR};
@@ -204,6 +206,28 @@ pub struct OutboxRecord {
     pub last_error: Option<LastError>,
     /// 投递尝试次数（§17.1 指标；每次进入 `dispatched` +1）。
     pub attempt_count: u32,
+    /// 非幂等命令在明确未投递时安全恢复所需的最小证据。
+    /// 可选以保持旧 outbox 记录的向后兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Box<CommandRecovery>>,
+}
+
+/// 按命令类型封闭的恢复证据。不得存放 bearer token、Cookie 或
+/// 用户消息正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommandRecovery {
+    /// 官方 ACP `session/request_permission` 的 JSON-RPC response 回投材料。
+    PermissionResponse {
+        /// server 生成的权限投影身份。
+        permission_id: String,
+        /// agent request id，响应必须原样回显。
+        request_id: serde_json::Value,
+        /// ACP 官方 options，用于将 Allow/Deny 映射回 optionId。
+        options: Vec<serde_json::Value>,
+        /// 首次裁决；必须与重试 action 完全一致。
+        decision: PermissionDecision,
+    },
 }
 
 /// 新记录（[`OutboxStore::insert`] 入参 → Received）。
@@ -379,6 +403,7 @@ impl OutboxStore {
             updated_at: now,
             last_error: None,
             attempt_count: 0,
+            recovery: None,
         };
         self.append_record(&record)
     }
@@ -393,6 +418,49 @@ impl OutboxStore {
     /// `accepted → intent_durable`（意图落盘，§4.4 提交点纪律第一步）。
     pub fn mark_intent_durable(&mut self, id: Uuid) -> Result<(), StoreError> {
         self.transition(id, OutboxStatus::IntentDurable, |_| {})
+    }
+
+    /// 为已落盘意图附加恢复证据。证据与 commandId 同一条记录
+    /// 追加并按 outbox fsync 纪律落盘，所以重启后仍能验证精确重试。
+    pub fn set_recovery(&mut self, id: Uuid, recovery: CommandRecovery) -> Result<(), StoreError> {
+        let mut record = self
+            .index
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| self.not_found(id))?;
+        if record.status != OutboxStatus::IntentDurable {
+            return self.reject(id, record.status, OutboxStatus::IntentDurable);
+        }
+        if let Some(existing) = &record.recovery {
+            if existing.as_ref() == &recovery {
+                return Ok(());
+            }
+            return Err(StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("conflicting recovery evidence for command {id}"),
+            });
+        }
+        record.recovery = Some(Box::new(recovery));
+        record.updated_at = Utc::now();
+        self.append_record(&record)
+    }
+
+    /// 投递已确认后删除不再需要的恢复材料，降低长期保留面。
+    pub fn clear_recovery(&mut self, id: Uuid) -> Result<(), StoreError> {
+        let mut record = self
+            .index
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| self.not_found(id))?;
+        if record.status != OutboxStatus::DeliveryConfirmed {
+            return self.reject(id, record.status, OutboxStatus::DeliveryConfirmed);
+        }
+        if record.recovery.is_none() {
+            return Ok(());
+        }
+        record.recovery = None;
+        record.updated_at = Utc::now();
+        self.append_record(&record)
     }
 
     /// `intent_durable → dispatched`（下发 instance；置 `dispatched_at`，
@@ -484,6 +552,30 @@ impl OutboxStore {
     /// `dispatched → delivery_unknown`（L2 后 L3 不可得，M1 路径 B，§5.3）。
     pub fn mark_delivery_unknown(&mut self, id: Uuid) -> Result<(), StoreError> {
         self.transition(id, OutboxStatus::DeliveryUnknown, |_| {})
+    }
+
+    /// server 重启时收敛带恢复证据的未终态命令。进程内
+    /// `intent_durable` 原本可在同一 runtime 恢复，但重启后 ChatRegistry /
+    /// binding 均需重建，不得默认原 ACP request 仍可投递。`dispatched`
+    /// 更无法确认副作用是否已发生。两者统一进入持久化
+    /// `delivery_unknown`，仅可经运维裁决。
+    pub fn reconcile_recovery_after_restart(&mut self) -> Result<usize, StoreError> {
+        let ids = self
+            .index
+            .values()
+            .filter(|record| {
+                record.recovery.is_some()
+                    && matches!(
+                        record.status,
+                        OutboxStatus::IntentDurable | OutboxStatus::Dispatched
+                    )
+            })
+            .map(|record| record.command_id)
+            .collect::<Vec<_>>();
+        for id in &ids {
+            self.transition(*id, OutboxStatus::DeliveryUnknown, |_| {})?;
+        }
+        Ok(ids.len())
     }
 
     /// delivery_unknown 人工裁决（§5.3 runbook；审计日志由本方法写入）：
@@ -994,6 +1086,7 @@ fn allowed_transition(from: OutboxStatus, to: OutboxStatus) -> bool {
             | (Accepted, IntentDurable)
             | (Accepted, Failed)
             | (IntentDurable, Dispatched)
+            | (IntentDurable, DeliveryUnknown)
             | (IntentDurable, Failed)
             | (Dispatched, DeliveryConfirmed)
             | (Dispatched, DeliveryUnknown)

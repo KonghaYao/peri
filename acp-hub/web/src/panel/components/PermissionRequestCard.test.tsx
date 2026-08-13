@@ -21,7 +21,7 @@ describe('PermissionRequestCard', () => {
   });
 
   it('locks both opposing decisions while delivery is pending', () => {
-    render(() => <PermissionRequestCard permission={permission} decision={{ decision: 'allow', phase: 'pending' }} readOnly={false} onResolve={vi.fn()} />);
+    render(() => <PermissionRequestCard permission={permission} decision={{ commandId: 'cmd-1', permissionId: permission.permissionId, decision: 'allow', phase: 'pending', retryable: false }} readOnly={false} onResolve={vi.fn()} />);
     expect(screen.getByRole('button', { name: /正在允许/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: '拒绝' })).toBeDisabled();
     expect(screen.getByLabelText('执行 shell 命令')).toHaveAttribute('aria-busy', 'true');
@@ -29,11 +29,20 @@ describe('PermissionRequestCard', () => {
   });
 
   it('keeps the lock and explains uncertainty instead of offering a contrary decision', () => {
-    render(() => <PermissionRequestCard permission={permission} decision={{ decision: 'deny', phase: 'uncertain' }} readOnly={false} onResolve={vi.fn()} />);
+    render(() => <PermissionRequestCard permission={permission} decision={{ commandId: 'cmd-1', permissionId: permission.permissionId, decision: 'deny', phase: 'uncertain', retryable: false }} readOnly={false} onResolve={vi.fn()} />);
     expect(screen.getByRole('alert')).toHaveTextContent('拒绝的结果尚未确认');
     expect(screen.getByRole('button', { name: '允许' })).toBeDisabled();
     expect(screen.getByRole('button', { name: /正在拒绝/ })).toBeDisabled();
     expect(screen.getByLabelText('执行 shell 命令')).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByRole('button', { name: '使用原请求重试' })).not.toBeInTheDocument();
+  });
+
+  it('offers the original command only after a definitely retryable delivery failure', () => {
+    const retry = vi.fn();
+    render(() => <PermissionRequestCard permission={permission} decision={{ commandId: 'cmd-1', permissionId: permission.permissionId, decision: 'allow', phase: 'uncertain', retryable: true }} readOnly={false} onResolve={vi.fn()} onRetry={retry} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('尚未送达');
+    fireEvent.click(screen.getByRole('button', { name: '使用原请求重试' }));
+    expect(retry).toHaveBeenCalledExactlyOnceWith('cmd-1');
   });
 
   it('closes mutation affordances for a read-only principal', () => {

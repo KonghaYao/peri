@@ -8,7 +8,10 @@
 // 对话操作（新建/新会话/取消/关闭）已收敛到左侧对话列表区。
 
 import { Show } from 'solid-js';
-import { cancelTurn, cancellingTurn, chatHead, chatStatusSignal, clearComposerDraft, composerDraft, dismissMessageSubmission, isTerminal, messageSubmission, navigateProjectSession, openingSessionId, projectSessions, readOnly, retryMessageSubmission, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, setComposerDraft, turnActive } from '../store';
+import { cancelTurn, chatHead, chatStatusSignal, isTerminal, navigateProjectSession, openingSessionId, projectSessions, retryMessageSubmission, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, turnActive } from '../store';
+import { readOnly } from '../lib/auth-state';
+import { composerDraft, dismissFailedMessageDelivery, messageSubmission, setComposerDraft } from '../lib/message-delivery';
+import { runtimeControlFor } from '../lib/runtime-control';
 import { Button, CopyButton, Icon, IconButton, Textarea } from '../../ui';
 
 /** tokens 数值 → "12k"/"200k" 缩写（>=1000 取 k；非法值 → null）。 */
@@ -28,6 +31,11 @@ export function Composer() {
   };
 
   const terminal = () => isTerminal(chatStatusSignal()[selectedCid() ?? '']);
+  const cancelControl = () => {
+    const control = runtimeControlFor(selectedCid());
+    return control?.kind === 'cancel' ? control : null;
+  };
+  const cancelLocked = () => !!cancelControl() && cancelControl()?.phase !== 'failed';
   const inputDisabled = () => !selectedCid() || !runtimeDocsHydrated() || terminal() || !!openingSessionId() || readOnly() || turnActive() || !!messageSubmission();
   const inputPlaceholder = () =>
     readOnly() ? '只读模式' : openingSessionId() ? '正在打开会话…' : !selectedCid()
@@ -56,7 +64,7 @@ export function Composer() {
   };
 
   function submit() {
-    const text = composerDraft().trim();
+    const text = composerDraft(selectedSessionId()).trim();
     if (!text) return;
     if (!sendMessage(text)) return;
     if (taRef) {
@@ -67,8 +75,6 @@ export function Composer() {
       taRef.style.height = 'auto';
       taRef.style.height = `${taRef.scrollHeight}px`;
     }
-    const sessionId = selectedSessionId();
-    if (sessionId) clearComposerDraft(sessionId);
   }
 
   return (
@@ -81,10 +87,10 @@ export function Composer() {
           ref={taRef}
           autoResize
           maxHeight={180}
-          value={composerDraft()}
+          value={composerDraft(selectedSessionId())}
           onInput={(e) => {
             const el = e.currentTarget;
-            setComposerDraft(el.value);
+            setComposerDraft(selectedSessionId(), el.value);
           }}
           onKeyDown={(e) => {
             if (e.isComposing) return; // IME 组合确认回车不误发
@@ -104,12 +110,12 @@ export function Composer() {
           </span>
           <span class="composer-shortcut" aria-hidden="true">Enter 发送 · Shift + Enter 换行</span>
           <Show when={turnActive()} fallback={
-            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={submit} disabled={inputDisabled() || !composerDraft().trim()} label="发送" class="composer-action">
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={submit} disabled={inputDisabled() || !composerDraft(selectedSessionId()).trim()} label="发送" class="composer-action">
               <Icon><path d="M10 16V4" /><path d="M5 9l5-5 5 5" /></Icon>
             </IconButton>
           }>
-            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={cancelTurn} disabled={cancellingTurn() || readOnly()} busy={cancellingTurn()} label="停止生成" class="composer-action composer-action--stop">
-              <Show when={!cancellingTurn()}><span aria-hidden="true" /></Show>
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={cancelTurn} disabled={cancelLocked() || readOnly()} busy={cancelControl()?.phase === 'sending' || cancelControl()?.phase === 'accepted'} label={cancelControl()?.phase === 'uncertain' ? '停止结果尚未确认' : '停止生成'} class="composer-action composer-action--stop">
+              <Show when={!cancelControl() || cancelControl()?.phase === 'uncertain' || cancelControl()?.phase === 'confirmed'}><span aria-hidden="true" /></Show>
             </IconButton>
           </Show>
         </div>
@@ -118,7 +124,7 @@ export function Composer() {
         <section class={`submission-state submission-state--${submission().phase}`} role={submission().phase === 'failed' || submission().phase === 'uncertain' ? 'alert' : 'status'}>
           <div class="submission-state__body"><strong>{submission().phase === 'uncertain' ? '结果尚未确认' : submission().phase === 'failed' ? '消息未发送' : '正在提交消息'}</strong><p>{submission().detail || '在服务器确认前，我们会保留这条消息。'}</p><details><summary>查看原消息</summary><pre>{submission().text}</pre></details></div>
           <Show when={submission().phase === 'failed' || submission().phase === 'uncertain'}>
-            <div class="submission-state__actions"><CopyButton text={submission().text} label="复制原文" size="compact" /><Show when={submission().retryable}><Button variant="primary" size="compact" onClick={retryMessageSubmission}>使用同一请求重新确认</Button></Show><Show when={submission().phase === 'failed'}><Button size="compact" onClick={dismissMessageSubmission}>返回编辑</Button></Show></div>
+            <div class="submission-state__actions"><CopyButton text={submission().text} label="复制原文" size="compact" /><Show when={submission().retryable}><Button variant="primary" size="compact" onClick={retryMessageSubmission}>使用同一请求重新确认</Button></Show><Show when={submission().phase === 'failed'}><Button size="compact" onClick={dismissFailedMessageDelivery}>返回编辑</Button></Show></div>
           </Show>
         </section>
       }</Show>

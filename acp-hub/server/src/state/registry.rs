@@ -415,6 +415,10 @@ impl RegistryApplier {
                         Some(v) => m.insert(&mut txn, "active_chat_id", v.clone()),
                         None => m.insert(&mut txn, "active_chat_id", yrs::Any::Null),
                     };
+                    match &s.archived_at {
+                        Some(v) => m.insert(&mut txn, "archived_at", v.clone()),
+                        None => m.insert(&mut txn, "archived_at", yrs::Any::Null),
+                    };
                 }
                 Ok(())
             }

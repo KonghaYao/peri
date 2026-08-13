@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use acp_hub_proto::ack::AckStatus;
 use acp_hub_proto::action::{
-    ActionEnvelope, PersistedSessionCreatePayload, PersistedSessionOpenPayload,
+    ActionEnvelope, CloseChatPayload, PersistedSessionCreatePayload, PersistedSessionOpenPayload,
     ProjectCreatePayload, PromptChatPayload,
 };
 use acp_hub_proto::Frame;
@@ -264,6 +264,56 @@ async fn web_project_session_survives_restart_and_rebinds_exact_acp_id() -> Resu
         wait_terminal(&mut client, Duration::from_secs(20)).await?,
         "first chat/prompt",
     )?;
+
+    let close_command = uuid::Uuid::new_v4().to_string();
+    client
+        .send(&Frame::Action(ActionEnvelope::Close {
+            command_id: close_command,
+            payload: CloseChatPayload {
+                chat_id: first_chat_id.clone(),
+            },
+        }))
+        .await?;
+    committed(
+        wait_terminal(&mut client, Duration::from_secs(20)).await?,
+        "chat/close before archive",
+    )?;
+
+    let archive_command = uuid::Uuid::new_v4().to_string();
+    client
+        .send(&Frame::Action(ActionEnvelope::PersistedSessionArchive {
+            command_id: archive_command,
+            payload: PersistedSessionOpenPayload {
+                session_id: logical_session_id.clone(),
+            },
+        }))
+        .await?;
+    let archive_ack = committed(
+        wait_terminal(&mut client, Duration::from_secs(20)).await?,
+        "session/archive",
+    )?;
+    assert_eq!(
+        archive_ack.session_id.as_deref(),
+        Some(logical_session_id.as_str())
+    );
+
+    let forbidden_open_command = uuid::Uuid::new_v4().to_string();
+    client
+        .send(&Frame::Action(ActionEnvelope::PersistedSessionOpen {
+            command_id: forbidden_open_command,
+            payload: PersistedSessionOpenPayload {
+                session_id: logical_session_id.clone(),
+            },
+        }))
+        .await?;
+    match wait_terminal(&mut client, Duration::from_secs(10)).await? {
+        Frame::ActionError(error) => assert_eq!(
+            error.code,
+            acp_hub_proto::ack::ErrorCode::InvalidState,
+            "archived session must be fail-closed on the wire"
+        ),
+        other => return Err(format!("archived session unexpectedly opened: {other:?}")),
+    }
     let _ = client.ws.close(None).await;
 
     instance.kill();
@@ -297,10 +347,51 @@ async fn web_project_session_survives_restart_and_rebinds_exact_acp_id() -> Resu
         project_session_field(&registry, &logical_session_id, "lifecycle").as_deref(),
         Some("ready")
     );
+    assert!(
+        project_session_field(&registry, &logical_session_id, "archived_at").is_some(),
+        "restart must preserve the independent session archive marker"
+    );
     assert_eq!(
         project_session_field(&registry, &logical_session_id, "active_chat_id"),
         None,
         "server 重启后 runtime chat hint 不得冒充已恢复 runtime"
+    );
+
+    let restore_command = uuid::Uuid::new_v4().to_string();
+    restored_client
+        .send(&Frame::Action(ActionEnvelope::PersistedSessionRestore {
+            command_id: restore_command,
+            payload: PersistedSessionOpenPayload {
+                session_id: logical_session_id.clone(),
+            },
+        }))
+        .await?;
+    let restore_ack = committed(
+        wait_terminal(&mut restored_client, Duration::from_secs(20)).await?,
+        "session/restore",
+    )?;
+    assert_eq!(
+        restore_ack.session_id.as_deref(),
+        Some(logical_session_id.as_str())
+    );
+    let _ = restored_client.ws.close(None).await;
+    let (mut restored_client, restored_snapshots) =
+        WsClient::connect_cookie(env.port, &cookie, &["hub:registry"]).await?;
+    let restored_registry = doc_from_snapshots(&restored_snapshots, "hub:registry")?;
+    assert_eq!(
+        project_session_field(&restored_registry, &logical_session_id, "archived_at"),
+        None,
+        "a fresh Registry snapshot must prove the restore projection barrier"
+    );
+    assert_eq!(
+        project_session_field(&restored_registry, &logical_session_id, "acp_session_id").as_deref(),
+        Some(acp_session_id.as_str()),
+        "restore must preserve the durable ACP identity"
+    );
+    assert_eq!(
+        project_session_field(&restored_registry, &logical_session_id, "lifecycle").as_deref(),
+        Some("ready"),
+        "restore must not rewrite runtime lifecycle"
     );
 
     let open_command = uuid::Uuid::new_v4().to_string();

@@ -36,18 +36,19 @@ use crate::auth::audit::audit;
 use crate::auth::ConnectionCtx;
 use crate::channel::broadcaster::OutboundMsg;
 use crate::channel::relay_event_handler::RelayEventHandler;
-use crate::control::ProjectService;
 use crate::control::WorkspaceRegistry;
 use crate::control::{ChatError, ChatRegistry, ChatState};
 use crate::control::{InstanceError, InstanceRegistry, SpawnOutcome};
+use crate::control::{ProjectService, ProjectServiceError};
 use crate::persist::metadata::{payload_hash, BeginCommand, MetadataError, NewSession};
 use crate::persist::outbox::{
-    CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass,
+    CommandRecovery, CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass,
 };
 use crate::persist::Store;
 use crate::protocol::{
     extract_agent_config, validate_cwd, OutboundCtx, OutboundMessage, Translator,
 };
+use crate::state::aggregator::ApplyReason;
 use crate::state::doc_manager::BatchConfig;
 use crate::state::doc_manager::{DocCommand, DocManager, SubmitError, SubmitResult};
 
@@ -138,6 +139,8 @@ struct CoordInner {
     /// 会让两个历史流写入同一个 Yjs Doc；session-new 同理（新会话通知
     /// 与既有流交错）。
     loads_in_flight: StdMutex<HashSet<String>>,
+    /// project 级 session discovery 单飞；避免重复打开多个临时 ACP 进程。
+    discoveries_in_flight: StdMutex<HashSet<String>>,
     /// L3 确认超时（§4.4 路径 B 默认 30s；测试注入短值）。
     l3_timeout: Duration,
     projects: RwLock<Option<ProjectService>>,
@@ -146,6 +149,21 @@ struct CoordInner {
 struct LoadFlightGuard {
     inner: Arc<CoordInner>,
     chat_id: String,
+}
+
+struct DiscoveryFlightGuard {
+    inner: Arc<CoordInner>,
+    project_id: String,
+}
+
+impl Drop for DiscoveryFlightGuard {
+    fn drop(&mut self) {
+        self.inner
+            .discoveries_in_flight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.project_id);
+    }
 }
 
 impl Drop for LoadFlightGuard {
@@ -230,6 +248,7 @@ impl CommandCoordinator {
                 initialize_timeout,
                 binding_timeout,
                 loads_in_flight: StdMutex::new(HashSet::new()),
+                discoveries_in_flight: StdMutex::new(HashSet::new()),
                 l3_timeout,
                 projects: RwLock::new(None),
             }),
@@ -378,13 +397,57 @@ impl CommandCoordinator {
                 if payload.name.trim().is_empty()
                     || !matches!(
                         projects.metadata().session(&payload.session_id).await,
-                        Ok(Some(_))
+                        Ok(Some(ref session)) if session.archived_at.is_none()
                     )
                 {
                     return SubmitAck::Failed(action_error(
                         command_id,
                         ErrorCode::InvalidState,
                         "session not found or name empty",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::PersistedSessionArchive { payload, .. } => {
+                let Some(session) = projects
+                    .metadata()
+                    .session(&payload.session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|session| session.archived_at.is_none())
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "active session not found",
+                        false,
+                    ));
+                };
+                if let Some(acp_id) = session.acp_session_id.as_deref() {
+                    if self.inner.chats.has_live_acp_session(acp_id).await {
+                        return SubmitAck::Failed(action_error(
+                            command_id,
+                            ErrorCode::InvalidState,
+                            "session has a running instance; close it before archiving",
+                            false,
+                        ));
+                    }
+                }
+            }
+            ActionEnvelope::PersistedSessionRestore { payload, .. } => {
+                let restorable = match projects.metadata().session(&payload.session_id).await {
+                    Ok(Some(session)) if session.archived_at.is_some() => matches!(
+                        projects.metadata().project(&session.project_id).await,
+                        Ok(Some(ref project)) if project.archived_at.is_none()
+                    ),
+                    _ => false,
+                };
+                if !restorable {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "archived session or active project not found",
                         false,
                     ));
                 }
@@ -451,6 +514,7 @@ impl CommandCoordinator {
                     .await
                     .ok()
                     .flatten()
+                    .filter(|session| session.archived_at.is_none())
                 else {
                     return SubmitAck::Failed(action_error(
                         command_id,
@@ -514,6 +578,10 @@ impl CommandCoordinator {
                 (None, Some(payload.session_id.as_str()))
             }
             ActionEnvelope::PersistedSessionRename { payload, .. } => {
+                (None, Some(payload.session_id.as_str()))
+            }
+            ActionEnvelope::PersistedSessionArchive { payload, .. }
+            | ActionEnvelope::PersistedSessionRestore { payload, .. } => {
                 (None, Some(payload.session_id.as_str()))
             }
             ActionEnvelope::PersistedSessionImport { payload, .. } => {
@@ -1114,6 +1182,135 @@ impl CommandCoordinator {
                 )
                 .await;
             }
+            ActionEnvelope::PersistedSessionArchive { payload, .. }
+            | ActionEnvelope::PersistedSessionRestore { payload, .. } => {
+                let archive = matches!(&cmd.action, ActionEnvelope::PersistedSessionArchive { .. });
+                let mutation = if archive {
+                    projects.archive_session_metadata(&payload.session_id).await
+                } else {
+                    projects.restore_session_metadata(&payload.session_id).await
+                };
+                let rec = projects
+                    .metadata()
+                    .session(&payload.session_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let project_id = rec.as_ref().map(|record| record.project_id.as_str());
+                let acp_id = rec
+                    .as_ref()
+                    .and_then(|record| record.acp_session_id.as_deref());
+                if matches!(
+                    &mutation,
+                    Err(ProjectServiceError::Metadata(
+                        MetadataError::InvalidState(_)
+                            | MetadataError::NotFound(_)
+                            | MetadataError::Conflict(_)
+                    ))
+                ) {
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "failed",
+                            project_id,
+                            Some(&payload.session_id),
+                            None,
+                            acp_id,
+                            Some("invalid_state"),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::InvalidState,
+                        "session lifecycle changed before mutation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if mutation.is_err()
+                    || projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "projection_pending",
+                            project_id,
+                            Some(&payload.session_id),
+                            None,
+                            acp_id,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                {
+                    let error = if archive {
+                        "session_archive_projection_failed"
+                    } else {
+                        "session_restore_projection_failed"
+                    };
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "reconciliation_required",
+                            project_id,
+                            Some(&payload.session_id),
+                            None,
+                            acp_id,
+                            Some(error),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session lifecycle change requires reconciliation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects.reproject().await.is_err() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session lifecycle projection pending",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "committed",
+                        project_id,
+                        Some(&payload.session_id),
+                        None,
+                        acp_id,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "session lifecycle command finalize failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    project_id,
+                    Some(&payload.session_id),
+                    None,
+                    acp_id.map(str::to_string),
+                )
+                .await;
+            }
             ActionEnvelope::PersistedSessionImport { payload, .. } => {
                 let Some(project) = projects
                     .metadata()
@@ -1617,6 +1814,8 @@ impl CommandCoordinator {
                 | ActionEnvelope::PersistedSessionCreate { .. }
                 | ActionEnvelope::PersistedSessionOpen { .. }
                 | ActionEnvelope::PersistedSessionRename { .. }
+                | ActionEnvelope::PersistedSessionArchive { .. }
+                | ActionEnvelope::PersistedSessionRestore { .. }
                 | ActionEnvelope::PersistedSessionImport { .. }
         ) {
             return self.submit_metadata_action(ctx, action, tx).await;
@@ -1663,6 +1862,10 @@ impl CommandCoordinator {
             return self
                 .exec_session_list(ctx, &action, tx, &command_id_str)
                 .await;
+        }
+
+        if let ActionEnvelope::PersistedSessionDiscover { .. } = &action {
+            return self.exec_project_session_discover(ctx, action, tx).await;
         }
 
         // chat/load 会话切换（§8.5）：在当前对话（其 ACP 进程）内把目标
@@ -1791,44 +1994,81 @@ impl CommandCoordinator {
         };
 
         // ---- 2. 去重判定（outbox 记录，§4.4）----
-        if let Some(rec) = store.outbox_get(command_id).await {
-            match dedup_verdict(&rec) {
-                DedupVerdict::Duplicate => {
-                    return SubmitAck::Duplicate(ActionAck {
-                        command_id: command_id_str,
-                        status: AckStatus::Duplicate,
-                        turn_id: rec.turn_id.map(|t| t.to_string()),
-                        chat_id: None,
-                        project_id: None,
-                        session_id: None,
-                        acp_session_id: None,
-                        committed_projection_version: None,
-                    })
+        let resume_permission = if let Some(rec) = store.outbox_get(command_id).await {
+            if rec.recovery.is_some() {
+                if !permission_recovery_payload_matches(&rec, &action) {
+                    return SubmitAck::Failed(action_error(
+                        command_id_str,
+                        ErrorCode::InvalidState,
+                        "command payload conflicts with durable permission recovery evidence",
+                        false,
+                    ));
                 }
-                DedupVerdict::RedeliverFailed => {
-                    let err = rec
-                        .last_error
-                        .clone()
-                        .unwrap_or_else(|| LastError::from_error_code(ErrorCode::InvalidState));
-                    return SubmitAck::Failed(ActionError {
-                        command_id: command_id_str,
-                        code: error_code_from_str(&err.code),
-                        message: "command previously failed; retry not permitted".to_string(),
-                        retryable: err.retryable,
-                        retry_after_ms: None,
-                    });
-                }
-                DedupVerdict::RedeliverUnknown => {
+                if rec.status != OutboxStatus::IntentDurable {
                     return SubmitAck::Failed(action_error(
                         command_id_str,
                         ErrorCode::AgentUnavailable,
-                        "delivery unknown; automatic retry not permitted (path B)",
+                        "permission delivery result is unknown; automatic retry is not permitted",
                         false,
-                    ))
+                    ));
                 }
-                DedupVerdict::Proceed => {}
+                if self
+                    .inner
+                    .chats
+                    .entry(&chat_id_str)
+                    .await
+                    .is_none_or(|entry| entry.state.is_terminal())
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id_str,
+                        ErrorCode::AgentUnavailable,
+                        "the original runtime no longer exists; permission delivery requires operator reconciliation",
+                        false,
+                    ));
+                }
+                true
+            } else {
+                match dedup_verdict(&rec) {
+                    DedupVerdict::Duplicate => {
+                        return SubmitAck::Duplicate(ActionAck {
+                            command_id: command_id_str,
+                            status: AckStatus::Duplicate,
+                            turn_id: rec.turn_id.map(|t| t.to_string()),
+                            chat_id: None,
+                            project_id: None,
+                            session_id: None,
+                            acp_session_id: None,
+                            committed_projection_version: None,
+                        })
+                    }
+                    DedupVerdict::RedeliverFailed => {
+                        let err = rec
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| LastError::from_error_code(ErrorCode::InvalidState));
+                        return SubmitAck::Failed(ActionError {
+                            command_id: command_id_str,
+                            code: error_code_from_str(&err.code),
+                            message: "command previously failed; retry not permitted".to_string(),
+                            retryable: err.retryable,
+                            retry_after_ms: None,
+                        });
+                    }
+                    DedupVerdict::RedeliverUnknown => {
+                        return SubmitAck::Failed(action_error(
+                            command_id_str,
+                            ErrorCode::AgentUnavailable,
+                            "delivery unknown; automatic retry not permitted (path B)",
+                            false,
+                        ))
+                    }
+                    DedupVerdict::Proceed => {}
+                }
+                false
             }
-        }
+        } else {
+            false
+        };
 
         // ---- 3. 入队上限（§7.4 规则 6：同一临界区）----
         if !self.inner.doc.try_reserve(&chat_id_str).await {
@@ -1847,34 +2087,36 @@ impl CommandCoordinator {
         };
         let command_type = command_type_of(&action);
         let retryable_class = command_type.default_retryable_class();
-        if let Err(e) = store.outbox().lock().await.insert(NewOutboxRecord {
-            command_id,
-            chat_id,
-            command_type,
-            turn_id,
-            retryable_class,
-        }) {
-            warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox insert failed");
-            self.inner.doc.release_reserve(&chat_id_str).await;
-            return SubmitAck::Failed(action_error(
-                command_id_str,
-                ErrorCode::AgentUnavailable,
-                "outbox persist failed",
-                true,
-            ));
-        }
-        // insert(received) → mark_accepted（同一临界区）：accepted Ack 语义
-        // 与 outbox 状态机对齐（Received → Accepted → IntentDurable，§4.4；
-        // 执行器 mark_intent_durable 要求前置 Accepted）。
-        if let Err(e) = store.outbox().lock().await.mark_accepted(command_id) {
-            warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox mark_accepted failed");
-            self.inner.doc.release_reserve(&chat_id_str).await;
-            return SubmitAck::Failed(action_error(
-                command_id_str,
-                ErrorCode::AgentUnavailable,
-                "outbox mark_accepted failed",
-                true,
-            ));
+        if !resume_permission {
+            if let Err(e) = store.outbox().lock().await.insert(NewOutboxRecord {
+                command_id,
+                chat_id,
+                command_type,
+                turn_id,
+                retryable_class,
+            }) {
+                warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox insert failed");
+                self.inner.doc.release_reserve(&chat_id_str).await;
+                return SubmitAck::Failed(action_error(
+                    command_id_str,
+                    ErrorCode::AgentUnavailable,
+                    "outbox persist failed",
+                    true,
+                ));
+            }
+            // insert(received) → mark_accepted（同一临界区）：accepted Ack 语义
+            // 与 outbox 状态机对齐（Received → Accepted → IntentDurable，§4.4；
+            // 执行器 mark_intent_durable 要求前置 Accepted）。
+            if let Err(e) = store.outbox().lock().await.mark_accepted(command_id) {
+                warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox mark_accepted failed");
+                self.inner.doc.release_reserve(&chat_id_str).await;
+                return SubmitAck::Failed(action_error(
+                    command_id_str,
+                    ErrorCode::AgentUnavailable,
+                    "outbox mark_accepted failed",
+                    true,
+                ));
+            }
         }
 
         // ---- 5. 入队执行器（accepted 立即返回，§4.4）----
@@ -2420,6 +2662,267 @@ impl CommandCoordinator {
         SubmitAck::Accepted {
             command_id: command_id.to_string(),
         }
+    }
+
+    /// Project-scoped ACP session discovery. Unlike legacy `session/list`, the
+    /// caller does not need an already-active logical session. A live runtime
+    /// for the same project is reused when available; otherwise a private
+    /// initialize/list/kill process is created without registering a normal
+    /// runtime chat or logical session in Registry/SQLite. It receives only a
+    /// private heartbeat-ownership lease in ChatRegistry.
+    async fn exec_project_session_discover(
+        &self,
+        ctx: &ConnectionCtx,
+        action: ActionEnvelope,
+        tx: mpsc::Sender<OutboundMsg>,
+    ) -> SubmitAck {
+        let (command_id, project_id) = match action {
+            ActionEnvelope::PersistedSessionDiscover {
+                command_id,
+                payload,
+            } => (command_id, payload.project_id),
+            _ => unreachable!("dispatch guarantees session/discover"),
+        };
+        if Uuid::parse_str(&command_id).is_err() {
+            return SubmitAck::Failed(action_error(
+                command_id,
+                ErrorCode::InvalidState,
+                "invalid commandId",
+                false,
+            ));
+        }
+        let Some(projects) = self.inner.projects.read().await.clone() else {
+            return SubmitAck::Failed(action_error(
+                command_id,
+                ErrorCode::AgentUnavailable,
+                "metadata catalog unavailable",
+                true,
+            ));
+        };
+        let Some(project) = projects
+            .metadata()
+            .project(&project_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|project| project.archived_at.is_none())
+        else {
+            return SubmitAck::Failed(action_error(
+                command_id,
+                ErrorCode::InvalidState,
+                "active project not found",
+                false,
+            ));
+        };
+        {
+            let mut flights = self
+                .inner
+                .discoveries_in_flight
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !flights.insert(project_id.clone()) {
+                return SubmitAck::Failed(action_error(
+                    command_id,
+                    ErrorCode::InvalidState,
+                    "session discovery already in progress for this project",
+                    true,
+                ));
+            }
+        }
+        let guard = DiscoveryFlightGuard {
+            inner: self.inner.clone(),
+            project_id: project_id.clone(),
+        };
+        let cmd = ExecCmd {
+            ctx: ctx.clone(),
+            chat_id: String::new(),
+            action: ActionEnvelope::PersistedSessionDiscover {
+                command_id: command_id.clone(),
+                payload: acp_hub_proto::action::ProjectArchivePayload {
+                    project_id: project_id.clone(),
+                },
+            },
+            tx,
+        };
+        self.send_metadata_ack(
+            &cmd,
+            AckStatus::Accepted,
+            Some(&project_id),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let me = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let result = me.discover_project_sessions(&project).await;
+            match result {
+                Ok(_) => {
+                    audit(
+                        "session.discover",
+                        Some(&command_id),
+                        Some(&cmd.ctx.token_id),
+                        "ok",
+                        Duration::ZERO,
+                        None,
+                    );
+                    me.send_metadata_ack(
+                        &cmd,
+                        AckStatus::Committed,
+                        Some(&project_id),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                Err(message) => {
+                    me.send_error(&cmd, ErrorCode::AgentUnavailable, &message, true)
+                        .await;
+                }
+            }
+        });
+        SubmitAck::Handled
+    }
+
+    async fn discover_project_sessions(
+        &self,
+        project: &crate::persist::metadata::ProjectRecord,
+    ) -> Result<usize, String> {
+        let reusable = self
+            .inner
+            .chats
+            .all_chats()
+            .await
+            .into_iter()
+            .find(|(_, chat)| {
+                !chat.state.is_terminal()
+                    && chat.session_id.is_some()
+                    && chat.instance_id == project.instance_id
+                    && chat.cwd == project.cwd
+            })
+            .map(|(chat_id, _)| chat_id);
+        if let Some(chat_id) = reusable {
+            return self
+                .discover_sessions_through_runtime(&project.instance_id, &chat_id, &project.cwd)
+                .await;
+        }
+
+        let chat_id = Uuid::new_v4().to_string();
+        self.inner.chats.register_ephemeral(&chat_id).await;
+        let result = self
+            .discover_sessions_through_ephemeral(&project.instance_id, &chat_id, &project.cwd)
+            .await;
+        let kill = InstanceKill {
+            command_id: Uuid::new_v4().to_string(),
+            chat_id: chat_id.clone(),
+            grace: Some(1_000),
+        };
+        if let Err(error) = self
+            .inner
+            .instance
+            .send_kill(&project.instance_id, kill)
+            .await
+        {
+            warn!(chat_id, error = ?error, "discovery runtime cleanup failed");
+        }
+        self.inner.chats.unregister_ephemeral(&chat_id).await;
+        result
+    }
+
+    async fn discover_sessions_through_ephemeral(
+        &self,
+        instance_id: &str,
+        chat_id: &str,
+        cwd: &str,
+    ) -> Result<usize, String> {
+        let spawn = InstanceSpawn {
+            command_id: Uuid::new_v4().to_string(),
+            chat_id: chat_id.to_string(),
+            cmd: self.inner.acp_cmd.clone(),
+            cwd: cwd.to_string(),
+            env: None,
+        };
+        match tokio::time::timeout(
+            self.inner.spawn_timeout,
+            self.inner.instance.send_spawn(instance_id, spawn),
+        )
+        .await
+        {
+            Ok(Ok(SpawnOutcome::Acked(ack))) if ack.ok => {}
+            Ok(Ok(_)) => return Err("ACP discovery process failed to start".to_string()),
+            Ok(Err(error)) => return Err(format!("ACP discovery spawn failed: {error}")),
+            Err(_) => return Err("ACP discovery spawn timed out".to_string()),
+        }
+        let (rpc_id, message) = self.inner.translator.initialize_rpc(cwd);
+        let rx = self
+            .inner
+            .relay
+            .register_rpc(&rpc_id, "session_discover_initialize".to_string())
+            .await;
+        if let Err(error) = self
+            .inner
+            .instance
+            .forward_rpc(instance_id, chat_id, &message)
+            .await
+        {
+            self.inner.relay.cancel_rpc(&rpc_id).await;
+            return Err(format!("ACP discovery initialize failed: {error}"));
+        }
+        match tokio::time::timeout(self.inner.initialize_timeout, rx).await {
+            Ok(Ok(response)) if response.get("error").is_none() => {}
+            _ => return Err("ACP discovery initialize timed out or was rejected".to_string()),
+        }
+        self.discover_sessions_through_runtime(instance_id, chat_id, cwd)
+            .await
+    }
+
+    async fn discover_sessions_through_runtime(
+        &self,
+        instance_id: &str,
+        chat_id: &str,
+        cwd: &str,
+    ) -> Result<usize, String> {
+        let rpc_id = self.inner.translator.alloc_rpc_id();
+        let message = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "method": "session/list",
+            "params": { "cwd": cwd },
+        });
+        let rx = self
+            .inner
+            .relay
+            .register_rpc(&rpc_id, "session_discover".to_string())
+            .await;
+        if let Err(error) = self
+            .inner
+            .instance
+            .forward_rpc(instance_id, chat_id, &message)
+            .await
+        {
+            self.inner.relay.cancel_rpc(&rpc_id).await;
+            return Err(format!("ACP session discovery failed: {error}"));
+        }
+        let response = match tokio::time::timeout(SESSION_POLL_TIMEOUT, rx).await {
+            Ok(Ok(response)) if response.get("error").is_none() => response,
+            _ => return Err("ACP session discovery timed out or was rejected".to_string()),
+        };
+        let mut entries = parse_session_list_response(&response);
+        for entry in &mut entries {
+            entry.cwd = cwd.to_string();
+            entry.bound_chat_id = None;
+        }
+        self.refresh_catalog_titles(&entries).await;
+        let count = entries.len();
+        self.inner
+            .chats
+            .registry()
+            .apply_sessions(entries)
+            .await
+            .map_err(|error| format!("session discovery projection failed: {error}"))?;
+        Ok(count)
     }
 
     /// chat/load 会话切换执行（§8.5）：在当前对话（其 ACP 进程）内把
@@ -3165,7 +3668,7 @@ impl CommandCoordinator {
                 warn!(chat_id, "user entry projection persist failed (degraded)");
             }
             _ => {}
-        }
+        };
         self.inner
             .chats
             .set_active_turn(chat_id, &turn_id.to_string())
@@ -4039,12 +4542,46 @@ impl CommandCoordinator {
         else {
             return;
         };
-        if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(chat_id, error = ?e, "mark_intent_durable failed");
-            return;
+        let persisted_recovery = store
+            .outbox_get(command_id)
+            .await
+            .and_then(|record| record.recovery.map(|recovery| *recovery));
+        if persisted_recovery.is_none() {
+            if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
+                warn!(chat_id, error = ?e, "mark_intent_durable failed");
+                return;
+            }
+        }
+        // 官方 request 的 ACP response 材料必须先于 Control Doc CAS
+        // 落入同一 command outbox。否则 server 在 CAS 后崩溃会只留下
+        // resolved 投影，却无法重建 response。
+        let live_permission = self
+            .inner
+            .relay
+            .claim_pending_permission(&payload.permission_id, &command_id_str, payload.decision)
+            .await;
+        let recovery = live_permission
+            .as_ref()
+            .map(|permission| CommandRecovery::PermissionResponse {
+                permission_id: payload.permission_id.clone(),
+                request_id: permission.request_id.clone(),
+                options: permission.options.clone(),
+                decision: payload.decision,
+            })
+            .or(persisted_recovery);
+        if let Some(evidence) = recovery.clone() {
+            if let Err(e) = store
+                .outbox()
+                .lock()
+                .await
+                .set_recovery(command_id, evidence)
+            {
+                warn!(chat_id, error = ?e, "persist permission recovery failed");
+                return;
+            }
         }
         // 1. CAS（§7.4 规则 4：pending → resolved 原子一次）。
-        match self
+        let replay_same_decision = match self
             .inner
             .doc
             .submit_command(
@@ -4056,16 +4593,15 @@ impl CommandCoordinator {
             )
             .await
         {
+            SubmitResult::Applied(r)
+                if !r.applied && r.reason == Some(ApplyReason::PermissionDecisionReplay) =>
+            {
+                true
+            }
             SubmitResult::Applied(r) if !r.applied => {
                 // 已裁决/已过期/未知 → 幂等 duplicate（§7.4 规则 4；§4.4
                 // duplicate ack），命令账本清除【决策：CAS 非 Migrated 的命令
                 // 未产生副作用，tombstone 释放 commandId】。
-                // #1：duplicate 不触发 take，官方表项滞留至断链——顺手移除
-                // （评审 P2-b；remove 幂等无害）。
-                self.inner
-                    .relay
-                    .remove_pending_permission(&payload.permission_id)
-                    .await;
                 let _ = store.outbox().lock().await.clear_for_retry(command_id);
                 let _ = cmd
                     .tx
@@ -4091,33 +4627,60 @@ impl CommandCoordinator {
                 warn!(chat_id, "resolve CAS persist failed (degraded)");
                 return;
             }
-            _ => {}
-        }
+            _ => false,
+        };
         // 2. 双轨（OQ7 裁决 / 评审 P0-1）：官方 `session/request_permission`
         //    （take 命中）→ 官方响应帧（无 L3，JSON-RPC response 无回执，
         //    §4.4 以 forward_ack 为确认点）；原始形态 `permission_request`
         //    （map_raw:475 路径，未命中）→ 旧轨 translate + register_rpc +
         //    L3（原样保留）。两轨共享 CAS 幂等，转发目标同为 entry 归属
         //    instance。
-        let perm = self
-            .inner
-            .relay
-            .take_pending_permission(&payload.permission_id)
-            .await;
+        if replay_same_decision && recovery.is_none() {
+            let _ = store.outbox().lock().await.clear_for_retry(command_id);
+            let _ = cmd
+                .tx
+                .send(OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+                    command_id: command_id_str.clone(),
+                    status: AckStatus::Duplicate,
+                    turn_id: None,
+                    chat_id: None,
+                    project_id: None,
+                    session_id: None,
+                    acp_session_id: None,
+                    committed_projection_version: None,
+                })))
+                .await;
+            return;
+        }
         let Some(entry) = self.inner.chats.entry(chat_id).await else {
             return;
         };
         let instance_id = entry.instance_id.clone();
-        match perm {
-            Some(perm) => {
+        match recovery {
+            Some(CommandRecovery::PermissionResponse {
+                permission_id,
+                request_id,
+                options,
+                decision,
+            }) => {
+                if permission_id != payload.permission_id || decision != payload.decision {
+                    self.fail_terminal(
+                        chat_id,
+                        command_id,
+                        cmd,
+                        ErrorCode::InvalidState,
+                        "permission recovery evidence mismatch",
+                    )
+                    .await;
+                    return;
+                }
                 // 官方轨：响应帧构造不经 translate（评审 P0-1）；id = agent
                 // request id 原样回显（string/number 均合法，instance_registry
                 // forward_rpc 已放宽提取）。
-                let msg = self.inner.translator.permission_response_rpc(
-                    &perm.request_id,
-                    payload.decision,
-                    &perm.options,
-                );
+                let msg =
+                    self.inner
+                        .translator
+                        .permission_response_rpc(&request_id, decision, &options);
                 // mark_dispatched 先行（评审 P2-a：outbox Dispatched→
                 // DeliveryConfirmed 强校验，漏写则 mark_delivery_confirmed
                 // 被拒、命令卡 IntentDurable）。
@@ -4137,7 +4700,7 @@ impl CommandCoordinator {
                     .forward_rpc(&instance_id, chat_id, &msg)
                     .await
                 {
-                    self.fail_retryable(
+                    self.fail_recoverable(
                         chat_id,
                         command_id,
                         cmd,
@@ -4156,6 +4719,10 @@ impl CommandCoordinator {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
+                if let Err(e) = store.outbox().lock().await.clear_recovery(command_id) {
+                    warn!(chat_id, error = ?e, "clear permission recovery failed");
+                    return;
+                }
                 if let Err(e) = store
                     .outbox()
                     .lock()
@@ -4169,6 +4736,10 @@ impl CommandCoordinator {
                     warn!(chat_id, error = ?e, "mark_completed failed");
                     return;
                 }
+                self.inner
+                    .relay
+                    .remove_pending_permission(&payload.permission_id)
+                    .await;
                 self.send_committed(cmd, None, None).await;
             }
             None => {
@@ -4205,12 +4776,15 @@ impl CommandCoordinator {
                     .forward_rpc(&instance_id, chat_id, &msg)
                     .await
                 {
-                    self.fail_retryable(
+                    // 遗留私有 permission_request 没有可持久的官方
+                    // request 回投材料，CAS 已经裁后无法在重启间
+                    // 证明一次安全重放。因此不得对客户谎报 retryable。
+                    self.fail_terminal(
                         chat_id,
                         command_id,
                         cmd,
                         instance_error_code(&e),
-                        "forward failed",
+                        "legacy permission response was not delivered; retry is not safe",
                     )
                     .await;
                     return;
@@ -4316,6 +4890,32 @@ impl CommandCoordinator {
         let _ = store.outbox().lock().await.clear_for_retry(command_id);
         let retryable = code.default_retryable();
         self.send_error(cmd, code, message, retryable).await;
+    }
+
+    /// 已有持久化恢复证据的 retryable 失败。`mark_failed` 会将已投递
+    /// 尝试回退到 `intent_durable`；与普通失败不同，这里不能 tombstone，
+    /// 否则会丢失安全重放所需的 commandId 和 ACP response 材料。
+    async fn fail_recoverable(
+        &self,
+        chat_id: &str,
+        command_id: uuid::Uuid,
+        cmd: &ExecCmd,
+        code: ErrorCode,
+        message: &str,
+    ) {
+        let last = LastError::from_error_code(code);
+        let Some(store) = self
+            .inner
+            .store
+            .chat(chat_uuid(chat_id).unwrap_or_default())
+        else {
+            return;
+        };
+        if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
+            warn!(chat_id, error = ?e, "mark recoverable failure failed");
+        }
+        self.send_error(cmd, code, message, code.default_retryable())
+            .await;
     }
 
     /// 终态失败（§4.4 非 retryable）：mark_failed（保留记录）+
@@ -4526,7 +5126,10 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
         | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionRestore { command_id, .. }
         | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
         | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
@@ -4558,7 +5161,10 @@ fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionCreate { .. }
         | ActionEnvelope::PersistedSessionOpen { .. }
         | ActionEnvelope::PersistedSessionRename { .. } => None,
+        ActionEnvelope::PersistedSessionArchive { .. }
+        | ActionEnvelope::PersistedSessionRestore { .. } => None,
         ActionEnvelope::PersistedSessionImport { .. } => None,
+        ActionEnvelope::PersistedSessionDiscover { .. } => None,
         ActionEnvelope::SubscribeEvents { .. } | ActionEnvelope::UnsubscribeEvents { .. } => None,
         // workspace 管理命令 / session/list 按需查询：submit 层直接执行
         // （不解析 chat_id）。
@@ -4584,6 +5190,26 @@ fn dedup_verdict(rec: &crate::persist::outbox::OutboxRecord) -> DedupVerdict {
         }
         _ => DedupVerdict::Duplicate,
     }
+}
+
+/// 验证重试 action 是持久恢复证据所绑定的原 permission payload。
+/// 是否处于可恢复阶段由调用方独立判定，避免把 `dispatched`
+/// 的投递未知误报成 payload 篡改。
+fn permission_recovery_payload_matches(
+    rec: &crate::persist::outbox::OutboxRecord,
+    action: &ActionEnvelope,
+) -> bool {
+    let ActionEnvelope::ResolvePermission { payload, .. } = action else {
+        return false;
+    };
+    matches!(
+        rec.recovery.as_deref(),
+        Some(CommandRecovery::PermissionResponse {
+            permission_id,
+            decision,
+            ..
+        }) if permission_id == &payload.permission_id && decision == &payload.decision
+    )
 }
 
 enum DedupVerdict {

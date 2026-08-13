@@ -1,4 +1,4 @@
-import { render, screen } from '@solidjs/testing-library';
+import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   setChatHead,
@@ -12,6 +12,8 @@ import {
   setSelectedSessionId,
 } from '../store';
 import { ChatHeader } from './ChatHeader';
+import { resetRuntimeControls, startRuntimeControl } from '../lib/runtime-control';
+import { setPrincipalRole } from '../lib/auth-state';
 
 const session = {
   id: 'session-1',
@@ -34,6 +36,8 @@ function resetStore() {
   setPermissions([]);
   setRuntimeDocsState({ chat: false, control: false });
   setConnState({ text: '未连接', kind: 'idle' });
+  resetRuntimeControls();
+  setPrincipalRole(null);
 }
 
 afterEach(resetStore);
@@ -46,6 +50,14 @@ describe('ChatHeader runtime truth', () => {
 
     expect(screen.getByText('持久会话')).toBeInTheDocument();
     expect(screen.getByText('未启动 · 会话已保存')).toBeInTheDocument();
+  });
+
+  it('disambiguates a fallback title with the durable ACP identity', () => {
+    setProjectSessions([{ ...session, title: '新对话', acpSessionId: 'acp-12345678', activeChatId: null }]);
+    setSelectedSessionId(session.id);
+    render(() => <ChatHeader />);
+
+    expect(screen.getByText('新对话 · …12345678')).toBeInTheDocument();
   });
 
   it('announces permission attention before generic active work', () => {
@@ -88,5 +100,30 @@ describe('ChatHeader runtime truth', () => {
 
     expect(screen.getByText('正在载入会话…')).toBeInTheDocument();
     expect(screen.queryByText('可输入 · 会话已保存')).not.toBeInTheDocument();
+  });
+
+  it('prevents close while another control owns the runtime', () => {
+    setProjectSessions([session]);
+    setSelectedSessionId(session.id);
+    setSelectedCid('chat-1');
+    setChatStatusSignal({ 'chat-1': 'active' });
+    startRuntimeControl('cancel-1', 'chat-1', 'cancel');
+    render(() => <ChatHeader />);
+    screen.getByRole('button', { name: '会话操作' }).click();
+    expect(screen.getByRole('menuitem', { name: '关闭运行实例' })).toBeDisabled();
+  });
+
+  it('closes the confirmation when Registry proves the runtime is terminal', async () => {
+    setPrincipalRole('full');
+    setProjectSessions([session]);
+    setSelectedSessionId(session.id);
+    setSelectedCid('chat-1');
+    setChatStatusSignal({ 'chat-1': 'active' });
+    render(() => <ChatHeader />);
+    fireEvent.click(screen.getByRole('button', { name: '会话操作' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '关闭运行实例' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    setChatStatusSignal({ 'chat-1': 'closed' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 });

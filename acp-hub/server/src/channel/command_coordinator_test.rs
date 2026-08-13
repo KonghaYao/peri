@@ -18,7 +18,7 @@ use yrs::{Map, ReadTxn, Transact};
 use acp_hub_proto::ack::{AckStatus, ActionError, ErrorCode};
 use acp_hub_proto::action::{
     ActionEnvelope, CreateChatPayload, PersistedSessionImportPayload,
-    PersistedSessionRenamePayload, ProjectCreatePayload, PromptChatPayload,
+    PersistedSessionRenamePayload, ProjectArchivePayload, ProjectCreatePayload, PromptChatPayload,
     ResolvePermissionPayload,
 };
 use acp_hub_proto::frame::Frame;
@@ -29,7 +29,7 @@ use crate::channel::OutboundMsg;
 use crate::channel::RelayEventHandler;
 use crate::channel::{CommandCoordinator, SubmitAck, DEFAULT_ACP_CMD};
 use crate::control::StoreSink;
-use crate::control::{ChatRegistry, ProjectService};
+use crate::control::{ChatRegistry, ChatState, ProjectService};
 use crate::control::{InstanceAck, InstanceConn, InstanceRegistry};
 use crate::persist::metadata::MetadataStore;
 use crate::persist::{PersistConfig, Store};
@@ -341,6 +341,98 @@ async fn project_archive_rejects_a_live_runtime() {
     assert!(env
         .metadata
         .project("p1")
+        .await
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+}
+
+#[tokio::test]
+async fn session_archive_restore_commits_without_changing_lifecycle() {
+    let env = env().await;
+    env.metadata
+        .create_project("p1", "Demo", env._tmp.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    env.metadata
+        .import_session("logical-1", "p1", "acp-1", "Saved", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    let lifecycle = env
+        .metadata
+        .session("logical-1")
+        .await
+        .unwrap()
+        .unwrap()
+        .lifecycle;
+
+    for archive in [true, false] {
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let action = if archive {
+            ActionEnvelope::PersistedSessionArchive {
+                command_id,
+                payload: acp_hub_proto::action::PersistedSessionOpenPayload {
+                    session_id: "logical-1".into(),
+                },
+            }
+        } else {
+            ActionEnvelope::PersistedSessionRestore {
+                command_id,
+                payload: acp_hub_proto::action::PersistedSessionOpenPayload {
+                    session_id: "logical-1".into(),
+                },
+            }
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        assert!(matches!(
+            env.coordinator.submit(&ctx("catalog"), action, tx).await,
+            SubmitAck::Handled
+        ));
+        assert!(
+            matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Accepted)
+        );
+        assert!(
+            matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Committed && ack.session_id.as_deref() == Some("logical-1"))
+        );
+        let session = env.metadata.session("logical-1").await.unwrap().unwrap();
+        assert_eq!(session.archived_at.is_some(), archive);
+        assert_eq!(session.lifecycle, lifecycle);
+    }
+}
+
+#[tokio::test]
+async fn session_archive_rejects_a_live_runtime() {
+    let env = env().await;
+    env.metadata
+        .create_project("p1", "Demo", env._tmp.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    env.metadata
+        .import_session("logical-1", "p1", "acp-1", "Active", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    bound_session(&env, S1, "acp-1").await;
+    let (tx, _rx) = mpsc::channel(4);
+    let result = env
+        .coordinator
+        .submit(
+            &ctx("catalog"),
+            ActionEnvelope::PersistedSessionArchive {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: acp_hub_proto::action::PersistedSessionOpenPayload {
+                    session_id: "logical-1".into(),
+                },
+            },
+            tx,
+        )
+        .await;
+    assert!(
+        matches!(result, SubmitAck::Failed(ref error) if error.code == ErrorCode::InvalidState)
+    );
+    assert!(env
+        .metadata
+        .session("logical-1")
         .await
         .unwrap()
         .unwrap()
@@ -997,7 +1089,7 @@ async fn resolve_official_permission_sends_response() {
         command_id: cid.clone(),
         payload: ResolvePermissionPayload {
             chat_id: S1.into(),
-            permission_id: pid,
+            permission_id: pid.clone(),
             decision: acp_hub_proto::action::PermissionDecision::Allow,
         },
     };
@@ -1071,7 +1163,7 @@ async fn resolve_official_forward_failure_retryable() {
         command_id: cid.clone(),
         payload: ResolvePermissionPayload {
             chat_id: S2.into(),
-            permission_id: pid,
+            permission_id: pid.clone(),
             decision: acp_hub_proto::action::PermissionDecision::Allow,
         },
     };
@@ -1086,6 +1178,211 @@ async fn resolve_official_forward_failure_retryable() {
         other => panic!("expected action_error, got {other:?}"),
     }
     assert!(env.instance_rx.try_recv().is_err(), "无 forward 帧（离线）");
+    let persisted = env
+        .store
+        .chat(uuid::Uuid::parse_str(S2).unwrap())
+        .unwrap()
+        .outbox_get(uuid::Uuid::parse_str(&cid).unwrap())
+        .await
+        .expect("恢复命令已落盘");
+    assert_eq!(
+        persisted.status,
+        crate::persist::outbox::OutboxStatus::IntentDurable
+    );
+    assert!(persisted.recovery.is_some(), "ACP response 材料必须持久化");
+
+    // 相反 decision 即使使用新 commandId，也只能得到 duplicate；不得消费
+    // 首次 Allow 所需的官方 request 回投材料。
+    let opposite_id = uuid::Uuid::new_v4().to_string();
+    let opposite = ActionEnvelope::ResolvePermission {
+        command_id: opposite_id.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S2.into(),
+            permission_id: pid.clone(),
+            decision: acp_hub_proto::action::PermissionDecision::Deny,
+        },
+    };
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), opposite, tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Duplicate);
+            assert_eq!(ack.command_id, opposite_id);
+        }
+        other => panic!("expected opposite duplicate ack, got {other:?}"),
+    }
+    assert!(
+        env.relay.pending_permission(&pid).await.is_some(),
+        "相反 decision 不得消费首次裁决的恢复材料"
+    );
+
+    // 即使 decision 相同，新 commandId 也不能冒充原命令重放
+    // 安全副作用。
+    let same_decision_id = uuid::Uuid::new_v4().to_string();
+    let same_decision = ActionEnvelope::ResolvePermission {
+        command_id: same_decision_id.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S2.into(),
+            permission_id: pid.clone(),
+            decision: acp_hub_proto::action::PermissionDecision::Allow,
+        },
+    };
+    let r = env
+        .coordinator
+        .submit(&ctx("c"), same_decision, tx.clone())
+        .await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Duplicate);
+            assert_eq!(ack.command_id, same_decision_id);
+        }
+        other => panic!("expected same-decision duplicate ack, got {other:?}"),
+    }
+    assert!(
+        env.relay.pending_permission(&pid).await.is_some(),
+        "新 commandId 不得消费原命令的恢复材料"
+    );
+
+    // 同一 commandId + 同一 decision 在 instance 恢复后必须真正重发官方
+    // response，不能因本地 CAS 已 resolved 而只返回虚假的 duplicate。
+    env.instance
+        .on_hello(
+            "local",
+            "tok-m",
+            InstanceConn {
+                tx: env.instance_tx.clone(),
+            },
+            &acp_hub_proto::instance::InstanceHello {
+                token: "tok".into(),
+                hostname: "local".into(),
+                caps: serde_json::json!({}),
+                buffered: None,
+                buffer_lost: None,
+                stream_epochs: None,
+                nonce: "AAAA".into(),
+            },
+        )
+        .await;
+    let retry = ActionEnvelope::ResolvePermission {
+        command_id: cid.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S2.into(),
+            permission_id: pid.clone(),
+            decision: acp_hub_proto::action::PermissionDecision::Allow,
+        },
+    };
+    let r = env.coordinator.submit(&ctx("c"), retry, tx.clone()).await;
+    assert!(matches!(r, SubmitAck::Accepted { .. }), "{r:?}");
+    let fwd = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("recovery forward received")
+        .expect("rx alive");
+    match fwd {
+        OutboundMsg::Frame(Frame::InstanceForward(f)) => {
+            let command_id = f.command_id.clone();
+            env.instance
+                .on_ack(
+                    "local",
+                    &command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: command_id.clone(),
+                        chat_id: f.chat_id,
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+        }
+        other => panic!("expected recovery forward, got {other:?}"),
+    }
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionAck(ack)))) => {
+            assert_eq!(ack.status, acp_hub_proto::ack::AckStatus::Committed);
+            assert_eq!(ack.command_id, cid);
+        }
+        other => panic!("expected recovery committed ack, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn persisted_permission_recovery_without_runtime_fails_closed() {
+    let env = env().await;
+    bound_session(&env, S2, "acp-2").await;
+    setup_active_turn(&env, S2).await;
+    let pid = register_official_permission(&env, S2, "acp-2", 1).await;
+    env.instance
+        .on_disconnect(
+            "local",
+            &InstanceConn {
+                tx: env.instance_tx.clone(),
+            },
+        )
+        .await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let action = ActionEnvelope::ResolvePermission {
+        command_id: cid.clone(),
+        payload: ResolvePermissionPayload {
+            chat_id: S2.into(),
+            permission_id: pid,
+            decision: acp_hub_proto::action::PermissionDecision::Allow,
+        },
+    };
+    assert!(matches!(
+        env.coordinator
+            .submit(&ctx("c"), action.clone(), tx.clone())
+            .await,
+        SubmitAck::Accepted { .. }
+    ));
+    let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("offline error")
+        .expect("channel alive");
+
+    let chat_store = env.store.chat(uuid::Uuid::parse_str(S2).unwrap()).unwrap();
+    let command_id = uuid::Uuid::parse_str(&cid).unwrap();
+    chat_store
+        .outbox()
+        .lock()
+        .await
+        .mark_dispatched(command_id, chrono::Utc::now())
+        .unwrap();
+    match env
+        .coordinator
+        .submit(&ctx("c"), action.clone(), tx.clone())
+        .await
+    {
+        SubmitAck::Failed(error) => {
+            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert!(!error.retryable);
+            assert!(error.message.contains("delivery result is unknown"));
+        }
+        other => panic!("expected delivery-unknown rejection, got {other:?}"),
+    }
+    chat_store
+        .outbox()
+        .lock()
+        .await
+        .mark_failed(
+            command_id,
+            crate::persist::outbox::LastError::from_error_code(
+                acp_hub_proto::ack::ErrorCode::InstanceOffline,
+            ),
+        )
+        .unwrap();
+    env.chats.transition(S2, ChatState::Ended).await.unwrap();
+    match env.coordinator.submit(&ctx("c"), action, tx).await {
+        SubmitAck::Failed(error) => {
+            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert!(!error.retryable);
+            assert!(error.message.contains("operator reconciliation"));
+        }
+        other => panic!("expected fail-closed restart result, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1448,6 +1745,214 @@ async fn create_with_unknown_workspace_fails_invalid_state() {
 }
 
 // ── session/list 按需查询（§6.3：agent 侧真实数据源）────────────────────
+
+#[tokio::test]
+async fn project_session_discover_bootstraps_and_cleans_private_runtime() {
+    let mut env = env().await;
+    let cwd = env._tmp.path().to_string_lossy().into_owned();
+    env.metadata
+        .create_project("project-1", "Demo", &cwd, "local")
+        .await
+        .unwrap();
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let (tx, mut rx) = mpsc::channel(16);
+    let result = env
+        .coordinator
+        .submit(
+            &ctx("discover"),
+            ActionEnvelope::PersistedSessionDiscover {
+                command_id: command_id.clone(),
+                payload: ProjectArchivePayload {
+                    project_id: "project-1".into(),
+                },
+            },
+            tx,
+        )
+        .await;
+    assert!(matches!(result, SubmitAck::Handled));
+    assert!(
+        matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Accepted)
+    );
+
+    let (second_tx, _second_rx) = mpsc::channel(4);
+    let duplicate_flight = env
+        .coordinator
+        .submit(
+            &ctx("discover-again"),
+            ActionEnvelope::PersistedSessionDiscover {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: ProjectArchivePayload {
+                    project_id: "project-1".into(),
+                },
+            },
+            second_tx,
+        )
+        .await;
+    assert!(matches!(duplicate_flight, SubmitAck::Failed(ref error) if error.retryable));
+
+    let spawn = match env.instance_rx.recv().await.unwrap() {
+        OutboundMsg::Frame(Frame::InstanceSpawn(spawn)) => spawn,
+        other => panic!("expected private discovery spawn, got {other:?}"),
+    };
+    assert_eq!(spawn.cwd, cwd);
+    let private_chat = spawn.chat_id.clone();
+    let reconciliation = env
+        .chats
+        .reconcile_alive("local", std::slice::from_ref(&private_chat))
+        .await
+        .unwrap();
+    assert!(
+        reconciliation.to_kill.is_empty(),
+        "heartbeat must not race-kill a managed discovery runtime"
+    );
+    env.instance
+        .on_ack(
+            "local",
+            &spawn.command_id,
+            InstanceAck::Spawn(acp_hub_proto::instance::InstanceSpawnAck {
+                command_id: spawn.command_id.clone(),
+                chat_id: private_chat.clone(),
+                ok: true,
+                error: None,
+            }),
+        )
+        .await;
+
+    for expected_method in ["initialize", "session/list"] {
+        let forward = match env.instance_rx.recv().await.unwrap() {
+            OutboundMsg::Frame(Frame::InstanceForward(forward)) => forward,
+            other => panic!("expected {expected_method} forward, got {other:?}"),
+        };
+        assert_eq!(forward.chat_id, private_chat);
+        assert_eq!(forward.frame["method"], expected_method);
+        env.instance
+            .on_ack(
+                "local",
+                &forward.command_id,
+                InstanceAck::Forward(InstanceForwardAck {
+                    command_id: forward.command_id.clone(),
+                    chat_id: private_chat.clone(),
+                    ok: true,
+                    error: None,
+                }),
+            )
+            .await;
+        let id = forward.frame["id"].as_str().unwrap().to_string();
+        let result = if expected_method == "session/list" {
+            serde_json::json!({ "sessions": [{ "sessionId": "acp-old", "title": "Existing", "updatedAt": "2026-08-14T00:00:00Z" }] })
+        } else {
+            serde_json::json!({})
+        };
+        let response = acp_hub_proto::instance::InstanceEvent {
+            chat_id: private_chat.clone(),
+            epoch: 0,
+            seq: if expected_method == "initialize" {
+                1
+            } else {
+                2
+            },
+            frame: serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        };
+        assert!(matches!(
+            env.relay.on_instance_event("local", &response).await,
+            crate::channel::ConsumeResult::RpcConfirmed { .. }
+        ));
+    }
+
+    let kill = match env.instance_rx.recv().await.unwrap() {
+        OutboundMsg::Frame(Frame::InstanceKill(kill)) => kill,
+        other => panic!("expected discovery cleanup kill, got {other:?}"),
+    };
+    assert_eq!(kill.chat_id, private_chat);
+    env.instance
+        .on_ack(
+            "local",
+            &kill.command_id,
+            InstanceAck::Kill(acp_hub_proto::instance::InstanceKillAck {
+                command_id: kill.command_id.clone(),
+                chat_id: private_chat,
+                ok: true,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Committed)
+    );
+    assert!(
+        env.chats.all_chats().await.is_empty(),
+        "private discovery must not create a sidebar/runtime chat"
+    );
+    let candidates = env.chats.registry().list_legacy_sessions().await.unwrap();
+    assert!(candidates
+        .iter()
+        .any(|session| session.session_id == "acp-old" && session.cwd == cwd));
+}
+
+#[tokio::test]
+async fn project_session_discover_reuses_matching_live_runtime_without_spawn() {
+    let mut env = env().await;
+    bound_session(&env, S1, "acp-live").await;
+    env.metadata
+        .create_project("project-1", "Demo", "/", "local")
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(8);
+    let result = env
+        .coordinator
+        .submit(
+            &ctx("discover"),
+            ActionEnvelope::PersistedSessionDiscover {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: ProjectArchivePayload {
+                    project_id: "project-1".into(),
+                },
+            },
+            tx,
+        )
+        .await;
+    assert!(matches!(result, SubmitAck::Handled));
+    assert!(
+        matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Accepted)
+    );
+    let forward = match env.instance_rx.recv().await.unwrap() {
+        OutboundMsg::Frame(Frame::InstanceForward(forward)) => forward,
+        other => {
+            panic!("matching live runtime should receive session/list directly, got {other:?}")
+        }
+    };
+    assert_eq!(forward.chat_id, S1);
+    assert_eq!(forward.frame["method"], "session/list");
+    env.instance
+        .on_ack(
+            "local",
+            &forward.command_id,
+            InstanceAck::Forward(InstanceForwardAck {
+                command_id: forward.command_id.clone(),
+                chat_id: S1.into(),
+                ok: true,
+                error: None,
+            }),
+        )
+        .await;
+    let response = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S1.into(),
+        epoch: 0,
+        seq: 1,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": forward.frame["id"],
+            "result": { "sessions": [] }
+        }),
+    };
+    env.relay.on_instance_event("local", &response).await;
+    assert!(
+        matches!(rx.recv().await, Some(OutboundMsg::Frame(Frame::ActionAck(ref ack))) if ack.status == AckStatus::Committed)
+    );
+    assert!(
+        env.instance_rx.try_recv().is_err(),
+        "reuse path must not spawn or kill another process"
+    );
+}
 
 /// 完整链路：bound chat → submit session/list → instance 侧收到 RPC 帧 →
 /// 回 forward ack + JSON-RPC 响应 → client 收 session_list 帧（条目带 cwd）。

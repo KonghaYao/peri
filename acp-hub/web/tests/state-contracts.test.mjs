@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { transform } from 'lightningcss';
 import postcss from 'postcss';
-import { acceptMessageSubmission, beginMessageSubmission, beginQuickStart, completesMessageSubmission, failMessageSubmission, isTurnActive, lockPermissionDecision, markMessageUncertain, markPermissionDecisionUncertain, quickStartCanActivate, unlockPermissionDecision, updateQuickStart } from '../src/panel/lib/action-state.mjs';
+import { isTurnActive } from '../src/panel/lib/action-state.mjs';
 import { cleanSessionTitle, connectionProblemForClose, formatRelativeTime, retainLiveRuntimeHints, sessionDisplayTitle, shortSessionId } from '../src/panel/lib/recovery-state.mjs';
 import { messageTime } from '../src/panel/lib/message-time.mjs';
 import { parseMarkdown, safeHref } from '../src/panel/lib/markdown.mjs';
@@ -52,6 +52,7 @@ test('Composer and quick start have one neutral keyboard-focus owner and no stal
 test('runtime status distinguishes durable session state from process state', () => {
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: false, hasPendingPermission: false, turnActive: false }).label, '未启动 · 会话已保存');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'active', hasPendingPermission: false, turnActive: false }).tone, 'ready');
+  assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, isSelected: false, chatStatus: null, hasPendingPermission: false, turnActive: false }).label, '运行中 · 点击切换');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, isHydrated: false, chatStatus: 'active', hasPendingPermission: false, turnActive: false }).label, '正在载入会话…');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'active', hasPendingPermission: true, turnActive: true }).label, '等待你的许可');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'crashed', hasPendingPermission: false, turnActive: false }).tone, 'danger');
@@ -66,53 +67,16 @@ test('principal parsing and mutation policy are closed by default', async () => 
   assert.equal(canMutate('read-only'), false);
   assert.equal(canMutate(null), false);
 });
-test('message submission preserves text through accepted and uncertain states', () => {
-  const sending = beginMessageSubmission('cmd-1', 'important draft');
-  const accepted = acceptMessageSubmission(sending, 'cmd-1');
-  const uncertain = markMessageUncertain(accepted, 'cmd-1');
-  assert.equal(accepted.phase, 'accepted');
-  assert.equal(uncertain.phase, 'uncertain');
-  assert.equal(uncertain.text, 'important draft');
-  assert.equal(uncertain.retryable, true);
-  assert.equal(completesMessageSubmission(uncertain, { commandId: 'cmd-1', status: 'duplicate' }), true);
-});
-
-test('message retry identity survives uncertainty and a late terminal ack completes it once', () => {
-  const initial = beginMessageSubmission('same-command', 'do not lose this');
-  const uncertain = markMessageUncertain(acceptMessageSubmission(initial, 'same-command'), 'same-command');
-  assert.equal(uncertain.commandId, 'same-command');
-  assert.equal(uncertain.text, 'do not lose this');
-  assert.equal(completesMessageSubmission(uncertain, { commandId: 'other-command', status: 'committed' }), false);
-  assert.equal(completesMessageSubmission(uncertain, { commandId: 'same-command', status: 'committed' }), true);
-  assert.equal(completesMessageSubmission(uncertain, { commandId: 'same-command', status: 'duplicate' }), true);
-});
-
 test('prompt recovery is owned by CommandTracker rather than an ad-hoc frame cache', () => {
   const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
+  const delivery = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'message-delivery.ts'), 'utf8');
+  const activation = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'session-activation.ts'), 'utf8');
   assert.match(store, /sendAction\(frame, 'prompt', \{\s*retryOnUncertain: true/);
-  assert.match(store, /sendAction\(frame, 'session\/create', \{\s*retryOnUncertain: true/);
+  assert.match(activation, /this\.deps\.send\(frame, 'session\/create', \{\s*retryOnUncertain: true/);
   assert.match(store, /commands\.retry\(current\.commandId, sendFrame\)/);
   assert.doesNotMatch(store, /retryableMessageFrame|retryableQuickStartFrame/);
-});
-
-test('quick start preserves project, text and command identity until a complete activation ack', () => {
-  const initial = beginQuickStart('create-1', 'project-1', 'first prompt');
-  const uncertain = updateQuickStart(initial, 'create-1', 'uncertain', 'unknown');
-  assert.equal(uncertain.text, 'first prompt');
-  assert.equal(uncertain.projectId, 'project-1');
-  assert.equal(quickStartCanActivate(uncertain, { commandId: 'create-2', status: 'committed', sessionId: 's', chatId: 'c' }), false);
-  assert.equal(quickStartCanActivate(uncertain, { commandId: 'create-1', status: 'committed', sessionId: 's' }), false);
-  assert.equal(quickStartCanActivate(uncertain, { commandId: 'create-1', status: 'committed', sessionId: 's', chatId: 'c' }), true);
-  assert.equal(quickStartCanActivate(uncertain, { commandId: 'create-1', status: 'duplicate', sessionId: 's', chatId: 'c' }), true);
-  assert.equal(updateQuickStart(initial, 'create-1', 'failed', 'invalid', false).retryable, false);
-});
-
-test('message failure is command correlated and retains retry policy', () => {
-  const sending = beginMessageSubmission('cmd-1', 'draft');
-  assert.equal(failMessageSubmission(sending, 'stale', 'wrong'), sending);
-  assert.deepEqual(failMessageSubmission(sending, 'cmd-1', 'offline', true), {
-    ...sending, phase: 'failed', detail: 'offline', retryable: true,
-  });
+  assert.match(delivery, /if \(currentSubmission\(\)\) return false/);
+  assert.doesNotMatch(delivery, /export const composerDrafts/);
 });
 
 test('active turn excludes every terminal projection state', () => {
@@ -124,21 +88,18 @@ test('active turn excludes every terminal projection state', () => {
   assert.equal(isTurnActive(null), false);
 });
 
-test('permission lock is idempotent and remains until the projection removes it', () => {
-  const empty = new Map();
-  const locked = lockPermissionDecision(empty, 'permission-1', 'allow');
-  assert.equal(lockPermissionDecision(locked, 'permission-1', 'deny'), locked);
-  assert.deepEqual(locked.get('permission-1'), { decision: 'allow', phase: 'pending' });
-  const uncertain = markPermissionDecisionUncertain(locked, 'permission-1');
-  assert.deepEqual(uncertain.get('permission-1'), { decision: 'allow', phase: 'uncertain' });
-  assert.equal(markPermissionDecisionUncertain(uncertain, 'permission-1'), uncertain);
-  assert.equal(unlockPermissionDecision(locked, 'permission-1').has('permission-1'), false);
-});
-
 test('permission delivery uncertainty remains locked in the security surface', () => {
   const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
-  assert.match(store, /onTimeout:\s*\(\)\s*=>\s*\{[\s\S]*?markPermissionDecisionUncertain\(decisions, permissionId\)[\s\S]*?不要提交相反决策/);
-  assert.match(store, /onError:\s*release/);
+  const delivery = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'permission-delivery.ts'), 'utf8');
+  assert.match(store, /startPermissionDecision\(frame\.commandId, permissionId, decision\)/);
+  assert.match(store, /retryOnError: true/);
+  assert.match(store, /onTimeout:\s*\(\)\s*=>\s*\{[\s\S]*?markPermissionDecisionUncertain\(frame\.commandId\)[\s\S]*?不要提交相反决策/);
+  assert.match(store, /onError:\s*\(error\)\s*=>\s*error\.retryable[\s\S]*?markPermissionDecisionUncertain\(frame\.commandId, true\)[\s\S]*?failPermissionDecision\(frame\.commandId\)/);
+  assert.match(delivery, /retryable:\s*boolean/);
+  assert.match(delivery, /markPermissionDecisionUncertain\(commandId: string, retryable = false\)/);
+  assert.match(store, /retainProjectedPermissions\(visiblePermissionIds\)/);
+  assert.doesNotMatch(store, /pendingPermissionDecisions|setPendingPermissionDecisions|lockPermissionDecision|unlockPermissionDecision/);
+  assert.match(delivery, /if \(!permissionId \|\| decisions\(\)\.has\(permissionId\)\) return false/);
 });
 
 test('runtime hints survive only while Registry proves the chat is non-terminal', () => {
@@ -341,9 +302,13 @@ test('responsive behavior has compact, medium and wide layout contracts', () => 
 
 test('coarse pointers never depend on hover to discover sidebar actions', () => {
   const styles = readFileSync(join(import.meta.dirname, '..', 'src', 'styles.css'), 'utf8');
+  const primitives = readFileSync(join(import.meta.dirname, '..', 'src', 'ui', 'primitives.css'), 'utf8');
   const coarse = styles.match(/@media\(pointer:coarse\)\{([^}]|\}(?!\s*@media))*\}/s)?.[0] || '';
   assert.match(coarse, /\.session-menu\{[^}]*opacity:1/);
-  assert.match(coarse, /\.project-heading>\.ui-tooltip-anchor \.ui-icon-button\{opacity:1\}/);
+  assert.match(coarse, /\.project-heading>\.ui-tooltip-anchor \.ui-icon-button\{[^}]*width:44px;min-height:44px;opacity:1/);
+  assert.match(coarse, /\.project-disclosure,\.archived-projects__toggle,\.archived-sessions__toggle,\.session-search-results button\{min-height:44px/);
+  assert.match(coarse, /\.archived-project-row \.ui-button,\.archived-session-row \.ui-button\{min-height:44px/);
+  assert.match(primitives, /@media\(pointer:coarse\)\{\.ui-button,\.ui-menu__item\{min-height:44px\}\.ui-icon-button\{width:44px;min-height:44px\}\.ui-dialog__close\{width:44px;height:44px\}\}/);
   assert.match(styles, /\.session-row\.is-selected \.session-menu/);
 });
 
@@ -381,6 +346,12 @@ test('connection loss settles pending actions instead of silently discarding the
   assert.match(tracker, /settleConnectionLoss\(\): void/);
   assert.match(tracker, /for \(const commandId of \[\.\.\.this\.pending\.keys\(\)\]\)/);
   assert.match(store, /case 'reconnecting':[\s\S]*?commands\.settleConnectionLoss\(\)/);
+  assert.match(store, /case 'fatal':[\s\S]*?commands\.settleConnectionLoss\(\)/);
+  assert.match(store, /case 'closed':[\s\S]*?commands\.settleConnectionLoss\(\)/);
+  for (const state of ['reconnecting', 'fatal', 'closed']) {
+    const branch = store.match(new RegExp(`case '${state}':([\\s\\S]*?)(?=case '|default:)`))?.[1] || '';
+    assert.doesNotMatch(branch, /setMessageSubmission|setQuickStartSubmission|markMessageUncertain|updateQuickStart/, `${state} must settle action state only through CommandTracker callbacks`);
+  }
   assert.match(store, /export function connectWithCookie\(\)[\s\S]*?commands\.settleConnectionLoss\(\)/);
   assert.doesNotMatch(store, /connectWithCookie\(\)[\s\S]{0,500}setPersistentErrors\(\[\]\)/);
 });
@@ -395,7 +366,11 @@ test('replaced websocket callbacks cannot mutate the new connection state', () =
 
 test('routine connection readiness stays in persistent status instead of interrupting with a toast', () => {
   const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
-  assert.match(store, /case 'ready':[\s\S]*?setConnState\(\{ text: '就绪', kind: 'ok' \}\)/);
+  const state = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'connection-state.mjs'), 'utf8');
+  assert.match(store, /const transition = connectionTransition\(state, detail, !!principalRole\(\)\)/);
+  assert.match(state, /case 'ready':[\s\S]*?ready: true,[\s\S]*?busy: false,[\s\S]*?text: '就绪'/);
+  assert.match(state, /case 'reconnecting':[\s\S]*?ready: false,[\s\S]*?busy: true/);
+  assert.doesNotMatch(store, /case 'ready':[\s\S]{0,260}set(?:Busy|ConnState|ConnectionProblem)\(/);
   assert.doesNotMatch(store, /toast\('连接就绪'\)/);
 });
 
@@ -414,9 +389,36 @@ test('downstream parsing rejects unsafe JSON shapes while preserving future tags
   const ws = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'ws-client.ts'), 'utf8');
   assert.match(protocol, /!value \|\| typeof value !== 'object' \|\| Array\.isArray\(value\)/);
   assert.match(protocol, /typeof frame\.t !== 'string' \|\| !frame\.t\.trim\(\)/);
-  assert.doesNotMatch(protocol, /FRAME_TAGS|KNOWN_TAGS|switch \(frame\.t\)/);
+  assert.doesNotMatch(protocol, /FRAME_TAGS|KNOWN_TAGS/);
+  assert.match(protocol, /case 'action_ack':/);
+  assert.match(protocol, /case 'action_error':/);
+  assert.match(protocol, /case 'ysync\.update':/);
+  assert.match(protocol, /case 'ready':/);
+  assert.match(protocol, /!optionalStrings\(frame, \['turnId', 'chatId', 'projectId', 'sessionId', 'acpSessionId'\]\)/);
   assert.match(ws, /\[ws-client\] 帧解析失败 length=\$\{size\}/);
   assert.doesNotMatch(ws, /帧解析失败[^\n]*(?:ev\.data|JSON\.stringify)/);
+});
+
+test('each Yjs document kind has one independent reader behind a logic-free barrel', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel', 'lib');
+  const barrel = readFileSync(join(root, 'yjs.ts'), 'utf8');
+  const registry = readFileSync(join(root, 'registry-view.ts'), 'utf8');
+  const chat = readFileSync(join(root, 'chat-view.ts'), 'utf8');
+  const control = readFileSync(join(root, 'control-view.ts'), 'utf8');
+  const docs = readFileSync(join(root, 'doc-store.ts'), 'utf8');
+  assert.match(barrel, /export \{ DocStore \} from '\.\/doc-store'/);
+  assert.match(barrel, /export \{ renderRegistry \} from '\.\/registry-view'/);
+  assert.match(barrel, /export \{ renderChat \} from '\.\/chat-view'/);
+  assert.match(barrel, /export \{ renderControl \} from '\.\/control-view'/);
+  assert.doesNotMatch(barrel, /function |class DocStore|from 'yjs'/);
+  assert.match(registry, /export function renderRegistry/);
+  assert.doesNotMatch(registry, /renderChat|renderControl|class DocStore/);
+  assert.match(chat, /export function renderChat/);
+  assert.doesNotMatch(chat, /renderRegistry|renderControl|class DocStore/);
+  assert.match(control, /export function renderControl/);
+  assert.doesNotMatch(control, /renderRegistry|renderChat|class DocStore/);
+  assert.match(docs, /export class DocStore/);
+  assert.doesNotMatch(docs, /renderRegistry|renderChat|renderControl/);
 });
 
 test('design tokens cannot directly reference themselves', () => {
@@ -507,10 +509,11 @@ test('responsive navigation behavior belongs to the shared Drawer primitive', ()
 test('all empty-session creation entry points share one store-level single-flight guard', () => {
   const root = join(import.meta.dirname, '..', 'src');
   const store = readFileSync(join(root, 'panel', 'store.ts'), 'utf8');
+  const activation = readFileSync(join(root, 'panel', 'lib', 'session-activation.ts'), 'utf8');
   const sidebar = readFileSync(join(root, 'panel', 'components', 'ProjectSidebar.tsx'), 'utf8');
   const chatView = readFileSync(join(root, 'panel', 'components', 'ChatView.tsx'), 'utf8');
-  assert.match(store, /creatingSessionProjectId\(\)/);
-  assert.match(store, /setCreatingSessionProjectId\(projectId\)/);
+  assert.match(activation, /this\.deps\.creatingProjectId\(\)/);
+  assert.match(activation, /this\.deps\.setCreatingProjectId\(projectId\)/);
   assert.match(sidebar, /busy=\{creatingSessionProjectId\(\) === project\.id\}/);
   assert.match(chatView, /busy=\{creatingSessionProjectId\(\) === activeProjects\(\)\[0\]\.id\}/);
 });
@@ -519,17 +522,99 @@ test('uncertain metadata retries preserve the original frame identity and are id
   const root = join(import.meta.dirname, '..', 'src', 'panel');
   const store = readFileSync(join(root, 'store.ts'), 'utf8');
   const tracker = readFileSync(join(root, 'lib', 'command-tracker.ts'), 'utf8');
+  const catalog = readFileSync(join(root, 'lib', 'catalog-actions.ts'), 'utf8');
+  const activation = readFileSync(join(root, 'lib', 'session-activation.ts'), 'utf8');
   assert.match(tracker, /this\.uncertain\.set\(commandId, request\)/);
   assert.match(tracker, /return this\.dispatch\(request, send\)/);
   assert.match(tracker, /frame: tracked\.frame/);
   assert.match(store, /const sent = commands\.retry\(commandId, sendFrame\) === 'sent'/);
   assert.match(store, /if \(sent\) setPersistentErrors/);
   assert.match(store, /commands\.reset\(\)/);
-  assert.match(store, /function rejectWhileMetadataUncertain\(\)/);
+  assert.match(activation, /this\.deps\.hasUncertainMetadata\(\)/);
   assert.match(store, /onUncertainCountChange: setUncertainMetadataCount/);
-  for (const action of ['project/create', 'project/archive', 'project/restore', 'project/rename', 'session/create', 'session/rename', 'session/import']) {
+  assert.match(store, /new CatalogActions\(\{/);
+  assert.doesNotMatch(store, /H\.project(?:Create|Archive|Restore|Rename)\(/);
+  assert.doesNotMatch(store, /H\.persistedSession(?:Rename|Archive|Restore|Import|Discover)\(/);
+  for (const action of ['project/create', 'project/archive', 'project/restore', 'project/rename', 'session/rename', 'session/import']) {
     const escaped = action.replace('/', '\\/');
-    assert.match(store, new RegExp(`sendAction\\(frame, '${escaped}', \\{ retryOnUncertain: true`), action);
+    assert.match(catalog, new RegExp(`'${escaped}'`), action);
+  }
+  assert.match(activation, /this\.deps\.send\(frame, 'session\/create', \{/);
+  assert.match(catalog, /retryOnUncertain: true/);
+  assert.match(catalog, /archive \? 'session\/archive' : 'session\/restore'/);
+});
+
+test('project session discovery is an explicit cold-start read path', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const catalog = readFileSync(join(root, 'lib', 'catalog-actions.ts'), 'utf8');
+  const protocol = readFileSync(join(root, 'lib', 'protocol.ts'), 'utf8');
+  const dialog = readFileSync(join(root, 'components', 'SessionImportDialog.tsx'), 'utf8');
+  assert.match(protocol, /action\('session\/discover', \{ projectId \}\)/);
+  assert.match(store, /catalogActions\.discoverSessions/);
+  assert.match(catalog, /this\.deps\.send\(frame, 'session\/discover'/);
+  assert.match(dialog, /props\.onDiscover\(projectId/);
+  assert.match(dialog, /正在读取 ACP 会话/);
+  assert.doesNotMatch(catalog, /this\.deps\.send\(frame, 'session\/discover', \{\s*retryOnUncertain: true/);
+});
+
+test('terminal action effects have one owner and late acknowledgements cannot resume quick start', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const tracker = readFileSync(join(root, 'lib', 'command-tracker.ts'), 'utf8');
+  const activation = readFileSync(join(root, 'lib', 'session-activation.ts'), 'utf8');
+  const ackHandler = store.slice(store.indexOf('function onAck('), store.indexOf('const ERROR_REASONS'));
+  const errorHandler = store.slice(store.indexOf('function onActionError('), store.indexOf('// ── 渲染入口'));
+  const lateBranch = ackHandler.slice(ackHandler.indexOf("if (disposition === 'late_terminal')"));
+  assert.ok(ackHandler.indexOf('commands.acknowledge(ack)') < ackHandler.indexOf("if (disposition === 'late_terminal')"));
+  assert.doesNotMatch(lateBranch, /selectChat\(|sendMessage\(/);
+  assert.match(lateBranch, /settleLateQuickStart/);
+  assert.match(errorHandler, /commands\.fail\(err\)/);
+  assert.doesNotMatch(errorHandler, /failMessageSubmission|failQuickStart|failPermissionDecision/);
+  assert.doesNotMatch(store, /permissionCommands/);
+  assert.match(tracker, /tracked\.callbacks\?\.onTerminal\?\.\(ack\)/);
+  assert.match(tracker, /return wasUncertain && ack\.status !== 'accepted' \? 'late_terminal' : 'unknown'/);
+  const prompt = store.slice(store.indexOf('export function sendMessage'), store.indexOf('export function retryMessageSubmission'));
+  assert.equal((activation.match(/failQuickStart\(frame\.commandId/g) || []).length, 1);
+  assert.equal((prompt.match(/failMessageDelivery\(frame\.commandId/g) || []).length, 1);
+  assert.match(prompt, /startMessageDelivery\(frame\.commandId, text, sessionId, currentCid\)/);
+  assert.doesNotMatch(store, /setMessageSubmission|setQuickStartSubmission|composerDrafts|restoreSubmissionDraft/);
+});
+
+test('runtime controls are chat-scoped and reconcile through projection truth', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const control = readFileSync(join(root, 'lib', 'runtime-control.ts'), 'utf8');
+  assert.doesNotMatch(store, /cancellingTurn|closingChat|setCancellingTurn|setClosingChat/);
+  assert.match(store, /startRuntimeControl\(frame\.commandId, chatId, 'cancel'\)/);
+  assert.match(store, /startRuntimeControl\(frame\.commandId, chatId, 'close'\)/);
+  assert.match(store, /retryOnUncertain: true/);
+  assert.match(store, /reconcileCurrentRuntimeControl\(ctrl\)/);
+  assert.match(control, /const \[controls, setControls\] = createSignal<Record<string, RuntimeControlSubmission>>/);
+  assert.match(control, /current\.kind === 'cancel' && \(!turnActive \|\| terminal\)/);
+  assert.match(control, /current\.kind === 'close' && terminal/);
+});
+
+test('authentication invalidation survives UI cleanup and reaches the login surface', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const gate = readFileSync(join(root, 'components', 'AuthGate.tsx'), 'utf8');
+  const authState = readFileSync(join(root, 'lib', 'auth-state.ts'), 'utf8');
+  const invalidator = store.slice(store.indexOf('function invalidateAuthentication('), store.indexOf('export function cancelTurn'));
+  assert.ok(invalidator.indexOf('clearUiSession()') < invalidator.indexOf('publishAuthInvalidation(reason)'));
+  assert.match(authState, /setInvalidation\(\{ id: \+\+invalidationSequence, reason \}\)/);
+  assert.match(authState, /setInvalidation\(null\)/);
+  assert.doesNotMatch(authState, /authInvalidated|authInvalidationReason/);
+  assert.match(gate, /const event = authInvalidation\(\)/);
+  assert.match(gate, /message: event\.reason/);
+  assert.match(gate, /setProblem\(\{ kind: 'credential'/);
+  assert.match(gate, /let requestEpoch = 0/);
+  assert.match(gate, /if \(epoch !== requestEpoch\) return/);
+  assert.doesNotMatch(store, /export \{[^}]*authInvalidation/);
+  for (const file of ['ProjectSidebar.tsx', 'Composer.tsx', 'MessageList.tsx', 'SessionSearch.tsx', 'ChatView.tsx', 'ChatHeader.tsx', 'QuickStartComposer.tsx']) {
+    const feature = readFileSync(join(root, 'components', file), 'utf8');
+    assert.match(feature, /from '\.\.\/lib\/auth-state'/, file);
+    assert.doesNotMatch(feature, /import \{[^}]*\breadOnly\b[^}]*\} from '\.\.\/store'/, file);
   }
 });
 
@@ -551,11 +636,27 @@ test('session navigation closes only after a server-authoritative open commits',
   const sidebar = readFileSync(join(root, 'components', 'ProjectSidebar.tsx'), 'utf8');
   const sessionRow = readFileSync(join(root, 'components', 'ProjectSessionRow.tsx'), 'utf8');
   const search = readFileSync(join(root, 'components', 'SessionSearch.tsx'), 'utf8');
-  assert.match(store, /export interface OpenSessionCallbacks/);
-  assert.match(store, /callbacks\.onCommitted\?\.\(\)/);
+  const activation = readFileSync(join(root, 'lib', 'session-activation.ts'), 'utf8');
+  assert.match(activation, /export interface OpenSessionCallbacks/);
+  assert.match(activation, /callbacks\.onCommitted\?\.\(\)/);
   assert.match(sidebar, /onOpen=\{\(sessionId, onCommitted\) => \{ navigateProjectSession\(sessionId, \{ onCommitted \}\); \}\}/);
   assert.match(sessionRow, /props\.onOpen\(props\.session\.id, props\.onNavigate\)/);
   assert.doesNotMatch(sessionRow, /props\.onOpen\(props\.session\.id[^;]*;\s*props\.onNavigate\(\)/);
   assert.match(search, /onCommitted: \(\) => \{ props\.onClose\(\)/);
   assert.match(search, /onUncertain:/);
+});
+
+test('session activation policy is a deep module rather than store callback sprawl', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const activation = readFileSync(join(root, 'lib', 'session-activation.ts'), 'utf8');
+  assert.match(store, /new SessionActivation\(\{/);
+  assert.match(store, /sessionActivation\.create\(projectId, title\)/);
+  assert.match(store, /sessionActivation\.quickStart\(projectId, text\)/);
+  assert.match(store, /sessionActivation\.navigate\(sessionId, callbacks\)/);
+  assert.doesNotMatch(store, /H\.persistedSession(?:Create|Open)\(/);
+  assert.doesNotMatch(store, /new SessionNavigator|sessionNavigator\.transition/);
+  assert.match(activation, /class SessionActivation/);
+  assert.match(activation, /'创建会话回复不完整'/);
+  assert.match(activation, /if \(!ack\.sessionId \|\| !ack\.chatId\)/);
 });

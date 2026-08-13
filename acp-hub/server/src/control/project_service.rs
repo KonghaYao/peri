@@ -156,6 +156,14 @@ impl ProjectService {
         Ok(self.metadata.rename_session(id, name).await?)
     }
 
+    pub async fn archive_session_metadata(&self, id: &str) -> Result<(), ProjectServiceError> {
+        Ok(self.metadata.archive_session(id).await?)
+    }
+
+    pub async fn restore_session_metadata(&self, id: &str) -> Result<(), ProjectServiceError> {
+        Ok(self.metadata.restore_session(id).await?)
+    }
+
     pub async fn archive_project(&self, id: &str) -> Result<(), ProjectServiceError> {
         self.metadata.archive_project(id).await?;
         self.reproject().await
@@ -275,6 +283,7 @@ fn session_summary(s: ProjectSessionRecord) -> ProjectSessionSummary {
         updated_at: s.updated_at,
         last_opened_at: s.last_opened_at,
         active_chat_id: s.last_chat_id,
+        archived_at: s.archived_at,
     }
 }
 

@@ -1,6 +1,6 @@
 import { createUniqueId, Show } from 'solid-js';
-import type { PendingPermission } from '../lib/yjs';
-import type { PermissionDecisionState } from '../store';
+import type { PendingPermission } from '../lib/control-view';
+import type { PermissionDecisionState } from '../lib/permission-delivery';
 import { Button } from '../../ui';
 
 function shortId(id: string | null | undefined, length = 8): string {
@@ -13,6 +13,7 @@ export interface PermissionRequestCardProps {
   decision?: PermissionDecisionState;
   readOnly: boolean;
   onResolve: (decision: 'allow' | 'deny') => void;
+  onRetry?: (commandId: string) => void;
 }
 
 /** A security decision surface. The server projection owns its lifetime; the
@@ -22,6 +23,7 @@ export function PermissionRequestCard(props: PermissionRequestCardProps) {
   const actionable = () => !!props.permission.permissionId;
   const locked = () => !!props.decision;
   const uncertain = () => props.decision?.phase === 'uncertain';
+  const retryable = () => uncertain() && props.decision?.retryable === true;
   const action = () => props.decision?.decision === 'allow' ? '允许' : '拒绝';
   const statusId = `permission-status-${domId}`;
 
@@ -39,7 +41,9 @@ export function PermissionRequestCard(props: PermissionRequestCardProps) {
       <Show when={props.permission.toolCallId}><code title={props.permission.toolCallId || undefined}>tool {shortId(props.permission.toolCallId)}</code></Show>
       <div id={statusId} class="permission-request__status" role={uncertain() ? 'alert' : 'status'} aria-live="polite">
         <Show when={uncertain()} fallback={locked() ? `正在${action()}…` : !actionable() ? '请求缺少权限标识，已阻止提交。请等待 server 重新同步。' : props.readOnly ? '只读模式无法处理该请求。' : '选择后会立即锁定，避免提交相反决策。'}>
-          {`${action()}的结果尚未确认。为避免执行相反决策，请等待请求消失或明确错误。`}
+          {retryable()
+            ? `${action()}尚未送达。可以使用原请求重新确认，不会创建第二次裁决。`
+            : `${action()}的结果尚未确认。为避免执行相反决策，请等待请求消失或明确错误。`}
         </Show>
       </div>
     </div>
@@ -50,6 +54,9 @@ export function PermissionRequestCard(props: PermissionRequestCardProps) {
       <Button variant="secondary" disabled={props.readOnly || locked() || !actionable()} busy={props.decision?.phase === 'pending' && props.decision.decision === 'deny'} onClick={() => actionable() && props.onResolve('deny')}>
         {props.decision?.decision === 'deny' ? '正在拒绝…' : '拒绝'}
       </Button>
+      <Show when={retryable() && props.decision}>
+        {(decision) => <Button variant="primary" disabled={props.readOnly} onClick={() => props.onRetry?.(decision().commandId)}>使用原请求重试</Button>}
+      </Show>
     </div>
   </section>;
 }

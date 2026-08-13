@@ -99,8 +99,17 @@ export const persistedSessionOpen = (sessionId: string) =>
 export const persistedSessionRename = (sessionId: string, name: string) =>
   action('session/rename', { sessionId, name });
 
+export const persistedSessionArchive = (sessionId: string) =>
+  action('session/archive', { sessionId });
+
+export const persistedSessionRestore = (sessionId: string) =>
+  action('session/restore', { sessionId });
+
 export const persistedSessionImport = (projectId: string, acpSessionId: string) =>
   action('session/import', { projectId, acpSessionId });
+
+export const persistedSessionDiscover = (projectId: string) =>
+  action('session/discover', { projectId });
 
 /** 按需查询指定对话的 ACP 会话列表（§6.3）：server 从 chat record 解析
  *  cwd 向 agent 侧发 session/list RPC，结果经 `session_list` 下行帧回投
@@ -142,17 +151,78 @@ export const resolvePermission = (chatId: string, permissionId: string, decision
  * older browser. JSON primitives, arrays and missing/empty tags are malformed:
  * letting `null` through would make ws-client's `frame.t` access throw inside
  * the browser message callback and silently stop processing that delivery. */
-export const parse = (text: string): Record<string, unknown> | null => {
+export type DownstreamFrame =
+  | { t: 'keep_alive' }
+  | { t: 'ready'; projectionVersions: Record<string, number> }
+  | { t: 'ysync.update'; doc: string; update: string; projectionVersion?: number }
+  | { t: 'action_ack'; commandId: string; status: 'accepted' | 'committed' | 'duplicate'; turnId?: string; chatId?: string; projectId?: string; sessionId?: string; acpSessionId?: string; committedProjectionVersion?: number }
+  | { t: 'action_error'; commandId: string; code: string; message: string; retryable: boolean; retryAfterMs?: number }
+  | { t: 'auth_error'; [key: string]: unknown }
+  | { t: string; [key: string]: unknown };
+
+/**
+ * Unknown tags remain forward-compatible. Known browser-consumed tags are
+ * decoded strictly so malformed terminal identities cannot enter state machines.
+ */
+export const parse = (text: string): DownstreamFrame | null => {
   try {
     const value: unknown = JSON.parse(text);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const frame = value as Record<string, unknown>;
     if (typeof frame.t !== 'string' || !frame.t.trim()) return null;
-    return frame;
+    return decodeKnownFrame(frame);
   } catch {
     return null;
   }
 };
+
+function decodeKnownFrame(frame: Record<string, unknown>): DownstreamFrame | null {
+  switch (frame.t) {
+    case 'keep_alive':
+      return { t: 'keep_alive' };
+    case 'ready': {
+      if (!isProjectionVersions(frame.projectionVersions)) return null;
+      return frame as DownstreamFrame;
+    }
+    case 'ysync.update':
+      if (!isDocId(frame.doc) || !isBase64(frame.update)) return null;
+      if (frame.projectionVersion !== undefined && !nonNegativeInteger(frame.projectionVersion)) return null;
+      return frame as DownstreamFrame;
+    case 'action_ack':
+      if (!nonEmptyString(frame.commandId) || !['accepted', 'committed', 'duplicate'].includes(String(frame.status))) return null;
+      if (!optionalStrings(frame, ['turnId', 'chatId', 'projectId', 'sessionId', 'acpSessionId'])) return null;
+      if (frame.committedProjectionVersion !== undefined && !nonNegativeInteger(frame.committedProjectionVersion)) return null;
+      return frame as DownstreamFrame;
+    case 'action_error':
+      if (!nonEmptyString(frame.commandId) || !nonEmptyString(frame.code) || typeof frame.message !== 'string' || typeof frame.retryable !== 'boolean') return null;
+      if (frame.retryAfterMs !== undefined && !nonNegativeInteger(frame.retryAfterMs)) return null;
+      return frame as DownstreamFrame;
+    case 'auth_error':
+      return frame as DownstreamFrame;
+    default:
+      return frame as DownstreamFrame;
+  }
+}
+
+const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && !!value.trim();
+const nonNegativeInteger = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
+
+function optionalStrings(frame: Record<string, unknown>, keys: string[]): boolean {
+  return keys.every((key) => frame[key] === undefined || nonEmptyString(frame[key]));
+}
+
+function isProjectionVersions(value: unknown): value is Record<string, number> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.entries(value).every(([key, item]) => isDocId(key) && nonNegativeInteger(item));
+}
+
+const isDocId = (value: unknown): value is string => value === DOC_REGISTRY
+  || (typeof value === 'string' && /^(?:chat|session):[A-Za-z0-9._-]+$/.test(value));
+
+function isBase64(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  try { atob(value); return true; } catch { return false; }
+}
 
 // ── base64 ↔ Uint8Array（浏览器内置 atob/btoa）──────────────────────────
 

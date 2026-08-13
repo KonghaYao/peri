@@ -58,11 +58,30 @@ pub enum ActionEnvelope {
         command_id: String,
         payload: PersistedSessionRenamePayload,
     },
+    /// 从导航中可逆归档一个持久会话；不删除 ACP thread 或 chat history。
+    #[serde(rename = "session/archive", rename_all = "camelCase")]
+    PersistedSessionArchive {
+        command_id: String,
+        payload: PersistedSessionOpenPayload,
+    },
+    /// 恢复一个已归档的持久会话。
+    #[serde(rename = "session/restore", rename_all = "camelCase")]
+    PersistedSessionRestore {
+        command_id: String,
+        payload: PersistedSessionOpenPayload,
+    },
     /// 将 ACP 历史会话显式加入某个 project 的持久侧边栏。
     #[serde(rename = "session/import", rename_all = "camelCase")]
     PersistedSessionImport {
         command_id: String,
         payload: PersistedSessionImportPayload,
+    },
+    /// 刷新某个 project 的 ACP 历史会话候选。没有可复用 runtime 时，
+    /// server 使用不可见的短生命周期 discovery runtime。
+    #[serde(rename = "session/discover", rename_all = "camelCase")]
+    PersistedSessionDiscover {
+        command_id: String,
+        payload: ProjectArchivePayload,
     },
     /// 创建对话；`instance_id` 缺省 = 本机（§4.3）。
     #[serde(rename = "chat/create", rename_all = "camelCase")]
@@ -155,7 +174,10 @@ impl ActionEnvelope {
             ActionEnvelope::PersistedSessionCreate { .. } => "session/create",
             ActionEnvelope::PersistedSessionOpen { .. } => "session/open",
             ActionEnvelope::PersistedSessionRename { .. } => "session/rename",
+            ActionEnvelope::PersistedSessionArchive { .. } => "session/archive",
+            ActionEnvelope::PersistedSessionRestore { .. } => "session/restore",
             ActionEnvelope::PersistedSessionImport { .. } => "session/import",
+            ActionEnvelope::PersistedSessionDiscover { .. } => "session/discover",
             ActionEnvelope::Create { .. } => "chat/create",
             ActionEnvelope::Load { .. } => "chat/load",
             ActionEnvelope::Close { .. } => "chat/close",

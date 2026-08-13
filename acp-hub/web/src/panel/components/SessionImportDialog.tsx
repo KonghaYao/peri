@@ -1,5 +1,5 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
-import type { ProjectInfo, SessionSummaryInfo } from '../lib/yjs';
+import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js';
+import type { ProjectInfo, SessionSummaryInfo } from '../lib/registry-view';
 import { Button, Dialog, Icon, TextField } from '../../ui';
 import { importCandidates } from '../lib/session-import.mjs';
 import { cleanSessionTitle, formatRelativeTime, shortSessionId } from '../lib/recovery-state.mjs';
@@ -9,6 +9,8 @@ export interface SessionImportDialogProps {
   project: ProjectInfo | null;
   sessions: SessionSummaryInfo[];
   onClose: () => void;
+  discovering: boolean;
+  onDiscover: (projectId: string, onCommitted: () => void, onFailed: (message: string) => void) => boolean;
   onImport: (
     projectId: string,
     sessionId: string,
@@ -34,6 +36,8 @@ export function SessionImportDialog(props: SessionImportDialogProps) {
     setSelectedId(null);
     setSubmitting(false);
     setProblem(null);
+    const projectId = props.project?.id;
+    if (projectId) untrack(() => props.onDiscover(projectId, () => setProblem(null), setProblem));
   });
 
   const candidates = createMemo(() => {
@@ -79,12 +83,12 @@ export function SessionImportDialog(props: SessionImportDialogProps) {
         <h2>导入会话</h2>
         <p>只显示此项目目录中、尚未加入侧边栏的 ACP 会话。导入不会复制或移动原会话。</p>
       </div>
-      <TextField label="搜索会话" value={query()} disabled={submitting()} onInput={(event) => setQuery(event.currentTarget.value)} placeholder="按标题或会话 ID 搜索" />
+      <TextField label="搜索会话" value={query()} disabled={submitting() || props.discovering} onInput={(event) => setQuery(event.currentTarget.value)} placeholder="按标题或会话 ID 搜索" />
       <div class="import-session-list">
-        <For each={candidates()} fallback={<div class="import-empty">没有可导入的会话</div>}>
+        <For each={candidates()} fallback={<div class="import-empty">{props.discovering ? <><span class="ui-spinner" aria-hidden="true" />正在读取 ACP 会话…</> : '没有可导入的会话'}</div>}>
           {(candidate) => <button
             type="button"
-            disabled={submitting()}
+            disabled={submitting() || props.discovering}
             class={`import-session-row ${selectedId() === candidate.sessionId ? 'is-selected' : ''}`}
             aria-pressed={selectedId() === candidate.sessionId}
             aria-controls={selectedId() === candidate.sessionId ? 'import-session-review' : undefined}
@@ -107,9 +111,10 @@ export function SessionImportDialog(props: SessionImportDialogProps) {
       </section>}</Show>
       <Show when={submitting()}><div class="import-session-status" role="status"><span class="ui-spinner" aria-hidden="true" />正在向 server 确认导入结果…</div></Show>
       <Show when={problem()}>{(message) => <div class="import-session-problem" role="alert">{message()}</div>}</Show>
+      <Show when={!props.discovering && problem()}><Button size="compact" onClick={() => { const id = props.project?.id; if (id) props.onDiscover(id, () => setProblem(null), setProblem); }}>重新读取 ACP 会话</Button></Show>
       <div class="form-actions">
         <Button disabled={submitting()} onClick={close}>取消</Button>
-        <Button variant="primary" busy={submitting()} disabled={!selected()} onClick={submit}>导入所选会话</Button>
+        <Button variant="primary" busy={submitting()} disabled={!selected() || props.discovering} onClick={submit}>导入所选会话</Button>
       </div>
     </div>
   </Dialog>;

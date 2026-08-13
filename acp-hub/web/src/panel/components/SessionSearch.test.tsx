@@ -10,6 +10,7 @@ const store = vi.hoisted(() => ({
   selectedSessionId: vi.fn(() => null),
 }));
 vi.mock('../store', () => store);
+vi.mock('../lib/auth-state', () => ({ readOnly: store.readOnly }));
 
 import { SessionSearch } from './SessionSearch';
 

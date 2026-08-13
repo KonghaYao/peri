@@ -179,6 +179,23 @@ Verification:
 - `cargo clippy --workspace --all-targets -- -D warnings` — passed.
 - `cd acp-hub/web && bun run test && bun run build` — 18/18 Node contracts, 10/10 DOM/Yjs tests and production build passed.
 
+### 2026-08-14 — Cold-start ACP session discovery
+
+- Fixed the import dead-end for projects without a running Hub chat. Opening Import now sends the explicit project-scoped `session/discover` action instead of waiting for the background poller attached to an existing runtime.
+- The server reuses a compatible live runtime when possible. Otherwise it owns a private `spawn → initialize → session/list → kill` lifecycle that never creates a Registry chat, SQLite logical session, sidebar item or ACP thread.
+- Private discovery runtimes are registered only in the heartbeat ownership set, so reconciliation cannot race-kill them as unknown processes. Project-level single-flight prevents duplicate cold-start processes.
+- The import dialog has an honest loading state, disables selection while the catalog is refreshing, and keeps a persistent retry action after a definite discovery failure or safe read timeout. Import remains a separate explicit confirmation and metadata mutation.
+- Protocol roundtrip/allowlist tests, coordinator lifecycle tests and Solid interaction tests cover both live-runtime reuse and private-runtime cleanup.
+
+Verification:
+
+- `cargo test -p acp-hub-proto --quiet` — 35/35 unit and 5/5 contract tests passed.
+- `cargo test -p acp-hub-server --lib --quiet` — 403/403 passed, including private discovery lifecycle, single-flight, heartbeat ownership and live-runtime reuse.
+- `cargo test -p acp-hub-server --test auth_contract_tests|integration_tests|resilience_tests` — 4/4, 6/6 and 3/3 passed.
+- `cargo clippy -p acp-hub-server --all-targets -- -D warnings` — passed.
+- `cd acp-hub/web && bun run test && bun run build` — 50/50 source architecture contracts, 176/176 Vitest interactions and production build passed (107 modules; 211.86 kB JavaScript before gzip).
+- `cargo fmt --all -- --check` and `git diff --check` — passed.
+
 ### 2026-08-13 — Solid component library enforcement
 
 - Added behavioral `Status` and bounded auto-growing `Textarea` primitives, replacing duplicated connection semantics in header/sidebar and hand-written Composer resizing.
@@ -666,6 +683,23 @@ Verification:
 - The restarted local server loaded the final bundle. Browser computed style for the focused login field was neutral `rgb(98, 98, 94)`, with a white separation ring plus 3px neutral ring and no outline; the final CSS bundle also contained the Composer keyboard-focus rule.
 - `git diff --check` passed.
 
+### 2026-08-14 — Permission retry preserves end-to-end command identity
+
+- The browser retains the original serialized permission frame only when the server explicitly reports a retryable, known-not-delivered failure. The Error Center retries that exact `commandId`; timeout or disconnect remains delivery-unknown and still forbids blind retry.
+- The server distinguishes same-decision recovery from an ordinary CAS duplicate. An official `session/request_permission` keeps its ACP response material until delivery is confirmed and binds the first resolution to `(commandId, decision)`. Only that exact command may recover. A new command with the opposite **or the same** decision receives `duplicate` and cannot replay the security side effect.
+- Successful forwarding completes the durable outbox before removing ACP response material. The legacy private permission path has no restart-safe response material, so a definite forward failure is honestly terminal/non-retryable instead of promising a recovery the server cannot prove safe.
+- Official ACP response material is persisted as an optional, command-typed outbox recovery payload before the Control Doc CAS and removed immediately after delivery confirmation. While the original runtime remains alive, only the exact payload may resume from `intent_durable`. A `dispatched` record is delivery-unknown and cannot replay. After server restart the old runtime is terminal by contract, so persisted evidence remains available for operator reconciliation but never authorizes automatic delivery. Existing outbox JSON remains backward compatible because the field is optional; ordinary commands pay only one optional pointer rather than embedding the large permission payload.
+- The Control Doc exposes an internal `PermissionDecisionReplay` result based on the stored decision. This is coordinator evidence only; it does not weaken the public one-way `pending → resolved` state machine or make Yjs the command identity authority.
+
+Verification:
+
+- The focused recovery test covers offline failure, opposite-decision rejection, same-decision/new-command rejection, exact-command recovery, instance forwarding and committed Ack.
+- Relay tests passed 18/18 and prove official permission material remains available until confirmed delivery.
+- `cargo test -p acp-hub-server --lib` — full gate includes outbox close/reopen evidence, legacy-record decoding, cleanup after delivery, same-runtime recovery, delivery-unknown rejection and terminal-runtime fail-closed behavior.
+- `cargo clippy -p acp-hub-server --lib -- -D warnings` — passed with zero warnings.
+- `cd acp-hub/web && bun run test` — 49/49 Node contracts and 172/172 Vitest module/Solid DOM/Yjs tests passed across 28 files.
+- `cd acp-hub/web && bun run build` — production build passed at 107 modules: `index-Ddq6ReZm.js` is 210.30 kB and the hashed CSS asset is 48.60 kB before gzip.
+
 ### 2026-08-14 — Source CSS is parsed as a contract, not best-effort text
 
 - The three authored stylesheets now pass Lightning CSS with error recovery disabled before PostCSS inspects their structure. A malformed media block or parser warning therefore fails the architecture suite instead of relying on the production bundler to recover silently.
@@ -677,6 +711,156 @@ Verification:
 
 - `cd acp-hub/web && bun run test` — 51/51 Node architecture/state contracts and 131/131 module/Solid DOM/Yjs tests passed across 20 files.
 - `cd acp-hub/web && bun run build` — production build passed at 101 modules: `index-BFfeTiFX.js` is 206.03 kB and `index-8ASp6MzR.css` is 48.02 kB before gzip.
+
+### 2026-08-14 — Runtime presence no longer masquerades as input readiness
+
+- A Registry `active_chat_id` now means only that a runtime exists. An unselected sidebar row says `运行中 · 点击切换`; it cannot claim `可输入` until this browser has selected it and hydrated both authoritative documents.
+- Default conversation names use the same durable ACP/session-id suffix in the selected header as the sidebar, so switching among several `新对话` sessions does not erase their identity.
+- The persistent reconnect action now consumes the shared connection busy state. While a connection attempt is active it exposes progress through `aria-busy` and cannot start a competing WebSocket.
+- Browser-driven localhost inspection was attempted but rejected by the in-app browser URL policy; no alternate automation or policy bypass was used. The affected behavior is covered by real Solid component tests instead.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 51/51 Node architecture/state contracts and 135/135 module/Solid DOM/Yjs tests passed across 21 files.
+- `cd acp-hub/web && bun run build` — production build passed at 101 modules: `index-Bd3F0IR1.js` is 206.25 kB and `index-8ASp6MzR.css` is 48.02 kB before gzip.
+- `git diff --check` passed.
+
+### 2026-08-14 — Connection readiness has one authoritative state module
+
+- The audit of the 978-line Solid store found a real split-brain condition: a successful `ready` event did not clear the exported connection `busy` signal, while `reconnecting` did not close the internal action-ready gate. UI controls and action dispatch could therefore describe different connection realities.
+- A deep `connectionTransition` module now owns the complete event-to-presentation/gating mapping. `connecting`, authenticated `open`, and `reconnecting` are all busy and action-closed; only server `ready` opens actions and clears busy; `fatal` and `closed` settle both and produce the single recovery problem.
+- Store branches retain only domain effects such as command uncertainty, navigation reset, subscription replay, and authentication invalidation. An architecture gate prevents them from rebuilding independent `ready`/`busy`/status interpretations.
+- Focused tests cover every lifecycle class, including future/heartbeat no-ops, permanent instance loss, manual closure with and without a principal, and reconnect countdown rounding.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 51/51 Node architecture/state contracts and 139/139 module/Solid DOM/Yjs tests passed across 22 files.
+
+### 2026-08-14 — Connection loss is settled once through CommandTracker
+
+- `reconnecting`, `fatal`, and `closed` previously called `CommandTracker::settleConnectionLoss` and then manually repeated message and quick-start uncertainty transitions in the store. This duplicated the lifecycle authority and made future callback changes vulnerable to double settlement or drift.
+- The status branches now invoke only the tracker. Message draft recovery, quick-start preservation, permission locking, metadata reconciliation, and session-open non-navigation are produced by the callbacks registered at dispatch time.
+- A source architecture gate forbids those three branches from directly mutating message or quick-start action state. A fault test dispatches four domain-shaped commands, settles the same disconnect twice, and proves every callback fires exactly once while only retry-safe requests retain reconciliation evidence.
+
+### 2026-08-14 — Terminal action effects have one owner
+
+- The global Ack/Error handlers no longer repeat prompt, quick-start, or permission state mutations already registered with `CommandTracker`. Pending terminal effects execute through the dispatch callback exactly once; a definite error that arrives after uncertainty uses that same callback to converge local state.
+- A late committed/duplicate Ack still clears reconciliation evidence but never resumes an expired continuation. In particular, a timed-out quick start cannot unexpectedly switch sessions and send its retained first prompt; it becomes an explicit, dismissible recovery state and asks the user to open the server-projected session.
+- Non-retryable permission callbacks are retained only for one additional Ack window so a late definite rejection can unlock the exact permission safely without leaking closures indefinitely.
+- Direct fake-timer coverage proves pending and late terminal classifications, late errors settle once, non-retryable late errors cannot invoke success continuations, and source architecture tests forbid global handlers from reclaiming domain ownership.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 52/52 Node architecture contracts and 142/142 Vitest module/Solid DOM/Yjs tests passed across 22 files.
+- `cd acp-hub/web && bun run build` — production build passed at 102 modules: `index-D05pQ23t.js` is 206.57 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered its Registry and serves that exact bundle from `127.0.0.1:8456`; a live probe returned 200 with CSP, `nosniff`, frame denial, `no-referrer`, and `Cache-Control: no-store`.
+- `git diff --check` passed.
+
+### 2026-08-14 — Authentication invalidation retains its explanation
+
+- `auth_error` and close code 4502 previously wrote a connection problem and immediately erased it through `clearUiSession`, leaving the user at an unexplained login form.
+- Authentication invalidation is now one atomic store operation: clear runtime state first, revoke the local principal, then publish a durable login reason and invalidation epoch. `AuthGate` consumes that reason directly and retains it until a successful login or explicit logout.
+- A source contract fixes the ordering and requires the login surface to render the retained reason, preventing future cleanup refactors from silently swallowing security feedback.
+
+### 2026-08-14 — Synchronous transport rejection is settled once
+
+- `sendAction` already maps a synchronous WebSocket rejection into the action's registered `onError` without adding a pending command. Prompt and quick start then repeated the same failure mutation after inspecting the false return value.
+- Those caller-owned fallbacks are removed. Transport rejection, server `action_error`, and a definite late error now share the same command-correlated domain callback, so future focus, telemetry, or recovery behavior cannot fire twice in the narrow send race.
+- A source contract counts one failure transition in each flow and protects this exactly-once boundary.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 53/53 Node architecture contracts and 142/142 Vitest module/Solid DOM/Yjs tests passed across 22 files.
+- `cd acp-hub/web && bun run build` — production build passed at 102 modules: `index-DMAbM-FC.js` is 206.57 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service serves that exact bundle at `127.0.0.1:8456`.
+- `git diff --check` passed.
+
+### 2026-08-14 — Accepted replay is idempotent and permission shadow state is gone
+
+- Replayed `accepted` Acks now retain the pending timer but invoke the domain accepted callback only once. Loading transitions and future telemetry cannot double-count a server replay.
+- The obsolete global `permissionCommands` map is removed. It duplicated command-to-permission identity after terminal ownership moved into `CommandTracker`; the registered callback now remains the only association and releases only its exact permission on a definite failure.
+- Focused fake-timer coverage sends `accepted` twice before committed and proves one accepted callback plus one terminal callback.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 53/53 Node architecture contracts and 142/142 Vitest module/Solid DOM/Yjs tests passed across 22 files.
+- `cd acp-hub/web && bun run build` — production build passed at 102 modules: `index-u5sa0l7P.js` is 206.49 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service serves that exact bundle at `127.0.0.1:8456`; `git diff --check` passed.
+
+### 2026-08-14 — Authentication state is atomic and stale HTTP results are fenced
+
+- The store's separate invalidation epoch and reason signals had a reactive race: clearing the reason after a successful login could re-run the still-positive epoch effect and immediately return the user to signed out. Principal, closed-by-default mutation policy and a single `{id, reason}` invalidation event now live in a dedicated `auth-state` module.
+- Feature components read `readOnly` directly from that narrow authority. The 900-line orchestration store no longer exports authentication signals as a second public entrance; it only consumes the principal for action guards and publishes invalidation after runtime cleanup.
+- `AuthGate` fences every status/login request with a monotonic request epoch. A WebSocket invalidation or logout supersedes in-flight HTTP, so a stale 200 cannot resurrect a revoked browser session. Successful responses with a missing/unknown role fail closed, and logout network failure is contained as visible feedback rather than an unhandled promise.
+- Real Solid tests prove invalidation → successful re-login does not reapply the old event, late status success cannot enter the workspace, and an `instance` role cannot cross the browser gate. Module tests prove atomic principal revocation, closed-by-default policy and explicit invalidation clearing.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 53/53 Node architecture contracts and 148/148 Vitest module/Solid DOM/Yjs tests passed across 24 files.
+- `cd acp-hub/web && bun run build` — production build passed at 103 modules: `index-X0eyrTKK.js` is 207.06 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered 143 chats, reauthenticated the local instance, and serves that exact bundle from `127.0.0.1:8456`. A live probe returned 200 with CSP, `nosniff`, frame denial, `no-referrer`, and `Cache-Control: no-store`.
+- `git diff --check` passed.
+
+### 2026-08-14 — Message delivery recovery is a deep module
+
+- Draft isolation, one unresolved submission, command correlation, accepted/uncertain/failed/retry/terminal transitions and safe draft restoration now live behind `message-delivery`. The orchestration store supplies protocol events; Composer reads only the selected durable session's draft and current submission.
+- The module clears the source draft when delivery starts, restores it after unknown/definite failure only if the user has not written a newer draft, and clears a restored copy on committed/duplicate only when it still equals the submitted source. Cross-session drafts never share a key.
+- `start` fails closed if any delivery remains unresolved, even if a caller omits its guard. The full draft map is not exported. The old message helpers in `action-state.mjs`, their ambient declarations and implementation-shaped tests were deleted rather than layered underneath the new authority.
+- Interface-level tests cover start→uncertain restoration, unrelated/accepted terminal rejection, duplicate completion, newer-edit preservation, cross-session isolation, same-command retry and accidental second-start refusal.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 50/50 Node architecture contracts and 153/153 Vitest module/Solid DOM/Yjs tests passed across 25 files. Three implementation-shaped Node tests for the deleted shallow helpers were intentionally replaced by five interface-level module tests.
+- `cd acp-hub/web && bun run build` — production build passed at 104 modules: `index-CNUYwUsd.js` is 207.06 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered 143 chats, authenticated/reconciled the local instance, and serves that exact bundle at `127.0.0.1:8456`. The live entry retains CSP, `nosniff`, frame denial, and `Cache-Control: no-store`.
+- `store.ts` is 882 lines, down from 937 at the start of this continuation because authentication and message recovery authority moved behind tested seams rather than being copied. `git diff --check` passed.
+
+### 2026-08-14 — Quick start has one recoverable activation authority
+
+- The compound “create durable session, then send the first prompt” flow no longer spreads its state machine across `store.ts`, generic action helpers and the component. `quick-start-delivery` now owns the single unresolved submission, project/text/command correlation, accepted/uncertain/failed transitions, same-command retry and activation validation.
+- A committed/duplicate acknowledgement activates only when it carries the exact command plus non-empty durable session and runtime chat ids. The module returns one activation value to the orchestration store and clears itself before navigation; unrelated, incomplete and accepted acknowledgements cannot resume the continuation.
+- A terminal acknowledgement arriving after timeout reconciles the operation to an explicit non-retryable recovery state but never automatically sends the preserved first prompt. This prevents an expired continuation from executing work after the user has already been told that the result was unknown.
+- Starting a second quick start while one is unresolved fails closed inside the module, not only in UI guards. The old quick-start helpers and ambient declarations were deleted rather than retained as a second state API. The composer reads recovery state directly from the narrow authority.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 49/49 Node architecture contracts and 157/157 Vitest module/Solid DOM/Yjs tests passed across 26 files.
+- Interface tests cover identity-preserving retry, incomplete/unrelated Ack rejection, duplicate activation, late-terminal reconciliation without continuation replay, dismissal, definite failure and accidental second-start refusal.
+- `cd acp-hub/web && bun run build` — production build passed at 105 modules: `index-DCXNH71v.js` is 207.47 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered 143 chats and serves those exact assets from `127.0.0.1:8456`. A live probe returned 200 with CSP, `nosniff`, frame denial, `no-referrer`, and `Cache-Control: no-store`.
+- `git diff --check` passed.
+
+### 2026-08-14 — Runtime controls are scoped, recoverable commands
+
+- Stop generation and Close runtime no longer use independent global booleans. `runtime-control` owns one unresolved control per runtime chat, with exact command identity, operation kind, accepted/uncertain/confirmed/failed phases and same-command retry.
+- A runtime cannot receive conflicting Stop and Close commands while either result remains unresolved; controls on unrelated chats remain independent. A definite failure permits a new command, while uncertainty stays locked and is recoverable only through the original command id.
+- A committed/duplicate Ack confirms only command delivery. The busy state clears only when the server projection proves the turn is no longer active or the runtime chat is terminal. This handles Ack-before-projection and projection-before-Ack without guessing from timers.
+- A late terminal Ack reconciles state but cannot replay expired Dialog callbacks. The close confirmation also reacts directly to a terminal Registry projection, so it cannot remain stranded when projection wins the race.
+- Composer and ChatHeader consume the scoped runtime authority directly. The old `cancellingTurn` / `closingChat` signals and setters were deleted, and a source architecture contract prevents their return.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 50/50 Node architecture contracts and 165/165 Vitest module/Solid DOM/Yjs tests passed across 27 files.
+- Runtime-control tests cover conflicting-operation exclusion, cross-chat independence, accepted→uncertain→same-command retry, incomplete/unrelated terminal rejection, projection-gated release and definite-failure replacement.
+- Component tests prove Stop remains locked while unresolved, Close is disabled while another control owns the runtime, and a terminal Registry projection dismisses the confirmation Dialog.
+- `cd acp-hub/web && bun run build` — production build passed at 106 modules: `index-BsKZ_GmR.js` is 209.68 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered 143 chats, reauthenticated the local instance and serves those exact assets from `127.0.0.1:8456`. A live probe returned 200 with CSP, `nosniff`, frame denial, `no-referrer`, and `Cache-Control: no-store`.
+- `git diff --check` passed.
+
+### 2026-08-14 — Permission decisions have one security-state authority
+
+- Permission locking no longer lives in a generic action helper plus a store-owned `Map`. `permission-delivery` owns command correlation, permission identity, Allow/Deny choice, pending/uncertain phases, definite-error release and projection-authoritative removal.
+- The first decision for one `permissionId` wins. An opposite or repeated click is rejected inside the module even if a component or store guard regresses; unrelated simultaneous permission requests remain independently actionable.
+- Timeout or disconnect keeps the exact decision locked as uncertain. Unlike ordinary metadata commands, the UI does not offer automatic retry for a security decision whose effect may already have occurred. Only an explicit server error unlocks it; disappearance from the server projection removes it authoritatively.
+- Empty permission identities fail closed before state mutation. Components import the narrow state type and signal directly; the store only supplies protocol events. The old `lockPermissionDecision`, `markPermissionDecisionUncertain`, `unlockPermissionDecision` helpers, ambient declarations and store signal were deleted.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 49/49 Node architecture contracts and 170/170 Vitest module/Solid DOM/Yjs tests passed across 28 files.
+- Interface tests cover first-choice wins, opposite-choice rejection, independent concurrent requests, exact-command uncertainty, definite-error release, projection removal and empty-id closure.
+- `cd acp-hub/web && bun run build` — production build passed at 107 modules: `index-D1glPqB_.js` is 209.91 kB and the hashed CSS asset is 48.60 kB before gzip.
+- The restarted local service recovered 143 chats, reauthenticated the local instance and serves those exact assets from `127.0.0.1:8456`. A live probe returned 200 with CSP, `nosniff`, frame denial, `no-referrer`, and `Cache-Control: no-store`.
+- `git diff --check` passed.
 
 ### 2026-08-14 — Permission decisions remain safe when delivery is unknown
 
@@ -748,3 +932,103 @@ Verification:
 - `cd acp-hub/web && bun run test && bun run build` — 49/49 Node architecture/state contracts and 131/131 module/Solid DOM/Yjs tests passed across 20 files.
 - The production build passed at 101 modules: `index-BLNWKBRO.js` is 206.03 kB and `index-BbIiZ_Cn.css` is 47.90 kB before gzip, both smaller than the preceding verified bundle despite the stronger reader contract.
 - `git diff --check` passed.
+
+### 2026-08-14 — Coarse-pointer targets survive the cascade
+
+- Touch accessibility is now a computed CSS contract, not a collection of nominal declarations. The audit found that the shared 44px `IconButton` rule was being defeated by a more-specific project-header selector, so coarse-pointer users still received 30px controls despite a green source check.
+- The Solid UI layer now owns 44px coarse-pointer minimums for Button, Menu item, IconButton and Dialog close controls. Product styles add only structural targets such as project disclosure, archived-project toggle/restore, session search results and sidebar rows.
+- The project-header override now matches the specificity of its desktop rule and explicitly restores both width and minimum height. The source contract asserts that exact higher-specificity selector, preventing a future cascade regression from producing another false green.
+- Hover-only sidebar actions remain fully visible for coarse pointers, and session rows keep a 52px structural target without inflating the desktop reading density.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 49/49 Node architecture contracts and 172/172 Vitest module/Solid DOM/Yjs tests passed across 28 files.
+- `cd acp-hub/web && bun run build` — production build passed at 107 modules: `index-CTWFgNa5.js` is 210.30 kB and the hashed CSS asset is 48.83 kB before gzip.
+- `cargo test -p acp-hub-server --lib --quiet` — 401/401 server library tests passed, including permission delivery recovery and restart reconciliation.
+- `cargo fmt --check` and `git diff --check` passed.
+
+### 2026-08-14 — Permission recovery is visible at the decision surface
+
+- The permission card now distinguishes a definitely retryable delivery failure from a timeout/disconnect whose outcome is unknown. Both keep Allow and Deny locked; only the former exposes a recovery action.
+- Recovery reuses the exact stored `commandId` and original Allow/Deny choice through `CommandTracker`. The card cannot create a second decision, and the user no longer has to discover a detached Error Center card to recover the security action.
+- Delivery-unknown remains fail closed: it explains the uncertainty, offers no retry, and forbids the opposite decision until the server projection removes the request or an operator reconciles it.
+- The client state records retryability separately from phase, so a generic `uncertain` label can never accidentally authorize replay.
+
+Verification:
+
+- Focused permission delivery, queue, card and MessageList tests passed 19/19, including same-command retry visibility and delivery-unknown non-retryability.
+
+### 2026-08-14 — Durable sessions can be archived without deleting history
+
+- Project-session cleanup is now an additive, reversible metadata operation. `session/archive` sets an independent SQLite `archived_at` fact and `session/restore` clears it; neither action changes the runtime lifecycle, ACP durable id, conversation documents or local project files.
+- Both mutations use the global metadata command ledger, ordered accepted/terminal acknowledgements and the SQLite→Registry projection barrier. Retry after an uncertain result reuses the original command id; a race that loses to another valid lifecycle mutation becomes a definite `INVALID_STATE` rather than a false reconciliation incident.
+- Server authorization is independent from the UI. Archived sessions cannot be opened or renamed through hidden wire calls, restore requires an active parent project, and a session with a live ACP runtime fails closed instead of disappearing behind the sidebar.
+- The sidebar exposes a semantic session menu, explicit confirmation, a per-project archived section and restore control. Archived sessions are absent from normal navigation, global search and remembered-session recovery; archiving the current terminal session releases its runtime document subscriptions immediately.
+
+Verification:
+
+- `cargo test -p acp-hub-proto` — 35/35 unit and 5/5 contract tests passed with additive action/schema roundtrips and whitelist coverage.
+- `cargo test -p acp-hub-server --lib` — 407/407 passed with loopback permissions, including v4 migration, reversible retention, runtime fail-closed behavior and ordered coordinator acknowledgements.
+- Auth, integration and resilience suites passed 4/4, 6/6 and 3/3; `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- `cargo test -p acp-hub-server --test product_flow_tests -- --nocapture` — passed against real loopback server, instance daemon and ACP child. The journey closes the runtime, archives the logical session, proves wire-level open rejection, restarts the server, observes `archived_at` in a fresh Registry snapshot, restores it, observes the marker cleared in another fresh snapshot, and finally proves one exact `session/load` for the original durable ACP id before continuing the conversation.
+- `cd acp-hub/web && bun run test && bun run build` — 50/50 Node architecture contracts and 180/180 Vitest module/Solid DOM/Yjs tests passed across 28 files. Production build serves `index-CX_zZCaH.js` and `index-C4jJyeZk.css`.
+
+### 2026-08-14 — Catalog command policy is a deep module
+
+- The former monolithic Solid store no longer repeats project/session catalog authorization, uncertainty, retry and terminal-Ack policy across each mutation. `CatalogActions` now owns those invariants behind a narrow injected transport/effects interface; `store.ts` is reduced from 959 to 845 lines and exports compatibility-thin feature entry points.
+- Catalog mutations preserve exactly one recovery contract: authorization and connection are fail closed, an outstanding uncertain metadata command blocks a second mutation, replayable operations retain the original frame/`commandId`, and local selection changes only after `committed` or `duplicate`.
+- Read-only ACP session discovery remains deliberately non-replayable: timeout cleanup is server-owned and a fresh discovery command is safe. This distinction is explicit rather than inherited accidentally from metadata mutations.
+- Source architecture contracts forbid direct catalog protocol constructors from returning to the store. Direct module tests inject transport callbacks and verify closed gates, duplicate/committed terminal effects, same-command uncertainty evidence, discovery single-flight behavior and import identity validation.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 50/50 Node architecture contracts and 185/185 Vitest module/Solid DOM/Yjs tests passed across 29 files.
+- `cd acp-hub/web && bun run build` — production build passed at 108 modules: `index-U3RnqJvp.js` is 216.58 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
+- `bun run typecheck` and `git diff --check` passed.
+- The loopback service was restarted against the production build. A fresh HTTP probe returned the same `index-U3RnqJvp.js`/`index-C4jJyeZk.css` identities, `Cache-Control: no-store` for the HTML shell, immutable caching for the fingerprinted JavaScript, and the existing CSP/`nosniff`/frame-denial headers; the instance reconnected successfully.
+
+### 2026-08-14 — Yjs document readers have independent schema boundaries
+
+- The former 652-line `yjs.ts` mixed transport document ownership with three unrelated projection schemas. It is now a 34-line compatibility barrel; `DocStore`, Registry catalog, chat conversation and session/control projections live in independent modules with a small semantics-free Yjs value adapter.
+- Product code imports domain types directly from `registry-view`, `chat-view` or `control-view`. A Registry schema change can no longer acquire chat/tool or permission parsing dependencies through the shared barrel, and the executable architecture contract prevents those readers from recombining.
+- The extraction exposed and fixed a real reconnect race. `DocStore.clear()` now advances a generation fence: an old queued animation-frame render cannot run after logout/reconnect, and cannot delete the pending marker for a new connection that reused the same doc id.
+- Direct Y.Doc tests preserve archive metadata, tool evidence, legacy exact-turn tool repair and actionable permission ordering. Dedicated DocStore fault tests cover v1 updates, same-frame coalescing, corrupt-frame containment, identity destruction and old-generation callback fencing.
+
+Verification:
+
+- Focused reader/DocStore tests passed 10/10.
+- `cd acp-hub/web && bun run test` — 51/51 Node architecture contracts and 189/189 Vitest module/Solid DOM/Yjs tests passed across 30 files.
+- `cd acp-hub/web && bun run build` — production build passed at 112 modules: `index-BSF60GjN.js` is 216.53 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
+- `bun run typecheck` and `git diff --check` passed.
+- The loopback service was restarted and a fresh probe confirmed those exact assets. The HTML shell remains `no-store`, the fingerprinted JavaScript remains immutable, CSP/`nosniff`/frame denial remain present, persistence recovery completed without degradation and the local instance reconnected.
+
+### 2026-08-14 — Session activation is one atomic application service
+
+- Empty-session creation, first-message quick start, remembered-session restore and explicit session open no longer embed separate gate/transport/Ack/navigation branches in the Solid store. `SessionActivation` composes the existing tested `SessionNavigator` and quick-start delivery state machine behind one injected application boundary; `store.ts` falls from 845 to 750 lines.
+- All activation paths now share readiness, role, metadata-uncertainty and creation/open single-flight policy. Read-only navigation still reuses only a Registry-proven live runtime without emitting a mutation, while writable open remains command-correlated and leaves the current selection unchanged through failure, timeout and late terminal delivery.
+- Empty-session create now treats a committed/duplicate Ack without both logical `sessionId` and runtime `chatId` as a visible protocol-integrity failure. It never writes a remembered logical selection or navigates to a partial identity, avoiding the prior half-selected state that had no runtime documents to subscribe.
+- Quick start activates the exact returned logical/runtime pair first, then submits the preserved normalized source. If prompt submission cannot begin, the full source is retained in a persistent recovery problem rather than disappearing.
+- Direct façade tests cover closed creation gates, incomplete committed identity, open timeout plus late Ack quarantine, Unicode first-message preservation and read-only live-runtime reuse. A source contract prevents `session/create`, `session/open` and `SessionNavigator` callback sprawl from returning to the store.
+
+Verification:
+
+- Focused `SessionActivation` tests passed 5/5.
+- `cd acp-hub/web && bun run test` — 52/52 Node architecture contracts and 194/194 Vitest module/Solid DOM/Yjs tests passed across 31 files.
+- `cd acp-hub/web && bun run build` — production build passed at 113 modules: `index-DJCK5_Q0.js` is 218.39 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
+- `bun run typecheck` and `git diff --check` passed.
+- The loopback service now serves those exact fingerprints. A fresh HTTP probe retained `no-store` on the shell, immutable caching on the JavaScript, CSP/`nosniff`/frame denial, clean persistence recovery and a successfully reconnected local instance.
+
+### 2026-08-14 — Known downstream frames are decoded before state machines
+
+- The WebSocket boundary previously validated only `{t: string}` and cast every known frame in the store. A syntactically valid JSON `action_ack` with a numeric command/chat id or invented terminal status could therefore reach `CommandTracker` and activation callbacks despite TypeScript's static types.
+- Parsing now deliberately has two compatibility modes. Unknown non-empty string tags remain intact for forward evolution; known browser-consumed tags (`ready`, `ysync.update`, `action_ack`, `action_error`) are decoded against the Rust wire shape before any callback runs.
+- Ack identities must be non-empty strings and status is closed to `accepted|committed|duplicate`. Error code/message and boolean retryability, non-negative safe projection versions, valid Registry/chat/session DocIds and actual base64 Yjs updates are enforced. Additive fields on otherwise valid known frames remain preserved.
+- Malformed known frames take the same payload-redacted protocol-issue path as invalid JSON and cannot acknowledge a command, move session navigation or allocate an arbitrary browser Y.Doc. The next valid or future-tag frame still proceeds, preserving connection resilience.
+
+Verification:
+
+- Focused protocol/transport tests passed 25/25, including malformed terminal identities, invalid status/retry flag/base64/DocId/projection maps, valid additive fields and malformed→future-frame continuation.
+- `cd acp-hub/web && bun run test` — 52/52 Node architecture contracts and 204/204 Vitest module/Solid DOM/Yjs tests passed across 31 files.
+- `cd acp-hub/web && bun run build` — production build passed at 113 modules: `index-BlfhNvtp.js` is 219.62 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
+- `bun run typecheck` and `git diff --check` passed.
+- The loopback deployment now serves those exact assets. Its shell and fingerprinted-resource cache policies, CSP/`nosniff`/frame denial, clean persistence recovery and local instance reconnection were confirmed by a fresh HTTP/log probe.

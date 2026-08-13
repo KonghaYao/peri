@@ -12,6 +12,11 @@ export function runtimeState(input) {
   if (input.isOpening || ['activating', 'pending'].includes(input.lifecycle)) return { label: '正在恢复 ACP 会话…', tone: 'busy' };
   if (!input.hasRuntime) return { label: '未启动 · 会话已保存', tone: 'idle' };
 
+  // A Registry runtime hint says that an ACP process exists; it does not mean
+  // this browser has selected and hydrated that conversation. Keep the
+  // sidebar honest instead of advertising “可输入” on multiple rows at once.
+  if (input.isSelected === false) return { label: '运行中 · 点击切换', tone: 'ready' };
+
   const chatStatus = String(input.chatStatus || '').toLowerCase();
   if (TERMINAL_LABELS[chatStatus]) {
     return { label: TERMINAL_LABELS[chatStatus], tone: chatStatus === 'crashed' ? 'danger' : 'idle' };

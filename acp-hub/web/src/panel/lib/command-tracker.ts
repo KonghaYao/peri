@@ -22,6 +22,7 @@ export interface CommandCallbacks<A extends CommandAck = CommandAck, E extends C
   onError?: (error: E) => void;
   onUncertain?: (reason: 'timeout' | 'disconnect') => void;
   retryOnUncertain?: boolean;
+  retryOnError?: boolean;
 }
 
 export interface CommandRequest<F extends CommandFrame, A extends CommandAck = CommandAck, E extends CommandError = CommandError> {
@@ -32,6 +33,12 @@ export interface CommandRequest<F extends CommandFrame, A extends CommandAck = C
 
 interface TrackedCommand<F extends CommandFrame, A extends CommandAck, E extends CommandError> extends CommandRequest<F, A, E> {
   timer: ReturnType<typeof setTimeout>;
+  accepted: boolean;
+}
+
+interface AwaitingTerminal<F extends CommandFrame, A extends CommandAck, E extends CommandError> {
+  request: CommandRequest<F, A, E>;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export interface CommandTrackerOptions<F extends CommandFrame, A extends CommandAck, E extends CommandError> {
@@ -41,6 +48,7 @@ export interface CommandTrackerOptions<F extends CommandFrame, A extends Command
 }
 
 export type DispatchResult = 'sent' | 'unavailable' | 'already_pending';
+export type AckDisposition = 'accepted' | 'terminal' | 'late_terminal' | 'unknown';
 
 /**
  * Owns the browser command lifecycle from transport send through exactly one
@@ -55,6 +63,7 @@ export class CommandTracker<
 > {
   private readonly pending = new Map<string, TrackedCommand<F, A, E>>();
   private readonly uncertain = new Map<string, CommandRequest<F, A, E>>();
+  private readonly awaitingTerminal = new Map<string, AwaitingTerminal<F, A, E>>();
 
   constructor(private readonly options: CommandTrackerOptions<F, A, E>) {}
 
@@ -63,34 +72,49 @@ export class CommandTracker<
     if (this.pending.has(commandId)) return 'already_pending';
     if (!send(request.frame)) return 'unavailable';
     const timer = setTimeout(() => this.makeUncertain(commandId, 'timeout'), this.options.timeoutMs);
-    this.pending.set(commandId, { ...request, timer });
+    this.pending.set(commandId, { ...request, timer, accepted: false });
     return 'sent';
   }
 
-  acknowledge(ack: A): boolean {
+  acknowledge(ack: A): AckDisposition {
     const commandId = ack.commandId;
-    if (!commandId) return false;
+    if (!commandId) return 'unknown';
     const tracked = this.pending.get(commandId);
     if (!tracked) {
+      const wasUncertain = this.uncertain.has(commandId) || this.awaitingTerminal.has(commandId);
       if (ack.status !== 'accepted') this.forget(commandId);
-      return false;
+      return wasUncertain && ack.status !== 'accepted' ? 'late_terminal' : 'unknown';
     }
     if (ack.status === 'accepted') {
-      tracked.callbacks?.onAccepted?.(ack);
-      return true;
+      if (!tracked.accepted) {
+        tracked.accepted = true;
+        tracked.callbacks?.onAccepted?.(ack);
+      }
+      return 'accepted';
     }
     this.releasePending(commandId);
     this.forget(commandId);
     tracked.callbacks?.onTerminal?.(ack);
-    return true;
+    return 'terminal';
   }
 
   fail(error: E): boolean {
     const commandId = error.commandId;
     if (!commandId) return false;
-    const tracked = this.pending.get(commandId);
+    const awaiting = this.awaitingTerminal.get(commandId);
+    const tracked = this.releasePending(commandId)
+      ?? this.uncertain.get(commandId)
+      ?? awaiting?.request;
     if (!tracked) return false;
-    this.releasePending(commandId);
+    if (error.retryable && tracked.callbacks?.retryOnError) {
+      const wasUncertain = this.uncertain.has(commandId);
+      if (awaiting) clearTimeout(awaiting.timer);
+      this.awaitingTerminal.delete(commandId);
+      this.uncertain.set(commandId, tracked);
+      if (!wasUncertain) this.options.onUncertainCountChange?.(this.uncertain.size);
+      tracked.callbacks?.onError?.(error);
+      return true;
+    }
     this.forget(commandId);
     tracked.callbacks?.onError?.(error);
     return true;
@@ -107,14 +131,19 @@ export class CommandTracker<
   }
 
   forget(commandId: string): void {
-    if (!this.uncertain.delete(commandId)) return;
-    this.options.onUncertainCountChange?.(this.uncertain.size);
+    const counted = this.uncertain.delete(commandId);
+    const awaiting = this.awaitingTerminal.get(commandId);
+    if (awaiting) clearTimeout(awaiting.timer);
+    this.awaitingTerminal.delete(commandId);
+    if (counted) this.options.onUncertainCountChange?.(this.uncertain.size);
   }
 
   reset(): void {
     for (const tracked of this.pending.values()) clearTimeout(tracked.timer);
+    for (const awaiting of this.awaitingTerminal.values()) clearTimeout(awaiting.timer);
     this.pending.clear();
     this.uncertain.clear();
+    this.awaitingTerminal.clear();
     this.options.onUncertainCountChange?.(0);
   }
 
@@ -141,6 +170,11 @@ export class CommandTracker<
     if (tracked.callbacks?.retryOnUncertain) {
       this.uncertain.set(commandId, request);
       this.options.onUncertainCountChange?.(this.uncertain.size);
+    } else {
+      // Retain only the callbacks needed to settle a definite late error.
+      // A late acknowledgement must never run an expired business continuation.
+      const timer = setTimeout(() => this.forget(commandId), this.options.timeoutMs);
+      this.awaitingTerminal.set(commandId, { request, timer });
     }
     if (tracked.callbacks?.onUncertain) tracked.callbacks.onUncertain(reason);
     else this.options.onFallbackUncertain(request, reason);

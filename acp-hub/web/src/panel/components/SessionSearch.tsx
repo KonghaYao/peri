@@ -1,9 +1,10 @@
 import { createEffect, createSignal, For, Show } from 'solid-js';
 import { Dialog, primaryShortcut, Spinner, TextField } from '../../ui';
-import { navigateProjectSession, openingSessionId, projectSessions, projects, readOnly, selectedSessionId } from '../store';
+import { navigateProjectSession, openingSessionId, projectSessions, projects, selectedSessionId } from '../store';
+import { readOnly } from '../lib/auth-state';
 import { formatRelativeTime, sessionDisplayTitle, shortSessionId } from '../lib/recovery-state.mjs';
 import { searchProjectSessions } from '../lib/session-search.mjs';
-import type { ProjectSessionInfo } from '../lib/yjs';
+import type { ProjectSessionInfo } from '../lib/registry-view';
 
 type SearchResult = ProjectSessionInfo & { project: { name: string } | null };
 
@@ -11,7 +12,11 @@ export function SessionSearch(props: { open: boolean; onClose: () => void; onSel
   const [query, setQuery] = createSignal('');
   const [problem, setProblem] = createSignal<string | null>(null);
   let resultList: HTMLDivElement | undefined;
-  const results = () => searchProjectSessions(query(), projects().filter((project) => !project.archivedAt), projectSessions()) as SearchResult[];
+  const results = () => searchProjectSessions(
+    query(),
+    projects().filter((project) => !project.archivedAt),
+    projectSessions().filter((session) => !session.archivedAt),
+  ) as SearchResult[];
   createEffect(() => { if (!props.open) { setQuery(''); setProblem(null); } });
   const choose = (session: ProjectSessionInfo) => {
     setProblem(null);

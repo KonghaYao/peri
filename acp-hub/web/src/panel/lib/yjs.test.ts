@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
-import { renderChat, renderControl } from './yjs';
+import { renderChat } from './chat-view';
+import { renderControl } from './control-view';
+import { renderRegistry } from './registry-view';
+
+describe('renderRegistry project session catalog', () => {
+  it('preserves the independent archive marker without changing runtime lifecycle', () => {
+    const doc = new Y.Doc();
+    const sessions = new Y.Map<unknown>();
+    const session = new Y.Map<unknown>();
+    doc.getMap<unknown>('root').set('project_sessions', sessions);
+    sessions.set('logical-1', session);
+    session.set('project_id', 'project-1');
+    session.set('acp_session_id', 'acp-1');
+    session.set('title', 'Saved work');
+    session.set('lifecycle', 'ready');
+    session.set('archived_at', '2026-08-14T00:00:00Z');
+
+    const [projectSession] = renderRegistry(doc).projectSessions;
+    expect(projectSession.archivedAt).toBe('2026-08-14T00:00:00Z');
+    expect(projectSession.lifecycle).toBe('ready');
+  });
+});
 
 describe('renderChat tool projection', () => {
   it('preserves server-projected arguments, result and public error', () => {
