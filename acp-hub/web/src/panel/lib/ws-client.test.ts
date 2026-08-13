@@ -69,6 +69,18 @@ describe('WsClient protocol boundary', () => {
     expect(frames).toHaveBeenCalledWith({ t: 'future.frame', value: 1 });
   });
 
+  it('rejects malformed known terminal frames before consumers can navigate', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { socket, frames, issues } = harness();
+    const malformed = '{"t":"action_ack","commandId":7,"status":"committed","sessionId":"wrong","chatId":"wrong"}';
+    socket.deliver(malformed);
+    socket.deliver('{"t":"future.frame","version":1}');
+
+    expect(issues).toHaveBeenCalledWith({ kind: 'malformed_frame', size: malformed.length });
+    expect(frames).toHaveBeenCalledOnce();
+    expect(frames).toHaveBeenCalledWith({ t: 'future.frame', version: 1 });
+  });
+
   it('isolates a consumer exception so later deliveries still run', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const onFrame = vi.fn()

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@solidjs/testing-library';
 import { describe, expect, it, vi } from 'vitest';
-import type { ChatEntry } from '../lib/yjs';
+import type { ChatEntry } from '../lib/chat-view';
 import { ConversationMessage } from './ConversationMessage';
 
 function entry(overrides: Partial<ChatEntry> = {}): ChatEntry {

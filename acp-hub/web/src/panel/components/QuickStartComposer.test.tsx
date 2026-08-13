@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installPrincipalRole } from '../store';
+import { installPrincipalRole } from '../lib/auth-state';
 import { QuickStartComposer } from './QuickStartComposer';
 
 afterEach(() => installPrincipalRole(null));

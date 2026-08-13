@@ -4,7 +4,7 @@ use tempfile::tempdir;
 use super::metadata::{payload_hash, BeginCommand, MetadataError, MetadataStore, NewSession};
 
 #[tokio::test]
-async fn v2_catalog_migrates_additively_to_hub_title() {
+async fn v2_catalog_migrates_additively_to_current_schema() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("metadata.sqlite3");
     let mut connection =
@@ -37,6 +37,10 @@ async fn v2_catalog_migrates_additively_to_hub_title() {
     assert!(
         !store.seed_hub_title("unknown", "Title").await.unwrap(),
         "the additive column must be queryable without rebuilding user data"
+    );
+    assert!(
+        store.session("unknown").await.unwrap().is_none(),
+        "the archive column must also be queryable after an additive migration"
     );
 }
 
@@ -102,6 +106,52 @@ async fn project_archive_is_reversible_without_losing_sessions() {
         store.restore_project("p1").await.is_err(),
         "restoring an active project is not an idempotent mutation"
     );
+}
+
+#[tokio::test]
+async fn session_archive_is_reversible_and_preserves_runtime_lifecycle() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .import_session("s1", "p1", "acp-1", "Saved work", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    let lifecycle = store.session("s1").await.unwrap().unwrap().lifecycle;
+
+    store.archive_session("s1").await.unwrap();
+    let archived = store.session("s1").await.unwrap().unwrap();
+    assert!(archived.archived_at.is_some());
+    assert_eq!(archived.lifecycle, lifecycle);
+
+    store.restore_session("s1").await.unwrap();
+    let restored = store.session("s1").await.unwrap().unwrap();
+    assert!(restored.archived_at.is_none());
+    assert_eq!(restored.lifecycle, lifecycle);
+    assert_eq!(restored.acp_session_id.as_deref(), Some("acp-1"));
+}
+
+#[tokio::test]
+async fn session_restore_requires_an_active_parent_project() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .import_session("s1", "p1", "acp-1", "Saved work", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    store.archive_session("s1").await.unwrap();
+    store.archive_project("p1").await.unwrap();
+    assert!(matches!(
+        store.restore_session("s1").await,
+        Err(MetadataError::InvalidState(_))
+    ));
 }
 
 #[tokio::test]

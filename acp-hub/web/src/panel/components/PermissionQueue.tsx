@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, Show } from 'solid-js';
-import type { PendingPermission } from '../lib/yjs';
-import type { PermissionDecisionState } from '../store';
+import type { PendingPermission } from '../lib/control-view';
+import type { PermissionDecisionState } from '../lib/permission-delivery';
 import { Button } from '../../ui';
 import { PermissionRequestCard } from './PermissionRequestCard';
 
@@ -9,6 +9,7 @@ export interface PermissionQueueProps {
   decisions: Map<string, PermissionDecisionState>;
   readOnly: boolean;
   onResolve: (permissionId: string, decision: 'allow' | 'deny') => void;
+  onRetry?: (commandId: string) => void;
 }
 
 /** Keeps one security decision in focus while making every server-projected
@@ -65,6 +66,7 @@ export function PermissionQueue(props: PermissionQueueProps) {
           const id = permissionId();
           if (id) props.onResolve(id, decision);
         }}
+        onRetry={props.onRetry}
       />
     </aside>;
   }}</Show>;

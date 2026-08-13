@@ -3,11 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const store = vi.hoisted(() => ({
   archiveProject: vi.fn(),
+  archiveProjectSession: vi.fn(),
   chatStatusSignal: vi.fn(() => ({})),
   connState: vi.fn(() => ({ kind: 'ok', text: '已连接' })),
   createProject: vi.fn(),
   createProjectSession: vi.fn(),
   creatingSessionProjectId: vi.fn(() => null as string | null),
+  discoverProjectSessions: vi.fn(() => true),
+  discoveringSessionsProjectId: vi.fn(() => null as string | null),
   importableSessions: vi.fn(() => []),
   importProjectSession: vi.fn(),
   navigateProjectSession: vi.fn(),
@@ -20,7 +23,7 @@ const store = vi.hoisted(() => ({
     instanceId: 'local',
     createdAt: '2026-08-13T10:00:00Z',
     updatedAt: '2026-08-13T10:00:00Z',
-    archivedAt: null,
+    archivedAt: null as string | null,
   }]),
   projectSessions: vi.fn(() => [{
     id: 'hub-abcdef12',
@@ -31,18 +34,21 @@ const store = vi.hoisted(() => ({
     lastOpenedAt: null,
     activeChatId: null as string | null,
     acpSessionId: 'acp-12345678',
+    archivedAt: null as string | null,
   }]),
   readOnly: vi.fn(() => false),
   runtimeDocsHydrated: vi.fn(() => true),
   renameProject: vi.fn(),
   renameProjectSession: vi.fn(),
   restoreProject: vi.fn(),
+  restoreProjectSession: vi.fn(),
   selectedCid: vi.fn(() => null as string | null),
   selectedSessionId: vi.fn(() => null as string | null),
   turnActive: vi.fn(() => false),
 }));
 
 vi.mock('../store', () => store);
+vi.mock('../lib/auth-state', () => ({ readOnly: store.readOnly }));
 vi.mock('./AuthGate', () => ({ useAuthActions: () => ({ logout: vi.fn() }) }));
 
 import { ProjectSidebar } from './ProjectSidebar';
@@ -56,6 +62,8 @@ describe('ProjectSidebar session navigation', () => {
     store.navigateProjectSession.mockReset();
     store.openingSessionId.mockReturnValue(null);
     store.readOnly.mockReturnValue(false);
+    store.selectedSessionId.mockReturnValue(null);
+    store.selectedCid.mockReturnValue(null);
     store.projectSessions.mockReturnValue([{
       id: 'hub-abcdef12',
       projectId: 'p1',
@@ -65,6 +73,7 @@ describe('ProjectSidebar session navigation', () => {
       lastOpenedAt: null,
       activeChatId: null,
       acpSessionId: 'acp-12345678',
+      archivedAt: null,
     }]);
   });
 
@@ -110,6 +119,7 @@ describe('ProjectSidebar session navigation', () => {
       lastOpenedAt: null,
       activeChatId: 'chat-live',
       acpSessionId: 'acp-12345678',
+      archivedAt: null,
     }]);
 
     render(() => <ProjectSidebar onNavigate={navigate} />);
@@ -117,5 +127,47 @@ describe('ProjectSidebar session navigation', () => {
 
     expect(store.navigateProjectSession).toHaveBeenCalledWith('hub-abcdef12');
     expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it('describes an unselected live runtime as switchable, not input-ready', () => {
+    store.projectSessions.mockReturnValue([{
+      id: 'hub-abcdef12',
+      projectId: 'p1',
+      title: '架构重构',
+      lifecycle: 'ready',
+      updatedAt: '2026-08-13T10:00:00Z',
+      lastOpenedAt: null,
+      activeChatId: 'chat-live',
+      acpSessionId: 'acp-12345678',
+      archivedAt: null,
+    }]);
+
+    render(() => <ProjectSidebar />);
+
+    expect(screen.getByText(/运行中 · 点击切换/)).toBeInTheDocument();
+    expect(screen.queryByText(/可输入/)).not.toBeInTheDocument();
+  });
+
+  it('keeps archived sessions out of normal navigation and restores them explicitly', () => {
+    let commit = () => {};
+    store.restoreProjectSession.mockImplementation((_id, onCommitted) => { commit = onCommitted; return true; });
+    store.projectSessions.mockReturnValue([{
+      id: 'hub-abcdef12',
+      projectId: 'p1',
+      title: '架构重构',
+      lifecycle: 'ready',
+      updatedAt: '2026-08-13T10:00:00Z',
+      lastOpenedAt: null,
+      activeChatId: null,
+      acpSessionId: 'acp-12345678',
+      archivedAt: '2026-08-14T00:00:00Z',
+    }]);
+
+    render(() => <ProjectSidebar />);
+    expect(screen.queryByRole('button', { name: /^架构重构/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /已归档会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复' }));
+    expect(store.restoreProjectSession).toHaveBeenCalledWith('hub-abcdef12', expect.any(Function), expect.any(Function));
+    commit();
   });
 });

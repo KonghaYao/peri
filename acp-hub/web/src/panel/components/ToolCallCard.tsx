@@ -1,5 +1,5 @@
 import { createMemo, Show } from 'solid-js';
-import type { ToolCallInfo } from '../lib/yjs';
+import type { ToolCallInfo } from '../lib/chat-view';
 import { CopyButton } from '../../ui';
 
 const STATUS: Record<string, { label: string; tone: string }> = {

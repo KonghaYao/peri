@@ -141,7 +141,10 @@ pub fn pending_count_for_tool(pair: &DocPair, tool_call_id: &str) -> usize {
 }
 
 /// Read the pending record's optional tool link before a control-path CAS.
-pub fn context(pair: &DocPair, permission_id: &str) -> Option<(String, Option<String>)> {
+pub fn context(
+    pair: &DocPair,
+    permission_id: &str,
+) -> Option<(String, Option<String>, Option<PermissionDecision>)> {
     let txn = pair.session.transact();
     let root = chat_writer::root_map_read(&txn)?;
     let permissions = root
@@ -159,7 +162,15 @@ pub fn context(pair: &DocPair, permission_id: &str) -> Option<(String, Option<St
     let tool_call_id = permission
         .get(&txn, "tool_call_id")
         .and_then(|value| value.cast::<String>().ok());
-    Some((status, tool_call_id))
+    let decision = permission
+        .get(&txn, "decision")
+        .and_then(|value| value.cast::<String>().ok())
+        .and_then(|value| match value.as_str() {
+            "allow" => Some(PermissionDecision::Allow),
+            "deny" => Some(PermissionDecision::Deny),
+            _ => None,
+        });
+    Some((status, tool_call_id, decision))
 }
 
 pub fn pending_tool_ids(pair: &DocPair) -> Vec<String> {

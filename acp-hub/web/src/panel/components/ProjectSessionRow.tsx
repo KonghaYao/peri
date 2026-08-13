@@ -1,6 +1,6 @@
 import { createEffect, createSignal, Show } from 'solid-js';
-import type { ProjectSessionInfo } from '../lib/yjs';
-import { Button, Icon, IconButton, Popover, Spinner, TextField } from '../../ui';
+import type { ProjectSessionInfo } from '../lib/registry-view';
+import { Button, Icon, IconButton, Menu, MenuItem, Popover, Spinner, TextField } from '../../ui';
 import { formatRelativeTime, sessionDisplayTitle } from '../lib/recovery-state.mjs';
 import { runConfirmedMutation } from '../lib/form-mutation';
 
@@ -17,11 +17,14 @@ export interface ProjectSessionRowProps {
   navigationBusy: boolean;
   readOnly: boolean;
   renameOpen: boolean;
+  menuOpen: boolean;
+  runtimeActive: boolean;
   replacementBusy: boolean;
   onNavigate: () => void;
   onOpen: (sessionId: string, onCommitted: () => void) => void;
   onSelectRuntime: (sessionId: string, chatId: string) => void;
   onRenameOpenChange: (open: boolean) => void;
+  onMenuOpenChange: (open: boolean) => void;
   onRename: (
     sessionId: string,
     name: string,
@@ -29,20 +32,19 @@ export interface ProjectSessionRowProps {
     onFailed: () => void,
   ) => boolean;
   onCreateReplacement: (title: string) => void;
+  onArchiveRequest: (sessionId: string) => void;
 }
 
 function ChatIcon() {
   return <Icon><path d="M4 4.5h12v9H8l-4 3v-12Z" /></Icon>;
 }
 
-function EditIcon() {
-  return <Icon><path d="m4 14.8.7-3.4 7.8-7.8a1.5 1.5 0 0 1 2.1 0l1.8 1.8a1.5 1.5 0 0 1 0 2.1l-7.8 7.8-3.4.7Z" /><path d="m11.3 4.8 3.9 3.9" /></Icon>;
-}
+function MoreIcon() { return <Icon><circle cx="4" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="16" cy="10" r="1" /></Icon>; }
 
 export function ProjectSessionRow(props: ProjectSessionRowProps) {
   const [draft, setDraft] = createSignal(props.session.title);
   const [submitting, setSubmitting] = createSignal(false);
-  let renameTrigger: HTMLButtonElement | undefined;
+  let menuTrigger: HTMLButtonElement | undefined;
   const renameId = () => `rename-session-${props.session.id}`;
   const displayTitle = () => sessionDisplayTitle(
     props.session.title,
@@ -97,22 +99,29 @@ export function ProjectSessionRow(props: ProjectSessionRowProps) {
     </button>
     <IconButton
       tooltipPlacement="end"
-      ref={renameTrigger}
       class="session-menu"
+      ref={menuTrigger}
       disabled={props.readOnly || submitting()}
-      label={`重命名 ${displayTitle()}`}
-      aria-haspopup="dialog"
-      aria-expanded={props.renameOpen}
-      aria-controls={props.renameOpen ? renameId() : undefined}
-      onClick={() => props.onRenameOpenChange(true)}
+      label={`会话操作：${displayTitle()}`}
+      aria-haspopup="menu"
+      aria-expanded={props.menuOpen}
+      aria-controls={props.menuOpen ? `${renameId()}-menu` : undefined}
+      onClick={() => props.onMenuOpenChange(!props.menuOpen)}
     >
-      <EditIcon />
+      <MoreIcon />
     </IconButton>
+    <Menu open={props.menuOpen} id={`${renameId()}-menu`} label={`会话操作：${displayTitle()}`} trigger={() => menuTrigger} onClose={() => props.onMenuOpenChange(false)}>
+      <MenuItem onClick={() => { props.onMenuOpenChange(false); props.onRenameOpenChange(true); }}>重命名会话</MenuItem>
+      <MenuItem tone="danger" disabled={props.runtimeActive} title={props.runtimeActive ? '请先关闭此会话的运行实例' : undefined} onClick={() => {
+        props.onMenuOpenChange(false);
+        props.onArchiveRequest(props.session.id);
+      }}>归档会话</MenuItem>
+    </Menu>
     <Popover
       open={props.renameOpen}
       id={renameId()}
       label={`重命名 ${displayTitle()}`}
-      trigger={() => renameTrigger}
+      trigger={() => menuTrigger}
       dismissible={!submitting()}
       onClose={() => props.onRenameOpenChange(false)}
     >

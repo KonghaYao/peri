@@ -176,7 +176,10 @@ impl Translator {
             | ActionEnvelope::PersistedSessionCreate { .. }
             | ActionEnvelope::PersistedSessionOpen { .. }
             | ActionEnvelope::PersistedSessionRename { .. }
-            | ActionEnvelope::PersistedSessionImport { .. } => {
+            | ActionEnvelope::PersistedSessionArchive { .. }
+            | ActionEnvelope::PersistedSessionRestore { .. }
+            | ActionEnvelope::PersistedSessionImport { .. }
+            | ActionEnvelope::PersistedSessionDiscover { .. } => {
                 Err(TranslateError::UnsupportedAction("metadata control-plane"))
             }
         }

@@ -342,6 +342,14 @@ impl Store {
         if outbox_replay.degraded {
             result.degraded = true;
         }
+        let reconciled = outbox.reconcile_recovery_after_restart()?;
+        if reconciled > 0 {
+            warn!(
+                chat_id = %chat_id,
+                commands = reconciled,
+                "permission recovery commands moved to delivery_unknown after restart"
+            );
+        }
         // 4. update 日志回放（§4.4）：快照基线选择 + 尾部截断。
         let mut update_log = UpdateLog::open(
             dir,

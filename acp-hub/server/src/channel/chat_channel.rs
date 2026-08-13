@@ -242,7 +242,10 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
         | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionRestore { command_id, .. }
         | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
         | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }

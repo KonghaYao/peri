@@ -404,19 +404,15 @@ async fn request_permission_registered_and_delivered() {
     let perms = mirror_pending_permissions(&env).await;
     assert_eq!(perms.len(), 1, "权限投影写入 control doc");
     let pid = perms[0].0.clone();
-    // take 命中且回读一致；一次性 remove。
-    let taken = env
-        .relay
-        .take_pending_permission(&pid)
-        .await
-        .expect("take 命中");
+    // 回读命中且一致；确认 delivery 前必须可重复读取。
+    let taken = env.relay.pending_permission(&pid).await.expect("read 命中");
     assert_eq!(taken.request_id, json!(5), "agent request id 原样");
     assert_eq!(taken.options.len(), 1);
     assert_eq!(taken.options[0]["optionId"], json!("allow-once"));
     assert_eq!(taken.chat_id, S1);
     assert!(
-        env.relay.take_pending_permission(&pid).await.is_none(),
-        "一次性 remove"
+        env.relay.pending_permission(&pid).await.is_some(),
+        "delivery 前保留回投材料"
     );
 }
 
@@ -474,11 +470,8 @@ async fn request_permission_before_active_turn_empty_turn_id() {
     assert_eq!(perms.len(), 1, "权限仍投影");
     assert_eq!(perms[0].1, "", "registry 无 active turn → turn_id 空串");
     assert!(
-        env.relay
-            .take_pending_permission(&perms[0].0)
-            .await
-            .is_some(),
-        "take 仍命中（功能不丢）"
+        env.relay.pending_permission(&perms[0].0).await.is_some(),
+        "read 仍命中（功能不丢）"
     );
 }
 

@@ -15,7 +15,7 @@
 //            'reconnecting' | 'fatal' | 'closed'
 //   onFrame(frame)   —— 每个非 keep_alive 下行帧（已 parse 的对象）。
 
-import { auth, parse, pong } from './protocol';
+import { auth, parse, pong, type DownstreamFrame } from './protocol';
 
 export type ConnStatus =
   | 'connecting'
@@ -38,7 +38,7 @@ export interface WsClientOpts {
   url: string;
   token?: string;
   onStatus: (state: ConnStatus, detail: ConnDetail) => void;
-  onFrame: (frame: Record<string, unknown>) => void;
+  onFrame: (frame: DownstreamFrame) => void;
   onProtocolIssue?: (issue: WsProtocolIssue) => void;
 }
 

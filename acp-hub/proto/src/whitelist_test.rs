@@ -160,14 +160,17 @@ fn m1_action_type_subset() {
         "session/create",
         "session/open",
         "session/rename",
+        "session/archive",
+        "session/restore",
         "session/import",
+        "session/discover",
     ] {
         assert!(m1_allows_action_type(t), "{t} 应在 M1");
     }
     for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 18);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 21);
 }
 
 /// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与

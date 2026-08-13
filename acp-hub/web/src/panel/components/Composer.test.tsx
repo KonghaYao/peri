@@ -1,19 +1,17 @@
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  setCancellingTurn,
   setChatHead,
   setChatStatusSignal,
-  setComposerDraft,
-  setComposerDrafts,
-  setMessageSubmission,
   setOpeningSession,
-  setPrincipalRole,
   setProjectSessions,
   setRuntimeDocsState,
   setSelectedCid,
   setSelectedSessionId,
 } from '../store';
+import { setPrincipalRole } from '../lib/auth-state';
+import { failMessageDelivery, markMessageDeliveryUncertain, resetMessageDelivery, setComposerDraft, startMessageDelivery } from '../lib/message-delivery';
+import { resetRuntimeControls, startRuntimeControl } from '../lib/runtime-control';
 import { Composer } from './Composer';
 
 function resetStore() {
@@ -23,10 +21,9 @@ function resetStore() {
   setPrincipalRole(null);
   setChatStatusSignal({});
   setChatHead(null);
-  setMessageSubmission(null);
-  setCancellingTurn(false);
+  resetRuntimeControls();
   setRuntimeDocsState({ chat: false, control: false });
-  setComposerDrafts({});
+  resetMessageDelivery();
   setProjectSessions([]);
 }
 
@@ -81,10 +78,19 @@ describe('Composer', () => {
     expect(screen.getByRole('textbox')).toBeDisabled();
   });
 
+  it('keeps stop locked while its exact runtime control is unresolved', () => {
+    selectReadyChat();
+    setChatHead({ chat: { chatId: 'chat-1', title: 'Chat', status: 'active', activeTurnId: 'turn-1', createdAt: null, updatedAt: null }, agent: null, activeTurn: { turnId: 'turn-1', turnStatus: 'running', updatedAt: null }, pendingPermissions: [] });
+    startRuntimeControl('cancel-1', 'chat-1', 'cancel');
+    render(() => <Composer />);
+    expect(screen.getByRole('button', { name: '停止生成' })).toBeDisabled();
+  });
+
   it('restores uncertain message text and keeps same-request recovery visible', async () => {
     selectReadyChat();
-    setComposerDraft('preserved draft');
-    setMessageSubmission({ commandId: 'cmd-1', text: 'preserved draft', sessionId: 'session-1', chatId: 'chat-1', phase: 'uncertain', detail: '服务器尚未确认', retryable: true });
+    setComposerDraft('session-1', 'preserved draft');
+    startMessageDelivery('cmd-1', 'preserved draft', 'session-1', 'chat-1');
+    markMessageDeliveryUncertain('cmd-1');
     render(() => <Composer />);
     await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('preserved draft'));
     expect(screen.getByRole('alert')).toHaveTextContent('结果尚未确认');
@@ -93,8 +99,9 @@ describe('Composer', () => {
 
   it('returns a definite failure to editing without promising an invalid same-request retry', async () => {
     selectReadyChat();
-    setComposerDraft('fix and send again');
-    setMessageSubmission({ commandId: 'cmd-failed', text: 'fix and send again', sessionId: 'session-1', chatId: 'chat-1', phase: 'failed', detail: '服务器已明确拒绝该请求', retryable: false });
+    setComposerDraft('session-1', 'fix and send again');
+    startMessageDelivery('cmd-failed', 'fix and send again', 'session-1', 'chat-1');
+    failMessageDelivery('cmd-failed', '服务器已明确拒绝该请求');
     render(() => <Composer />);
     await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('fix and send again'));
     expect(screen.getByRole('alert')).toHaveTextContent('消息未发送');
@@ -125,7 +132,8 @@ describe('Composer', () => {
       { id: 'session-1', projectId: 'project-1', acpSessionId: 'acp-1', title: 'Session A', lifecycle: 'ready', updatedAt: null, lastOpenedAt: null, activeChatId: 'chat-1' },
       { id: 'session-2', projectId: 'project-1', acpSessionId: 'acp-2', title: 'Session B', lifecycle: 'ready', updatedAt: null, lastOpenedAt: null, activeChatId: 'chat-2' },
     ]);
-    setMessageSubmission({ commandId: 'cmd-a', text: 'private draft A', sessionId: 'session-1', chatId: 'chat-1', phase: 'uncertain', detail: 'unknown', retryable: true });
+    startMessageDelivery('cmd-a', 'private draft A', 'session-1', 'chat-1');
+    markMessageDeliveryUncertain('cmd-a');
     setSelectedSessionId('session-2');
     setSelectedCid('chat-2');
     render(() => <Composer />);

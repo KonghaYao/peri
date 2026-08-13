@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@solidjs/testing-library';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ProjectSessionInfo } from '../lib/yjs';
+import type { ProjectSessionInfo } from '../lib/registry-view';
 import { ProjectSessionRow, type ProjectSessionRowProps } from './ProjectSessionRow';
 
 const session: ProjectSessionInfo = {
@@ -12,6 +12,7 @@ const session: ProjectSessionInfo = {
   updatedAt: '2026-08-13T10:00:00Z',
   lastOpenedAt: null,
   activeChatId: null,
+  archivedAt: null,
 };
 
 function props(overrides: Partial<ProjectSessionRowProps> = {}): ProjectSessionRowProps {
@@ -23,13 +24,17 @@ function props(overrides: Partial<ProjectSessionRowProps> = {}): ProjectSessionR
     navigationBusy: false,
     readOnly: false,
     renameOpen: false,
+    menuOpen: false,
+    runtimeActive: false,
     replacementBusy: false,
     onNavigate: vi.fn(),
     onOpen: vi.fn(),
     onSelectRuntime: vi.fn(),
     onRenameOpenChange: vi.fn(),
+    onMenuOpenChange: vi.fn(),
     onRename: vi.fn(() => true),
     onCreateReplacement: vi.fn(),
+    onArchiveRequest: vi.fn(),
     ...overrides,
   };
 }
@@ -79,5 +84,27 @@ describe('ProjectSessionRow', () => {
     expect(value.onRenameOpenChange).not.toHaveBeenCalledWith(false);
     commit?.();
     expect(value.onRenameOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('exposes archive through a semantic menu and delegates confirmation ownership', () => {
+    const value = props({ menuOpen: true });
+    render(() => <ProjectSessionRow {...value} />);
+
+    fireEvent.click(screen.getByRole('menuitem', { name: '归档会话' }));
+
+    expect(value.onMenuOpenChange).toHaveBeenCalledWith(false);
+    expect(value.onArchiveRequest).toHaveBeenCalledWith('hub-abcdef12');
+  });
+
+  it('does not allow a live runtime to be hidden from the sidebar', () => {
+    const value = props({
+      menuOpen: true,
+      runtimeActive: true,
+      session: { ...session, activeChatId: 'chat-live' },
+    });
+    render(() => <ProjectSessionRow {...value} />);
+
+    expect(screen.getByRole('menuitem', { name: '归档会话' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: '归档会话' })).toHaveAttribute('title', '请先关闭此会话的运行实例');
   });
 });

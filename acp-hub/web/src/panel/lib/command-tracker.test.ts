@@ -3,7 +3,7 @@ import { CommandTracker, type CommandRequest } from './command-tracker';
 
 interface Frame { commandId: string; t: string; [key: string]: unknown }
 interface Ack { commandId?: string; status?: string; chatId?: string; [key: string]: unknown }
-interface ErrorFrame { commandId?: string; code?: string; message?: string }
+interface ErrorFrame { commandId?: string; code?: string; message?: string; retryable?: boolean }
 
 function harness() {
   const fallback = vi.fn();
@@ -29,13 +29,14 @@ describe('CommandTracker', () => {
       callbacks: { onAccepted: accepted, onTerminal: terminal },
     };
     expect(tracker.dispatch(request, () => true)).toBe('sent');
-    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'accepted' })).toBe(true);
+    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'accepted' })).toBe('accepted');
+    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'accepted' })).toBe('accepted');
     expect(accepted).toHaveBeenCalledOnce();
     expect(tracker.hasPending('cmd-1')).toBe(true);
-    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'committed' })).toBe(true);
+    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'committed' })).toBe('terminal');
     expect(terminal).toHaveBeenCalledOnce();
     expect(tracker.hasPending('cmd-1')).toBe(false);
-    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'duplicate' })).toBe(false);
+    expect(tracker.acknowledge({ commandId: 'cmd-1', status: 'duplicate' })).toBe('unknown');
   });
 
   it('retains the exact frame for same-command retry after timeout', () => {
@@ -76,8 +77,8 @@ describe('CommandTracker', () => {
     const resent: Frame[] = [];
     expect(tracker.retry(frame.commandId, (candidate) => { resent.push(candidate); return true; })).toBe('sent');
     expect(resent).toEqual([frame]);
-    expect(tracker.acknowledge({ commandId: frame.commandId, status: 'duplicate' })).toBe(true);
-    expect(tracker.acknowledge({ commandId: frame.commandId, status: 'committed' })).toBe(false);
+    expect(tracker.acknowledge({ commandId: frame.commandId, status: 'duplicate' })).toBe('terminal');
+    expect(tracker.acknowledge({ commandId: frame.commandId, status: 'committed' })).toBe('unknown');
     expect(transitions).toEqual(['accepted', 'uncertain', 'terminal:duplicate']);
     expect(tracker.hasUncertain(frame.commandId)).toBe(false);
   });
@@ -107,10 +108,43 @@ describe('CommandTracker', () => {
     }, () => true);
     vi.advanceTimersByTime(30_000);
     expect(tracker.hasUncertain('late')).toBe(true);
-    expect(tracker.acknowledge({ commandId: 'late', status: 'committed' })).toBe(false);
+    expect(tracker.acknowledge({ commandId: 'late', status: 'committed' })).toBe('late_terminal');
     expect(terminal).not.toHaveBeenCalled();
     expect(tracker.hasUncertain('late')).toBe(false);
     expect(counts).toEqual([1, 0]);
+  });
+
+  it('routes a definite late error through the original callback exactly once', () => {
+    vi.useFakeTimers();
+    const { tracker, counts } = harness();
+    const onError = vi.fn();
+    tracker.dispatch({
+      frame: { t: 'action', commandId: 'late-error' },
+      label: 'prompt',
+      callbacks: { retryOnUncertain: true, onError },
+    }, () => true);
+    vi.advanceTimersByTime(30_000);
+    expect(tracker.fail({ commandId: 'late-error', code: 'INVALID_STATE' })).toBe(true);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(tracker.fail({ commandId: 'late-error', code: 'INVALID_STATE' })).toBe(false);
+    expect(counts).toEqual([1, 0]);
+  });
+
+  it('retains non-retryable callbacks only to settle a definite late error', () => {
+    vi.useFakeTimers();
+    const { tracker } = harness();
+    const onError = vi.fn();
+    const terminal = vi.fn();
+    tracker.dispatch({
+      frame: { t: 'action', commandId: 'permission' },
+      label: 'resolve',
+      callbacks: { onError, onTerminal: terminal },
+    }, () => true);
+    vi.advanceTimersByTime(30_000);
+    expect(tracker.hasUncertain('permission')).toBe(false);
+    expect(tracker.fail({ commandId: 'permission', code: 'INVALID_STATE' })).toBe(true);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(terminal).not.toHaveBeenCalled();
   });
 
   it('settles every pending command as uncertain on disconnect', () => {
@@ -123,6 +157,33 @@ describe('CommandTracker', () => {
     expect(fallback).toHaveBeenCalledWith(expect.objectContaining({ label: 'two' }), 'disconnect');
     expect(tracker.hasPending('one')).toBe(false);
     expect(tracker.hasPending('two')).toBe(false);
+  });
+
+  it('fans one disconnect out to each domain callback exactly once', () => {
+    const { tracker, fallback } = harness();
+    const callbacks = {
+      message: vi.fn(),
+      quickStart: vi.fn(),
+      permission: vi.fn(),
+      sessionOpen: vi.fn(),
+    };
+    for (const [domain, onUncertain] of Object.entries(callbacks)) {
+      tracker.dispatch({
+        frame: { t: 'action', commandId: domain },
+        label: domain,
+        callbacks: { retryOnUncertain: domain !== 'permission', onUncertain },
+      }, () => true);
+    }
+
+    tracker.settleConnectionLoss();
+    tracker.settleConnectionLoss();
+
+    for (const callback of Object.values(callbacks)) {
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback).toHaveBeenCalledWith('disconnect');
+    }
+    expect(tracker.uncertainCount()).toBe(3);
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it('reports transport rejection without registering a timer or callback', () => {
@@ -169,6 +230,36 @@ describe('CommandTracker', () => {
     expect(onError).toHaveBeenCalledOnce();
     expect(fallback).not.toHaveBeenCalled();
     expect(tracker.fail({ commandId: 'bad', code: 'INVALID_STATE' })).toBe(false);
+  });
+
+  it('retains the exact request only when a retryable error opted into recovery', () => {
+    const { tracker, counts } = harness();
+    const onError = vi.fn();
+    const frame = { t: 'action', commandId: 'permission-retry' };
+    tracker.dispatch({
+      frame,
+      label: 'permission/resolve',
+      callbacks: { retryOnError: true, onError },
+    }, () => true);
+    expect(tracker.fail({ commandId: frame.commandId, code: 'INSTANCE_OFFLINE', retryable: true })).toBe(true);
+    expect(tracker.hasUncertain(frame.commandId)).toBe(true);
+    expect(counts).toEqual([1]);
+    const send = vi.fn(() => true);
+    expect(tracker.retry(frame.commandId, send)).toBe('sent');
+    expect(send).toHaveBeenCalledExactlyOnceWith(frame);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it('does not retain non-retryable errors even when recovery was requested', () => {
+    const { tracker, counts } = harness();
+    tracker.dispatch({
+      frame: { t: 'action', commandId: 'permission-denied' },
+      label: 'permission/resolve',
+      callbacks: { retryOnError: true },
+    }, () => true);
+    expect(tracker.fail({ commandId: 'permission-denied', code: 'INVALID_STATE', retryable: false })).toBe(true);
+    expect(tracker.hasUncertain('permission-denied')).toBe(false);
+    expect(counts).toEqual([]);
   });
 
   it('reset cancels timers and clears pending and uncertain state without callbacks', () => {

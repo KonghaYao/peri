@@ -10,6 +10,8 @@ function props(overrides: Partial<SessionImportDialogProps> = {}): SessionImport
       { sessionId: 'acp-one', title: '架构重构', status: null, updatedAt: '2026-08-13T10:00:00Z', cwd: '/repo' },
       { sessionId: 'acp-other', title: '其他目录', status: null, updatedAt: null, cwd: '/other' },
     ],
+    discovering: false,
+    onDiscover: vi.fn(() => true),
     onClose: vi.fn(),
     onImport: vi.fn(() => true),
     ...overrides,
@@ -17,6 +19,22 @@ function props(overrides: Partial<SessionImportDialogProps> = {}): SessionImport
 }
 
 describe('SessionImportDialog', () => {
+  it('discovers project sessions when opened and exposes retry after failure', () => {
+    const onDiscover = vi.fn((_projectId, _committed, failed) => { failed('ACP 实例暂时不可用'); return true; });
+    render(() => <SessionImportDialog {...props({ sessions: [], onDiscover })} />);
+    expect(onDiscover).toHaveBeenCalledWith('p1', expect.any(Function), expect.any(Function));
+    expect(screen.getByRole('alert')).toHaveTextContent('ACP 实例暂时不可用');
+    fireEvent.click(screen.getByRole('button', { name: '重新读取 ACP 会话' }));
+    expect(onDiscover).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a non-interactive loading state while discovery is running', () => {
+    render(() => <SessionImportDialog {...props({ sessions: [], discovering: true })} />);
+    expect(screen.getByText('正在读取 ACP 会话…')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '搜索会话' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '导入所选会话' })).toBeDisabled();
+  });
+
   it('shows only cwd-scoped candidates and filters by stable id', () => {
     render(() => <SessionImportDialog {...props()} />);
     expect(screen.getByRole('button', { name: /架构重构/ })).toBeInTheDocument();

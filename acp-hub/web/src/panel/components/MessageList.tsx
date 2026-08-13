@@ -10,12 +10,14 @@
 // permission decision 值（allow/deny、按钮顺序）均不变。
 
 import { createEffect, createSignal, For, Show } from 'solid-js';
-import { chatEntries, pendingPermissionDecisions, permissions, readOnly, resolvePermission, runtimeDocsHydrated } from '../store';
+import { chatEntries, permissions, resolvePermission, retryPersistentAction, runtimeDocsHydrated } from '../store';
+import { readOnly } from '../lib/auth-state';
 import { messageActivity, nextFollowState } from '../lib/message-follow.mjs';
 import { messageTime } from '../lib/message-time.mjs';
 import { Button } from '../../ui';
 import { PermissionQueue } from './PermissionQueue';
 import { ConversationMessage } from './ConversationMessage';
+import { permissionDecisions } from '../lib/permission-delivery';
 
 
 // ── 权限条 ──────────────────────────────────────────────────────────────
@@ -26,9 +28,10 @@ import { ConversationMessage } from './ConversationMessage';
 function PermissionBar() {
   return <PermissionQueue
     permissions={permissions()}
-    decisions={pendingPermissionDecisions()}
+    decisions={permissionDecisions()}
     readOnly={readOnly()}
     onResolve={resolvePermission}
+    onRetry={retryPersistentAction}
   />;
 }
 

@@ -24,6 +24,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, info, warn};
 
+use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::instance::{InstanceBufferSync, InstanceEvent, InstanceProcessExit};
 use acp_hub_proto::schema::PermissionOptions;
 
@@ -99,7 +100,7 @@ pub struct PendingRpc {
 
 /// pending_permission 表条目（#1：官方 `session/request_permission` 响应回
 /// 投数据；key = server 生成 permission_id）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PendingPermissionReq {
     /// agent 的 request id（响应帧 id 原样回显）。
     pub request_id: serde_json::Value,
@@ -107,6 +108,11 @@ pub struct PendingPermissionReq {
     pub options: Vec<serde_json::Value>,
     /// 归属 chat（断链/进程退出清理用）。
     pub chat_id: String,
+    /// 首次裁决的 commandId。明确未送达时只允许这一条命令
+    /// 恢复，防止新 commandId 把同一安全副作用重放。
+    resolving_command_id: Option<String>,
+    /// 与 `resolving_command_id` 绑定的原始决策。
+    resolving_decision: Option<PermissionDecision>,
 }
 
 /// instance 入站事件消费（§4.5）。
@@ -543,6 +549,8 @@ impl RelayEventHandler {
                 request_id: req.request_id.clone(),
                 options: req.options.clone(),
                 chat_id: chat_id.to_string(),
+                resolving_command_id: None,
+                resolving_decision: None,
             },
         );
         let turn_id = self
@@ -570,21 +578,44 @@ impl RelayEventHandler {
         self.submit(chat_id, nev).await
     }
 
-    /// resolve 取表（coordinator 出站响应；一次性 remove——官方轨唯一消费
-    /// 点，未命中 = 原始形态权限流，走旧轨）。
-    pub async fn take_pending_permission(
-        &self,
-        permission_id: &str,
-    ) -> Option<PendingPermissionReq> {
+    /// 读取官方 request 回投材料。发送成功前不得移除：明确未送达时，同一
+    /// decision + commandId 需要复用它恢复；相反 decision 不得消费它。
+    pub async fn pending_permission(&self, permission_id: &str) -> Option<PendingPermissionReq> {
         self.inner
             .pending_permissions
-            .write()
+            .read()
             .await
-            .remove(permission_id)
+            .get(permission_id)
+            .cloned()
     }
 
-    /// 表项移除（CAS Duplicate 分支清理；幂等无害——duplicate 不触发
-    /// take，表项滞留至断链，remove 防泄漏）。
+    /// 申领官方 permission response 的唯一投递权。
+    ///
+    /// 首次决策会将 `(commandId, decision)` 绑定到 request；后续只有
+    /// 完全相同的命令才能在明确未送达后恢复。其他 commandId 或相反
+    /// decision 均不得获取响应材料。
+    pub async fn claim_pending_permission(
+        &self,
+        permission_id: &str,
+        command_id: &str,
+        decision: PermissionDecision,
+    ) -> Option<PendingPermissionReq> {
+        let mut pending = self.inner.pending_permissions.write().await;
+        let request = pending.get_mut(permission_id)?;
+        match (&request.resolving_command_id, request.resolving_decision) {
+            (None, None) => {
+                request.resolving_command_id = Some(command_id.to_string());
+                request.resolving_decision = Some(decision);
+            }
+            (Some(existing_id), Some(existing_decision))
+                if existing_id == command_id && existing_decision == decision => {}
+            _ => return None,
+        }
+        Some(request.clone())
+    }
+
+    /// 投递确认后移除表项；幂等无害。未确认前必须保留，
+    /// 以便原 `(commandId, decision)` 在明确未送达时恢复。
     pub async fn remove_pending_permission(&self, permission_id: &str) {
         self.inner
             .pending_permissions

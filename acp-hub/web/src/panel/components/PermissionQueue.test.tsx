@@ -1,8 +1,8 @@
 import { fireEvent, render, screen } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { describe, expect, it, vi } from 'vitest';
-import type { PendingPermission } from '../lib/yjs';
-import type { PermissionDecisionState } from '../store';
+import type { PendingPermission } from '../lib/control-view';
+import type { PermissionDecisionState } from '../lib/permission-delivery';
 import { PermissionQueue } from './PermissionQueue';
 
 function permission(id: string, title: string): PendingPermission {
@@ -43,7 +43,7 @@ describe('PermissionQueue', () => {
   });
 
   it('applies a decision lock only to its matching permission id', () => {
-    const decisions = new Map<string, PermissionDecisionState>([['p1', { decision: 'allow', phase: 'pending' }]]);
+    const decisions = new Map<string, PermissionDecisionState>([['p1', { commandId: 'cmd-1', permissionId: 'p1', decision: 'allow', phase: 'pending', retryable: false }]]);
     const resolve = vi.fn();
     render(() => <PermissionQueue permissions={[permission('p1', '第一项'), permission('p2', '第二项')]} decisions={decisions} readOnly={false} onResolve={resolve} />);
     expect(screen.getByRole('button', { name: /正在允许/ })).toBeDisabled();

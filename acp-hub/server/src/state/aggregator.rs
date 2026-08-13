@@ -60,6 +60,9 @@ impl ApplyResult {
 pub enum ApplyReason {
     /// 幂等键（turn_id/entry_id/tool_call_id/permission_id）已存在，重放跳过。
     DuplicateIdempotent,
+    /// 权限已经记录为同一 decision；调用方可用仍存在的 ACP request 回投材料
+    /// 恢复一次明确未送达的 response。相反 decision 不得进入此分支。
+    PermissionDecisionReplay,
     /// 终态守卫：turn 处于 cancelling/completed/failed/cancelled，晚到增量丢弃
     /// （§6.3）。
     TurnTerminalGuard,

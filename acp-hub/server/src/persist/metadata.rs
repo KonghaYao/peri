@@ -16,7 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const METADATA_DB_FILE: &str = "metadata.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations(
@@ -102,6 +102,12 @@ const MIGRATION_V3: &str = r#"
 ALTER TABLE project_sessions ADD COLUMN hub_title TEXT;
 "#;
 
+const MIGRATION_V4: &str = r#"
+ALTER TABLE project_sessions ADD COLUMN archived_at TEXT;
+CREATE INDEX IF NOT EXISTS project_sessions_archived_updated_idx
+  ON project_sessions(archived_at, updated_at DESC);
+"#;
+
 #[derive(Debug, Error)]
 pub enum MetadataError {
     #[error("metadata database error: {0}")]
@@ -146,6 +152,9 @@ pub struct ProjectSessionRecord {
     pub last_chat_id: Option<String>,
     pub failure_code: Option<String>,
     pub origin: String,
+    /// Navigation-only soft archive marker. The runtime lifecycle remains
+    /// untouched so restore never invents a prior state.
+    pub archived_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +322,19 @@ impl MetadataStore {
                 .execute(&mut *tx)
                 .await?;
         }
+        if found < 4 {
+            for statement in MIGRATION_V4
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                sqlx::query(statement).execute(&mut *tx).await?;
+            }
+            sqlx::query("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)")
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -393,6 +415,17 @@ impl MetadataStore {
                 .bind("pending").bind(&ts).bind(&ts).bind("hub").execute(&mut *tx).await?;
         }
         if let Some(session_id) = activate_session {
+            let archivable: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM project_sessions WHERE id=? AND archived_at IS NULL",
+            )
+            .bind(session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if archivable.is_none() {
+                return Err(MetadataError::InvalidState(format!(
+                    "session {session_id} is archived or missing"
+                )));
+            }
             sqlx::query("INSERT INTO session_activations(session_id,command_id,phase,started_at,updated_at) VALUES(?,?,?,?,?)")
                 .bind(session_id).bind(command_id).bind("intention_durable").bind(&ts).bind(&ts)
                 .execute(&mut *tx).await.map_err(|e| {
@@ -734,6 +767,46 @@ impl MetadataStore {
         self.bump_generation().await
     }
 
+    pub async fn archive_session(&self, id: &str) -> Result<()> {
+        let ts = now();
+        let result = sqlx::query(
+            "UPDATE project_sessions SET archived_at=?,updated_at=? \
+             WHERE id=? AND archived_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM session_activations WHERE session_id=?)",
+        )
+        .bind(&ts)
+        .bind(&ts)
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(MetadataError::InvalidState(format!(
+                "session {id} not archivable"
+            )));
+        }
+        self.bump_generation().await
+    }
+
+    pub async fn restore_session(&self, id: &str) -> Result<()> {
+        let ts = now();
+        let result = sqlx::query(
+            "UPDATE project_sessions SET archived_at=NULL,updated_at=? \
+             WHERE id=? AND archived_at IS NOT NULL \
+             AND project_id IN (SELECT id FROM projects WHERE archived_at IS NULL)",
+        )
+        .bind(&ts)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(MetadataError::InvalidState(format!(
+                "session {id} not restorable"
+            )));
+        }
+        self.bump_generation().await
+    }
+
     pub async fn update_acp_title(&self, acp: &str, title: &str) -> Result<()> {
         self.update_acp_titles(&[(acp.to_string(), title.to_string())])
             .await?;
@@ -791,13 +864,13 @@ impl MetadataStore {
     }
 
     pub async fn session(&self, id: &str) -> Result<Option<ProjectSessionRecord>> {
-        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE id=?")
+        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin,archived_at FROM project_sessions WHERE id=?")
             .bind(id).fetch_optional(&self.pool).await?;
         Ok(row.map(session_from_row))
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<ProjectSessionRecord>> {
-        Ok(sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
+        Ok(sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin,archived_at FROM project_sessions ORDER BY updated_at DESC,id")
             .fetch_all(&self.pool).await?.into_iter().map(session_from_row).collect())
     }
 
@@ -813,7 +886,7 @@ impl MetadataStore {
                 .await?;
         let projects = sqlx::query("SELECT id,name,cwd,instance_id,created_at,updated_at,archived_at FROM projects ORDER BY updated_at DESC,id")
             .fetch_all(&mut *tx).await?.into_iter().map(project_from_row).collect();
-        let sessions = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
+        let sessions = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin,archived_at FROM project_sessions ORDER BY updated_at DESC,id")
             .fetch_all(&mut *tx).await?.into_iter().map(session_from_row).collect();
         tx.commit().await?;
         Ok(MetadataSnapshot {
@@ -879,7 +952,7 @@ impl MetadataStore {
         &self,
         acp_session_id: &str,
     ) -> Result<Option<ProjectSessionRecord>> {
-        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE acp_session_id=?")
+        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin,archived_at FROM project_sessions WHERE acp_session_id=?")
             .bind(acp_session_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1016,6 +1089,7 @@ fn session_from_row(r: sqlx::sqlite::SqliteRow) -> ProjectSessionRecord {
         last_chat_id: r.get(10),
         failure_code: r.get(11),
         origin: r.get(12),
+        archived_at: r.get(13),
     }
 }
 
