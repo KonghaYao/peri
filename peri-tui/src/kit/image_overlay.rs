@@ -47,7 +47,9 @@ use ratatui_kit::ratatui::buffer::Buffer;
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::BorderType;
 use ratatui_kit::ratatui::widgets::Widget as _;
+use unicode_width::UnicodeWidthStr;
 
 /// 像素区最小终端尺寸（§7.4）：终端小于该尺寸仅显示 meta 行（纯文本降级）。
 const MIN_PREVIEW_TERM_W: u16 = 30;
@@ -357,7 +359,10 @@ fn draw_preview_overlay(
         return;
     }
     let popup = THEME_ATOM.state().read().component.popup;
-    let block = Block::bordered().border_style(Style::default().fg(popup.border));
+    // [样式] 圆角边框弹窗（无背景填充，透明露出下层——用户要求不要背景色）。
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(popup.border));
     block.render(rect, buf);
 
     // meta 行：边框内顶部一行（display width 截断，TUI-TEXT-001）。
@@ -392,11 +397,34 @@ fn draw_preview_overlay(
         return;
     }
     if !matches!(state, ImagePreviewState::Ready { .. }) || !preview_supported(caps) {
+        // [方案 B] 终端不支持图片协议（无协议/ITerm2 disabled）：像素区给出
+        // 能力提示而非静默空白（grok 降级面板精神的精简版）；Degraded/Error
+        // 状态不重复提示（meta 行已含原因文案，§5.7）。
+        if matches!(state, ImagePreviewState::Ready { .. }) {
+            paint_no_protocol_hint(buf, &pixel_area);
+        }
         return;
     }
     if let Some(img) = async_img {
         img.render(pixel_area, buf);
     }
+}
+
+/// [方案 B] 终端不支持图片协议时，在像素区中央绘制一行能力提示
+/// （i18n `image-preview-no-protocol`）。文本过 [`sanitize_for_terminal`]
+/// （幂等，§6.2-4）+ 按像素区宽度截断（TUI-TEXT-001）。
+fn paint_no_protocol_hint(buf: &mut Buffer, area: &Rect) {
+    let raw = i18n::tr("image-preview-no-protocol");
+    let hint = sanitize_for_terminal(&raw);
+    if hint.is_empty() || area.width < 2 {
+        return;
+    }
+    let inner_w = usize::from(area.width.saturating_sub(2).max(1));
+    let text = truncate_by_width(&hint, inner_w);
+    let x = area.x + (area.width.saturating_sub(text.width() as u16)) / 2;
+    let y = area.y + area.height.saturating_div(2);
+    let secondary = THEME_ATOM.state().read().semantic.text.secondary;
+    buf.set_stringn(x, y, &text, inner_w, Style::default().fg(secondary));
 }
 
 // ── OverlayDrawHook：AsyncImage 生命周期 + 绘制 ──────────────────────────

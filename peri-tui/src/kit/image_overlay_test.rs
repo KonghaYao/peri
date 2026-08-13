@@ -464,9 +464,9 @@ fn draw_preview_overlay_ready_transmits() {
     let buf = term.backend().buffer();
     // 首帧 transmit 恰好 1 处（y==0 首行 cell——overlay 内首行即 rect.y）。
     assert_eq!(count_transmit(buf), 1, "Ready + Kitty 应输出像素 transmit");
-    // 边框可见。
+    // 边框可见（Rounded 圆角：左上角 ╭）。
     assert!(
-        buf.content().iter().any(|c| c.symbol() == "┌"),
+        buf.content().iter().any(|c| c.symbol() == "╭"),
         "边框左上角存在"
     );
 }
@@ -568,6 +568,37 @@ fn draw_preview_overlay_unsupported_protocol_degrades() {
         0,
         "无协议/disabled → 文本降级"
     );
+}
+
+/// [方案 B] 无协议终端：像素区显示终端能力提示（而非静默空白），
+/// 且不 transmit。同时覆盖 ITerm2 disabled（同分支，§6.3）。
+#[test]
+fn draw_preview_overlay_no_protocol_shows_hint() {
+    crate::i18n::init(Some("en"));
+    for protocol in [GraphicsProtocol::None, GraphicsProtocol::ITerm2] {
+        let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let rect = Rect::new(10, 4, 24, 12);
+        let state = ready_state(PathBuf::from("/tmp/a.png"));
+        let caps = caps(protocol);
+        term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
+            .unwrap();
+        assert_eq!(
+            count_transmit(term.backend().buffer()),
+            0,
+            "{protocol:?} 不 transmit"
+        );
+        let content: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            content.contains("terminal doesn'"),
+            "{protocol:?} 能力提示应出现在像素区（宽截断后前缀），实际: {content}"
+        );
+    }
 }
 
 #[test]
