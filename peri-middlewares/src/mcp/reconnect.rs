@@ -3,9 +3,9 @@ use std::sync::Arc;
 use super::{
     auth_store::FileCredentialStore,
     client::{
-        build_authed_transport, build_http_transport, spawn_stdio_transport, ClientStatus,
-        McpClientHandle, McpClientPool, McpPoolError, McpServiceWrapper, OAuthStatus,
-        HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
+        spawn_stdio_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
+        OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
     oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
     transport::TransportConfig,
@@ -27,6 +27,13 @@ impl McpClientPool {
                 status: ClientStatus::Disconnected,
             })?;
 
+        // 终止旧订阅循环并清理 subscription_tasks 条目：abort 防止旧 task
+        // 残留（其内退避重试可能误取到重建后的 peer 造成双订阅循环）。
+        if let Some(handles) = self.subscription_tasks.lock().await.remove(server_name) {
+            for h in handles {
+                h.abort();
+            }
+        }
         if let Some(mut svc) = self.services.lock().await.remove(server_name) {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
@@ -52,14 +59,18 @@ impl McpClientPool {
         } else {
             STDIO_CONNECT_TIMEOUT
         };
+        // subscriptions 配置存在时协商 2026-07-28 协议（Auto：先
+        // server/discover，服务器不支持时回退 legacy 握手），否则维持原路径。
+        let subscriptions = server_config
+            .subscriptions
+            .as_ref()
+            .filter(|s| !s.is_empty());
 
         let mut used_oauth = false;
         let result = match &tc {
             TransportConfig::Stdio { command, args, env } => {
                 match spawn_stdio_transport(command, args, env) {
-                    Ok(t) => {
-                        tokio::time::timeout(timeout, rmcp::service::serve_client((), t)).await
-                    }
+                    Ok(t) => serve_client_auto(t, None, subscriptions, timeout).await,
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
                         return Err(McpPoolError::ConnectionFailed {
@@ -101,38 +112,40 @@ impl McpClientPool {
                         Ok(()) => {
                             used_oauth = true;
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
-                                tokio::time::timeout(
+                                serve_client_auto(
+                                    build_authed_transport(url, headers, am),
+                                    None,
+                                    subscriptions,
                                     timeout,
-                                    rmcp::service::serve_client(
-                                        (),
-                                        build_authed_transport(url, headers, am),
-                                    ),
                                 )
                                 .await
                             } else {
-                                tokio::time::timeout(
+                                serve_client_auto(
+                                    build_http_transport(url, headers),
+                                    None,
+                                    subscriptions,
                                     timeout,
-                                    rmcp::service::serve_client(
-                                        (),
-                                        build_http_transport(url, headers),
-                                    ),
                                 )
                                 .await
                             }
                         }
                         Err(e) => {
                             tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                            tokio::time::timeout(
+                            serve_client_auto(
+                                build_http_transport(url, headers),
+                                None,
+                                subscriptions,
                                 timeout,
-                                rmcp::service::serve_client((), build_http_transport(url, headers)),
                             )
                             .await
                         }
                     }
                 } else {
-                    tokio::time::timeout(
+                    serve_client_auto(
+                        build_http_transport(url, headers),
+                        None,
+                        subscriptions,
                         timeout,
-                        rmcp::service::serve_client((), build_http_transport(url, headers)),
                     )
                     .await
                 }
@@ -141,6 +154,11 @@ impl McpClientPool {
 
         match result {
             Ok(Ok(rs)) => {
+                // 订阅配置存在：按 server 配置重建 subscriptions/listen 长流
+                // （2026-07-28）。失败仅告警——server 可能不支持，连接本身仍可用。
+                if let Some(sub) = subscriptions {
+                    setup_subscription(self, &rs, server_name, sub).await;
+                }
                 let tools =
                     rs.list_all_tools()
                         .await
@@ -172,7 +190,7 @@ impl McpClientPool {
                 self.services
                     .lock()
                     .await
-                    .insert(server_name.to_string(), McpServiceWrapper::Default(rs));
+                    .insert(server_name.to_string(), rs);
                 self.record_status_change(server_name, old_status.as_ref());
                 Ok(())
             }

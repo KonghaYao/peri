@@ -12,7 +12,8 @@ bun run chat/server.ts
 ```
 
 - 聊天 UI：http://localhost:3100/ （微信风格：用户右侧绿泡、agent 左侧白泡）
-- MCP 端点：http://localhost:3100/mcp （Streamable HTTP，协议 2026-07-28）
+- MCP 端点：http://localhost:3100/mcp （Streamable HTTP；实现 2026-07-28 的
+  `subscriptions/listen` 与 `resources/updated` 推送）
 - 资源：`chat://room/general/messages`
 
 ## 在 peri 中接入
@@ -32,10 +33,15 @@ bun run chat/server.ts
 }
 ```
 
-`subscriptions` 配置存在时，peri 连接会协商 2026-07-28 协议并建立
-`subscriptions/listen` 长流（订阅字段说明见 `peri-acp-types/src/plugin.rs` 的
-`McpSubscriptionsConfig`：`resources` URI 列表、`toolsListChanged`、
-`promptsListChanged`、`resourcesListChanged`）。
+`subscriptions` 配置存在时，peri 连接会建立 `subscriptions/listen` 长流
+（订阅字段说明见 `peri-acp-types/src/plugin.rs` 的 `McpSubscriptionsConfig`：
+`resources` URI 列表、`toolsListChanged`、`promptsListChanged`、
+`resourcesListChanged`）。
+
+> 协商说明：本 server **未实现 `server/discover`**，也不是完整 2026-07-28
+> server —— 如实实现的只有 `subscriptions/listen`（SSE 长流）与
+> `resources/updated` 推送。peri 的 Auto 模式在 discover 得到 -32601 后
+> 回退 legacy initialize 完成握手，2026-07-28 协议协商即经此回退兼容达成。
 
 ### 通知 → 唤醒链路
 
@@ -52,5 +58,7 @@ bun run chat/server.ts
 - `server.ts` 为手写 JSON-RPC server（bun）：npm SDK 尚未发布 2026-07-28
   协议；`subscriptions/listen` 返回 SSE 流（`text/event-stream`），先发
   `notifications/subscriptions/acknowledged` 确认，再在资源变化时推送通知。
+- 未实现 `server/discover`（返回 -32601）：初始化握手依赖 peri Auto 模式回退
+  legacy initialize，见上文「协商说明」。
 - `Bun.serve` 需 `idleTimeout: 0`：默认 10s 空闲超时会掐断订阅长流。
 - server 状态在内存中（重启即清空），房间固定 `general`。
