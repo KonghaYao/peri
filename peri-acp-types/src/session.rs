@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::command::PromptStopReason;
+use crate::mcp_skills::McpSkillRegistry;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
 
@@ -652,5 +653,13 @@ pub trait SessionAccessPort: Send + Sync {
     /// 默认实现返回 false（print mode / 未装配端口时安全 no-op）。
     fn mcp_subscription_for(&self, _session_id: &str) -> bool {
         false
+    }
+
+    /// 会话级 MCP skill 远端注册表（AcpSession 持有；发现任务写入，
+    /// Skills 侧读取合并）。
+    ///
+    /// 默认实现返回 None（print mode / 未装配端口时安全 no-op）。
+    fn mcp_skill_registry(&self, _session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        None
     }
 }

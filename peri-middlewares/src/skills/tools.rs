@@ -10,6 +10,7 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use peri_acp_types::mcp_skills::mcp_skill_name;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
@@ -213,6 +214,18 @@ fn find_and_load_skill(
     skill_name: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let input_lower = skill_name.to_lowercase();
+    // MCP 别名分支（DD-3）：`<server>:<skill>` → `mcp__<server>__<skill>`。
+    // 在既有 rsplit_once 剥前缀**之前**同构查找缓存（大小写无关）；命中即
+    // 加载返回。未命中继续走下方磁盘路径——本地 plugin 命名空间语义不变。
+    if let Some((prefix, suffix)) = skill_name.rsplit_once(':') {
+        if !suffix.is_empty() {
+            let mcp_full = mcp_skill_name(prefix, suffix).to_lowercase();
+            if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == mcp_full) {
+                return load_skill_content(skill);
+            }
+        }
+    }
+
     // 去掉可能的命名空间前缀 `ns:name` → `name`
     let bare_name = input_lower
         .rsplit_once(':')
@@ -253,6 +266,17 @@ fn load_skill_content(
             .ok_or_else(|| {
                 format!("Builtin skill '{}' not found in BUILTIN_SKILLS", skill.name).into()
             })
+    } else if matches!(skill.source, super::SkillSource::Mcp) {
+        // MCP 内容已在发现时缓存于 metadata（零 RPC，对齐 Builtin 模式）；
+        // 包裹来源标注（提示注入防御，与 SkillPreload 注入面一致）。
+        match skill.content.as_deref() {
+            Some(content) => Ok(super::annotate_mcp_content(skill, content)),
+            None => Err(format!(
+                "Skill '{}' not found. Use DiscoverSkillsTool to see available skills.",
+                skill.name
+            )
+            .into()),
+        }
     } else {
         std::fs::read_to_string(&skill.path).map_err(|_e| {
             format!(
@@ -273,6 +297,7 @@ fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
         super::SkillSource::Project => "project",
         super::SkillSource::Plugin => "plugin",
         super::SkillSource::Builtin => "builtin",
+        super::SkillSource::Mcp => "mcp",
     };
     json!({
         "name": skill.name,

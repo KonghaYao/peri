@@ -589,6 +589,163 @@ fn test_handle_session_update_parses_available_commands() {
     );
 }
 
+/// Slice 7：meta.mcpSkillNames（JSON 数组 of string）→ MCP_SKILL_NAMES atom。
+#[test]
+#[serial]
+fn test_handle_session_update_parses_mcp_skill_names() {
+    crate::kit::atoms::init_atoms();
+    *MCP_SKILL_NAMES.state().write() = Vec::new();
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "Show help"},
+                {"name": "mcp__demo__hello", "description": "MCP skill hello"}
+            ],
+            "meta": {
+                "skillNames": ["help"],
+                "mcpSkillNames": ["mcp__demo__hello"]
+            }
+        }
+    });
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &dummy_tx, "test");
+    let names = MCP_SKILL_NAMES.state().read().clone();
+    assert_eq!(
+        names,
+        vec!["mcp__demo__hello".to_string()],
+        "mcpSkillNames 应写入 MCP_SKILL_NAMES atom"
+    );
+}
+
+/// Slice 7：meta.mcpSkillNames 缺失 key → atom 清空（"缺 key" = 无 mcp skill，
+/// 跨 session/断连后不残留旧值）。
+#[test]
+#[serial]
+fn test_handle_session_update_mcp_skill_names_missing_key() {
+    crate::kit::atoms::init_atoms();
+    // 预置陈旧值：缺 key 的 update 必须把它清掉，而非保留
+    *MCP_SKILL_NAMES.state().write() = vec!["mcp__old__stale".to_string()];
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "Show help"}
+            ]
+        }
+    });
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &dummy_tx, "test");
+    assert!(
+        MCP_SKILL_NAMES.state().read().is_empty(),
+        "缺失 mcpSkillNames → atom 清空（不保留陈旧值）"
+    );
+}
+
+/// Slice 7：meta.mcpSkillNames 非数组 → atom 清空（安全落空，不 panic）。
+#[test]
+#[serial]
+fn test_handle_session_update_mcp_skill_names_non_array() {
+    crate::kit::atoms::init_atoms();
+    *MCP_SKILL_NAMES.state().write() = vec!["mcp__old__stale".to_string()];
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "Show help"}
+            ],
+            "meta": {
+                "mcpSkillNames": "not-an-array"
+            }
+        }
+    });
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &dummy_tx, "test");
+    assert!(
+        MCP_SKILL_NAMES.state().read().is_empty(),
+        "非数组 mcpSkillNames → atom 空"
+    );
+}
+
+/// 评审 HIGH-1 回归：ACP 真实 wire key 是 "_meta"（serde rename）——
+/// AvailableCommandsUpdate.meta 标注 #[serde(rename = "_meta")]，生产 payload
+/// 走 `_meta`，此前的 `meta` 键解析在生产环境恒 None → MCP_SKILL_NAMES 恒空、
+/// McpSkill 归类永不激活。本测试用 `_meta` 键锁死真实 wire 格式。
+#[test]
+#[serial]
+fn test_handle_session_update_mcp_skill_names_underscore_meta_wire_format() {
+    crate::kit::atoms::init_atoms();
+    *MCP_SKILL_NAMES.state().write() = Vec::new();
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "Show help"},
+                {"name": "mcp__demo__hello", "description": "MCP skill hello"}
+            ],
+            "_meta": {
+                "skillNames": ["help"],
+                "mcpSkillNames": ["mcp__demo__hello"]
+            }
+        }
+    });
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &dummy_tx, "test");
+    assert_eq!(
+        MCP_SKILL_NAMES.state().read().clone(),
+        vec!["mcp__demo__hello".to_string()],
+        "_meta（生产 wire key）的 mcpSkillNames 应写入 MCP_SKILL_NAMES"
+    );
+    assert_eq!(
+        SKILL_NAMES.state().read().clone(),
+        vec!["help".to_string()],
+        "_meta 的 skillNames 应写入 SKILL_NAMES（同款键名修复）"
+    );
+}
+
+/// 评审 HIGH-1 回归补充：`_meta` 与 `meta` 同时出现时 `_meta` 优先
+/// （生产格式优先于兼容格式）。
+#[test]
+#[serial]
+fn test_handle_session_update_underscore_meta_takes_priority() {
+    crate::kit::atoms::init_atoms();
+    *MCP_SKILL_NAMES.state().write() = Vec::new();
+    *SKILL_NAMES.state().write() = Vec::new();
+    let payload = json!({
+        "sessionId": "s1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "help", "description": "Show help"}
+            ],
+            "_meta": {
+                "skillNames": ["help"],
+                "mcpSkillNames": ["mcp__real__skill"]
+            },
+            "meta": {
+                "skillNames": ["stale"],
+                "mcpSkillNames": ["mcp__stale__skill"]
+            }
+        }
+    });
+    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &dummy_tx, "test");
+    assert_eq!(
+        MCP_SKILL_NAMES.state().read().clone(),
+        vec!["mcp__real__skill".to_string()],
+        "_meta 应优先于 meta"
+    );
+    assert_eq!(
+        SKILL_NAMES.state().read().clone(),
+        vec!["help".to_string()],
+        "_meta 的 skillNames 应优先"
+    );
+}
+
 /// 验证非 available_commands_update 的 session/update 不会错误写入 atom。
 #[test]
 #[serial]

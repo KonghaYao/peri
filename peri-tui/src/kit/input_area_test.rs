@@ -615,3 +615,49 @@ fn test_exit_entry_focus_on_edit_noop_when_no_focus() {
     exit_entry_focus_on_edit();
     assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none());
 }
+
+/// Slice 7：build_slash_items 归类——预置 SKILL_NAMES / MCP_SKILL_NAMES 后
+/// 断言 McpSkill / Skill / Command 三分（小写化匹配）。
+#[test]
+#[serial]
+fn test_build_slash_items_classifies_mcp_skill_skill_command() {
+    crate::kit::atoms::init_atoms();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
+        ("mcp__demo__hello".to_string(), "MCP skill".to_string()),
+        ("MySkill".to_string(), "本地 skill".to_string()),
+        ("plaincmd".to_string(), "普通命令".to_string()),
+    ];
+    *SKILL_NAMES.state().write() = vec!["MySkill".to_string()];
+    *MCP_SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
+
+    let items = build_slash_items();
+    let kind_of = |label: &str| {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .map(|i| i.kind.clone())
+            .unwrap_or_else(|| panic!("未找到 slash 条目 {label}"))
+    };
+    assert_eq!(kind_of("mcp__demo__hello"), SlashActionKind::McpSkill);
+    assert_eq!(kind_of("MySkill"), SlashActionKind::Skill);
+    assert_eq!(kind_of("plaincmd"), SlashActionKind::Command);
+}
+
+/// Slice 7：归类优先级 McpSkill > Skill（同名同时出现在两个 atom 时）。
+#[test]
+#[serial]
+fn test_build_slash_items_mcp_skill_priority_over_skill() {
+    crate::kit::atoms::init_atoms();
+    *AVAILABLE_SLASH_COMMANDS.state().write() =
+        vec![("mcp__demo__hello".to_string(), "MCP skill".to_string())];
+    *SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
+    *MCP_SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
+
+    let items = build_slash_items();
+    let kind = items
+        .iter()
+        .find(|i| i.label == "mcp__demo__hello")
+        .map(|i| i.kind.clone())
+        .expect("应有 mcp__demo__hello 条目");
+    assert_eq!(kind, SlashActionKind::McpSkill, "McpSkill 优先于 Skill");
+}

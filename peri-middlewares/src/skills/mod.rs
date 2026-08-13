@@ -13,6 +13,7 @@ pub use loader::{
     scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
     MAX_SKILLS_DIRS_PER_ROOT,
 };
+use peri_acp_types::{mcp_skills::McpSkillRegistry, skills::SkillOrigin};
 use peri_agent::{
     error::AgentResult,
     middleware::{r#trait::Middleware, state::MiddlewareState},
@@ -71,6 +72,16 @@ pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界）
+pub fn annotate_mcp_content(meta: &SkillMetadata, content: &str) -> String {
+    match &meta.origin {
+        Some(SkillOrigin::Mcp { server, uri }) => {
+            format!("This skill is served by MCP server \"{server}\", uri: {uri}.\n\n{content}")
+        }
+        _ => content.to_string(),
+    }
+}
+
 /// SkillsMiddleware - 渐进式 Skills 摘要注入
 ///
 /// 在 `before_agent` 时扫描 skills 目录，将所有 skill 的 name + description
@@ -94,6 +105,9 @@ pub struct SkillsMiddleware {
     /// Session 级 skills 列表缓存：非 frozen 路径由 before_agent 填充，
     /// frozen 路径由工具首次调用时惰性扫描并写入。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
+    /// MCP 远端技能注册表（None = 仅本地扫描；发现条目合并进 cached_skills
+    /// 供 SkillTool / DiscoverSkillsTool 可见，不进 prompt contribution）。
+    mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
 impl SkillsMiddleware {
@@ -107,6 +121,7 @@ impl SkillsMiddleware {
             disable_bundled: false,
             cached_contribution: Arc::new(RwLock::new(None)),
             cached_skills: Arc::new(RwLock::new(None)),
+            mcp_registry: None,
         }
     }
 
@@ -140,6 +155,13 @@ impl SkillsMiddleware {
     /// 插件 skills 优先级低于项目级，同名先到先得
     pub fn with_plugin_roots(mut self, roots: Vec<SkillRoot>) -> Self {
         self.plugin_roots = roots;
+        self
+    }
+
+    /// 注入 MCP 远端技能注册表（None = 仅本地扫描；默认 None，
+    /// `new()` 签名与既有测试/构造点不变）。
+    pub fn with_mcp_registry(mut self, reg: Option<Arc<McpSkillRegistry>>) -> Self {
+        self.mcp_registry = reg;
         self
     }
 
@@ -268,6 +290,7 @@ impl SkillsMiddleware {
                 SkillSource::Project => "project",
                 SkillSource::Plugin => "plugin",
                 SkillSource::Builtin => "builtin",
+                SkillSource::Mcp => "mcp",
             };
             lines.push(format!("- **{}** [{}]", skill.name, source));
         }
@@ -307,12 +330,26 @@ impl Middleware for SkillsMiddleware {
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 扫描 skills 并缓存 structured metadata（frozen/non-frozen 两条路径都需要，避免工具调用时懒扫描）
         let roots = self.resolve_roots(state.cwd());
-        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
+        let mut skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
             .await
             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                 middleware: "SkillsMiddleware".to_string(),
                 reason: format!("spawn_blocking 失败: {e}"),
             })?;
+
+        // 分源合并（DD-4）：本地扫描结果 + 远端 MCP registry 条目。
+        // 小写名去重、本地优先（MCP 只追加不覆盖）；每次 before_agent 全量
+        // 重建，MCP 条目不会被后续本地扫描覆盖。
+        if let Some(reg) = &self.mcp_registry {
+            let mut seen: std::collections::HashSet<String> =
+                skills.iter().map(|s| s.name.to_lowercase()).collect();
+            for m in reg.all_skills() {
+                if seen.insert(m.name.to_lowercase()) {
+                    skills.push(m);
+                }
+            }
+        }
+
         *self.cached_skills.write().unwrap() = if skills.is_empty() {
             None
         } else {
@@ -329,12 +366,23 @@ impl Middleware for SkillsMiddleware {
             return Ok(());
         }
 
-        // non-frozen 路径：根据扫描结果生成摘要并缓存
+        // non-frozen 路径：根据扫描结果生成摘要并缓存。
+        // MCP 条目不进 prompt contribution（验收 9）——工具可见面由
+        // cached_skills 覆盖（SkillTool / DiscoverSkillsTool 共享同缓存）。
         let skills_ref = self.cached_skills.read().unwrap();
         match skills_ref.as_ref() {
-            Some(skills_list) if !skills_list.is_empty() => {
-                let summary = Self::build_summary(skills_list);
-                *self.cached_contribution.write().unwrap() = Some(summary);
+            Some(skills_list) => {
+                let local: Vec<SkillMetadata> = skills_list
+                    .iter()
+                    .filter(|s| !matches!(s.source, SkillSource::Mcp))
+                    .cloned()
+                    .collect();
+                if !local.is_empty() {
+                    let summary = Self::build_summary(&local);
+                    *self.cached_contribution.write().unwrap() = Some(summary);
+                } else {
+                    *self.cached_contribution.write().unwrap() = None;
+                }
             }
             _ => {
                 *self.cached_contribution.write().unwrap() = None;

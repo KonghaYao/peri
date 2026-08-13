@@ -27,6 +27,7 @@ use peri_acp_types::{
     identity::AgentId,
     interaction::{ChannelState, UserInteractionBroker},
     lsp::LspServerConfig,
+    mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
     ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
     session::{CronOwner, MessageQueue, SessionInbox},
@@ -150,6 +151,9 @@ pub struct StageBuildInput {
     /// session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无则
     /// 安全 no-op——订阅通知不唤醒 print 模式单次进程）
     pub launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// 会话级 MCP skill 远端注册表（SessionAccessPort 投影；None = print
+    /// 模式，跳过发现与合并）。
+    pub mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     /// tool invocation resolver（wrapper-aware canonical resolver）
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     /// compact 前置 hook（hook_groups 非空时 ACP 装配点构造）
@@ -380,6 +384,7 @@ pub(crate) fn build_agent(
             plugin_loaded,
             hook_groups,
             session_start_source,
+            mcp_skill_registry: input.mcp_skill_registry.clone(),
             cron_scheduler,
             mcp_pool,
             channel_state,

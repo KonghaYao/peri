@@ -379,3 +379,83 @@ async fn test_skill_tool_error_is_recoverable_when_file_deleted_mid_session() {
         "错误应说明 catalog/磁盘边界并提供可恢复路径，实际: {msg}"
     );
 }
+
+/// 分源合并（验收 8/9）：本地 + MCP 合并进 cached_skills、两轮不被本地扫描
+/// 覆盖；MCP 条目不进 prompt contribution；DiscoverSkillsTool 视角可见 mcp。
+#[tokio::test]
+async fn test_mcp_registry_merged_into_cache_and_kept_out_of_contribution() {
+    use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
+    use peri_acp_types::skills::SkillOrigin;
+
+    // 本地 skill：tempdir 项目级目录
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    write_skill(&skills_dir, "local-skill", "本地技能");
+
+    // 手工 seed registry（Started → Completed 造 Discovered 条目）
+    let reg = Arc::new(McpSkillRegistry::new());
+    let h: HandleToken = Arc::new(1u32);
+    let mcp_skill = peri_acp_types::skills::SkillMetadata {
+        name: "mcp__demo__hello".to_string(),
+        description: "远端 hello 技能".to_string(),
+        source: SkillSource::Mcp,
+        origin: Some(SkillOrigin::Mcp {
+            server: "demo".to_string(),
+            uri: "skill://hello/SKILL.md".to_string(),
+        }),
+        ..Default::default()
+    };
+    reg.mark_discovery_started("demo", h.clone());
+    reg.mark_discovery_completed("demo", h, vec![mcp_skill]);
+
+    let mw = SkillsMiddleware::new().with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+
+    // 两轮 before_agent：第二轮 MCP 条目仍在（不被本地扫描覆盖）
+    for _ in 0..2 {
+        mw.before_agent(&mut state).await.unwrap();
+    }
+
+    // cached_skills 含本地 + mcp 条目
+    let cache = mw.skills_cache();
+    {
+        let skills = cache.read().unwrap();
+        let skills = skills.as_ref().expect("合并后缓存非空");
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"local-skill"), "本地条目在缓存: {names:?}");
+        assert!(
+            names.contains(&"mcp__demo__hello"),
+            "MCP 条目在缓存（第二轮不被本地扫描覆盖）: {names:?}"
+        );
+    }
+
+    // non-frozen contribution 不含 mcp name/description（验收 9）
+    let content = contribution(&mw).unwrap();
+    assert!(content.contains("local-skill"), "本地条目进摘要: {content}");
+    assert!(
+        !content.contains("mcp__demo__hello"),
+        "MCP name 不进 contribution: {content}"
+    );
+    assert!(
+        !content.contains("远端 hello"),
+        "MCP description 不进 contribution: {content}"
+    );
+
+    // DiscoverSkillsTool 视角缓存含 mcp 条目（source: "mcp"）
+    let discover = tools::DiscoverSkillsTool::new(cache);
+    let out = discover
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = parsed.as_array().expect("DiscoverSkillsTool 返回数组");
+    assert!(
+        arr.iter()
+            .any(|e| e["name"] == "mcp__demo__hello" && e["source"] == "mcp"),
+        "DiscoverSkillsTool 视角含 mcp 条目（source 标注）: {parsed}"
+    );
+}

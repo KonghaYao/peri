@@ -160,6 +160,7 @@ use peri_acp_types::goal::GoalController;
 use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::{ChannelState, UserInteractionBroker};
 use peri_acp_types::lsp::LspServerConfig;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
 use peri_acp_types::skills::SkillRoot;
@@ -257,6 +258,9 @@ pub struct AssemblyContext {
     pub hook_groups: Vec<Vec<RegisteredHook>>,
     /// session 启动来源（hook 注入用）
     pub session_start_source: Option<String>,
+    /// 会话级 MCP skill 远端注册表（SessionAccessPort 投影；None = print
+    /// 模式，跳过发现与合并）。
+    pub mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     // ── 外部服务 ──
     /// Cron 调度器端口（None = 构造临时实例；装配方 downcast 还原）
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
