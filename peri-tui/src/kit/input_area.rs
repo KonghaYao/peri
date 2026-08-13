@@ -35,9 +35,9 @@ use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
     CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
-    LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS,
-    POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SKILL_NAMES, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
+    LANG_VERSION, LOCAL_EVENT_TX, MCP_SKILL_NAMES, MENTION_PREFIX, MENTION_SELECTED_INDEX,
+    PENDING_ATTACHMENTS, POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SKILL_NAMES, SLASH_HINT_ACTIVE,
+    SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
@@ -898,7 +898,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                     open_panel(kind);
                                 }
                             }
-                            SlashActionKind::Command | SlashActionKind::Skill => {
+                            SlashActionKind::Command
+                            | SlashActionKind::Skill
+                            | SlashActionKind::McpSkill => {
                                 // S16：command/skill 先检查是否映射到面板（如 /history → ThreadBrowser）
                                 if let Some(kind) = panel_for_slash_command(&item.insert_text) {
                                     // 清空输入框再打开面板
@@ -1296,8 +1298,18 @@ fn apply_slash_selection(state: &mut TextAreaState, cmd: &str) {
 
 fn build_slash_items() -> Vec<SlashCompletionItem> {
     let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
-    let skill_names: std::collections::HashSet<String> =
-        SKILL_NAMES.state().read().iter().cloned().collect();
+    let skill_names: std::collections::HashSet<String> = SKILL_NAMES
+        .state()
+        .read()
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let mcp_skill_names: std::collections::HashSet<String> = MCP_SKILL_NAMES
+        .state()
+        .read()
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
     let mut items = Vec::with_capacity(PANELS.len() + remote.len() + 1);
     for panel in PANELS {
         if panel.slash_command.is_empty() {
@@ -1321,8 +1333,12 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
         label_lowercase: "setup".to_string(),
     });
     for (name, description) in &remote {
-        // S16：根据 SKILL_NAMES 区分 Skill vs Command
-        let kind = if skill_names.contains(name) {
+        // S16：根据 SKILL_NAMES / MCP_SKILL_NAMES 区分 McpSkill / Skill / Command，
+        // 优先级 McpSkill > Skill > Command（先判 MCP_SKILL_NAMES）。
+        let name_lower = name.to_lowercase();
+        let kind = if mcp_skill_names.contains(&name_lower) {
+            SlashActionKind::McpSkill
+        } else if skill_names.contains(&name_lower) {
             SlashActionKind::Skill
         } else {
             SlashActionKind::Command
@@ -1332,7 +1348,7 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
             insert_text: name.clone(),
             description: description.clone(),
             kind,
-            label_lowercase: name.to_lowercase(),
+            label_lowercase: name_lower,
         });
     }
     // 字母序排序——只排一次，组件端不再重排

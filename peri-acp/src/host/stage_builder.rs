@@ -34,6 +34,7 @@ use peri_acp_types::{
     event::AgentEventHandler,
     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
     goal::GoalController,
+    mcp_skills::McpSkillRegistry,
     session::SessionInbox,
 };
 use peri_agent::agent::{async_tasks::TaskManager, LangfuseBridgeLike};
@@ -126,6 +127,11 @@ pub(crate) fn build_stage_context(
             Arc::new(move |sid: &str| sa.mcp_subscription_for(sid))
                 as Arc<dyn Fn(&str) -> bool + Send + Sync>
         });
+    // 会话级 MCP skill 远端注册表（SessionManager 路径；None = print 模式，
+    // 跳过发现与合并——与 shared_queue 同模式投影）
+    let mcp_skill_registry: Option<Arc<McpSkillRegistry>> = session_access
+        .as_ref()
+        .and_then(|sa| sa.mcp_skill_registry(&ctx.session_id));
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
     // workflow_enabled 与正式实现 WorkflowMiddlewareAdaptor 条件注册共用同一
@@ -232,6 +238,7 @@ pub(crate) fn build_stage_context(
         idle_suspended_flag,
         launch_cron_bridge,
         launch_mcp_subscription,
+        mcp_skill_registry,
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,
         compact_post_hook,

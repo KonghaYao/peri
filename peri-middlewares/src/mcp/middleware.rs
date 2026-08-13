@@ -4,13 +4,16 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
 use peri_agent::{
+    agent::AgentCancellationToken,
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
 
 use super::{
     client::{ClientStatus, McpClientPool},
+    discover_tool::DiscoverMCPTool,
     resource_tool::McpResourceTool,
     tool_bridge::build_tool_bridges,
 };
@@ -19,6 +22,11 @@ use super::{
 /// 并向模型通报 MCP 连接状态（首 turn 概览 + 运行中上下线变化）。
 pub struct McpMiddleware {
     pool: Arc<McpClientPool>,
+    /// 会话级 MCP skill 远端注册表（None = 未装配 session 透传；DiscoverMCP
+    /// 的 skill 域查询读它）。
+    registry: Option<Arc<McpSkillRegistry>>,
+    /// session 取消令牌（发现任务持有；触发后 before_agent 不再投影/spawn）
+    cancel: AgentCancellationToken,
     /// 是否已向模型提示过 tool search 用法（每个会话实例恰好一次）
     hint_sent: AtomicBool,
 }
@@ -27,8 +35,22 @@ impl McpMiddleware {
     pub fn new(pool: Arc<McpClientPool>) -> Self {
         Self {
             pool,
+            registry: None,
+            cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
         }
+    }
+
+    /// 注入 skill 发现装配（session 级 registry + cancel token；assembly 槽位
+    /// 调用）。不调用时保持无发现行为（既有测试/print 模式兼容）。
+    pub fn with_skill_discovery(
+        mut self,
+        registry: Option<Arc<McpSkillRegistry>>,
+        cancel: AgentCancellationToken,
+    ) -> Self {
+        self.registry = registry;
+        self.cancel = cancel;
+        self
     }
 
     /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
@@ -119,6 +141,11 @@ impl Middleware for McpMiddleware {
             tools.push(Box::new(McpResourceTool::new(Arc::clone(&self.pool))));
         }
 
+        tools.push(Box::new(DiscoverMCPTool::new(
+            Arc::clone(&self.pool),
+            self.registry.clone(),
+        )));
+
         tools
     }
 
@@ -129,6 +156,56 @@ impl Middleware for McpMiddleware {
         _state: &mut dyn MiddlewareState,
     ) -> peri_agent::error::AgentResult<Option<String>> {
         Ok(self.overview_text())
+    }
+
+    /// 每轮投映 pool 已连接 server → 触发 MCP skill 发现（DD-2）。
+    ///
+    /// - registry 未装配 / cancel 已触发 → 直接返回（零动作）；
+    /// - `project_connected` 内部完成断连清理（有移除才触发 on_change）；
+    /// - 需发现的 (name, handle) 同步置 Started 后 spawn 发现任务（持
+    ///   session cancel token）。发现本身静默：不向 state 写任何消息。
+    async fn before_agent(
+        &self,
+        _state: &mut dyn MiddlewareState,
+    ) -> peri_agent::error::AgentResult<()> {
+        let Some(registry) = self.registry.as_ref() else {
+            return Ok(());
+        };
+        if self.cancel.is_cancelled() {
+            return Ok(());
+        }
+        let connected: Vec<(String, HandleToken)> = self
+            .pool
+            .get_all_clients()
+            .into_iter()
+            .map(|h| {
+                let t: HandleToken = h.clone();
+                (h.name.clone(), t)
+            })
+            .collect();
+        let projection = registry.project_connected(&connected);
+        for (name, handle_token) in projection.to_discover {
+            registry.mark_discovery_started(&name, handle_token.clone());
+            // mark 与取 handle 之间可能断连/重连，两者都自愈，无需显式补偿：
+            // - get_client 返回 None（断连）：Started 残留由下轮 before_agent 的
+            //   project_connected 移除清理（server 已不在 connected 列表）；
+            // - get_client 返回新 Arc（重连）：Started 中仍是旧 token，自愈触发
+            //   源是下轮 project_connected 的 token 不一致检测（新 handle 与
+            //   Started 旧 token 的 Arc::ptr_eq 不相等）→ 重新 to_discover +
+            //   重新 Started，触发重扫。旧发现任务的完成回写被
+            //   mark_discovery_completed 的 Arc::ptr_eq 拒绝，但那只发生在
+            //   "下轮已用新 token 重新 Started" 的交错下——ptr_eq 拒绝是防御
+            //   （旧任务不得覆盖新状态），不是重扫触发源。
+            let Some(handle) = self.pool.get_client(&name) else {
+                continue;
+            };
+            let reg = Arc::clone(registry);
+            let cancel = self.cancel.clone();
+            tokio::spawn(async move {
+                crate::mcp::skill_discovery::run_discovery(reg, handle, handle_token, cancel).await;
+            });
+        }
+        Ok(())
     }
 
     /// 每轮 ReAct 迭代：drain 状态变化缓冲并以 Info 消息推送（不唤醒循环；

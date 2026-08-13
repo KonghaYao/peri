@@ -66,6 +66,8 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
         // 占位值：实际 source/plugin_name 由 scan_dir_recursive 中的 insert_skill 覆盖
         source: SkillSource::Project,
         plugin_name: None,
+        origin: None,
+        content: None,
     })
 }
 
@@ -118,6 +120,8 @@ fn scan_skill_roots_impl(
                     path: PathBuf::from(format!("<builtin>/{}", skill.name)),
                     source: SkillSource::Builtin,
                     plugin_name: None,
+                    origin: None,
+                    content: None,
                 };
                 insert_skill(meta, root, &mut seen, &mut ordered);
             }

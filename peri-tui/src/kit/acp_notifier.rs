@@ -24,7 +24,8 @@ use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
     ACP_STATE, ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, INPUT_BUFFER,
-    NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SKILL_NAMES, SPINNER_TOKEN_COUNT,
+    MCP_SKILL_NAMES, NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SKILL_NAMES,
+    SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::truncate::summarize_input;
@@ -380,10 +381,11 @@ fn handle_session_update(
             .collect();
         let len = entries.len();
         *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
-        refresh_slash_items();
-        // 从 meta 中提取 skill 名称，写入 SKILL_NAMES atom
-        if let Some(skill_names) = update
-            .get("meta")
+        // 从 meta 中提取 skill 名称，写入 SKILL_NAMES atom。
+        // 真实 wire key 是 "_meta"（serde rename），"_meta" 优先、"meta" 兜底
+        // （与下方 is_session_replay 的解析先例一致）。
+        let meta = update.get("_meta").or_else(|| update.get("meta"));
+        if let Some(skill_names) = meta
             .and_then(|m| m.get("skillNames"))
             .and_then(|s| s.as_array())
         {
@@ -393,6 +395,22 @@ fn handle_session_update(
                 .collect();
             *SKILL_NAMES.state().write() = names;
         }
+        // 从 meta 中提取 MCP skill 名称，写入 MCP_SKILL_NAMES atom
+        // ACP 契约：mcp 列表为空时省略该 key → "缺 key" 语义 = 无 mcp skill，
+        // 显式清空，避免跨 session/断连后残留旧值。
+        let mcp_names = meta
+            .and_then(|m| m.get("mcpSkillNames"))
+            .and_then(|s| s.as_array())
+            .map(|mcp_skill_names| {
+                mcp_skill_names
+                    .iter()
+                    .filter_map(|n| n.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        *MCP_SKILL_NAMES.state().write() = mcp_names;
+        // 归类依赖两个 atom 的最新值，刷新须在写入之后（避免缓存用旧分类）。
+        refresh_slash_items();
         debug!(
             "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",
             len

@@ -88,6 +88,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             plugin_loaded,
             hook_groups,
             session_start_source,
+            mcp_skill_registry: _,
             cron_scheduler,
             mcp_pool,
             channel_state,
@@ -267,8 +268,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // （SkillTool(skill_name) + DiscoverSkillsTool）；旧 Skill(skill, args)
                 // 双协议已按 D3 移除，不再单独注册 SkillToolMiddleware。
                 ChainSlot::Skills => {
-                    let mut skills_mw =
-                        SkillsMiddleware::new().with_plugin_roots(plugin_skill_roots.clone());
+                    let mut skills_mw = SkillsMiddleware::new()
+                        .with_plugin_roots(plugin_skill_roots.clone())
+                        .with_mcp_registry(ctx.mcp_skill_registry.clone());
                     if let Some(summary) = frozen_skill_summary {
                         skills_mw = skills_mw.with_frozen_summary(summary.clone());
                     }
@@ -277,7 +279,8 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::SkillPreload => {
                     chain.add(Box::new(
                         SkillPreloadMiddleware::new(preload_skills.clone(), cwd)
-                            .with_plugin_roots(plugin_skill_roots.clone()),
+                            .with_plugin_roots(plugin_skill_roots.clone())
+                            .with_mcp_registry(ctx.mcp_skill_registry.clone()),
                     ));
                 }
                 ChainSlot::AtMention => {
@@ -380,7 +383,10 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
                 ChainSlot::Mcp => {
                     if let Some(pool) = mcp_pool_concrete.as_ref() {
-                        let mw = McpMiddleware::new(Arc::clone(pool));
+                        let mw = McpMiddleware::new(Arc::clone(pool)).with_skill_discovery(
+                            ctx.mcp_skill_registry.clone(),
+                            ctx.cancel.clone(),
+                        );
                         // 注入状态变化通知：经 session 事件通道发布
                         // system-notification（TUI 通知面显示）。pool 全局共享，
                         // 多 session 时以最后装配的 session 通道为准。

@@ -156,6 +156,7 @@ fn base_context() -> AssemblyContext {
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         session_start_source: None,
+        mcp_skill_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
         channel_state: None,

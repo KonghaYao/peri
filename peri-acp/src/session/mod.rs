@@ -38,6 +38,7 @@ use std::{
 use chrono::Utc;
 use dashmap::DashMap;
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::{
@@ -116,6 +117,9 @@ pub struct AcpSession {
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
     /// 用户 prompt 注入 inbox 唤醒 loop（而非在 prompt lock 上阻塞）。
     pub idle_suspended: Arc<AtomicBool>,
+    /// Session 级 MCP skill 远端注册表（发现任务写入，Skills 侧读取合并；
+    /// 随本结构 drop 释放，杜绝全局挂点——验收 14）。
+    pub mcp_skill_registry: Arc<McpSkillRegistry>,
 }
 
 struct SessionManagerInner {
@@ -254,6 +258,7 @@ impl SessionManager {
             cron_bridge: None,
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
+            mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -293,6 +298,7 @@ impl SessionManager {
             cron_bridge: None,
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
+            mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
         }
     }
 
@@ -545,6 +551,17 @@ impl SessionManager {
             .map(|s| s.goal_state.clone())
     }
 
+    /// 取指定 session 的 MCP skill 远端注册表句柄（SessionAccessPort 投影用）。
+    ///
+    /// 内部 Arc 共享，clone 廉价；session 不存在时返回 None。
+    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    pub fn mcp_skill_registry_for(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.mcp_skill_registry.clone())
+    }
+
     /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
     /// 内部 Arc 共享，clone 廉价。session 不存在时返回 None。
     pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
@@ -779,5 +796,9 @@ impl SessionAccessPort for SessionManager {
 
     fn mcp_subscription_for(&self, session_id: &str) -> bool {
         SessionManager::mcp_subscription_for(self, session_id)
+    }
+
+    fn mcp_skill_registry(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        self.mcp_skill_registry_for(session_id)
     }
 }

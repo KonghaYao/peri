@@ -23,15 +23,30 @@ use crate::provider::LlmProvider;
 
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
-/// 丢弃所有发送操作的 mock transport
-struct MockTransport;
+/// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6
+/// 改造：原实现丢弃 `_params`，现记录供 available_commands_update 回调重发
+/// 断言）。
+#[derive(Default)]
+struct MockTransport {
+    notifications: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+impl MockTransport {
+    fn notifications(&self) -> Vec<(String, Value)> {
+        self.notifications.lock().unwrap().clone()
+    }
+}
 
 #[async_trait]
 impl crate::transport::AcpTransport for MockTransport {
     async fn send_request(&self, _method: &str, _params: Value) -> Result<Value, AcpError> {
         Ok(json!({}))
     }
-    async fn send_notification(&self, _method: &str, _params: Value) -> Result<(), AcpError> {
+    async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        self.notifications
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
         Ok(())
     }
     async fn recv(&self) -> Option<IncomingMessage> {
@@ -157,7 +172,7 @@ async fn test_update_config_切换provider后cfg_provider更新() {
 
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // 构造 update_config 参数：sonnet profile 的 provider 改为 "b"
     let mut updated_config = peri_config.clone();
@@ -224,7 +239,7 @@ async fn test_update_config_空providers返回错误() {
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // 空 providers
     let mut bad_config = PeriConfig::default();
@@ -272,7 +287,7 @@ async fn test_update_config_不存在的provider_id返回错误() {
     let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // sonnet profile 的 provider 指向不存在的 provider
     let mut bad_config = peri_config.clone();
@@ -362,7 +377,7 @@ async fn test_rewind_candidates_routes_to_dispatch() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
 
     let result = handle_request(
@@ -394,7 +409,7 @@ async fn test_rewind_preview_routes_to_dispatch() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
     let target_id = sessions.get(&sid).unwrap().history[2]
         .id()
@@ -430,7 +445,7 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
 
     let result = handle_request(
@@ -464,7 +479,7 @@ async fn test_rewind_routes_to_dispatch() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
     let target_id = sessions.get(&sid).unwrap().history[0]
         .id()
@@ -507,7 +522,7 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = "cancel-bg-session".to_string();
     cfg.session_manager
         .new_session_with_id(&sid, tmp.path().to_str().unwrap())
@@ -565,7 +580,7 @@ async fn test_cancel_bg_task_session_not_found_returns_error() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     let result = handle_request(
         "session/cancel-bg-task",
@@ -599,7 +614,7 @@ async fn test_cancel_bg_task_task_not_found_returns_error() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = "cancel-bg-session".to_string();
     cfg.session_manager
         .new_session_with_id(&sid, tmp.path().to_str().unwrap())
@@ -714,7 +729,7 @@ async fn test_kill_run_targets_requested_session() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd);
@@ -819,7 +834,7 @@ async fn test_kill_agent_targets_requested_session() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     register_session_with_workflow(&mut sessions, "sess-a", cwd);
@@ -885,7 +900,7 @@ async fn test_resume_targets_requested_session() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     register_session_with_workflow(&mut sessions, "sess-a", cwd);
@@ -957,7 +972,7 @@ async fn test_delete_removes_thread_and_active_session() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id）
@@ -1019,7 +1034,7 @@ async fn test_delete_unknown_session_is_idempotent() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     let resp = handle_request(
         "session/delete",
@@ -1046,7 +1061,7 @@ async fn test_delete_missing_session_id_returns_error() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     let err = handle_request(
         "session/delete",
@@ -1096,7 +1111,7 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
     let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id），与 delete 分支的 thread_store 删除对应
@@ -1161,4 +1176,143 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
         1,
         "删除活跃会话必须 shutdown LSP pool（M2）"
     );
+}
+
+// ── AvailableCommandsUpdate + MCP 回调重发（Slice 6 / DD-5）──────────────────
+
+/// 构造 mcp SkillMetadata（content Some，模拟发现任务回写 registry）。
+fn fake_mcp_skill_meta(server: &str, skill: &str) -> peri_acp_types::skills::SkillMetadata {
+    peri_acp_types::skills::SkillMetadata {
+        name: format!("mcp__{server}__{skill}"),
+        description: format!("MCP skill {skill}"),
+        path: std::path::PathBuf::new(),
+        source: peri_acp_types::skills::SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(peri_acp_types::skills::SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("skill://{server}/{skill}/SKILL.md"),
+        }),
+        content: Some(format!("# Body of {skill}")),
+    }
+}
+
+/// session/new 首发无 mcp 条目；registry 发现完成后经 on_change 回调重发，
+/// 第二次通知含 mcp 条目与 meta.mcpSkillNames（验收 11/13 的 ACP 半边）。
+#[tokio::test]
+async fn test_available_commands_update_mcp_callback_resend() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let sid = result["sessionId"].as_str().unwrap().to_string();
+
+    // 首发：registry 尚未发现 → availableCommands 无 mcp 条目
+    let notifications = transport.notifications();
+    assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
+    assert_eq!(notifications[0].0, "session/update");
+    let update0 = &notifications[0].1["update"];
+    assert_eq!(update0["sessionUpdate"], "available_commands_update");
+    let commands0 = update0["availableCommands"].as_array().unwrap();
+    assert!(
+        commands0.iter().all(|c| c["name"] != "mcp__demo__hello"),
+        "首发不得含 mcp 条目"
+    );
+
+    // 变更 registry：Started → Discovered(1 条) → on_change 触发回调重发
+    let registry = cfg
+        .session_manager
+        .mcp_skill_registry_for(&sid)
+        .expect("session 应持有 registry");
+    let token: peri_acp_types::mcp_skills::HandleToken = Arc::new(42u32);
+    registry.mark_discovery_started("demo", token.clone());
+    registry.mark_discovery_completed("demo", token, vec![fake_mcp_skill_meta("demo", "hello")]);
+
+    // 回调经 tokio::spawn 异步发送 → 轮询短等待
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while transport.notifications().len() < 2 {
+        assert!(std::time::Instant::now() < deadline, "等待重发通知超时");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // 静默断言（验收 13 ACP 半边）：除 available_commands_update 外无其它
+    // 通知类型
+    let notifications = transport.notifications();
+    assert!(
+        notifications.iter().all(|(m, p)| {
+            m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
+        }),
+        "不得出现其它通知类型，实际: {:?}",
+        notifications
+            .iter()
+            .map(|(m, p)| (m.as_str(), p["update"]["sessionUpdate"].clone()))
+            .collect::<Vec<_>>()
+    );
+
+    let update1 = &notifications[1].1["update"];
+    let commands1 = update1["availableCommands"].as_array().unwrap();
+    assert!(
+        commands1.iter().any(|c| c["name"] == "mcp__demo__hello"),
+        "第二次通知应含 mcp 条目"
+    );
+    assert_eq!(
+        update1["_meta"]["mcpSkillNames"],
+        json!(["mcp__demo__hello"]),
+        "meta.mcpSkillNames 应正确"
+    );
+}
+
+/// 防引用环断言：注册回调后清零外部强引用（持 Weak 观察）→ upgrade 必须
+/// 变 None（回调不得捕获 registry Arc 强引用）。
+#[tokio::test]
+async fn test_available_commands_update_callback_does_not_hold_strong_ref() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let reg = Arc::new(peri_acp_types::mcp_skills::McpSkillRegistry::new());
+    let weak = Arc::downgrade(&reg);
+
+    crate::host::notify::send_available_commands_update(
+        &transport_dyn,
+        "anti-cycle-session",
+        &cfg.skills,
+        tmp.path().to_str().unwrap(),
+        &cfg.plugin_skill_roots,
+        &PeriCaps::all_enabled(),
+        Some(reg), // 唯一强引用移入函数，返回后即释放
+    )
+    .await;
+
+    // 外部强引用清零后：回调闭包只持 Weak，registry 必须能被回收
+    assert!(
+        weak.upgrade().is_none(),
+        "回调不得捕获 registry 强引用（引用环）；upgrade 应为 None"
+    );
+    assert_eq!(weak.strong_count(), 0, "strong_count 应归零");
 }

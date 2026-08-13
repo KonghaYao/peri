@@ -516,3 +516,51 @@ async fn test_mcp_subscription_for未注入端口返回false() {
         "未配置端口时应返回 false"
     );
 }
+
+/// MCP skill registry 生命周期（验收 14 半边）：ensure_session 后投影同 Arc、
+/// 各 session 隔离；close_session 并把 manager/句柄 drop 干净后 Weak 升级失败
+/// （registry 随 session 释放，无全局挂点）。
+#[tokio::test]
+async fn test_mcp_skill_registry_lifecycle_released_on_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    let session_id = "test-registry-lifecycle";
+    mgr.ensure_session(session_id, "/tmp");
+
+    let reg = mgr
+        .mcp_skill_registry_for(session_id)
+        .expect("ensure_session 后应能取到 registry Arc");
+    // 同一 session 重复投影必须返回同一底层 registry（每轮透传语义）
+    assert!(
+        Arc::ptr_eq(
+            &reg,
+            &mgr.mcp_skill_registry_for(session_id)
+                .expect("重复投影仍应命中")
+        ),
+        "同 session 每轮投影同一 registry"
+    );
+
+    // 不同 session 各自独立 registry（session 级隔离）
+    mgr.ensure_session("other-registry-session", "/tmp");
+    assert!(
+        !Arc::ptr_eq(
+            &reg,
+            &mgr.mcp_skill_registry_for("other-registry-session")
+                .expect("另一 session 应有自己的 registry")
+        ),
+        "不同 session 不得共享同一 registry"
+    );
+
+    let weak = Arc::downgrade(&reg);
+
+    // close_session + 把 manager 与句柄 drop 干净（session 对象不得被测试变量
+    // 继续持有）后，registry 必须释放
+    mgr.close_session(session_id).await.unwrap();
+    drop(reg);
+    drop(mgr);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "close_session 后 registry Arc 必须释放（无全局挂点）"
+    );
+}
