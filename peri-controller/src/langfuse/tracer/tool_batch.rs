@@ -106,6 +106,20 @@ impl ToolBatch {
 
     /// 工具调用结束：将 PendingTool 从待处理中移除，存入 completed_tools。
     /// 同时自动记录 batch_end_time（最后一个工具结束的时间）
+    /// Act 阶段开始：将 batch span 的父 observation 更新为新的 stage-act span。
+    ///
+    /// 事件链中 ToolStart 先于 StageStarted(Act) 到达（LLM 响应产生 tool_calls 后
+    /// 先发 ToolStart 再切阶段），首次 on_tool_start 冻结的 parent 还是旧 stage
+    /// （stage-reason）。stage-act 创建后必须重挂，否则 batch（及其所有工具）
+    /// 会挂到旧 stage 下，stage-act 变成空 span。
+    /// batch 尚未创建（batch_span_id 为 None）时无需处理——后续 on_tool_start
+    /// 会通过 content_owner 直接取到新 stage-act。
+    pub(crate) fn on_act_stage_start(&mut self, act_span_id: &str) {
+        if self.batch_span_id.is_some() {
+            self.parent_observation_id = Some(act_span_id.to_string());
+        }
+    }
+
     pub(crate) fn on_tool_end(
         &mut self,
         tool_call_id: &str,
