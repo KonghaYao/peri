@@ -680,6 +680,24 @@ msg-copy-md = Copy
 msg-tip-prefix =   ⎿  Tip: 
 msg-todo-available =  (available)
 
+# ---- @image lines (image-p0-p1-spec §4 T4) ----
+# 用户气泡 `@image <path>` 行的 meta 行文案；$name 为文件名（hover 时为绝对路径），
+# $size 为人类可读大小（user-image-size-*）或缺失文案（user-image-missing）。
+user-image-meta = [Image: { $name } · { $size }]
+user-image-missing = missing
+user-image-size-bytes = { $count } B
+user-image-size-kb = { $count } KB
+user-image-size-mb = { $count } MB
+user-image-open-failed = Failed to open image
+
+# ---- image preview overlay (image-p0-p1-spec §7 T7) ----
+# 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、
+# 解码中行、手工路径降级提示、校验/解码失败固定文案（不显示原因细节）。
+image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime }]
+image-preview-loading = [Image: { $name }]
+image-preview-degraded = Only images inside the managed folder (~/.peri/images) can be previewed
+image-preview-error = This image cannot be previewed
+
 # ---- Message Entry Status Fallbacks (spec §4.1: symbols' text fallbacks) ----
 # Unicode 能力不足时，状态由符号退化为明确文本；同时 serve as aria/语义后备。
 msg-status-running = Running

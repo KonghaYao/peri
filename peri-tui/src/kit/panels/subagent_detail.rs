@@ -79,7 +79,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
             for vm in g.view_models.iter() {
-                let (vm_lines, _, _) = vm_to_lines_cached(vm, &grid, &mut cache, false);
+                let (vm_lines, _, _, _) = vm_to_lines_cached(vm, &grid, &mut cache, false);
                 lines.extend(vm_lines);
             }
         }
