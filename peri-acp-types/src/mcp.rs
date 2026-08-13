@@ -42,3 +42,7 @@ impl dyn McpSubscriptionPort {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_test.rs"]
+mod tests;

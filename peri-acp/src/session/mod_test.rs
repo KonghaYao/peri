@@ -85,6 +85,80 @@ fn make_manager_with_cron_option(
     )
 }
 
+/// 测试用 MCP 订阅端口：与真实实现（McpClientPool）同构——注册表为
+/// session_id → InboxHandle 的 HashMap（insert 天然幂等）；另记录注销调用。
+#[derive(Default)]
+struct FakeMcpSubscriptionPort {
+    inboxes:
+        std::sync::Mutex<std::collections::HashMap<String, peri_acp_types::session::InboxHandle>>,
+    unregistered: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeMcpSubscriptionPort {
+    fn inbox_count(&self) -> usize {
+        self.inboxes.lock().unwrap().len()
+    }
+
+    fn has_inbox(&self, session_id: &str) -> bool {
+        self.inboxes.lock().unwrap().contains_key(session_id)
+    }
+
+    fn unregistered(&self) -> Vec<String> {
+        self.unregistered.lock().unwrap().clone()
+    }
+}
+
+impl peri_acp_types::mcp::McpSubscriptionPort for FakeMcpSubscriptionPort {
+    fn register_inbox(&self, session_id: &str, handle: peri_acp_types::session::InboxHandle) {
+        self.inboxes
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), handle);
+    }
+
+    fn unregister_inbox(&self, session_id: &str) {
+        self.inboxes.lock().unwrap().remove(session_id);
+        self.unregistered
+            .lock()
+            .unwrap()
+            .push(session_id.to_string());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// 同 make_session_manager，仅 MCP 订阅端口参数按需注入（mcp_subscription_for 测试用）。
+fn make_manager_with_mcp_subscription(
+    tmp: &tempfile::TempDir,
+    mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
+) -> SessionManager {
+    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    SessionManager::new(
+        thread_store,
+        provider,
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None, // cron 调度器（测试无）
+        mcp_subscription,
+        None, // 无 bg 场景：fallback NoopTaskManager
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+    )
+}
+
 // ── 测试 ──────────────────────────────────────────────────────────────────────
 
 /// 验证 ensure_session 幂等：重复调用不会覆盖已有记录
@@ -353,5 +427,92 @@ async fn test_pending_caps_double_fallback_semantics() {
         ensured,
         peri_acp_types::PeriCaps::all_enabled(),
         "ensure 未协商 → all_enabled"
+    );
+}
+
+// ── mcp_subscription_for（2026-07-28 subscriptions/listen 订阅 inbox 注册）───
+
+/// mcp_subscription_for：首次调用惰性注册，重复调用幂等（只注册一次、不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for_幂等注册() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    let session_id = "test-mcp-sub-idempotent";
+    mgr.ensure_session(session_id, "/tmp");
+
+    assert!(
+        mgr.mcp_subscription_for(session_id),
+        "session 存在时首次调用应返回 true"
+    );
+    assert_eq!(port.inbox_count(), 1, "首次调用应注册一个 inbox");
+    assert!(
+        mgr.mcp_subscription_for(session_id),
+        "重复调用应仍返回 true（不 panic）"
+    );
+    assert_eq!(
+        port.inbox_count(),
+        1,
+        "重复调用不得重复注册（insert 幂等，注册表条目不增长）"
+    );
+    assert!(port.has_inbox(session_id), "inbox 应保留在注册表中");
+    assert!(port.unregistered().is_empty(), "注册后未 close 前不应注销");
+}
+
+/// mcp_subscription_for：session 不存在时返回 false（不注册、不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for_session不存在返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    assert!(!mgr.mcp_subscription_for("non-existent"));
+    assert_eq!(port.inbox_count(), 0, "session 不存在时不得注册");
+}
+
+/// mcp_subscription_for：close_session 后返回 false，且端口收到 unregister_inbox。
+#[tokio::test]
+async fn test_mcp_subscription_for_close_session后返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    let session_id = "test-mcp-sub-close";
+    mgr.ensure_session(session_id, "/tmp");
+    assert!(mgr.mcp_subscription_for(session_id));
+
+    mgr.close_session(session_id).await.unwrap();
+    assert!(
+        !mgr.mcp_subscription_for(session_id),
+        "close_session 后应返回 false"
+    );
+    assert_eq!(
+        port.unregistered(),
+        vec![session_id.to_string()],
+        "close_session 必须注销 inbox（通知不再唤醒已关闭的会话）"
+    );
+    assert!(
+        !port.has_inbox(session_id),
+        "注销后注册表中不得残留该 session 条目"
+    );
+}
+
+/// mcp_subscription_for：未注入端口时返回 false（不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for未注入端口返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    let session_id = "test-mcp-sub-no-port";
+    mgr.ensure_session(session_id, "/tmp");
+    assert!(
+        !mgr.mcp_subscription_for(session_id),
+        "未配置端口时应返回 false"
     );
 }

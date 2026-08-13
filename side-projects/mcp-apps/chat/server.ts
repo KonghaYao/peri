@@ -9,6 +9,10 @@
 //   GET  /api/messages    → UI 轮询读取消息
 //   POST /api/messages    → UI 发送消息（含 @agent 时触发订阅通知）
 //   POST /mcp             → MCP JSON-RPC（Streamable HTTP，stateless）
+//
+// 协议实现说明：如实实现 2026-07-28 的 subscriptions/listen（SSE 长流）与
+// resources/updated 推送；未实现 server/discover，初始化协商依赖 peri 的
+// Auto 模式（discover 得 -32601 后回退 legacy initialize）兼容。
 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -33,12 +37,12 @@ interface ChatMessage {
 const rooms = new Map<string, ChatMessage[]>();
 let nextId = 1;
 
-/** 活跃的 subscriptions/listen 流：subscriptionId → { send, uris } */
+/** 活跃的 subscriptions/listen 流：subscriptionId（String(id) 归一化）→ { send, uris } */
 interface SubscriptionEntry {
   send: (payload: unknown) => void;
   uris: Set<string>;
 }
-const subscriptions = new Map<number, SubscriptionEntry>();
+const subscriptions = new Map<string, SubscriptionEntry>();
 
 function getMessages(room: string): ChatMessage[] {
   return rooms.get(room) ?? [];
@@ -246,14 +250,12 @@ function listen(id: unknown, params?: Record<string, unknown>): Response {
         },
       });
 
-      subscriptions.set(
-        Number(id) ?? id as number,
-        { send, uris: new Set(requestedUris) },
-      );
+      // JSON-RPC id 可能是 number/string/null，统一 String(id) 归一化为 key
+      subscriptions.set(String(id), { send, uris: new Set(requestedUris) });
       console.log(`[mcp] subscriptions/listen 建立 (id=${id}, uris=${JSON.stringify(requestedUris)})`);
     },
     cancel() {
-      subscriptions.delete(Number(id));
+      subscriptions.delete(String(id));
       console.log(`[mcp] subscriptions/listen 关闭 (id=${id})`);
     },
   });

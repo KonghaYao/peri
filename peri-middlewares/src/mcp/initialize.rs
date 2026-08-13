@@ -1,37 +1,17 @@
 use std::{path::Path, sync::Arc};
 
-use peri_acp_types::plugin::McpSubscriptionsConfig;
-use rmcp::model::{ProtocolVersion, SubscriptionFilter};
-
 use super::{
     auth_store::FileCredentialStore,
     channel_handler::ChannelHandler,
     client::{
-        build_http_transport, spawn_stdio_transport, ClientStatus, McpClientHandle, McpClientPool,
-        McpInitStatus, McpServiceWrapper, OAuthStatus, HTTP_CONNECT_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        build_http_transport, serve_client_auto, setup_subscription, spawn_stdio_transport,
+        ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
+        HTTP_CONNECT_TIMEOUT, STDIO_CONNECT_TIMEOUT,
     },
     config::OAuthConfig,
     oauth_flow::OAuthFlowEvent,
     transport::TransportConfig,
 };
-
-/// 由 `McpSubscriptionsConfig` 构建 `subscriptions/listen` 过滤器。
-fn build_subscription_filter(sub: &McpSubscriptionsConfig) -> SubscriptionFilter {
-    let mut b = SubscriptionFilter::builder();
-    if !sub.resources.is_empty() {
-        b = b.resource_subscriptions(sub.resources.iter().cloned());
-    }
-    if sub.tools_list_changed {
-        b = b.tools_list_changed();
-    }
-    if sub.prompts_list_changed {
-        b = b.prompts_list_changed();
-    }
-    if sub.resources_list_changed {
-        b = b.resources_list_changed();
-    }
-    b.build()
-}
 
 impl McpClientPool {
     pub async fn run_initialize(
@@ -128,38 +108,13 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(transport) => {
-                        if subscriptions.is_some() {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client_with_lifecycle(
-                                    (),
-                                    transport,
-                                    rmcp::service::ClientLifecycleMode::Auto {
-                                        preferred_versions: vec![
-                                            ProtocolVersion::V_2026_07_28,
-                                            ProtocolVersion::V_2025_11_25,
-                                        ],
-                                        legacy_version: None,
-                                    },
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        } else if let Some(ref handler) = channel_handler {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client(handler.clone(), transport),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Channel))
-                        } else {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client((), transport),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        }
+                        serve_client_auto(
+                            transport,
+                            channel_handler.as_ref(),
+                            subscriptions,
+                            timeout,
+                        )
+                        .await
                     }
                     Err(e) => {
                         Self::insert_failed(&pool, name, format!("stdio 启动失败: {e}"));
@@ -198,41 +153,13 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        if subscriptions.is_some() {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client_with_lifecycle(
-                                    (),
-                                    build_http_transport(url, headers),
-                                    rmcp::service::ClientLifecycleMode::Auto {
-                                        preferred_versions: vec![
-                                            ProtocolVersion::V_2026_07_28,
-                                            ProtocolVersion::V_2025_11_25,
-                                        ],
-                                        legacy_version: None,
-                                    },
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        } else if let Some(ref handler) = channel_handler {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client(
-                                    handler.clone(),
-                                    build_http_transport(url, headers),
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Channel))
-                        } else {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client((), build_http_transport(url, headers)),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        }
+                        serve_client_auto(
+                            build_http_transport(url, headers),
+                            channel_handler.as_ref(),
+                            subscriptions,
+                            timeout,
+                        )
+                        .await
                     }
                 }
             };
@@ -242,23 +169,7 @@ impl McpClientPool {
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     // 失败仅告警——server 可能不支持，连接本身仍可用。
                     if let Some(sub) = subscriptions {
-                        match rs.peer().listen(build_subscription_filter(sub)).await {
-                            Ok(subscription) => {
-                                pool.spawn_subscription_loop(name, subscription).await;
-                                tracing::info!(
-                                    server = %name,
-                                    resources = ?sub.resources,
-                                    "subscriptions/listen 已建立"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    server = %name,
-                                    error = %e,
-                                    "subscriptions/listen 建立失败（server 可能不支持）"
-                                );
-                            }
-                        }
+                        setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = rs.list_all_resources().await.unwrap_or_default();
@@ -424,35 +335,7 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(t) => {
-                        if subscriptions.is_some() {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client_with_lifecycle(
-                                    (),
-                                    t,
-                                    rmcp::service::ClientLifecycleMode::Auto {
-                                        preferred_versions: vec![
-                                            ProtocolVersion::V_2026_07_28,
-                                            ProtocolVersion::V_2025_11_25,
-                                        ],
-                                        legacy_version: None,
-                                    },
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        } else if let Some(ref handler) = channel_handler {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client(handler.clone(), t),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Channel))
-                        } else {
-                            tokio::time::timeout(timeout, rmcp::service::serve_client((), t))
-                                .await
-                                .map(|inner| inner.map(McpServiceWrapper::Default))
-                        }
+                        serve_client_auto(t, channel_handler.as_ref(), subscriptions, timeout).await
                     }
                     Err(e) => {
                         Self::insert_failed(&pool, name, format!("stdio 失败: {e}"));
@@ -491,41 +374,13 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        if subscriptions.is_some() {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client_with_lifecycle(
-                                    (),
-                                    build_http_transport(url, headers),
-                                    rmcp::service::ClientLifecycleMode::Auto {
-                                        preferred_versions: vec![
-                                            ProtocolVersion::V_2026_07_28,
-                                            ProtocolVersion::V_2025_11_25,
-                                        ],
-                                        legacy_version: None,
-                                    },
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        } else if let Some(ref handler) = channel_handler {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client(
-                                    handler.clone(),
-                                    build_http_transport(url, headers),
-                                ),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Channel))
-                        } else {
-                            tokio::time::timeout(
-                                timeout,
-                                rmcp::service::serve_client((), build_http_transport(url, headers)),
-                            )
-                            .await
-                            .map(|inner| inner.map(McpServiceWrapper::Default))
-                        }
+                        serve_client_auto(
+                            build_http_transport(url, headers),
+                            channel_handler.as_ref(),
+                            subscriptions,
+                            timeout,
+                        )
+                        .await
                     }
                 }
             };
@@ -534,23 +389,7 @@ impl McpClientPool {
                 Ok(Ok(rs)) => {
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     if let Some(sub) = subscriptions {
-                        match rs.peer().listen(build_subscription_filter(sub)).await {
-                            Ok(subscription) => {
-                                pool.spawn_subscription_loop(name, subscription).await;
-                                tracing::info!(
-                                    server = %name,
-                                    resources = ?sub.resources,
-                                    "subscriptions/listen 已建立"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    server = %name,
-                                    error = %e,
-                                    "subscriptions/listen 建立失败（server 可能不支持）"
-                                );
-                            }
-                        }
+                        setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = rs.list_all_resources().await.unwrap_or_default();
