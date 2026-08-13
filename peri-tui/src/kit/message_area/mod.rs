@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::kit::atoms::{
-    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, KEEPGOING_BLOCKED_UNTIL,
-    LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT, SELECTED_SUBAGENT_ID, SUBMIT_TX, VIEW_MODELS,
-    ViewModelsSnapshot,
+    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, IMAGE_HOVER,
+    KEEPGOING_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT, SELECTED_SUBAGENT_ID,
+    SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
 };
 use crate::kit::focus_router;
 use crate::kit::mouse_router;
@@ -48,7 +48,7 @@ use footer::{KeepGoingLayout, build_footer_lines};
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::vm_to_lines_cached;
+use render::{ImageLineInfo, vm_to_lines_cached};
 use scroll::{DragThrottle, GesturePending, ScrollThrottle, ScrollbarDragState};
 use selection::{
     WrappedLineInfo, build_wrap_map, concat_wrap_maps, copy_to_clipboard,
@@ -198,6 +198,106 @@ fn entry_click_decision(
         Some((slot, 0)) => Some(slot),
         _ => None,
     }
+}
+
+// ── [T4 §4] @image 行交互：hover 目标解析 + 点击 open ────────────────────
+
+/// Moved 事件 hover 目标解析（§4.4）：命中 [`ImageLineHit`] → [`ImageHoverState`]；
+/// 未命中或遮挡（`mouse_router::is_occluded`）→ None（恢复默认渲染）。
+/// 纯函数（mod_test 直调锁定）——handler 只做「命中集合变化才写」的胶水。
+fn hover_target_for(
+    hits: &[ImageLineHit],
+    x: u16,
+    y: u16,
+    occluded: bool,
+) -> Option<ImageHoverState> {
+    if occluded {
+        return None;
+    }
+    hits.iter()
+        .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
+        .map(|h| ImageHoverState {
+            row: h.row,
+            slot_index: h.slot_index,
+            logical_idx: h.logical_idx,
+            vm_hash: h.vm_hash,
+            path: h.path.clone(),
+            size_text: h.size_text.clone(),
+        })
+}
+
+/// open 命令构建失败原因（错误文本不含路径细节，RUST-ERROR-001）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenImageError {
+    /// 非 macOS 平台尚未验证（§4.6：安全降级，仅记录日志不 spawn）。
+    UnsupportedPlatform,
+    /// T5 校验失败（非常规文件 / 扩展名 / 大小上限等）。
+    ValidationFailed,
+}
+
+/// 构建打开图片的 open 命令（参数化，**禁止 shell 拼接**，§6.2-6）。
+///
+/// 平台选型（§4.2）：macOS `open`；Windows `cmd /C start`、Linux `xdg-open`
+/// 未验证前返回 [`OpenImageError::UnsupportedPlatform`]（§4.6 安全降级——
+/// 不 spawn）。打开前过 T5 校验（常规文件 + 扩展名 + 大小上限；§4.4）。
+/// stdout/stderr 重定向 null——detach 不阻塞 TUI、不继承终端。
+///
+/// [F8 残余窗口] 调用方传 canonical 路径（T4 `ImageLineHit.path`，render.rs
+/// 注释），但 `open` 命令本身按路径打开：T5 校验与 spawn 之间文件仍可能被
+/// 替换（OS 语义固有，无法经 fd 传递到外部命令）——登记为低危残余窗口。
+pub(crate) fn build_open_command(path: &str) -> Result<std::process::Command, OpenImageError> {
+    build_open_command_with(path, "open")
+}
+
+/// [`build_open_command`] 的二进制名注入版（P2-7：成功 spawn 路径测试
+/// 注入 `/bin/echo` 等，不依赖真实 Finder；生产路径恒为 `"open"`）。
+fn build_open_command_with(
+    path: &str,
+    open_bin: &str,
+) -> Result<std::process::Command, OpenImageError> {
+    if !cfg!(target_os = "macos") {
+        return Err(OpenImageError::UnsupportedPlatform);
+    }
+    crate::kit::image_safety::validate_image_file(std::path::Path::new(path))
+        .map_err(|_| OpenImageError::ValidationFailed)?;
+    let mut cmd = std::process::Command::new(open_bin);
+    cmd.arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Ok(cmd)
+}
+
+/// 点击 open 完整链路（§4.4）：T5 校验 → 参数化 Command → detach spawn。
+/// 校验失败 → NOTIFICATION 提示（paste-truncated 通知模式）；未支持平台
+/// （非 macOS）→ 仅记录日志不 spawn（§4.6 安全降级）。返回是否成功 spawn。
+pub(crate) fn try_open_image(path: &str) -> bool {
+    match build_open_command(path) {
+        Ok(mut cmd) => match cmd.spawn() {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "image open: spawn failed");
+                false
+            }
+        },
+        Err(OpenImageError::UnsupportedPlatform) => {
+            tracing::warn!("image open: platform not supported (macOS verified only)");
+            false
+        }
+        Err(OpenImageError::ValidationFailed) => {
+            show_open_failed_notification();
+            false
+        }
+    }
+}
+
+/// 打开失败状态栏提示（参照 submit_blocked 的 paste-truncated 通知模式）。
+fn show_open_failed_notification() {
+    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+        message: crate::i18n::tr("user-image-open-failed"),
+        until: std::time::Instant::now() + std::time::Duration::from_secs(3),
+    });
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 /// 对 VM 应用手动折叠覆盖：写 fold + user_modified + 重算 hash（G1）。
@@ -431,6 +531,9 @@ struct VmCacheSlot {
     /// 与列区间）。None = 非 pending interaction。rebuild 时随 lines 重建，
     /// 供视口 post-pass 应用「当前项」高亮与点击热区。
     interaction: Option<render::InteractionLayout>,
+    /// [T4 §4] @image 行渲染期信息（slot 内逻辑索引 + 展示路径 + 受管理标志）。
+    /// rebuild 时随 lines 重建，供点击/hover 屏幕命中映射。
+    image_lines: Vec<ImageLineInfo>,
     /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
     /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
     anim_frame: u64,
@@ -470,6 +573,54 @@ struct InteractionOptionHit {
     option_index: usize,
 }
 
+/// @image 行的屏幕点击区域（每帧由渲染 body 构建，点击/hover handler 实时读取
+/// ——与 CopyButtonHit 同模式；事件在上帧渲染完成后分发，读取最近一帧的位置）。
+/// 存屏幕绝对坐标（含 scroll_y / area 偏移换算），handler 无需再查 wrap_map。
+struct ImageLineHit {
+    /// meta 行所在屏幕行（绝对坐标）。
+    row: u16,
+    /// 命中列范围（屏幕绝对坐标，[x_start, x_end)；content 区域内整行命中，
+    /// 不含滚动条列——滚动条点击不被误吞）。
+    x_start: u16,
+    x_end: u16,
+    /// 所属 VM 在 VIEW_MODELS.items 中的索引——点击时校验仍指向同一 VM
+    /// （Rewind / Reset 可能增删 items 导致索引错位）。
+    slot_index: usize,
+    /// 渲染时该 VM 的 content_hash——点击时校验（同 CopyButtonHit 防御）。
+    vm_hash: u64,
+    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标。
+    path: String,
+    /// 受管理目录内（~/.peri/images）→ 自动预览候选。本任务（T4）仅传递
+    /// 给 T7 预览资格判定，暂无读取点。
+    #[allow(dead_code)]
+    managed: bool,
+    /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
+    /// hover 时不再 stat（§4.4 stat 时机取舍）。
+    size_text: String,
+    /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）——hover 渲染定位。
+    logical_idx: usize,
+}
+
+/// @image 行 hover 状态（§4.4）：Moved 事件命中变化时由 handler 写入
+/// [`IMAGE_HOVER`]，渲染 body 读取决定该 meta 行是否显示绝对路径 + accent
+/// 高亮（移出/遮挡 → None 恢复默认渲染）。字段与 [`ImageLineHit`] 对齐
+/// （渲染定位 + 陈旧校验）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImageHoverState {
+    /// 命中时鼠标所在屏幕行（绝对坐标）。
+    pub(crate) row: u16,
+    /// 所属 VM 在 VIEW_MODELS.items 中的索引。
+    pub(crate) slot_index: usize,
+    /// slot 内逻辑行索引——渲染定位（滚动后 hover 高亮跟随行）。
+    pub(crate) logical_idx: usize,
+    /// 渲染时该 VM 的 content_hash（陈旧校验）。
+    pub(crate) vm_hash: u64,
+    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——hover 行显示。
+    pub(crate) path: String,
+    /// 重建期算好的大小文案（B/KB/MB 或 missing）。
+    pub(crate) size_text: String,
+}
+
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
 #[component]
@@ -487,6 +638,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
     let strip_color = !caps.read().color;
+    // 订阅 IMAGE_HOVER：Moved handler 写入时触发消息区重渲染（hover 行
+    // 绝对路径显示/清除）。读取仍在渲染 body 视口循环（读副本，G3 视口级）。
+    hooks.use_atom(&IMAGE_HOVER);
 
     let snapshot = view_models.read();
     let todo_items = todo_atom.read().clone();
@@ -536,6 +690,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
     // md 复制按钮屏幕点击区域（每帧更新，点击 handler 实时读取——同上）
     let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
+    // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
+    // Moved handler 实时读取——同 CopyButtonHit 模式）。
+    let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
 
     let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
     // [Why has_content 而非 !footer_lines.is_empty()] footer 常驻渲染后恒非空
@@ -691,7 +848,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             let vm = &snapshot2.items[*i];
             let vm_hash = vm.content_hash();
             let slot = &mut caches[*i];
-            let (lines, copy_button, interaction) =
+            let (lines, copy_button, interaction, image_lines) =
                 vm_to_lines_cached(vm, &grid, &mut slot.markdown_cache, true);
             let lines = Arc::new(lines);
             let (_, wm) = build_wrap_map(&lines, vis_width);
@@ -706,6 +863,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             slot.visual_rows = visual_rows;
             slot.copy_button = copy_button;
             slot.interaction = interaction;
+            slot.image_lines = image_lines;
         }
     }
     // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
@@ -997,6 +1155,78 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             }
             // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
             EventResult::Consumed
+        });
+    }
+
+    // ── [T4 §4] @image 行点击（open 图片文件）──
+    // [Why 注册顺序] 与 keepgoing/md 复制/interaction 一致：必须在 scroll
+    // handler 之前——scroll::handle_event 对消息区内 Down(Left) 一律 Consumed
+    // （文本选中起点），在其后注册收不到点击。命中 → Consumed；未命中 → Ignored。
+    // 打开前过 T5 校验（常规文件 + 扩展名 + 大小上限）；校验失败 → NOTIFICATION
+    // 提示（paste-truncated 通知模式）。open 用参数化 Command（§6.2-6 禁止 shell
+    // 拼接），macOS 验证；其他平台未验证前仅记录日志不 spawn（§4.6 安全降级）。
+    {
+        let image_rects_for_click = image_rects;
+        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+            let Event::Mouse(mouse) = event else {
+                return EventResult::Ignored;
+            };
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return EventResult::Ignored;
+            }
+            // 弹窗/面板遮挡时不响应（与 keepgoing / scroll handler 一致）
+            if mouse_router::is_occluded() {
+                return EventResult::Ignored;
+            }
+            let (x, y) = (mouse.column, mouse.row);
+            let hits = image_rects_for_click.read();
+            let Some(hit) = hits
+                .iter()
+                .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
+            else {
+                return EventResult::Ignored;
+            };
+            // 校验 VM 身份（Rewind/Reset 索引错位防御）——同 md 复制按钮模式。
+            let vm_guard = view_models.read();
+            let matched = vm_guard.items.get(hit.slot_index).is_some_and(|vm| {
+                matches!(vm, TuiRenderUnit::TuiUserBubble(_)) && vm.content_hash() == hit.vm_hash
+            });
+            drop(vm_guard);
+            if matched {
+                try_open_image(&hit.path);
+            }
+            // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
+            EventResult::Consumed
+        });
+    }
+
+    // ── [T4 §4] @image 行 hover（绝对路径 + accent 高亮）──
+    // [Why 注册顺序] 注册在 scroll handler 之前（scroll.rs 对 Moved 直接
+    // Ignored，顺序在其前即可收到）；Moved 恒 Ignored，不消费事件。
+    // [防风暴 §4.6] 仅当「命中集合变化」时 write（触发重渲染）；命中不变
+    // 的移动 no-op——防高频 Moved 每帧全量重渲染消息区。
+    {
+        let image_rects_for_hover = image_rects;
+        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+            let Event::Mouse(mouse) = event else {
+                return EventResult::Ignored;
+            };
+            if mouse.kind != MouseEventKind::Moved {
+                return EventResult::Ignored;
+            }
+            let new_state = hover_target_for(
+                &image_rects_for_hover.read(),
+                mouse.column,
+                mouse.row,
+                mouse_router::is_occluded(),
+            );
+            // [TRAP] 先 copy 出当前值 drop guard 再 write——parking_lot 同线程
+            // read+write 冲突会 panic。
+            let current = IMAGE_HOVER.state().read().clone();
+            if current != new_state {
+                *IMAGE_HOVER.state().write() = new_state;
+            }
+            EventResult::Ignored
         });
     }
 
@@ -1316,6 +1546,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         *scrollbar_fields.write_no_update() = ScrollbarFields::default();
         // 清空 md 复制按钮映射——Welcome 页面无消息，防止点击残留按钮复制已消失内容
         *copy_buttons.write_no_update() = Arc::new(Vec::new());
+        // 清空 @image 行热区映射（同 copy_buttons——Welcome 页面无消息可点）
+        *image_rects.write_no_update() = Arc::new(Vec::new());
         if let Some(lines) = brewed_lines {
             return element!(
                 View(
@@ -1465,6 +1697,49 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         *copy_buttons.write_no_update() = Arc::new(hits);
     }
 
+    // ── [T4 §4] @image 行屏幕位置（每帧更新）──
+    // 与 md 复制按钮同模式：meta 行在 slot 内是完整渲染的逻辑行（部分截断的
+    // meta 行不进入映射——渲染位置与点击区域错位）。屏幕行 = area.y + slot
+    // 视觉偏移 + 行内视觉偏移 - scroll_y；视口外的行不进入映射（点不到）。
+    // 命中列 = content 区域内整行（前缀列到滚动条列前），wrap 续行同列区间
+    // 天然覆盖；滚动条列（最右 1 列）不进入——滚动条点击不被误吞。
+    {
+        let mut hits: Vec<ImageLineHit> = Vec::new();
+        if let Some(area) = area_rect {
+            let vp_end = area.y.saturating_add(vis_height);
+            let caches_read = vm_caches.read();
+            let content_x = area.x.saturating_add(grid.cont_prefix_width() as u16);
+            for (slot_index, slot) in caches_read.iter().enumerate() {
+                for info in &slot.image_lines {
+                    let Some(entry) = slot.wrap_map.get(info.logical_idx) else {
+                        continue;
+                    };
+                    let vis_row = slot_visual_starts
+                        .get(slot_index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(entry.visual_start);
+                    let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                    if row < area.y as i64 || row >= vp_end as i64 {
+                        continue;
+                    }
+                    hits.push(ImageLineHit {
+                        row: row as u16,
+                        x_start: content_x,
+                        x_end: content_x.saturating_add(grid.content),
+                        slot_index,
+                        vm_hash: slot.content_hash,
+                        path: info.path.clone(),
+                        managed: info.managed,
+                        size_text: info.size_text.clone(),
+                        logical_idx: info.logical_idx,
+                    });
+                }
+            }
+        }
+        *image_rects.write_no_update() = Arc::new(hits);
+    }
+
     // ── [Slice 4 §6.8] interaction option 屏幕位置 + 当前项高亮信息（每帧更新）──
     // 与 md 复制按钮同模式：视口外的选项不进映射（点不到）；高亮只作用于
     // 视口行（G3 视口级，不动渲染缓存）。返回值供视口循环对「焦点 slot 的
@@ -1571,6 +1846,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
+    // [T4 §4] hover 状态读副本（每帧一次）：视口 post-pass 据此把命中的
+    // @image meta 行替换为绝对路径 + accent 高亮（G3 视口级，不写缓存）。
+    // 陈旧校验：hover 的 vm_hash 与当帧 slot 的 content_hash 不一致
+    // （Rewind/Reset 后索引错位 / 内容变更）→ 不应用（防御误高亮）。
+    let image_hover = {
+        let caches = vm_caches.read();
+        IMAGE_HOVER.state().read().as_ref().and_then(|h| {
+            caches
+                .get(h.slot_index)
+                .filter(|s| s.content_hash == h.vm_hash)
+                .map(|_| h.clone())
+        })
+    };
     // [Slice 3] §9 focus 视觉（G3：只作用于视口行，不写缓存/业务状态）：
     // focused entry 左缘 selection border（outer 列，空格 + selection 背景
     // 反色——整格填充色块，视觉为连续竖线；NO_COLOR 时退化为 `|` 字符，
@@ -1605,6 +1893,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 } else {
                     line.clone()
                 };
+                // [T4 §4] @image hover 视觉 post-pass：命中行替换为绝对路径 +
+                // accent 高亮。按 (slot_index, logical_idx) 定位——滚动后 hover
+                // 高亮跟随行移动，不依赖鼠标位置。
+                if let Some(h) = image_hover.as_ref()
+                    && entry.slot_index == h.slot_index
+                    && local_idx == h.logical_idx
+                {
+                    let hover_sem = THEME_ATOM.state().read().semantic;
+                    out = render::render_image_hover_line(h, &grid, &hover_sem);
+                }
                 // [Slice 3] focus 视觉 post-pass——替换首列 outer 空 cell
                 // （渲染层约定：非空行首 span 恒为裸空格 outer cell）。
                 if focus_slot == Some(entry.slot_index)

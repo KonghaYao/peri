@@ -99,6 +99,7 @@ fn build_preview(theme_name: &str) -> Vec<Line<'static>> {
         .flat_map(|s| match s {
             MarkdownSegment::Text(lines) => lines.clone(),
             MarkdownSegment::Table(_) => vec![],
+            MarkdownSegment::Image(_) => vec![],
         })
         .collect()
 }

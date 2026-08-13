@@ -655,6 +655,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let hidden = props.hidden;
     let text = editor.text.clone();
     let cursor = editor.cursor;
+    // [T7 §7.3] 输入区快照（cursor 触发源）：render body 每帧 write_no_update
+    // 写 INPUT_SNAPSHOT（同 keepgoing_rect 模式——TUI-RENDER-001 派生缓存，
+    // 不唤醒订阅者；overlay 组件经渲染循环每帧读取最新值）。
+    *crate::kit::atoms::INPUT_SNAPSHOT.state().write_no_update() =
+        crate::kit::atoms::InputSnapshot {
+            text: text.clone(),
+            cursor_char: cursor,
+        };
     let loading = props.loading;
     // 光标显示逻辑：loading 态始终显示；无面板/弹窗激活时显示；否则隐藏
     // use_atom 确保面板/弹窗变化时触发重渲染；*解引用取最新值

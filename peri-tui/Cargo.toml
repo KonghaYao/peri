@@ -37,6 +37,16 @@ peri-resources = { path = "../peri-resources" }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
 ratatui-kit = { version = "0.10.2", features = ["full"] }
 ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
+# ── P1 像素渲染基础（image-p0-p1-spec §6.3 / spike S2）──
+# default-features=false 关闭 chafa-dyn（pkg-config C 库，必须）；不启用
+# tokio/serde/termion/termwiz/chafa-*。**不启用 image-defaults**（F6 评审：
+# 该 feature 打开 image/default——exr/tiff/dds/avif 等永不被调用的解码器
+# 进编译图，攻击面扩大）；ratatui-image 自身仅需 png（resize 用 imageops，
+# 见其 Cargo.toml [dependencies.image]），格式解码器由下方 image 4 格式声明
+# 提供（feature 并集）。image 显式声明供 T5 像素校验与 T6 构造 DynamicImage
+# 用，与 ratatui-image 锁一致 0.25.x。
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

@@ -1,0 +1,16 @@
+# 独立实验 crate：验证 ratatui-image 11.x 作为 P1 像素渲染层基础
+# 空 [workspace] 段脱离主 workspace（与 side-projects/git-stats 同模式）
+[package]
+name = "image-spike"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ratatui = "0.30.2"
+# default-features=false 关闭 chafa-dyn（pkg-config 动态链接 libchafa C 库）
+# 显式保留 crossterm backend 与 image-defaults
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults"] }
+# 测试直接构造 DynamicImage 用（版本与 ratatui-image 的 image ^0.25.6 对齐）
+image = "0.25"
