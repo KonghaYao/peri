@@ -527,12 +527,21 @@ pub(crate) fn vm_to_lines_cached(
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
-            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行。
-            // reasoning 是过程 entry，不自行增加空行；若后接正文，正文前导空行
-            // 负责分隔。空 bubble（无 text 无 reasoning）仍返回 0 行。
+            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行；
+            // 节拍空行带竖线前缀（左缘时间线不断链）。reasoning 是过程 entry，
+            // 不自行增加空行；若后接正文，正文前导空行负责分隔。空 bubble
+            // （无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
                 return (lines, None, None);
             }
+
+            // AI 正文竖线颜色——正文行与前后 turn 节拍空行共用；主题值在
+            // guard 生命周期内复制（TUI-THEME-001），不跨渲染路径持有读锁。
+            let (md_text_fg, line_color) = {
+                let theme_guard = peri_theme::atoms::THEME_ATOM.state();
+                let theme = theme_guard.read();
+                (theme.component.markdown.text, theme.semantic.accent)
+            };
 
             // 推理块（§6.3）——视觉独立 entry
             if let Some(ref reasoning) = data.reasoning {
@@ -543,12 +552,8 @@ pub(crate) fn vm_to_lines_cached(
 
             // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
             if !data.text.is_empty() {
-                lines.push(Line::default());
-                let theme_guard = peri_theme::atoms::THEME_ATOM.state();
-                let theme = theme_guard.read();
-                let md_text_fg = theme.component.markdown.text;
-                // AI 正文续行竖线使用主题主色。
-                let line_color = theme.semantic.accent;
+                // 前导空行带竖线前缀（与正文同色）——turn 节拍空行不断链。
+                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let segments = crate::kit::markdown::parse_markdown_cached(
@@ -623,7 +628,8 @@ pub(crate) fn vm_to_lines_cached(
             };
 
             if !data.text.is_empty() {
-                lines.push(Line::default());
+                // 尾随空行同样带竖线前缀——turn 节拍对称且左缘时间线不断链。
+                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
             }
 
             (lines, copy_button, None)
@@ -655,7 +661,8 @@ pub(crate) fn vm_to_lines_cached(
 
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///
-/// - 首行 1 个空行（§3.2 turn 节拍），正文行 `[│][gap]` 与其余 entry 同起点。
+/// - 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，左缘时间线不断链；
+///   正文行 `[│][gap]` 与其余 entry 同起点。
 /// - 保留用户换行；长 prompt 最多 `USER_BODY_MAX_LINES` 个视觉行，
 ///   超出显示 `… +N lines`（§6.1）。
 /// - 正文左侧竖线使用 text.secondary；slash command / `@mention` 局部强调（accent.user）。
@@ -670,8 +677,13 @@ fn render_user_bubble_lines(
     if data.text.is_empty() {
         return Vec::new();
     }
-    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）。
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）；空行带竖线前缀
+    // （与正文同色），左缘时间线在节拍空行处不断链。
+    let mut lines: Vec<Line<'static>> = vec![prefixed_cont_line(
+        grid,
+        sem.text.secondary,
+        Line::default(),
+    )];
 
     // 正文：保留用户换行；每行按 display width 折行成「视觉行」（§6.1 口径），
     // 最多 USER_BODY_MAX_LINES 个视觉行，超出显示 `… +N lines`（§12：grapheme
@@ -703,8 +715,13 @@ fn render_user_bubble_lines(
         lines.push(Line::from(spans));
     }
     // §3.2：user 尾部 1 空行（turn 节拍对称）——分隔后续 thinking/tool；
-    // assistant 正文仍由自身前导空行建立正文块边界。
-    lines.push(Line::from(""));
+    // assistant 正文仍由自身前导空行建立正文块边界。尾随空行同样带竖线前缀，
+    // 左缘时间线连续。
+    lines.push(prefixed_cont_line(
+        grid,
+        sem.text.secondary,
+        Line::default(),
+    ));
     lines
 }
 

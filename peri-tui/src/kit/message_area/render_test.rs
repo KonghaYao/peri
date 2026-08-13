@@ -27,11 +27,30 @@ fn all_text(lines: &[Line<'static>]) -> String {
     lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
 }
 
+/// 空白分隔行判定：无 spans，或 spans 全部为网格前缀列（outer 空 / `│` / gap），
+/// 无正文内容——§3.2 turn 节拍空行现在带竖线前缀，不再是 `spans.is_empty()`。
+fn is_blank_separator(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|s| {
+        let c = s.content.as_ref();
+        c.trim().is_empty() || c == "\u{2502}"
+    })
+}
+
+/// 行是否有正文内容（前缀列不算正文）。
+fn has_body_content(line: &Line<'static>) -> bool {
+    !is_blank_separator(line)
+}
+
+/// 空白分隔行 + 竖线前缀（§3.2：turn 节拍空行不断链左缘时间线）。
+fn is_rail_blank(line: &Line<'static>) -> bool {
+    is_blank_separator(line) && line.spans.iter().any(|s| s.content.as_ref() == "\u{2502}")
+}
+
 /// 首个非空渲染行的文本（跳过 leading 空行）。
 fn header_of(lines: &[Line<'static>]) -> String {
     lines
         .iter()
-        .find(|l| l.spans.iter().any(|s| !s.content.is_empty()))
+        .find(|l| has_body_content(l))
         .map(line_text)
         .unwrap_or_default()
 }
@@ -41,7 +60,7 @@ fn header_of(lines: &[Line<'static>]) -> String {
 fn body_vline_count(lines: &[Line<'static>]) -> usize {
     lines
         .iter()
-        .skip_while(|l| !l.spans.iter().any(|s| !s.content.is_empty()))
+        .skip_while(|l| !has_body_content(l))
         .skip(1)
         .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{2502}"))
         .count()
@@ -51,7 +70,7 @@ fn body_vline_count(lines: &[Line<'static>]) -> usize {
 fn nth_nonempty_line(lines: &[Line<'static>], n: usize) -> Line<'static> {
     lines
         .iter()
-        .filter(|l| l.spans.iter().any(|s| !s.content.is_empty()))
+        .filter(|l| has_body_content(l))
         .nth(n)
         .cloned()
         .unwrap_or_default()
@@ -401,10 +420,13 @@ fn test_vertical_rhythm_blank_lines() {
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into())),
         &grid,
     );
-    assert!(user_lines[0].spans.is_empty(), "user 前应有 1 空行");
     assert!(
-        user_lines.last().is_some_and(|l| l.spans.is_empty()),
-        "user 后应有 1 空行（turn 节拍对称）"
+        is_rail_blank(&user_lines[0]),
+        "user 前应有 1 空行（带竖线前缀，时间线不断链）"
+    );
+    assert!(
+        user_lines.last().is_some_and(is_rail_blank),
+        "user 后应有 1 空行（turn 节拍对称且带竖线前缀）"
     );
     let header = header_of(&user_lines);
     assert!(
@@ -429,14 +451,12 @@ fn test_vertical_rhythm_blank_lines() {
         &grid,
     );
     assert!(
-        assistant_lines[0].spans.is_empty(),
-        "assistant 正文前应有 1 空行"
+        is_rail_blank(&assistant_lines[0]),
+        "assistant 正文前应有 1 空行（带竖线前缀，时间线不断链）"
     );
     assert!(
-        assistant_lines
-            .last()
-            .is_some_and(|line| line.spans.is_empty()),
-        "assistant 正文后应有 1 空行"
+        assistant_lines.last().is_some_and(is_rail_blank),
+        "assistant 正文后应有 1 空行（带竖线前缀）"
     );
 
     // 工具行之间无空行：completed + expanded 展开体（首行 + 输出行）无内部空行
@@ -488,10 +508,13 @@ fn test_empty_user_bubble_renders_zero_lines() {
     let real_user =
         TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into()));
     let real_lines = vm_to_lines(&real_user, &grid);
-    assert!(real_lines[0].spans.is_empty(), "非空 user 前应有 1 空行");
     assert!(
-        real_lines.last().is_some_and(|l| l.spans.is_empty()),
-        "非空 user 后应有 1 空行"
+        is_rail_blank(&real_lines[0]),
+        "非空 user 前应有 1 空行（带竖线前缀）"
+    );
+    assert!(
+        real_lines.last().is_some_and(is_rail_blank),
+        "非空 user 后应有 1 空行（带竖线前缀）"
     );
 }
 
@@ -512,8 +535,8 @@ fn test_user_long_prompt_capped_at_six_lines() {
     // 1 空行 + 6 正文 + 1 `… +6 lines` + 1 尾部空行（无 role label 行）
     assert_eq!(lines.len(), 9, "6 行上限 + 省略行 + 尾部空行，其余截断");
     assert!(
-        lines.last().is_some_and(|l| l.spans.is_empty()),
-        "尾部空行（turn 节拍对称）"
+        lines.last().is_some_and(is_rail_blank),
+        "尾部空行（turn 节拍对称，带竖线前缀）"
     );
     let last = line_text(&lines[lines.len() - 2]);
     assert!(
@@ -2318,7 +2341,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
 
     // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到消息区右缘（term-1）
     let wide = mk(120);
-    let last = wide.iter().rev().find(|l| !l.spans.is_empty()).unwrap();
+    let last = wide.iter().rev().find(|l| has_body_content(l)).unwrap();
     let text = line_text(last);
     assert!(text.contains("12.4s"), "Wide 应显示 12.4s，实际 {text:?}");
     let g = GridSpec::grid_for(120);
@@ -2333,7 +2356,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
     let last = std_lines
         .iter()
         .rev()
-        .find(|l| !l.spans.is_empty())
+        .find(|l| has_body_content(l))
         .unwrap();
     let text = line_text(last);
     assert!(
