@@ -50,6 +50,23 @@ async fn register_and_bind_resolve() {
 }
 
 #[tokio::test]
+async fn live_workspace_scan_uses_runtime_state_not_session_hints() {
+    let (reg, _doc) = test_registry().await;
+    let reg = ChatRegistry::new(reg);
+    reg.register("active", "m1", None, "/", Some("project-a"))
+        .await
+        .unwrap();
+    reg.register("other", "m1", None, "/", Some("project-b"))
+        .await
+        .unwrap();
+    assert!(reg.has_live_workspace("project-a").await);
+    assert!(!reg.has_live_workspace("missing").await);
+    reg.transition("active", ChatState::Closed).await.unwrap();
+    assert!(!reg.has_live_workspace("project-a").await);
+    assert!(reg.has_live_workspace("project-b").await);
+}
+
+#[tokio::test]
 async fn bind_before_frames_dropped_semantics() {
     let (reg, _doc) = test_registry().await;
     let reg = ChatRegistry::new(reg);

@@ -141,6 +141,13 @@ pub struct ProjectSessionRecord {
     pub origin: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct MetadataSnapshot {
+    pub generation: i64,
+    pub projects: Vec<ProjectRecord>,
+    pub sessions: Vec<ProjectSessionRecord>,
+}
+
 impl ProjectSessionRecord {
     pub fn display_title(&self) -> String {
         self.custom_name
@@ -482,6 +489,41 @@ impl MetadataStore {
         self.bump_generation().await
     }
 
+    pub async fn restore_project(&self, id: &str) -> Result<()> {
+        let ts = now();
+        let result = sqlx::query(
+            "UPDATE projects SET archived_at=NULL,updated_at=? WHERE id=? AND archived_at IS NOT NULL",
+        )
+        .bind(&ts)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(MetadataError::NotFound(format!("archived project {id}")));
+        }
+        self.bump_generation().await
+    }
+
+    pub async fn rename_project(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(MetadataError::InvalidState("project name is empty".into()));
+        }
+        let ts = now();
+        let result = sqlx::query(
+            "UPDATE projects SET name=?,updated_at=? WHERE id=? AND archived_at IS NULL",
+        )
+        .bind(name)
+        .bind(&ts)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(MetadataError::NotFound(format!("active project {id}")));
+        }
+        self.bump_generation().await
+    }
+
     pub async fn project(&self, id: &str) -> Result<Option<ProjectRecord>> {
         let row = sqlx::query("SELECT id,name,cwd,instance_id,created_at,updated_at,archived_at FROM projects WHERE id=?")
             .bind(id).fetch_optional(&self.pool).await?;
@@ -671,13 +713,31 @@ impl MetadataStore {
     }
 
     pub async fn update_acp_title(&self, acp: &str, title: &str) -> Result<()> {
-        sqlx::query("UPDATE project_sessions SET acp_title=?,updated_at=? WHERE acp_session_id=?")
-            .bind(title)
-            .bind(now())
-            .bind(acp)
-            .execute(&self.pool)
+        self.update_acp_titles(&[(acp.to_string(), title.to_string())])
             .await?;
-        self.bump_generation().await
+        Ok(())
+    }
+
+    /// Persist ACP-owned titles by exact durable session id. Empty titles never
+    /// erase a known value, and user `custom_name` aliases remain untouched.
+    /// Returns the number of changed rows so callers can avoid a no-op Registry
+    /// rebuild on every session/list poll.
+    pub async fn update_acp_titles(&self, titles: &[(String, String)]) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let ts = now();
+        let mut changed = 0u64;
+        for (acp, title) in titles {
+            if acp.trim().is_empty() || title.trim().is_empty() {
+                continue;
+            }
+            changed += sqlx::query("UPDATE project_sessions SET acp_title=?,updated_at=? WHERE acp_session_id=? AND COALESCE(acp_title,'')<>?")
+                .bind(title).bind(&ts).bind(acp).bind(title).execute(&mut *tx).await?.rows_affected();
+        }
+        if changed > 0 {
+            bump_generation_tx(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
     }
 
     pub async fn session(&self, id: &str) -> Result<Option<ProjectSessionRecord>> {
@@ -689,6 +749,28 @@ impl MetadataStore {
     pub async fn list_sessions(&self) -> Result<Vec<ProjectSessionRecord>> {
         Ok(sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
             .fetch_all(&self.pool).await?.into_iter().map(session_from_row).collect())
+    }
+
+    /// Reads the projection generation and its complete source data from one
+    /// SQLite read transaction. A writer racing after this snapshot leaves a
+    /// larger generation behind, so startup/poll repair can detect and replay
+    /// it instead of falsely marking stale data as current.
+    pub async fn snapshot(&self) -> Result<MetadataSnapshot> {
+        let mut tx = self.pool.begin().await?;
+        let generation: i64 =
+            sqlx::query_scalar("SELECT generation FROM projection_state WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await?;
+        let projects = sqlx::query("SELECT id,name,cwd,instance_id,created_at,updated_at,archived_at FROM projects ORDER BY updated_at DESC,id")
+            .fetch_all(&mut *tx).await?.into_iter().map(project_from_row).collect();
+        let sessions = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
+            .fetch_all(&mut *tx).await?.into_iter().map(session_from_row).collect();
+        tx.commit().await?;
+        Ok(MetadataSnapshot {
+            generation,
+            projects,
+            sessions,
+        })
     }
 
     pub async fn import_explicit_session(
@@ -831,7 +913,7 @@ impl MetadataStore {
     }
 
     pub async fn mark_projected(&self, generation: i64) -> Result<()> {
-        sqlx::query("UPDATE projection_state SET projected_generation=?,updated_at=? WHERE singleton=1 AND generation>=?")
+        sqlx::query("UPDATE projection_state SET projected_generation=MAX(projected_generation,?),updated_at=? WHERE singleton=1 AND generation>=?")
             .bind(generation).bind(now()).bind(generation).execute(&self.pool).await?;
         Ok(())
     }

@@ -18,7 +18,7 @@ use tracing::{debug, trace, warn};
 use acp_hub_proto::conn::DocId;
 use acp_hub_proto::schema::{
     ActiveTurnProjection, ChatStatus, ChatSummary, EntryStatus, InstanceStatus,
-    SessionSummaryProjection, TurnStatus, WorkspaceSummary,
+    SessionSummaryProjection, ToolCallStatus, TurnStatus, WorkspaceSummary,
 };
 use yrs::{Map, ReadTxn, StateVector, Transact, WriteTxn};
 
@@ -909,31 +909,97 @@ async fn apply_command(
         DocCommand::ResolvePermission {
             permission_id,
             decision,
-        } => match permission::resolve(pair, permission_id, *decision) {
-            CasOutcome::Migrated => {
-                bump_control_projection(pair);
-                ApplyResult {
-                    applied: true,
-                    reason: None,
-                }
+        } => {
+            let context = permission::context(pair, permission_id);
+            if context
+                .as_ref()
+                .is_some_and(|(status, _)| status == "pending")
+            {
+                let linked_tool = context.as_ref().and_then(|(_, id)| id.as_deref());
+                migrate_permission_tool(
+                    pair,
+                    linked_tool,
+                    match decision {
+                        acp_hub_proto::action::PermissionDecision::Allow
+                            if linked_tool.is_some_and(|id| {
+                                permission::pending_count_for_tool(pair, id) > 1
+                            }) =>
+                        {
+                            ToolCallStatus::AwaitingPermission
+                        }
+                        acp_hub_proto::action::PermissionDecision::Allow => ToolCallStatus::Running,
+                        acp_hub_proto::action::PermissionDecision::Deny => {
+                            ToolCallStatus::Cancelled
+                        }
+                    },
+                );
             }
-            CasOutcome::Duplicate => ApplyResult {
-                applied: false,
-                reason: Some(ApplyReason::DuplicateIdempotent),
-            },
-            CasOutcome::Expired => ApplyResult {
-                applied: false,
-                reason: None,
-            },
-            CasOutcome::Unknown => ApplyResult {
-                applied: false,
-                reason: Some(ApplyReason::UnknownPermission),
-            },
-        },
+            match permission::resolve(pair, permission_id, *decision) {
+                CasOutcome::Migrated => {
+                    let no_pending_left = permission::pending_count(pair) == 0;
+                    let mut txn = pair.session_txn();
+                    let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                    if *decision == acp_hub_proto::action::PermissionDecision::Deny {
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "cancelled",
+                        );
+                    } else if no_pending_left {
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "running",
+                        );
+                    }
+                    chat_writer::bump_projection_version(&mut txn, &root);
+                    ApplyResult {
+                        applied: true,
+                        reason: None,
+                    }
+                }
+                CasOutcome::Duplicate => ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::DuplicateIdempotent),
+                },
+                CasOutcome::Expired => ApplyResult {
+                    applied: false,
+                    reason: None,
+                },
+                CasOutcome::Unknown => ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::UnknownPermission),
+                },
+            }
+        }
         DocCommand::ExpirePermission { permission_id } => {
+            let context = permission::context(pair, permission_id);
+            if context
+                .as_ref()
+                .is_some_and(|(status, _)| status == "pending")
+            {
+                migrate_permission_tool(
+                    pair,
+                    context.as_ref().and_then(|(_, id)| id.as_deref()),
+                    ToolCallStatus::Cancelled,
+                );
+            }
             match permission::expire(pair, permission_id) {
                 CasOutcome::Migrated => {
-                    bump_control_projection(pair);
+                    let no_pending_left = permission::pending_count(pair) == 0;
+                    let mut txn = pair.session_txn();
+                    let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                    if no_pending_left {
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "cancelled",
+                        );
+                    }
+                    chat_writer::bump_projection_version(&mut txn, &root);
                     ApplyResult {
                         applied: true,
                         reason: None,
@@ -954,6 +1020,13 @@ async fn apply_command(
             }
         }
         DocCommand::ExpirePendingPermissions => {
+            for tool_call_id in permission::pending_tool_ids(pair) {
+                migrate_permission_tool(
+                    pair,
+                    Some(tool_call_id.as_str()),
+                    ToolCallStatus::Cancelled,
+                );
+            }
             let migrated = permission::expire_all_pending(pair);
             if migrated > 0 {
                 bump_control_projection(pair);
@@ -1000,6 +1073,7 @@ async fn apply_command(
                     &chrono::Utc::now().to_rfc3339(),
                     None,
                 );
+                chat_writer::cancel_nonterminal_tools_for_turn(&mut txn, &root, turn_id);
                 chat_writer::bump_projection_version(&mut txn, &root);
                 ApplyResult {
                     applied: true,
@@ -1073,6 +1147,9 @@ async fn apply_command(
                     completed_at,
                     None,
                 );
+                if matches!(status, TurnStatus::Cancelled | TurnStatus::Interrupted) {
+                    chat_writer::cancel_nonterminal_tools_for_turn(&mut txn, &root, turn_id);
+                }
                 chat_writer::bump_projection_version(&mut txn, &root);
                 ApplyResult {
                     applied: true,
@@ -1354,6 +1431,30 @@ fn read_session_active_turn(pair: &DocPair) -> (Option<String>, String) {
         }
         None => (None, String::new()),
     }
+}
+
+fn migrate_permission_tool(pair: &mut DocPair, tool_call_id: Option<&str>, next: ToolCallStatus) {
+    let Some(tool_call_id) = tool_call_id else {
+        return;
+    };
+    let existing = {
+        let txn = pair.chat.transact();
+        chat_writer::tool_call_projection(&txn, tool_call_id)
+    };
+    let Some(mut tool) = existing else {
+        return;
+    };
+    if matches!(
+        tool.status,
+        ToolCallStatus::Completed | ToolCallStatus::Error | ToolCallStatus::Cancelled
+    ) {
+        return;
+    }
+    tool.status = next;
+    let mut txn = pair.chat_txn();
+    let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+    chat_writer::upsert_tool_call(&mut txn, &root, &tool);
+    chat_writer::bump_projection_version(&mut txn, &root);
 }
 
 fn bump_control_projection(pair: &mut DocPair) {

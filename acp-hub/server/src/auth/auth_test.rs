@@ -891,12 +891,18 @@ fn browser_session_is_opaque_logout_and_revocation_aware() {
     let (sid, ctx) = svc.create_browser_session(&rec.token).unwrap();
     assert!(sid.len() >= 43 && !sid.contains(&rec.token));
     assert_eq!(ctx.token_id, rec.id);
-    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_ok());
+    assert!(svc
+        .validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap())
+        .is_ok());
     assert!(svc.delete_browser_session(&sid));
-    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_err());
+    assert!(svc
+        .validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap())
+        .is_err());
     let (sid, _) = svc.create_browser_session(&rec.token).unwrap();
     svc.store_mut().revoke(&rec.id).unwrap();
-    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_err());
+    assert!(svc
+        .validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap())
+        .is_err());
 }
 
 #[test]
@@ -915,8 +921,12 @@ fn external_cli_revoke_is_seen_by_open_identity_revalidation() {
     let mut external = TokenStore::load(&path).unwrap();
     let rec = external.generate(TokenRole::Full, "browser").unwrap();
     let mut svc = AuthService::new(TokenStore::load(&path).unwrap());
-    assert!(svc.revalidate_client_identity(&rec.id, TokenRole::Full).is_ok());
+    assert!(svc
+        .revalidate_client_identity(&rec.id, TokenRole::Full)
+        .is_ok());
     std::thread::sleep(Duration::from_millis(10));
     external.revoke(&rec.id).unwrap();
-    assert!(svc.revalidate_client_identity(&rec.id, TokenRole::Full).is_err());
+    assert!(svc
+        .revalidate_client_identity(&rec.id, TokenRole::Full)
+        .is_err());
 }

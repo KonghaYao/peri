@@ -5,8 +5,8 @@ use crate::action::{
     ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChatPayload, LoadChatPayload,
     PermissionDecision, PersistedSessionCreatePayload, PersistedSessionImportPayload,
     PersistedSessionOpenPayload, PersistedSessionRenamePayload, ProjectArchivePayload,
-    ProjectCreatePayload, PromptChatPayload, ResolvePermissionPayload, SubscribeEventsPayload,
-    UnsubscribeEventsPayload,
+    ProjectCreatePayload, ProjectRenamePayload, PromptChatPayload, ResolvePermissionPayload,
+    SubscribeEventsPayload, UnsubscribeEventsPayload,
 };
 use crate::conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 use crate::event::EventFrame;
@@ -39,6 +39,19 @@ fn all_frames() -> Vec<Frame> {
             command_id: "pa1".into(),
             payload: ProjectArchivePayload {
                 project_id: "p1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::ProjectRestore {
+            command_id: "project-restore".into(),
+            payload: ProjectArchivePayload {
+                project_id: "project-1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::ProjectRename {
+            command_id: "project-rename".into(),
+            payload: ProjectRenamePayload {
+                project_id: "project-1".into(),
+                name: "New name".into(),
             },
         }),
         Frame::Action(ActionEnvelope::PersistedSessionCreate {

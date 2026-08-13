@@ -68,7 +68,10 @@ fn auth_contract_host_and_cookie_parsing() {
     assert!(valid_loopback_host("localhost:8456"));
     assert!(valid_loopback_host("[::1]:8456"));
     assert!(!valid_loopback_host("evil.example:8456"));
-    assert_eq!(cookie_value("x=1; acp_hub_session=opaque; y=2", "acp_hub_session").as_deref(), Some("opaque"));
+    assert_eq!(
+        cookie_value("x=1; acp_hub_session=opaque; y=2", "acp_hub_session").as_deref(),
+        Some("opaque")
+    );
 }
 
 /// 路由表：面板为唯一页面（/、/index.html、旧链接 /panel.html 同源），

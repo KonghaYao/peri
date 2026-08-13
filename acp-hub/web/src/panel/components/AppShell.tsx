@@ -1,42 +1,39 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, onCleanup, onMount } from 'solid-js';
 import { ProjectSidebar } from './ProjectSidebar';
 import { ChatView } from './ChatView';
+import { compactViewportQuery, Drawer } from '../../ui';
 
 export function AppShell() {
   const [open, setOpen] = createSignal(false);
   const [mobile, setMobile] = createSignal(false);
+  const [sidebarIntent, setSidebarIntent] = createSignal<{ kind: 'create-project' | 'import'; projectId?: string; nonce: number } | null>(null);
   let drawer: HTMLElement | undefined;
-  let trigger: HTMLElement | null = null;
+  let main: HTMLElement | undefined;
   onMount(() => {
-    const close = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
-      if (e.key !== 'Tab' || !mobile() || !open() || !drawer) return;
-      const items = [...drawer.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),[tabindex]:not([tabindex="-1"])')];
-      const edge = e.shiftKey ? items[0] : items.at(-1);
-      if (items.length && document.activeElement === edge) { e.preventDefault(); (e.shiftKey ? items.at(-1) : items[0])?.focus(); }
+    const query = window.matchMedia(compactViewportQuery);
+    const sync = () => {
+      setMobile(query.matches);
+      if (!query.matches) setOpen(false);
     };
-    document.addEventListener('keydown', close);
-    onCleanup(() => document.removeEventListener('keydown', close));
-    const query = window.matchMedia('(max-width: 767px)');
-    const sync = () => setMobile(query.matches);
     sync(); query.addEventListener('change', sync);
     onCleanup(() => query.removeEventListener('change', sync));
   });
-  createEffect(() => {
-    if (!mobile()) return;
-    if (open()) queueMicrotask(() => drawer?.querySelector<HTMLElement>('button:not(:disabled),input')?.focus());
-    else if (trigger) { trigger.focus(); trigger = null; }
-  });
-  const openDrawer = () => { trigger = document.activeElement as HTMLElement | null; setOpen(true); };
+  const openDrawer = () => {
+    if (mobile()) setOpen(true);
+    else queueMicrotask(() => drawer?.querySelector<HTMLElement>('.project-heading button:not(:disabled),.new-project-button:not(:disabled)')?.focus());
+  };
+  const requestSidebar = (kind: 'create-project' | 'import', projectId?: string) => {
+    setSidebarIntent({ kind, projectId, nonce: Date.now() });
+    if (mobile()) openDrawer();
+  };
   return (
     <div class="app-shell">
-      <aside ref={drawer} class={`project-drawer ${open() ? 'is-open' : ''}`} inert={mobile() && !open()}>
-        <ProjectSidebar onNavigate={() => setOpen(false)} />
-      </aside>
-      <main class="conversation-pane">
-        <ChatView onOpenNavigation={openDrawer} />
+      <Drawer ref={(element) => { drawer = element; }} class="project-drawer" open={open()} modal={mobile()} label="项目与会话导航" background={() => main} onClose={() => setOpen(false)}>
+        <ProjectSidebar onNavigate={() => setOpen(false)} intent={sidebarIntent()} />
+      </Drawer>
+      <main ref={main} class="conversation-pane">
+        <ChatView onOpenNavigation={openDrawer} onCreateProject={() => requestSidebar('create-project')} onImport={(projectId) => requestSidebar('import', projectId)} />
       </main>
-      <Show when={open()}><button class="drawer-scrim" aria-label="关闭导航" onClick={() => setOpen(false)} /></Show>
     </div>
   );
 }

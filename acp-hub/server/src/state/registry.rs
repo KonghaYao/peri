@@ -271,9 +271,14 @@ impl RegistryState {
         rx.await.map_err(|_| RegistryError::ChannelClosed)
     }
 
-    pub async fn list_legacy_sessions(&self) -> Result<Vec<SessionSummaryProjection>, RegistryError> {
+    pub async fn list_legacy_sessions(
+        &self,
+    ) -> Result<Vec<SessionSummaryProjection>, RegistryError> {
         let (reply, rx) = oneshot::channel();
-        self.inner.tx.send(RegistryMsg::ListLegacySessions(reply)).await
+        self.inner
+            .tx
+            .send(RegistryMsg::ListLegacySessions(reply))
+            .await
             .map_err(|_| RegistryError::ChannelClosed)?;
         rx.await.map_err(|_| RegistryError::ChannelClosed)
     }
@@ -453,8 +458,12 @@ impl RegistryApplier {
 
     pub(crate) fn list_legacy_sessions(&self) -> Vec<SessionSummaryProjection> {
         let txn = self.doc.transact();
-        let Some(root) = txn.get_map(ROOT) else { return Vec::new() };
-        session_list::read_current(&txn, &root).into_values().collect()
+        let Some(root) = txn.get_map(ROOT) else {
+            return Vec::new();
+        };
+        session_list::read_current(&txn, &root)
+            .into_values()
+            .collect()
     }
 
     /// gap 写回（读现状改 gap 字段；§9.4/§12.4）。

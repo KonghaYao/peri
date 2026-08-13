@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use acp_hub_proto::schema::{ProjectSessionSummary, ProjectSummary, WorkspaceSummary};
+use acp_hub_proto::schema::{
+    ProjectSessionSummary, ProjectSummary, SessionSummaryProjection, WorkspaceSummary,
+};
 use thiserror::Error;
 
 use crate::persist::metadata::{MetadataError, MetadataStore, ProjectRecord, ProjectSessionRecord};
@@ -134,6 +136,18 @@ impl ProjectService {
         Ok(self.metadata.archive_project(id).await?)
     }
 
+    pub async fn restore_project_metadata(&self, id: &str) -> Result<(), ProjectServiceError> {
+        Ok(self.metadata.restore_project(id).await?)
+    }
+
+    pub async fn rename_project_metadata(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<(), ProjectServiceError> {
+        Ok(self.metadata.rename_project(id, name).await?)
+    }
+
     pub async fn rename_session_metadata(
         &self,
         id: &str,
@@ -152,25 +166,36 @@ impl ProjectService {
         self.reproject().await
     }
 
-    pub async fn reproject(&self) -> Result<(), ProjectServiceError> {
-        let projects = self
-            .metadata
-            .list_projects()
-            .await?
-            .into_iter()
-            .map(project_summary)
+    /// Refreshes ACP-derived titles for sessions already admitted to the hub
+    /// catalog. SQLite remains authoritative; Registry is rebuilt only when an
+    /// exact durable id changed, and user aliases continue to win at display.
+    pub async fn refresh_acp_titles(
+        &self,
+        sessions: &[SessionSummaryProjection],
+    ) -> Result<u64, ProjectServiceError> {
+        let titles: Vec<_> = sessions
+            .iter()
+            .map(|session| (session.session_id.clone(), session.title.clone()))
             .collect();
-        let sessions = self
-            .metadata
-            .list_sessions()
-            .await?
+        let changed = self.metadata.update_acp_titles(&titles).await?;
+        let (generation, projected_generation) = self.metadata.generation().await?;
+        if changed > 0 || generation != projected_generation {
+            self.reproject().await?;
+        }
+        Ok(changed)
+    }
+
+    pub async fn reproject(&self) -> Result<(), ProjectServiceError> {
+        let snapshot = self.metadata.snapshot().await?;
+        let projects = snapshot.projects.into_iter().map(project_summary).collect();
+        let sessions = snapshot
+            .sessions
             .into_iter()
             .filter(|session| session.origin != "legacy_hidden")
             .map(session_summary)
             .collect();
         self.registry.replace_projects(projects, sessions).await?;
-        let (generation, _) = self.metadata.generation().await?;
-        self.metadata.mark_projected(generation).await?;
+        self.metadata.mark_projected(snapshot.generation).await?;
         Ok(())
     }
 
@@ -213,5 +238,73 @@ fn session_summary(s: ProjectSessionRecord) -> ProjectSessionSummary {
         updated_at: s.updated_at,
         last_opened_at: s.last_opened_at,
         active_chat_id: s.last_chat_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use acp_hub_proto::schema::SessionSummaryProjection;
+    use tempfile::tempdir;
+
+    use super::ProjectService;
+    use crate::control::StoreSink;
+    use crate::persist::metadata::MetadataStore;
+    use crate::persist::{PersistConfig, Store};
+    use crate::state::doc_manager::{BatchConfig, DocManager};
+
+    #[tokio::test]
+    async fn title_refresh_repairs_an_existing_projection_gap() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(
+            Store::open(&PersistConfig {
+                data_dir: dir.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        store.recover().await;
+        let sink = Arc::new(StoreSink::new(store).await.unwrap());
+        let doc = DocManager::new(BatchConfig::default(), sink);
+        let metadata = Arc::new(MetadataStore::open(dir.path()).await.unwrap());
+        metadata
+            .create_project("p", "Demo", "/", "local")
+            .await
+            .unwrap();
+        metadata
+            .import_session("s", "p", "acp", "Old", "2026-08-13T00:00:00Z")
+            .await
+            .unwrap();
+        let service = ProjectService::new(metadata.clone(), doc.registry());
+        service.reproject().await.unwrap();
+
+        metadata.update_acp_title("acp", "New").await.unwrap();
+        let (generation, projected) = metadata.generation().await.unwrap();
+        assert!(
+            generation > projected,
+            "fixture must contain a projection gap"
+        );
+
+        assert_eq!(
+            service
+                .refresh_acp_titles(&[SessionSummaryProjection {
+                    session_id: "acp".into(),
+                    title: "New".into(),
+                    status: String::new(),
+                    updated_at: String::new(),
+                    cwd: "/".into(),
+                    bound_chat_id: None,
+                }])
+                .await
+                .unwrap(),
+            0,
+            "same title is a metadata no-op"
+        );
+        let (generation_after, projected_after) = metadata.generation().await.unwrap();
+        assert_eq!(
+            generation_after, projected_after,
+            "no-op poll repairs pending projection"
+        );
     }
 }

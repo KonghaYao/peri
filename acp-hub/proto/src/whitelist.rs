@@ -86,6 +86,8 @@ pub enum M1Check {
 pub const M1_ACTION_TYPES: &[&str] = &[
     "project/create",
     "project/archive",
+    "project/restore",
+    "project/rename",
     "session/create",
     "session/open",
     "session/rename",

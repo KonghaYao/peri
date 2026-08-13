@@ -155,6 +155,8 @@ fn m1_action_type_subset() {
         "session/list",
         "project/create",
         "project/archive",
+        "project/restore",
+        "project/rename",
         "session/create",
         "session/open",
         "session/rename",
@@ -165,7 +167,7 @@ fn m1_action_type_subset() {
     for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 16);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 18);
 }
 
 /// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与

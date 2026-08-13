@@ -61,9 +61,13 @@ export class WsClient {
 
   /** 建立（或重建立）连接。调用方每次 connect 前应确保旧实例已 close。 */
   connect(): void {
+    this.openConnection(true);
+  }
+
+  private openConnection(resetBackoff: boolean): void {
     const { url, token, onStatus } = this.opts;
     this.intentional = false;
-    this.retryMs = RETRY_BASE_MS;
+    if (resetBackoff) this.retryMs = RETRY_BASE_MS;
     onStatus('connecting', {});
     let ws: WebSocket;
     try {
@@ -90,7 +94,8 @@ export class WsClient {
     ws.onmessage = (ev) => {
       const frame = parse(ev.data as string);
       if (!frame) {
-        console.error('[ws-client] 帧解析失败，原始数据:', ev.data);
+        const size = typeof ev.data === 'string' ? ev.data.length : 0;
+        console.error(`[ws-client] 帧解析失败 length=${size}`);
         return;
       }
       if (frame.t === 'keep_alive') {
@@ -102,22 +107,23 @@ export class WsClient {
       if (frame.t === 'ready') {
         // ready 只在首个订阅时下发一次；本模块上抛，不转发 onFrame
         // （调用方在 onStatus('ready') 里取 projectionVersions）。
+        this.retryMs = RETRY_BASE_MS;
         onStatus('ready', frame as ConnDetail);
         return;
       }
       if (frame.t === 'error' || frame.t === 'auth_error' || frame.t === 'action_error') {
-        // 错误帧集中打点，便于排查协议/权限问题。
-        console.error('[ws-client] 服务端错误帧:', frame);
+        // 只记录协议类型；message/details 可含工具参数或用户内容。
+        console.error(`[ws-client] 服务端错误帧 type=${frame.t}`);
       }
       this.opts.onFrame(frame);
     };
 
-    ws.onerror = (ev) => {
-      console.error('[ws-client] WebSocket 错误:', ev);
+    ws.onerror = () => {
+      console.error('[ws-client] WebSocket 传输错误');
     };
 
     ws.onclose = (ev) => {
-      console.warn(`[ws-client] 连接关闭 code=${ev.code} reason=${ev.reason}`);
+      console.warn(`[ws-client] 连接关闭 code=${ev.code}`);
       this.ws = null;
       if (this.intentional) {
         onStatus('closed', { code: ev.code });
@@ -136,7 +142,8 @@ export class WsClient {
   private scheduleReconnect(code: number): void {
     this.opts.onStatus('reconnecting', { retryMs: this.retryMs, code });
     this.retryTimer = setTimeout(() => {
-      this.connect();
+      this.retryTimer = null;
+      this.openConnection(false);
     }, this.retryMs);
     this.retryMs = Math.min(this.retryMs * 2, RETRY_MAX_MS);
   }

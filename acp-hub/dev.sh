@@ -26,11 +26,12 @@ CONFIG_DIR="${ACP_HUB_CONFIG_DIR:-$HOME/.config/acp-hub}"
 DATA_DIR="${ACP_HUB_DATA_DIR:-$HOME/.local/share/acp-hub}"
 TOKENS_FILE="${CONFIG_DIR}/tokens.toml"
 INSTANCE_TOKEN_FILE="${DATA_DIR}/instance.token"
+INSTANCE_DATA_DIR="${ACP_HUB_INSTANCE_DATA_DIR:-${DATA_DIR}/instance}"
 LOG_DIR="$(pwd)/.tmp"
 SERVER_LOG="${LOG_DIR}/server.log"
 INSTANCE_LOG="${LOG_DIR}/instance.log"
 
-mkdir -p "${LOG_DIR}" "${DATA_DIR}"
+mkdir -p "${LOG_DIR}" "${DATA_DIR}" "${INSTANCE_DATA_DIR}"
 
 SERVER_PID=""
 INSTANCE_PID=""
@@ -96,7 +97,9 @@ echo "==> instance token 就绪: ${INSTANCE_TOKEN_FILE}"
 
 # ---- 4. 启动 instance ----
 echo "==> 启动 acp-instance（日志: ${INSTANCE_LOG}）"
-cargo run -q -p acp-instance --bin acp-instance -- --token-file "${INSTANCE_TOKEN_FILE}" >"${INSTANCE_LOG}" 2>&1 &
+cargo run -q -p acp-instance --bin acp-instance -- \
+    --token-file "${INSTANCE_TOKEN_FILE}" \
+    --data-dir "${INSTANCE_DATA_DIR}" >"${INSTANCE_LOG}" 2>&1 &
 INSTANCE_PID=$!
 
 # ---- 5. 前台滚动日志，Ctrl+C 退出 ----

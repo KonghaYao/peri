@@ -171,6 +171,8 @@ impl Translator {
             )),
             ActionEnvelope::ProjectCreate { .. }
             | ActionEnvelope::ProjectArchive { .. }
+            | ActionEnvelope::ProjectRestore { .. }
+            | ActionEnvelope::ProjectRename { .. }
             | ActionEnvelope::PersistedSessionCreate { .. }
             | ActionEnvelope::PersistedSessionOpen { .. }
             | ActionEnvelope::PersistedSessionRename { .. }

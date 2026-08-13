@@ -560,6 +560,7 @@ impl RelayEventHandler {
                 permission_id: req.permission_id.clone(),
                 turn_id,
                 tool_call_id: req.tool_call_id.clone(),
+                tool: Some(req.tool.clone()),
                 title: req.title.clone(),
                 description: req.description.clone(),
                 options: permission_option_kinds(&req.options),

@@ -9,25 +9,21 @@
 // role/状态呈现八类视觉。消息模型、顺序、Yjs 读取、自动吸底算法与
 // permission decision 值（allow/deny、按钮顺序）均不变。
 
-import { createEffect, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
 import type { ChatEntry } from '../lib/yjs';
-import { chatEntries, permissions, readOnly, resolvePermission } from '../store';
-import { Badge, badgeKind } from './Badge';
+import { chatEntries, pendingPermissionDecisions, permissions, readOnly, resolvePermission } from '../store';
+import { MessageStatusBadge } from './Badge';
+import { Markdown } from './Markdown';
+import { ToolCallCard } from './ToolCallCard';
+import { messageActivity, nextFollowState } from '../lib/message-follow.mjs';
+import { messageTime } from '../lib/message-time.mjs';
+import { Button, CopyButton } from '../../ui';
 
 function shortId(id: string | null | undefined, n = 8): string {
   if (!id) return '—';
   return id.length > n ? `${id.slice(0, n)}…` : id;
 }
 
-// 工具/资源状态文字着色（§3.8：只给状态文字着色，不给整块强色背景）。
-// badgeKind 与 Badge 同源，语义映射保持一致；色值统一走 §3.2 token
-// （--success/--warning/--danger），与 Badge 的 KIND_CLASS 同一事实源。
-const STATUS_TEXT: Record<string, string> = {
-  ok: 'text-[var(--success)]',
-  warn: 'text-[var(--warning)]',
-  err: 'text-[var(--danger)]',
-  neutral: 'text-[var(--text-muted)]',
-};
 
 // ── 权限条 ──────────────────────────────────────────────────────────────
 
@@ -38,6 +34,8 @@ const STATUS_TEXT: Record<string, string> = {
 // 与按钮顺序（允许在前/拒绝在后）保持现状不变。
 function PermissionBar() {
   const p = () => permissions()[0]; // M3 雏形：逐条展示第一条，处理完移除
+  const pendingDecision = () => p()?.permissionId ? pendingPermissionDecisions().get(p()!.permissionId!) : undefined;
+  const pending = () => !!pendingDecision();
 
   return (
     <Show when={p()}>
@@ -54,21 +52,22 @@ function PermissionBar() {
               </span>
             ) : null}
           </p>
-          <div class="mt-2.5 flex gap-2">
-            <button
-              disabled={readOnly()}
+          <div class="permission-actions mt-2.5 flex gap-2">
+            <Button
+              variant="primary"
+              disabled={readOnly() || pending()}
+              busy={pending()}
               onClick={() => resolvePermission(perm().permissionId || '', 'allow')}
-              class="min-h-10 rounded-lg bg-[var(--btn-primary)] px-4 py-2 text-sm font-medium text-white transition-colors duration-150 hover:bg-[var(--btn-primary-hover)] sm:min-h-9"
             >
-              允许
-            </button>
-            <button
-              disabled={readOnly()}
+              {pendingDecision() === 'allow' ? '正在允许…' : '允许'}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={readOnly() || pending()}
               onClick={() => resolvePermission(perm().permissionId || '', 'deny')}
-              class="min-h-10 rounded-lg border border-[var(--border-strong)] bg-white px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors duration-150 hover:bg-[var(--hover)] sm:min-h-9"
             >
-              拒绝
-            </button>
+              {pendingDecision() === 'deny' ? '正在拒绝…' : '拒绝'}
+            </Button>
           </div>
         </section>
       )}
@@ -81,20 +80,15 @@ function PermissionBar() {
 // 三点脉冲动画：streaming 光标与空体骨架共用；通过 className 调整尺寸/颜色
 function LoadingDots(props: { className?: string }) {
   return (
-    <span
-      class={`inline-flex items-center ${props.className ?? ''}`}
-      aria-label="加载中"
-    >
-      <For each={[0, 1, 2]}>
-        {(i) => (
-          <span
-            class="animate-pulse leading-none"
-            style={{ 'animation-delay': `${i * 0.15}s` }}
-          >
-            ●
-          </span>
-        )}
-      </For>
+    <span class={props.className ?? ''}>
+      <span class="inline-flex items-center" aria-hidden="true">
+        <For each={[0, 1, 2]}>
+          {(i) => (
+            <span class="animate-pulse leading-none" style={{ 'animation-delay': `${i * 0.15}s` }}>●</span>
+          )}
+        </For>
+      </span>
+      <span class="sr-only">加载中</span>
     </span>
   );
 }
@@ -103,6 +97,7 @@ function LoadingDots(props: { className?: string }) {
 
 function MessageBubble(props: { entry: ChatEntry }) {
   const e = () => props.entry;
+  const timestamp = createMemo(() => messageTime(e().createdAt));
   const align = () =>
     e().role === 'user' ? 'justify-end' : e().role === 'system' ? 'justify-center' : 'justify-start';
   // §3.8：user 右对齐浅灰圆角气泡（16px 圆角、12px 16px padding、深色文字，
@@ -135,8 +130,8 @@ function MessageBubble(props: { entry: ChatEntry }) {
         <div class="[&>*+*]:mt-2.5">
           <Show when={e().role !== 'system'}>
             <div class={metaCls()}>
-              <span class="text-[var(--text-muted)]">{e().createdAt}</span>
-              <Badge status={e().status} />
+              <Show when={timestamp()}>{(time) => <time class="text-[var(--text-muted)]" dateTime={e().createdAt} title={time().exact}>{time().label}</time>}</Show>
+              <MessageStatusBadge status={e().status} />
             </div>
           </Show>
 
@@ -155,25 +150,13 @@ function MessageBubble(props: { entry: ChatEntry }) {
 
           <Show when={e().text}>
             <div class={textCls()}>
-              {e().text}
+              <Show when={e().role === 'assistant' && e().status !== 'streaming'} fallback={e().text}><Markdown source={e().text} /></Show>
               {e().status === 'streaming' && <LoadingDots className="ml-0.5" />}
             </div>
           </Show>
 
           <For each={e().toolCalls}>
-            {(tc) => (
-              <div class="rounded-[10px] bg-[var(--surface-muted)] px-3 py-2.5">
-                <div class="flex items-baseline gap-2">
-                  <span class="text-[13px] font-medium text-[var(--text-primary)]">
-                    {tc.name || tc.toolCallId || '工具调用'}
-                  </span>
-                  <span class={`text-xs ${STATUS_TEXT[badgeKind(tc.status)]}`}>
-                    {tc.status || '—'}
-                  </span>
-                </div>
-                <div class="mt-0.5 font-mono text-xs text-[var(--text-muted)]">{tc.toolCallId}</div>
-              </div>
-            )}
+            {(tc) => <ToolCallCard toolCall={tc} />}
           </For>
 
           <For each={e().resources}>
@@ -199,6 +182,10 @@ function MessageBubble(props: { entry: ChatEntry }) {
             </div>
           </Show>
 
+          <Show when={e().role === 'assistant' && e().text && e().status !== 'streaming'}>
+            <div class="message-actions"><CopyButton text={e().text} label="复制回答" /></div>
+          </Show>
+
           {/* 空体（pending/streaming 骨架）→ 占位 loading */}
           <Show when={!e().text && !e().reasoning.length && !e().toolCalls.length && !e().error}>
             <LoadingDots className="text-[var(--text-muted)]" />
@@ -213,18 +200,40 @@ function MessageBubble(props: { entry: ChatEntry }) {
 
 export function MessageList() {
   const [stick, setStick] = createSignal(true);
+  const [hasNewContent, setHasNewContent] = createSignal(false);
   let areaRef: HTMLDivElement | undefined;
+  let previousActivity = '';
 
   // 自动吸底（用户上滚时暂停）——算法与阈值（40px）保持不变
   createEffect(() => {
     const list = chatEntries();
-    if (stick() && areaRef && list.length) {
+    const activity = messageActivity(list);
+    const follow = nextFollowState({ stick: stick(), hasNewContent: hasNewContent(), previousActivity, activity });
+    if (follow.stick && areaRef && list.length) {
       areaRef.scrollTop = areaRef.scrollHeight;
     }
+    setHasNewContent(follow.hasNewContent);
+    previousActivity = follow.activity;
   });
 
+  const jumpToLatest = () => {
+    if (!areaRef) return;
+    areaRef.scrollTo({ top: areaRef.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    setStick(true);
+    setHasNewContent(false);
+  };
+
+  const completionAnnouncement = () => {
+    const entry = [...chatEntries()].reverse().find((item) => item.role === 'assistant' && ['completed', 'failed', 'cancelled', 'interrupted'].includes(item.status || ''));
+    if (!entry) return '';
+    const status = entry.status === 'completed' ? '完成' : entry.status === 'failed' ? '失败' : entry.status === 'cancelled' ? '取消' : '中断';
+    const timestamp = messageTime(entry.createdAt);
+    return `助手回答已${status}${timestamp ? `，${timestamp.label}` : ''}`;
+  };
+
   return (
-    <section aria-live="polite" aria-relevant="additions text" aria-label="对话消息"
+    <div class="message-list-shell">
+    <section aria-label="对话消息"
       ref={areaRef}
       onScroll={(e) => {
         const el = e.currentTarget;
@@ -232,6 +241,7 @@ export function MessageList() {
       }}
       class="ui-scrollbar min-h-0 flex-1 overflow-y-auto"
     >
+      <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{completionAnnouncement()}</div>
       {/* 居中正文列：宽屏 max-w 820px 居中留白（§3.13 验收 8），窄屏 16px
           padding；上 24px 按 §3.4，底部 156px 留白等 F7 Composer 悬浮 */}
       <div class="mx-auto w-full max-w-[820px] px-4 pt-6 pb-6">
@@ -241,5 +251,7 @@ export function MessageList() {
         </For>
       </div>
     </section>
+    <Show when={!stick() || hasNewContent()}><Button type="button" size="compact" class="jump-latest" onClick={jumpToLatest}>{hasNewContent() ? '↓ 有新内容' : '↓ 回到底部'}</Button></Show>
+    </div>
   );
 }

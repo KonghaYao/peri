@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use acp_hub_proto::schema::{BlockVisibility, TurnStatus};
+use acp_hub_proto::schema::{BlockVisibility, ToolCallStatus, TurnStatus};
 
 use super::*;
 
@@ -235,10 +235,41 @@ fn map_tool_call_update_running() {
     });
     match norm(f) {
         NormalizeOutcome::Event(ev) => match ev.body {
-            EventBody::ToolCallUpdated { arguments, .. } => {
-                assert_eq!(arguments, Some(json!({"x": 1})))
+            EventBody::ToolCallUpdated {
+                arguments, status, ..
+            } => {
+                assert_eq!(arguments, Some(json!({"x": 1})));
+                assert_eq!(status, Some(ToolCallStatus::Running));
             }
             _ => panic!("expected tool call updated"),
+        },
+        other => panic!("expected event, got {other:?}"),
+    }
+}
+
+#[test]
+fn map_official_tool_call_update_in_progress_is_update_not_duplicate_start() {
+    let f = json!({
+        "jsonrpc": "2.0", "method": "session/update",
+        "params": {
+            "sessionId": "acp-1",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc1",
+                "status": "in_progress",
+                "rawInput": {"cmd": "pwd"}
+            }
+        }
+    });
+    match norm(f) {
+        NormalizeOutcome::Event(ev) => match ev.body {
+            EventBody::ToolCallUpdated {
+                status, arguments, ..
+            } => {
+                assert_eq!(status, Some(ToolCallStatus::Running));
+                assert_eq!(arguments, Some(json!({"cmd": "pwd"})));
+            }
+            other => panic!("expected tool call update, got {other:?}"),
         },
         other => panic!("expected event, got {other:?}"),
     }
@@ -252,8 +283,13 @@ fn map_tool_call_update_completed() {
     });
     match norm(f) {
         NormalizeOutcome::Event(ev) => match ev.body {
-            EventBody::ToolCallCompleted { result, .. } => {
-                assert_eq!(result, Some(json!({"ok": true})))
+            EventBody::ToolCallCompleted {
+                result,
+                completed_at,
+                ..
+            } => {
+                assert_eq!(result, Some(json!({"ok": true})));
+                assert_eq!(completed_at, "2026-08-07T00:00:00Z");
             }
             _ => panic!("expected tool call completed"),
         },
@@ -319,7 +355,11 @@ fn map_request_permission_official() {
         "method": "session/request_permission",
         "params": {
             "sessionId": "acp-1",
-            "toolCall": {"toolCallId": "tc1", "title": "run cmd"},
+            "toolCall": {
+                "toolCallId": "tc1",
+                "title": "run cmd",
+                "rawInput": {"cmd": "cargo test"}
+            },
             "options": [
                 {"optionId": "allow-once", "name": "允许一次", "kind": "allow_once"},
                 {"optionId": "reject-once", "name": "拒绝一次", "kind": "reject_once"}
@@ -335,6 +375,9 @@ fn map_request_permission_official() {
             );
             assert_eq!(req.tool_call_id.as_deref(), Some("tc1"));
             assert_eq!(req.title, "run cmd");
+            assert_eq!(req.tool.tool_call_id, "tc1");
+            assert_eq!(req.tool.name, "run cmd");
+            assert_eq!(req.tool.arguments, Some(json!({"cmd": "cargo test"})));
             assert_eq!(req.description, None, "官方无 description 字段");
             assert_eq!(req.options.len(), 2, "官方 options 原样保留");
             assert_eq!(req.session_id, "acp-1");

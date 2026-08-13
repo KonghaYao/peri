@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use yrs::updates::decoder::Decode;
 use yrs::{Map, ReadTxn, Transact};
 
-use acp_hub_proto::ack::{ActionError, ErrorCode};
+use acp_hub_proto::ack::{AckStatus, ActionError, ErrorCode};
 use acp_hub_proto::action::{
     ActionEnvelope, CreateChatPayload, PersistedSessionImportPayload,
     PersistedSessionRenamePayload, ProjectCreatePayload, PromptChatPayload,
@@ -230,6 +230,163 @@ async fn project_create_accepts_before_terminal_and_session_rename_persists() {
             .display_title(),
         "Renamed"
     );
+}
+
+#[tokio::test]
+async fn project_archive_and_restore_roundtrip_through_ordered_acks() {
+    let env = env().await;
+    env.metadata
+        .create_project("p1", "Demo", env._tmp.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(8);
+
+    for (action, expect_archived) in [
+        (
+            ActionEnvelope::ProjectArchive {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: acp_hub_proto::action::ProjectArchivePayload {
+                    project_id: "p1".into(),
+                },
+            },
+            true,
+        ),
+        (
+            ActionEnvelope::ProjectRestore {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: acp_hub_proto::action::ProjectArchivePayload {
+                    project_id: "p1".into(),
+                },
+            },
+            false,
+        ),
+    ] {
+        assert!(matches!(
+            env.coordinator
+                .submit(&ctx("catalog"), action, tx.clone())
+                .await,
+            SubmitAck::Handled
+        ));
+        let accepted = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(accepted, OutboundMsg::Frame(Frame::ActionAck(ref ack)) if ack.status == acp_hub_proto::ack::AckStatus::Accepted)
+        );
+        let terminal = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(terminal, OutboundMsg::Frame(Frame::ActionAck(ref ack)) if ack.status == acp_hub_proto::ack::AckStatus::Committed)
+        );
+        assert_eq!(
+            env.metadata
+                .project("p1")
+                .await
+                .unwrap()
+                .unwrap()
+                .archived_at
+                .is_some(),
+            expect_archived
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_archive_rejects_a_live_runtime() {
+    let env = env().await;
+    env.metadata
+        .create_project("p1", "Demo", env._tmp.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    env.metadata
+        .import_session("logical-1", "p1", "acp-1", "Active", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    env.chats
+        .register(
+            "chat-live",
+            "local",
+            Some("Active"),
+            env._tmp.path().to_str().unwrap(),
+            Some("p1"),
+        )
+        .await
+        .unwrap();
+    env.chats.bind("chat-live", "acp-1").await.unwrap();
+    env.metadata
+        .touch_session_open("logical-1", "chat-live")
+        .await
+        .unwrap();
+
+    let (tx, _rx) = mpsc::channel(4);
+    let result = env
+        .coordinator
+        .submit(
+            &ctx("catalog"),
+            ActionEnvelope::ProjectArchive {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                payload: acp_hub_proto::action::ProjectArchivePayload {
+                    project_id: "p1".into(),
+                },
+            },
+            tx,
+        )
+        .await;
+    assert!(
+        matches!(result, SubmitAck::Failed(ref error) if error.code == ErrorCode::InvalidState)
+    );
+    assert!(env
+        .metadata
+        .project("p1")
+        .await
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+}
+
+#[tokio::test]
+async fn project_rename_commits_after_projection_without_changing_identity() {
+    let env = env().await;
+    let cwd = env._tmp.path().to_str().unwrap();
+    env.metadata
+        .create_project("p1", "Before", cwd, "local")
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(4);
+    assert!(matches!(
+        env.coordinator
+            .submit(
+                &ctx("catalog"),
+                ActionEnvelope::ProjectRename {
+                    command_id: uuid::Uuid::new_v4().to_string(),
+                    payload: acp_hub_proto::action::ProjectRenamePayload {
+                        project_id: "p1".into(),
+                        name: "After".into(),
+                    },
+                },
+                tx,
+            )
+            .await,
+        SubmitAck::Handled
+    ));
+    for status in [AckStatus::Accepted, AckStatus::Committed] {
+        let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(frame, OutboundMsg::Frame(Frame::ActionAck(ref ack)) if ack.status == status)
+        );
+    }
+    let project = env.metadata.project("p1").await.unwrap().unwrap();
+    assert_eq!(project.id, "p1");
+    assert_eq!(project.name, "After");
+    assert_eq!(project.cwd, cwd);
+    assert_eq!(project.instance_id, "local");
 }
 
 #[tokio::test]
@@ -1213,6 +1370,20 @@ async fn session_list_queries_agent_and_returns_frame() {
     let mut env = env().await;
     let (tx, mut rx) = mpsc::channel(16);
     bound_session(&env, S1, "acp-1").await;
+    env.metadata
+        .create_project("project-1", "Demo", "/", "local")
+        .await
+        .unwrap();
+    env.metadata
+        .import_session(
+            "logical-1",
+            "project-1",
+            "acp-1",
+            "旧标题",
+            "2026-08-09T00:00:00Z",
+        )
+        .await
+        .unwrap();
     let cid = uuid::Uuid::new_v4().to_string();
     let action = ActionEnvelope::SessionList {
         command_id: cid.clone(),
@@ -1288,6 +1459,17 @@ async fn session_list_queries_agent_and_returns_frame() {
         }
         other => panic!("expected session_list frame, got {other:?}"),
     }
+    let persisted = env
+        .metadata
+        .session("logical-1")
+        .await
+        .unwrap()
+        .expect("catalog session remains present");
+    assert_eq!(
+        persisted.acp_title.as_deref(),
+        Some("已打开会话"),
+        "session/list ACP title must persist by exact durable session id"
+    );
 }
 
 /// 未知 chat → CHAT_NOT_FOUND（同步失败，无 instance 帧）。

@@ -28,6 +28,125 @@ async fn fresh_open_reopen_and_crud() {
 }
 
 #[tokio::test]
+async fn project_archive_is_reversible_without_losing_sessions() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .import_session("s1", "p1", "acp-1", "Saved work", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+
+    store.archive_project("p1").await.unwrap();
+    assert!(store
+        .project("p1")
+        .await
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_some());
+    store.restore_project("p1").await.unwrap();
+    assert!(store
+        .project("p1")
+        .await
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_none());
+    assert_eq!(
+        store.session("s1").await.unwrap().unwrap().display_title(),
+        "Saved work"
+    );
+    assert!(
+        store.restore_project("p1").await.is_err(),
+        "restoring an active project is not an idempotent mutation"
+    );
+}
+
+#[tokio::test]
+async fn project_rename_preserves_directory_and_rejects_empty_or_archived_projects() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    store
+        .create_project("p1", "Before", cwd, "local")
+        .await
+        .unwrap();
+    store.rename_project("p1", "  After  ").await.unwrap();
+    let renamed = store.project("p1").await.unwrap().unwrap();
+    assert_eq!(renamed.name, "After");
+    assert_eq!(renamed.cwd, cwd);
+    assert!(store.rename_project("p1", "  ").await.is_err());
+    store.archive_project("p1").await.unwrap();
+    assert!(store.rename_project("p1", "Hidden").await.is_err());
+}
+
+#[tokio::test]
+async fn acp_title_refresh_is_exact_idempotent_and_preserves_user_alias() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .import_session("s1", "p1", "acp-1", "Old ACP title", "2026-08-13T00:00:00Z")
+        .await
+        .unwrap();
+    store.rename_session("s1", "My alias").await.unwrap();
+    let generation_before = store.generation().await.unwrap().0;
+
+    assert_eq!(
+        store
+            .update_acp_titles(&[
+                ("acp-1".into(), "New ACP title".into()),
+                ("unknown".into(), "Ignored".into()),
+                ("acp-1".into(), "".into()),
+            ])
+            .await
+            .unwrap(),
+        1
+    );
+    let refreshed = store.session("s1").await.unwrap().unwrap();
+    assert_eq!(refreshed.acp_title.as_deref(), Some("New ACP title"));
+    assert_eq!(refreshed.display_title(), "My alias");
+    assert_eq!(store.generation().await.unwrap().0, generation_before + 1);
+
+    assert_eq!(
+        store
+            .update_acp_titles(&[("acp-1".into(), "New ACP title".into())])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(store.generation().await.unwrap().0, generation_before + 1);
+}
+
+#[tokio::test]
+async fn projection_snapshot_is_generation_consistent_and_watermark_monotonic() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    let snapshot = store.snapshot().await.unwrap();
+    assert_eq!(snapshot.projects.len(), 1);
+    assert_eq!(snapshot.sessions.len(), 0);
+
+    store.mark_projected(snapshot.generation).await.unwrap();
+    store.mark_projected(snapshot.generation - 1).await.unwrap();
+    assert_eq!(
+        store.generation().await.unwrap().1,
+        snapshot.generation,
+        "an older projection completion cannot move the watermark backwards"
+    );
+}
+
+#[tokio::test]
 async fn command_dedup_detects_payload_mismatch_and_replays_result() {
     let dir = tempdir().unwrap();
     let store = MetadataStore::open(dir.path()).await.unwrap();
