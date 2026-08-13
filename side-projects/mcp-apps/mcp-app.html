@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NEON SERVER CLOCK</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --cyan: #00fff7;
+        --cyan-dim: rgba(0, 255, 247, 0.45);
+        --violet: #7b2ff7;
+        --bg: #04060c;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        background: var(--bg);
+        color: #d6fbff;
+        font-family: "SF Mono", ui-monospace, Menlo, "Cascadia Mono", "Courier New", monospace;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+      }
+
+      /* ---- drifting neon glows ---- */
+      .glow {
+        position: fixed;
+        border-radius: 50%;
+        filter: blur(90px);
+        pointer-events: none;
+        z-index: 0;
+      }
+      .glow-a {
+        width: 420px;
+        height: 420px;
+        background: rgba(0, 229, 255, 0.32);
+        top: -120px;
+        left: -100px;
+        animation: drift-a 16s ease-in-out infinite alternate;
+      }
+      .glow-b {
+        width: 520px;
+        height: 520px;
+        background: rgba(123, 47, 247, 0.3);
+        bottom: -160px;
+        right: -140px;
+        animation: drift-b 20s ease-in-out infinite alternate;
+      }
+      @keyframes drift-a {
+        from { transform: translate(0, 0) scale(1); }
+        to { transform: translate(60px, 40px) scale(1.25); }
+      }
+      @keyframes drift-b {
+        from { transform: translate(0, 0) scale(1.1); }
+        to { transform: translate(-70px, -50px) scale(0.9); }
+      }
+
+      /* ---- CRT scanlines + vignette ---- */
+      .scanlines {
+        position: fixed;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        background:
+          repeating-linear-gradient(
+            0deg,
+            rgba(255, 255, 255, 0.028) 0 1px,
+            transparent 1px 3px
+          ),
+          radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
+      }
+
+      /* ---- glass panel ---- */
+      .panel {
+        position: relative;
+        z-index: 2;
+        min-width: min(92vw, 640px);
+        padding: 34px 44px 26px;
+        border-radius: 22px;
+        border: 1px solid rgba(0, 255, 247, 0.22);
+        background: rgba(8, 14, 24, 0.72);
+        backdrop-filter: blur(16px);
+        box-shadow:
+          0 0 0 1px rgba(0, 255, 247, 0.05),
+          0 0 40px rgba(0, 255, 247, 0.12),
+          0 24px 60px rgba(0, 0, 0, 0.6),
+          inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+      .title {
+        font-size: 13px;
+        letter-spacing: 0.42em;
+        color: var(--cyan);
+        text-shadow: 0 0 12px rgba(0, 255, 247, 0.65);
+        font-weight: 700;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        color: #7fd6d2;
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #999;
+      }
+      .dot[data-state="connecting"] {
+        background: #ffb020;
+        animation: blink 0.8s steps(2) infinite;
+      }
+      .dot[data-state="syncing"] {
+        background: var(--cyan);
+        animation: blink 0.4s steps(2) infinite;
+      }
+      .dot[data-state="connected"] {
+        background: #34ffc3;
+        box-shadow: 0 0 10px rgba(52, 255, 195, 0.9);
+        animation: breathe 2.4s ease-in-out infinite;
+      }
+      .dot[data-state="error"] {
+        background: #ff3b5c;
+        box-shadow: 0 0 10px rgba(255, 59, 92, 0.9);
+      }
+      @keyframes blink {
+        50% { opacity: 0.15; }
+      }
+      @keyframes breathe {
+        0%, 100% { opacity: 1; box-shadow: 0 0 8px rgba(52, 255, 195, 0.8); }
+        50% { opacity: 0.55; box-shadow: 0 0 16px rgba(52, 255, 195, 1); }
+      }
+
+      /* ---- the big neon clock ---- */
+      .clock {
+        text-align: center;
+        font-size: clamp(56px, 13vw, 118px);
+        font-weight: 700;
+        line-height: 1.05;
+        letter-spacing: 0.06em;
+        font-variant-numeric: tabular-nums;
+        color: #eafffe;
+        text-shadow:
+          0 0 6px rgba(0, 255, 247, 0.95),
+          0 0 26px rgba(0, 255, 247, 0.55),
+          0 0 80px rgba(0, 255, 247, 0.3);
+        margin: 6px 0 2px;
+      }
+      .clock.tick {
+        animation: tick-pulse 0.4s ease-out;
+      }
+      @keyframes tick-pulse {
+        0% { filter: brightness(1.9); }
+        100% { filter: brightness(1); }
+      }
+
+      .sub {
+        display: flex;
+        justify-content: center;
+        gap: 18px;
+        font-size: 13px;
+        letter-spacing: 0.2em;
+        color: #7fd6d2;
+        margin-bottom: 8px;
+      }
+      .sub .tz {
+        color: var(--cyan);
+        text-shadow: 0 0 8px rgba(0, 255, 247, 0.5);
+      }
+      .local {
+        text-align: center;
+        font-size: 11px;
+        letter-spacing: 0.24em;
+        color: #45666b;
+        margin-bottom: 26px;
+      }
+
+      /* ---- controls ---- */
+      .sync-row {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 26px;
+        margin-bottom: 16px;
+      }
+      #sync-btn {
+        background: transparent;
+        border: 1px solid rgba(0, 255, 247, 0.55);
+        color: #7dfff8;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.3em;
+        padding: 11px 26px;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-shadow: 0 0 8px rgba(0, 255, 247, 0.6);
+      }
+      #sync-btn:hover:not(:disabled) {
+        background: rgba(0, 255, 247, 0.14);
+        box-shadow: 0 0 22px rgba(0, 255, 247, 0.45);
+        transform: translateY(-1px);
+      }
+      #sync-btn:disabled {
+        opacity: 0.45;
+        cursor: wait;
+      }
+
+      .switch {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+        letter-spacing: 0.24em;
+        color: #7fd6d2;
+        cursor: pointer;
+        user-select: none;
+      }
+      .switch input {
+        display: none;
+      }
+      .switch .track {
+        position: relative;
+        width: 42px;
+        height: 20px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(0, 255, 247, 0.3);
+        transition: all 0.25s ease;
+      }
+      .switch .track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #7fd6d2;
+        transition: all 0.25s ease;
+      }
+      .switch input:checked + .track {
+        background: rgba(0, 255, 247, 0.22);
+        box-shadow: 0 0 14px rgba(0, 255, 247, 0.5);
+      }
+      .switch input:checked + .track::after {
+        left: 24px;
+        background: var(--cyan);
+        box-shadow: 0 0 8px rgba(0, 255, 247, 0.9);
+      }
+
+      footer {
+        text-align: center;
+        font-size: 10px;
+        letter-spacing: 0.3em;
+        color: #2f4a4e;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="glow glow-a"></div>
+    <div class="glow glow-b"></div>
+    <div class="scanlines"></div>
+
+    <main class="panel">
+      <header>
+        <div class="title">NEON SERVER CLOCK</div>
+        <div class="status">
+          <span class="dot" id="status-dot" data-state="connecting"></span>
+          <span id="status-text">BOOTING&hellip;</span>
+        </div>
+      </header>
+
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="sub">
+        <span id="date">&hellip;</span>
+        <span class="tz">SERVER &middot; UTC</span>
+      </div>
+      <div class="local" id="local">LOCAL --:--:--</div>
+
+      <div class="sync-row">
+        <button id="sync-btn">&#8635;&nbsp;SYNC</button>
+        <label class="switch">
+          AUTO
+          <input type="checkbox" id="auto-toggle" />
+          <span class="track"></span>
+        </label>
+      </div>
+
+      <footer id="last-sync">NO SYNC YET</footer>
+    </main>
+
+    <script type="module" src="/src/mcp-app.ts"></script>
+  </body>
+</html>

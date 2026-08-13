@@ -135,6 +135,9 @@ struct SessionManagerInner {
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
+    /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
+    pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
@@ -157,6 +160,7 @@ impl SessionManager {
         permission_mode: Arc<SharedPermissionMode>,
         agent_overrides: Option<AgentOverrides>,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+        mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
         skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     ) -> Self {
@@ -171,6 +175,7 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                mcp_subscription,
                 skills,
                 task_manager_factory,
             }),
@@ -292,6 +297,10 @@ impl SessionManager {
     }
 
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
+        // 注销 MCP 订阅 inbox（通知不再唤醒已关闭的会话）
+        if let Some(port) = &self.inner.mcp_subscription {
+            port.unregister_inbox(session_id);
+        }
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
             // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
@@ -618,6 +627,27 @@ impl SessionManager {
         true
     }
 
+    /// 确保指定 session 的 MCP 订阅 inbox 已注册（lazy-init，幂等）。
+    ///
+    /// 首次调用：把 session 级 inbox handle 注册到 `McpSubscriptionPort`
+    /// （peri-middlewares 实现侧维护 session_id → inbox 注册表）。此后每
+    /// turn 重复调用均为 no-op（HashMap insert 幂等）。注册跨 turn 存活，
+    /// close_session 时经 [`SessionManager::close_session`] 注销。
+    ///
+    /// session 不存在或端口未配置时返回 false。
+    pub fn mcp_subscription_for(&self, session_id: &str) -> bool {
+        let port = match &self.inner.mcp_subscription {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        let Some(inbox) = self.session_inbox_for(session_id) else {
+            return false;
+        };
+        port.register_inbox(session_id, inbox.handle());
+        tracing::trace!(session_id = %session_id, "MCP 订阅 inbox 已注册");
+        true
+    }
+
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。
     pub fn cancel_cascade_children_for(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
@@ -745,5 +775,9 @@ impl SessionAccessPort for SessionManager {
 
     fn cron_bridge_for(&self, session_id: &str) -> bool {
         SessionManager::cron_bridge_for(self, session_id)
+    }
+
+    fn mcp_subscription_for(&self, session_id: &str) -> bool {
+        SessionManager::mcp_subscription_for(self, session_id)
     }
 }

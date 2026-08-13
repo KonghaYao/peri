@@ -147,6 +147,9 @@ pub struct StageBuildInput {
     /// session 级 cron bridge 惰性启动器（SessionManager 路径；无则走
     /// print 模式 turn 级 CronOwner）
     pub launch_cron_bridge: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无则
+    /// 安全 no-op——订阅通知不唤醒 print 模式单次进程）
+    pub launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
     /// tool invocation resolver（wrapper-aware canonical resolver）
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     /// compact 前置 hook（hook_groups 非空时 ACP 装配点构造）
@@ -667,6 +670,12 @@ pub fn build_stage_context(
             // 分支内 scheduler 恒为 Some（else-if 绑定），直接注入
             session.set_async_owners(session_inbox, Some(owner), None);
         }
+    }
+
+    // MCP 订阅 inbox 惰性注册（幂等；SessionManager 路径注册到订阅端口，
+    // 无 SessionManager 时 no-op——print 模式不接收外部订阅通知唤醒）
+    if let Some(ref launch) = input.launch_mcp_subscription {
+        launch(&session_id);
     }
 
     let turn = session.start_turn();

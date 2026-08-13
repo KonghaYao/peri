@@ -204,6 +204,7 @@ pub(crate) fn expand_server_config_with_context(
         }),
         disabled: config.disabled,
         source: config.source.clone(),
+        subscriptions: config.subscriptions.clone(),
     }
 }
 
@@ -584,6 +585,7 @@ fn test_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        subscriptions: None,
         source: None,
     }
 }

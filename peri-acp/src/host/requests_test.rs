@@ -89,6 +89,7 @@ fn make_server_config(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
+        None,
         // 注入真实 TaskManager 工厂：cancel-bg-task 回归测试依赖 registry 簿记
         Some(Arc::new(|| {
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())

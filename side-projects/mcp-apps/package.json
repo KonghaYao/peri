@@ -1,0 +1,26 @@
+{
+  "name": "mcp-apps-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP 实验场（bun）：get-time MCP Apps demo + 微信风格聊天场景（subscriptions/listen）",
+  "type": "module",
+  "scripts": {
+    "chat": "bun run chat/server.ts",
+    "get-time": "bunx tsx server.ts",
+    "build": "INPUT=mcp-app.html bunx vite build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

@@ -645,4 +645,12 @@ pub trait SessionAccessPort: Send + Sync {
     /// 确保 session 级 cron bridge 已启动（lazy-init，幂等；见
     /// `SessionManager::cron_bridge_for`）。
     fn cron_bridge_for(&self, session_id: &str) -> bool;
+
+    /// 确保 session 级 MCP 订阅 inbox 已注册（lazy-init，幂等；见
+    /// `SessionManager::mcp_subscription_for`）。
+    ///
+    /// 默认实现返回 false（print mode / 未装配端口时安全 no-op）。
+    fn mcp_subscription_for(&self, _session_id: &str) -> bool {
+        false
+    }
 }

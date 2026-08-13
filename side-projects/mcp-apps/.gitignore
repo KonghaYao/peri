@@ -1,0 +1,7 @@
+# 依赖与构建产物（bun 项目使用 bun.lock，npm lockfile 不提交）
+node_modules/
+dist/
+package-lock.json
+
+# 运行时日志
+*.log

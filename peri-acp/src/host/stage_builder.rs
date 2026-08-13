@@ -115,8 +115,15 @@ pub(crate) fn build_stage_context(
     // session 级 cron bridge 惰性启动器（SessionManager 路径；无则走
     // print 模式 turn 级 CronOwner——正式实现内部处理）
     let launch_cron_bridge: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>> =
-        session_access.map(|sa| {
+        session_access.clone().map(|sa| {
             Arc::new(move |sid: &str| sa.cron_bridge_for(sid))
+                as Arc<dyn Fn(&str) -> bool + Send + Sync>
+        });
+    // session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无
+    // SessionManager 时安全 no-op——print 模式无会话 inbox 可注册）
+    let launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>> =
+        session_access.clone().map(|sa| {
+            Arc::new(move |sid: &str| sa.mcp_subscription_for(sid))
                 as Arc<dyn Fn(&str) -> bool + Send + Sync>
         });
 
@@ -224,6 +231,7 @@ pub(crate) fn build_stage_context(
         idle_inbox,
         idle_suspended_flag,
         launch_cron_bridge,
+        launch_mcp_subscription,
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,
         compact_post_hook,

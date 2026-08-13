@@ -1,5 +1,8 @@
 use std::{path::Path, sync::Arc};
 
+use peri_acp_types::plugin::McpSubscriptionsConfig;
+use rmcp::model::{ProtocolVersion, SubscriptionFilter};
+
 use super::{
     auth_store::FileCredentialStore,
     channel_handler::ChannelHandler,
@@ -11,6 +14,24 @@ use super::{
     oauth_flow::OAuthFlowEvent,
     transport::TransportConfig,
 };
+
+/// 由 `McpSubscriptionsConfig` 构建 `subscriptions/listen` 过滤器。
+fn build_subscription_filter(sub: &McpSubscriptionsConfig) -> SubscriptionFilter {
+    let mut b = SubscriptionFilter::builder();
+    if !sub.resources.is_empty() {
+        b = b.resource_subscriptions(sub.resources.iter().cloned());
+    }
+    if sub.tools_list_changed {
+        b = b.tools_list_changed();
+    }
+    if sub.prompts_list_changed {
+        b = b.prompts_list_changed();
+    }
+    if sub.resources_list_changed {
+        b = b.resources_list_changed();
+    }
+    b.build()
+}
 
 impl McpClientPool {
     pub async fn run_initialize(
@@ -93,6 +114,12 @@ impl McpClientPool {
             } else {
                 STDIO_CONNECT_TIMEOUT
             };
+            // subscriptions 配置存在时协商 2026-07-28 协议（Auto：先 server/discover，
+            // 服务器不支持时回退 legacy 握手），否则维持原协商路径。
+            let subscriptions = server_config
+                .subscriptions
+                .as_ref()
+                .filter(|s| !s.is_empty());
 
             let connect_result = match transport_config {
                 TransportConfig::Stdio {
@@ -101,7 +128,24 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(transport) => {
-                        if let Some(ref handler) = channel_handler {
+                        if subscriptions.is_some() {
+                            tokio::time::timeout(
+                                timeout,
+                                rmcp::service::serve_client_with_lifecycle(
+                                    (),
+                                    transport,
+                                    rmcp::service::ClientLifecycleMode::Auto {
+                                        preferred_versions: vec![
+                                            ProtocolVersion::V_2026_07_28,
+                                            ProtocolVersion::V_2025_11_25,
+                                        ],
+                                        legacy_version: None,
+                                    },
+                                ),
+                            )
+                            .await
+                            .map(|inner| inner.map(McpServiceWrapper::Default))
+                        } else if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
                                 timeout,
                                 rmcp::service::serve_client(handler.clone(), transport),
@@ -154,7 +198,24 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        if let Some(ref handler) = channel_handler {
+                        if subscriptions.is_some() {
+                            tokio::time::timeout(
+                                timeout,
+                                rmcp::service::serve_client_with_lifecycle(
+                                    (),
+                                    build_http_transport(url, headers),
+                                    rmcp::service::ClientLifecycleMode::Auto {
+                                        preferred_versions: vec![
+                                            ProtocolVersion::V_2026_07_28,
+                                            ProtocolVersion::V_2025_11_25,
+                                        ],
+                                        legacy_version: None,
+                                    },
+                                ),
+                            )
+                            .await
+                            .map(|inner| inner.map(McpServiceWrapper::Default))
+                        } else if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
                                 timeout,
                                 rmcp::service::serve_client(
@@ -178,6 +239,27 @@ impl McpClientPool {
 
             match connect_result {
                 Ok(Ok(rs)) => {
+                    // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
+                    // 失败仅告警——server 可能不支持，连接本身仍可用。
+                    if let Some(sub) = subscriptions {
+                        match rs.peer().listen(build_subscription_filter(sub)).await {
+                            Ok(subscription) => {
+                                pool.spawn_subscription_loop(name, subscription).await;
+                                tracing::info!(
+                                    server = %name,
+                                    resources = ?sub.resources,
+                                    "subscriptions/listen 已建立"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    server = %name,
+                                    error = %e,
+                                    "subscriptions/listen 建立失败（server 可能不支持）"
+                                );
+                            }
+                        }
+                    }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = rs.list_all_resources().await.unwrap_or_default();
                     tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
@@ -329,6 +411,11 @@ impl McpClientPool {
             } else {
                 STDIO_CONNECT_TIMEOUT
             };
+            // subscriptions 配置存在时协商 2026-07-28 协议（Auto 协商），否则维持原路径。
+            let subscriptions = server_config
+                .subscriptions
+                .as_ref()
+                .filter(|s| !s.is_empty());
 
             let connect_result = match tc {
                 TransportConfig::Stdio {
@@ -337,7 +424,24 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(t) => {
-                        if let Some(ref handler) = channel_handler {
+                        if subscriptions.is_some() {
+                            tokio::time::timeout(
+                                timeout,
+                                rmcp::service::serve_client_with_lifecycle(
+                                    (),
+                                    t,
+                                    rmcp::service::ClientLifecycleMode::Auto {
+                                        preferred_versions: vec![
+                                            ProtocolVersion::V_2026_07_28,
+                                            ProtocolVersion::V_2025_11_25,
+                                        ],
+                                        legacy_version: None,
+                                    },
+                                ),
+                            )
+                            .await
+                            .map(|inner| inner.map(McpServiceWrapper::Default))
+                        } else if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
                                 timeout,
                                 rmcp::service::serve_client(handler.clone(), t),
@@ -387,7 +491,24 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        if let Some(ref handler) = channel_handler {
+                        if subscriptions.is_some() {
+                            tokio::time::timeout(
+                                timeout,
+                                rmcp::service::serve_client_with_lifecycle(
+                                    (),
+                                    build_http_transport(url, headers),
+                                    rmcp::service::ClientLifecycleMode::Auto {
+                                        preferred_versions: vec![
+                                            ProtocolVersion::V_2026_07_28,
+                                            ProtocolVersion::V_2025_11_25,
+                                        ],
+                                        legacy_version: None,
+                                    },
+                                ),
+                            )
+                            .await
+                            .map(|inner| inner.map(McpServiceWrapper::Default))
+                        } else if let Some(ref handler) = channel_handler {
                             tokio::time::timeout(
                                 timeout,
                                 rmcp::service::serve_client(
@@ -411,6 +532,26 @@ impl McpClientPool {
 
             match connect_result {
                 Ok(Ok(rs)) => {
+                    // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
+                    if let Some(sub) = subscriptions {
+                        match rs.peer().listen(build_subscription_filter(sub)).await {
+                            Ok(subscription) => {
+                                pool.spawn_subscription_loop(name, subscription).await;
+                                tracing::info!(
+                                    server = %name,
+                                    resources = ?sub.resources,
+                                    "subscriptions/listen 已建立"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    server = %name,
+                                    error = %e,
+                                    "subscriptions/listen 建立失败（server 可能不支持）"
+                                );
+                            }
+                        }
+                    }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = rs.list_all_resources().await.unwrap_or_default();
                     let peer = rs.peer().clone();
