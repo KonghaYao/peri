@@ -1,4 +1,5 @@
 export { Button, IconButton } from './Button';
+export { Icon } from './Icon';
 export { Badge, type BadgeTone } from './Badge';
 export { CopyButton } from './CopyButton';
 export { Dialog } from './Dialog';

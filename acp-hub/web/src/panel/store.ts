@@ -6,8 +6,8 @@
 //   2. registry 渲染 → 左栏实例/对话。
 //   3. 点击对话 → subscribe ["chat:{cid}","session:{cid}"] → 快照渲染历史
 //      → 增量实时更新（yjs 流式）。
-//   4. 发送消息 → chat/prompt（commandId 记入 pendingAcks）→ 输入框清空。
-//      用户消息气泡依赖 agent 回显（server 单写者，本地不造假）。
+//   4. 发送消息 → chat/prompt（CommandTracker 跟踪 accepted→terminal）;
+//      用户消息依赖 server 投影，本地只保留可恢复的提交状态。
 //   5. create committed ack（带 chatId）→ 自动订阅 chat:{cid} 并选中。
 //   6. 断线：4500/4501/4502 停止并提示；1011/1013 指数退避重连（ws-client），
 //      重连后重放订阅（快照兜底）。
@@ -18,12 +18,13 @@ import * as H from './lib/protocol';
 import { DocStore, renderChat, renderControl, renderRegistry } from './lib/yjs';
 import type { ChatEntry, ChatInfo, ControlView, ProjectInfo, ProjectSessionInfo, SessionSummaryInfo } from './lib/yjs';
 import { WsClient } from './lib/ws-client';
-import type { ConnStatus, ConnDetail } from './lib/ws-client';
+import type { ConnStatus, ConnDetail, WsProtocolIssue } from './lib/ws-client';
 import { canMutate, type PrincipalRole } from './lib/auth-role';
-import { beginOpen, matchesOpening, shouldIgnoreLateAck, terminalCanCommit } from './lib/open-state.mjs';
 import { unimportedSessions } from './lib/session-import.mjs';
-import { acceptMessageSubmission, beginMessageSubmission, beginQuickStart, completesMessageSubmission, failMessageSubmission, isTurnActive, lockPermissionDecision, markMessageUncertain, quickStartCanActivate, unlockPermissionDecision, updateQuickStart } from './lib/action-state.mjs';
-import { chooseRestorableSession, connectionProblemForClose, retainLiveRuntimeHints } from './lib/recovery-state.mjs';
+import { acceptMessageSubmission, beginMessageSubmission, beginQuickStart, completesMessageSubmission, failMessageSubmission, isTurnActive, lockPermissionDecision, markMessageUncertain, markPermissionDecisionUncertain, quickStartCanActivate, unlockPermissionDecision, updateQuickStart } from './lib/action-state.mjs';
+import { connectionProblemForClose, retainLiveRuntimeHints } from './lib/recovery-state.mjs';
+import { CommandTracker } from './lib/command-tracker';
+import { SessionNavigator, type OpeningSession, type SessionNavigationEffect } from './lib/session-navigator';
 
 const ACK_TIMEOUT_MS = 30000;
 
@@ -48,9 +49,11 @@ export const [projects, setProjects] = createSignal<ProjectInfo[]>([]);
 export const [projectSessions, setProjectSessions] = createSignal<ProjectSessionInfo[]>([]);
 export const [importableSessions, setImportableSessions] = createSignal<SessionSummaryInfo[]>([]);
 export const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
-export interface OpeningSession { commandId: string; sessionId: string; previousSessionId: string | null; previousChatId: string | null }
 export const [openingSession, setOpeningSession] = createSignal<OpeningSession | null>(null);
 export const openingSessionId = () => openingSession()?.sessionId ?? null;
+export interface RuntimeDocsState { chat: boolean; control: boolean }
+export const [runtimeDocsState, setRuntimeDocsState] = createSignal<RuntimeDocsState>({ chat: false, control: false });
+export const runtimeDocsHydrated = () => runtimeDocsState().chat && runtimeDocsState().control;
 export const [principalRole, setPrincipalRole] = createSignal<PrincipalRole>(null);
 export const readOnly = () => !canMutate(principalRole());
 export const [authInvalidated, setAuthInvalidated] = createSignal(0);
@@ -59,12 +62,34 @@ export const [chatStatusSignal, setChatStatusSignal] = createSignal<Record<strin
 export const [toasts, setToasts] = createSignal<{ id: number; msg: string }[]>([]);
 export interface PersistentError { id: number; title: string; detail: string; commandId: string | null; retryable: boolean; retrying: boolean }
 export const [persistentErrors, setPersistentErrors] = createSignal<PersistentError[]>([]);
-export interface MessageSubmission { commandId: string; text: string; phase: 'sending' | 'accepted' | 'uncertain' | 'failed'; detail: string | null; retryable: boolean }
+export interface MessageSubmission { commandId: string; text: string; sessionId: string; chatId: string; phase: 'sending' | 'accepted' | 'uncertain' | 'failed'; detail: string | null; retryable: boolean }
 export const [messageSubmission, setMessageSubmission] = createSignal<MessageSubmission | null>(null);
+export const [composerDrafts, setComposerDrafts] = createSignal<Record<string, string>>({});
+export const composerDraft = () => selectedSessionId() ? composerDrafts()[selectedSessionId()!] || '' : '';
+export function setComposerDraft(text: string): void {
+  const sessionId = selectedSessionId();
+  if (!sessionId) return;
+  setComposerDrafts((drafts) => ({ ...drafts, [sessionId]: text }));
+}
+export function clearComposerDraft(sessionId: string): void {
+  setComposerDrafts((drafts) => {
+    if (!(sessionId in drafts)) return drafts;
+    const next = { ...drafts };
+    delete next[sessionId];
+    return next;
+  });
+}
+function restoreSubmissionDraft(submission: MessageSubmission | null): void {
+  if (!submission || !['failed', 'uncertain'].includes(submission.phase)) return;
+  setComposerDrafts((drafts) => drafts[submission.sessionId]
+    ? drafts
+    : { ...drafts, [submission.sessionId]: submission.text });
+}
 export const turnActive = () => isTurnActive(chatHead()?.activeTurn);
 export const [cancellingTurn, setCancellingTurn] = createSignal(false);
 export const [closingChat, setClosingChat] = createSignal(false);
-export const [pendingPermissionDecisions, setPendingPermissionDecisions] = createSignal<Map<string, string>>(new Map());
+export interface PermissionDecisionState { decision: string; phase: 'pending' | 'uncertain' }
+export const [pendingPermissionDecisions, setPendingPermissionDecisions] = createSignal<Map<string, PermissionDecisionState>>(new Map());
 export interface ConnectionProblem { code: number | null; title: string; detail: string; action: 'reconnect' | 'login' | null }
 export const [connectionProblem, setConnectionProblem] = createSignal<ConnectionProblem | null>(null);
 export const [restoringSessionId, setRestoringSessionId] = createSignal<string | null>(null);
@@ -79,65 +104,23 @@ let ws: WsClient | null = null; // 当前 WsClient
 let connectionEpoch = 0; // 隔离被替换连接的延迟 status/frame 回调
 let currentCid: string | null = null; // 选中对话（重连后恢复订阅）
 let ready = false; // ready 门控：就绪后才发 action
-interface PendingAction {
-  label: string;
-  frame: ActionFrame;
-  options: ActionOptions;
+type ActionFrame = ReturnType<typeof H.action>;
+interface ActionOptions {
   cb?: (ack: Ack) => void;
   onAccepted?: (ack: Ack) => void;
   onTimeout?: () => void;
   onError?: (err: ActionError) => void;
   retryOnUncertain?: boolean;
-  timer: ReturnType<typeof setTimeout>;
 }
-type ActionFrame = ReturnType<typeof H.action>;
-type ActionOptions = Omit<PendingAction, 'label' | 'frame' | 'options' | 'timer'>;
-const pendingAcks = new Map<string, PendingAction>();
-const uncertainActionRetries = new Map<string, { frame: ActionFrame; label: string; options: ActionOptions }>();
 const [uncertainMetadataCount, setUncertainMetadataCount] = createSignal(0);
-const ignoredOpenCommands = new Set<string>();
-let retryableMessageFrame: ReturnType<typeof H.action> | null = null;
-let retryableQuickStartFrame: ReturnType<typeof H.action> | null = null;
 const permissionCommands = new Map<string, string>();
 const LAST_SESSION_KEY = 'acp-hub:last-session';
 let registryReceived = false;
-let attemptedRestore = false;
-
-function registerUncertainAction(commandId: string, retry: { frame: ActionFrame; label: string; options: ActionOptions }): void {
-  uncertainActionRetries.set(commandId, retry);
-  setUncertainMetadataCount(uncertainActionRetries.size);
-}
-
-function forgetUncertainAction(commandId: string): void {
-  uncertainActionRetries.delete(commandId);
-  setUncertainMetadataCount(uncertainActionRetries.size);
-}
-
-function clearUncertainActions(): void {
-  uncertainActionRetries.clear();
-  setUncertainMetadataCount(0);
-}
 
 function rejectWhileMetadataUncertain(): boolean {
   if (!uncertainMetadataCount()) return false;
   toast('先处理“结果尚未确认”的项目或会话操作');
   return true;
-}
-
-function settlePendingActionsAsUncertain(): void {
-  for (const [commandId, pending] of [...pendingAcks]) {
-    clearTimeout(pending.timer);
-    pendingAcks.delete(commandId);
-    if (matchesOpening(openingSession(), commandId)) {
-      ignoredOpenCommands.add(commandId);
-      setOpeningSession(null);
-    }
-    if (pending.retryOnUncertain) registerUncertainAction(commandId, {
-      frame: pending.frame, label: pending.label, options: pending.options,
-    });
-    if (pending.onTimeout) pending.onTimeout();
-    else persistActionProblem('结果尚未确认', `${pending.label} 在连接中断前未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`, commandId);
-  }
 }
 
 interface Ack {
@@ -155,6 +138,18 @@ interface ActionError {
   retryable?: boolean;
 }
 
+const commands = new CommandTracker<ActionFrame, Ack, ActionError>({
+  timeoutMs: ACK_TIMEOUT_MS,
+  onUncertainCountChange: setUncertainMetadataCount,
+  onFallbackUncertain: (request, reason) => persistActionProblem(
+    '结果尚未确认',
+    reason === 'disconnect'
+      ? `${request.label} 在连接中断前未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`
+      : `${request.label} 已超过 30 秒未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`,
+    request.frame.commandId,
+  ),
+});
+
 let toastSeq = 0;
 
 // ── toast ───────────────────────────────────────────────────────────────
@@ -170,7 +165,7 @@ export function toast(msg: string): void {
 export function dismissPersistentError(id: number): void {
   setPersistentErrors((items) => {
     const target = items.find((item) => item.id === id);
-    if (target?.commandId) forgetUncertainAction(target.commandId);
+    if (target?.commandId) commands.forget(target.commandId);
     return items.filter((item) => item.id !== id);
   });
 }
@@ -188,18 +183,37 @@ export function retainPersistentErrors(items: PersistentError[], next: Persisten
 
 function persistActionProblem(title: string, detail: string, commandId?: string): void {
   setPersistentErrors((items) => retainPersistentErrors(items, {
-    id: ++toastSeq, title, detail, commandId: commandId || null, retryable: !!commandId && uncertainActionRetries.has(commandId), retrying: false,
+    id: ++toastSeq, title, detail, commandId: commandId || null, retryable: !!commandId && commands.hasUncertain(commandId), retrying: false,
   }));
 }
 
+export function reportTransportIssue(issue: WsProtocolIssue): void {
+  const problem = issue.kind === 'non_text_frame'
+    ? { title: '收到不支持的服务器数据', detail: `WebSocket 下行帧不是文本（${issue.size} 字节），已安全忽略且未记录其内容。` }
+    : issue.kind === 'malformed_frame'
+      ? { title: '收到格式错误的服务器数据', detail: `WebSocket 下行文本无法识别（${issue.size} 个字符），已安全忽略且未记录其内容。` }
+      : issue.kind === 'send_error'
+        ? { title: '数据未能写入连接', detail: '浏览器连接在发送瞬间失效。相关操作没有被登记为已发送；消息草稿和可恢复状态仍会保留。' }
+        : { title: '页面未能处理服务器更新', detail: `浏览器的 ${issue.callback === 'frame' ? '下行数据' : '连接状态'} 处理发生异常。连接仍保持，后续更新会继续处理。` };
+  setPersistentErrors((items) => {
+    const withoutDuplicate = items.filter((item) => item.title !== problem.title);
+    return retainPersistentErrors(withoutDuplicate, {
+      id: ++toastSeq,
+      ...problem,
+      commandId: null,
+      retryable: false,
+      retrying: false,
+    });
+  });
+}
+
 export function retryPersistentAction(commandId: string): boolean {
-  const retry = uncertainActionRetries.get(commandId);
-  if (!retry || !ready) {
-    toast(!retry ? '此操作不能安全重试' : '连接未就绪，暂时不能重新确认');
+  if (!commands.hasUncertain(commandId) || !ready) {
+    toast(!commands.hasUncertain(commandId) ? '此操作不能安全重试' : '连接未就绪，暂时不能重新确认');
     return false;
   }
-  if (pendingAcks.has(commandId)) return false;
-  const sent = sendAction(retry.frame, retry.label, retry.options);
+  if (commands.hasPending(commandId)) return false;
+  const sent = commands.retry(commandId, sendFrame) === 'sent';
   if (sent) setPersistentErrors((items) => items.map((item) => item.commandId === commandId
     ? { ...item, title: '正在重新确认', detail: '正在使用原 commandId 查询或完成此操作，不会创建第二个请求。', retryable: false, retrying: true }
     : item));
@@ -245,6 +259,7 @@ export function selectChat(cid: string): void {
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
   setSubscribedDocs('—'); // 订阅清单等下一帧 ready 刷新（简单置空亦可）
 }
 
@@ -252,21 +267,26 @@ export function selectChat(cid: string): void {
 
 // 发送 action 并登记 ack 回调；ready 前不发（server 会缓冲，但面板
 // 以 ready 门控保证可预期）。
+function sendFrame(frame: ActionFrame): boolean { return !!ws?.send(frame); }
+
 function sendAction(frame: ActionFrame, label: string, options: ActionOptions = {}): boolean {
-  if (!ws || !ws.send(frame)) {
+  const result = commands.dispatch({
+    frame,
+    label,
+    callbacks: {
+      onAccepted: options.onAccepted,
+      onTerminal: options.cb,
+      onError: options.onError,
+      retryOnUncertain: options.retryOnUncertain,
+      onUncertain: options.onTimeout,
+    },
+  }, sendFrame);
+  if (result !== 'sent') {
+    if (result === 'already_pending') return false;
     toast(`连接未就绪，无法发送 ${label}`);
     options.onError?.({ commandId: frame.commandId, code: 'UNAVAILABLE', message: '连接未就绪', retryable: true });
-    if (matchesOpening(openingSession(), frame.commandId)) setOpeningSession(null);
     return false;
   }
-  const timer = setTimeout(() => {
-    pendingAcks.delete(frame.commandId);
-    if (matchesOpening(openingSession(), frame.commandId)) { ignoredOpenCommands.add(frame.commandId); setOpeningSession(null); }
-    if (options.retryOnUncertain) registerUncertainAction(frame.commandId, { frame, label, options });
-    options.onTimeout?.();
-    if (!options.onTimeout) persistActionProblem('结果尚未确认', `${label} 已超过 30 秒未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`, frame.commandId);
-  }, ACK_TIMEOUT_MS);
-  pendingAcks.set(frame.commandId, { label, ...options, frame, options, timer });
   return true;
 }
 
@@ -295,18 +315,19 @@ function onFrame(frame: Record<string, unknown>): void {
 }
 
 function onAck(ack: Ack): void {
-  if (shouldIgnoreLateAck(ignoredOpenCommands, ack)) return;
   showAck(ack);
-  if (completesMessageSubmission(messageSubmission(), ack)) {
+  const completedSubmission = messageSubmission();
+  if (completesMessageSubmission(completedSubmission, ack)) {
+    if (completedSubmission && composerDrafts()[completedSubmission.sessionId] === completedSubmission.text) {
+      clearComposerDraft(completedSubmission.sessionId);
+    }
     setMessageSubmission(null);
-    retryableMessageFrame = null;
   }
   if (quickStartCanActivate(quickStartSubmission(), ack)) {
     const quick = quickStartSubmission()!;
     const sessionId = ack.sessionId as string;
     const chatId = ack.chatId as string;
     setQuickStartSubmission(null);
-    retryableQuickStartFrame = null;
     setSelectedSessionId(sessionId);
     rememberSession(sessionId);
     selectChat(chatId);
@@ -314,28 +335,9 @@ function onAck(ack: Ack): void {
   }
   if (ack.status !== 'accepted' && ack.commandId) {
     permissionCommands.delete(ack.commandId);
-    forgetUncertainAction(ack.commandId);
     setPersistentErrors((items) => items.filter((item) => item.commandId !== ack.commandId));
   }
-  const pending = pendingAcks.get(ack.commandId || '');
-  // accepted is only the queue acknowledgement. Keep the command registered so
-  // the committed/duplicate terminal acknowledgement can drive navigation.
-  if (pending && ack.status === 'accepted') pending.onAccepted?.(ack);
-  if (pending && ack.status !== 'accepted') {
-    clearTimeout(pending.timer);
-    pendingAcks.delete(ack.commandId || '');
-    if (typeof pending.cb === 'function') pending.cb(ack);
-  }
-  // create 的 committed ack 携带 server 生成的 chatId —— 唯一告知
-  // 路径：自动补订阅 chat:{cid}/session:{cid} 并选中。§8.5 激活语义：
-  // 点击已打开的历史会话时 server 同样回 committed + 既有 chatId——
-  // 此处统一切换选中（不新建重复对话）。
-  if ((ack.status === 'committed' || ack.status === 'duplicate') && ack.chatId && ack.chatId !== currentCid && openingSession()?.commandId !== ack.commandId && !ignoredOpenCommands.has(ack.commandId || '')) {
-    toast(`已打开对话: ${ack.chatId.slice(0, 8)}…`);
-    const chatId = ack.chatId;
-    if (!chatId) return;
-    selectChat(chatId);
-  }
+  commands.acknowledge(ack);
 }
 
 const ERROR_REASONS: Record<string, string> = {
@@ -356,23 +358,23 @@ function onActionError(err: ActionError): void {
   showActionError(err);
   const submission = messageSubmission();
   if (submission && submission.commandId === err.commandId) {
-    setMessageSubmission(failMessageSubmission(submission, submission.commandId, err.message || '消息提交失败', !!err.retryable));
+    const failed = failMessageSubmission(submission, submission.commandId, err.message || '消息提交失败', false) as MessageSubmission;
+    setMessageSubmission(failed);
+    restoreSubmissionDraft(failed);
+  }
+  const quick = quickStartSubmission();
+  if (quick && quick.commandId === err.commandId) {
+    setQuickStartSubmission(updateQuickStart(quick, quick.commandId, 'failed', err.message || '无法创建会话。你的消息仍保留。', false));
   }
   if (err.commandId) {
-    forgetUncertainAction(err.commandId);
     const permissionId = permissionCommands.get(err.commandId);
     if (permissionId) {
       setPendingPermissionDecisions((decisions) => unlockPermissionDecision(decisions, permissionId));
       permissionCommands.delete(err.commandId);
     }
   }
-  const pending = pendingAcks.get(err.commandId || '');
-  if (pending) {
-    clearTimeout(pending.timer);
-    pendingAcks.delete(err.commandId || '');
-    pending.onError?.(err);
-  }
-  if (matchesOpening(openingSession(), err.commandId)) setOpeningSession(null);
+  const wasPending = commands.fail(err);
+  if (!wasPending && err.commandId) commands.forget(err.commandId);
   const reason = err.code ? ERROR_REASONS[err.code] : undefined;
   persistActionProblem(reason || err.code || '操作失败', err.message || '服务器未提供更多信息。', err.commandId);
 }
@@ -396,18 +398,20 @@ store.onUpdate = (docId: string): void => {
     setProjectSessions(projectedSessions);
     setImportableSessions(unimportedSessions(reg.sessions, reg.projectSessions));
     registryReceived = true;
-    restoreLastSession(projectedSessions);
+    reconcileSessionNavigation(projectedSessions);
     return;
   }
   if (currentCid && docId === H.chatDoc(currentCid)) {
     const conv = renderChat(store.docFor(docId));
     setChatEntries(conv.entries);
+    setRuntimeDocsState((state) => ({ ...state, chat: true }));
     return;
   }
   if (currentCid && docId === H.sessionDoc(currentCid)) {
     const ctrl = renderControl(store.docFor(docId));
     setChatHead(ctrl);
     setPermissions(ctrl.pendingPermissions);
+    setRuntimeDocsState((state) => ({ ...state, control: true }));
     const visiblePermissionIds = new Set(ctrl.pendingPermissions.map((item) => item.permissionId).filter((id): id is string => !!id));
     setPendingPermissionDecisions((decisions) => new Map([...decisions].filter(([id]) => visiblePermissionIds.has(id))));
   }
@@ -433,20 +437,23 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       ready = true;
       setConnState({ text: '就绪', kind: 'ok' });
       setConnectionProblem(null);
-      if (registryReceived) restoreLastSession(projectSessions());
+      if (registryReceived) reconcileSessionNavigation(projectSessions());
       setSubscribedDocs(
         detail.projectionVersions
           ? Object.keys(detail.projectionVersions as Record<string, unknown>).join('、')
           : '—',
       );
-      toast('连接就绪');
       break;
     case 'heartbeat':
       setHeartbeatCount((c) => c + 1);
       break;
     case 'reconnecting':
-      settlePendingActionsAsUncertain();
-      setMessageSubmission((current) => current ? markMessageUncertain(current, current.commandId) : null);
+      commands.settleConnectionLoss();
+      setMessageSubmission((current) => {
+        const uncertain = current ? markMessageUncertain(current, current.commandId) as MessageSubmission : null;
+        restoreSubmissionDraft(uncertain);
+        return uncertain;
+      });
       setQuickStartSubmission((current) => current ? updateQuickStart(current, current.commandId, 'uncertain', '连接中断，创建结果尚未确认。重新确认会复用同一请求。') : null);
       setConnState({
         text: `重连中（${Math.round((detail.retryMs || 0) / 1000)}s 后）`,
@@ -455,9 +462,13 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       break;
     case 'fatal':
       ready = false;
-      settlePendingActionsAsUncertain();
-      setOpeningSession(null);
-      setMessageSubmission((current) => current ? markMessageUncertain(current, current.commandId) : null);
+      commands.settleConnectionLoss();
+      applyNavigationEffects(sessionNavigator.transition({ type: 'connection-lost' }));
+      setMessageSubmission((current) => {
+        const uncertain = current ? markMessageUncertain(current, current.commandId) as MessageSubmission : null;
+        restoreSubmissionDraft(uncertain);
+        return uncertain;
+      });
       setQuickStartSubmission((current) => current ? updateQuickStart(current, current.commandId, 'uncertain', '连接已停止，创建结果尚未确认。重新登录或连接后可安全确认。') : null);
       // connect() 置 busy(true) 后无任何路径恢复（closed 仅由用户主动
       // disconnect 触发，那里已 setBusy(false)）→ 必须在此恢复按钮，
@@ -480,9 +491,13 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       break;
     case 'closed':
       ready = false;
-      settlePendingActionsAsUncertain();
-      setOpeningSession(null);
-      setMessageSubmission((current) => current ? markMessageUncertain(current, current.commandId) : null);
+      commands.settleConnectionLoss();
+      applyNavigationEffects(sessionNavigator.transition({ type: 'connection-lost' }));
+      setMessageSubmission((current) => {
+        const uncertain = current ? markMessageUncertain(current, current.commandId) as MessageSubmission : null;
+        restoreSubmissionDraft(uncertain);
+        return uncertain;
+      });
       setQuickStartSubmission((current) => current ? updateQuickStart(current, current.commandId, 'uncertain', '连接已断开，创建结果尚未确认。重新连接后可安全确认。') : null);
       setConnState({ text: '已断开', kind: 'idle' });
       if (principalRole()) setConnectionProblem({ code: null, title: '连接已断开', detail: '当前页面没有连接到 acp-hub server。你的持久会话仍然安全。', action: 'reconnect' });
@@ -498,13 +513,14 @@ function wsUrl(): string {
 }
 
 export function connectWithCookie(): void {
-  settlePendingActionsAsUncertain();
+  commands.settleConnectionLoss();
   const epoch = ++connectionEpoch;
   if (ws) ws.close();
   const client = new WsClient({
     url: wsUrl(),
     onStatus: (state, detail) => { if (epoch === connectionEpoch) onStatus(state, detail); },
     onFrame: (frame) => { if (epoch === connectionEpoch) onFrame(frame); },
+    onProtocolIssue: (issue) => { if (epoch === connectionEpoch) reportTransportIssue(issue); },
   });
   ws = client;
   client.connect();
@@ -518,24 +534,42 @@ function rememberSession(sessionId: string): void {
   try { window.localStorage.setItem(LAST_SESSION_KEY, sessionId); } catch { /* 浏览器禁用存储时退化为手动选择 */ }
 }
 
-function restoreLastSession(sessions: ProjectSessionInfo[]): void {
-  if (!ready || attemptedRestore || selectedSessionId() || openingSession()) return;
-  attemptedRestore = true;
+function readRememberedSession(): string | null {
   let preferred: string | null = null;
   try { preferred = window.localStorage.getItem(LAST_SESSION_KEY); } catch { /* 手动选择兜底 */ }
-  const candidate = chooseRestorableSession(preferred, sessions) as ProjectSessionInfo | null;
-  if (!candidate) {
-    if (preferred) try { window.localStorage.removeItem(LAST_SESSION_KEY); } catch { /* stale preference is harmless */ }
-    return;
+  return preferred;
+}
+
+function forgetRememberedSession(): void {
+  try { window.localStorage.removeItem(LAST_SESSION_KEY); } catch { /* UI preference only */ }
+}
+
+const sessionNavigator = new SessionNavigator((snapshot) => {
+  setOpeningSession(snapshot.opening);
+  setRestoringSessionId(snapshot.restoringSessionId);
+});
+
+function applyNavigationEffects(effects: SessionNavigationEffect[]): void {
+  for (const effect of effects) {
+    if (effect.type === 'request-open') openProjectSession(effect.sessionId);
+    if (effect.type === 'activate') {
+      setSelectedSessionId(effect.sessionId);
+      rememberSession(effect.sessionId);
+      selectChat(effect.chatId);
+    }
+    if (effect.type === 'forget-preference') forgetRememberedSession();
   }
-  setRestoringSessionId(candidate.id);
-  if (readOnly() && candidate.activeChatId) {
-    selectPersistedSessionLocally(candidate.id, candidate.activeChatId);
-    setRestoringSessionId(null);
-    return;
-  }
-  if (readOnly()) { setRestoringSessionId(null); return; }
-  openProjectSession(candidate.id);
+}
+
+function reconcileSessionNavigation(sessions: ProjectSessionInfo[]): void {
+  applyNavigationEffects(sessionNavigator.transition({
+    type: 'catalog',
+    ready,
+    readOnly: readOnly(),
+    preferredId: readRememberedSession(),
+    selectedSessionId: selectedSessionId(),
+    sessions,
+  }));
 }
 
 export function createProject(name: string, cwd: string, onCommitted?: () => void, onFailed?: () => void): boolean {
@@ -572,6 +606,7 @@ export function archiveProject(projectId: string, onCommitted?: () => void, onFa
       setChatEntries([]);
       setChatHead(null);
       setPermissions([]);
+      setRuntimeDocsState({ chat: false, control: false });
       try { window.localStorage.removeItem(LAST_SESSION_KEY); } catch { /* UI preference only */ }
     }
     toast('项目已归档');
@@ -626,8 +661,9 @@ export function createProjectSession(projectId: string, title?: string): boolean
     if (ack.status !== 'committed' && ack.status !== 'duplicate') return;
     finish();
     if ((ack.status === 'committed' || ack.status === 'duplicate') && ack.sessionId) {
-      setSelectedSessionId(ack.sessionId as string);
-      rememberSession(ack.sessionId as string);
+      const sessionId = ack.sessionId as string;
+      if (ack.chatId) applyNavigationEffects(sessionNavigator.transition({ type: 'local-select', sessionId, chatId: ack.chatId }));
+      else { setSelectedSessionId(sessionId); rememberSession(sessionId); }
     }
   }, onError: finish, onTimeout: () => {
     finish();
@@ -644,34 +680,29 @@ export function createSessionWithFirstMessage(projectId: string, text: string): 
   }
   const title = source.split(/\r?\n/, 1)[0].slice(0, 60);
   const frame = H.persistedSessionCreate(projectId, title);
-  retryableQuickStartFrame = frame;
   setQuickStartSubmission(beginQuickStart(frame.commandId, projectId, source) as QuickStartSubmission);
   const sent = sendAction(frame, 'session/create', {
+    retryOnUncertain: true,
     onAccepted: () => setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'accepted')),
     onTimeout: () => setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'uncertain', '会话创建结果尚未确认。重新确认会复用同一请求，不会创建重复会话。')),
-    onError: (error) => setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'failed', error.message || '无法创建会话。你的消息仍保留。', !!error.retryable)),
+    onError: (error) => setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'failed', error.message || '无法创建会话。你的消息仍保留。', false)),
   });
-  if (!sent) setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'failed', '连接未就绪。你的消息仍保留。'));
+  if (!sent) setQuickStartSubmission((current) => updateQuickStart(current, frame.commandId, 'failed', '连接未就绪。你的消息仍保留。', false));
   return sent;
 }
 
 export function retryQuickStart(): void {
   const current = quickStartSubmission();
-  const frame = retryableQuickStartFrame;
-  if (!current || !frame || current.commandId !== frame.commandId || !['uncertain', 'failed'].includes(current.phase)) return;
+  if (!current || current.phase !== 'uncertain' || !commands.hasUncertain(current.commandId)) return;
   if (!ready) return toast('连接未就绪，暂时不能重新确认');
-  setQuickStartSubmission(updateQuickStart(current, frame.commandId, 'creating'));
-  sendAction(frame, 'session/create', {
-    onAccepted: () => setQuickStartSubmission((value) => updateQuickStart(value, frame.commandId, 'accepted')),
-    onTimeout: () => setQuickStartSubmission((value) => updateQuickStart(value, frame.commandId, 'uncertain', '会话创建结果尚未确认。重新确认会复用同一请求，不会创建重复会话。')),
-    onError: (error) => setQuickStartSubmission((value) => updateQuickStart(value, frame.commandId, 'failed', error.message || '无法创建会话。你的消息仍保留。', !!error.retryable)),
-  });
+  const result = commands.retry(current.commandId, sendFrame);
+  if (result === 'sent') setQuickStartSubmission(updateQuickStart(current, current.commandId, 'creating'));
+  else toast('连接未就绪，原请求仍已保留');
 }
 
 export function dismissFailedQuickStart(): void {
   if (quickStartSubmission()?.phase !== 'failed') return;
   setQuickStartSubmission(null);
-  retryableQuickStartFrame = null;
 }
 
 export interface OpenSessionCallbacks {
@@ -680,26 +711,21 @@ export interface OpenSessionCallbacks {
   onUncertain?: () => void;
 }
 
-export function openProjectSession(sessionId: string, callbacks: OpenSessionCallbacks = {}): boolean {
-  if (!ready || readOnly() || rejectWhileMetadataUncertain()) {
-    const message = readOnly() ? '只读模式不能打开运行会话' : !ready ? '连接未就绪' : '先确认上一项操作';
+function openProjectSession(sessionId: string, callbacks: OpenSessionCallbacks = {}): boolean {
+  if (!ready || readOnly() || openingSession() || rejectWhileMetadataUncertain()) {
+    const message = readOnly() ? '只读模式不能打开运行会话' : !ready ? '连接未就绪' : openingSession() ? '另一个会话正在打开' : '先确认上一项操作';
     toast(message);
     callbacks.onFailed?.(message);
     return false;
   }
   const frame = H.persistedSessionOpen(sessionId);
-  setOpeningSession(beginOpen(frame.commandId, sessionId, selectedSessionId(), currentCid));
+  sessionNavigator.transition({ type: 'open-started', commandId: frame.commandId, sessionId, previousSessionId: selectedSessionId(), previousChatId: currentCid });
   return sendAction(frame, 'session/open', { cb: (ack) => {
-    if (!terminalCanCommit(openingSession(), ack)) return;
-    setSelectedSessionId(sessionId);
-    const committedChatId = ack.chatId;
-    if (!committedChatId) return;
-    selectChat(committedChatId);
-    rememberSession(sessionId);
-    setRestoringSessionId(null);
-    setOpeningSession(null);
+    const effects = sessionNavigator.transition({ type: 'open-terminal', commandId: ack.commandId, status: ack.status, chatId: ack.chatId });
+    if (!effects.length) return;
+    applyNavigationEffects(effects);
     callbacks.onCommitted?.();
-  }, onError: (error) => { setRestoringSessionId(null); attemptedRestore = false; callbacks.onFailed?.(error.message || '无法打开会话'); }, onTimeout: () => { setRestoringSessionId(null); attemptedRestore = false; persistActionProblem('打开结果尚未确认', '未切换当前会话。请等待侧边栏状态同步；如果会话仍未启动，再重新打开。', frame.commandId); callbacks.onUncertain?.(); } });
+  }, onError: (error) => { sessionNavigator.transition({ type: 'open-failed', commandId: frame.commandId }); callbacks.onFailed?.(error.message || '无法打开会话'); }, onTimeout: () => { sessionNavigator.transition({ type: 'open-uncertain', commandId: frame.commandId }); persistActionProblem('打开结果尚未确认', '未切换当前会话。请等待侧边栏状态同步；如果会话仍未启动，再重新打开。', frame.commandId); callbacks.onUncertain?.(); } });
 }
 
 export function renameProjectSession(sessionId: string, name: string, onCommitted?: () => void, onFailed?: () => void): boolean {
@@ -715,7 +741,7 @@ export function renameProjectSession(sessionId: string, name: string, onCommitte
   } });
 }
 
-export function importProjectSession(projectId: string, acpSessionId: string, onCommitted?: () => void, onFailed?: () => void): boolean {
+export function importProjectSession(projectId: string, acpSessionId: string, onCommitted?: () => void, onFailed?: (kind: 'failed' | 'uncertain') => void): boolean {
   if (!ready || readOnly() || rejectWhileMetadataUncertain()) { toast(readOnly() ? '只读模式不能导入会话' : !ready ? '连接未就绪' : '先确认上一项操作'); return false; }
   const frame = H.persistedSessionImport(projectId, acpSessionId);
   return sendAction(frame, 'session/import', { retryOnUncertain: true, cb: (ack) => {
@@ -723,14 +749,14 @@ export function importProjectSession(projectId: string, acpSessionId: string, on
       toast('会话已加入侧边栏');
       onCommitted?.();
     }
-  }, onError: () => onFailed?.(), onTimeout: () => { persistActionProblem('导入结果尚未确认', '服务器可能已导入此会话。请等待侧边栏刷新；如需确认，请使用原请求重试。', frame.commandId); onFailed?.(); } });
+  }, onError: () => onFailed?.('failed'), onTimeout: () => { persistActionProblem('导入结果尚未确认', '服务器可能已导入此会话。请等待侧边栏刷新；如需确认，请使用原请求重试。', frame.commandId); onFailed?.('uncertain'); } });
 }
 
 export function disconnect(): void {
-  settlePendingActionsAsUncertain();
+  commands.settleConnectionLoss();
   connectionEpoch += 1;
   ready = false;
-  setOpeningSession(null);
+  applyNavigationEffects(sessionNavigator.transition({ type: 'connection-lost' }));
   setClosingChat(false);
   if (ws) {
     ws.close();
@@ -747,30 +773,46 @@ export function clearUiSession(): void {
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
   setProjects([]);
   setProjectSessions([]);
   setImportableSessions([]);
   setMessageSubmission(null);
-  retryableMessageFrame = null;
+  setComposerDrafts({});
   setQuickStartSubmission(null);
-  retryableQuickStartFrame = null;
   setCreatingSessionProjectId(null);
   setPersistentErrors([]);
-  clearUncertainActions();
+  commands.reset();
   setCancellingTurn(false);
   setClosingChat(false);
-  setPendingPermissionDecisions(new Map<string, string>());
+  setPendingPermissionDecisions(new Map<string, PermissionDecisionState>());
   setConnectionProblem(null);
-  setRestoringSessionId(null);
+  applyNavigationEffects(sessionNavigator.transition({ type: 'reset' }));
   permissionCommands.clear();
   registryReceived = false;
-  attemptedRestore = false;
-  ignoredOpenCommands.clear();
   store.clear();
 }
 
-export function selectPersistedSessionLocally(sessionId: string, chatId: string): void {
-  setSelectedSessionId(sessionId); rememberSession(sessionId); selectChat(chatId);
+function selectPersistedSessionLocally(sessionId: string, chatId: string): void {
+  applyNavigationEffects(sessionNavigator.transition({ type: 'local-select', sessionId, chatId }));
+}
+
+export function navigateProjectSession(sessionId: string, callbacks: OpenSessionCallbacks = {}): boolean {
+  const session = projectSessions().find((item) => item.id === sessionId);
+  if (!session || session.lifecycle !== 'ready') {
+    callbacks.onFailed?.('会话尚未就绪');
+    return false;
+  }
+  if (readOnly()) {
+    if (!session.activeChatId) {
+      callbacks.onFailed?.('只读模式只能查看已启动的会话');
+      return false;
+    }
+    selectPersistedSessionLocally(session.id, session.activeChatId);
+    callbacks.onCommitted?.();
+    return true;
+  }
+  return openProjectSession(session.id, callbacks);
 }
 
 // ── 用户动作 → action ──────────────────────────────────────────────────
@@ -788,53 +830,58 @@ export function sendMessage(text: string, effort?: string): boolean {
     toast('请先选择对话');
     return false;
   }
+  const sessionId = selectedSessionId();
+  if (!sessionId) {
+    toast('持久会话尚未就绪');
+    return false;
+  }
   if (isTerminal(chatStatusSignal()[currentCid])) {
     toast('对话已结束，不能发送消息');
     return false;
   }
   const frame = H.prompt(currentCid, text, effort);
-  retryableMessageFrame = frame;
-  setMessageSubmission(beginMessageSubmission(frame.commandId, text) as MessageSubmission);
+  setMessageSubmission(beginMessageSubmission(frame.commandId, text, sessionId, currentCid) as MessageSubmission);
   const sent = sendAction(frame, 'prompt', {
+    retryOnUncertain: true,
     onAccepted: () => setMessageSubmission((current) => acceptMessageSubmission(current, frame.commandId)),
-    onTimeout: () => setMessageSubmission((current) => markMessageUncertain(current, frame.commandId)),
-    onError: (err) => setMessageSubmission((current) => failMessageSubmission(current, frame.commandId, err.message || '消息提交失败', !!err.retryable)),
+    onTimeout: () => setMessageSubmission((current) => {
+      const uncertain = markMessageUncertain(current, frame.commandId) as MessageSubmission | null;
+      restoreSubmissionDraft(uncertain);
+      return uncertain;
+    }),
+    onError: (err) => setMessageSubmission((current) => {
+      const failed = failMessageSubmission(current, frame.commandId, err.message || '消息提交失败', false) as MessageSubmission | null;
+      restoreSubmissionDraft(failed);
+      return failed;
+    }),
     cb: (ack) => {
       if (completesMessageSubmission(messageSubmission(), ack)) {
         setMessageSubmission(null);
-        retryableMessageFrame = null;
       }
     },
   });
   if (!sent) {
-    setMessageSubmission((current) => failMessageSubmission(current, frame.commandId, '连接未就绪，消息未发送', true));
+    setMessageSubmission((current) => {
+      const failed = failMessageSubmission(current, frame.commandId, '连接未就绪，消息未发送', false) as MessageSubmission | null;
+      restoreSubmissionDraft(failed);
+      return failed;
+    });
   }
   return sent;
 }
 
 export function retryMessageSubmission(): void {
   const current = messageSubmission();
-  const frame = retryableMessageFrame;
-  if (!current || !frame || current.commandId !== frame.commandId) return;
+  if (!current || current.phase !== 'uncertain' || !commands.hasUncertain(current.commandId)) return;
   if (!ready) return toast('连接未就绪，暂时不能重新确认');
-  setMessageSubmission({ ...current, phase: 'sending', detail: null });
-  sendAction(frame, 'prompt', {
-    onAccepted: () => setMessageSubmission((value) => acceptMessageSubmission(value, frame.commandId)),
-    onTimeout: () => setMessageSubmission((value) => markMessageUncertain(value, frame.commandId)),
-    onError: (err) => setMessageSubmission((value) => failMessageSubmission(value, frame.commandId, err.message || '消息提交失败', !!err.retryable)),
-    cb: (ack) => {
-      if (completesMessageSubmission(messageSubmission(), ack)) {
-        setMessageSubmission(null);
-        retryableMessageFrame = null;
-      }
-    },
-  });
+  const result = commands.retry(current.commandId, sendFrame);
+  if (result === 'sent') setMessageSubmission({ ...current, phase: 'sending', detail: null });
+  else toast('连接未就绪，原请求仍已保留');
 }
 
 export function dismissMessageSubmission(): void {
-  if (messageSubmission()?.phase === 'sending' || messageSubmission()?.phase === 'accepted') return;
+  if (messageSubmission()?.phase !== 'failed') return;
   setMessageSubmission(null);
-  retryableMessageFrame = null;
 }
 
 export function installPrincipalRole(role: PrincipalRole): void { setPrincipalRole(role); }
@@ -897,7 +944,10 @@ export function resolvePermission(permissionId: string, decision: string): void 
   sendAction(frame, 'resolve', {
     cb: () => permissionCommands.delete(frame.commandId),
     onError: release,
-    onTimeout: () => persistActionProblem('权限决策结果尚未确认', '请等待请求从界面消失或返回错误，不要提交相反决策。', frame.commandId),
+    onTimeout: () => {
+      setPendingPermissionDecisions((decisions) => markPermissionDecisionUncertain(decisions, permissionId));
+      persistActionProblem('权限决策结果尚未确认', '请等待请求从界面消失或返回错误，不要提交相反决策。', frame.commandId);
+    },
   });
 }
 

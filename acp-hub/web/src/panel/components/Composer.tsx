@@ -7,9 +7,9 @@
 // 通过 title 可发现；发送 / 停止主动作始终保留。
 // 对话操作（新建/新会话/取消/关闭）已收敛到左侧对话列表区。
 
-import { createEffect, createSignal, Show } from 'solid-js';
-import { cancelTurn, cancellingTurn, chatHead, chatStatusSignal, dismissMessageSubmission, isTerminal, messageSubmission, openingSessionId, readOnly, retryMessageSubmission, selectedCid, sendMessage, turnActive } from '../store';
-import { Button, CopyButton, IconButton, Textarea } from '../../ui';
+import { Show } from 'solid-js';
+import { cancelTurn, cancellingTurn, chatHead, chatStatusSignal, clearComposerDraft, composerDraft, dismissMessageSubmission, isTerminal, messageSubmission, navigateProjectSession, openingSessionId, projectSessions, readOnly, retryMessageSubmission, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, setComposerDraft, turnActive } from '../store';
+import { Button, CopyButton, Icon, IconButton, Textarea } from '../../ui';
 
 /** tokens 数值 → "12k"/"200k" 缩写（>=1000 取 k；非法值 → null）。 */
 function fmtTokens(n: number | null): string | null {
@@ -19,22 +19,23 @@ function fmtTokens(n: number | null): string | null {
 }
 
 export function Composer() {
-  const [msg, setMsg] = createSignal('');
   let taRef: HTMLTextAreaElement | undefined;
+  const submissionForSession = () => messageSubmission()?.sessionId === selectedSessionId() ? messageSubmission() : null;
+  const submissionInAnotherSession = () => messageSubmission() && !submissionForSession() ? messageSubmission() : null;
+  const pendingSessionTitle = () => {
+    const submission = submissionInAnotherSession();
+    return projectSessions().find((session) => session.id === submission?.sessionId)?.title || '另一会话';
+  };
 
   const terminal = () => isTerminal(chatStatusSignal()[selectedCid() ?? '']);
-  const inputDisabled = () => !selectedCid() || terminal() || !!openingSessionId() || readOnly() || turnActive() || !!messageSubmission();
+  const inputDisabled = () => !selectedCid() || !runtimeDocsHydrated() || terminal() || !!openingSessionId() || readOnly() || turnActive() || !!messageSubmission();
   const inputPlaceholder = () =>
     readOnly() ? '只读模式' : openingSessionId() ? '正在打开会话…' : !selectedCid()
       ? '先从左侧选择或新建会话'
+      : !runtimeDocsHydrated() ? '正在载入会话…'
       : terminal()
         ? '对话已结束（历史只读）'
-        : turnActive() ? 'Agent 正在工作，可随时停止' : messageSubmission() ? '正在确认上一条消息…' : '给 Agent 发消息';
-
-  createEffect(() => {
-    const failed = messageSubmission();
-    if (failed && (failed.phase === 'failed' || failed.phase === 'uncertain') && !msg()) setMsg(failed.text);
-  });
+        : turnActive() ? 'Agent 正在工作，可随时停止' : submissionForSession() ? '正在确认当前消息…' : submissionInAnotherSession() ? '另一会话的消息仍在确认…' : '给 Agent 发消息';
 
   // 信息行三个真实值（agent map，server 写入；缺失 → —）。
   const model = () => chatHead()?.agent?.model || '—';
@@ -55,7 +56,7 @@ export function Composer() {
   };
 
   function submit() {
-    const text = msg().trim();
+    const text = composerDraft().trim();
     if (!text) return;
     if (!sendMessage(text)) return;
     if (taRef) {
@@ -66,7 +67,8 @@ export function Composer() {
       taRef.style.height = 'auto';
       taRef.style.height = `${taRef.scrollHeight}px`;
     }
-    setMsg('');
+    const sessionId = selectedSessionId();
+    if (sessionId) clearComposerDraft(sessionId);
   }
 
   return (
@@ -79,10 +81,10 @@ export function Composer() {
           ref={taRef}
           autoResize
           maxHeight={180}
-          value={msg()}
+          value={composerDraft()}
           onInput={(e) => {
             const el = e.currentTarget;
-            setMsg(el.value);
+            setComposerDraft(el.value);
           }}
           onKeyDown={(e) => {
             if (e.isComposing) return; // IME 组合确认回车不误发
@@ -102,8 +104,8 @@ export function Composer() {
           </span>
           <span class="composer-shortcut" aria-hidden="true">Enter 发送 · Shift + Enter 换行</span>
           <Show when={turnActive()} fallback={
-            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={submit} disabled={inputDisabled() || !msg().trim()} label="发送" class="composer-action">
-              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16V4" /><path d="M5 9l5-5 5 5" /></svg>
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={submit} disabled={inputDisabled() || !composerDraft().trim()} label="发送" class="composer-action">
+              <Icon><path d="M10 16V4" /><path d="M5 9l5-5 5 5" /></Icon>
             </IconButton>
           }>
             <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={cancelTurn} disabled={cancellingTurn() || readOnly()} busy={cancellingTurn()} label="停止生成" class="composer-action composer-action--stop">
@@ -112,12 +114,18 @@ export function Composer() {
           </Show>
         </div>
       </section>
-      <Show when={messageSubmission()}>{(submission) =>
+      <Show when={submissionForSession()}>{(submission) =>
         <section class={`submission-state submission-state--${submission().phase}`} role={submission().phase === 'failed' || submission().phase === 'uncertain' ? 'alert' : 'status'}>
           <div class="submission-state__body"><strong>{submission().phase === 'uncertain' ? '结果尚未确认' : submission().phase === 'failed' ? '消息未发送' : '正在提交消息'}</strong><p>{submission().detail || '在服务器确认前，我们会保留这条消息。'}</p><details><summary>查看原消息</summary><pre>{submission().text}</pre></details></div>
           <Show when={submission().phase === 'failed' || submission().phase === 'uncertain'}>
-            <div class="submission-state__actions"><CopyButton text={submission().text} label="复制原文" size="compact" /><Show when={submission().retryable}><Button variant="primary" size="compact" onClick={retryMessageSubmission}>使用同一请求重新确认</Button></Show><Button size="compact" onClick={dismissMessageSubmission}>关闭</Button></div>
+            <div class="submission-state__actions"><CopyButton text={submission().text} label="复制原文" size="compact" /><Show when={submission().retryable}><Button variant="primary" size="compact" onClick={retryMessageSubmission}>使用同一请求重新确认</Button></Show><Show when={submission().phase === 'failed'}><Button size="compact" onClick={dismissMessageSubmission}>返回编辑</Button></Show></div>
           </Show>
+        </section>
+      }</Show>
+      <Show when={submissionInAnotherSession()}>{(submission) =>
+        <section class="submission-state submission-state--foreign" role="status">
+          <div class="submission-state__body"><strong>另一会话仍在确认</strong><p>“{pendingSessionTitle()}”还有一条消息等待服务器终态。为避免重复执行，确认完成前暂不发送新消息。</p></div>
+          <div class="submission-state__actions"><Button size="compact" onClick={() => navigateProjectSession(submission().sessionId)}>返回该会话</Button></div>
         </section>
       }</Show>
     </div>

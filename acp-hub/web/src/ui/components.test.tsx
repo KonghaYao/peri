@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { describe, expect, it, vi } from 'vitest';
 import { Button, IconButton } from './Button';
+import { Icon } from './Icon';
 import { Badge } from './Badge';
 import { CopyButton } from './CopyButton';
 import { Dialog } from './Dialog';
@@ -55,6 +56,19 @@ describe('Button', () => {
     expect(submit).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(submit).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Icon', () => {
+  it('owns a finite outline canvas and remains hidden from accessibility APIs', () => {
+    const { container } = render(() => <Icon><circle cx="10" cy="10" r="5" /></Icon>);
+    const icon = container.querySelector('svg');
+    expect(icon).toHaveClass('ui-icon', 'ui-icon--default');
+    expect(icon).toHaveAttribute('viewBox', '0 0 20 20');
+    expect(icon).toHaveAttribute('fill', 'none');
+    expect(icon).toHaveAttribute('stroke', 'currentColor');
+    expect(icon).toHaveAttribute('aria-hidden', 'true');
+    expect(icon).not.toHaveAttribute('tabindex');
   });
 });
 

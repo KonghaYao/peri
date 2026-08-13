@@ -16,7 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const METADATA_DB_FILE: &str = "metadata.sqlite3";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations(
@@ -98,6 +98,10 @@ WHERE EXISTS (
 );
 "#;
 
+const MIGRATION_V3: &str = r#"
+ALTER TABLE project_sessions ADD COLUMN hub_title TEXT;
+"#;
+
 #[derive(Debug, Error)]
 pub enum MetadataError {
     #[error("metadata database error: {0}")]
@@ -132,6 +136,9 @@ pub struct ProjectSessionRecord {
     pub acp_session_id: Option<String>,
     pub acp_title: Option<String>,
     pub custom_name: Option<String>,
+    /// Hub-derived fallback from the first safely-dispatched user prompt.
+    /// This is presentation metadata, not an ACP title mutation.
+    pub hub_title: Option<String>,
     pub lifecycle: String,
     pub created_at: String,
     pub updated_at: String,
@@ -153,6 +160,8 @@ impl ProjectSessionRecord {
         self.custom_name
             .as_deref()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.acp_title.as_deref().filter(|s| meaningful_title(s)))
+            .or_else(|| self.hub_title.as_deref().filter(|s| !s.trim().is_empty()))
             .or_else(|| self.acp_title.as_deref().filter(|s| !s.trim().is_empty()))
             .unwrap_or("新对话")
             .to_string()
@@ -287,6 +296,19 @@ impl MetadataStore {
                 sqlx::query(statement).execute(&mut *tx).await?;
             }
             sqlx::query("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?)")
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        if found < 3 {
+            for statement in MIGRATION_V3
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                sqlx::query(statement).execute(&mut *tx).await?;
+            }
+            sqlx::query("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?)")
                 .bind(now())
                 .execute(&mut *tx)
                 .await?;
@@ -718,6 +740,34 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Installs a Hub-owned fallback title exactly once for a Hub-created
+    /// logical session. ACP titles and user aliases remain independent facts;
+    /// [`ProjectSessionRecord::display_title`] defines their precedence.
+    pub async fn seed_hub_title(&self, acp: &str, title: &str) -> Result<bool> {
+        let title = title.trim();
+        if acp.trim().is_empty() || title.is_empty() {
+            return Ok(false);
+        }
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE project_sessions SET hub_title=?,updated_at=? \
+             WHERE acp_session_id=? AND origin='hub' \
+             AND COALESCE(custom_name,'')='' AND COALESCE(hub_title,'')=''",
+        )
+        .bind(title)
+        .bind(now())
+        .bind(acp)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if changed {
+            bump_generation_tx(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     /// Persist ACP-owned titles by exact durable session id. Empty titles never
     /// erase a known value, and user `custom_name` aliases remain untouched.
     /// Returns the number of changed rows so callers can avoid a no-op Registry
@@ -741,13 +791,13 @@ impl MetadataStore {
     }
 
     pub async fn session(&self, id: &str) -> Result<Option<ProjectSessionRecord>> {
-        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE id=?")
+        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE id=?")
             .bind(id).fetch_optional(&self.pool).await?;
         Ok(row.map(session_from_row))
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<ProjectSessionRecord>> {
-        Ok(sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
+        Ok(sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
             .fetch_all(&self.pool).await?.into_iter().map(session_from_row).collect())
     }
 
@@ -763,7 +813,7 @@ impl MetadataStore {
                 .await?;
         let projects = sqlx::query("SELECT id,name,cwd,instance_id,created_at,updated_at,archived_at FROM projects ORDER BY updated_at DESC,id")
             .fetch_all(&mut *tx).await?.into_iter().map(project_from_row).collect();
-        let sessions = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
+        let sessions = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions ORDER BY updated_at DESC,id")
             .fetch_all(&mut *tx).await?.into_iter().map(session_from_row).collect();
         tx.commit().await?;
         Ok(MetadataSnapshot {
@@ -829,7 +879,7 @@ impl MetadataStore {
         &self,
         acp_session_id: &str,
     ) -> Result<Option<ProjectSessionRecord>> {
-        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE acp_session_id=?")
+        let row = sqlx::query("SELECT id,project_id,acp_session_id,acp_title,custom_name,hub_title,lifecycle,created_at,updated_at,last_opened_at,last_chat_id,failure_code,origin FROM project_sessions WHERE acp_session_id=?")
             .bind(acp_session_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -958,14 +1008,24 @@ fn session_from_row(r: sqlx::sqlite::SqliteRow) -> ProjectSessionRecord {
         acp_session_id: r.get(2),
         acp_title: r.get(3),
         custom_name: r.get(4),
-        lifecycle: r.get(5),
-        created_at: r.get(6),
-        updated_at: r.get(7),
-        last_opened_at: r.get(8),
-        last_chat_id: r.get(9),
-        failure_code: r.get(10),
-        origin: r.get(11),
+        hub_title: r.get(5),
+        lifecycle: r.get(6),
+        created_at: r.get(7),
+        updated_at: r.get(8),
+        last_opened_at: r.get(9),
+        last_chat_id: r.get(10),
+        failure_code: r.get(11),
+        origin: r.get(12),
     }
+}
+
+fn meaningful_title(title: &str) -> bool {
+    let normalized = title.trim().to_lowercase();
+    !normalized.is_empty()
+        && !matches!(
+            normalized.as_str(),
+            "新对话" | "未命名会话" | "untitled" | "new conversation" | "new chat"
+        )
 }
 
 fn now() -> String {

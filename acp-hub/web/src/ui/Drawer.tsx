@@ -56,7 +56,7 @@ export function Drawer(props: DrawerProps) {
       aria-label={props.modal && props.open ? props.label : undefined}
     >{props.children}</aside>
     <Show when={props.modal && props.open}>
-      <button type="button" class="drawer-scrim" aria-label={`关闭${props.label}`} onClick={props.onClose} />
+      <button type="button" class="ui-drawer-scrim" aria-label={`关闭${props.label}`} onClick={props.onClose} />
     </Show>
   </>;
 }

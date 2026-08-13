@@ -95,4 +95,19 @@ describe('renderControl permission projection', () => {
     expect(renderControl(doc).pendingPermissions.map((item) => item.permissionId)).toEqual(['pending']);
     expect(permissions.size).toBe(3);
   });
+
+  it('orders actionable requests by expiry and stable identity', () => {
+    const doc = new Y.Doc();
+    const permissions = new Y.Map<unknown>();
+    doc.getMap<unknown>('root').set('pending_permissions', permissions);
+    for (const [id, expiresAt] of [['late', '2026-08-13T12:02:00Z'], ['same-b', '2026-08-13T12:01:00Z'], ['unknown', 'bad'], ['same-a', '2026-08-13T12:01:00Z']] as const) {
+      const permission = new Y.Map<unknown>();
+      permission.set('permission_id', id);
+      permission.set('status', 'pending');
+      permission.set('expires_at', expiresAt);
+      permissions.set(id, permission);
+    }
+
+    expect(renderControl(doc).pendingPermissions.map((item) => item.permissionId)).toEqual(['same-a', 'same-b', 'late', 'unknown']);
+  });
 });

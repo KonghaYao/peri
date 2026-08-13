@@ -3,12 +3,14 @@
 //! 从 stdin 读取 JSON-RPC 行，按简单协议响应：
 //! - initialize → 返回 capabilities
 //! - session/new → 返回 {session_id: "test-sid-001"}
+//! - session/load → 恢复请求中的 sessionId，后续 update 继续归属该会话
 //! - prompt → 逐行返回 session/update 通知（模拟流式输出）
 //! - session/close → 返回 {closed: true} 后退出
 //!
 //! 支持 --crash-after=N：处理 N 条消息后 exit(1) 模拟崩溃
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -17,6 +19,11 @@ fn main() {
         .position(|a| a == "--crash-after")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok());
+    let audit_file = args
+        .iter()
+        .position(|a| a == "--audit-file")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
 
     let stdin = std::io::stdin();
     let reader = BufReader::new(stdin.lock());
@@ -74,6 +81,21 @@ fn main() {
                         "sessionId": current_session_id
                     }),
                 );
+            }
+
+            Some("session/load") => {
+                let requested = msg
+                    .get("params")
+                    .and_then(|params| params.get("sessionId").or_else(|| params.get("session_id")))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if requested.is_empty() {
+                    send_error(&id, -32602, "session/load requires sessionId");
+                } else {
+                    write_audit(&audit_file, "session/load", requested);
+                    current_session_id = requested.to_string();
+                    send_response(&id, &serde_json::json!({"loaded": true}));
+                }
             }
 
             Some("session/prompt") | Some("prompt") => {
@@ -167,11 +189,37 @@ fn main() {
     }
 }
 
+/// Test-only wire observation. Production instance logging intentionally never
+/// records ACP stderr bodies; integration fixtures opt into this private temp file
+/// so the restart product journey can prove the exact session/load identity.
+fn write_audit(path: &Option<PathBuf>, method: &str, session_id: &str) {
+    let Some(path) = path else { return };
+    let record = serde_json::json!({"method": method, "sessionId": session_id});
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{record}");
+    let _ = file.flush();
+}
+
 fn send_response(id: &Option<serde_json::Value>, result: &serde_json::Value) {
     let resp = serde_json::json!({
         "jsonrpc": "2.0",
         "id": id.clone().unwrap_or(serde_json::Value::Null),
         "result": result,
+    });
+    send(&resp);
+}
+
+fn send_error(id: &Option<serde_json::Value>, code: i64, message: &str) {
+    let resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.clone().unwrap_or(serde_json::Value::Null),
+        "error": {"code": code, "message": message},
     });
     send(&resp);
 }

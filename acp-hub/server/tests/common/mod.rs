@@ -67,6 +67,16 @@ pub fn test_child_bin() -> PathBuf {
         "test-child 未构建：请先 `cargo build --workspace`（期望路径 {}）",
         p.display()
     );
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../instance/src/bin/test_child.rs");
+    let source_mtime = fs::metadata(&source).and_then(|meta| meta.modified()).ok();
+    let binary_mtime = fs::metadata(&p).and_then(|meta| meta.modified()).ok();
+    assert!(
+        !matches!((source_mtime, binary_mtime), (Some(source), Some(binary)) if source > binary),
+        "test-child 比源码旧：请先在 acp-hub 运行 `cargo build --workspace`（源码 {}，二进制 {}）",
+        source.display(),
+        p.display()
+    );
     p
 }
 
@@ -103,6 +113,8 @@ pub struct TestEnv {
     pub fake_bin_dir: PathBuf,
     /// instance 数据目录（水位/缓冲）。
     pub instance_data_dir: PathBuf,
+    /// 测试 ACP 子进程接收的关键 wire 身份审计（仅 temp fixture）。
+    pub acp_audit_file: PathBuf,
 }
 
 impl TestEnv {
@@ -112,9 +124,11 @@ impl TestEnv {
         let config_dir = tmp.path().join("config");
         let data_dir = tmp.path().join("data");
         let instance_data_dir = tmp.path().join("instance-data");
+        let acp_audit_file = tmp.path().join("acp-wire-audit.jsonl");
         fs::create_dir_all(&config_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(&instance_data_dir).unwrap();
+        fs::write(&acp_audit_file, "").expect("create ACP wire audit file");
 
         let instance_token = fresh_token();
         let client_token = fresh_token();
@@ -130,7 +144,7 @@ impl TestEnv {
 
         let fake_bin_dir = tmp.path().join("fake-bin");
         fs::create_dir_all(&fake_bin_dir).unwrap();
-        write_fake_peri(&fake_bin_dir, &test_child_bin());
+        write_fake_peri(&fake_bin_dir, &test_child_bin(), &acp_audit_file);
 
         TestEnv {
             tmp,
@@ -141,6 +155,7 @@ impl TestEnv {
             client_token,
             fake_bin_dir,
             instance_data_dir,
+            acp_audit_file,
         }
     }
 
@@ -171,8 +186,12 @@ fn write_tokens_file(path: &Path, records: &[(String, &str, String)]) {
 
 /// fake `peri`：server 默认 ACP 命令 `peri acp`（M1 常量），instance 经 PATH
 /// 查找；脚本 exec test-child（argv 透传，test-child 忽略未知参数）。
-fn write_fake_peri(dir: &Path, test_child: &Path) {
-    let script = format!("#!/bin/sh\nexec '{}' \"$@\"\n", test_child.display());
+fn write_fake_peri(dir: &Path, test_child: &Path, audit_file: &Path) {
+    let script = format!(
+        "#!/bin/sh\nexec '{}' --audit-file '{}' \"$@\"\n",
+        test_child.display(),
+        audit_file.display()
+    );
     let p = dir.join("peri");
     fs::write(&p, script).expect("write fake peri");
     #[cfg(unix)]
@@ -454,6 +473,7 @@ impl Drop for InstanceProc {
 
 use acp_hub_proto::Frame;
 use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -484,6 +504,62 @@ impl WsClient {
             ready: false,
             role: "client",
         })
+    }
+
+    /// 使用浏览器 HttpOnly session cookie 建立预认证 WS。首帧直接订阅，
+    /// 不发送 bearer auth frame，覆盖真实 Web 登录后的连接语义。
+    pub async fn connect_cookie(
+        port: u16,
+        cookie: &str,
+        docs: &[&str],
+    ) -> Result<(WsClient, Vec<Frame>), String> {
+        let url = format!("ws://127.0.0.1:{port}/");
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| format!("构造 cookie ws request 失败: {e}"))?;
+        request.headers_mut().insert(
+            "origin",
+            format!("http://127.0.0.1:{port}")
+                .parse()
+                .map_err(|e| format!("origin header 非法: {e}"))?,
+        );
+        request.headers_mut().insert(
+            "cookie",
+            cookie
+                .parse()
+                .map_err(|e| format!("cookie header 非法: {e}"))?,
+        );
+        let (ws, _response) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| format!("cookie ws connect 失败: {e}"))?;
+        let mut client = WsClient {
+            ws,
+            auto_pong: true,
+            ready: false,
+            role: "client",
+        };
+        client
+            .send(&Frame::YsyncSubscribe(
+                acp_hub_proto::ysync::YsyncSubscribe {
+                    docs: docs.iter().map(|d| d.parse().unwrap()).collect(),
+                },
+            ))
+            .await?;
+        let mut snapshots = Vec::new();
+        client
+            .recv_until(
+                |frame| {
+                    if matches!(frame, Frame::YsyncUpdate(_)) {
+                        snapshots.push(frame.clone());
+                        false
+                    } else {
+                        matches!(frame, Frame::Ready(_))
+                    }
+                },
+                RECV_TIMEOUT,
+            )
+            .await?;
+        Ok((client, snapshots))
     }
 
     /// 发送一帧（serde 序列化）。
@@ -747,6 +823,25 @@ pub fn chat_ids(doc: &yrs::Doc) -> Vec<String> {
         }
     }
     out
+}
+
+/// root.projects/<project_id>/<field> 字符串读取。
+pub fn project_field(doc: &yrs::Doc, project_id: &str, field: &str) -> Option<String> {
+    nested_map_string(doc, "projects", project_id, field)
+}
+
+/// root.project_sessions/<session_id>/<field> 字符串读取。
+pub fn project_session_field(doc: &yrs::Doc, session_id: &str, field: &str) -> Option<String> {
+    nested_map_string(doc, "project_sessions", session_id, field)
+}
+
+fn nested_map_string(doc: &yrs::Doc, collection: &str, id: &str, field: &str) -> Option<String> {
+    let txn = doc.transact();
+    let root = txn.get_map("root")?;
+    let items = root.get(&txn, collection)?.cast::<yrs::MapRef>().ok()?;
+    let item = items.get(&txn, id)?.cast::<yrs::MapRef>().ok()?;
+    item.get(&txn, field)
+        .and_then(|value| value.cast::<String>().ok())
 }
 
 /// root.global/status。

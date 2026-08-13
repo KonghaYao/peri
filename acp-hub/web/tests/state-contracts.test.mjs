@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { beginOpen, matchesOpening, terminalCanCommit, shouldClearOpening, shouldIgnoreLateAck } from '../src/panel/lib/open-state.mjs';
-import { acceptMessageSubmission, beginMessageSubmission, beginQuickStart, completesMessageSubmission, failMessageSubmission, isTurnActive, lockPermissionDecision, markMessageUncertain, quickStartCanActivate, unlockPermissionDecision, updateQuickStart } from '../src/panel/lib/action-state.mjs';
-import { chooseRestorableSession, cleanSessionTitle, connectionProblemForClose, formatRelativeTime, retainLiveRuntimeHints, sessionDisplayTitle, shortSessionId } from '../src/panel/lib/recovery-state.mjs';
+import { transform } from 'lightningcss';
+import postcss from 'postcss';
+import { acceptMessageSubmission, beginMessageSubmission, beginQuickStart, completesMessageSubmission, failMessageSubmission, isTurnActive, lockPermissionDecision, markMessageUncertain, markPermissionDecisionUncertain, quickStartCanActivate, unlockPermissionDecision, updateQuickStart } from '../src/panel/lib/action-state.mjs';
+import { cleanSessionTitle, connectionProblemForClose, formatRelativeTime, retainLiveRuntimeHints, sessionDisplayTitle, shortSessionId } from '../src/panel/lib/recovery-state.mjs';
 import { messageTime } from '../src/panel/lib/message-time.mjs';
 import { parseMarkdown, safeHref } from '../src/panel/lib/markdown.mjs';
 import { messageActivity, nextFollowState } from '../src/panel/lib/message-follow.mjs';
@@ -15,26 +16,46 @@ import { runtimeState } from '../src/panel/lib/runtime-state.mjs';
 const parsePrincipal = (v) => v && ['full','read-only'].includes(v.role) ? v.role : null;
 const canMutate = (role) => role === 'full';
 
+test('source stylesheets are structurally valid and consume only declared design tokens', () => {
+  const source = join(import.meta.dirname, '..', 'src');
+  const files = ['styles.css', 'ui/primitives.css', 'ui/tokens.css'];
+  const roots = files.map((file) => {
+    const css = readFileSync(join(source, file), 'utf8');
+    const strict = transform({ filename: file, code: Buffer.from(css), errorRecovery: false });
+    assert.deepEqual(strict.warnings, [], `${file} has strict-parser warnings`);
+    return postcss.parse(css, { from: file });
+  });
+  for (const root of roots) {
+    root.walkAtRules('media', (media) => {
+      const directDeclarations = (media.nodes || []).filter((node) => node.type === 'decl');
+      assert.deepEqual(directDeclarations.map((decl) => `${decl.source?.start?.line}:${decl.prop}`), [], `${media.source?.input.file} has declarations outside a rule`);
+    });
+  }
+  const tokenSource = readFileSync(join(source, 'ui', 'tokens.css'), 'utf8');
+  const defined = new Set([...tokenSource.matchAll(/(--[\w-]+)\s*:/g)].map((match) => match[1]));
+  const used = new Set(files.slice(0, 2).flatMap((file) => [...readFileSync(join(source, file), 'utf8').matchAll(/var\((--[\w-]+)/g)].map((match) => match[1])));
+  assert.deepEqual([...used].filter((token) => !defined.has(token)).sort(), []);
+});
+
+test('Composer and quick start have one neutral keyboard-focus owner and no stale selectors', () => {
+  const css = readFileSync(join(import.meta.dirname, '..', 'src', 'styles.css'), 'utf8');
+  const root = postcss.parse(css);
+  const focusRules = [];
+  root.walkRules((rule) => {
+    if (rule.selector.includes('.composer-surface:focus-within') || rule.selector.includes('.quick-start__surface:focus-within')) focusRules.push(rule.selector);
+  });
+  assert.equal(focusRules.length, 1);
+  assert.doesNotMatch(css, /--focus-neutral|--surface-border-focus|\.permission-actions\b/);
+  assert.match(css, /\.composer-surface:has\(\.composer-input:focus-visible\)/);
+});
+
 test('runtime status distinguishes durable session state from process state', () => {
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: false, hasPendingPermission: false, turnActive: false }).label, '未启动 · 会话已保存');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'active', hasPendingPermission: false, turnActive: false }).tone, 'ready');
+  assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, isHydrated: false, chatStatus: 'active', hasPendingPermission: false, turnActive: false }).label, '正在载入会话…');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'active', hasPendingPermission: true, turnActive: true }).label, '等待你的许可');
   assert.equal(runtimeState({ hasSession: true, isOpening: false, hasRuntime: true, chatStatus: 'crashed', hasPendingPermission: false, turnActive: false }).tone, 'danger');
   assert.equal(runtimeState({ hasSession: true, lifecycle: 'reconciliation_required', isOpening: false, hasRuntime: false, hasPendingPermission: false, turnActive: false }).tone, 'attention');
-});
-
-test('opening a session preserves selection until its terminal ack', async () => {
-  const opening = beginOpen('cmd', 'new', 'old', 'chat-old');
-  assert.deepEqual(opening, { commandId:'cmd',sessionId:'new',previousSessionId:'old',previousChatId:'chat-old' });
-  assert.equal(terminalCanCommit(opening,{commandId:'cmd',status:'committed',chatId:'chat-new'}),true);
-  assert.equal(terminalCanCommit(opening,{commandId:'cmd',status:'duplicate',chatId:'chat-new'}),true);
-});
-
-test('stale terminal ack cannot switch a newer opening request', async () => {
-  const newer=beginOpen('b','session-b','old','chat-old');
-  assert.equal(terminalCanCommit(newer,{commandId:'a',status:'committed',chatId:'chat-a'}),false);
-  assert.equal(shouldClearOpening(newer,'a'),false);
-  assert.equal(matchesOpening(newer,'b'),true);
 });
 
 test('principal parsing and mutation policy are closed by default', async () => {
@@ -45,12 +66,6 @@ test('principal parsing and mutation policy are closed by default', async () => 
   assert.equal(canMutate('read-only'), false);
   assert.equal(canMutate(null), false);
 });
-test('timed out open rejects a late terminal ack', () => {
-  const ignored = new Set(['late']);
-  assert.equal(shouldIgnoreLateAck(ignored,{commandId:'late',status:'committed',chatId:'wrong'}),true);
-  assert.equal(shouldIgnoreLateAck(ignored,{commandId:'other',status:'committed',chatId:'ok'}),false);
-});
-
 test('message submission preserves text through accepted and uncertain states', () => {
   const sending = beginMessageSubmission('cmd-1', 'important draft');
   const accepted = acceptMessageSubmission(sending, 'cmd-1');
@@ -70,6 +85,14 @@ test('message retry identity survives uncertainty and a late terminal ack comple
   assert.equal(completesMessageSubmission(uncertain, { commandId: 'other-command', status: 'committed' }), false);
   assert.equal(completesMessageSubmission(uncertain, { commandId: 'same-command', status: 'committed' }), true);
   assert.equal(completesMessageSubmission(uncertain, { commandId: 'same-command', status: 'duplicate' }), true);
+});
+
+test('prompt recovery is owned by CommandTracker rather than an ad-hoc frame cache', () => {
+  const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
+  assert.match(store, /sendAction\(frame, 'prompt', \{\s*retryOnUncertain: true/);
+  assert.match(store, /sendAction\(frame, 'session\/create', \{\s*retryOnUncertain: true/);
+  assert.match(store, /commands\.retry\(current\.commandId, sendFrame\)/);
+  assert.doesNotMatch(store, /retryableMessageFrame|retryableQuickStartFrame/);
 });
 
 test('quick start preserves project, text and command identity until a complete activation ack', () => {
@@ -105,15 +128,17 @@ test('permission lock is idempotent and remains until the projection removes it'
   const empty = new Map();
   const locked = lockPermissionDecision(empty, 'permission-1', 'allow');
   assert.equal(lockPermissionDecision(locked, 'permission-1', 'deny'), locked);
-  assert.equal(locked.get('permission-1'), 'allow');
+  assert.deepEqual(locked.get('permission-1'), { decision: 'allow', phase: 'pending' });
+  const uncertain = markPermissionDecisionUncertain(locked, 'permission-1');
+  assert.deepEqual(uncertain.get('permission-1'), { decision: 'allow', phase: 'uncertain' });
+  assert.equal(markPermissionDecisionUncertain(uncertain, 'permission-1'), uncertain);
   assert.equal(unlockPermissionDecision(locked, 'permission-1').has('permission-1'), false);
 });
 
-test('last session restore accepts only an existing ready logical session', () => {
-  const sessions = [{ id: 'ready', lifecycle: 'ready' }, { id: 'failed', lifecycle: 'failed' }];
-  assert.equal(chooseRestorableSession('ready', sessions), sessions[0]);
-  assert.equal(chooseRestorableSession('failed', sessions), null);
-  assert.equal(chooseRestorableSession('missing', sessions), null);
+test('permission delivery uncertainty remains locked in the security surface', () => {
+  const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
+  assert.match(store, /onTimeout:\s*\(\)\s*=>\s*\{[\s\S]*?markPermissionDecisionUncertain\(decisions, permissionId\)[\s\S]*?不要提交相反决策/);
+  assert.match(store, /onError:\s*release/);
 });
 
 test('runtime hints survive only while Registry proves the chat is non-terminal', () => {
@@ -233,11 +258,44 @@ test('feature components consume the Solid UI library only through its public ba
   assert.deepEqual(offenders, []);
 });
 
+test('feature-owned SVG geometry always uses the shared finite icon canvas', () => {
+  const components = join(import.meta.dirname, '..', 'src', 'panel', 'components');
+  const offenders = readdirSync(components)
+    .filter((file) => file.endsWith('.tsx'))
+    .filter((file) => /<svg\b/.test(readFileSync(join(components, file), 'utf8')));
+  assert.deepEqual(offenders, []);
+  const icon = readFileSync(join(import.meta.dirname, '..', 'src', 'ui', 'Icon.tsx'), 'utf8');
+  assert.match(icon, /class={`ui-icon/);
+  assert.match(icon, /fill="none"/);
+  assert.match(icon, /stroke="currentColor"/);
+});
+
 test('high-frequency chat controls are owned by the Solid UI library', () => {
   const components = join(import.meta.dirname, '..', 'src', 'panel', 'components');
   for (const file of ['Composer.tsx', 'MessageList.tsx']) {
     assert.doesNotMatch(readFileSync(join(components, file), 'utf8'), /<button\b/, file);
   }
+});
+
+test('MessageList delegates entry semantics to one tested conversation component', () => {
+  const components = join(import.meta.dirname, '..', 'src', 'panel', 'components');
+  const list = readFileSync(join(components, 'MessageList.tsx'), 'utf8');
+  const message = readFileSync(join(components, 'ConversationMessage.tsx'), 'utf8');
+  assert.match(list, /<ConversationMessage entry=\{entry\}/);
+  assert.doesNotMatch(list, /function MessageBubble|<Markdown|<ToolCallCard/);
+  assert.match(message, /conversation-message--\$\{role\(\)\}/);
+  assert.match(message, /role="alert" aria-label="消息错误"/);
+});
+
+test('the permission surface exposes a queue and never resolves an empty identity', () => {
+  const components = join(import.meta.dirname, '..', 'src', 'panel', 'components');
+  const messageList = readFileSync(join(components, 'MessageList.tsx'), 'utf8');
+  const queue = readFileSync(join(components, 'PermissionQueue.tsx'), 'utf8');
+  const card = readFileSync(join(components, 'PermissionRequestCard.tsx'), 'utf8');
+  assert.match(messageList, /<PermissionQueue/);
+  assert.doesNotMatch(messageList, /permissions\(\)\[0\]/);
+  assert.match(queue, /if \(id\) props\.onResolve\(id, decision\)/);
+  assert.match(card, /disabled=\{props\.readOnly \|\| locked\(\) \|\| !actionable\(\)\}/);
 });
 
 test('the shared Button defaults to non-submitting behavior', () => {
@@ -263,7 +321,7 @@ test('feature components never introduce literal colors', () => {
   assert.deepEqual(offenders, []);
 });
 
-test('responsive behavior has one compact breakpoint contract', () => {
+test('responsive behavior has compact, medium and wide layout contracts', () => {
   const root = join(import.meta.dirname, '..', 'src');
   const shell = readFileSync(join(root, 'panel', 'components', 'AppShell.tsx'), 'utf8');
   const css = readFileSync(join(root, 'styles.css'), 'utf8');
@@ -271,7 +329,14 @@ test('responsive behavior has one compact breakpoint contract', () => {
   assert.match(shell, /compactViewportQuery/);
   assert.doesNotMatch(shell, /max-width:\s*\d+px/);
   assert.match(breakpoints, /COMPACT_VIEWPORT_MAX\s*=\s*959/);
+  assert.match(breakpoints, /MEDIUM_VIEWPORT_MAX\s*=\s*1199/);
   assert.match(css, /@media\(max-width:959px\)/);
+  assert.match(css, /@media\(min-width:960px\) and \(max-width:1199px\)/);
+  const medium = css.match(/@media\(min-width:960px\) and \(max-width:1199px\)\{([\s\S]*?)\n\}/)?.[0] || '';
+  assert.match(medium, /grid-template-columns:240px minmax\(0,1fr\)/);
+  assert.match(medium, /max-width:760px/);
+  assert.match(medium, /max-width:800px/);
+  assert.doesNotMatch(medium, /project-drawer\{[^}]*position:fixed/);
 });
 
 test('coarse pointers never depend on hover to discover sidebar actions', () => {
@@ -303,15 +368,20 @@ test('composer keeps the writing surface quiet and keyboard behavior discoverabl
   assert.match(composer, /runtimeSummary/);
   assert.doesNotMatch(composer, />\s*effort：/);
   assert.doesNotMatch(composer, />\s*上下文：/);
-  assert.match(styles, /\.composer-surface:focus-within\{[^}]*var\(--focus-neutral\)/);
+  assert.match(styles, /\.composer-surface:focus-within\s*\{[^}]*border-color:\s*var\(--border-strong\)/);
+  assert.match(styles, /\.composer-surface:has\(\.composer-input:focus-visible\)\s*\{[^}]*var\(--focus-ring\)/);
+  assert.match(styles, /\.composer-toolbar>\.ui-tooltip-anchor\{margin-left:auto;flex:0 0 auto\}/);
   assert.doesNotMatch(styles, /\.composer-surface:focus-within\{[^}]*(?:blue|#[0-9a-f]*ff[0-9a-f]*)/i);
 });
 
 test('connection loss settles pending actions instead of silently discarding their callbacks', () => {
-  const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
-  assert.match(store, /function settlePendingActionsAsUncertain\(\)/);
-  assert.match(store, /case 'reconnecting':[\s\S]*?settlePendingActionsAsUncertain\(\)/);
-  assert.match(store, /export function connectWithCookie\(\)[\s\S]*?settlePendingActionsAsUncertain\(\)/);
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const tracker = readFileSync(join(root, 'lib', 'command-tracker.ts'), 'utf8');
+  assert.match(tracker, /settleConnectionLoss\(\): void/);
+  assert.match(tracker, /for \(const commandId of \[\.\.\.this\.pending\.keys\(\)\]\)/);
+  assert.match(store, /case 'reconnecting':[\s\S]*?commands\.settleConnectionLoss\(\)/);
+  assert.match(store, /export function connectWithCookie\(\)[\s\S]*?commands\.settleConnectionLoss\(\)/);
   assert.doesNotMatch(store, /connectWithCookie\(\)[\s\S]{0,500}setPersistentErrors\(\[\]\)/);
 });
 
@@ -321,6 +391,12 @@ test('replaced websocket callbacks cannot mutate the new connection state', () =
   assert.match(store, /const epoch = \+\+connectionEpoch/);
   assert.match(store, /onStatus: \(state, detail\) => \{ if \(epoch === connectionEpoch\) onStatus\(state, detail\); \}/);
   assert.match(store, /onFrame: \(frame\) => \{ if \(epoch === connectionEpoch\) onFrame\(frame\); \}/);
+});
+
+test('routine connection readiness stays in persistent status instead of interrupting with a toast', () => {
+  const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
+  assert.match(store, /case 'ready':[\s\S]*?setConnState\(\{ text: '就绪', kind: 'ok' \}\)/);
+  assert.doesNotMatch(store, /toast\('连接就绪'\)/);
 });
 
 test('browser diagnostics never print raw protocol or user payloads', () => {
@@ -333,6 +409,16 @@ test('browser diagnostics never print raw protocol or user payloads', () => {
   assert.doesNotMatch(yjs, /console\.warn\([^\n]*,\s*err\)/);
 });
 
+test('downstream parsing rejects unsafe JSON shapes while preserving future tags', () => {
+  const protocol = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'protocol.ts'), 'utf8');
+  const ws = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'lib', 'ws-client.ts'), 'utf8');
+  assert.match(protocol, /!value \|\| typeof value !== 'object' \|\| Array\.isArray\(value\)/);
+  assert.match(protocol, /typeof frame\.t !== 'string' \|\| !frame\.t\.trim\(\)/);
+  assert.doesNotMatch(protocol, /FRAME_TAGS|KNOWN_TAGS|switch \(frame\.t\)/);
+  assert.match(ws, /\[ws-client\] 帧解析失败 length=\$\{size\}/);
+  assert.doesNotMatch(ws, /帧解析失败[^\n]*(?:ev\.data|JSON\.stringify)/);
+});
+
 test('design tokens cannot directly reference themselves', () => {
   const css = readFileSync(join(import.meta.dirname, '..', 'src', 'ui', 'tokens.css'), 'utf8');
   const selfReferences = [...css.matchAll(/--([a-z0-9-]+)\s*:\s*var\(--\1\)/gi)].map((match) => match[1]);
@@ -342,8 +428,11 @@ test('design tokens cannot directly reference themselves', () => {
 test('reusable design tokens have one UI-library source', () => {
   const root = join(import.meta.dirname, '..', 'src');
   const styles = readFileSync(join(root, 'styles.css'), 'utf8');
+  const primitives = readFileSync(join(root, 'ui', 'primitives.css'), 'utf8');
   const tokens = readFileSync(join(root, 'ui', 'tokens.css'), 'utf8');
-  assert.match(styles, /^@import 'tailwindcss';\n@import '\.\/ui\/tokens\.css';/);
+  assert.match(styles, /^@import 'tailwindcss';\n@import '\.\/ui\/primitives\.css';/);
+  assert.doesNotMatch(styles, /@import '\.\/ui\/tokens\.css'/);
+  assert.match(primitives, /^@import '\.\/tokens\.css';/);
   assert.doesNotMatch(styles, /:root\s*\{/);
   assert.match(tokens, /:root\s*\{/);
   assert.match(tokens, /--composer-border:/);
@@ -354,6 +443,30 @@ test('reusable design tokens have one UI-library source', () => {
     .map((file) => readFileSync(join(root, 'panel', 'components', file), 'utf8'))];
   const referenced = new Set(sourceFiles.flatMap((source) => [...source.matchAll(/var\(--([a-z0-9-]+)/gi)].map((match) => match[1])));
   assert.deepEqual([...referenced].filter((token) => !declared.has(token)), []);
+});
+
+test('primitive visuals are standalone and do not leak into feature styles', () => {
+  const root = join(import.meta.dirname, '..', 'src');
+  const styles = readFileSync(join(root, 'styles.css'), 'utf8');
+  const primitives = readFileSync(join(root, 'ui', 'primitives.css'), 'utf8');
+  const drawer = readFileSync(join(root, 'ui', 'Drawer.tsx'), 'utf8');
+  const ownedSelectors = [
+    '.ui-icon{', '.ui-button{', '.ui-icon-button{', '.ui-field{', '.ui-dialog-backdrop{',
+    '.ui-drawer-scrim{', '.ui-menu{', '.ui-tooltip{', '.ui-status{', '.ui-badge{',
+    '.ui-toast{', '.ui-empty{', '.ui-spinner{', '.ui-scrollbar{',
+  ];
+  for (const selector of ownedSelectors) {
+    assert.match(primitives, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const className = selector.slice(0, -1);
+    const escapedClass = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.doesNotMatch(
+      styles,
+      new RegExp(`(?:^|})\\s*${escapedClass}\\s*\\{`, 'm'),
+      `${className} base styles must remain owned by primitives.css`,
+    );
+  }
+  assert.match(drawer, /class="ui-drawer-scrim"/);
+  assert.doesNotMatch(styles, /drawer-scrim/);
 });
 
 test('domain status inference delegates visual rendering to the shared Badge', () => {
@@ -373,9 +486,9 @@ test('icon-only controls receive visible help from the shared Tooltip', () => {
   assert.doesNotMatch(button, /title=\{/);
   assert.match(tooltip, /role="tooltip"/);
   assert.match(tooltip, /event\.key === 'Escape'/);
-  const sidebar = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'components', 'ProjectSidebar.tsx'), 'utf8');
-  assert.match(sidebar, /<IconButton[^>]*class="session-menu"/);
-  assert.doesNotMatch(sidebar, /<button[^>]*class="session-menu"/);
+  const sessionRow = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'components', 'ProjectSessionRow.tsx'), 'utf8');
+  assert.match(sessionRow, /<IconButton[^>]*[\s\S]*?class="session-menu"/);
+  assert.doesNotMatch(sessionRow, /<button[^>]*class="session-menu"/);
 });
 
 test('responsive navigation behavior belongs to the shared Drawer primitive', () => {
@@ -403,13 +516,17 @@ test('all empty-session creation entry points share one store-level single-fligh
 });
 
 test('uncertain metadata retries preserve the original frame identity and are identity-scoped', () => {
-  const store = readFileSync(join(import.meta.dirname, '..', 'src', 'panel', 'store.ts'), 'utf8');
-  assert.match(store, /registerUncertainAction\(frame\.commandId, \{ frame, label, options \}\)/);
-  assert.match(store, /const sent = sendAction\(retry\.frame, retry\.label, retry\.options\)/);
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const tracker = readFileSync(join(root, 'lib', 'command-tracker.ts'), 'utf8');
+  assert.match(tracker, /this\.uncertain\.set\(commandId, request\)/);
+  assert.match(tracker, /return this\.dispatch\(request, send\)/);
+  assert.match(tracker, /frame: tracked\.frame/);
+  assert.match(store, /const sent = commands\.retry\(commandId, sendFrame\) === 'sent'/);
   assert.match(store, /if \(sent\) setPersistentErrors/);
-  assert.match(store, /uncertainActionRetries\.clear\(\)/);
+  assert.match(store, /commands\.reset\(\)/);
   assert.match(store, /function rejectWhileMetadataUncertain\(\)/);
-  assert.match(store, /setUncertainMetadataCount\(uncertainActionRetries\.size\)/);
+  assert.match(store, /onUncertainCountChange: setUncertainMetadataCount/);
   for (const action of ['project/create', 'project/archive', 'project/restore', 'project/rename', 'session/create', 'session/rename', 'session/import']) {
     const escaped = action.replace('/', '\\/');
     assert.match(store, new RegExp(`sendAction\\(frame, '${escaped}', \\{ retryOnUncertain: true`), action);
@@ -432,11 +549,13 @@ test('session navigation closes only after a server-authoritative open commits',
   const root = join(import.meta.dirname, '..', 'src', 'panel');
   const store = readFileSync(join(root, 'store.ts'), 'utf8');
   const sidebar = readFileSync(join(root, 'components', 'ProjectSidebar.tsx'), 'utf8');
+  const sessionRow = readFileSync(join(root, 'components', 'ProjectSessionRow.tsx'), 'utf8');
   const search = readFileSync(join(root, 'components', 'SessionSearch.tsx'), 'utf8');
   assert.match(store, /export interface OpenSessionCallbacks/);
   assert.match(store, /callbacks\.onCommitted\?\.\(\)/);
-  assert.match(sidebar, /openProjectSession\(session\.id, \{ onCommitted: props\.onNavigate \}\)/);
-  assert.doesNotMatch(sidebar, /openProjectSession\(session\.id\); props\.onNavigate/);
+  assert.match(sidebar, /onOpen=\{\(sessionId, onCommitted\) => \{ navigateProjectSession\(sessionId, \{ onCommitted \}\); \}\}/);
+  assert.match(sessionRow, /props\.onOpen\(props\.session\.id, props\.onNavigate\)/);
+  assert.doesNotMatch(sessionRow, /props\.onOpen\(props\.session\.id[^;]*;\s*props\.onNavigate\(\)/);
   assert.match(search, /onCommitted: \(\) => \{ props\.onClose\(\)/);
   assert.match(search, /onUncertain:/);
 });

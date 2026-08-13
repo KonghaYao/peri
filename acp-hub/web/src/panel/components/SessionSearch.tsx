@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from 'solid-js';
 import { Dialog, primaryShortcut, Spinner, TextField } from '../../ui';
-import { openProjectSession, openingSessionId, projectSessions, projects, readOnly, selectedSessionId, selectPersistedSessionLocally } from '../store';
+import { navigateProjectSession, openingSessionId, projectSessions, projects, readOnly, selectedSessionId } from '../store';
 import { formatRelativeTime, sessionDisplayTitle, shortSessionId } from '../lib/recovery-state.mjs';
 import { searchProjectSessions } from '../lib/session-search.mjs';
 import type { ProjectSessionInfo } from '../lib/yjs';
@@ -15,13 +15,11 @@ export function SessionSearch(props: { open: boolean; onClose: () => void; onSel
   createEffect(() => { if (!props.open) { setQuery(''); setProblem(null); } });
   const choose = (session: ProjectSessionInfo) => {
     setProblem(null);
-    if (readOnly() && session.activeChatId) { selectPersistedSessionLocally(session.id, session.activeChatId); props.onClose(); props.onSelected?.(); }
-    else if (!readOnly()) openProjectSession(session.id, {
+    navigateProjectSession(session.id, {
       onCommitted: () => { props.onClose(); props.onSelected?.(); },
       onFailed: (message) => setProblem(message),
       onUncertain: () => setProblem('打开结果尚未确认。当前会话没有切换，请等待状态同步后再决定是否重试。'),
     });
-    else return;
   };
   const focusResult = (direction: 1 | -1) => {
     const items = [...(resultList?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || [])];

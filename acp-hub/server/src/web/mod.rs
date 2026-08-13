@@ -19,7 +19,7 @@
 //! 持任何动态端点，页面的 ws 探测直连 hub 的 ws 时序（无 token 会被 1011
 //! 关闭，见面板内连接逻辑，如实展示，不造假）。
 
-use crate::auth::{AuthService, BROWSER_COOKIE};
+use crate::auth::{AuthService, BROWSER_COOKIE, BROWSER_SESSION_TTL_SECS};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,6 +31,12 @@ const MAX_HTTP_BODY: usize = 4 * 1024;
 const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserLoginRequest {
+    token: String,
+}
 
 /// 静态资源路由表：URL 路径 → 产物相对路径。`/`、`/index.html` 与旧链接
 /// `/panel.html` 均映射面板入口 `index.html`，`/assets/*` 直接对应 vite
@@ -204,21 +210,64 @@ pub(crate) async fn serve_http(
         .split('?')
         .next()
         .unwrap_or_default();
+    let version = request_parts.next().unwrap_or_default();
+    let mut malformed = version != "HTTP/1.1" || request_parts.next().is_some();
     let mut host = None;
     let mut origin = None;
     let mut cookie = None;
-    let mut content_length = 0usize;
+    let mut content_type = None;
+    let mut content_length = None;
+    let mut transfer_encoding = None;
+    let mut cookie_header_seen = false;
     for line in lines {
+        if line.is_empty() {
+            continue;
+        }
         let Some((name, value)) = line.split_once(':') else {
+            malformed = true;
             continue;
         };
-        match name.trim().to_ascii_lowercase().as_str() {
-            "host" => host = Some(value.trim()),
-            "origin" => origin = Some(value.trim()),
-            "cookie" => cookie = cookie_value(value.trim(), BROWSER_COOKIE),
-            "content-length" => content_length = value.trim().parse().unwrap_or(MAX_HTTP_BODY + 1),
+        if name != name.trim() || !is_http_header_name(name) {
+            malformed = true;
+            continue;
+        }
+        let name = name.to_ascii_lowercase();
+        let value = value.trim();
+        match name.as_str() {
+            "host" => set_unique_header(&mut host, value, &mut malformed),
+            "origin" => set_unique_header(&mut origin, value, &mut malformed),
+            "cookie" => {
+                if cookie_header_seen {
+                    malformed = true;
+                } else {
+                    cookie_header_seen = true;
+                    cookie = cookie_value(value, BROWSER_COOKIE);
+                }
+            }
+            "content-type" => set_unique_header(&mut content_type, value, &mut malformed),
+            "content-length" => {
+                if content_length.is_some() {
+                    malformed = true;
+                } else {
+                    content_length = value.parse::<usize>().ok();
+                    if content_length.is_none() {
+                        malformed = true;
+                    }
+                }
+            }
+            "transfer-encoding" => set_unique_header(&mut transfer_encoding, value, &mut malformed),
             _ => {}
         }
+    }
+    if malformed || method.is_empty() || path.is_empty() {
+        return write_http(
+            &mut stream,
+            "400 Bad Request",
+            "application/json",
+            br#"{"error":"bad_request"}"#,
+            &security_headers(),
+        )
+        .await;
     }
     if path != "/api/auth/session" {
         return serve_static_consumed(stream, method, path).await;
@@ -236,12 +285,111 @@ pub(crate) async fn serve_http(
         )
         .await;
     }
+    if transfer_encoding.is_some() {
+        return write_http(
+            &mut stream,
+            "400 Bad Request",
+            "application/json",
+            br#"{"error":"transfer_encoding_not_supported"}"#,
+            &security_headers(),
+        )
+        .await;
+    }
+    let content_length = content_length.unwrap_or(0);
+    match method {
+        "POST" => {
+            if origin.is_none() {
+                return write_http(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    br#"{"error":"origin_required"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+            if !content_type.is_some_and(is_json_content_type) {
+                return write_http(
+                    &mut stream,
+                    "415 Unsupported Media Type",
+                    "application/json",
+                    br#"{"error":"content_type"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+            if content_length == 0 {
+                return write_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"error":"body_required"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+        }
+        "GET" => {
+            if content_length != 0 {
+                return write_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"error":"body_not_allowed"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+        }
+        "DELETE" => {
+            if origin.is_none() {
+                return write_http(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json",
+                    br#"{"error":"origin_required"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+            if content_length != 0 {
+                return write_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"error":"body_not_allowed"}"#,
+                    &security_headers(),
+                )
+                .await;
+            }
+        }
+        _ => {
+            return write_http(
+                &mut stream,
+                "405 Method Not Allowed",
+                "application/json",
+                br#"{"error":"method"}"#,
+                &security_headers(),
+            )
+            .await;
+        }
+    }
     if content_length > MAX_HTTP_BODY {
         return write_http(
             &mut stream,
             "413 Payload Too Large",
             "application/json",
             br#"{"error":"too_large"}"#,
+            &security_headers(),
+        )
+        .await;
+    }
+    if buf.len() - head_end > content_length {
+        return write_http(
+            &mut stream,
+            "400 Bad Request",
+            "application/json",
+            br#"{"error":"body_length_mismatch"}"#,
             &security_headers(),
         )
         .await;
@@ -265,12 +413,12 @@ pub(crate) async fn serve_http(
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.len() - head_end > MAX_HTTP_BODY {
+        if buf.len() - head_end > content_length {
             return write_http(
                 &mut stream,
-                "413 Payload Too Large",
+                "400 Bad Request",
                 "application/json",
-                br#"{"error":"too_large"}"#,
+                br#"{"error":"body_length_mismatch"}"#,
                 &security_headers(),
             )
             .await;
@@ -288,18 +436,26 @@ pub(crate) async fn serve_http(
     }
     let response = match method {
         "POST" => {
-            let body: serde_json::Value = serde_json::from_slice(
+            let body: BrowserLoginRequest = match serde_json::from_slice(
                 &buf[head_end..head_end + content_length.min(buf.len() - head_end)],
-            )
-            .unwrap_or_default();
-            match body
-                .get("token")
-                .and_then(|v| v.as_str())
-                .and_then(|token| {
-                    auth.try_lock()
-                        .ok()
-                        .and_then(|mut a| a.create_browser_session(token).ok())
-                }) {
+            ) {
+                Ok(body) => body,
+                Err(_) => {
+                    return write_http(
+                        &mut stream,
+                        "400 Bad Request",
+                        "application/json",
+                        br#"{"error":"invalid_json"}"#,
+                        &security_headers(),
+                    )
+                    .await;
+                }
+            };
+            match auth
+                .try_lock()
+                .ok()
+                .and_then(|mut a| a.create_browser_session(&body.token).ok())
+            {
                 Some((sid, ctx)) => (
                     "200 OK",
                     serde_json::to_vec(
@@ -308,7 +464,9 @@ pub(crate) async fn serve_http(
                     .unwrap(),
                     vec![(
                         "Set-Cookie".to_string(),
-                        format!("{BROWSER_COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/"),
+                        format!(
+                            "{BROWSER_COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={BROWSER_SESSION_TTL_SECS}"
+                        ),
                     )],
                 ),
                 None => (
@@ -352,11 +510,7 @@ pub(crate) async fn serve_http(
                 )],
             )
         }
-        _ => (
-            "405 Method Not Allowed",
-            br#"{"error":"method"}"#.to_vec(),
-            vec![],
-        ),
+        _ => unreachable!("method surface validated before body read"),
     };
     let mut extra = security_headers();
     extra.extend(response.2);
@@ -375,22 +529,69 @@ async fn serve_static_consumed(
     method: &str,
     path: &str,
 ) -> std::io::Result<()> {
-    let found = if method == "GET" { route(path) } else { None };
+    let is_head = method == "HEAD";
+    let found = if method == "GET" || is_head {
+        route(path)
+    } else {
+        None
+    };
     match found {
-        Some((_, ct, body)) => {
-            write_http(&mut stream, "200 OK", ct, body, &security_headers()).await
+        Some((name, ct, body)) => {
+            let mut headers = base_security_headers();
+            headers.extend(cache_headers_for_static(path, Some(name)));
+            write_http_response(&mut stream, "200 OK", ct, body, &headers, !is_head).await
         }
         None => {
-            write_http(
+            let mut headers = base_security_headers();
+            headers.extend(cache_headers_for_static(path, None));
+            write_http_response(
                 &mut stream,
                 "404 Not Found",
                 "text/plain",
                 b"404 Not Found\n",
-                &security_headers(),
+                &headers,
+                !is_head,
             )
             .await
         }
     }
+}
+
+/// Static cache policy is identity-based, not extension-based. Only a real embedded
+/// Vite asset under `/assets/` is immutable; entry documents and misses always fetch
+/// fresh so a restarted server cannot be paired with an obsolete client bundle.
+pub(crate) fn cache_headers_for_static(
+    request_path: &str,
+    routed_name: Option<&str>,
+) -> Vec<(String, String)> {
+    let immutable =
+        request_path.starts_with("/assets/") && routed_name.is_some_and(is_fingerprinted_asset);
+    vec![(
+        "Cache-Control".into(),
+        if immutable {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-store"
+        }
+        .into(),
+    )]
+}
+
+fn is_fingerprinted_asset(name: &str) -> bool {
+    let Some(file_name) = name
+        .strip_prefix("assets/")
+        .and_then(|path| path.rsplit('/').next())
+    else {
+        return false;
+    };
+    let stem = file_name.split('.').next().unwrap_or_default();
+    let Some((_, fingerprint)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    fingerprint.len() >= 8
+        && fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 async fn write_http(
     stream: &mut TcpStream,
@@ -398,6 +599,17 @@ async fn write_http(
     ct: &str,
     body: &[u8],
     headers: &[(String, String)],
+) -> std::io::Result<()> {
+    write_http_response(stream, status, ct, body, headers, true).await
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    ct: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    include_body: bool,
 ) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -411,12 +623,22 @@ async fn write_http(
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
+    if include_body {
+        stream.write_all(body).await?;
+    }
     stream.shutdown().await
 }
 fn security_headers() -> Vec<(String, String)> {
-    vec![
+    let mut headers = base_security_headers();
+    headers.extend([
         ("Cache-Control".into(), "no-store".into()),
+        ("Pragma".into(), "no-cache".into()),
+    ]);
+    headers
+}
+
+fn base_security_headers() -> Vec<(String, String)> {
+    vec![
         ("X-Content-Type-Options".into(), "nosniff".into()),
         (
             "Content-Security-Policy".into(),
@@ -426,6 +648,36 @@ fn security_headers() -> Vec<(String, String)> {
         ("X-Frame-Options".into(), "DENY".into()),
     ]
 }
+
+fn set_unique_header<'a>(slot: &mut Option<&'a str>, value: &'a str, malformed: &mut bool) {
+    if slot.replace(value).is_some() {
+        *malformed = true;
+    }
+}
+
+fn is_http_header_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn is_json_content_type(value: &str) -> bool {
+    let mut parts = value.split(';').map(str::trim);
+    if !parts
+        .next()
+        .is_some_and(|media| media.eq_ignore_ascii_case("application/json"))
+    {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(parameter) => {
+            parameter.eq_ignore_ascii_case("charset=utf-8") && parts.next().is_none()
+        }
+    }
+}
+
 pub(crate) fn valid_loopback_host(host: &str) -> bool {
     let h = if let Some(rest) = host.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")

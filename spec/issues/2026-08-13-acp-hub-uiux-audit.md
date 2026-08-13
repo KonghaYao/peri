@@ -408,6 +408,107 @@ Verification:
 - An architecture contract prevents sidebar/search navigation from returning to send-then-close behavior; `git diff --check` passed.
 - The isolated service recovered 137 chats, authenticated/reconciled the local instance, and serves `index-CLoomQby.js` with `index-CWruQ5aU.css`.
 
+### 2026-08-13 — First-prompt session identity
+
+- A Hub-created session no longer remains one of several indistinguishable fallback rows while waiting for an ACP title refresh. After the prompt has crossed the ACP dispatch boundary and the server has attempted its authoritative user-entry projection, the Hub derives a one-shot navigation fallback from its first meaningful line.
+- The fallback is a separate SQLite fact (`hub_title`), introduced by an additive v2→v3 migration. It is not written into `acp_title` and never claims that the ACP thread was renamed.
+- Display precedence is explicit and tested: user alias → meaningful ACP title → Hub first-prompt fallback → low-information ACP default → `新对话`. A later exact-id `session/list` title naturally takes over; a user alias always remains authoritative.
+- Derivation normalizes internal whitespace, ignores leading blank lines, truncates on Unicode character boundaries at 60 characters, and writes only once for `origin='hub'`. Imported and unknown ACP sessions are never admitted or renamed by this path.
+- A metadata/projection failure is logged without changing the already-safe prompt delivery result. The next title refresh/reprojection remains the repair path; naming cannot turn a delivered prompt into a false failure.
+
+Verification:
+
+- `cargo test -p acp-hub-server --lib` — 390/390 passed with loopback permissions, including additive migration, title precedence/idempotency and the prompt-forward→SQLite→Registry coordinator path.
+- `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` — passed in the standalone acp-hub workspace.
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node contracts, 63/63 Solid DOM/Yjs tests and production build passed (94 modules; 193.22 kB JavaScript and 44.00 kB CSS before gzip).
+
+### 2026-08-13 — Project session row boundary
+
+- The project sidebar no longer implements a saved session's open, read-only reuse, rename form and recovery affordances inline. `ProjectSessionRow` is now a feature-domain component with an explicit facts/events interface; it has no WebSocket, Yjs subscription or command-id knowledge.
+- Navigation remains server-authoritative: a normal row delegates the navigation callback as the `session/open` committed continuation, while a read-only principal may only switch locally to a runtime already proven active by Registry state.
+- Rename draft, validation and submitting state are local to the row. The editor closes only after committed/duplicate acknowledgement and remains actionable after a definite send or server failure.
+- Architecture contracts were updated to follow the actual component boundary rather than assuming these controls remain textually inside `ProjectSidebar.tsx`.
+
+Evidence:
+
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node contracts and 66/66 Solid DOM/Yjs tests passed across 11 test files; production build passed (95 modules; 194.11 kB JavaScript and 44.00 kB CSS before gzip).
+- `cd acp-hub/web && git diff --check` — passed.
+
+### 2026-08-13 — Session import workflow boundary
+
+- `SessionImportDialog` now owns the import query, candidate selection and submitting lifecycle. `ProjectSidebar` supplies only the selected project fact, current ACP candidates, close event and authenticated import command.
+- Candidate admission remains exact and inspectable: cwd scope is applied before presentation, already-cataloged ACP ids are excluded by the store selector, and search matches the cleaned title or full stable ACP session id.
+- Import is confirmation-driven. The dialog remains open while the command is pending, closes only after committed/duplicate acknowledgement, and preserves the selected candidate after a definite failure so the user can retry without reconstructing context.
+
+Evidence:
+
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node contracts and 69/69 Solid DOM/Yjs tests passed across 12 test files; production build passed (96 modules; 194.30 kB JavaScript and 44.00 kB CSS before gzip).
+- Focused DOM coverage proves cwd filtering, stable-id filtering, committed-only close and failure-state retention.
+
+### 2026-08-13 — Browser command lifecycle module
+
+- The 900-line Solid store no longer owns ad-hoc pending timers and uncertain-retry maps. `CommandTracker` is the single in-process module for transport acceptance, accepted→terminal ordering, timeout, connection-loss settlement, exact-frame retry and late-terminal cleanup.
+- Its interface is deliberately domain-neutral: callers provide one frame, one label and lifecycle callbacks; the module knows nothing about projects, sessions, prompts, permissions, Solid signals or UI copy. The store remains the adapter that maps generic outcomes into domain state.
+- `accepted` never releases a command. Exactly one pending terminal acknowledgement or error releases its timer and continuation; a late terminal acknowledgement after timeout clears reconciliation evidence without re-running the expired continuation.
+- Retryable metadata uncertainty retains the exact original frame and command id until terminal evidence or explicit dismissal. A transport-rejected retry cannot erase that evidence, and a duplicate concurrent dispatch with the same command id never reaches the socket twice.
+- Connection replacement, reconnect, fatal close, ordinary close and explicit disconnect all pass through the same settlement path. Reset cancels every timer and clears both pending and reconciliation state without firing domain callbacks.
+
+Evidence:
+
+- Direct fake-timer tests cover accepted→committed, exactly-once terminal handling, timeout→same-frame retry, late terminal cleanup, disconnect settlement, transport rejection, duplicate in-flight dispatch, failed retry evidence retention, terminal error and reset cleanup.
+- Store architecture contracts now follow the module seam instead of asserting a particular private map/helper implementation.
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node contracts and 78/78 module/Solid DOM/Yjs tests passed across 13 test files; production build passed (97 modules; 195.69 kB JavaScript and 44.00 kB CSS before gzip).
+- `cd acp-hub/web && git diff --check` — passed.
+
+### 2026-08-13 — Compact / medium / wide reading rhythm
+
+- Responsive behavior now has three explicit product states instead of treating every non-mobile viewport as the same desktop. Compact (`≤959px`) keeps the proven modal Drawer; medium (`960–1199px`) keeps navigation structural but reduces it from 280px to 240px; wide (`≥1200px`) retains the full catalog and 820/864px reading rhythm.
+- The medium state spends reclaimed width on the actual task: message reading is capped at 760px and the Composer at 800px, while header, alert and content gutters tighten together. Navigation hierarchy remains intact; project/session actions and runtime state are not hidden or replaced by an icon-only rail.
+- Breakpoint ownership remains centralized in `ui/breakpoints.ts`. `MEDIUM_VIEWPORT_MAX=1199` joins the existing compact and phone contracts; feature JavaScript contains no duplicated media-query literal.
+- The medium media block is deliberately CSS-only because no interaction semantics change there. Drawer modal state still begins only at the compact threshold, preventing a second responsive state machine.
+
+Evidence:
+
+- The source contract proves all three ranges, the 240px structural sidebar, 760/800px reading limits, and the absence of fixed/modal Drawer behavior in medium mode.
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node contracts and 78/78 module/Solid DOM/Yjs tests passed; production build passed (97 modules; 195.70 kB JavaScript and 44.60 kB CSS before gzip).
+- `cd acp-hub/web && git diff --check` — passed.
+- The restarted local service recovered 137 chats, reauthenticated the local instance, completed alive-session reconciliation and serves `index-CxnjoQ_A.js` with `index-DxM2Up69.css`. In-app-browser reload was explicitly rejected by its localhost URL policy; no workaround was attempted, so screenshot/pixel evidence for the medium state remains open rather than inferred from source.
+
+### 2026-08-13 — Browser project/session restart journey
+
+- The product's primary persistence claim is now covered by a real process-level integration journey rather than inferred from metadata unit tests. It starts the production server, instance daemon and ACP child, logs in through `POST /api/auth/session`, and opens a cookie-preauthenticated WebSocket whose first frame is the Registry subscription rather than a bearer token.
+- The journey creates a project and Hub-owned logical session, sends a first prompt, then kills and restarts both server and instance against the same isolated data directories. The pre-restart browser cookie is required to fail because browser sessions are memory-only; a fresh login restores the same project id, logical session id and exact ACP session id from Registry v2.
+- Reopening the restored logical session must return a new runtime chat id and the original ACP session id. The test then subscribes the new chat and requires both a committed prompt result and a Yjs chat update, proving the restored binding accepts real ACP traffic rather than merely acknowledging `session/load`.
+- The ACP test child now models `session/load` explicitly: it adopts the requested durable session id and uses that exact identity for subsequent notifications. A focused child-process test prevents the E2E substitute from silently treating load as an unknown no-op.
+- Login evidence also asserts `HttpOnly`, `SameSite=Strict`, `Path=/`, `Cache-Control: no-store`, `nosniff`, no bearer-token reflection, logout cookie expiry and post-logout 401.
+
+Evidence:
+
+- `cargo test -p acp-instance --test child_test test_session_load_restores_notification_identity` — passed.
+- `cargo build --workspace` — passed.
+- `cargo test -p acp-hub-server --test product_flow_tests -- --nocapture` — passed with real loopback processes; the final journey including post-load Yjs delivery finished in 2.04s.
+- Full regression after the new journey: server lib 390/390, auth contracts 4/4, existing process integration 6/6, resilience 3/3 and product flow 1/1 passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` and `git diff --check` — passed.
+- `cd acp-hub/web && bun run typecheck && bun run test && bun run build` — 45/45 Node contracts, 78/78 module/Solid DOM/Yjs tests and production build passed (97 modules; 195.70 kB JavaScript and 44.60 kB CSS before gzip).
+- Exact process inspection found only the intentionally retained local 8456 development server and its instance; no E2E `test-child` or temporary stack remained.
+
+### 2026-08-13 — Closed browser-auth HTTP surface
+
+- The browser token exchange is now a deliberately closed HTTP/1.1 protocol rather than permissive parsing added to the static asset server. POST and DELETE require an exact same-origin Origin; POST requires a non-empty bounded JSON body, while GET and DELETE reject bodies.
+- Ambiguous framing fails closed: any Transfer-Encoding, duplicate security-relevant header, malformed header name, unsupported HTTP version, invalid Content-Length, undeclared trailing bytes, short body or oversized body is rejected before credential validation. The login JSON schema rejects unknown fields, so malformed requests cannot be mislabeled as bad credentials.
+- `application/json` is the only login media type; one optional UTF-8 charset parameter is accepted. Form posts, missing content type, alternate charsets and duplicate parameters return 415/400 rather than reaching token validation.
+- Browser Cookie lifetime and server-side session lifetime now share one Rust constant. Login sends `Max-Age=28800`, and every auth response carries `Cache-Control: no-store`, `Pragma: no-cache` and `nosniff`.
+- The parser keeps one absolute five-second deadline across fragmented header/body reads. A real socket test proves legitimate fragmentation still reaches credential validation while the rejection matrix remains deterministic.
+
+Evidence:
+
+- `cargo test -p acp-hub-server --lib web::web_test` — 15/15 passed, including real TCP framing, Origin, media-type, body-boundary and fragmented-read cases.
+- `cargo test -p acp-hub-server --lib` — 394/394 passed.
+- `cargo test -p acp-hub-server --test auth_contract_tests` — 4/4 passed.
+- `cargo test -p acp-hub-server --test product_flow_tests` — passed; the cookie-authenticated create/restart/load journey remained intact.
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed.
+- The rebuilt isolated 8456 service returned 401 with `no-store`/`no-cache`/`nosniff`, 415 for `text/plain` login and 400 for chunked login in live black-box probes.
+
 ### 2026-08-13 — Interaction primitives under composition
 
 - Every feature-owned native button now declares its form behavior, and the source contract rejects an untyped `<button>`. Component rearrangement can no longer reintroduce implicit submit outside the shared primitive.
@@ -445,7 +546,205 @@ Verification:
 - `cd acp-hub/web && bun run test && bun run build` — 40/40 Node contracts and 46/46 Solid DOM/Yjs tests passed; production build passed (91 modules; 189.81 kB JavaScript and 42.48 kB CSS before gzip).
 - Tests cover non-dismissible mutation state, visible Dialog title/close action, original inert restoration, payload-safe diagnostics and platform shortcut labels.
 
+### 2026-08-13 — Single-owner session navigation
+
+- Logical session restore, explicit open, read-only live-runtime reuse, failure, uncertainty and late terminal acknowledgement are now one `SessionNavigator` state machine. The Solid store adapts effects to protocol sends, local preference cleanup and runtime Doc subscription; feature components no longer decide which navigation mechanism is safe.
+- Runtime selection remains unchanged until the exact current `session/open` command returns `committed` or `duplicate` with a chat id. An unrelated terminal Ack cannot supersede the active request, and a terminal Ack arriving after timeout cannot move the UI.
+- Late terminal Acks are no longer discarded before `CommandTracker`. They can close durable uncertainty evidence while the navigator independently quarantines their UI continuation. This removes the previous conflict between transport reconciliation and stale-navigation safety.
+- Last-session recovery runs once per authenticated UI lifetime, accepts only a Registry-proven ready session, reuses a live runtime in read-only mode, and forgets a stale browser preference without treating localStorage as authority.
+- The legacy `open-state.mjs` reducer and its duplicated source-contract tests were deleted. Module-level tests now exercise the public state-machine interface, including failed restore non-repetition.
+
 Verification:
 
-- `cd acp-hub/web && bun run typecheck && bun run test && bun run build` — 32/32 Node contracts, 22/22 Solid DOM/Yjs tests, and production build passed (86 modules; 182.76 kB JavaScript before gzip).
-- `bash -n acp-hub/dev.sh` and `git diff --check` — passed.
+- `cd acp-hub/web && bun run test` — 41/41 Node architecture contracts and 84/84 module/Solid DOM/Yjs tests passed across 14 files.
+- `cd acp-hub/web && bun run build` — passed (97 modules; 197.61 kB JavaScript and 44.60 kB CSS before gzip).
+
+### 2026-08-13 — Finite icon and Composer layout contracts
+
+- A real authenticated browser pass exposed a severe visual regression that source-only review had missed: the session-search circle inherited SVG's default black fill and no finite size, producing a large black disk in the sidebar. Every feature-owned icon now supplies geometry through the shared `Icon` primitive, which owns the 20×20 canvas, closed sizes, outline paint, line caps and decorative accessibility semantics.
+- An architecture contract scans every feature component and rejects bare `<svg>` canvases. This prevents a new button or navigation entry from silently bypassing the component system and relying on a selector that happens to include its class.
+- The same narrow-screen pass found that Tooltip's wrapper, not the nested Send button, participates in Composer flex layout. The toolbar now assigns the auto margin to `.ui-tooltip-anchor`, keeping Send/Stop pinned to the bottom-right hot zone on compact screens.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 42/42 Node architecture contracts and 85/85 module/Solid DOM/Yjs tests passed across 14 files.
+- `cd acp-hub/web && bun run build` — passed (98 modules; 198.11 kB JavaScript and 44.74 kB CSS before gzip).
+- Authenticated desktop browser evidence confirms the former black disk is now an 18px outline search icon and all sidebar/project/session controls share one stroke language.
+- Authenticated 390×844 evidence confirms Drawer/search Dialog remain viewport-correct and the Composer action geometry is `left=333,right=373,bottom=828` inside a surface `left=10,right=380,bottom=834`.
+
+### 2026-08-13 — Standalone primitive visual boundary
+
+- `src/ui/primitives.css` is now the component library's public visual entry and imports `tokens.css` itself. A consumer no longer needs product `styles.css` to render Button, Icon, Field, Dialog, Drawer scrim, Popover, Menu, Tooltip, Badge, Status, Spinner, Toast, EmptyState or shared scrollbars correctly.
+- Product `styles.css` retains only shell/feature layout and parent-qualified contextual overrides. Drawer scrim ownership moved into the Drawer primitive, removing a hidden dependency on the product's compact media query.
+- An executable architecture contract requires the public import chain, proves all base selectors exist in `primitives.css`, and rejects independent primitive-base redefinitions in product styles while still permitting explicit contextual layout overrides.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 43/43 Node architecture contracts and 85/85 module/Solid DOM/Yjs tests passed across 14 files.
+- `cd acp-hub/web && bun run build` — passed (98 modules; 198.12 kB JavaScript and 45.06 kB CSS before gzip).
+
+### 2026-08-13 — Runtime hydration truth and empty-conversation continuity
+
+- Authenticated desktop/mobile inspection found a selected, writable, zero-message session rendered as a nearly blank page: Header already said `可输入`, Composer was active, but the conversation surface gave no confirmation that session activation had succeeded. More importantly, the same empty entry array also existed before runtime history arrived, so adding generic empty copy alone would have lied during restore.
+- The store now tracks chat and control Y.Doc hydration independently. Runtime selection resets both facts; each fact becomes true only after the matching server update is applied. Composer remains disabled and Header/message surface say `正在载入会话` until both are authoritative.
+- A projected pending permission remains higher priority than ordinary loading status as soon as the control document arrives. Once both documents are present and the server projection is truly empty, the conversation explains that the first message will remain attached to this persisted session.
+- Routine `ready` no longer produces a success Toast. Connection health remains in the persistent Header/sidebar Status, so login and reconnect do not cover mobile navigation or the current-session identity with redundant feedback.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 44/44 Node architecture/state contracts and 89/89 module/Solid DOM/Yjs tests passed across 15 files.
+- `cd acp-hub/web && bun run build` — passed (98 modules; 199.07 kB JavaScript and 45.82 kB CSS before gzip).
+- Final service recovered 139 chats, marked the stale runtime ended, authenticated the local instance and completed alive-session reconciliation.
+- Authenticated 390×844 browser evidence shows the confirmed empty-session explanation, enabled Composer only after hydration, zero Toast overlays, and assets `index-Cs9nb9Sg.js` / `index-CP8RW9x0.css`.
+- Authenticated 1280×720 evidence shows the empty explanation centered above the 824px Composer with `toastCount=0`; Header and selected sidebar row agree on `可输入 · 会话已保存` only after hydration.
+
+### 2026-08-13 — Session-scoped Composer drafts
+
+- Composer text is now keyed by persistent project-session identity. Switching runtimes cannot carry a draft into another logical conversation, while returning to the source session restores the exact unsent text.
+- Message submission state carries command, project-session and runtime-chat identities. Transport failure or uncertain delivery restores text only to its owner session; another session receives a privacy-safe global single-flight notice without the source text.
+- A user cannot dismiss an uncertain submission and accidentally reissue it under a new command. Definite failure can return the preserved text to editing, and a late terminal acknowledgement clears only the matching restored copy.
+- Logout and authentication invalidation clear all in-memory drafts together with the server-authoritative UI session.
+
+Verification:
+
+- `cd acp-hub/web && bun run test && bun run build` — 44/44 Node contracts and 91/91 module/Solid DOM/Yjs tests passed across 15 files; production build passed (98 modules; 200.48 kB JavaScript and 45.89 kB CSS before gzip).
+- Component tests cover A→B→A draft isolation/recovery and ensure another session's pending state never renders the source text.
+- Authenticated browser evidence used two persisted sessions without sending: the target session's Composer stayed empty, both returns restored `A session local draft — do not send`, and the test text was cleared afterward.
+
+### 2026-08-13 — Fact-grounded session import review
+
+- Import now has three explicit phases: choose a cwd-scoped ACP candidate, review the exact known facts, then submit. The review exposes the title, local relative activity, project cwd and full ACP session id instead of relying on a truncated row alone.
+- The UI states that ACP currently provides no message-content preview. It does not turn a title into a fabricated excerpt or imply that the conversation body has been inspected.
+- A selection that disappears after search or catalog refresh cannot be submitted. Search and candidate controls remain locked while the server is deciding the import.
+- Definite server rejection and delivery-unknown timeout are separate UI states. Only the latter tells the user to reconcile using the original request identity; both preserve the selected candidate and dialog context.
+
+Verification:
+
+- `cd acp-hub/web && bun run test && bun run build` — 44/44 Node architecture/state contracts and 94/94 module/Solid DOM/Yjs tests passed across 15 files; production build passed (98 modules; 202.34 kB JavaScript and 47.27 kB CSS before gzip).
+- `bun run typecheck` and `git diff --check` passed.
+- Six focused Dialog tests cover cwd filtering, commit-gated close, fact-only review semantics, stale/hidden selection invalidation, definite failure and delivery uncertainty.
+- The restarted server recovered 142 chats, marked two stale runtimes ended, authenticated the local instance and completed reconciliation. A direct HTTP response serves the new `index-hwpuOODF.js` / `index-CIXr7V0A.css` bundle.
+- The existing in-app browser tab retained its prior HTML/bundle after normal and hard refresh, so no claim is made that the new visual layout was observed there; behavioral DOM evidence comes from the real Solid component harness rather than a stale screenshot.
+
+### 2026-08-13 — Upgrade-safe static cache contract
+
+- Static HTTP caching is now classified by resource identity. App entry documents, compatibility routes, misses and fixed-name assets remain `no-store`, so a restarted server cannot intentionally bootstrap an obsolete Web bundle.
+- Only a real embedded `/assets/` resource whose final stem contains a Vite-style fingerprint of at least eight safe characters receives one-year `immutable` caching. A path prefix or file extension alone is insufficient.
+- Security headers are composed independently from cache policy. HTML, immutable assets and errors all retain CSP, `nosniff`, frame denial and no-referrer protection; authentication responses retain their stricter `no-store` plus `Pragma` contract.
+- Static `HEAD` now mirrors the exact GET status, content metadata, cache policy and security headers without emitting a body. Deployment probes no longer report the existing app entry as 404.
+
+Verification:
+
+- `cargo test -p acp-hub-server --lib web::web_test::` — 18/18 passed, including real loopback GET/HEAD responses for entry HTML, fingerprinted assets and missing assets.
+- `cargo test -p acp-hub-server --lib` — 396/396 passed across auth, gateway, persistence, metadata, Yjs projection and Web HTTP behavior.
+- `cargo clippy -p acp-hub-server --lib -- -D warnings` and `cargo fmt --all -- --check` passed.
+
+### 2026-08-13 — Restart journey proven at the ACP wire
+
+- The browser project-session product journey now proves more than matching Ack fields: after killing and restarting server and instance, the fresh ACP process records the exact `session/load.params.sessionId` it received on stdin. The test requires that single value to equal the durable ACP id created before restart.
+- The same journey still proves memory-only browser-cookie invalidation, re-login, SQLite/Registry catalog recovery, cleared runtime hints, a distinct fresh `chat_id`, continued prompt delivery/Yjs update, and logout revocation.
+- Production redaction remains unchanged. Instance stderr handling still counts bytes/lines without logging bodies; only the fake ACP fixture accepts `--audit-file`, and it writes one structured method/session identity record inside the test's private temp directory.
+- The integration fixture now creates the audit file eagerly and rejects a sibling `test-child` binary older than its source with an actionable `cargo build --workspace` diagnostic. This prevents stale fixture binaries from producing misleading product-test failures.
+
+Verification:
+
+- `cargo build --workspace && cargo test -p acp-hub-server --test product_flow_tests -- --nocapture` — passed; exact durable ACP id observed once across `session/load` stdin, then restored prompt committed and projected.
+- `cargo test -p acp-instance` — 51/51 library tests and 8/8 child-process integration tests passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` and `git diff --check` passed.
+
+### 2026-08-13 — Message delivery uncertainty has one owner
+
+- `CommandTracker` is now the sole owner of prompt and quick-start retry identity. Both actions opt into retained uncertainty, and their recovery controls call `commands.retry(commandId, sendFrame)` instead of replaying a second store-owned frame cache.
+- Only timeout or disconnect can expose “使用同一请求重新确认”. A definite `action_error` restores the original text for editing, marks the request non-retryable, and never reuses the terminal command id.
+- The lifecycle test covers `sent → accepted → timeout → same-frame retry → duplicate`, asserts the exact frame identity, and proves a second terminal frame cannot settle the command twice. A separate regression proves terminal errors never enter the uncertainty map.
+- Composer and quick-start keyboard focus now use a neutral high-contrast double ring. Pointer focus stays quiet, and the obsolete blue halo does not return. The shared field removes the duplicate global outline so its computed focus style has one intentional ring.
+
+Verification:
+
+- `cd acp-hub/web && bun run test && bun run build` — 45/45 Node architecture/state contracts and 97/97 module/Solid DOM/Yjs tests passed across 15 files; production build passed (98 modules; 201.94 kB JavaScript and 47.65 kB CSS before gzip).
+- Focused lifecycle/Composer suite passed 19/19.
+- The restarted local server loaded the final bundle. Browser computed style for the focused login field was neutral `rgb(98, 98, 94)`, with a white separation ring plus 3px neutral ring and no outline; the final CSS bundle also contained the Composer keyboard-focus rule.
+- `git diff --check` passed.
+
+### 2026-08-14 — Source CSS is parsed as a contract, not best-effort text
+
+- The three authored stylesheets now pass Lightning CSS with error recovery disabled before PostCSS inspects their structure. A malformed media block or parser warning therefore fails the architecture suite instead of relying on the production bundler to recover silently.
+- The AST contract forbids declarations directly under media queries and verifies that every consumed custom property is declared by the shared token source.
+- Composer and quick-start now have one shared neutral `focus-within` owner. The obsolete duplicate focus rules and stale permission selector are gone; the blue treatment is limited to the high-contrast `focus-visible` keyboard ring rather than a persistent input border.
+- `postcss` and `lightningcss` are explicit test dependencies, so the gate does not depend on an incidental transitive dependency from Vite.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 51/51 Node architecture/state contracts and 131/131 module/Solid DOM/Yjs tests passed across 20 files.
+- `cd acp-hub/web && bun run build` — production build passed at 101 modules: `index-BFfeTiFX.js` is 206.03 kB and `index-8ASp6MzR.css` is 48.02 kB before gzip.
+
+### 2026-08-14 — Permission decisions remain safe when delivery is unknown
+
+- The permission prompt is now an explicit `PermissionRequestCard` rather than anonymous markup inside the message list. It renders only server-projected facts: title, description and the associated tool identity; it does not invent an authorization scope that ACP did not provide.
+- A decision has two client phases: `pending` while its terminal result is awaited, and `uncertain` after timeout or disconnect. Both phases disable Allow and Deny together. The uncertain state explains that the original decision may already have taken effect and forbids submitting the opposite choice.
+- A definite `action_error` is the only client outcome that releases the decision lock for retry. A committed/duplicate acknowledgement does not eagerly unlock it; the server-authoritative permission projection must remove the request first.
+- The card exposes `aria-busy` only during active delivery, uses a one-shot alert for uncertainty, and gives coarse-pointer/mobile actions a 44px target. Read-only principals see the request facts but no enabled mutation.
+
+Verification:
+
+- Focused permission/MessageList tests passed 6/6, covering known facts, first-decision dispatch, pending lock, uncertain lock and explanation, read-only closure, and runtime hydration.
+- `cd acp-hub/web && bun run test && bun run build` — 46/46 Node architecture/state contracts and 101/101 module/Solid DOM/Yjs tests passed across 16 files; production build passed (99 modules; 203.52 kB JavaScript and 48.46 kB CSS before gzip).
+- The architecture contract proves timeout transitions through `markPermissionDecisionUncertain`, while explicit errors retain the only unlock path.
+- `git diff --check` passed.
+
+### 2026-08-14 — Downstream JSON cannot crash the WebSocket callback
+
+- The browser parser no longer casts every successful `JSON.parse` result to a frame. It accepts only a non-array object with a non-empty string `t`; `null`, arrays, primitives and missing/non-string/blank tags are malformed and never reach `ws-client`'s `frame.t` access.
+- The parser deliberately does not embed the Rust frame registry. An unknown string tag remains a structurally valid envelope and reaches the store's compatibility default, where an older Web client safely ignores it. Shape validation therefore does not turn optional protocol evolution into a hard disconnect.
+- Malformed-frame diagnostics remain payload-safe: the browser records only the received string length, never the raw frame, error body, token or user content.
+- Repository evidence confirmed that normal server protocol failures use the typed `action_error` frame. The legacy `error`/`auth_error` checks in `ws-client` are compatibility/bootstrap handling, not a newly invented public frame schema.
+
+Verification:
+
+- Focused parser tests passed 10/10: known frame, unknown future tag, invalid JSON, null, array, string/number primitives, missing tag, non-string tag and blank tag.
+- `cd acp-hub/web && bun run test && bun run build` — 47/47 Node architecture/state contracts and 111/111 module/Solid DOM/Yjs tests passed across 17 files; production build passed (99 modules; 203.63 kB JavaScript and 48.54 kB CSS before gzip).
+- `git diff --check` passed.
+
+### 2026-08-14 — WebSocket transport failures are contained and visible
+
+- The browser transport now accepts downstream text only. `Blob`, `ArrayBuffer` and typed-array deliveries are rejected before JSON parsing; diagnostics include only category and byte/character count, never the frame body.
+- A malformed delivery or one feature callback throwing cannot poison later WebSocket messages. The adapter contains the exception, reports a typed protocol issue and continues processing the next valid frame.
+- Native `WebSocket.send` races now return `false` instead of escaping the command lifecycle. `CommandTracker` therefore never registers an action as sent when the browser rejected the write synchronously.
+- Legacy bearer bootstrap no longer logs or surfaces the thrown send error, because a browser/polyfill could include the serialized auth frame in that message.
+- Transport/protocol issues appear as deduplicated persistent cards in the existing Error Center. They remain dismissible and do not misuse short success-toast timing.
+
+Verification:
+
+- Focused transport and Error Center fault-injection tests passed 11/11, including binary payload redaction, malformed→valid continuation, consumer exceptions, synchronous send failure, failed-pong health semantics, status-callback isolation and legacy bearer redaction.
+- `cd acp-hub/web && bun run test && bun run build` — 47/47 Node architecture/state contracts and 119/119 module/Solid DOM/Yjs tests passed across 18 files; the production bundle was served successfully.
+- `git diff --check` passed; a loopback HTTP probe returned 200 with CSP, `nosniff`, frame denial and `Cache-Control: no-store` intact.
+
+### 2026-08-14 — Simultaneous permission requests are a visible security queue
+
+- The former `permissions()[0]` M3 placeholder is gone. Every server-projected pending request is discoverable through one focused queue with an explicit current/total count and Previous/Next controls.
+- Queue navigation never submits a decision. The selected request follows `permission_id` through unrelated Yjs updates, and removal advances predictably at the same queue position rather than jumping back to an arbitrary map entry.
+- Projection order is deterministic: valid expiry time first, then stable permission identity. The UI does not depend on Y.Map iteration order to decide which security question appears first.
+- Decision locks remain scoped to their exact permission id, so one pending/uncertain choice cannot disable or mislabel another request. A malformed projection without an id is visible but fail-closed; Allow and Deny cannot emit an empty identifier.
+- ARIA title/status ids are generated locally rather than derived from external protocol identifiers.
+
+Verification:
+
+- Focused Yjs/queue/card/MessageList tests passed 17/17, covering stable ordering, discovery, navigation without mutation, identity retention, removal, independent locks, malformed-id closure and production mounting.
+- `cd acp-hub/web && bun run test && bun run build` — 48/48 Node architecture/state contracts and 126/126 module/Solid DOM/Yjs tests passed across 19 files; production build serves `index-9g1ZZOXr.js` and `index-DuRSCz2J.css`.
+- `git diff --check` passed. The local service recovered its Registry and serves the same verified bundle from `127.0.0.1:8456`.
+
+### 2026-08-14 — Conversation entries are a tested reading component
+
+- `MessageList` no longer owns every message-role and evidence branch alongside scrolling and hydration. A dedicated `ConversationMessage` component owns the stable visual/semantic contract for user, system and assistant entries; the list is reduced from 231 to 107 lines and remains responsible only for collection behavior.
+- The reader keeps the existing restrained hierarchy intentionally: user text is an inert, right-aligned surface; completed assistant content uses safe Markdown on the open reading plane; streaming assistant content remains plain text so partial Markdown cannot restructure the page.
+- Reasoning is collapsed by default. Tool calls retain their existing tested disclosure. Resources are named, inert facts with full identifiers available, while projected errors are explicit named alerts rather than anonymous colored blocks.
+- Empty assistant projections expose one screen-reader progress label. Streaming dots themselves are hidden and use a product-owned reduced-motion-aware keyframe instead of depending on a Tailwind implementation detail.
+- Feature styles now use semantic `conversation-message`, `message-reasoning`, `message-resource` and `message-error` classes rather than embedding high-density utility strings into the domain component.
+
+Verification:
+
+- Focused `ConversationMessage` and production `MessageList` tests passed 8/8, covering inert user text, assistant Markdown/copy, streaming plain text, evidence layers, errors, empty progress and list mounting.
+- The source architecture contract requires `MessageList → ConversationMessage` delegation and forbids the former inline `MessageBubble`/Markdown/tool composition.
+- `cd acp-hub/web && bun run test && bun run build` — 49/49 Node architecture/state contracts and 131/131 module/Solid DOM/Yjs tests passed across 20 files.
+- The production build passed at 101 modules: `index-BLNWKBRO.js` is 206.03 kB and `index-BbIiZ_Cn.css` is 47.90 kB before gzip, both smaller than the preceding verified bundle despite the stronger reader contract.
+- `git diff --check` passed.

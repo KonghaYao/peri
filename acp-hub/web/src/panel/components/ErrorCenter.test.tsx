@@ -1,6 +1,6 @@
 import { render, screen } from '@solidjs/testing-library';
 import { afterEach, describe, expect, it } from 'vitest';
-import { retainPersistentErrors, setPersistentErrors, type PersistentError } from '../store';
+import { reportTransportIssue, retainPersistentErrors, setPersistentErrors, type PersistentError } from '../store';
 import { ErrorCenter } from './ErrorCenter';
 
 afterEach(() => setPersistentErrors([]));
@@ -36,5 +36,15 @@ describe('ErrorCenter', () => {
     expect(screen.getByRole('button', { name: '使用原请求重新确认' })).toBeInTheDocument();
     expect(screen.getByText('结果尚未确认').closest('.error-card')).not.toHaveTextContent('关闭');
     expect(screen.getByText('无权限').closest('.error-card')).not.toHaveTextContent('使用原请求重新确认');
+  });
+
+  it('surfaces one payload-free transport problem instead of transient toasts', () => {
+    reportTransportIssue({ kind: 'malformed_frame', size: 17 });
+    reportTransportIssue({ kind: 'malformed_frame', size: 29 });
+    render(() => <ErrorCenter />);
+
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByText('收到格式错误的服务器数据')).toBeInTheDocument();
+    expect(screen.getByText(/29 个字符/)).toBeInTheDocument();
   });
 });

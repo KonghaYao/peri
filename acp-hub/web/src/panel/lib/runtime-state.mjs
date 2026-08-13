@@ -17,6 +17,7 @@ export function runtimeState(input) {
     return { label: TERMINAL_LABELS[chatStatus], tone: chatStatus === 'crashed' ? 'danger' : 'idle' };
   }
   if (input.hasPendingPermission) return { label: '等待你的许可', tone: 'attention' };
+  if (input.isHydrated === false) return { label: '正在载入会话…', tone: 'busy' };
   if (input.turnActive) return { label: 'Agent 正在工作', tone: 'busy' };
   return { label: '可输入 · 会话已保存', tone: 'ready' };
 }

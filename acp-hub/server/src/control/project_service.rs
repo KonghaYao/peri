@@ -185,6 +185,25 @@ impl ProjectService {
         Ok(changed)
     }
 
+    /// Derives a restrained Hub fallback from the first dispatched user
+    /// prompt. It never mutates the ACP thread title and never outranks a user
+    /// alias or a meaningful ACP-owned title.
+    pub async fn seed_prompt_title(
+        &self,
+        acp_session_id: &str,
+        prompt: &str,
+    ) -> Result<bool, ProjectServiceError> {
+        let Some(title) = prompt_title(prompt) else {
+            return Ok(false);
+        };
+        let changed = self.metadata.seed_hub_title(acp_session_id, &title).await?;
+        let (generation, projected_generation) = self.metadata.generation().await?;
+        if changed || generation != projected_generation {
+            self.reproject().await?;
+        }
+        Ok(changed)
+    }
+
     pub async fn reproject(&self) -> Result<(), ProjectServiceError> {
         let snapshot = self.metadata.snapshot().await?;
         let projects = snapshot.projects.into_iter().map(project_summary).collect();
@@ -213,6 +232,24 @@ impl ProjectService {
             })
             .await?;
         Ok(())
+    }
+}
+
+fn prompt_title(prompt: &str) -> Option<String> {
+    const MAX_CHARS: usize = 60;
+    let line = prompt.lines().find(|line| !line.trim().is_empty())?;
+    let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        let mut shortened: String = prefix.chars().take(MAX_CHARS - 1).collect();
+        shortened.push('…');
+        Some(shortened)
+    } else {
+        Some(prefix)
     }
 }
 
@@ -248,7 +285,7 @@ mod tests {
     use acp_hub_proto::schema::SessionSummaryProjection;
     use tempfile::tempdir;
 
-    use super::ProjectService;
+    use super::{prompt_title, ProjectService};
     use crate::control::StoreSink;
     use crate::persist::metadata::MetadataStore;
     use crate::persist::{PersistConfig, Store};
@@ -306,5 +343,17 @@ mod tests {
             generation_after, projected_after,
             "no-op poll repairs pending projection"
         );
+    }
+
+    #[test]
+    fn prompt_title_uses_the_first_meaningful_line_and_unicode_boundaries() {
+        assert_eq!(
+            prompt_title("\n  重构   ACP Hub 的会话目录  \nignored").as_deref(),
+            Some("重构 ACP Hub 的会话目录")
+        );
+        let title = prompt_title(&"界".repeat(80)).unwrap();
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
+        assert_eq!(prompt_title(" \n\t"), None);
     }
 }

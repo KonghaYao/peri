@@ -7,6 +7,7 @@ import {
   setOpeningSession,
   setPermissions,
   setProjectSessions,
+  setRuntimeDocsState,
   setSelectedCid,
   setSelectedSessionId,
 } from '../store';
@@ -31,6 +32,7 @@ function resetStore() {
   setChatStatusSignal({});
   setChatHead(null);
   setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
   setConnState({ text: '未连接', kind: 'idle' });
 }
 
@@ -51,6 +53,7 @@ describe('ChatHeader runtime truth', () => {
     setSelectedSessionId(session.id);
     setSelectedCid('chat-1');
     setChatStatusSignal({ 'chat-1': 'active' });
+    setRuntimeDocsState({ chat: false, control: true });
     setChatHead({
       chat: { chatId: 'chat-1', title: session.title, status: 'active', activeTurnId: 'turn-1', createdAt: null, updatedAt: null },
       agent: null,
@@ -73,5 +76,17 @@ describe('ChatHeader runtime truth', () => {
 
     const status = screen.getByText('运行异常退出 · 会话已保留');
     expect(status).toHaveClass('runtime-status--danger');
+  });
+
+  it('does not announce input readiness before runtime hydration completes', () => {
+    setProjectSessions([session]);
+    setSelectedSessionId(session.id);
+    setSelectedCid('chat-1');
+    setChatStatusSignal({ 'chat-1': 'active' });
+    setRuntimeDocsState({ chat: true, control: false });
+    render(() => <ChatHeader />);
+
+    expect(screen.getByText('正在载入会话…')).toBeInTheDocument();
+    expect(screen.queryByText('可输入 · 会话已保存')).not.toBeInTheDocument();
   });
 });
