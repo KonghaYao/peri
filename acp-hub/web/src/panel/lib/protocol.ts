@@ -72,6 +72,30 @@ export const workspaceCreate = (name: string, cwd: string) =>
 export const workspaceRemove = (workspaceId: string) =>
   action('workspace/remove', { workspaceId });
 
+export const projectCreate = (name: string, cwd: string, instanceId?: string) => {
+  const payload: Record<string, unknown> = { name, cwd };
+  if (instanceId) payload.instanceId = instanceId;
+  return action('project/create', payload);
+};
+
+export const projectArchive = (projectId: string) =>
+  action('project/archive', { projectId });
+
+export const persistedSessionCreate = (projectId: string, title?: string) => {
+  const payload: Record<string, unknown> = { projectId };
+  if (title) payload.title = title;
+  return action('session/create', payload);
+};
+
+export const persistedSessionOpen = (sessionId: string) =>
+  action('session/open', { sessionId });
+
+export const persistedSessionRename = (sessionId: string, name: string) =>
+  action('session/rename', { sessionId, name });
+
+export const persistedSessionImport = (projectId: string, acpSessionId: string) =>
+  action('session/import', { projectId, acpSessionId });
+
 /** 按需查询指定对话的 ACP 会话列表（§6.3）：server 从 chat record 解析
  *  cwd 向 agent 侧发 session/list RPC，结果经 `session_list` 下行帧回投
  *  （agent 侧是真实数据源，非轮询投影过滤）。 */

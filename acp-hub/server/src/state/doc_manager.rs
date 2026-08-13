@@ -17,7 +17,7 @@ use tracing::{debug, trace, warn};
 
 use acp_hub_proto::conn::DocId;
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, EntryStatus, InstanceStatus, ChatStatus, ChatSummary,
+    ActiveTurnProjection, ChatStatus, ChatSummary, EntryStatus, InstanceStatus,
     SessionSummaryProjection, TurnStatus, WorkspaceSummary,
 };
 use yrs::{Map, ReadTxn, StateVector, Transact, WriteTxn};
@@ -28,9 +28,7 @@ use crate::state::doc_pair::DocPair;
 use crate::state::factory::Factory;
 use crate::state::normalized::{EventBody, NormalizedEvent};
 use crate::state::permission::{self, CasOutcome};
-use crate::state::registry::{
-    DegradeCause, RegistryApplier, RegistryMsg, RegistryState,
-};
+use crate::state::registry::{DegradeCause, RegistryApplier, RegistryMsg, RegistryState};
 
 /// 微批次/队列参数（§6.4/§8.6）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,16 +135,22 @@ pub enum DocCommand {
         decision: acp_hub_proto::action::PermissionDecision,
     },
     /// 权限 CAS：expire（pending → expired；定时器路径，§4.7）。
-    ExpirePermission { permission_id: String },
+    ExpirePermission {
+        permission_id: String,
+    },
     /// 断链清理：该 chat 全部 pending 权限批量 expired（§7.1；对齐参考实现
     /// `expireTurnPermissions`——断链即会话失效，未决议权限全部过期）。
     ExpirePendingPermissions,
     /// 断链 → 活动 turn 置 interrupted（§7.3 分区恢复；turn 级终态）。
-    MarkTurnInterrupted { turn_id: String },
+    MarkTurnInterrupted {
+        turn_id: String,
+    },
     /// cancel 前置：活动 turn 置 cancelling（§7.2 状态机参考语义：取消请求
     /// 发出即进入取消中；终态由 agent 的 interrupted 事件或控制面注入的
     /// Cancelled 覆盖）。
-    MarkTurnCancelling { turn_id: String },
+    MarkTurnCancelling {
+        turn_id: String,
+    },
     /// 控制面 turn 终态（§7.2）：active_turn 匹配且非终态 → 终态迁移 +
     /// assistant entry 迁移。等价聚合器 TurnTerminal 事件分支，但走控制面
     /// （不经聚合器 seq 水位——宿主注入无 instance 流 seq）。
@@ -156,15 +160,21 @@ pub enum DocCommand {
         completed_at: String,
     },
     /// 标题更新（§7.4 规则 5：可独立排队，仍经服务端命令写入）。
-    UpdateTitle { title: String },
+    UpdateTitle {
+        title: String,
+    },
     /// `session/load` 回放开始（§8.5 显式重建）：置聚合器回放模式
     /// （历史 chunk 无 turn_id，按回放序归位）。须先于回放通知进入
     /// writer 队列（coordinator 在 forward_rpc 后立即提交）。
-    BeginLoadReplay { acp_session_id: String },
+    BeginLoadReplay {
+        acp_session_id: String,
+    },
     /// agent 投影的 acp_session_id 更新（§5.4 agent map；参考实现 load/resume
     /// 成功路径 `registry.forEachByRcsSession` 更新 acpSessionId 的等价物）。
     /// 用途：create 的 session/new 绑定建立后写入；load 失败恢复路径写回旧值。
-    SetAgentSessionId { acp_session_id: String },
+    SetAgentSessionId {
+        acp_session_id: String,
+    },
     /// agent 投影的 model/effort 更新（§5.4 agent map；部分更新语义——
     /// None 不覆盖）。来源：session/new 响应体 configOptions 提取
     /// （handle_new 不发 config_option_update 通知，响应即唯一路径；
@@ -186,29 +196,46 @@ pub enum DocCommand {
     EndLoadReplay,
     /// 旧 turn 未完成时新 prompt 的裁决（§6.4：旧 assistant entry 置 cancelled，
     /// 不发 ACP cancel）。
-    CancelStaleAssistantEntry { turn_id: String, entry_id: String },
+    CancelStaleAssistantEntry {
+        turn_id: String,
+        entry_id: String,
+    },
     /// chat 级终态（ended/closed/crashed，§7.3）写视图。
-    SetChatTerminal { status: ChatStatus },
+    SetChatTerminal {
+        status: ChatStatus,
+    },
     /// Registry：活跃 chat 摘要 upsert/移除/gap 同步（§12.4）。
     RegistryUpsertChat(ChatSummary),
-    RegistryRemoveChat { chat_id: String },
+    RegistryRemoveChat {
+        chat_id: String,
+    },
     /// Registry：instance 视图与全局状态（§12.4/§12.5）。
     RegistryUpsertInstance(acp_hub_proto::schema::InstanceView),
     RegistrySetInstanceState {
         instance_id: String,
         status: InstanceStatus,
     },
-    RegistrySetGlobal { status: acp_hub_proto::schema::GlobalStatus },
+    RegistrySetGlobal {
+        status: acp_hub_proto::schema::GlobalStatus,
+    },
     /// Registry：ACP `session/list` 响应全量同步投影（§6.3：幂等，10s 轮询；
     /// 响应中不存在的旧条目删除——自愈）。sessions 是 **instance 级数据**
     /// （agent 磁盘历史），投影到全局 Registry Doc——不随 chat 销毁/重建，
     /// 切换对话列表持续可用。走控制面（不经聚合器 seq 水位——宿主注入
     /// 无 instance 流 seq，`SetTurnTerminal` 同源）。
-    RegistryApplySessions { entries: Vec<SessionSummaryProjection> },
+    RegistryApplySessions {
+        entries: Vec<SessionSummaryProjection>,
+    },
     /// Registry：工作区摘要 upsert/移除（独立于 chat 的上层概念：定义本地
     /// 目录 cwd，其下新建对话继承；Registry Doc `workspaces` map）。
     RegistryUpsertWorkspace(WorkspaceSummary),
-    RegistryRemoveWorkspace { workspace_id: String },
+    RegistryRemoveWorkspace {
+        workspace_id: String,
+    },
+    RegistryReplaceProjects {
+        projects: Vec<acp_hub_proto::schema::ProjectSummary>,
+        sessions: Vec<acp_hub_proto::schema::ProjectSessionSummary>,
+    },
 }
 
 impl DocCommand {
@@ -224,6 +251,7 @@ impl DocCommand {
                 | DocCommand::RegistryApplySessions { .. }
                 | DocCommand::RegistryUpsertWorkspace(_)
                 | DocCommand::RegistryRemoveWorkspace { .. }
+                | DocCommand::RegistryReplaceProjects { .. }
         )
     }
 }
@@ -285,7 +313,12 @@ impl DocManager {
         {
             let broadcast = broadcast.clone();
             let sink = sink.clone();
-            tokio::spawn(registry_writer_loop(registry_doc, registry_rx, sink, broadcast));
+            tokio::spawn(registry_writer_loop(
+                registry_doc,
+                registry_rx,
+                sink,
+                broadcast,
+            ));
         }
         DocManager {
             chats: RwLock::new(HashMap::new()),
@@ -418,12 +451,7 @@ impl DocManager {
         // delta 类：入队即返回（§8.2 微批次不逐事件应答；挂 reply 会使调用方
         // 在窗口内阻塞至 flush，破坏流式语义）。
         if is_batchable(&ev.body) {
-            if handle
-                .tx
-                .send(ChatMsg::Event(ev, None))
-                .await
-                .is_err()
-            {
+            if handle.tx.send(ChatMsg::Event(ev, None)).await.is_err() {
                 handle.inflight.fetch_sub(1, Ordering::SeqCst);
                 return SubmitResult::Rejected(SubmitError::ChannelClosed);
             }
@@ -442,7 +470,8 @@ impl DocManager {
             handle.inflight.fetch_sub(1, Ordering::SeqCst);
             return SubmitResult::Rejected(SubmitError::ChannelClosed);
         }
-        rx.await.unwrap_or(SubmitResult::Rejected(SubmitError::ChannelClosed))
+        rx.await
+            .unwrap_or(SubmitResult::Rejected(SubmitError::ChannelClosed))
     }
 
     /// 控制路径（F7 command-coordinator / 定时器）：注册 user entry、权限 CAS、
@@ -469,7 +498,8 @@ impl DocManager {
             handle.inflight.fetch_sub(1, Ordering::SeqCst);
             return SubmitResult::Rejected(SubmitError::ChannelClosed);
         }
-        rx.await.unwrap_or(SubmitResult::Rejected(SubmitError::ChannelClosed))
+        rx.await
+            .unwrap_or(SubmitResult::Rejected(SubmitError::ChannelClosed))
     }
 
     async fn submit_registry_command(&self, cmd: DocCommand) -> SubmitResult {
@@ -571,7 +601,10 @@ async fn chat_writer_loop(
             .session
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        if let Err(e) = sink.persist_update(DocId::session(&chat_id), init_session).await {
+        if let Err(e) = sink
+            .persist_update(DocId::session(&chat_id), init_session)
+            .await
+        {
             warn!(chat_id, error = ?e, "session init baseline persist failed");
         }
     }
@@ -635,7 +668,10 @@ async fn chat_writer_loop(
 }
 
 fn is_batchable(body: &EventBody) -> bool {
-    matches!(body, EventBody::MessageDelta { .. } | EventBody::ReasoningDelta { .. })
+    matches!(
+        body,
+        EventBody::MessageDelta { .. } | EventBody::ReasoningDelta { .. }
+    )
 }
 
 fn estimate_bytes(ev: &NormalizedEvent) -> usize {
@@ -712,18 +748,30 @@ async fn persist_and_broadcast(
     // chat 事务先提交 → update 先到（§6.4 固定顺序）。
     while let Ok(update) = chat_updates.try_recv() {
         let doc = DocId::chat(chat_id);
-        if sink.persist_update(doc.clone(), update.clone()).await.is_err() {
+        if sink
+            .persist_update(doc.clone(), update.clone())
+            .await
+            .is_err()
+        {
             all_ok = false;
-            let _ = registry.report_condition(DegradeCause::PersistFailure).await;
+            let _ = registry
+                .report_condition(DegradeCause::PersistFailure)
+                .await;
             warn!(chat_id, "chat update persist failed");
         }
         broadcast_send(broadcast, DocUpdate { doc, update }).await;
     }
     while let Ok(update) = control_updates.try_recv() {
         let doc = DocId::session(chat_id);
-        if sink.persist_update(doc.clone(), update.clone()).await.is_err() {
+        if sink
+            .persist_update(doc.clone(), update.clone())
+            .await
+            .is_err()
+        {
             all_ok = false;
-            let _ = registry.report_condition(DegradeCause::PersistFailure).await;
+            let _ = registry
+                .report_condition(DegradeCause::PersistFailure)
+                .await;
             warn!(chat_id, "control update persist failed");
         }
         broadcast_send(broadcast, DocUpdate { doc, update }).await;
@@ -753,7 +801,12 @@ async fn report_gap(chat_id: &str, pair: &mut DocPair, registry: &RegistryState)
     } else {
         None
     };
-    trace!(chat_id, gap_count = pair.stream.gap_count, uncalibratable = pair.stream.uncalibratable, "gap report");
+    trace!(
+        chat_id,
+        gap_count = pair.stream.gap_count,
+        uncalibratable = pair.stream.uncalibratable,
+        "gap report"
+    );
     if let Err(e) = registry.set_chat_gap(chat_id, gap).await {
         // 上报失败不阻塞主流程；Registry 状态源会在下次机会补报。
         warn!(chat_id, error = ?e, "gap report to registry failed");
@@ -918,8 +971,8 @@ async fn apply_command(
         DocCommand::MarkTurnInterrupted { turn_id } => {
             // 读 active_turn：匹配且非终态 → 置 interrupted（§7.3）。
             let (active_tid, active_status) = read_session_active_turn(pair);
-            let should_interrupt =
-                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
+            let should_interrupt = active_tid.as_deref() == Some(turn_id.as_str())
+                && !is_terminal_turn(&active_status);
             if !should_interrupt {
                 ApplyResult {
                     applied: false,
@@ -958,8 +1011,8 @@ async fn apply_command(
             // 读 active_turn：匹配且非终态 → 置 cancelling（§7.2）。仅改
             // 状态字段（turn_id/updated_at 保持；终态由后续事件/命令覆盖）。
             let (active_tid, active_status) = read_session_active_turn(pair);
-            let should_cancel =
-                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
+            let should_cancel = active_tid.as_deref() == Some(turn_id.as_str())
+                && !is_terminal_turn(&active_status);
             if !should_cancel {
                 ApplyResult {
                     applied: false,
@@ -984,8 +1037,8 @@ async fn apply_command(
         } => {
             // 终态守卫（§7.2）：active_turn 存在、turn_id 匹配且非终态才迁移。
             let (active_tid, active_status) = read_session_active_turn(pair);
-            let should_terminate =
-                active_tid.as_deref() == Some(turn_id.as_str()) && !is_terminal_turn(&active_status);
+            let should_terminate = active_tid.as_deref() == Some(turn_id.as_str())
+                && !is_terminal_turn(&active_status);
             if !should_terminate {
                 ApplyResult {
                     applied: false,
@@ -1038,10 +1091,7 @@ async fn apply_command(
                 reason: None,
             }
         }
-        DocCommand::CancelStaleAssistantEntry {
-            turn_id,
-            entry_id,
-        } => {
+        DocCommand::CancelStaleAssistantEntry { turn_id, entry_id } => {
             let mut txn = pair.chat_txn();
             let root = txn.get_or_insert_map(crate::state::factory::ROOT);
             chat_writer::migrate_entry_terminal(
@@ -1180,11 +1230,7 @@ async fn apply_command(
                 {
                     am.remove(&mut txn, "acp_session_id");
                 }
-                root.insert(
-                    &mut txn,
-                    "pending_permissions",
-                    yrs::MapPrelim::default(),
-                );
+                root.insert(&mut txn, "pending_permissions", yrs::MapPrelim::default());
                 chat_writer::bump_projection_version(&mut txn, &root);
             }
 
@@ -1246,7 +1292,12 @@ async fn apply_command(
     // 置位 gap_dirty（BeginLoadReplay 显式重建、ResumeAfterGap 追平恢复），
     // 须在本命令处理周期内写回 registry，不依赖后续事件到达。
     report_gap(chat_id, pair, registry).await;
-    trace!(chat_id, cmd = command_kind(&cmd), applied = result.applied, "command applied");
+    trace!(
+        chat_id,
+        cmd = command_kind(&cmd),
+        applied = result.applied,
+        "command applied"
+    );
     if !ok {
         SubmitResult::PersistFailed
     } else {
@@ -1276,10 +1327,7 @@ fn command_kind(cmd: &DocCommand) -> &'static str {
 }
 
 fn is_terminal_turn(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "interrupted"
-    )
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
 
 /// 读 Session Doc `session` map 的 active turn 内嵌投影
@@ -1373,6 +1421,9 @@ async fn registry_writer_loop(
             RegistryMsg::ListWorkspaces(reply) => {
                 let _ = reply.send(applier.list_workspaces());
             }
+            RegistryMsg::ListLegacySessions(reply) => {
+                let _ = reply.send(applier.list_legacy_sessions());
+            }
         }
     }
 }
@@ -1384,7 +1435,11 @@ async fn persist_registry_updates(
 ) {
     while let Ok(update) = update_rx.try_recv() {
         let doc = DocId::REGISTRY;
-        if sink.persist_update(doc.clone(), update.clone()).await.is_err() {
+        if sink
+            .persist_update(doc.clone(), update.clone())
+            .await
+            .is_err()
+        {
             warn!("registry update persist failed");
         }
         broadcast_send(broadcast, DocUpdate { doc, update }).await;

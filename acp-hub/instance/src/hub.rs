@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use acp_hub_proto::instance::{
-    InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello, InstanceKill, InstanceKillAck,
-    InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
+    InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello, InstanceKill,
+    InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
 use acp_hub_proto::protocol::Defaults;
 use acp_hub_proto::Frame;
@@ -465,7 +465,11 @@ async fn handle_inbound(
                 command_id: fwd.command_id.clone(),
                 chat_id: fwd.chat_id.clone(),
                 ok,
-                error: if ok { None } else { Some("stdin_write_failed".to_string()) },
+                error: if ok {
+                    None
+                } else {
+                    Some("stdin_write_failed".to_string())
+                },
             });
             if let Err(e) = handle.send(ack).await {
                 tracing::warn!(target: "acp_hub::instance", chat_id = %fwd.chat_id,
@@ -754,8 +758,16 @@ async fn forward_child_output(
                 }
             }
             // §8.5：session 结束同步删除缓冲文件与内存段；滑窗清理。
-            state.buffer.lock().expect("buffer mutex poisoned").remove(&sid);
-            state.rings.lock().expect("rings mutex poisoned").remove(&sid);
+            state
+                .buffer
+                .lock()
+                .expect("buffer mutex poisoned")
+                .remove(&sid);
+            state
+                .rings
+                .lock()
+                .expect("rings mutex poisoned")
+                .remove(&sid);
             tracing::info!(target: "acp_hub::instance", chat_id = %sid, code,
                 "ACP 进程退出（会话条目保留，供重建 epoch+1）");
 
@@ -862,7 +874,11 @@ async fn resync_loop(state: &HubState, handle: &TransportHandle, _config: &Insta
         });
         match handle.send_acked(frame).await {
             Ok(()) => {
-                state.buffer.lock().expect("buffer mutex poisoned").commit(&sid);
+                state
+                    .buffer
+                    .lock()
+                    .expect("buffer mutex poisoned")
+                    .commit(&sid);
                 let last = frames.last().map(|bf| bf.seq).unwrap_or(from_seq);
                 let mut chats = state.chats.lock().expect("chats mutex poisoned");
                 if let Some(entry) = chats.get_mut(&sid) {
@@ -873,7 +889,11 @@ async fn resync_loop(state: &HubState, handle: &TransportHandle, _config: &Insta
             }
             Err(_) => {
                 // 断线：未确认帧回置 pending（from_seq 不变，重连重发，§6.2）。
-                state.buffer.lock().expect("buffer mutex poisoned").rollback(&sid);
+                state
+                    .buffer
+                    .lock()
+                    .expect("buffer mutex poisoned")
+                    .rollback(&sid);
                 tracing::warn!(target: "acp_hub::instance", chat_id = %sid,
                     "buffer_sync 发送中断（断线），帧回置 pending");
                 return;
@@ -909,18 +929,17 @@ async fn send_heartbeat(state: &HubState, handle: &TransportHandle) {
 async fn shutdown_all(state: &HubState, config: &InstanceConfig) {
     let acps: Vec<Arc<AcpProcess>> = {
         let chats = state.chats.lock().expect("chats mutex poisoned");
-        chats
-            .values()
-            .filter_map(|e| e.acp.clone())
-            .collect()
+        chats.values().filter_map(|e| e.acp.clone()).collect()
     };
     if acps.is_empty() {
         return;
     }
     let grace = config.kill_grace;
-    let tasks = acps
-        .into_iter()
-        .map(|acp| tokio::spawn(async move { let _ = acp.kill(grace).await; }));
+    let tasks = acps.into_iter().map(|acp| {
+        tokio::spawn(async move {
+            let _ = acp.kill(grace).await;
+        })
+    });
     join_all(tasks).await;
 }
 

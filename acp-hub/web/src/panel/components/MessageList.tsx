@@ -11,7 +11,7 @@
 
 import { createEffect, createSignal, For, Show } from 'solid-js';
 import type { ChatEntry } from '../lib/yjs';
-import { chatEntries, permissions, resolvePermission } from '../store';
+import { chatEntries, permissions, readOnly, resolvePermission } from '../store';
 import { Badge, badgeKind } from './Badge';
 
 function shortId(id: string | null | undefined, n = 8): string {
@@ -56,12 +56,14 @@ function PermissionBar() {
           </p>
           <div class="mt-2.5 flex gap-2">
             <button
+              disabled={readOnly()}
               onClick={() => resolvePermission(perm().permissionId || '', 'allow')}
               class="min-h-10 rounded-lg bg-[var(--btn-primary)] px-4 py-2 text-sm font-medium text-white transition-colors duration-150 hover:bg-[var(--btn-primary-hover)] sm:min-h-9"
             >
               允许
             </button>
             <button
+              disabled={readOnly()}
               onClick={() => resolvePermission(perm().permissionId || '', 'deny')}
               class="min-h-10 rounded-lg border border-[var(--border-strong)] bg-white px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors duration-150 hover:bg-[var(--hover)] sm:min-h-9"
             >
@@ -222,7 +224,7 @@ export function MessageList() {
   });
 
   return (
-    <section
+    <section aria-live="polite" aria-relevant="additions text" aria-label="对话消息"
       ref={areaRef}
       onScroll={(e) => {
         const el = e.currentTarget;

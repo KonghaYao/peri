@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, oneshot};
 use yrs::{Map, ReadTxn, Transact, WriteTxn};
 
 use acp_hub_proto::schema::{
-    ChatSummary, GlobalStatus, InstanceStatus, InstanceView, SessionSummaryProjection,
-    WorkspaceSummary,
+    ChatSummary, GlobalStatus, InstanceStatus, InstanceView, ProjectSessionSummary, ProjectSummary,
+    SessionSummaryProjection, WorkspaceSummary,
 };
 
 use crate::state::doc_manager::DocCommand;
@@ -40,6 +40,7 @@ pub(crate) enum RegistryMsg {
     },
     /// workspace 全量查询（启动恢复：内存注册表从 Registry Doc 重建）。
     ListWorkspaces(oneshot::Sender<Vec<WorkspaceSummary>>),
+    ListLegacySessions(oneshot::Sender<Vec<SessionSummaryProjection>>),
 }
 
 /// Registry 操作错误。
@@ -140,11 +141,7 @@ impl RegistryState {
     }
 
     /// gap 写回（聚合器上报，§9.4）：`Some(count)` 置缺口、`None` 追平清除。
-    pub async fn set_chat_gap(
-        &self,
-        chat_id: &str,
-        gap: Option<u64>,
-    ) -> Result<(), RegistryError> {
+    pub async fn set_chat_gap(&self, chat_id: &str, gap: Option<u64>) -> Result<(), RegistryError> {
         let (reply, rx) = oneshot::channel();
         self.inner
             .tx
@@ -160,11 +157,7 @@ impl RegistryState {
 
     /// chat 状态迁移（accepting/active/ended/closed/crashed + pending_close，
     /// §7.3/§7.6）。
-    pub async fn set_chat_status(
-        &self,
-        chat_id: &str,
-        status: &str,
-    ) -> Result<(), RegistryError> {
+    pub async fn set_chat_status(&self, chat_id: &str, status: &str) -> Result<(), RegistryError> {
         let (reply, rx) = oneshot::channel();
         self.inner
             .tx
@@ -278,6 +271,22 @@ impl RegistryState {
         rx.await.map_err(|_| RegistryError::ChannelClosed)
     }
 
+    pub async fn list_legacy_sessions(&self) -> Result<Vec<SessionSummaryProjection>, RegistryError> {
+        let (reply, rx) = oneshot::channel();
+        self.inner.tx.send(RegistryMsg::ListLegacySessions(reply)).await
+            .map_err(|_| RegistryError::ChannelClosed)?;
+        rx.await.map_err(|_| RegistryError::ChannelClosed)
+    }
+
+    pub async fn replace_projects(
+        &self,
+        projects: Vec<ProjectSummary>,
+        sessions: Vec<ProjectSessionSummary>,
+    ) -> Result<(), RegistryError> {
+        self.send(DocCommand::RegistryReplaceProjects { projects, sessions })
+            .await
+    }
+
     async fn set_global(&self, status: GlobalStatus) -> Result<(), RegistryError> {
         self.send(DocCommand::RegistrySetGlobal { status }).await
     }
@@ -364,6 +373,46 @@ impl RegistryApplier {
                 workspaces.remove(&mut txn, workspace_id);
                 Ok(())
             }
+            DocCommand::RegistryReplaceProjects { projects, sessions } => {
+                let pm = root.get_or_init::<_, yrs::MapRef>(&mut txn, "projects");
+                pm.clear(&mut txn);
+                for p in projects {
+                    let m = pm.get_or_init::<_, yrs::MapRef>(&mut txn, p.id.as_str());
+                    m.insert(&mut txn, "id", p.id.clone());
+                    m.insert(&mut txn, "name", p.name.clone());
+                    m.insert(&mut txn, "cwd", p.cwd.clone());
+                    m.insert(&mut txn, "instance_id", p.instance_id.clone());
+                    m.insert(&mut txn, "created_at", p.created_at.clone());
+                    m.insert(&mut txn, "updated_at", p.updated_at.clone());
+                    match &p.archived_at {
+                        Some(v) => m.insert(&mut txn, "archived_at", v.clone()),
+                        None => m.insert(&mut txn, "archived_at", yrs::Any::Null),
+                    };
+                }
+                let sm = root.get_or_init::<_, yrs::MapRef>(&mut txn, "project_sessions");
+                sm.clear(&mut txn);
+                for s in sessions {
+                    let m = sm.get_or_init::<_, yrs::MapRef>(&mut txn, s.id.as_str());
+                    m.insert(&mut txn, "id", s.id.clone());
+                    m.insert(&mut txn, "project_id", s.project_id.clone());
+                    match &s.acp_session_id {
+                        Some(v) => m.insert(&mut txn, "acp_session_id", v.clone()),
+                        None => m.insert(&mut txn, "acp_session_id", yrs::Any::Null),
+                    };
+                    m.insert(&mut txn, "title", s.title.clone());
+                    m.insert(&mut txn, "lifecycle", s.lifecycle.clone());
+                    m.insert(&mut txn, "updated_at", s.updated_at.clone());
+                    match &s.last_opened_at {
+                        Some(v) => m.insert(&mut txn, "last_opened_at", v.clone()),
+                        None => m.insert(&mut txn, "last_opened_at", yrs::Any::Null),
+                    };
+                    match &s.active_chat_id {
+                        Some(v) => m.insert(&mut txn, "active_chat_id", v.clone()),
+                        None => m.insert(&mut txn, "active_chat_id", yrs::Any::Null),
+                    };
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -400,6 +449,12 @@ impl RegistryApplier {
             }
         }
         out
+    }
+
+    pub(crate) fn list_legacy_sessions(&self) -> Vec<SessionSummaryProjection> {
+        let txn = self.doc.transact();
+        let Some(root) = txn.get_map(ROOT) else { return Vec::new() };
+        session_list::read_current(&txn, &root).into_values().collect()
     }
 
     /// gap 写回（读现状改 gap 字段；§9.4/§12.4）。

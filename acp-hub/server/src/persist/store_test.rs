@@ -12,9 +12,7 @@ use tempfile::tempdir;
 use crate::config::FsyncMode;
 use crate::persist::outbox::{CommandType, DeliveryVerdict};
 use crate::persist::store::{EvictionCandidate, Store};
-use crate::persist::{
-    PersistConfig, RecoveryResult, StoreError, WarningCode,
-};
+use crate::persist::{PersistConfig, RecoveryResult, StoreError, WarningCode};
 
 /// 测试配置：tempdir 数据目录 + PerCommit + 大 compact 阈值（默认不触发）。
 fn test_config(data_dir: PathBuf) -> PersistConfig {
@@ -37,8 +35,7 @@ fn chat_doc(sid: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
 async fn seed_chat_with_terminal(store: &Store, sid: uuid::Uuid) {
     let chat = store.create_chat(sid).unwrap();
     let d = chat_doc(&sid, b"seed");
-    chat
-        .append_update(1, 1, &[(d.0.clone(), &d.1)])
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
         .await
         .unwrap();
     let rec = crate::persist::outbox::NewOutboxRecord {
@@ -53,7 +50,8 @@ async fn seed_chat_with_terminal(store: &Store, sid: uuid::Uuid) {
         ob.insert(rec.clone()).unwrap();
         ob.mark_accepted(rec.command_id).unwrap();
         ob.mark_intent_durable(rec.command_id).unwrap();
-        ob.mark_dispatched(rec.command_id, chrono::Utc::now()).unwrap();
+        ob.mark_dispatched(rec.command_id, chrono::Utc::now())
+            .unwrap();
         ob.mark_delivery_confirmed(rec.command_id).unwrap();
         ob.mark_projection_committed(rec.command_id).unwrap();
         ob.mark_completed(rec.command_id).unwrap();
@@ -71,11 +69,19 @@ async fn t7_crash_a_tmp_leftover_cleaned() {
     {
         let store = Store::open(&cfg).unwrap();
         let chat = store.create_chat(sid).unwrap();
-        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
     }
     // 手动制造 tmp 残留（模拟 rename 前崩溃，旧日志完整）
-    let tmp = dir.path().join("chats").join(sid.to_string()).join("updates.snapshot.tmp");
+    let tmp = dir
+        .path()
+        .join("chats")
+        .join(sid.to_string())
+        .join("updates.snapshot.tmp");
     std::fs::write(&tmp, b"stale").unwrap();
     let store = Store::open(&cfg).unwrap();
     let result = store.recover().await;
@@ -100,9 +106,15 @@ async fn t7_crash_b_snapshot_base_with_dup_log() {
     let snapshot_docs = {
         let store = Store::open(&cfg).unwrap();
         let chat = store.create_chat(sid).unwrap();
-        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
-        chat.append_update(1, 3, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
+        chat.append_update(1, 3, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
         let mut lg = chat.update_log().lock().await;
         lg.compact(docs.clone()).await.unwrap();
@@ -126,7 +138,11 @@ async fn t7_crash_b_snapshot_base_with_dup_log() {
         .join("chats")
         .join(sid.to_string())
         .join("updates.log");
-    assert_eq!(std::fs::metadata(&log_path).unwrap().len(), 0, "log truncated");
+    assert_eq!(
+        std::fs::metadata(&log_path).unwrap().len(),
+        0,
+        "log truncated"
+    );
 }
 
 /// T7-C：快照 + 空日志（truncate 后崩溃）→ 快照基线。
@@ -139,8 +155,12 @@ async fn t7_crash_c_snapshot_only() {
     {
         let store = Store::open(&cfg).unwrap();
         let chat = store.create_chat(sid).unwrap();
-        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
-        chat.append_update(1, 2, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
+        chat.append_update(1, 2, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
         let mut lg = chat.update_log().lock().await;
         lg.compact(docs).await.unwrap();
@@ -165,7 +185,9 @@ async fn t7_maybe_compact_trigger() {
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
     let chat = store.create_chat(sid).unwrap();
-    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
     let mut lg = chat.update_log().lock().await;
     let triggered = lg.maybe_compact(docs.clone()).await.unwrap();
@@ -181,7 +203,10 @@ async fn t7_maybe_compact_trigger() {
     cfg2.compact_interval = Duration::ZERO;
     let store2 = Store::open(&cfg2).unwrap();
     let chat2 = store2.create_chat(uuid::Uuid::new_v4()).unwrap();
-    chat2.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat2
+        .append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     let mut lg2 = chat2.update_log().lock().await;
     let triggered3 = lg2
         .maybe_compact(std::collections::HashMap::from([(d.0, d.1)]))
@@ -201,7 +226,9 @@ async fn t7_invalid_snapshot_moved_to_corrupt() {
     {
         let store = Store::open(&cfg).unwrap();
         let chat = store.create_chat(sid).unwrap();
-        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
         let docs = std::collections::HashMap::from([(d.0.clone(), d.1.clone())]);
         let mut lg = chat.update_log().lock().await;
         lg.compact(docs).await.unwrap();
@@ -254,7 +281,9 @@ async fn t9_budget_exceeded_no_candidates_degrades() {
     let d = chat_doc(&sid, b"payload-01");
     let store = Store::open(&cfg).unwrap();
     let chat = store.create_chat(sid).unwrap();
-    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     let report = store.enforce_budget();
     assert!(report.exceeded);
     assert!(report.used > 0);
@@ -273,12 +302,13 @@ async fn t9_budget_exceeded_with_candidates() {
     seed_chat_with_terminal(&store, sid).await;
     let report = store.enforce_budget();
     assert!(report.exceeded);
-    assert!(report.eviction_candidates.contains(
-        &EvictionCandidate::ArchiveChat { chat_id: sid }
-    ));
-    assert!(report.eviction_candidates.iter().any(
-        |c| matches!(c, EvictionCandidate::OutboxTerminal { chat_id: s, .. } if *s == sid)
-    ));
+    assert!(report
+        .eviction_candidates
+        .contains(&EvictionCandidate::ArchiveChat { chat_id: sid }));
+    assert!(report
+        .eviction_candidates
+        .iter()
+        .any(|c| matches!(c, EvictionCandidate::OutboxTerminal { chat_id: s, .. } if *s == sid)));
     assert!(
         !store.status().degraded,
         "candidates available => not degraded (M1 只告警+候选)"
@@ -299,9 +329,15 @@ async fn t10_recovery_orchestration_integration() {
         let store = Store::open(&cfg).unwrap();
         // chat A：3 条 update + outbox 到 delivery_unknown
         let a = store.create_chat(sid_a).unwrap();
-        a.append_update(1, 1, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
-        a.append_update(1, 2, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
-        a.append_update(1, 3, &[(d_a.0.clone(), &d_a.1)]).await.unwrap();
+        a.append_update(1, 1, &[(d_a.0.clone(), &d_a.1)])
+            .await
+            .unwrap();
+        a.append_update(1, 2, &[(d_a.0.clone(), &d_a.1)])
+            .await
+            .unwrap();
+        a.append_update(1, 3, &[(d_a.0.clone(), &d_a.1)])
+            .await
+            .unwrap();
         let rec = crate::persist::outbox::NewOutboxRecord {
             command_id: uuid::Uuid::new_v4(),
             chat_id: sid_a,
@@ -314,13 +350,18 @@ async fn t10_recovery_orchestration_integration() {
             ob.insert(rec.clone()).unwrap();
             ob.mark_accepted(rec.command_id).unwrap();
             ob.mark_intent_durable(rec.command_id).unwrap();
-            ob.mark_dispatched(rec.command_id, chrono::Utc::now()).unwrap();
+            ob.mark_dispatched(rec.command_id, chrono::Utc::now())
+                .unwrap();
             ob.mark_delivery_unknown(rec.command_id).unwrap();
         }
         // chat B：正常 2 条
         let b = store.create_chat(sid_b).unwrap();
-        b.append_update(1, 1, &[(d_b.0.clone(), &d_b.1)]).await.unwrap();
-        b.append_update(1, 2, &[(d_b.0.clone(), &d_b.1)]).await.unwrap();
+        b.append_update(1, 1, &[(d_b.0.clone(), &d_b.1)])
+            .await
+            .unwrap();
+        b.append_update(1, 2, &[(d_b.0.clone(), &d_b.1)])
+            .await
+            .unwrap();
         drop(store);
         // 破坏 chat A 的第 2 条 update 记录 payload
         let log_path = dir
@@ -404,7 +445,9 @@ async fn t10_watermark_corrupt_degrades() {
     {
         let store = Store::open(&cfg).unwrap();
         let chat = store.create_chat(sid).unwrap();
-        chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+        chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+            .await
+            .unwrap();
     }
     // 破坏水位文件
     let wm_path = dir
@@ -438,7 +481,9 @@ async fn t10_archive_conditions() {
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
     let chat = store.create_chat(sid).unwrap();
-    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     let now = chrono::Utc::now();
     // 未关闭 → 不归档
     assert!(!store.archive_chat(sid, now).unwrap());
@@ -469,7 +514,9 @@ async fn t10_archive_blocked_by_open_outbox() {
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
     let chat = store.create_chat(sid).unwrap();
-    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     let rec = crate::persist::outbox::NewOutboxRecord {
         command_id: uuid::Uuid::new_v4(),
         chat_id: sid,
@@ -482,7 +529,8 @@ async fn t10_archive_blocked_by_open_outbox() {
         ob.insert(rec.clone()).unwrap();
         ob.mark_accepted(rec.command_id).unwrap();
         ob.mark_intent_durable(rec.command_id).unwrap();
-        ob.mark_dispatched(rec.command_id, chrono::Utc::now()).unwrap();
+        ob.mark_dispatched(rec.command_id, chrono::Utc::now())
+            .unwrap();
         ob.mark_delivery_unknown(rec.command_id).unwrap();
     }
     chat.mark_closed(chrono::Utc::now());
@@ -509,12 +557,20 @@ async fn t11_dir_and_file_permissions() {
     let d = chat_doc(&sid, b"payload");
     let store = Store::open(&cfg).unwrap();
     assert_eq!(
-        std::fs::metadata(cfg.data_dir.join("chats")).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(cfg.data_dir.join("chats"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
         0o700,
         "chats dir 0700"
     );
     assert_eq!(
-        std::fs::metadata(cfg.data_dir.join("archive")).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(cfg.data_dir.join("archive"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
         0o700,
         "archive dir 0700"
     );
@@ -524,7 +580,9 @@ async fn t11_dir_and_file_permissions() {
         0o700,
         "chat dir 0700"
     );
-    chat.append_update(1, 1, &[(d.0.clone(), &d.1)]).await.unwrap();
+    chat.append_update(1, 1, &[(d.0.clone(), &d.1)])
+        .await
+        .unwrap();
     for f in ["updates.log", "watermark.json"] {
         let p = chat.dir().join(f);
         assert_eq!(
@@ -547,7 +605,11 @@ async fn t11_dir_and_file_permissions() {
     }
     let outbox_path = chat.dir().join("outbox.log");
     assert_eq!(
-        std::fs::metadata(&outbox_path).unwrap().permissions().mode() & 0o777,
+        std::fs::metadata(&outbox_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
         0o600,
         "outbox.log 0600"
     );

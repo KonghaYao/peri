@@ -1,6 +1,6 @@
 //! ACPChannel 纯函数单测（设计稿 §16 测试 1–5）。
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use acp_hub_proto::schema::{BlockVisibility, TurnStatus};
 
@@ -329,7 +329,10 @@ fn map_request_permission_official() {
     match norm(f) {
         NormalizeOutcome::PermissionRequest(req) => {
             assert_eq!(req.request_id, json!(5), "agent request id 原样（number）");
-            assert!(!req.permission_id.is_empty(), "permission_id 由 server 生成");
+            assert!(
+                !req.permission_id.is_empty(),
+                "permission_id 由 server 生成"
+            );
             assert_eq!(req.tool_call_id.as_deref(), Some("tc1"));
             assert_eq!(req.title, "run cmd");
             assert_eq!(req.description, None, "官方无 description 字段");
@@ -424,7 +427,11 @@ fn map_tool_call_update_failed_terminal() {
     });
     match norm(f) {
         NormalizeOutcome::Event(ev) => match ev.body {
-            EventBody::ToolCallCompleted { result, public_error, .. } => {
+            EventBody::ToolCallCompleted {
+                result,
+                public_error,
+                ..
+            } => {
                 assert_eq!(result, None);
                 let pe = public_error.unwrap();
                 assert_eq!(pe.code, "agent_error");
@@ -718,7 +725,8 @@ fn rpc_response_ok() {
 
 #[test]
 fn rpc_response_error() {
-    let f = json!({"jsonrpc": "2.0", "id": "hub-4", "error": {"code": -32601, "message": "unknown"}});
+    let f =
+        json!({"jsonrpc": "2.0", "id": "hub-4", "error": {"code": -32601, "message": "unknown"}});
     match norm(f) {
         NormalizeOutcome::RpcResponse { id, is_error } => {
             assert_eq!(id, "hub-4");

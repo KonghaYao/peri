@@ -8,24 +8,24 @@
 //! 设计稿：`docs/plans/f5-channel-control.md` §11–§14；权威：`docs/architecture.md`
 //! §4.5–§4.7、§7.1–§7.6、§8.3–§8.6、§9.2、§17.2。
 
+mod chat_registry;
 mod close_codes;
 mod heartbeat;
 mod hub;
 mod instance_registry;
-mod chat_registry;
+mod project_service;
 mod workspace_registry;
 
+pub use chat_registry::{ChatError, ChatRecord, ChatRegistry, ChatState, ReconciliationReport};
 pub use close_codes::{
-    CLOSE_CONFIG_FATAL, CLOSE_KEEPALIVE_TIMEOUT, CLOSE_INSTANCE_OFFLINE, ReconnectPolicy,
-    reconnect_policy,
+    reconnect_policy, ReconnectPolicy, CLOSE_CONFIG_FATAL, CLOSE_INSTANCE_OFFLINE,
+    CLOSE_KEEPALIVE_TIMEOUT,
 };
 pub use heartbeat::{Heartbeat, HeartbeatDriver, HeartbeatOutcome};
 pub use hub::{Hub, HubError, StoreSink};
 pub use instance_registry::{
-    HelloOutcome, KillOutcome, InstanceAck, InstanceConn, InstanceError, InstanceRegistry,
-    InstanceState, SpawnOutcome,
+    HelloOutcome, InstanceAck, InstanceConn, InstanceError, InstanceRegistry, InstanceState,
+    KillOutcome, SpawnOutcome,
 };
-pub use chat_registry::{
-    ChatError, ChatRecord, ChatRegistry, ChatState, ReconciliationReport,
-};
+pub use project_service::{ProjectService, ProjectServiceError};
 pub use workspace_registry::{WorkspaceError, WorkspaceRecord, WorkspaceRegistry};

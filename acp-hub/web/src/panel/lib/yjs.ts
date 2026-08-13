@@ -21,6 +21,7 @@ export class DocStore {
   private rafPending = new Set<string>(); // 本帧已排队的 docId（合帧去重）
   /** (docId) => void，main 注册渲染入口。 */
   onUpdate: ((docId: string) => void) | null = null;
+  clear(): void { this.docs.forEach((doc) => doc.destroy()); this.docs.clear(); this.rafPending.clear(); }
 
   /** 取（或创建）docId 对应的 Y.Doc。多标签页各自独立连接 + 独立 Y.Doc，
    *  server 单写者 + CRDT 收敛 → 天然一致（M3 §3.1 原则 4）。 */
@@ -136,6 +137,27 @@ export interface WorkspaceInfo {
   updatedAt: string | null;
 }
 
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  cwd: string;
+  instanceId: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  archivedAt: string | null;
+}
+
+export interface ProjectSessionInfo {
+  id: string;
+  projectId: string;
+  acpSessionId: string | null;
+  title: string;
+  lifecycle: string;
+  updatedAt: string | null;
+  lastOpenedAt: string | null;
+  activeChatId: string | null;
+}
+
 export interface RegistryView {
   instances: InstanceInfo[];
   chats: ChatInfo[];
@@ -144,6 +166,8 @@ export interface RegistryView {
   sessions: SessionSummaryInfo[];
   /** 工作区定义列表（§6.3 workspace 扩展）。 */
   workspaces: WorkspaceInfo[];
+  projects: ProjectInfo[];
+  projectSessions: ProjectSessionInfo[];
   globalStatus: string;
   schemaVersion: unknown;
   projectionVersion: unknown;
@@ -264,6 +288,8 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
   const chats: ChatInfo[] = [];
   const sessions: SessionSummaryInfo[] = [];
   const workspaces: WorkspaceInfo[] = [];
+  const projects: ProjectInfo[] = [];
+  const projectSessions: ProjectSessionInfo[] = [];
   let globalStatus = 'unknown';
 
   const m = asMap(root.get('instances'));
@@ -323,6 +349,39 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
     globalStatus = getStr(g, 'status') || 'unknown'; // healthy|degraded|restarting
   }
 
+  const projectsMap = asMap(root.get('projects'));
+  projectsMap?.forEach((v, id) => {
+    const p = asMap(v);
+    if (!p) return;
+    projects.push({
+      id,
+      name: getStr(p, 'name') || id,
+      cwd: getStr(p, 'cwd') || '',
+      instanceId: getStr(p, 'instance_id') || '',
+      createdAt: getStr(p, 'created_at'),
+      updatedAt: getStr(p, 'updated_at'),
+      archivedAt: getStr(p, 'archived_at'),
+    });
+  });
+  projects.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+
+  const projectSessionsMap = asMap(root.get('project_sessions'));
+  projectSessionsMap?.forEach((v, id) => {
+    const s = asMap(v);
+    if (!s) return;
+    projectSessions.push({
+      id,
+      projectId: getStr(s, 'project_id') || '',
+      acpSessionId: getStr(s, 'acp_session_id'),
+      title: getStr(s, 'title') || '新对话',
+      lifecycle: getStr(s, 'lifecycle') || 'pending',
+      updatedAt: getStr(s, 'updated_at'),
+      lastOpenedAt: getStr(s, 'last_opened_at'),
+      activeChatId: getStr(s, 'active_chat_id'),
+    });
+  });
+  projectSessions.sort((a, b) => String(b.lastOpenedAt || b.updatedAt || '').localeCompare(String(a.lastOpenedAt || a.updatedAt || '')));
+
   // ACP 会话（agent 磁盘历史，instance 级）：key = session_id。
   const smap = asMap(root.get('sessions'));
   if (smap) {
@@ -354,6 +413,8 @@ export function renderRegistry(doc: Y.Doc): RegistryView {
     chats,
     sessions,
     workspaces,
+    projects,
+    projectSessions,
     globalStatus,
     schemaVersion: root.get('schema_version'),
     projectionVersion: root.get('projection_version'),

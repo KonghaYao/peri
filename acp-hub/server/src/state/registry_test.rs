@@ -64,17 +64,35 @@ async fn wait_registry_update(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DocU
 fn applier_writes_instance_fields() {
     let mut applier = RegistryApplier::new(Factory::new().create_registry_doc());
     applier
-        .apply(&DocCommand::RegistryUpsertInstance(view("m1", "2026-08-07T00:00:01Z", 2)))
+        .apply(&DocCommand::RegistryUpsertInstance(view(
+            "m1",
+            "2026-08-07T00:00:01Z",
+            2,
+        )))
         .unwrap();
     let txn = applier.doc.transact();
     let root = txn.get_map(ROOT).unwrap();
-    let instances = root.get(&txn, "instances").unwrap().cast::<yrs::MapRef>().unwrap();
+    let instances = root
+        .get(&txn, "instances")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(instances.len(&txn), 1);
-    let mm = instances.get(&txn, "m1").unwrap().cast::<yrs::MapRef>().unwrap();
+    let mm = instances
+        .get(&txn, "m1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(mm.get(&txn, "id"), Some(yrs::Out::Any("m1".into())));
-    assert_eq!(mm.get(&txn, "hostname"), Some(yrs::Out::Any("host1".into())));
+    assert_eq!(
+        mm.get(&txn, "hostname"),
+        Some(yrs::Out::Any("host1".into()))
+    );
     assert_eq!(mm.get(&txn, "status"), Some(yrs::Out::Any("online".into())));
-    assert_eq!(mm.get(&txn, "token_id"), Some(yrs::Out::Any("tok-1".into())));
+    assert_eq!(
+        mm.get(&txn, "token_id"),
+        Some(yrs::Out::Any("tok-1".into()))
+    );
     assert_eq!(
         mm.get(&txn, "registered_at"),
         Some(yrs::Out::Any("2026-08-01T00:00:00Z".into()))
@@ -111,7 +129,8 @@ async fn upsert_instance_writes_and_overwrites_registry_doc() {
 async fn set_instance_status_unknown_instance_not_found() {
     let (reg, _doc) = test_registry().await;
     assert!(matches!(
-        reg.set_instance_status("ghost", InstanceStatus::Offline).await,
+        reg.set_instance_status("ghost", InstanceStatus::Offline)
+            .await,
         Err(RegistryError::NotFound(_))
     ));
 }
@@ -123,8 +142,8 @@ async fn set_instance_status_unknown_instance_not_found() {
 /// upsert 全字段覆盖）。
 #[test]
 fn upsert_chat_does_not_resurrect_existing_entry() {
-    use acp_hub_proto::schema::ChatSummary;
     use crate::state::doc_manager::DocCommand;
+    use acp_hub_proto::schema::ChatSummary;
 
     let mut applier = RegistryApplier::new(yrs::Doc::new());
     // 首次 upsert（create 语义）：新条目全量写入（accepting）。
@@ -170,8 +189,14 @@ fn upsert_chat_does_not_resurrect_existing_entry() {
         Some(yrs::Out::Any("ended".into())),
         "已 ended 会话不得被 upsert 复活"
     );
-    assert_eq!(sm.get(&txn, "title"), Some(yrs::Out::Any("历史标题".into())));
-    assert_eq!(sm.get(&txn, "instance_id"), Some(yrs::Out::Any("m1".into())));
+    assert_eq!(
+        sm.get(&txn, "title"),
+        Some(yrs::Out::Any("历史标题".into()))
+    );
+    assert_eq!(
+        sm.get(&txn, "instance_id"),
+        Some(yrs::Out::Any("m1".into()))
+    );
     assert_eq!(
         sm.get(&txn, "updated_at"),
         Some(yrs::Out::Any("2026-08-02T00:00:00Z".into())),

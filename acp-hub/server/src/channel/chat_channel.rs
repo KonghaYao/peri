@@ -21,11 +21,11 @@ use acp_hub_proto::frame::Frame;
 use acp_hub_proto::whitelist::m1_allows_action_type;
 
 use crate::auth::ConnectionCtx;
+use crate::channel::ConnectionRegistry;
 use crate::channel::{Broadcaster, OutboundMsg};
 use crate::channel::{CommandCoordinator, SubmitAck};
-use crate::channel::ConnectionRegistry;
-use crate::control::InstanceRegistry;
 use crate::control::ChatRegistry;
+use crate::control::InstanceRegistry;
 
 /// ready 前 Action 缓冲上限（§4.6：上限 = 命令队列上限 64，§7.4 规则 1）。
 pub const PENDING_ACTION_LIMIT: usize = 64;
@@ -108,10 +108,7 @@ impl ChatChannel {
         // 首帧纪律（§6）：认证后首帧必须是 ysync.subscribe/action。
         if self.first_frame {
             self.first_frame = false;
-            let ok = matches!(
-                frame,
-                Frame::Action(_) | Frame::YsyncSubscribe(_)
-            );
+            let ok = matches!(frame, Frame::Action(_) | Frame::YsyncSubscribe(_));
             if !ok {
                 return DispatchOutcome::Disconnect(1011);
             }
@@ -135,11 +132,9 @@ impl ChatChannel {
             }
             // 上行 ysync.update：方向拒绝（§5.6 server 是唯一写入者；客户端
             // 无写租约）→ UNSUPPORTED_FRAME（§4.8 不静默）。
-            Frame::YsyncUpdate(_) => {
-                DispatchOutcome::Send(vec![OutboundMsg::Frame(unsupported_frame(
-                    "ysync.update is server-to-client only",
-                ))])
-            }
+            Frame::YsyncUpdate(_) => DispatchOutcome::Send(vec![OutboundMsg::Frame(
+                unsupported_frame("ysync.update is server-to-client only"),
+            )]),
             // 其余 S→C 帧上行（ready/keep_alive/action_ack/action_error 等）
             // 协议违规 → UNSUPPORTED_FRAME。
             other => {
@@ -198,22 +193,25 @@ impl ChatChannel {
             return DispatchOutcome::None;
         }
         match deps.coordinator.submit(&self.ctx, action, tx).await {
-            SubmitAck::Accepted { command_id } => DispatchOutcome::Send(vec![
-                OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+            SubmitAck::Accepted { command_id } => {
+                DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionAck(ActionAck {
                     command_id,
                     status: AckStatus::Accepted,
                     turn_id: None,
                     chat_id: None,
+                    project_id: None,
+                    session_id: None,
                     acp_session_id: None,
                     committed_projection_version: None,
-                })),
-            ]),
+                }))])
+            }
             SubmitAck::Duplicate(ack) => {
                 DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionAck(ack))])
             }
             SubmitAck::Failed(err) => {
                 DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionError(err))])
             }
+            SubmitAck::Handled => DispatchOutcome::None,
         }
     }
 
@@ -237,7 +235,13 @@ impl ChatChannel {
 
 fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     match action {
-        ActionEnvelope::Create { command_id, .. }
+        ActionEnvelope::ProjectCreate { command_id, .. }
+        | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionCreate { command_id, .. }
+        | ActionEnvelope::PersistedSessionOpen { command_id, .. }
+        | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }

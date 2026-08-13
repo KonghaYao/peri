@@ -135,11 +135,10 @@ fn encode_doc_commit(epoch: u32, seq: u64, docs: &[(DocId, &[u8])]) -> Result<Ve
                 }
             },
         };
-        let len = u32::try_from(update.len())
-            .map_err(|_| StoreError::Corrupt {
-                path: PathBuf::from("updates.log"),
-                detail: "doc update exceeds u32 len".into(),
-            })?;
+        let len = u32::try_from(update.len()).map_err(|_| StoreError::Corrupt {
+            path: PathBuf::from("updates.log"),
+            detail: "doc update exceeds u32 len".into(),
+        })?;
         body.push(id);
         body.extend_from_slice(&len.to_le_bytes());
         body.extend_from_slice(update);
@@ -352,7 +351,8 @@ impl UpdateLog {
         // 打开时探测尾部，恢复内存计数（重启场景；损坏由 replay 处理）。
         if let Err(e) = log.probe_tail() {
             warn!(chat_id = %log.chat_id, path = %log.path.display(), error = %e, "update log tail probe failed");
-            log.degraded.set(format!("update log tail probe failed: {e}"));
+            log.degraded
+                .set(format!("update log tail probe failed: {e}"));
         }
         Ok(log)
     }
@@ -369,7 +369,8 @@ impl UpdateLog {
         let file = self.file.as_mut().ok_or("file closed")?;
         let mut pos = 0u64;
         loop {
-            file.seek(io::SeekFrom::Start(pos)).map_err(|e| e.to_string())?;
+            file.seek(io::SeekFrom::Start(pos))
+                .map_err(|e| e.to_string())?;
             let mut header = [0u8; 8];
             match file.read_exact(&mut header) {
                 Ok(()) => {}
@@ -391,7 +392,9 @@ impl UpdateLog {
                 return Err(e.to_string());
             }
             // CRC 校验：probe 与 replay 同纪律（§4.1）。
-            if crc32fast::hash(&body) != u32::from_le_bytes(header[4..8].try_into().expect("4 bytes")) {
+            if crc32fast::hash(&body)
+                != u32::from_le_bytes(header[4..8].try_into().expect("4 bytes"))
+            {
                 self.tail_probe_corrupted = true;
                 break;
             }
@@ -430,10 +433,7 @@ impl UpdateLog {
         let started = std::time::Instant::now();
         if self.degraded.is_set() {
             return Err(StoreError::Degraded {
-                reason: self
-                    .degraded
-                    .reason()
-                    .unwrap_or_else(|| "unknown".into()),
+                reason: self.degraded.reason().unwrap_or_else(|| "unknown".into()),
             });
         }
         let body = encode_doc_commit(epoch, seq, docs)?;
@@ -479,7 +479,10 @@ impl UpdateLog {
         if seq > self.last_seq {
             self.last_seq = seq;
         }
-        if let Err(e) = self.watermark.write(&Watermark { epoch, last_seq: seq }) {
+        if let Err(e) = self.watermark.write(&Watermark {
+            epoch,
+            last_seq: seq,
+        }) {
             self.degraded.set(format!("watermark write failed: {e}"));
             warn!(
                 chat_id = %self.chat_id, epoch, seq, error = %e,
@@ -521,10 +524,11 @@ impl UpdateLog {
         let mut pos = 0u64;
         let mut prev: Option<(u32, u64)> = None;
         loop {
-            f.seek(io::SeekFrom::Start(pos)).map_err(|e| StoreError::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+            f.seek(io::SeekFrom::Start(pos))
+                .map_err(|e| StoreError::Io {
+                    path: path.clone(),
+                    source: e,
+                })?;
             match read_blob(&mut f) {
                 Ok(Some(body)) => {
                     let blob_len = 8 + body.len() as u64;
@@ -536,15 +540,13 @@ impl UpdateLog {
                                         chat_id = %self.chat_id, epoch, seq, prev_seq = ps,
                                         "replay: seq non-monotonic within epoch"
                                     );
-                                    outcome.warnings.push(
-                                        crate::persist::RecoveryWarning {
-                                            code: crate::persist::WarningCode::SeqNonMonotonic,
-                                            path: path.clone(),
-                                            message: format!(
-                                                "seq {seq} < previous {ps} within epoch {epoch}"
-                                            ),
-                                        },
-                                    );
+                                    outcome.warnings.push(crate::persist::RecoveryWarning {
+                                        code: crate::persist::WarningCode::SeqNonMonotonic,
+                                        path: path.clone(),
+                                        message: format!(
+                                            "seq {seq} < previous {ps} within epoch {epoch}"
+                                        ),
+                                    });
                                 }
                             }
                             prev = Some((epoch, seq));
@@ -584,7 +586,11 @@ impl UpdateLog {
     }
 
     /// 处理损坏点：截断日志于损坏点、损坏段写入 corrupt/、置 degraded。
-    fn handle_corruption(&mut self, offset: u64, detail: &str) -> Result<CorruptionInfo, StoreError> {
+    fn handle_corruption(
+        &mut self,
+        offset: u64,
+        detail: &str,
+    ) -> Result<CorruptionInfo, StoreError> {
         let path = self.path.clone();
         let mut f = OpenOptions::new()
             .read(true)
@@ -607,11 +613,10 @@ impl UpdateLog {
                 path: path.clone(),
                 source: e,
             })?;
-        f.read_to_end(&mut segment)
-            .map_err(|e| StoreError::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+        f.read_to_end(&mut segment).map_err(|e| StoreError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
         let artifact = self
             .corrupt_dir
             .join(format!("{}.{offset}.bin", UPDATES_LOG_FILE));
@@ -636,16 +641,16 @@ impl UpdateLog {
             path: path.clone(),
             source: io::Error::new(io::ErrorKind::NotConnected, "log closed"),
         })?;
-        file.set_len(offset)
-            .map_err(|e| StoreError::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+        file.set_len(offset).map_err(|e| StoreError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
         file.sync_data().map_err(|e| StoreError::Io {
             path: path.clone(),
             source: e,
         })?;
-        self.degraded.set(format!("update log tail truncated at {offset}: {detail}"));
+        self.degraded
+            .set(format!("update log tail truncated at {offset}: {detail}"));
         warn!(
             chat_id = %self.chat_id, path = %path.display(),
             offset, bytes_kept, reason = detail,
@@ -782,7 +787,10 @@ impl UpdateLog {
     ) -> Result<bool, StoreError> {
         let by_size = self.bytes > self.compact_threshold_bytes;
         let by_age = match self.last_compact_at {
-            Some(t) => t.elapsed().map(|e| e > self.compact_interval).unwrap_or(false),
+            Some(t) => t
+                .elapsed()
+                .map(|e| e > self.compact_interval)
+                .unwrap_or(false),
             None => false,
         };
         if !by_size && !by_age {
@@ -809,10 +817,7 @@ impl UpdateLog {
         let started = std::time::Instant::now();
         if self.degraded.is_set() {
             return Err(StoreError::Degraded {
-                reason: self
-                    .degraded
-                    .reason()
-                    .unwrap_or_else(|| "unknown".into()),
+                reason: self.degraded.reason().unwrap_or_else(|| "unknown".into()),
             });
         }
         let s = self.last_seq;
@@ -824,11 +829,10 @@ impl UpdateLog {
             created_at: chrono::Utc::now(),
             docs,
         };
-        let body = serde_json::to_vec(&snapshot)
-            .map_err(|e| StoreError::Corrupt {
-                path: self.snapshot_path.clone(),
-                detail: format!("snapshot serialize failed: {e}"),
-            })?;
+        let body = serde_json::to_vec(&snapshot).map_err(|e| StoreError::Corrupt {
+            path: self.snapshot_path.clone(),
+            detail: format!("snapshot serialize failed: {e}"),
+        })?;
         let tmp_path = self.tmp_snapshot_path.clone();
         let snapshot_path = self.snapshot_path.clone();
         let mut tmp = OpenOptions::new()

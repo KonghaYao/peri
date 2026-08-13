@@ -38,11 +38,7 @@ fn hello(instance_id: &str) -> InstanceHello {
 async fn lifecycle_hello_heartbeat_offline() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx, _rx) = mpsc::channel(8);
     let outcome = reg
         .on_hello("m1", "tok-1", InstanceConn { tx }, &hello("m1"))
@@ -51,21 +47,36 @@ async fn lifecycle_hello_heartbeat_offline() {
     assert_eq!(reg.state("m1").await, Some(InstanceState::Online));
 
     // 心跳续期。
-    reg.on_heartbeat("m1", &InstanceHeartbeat { load: 10, alive_sessions: vec![] })
-        .await
-        .unwrap();
+    reg.on_heartbeat(
+        "m1",
+        &InstanceHeartbeat {
+            load: 10,
+            alive_sessions: vec![],
+        },
+    )
+    .await
+    .unwrap();
 
     // 30s 无心跳 → OFFLINE（注入时钟）。
     let t0 = Instant::now();
-    assert!(reg.sweep_offline(t0 + Duration::from_secs(29)).await.is_empty());
+    assert!(reg
+        .sweep_offline(t0 + Duration::from_secs(29))
+        .await
+        .is_empty());
     let offline = reg.sweep_offline(t0 + Duration::from_secs(31)).await;
     assert_eq!(offline, vec!["m1".to_string()]);
     assert_eq!(reg.state("m1").await, Some(InstanceState::Offline));
 
     // 重连心跳 → ONLINE。
-    reg.on_heartbeat("m1", &InstanceHeartbeat { load: 0, alive_sessions: vec![] })
-        .await
-        .unwrap();
+    reg.on_heartbeat(
+        "m1",
+        &InstanceHeartbeat {
+            load: 0,
+            alive_sessions: vec![],
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(reg.state("m1").await, Some(InstanceState::Online));
     let _ = _drop;
 }
@@ -74,11 +85,7 @@ async fn lifecycle_hello_heartbeat_offline() {
 async fn hello_fencing_replaces_connection() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx1, mut rx1) = mpsc::channel(8);
     reg.on_hello("m1", "tok-1", InstanceConn { tx: tx1 }, &hello("m1"))
         .await;
@@ -99,11 +106,7 @@ async fn spawn_ack_tracking_and_timeout() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
     // 指令超时用极短值。
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_millis(50),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_millis(50), chats);
     let (tx, mut rx) = mpsc::channel(8);
     reg.on_hello("m1", "tok-1", InstanceConn { tx }, &hello("m1"))
         .await;
@@ -161,11 +164,7 @@ async fn spawn_ack_tracking_and_timeout() {
 async fn offline_instance_rejects_commands() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx, _rx) = mpsc::channel(8);
     reg.on_hello("m1", "tok-1", InstanceConn { tx: tx.clone() }, &hello("m1"))
         .await;
@@ -189,11 +188,7 @@ async fn offline_instance_rejects_commands() {
 async fn forward_rpc_and_offline() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx, mut rx) = mpsc::channel(8);
     reg.on_hello("m1", "tok-1", InstanceConn { tx: tx.clone() }, &hello("m1"))
         .await;
@@ -206,18 +201,17 @@ async fn forward_rpc_and_offline() {
                 assert_eq!(f.command_id, "hub-1");
                 assert_eq!(f.chat_id, "s1");
                 assert_eq!(f.frame["id"], json!("hub-1"));
-                reg2
-                    .on_ack(
-                        "m1",
-                        &f.command_id,
-                        InstanceAck::Forward(InstanceForwardAck {
-                            command_id: f.command_id.clone(),
-                            chat_id: f.chat_id.clone(),
-                            ok: true,
-                            error: None,
-                        }),
-                    )
-                    .await;
+                reg2.on_ack(
+                    "m1",
+                    &f.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: f.command_id.clone(),
+                        chat_id: f.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
             }
             other => panic!("expected forward frame, got {other:?}"),
         }
@@ -230,7 +224,8 @@ async fn forward_rpc_and_offline() {
         Err(InstanceError::UnknownInstance(_))
     ));
     // 断开后 OFFLINE。
-    reg.on_disconnect("m1", &InstanceConn { tx: tx.clone() }).await;
+    reg.on_disconnect("m1", &InstanceConn { tx: tx.clone() })
+        .await;
     assert!(matches!(
         reg.forward_rpc("m1", "s1", &msg).await,
         Err(InstanceError::Offline)
@@ -242,11 +237,7 @@ async fn forward_rpc_and_offline() {
 async fn chat_epoch_from_hello() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let mut h = hello("m1");
     h.stream_epochs = Some([("acp-1".to_string(), 1u64)].into_iter().collect());
     let (tx, _rx) = mpsc::channel(8);
@@ -274,11 +265,7 @@ async fn cleanup_orphans_kill_decision() {
     };
     let store = Arc::new(crate::persist::Store::open(&persist_cfg).unwrap());
     store.recover().await;
-    let sink = Arc::new(
-        crate::control::StoreSink::new(store.clone())
-            .await
-            .unwrap(),
-    );
+    let sink = Arc::new(crate::control::StoreSink::new(store.clone()).await.unwrap());
     let doc = Arc::new(crate::state::doc_manager::DocManager::new(
         crate::state::doc_manager::BatchConfig::default(),
         sink,
@@ -334,8 +321,14 @@ async fn cleanup_orphans_kill_decision() {
         }
     }
     let killed = cleanup.await.unwrap();
-    assert!(killed.contains(&"s1".to_string()), "意外存活应 kill（§7.5）");
-    assert!(killed.contains(&"s2".to_string()), "pending_close 应补发 kill（§7.6）");
+    assert!(
+        killed.contains(&"s1".to_string()),
+        "意外存活应 kill（§7.5）"
+    );
+    assert!(
+        killed.contains(&"s2".to_string()),
+        "pending_close 应补发 kill（§7.6）"
+    );
     assert!(!killed.contains(&"s3".to_string()), "正常存活不 kill");
     assert_eq!(targets.len(), 2);
     // s2 补发完成 → 清 pending_close（§7.6）。
@@ -350,18 +343,24 @@ async fn cleanup_orphans_kill_decision() {
 async fn fencing_stale_disconnect_keeps_new_connection_serving() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx1, _rx1) = mpsc::channel(8);
-    reg.on_hello("m1", "tok-1", InstanceConn { tx: tx1.clone() }, &hello("m1"))
-        .await;
+    reg.on_hello(
+        "m1",
+        "tok-1",
+        InstanceConn { tx: tx1.clone() },
+        &hello("m1"),
+    )
+    .await;
     // 新 hello（fencing 旧连接，§4.5）。
     let (tx2, mut rx2) = mpsc::channel(8);
     let outcome = reg
-        .on_hello("m1", "tok-1", InstanceConn { tx: tx2.clone() }, &hello("m1"))
+        .on_hello(
+            "m1",
+            "tok-1",
+            InstanceConn { tx: tx2.clone() },
+            &hello("m1"),
+        )
         .await;
     assert!(outcome.fenced_previous);
     // 旧连接退出（gateway 断链路径）——陈旧断开：不得置 Offline。
@@ -386,8 +385,8 @@ async fn fencing_stale_disconnect_keeps_new_connection_serving() {
     });
     match rx2.recv().await {
         Some(OutboundMsg::Frame(Frame::InstanceSpawn(k))) => {
-            assert!(reg
-                .on_ack(
+            assert!(
+                reg.on_ack(
                     "m1",
                     &k.command_id,
                     InstanceAck::Spawn(InstanceSpawnAck {
@@ -397,7 +396,8 @@ async fn fencing_stale_disconnect_keeps_new_connection_serving() {
                         error: None,
                     }),
                 )
-                .await);
+                .await
+            );
         }
         other => panic!("expected spawn frame on new connection, got {other:?}"),
     }
@@ -412,11 +412,7 @@ async fn fencing_stale_disconnect_keeps_new_connection_serving() {
 async fn heartbeat_recovery_after_offline_sweep_serves_commands() {
     let (registry, _drop) = test_registry();
     let chats = ChatRegistry::new(registry);
-    let reg = InstanceRegistry::new(
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-        chats,
-    );
+    let reg = InstanceRegistry::new(Duration::from_secs(30), Duration::from_secs(10), chats);
     let (tx, mut rx) = mpsc::channel(8);
     reg.on_hello("m1", "tok-1", InstanceConn { tx: tx.clone() }, &hello("m1"))
         .await;
@@ -469,8 +465,8 @@ async fn heartbeat_recovery_after_offline_sweep_serves_commands() {
     });
     match rx.recv().await {
         Some(OutboundMsg::Frame(Frame::InstanceSpawn(k))) => {
-            assert!(reg
-                .on_ack(
+            assert!(
+                reg.on_ack(
                     "m1",
                     &k.command_id,
                     InstanceAck::Spawn(InstanceSpawnAck {
@@ -480,7 +476,8 @@ async fn heartbeat_recovery_after_offline_sweep_serves_commands() {
                         error: None,
                     }),
                 )
-                .await);
+                .await
+            );
         }
         other => panic!("expected spawn frame after heartbeat recovery, got {other:?}"),
     }
@@ -501,11 +498,7 @@ async fn heartbeat_alive_sessions_reconciliation_kills() {
     };
     let store = Arc::new(crate::persist::Store::open(&persist_cfg).unwrap());
     store.recover().await;
-    let sink = Arc::new(
-        crate::control::StoreSink::new(store.clone())
-            .await
-            .unwrap(),
-    );
+    let sink = Arc::new(crate::control::StoreSink::new(store.clone()).await.unwrap());
     let doc = Arc::new(crate::state::doc_manager::DocManager::new(
         crate::state::doc_manager::BatchConfig::default(),
         sink,
@@ -555,8 +548,14 @@ async fn heartbeat_alive_sessions_reconciliation_kills() {
             other => panic!("expected InstanceKill, got {other:?}"),
         }
     }
-    assert!(targets.contains(&"s1".to_string()), "意外存活应 kill（§7.5）");
-    assert!(targets.contains(&"s2".to_string()), "pending_close 应补发 kill（§7.6）");
+    assert!(
+        targets.contains(&"s1".to_string()),
+        "意外存活应 kill（§7.5）"
+    );
+    assert!(
+        targets.contains(&"s2".to_string()),
+        "pending_close 应补发 kill（§7.6）"
+    );
     // kill 完成 → 会话 Closed（pending_close 集合清除，§7.6）。
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(chats.pending_close_chats().await.is_empty());

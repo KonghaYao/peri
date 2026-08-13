@@ -51,7 +51,10 @@ impl ChatState {
 
     /// 是否终态（ended/closed/crashed；§8.2「不再接受该 chat 的新事件」）。
     pub fn is_terminal(self) -> bool {
-        matches!(self, ChatState::Ended | ChatState::Closed | ChatState::Crashed)
+        matches!(
+            self,
+            ChatState::Ended | ChatState::Closed | ChatState::Crashed
+        )
     }
 }
 
@@ -232,12 +235,7 @@ impl ChatRegistry {
     /// binding 查询（RelayEventHandler/ACPChannel 投递前校验，§6.1 规则 5：
     /// session_id 只用于协议投递，不能成为 Doc 名/广播频道/缓存键）。
     pub async fn resolve(&self, session_id: &str) -> Option<String> {
-        self.inner
-            .bindings
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
+        self.inner.bindings.read().await.get(session_id).cloned()
     }
 
     /// 会话切换（§8.5 当前对话内 load）：把 chat 的**当前会话**切到
@@ -289,23 +287,24 @@ impl ChatRegistry {
             .registry
             .set_chat_status(chat_id, ChatState::PendingClose.as_str())
             .await?;
-        warn!(chat_id, "chat close deferred: instance offline (pending_close)");
+        warn!(
+            chat_id,
+            "chat close deferred: instance offline (pending_close)"
+        );
         Ok(())
     }
 
     /// 状态迁移 + Registry 写回（§7.3/§7.6；终态不可逆，防御性检查）。
-    pub async fn transition(
-        &self,
-        chat_id: &str,
-        state: ChatState,
-    ) -> Result<(), ChatError> {
+    pub async fn transition(&self, chat_id: &str, state: ChatState) -> Result<(), ChatError> {
         let mut chats = self.inner.chats.write().await;
         let Some(entry) = chats.get_mut(chat_id) else {
             return Err(ChatError::NotFound(chat_id.to_string()));
         };
         if entry.state.is_terminal() && entry.state != state {
             warn!(
-                chat_id, from = entry.state.as_str(), to = state.as_str(),
+                chat_id,
+                from = entry.state.as_str(),
+                to = state.as_str(),
                 "chat terminal state transition rejected (防御)"
             );
             return Ok(());

@@ -40,7 +40,11 @@ impl NonceRegistry {
     /// 见过但已过期 → 视为新 nonce（重新登记，`Accepted`）。
     ///
     /// `now` 由调用方注入（测试可推进虚拟时钟，§6.3 N4）。
-    pub fn check_and_mark(&mut self, nonce: &[u8; CHALLENGE_NONCE_LEN], now: Instant) -> NonceVerdict {
+    pub fn check_and_mark(
+        &mut self,
+        nonce: &[u8; CHALLENGE_NONCE_LEN],
+        now: Instant,
+    ) -> NonceVerdict {
         if let Some(&marked_at) = self.seen.get(nonce) {
             if now.duration_since(marked_at) <= NONCE_TTL {
                 return NonceVerdict::Replay;

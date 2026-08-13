@@ -8,7 +8,7 @@
 // 对话操作（新建/新会话/取消/关闭）已收敛到左侧对话列表区。
 
 import { createSignal } from 'solid-js';
-import { chatHead, chatStatusSignal, isTerminal, selectedCid, sendMessage } from '../store';
+import { chatHead, chatStatusSignal, isTerminal, openingSessionId, readOnly, selectedCid, sendMessage } from '../store';
 
 /** tokens 数值 → "12k"/"200k" 缩写（>=1000 取 k；非法值 → null）。 */
 function fmtTokens(n: number | null): string | null {
@@ -22,9 +22,9 @@ export function Composer() {
   let taRef: HTMLTextAreaElement | undefined;
 
   const terminal = () => isTerminal(chatStatusSignal()[selectedCid() ?? '']);
-  const inputDisabled = () => !selectedCid() || terminal();
+  const inputDisabled = () => !selectedCid() || terminal() || !!openingSessionId() || readOnly();
   const inputPlaceholder = () =>
-    !selectedCid()
+    readOnly() ? '只读模式' : openingSessionId() ? '正在打开会话…' : !selectedCid()
       ? '输入消息，Enter 发送（需先选中对话）'
       : terminal()
         ? '对话已结束（历史只读）'
@@ -58,10 +58,10 @@ export function Composer() {
   }
 
   return (
-    <div class="mx-auto w-full max-w-[var(--composer-max)] px-5 pb-5 max-[480px]:px-2.5 max-[480px]:pb-[max(10px,env(safe-area-inset-bottom))]">
+    <div class="composer-wrap">
       <section
         aria-disabled={inputDisabled()}
-        class="rounded-[var(--composer-radius)] border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-float)] transition-colors duration-[120ms] ease-out focus-within:border-[var(--accent)] max-[480px]:rounded-[20px]"
+        class="composer-surface"
       >
         <textarea
           ref={taRef}
@@ -83,9 +83,9 @@ export function Composer() {
           placeholder={inputPlaceholder()}
           disabled={inputDisabled()}
           spellcheck={false}
-          class="ui-scrollbar block h-[52px] min-h-[52px] max-h-[180px] w-full resize-none overflow-y-auto bg-transparent px-[18px] pt-4 pb-2 text-[15px] leading-[23px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] disabled:bg-transparent disabled:text-[var(--text-secondary)] disabled:placeholder:text-[var(--text-muted)]"
+          class="composer-input ui-scrollbar"
         />
-        <div class="flex h-11 items-center gap-2 pl-[14px] pr-2.5">
+        <div class="composer-toolbar">
           <span class="min-w-0 truncate text-xs text-[var(--text-muted)]" title={model()}>
             模型：{model()}
           </span>

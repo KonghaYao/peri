@@ -9,7 +9,7 @@ use acp_hub_proto::ack::{AckStatus, ErrorCode};
 use acp_hub_proto::Frame;
 
 use common::{
-    fetch_registry_snapshot, fresh_token, global_status, chat_field, chat_ids, wait_terminal,
+    chat_field, chat_ids, fetch_registry_snapshot, fresh_token, global_status, wait_terminal,
     InstanceProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
 };
 
@@ -61,10 +61,12 @@ async fn t09_body() -> Result<(), String> {
     //    （wait_terminal 跳过前置 accepted）。
     let mut c = WsClient::connect_client(port, &env.client_token, &["hub:registry"]).await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: command_id.clone(),
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     let err = wait_terminal(&mut c, RECV_TIMEOUT).await?;
     match err {
@@ -116,10 +118,12 @@ async fn t09_body() -> Result<(), String> {
     //    经 instance/forward 下行，终态由后续收帧确认）。
     let mut c = WsClient::connect_client(port, &env.client_token, &["hub:registry"]).await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: command_id.clone(),
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     let _ = c
         .recv_until(
@@ -141,9 +145,7 @@ async fn t09_body() -> Result<(), String> {
 
     // 5. session 级（interrupted + gap + buffer_sync 补推）在进程级验证
     //    依赖「create committed 后断线」的编排；本用例聚焦机器级语义。
-    println!(
-        "  [t09] 机器级断线/重连语义成立；session 级（interrupted/gap/补推）由其他场景承接"
-    );
+    println!("  [t09] 机器级断线/重连语义成立；session 级（interrupted/gap/补推）由其他场景承接");
     Ok(())
 }
 
@@ -167,22 +169,26 @@ async fn t10_body() -> Result<(), String> {
 
     // 需要已 committed 的 session（binding 建立，§6.2 全时序）。
     let create_cid = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: create_cid,
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: create_cid,
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     match wait_terminal(&mut c, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
             let sid = a.chat_id.unwrap_or_default();
             // cancel：转发 ACP session/cancel → L3 → committed（终态投影）。
             let cancel_cid = uuid::Uuid::new_v4().to_string();
-            c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Cancel {
-                command_id: cancel_cid.clone(),
-                payload: acp_hub_proto::action::CancelChatPayload {
-                    chat_id: sid.clone(),
+            c.send(&Frame::Action(
+                acp_hub_proto::action::ActionEnvelope::Cancel {
+                    command_id: cancel_cid.clone(),
+                    payload: acp_hub_proto::action::CancelChatPayload {
+                        chat_id: sid.clone(),
+                    },
                 },
-            }))
+            ))
             .await?;
             let ack = wait_terminal(&mut c, RECV_TIMEOUT).await?;
             match ack {
@@ -194,12 +200,14 @@ async fn t10_body() -> Result<(), String> {
             }
             // close：kill ACP 进程 → session closed。
             let close_cid = uuid::Uuid::new_v4().to_string();
-            c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Close {
-                command_id: close_cid.clone(),
-                payload: acp_hub_proto::action::CloseChatPayload {
-                    chat_id: sid.clone(),
+            c.send(&Frame::Action(
+                acp_hub_proto::action::ActionEnvelope::Close {
+                    command_id: close_cid.clone(),
+                    payload: acp_hub_proto::action::CloseChatPayload {
+                        chat_id: sid.clone(),
+                    },
                 },
-            }))
+            ))
             .await?;
             let ack = wait_terminal(&mut c, RECV_TIMEOUT).await?;
             match ack {
@@ -228,9 +236,7 @@ async fn t10_body() -> Result<(), String> {
                 other => Err(format!("close 意外 ack: {:?}", other)),
             }
         }
-        Frame::ActionError(e) => {
-            Err(format!("前置 create 失败: {:?} {}", e.code, e.message))
-        }
+        Frame::ActionError(e) => Err(format!("前置 create 失败: {:?} {}", e.code, e.message)),
         other => Err(format!("前置 create 意外终态: {:?}", other)),
     }
 }
@@ -263,7 +269,10 @@ async fn t11_body() -> Result<(), String> {
     let (_snap, _ready) = c.handshake(&env.client_token, &["hub:registry"]).await?;
     // 等 keep_alive 到来（确认心跳接线）。
     let _ = c
-        .recv_until(|f| matches!(f, Frame::KeepAlive(_)), Duration::from_secs(10))
+        .recv_until(
+            |f| matches!(f, Frame::KeepAlive(_)),
+            Duration::from_secs(10),
+        )
         .await?;
     // 不回 pong → 3×interval 内 server 以 4501 关闭。
     let code = c.recv_close(Duration::from_secs(15)).await?;

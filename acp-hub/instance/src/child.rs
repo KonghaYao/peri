@@ -320,11 +320,7 @@ impl AcpProcess {
 
     /// 当前运行状态（拷贝）。
     pub fn state(&self) -> ProcessState {
-        *self
-            .inner
-            .state
-            .lock()
-            .expect("state mutex poisoned")
+        *self.inner.state.lock().expect("state mutex poisoned")
     }
 
     /// 向 ACP 子进程写入一条 JSON-RPC 行（原样 + flush，§4.4 L2）。

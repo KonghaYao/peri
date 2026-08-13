@@ -36,17 +36,20 @@ use crate::auth::audit::audit;
 use crate::auth::ConnectionCtx;
 use crate::channel::broadcaster::OutboundMsg;
 use crate::channel::relay_event_handler::RelayEventHandler;
+use crate::control::ProjectService;
+use crate::control::WorkspaceRegistry;
 use crate::control::{ChatError, ChatRegistry, ChatState};
 use crate::control::{InstanceError, InstanceRegistry, SpawnOutcome};
-use crate::control::WorkspaceError;
-use crate::control::WorkspaceRegistry;
-use crate::persist::outbox::{CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass};
+use crate::persist::metadata::{payload_hash, BeginCommand, MetadataError, NewSession};
+use crate::persist::outbox::{
+    CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass,
+};
 use crate::persist::Store;
 use crate::protocol::{
-    OutboundCtx, OutboundMessage, Translator, extract_agent_config, validate_cwd,
+    extract_agent_config, validate_cwd, OutboundCtx, OutboundMessage, Translator,
 };
-use crate::state::doc_manager::{DocCommand, DocManager, SubmitError, SubmitResult};
 use crate::state::doc_manager::BatchConfig;
+use crate::state::doc_manager::{DocCommand, DocManager, SubmitError, SubmitResult};
 
 /// 默认 instance（§4.3 P5：instance_id 缺省 = 本机）。
 pub const DEFAULT_INSTANCE_ID: &str = "local";
@@ -77,6 +80,8 @@ pub enum SubmitAck {
     Duplicate(ActionAck),
     /// 同步失败（RATE_LIMITED/CHAT_NOT_FOUND/INVALID_STATE…）→ action_error。
     Failed(ActionError),
+    /// Coordinator wrote accepted and terminal frames through the same queue.
+    Handled,
 }
 
 /// 执行器命令（submit 入队载荷；终态经 `tx` 回客户端连接）。
@@ -135,6 +140,7 @@ struct CoordInner {
     loads_in_flight: StdMutex<HashSet<String>>,
     /// L3 确认超时（§4.4 路径 B 默认 30s；测试注入短值）。
     l3_timeout: Duration,
+    projects: RwLock<Option<ProjectService>>,
 }
 
 struct LoadFlightGuard {
@@ -169,8 +175,17 @@ impl CommandCoordinator {
         binding_timeout: Duration,
     ) -> Self {
         Self::with_l3_timeout(
-            store, doc, instance, chats, relay, cfg, acp_cmd,
-            spawn_timeout, initialize_timeout, binding_timeout, L3_TIMEOUT,
+            store,
+            doc,
+            instance,
+            chats,
+            relay,
+            cfg,
+            acp_cmd,
+            spawn_timeout,
+            initialize_timeout,
+            binding_timeout,
+            L3_TIMEOUT,
         )
     }
 
@@ -216,8 +231,13 @@ impl CommandCoordinator {
                 binding_timeout,
                 loads_in_flight: StdMutex::new(HashSet::new()),
                 l3_timeout,
+                projects: RwLock::new(None),
             }),
         }
+    }
+
+    pub async fn install_project_service(&self, projects: ProjectService) {
+        *self.inner.projects.write().await = Some(projects);
     }
 
     /// 工作区注册表（hub 装配：启动恢复重建）。
@@ -230,7 +250,13 @@ impl CommandCoordinator {
     pub async fn rebuild_create_index(&self) {
         let mut idx: HashMap<Uuid, Uuid> = HashMap::new();
         for (cid, store) in self.inner.store.chats_snapshot() {
-            let recs = store.outbox().lock().await.records().cloned().collect::<Vec<_>>();
+            let recs = store
+                .outbox()
+                .lock()
+                .await
+                .records()
+                .cloned()
+                .collect::<Vec<_>>();
             for rec in recs {
                 if rec.command_type == CommandType::Create {
                     idx.insert(rec.command_id, cid);
@@ -244,6 +270,1133 @@ impl CommandCoordinator {
         }
     }
 
+    async fn submit_metadata_action(
+        &self,
+        ctx: &ConnectionCtx,
+        action: ActionEnvelope,
+        tx: mpsc::Sender<OutboundMsg>,
+    ) -> SubmitAck {
+        let command_id = extract_command_id(&action).unwrap_or_default();
+        if Uuid::parse_str(&command_id).is_err() {
+            return SubmitAck::Failed(action_error(
+                command_id,
+                ErrorCode::InvalidState,
+                "invalid commandId",
+                false,
+            ));
+        }
+        let Some(projects) = self.inner.projects.read().await.clone() else {
+            return SubmitAck::Failed(action_error(
+                command_id,
+                ErrorCode::AgentUnavailable,
+                "metadata catalog unavailable",
+                true,
+            ));
+        };
+        let hash = match payload_hash(&action) {
+            Ok(v) => v,
+            Err(_) => {
+                return SubmitAck::Failed(action_error(
+                    command_id,
+                    ErrorCode::InvalidState,
+                    "invalid metadata payload",
+                    false,
+                ))
+            }
+        };
+        // Validate against the authoritative catalog before reserving the
+        // command id. A rejected request must not leave an in-progress dedup row.
+        let mut prepared_create = None;
+        let mut prepared_open = None;
+        match &action {
+            ActionEnvelope::ProjectCreate { payload, .. } => {
+                if let Err(e) = validate_cwd(&payload.cwd) {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        &format!("invalid cwd: {e}"),
+                        false,
+                    ));
+                }
+                if !std::path::Path::new(&payload.cwd).is_dir() {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "cwd not found",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::ProjectArchive { payload, .. } => {
+                if !matches!(projects.metadata().project(&payload.project_id).await, Ok(Some(ref p)) if p.archived_at.is_none())
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project not found or archived",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::PersistedSessionRename { payload, .. } => {
+                if payload.name.trim().is_empty()
+                    || !matches!(
+                        projects.metadata().session(&payload.session_id).await,
+                        Ok(Some(_))
+                    )
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "session not found or name empty",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::PersistedSessionImport { payload, .. } => {
+                let Some(project) = projects
+                    .metadata()
+                    .project(&payload.project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|p| p.archived_at.is_none())
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project not found or archived",
+                        false,
+                    ));
+                };
+                let candidate = self
+                    .inner
+                    .chats
+                    .registry()
+                    .list_legacy_sessions()
+                    .await
+                    .ok()
+                    .and_then(|items| {
+                        items.into_iter().find(|s| {
+                            s.session_id == payload.acp_session_id && s.cwd == project.cwd
+                        })
+                    });
+                if candidate.is_none() {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "ACP session is not available for this project",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::PersistedSessionCreate { payload, .. } => {
+                let Some(project) = projects
+                    .metadata()
+                    .project(&payload.project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|p| p.archived_at.is_none())
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project not found or archived",
+                        false,
+                    ));
+                };
+                prepared_create = Some((project, Uuid::new_v4().to_string()));
+            }
+            ActionEnvelope::PersistedSessionOpen { payload, .. } => {
+                let Some(session) = projects
+                    .metadata()
+                    .session(&payload.session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "session not found",
+                        false,
+                    ));
+                };
+                if session.lifecycle != "ready" || session.acp_session_id.is_none() {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "session is not ready",
+                        false,
+                    ));
+                }
+                let Some(project) = projects
+                    .metadata()
+                    .project(&session.project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|p| p.archived_at.is_none())
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project not found or archived",
+                        false,
+                    ));
+                };
+                let live_chat = if let (Some(chat), Some(acp)) = (
+                    session.last_chat_id.as_deref(),
+                    session.acp_session_id.as_deref(),
+                ) {
+                    self.inner
+                        .chats
+                        .entry(chat)
+                        .await
+                        .filter(|e| !e.state.is_terminal() && e.session_id.as_deref() == Some(acp))
+                        .map(|_| chat.to_string())
+                } else {
+                    None
+                };
+                prepared_open = Some((project, session, live_chat));
+            }
+            _ => unreachable!(),
+        }
+        let (project_hint, session_hint) = match &action {
+            ActionEnvelope::ProjectArchive { payload, .. } => {
+                (Some(payload.project_id.as_str()), None)
+            }
+            ActionEnvelope::PersistedSessionCreate { payload, .. } => {
+                (Some(payload.project_id.as_str()), None)
+            }
+            ActionEnvelope::PersistedSessionOpen { payload, .. } => {
+                (None, Some(payload.session_id.as_str()))
+            }
+            ActionEnvelope::PersistedSessionRename { payload, .. } => {
+                (None, Some(payload.session_id.as_str()))
+            }
+            ActionEnvelope::PersistedSessionImport { payload, .. } => {
+                (Some(payload.project_id.as_str()), None)
+            }
+            _ => (None, None),
+        };
+        let new_session = prepared_create.as_ref().map(|(project, id)| NewSession {
+            id,
+            project_id: &project.id,
+            title: match &action {
+                ActionEnvelope::PersistedSessionCreate { payload, .. } => payload.title.as_deref(),
+                _ => None,
+            },
+        });
+        let activate = prepared_create
+            .as_ref()
+            .map(|(_, id)| id.as_str())
+            .or_else(|| {
+                prepared_open
+                    .as_ref()
+                    .and_then(|(_, session, live)| live.is_none().then_some(session.id.as_str()))
+            });
+        match projects
+            .metadata()
+            .begin_command_with_activation(
+                &command_id,
+                action.type_str(),
+                &hash,
+                project_hint,
+                session_hint.or_else(|| prepared_create.as_ref().map(|(_, id)| id.as_str())),
+                new_session,
+                activate,
+            )
+            .await
+        {
+            Ok(BeginCommand::Existing) => match projects.metadata().command(&command_id).await {
+                Ok(Some(c)) if c.phase == "committed" => {
+                    return SubmitAck::Duplicate(ActionAck {
+                        command_id,
+                        status: AckStatus::Duplicate,
+                        turn_id: None,
+                        chat_id: c.chat_id,
+                        project_id: c.project_id,
+                        session_id: c.session_id,
+                        acp_session_id: c.acp_session_id,
+                        committed_projection_version: None,
+                    })
+                }
+                Ok(Some(c)) if c.phase == "projection_pending" => {
+                    if projects.reproject().await.is_err()
+                        || projects
+                            .metadata()
+                            .update_command(
+                                &command_id,
+                                "committed",
+                                c.project_id.as_deref(),
+                                c.session_id.as_deref(),
+                                c.chat_id.as_deref(),
+                                c.acp_session_id.as_deref(),
+                                None,
+                            )
+                            .await
+                            .is_err()
+                    {
+                        return SubmitAck::Failed(action_error(
+                            command_id,
+                            ErrorCode::AgentUnavailable,
+                            "metadata projection retry failed",
+                            true,
+                        ));
+                    }
+                    return SubmitAck::Duplicate(ActionAck {
+                        command_id,
+                        status: AckStatus::Duplicate,
+                        turn_id: None,
+                        chat_id: c.chat_id,
+                        project_id: c.project_id,
+                        session_id: c.session_id,
+                        acp_session_id: c.acp_session_id,
+                        committed_projection_version: None,
+                    });
+                }
+                Ok(Some(c)) if c.phase == "reconciliation_required" => {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "metadata command requires reconciliation",
+                        false,
+                    ))
+                }
+                Ok(Some(c)) if c.phase == "failed" => {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        c.error_code.as_deref().unwrap_or("metadata command failed"),
+                        false,
+                    ))
+                }
+                Ok(_) => {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "metadata command already in progress",
+                        false,
+                    ))
+                }
+                Err(_) => {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "metadata command lookup failed",
+                        true,
+                    ))
+                }
+            },
+            Err(MetadataError::Conflict(_)) => {
+                return SubmitAck::Failed(action_error(
+                    command_id,
+                    ErrorCode::InvalidState,
+                    "commandId reused with different payload",
+                    false,
+                ))
+            }
+            Err(_) => {
+                return SubmitAck::Failed(action_error(
+                    command_id,
+                    ErrorCode::AgentUnavailable,
+                    "metadata command persist failed",
+                    true,
+                ))
+            }
+            Ok(BeginCommand::New) => {}
+        }
+        if tx
+            .send(OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+                command_id: command_id.clone(),
+                status: AckStatus::Accepted,
+                turn_id: None,
+                chat_id: None,
+                project_id: None,
+                session_id: None,
+                acp_session_id: None,
+                committed_projection_version: None,
+            })))
+            .await
+            .is_err()
+        {
+            return SubmitAck::Handled;
+        }
+        let cmd = ExecCmd {
+            ctx: ctx.clone(),
+            chat_id: String::new(),
+            action: action.clone(),
+            tx: tx.clone(),
+        };
+        match action {
+            ActionEnvelope::ProjectCreate { payload, .. } => {
+                let id = Uuid::new_v4().to_string();
+                let name = if payload.name.trim().is_empty() {
+                    std::path::Path::new(&payload.cwd)
+                        .file_name()
+                        .map(|v| v.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Project".into())
+                } else {
+                    payload.name.trim().to_string()
+                };
+                let instance = payload
+                    .instance_id
+                    .as_deref()
+                    .unwrap_or(DEFAULT_INSTANCE_ID);
+                match projects
+                    .create_project_metadata(&id, &name, &payload.cwd, instance)
+                    .await
+                {
+                    Ok(p) => {
+                        if projects
+                            .metadata()
+                            .update_command(
+                                &command_id,
+                                "projection_pending",
+                                Some(&id),
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
+                            .is_err()
+                            || projects.reproject().await.is_err()
+                            || projects.mirror_legacy_workspace(&p).await.is_err()
+                            || projects
+                                .metadata()
+                                .update_command(
+                                    &command_id,
+                                    "committed",
+                                    Some(&id),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await
+                                .is_err()
+                        {
+                            let _ = projects
+                                .metadata()
+                                .update_command(
+                                    &command_id,
+                                    "reconciliation_required",
+                                    Some(&id),
+                                    None,
+                                    None,
+                                    None,
+                                    Some("project_projection_or_finalize_failed"),
+                                )
+                                .await;
+                            return SubmitAck::Failed(action_error(
+                                command_id,
+                                ErrorCode::AgentUnavailable,
+                                "project commit barrier failed",
+                                true,
+                            ));
+                        }
+                        self.send_metadata_ack(
+                            &cmd,
+                            AckStatus::Committed,
+                            Some(&id),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        let _ = projects
+                            .metadata()
+                            .update_command(
+                                &command_id,
+                                "reconciliation_required",
+                                Some(&id),
+                                None,
+                                None,
+                                None,
+                                Some("project_persist_or_projection_failed"),
+                            )
+                            .await;
+                        self.send_error(
+                            &cmd,
+                            ErrorCode::AgentUnavailable,
+                            "project persist/projection failed",
+                            false,
+                        )
+                        .await;
+                    }
+                }
+            }
+            ActionEnvelope::ProjectArchive { payload, .. } => {
+                if projects
+                    .archive_project_metadata(&payload.project_id)
+                    .await
+                    .is_err()
+                    || projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "projection_pending",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                {
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "reconciliation_required",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            Some("archive_projection_failed"),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project archive requires reconciliation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects.reproject().await.is_err() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project archive projection pending",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "committed",
+                        Some(&payload.project_id),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "project command finalize failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    Some(&payload.project_id),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            ActionEnvelope::PersistedSessionRename { payload, .. } => {
+                if payload.name.trim().is_empty()
+                    || projects
+                        .rename_session_metadata(&payload.session_id, payload.name.trim())
+                        .await
+                        .is_err()
+                {
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "reconciliation_required",
+                            None,
+                            Some(&payload.session_id),
+                            None,
+                            None,
+                            Some("rename_projection_failed"),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session rename requires reconciliation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                let rec = projects
+                    .metadata()
+                    .session(&payload.session_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let project_id = rec.as_ref().map(|r| r.project_id.clone());
+                let acp_session_id = rec.as_ref().and_then(|r| r.acp_session_id.clone());
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "projection_pending",
+                        project_id.as_deref(),
+                        Some(&payload.session_id),
+                        None,
+                        acp_session_id.as_deref(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session rename projection state failed",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects.reproject().await.is_err() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session rename projection pending",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "committed",
+                        project_id.as_deref(),
+                        Some(&payload.session_id),
+                        None,
+                        acp_session_id.as_deref(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "session rename finalize failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    project_id.as_deref(),
+                    Some(&payload.session_id),
+                    None,
+                    acp_session_id,
+                )
+                .await;
+            }
+            ActionEnvelope::PersistedSessionImport { payload, .. } => {
+                let Some(project) = projects
+                    .metadata()
+                    .project(&payload.project_id)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project not found",
+                        false,
+                    ));
+                };
+                let candidate = self
+                    .inner
+                    .chats
+                    .registry()
+                    .list_legacy_sessions()
+                    .await
+                    .ok()
+                    .and_then(|items| {
+                        items.into_iter().find(|s| {
+                            s.session_id == payload.acp_session_id && s.cwd == project.cwd
+                        })
+                    });
+                let Some(candidate) = candidate else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "ACP session disappeared before import",
+                        false,
+                    ));
+                };
+                let logical_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("acp-hub:imported-session:{}", candidate.session_id).as_bytes(),
+                )
+                .to_string();
+                let imported = projects
+                    .metadata()
+                    .import_explicit_session(
+                        &logical_id,
+                        &project.id,
+                        &candidate.session_id,
+                        &candidate.title,
+                        &candidate.updated_at,
+                    )
+                    .await;
+                let Ok(imported) = imported else {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "session import persist failed",
+                        true,
+                    ));
+                };
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "projection_pending",
+                        Some(&project.id),
+                        Some(&imported.id),
+                        None,
+                        Some(&candidate.session_id),
+                        None,
+                    )
+                    .await
+                    .is_err()
+                    || projects.reproject().await.is_err()
+                    || projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "committed",
+                            Some(&project.id),
+                            Some(&imported.id),
+                            None,
+                            Some(&candidate.session_id),
+                            None,
+                        )
+                        .await
+                        .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "session import commit failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    Some(&project.id),
+                    Some(&imported.id),
+                    None,
+                    Some(candidate.session_id),
+                )
+                .await;
+            }
+            ActionEnvelope::PersistedSessionCreate { payload, .. } => {
+                let (project, session_id) = prepared_create.expect("validated create preparation");
+                self.spawn_persisted_activation(
+                    cmd,
+                    projects,
+                    project,
+                    session_id,
+                    payload.title,
+                    None,
+                );
+            }
+            ActionEnvelope::PersistedSessionOpen { payload: _, .. } => {
+                let (project, session, live_chat) =
+                    prepared_open.expect("validated open preparation");
+                let acp_id = session.acp_session_id.clone().expect("validated ACP id");
+                if let Some(chat) = live_chat.as_deref() {
+                    if projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "committed",
+                            Some(&session.project_id),
+                            Some(&session.id),
+                            Some(chat),
+                            Some(&acp_id),
+                            None,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return SubmitAck::Failed(action_error(
+                            command_id,
+                            ErrorCode::AgentUnavailable,
+                            "session open finalize failed",
+                            true,
+                        ));
+                    }
+                    self.send_metadata_ack(
+                        &cmd,
+                        AckStatus::Committed,
+                        Some(&session.project_id),
+                        Some(&session.id),
+                        Some(chat),
+                        Some(acp_id),
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                self.spawn_persisted_activation(
+                    cmd,
+                    projects,
+                    project,
+                    session.id,
+                    session.acp_title,
+                    Some(acp_id),
+                );
+            }
+            _ => unreachable!(),
+        }
+        SubmitAck::Handled
+    }
+
+    fn spawn_persisted_activation(
+        &self,
+        cmd: ExecCmd,
+        projects: ProjectService,
+        project: crate::persist::metadata::ProjectRecord,
+        session_id: String,
+        title: Option<String>,
+        acp_id: Option<String>,
+    ) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let chat_command_id = Uuid::new_v4().to_string();
+            let (inner_tx, mut inner_rx) = mpsc::channel(16);
+            let create = ActionEnvelope::Create {
+                command_id: chat_command_id.clone(),
+                payload: acp_hub_proto::action::CreateChatPayload {
+                    instance_id: Some(project.instance_id.clone()),
+                    cwd: Some(project.cwd.clone()),
+                    title: title.clone(),
+                    acp_session_id: acp_id.clone(),
+                    workspace_id: None,
+                },
+            };
+            if projects
+                .metadata()
+                .activation_phase(&session_id, "dispatch_pending", None, acp_id.as_deref())
+                .await
+                .is_err()
+                || projects
+                    .metadata()
+                    .update_command(
+                        &extract_command_id(&cmd.action).unwrap_or_default(),
+                        "dispatched",
+                        Some(&project.id),
+                        Some(&session_id),
+                        None,
+                        acp_id.as_deref(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+            {
+                me.reconcile_activation(&cmd, &projects, &session_id, "dispatch_barrier_failed")
+                    .await;
+                return;
+            }
+            // Persist the unsafe-to-retry boundary before inner submit can
+            // enqueue/spawn any ACP lifecycle work.
+            if projects
+                .metadata()
+                .activation_phase(&session_id, "dispatched", None, acp_id.as_deref())
+                .await
+                .is_err()
+                || projects
+                    .metadata()
+                    .update_command(
+                        &extract_command_id(&cmd.action).unwrap_or_default(),
+                        "dispatched",
+                        Some(&project.id),
+                        Some(&session_id),
+                        None,
+                        acp_id.as_deref(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+            {
+                me.reconcile_activation(&cmd, &projects, &session_id, "dispatched_barrier_failed")
+                    .await;
+                return;
+            }
+            match Box::pin(me.submit(&cmd.ctx, create, inner_tx)).await {
+                SubmitAck::Accepted { .. } => {}
+                _ => {
+                    if projects
+                        .metadata()
+                        .fail_session(&session_id, "activation_submit_failed")
+                        .await
+                        .is_err()
+                        || projects.reproject().await.is_err()
+                    {
+                        let _ = projects
+                            .metadata()
+                            .mark_reconciliation_required(
+                                &session_id,
+                                "activation_submit_failure_barrier_failed",
+                            )
+                            .await;
+                    }
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &extract_command_id(&cmd.action).unwrap_or_default(),
+                            "failed",
+                            Some(&project.id),
+                            Some(&session_id),
+                            None,
+                            acp_id.as_deref(),
+                            Some("activation_submit_failed"),
+                        )
+                        .await;
+                    me.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "activation submit failed",
+                        true,
+                    )
+                    .await;
+                    return;
+                }
+            }
+            while let Some(msg) = inner_rx.recv().await {
+                match msg {
+                    OutboundMsg::Frame(Frame::ActionAck(ack))
+                        if ack.status == AckStatus::Committed =>
+                    {
+                        let Some(chat_id) = ack.chat_id else { break };
+                        let bound = me
+                            .inner
+                            .chats
+                            .entry(&chat_id)
+                            .await
+                            .and_then(|e| e.session_id);
+                        let Some(acp_session_id) =
+                            ack.acp_session_id.or_else(|| acp_id.clone()).or(bound)
+                        else {
+                            break;
+                        };
+                        if projects
+                            .metadata()
+                            .activation_phase(
+                                &session_id,
+                                "acp_id_durable",
+                                Some(&chat_id),
+                                Some(&acp_session_id),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            me.reconcile_activation(
+                                &cmd,
+                                &projects,
+                                &session_id,
+                                "acp_id_barrier_failed",
+                            )
+                            .await;
+                            return;
+                        }
+                        let original = extract_command_id(&cmd.action).unwrap_or_default();
+                        if projects
+                            .metadata()
+                            .finalize_session_and_command(
+                                &original,
+                                &session_id,
+                                &project.id,
+                                &acp_session_id,
+                                title.as_deref(),
+                                &chat_id,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            me.reconcile_activation(
+                                &cmd,
+                                &projects,
+                                &session_id,
+                                "finalize_barrier_failed",
+                            )
+                            .await;
+                            return;
+                        }
+                        if projects.reproject().await.is_err() {
+                            let _ = projects
+                                .metadata()
+                                .mark_reconciliation_required(&session_id, "projection_failed")
+                                .await;
+                            let _ = projects
+                                .metadata()
+                                .update_command(
+                                    &original,
+                                    "reconciliation_required",
+                                    Some(&project.id),
+                                    Some(&session_id),
+                                    Some(&chat_id),
+                                    Some(&acp_session_id),
+                                    Some("projection_failed"),
+                                )
+                                .await;
+                            me.send_error(
+                                &cmd,
+                                ErrorCode::AgentUnavailable,
+                                "session projection failed",
+                                true,
+                            )
+                            .await;
+                            return;
+                        }
+                        if projects
+                            .metadata()
+                            .update_command(
+                                &original,
+                                "committed",
+                                Some(&project.id),
+                                Some(&session_id),
+                                Some(&chat_id),
+                                Some(&acp_session_id),
+                                None,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            me.reconcile_activation(
+                                &cmd,
+                                &projects,
+                                &session_id,
+                                "command_commit_barrier_failed",
+                            )
+                            .await;
+                            return;
+                        }
+                        me.send_metadata_ack(
+                            &cmd,
+                            AckStatus::Committed,
+                            Some(&project.id),
+                            Some(&session_id),
+                            Some(&chat_id),
+                            Some(acp_session_id),
+                        )
+                        .await;
+                        return;
+                    }
+                    OutboundMsg::Frame(Frame::ActionError(_)) => {
+                        let original = extract_command_id(&cmd.action).unwrap_or_default();
+                        let _ = projects
+                            .metadata()
+                            .reconcile_activation_and_command(
+                                &session_id,
+                                &original,
+                                "activation_failed_or_unknown",
+                            )
+                            .await;
+                        let _ = projects.reproject().await;
+                        me.send_error(
+                            &cmd,
+                            ErrorCode::AgentUnavailable,
+                            "session activation failed; reconciliation required",
+                            false,
+                        )
+                        .await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            let original = extract_command_id(&cmd.action).unwrap_or_default();
+            let _ = projects
+                .metadata()
+                .reconcile_activation_and_command(
+                    &session_id,
+                    &original,
+                    "activation_channel_closed",
+                )
+                .await;
+            let _ = projects.reproject().await;
+            me.send_error(
+                &cmd,
+                ErrorCode::AgentUnavailable,
+                "session activation outcome unknown",
+                false,
+            )
+            .await;
+        });
+    }
+
+    async fn send_metadata_ack(
+        &self,
+        cmd: &ExecCmd,
+        status: AckStatus,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        chat_id: Option<&str>,
+        acp_id: Option<String>,
+    ) {
+        let _ = cmd
+            .tx
+            .send(OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+                command_id: extract_command_id(&cmd.action).unwrap_or_default(),
+                status,
+                turn_id: None,
+                chat_id: chat_id.map(str::to_string),
+                project_id: project_id.map(str::to_string),
+                session_id: session_id.map(str::to_string),
+                acp_session_id: acp_id,
+                committed_projection_version: None,
+            })))
+            .await;
+    }
+
+    async fn reconcile_activation(
+        &self,
+        cmd: &ExecCmd,
+        projects: &ProjectService,
+        session_id: &str,
+        code: &str,
+    ) {
+        let original = extract_command_id(&cmd.action).unwrap_or_default();
+        let _ = projects
+            .metadata()
+            .reconcile_activation_and_command(session_id, &original, code)
+            .await;
+        let _ = projects.reproject().await;
+        self.send_error(
+            cmd,
+            ErrorCode::AgentUnavailable,
+            "session activation requires reconciliation",
+            false,
+        )
+        .await;
+    }
+
     /// 提交入口（§7.4 规则 6）：临界区内 去重判定 → try_reserve → 入队。
     ///
     /// `tx` 为客户端连接发送队列（执行器终态回投）。
@@ -253,6 +1406,17 @@ impl CommandCoordinator {
         action: ActionEnvelope,
         tx: mpsc::Sender<OutboundMsg>,
     ) -> SubmitAck {
+        if matches!(
+            action,
+            ActionEnvelope::ProjectCreate { .. }
+                | ActionEnvelope::ProjectArchive { .. }
+                | ActionEnvelope::PersistedSessionCreate { .. }
+                | ActionEnvelope::PersistedSessionOpen { .. }
+                | ActionEnvelope::PersistedSessionRename { .. }
+                | ActionEnvelope::PersistedSessionImport { .. }
+        ) {
+            return self.submit_metadata_action(ctx, action, tx).await;
+        }
         // commandId（幂等键，uuid 形态，§4.3）。
         let command_id_str = match extract_command_id(&action) {
             Some(c) => c,
@@ -302,9 +1466,7 @@ impl CommandCoordinator {
         // chat/进程**（点击 SessionList 历史会话 = 当前对话内 load）。
         // 低频直通（同 workspace/session-list 管理面），不走 chat 队列。
         if let ActionEnvelope::Load { .. } = &action {
-            return self
-                .exec_load_chat(ctx, &action, tx, &command_id_str)
-                .await;
+            return self.exec_load_chat(ctx, &action, tx, &command_id_str).await;
         }
 
         // chat/session-new（§8.5）：当前对话内新建 ACP 会话——等价 create
@@ -343,6 +1505,8 @@ impl CommandCoordinator {
                                         status: AckStatus::Duplicate,
                                         turn_id: rec.turn_id.map(|t| t.to_string()),
                                         chat_id: Some(sid.to_string()),
+                                        project_id: None,
+                                        session_id: None,
                                         acp_session_id: None,
                                         committed_projection_version: None,
                                     })
@@ -431,14 +1595,17 @@ impl CommandCoordinator {
                         status: AckStatus::Duplicate,
                         turn_id: rec.turn_id.map(|t| t.to_string()),
                         chat_id: None,
+                        project_id: None,
+                        session_id: None,
                         acp_session_id: None,
                         committed_projection_version: None,
                     })
                 }
                 DedupVerdict::RedeliverFailed => {
-                    let err = rec.last_error.clone().unwrap_or_else(|| {
-                        LastError::from_error_code(ErrorCode::InvalidState)
-                    });
+                    let err = rec
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| LastError::from_error_code(ErrorCode::InvalidState));
                     return SubmitAck::Failed(ActionError {
                         command_id: command_id_str,
                         code: error_code_from_str(&err.code),
@@ -476,18 +1643,13 @@ impl CommandCoordinator {
         };
         let command_type = command_type_of(&action);
         let retryable_class = command_type.default_retryable_class();
-        if let Err(e) = store
-            .outbox()
-            .lock()
-            .await
-            .insert(NewOutboxRecord {
-                command_id,
-                chat_id,
-                command_type,
-                turn_id,
-                retryable_class,
-            })
-        {
+        if let Err(e) = store.outbox().lock().await.insert(NewOutboxRecord {
+            command_id,
+            chat_id,
+            command_type,
+            turn_id,
+            retryable_class,
+        }) {
             warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox insert failed");
             self.inner.doc.release_reserve(&chat_id_str).await;
             return SubmitAck::Failed(action_error(
@@ -631,7 +1793,13 @@ impl CommandCoordinator {
         if let Err(e) = self
             .inner
             .chats
-            .register(&chat_id.to_string(), &instance_id, Some(&title), &cwd, payload.workspace_id.as_deref())
+            .register(
+                &chat_id.to_string(),
+                &instance_id,
+                Some(&title),
+                &cwd,
+                payload.workspace_id.as_deref(),
+            )
             .await
         {
             warn!(chat_id = %chat_id, error = ?e, "chat register failed");
@@ -661,7 +1829,11 @@ impl CommandCoordinator {
                 tokio::spawn(async move {
                     me.executor_loop(sid, rx).await;
                 });
-                self.inner.executors.write().await.insert(chat_id, tx.clone());
+                self.inner
+                    .executors
+                    .write()
+                    .await
+                    .insert(chat_id, tx.clone());
                 tx
             }
         };
@@ -697,7 +1869,8 @@ impl CommandCoordinator {
             // 命令消费完成：释放 try_reserve 名额（§7.4 reserve/release 配对）。
             self.inner.doc.release_reserve(&cmd.chat_id).await;
             debug!(
-                chat_id, command_id = extract_command_id(&cmd.action).unwrap_or_default(),
+                chat_id,
+                command_id = extract_command_id(&cmd.action).unwrap_or_default(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "command executed"
             );
@@ -755,47 +1928,104 @@ impl CommandCoordinator {
         };
         match action {
             ActionEnvelope::WorkspaceCreate { payload, .. } => {
-                match self.inner.workspaces.create(&payload.name, &payload.cwd).await {
-                    Ok(rec) => {
-                        audit(
-                            "workspace.create",
-                            Some(command_id),
-                            Some(&cmd.ctx.token_id),
-                            "ok",
-                            std::time::Duration::ZERO,
-                            None,
-                        );
-                        debug!(workspace_id = %rec.id, cwd = %rec.cwd, "workspace created");
-                        self.send_committed(&cmd, None, None).await;
+                let Some(projects) = self.inner.projects.read().await.clone() else {
+                    return SubmitAck::Failed(action_error(
+                        command_id.to_string(),
+                        ErrorCode::AgentUnavailable,
+                        "metadata catalog unavailable",
+                        true,
+                    ));
+                };
+                if let Err(e) = validate_cwd(&payload.cwd) {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::InvalidState,
+                        &format!("invalid cwd: {e}"),
+                        false,
+                    )
+                    .await;
+                } else if !std::path::Path::new(&payload.cwd).is_dir() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::InvalidState,
+                        &format!("cwd not found: {}", payload.cwd),
+                        false,
+                    )
+                    .await;
+                } else {
+                    let id = Uuid::new_v4().to_string();
+                    let name = if payload.name.trim().is_empty() {
+                        std::path::Path::new(&payload.cwd)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| id[..8].to_string())
+                    } else {
+                        payload.name.trim().to_string()
+                    };
+                    match projects
+                        .create_project(&id, &name, &payload.cwd, DEFAULT_INSTANCE_ID)
+                        .await
+                    {
+                        Ok(rec) if projects.mirror_legacy_workspace(&rec).await.is_ok() => {
+                            self.inner.workspaces.rebuild().await;
+                            audit(
+                                "workspace.create",
+                                Some(command_id),
+                                Some(&cmd.ctx.token_id),
+                                "ok",
+                                std::time::Duration::ZERO,
+                                None,
+                            );
+                            debug!(workspace_id = %rec.id, cwd = %rec.cwd, "workspace created");
+                            self.send_committed(&cmd, None, None).await;
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "workspace create metadata write failed");
+                            self.send_error(
+                                &cmd,
+                                ErrorCode::AgentUnavailable,
+                                "workspace metadata write failed",
+                                true,
+                            )
+                            .await;
+                        }
+                        Ok(_) => {
+                            self.send_error(
+                                &cmd,
+                                ErrorCode::AgentUnavailable,
+                                "workspace projection failed",
+                                true,
+                            )
+                            .await
+                        }
                     }
-                    Err(WorkspaceError::CwdInvalid(m)) => {
-                        self.send_error(&cmd, ErrorCode::InvalidState, &m, false).await;
-                    }
-                    Err(WorkspaceError::CwdMissing(m)) => {
-                        self.send_error(
-                            &cmd,
-                            ErrorCode::InvalidState,
-                            &format!("cwd not found: {m}"),
-                            false,
-                        )
-                        .await;
-                    }
-                    Err(WorkspaceError::Registry(e)) => {
-                        warn!(error = ?e, "workspace create registry write failed");
-                        self.send_error(
-                            &cmd,
-                            ErrorCode::AgentUnavailable,
-                            "workspace registry write failed",
-                            true,
-                        )
-                        .await;
-                    }
-                    Err(WorkspaceError::NotFound(_)) => unreachable!("create 不产生 NotFound"),
                 }
             }
             ActionEnvelope::WorkspaceRemove { payload, .. } => {
-                match self.inner.workspaces.remove(&payload.workspace_id).await {
+                let Some(projects) = self.inner.projects.read().await.clone() else {
+                    return SubmitAck::Failed(action_error(
+                        command_id.to_string(),
+                        ErrorCode::AgentUnavailable,
+                        "metadata catalog unavailable",
+                        true,
+                    ));
+                };
+                match projects.archive_project(&payload.workspace_id).await {
                     Ok(()) => {
+                        if projects
+                            .metadata()
+                            .project(&payload.workspace_id)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = self
+                                .inner
+                                .workspaces
+                                .registry()
+                                .remove_workspace(&payload.workspace_id)
+                                .await;
+                            self.inner.workspaces.rebuild().await;
+                        }
                         audit(
                             "workspace.remove",
                             Some(command_id),
@@ -807,7 +2037,9 @@ impl CommandCoordinator {
                         debug!(workspace_id = %payload.workspace_id, "workspace removed");
                         self.send_committed(&cmd, None, None).await;
                     }
-                    Err(WorkspaceError::NotFound(id)) => {
+                    Err(crate::control::ProjectServiceError::Metadata(
+                        MetadataError::NotFound(id),
+                    )) => {
                         self.send_error(
                             &cmd,
                             ErrorCode::InvalidState,
@@ -816,7 +2048,7 @@ impl CommandCoordinator {
                         )
                         .await;
                     }
-                    Err(WorkspaceError::Registry(e)) => {
+                    Err(e) => {
                         warn!(error = ?e, "workspace remove registry write failed");
                         self.send_error(
                             &cmd,
@@ -826,7 +2058,6 @@ impl CommandCoordinator {
                         )
                         .await;
                     }
-                    Err(_) => unreachable!("remove 只产生 NotFound/Registry"),
                 }
             }
             _ => unreachable!("dispatch guarantees workspace command"),
@@ -1032,7 +2263,13 @@ impl CommandCoordinator {
                 false,
             ));
         }
-        if self.inner.chats.active_turn(&payload.chat_id).await.is_some() {
+        if self
+            .inner
+            .chats
+            .active_turn(&payload.chat_id)
+            .await
+            .is_some()
+        {
             return SubmitAck::Failed(action_error(
                 command_id.to_string(),
                 ErrorCode::InvalidState,
@@ -1093,9 +2330,9 @@ impl CommandCoordinator {
                     None,
                 );
                 let msg = match &e {
-                    ChatError::BindingConflict(existing) => format!(
-                        "该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）"
-                    ),
+                    ChatError::BindingConflict(existing) => {
+                        format!("该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）")
+                    }
                     other => format!("pre-bind failed: {other}"),
                 };
                 let _ = tx
@@ -1142,11 +2379,7 @@ impl CommandCoordinator {
             }
             // 3. session/load RPC（L3 匹配；cwd 与进程绑定目录一致）。
             let (rpc_id, msg) = me.inner.translator.session_load_rpc(&cwd, &acp_session_id);
-            let rx = me
-                .inner
-                .relay
-                .register_rpc(&rpc_id, cmd_id.clone())
-                .await;
+            let rx = me.inner.relay.register_rpc(&rpc_id, cmd_id.clone()).await;
             if let Err(e) = me
                 .inner
                 .instance
@@ -1197,6 +2430,8 @@ impl CommandCoordinator {
                             status: AckStatus::Committed,
                             turn_id: None,
                             chat_id: Some(chat_id),
+                            project_id: None,
+                            session_id: None,
                             acp_session_id: None,
                             committed_projection_version: None,
                         })))
@@ -1329,7 +2564,13 @@ impl CommandCoordinator {
                 false,
             ));
         }
-        if self.inner.chats.active_turn(&payload.chat_id).await.is_some() {
+        if self
+            .inner
+            .chats
+            .active_turn(&payload.chat_id)
+            .await
+            .is_some()
+        {
             return SubmitAck::Failed(action_error(
                 command_id.to_string(),
                 ErrorCode::InvalidState,
@@ -1403,11 +2644,7 @@ impl CommandCoordinator {
                 }
             };
             let rpc_id = msg["id"].as_str().unwrap_or_default().to_string();
-            let rx = me
-                .inner
-                .relay
-                .register_rpc(&rpc_id, cmd_id.clone())
-                .await;
+            let rx = me.inner.relay.register_rpc(&rpc_id, cmd_id.clone()).await;
             if let Err(e) = me
                 .inner
                 .instance
@@ -1460,9 +2697,9 @@ impl CommandCoordinator {
                     //    record 当前会话）+ chat doc agent.acp_session_id。
                     if let Err(e) = me.inner.chats.bind(&chat_id, &new_sid).await {
                         let msg = match &e {
-                            ChatError::BindingConflict(existing) => format!(
-                                "该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）"
-                            ),
+                            ChatError::BindingConflict(existing) => {
+                                format!("该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）")
+                            }
                             other => format!("bind failed: {other}"),
                         };
                         audit(
@@ -1530,6 +2767,8 @@ impl CommandCoordinator {
                             status: AckStatus::Committed,
                             turn_id: None,
                             chat_id: Some(chat_id),
+                            project_id: None,
+                            session_id: None,
                             acp_session_id: Some(new_sid),
                             committed_projection_version: None,
                         })))
@@ -1623,8 +2862,13 @@ impl CommandCoordinator {
             return;
         };
         let Some(acp_session_id) = entry.session_id.clone() else {
-            self.send_error(cmd, ErrorCode::InvalidState, "chat binding not established", false)
-                .await;
+            self.send_error(
+                cmd,
+                ErrorCode::InvalidState,
+                "chat binding not established",
+                false,
+            )
+            .await;
             return;
         };
         let instance_id = entry.instance_id.clone();
@@ -1637,13 +2881,23 @@ impl CommandCoordinator {
         ) {
             Ok(OutboundMessage::JsonRpc(v)) => v,
             Ok(_) => {
-                self.send_error(cmd, ErrorCode::InvalidState, "unexpected outbound shape", false)
-                    .await;
+                self.send_error(
+                    cmd,
+                    ErrorCode::InvalidState,
+                    "unexpected outbound shape",
+                    false,
+                )
+                .await;
                 return;
             }
             Err(e) => {
-                self.send_error(cmd, ErrorCode::InvalidState, &format!("translate failed: {e}"), false)
-                    .await;
+                self.send_error(
+                    cmd,
+                    ErrorCode::InvalidState,
+                    &format!("translate failed: {e}"),
+                    false,
+                )
+                .await;
                 return;
             }
         };
@@ -1654,12 +2908,28 @@ impl CommandCoordinator {
             .register_rpc(&rpc_id, command_id_str.clone())
             .await;
         // 3. 下发（L1+L2：forward_ack = M1 转发确认，§4.4）。
-        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
-            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
-                .await;
+        if let Err(e) = self
+            .inner
+            .instance
+            .forward_rpc(&instance_id, chat_id, &msg)
+            .await
+        {
+            self.fail_retryable(
+                chat_id,
+                command_id,
+                cmd,
+                instance_error_code(&e),
+                "forward failed",
+            )
+            .await;
             return;
         }
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_dispatched(command_id, Utc::now())
+        {
             warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
@@ -1728,7 +2998,9 @@ impl CommandCoordinator {
                 let is_error = response.get("error").is_some();
                 if is_error {
                     self.fail_terminal(
-                        chat_id, command_id, cmd,
+                        chat_id,
+                        command_id,
+                        cmd,
                         ErrorCode::AgentUnavailable,
                         "agent rejected prompt (L3 error)",
                     )
@@ -1738,7 +3010,12 @@ impl CommandCoordinator {
                     self.inner.chats.clear_active_turn(chat_id).await;
                     return;
                 }
-                if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_confirmed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
@@ -1760,7 +3037,12 @@ impl CommandCoordinator {
                 };
                 self.inject_turn_terminal(chat_id, &turn_id.to_string(), terminal_status)
                     .await;
-                if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_projection_committed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
@@ -1769,7 +3051,8 @@ impl CommandCoordinator {
                     return;
                 }
                 self.inner.chats.clear_active_turn(chat_id).await;
-                self.send_committed(cmd, Some(&turn_id.to_string()), None).await;
+                self.send_committed(cmd, Some(&turn_id.to_string()), None)
+                    .await;
                 audit(
                     "command.committed",
                     Some(&command_id_str),
@@ -1783,7 +3066,12 @@ impl CommandCoordinator {
                 // 无增量窗口耗尽（30s 无 L3 且无事件投递）→ delivery_unknown
                 // （路径 B：非幂等禁止自动重发，§4.4）。
                 self.inner.relay.cancel_rpc(&rpc_id).await;
-                if let Err(e) = store.outbox().lock().await.mark_delivery_unknown(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_unknown(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_delivery_unknown failed");
                     return;
                 }
@@ -1853,34 +3141,67 @@ impl CommandCoordinator {
             cwd: cwd.clone(),
             env: None,
         };
-        let spawn = match tokio::time::timeout(self.inner.spawn_timeout, self.inner.instance.send_spawn(&instance_id, spawn_cmd)).await {
+        let spawn = match tokio::time::timeout(
+            self.inner.spawn_timeout,
+            self.inner.instance.send_spawn(&instance_id, spawn_cmd),
+        )
+        .await
+        {
             Ok(Ok(SpawnOutcome::Acked(a))) => Some(a),
             Ok(Err(e)) => {
-                self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), "spawn failed")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    instance_error_code(&e),
+                    "spawn failed",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
             Err(_) => {
-                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "spawn timeout (10s)")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "spawn timeout (10s)",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
         };
         let spawn = spawn.expect("spawn outcome");
         if !spawn.ok {
-            self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent spawn failed")
-                .await;
+            self.fail_retryable(
+                &chat_id,
+                command_id,
+                cmd,
+                ErrorCode::AgentUnavailable,
+                "agent spawn failed",
+            )
+            .await;
             self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         // L1+L2（§4.4：create 的 delivery_confirmed 只要求 spawn_ack）。
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_dispatched(command_id, Utc::now())
+        {
             warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
-        if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_delivery_confirmed(command_id)
+        {
             warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
             return;
         }
@@ -1891,23 +3212,46 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&init_rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, &chat_id, &init_msg).await {
-            self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), "initialize forward failed")
-                .await;
+        if let Err(e) = self
+            .inner
+            .instance
+            .forward_rpc(&instance_id, &chat_id, &init_msg)
+            .await
+        {
+            self.fail_retryable(
+                &chat_id,
+                command_id,
+                cmd,
+                instance_error_code(&e),
+                "initialize forward failed",
+            )
+            .await;
             self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
         match tokio::time::timeout(self.inner.initialize_timeout, init_rx).await {
             Ok(Ok(r)) if r.get("error").is_none() => {}
             Ok(Ok(_)) => {
-                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize rejected")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "initialize rejected",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
             Ok(Err(_)) | Err(_) => {
-                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "initialize timeout (10s)")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "initialize timeout (10s)",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
@@ -1928,9 +3272,9 @@ impl CommandCoordinator {
                 // 重试无意义，终态错误 + 可读提示（携带既有 chat_id 供前端
                 // 从对话列表切换）。
                 let msg = match &e {
-                    ChatError::BindingConflict(existing) => format!(
-                        "该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）"
-                    ),
+                    ChatError::BindingConflict(existing) => {
+                        format!("该 ACP 会话已在对话 {existing} 中打开（请从对话列表切换）")
+                    }
                     other => format!("pre-bind failed: {other}"),
                 };
                 self.fail_terminal(&chat_id, command_id, cmd, ErrorCode::InvalidState, &msg)
@@ -1949,8 +3293,14 @@ impl CommandCoordinator {
                 )
                 .await
             {
-                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "begin replay failed")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "begin replay failed",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
@@ -1965,10 +3315,25 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&binding_rpc_id, command_id_str.clone())
             .await;
-        if let Err(e) = self.inner.instance.forward_rpc(&instance_id, &chat_id, &binding_msg).await {
-            let what = if load_session.is_some() { "session/load" } else { "session/new" };
-            self.fail_retryable(&chat_id, command_id, cmd, instance_error_code(&e), &format!("{what} forward failed"))
-                .await;
+        if let Err(e) = self
+            .inner
+            .instance
+            .forward_rpc(&instance_id, &chat_id, &binding_msg)
+            .await
+        {
+            let what = if load_session.is_some() {
+                "session/load"
+            } else {
+                "session/new"
+            };
+            self.fail_retryable(
+                &chat_id,
+                command_id,
+                cmd,
+                instance_error_code(&e),
+                &format!("{what} forward failed"),
+            )
+            .await;
             self.cleanup_create(&chat_id, &instance_id).await;
             return;
         }
@@ -1977,8 +3342,14 @@ impl CommandCoordinator {
             Some(sid) => match tokio::time::timeout(self.inner.binding_timeout, binding_rx).await {
                 Ok(Ok(r)) if r.get("error").is_none() => Some(sid.clone()),
                 Ok(Ok(_)) => {
-                    self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "session/load rejected")
-                        .await;
+                    self.fail_retryable(
+                        &chat_id,
+                        command_id,
+                        cmd,
+                        ErrorCode::AgentUnavailable,
+                        "session/load rejected",
+                    )
+                    .await;
                     self.cleanup_create(&chat_id, &instance_id).await;
                     return;
                 }
@@ -2013,22 +3384,29 @@ impl CommandCoordinator {
             },
         };
         let Some(acp_session_id) = acp_session_id else {
-            self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "binding timeout (30s)")
-                .await;
+            self.fail_retryable(
+                &chat_id,
+                command_id,
+                cmd,
+                ErrorCode::AgentUnavailable,
+                "binding timeout (30s)",
+            )
+            .await;
             self.cleanup_create(&chat_id, &instance_id).await;
             return;
         };
         // 4. binding（§6.2）。load 路径已预绑定（步骤 3）。
         if load_session.is_none() {
-            if let Err(e) = self
-                .inner
-                .chats
-                .bind(&chat_id, &acp_session_id)
-                .await
-            {
+            if let Err(e) = self.inner.chats.bind(&chat_id, &acp_session_id).await {
                 warn!(chat_id, error = ?e, "bind failed");
-                self.fail_retryable(&chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "bind failed")
-                    .await;
+                self.fail_retryable(
+                    &chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "bind failed",
+                )
+                .await;
                 self.cleanup_create(&chat_id, &instance_id).await;
                 return;
             }
@@ -2037,11 +3415,21 @@ impl CommandCoordinator {
             let _ = self
                 .inner
                 .doc
-                .submit_command(&chat_id, DocCommand::SetAgentSessionId { acp_session_id: acp_session_id.clone() })
+                .submit_command(
+                    &chat_id,
+                    DocCommand::SetAgentSessionId {
+                        acp_session_id: acp_session_id.clone(),
+                    },
+                )
                 .await;
         }
         // 5. 终态（§4.4：projection_committed → completed → committed）。
-        if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_projection_committed(command_id)
+        {
             warn!(chat_id, error = ?e, "mark_projection_committed failed");
             return;
         }
@@ -2096,8 +3484,13 @@ impl CommandCoordinator {
             return;
         };
         let Some(acp_session_id) = entry.session_id.clone() else {
-            self.send_error(cmd, ErrorCode::InvalidState, "chat binding not established", false)
-                .await;
+            self.send_error(
+                cmd,
+                ErrorCode::InvalidState,
+                "chat binding not established",
+                false,
+            )
+            .await;
             return;
         };
         let instance_id = entry.instance_id.clone();
@@ -2129,10 +3522,7 @@ impl CommandCoordinator {
                 let _ = self
                     .inner
                     .doc
-                    .submit_command(
-                        chat_id,
-                        DocCommand::MarkTurnCancelling { turn_id },
-                    )
+                    .submit_command(chat_id, DocCommand::MarkTurnCancelling { turn_id })
                     .await;
             }
         }
@@ -2142,14 +3532,28 @@ impl CommandCoordinator {
                 .forward_notification(&instance_id, chat_id, &msg)
                 .await
         } else {
-            self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await
+            self.inner
+                .instance
+                .forward_rpc(&instance_id, chat_id, &msg)
+                .await
         };
         if let Err(e) = forward {
-            self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
-                .await;
+            self.fail_retryable(
+                chat_id,
+                command_id,
+                cmd,
+                instance_error_code(&e),
+                "forward failed",
+            )
+            .await;
             return;
         }
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_dispatched(command_id, Utc::now())
+        {
             warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
@@ -2157,7 +3561,12 @@ impl CommandCoordinator {
             // notification：无响应帧可等——发送成功即 L3 等价确认（§7.2
             // 注入 Cancelled 终态；active turn 不存在则无终态可注入，仅确认
             // 命令）。
-            if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+            if let Err(e) = store
+                .outbox()
+                .lock()
+                .await
+                .mark_delivery_confirmed(command_id)
+            {
                 warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                 return;
             }
@@ -2168,7 +3577,12 @@ impl CommandCoordinator {
                 // 清除（§7.2）——否则滞留阻塞后续 load。
                 self.inner.chats.clear_active_turn(chat_id).await;
             }
-            if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+            if let Err(e) = store
+                .outbox()
+                .lock()
+                .await
+                .mark_projection_committed(command_id)
+            {
                 warn!(chat_id, error = ?e, "mark_projection_committed failed");
                 return;
             }
@@ -2187,11 +3601,21 @@ impl CommandCoordinator {
             .await;
         match tokio::time::timeout(self.inner.l3_timeout, rx).await {
             Ok(Ok(r)) if r.get("error").is_none() => {
-                if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_confirmed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
-                if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_projection_committed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
@@ -2202,12 +3626,22 @@ impl CommandCoordinator {
                 self.send_committed(cmd, None, None).await;
             }
             Ok(Ok(_)) => {
-                self.fail_terminal(chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "agent rejected command")
-                    .await;
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "agent rejected command",
+                )
+                .await;
             }
             Ok(Err(_)) | Err(_) => {
                 self.inner.relay.cancel_rpc(&rpc_id).await;
-                let _ = store.outbox().lock().await.mark_delivery_unknown(command_id);
+                let _ = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_unknown(command_id);
                 // §7.2 cancel 超时强制终态（参考实现 DEFAULT_CANCEL_TIMEOUT_MS
                 // 语义）：cancel 的确认超时后不得停留 cancelling——注入
                 // Cancelled 终态并清理登记表（agent 侧可能仍在取消中，但
@@ -2235,12 +3669,7 @@ impl CommandCoordinator {
     /// 语义同聚合器 TurnTerminal 事件分支：active_turn 匹配且非终态 → 终态
     /// 迁移 + assistant entry 迁移。真实 peri 无独立终态通知——prompt L3
     /// 响应 stopReason / cancel 发送成功即触发。
-    async fn inject_turn_terminal(
-        &self,
-        chat_id: &str,
-        turn_id: &str,
-        status: TurnStatus,
-    ) {
+    async fn inject_turn_terminal(&self, chat_id: &str, turn_id: &str, status: TurnStatus) {
         let _ = self
             .inner
             .doc
@@ -2298,11 +3727,7 @@ impl CommandCoordinator {
                 if code == ErrorCode::InstanceOffline {
                     // §7.6：offline 时 close → INSTANCE_OFFLINE(retryable) +
                     // pending_close 标记（重连自动补发 kill）。
-                    let _ = self
-                        .inner
-                        .chats
-                        .request_close_offline(chat_id)
-                        .await;
+                    let _ = self.inner.chats.request_close_offline(chat_id).await;
                 }
                 self.fail_retryable(chat_id, command_id, cmd, code, "kill failed")
                     .await;
@@ -2310,15 +3735,31 @@ impl CommandCoordinator {
             }
         };
         if !kill_ok {
-            self.fail_retryable(chat_id, command_id, cmd, ErrorCode::AgentUnavailable, "kill rejected by instance")
-                .await;
+            self.fail_retryable(
+                chat_id,
+                command_id,
+                cmd,
+                ErrorCode::AgentUnavailable,
+                "kill rejected by instance",
+            )
+            .await;
             return;
         }
-        if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_dispatched(command_id, Utc::now())
+        {
             warn!(chat_id, error = ?e, "mark_dispatched failed");
             return;
         }
-        if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_delivery_confirmed(command_id)
+        {
             warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
             return;
         }
@@ -2336,7 +3777,12 @@ impl CommandCoordinator {
         {
             warn!(chat_id, "close projection persist failed");
         }
-        if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_projection_committed(command_id)
+        {
             warn!(chat_id, error = ?e, "mark_projection_committed failed");
             return;
         }
@@ -2399,7 +3845,10 @@ impl CommandCoordinator {
                 // 未产生副作用，tombstone 释放 commandId】。
                 // #1：duplicate 不触发 take，官方表项滞留至断链——顺手移除
                 // （评审 P2-b；remove 幂等无害）。
-                self.inner.relay.remove_pending_permission(&payload.permission_id).await;
+                self.inner
+                    .relay
+                    .remove_pending_permission(&payload.permission_id)
+                    .await;
                 let _ = store.outbox().lock().await.clear_for_retry(command_id);
                 let _ = cmd
                     .tx
@@ -2408,6 +3857,8 @@ impl CommandCoordinator {
                         status: AckStatus::Duplicate,
                         turn_id: None,
                         chat_id: None,
+                        project_id: None,
+                        session_id: None,
                         acp_session_id: None,
                         committed_projection_version: None,
                     })))
@@ -2453,21 +3904,47 @@ impl CommandCoordinator {
                 // mark_dispatched 先行（评审 P2-a：outbox Dispatched→
                 // DeliveryConfirmed 强校验，漏写则 mark_delivery_confirmed
                 // 被拒、命令卡 IntentDurable）。
-                if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_dispatched(command_id, Utc::now())
+                {
                     warn!(chat_id, error = ?e, "mark_dispatched failed");
                     return;
                 }
                 // L1+L2：forward_ack 即确认点（无 L3 等待）。
-                if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
-                    self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
-                        .await;
+                if let Err(e) = self
+                    .inner
+                    .instance
+                    .forward_rpc(&instance_id, chat_id, &msg)
+                    .await
+                {
+                    self.fail_retryable(
+                        chat_id,
+                        command_id,
+                        cmd,
+                        instance_error_code(&e),
+                        "forward failed",
+                    )
+                    .await;
                     return;
                 }
-                if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_confirmed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                     return;
                 }
-                if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_projection_committed(command_id)
+                {
                     warn!(chat_id, error = ?e, "mark_projection_committed failed");
                     return;
                 }
@@ -2505,23 +3982,49 @@ impl CommandCoordinator {
                     .relay
                     .register_rpc(&rpc_id, command_id_str.clone())
                     .await;
-                if let Err(e) = self.inner.instance.forward_rpc(&instance_id, chat_id, &msg).await {
-                    self.fail_retryable(chat_id, command_id, cmd, instance_error_code(&e), "forward failed")
-                        .await;
+                if let Err(e) = self
+                    .inner
+                    .instance
+                    .forward_rpc(&instance_id, chat_id, &msg)
+                    .await
+                {
+                    self.fail_retryable(
+                        chat_id,
+                        command_id,
+                        cmd,
+                        instance_error_code(&e),
+                        "forward failed",
+                    )
+                    .await;
                     return;
                 }
-                if let Err(e) = store.outbox().lock().await.mark_dispatched(command_id, Utc::now()) {
+                if let Err(e) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_dispatched(command_id, Utc::now())
+                {
                     warn!(chat_id, error = ?e, "mark_dispatched failed");
                     return;
                 }
                 // 3. L3。
                 match tokio::time::timeout(self.inner.l3_timeout, rx).await {
                     Ok(Ok(r)) if r.get("error").is_none() => {
-                        if let Err(e) = store.outbox().lock().await.mark_delivery_confirmed(command_id) {
+                        if let Err(e) = store
+                            .outbox()
+                            .lock()
+                            .await
+                            .mark_delivery_confirmed(command_id)
+                        {
                             warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
                             return;
                         }
-                        if let Err(e) = store.outbox().lock().await.mark_projection_committed(command_id) {
+                        if let Err(e) = store
+                            .outbox()
+                            .lock()
+                            .await
+                            .mark_projection_committed(command_id)
+                        {
                             warn!(chat_id, error = ?e, "mark_projection_committed failed");
                             return;
                         }
@@ -2533,7 +4036,11 @@ impl CommandCoordinator {
                     }
                     _ => {
                         self.inner.relay.cancel_rpc(&rpc_id).await;
-                        let _ = store.outbox().lock().await.mark_delivery_unknown(command_id);
+                        let _ = store
+                            .outbox()
+                            .lock()
+                            .await
+                            .mark_delivery_unknown(command_id);
                         self.send_error(
                             cmd,
                             ErrorCode::AgentUnavailable,
@@ -2558,7 +4065,11 @@ impl CommandCoordinator {
             debug!(chat_id, error = ?e, "cleanup kill failed (already gone)");
         }
         let _ = self.inner.doc.close_chat(chat_id).await;
-        let _ = self.inner.chats.transition(chat_id, ChatState::Closed).await;
+        let _ = self
+            .inner
+            .chats
+            .transition(chat_id, ChatState::Closed)
+            .await;
         if let Ok(sid) = uuid::Uuid::parse_str(chat_id) {
             let _ = self.inner.store.remove_chat(sid);
         }
@@ -2641,6 +4152,8 @@ impl CommandCoordinator {
                 status: AckStatus::Committed,
                 turn_id: turn_id.map(str::to_string),
                 chat_id: chat_id.map(str::to_string),
+                project_id: None,
+                session_id: None,
                 acp_session_id: None,
                 committed_projection_version: None,
             })))
@@ -2694,7 +4207,8 @@ impl CommandCoordinator {
         for ((instance_id, cwd), chat_id) in per_cwd {
             let me = self.clone();
             tokio::spawn(async move {
-                me.poll_instance_sessions(&instance_id, &chat_id, &cwd).await;
+                me.poll_instance_sessions(&instance_id, &chat_id, &cwd)
+                    .await;
             });
         }
     }
@@ -2751,7 +4265,12 @@ impl CommandCoordinator {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn action_error(command_id: String, code: ErrorCode, message: &str, retryable: bool) -> ActionError {
+fn action_error(
+    command_id: String,
+    code: ErrorCode,
+    message: &str,
+    retryable: bool,
+) -> ActionError {
     ActionError {
         command_id,
         code,
@@ -2774,7 +4293,13 @@ fn command_type_of(action: &ActionEnvelope) -> CommandType {
 
 fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     match action {
-        ActionEnvelope::Create { command_id, .. }
+        ActionEnvelope::ProjectCreate { command_id, .. }
+        | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionCreate { command_id, .. }
+        | ActionEnvelope::PersistedSessionOpen { command_id, .. }
+        | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }
@@ -2798,6 +4323,12 @@ fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
         ActionEnvelope::Load { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::SessionNew { payload, .. } => Some(payload.chat_id.clone()),
         ActionEnvelope::Create { .. } => None,
+        ActionEnvelope::ProjectCreate { .. }
+        | ActionEnvelope::ProjectArchive { .. }
+        | ActionEnvelope::PersistedSessionCreate { .. }
+        | ActionEnvelope::PersistedSessionOpen { .. }
+        | ActionEnvelope::PersistedSessionRename { .. } => None,
+        ActionEnvelope::PersistedSessionImport { .. } => None,
         ActionEnvelope::SubscribeEvents { .. } | ActionEnvelope::UnsubscribeEvents { .. } => None,
         // workspace 管理命令 / session/list 按需查询：submit 层直接执行
         // （不解析 chat_id）。
@@ -2848,7 +4379,7 @@ fn chat_uuid(chat_id: &str) -> Option<uuid::Uuid> {
     uuid::Uuid::parse_str(chat_id).ok()
 }
 
-/// LastError.code（String，§4.4 稳定码）→ ErrorCode（脱敏映射；未知串 → 
+/// LastError.code（String，§4.4 稳定码）→ ErrorCode（脱敏映射；未知串 →
 /// INVALID_STATE，防御）。
 fn error_code_from_str(s: &str) -> ErrorCode {
     match s {

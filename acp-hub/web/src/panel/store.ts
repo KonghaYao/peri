@@ -1,7 +1,7 @@
 // acp-hub Web 面板 —— 装配与编排（SolidJS 响应式 store）。
 //
 // 流程（M3 方案 §4，移植自原 main.js）：
-//   1. 连接 → auth（ws-client 首帧纪律）→ ysync.subscribe ["hub:registry"]
+//   1. HttpOnly Cookie 鉴权 → ysync.subscribe ["hub:registry"]
 //      → 快照 + ready → UI 启用。
 //   2. registry 渲染 → 左栏实例/对话。
 //   3. 点击对话 → subscribe ["chat:{cid}","session:{cid}"] → 快照渲染历史
@@ -11,24 +11,22 @@
 //   5. create committed ack（带 chatId）→ 自动订阅 chat:{cid} 并选中。
 //   6. 断线：4500/4501/4502 停止并提示；1011/1013 指数退避重连（ws-client），
 //      重连后重放订阅（快照兜底）。
-//
-// token 解析优先级（M3 §4）：URL ?token= → sessionStorage（避免落盘明文）
-// → 输入框粘贴。
 
 import { createSignal } from 'solid-js';
 import type { Setter } from 'solid-js';
 import * as H from './lib/protocol';
 import { DocStore, renderChat, renderControl, renderRegistry } from './lib/yjs';
-import type { ChatEntry, ChatInfo, ControlView, InstanceInfo, SessionSummaryInfo, WorkspaceInfo } from './lib/yjs';
+import type { ChatEntry, ChatInfo, ControlView, ProjectInfo, ProjectSessionInfo, SessionSummaryInfo } from './lib/yjs';
 import { WsClient } from './lib/ws-client';
 import type { ConnStatus, ConnDetail } from './lib/ws-client';
+import { canMutate, type PrincipalRole } from './lib/auth-role';
+import { beginOpen, matchesOpening, shouldIgnoreLateAck, terminalCanCommit } from './lib/open-state.mjs';
+import { unimportedSessions } from './lib/session-import.mjs';
 
-const TOKEN_KEY = 'acp-hub-token';
 const ACK_TIMEOUT_MS = 30000;
 
 // ── UI 信号（组件消费）─────────────────────────────────────────────────
 
-export const [tokenInput, setTokenInput] = createSignal('');
 export const [busy, setBusy] = createSignal(false);
 export const [connState, setConnState] = createSignal<{ text: string; kind: string }>({
   text: '未连接',
@@ -39,25 +37,22 @@ export const [globalStatus, setGlobalStatus] = createSignal('');
 export const [subscribedDocs, setSubscribedDocs] = createSignal('—');
 export const [ackLog, setAckLog] = createSignal<string[]>([]);
 export const [errorLog, setErrorLog] = createSignal<string[]>([]);
-export const [instances, setInstances] = createSignal<InstanceInfo[]>([]);
 export const [chats, setChats] = createSignal<ChatInfo[]>([]);
 export const [selectedCid, setSelectedCid] = createSignal<string | null>(null);
 export const [chatEntries, setChatEntries] = createSignal<ChatEntry[]>([]);
 export const [chatHead, setChatHead] = createSignal<ControlView | null>(null);
 export const [permissions, setPermissions] = createSignal<ControlView['pendingPermissions']>([]);
-/** ACP 会话（§6.3 按需查询）：**按对话隔离缓存**——切换对话时向 agent 侧
- *  发 session/list 查询（真实数据源），结果存 `chatId → 列表`；切回对话
- *  复用缓存，10s 定时刷新当前对话。不再依赖 Registry Doc sessions 投影。 */
-export const [sessionsByChat, setSessionsByChat] = createSignal<Record<string, SessionSummaryInfo[]>>({});
-/** 当前选中对话的会话列表（跟随当前对话展示；未选对话 → []）。 */
-export const currentSessions = (): SessionSummaryInfo[] => {
-  const cid = selectedCid();
-  return cid ? sessionsByChat()[cid] ?? [] : [];
-};
-/** 工作区定义（Registry Doc workspaces，§6.3 workspace 扩展）。 */
-export const [workspaces, setWorkspaces] = createSignal<WorkspaceInfo[]>([]);
+export const [projects, setProjects] = createSignal<ProjectInfo[]>([]);
+export const [projectSessions, setProjectSessions] = createSignal<ProjectSessionInfo[]>([]);
+export const [importableSessions, setImportableSessions] = createSignal<SessionSummaryInfo[]>([]);
+export const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
+export interface OpeningSession { commandId: string; sessionId: string; previousSessionId: string | null; previousChatId: string | null }
+export const [openingSession, setOpeningSession] = createSignal<OpeningSession | null>(null);
+export const openingSessionId = () => openingSession()?.sessionId ?? null;
+export const [principalRole, setPrincipalRole] = createSignal<PrincipalRole>(null);
+export const readOnly = () => !canMutate(principalRole());
+export const [authInvalidated, setAuthInvalidated] = createSignal(0);
 /** 当前选中的工作区 id（null = 全部）：左栏对话/会话按此过滤。 */
-export const [selectedWsId, setSelectedWsId] = createSignal<string | null>(null);
 export const [chatStatusSignal, setChatStatusSignal] = createSignal<Record<string, string>>({});
 export const [toasts, setToasts] = createSignal<{ id: number; msg: string }[]>([]);
 
@@ -68,9 +63,7 @@ let ws: WsClient | null = null; // 当前 WsClient
 let currentCid: string | null = null; // 选中对话（重连后恢复订阅）
 let ready = false; // ready 门控：就绪后才发 action
 const pendingAcks = new Map<string, { label: string; cb?: (ack: Ack) => void; timer: ReturnType<typeof setTimeout> }>();
-// 每个 chat 只接受最近一次 session/list 响应，防止切换/load 后的旧响应
-// 晚到并覆盖「当前」标记。
-const latestSessionQueries = new Map<string, string>();
+const ignoredOpenCommands = new Set<string>();
 
 interface Ack {
   commandId?: string;
@@ -96,26 +89,6 @@ export function toast(msg: string): void {
   setTimeout(() => {
     setToasts((list) => list.filter((t) => t.id !== id));
   }, 2500);
-}
-
-// ── token 解析 ──────────────────────────────────────────────────────────
-
-function resolveToken(): string {
-  const params = new URLSearchParams(window.location.search);
-  const fromUrl = params.get('token');
-  if (fromUrl) {
-    // base64 token 含 `+`，URL query 中 `+` 被解码为空格——还原之。
-    const fixed = fromUrl.replace(/ /g, '+');
-    // URL token 是一次性入口：写入 sessionStorage 供刷新复用，随后从
-    // URL 中清理（避免明文留在地址栏/历史）。
-    sessionStorage.setItem(TOKEN_KEY, fixed);
-    params.delete('token');
-    const qs = params.toString();
-    const next = window.location.pathname + (qs ? '?' + qs : '');
-    window.history.replaceState(null, '', next);
-    return fixed;
-  }
-  return sessionStorage.getItem(TOKEN_KEY) || '';
 }
 
 // ── 订阅集合：registry 常驻 + 当前对话（chat + control 双 doc）─────────
@@ -144,10 +117,7 @@ export function isTerminal(status: string | undefined): boolean {
 }
 
 export function selectChat(cid: string): void {
-  if (cid === currentCid) {
-    querySessions(cid);
-    return;
-  }
+  if (cid === currentCid) return;
   const previousCid = currentCid;
   if (previousCid && ws) {
     ws.send(H.unsubscribe([H.chatDoc(previousCid), H.sessionDoc(previousCid)]));
@@ -155,58 +125,30 @@ export function selectChat(cid: string): void {
   currentCid = cid;
   setSelectedCid(cid);
   sendSubscribe(); // unsubscribe/subscribe 按 WebSocket 顺序生效，快照到达后渲染
-  // 对话切换：清空旧渲染，等快照到达后重新填充。ACP 会话（sessions）是
-  // **按对话隔离**的（§6.3）：切对话 → 立即按需查询该对话的会话列表 +
-  // 启动 10s 定时刷新（agent 侧真实数据源）。
+  // Runtime docs switch only after the logical session activation commits.
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
   setSubscribedDocs('—'); // 订阅清单等下一帧 ready 刷新（简单置空亦可）
-  restartSessionPoll(cid);
-}
-
-// ── session/list 按需查询（§6.3）────────────────────────────────────────
-
-let sessionTimer: ReturnType<typeof setInterval> | null = null;
-
-/** 切换对话时调用：立即查询一次 + 10s 定时刷新当前对话的会话列表。
- *  定时器随对话切换重建（上一对话的刷新立即停止——会话按对话隔离）。 */
-function restartSessionPoll(cid: string): void {
-  if (sessionTimer) {
-    clearInterval(sessionTimer);
-    sessionTimer = null;
-  }
-  querySessions(cid);
-  sessionTimer = setInterval(() => querySessions(cid), 10000);
-}
-
-/** 发 session/list 查询（无副作用；结果经 session_list 帧更新缓存）。 */
-function querySessions(cid: string): void {
-  if (!ws) return;
-  const frame = H.sessionList(cid);
-  latestSessionQueries.set(cid, frame.commandId);
-  if (!ws.send(frame)) latestSessionQueries.delete(cid);
-}
-
-/** 手动刷新当前对话的会话列表（不重置定时器/订阅/渲染）。 */
-export function refreshSessions(): void {
-  if (currentCid) querySessions(currentCid);
 }
 
 // ── ack 表 ──────────────────────────────────────────────────────────────
 
 // 发送 action 并登记 ack 回调；ready 前不发（server 会缓冲，但面板
 // 以 ready 门控保证可预期）。
-function sendAction(frame: ReturnType<typeof H.action>, label: string, cb?: (ack: Ack) => void): void {
+function sendAction(frame: ReturnType<typeof H.action>, label: string, cb?: (ack: Ack) => void): boolean {
   if (!ws || !ws.send(frame)) {
     toast(`连接未就绪，无法发送 ${label}`);
-    return;
+    if (matchesOpening(openingSession(), frame.commandId)) setOpeningSession(null);
+    return false;
   }
   const timer = setTimeout(() => {
     pendingAcks.delete(frame.commandId);
+    if (matchesOpening(openingSession(), frame.commandId)) { ignoredOpenCommands.add(frame.commandId); setOpeningSession(null); }
     toast(`ack 超时（30s）: ${label} ${frame.commandId.slice(0, 8)}…`);
   }, ACK_TIMEOUT_MS);
   pendingAcks.set(frame.commandId, { label, cb, timer });
+  return true;
 }
 
 // ── 下行帧分发 ──────────────────────────────────────────────────────────
@@ -222,24 +164,18 @@ function onFrame(frame: Record<string, unknown>): void {
     case 'action_error':
       onActionError(frame as ActionError);
       break;
-    case 'session_list': {
-      // 按需查询结果（§6.3）：更新该对话的会话缓存（按对话隔离）。
-      const f = frame as { commandId?: string; chatId?: string; sessions?: SessionSummaryInfo[] };
-      const chatId = f.chatId;
-      if (chatId && f.commandId === latestSessionQueries.get(chatId)) {
-        setSessionsByChat((prev) => ({ ...prev, [chatId]: f.sessions ?? [] }));
-      }
-      break;
-    }
     default:
       break; // 未知帧忽略（协议演进兼容）
   }
 }
 
 function onAck(ack: Ack): void {
+  if (shouldIgnoreLateAck(ignoredOpenCommands, ack)) return;
   showAck(ack);
   const pending = pendingAcks.get(ack.commandId || '');
-  if (pending) {
+  // accepted is only the queue acknowledgement. Keep the command registered so
+  // the committed/duplicate terminal acknowledgement can drive navigation.
+  if (pending && ack.status !== 'accepted') {
     clearTimeout(pending.timer);
     pendingAcks.delete(ack.commandId || '');
     if (typeof pending.cb === 'function') pending.cb(ack);
@@ -248,9 +184,11 @@ function onAck(ack: Ack): void {
   // 路径：自动补订阅 chat:{cid}/session:{cid} 并选中。§8.5 激活语义：
   // 点击已打开的历史会话时 server 同样回 committed + 既有 chatId——
   // 此处统一切换选中（不新建重复对话）。
-  if (ack.status === 'committed' && ack.chatId && ack.chatId !== currentCid) {
+  if ((ack.status === 'committed' || ack.status === 'duplicate') && ack.chatId && ack.chatId !== currentCid && openingSession()?.commandId !== ack.commandId && !ignoredOpenCommands.has(ack.commandId || '')) {
     toast(`已打开对话: ${ack.chatId.slice(0, 8)}…`);
-    selectChat(ack.chatId);
+    const chatId = ack.chatId;
+    if (!chatId) return;
+    selectChat(chatId);
   }
 }
 
@@ -275,6 +213,7 @@ function onActionError(err: ActionError): void {
     clearTimeout(pending.timer);
     pendingAcks.delete(err.commandId || '');
   }
+  if (matchesOpening(openingSession(), err.commandId)) setOpeningSession(null);
   const reason = err.code ? ERROR_REASONS[err.code] : undefined;
   toast(
     (err.code || 'ACTION_ERROR') + (reason ? `：${reason}` : '') +
@@ -293,14 +232,12 @@ store.onUpdate = (docId: string): void => {
       statusMap[s.id] = s.status || '';
     });
     setChatStatusSignal(statusMap);
-    setInstances(reg.instances);
     setChats(reg.chats);
     setGlobalStatus(reg.globalStatus);
     // 工作区定义（§6.3 workspace 扩展）：左栏过滤依据。
-    setWorkspaces(reg.workspaces);
-    // ACP 会话列表不再取 Registry Doc sessions 投影（§6.3 按需查询）：
-    // 切换对话时向 agent 侧发 session/list，结果按对话缓存（sessionsByChat）。
-    // server 轮询投影保留（不破坏既有消费方），前端展示以按需查询为准。
+    setProjects(reg.projects);
+    setProjectSessions(reg.projectSessions);
+    setImportableSessions(unimportedSessions(reg.sessions, reg.projectSessions));
     return;
   }
   if (currentCid && docId === H.chatDoc(currentCid)) {
@@ -338,8 +275,6 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
           ? Object.keys(detail.projectionVersions as Record<string, unknown>).join('、')
           : '—',
       );
-      // 重连后恢复当前对话的会话轮询（若之前有选中对话）。
-      if (currentCid) restartSessionPoll(currentCid);
       toast('连接就绪');
       break;
     case 'heartbeat':
@@ -353,14 +288,16 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       break;
     case 'fatal':
       ready = false;
-      if (sessionTimer) {
-        clearInterval(sessionTimer);
-        sessionTimer = null;
-      }
+      setOpeningSession(null);
       // connect() 置 busy(true) 后无任何路径恢复（closed 仅由用户主动
       // disconnect 触发，那里已 setBusy(false)）→ 必须在此恢复按钮，
       // 否则 4500/4501/4502 后 connect/disconnect 双双 disabled 无法重连。
       setBusy(false);
+      if (detail.code === 4502) {
+        clearUiSession();
+        setPrincipalRole(null);
+        setAuthInvalidated((v) => v + 1);
+      }
       setConnState({ text: `已停止（${detail.code}）`, kind: 'err' });
       toast(
         `连接终止（${detail.code}）：` +
@@ -372,6 +309,7 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       break;
     case 'closed':
       ready = false;
+      setOpeningSession(null);
       setConnState({ text: '已断开', kind: '' });
       break;
     default:
@@ -384,33 +322,57 @@ function wsUrl(): string {
   return scheme + window.location.host + '/';
 }
 
-export function connect(token: string): void {
-  if (!token) {
-    toast('请先粘贴 token（或 ?token= 传入）');
-    return;
-  }
-  sessionStorage.setItem(TOKEN_KEY, token);
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
+export function connectWithCookie(): void {
+  if (ws) ws.close();
   pendingAcks.forEach((p) => clearTimeout(p.timer));
   pendingAcks.clear();
-  ws = new WsClient({
-    url: wsUrl(),
-    token,
-    onStatus,
-    onFrame,
-  });
+  ws = new WsClient({ url: wsUrl(), onStatus, onFrame });
   ws.connect();
   setBusy(true);
 }
 
+export function createProject(name: string, cwd: string): void {
+  if (!ready || readOnly()) return toast(readOnly() ? '只读模式不能创建项目' : '连接未就绪');
+  sendAction(H.projectCreate(name, cwd), 'project/create');
+}
+
+export function createProjectSession(projectId: string, title?: string): void {
+  if (!ready || readOnly()) return toast(readOnly() ? '只读模式不能创建会话' : '连接未就绪');
+  sendAction(H.persistedSessionCreate(projectId, title), 'session/create', (ack) => {
+    if ((ack.status === 'committed' || ack.status === 'duplicate') && ack.sessionId) setSelectedSessionId(ack.sessionId as string);
+  });
+}
+
+export function openProjectSession(sessionId: string): void {
+  if (!ready || readOnly()) return toast(readOnly() ? '只读模式不能打开运行会话' : '连接未就绪');
+  const frame = H.persistedSessionOpen(sessionId);
+  setOpeningSession(beginOpen(frame.commandId, sessionId, selectedSessionId(), currentCid));
+  sendAction(frame, 'session/open', (ack) => {
+    if (!terminalCanCommit(openingSession(), ack)) return;
+    setSelectedSessionId(sessionId);
+    const committedChatId = ack.chatId;
+    if (!committedChatId) return;
+    selectChat(committedChatId);
+    setOpeningSession(null);
+  });
+}
+
+export function renameProjectSession(sessionId: string, name: string): void {
+  if (!ready || readOnly() || !name.trim()) return;
+  sendAction(H.persistedSessionRename(sessionId, name.trim()), 'session/rename');
+}
+
+export function importProjectSession(projectId: string, acpSessionId: string): void {
+  if (!ready || readOnly()) return toast(readOnly() ? '只读模式不能导入会话' : '连接未就绪');
+  sendAction(H.persistedSessionImport(projectId, acpSessionId), 'session/import', (ack) => {
+    if ((ack.status === 'committed' || ack.status === 'duplicate') && ack.sessionId) {
+      toast('会话已加入侧边栏');
+    }
+  });
+}
+
 export function disconnect(): void {
-  if (sessionTimer) {
-    clearInterval(sessionTimer);
-    sessionTimer = null;
-  }
+  setOpeningSession(null);
   if (ws) {
     ws.close();
     ws = null;
@@ -420,10 +382,31 @@ export function disconnect(): void {
   setBusy(false);
 }
 
+export function clearUiSession(): void {
+  disconnect();
+  currentCid = null;
+  setSelectedCid(null);
+  setSelectedSessionId(null);
+  setChatEntries([]);
+  setChatHead(null);
+  setPermissions([]);
+  setProjects([]);
+  setProjectSessions([]);
+  setImportableSessions([]);
+  ignoredOpenCommands.clear();
+  store.clear();
+}
+
+export function selectPersistedSessionLocally(sessionId: string, chatId: string): void {
+  setSelectedSessionId(sessionId); selectChat(chatId);
+}
+
 // ── 用户动作 → action ──────────────────────────────────────────────────
 
 export function sendMessage(text: string, effort?: string): void {
-  if (!ready) {
+  if (!ready || readOnly() || openingSessionId()) {
+    if (readOnly()) return toast('只读模式不能发送消息');
+    if (openingSessionId()) return toast('会话正在打开');
     toast('连接未就绪，稍后再试');
     return;
   }
@@ -444,102 +427,10 @@ export function sendMessage(text: string, effort?: string): void {
   });
 }
 
-export function newChat(): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  // instanceId/cwd 留空 = 本机；选中 workspace 时携带 workspace_id →
-  // server 继承其 cwd（§6.3 workspace 扩展）。
-  const wsId = selectedWsId();
-  sendAction(H.createChat(undefined, undefined, wsId || undefined), 'create', (ack) => {
-    // chatId 已在 onAck 里统一处理（自动订阅选中）
-    if (!ack.chatId) toast('create committed 缺少 chatId');
-  });
-}
-
-/** 点击 ACP 历史会话（§8.5 会话切换）：会话是**进程内实体**——在当前
- *  对话（其 ACP 进程）内 load 目标历史会话，**不新建对话/进程**。
- *  需先选中一个活跃对话（终态对话的进程已退出，无法切换）。 */
-export function openAcpSession(acpSessionId: string, title?: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  const cid = currentCid;
-  if (!cid) {
-    toast('请先选择对话（会话在当前对话内切换）');
-    return;
-  }
-  if (isTerminal(chatStatusSignal()[cid])) {
-    toast('对话已结束，不能切换会话');
-    return;
-  }
-  sendAction(H.loadChat(cid, acpSessionId), 'load', (ack) => {
-    if (ack.status === 'committed') {
-      toast(`已切换到会话 ${title || acpSessionId.slice(0, 8)}…`);
-      // 会话列表的「当前」标记已变化 → 重新查询一次。
-      querySessions(cid);
-    }
-  });
-}
-
-/** 当前对话内新建 ACP 会话（chat/session-new，§8.5）：会话是**进程内实体**——
- *  不新建对话/进程。committed 后刷新会话列表（tooltip「当前」标记更新）；
- *  错误由 onActionError 统一 toast。 */
-export function newSession(): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  const cid = currentCid;
-  if (!cid) {
-    toast('请先选择对话（新会话在当前对话内创建）');
-    return;
-  }
-  if (isTerminal(chatStatusSignal()[cid])) {
-    toast('对话已结束，不能新建会话');
-    return;
-  }
-  sendAction(H.sessionNew(cid), 'session/new', (ack) => {
-    if (ack.status === 'committed') {
-      toast('新会话已创建');
-      // 会话列表的「当前」标记已变化 → 重新查询一次。
-      querySessions(cid);
-    }
-  });
-}
-
-/** 新建工作区（§6.3 workspace 扩展）：定义本地目录 cwd，其下新建对话继承。
- *  cwd 须为已存在的绝对路径（server 校验：形态 + 目录存在性）。 */
-export function createWorkspace(name: string, cwd: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  sendAction(H.workspaceCreate(name, cwd), 'workspace/create', (ack) => {
-    if (ack.status === 'committed') {
-      toast('工作区已创建');
-    }
-  });
-}
-
-/** 删除工作区定义（不影响已建对话/会话）。 */
-export function removeWorkspace(workspaceId: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  sendAction(H.workspaceRemove(workspaceId), 'workspace/remove', (ack) => {
-    if (ack.status === 'committed') {
-      toast('工作区已删除');
-      if (selectedWsId() === workspaceId) setSelectedWsId(null);
-    }
-  });
-}
+export function installPrincipalRole(role: PrincipalRole): void { setPrincipalRole(role); }
 
 export function cancelTurn(): void {
-  if (!ready) {
+  if (!ready || readOnly()) {
     toast('连接未就绪，稍后再试');
     return;
   }
@@ -552,7 +443,7 @@ export function cancelTurn(): void {
 }
 
 export function closeChat(): void {
-  if (!ready) {
+  if (!ready || readOnly()) {
     toast('连接未就绪，稍后再试');
     return;
   }
@@ -565,7 +456,8 @@ export function closeChat(): void {
 }
 
 export function resolvePermission(permissionId: string, decision: string): void {
-  if (!ready) {
+  if (!ready || readOnly()) {
+    if (readOnly()) return toast('只读模式不能处理权限请求');
     toast('连接未就绪，稍后再试');
     return;
   }
@@ -596,8 +488,5 @@ function showActionError(err: ActionError): void {
 
 // ── 装配 ────────────────────────────────────────────────────────────────
 
-const initialToken = resolveToken();
-setTokenInput(initialToken);
-// 有 token 即自动连接（URL ?token= 或 sessionStorage 记忆），刷新/重开
-// 页面无需再手动点「连接」；无 token 时保持原手动连接入口。
-if (initialToken) connect(initialToken);
+// Browser UI authenticates through AuthGate and an HttpOnly cookie. The legacy
+// credential is recovered from URL or Web Storage here.

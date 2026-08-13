@@ -16,7 +16,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 clap = { workspace = true, features = ["derive", "env"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true, features = ["v4", "v7", "serde"] }
+uuid = { workspace = true, features = ["v4", "v5", "v7", "serde"] }
+libc.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 dirs-next = { workspace = true }
 tokio-tungstenite = { workspace = true }
@@ -28,6 +29,7 @@ base64 = { workspace = true }
 rand = { workspace = true }
 crc32fast = { workspace = true }
 toml = { workspace = true }
+sqlx = { workspace = true }
 acp-hub-proto = { path = "../proto" }
 agent-client-protocol-schema = { workspace = true }
 

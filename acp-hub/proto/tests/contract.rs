@@ -7,12 +7,11 @@ use acp_hub_proto::ack::ErrorCode;
 use acp_hub_proto::conn::{AuthResponse, DocId};
 use acp_hub_proto::frame::{Frame, ProtoError};
 use acp_hub_proto::hmac::{
-    compute_mac, derive_mac_key, generate_connection_context, mac_input, verify_mac,
-    SeenNonces,
+    compute_mac, derive_mac_key, generate_connection_context, mac_input, verify_mac, SeenNonces,
 };
 use acp_hub_proto::instance::InstanceHello;
 use acp_hub_proto::whitelist::{m1_allows, m1_check, Direction, M1Check, Role};
-use acp_hub_proto::{PROTOCOL_VERSION, CHAT_DOC_SCHEMA_VERSION};
+use acp_hub_proto::{CHAT_DOC_SCHEMA_VERSION, PROTOCOL_VERSION};
 
 const INSTANCE_TOKEN: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 const ROLE: &str = "instance";
@@ -40,12 +39,7 @@ fn vector_12_mutual_auth_handshake_succeeds() {
     // nonce ‖ connection_context ‖ protocol_version ‖ role，§9.2 顾问3）
     let server_key = derive_mac_key(&INSTANCE_TOKEN, ROLE);
     let context = generate_connection_context();
-    let input = mac_input(
-        &nonce,
-        &context,
-        &PROTOCOL_VERSION.to_string(),
-        ROLE,
-    );
+    let input = mac_input(&nonce, &context, &PROTOCOL_VERSION.to_string(), ROLE);
     let mac = compute_mac(&server_key, &input);
     let auth_response = AuthResponse {
         connection_context: base64_encode(&context),
@@ -104,10 +98,7 @@ fn vector_12_replay_rejected() {
 fn vector_6_unsupported_frame_error_mapping() {
     let raw = r#"{"t":"totally_unknown","x":1}"#;
     let err = Frame::parse(raw).unwrap_err();
-    assert_eq!(
-        err,
-        ProtoError::Unsupported("totally_unknown".into())
-    );
+    assert_eq!(err, ProtoError::Unsupported("totally_unknown".into()));
     // 上层映射：白名单外 → UNSUPPORTED_FRAME（§4.8 稳定错误码）
     match &err {
         ProtoError::Unsupported(_) | ProtoError::DirectionRejected(_) => {

@@ -4,9 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    PermissionOptions, PermissionStatus, PublicError, ChatStatus, TurnStatus,
-};
+use super::{ChatStatus, PermissionOptions, PermissionStatus, PublicError, TurnStatus};
 use crate::action::PermissionDecision;
 
 /// Control Doc 根对象（§5.4）。

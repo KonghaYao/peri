@@ -94,11 +94,10 @@ async fn t1_update_log_roundtrip_and_replay() {
     let (mut log, _wm, _deg) = test_log(dir.path(), FsyncMode::PerCommit);
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"update-a");
-    let d2 = (
-        DocId::session(&sid.to_string()),
-        b"update-b".to_vec(),
-    );
-    log.append(1, 1, &[(d1.0.clone(), &d1.1), (d2.0.clone(), &d2.1)]).await.unwrap();
+    let d2 = (DocId::session(&sid.to_string()), b"update-b".to_vec());
+    log.append(1, 1, &[(d1.0.clone(), &d1.1), (d2.0.clone(), &d2.1)])
+        .await
+        .unwrap();
     log.append(1, 2, &[(d1.0.clone(), &d1.1)]).await.unwrap();
     let stats: UpdateLogStats = log.stats();
     assert_eq!(stats.records, 2);
@@ -164,7 +163,10 @@ async fn t2_crc_corruption_truncates_tail() {
     let after_len = std::fs::metadata(&path).unwrap().len();
     assert_eq!(after_len as usize, 8 + len1);
     // degraded 语义：拒绝新 committed 承诺（§8.4；新 Action 返回可重试错误）
-    let err = log.append(1, 4, &[(d1.0.clone(), &d1.1)]).await.unwrap_err();
+    let err = log
+        .append(1, 4, &[(d1.0.clone(), &d1.1)])
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::Degraded { .. }), "got {err:?}");
 }
 
@@ -238,7 +240,10 @@ async fn t3_batch_mode_defers_flush() {
         // Batch 模式：水位未落盘（仅 dirty），文件系统层未 fsync（语义降级
         // 由上层声明，§8.4）。水位文件不应存在。
         wm_path = wm.path().to_path_buf();
-        assert!(!wm_path.exists(), "batch mode must not persist watermark before flush");
+        assert!(
+            !wm_path.exists(),
+            "batch mode must not persist watermark before flush"
+        );
         // flush 后水位落盘
         log.flush().unwrap();
         assert!(wm_path.exists());
@@ -256,6 +261,9 @@ async fn t_unsupported_doc_id_rejected() {
     let dir = tempdir().unwrap();
     let (mut log, _wm, _deg) = test_log(dir.path(), FsyncMode::PerCommit);
     let registry = (DocId::REGISTRY, b"nope".to_vec());
-    let err = log.append(1, 1, &[(registry.0, &registry.1)]).await.unwrap_err();
+    let err = log
+        .append(1, 1, &[(registry.0, &registry.1)])
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::Corrupt { .. }), "got {err:?}");
 }

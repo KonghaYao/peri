@@ -15,7 +15,36 @@ pub struct RegistryDocRoot {
     pub instances: HashMap<String, InstanceView>,
     /// 活跃 chat 摘要——唯一权威源，server 状态源单写（§5.2 裁决）。
     pub chats: HashMap<String, ChatSummary>,
+    #[serde(default)]
+    pub projects: HashMap<String, ProjectSummary>,
+    #[serde(default)]
+    pub project_sessions: HashMap<String, ProjectSessionSummary>,
     pub global: RegistryGlobal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub cwd: String,
+    pub instance_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSessionSummary {
+    pub id: String,
+    pub project_id: String,
+    pub acp_session_id: Option<String>,
+    pub title: String,
+    pub lifecycle: String,
+    pub updated_at: String,
+    pub last_opened_at: Option<String>,
+    pub active_chat_id: Option<String>,
 }
 
 /// 实例视图（§5.5）。

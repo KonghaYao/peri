@@ -10,8 +10,8 @@
 use yrs::{Array, Map, ReadTxn, Transact, WriteTxn};
 
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, EntryKind, EntryRole, EntryStatus, PermissionOptions, PermissionStatus, PublicError,
-    ChatStatus, ToolCallProjection, ToolCallStatus, TurnStatus,
+    ActiveTurnProjection, ChatStatus, EntryKind, EntryRole, EntryStatus, PermissionOptions,
+    PermissionStatus, PublicError, ToolCallProjection, ToolCallStatus, TurnStatus,
 };
 
 use crate::state::chat_writer::{self, ContentKind};
@@ -253,8 +253,9 @@ impl Aggregator {
                 block_id,
                 text,
             } => {
-                let (turn_id, entry_id, block_id) =
-                    self.resolve_entry_ids_from_snapshot(stream, snapshot, turn_id, entry_id, block_id, "text");
+                let (turn_id, entry_id, block_id) = self.resolve_entry_ids_from_snapshot(
+                    stream, snapshot, turn_id, entry_id, block_id, "text",
+                );
                 chat_writer::ensure_entry_with_blocks(
                     txn,
                     &root,
@@ -264,7 +265,14 @@ impl Aggregator {
                     Some(&turn_id),
                     "",
                 );
-                chat_writer::append_text_delta(txn, &root, &entry_id, &block_id, text, ContentKind::Text);
+                chat_writer::append_text_delta(
+                    txn,
+                    &root,
+                    &entry_id,
+                    &block_id,
+                    text,
+                    ContentKind::Text,
+                );
                 chat_writer::bump_projection_version(txn, &root);
             }
             EventBody::ReasoningDelta {
@@ -358,7 +366,10 @@ impl Aggregator {
                     .and_then(|s| s.cast::<String>().ok());
                 if let Some(s) = status {
                     if let Some(st) = chat_status_from_str(&s) {
-                        if matches!(st, ChatStatus::Ended | ChatStatus::Closed | ChatStatus::Crashed) {
+                        if matches!(
+                            st,
+                            ChatStatus::Ended | ChatStatus::Closed | ChatStatus::Crashed
+                        ) {
                             return Err(ApplyReason::ChatClosed);
                         }
                     }
@@ -373,7 +384,11 @@ impl Aggregator {
     }
 
     /// 判定步骤 1/2/3：epoch 校验、seq 水位 + gap、uncalibratable（§9.2）。
-    fn judge_stream(&self, stream: &mut StreamState, ev: &NormalizedEvent) -> Result<(), ApplyReason> {
+    fn judge_stream(
+        &self,
+        stream: &mut StreamState,
+        ev: &NormalizedEvent,
+    ) -> Result<(), ApplyReason> {
         // 1. epoch 校验（§4.5.1 防御；正常路径 hello 已对账）。
         if ev.epoch != stream.epoch {
             if ev.epoch > stream.epoch {
@@ -422,9 +437,8 @@ impl Aggregator {
         let txn = pair.session.transact();
         let root = chat_writer::root_map_read(&txn)?;
         let sm = root.get(&txn, "session")?.cast::<yrs::MapRef>().ok()?;
-        let str_or = |k: &str| -> Option<String> {
-            sm.get(&txn, k).and_then(|v| v.cast::<String>().ok())
-        };
+        let str_or =
+            |k: &str| -> Option<String> { sm.get(&txn, k).and_then(|v| v.cast::<String>().ok()) };
         Some(ActiveTurnProjection {
             turn_id: str_or("active_turn_id")?,
             turn_status: str_or("active_turn_status")
@@ -492,9 +506,7 @@ impl Aggregator {
                 Ok(())
             }
             EventBody::UserMessage {
-                turn_id,
-                entry_id,
-                ..
+                turn_id, entry_id, ..
             } => {
                 // `session/load` 回放（§8.5）：历史 user 消息同样无 turn_id，
                 // 但回放是**显式重建**——聚合器按回放序生成 turn 归位
@@ -549,10 +561,7 @@ impl Aggregator {
                 }
                 Ok(())
             }
-            EventBody::PermissionRequested {
-                permission_id,
-                ..
-            } => {
+            EventBody::PermissionRequested { permission_id, .. } => {
                 // 幂等：permission_id 已存在 → 跳过。
                 let txn = pair.session.transact();
                 if self.permission_exists(&txn, permission_id) {
@@ -581,9 +590,7 @@ impl Aggregator {
             | EventBody::SessionInfo { .. }
             | EventBody::SessionListResponse { .. } => Ok(()),
             EventBody::TurnTerminal {
-                turn_id,
-                status,
-                ..
+                turn_id, status, ..
             } => {
                 // 防御：仅终态四值（§3.2【决策】）。
                 if !matches!(
@@ -601,9 +608,9 @@ impl Aggregator {
                     Some(a) if a.turn_id != *turn_id => Err(ApplyReason::TurnTerminalGuard),
                     Some(a) => match a.turn_status {
                         // 不可逆终态：终态事件二次到达 → 校准完成（§7.2）。
-                        TurnStatus::Completed
-                        | TurnStatus::Failed
-                        | TurnStatus::Cancelled => Err(ApplyReason::CalibrationDone),
+                        TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Cancelled => {
+                            Err(ApplyReason::CalibrationDone)
+                        }
                         // cancelling：终态事件应用（状态机迁移，§7.2）；非终态
                         // 事件由 judge_turn_guard 拒绝。
                         TurnStatus::Cancelling => Ok(()),
@@ -811,12 +818,7 @@ impl Aggregator {
                         text,
                         ContentKind::Reasoning,
                     );
-                    chat_writer::set_reasoning_visibility(
-                        &mut txn,
-                        &root,
-                        &block_id,
-                        *visibility,
-                    );
+                    chat_writer::set_reasoning_visibility(&mut txn, &root, &block_id, *visibility);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
                 EventBody::UserMessage {
@@ -864,10 +866,7 @@ impl Aggregator {
                     chat_writer::upsert_tool_call(&mut txn, &root, &tc);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
-                EventBody::ToolCallUpdated {
-                    arguments,
-                    ..
-                } => {
+                EventBody::ToolCallUpdated { arguments, .. } => {
                     // 现有投影上 arguments 全量覆盖（M1，§3.2）。
                     let mut tc = pre_read.clone().unwrap_or_else(default_tool_call);
                     tc.arguments = arguments.clone();
@@ -886,13 +885,11 @@ impl Aggregator {
                         ToolCallStatus::Completed
                     };
                     // 超大 result 截断（§9.5：只做大小预算，不写超限内容）。
-                    tc.result = result
-                        .clone()
-                        .filter(|v| {
-                            serde_json::to_vec(v)
-                                .map(|b| b.len() <= TOOL_RESULT_MAX_BYTES)
-                                .unwrap_or(false)
-                        });
+                    tc.result = result.clone().filter(|v| {
+                        serde_json::to_vec(v)
+                            .map(|b| b.len() <= TOOL_RESULT_MAX_BYTES)
+                            .unwrap_or(false)
+                    });
                     tc.public_error = public_error.clone();
                     chat_writer::upsert_tool_call(&mut txn, &root, &tc);
                     chat_writer::bump_projection_version(&mut txn, &root);
@@ -950,7 +947,12 @@ impl Aggregator {
                     let mut txn = pair.session_txn();
                     let root = txn.get_or_insert_map(ROOT);
                     if no_pending_left {
-                        chat_writer::set_active_turn_status_if(&mut txn, &root, "awaitingPermission", "running");
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "running",
+                        );
                     }
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
@@ -966,7 +968,12 @@ impl Aggregator {
                     if no_pending_left {
                         // 未决议权限全部过期 → 该 turn 取消（参考实现 expire
                         // 语义）；仅当状态仍为 awaitingPermission 时推进。
-                        chat_writer::set_active_turn_status_if(&mut txn, &root, "awaitingPermission", "cancelled");
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "cancelled",
+                        );
                     }
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
@@ -1106,7 +1113,7 @@ impl Aggregator {
                         );
                         chat_writer::bump_projection_version(&mut txn, &root);
                     }
-                            EventBody::TurnTerminal {
+                    EventBody::TurnTerminal {
                         turn_id,
                         status,
                         completed_at,

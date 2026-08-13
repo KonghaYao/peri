@@ -210,7 +210,11 @@ impl InstanceRegistry {
         };
         drop(instances);
         info!(
-            instance_id, token_id, hostname, fenced, buffer_lost,
+            instance_id,
+            token_id,
+            hostname,
+            fenced,
+            buffer_lost,
             alive_sessions = alive.len(),
             "instance hello registered (idempotent replace)"
         );
@@ -275,7 +279,8 @@ impl InstanceRegistry {
                 entry.state = InstanceState::Offline;
                 offline.push(id.clone());
                 warn!(
-                    instance_id = id, timeout_ms = self.inner.offline_timeout.as_millis() as u64,
+                    instance_id = id,
+                    timeout_ms = self.inner.offline_timeout.as_millis() as u64,
                     "instance offline (heartbeat timeout)"
                 );
             }
@@ -317,7 +322,11 @@ impl InstanceRegistry {
         cmd: InstanceSpawn,
     ) -> Result<SpawnOutcome, InstanceError> {
         let ack = self
-            .send_command(instance_id, cmd.command_id.clone(), Frame::InstanceSpawn(cmd))
+            .send_command(
+                instance_id,
+                cmd.command_id.clone(),
+                Frame::InstanceSpawn(cmd),
+            )
             .await?;
         match ack {
             InstanceAck::Spawn(s) => Ok(SpawnOutcome::Acked(s)),
@@ -332,7 +341,11 @@ impl InstanceRegistry {
         cmd: InstanceKill,
     ) -> Result<KillOutcome, InstanceError> {
         let ack = self
-            .send_command(instance_id, cmd.command_id.clone(), Frame::InstanceKill(cmd))
+            .send_command(
+                instance_id,
+                cmd.command_id.clone(),
+                Frame::InstanceKill(cmd),
+            )
             .await?;
         match ack {
             InstanceAck::Kill(k) => Ok(KillOutcome::Acked(k)),
@@ -362,11 +375,12 @@ impl InstanceRegistry {
             };
             if entry.pending_acks.contains_key(&command_id) {
                 // 重发（chat_id 幂等键，§4.5）：登记覆盖旧 oneshot。
-                warn!(instance_id, command_id, "duplicate in-flight command ack slot replaced");
+                warn!(
+                    instance_id,
+                    command_id, "duplicate in-flight command ack slot replaced"
+                );
             }
-            entry
-                .pending_acks
-                .insert(command_id.clone(), reply);
+            entry.pending_acks.insert(command_id.clone(), reply);
             conn
         };
         if tx.send(OutboundMsg::Frame(frame)).await.is_err() {
@@ -437,9 +451,9 @@ impl InstanceRegistry {
             .await?;
         match ack {
             InstanceAck::Forward(f) if f.ok => Ok(()),
-            InstanceAck::Forward(f) => Err(InstanceError::ForwardRejected(
-                f.error.unwrap_or_default(),
-            )),
+            InstanceAck::Forward(f) => {
+                Err(InstanceError::ForwardRejected(f.error.unwrap_or_default()))
+            }
             _ => Err(InstanceError::ConnectionGone),
         }
     }
@@ -523,12 +537,7 @@ impl InstanceRegistry {
     /// 摘要日志 + to_kill 逐个补发 kill（§7.5 意外存活裁决 + §7.6
     /// pending_close 补发）。
     pub async fn reconcile_and_kill(&self, instance_id: &str, alive: &[String]) {
-        let report = match self
-            .inner
-            .chats
-            .reconcile_alive(instance_id, alive)
-            .await
-        {
+        let report = match self.inner.chats.reconcile_alive(instance_id, alive).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(instance_id, error = ?e, "heartbeat reconciliation failed");
@@ -555,12 +564,7 @@ impl InstanceRegistry {
                     // 意外存活/终态清理完成 → chat 置 Closed（§7.5「Registry
                     // 标记已清理」；pending_close 集合在 transition(Closed)
                     // 中清除，§7.6）。
-                    if let Ok(()) = self
-                        .inner
-                        .chats
-                        .transition(sid, ChatState::Closed)
-                        .await
-                    {
+                    if let Ok(()) = self.inner.chats.transition(sid, ChatState::Closed).await {
                         // noop
                     }
                 }
@@ -568,7 +572,11 @@ impl InstanceRegistry {
             }
         }
         if !killed.is_empty() {
-            info!(instance_id, killed = killed.len(), "orphan chats killed (§7.5)");
+            info!(
+                instance_id,
+                killed = killed.len(),
+                "orphan chats killed (§7.5)"
+            );
         }
         killed
     }

@@ -60,9 +60,15 @@ fn t4_legal_transitions_all_green() {
     let mut ob = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
     let rec = new_rec(sid, CommandType::Prompt);
     ob.insert(rec.clone()).unwrap();
-    assert_eq!(ob.get(rec.command_id).unwrap().status, OutboxStatus::Received);
+    assert_eq!(
+        ob.get(rec.command_id).unwrap().status,
+        OutboxStatus::Received
+    );
     ob.mark_accepted(rec.command_id).unwrap();
-    assert_eq!(ob.get(rec.command_id).unwrap().status, OutboxStatus::Accepted);
+    assert_eq!(
+        ob.get(rec.command_id).unwrap().status,
+        OutboxStatus::Accepted
+    );
     ob.mark_intent_durable(rec.command_id).unwrap();
     assert_eq!(
         ob.get(rec.command_id).unwrap().status,
@@ -85,7 +91,10 @@ fn t4_legal_transitions_all_green() {
         OutboxStatus::ProjectionCommitted
     );
     ob.mark_completed(rec.command_id).unwrap();
-    assert_eq!(ob.get(rec.command_id).unwrap().status, OutboxStatus::Completed);
+    assert_eq!(
+        ob.get(rec.command_id).unwrap().status,
+        OutboxStatus::Completed
+    );
 
     // delivery_unknown → ConfirmedDelivered → completed
     let rec2 = new_rec(sid, CommandType::Prompt);
@@ -100,7 +109,10 @@ fn t4_legal_transitions_all_green() {
     );
     ob.resolve_delivery_unknown(rec2.command_id, DeliveryVerdict::ConfirmedDelivered)
         .unwrap();
-    assert_eq!(ob.get(rec2.command_id).unwrap().status, OutboxStatus::Completed);
+    assert_eq!(
+        ob.get(rec2.command_id).unwrap().status,
+        OutboxStatus::Completed
+    );
 
     // delivery_unknown → ConfirmedNotDelivered → tombstone
     let rec3 = new_rec(sid, CommandType::Cancel);
@@ -135,7 +147,10 @@ fn t4_legal_transitions_all_green() {
     ob.mark_dispatched(rec5.command_id, Utc::now()).unwrap();
     ob.mark_delivery_confirmed(rec5.command_id).unwrap();
     ob.mark_failed(rec5.command_id, fatal_err()).unwrap();
-    assert_eq!(ob.get(rec5.command_id).unwrap().status, OutboxStatus::Failed);
+    assert_eq!(
+        ob.get(rec5.command_id).unwrap().status,
+        OutboxStatus::Failed
+    );
 
     // intent_durable → clear_for_retry（retryable 清除）
     let rec6 = new_rec(sid, CommandType::Close);
@@ -260,7 +275,11 @@ fn h1_delivery_confirmed_retryable_failure_falls_back() {
     // 投递后 retryable 失败（如 AGENT_UNAVAILABLE）
     ob.mark_failed(rec.command_id, retryable_err()).unwrap();
     let r = ob.get(rec.command_id).expect("record must be kept");
-    assert_eq!(r.status, OutboxStatus::IntentDurable, "fallback to intent_durable");
+    assert_eq!(
+        r.status,
+        OutboxStatus::IntentDurable,
+        "fallback to intent_durable"
+    );
     assert_eq!(r.dispatched_at, None, "dispatch bit cleared");
     assert_eq!(r.last_error.as_ref().unwrap().code, "AGENT_UNAVAILABLE");
     // 可重发：再次投递
@@ -300,7 +319,10 @@ fn h1_pre_dispatch_retryable_clears_and_fatal_fails() {
     ob.insert(rec3.clone()).unwrap();
     ob.mark_accepted(rec3.command_id).unwrap();
     ob.mark_failed(rec3.command_id, fatal_err()).unwrap();
-    assert_eq!(ob.get(rec3.command_id).unwrap().status, OutboxStatus::Failed);
+    assert_eq!(
+        ob.get(rec3.command_id).unwrap().status,
+        OutboxStatus::Failed
+    );
 }
 
 /// T5：跨重启（新实例重放同一目录）重建去重索引；dispatched/delivery_unknown
@@ -355,7 +377,13 @@ fn t5_restart_replay_rebuilds_index() {
         ob.mark_dispatched(f.command_id, Utc::now()).unwrap();
         ob.mark_delivery_confirmed(f.command_id).unwrap();
         ob.mark_failed(f.command_id, retryable_err()).unwrap();
-        (a.command_id, b.command_id, c.command_id, d.command_id, f.command_id)
+        (
+            a.command_id,
+            b.command_id,
+            c.command_id,
+            d.command_id,
+            f.command_id,
+        )
         // drop = 模拟重启
     };
     // 新实例重放同一目录
@@ -363,7 +391,10 @@ fn t5_restart_replay_rebuilds_index() {
     let result = ob2.replay_from_disk().unwrap();
     assert!(!result.degraded);
     assert!(result.truncated.is_none());
-    assert_eq!(result.stats.inserted, 6, "a/b/c/d/e/f inserted, e tombstoned");
+    assert_eq!(
+        result.stats.inserted, 6,
+        "a/b/c/d/e/f inserted, e tombstoned"
+    );
     assert_eq!(result.stats.removed, 1);
     assert_eq!(ob2.len(), 5);
     assert_eq!(ob2.get(a).unwrap().status, OutboxStatus::Completed);
@@ -464,7 +495,10 @@ fn t8_replay_entries_apply_in_order() {
         OutboxLogEntry::Remove(id),
         OutboxLogEntry::Record(rec(OutboxStatus::IntentDurable)),
     ]);
-    assert_eq!(stats.inserted, 2, "Accepted insert + IntentDurable re-insert after Remove");
+    assert_eq!(
+        stats.inserted, 2,
+        "Accepted insert + IntentDurable re-insert after Remove"
+    );
     assert_eq!(stats.updated, 1, "Dispatched overwrites Accepted");
     assert_eq!(stats.removed, 1);
     assert_eq!(ob.get(id).unwrap().status, OutboxStatus::IntentDurable);

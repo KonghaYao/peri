@@ -31,14 +31,16 @@ use acp_hub_proto::conn::DocId;
 use yrs::{Map, ReadTxn, Transact};
 
 use crate::channel::Broadcaster;
+use crate::channel::ChannelDeps;
 use crate::channel::CommandCoordinator;
 use crate::channel::ConnectionRegistry;
 use crate::channel::Gateway;
 use crate::channel::RelayEventHandler;
-use crate::channel::ChannelDeps;
 use crate::config::Config;
 use crate::control::ChatRegistry;
 use crate::control::InstanceRegistry;
+use crate::control::ProjectService;
+use crate::persist::metadata::MetadataStore;
 use crate::persist::update_log::{read_blob, write_blob};
 use crate::persist::Store;
 use crate::state::doc_manager::{BatchConfig, DocManager, DocUpdate, PersistError, UpdateSink};
@@ -46,7 +48,7 @@ use crate::state::factory::{DocKind, Factory};
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::view_store::encode_state_as_update;
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION,
 };
 
 /// registry 更新日志文件名（`<data_dir>/registry.log`，blob 格式；§8.4 同
@@ -93,6 +95,8 @@ pub struct Hub {
     pub auth: Arc<tokio::sync::Mutex<crate::auth::AuthService>>,
     /// Registry 状态源（§17.2 degraded 判定 / §8.4.1 恢复门禁）。
     pub registry: RegistryState,
+    pub metadata: Arc<MetadataStore>,
+    pub projects: ProjectService,
 }
 
 impl Hub {
@@ -117,6 +121,11 @@ impl Hub {
             sink.recovered_registry_doc(),
         ));
         let registry = doc.registry();
+        let metadata = Arc::new(
+            MetadataStore::open(store.data_dir())
+                .await
+                .map_err(|e| HubError::Store(e.to_string()))?,
+        );
         // 3. 注册表/协调器/广播器。
         let chats = Arc::new(ChatRegistry::new(registry.clone()));
         let instance = Arc::new(InstanceRegistry::new(
@@ -142,12 +151,30 @@ impl Hub {
             cfg.initialize_timeout,
             cfg.binding_timeout,
         ));
+        let projects = ProjectService::new(metadata.clone(), registry.clone());
+        coordinator.install_project_service(projects.clone()).await;
         // §4.4：create 全局去重索引（跨 server 重启有效）——store 已完成
         // recover（main 前置），从 outbox 重建后才接受连接。
         coordinator.rebuild_create_index().await;
         // §6.3 workspace 扩展：工作区内存注册表从 Registry Doc 重建（跨
         // 重启后 create 携带 workspace_id 仍能解析 cwd）。
         coordinator.rebuild_workspaces().await;
+        projects
+            .import_legacy_workspaces()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        projects
+            .import_legacy_sessions()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        metadata
+            .recover_after_restart()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        projects
+            .reproject()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
         // §6.3：session/list 轮询（10s 全量同步投影；server 侧，见
         // CommandCoordinator::spawn_session_poller 决策注释）。
         coordinator.spawn_session_poller();
@@ -200,7 +227,10 @@ impl Hub {
                 }
             }
             if marked > 0 {
-                info!(count = marked, "startup reconcile: stale chats marked ended");
+                info!(
+                    count = marked,
+                    "startup reconcile: stale chats marked ended"
+                );
             }
         }
         Ok(Hub {
@@ -216,6 +246,8 @@ impl Hub {
             gateway,
             auth,
             registry,
+            metadata,
+            projects,
         })
     }
 
@@ -495,7 +527,8 @@ impl UpdateSink for StoreSink {
                 };
                 match kind {
                     Some(kind) => {
-                        let d = create_mirror_doc(&self.factory, kind, std::slice::from_ref(&update));
+                        let d =
+                            create_mirror_doc(&self.factory, kind, std::slice::from_ref(&update));
                         docs.insert(doc.clone(), d);
                     }
                     None => return Err(PersistError(format!("unknown doc: {doc}"))),
@@ -531,8 +564,7 @@ impl UpdateSink for StoreSink {
                     seqs.insert(sid.to_string(), next);
                     next
                 };
-                chat
-                    .append_update(epoch, seq, &[(doc.clone(), update.as_slice())])
+                chat.append_update(epoch, seq, &[(doc.clone(), update.as_slice())])
                     .await
                     .map_err(|e| PersistError(e.to_string()))
             }
@@ -559,11 +591,7 @@ impl UpdateSink for StoreSink {
 /// `projection_version` 恒 0）。先应用业务 update 后，以 `schema_version`
 /// 占位使 [`Factory::ensure_schema`] 走「已有版本」分支（`patch_missing`
 /// 只补缺失键、不覆盖已有业务值）。
-fn create_mirror_doc(
-    factory: &Factory,
-    kind: DocKind,
-    updates: &[Vec<u8>],
-) -> yrs::Doc {
+fn create_mirror_doc(factory: &Factory, kind: DocKind, updates: &[Vec<u8>]) -> yrs::Doc {
     let mut doc = yrs::Doc::new();
     for update in updates {
         apply_update(&doc, update);

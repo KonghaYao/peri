@@ -13,7 +13,7 @@ use acp_hub_proto::ack::AckStatus;
 use acp_hub_proto::Frame;
 
 use common::{
-    doc_from_snapshots, fetch_registry_snapshot, global_status, chat_field, chat_ids,
+    chat_field, chat_ids, doc_from_snapshots, fetch_registry_snapshot, global_status,
     wait_terminal, InstanceProc, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
 };
 
@@ -51,7 +51,8 @@ impl Stack {
 
     /// 机器已注册可服务（server 侧已出现 instance connected）。
     fn wait_connected(&self) -> bool {
-        self.server.log_contains("instance connected", Duration::from_secs(10))
+        self.server
+            .log_contains("instance connected", Duration::from_secs(10))
     }
 }
 
@@ -64,14 +65,13 @@ async fn t01_body() -> Result<(), String> {
 
     // 1. hello 双向认证：instance 侧「认证通过」日志（HMAC 校验通过）。
     assert!(
-        stack.instance.log_contains("认证通过", Duration::from_secs(5)),
+        stack
+            .instance
+            .log_contains("认证通过", Duration::from_secs(5)),
         "instance 未确认 auth_response HMAC"
     );
     // server 侧注册日志（instance_id = token name = "local"）。
-    assert!(
-        stack.wait_connected(),
-        "server 未记录 instance connected"
-    );
+    assert!(stack.wait_connected(), "server 未记录 instance connected");
 
     // 2. 对账开门：Registry 快照 global.status = healthy（§8.4.1 不变量 4：
     //    hello 后 Restarting → Healthy）。
@@ -85,18 +85,22 @@ async fn t01_body() -> Result<(), String> {
     // 3. 机器级可服务性：client 发 session/create（默认 instance=local）→
     //    instance 必须能收 spawn 并拉起 test-child（spawn_ack ok）；后续
     //    initialize/session/new 经 instance/forward 下行（§4.4 L1+L2+L3）。
-    let mut c = WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"]).await?;
+    let mut c =
+        WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"])
+            .await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateChatPayload {
-            instance_id: None,
-            cwd: None,
-            title: Some("t01".to_string()),
-            acp_session_id: None,
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: command_id.clone(),
+            payload: acp_hub_proto::action::CreateChatPayload {
+                instance_id: None,
+                cwd: None,
+                title: Some("t01".to_string()),
+                acp_session_id: None,
                 workspace_id: None,
-}
-    }))
+            },
+        },
+    ))
     .await?;
     // accepted ack 先到。
     let ack = c
@@ -108,7 +112,10 @@ async fn t01_body() -> Result<(), String> {
     match ack {
         Frame::ActionAck(a) => assert_eq!(a.status, AckStatus::Accepted, "应首先收到 accepted"),
         Frame::ActionError(e) => {
-            return Err(format!("create 应在 accepted 前失败: {:?} {}", e.code, e.message))
+            return Err(format!(
+                "create 应在 accepted 前失败: {:?} {}",
+                e.code, e.message
+            ))
         }
         _ => unreachable!(),
     }
@@ -149,7 +156,9 @@ async fn t01_instance_hello_register() {
 async fn t02_body() -> Result<(), String> {
     let stack = Stack::start()?;
     let mut c = WsClient::connect(stack.env.port).await?;
-    let (snap, ready) = c.handshake(&stack.env.client_token, &["hub:registry"]).await?;
+    let (snap, ready) = c
+        .handshake(&stack.env.client_token, &["hub:registry"])
+        .await?;
     // 快照：registry doc 全量快照（含 schema 结构）。
     assert!(!snap.is_empty(), "应收到 ysync.update 快照");
     let doc = doc_from_snapshots(&snap, "hub:registry")?;
@@ -163,7 +172,8 @@ async fn t02_body() -> Result<(), String> {
     // ready 携带 projection_versions。
     if let Frame::Ready(r) = ready {
         assert!(
-            r.projection_versions.contains_key(&acp_hub_proto::conn::DocId::REGISTRY),
+            r.projection_versions
+                .contains_key(&acp_hub_proto::conn::DocId::REGISTRY),
             "ready 应携带 hub:registry 的 projection_version"
         );
     } else {
@@ -172,7 +182,10 @@ async fn t02_body() -> Result<(), String> {
     let _ = doc;
     // 读一次 keep_alive（自动 pong）确保心跳接线正常。
     let _ = c
-        .recv_until(|f| matches!(f, Frame::KeepAlive(_)), Duration::from_secs(12))
+        .recv_until(
+            |f| matches!(f, Frame::KeepAlive(_)),
+            Duration::from_secs(12),
+        )
         .await?;
     Ok(())
 }
@@ -194,18 +207,22 @@ async fn t02_client_handshake() {
 
 async fn t03_body() -> Result<(), String> {
     let stack = Stack::start()?;
-    let mut c = WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"]).await?;
+    let mut c =
+        WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"])
+            .await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: command_id.clone(),
-        payload: acp_hub_proto::action::CreateChatPayload {
-            instance_id: None,
-            cwd: None,
-            title: Some("t03".to_string()),
-            acp_session_id: None,
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: command_id.clone(),
+            payload: acp_hub_proto::action::CreateChatPayload {
+                instance_id: None,
+                cwd: None,
+                title: Some("t03".to_string()),
+                acp_session_id: None,
                 workspace_id: None,
-}
-    }))
+            },
+        },
+    ))
     .await?;
     // accepted → committed（携带 sessionId；wait_terminal 跳过前置 accepted）。
     let ack = wait_terminal(&mut c, Duration::from_secs(35)).await?;
@@ -253,25 +270,31 @@ async fn t03_create_session_full_seq() {
 
 async fn t04_body() -> Result<(), String> {
     let stack = Stack::start()?;
-    let mut c = WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"]).await?;
+    let mut c =
+        WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"])
+            .await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id,
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id,
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     match wait_terminal(&mut c, Duration::from_secs(35)).await? {
         Frame::ActionAck(a) if a.status == AckStatus::Committed => {
             let sid = a.chat_id.unwrap_or_default();
             let prompt_cid = uuid::Uuid::new_v4().to_string();
-            c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Prompt {
-                command_id: prompt_cid.clone(),
-                payload: acp_hub_proto::action::PromptChatPayload {
-                    chat_id: sid.clone(),
-                    message: "hello".to_string(),
-                    effort: None,
+            c.send(&Frame::Action(
+                acp_hub_proto::action::ActionEnvelope::Prompt {
+                    command_id: prompt_cid.clone(),
+                    payload: acp_hub_proto::action::PromptChatPayload {
+                        chat_id: sid.clone(),
+                        message: "hello".to_string(),
+                        effort: None,
+                    },
                 },
-            }))
+            ))
             .await?;
             // 预期：delta 广播（chat doc 增量）+ committed ack（prompt 同样
             // 先 accepted 后 committed，wait_terminal 跳过前置）。
@@ -306,16 +329,17 @@ async fn t04_prompt_stream_broadcast() {
 
 async fn t05_body() -> Result<(), String> {
     let stack = Stack::start()?;
-    let mut c = WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"]).await?;
+    let mut c =
+        WsClient::connect_client(stack.env.port, &stack.env.client_token, &["hub:registry"])
+            .await?;
     let command_id = uuid::Uuid::new_v4().to_string();
-    async fn send_create(
-        c: &mut WsClient,
-        command_id: &str,
-    ) -> Result<(), String> {
-        c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-            command_id: command_id.to_string(),
-            payload: acp_hub_proto::action::CreateChatPayload::default(),
-        }))
+    async fn send_create(c: &mut WsClient, command_id: &str) -> Result<(), String> {
+        c.send(&Frame::Action(
+            acp_hub_proto::action::ActionEnvelope::Create {
+                command_id: command_id.to_string(),
+                payload: acp_hub_proto::action::CreateChatPayload::default(),
+            },
+        ))
         .await
     }
     send_create(&mut c, &command_id).await?;
@@ -368,15 +392,15 @@ async fn t06_body() -> Result<(), String> {
     }
     let mut c = WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
     let cid_a = uuid::Uuid::new_v4().to_string();
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: cid_a,
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: cid_a,
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     let sid_a = match wait_terminal(&mut c, Duration::from_secs(35)).await? {
-        Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            a.chat_id.unwrap_or_default()
-        }
+        Frame::ActionAck(a) if a.status == AckStatus::Committed => a.chat_id.unwrap_or_default(),
         Frame::ActionError(e) => {
             return Err(format!("第一轮 create 失败: {:?} {}", e.code, e.message))
         }
@@ -399,18 +423,17 @@ async fn t06_body() -> Result<(), String> {
     if !instance2.wait_authenticated(Duration::from_secs(15)) {
         return Err("第二轮 instance 未在 15s 内完成认证握手".to_string());
     }
-    let mut c2 =
-        WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
+    let mut c2 = WsClient::connect_client(env.port, &env.client_token, &["hub:registry"]).await?;
     let cid_b = uuid::Uuid::new_v4().to_string();
-    c2.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::Create {
-        command_id: cid_b,
-        payload: acp_hub_proto::action::CreateChatPayload::default(),
-    }))
+    c2.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::Create {
+            command_id: cid_b,
+            payload: acp_hub_proto::action::CreateChatPayload::default(),
+        },
+    ))
     .await?;
     let sid_b = match wait_terminal(&mut c2, Duration::from_secs(35)).await? {
-        Frame::ActionAck(a) if a.status == AckStatus::Committed => {
-            a.chat_id.unwrap_or_default()
-        }
+        Frame::ActionAck(a) if a.status == AckStatus::Committed => a.chat_id.unwrap_or_default(),
         Frame::ActionError(e) => {
             return Err(format!("第二轮 create 失败: {:?} {}", e.code, e.message))
         }

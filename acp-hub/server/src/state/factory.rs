@@ -174,11 +174,7 @@ impl Factory {
                     root.insert(txn, "sessions", yrs::MapPrelim::default());
                 }
                 if root.get(txn, "global").is_none() {
-                    root.insert(
-                        txn,
-                        "global",
-                        yrs::MapPrelim::from([("status", "healthy")]),
-                    );
+                    root.insert(txn, "global", yrs::MapPrelim::from([("status", "healthy")]));
                 }
             }
         }

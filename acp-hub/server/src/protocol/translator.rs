@@ -144,13 +144,15 @@ impl Translator {
             }
             // create/close 不走此入口（create 两段式；close = instance/kill，
             // 由 coordinator 直接构造 InstanceKill）。
-            ActionEnvelope::Create { .. } => {
-                Err(TranslateError::UnsupportedAction("session/create (two-phase)"))
+            ActionEnvelope::Create { .. } => Err(TranslateError::UnsupportedAction(
+                "session/create (two-phase)",
+            )),
+            ActionEnvelope::Close { .. } => Err(TranslateError::UnsupportedAction(
+                "session/close (instance/kill)",
+            )),
+            ActionEnvelope::Load { .. } => {
+                Err(TranslateError::UnsupportedAction("session/load (M2)"))
             }
-            ActionEnvelope::Close { .. } => {
-                Err(TranslateError::UnsupportedAction("session/close (instance/kill)"))
-            }
-            ActionEnvelope::Load { .. } => Err(TranslateError::UnsupportedAction("session/load (M2)")),
             ActionEnvelope::SubscribeEvents { .. } => {
                 Err(TranslateError::UnsupportedAction("events/subscribe (M3)"))
             }
@@ -158,14 +160,22 @@ impl Translator {
                 Err(TranslateError::UnsupportedAction("events/unsubscribe (M3)"))
             }
             // workspace 管理命令：submit 层直接执行（不经过出站翻译）。
-            ActionEnvelope::WorkspaceCreate { .. } => {
-                Err(TranslateError::UnsupportedAction("workspace/create (control-plane)"))
-            }
-            ActionEnvelope::WorkspaceRemove { .. } => {
-                Err(TranslateError::UnsupportedAction("workspace/remove (control-plane)"))
-            }
-            ActionEnvelope::SessionList { .. } => {
-                Err(TranslateError::UnsupportedAction("session/list (control-plane)"))
+            ActionEnvelope::WorkspaceCreate { .. } => Err(TranslateError::UnsupportedAction(
+                "workspace/create (control-plane)",
+            )),
+            ActionEnvelope::WorkspaceRemove { .. } => Err(TranslateError::UnsupportedAction(
+                "workspace/remove (control-plane)",
+            )),
+            ActionEnvelope::SessionList { .. } => Err(TranslateError::UnsupportedAction(
+                "session/list (control-plane)",
+            )),
+            ActionEnvelope::ProjectCreate { .. }
+            | ActionEnvelope::ProjectArchive { .. }
+            | ActionEnvelope::PersistedSessionCreate { .. }
+            | ActionEnvelope::PersistedSessionOpen { .. }
+            | ActionEnvelope::PersistedSessionRename { .. }
+            | ActionEnvelope::PersistedSessionImport { .. } => {
+                Err(TranslateError::UnsupportedAction("metadata control-plane"))
             }
         }
     }
@@ -286,9 +296,11 @@ impl Translator {
 /// 第一个 `options[i]` 的 `optionId`（保底选档；options 已在入站解析时
 /// 校验为 `{optionId,name,kind}` 对象数组）。
 fn first_option_id(options: &[serde_json::Value]) -> Option<String> {
-    options
-        .iter()
-        .find_map(|v| v.get("optionId").and_then(serde_json::Value::as_str).map(str::to_string))
+    options.iter().find_map(|v| {
+        v.get("optionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 /// 第一个 `kind` 命中 `kinds`（含 camelCase 别名）的 `optionId`。

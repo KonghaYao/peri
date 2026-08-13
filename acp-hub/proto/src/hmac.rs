@@ -77,7 +77,10 @@ pub fn generate_connection_context() -> [u8; CONNECTION_CONTEXT_LEN] {
 /// `ikm = instance_token`（32B）；salt = 空（RFC 5869 零串）；
 /// info = `b"acp-hub-auth" ‖ role_utf8`；输出 32B。派生上下文含 role，
 /// 防止跨角色重放；token 本体不出现在 MAC 输入。
-pub fn derive_mac_key(instance_token: &[u8; CHALLENGE_NONCE_LEN], role: &str) -> [u8; HMAC_OUTPUT_LEN] {
+pub fn derive_mac_key(
+    instance_token: &[u8; CHALLENGE_NONCE_LEN],
+    role: &str,
+) -> [u8; HMAC_OUTPUT_LEN] {
     let mut info = Vec::with_capacity(DERIVE_INFO_PREFIX.len() + role.len());
     info.extend_from_slice(DERIVE_INFO_PREFIX);
     info.extend_from_slice(role.as_bytes());
@@ -134,8 +137,7 @@ pub fn verify_mac(
     }
     let mut mac = new_hmac(key);
     mac.update(input);
-    mac.verify_slice(&expected)
-        .map_err(|_| HmacError::Mismatch)
+    mac.verify_slice(&expected).map_err(|_| HmacError::Mismatch)
 }
 
 /// 防重放辅助集合（纯内存，无 I/O）。

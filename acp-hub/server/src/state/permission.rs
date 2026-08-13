@@ -133,11 +133,19 @@ fn cas_migrate(
         "pending" => {
             match decision {
                 Some(d) => {
-                    pm.insert(txn, "status", permission_status_str(PermissionStatus::Resolved));
+                    pm.insert(
+                        txn,
+                        "status",
+                        permission_status_str(PermissionStatus::Resolved),
+                    );
                     pm.insert(txn, "decision", decision_str(d));
                 }
                 None => {
-                    pm.insert(txn, "status", permission_status_str(PermissionStatus::Expired));
+                    pm.insert(
+                        txn,
+                        "status",
+                        permission_status_str(PermissionStatus::Expired),
+                    );
                     // decision 保持 null（§5.4）。
                 }
             }

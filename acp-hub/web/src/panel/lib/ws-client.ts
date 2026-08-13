@@ -1,10 +1,9 @@
 // acp-hub Web 面板 —— ws 客户端模块（移植自原 ws-client.js，TS 化）。
 //
 // 职责（M3 方案 §1/§4）：
-//   - 连接状态机：connecting → open（auth 已发）→ ready（server 首个订阅
+//   - 连接状态机：connecting → open → ready（server 首个订阅
 //     后下发）；ready 帧同时上抛给调用方（onStatus 带完整帧）。
-//   - 首帧纪律：ws 握手后第一帧必须是 auth，由本模块在 onopen 内强制发送
-//     （否则 server 1011 关闭，gateway.rs §4.6）。
+//   - 浏览器使用握手 Cookie；可选 token 仅供旧 wire-auth client 兼容。
 //   - 心跳：收到 keep_alive 立即回 pong（server 每 5s 一次，15s 不回 → 4501）。
 //   - 关闭码 → 重连策略：4500/4501/4502 永久停止（实例离线/心跳超时/认证
 //     失败），其余（1011 通用、1013 配额、1006 网络异常等）指数退避重连
@@ -37,7 +36,7 @@ export interface ConnDetail {
 
 export interface WsClientOpts {
   url: string;
-  token: string;
+  token?: string;
   onStatus: (state: ConnStatus, detail: ConnDetail) => void;
   onFrame: (frame: Record<string, unknown>) => void;
 }
@@ -76,9 +75,10 @@ export class WsClient {
     this.ws = ws;
 
     ws.onopen = () => {
-      // 首帧纪律：auth 必须是第一帧（无 HMAC，client 面单向认证）。
+      // Cookie-authenticated browser clients may subscribe immediately. Legacy
+      // clients still send the bearer auth frame as their first application frame.
       try {
-        ws.send(JSON.stringify(auth(token)));
+        if (token) ws.send(JSON.stringify(auth(token)));
       } catch (e) {
         console.error('[ws-client] auth 发送失败:', e);
         onStatus('fatal', { code: 0, reason: `auth 发送失败: ${(e as Error).message}` });

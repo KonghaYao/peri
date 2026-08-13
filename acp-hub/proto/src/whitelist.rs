@@ -84,6 +84,12 @@ pub enum M1Check {
 /// `chat/load`（原 M2 预留）于 §8.5 启用：当前对话内切换 ACP 会话
 /// （会话是进程内实体——load 不新建进程，无两阶段创建语义）。
 pub const M1_ACTION_TYPES: &[&str] = &[
+    "project/create",
+    "project/archive",
+    "session/create",
+    "session/open",
+    "session/rename",
+    "session/import",
     "chat/create",
     "chat/load",
     "chat/prompt",

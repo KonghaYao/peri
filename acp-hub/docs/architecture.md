@@ -1,7 +1,7 @@
 # acp-hub 架构设计（权威版）
 
-> 状态：v2.4 设计定稿（吸收三轮 advisor 成熟度审查修订）
-> 日期：2026-08-07
+> 状态：v2.5（补充 Web project session 与浏览器认证契约）
+> 日期：2026-08-12
 > 定位：acp-hub 独立项目的架构基准文档。与 peri 的唯一耦合点是 ACP 进程（协议线格式），本设计不依赖 peri 的任何 crate 与部署形态。
 > 来源：三轮对抗面试（产品/用户角度）收敛裁决 + 参考实现 `@fenix/chat-channel`（`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel`，实现基线 `docs/arch/19-yjs-chat-streaming.md`，ADR `spec/global/adr/2026-08-04-chat-channel-package-design.md`）+ 三视角对抗审查（架构师/高级开发工程师/高级运维工程师，2026-08-07）+ 三轮 advisor 成熟度审查（2026-08-07，opus，第三轮评级：**可开工**）。v2.1 修订项以「【审查】」标注；v2.2 以「【顾问】」；v2.3 以「【顾问2】」；v2.4 以「【顾问3】」。advisor 关于「删除 HMAC 双向认证」的删减建议**被否决**（§9.2 保留，v2.3 补齐协议级规范，v2.4 补齐线格式精度）。
 > 约定：引用 chat-channel 处标注其文档章节号（如「chat §5.2」），实现时以该仓库为对照基线。
@@ -53,6 +53,16 @@
 ---
 
 ## 3. 系统拓扑与组件
+
+### 3.0 Web project session 扩展
+
+Web UI 使用四层身份，禁止互换：`project_id` 是左栏分组，`project_session_id` 是 SQLite 持久入口，ACP `session_id` 是 agent 的 durable thread，`chat_id` 是一次 server/ACP runtime。`last_chat_id` 只作运行期提示；重启后打开持久入口必须以精确 ACP session id 走 `session/load`，不得复活旧进程或根据标题猜测。
+
+左栏 catalog 只展示来源为 `hub`（经 `session/create` 建立）或 `imported`（用户经 `session/import` 明确加入）的 project session。ACP `session/list` 的其余历史仅作为按 project cwd 分面的导入候选，不得在启动或轮询时自动进入侧边栏；旧版自动迁移记录标为 `legacy_hidden`，保留数据但不投影。
+
+`<data_dir>/metadata.sqlite3` 是 project/project session 元数据与全局 metadata command 去重的唯一事实源；现有 per-chat update/outbox/watermark 与 `registry.log` 保持原崩溃恢复语义。Registry v2 的 `projects`、`project_sessions` 是 SQLite 的只读广播投影。project/session mutation 的 committed Ack 必须跨过 SQLite 提交与 Registry 投影屏障；ACP 副作用结果不确定时进入 `reconciliation_required`，不得自动重试 `session/new`。
+
+浏览器认证通过同源 `POST/GET/DELETE /api/auth/session` 建立内存 opaque session，并只下发 `HttpOnly; SameSite=Strict; Path=/` Cookie。Web 不在 URL、Web Storage 或 WS 首帧保存/发送 bearer token。Cookie attach 与存量连接按心跳重新校验 token id、撤销状态和当前 role；loopback HTTP 校验 Host/Origin，instance HMAC 与旧 CLI wire-token 流程保持兼容。
 
 ### 3.1 拓扑
 

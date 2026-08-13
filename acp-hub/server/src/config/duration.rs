@@ -86,9 +86,7 @@ pub fn format_duration(d: Duration) -> String {
 }
 
 /// serde 反序列化：toml 字段为 `Option<Duration>`，值为字符串。
-pub fn deserialize_opt_duration<'de, D>(
-    d: D,
-) -> Result<Option<Duration>, D::Error>
+pub fn deserialize_opt_duration<'de, D>(d: D) -> Result<Option<Duration>, D::Error>
 where
     D: Deserializer<'de>,
 {

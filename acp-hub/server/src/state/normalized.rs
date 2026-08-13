@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::schema::{
-    BlockVisibility, PermissionOptions, PublicError, ChatStatus, SessionSummaryProjection,
+    BlockVisibility, ChatStatus, PermissionOptions, PublicError, SessionSummaryProjection,
     TurnStatus,
 };
 
@@ -161,14 +161,16 @@ pub enum EventBody {
     },
     /// `session_list` 响应 → Control Doc sessions（agent 磁盘历史，全量同步投影，
     /// §5.2 裁决：与 Registry 活跃会话语义不同、互不替代）。
-    SessionListResponse { entries: Vec<SessionSummaryProjection> },
+    SessionListResponse {
+        entries: Vec<SessionSummaryProjection>,
+    },
     /// Turn 终态（completed/failed/cancelled/interrupted）→ Chat Doc entry 终态
     /// 迁移 + Control Doc active_turn 更新（§7.2）。终态立即写入；之后的同 turn
     /// 增量丢弃（interrupted 例外：带 envelope 重放序依据恰一次校准，§6.3）。
     TurnTerminal {
         turn_id: String,
         /// 【决策】取值限定终态四值（Completed|Failed|Cancelled|Interrupted，
-    /// §7.2）；聚合器对非终态值按 `InvalidTerminalStatus` 拒绝（防御）。
+        /// §7.2）；聚合器对非终态值按 `InvalidTerminalStatus` 拒绝（防御）。
         status: TurnStatus,
         /// RFC3339（server 权威时钟，§4.7）。
         completed_at: String,

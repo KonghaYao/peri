@@ -48,7 +48,12 @@ async fn create_list_get_roundtrip() {
     assert_eq!(rec.cwd, path);
     // 名称缺省 → 目录名兜底。
     let rec2 = ws.create("", &path).await.unwrap();
-    let dirname = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let dirname = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(rec2.name, dirname);
     // list 按 created_at 升序。
     let all = ws.list().await;

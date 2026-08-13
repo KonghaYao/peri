@@ -72,7 +72,12 @@ async fn test_stdout_events_and_dropped_no_sid() {
         }
     }
     assert!(!saw_dropped, "JSON-RPC response 应兜底转发，不再缺口丢弃");
-    assert_eq!(frames.len(), 5, "应收到 2 响应 + 3 通知（got={}", frames.len());
+    assert_eq!(
+        frames.len(),
+        5,
+        "应收到 2 响应 + 3 通知（got={}",
+        frames.len()
+    );
     assert_eq!(
         frames.iter().filter(|e| e.session_id == "s1").count(),
         5,
@@ -97,7 +102,9 @@ async fn test_stdout_events_and_dropped_no_sid() {
     );
     // 兜底帧仍保持 response 形态（有 id、无 method）。
     assert!(
-        frames.iter().any(|e| e.frame.get("id") == Some(&serde_json::json!(1))),
+        frames
+            .iter()
+            .any(|e| e.frame.get("id") == Some(&serde_json::json!(1))),
         "initialize response 应以原帧转发（rpcId=1）"
     );
 
@@ -137,7 +144,8 @@ async fn test_stdout_events_and_dropped_no_sid() {
     );
     assert_eq!(frames2[0].session_id, "s2", "信封 session_id = 进程归属");
     assert_eq!(
-        frames2[0].frame["method"], serde_json::json!("agent/status"),
+        frames2[0].frame["method"],
+        serde_json::json!("agent/status"),
         "原帧透传"
     );
     assert!(!saw_dropped, "JSON-RPC 形态不得缺口丢弃");
@@ -192,7 +200,10 @@ async fn test_kill_idempotent_and_exit_event() {
     .await
     .expect("应收到 Exit 事件");
     assert_eq!(exit.0, "s1");
-    assert!(matches!(acp.state(), ProcessState::Exited(_)), "状态应迁移为 Exited");
+    assert!(
+        matches!(acp.state(), ProcessState::Exited(_)),
+        "状态应迁移为 Exited"
+    );
 
     // 已退出 → kill 立即成功（幂等，§4.5「已死成功返回」）。
     acp.kill(Duration::from_millis(100)).await.unwrap();
@@ -294,10 +305,15 @@ async fn request_permission_request_forwarded() {
     );
     assert_eq!(frames[0].session_id, "s4", "信封 session_id = 进程归属");
     assert_eq!(
-        frames[0].frame["method"], serde_json::json!("session/request_permission"),
+        frames[0].frame["method"],
+        serde_json::json!("session/request_permission"),
         "原帧透传"
     );
-    assert_eq!(frames[0].frame["id"], serde_json::json!(5), "id 原样保留（number）");
+    assert_eq!(
+        frames[0].frame["id"],
+        serde_json::json!(5),
+        "id 原样保留（number）"
+    );
     acp.kill(Duration::from_millis(200)).await.unwrap();
 }
 

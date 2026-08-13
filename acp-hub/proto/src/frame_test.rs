@@ -2,9 +2,11 @@
 
 use crate::ack::{AckStatus, ActionAck, ActionError, ErrorCode};
 use crate::action::{
-    ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChatPayload,
-    LoadChatPayload, PermissionDecision, PromptChatPayload, ResolvePermissionPayload,
-    SubscribeEventsPayload, UnsubscribeEventsPayload,
+    ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChatPayload, LoadChatPayload,
+    PermissionDecision, PersistedSessionCreatePayload, PersistedSessionImportPayload,
+    PersistedSessionOpenPayload, PersistedSessionRenamePayload, ProjectArchivePayload,
+    ProjectCreatePayload, PromptChatPayload, ResolvePermissionPayload, SubscribeEventsPayload,
+    UnsubscribeEventsPayload,
 };
 use crate::conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 use crate::event::EventFrame;
@@ -25,6 +27,47 @@ fn all_frames() -> Vec<Frame> {
     epochs.insert("s1".to_string(), 2u64);
 
     vec![
+        Frame::Action(ActionEnvelope::ProjectCreate {
+            command_id: "pc1".into(),
+            payload: ProjectCreatePayload {
+                name: "demo".into(),
+                cwd: "/tmp".into(),
+                instance_id: None,
+            },
+        }),
+        Frame::Action(ActionEnvelope::ProjectArchive {
+            command_id: "pa1".into(),
+            payload: ProjectArchivePayload {
+                project_id: "p1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionCreate {
+            command_id: "sc1".into(),
+            payload: PersistedSessionCreatePayload {
+                project_id: "p1".into(),
+                title: Some("new".into()),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionOpen {
+            command_id: "so1".into(),
+            payload: PersistedSessionOpenPayload {
+                session_id: "hs1".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionRename {
+            command_id: "sr1".into(),
+            payload: PersistedSessionRenamePayload {
+                session_id: "hs1".into(),
+                name: "renamed".into(),
+            },
+        }),
+        Frame::Action(ActionEnvelope::PersistedSessionImport {
+            command_id: "si1".into(),
+            payload: PersistedSessionImportPayload {
+                project_id: "p1".into(),
+                acp_session_id: "acp-s1".into(),
+            },
+        }),
         // --- action 方法面（§4.3，含 M2/M3 保留类型） ---
         Frame::Action(ActionEnvelope::Create {
             command_id: "c1".into(),
@@ -80,9 +123,7 @@ fn all_frames() -> Vec<Frame> {
         }),
         Frame::Action(ActionEnvelope::UnsubscribeEvents {
             command_id: "c8".into(),
-            payload: UnsubscribeEventsPayload {
-                chat_id: None,
-            },
+            payload: UnsubscribeEventsPayload { chat_id: None },
         }),
         // --- Ack 与错误 ---
         Frame::ActionAck(ActionAck {
@@ -90,6 +131,8 @@ fn all_frames() -> Vec<Frame> {
             status: AckStatus::Committed,
             turn_id: Some("t1".into()),
             chat_id: Some("s1".into()),
+            project_id: Some("p1".into()),
+            session_id: Some("hs1".into()),
             acp_session_id: None,
             committed_projection_version: Some(7),
         }),
@@ -135,12 +178,8 @@ fn all_frames() -> Vec<Frame> {
             update: "AAAA".into(),
             projection_version: Some(7),
         }),
-        Frame::YsyncSync(YsyncSync {
-            msg: "AAAA".into(),
-        }),
-        Frame::YsyncAwareness(YsyncAwareness {
-            msg: "AAAA".into(),
-        }),
+        Frame::YsyncSync(YsyncSync { msg: "AAAA".into() }),
+        Frame::YsyncAwareness(YsyncAwareness { msg: "AAAA".into() }),
         // --- instance 9 帧 ---
         Frame::InstanceHello(InstanceHello {
             token: "mt".into(),
@@ -211,7 +250,12 @@ fn all_frame_tags_roundtrip() {
         assert_eq!(parsed, frame, "roundtrip mismatch for tag {}", frame.tag());
         let raw2 = serde_json::to_string(&parsed).expect("re-serialize");
         let parsed2 = Frame::parse(&raw2).expect("re-parse");
-        assert_eq!(parsed2, parsed, "second roundtrip mismatch for tag {}", frame.tag());
+        assert_eq!(
+            parsed2,
+            parsed,
+            "second roundtrip mismatch for tag {}",
+            frame.tag()
+        );
     }
 }
 
@@ -240,7 +284,8 @@ fn action_envelope_nested_tag_shape() {
 #[test]
 fn load_vs_close_discrimination() {
     let load_raw = r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1","acpSessionId":"acp-1"}}"#;
-    let close_raw = r#"{"t":"action","commandId":"c3","type":"chat/close","payload":{"chatId":"s1"}}"#;
+    let close_raw =
+        r#"{"t":"action","commandId":"c3","type":"chat/close","payload":{"chatId":"s1"}}"#;
 
     let load = Frame::parse(load_raw).unwrap();
     let close = Frame::parse(close_raw).unwrap();
@@ -248,7 +293,10 @@ fn load_vs_close_discrimination() {
     assert!(matches!(close, Frame::Action(ActionEnvelope::Close { .. })));
     assert_ne!(load, close, "same-shape payloads must not collapse");
     // §8.5：缺 acpSessionId 的 chat/load 视为畸形（目标会话必填）。
-    assert!(Frame::parse(r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#).is_err());
+    assert!(Frame::parse(
+        r#"{"t":"action","commandId":"c2","type":"chat/load","payload":{"chatId":"s1"}}"#
+    )
+    .is_err());
 }
 
 /// 未知 `t` → `Unsupported`（§4.8 向量 6）。
@@ -278,9 +326,9 @@ fn malformed_input_is_malformed() {
         "not json",
         "",
         r#"{"t":42}"#,
-        r#"{"t":"action"}"#,                      // 缺 type/payload
-        r#"{"t":"instance/spawn"}"#,               // 缺必填字段
-        r#"{"t":"ysync.subscribe","docs":[1]}"#,  // 字段类型错误
+        r#"{"t":"action"}"#,                     // 缺 type/payload
+        r#"{"t":"instance/spawn"}"#,             // 缺必填字段
+        r#"{"t":"ysync.subscribe","docs":[1]}"#, // 字段类型错误
     ] {
         match Frame::parse(raw) {
             Err(ProtoError::Malformed(_)) => {}
@@ -327,7 +375,10 @@ fn ysync_update_projection_version_shape() {
     assert_eq!(v["doc"], "chat:s1");
     assert_eq!(v["update"], "AAAA");
     assert_eq!(v["projectionVersion"], 7);
-    assert_eq!(Frame::parse(&serde_json::to_string(&snapshot).unwrap()).unwrap(), snapshot);
+    assert_eq!(
+        Frame::parse(&serde_json::to_string(&snapshot).unwrap()).unwrap(),
+        snapshot
+    );
 
     // 增量：不携带投影版本
     let delta = Frame::YsyncUpdate(YsyncUpdate {

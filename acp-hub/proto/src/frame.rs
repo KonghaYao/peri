@@ -16,7 +16,8 @@ use crate::conn::{Auth, AuthResponse, KeepAlive, Pong, Ready};
 use crate::event::EventFrame;
 use crate::instance::{
     InstanceBufferSync, InstanceEvent, InstanceForward, InstanceForwardAck, InstanceHeartbeat,
-    InstanceHello, InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
+    InstanceHello, InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn,
+    InstanceSpawnAck,
 };
 use crate::session::SessionListFrame;
 use crate::whitelist::FRAME_TAGS;
