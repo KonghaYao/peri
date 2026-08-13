@@ -1477,3 +1477,82 @@ async fn test_bg_subagent_turn_end_cleanup() {
     );
     let _ = (obs_id, main_act);
 }
+
+// ── tool-batch 归属 stage-act ────────────────────────────────────────────────
+
+/// ToolStart 先于 StageStarted(Act) 到达（LLM 响应产生 tool_calls 后事件链先发
+/// ToolStart 再切阶段）时，batch parent 冻结在旧 stage-reason；Act 开始后必须
+/// 重挂到 stage-act，否则 stage-act 变空、batch 挂错父节点。
+#[tokio::test]
+async fn test_tool_batch_reparents_to_stage_act() {
+    let (mut t, session) = make_tracer(1.0);
+    t.set_main_agent_id("main".to_string());
+    t.on_turn_start("turn_act_reparent");
+
+    // ① Reason 阶段:LLM 决定调用工具
+    let reason = t
+        .on_stage_start_gated("main", Stage::Reason, "turn_act_reparent")
+        .unwrap();
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "m", "p", "plan", None, None);
+    // ② ToolStart 先到:batch 创建,parent 冻结为 stage-reason
+    t.on_tool_start("main", "call_1", "Bash", &serde_json::json!({"cmd": "ls"}));
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    // ③ Reason 结束(span 上报)
+    t.on_stage_end("main", &reason, StageStatus::Done);
+    // ④ Act 开始:batch parent 应重挂到 stage-act
+    let act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_act_reparent")
+        .unwrap();
+    // ⑤ 工具结束 + Act 结束 → flush batch(此时 parent 已是 stage-act)
+    t.on_tool_end("main", "call_1", "file list", false);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    t.on_stage_end("main", &act, StageStatus::Done);
+
+    let events = session.events_snapshot();
+    // batch span 的 parent 应为 stage-act
+    let batch_parents: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                if body.name.as_deref() == Some("tool-batch") {
+                    return Some(body.parent_observation_id.clone());
+                }
+            }
+            None
+        })
+        .collect();
+    assert_eq!(
+        batch_parents,
+        vec![Some(act.span_id.clone())],
+        "batch 应挂到 stage-act,而非旧 stage-reason"
+    );
+    // stage-act 不应为空:至少包含 batch 子节点
+    let map = parent_map(&events);
+    assert!(
+        map.values()
+            .any(|p| p.as_deref() == Some(act.span_id.as_str())),
+        "stage-act 下应有 batch 子节点"
+    );
+    // batch span 不应挂在 stage-reason 下(其下只有 generation 等 Reason 阶段内容)
+    let batch_ids: Vec<String> = events
+        .iter()
+        .filter_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                if body.name.as_deref() == Some("tool-batch") {
+                    return body.id.clone();
+                }
+            }
+            None
+        })
+        .collect();
+    assert!(
+        batch_ids
+            .iter()
+            .all(|id| map.get(id) == Some(&Some(act.span_id.clone()))),
+        "所有 batch span 应只挂 stage-act"
+    );
+
+    let _h = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+}
