@@ -1,8 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
+use peri_acp_types::mcp::McpSubscriptionPort;
+use peri_acp_types::session::InboxHandle;
 use rmcp::{
-    model::{Resource, Tool},
-    service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
+    model::{Resource, ServerNotification, Tool},
+    service::{Peer, QuitReason, RoleClient, RunningService, ServiceError, Subscription},
 };
 use thiserror::Error;
 
@@ -160,6 +162,13 @@ pub struct McpClientPool {
     /// `mcp/oauth_callback` RPC 回传授权码时由 host 装配面查表投递。
     pending_oauth_callbacks:
         parking_lot::Mutex<HashMap<String, tokio::sync::oneshot::Sender<OAuthCallbackResult>>>,
+    /// subscriptions/listen 会话 inbox 注册表（session_id → InboxHandle）。
+    /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
+    /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
+    pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
+    /// 活跃订阅循环任务（server_name → JoinHandle；随 transport 关闭自然结束）。
+    pub(crate) subscription_tasks:
+        tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -200,6 +209,8 @@ impl McpClientPool {
             notifier: parking_lot::RwLock::new(None),
             oauth_event_callback: parking_lot::RwLock::new(None),
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
+            session_inboxes: parking_lot::RwLock::new(HashMap::new()),
+            subscription_tasks: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -338,6 +349,8 @@ impl McpClientPool {
         if let Some(mut svc) = self.services.lock().await.remove(server_name) {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        // 关闭连接会终止订阅循环（transport 关闭 → 流结束）；清掉句柄引用即可。
+        self.subscription_tasks.lock().await.remove(server_name);
         self.configs.write().remove(server_name);
     }
 
@@ -347,6 +360,7 @@ impl McpClientPool {
         if let Some(mut svc) = self.services.lock().await.remove(server_name) {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
+        self.subscription_tasks.lock().await.remove(server_name);
         // 更新 handle 为 Disabled 状态（保留 config 引用）
         let (source, url) = self
             .configs
@@ -368,6 +382,79 @@ impl McpClientPool {
                 channel_capable: false,
             }),
         );
+    }
+
+    // ── subscriptions/listen（2026-07-28 协议）──────────────────────────────
+
+    /// 广播一条订阅通知到所有已注册的会话 inbox。
+    ///
+    /// 通知以 `<system-reminder><mcp-subscription …/>` Defer 消息注入，
+    /// 唤醒 idle executor（agent 随即读资源 / 调工具回复外部消息）。
+    fn broadcast_subscription_notification(&self, server: &str, uri: &str, subscription_id: &str) {
+        let handles: Vec<InboxHandle> = self.session_inboxes.read().values().cloned().collect();
+        if handles.is_empty() {
+            tracing::debug!(server = %server, uri = %uri, "订阅通知到达但无注册会话 inbox");
+            return;
+        }
+        let text = format!(
+            "<system-reminder><mcp-subscription server=\"{}\" uri=\"{}\" subscription-id=\"{}\">资源已更新，请查看并处理。</mcp-subscription></system-reminder>",
+            server, uri, subscription_id
+        );
+        for handle in handles {
+            handle.push_defer(
+                peri_acp_types::session::MessageSource::ChannelMessage,
+                peri_acp_types::messages::BaseMessage::human(text.clone()),
+            );
+        }
+        tracing::info!(server = %server, uri = %uri, sessions = %self.session_inboxes.read().len(), "订阅通知已广播到会话 inbox");
+    }
+
+    /// 启动订阅消费循环：读取 `subscriptions/listen` 流上的通知并广播。
+    ///
+    /// 循环持有 `Subscription`（drop 即取消订阅）；transport 关闭或流结束
+    /// 时自然退出。tool/prompt list_changed 由 rmcp peer 内部自动失效缓存。
+    pub(crate) async fn spawn_subscription_loop(
+        self: &Arc<Self>,
+        server: &str,
+        mut subscription: Subscription,
+    ) {
+        let pool = Arc::clone(self);
+        let task_server = server.to_string();
+        let handle = tokio::spawn(async move {
+            loop {
+                match subscription.next().await {
+                    Ok(Some(ServerNotification::ResourceUpdatedNotification(notif))) => {
+                        let sid = notif
+                            .params
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.subscription_id())
+                            .map(|id| id.to_string())
+                            .unwrap_or_default();
+                        pool.broadcast_subscription_notification(
+                            &task_server,
+                            &notif.params.uri,
+                            &sid,
+                        );
+                    }
+                    Ok(Some(_)) => {
+                        // list_changed 系列：rmcp peer 已失效对应缓存
+                    }
+                    Ok(None) => {
+                        tracing::info!(server = %task_server, "订阅流结束（server 侧关闭）");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(server = %task_server, error = %e, "订阅流错误，停止消费");
+                        break;
+                    }
+                }
+            }
+        });
+        self.subscription_tasks
+            .lock()
+            .await
+            .insert(server.to_string(), vec![handle]);
     }
 
     pub fn server_infos(&self) -> Vec<ServerInfo> {
@@ -680,6 +767,24 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
                 "toolsCount": info.tool_count,
             })).collect::<Vec<_>>(),
         })
+    }
+}
+
+/// `McpSubscriptionPort` 实现：SessionManager（peri-acp）在 session 创建 /
+/// 销毁时注册 / 注销 inbox；订阅通知到达时经 inbox 唤醒 agent。
+impl McpSubscriptionPort for McpClientPool {
+    fn register_inbox(&self, session_id: &str, handle: InboxHandle) {
+        self.session_inboxes
+            .write()
+            .insert(session_id.to_string(), handle);
+    }
+
+    fn unregister_inbox(&self, session_id: &str) {
+        self.session_inboxes.write().remove(session_id);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

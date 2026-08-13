@@ -108,6 +108,7 @@ fn make_stdio_context(
         permission_mode.clone(),
         None,
         Some(cron_scheduler.clone()),
+        None,
         Some(Arc::new(|| {
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>

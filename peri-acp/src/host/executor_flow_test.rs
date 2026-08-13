@@ -303,6 +303,7 @@ async fn make_session_context_with_manager(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
+        None, // MCP 订阅端口（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
     );
@@ -571,6 +572,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         LlmProvider::from_config(&peri_config).unwrap(),
         Arc::new(peri_config),
         SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
         None,
         None,
         None,

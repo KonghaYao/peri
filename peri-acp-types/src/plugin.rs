@@ -52,9 +52,45 @@ pub struct McpServerConfig {
     /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
+    /// subscriptions/listen 订阅配置（2026-07-28 协议；配置后连接协商
+    /// 2026-07-28 并建立订阅，收到通知时唤醒 agent）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscriptions: Option<McpSubscriptionsConfig>,
     /// 配置来源（运行时标记，不序列化）
     #[serde(skip)]
     pub source: Option<ConfigSource>,
+}
+
+/// `subscriptions/listen` 订阅配置（2026-07-28 协议）
+///
+/// 任一字段非空即启用订阅：连接协商 2026-07-28 协议版本，
+/// 建立对应过滤器的 `subscriptions/listen` 长流；收到通知时
+/// 唤醒 agent 会话（注入 `<system-reminder>` Defer 消息）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSubscriptionsConfig {
+    /// 订阅的资源 URI 列表（内容变化时收到 `notifications/resources/updated`）
+    #[serde(default)]
+    pub resources: Vec<String>,
+    /// 订阅工具列表变化（`notifications/tools/list_changed`）
+    #[serde(default)]
+    pub tools_list_changed: bool,
+    /// 订阅 prompts 列表变化（`notifications/prompts/list_changed`）
+    #[serde(default)]
+    pub prompts_list_changed: bool,
+    /// 订阅资源列表变化（`notifications/resources/list_changed`）
+    #[serde(default)]
+    pub resources_list_changed: bool,
+}
+
+impl McpSubscriptionsConfig {
+    /// 是否为空配置（空配置视为未启用订阅）
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+            && !self.tools_list_changed
+            && !self.prompts_list_changed
+            && !self.resources_list_changed
+    }
 }
 
 fn is_false(v: &Option<bool>) -> bool {

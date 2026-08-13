@@ -296,6 +296,7 @@ fn test_extract_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            subscriptions: None,
             source: None,
         })),
     );
@@ -413,6 +414,7 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
             headers: None,
             oauth: None,
             disabled: None,
+            subscriptions: None,
             source: None,
         })),
     );
@@ -495,6 +497,7 @@ fn test_merge_plugin_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            subscriptions: None,
             source: None,
         },
     );
@@ -522,6 +525,7 @@ fn test_merge_plugin_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            subscriptions: None,
             source: None,
         },
     );

@@ -44,6 +44,7 @@ pub mod hooks;
 pub mod identity;
 pub mod interaction;
 pub mod lsp;
+pub mod mcp;
 pub mod messages;
 pub mod model;
 pub mod peri_caps;

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
+use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
@@ -89,6 +90,7 @@ pub fn build_session_manager(
     peri_config: &Arc<RwLock<PeriConfig>>,
     permission_mode: Arc<SharedPermissionMode>,
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
     skills: Arc<dyn SkillsPort>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
@@ -99,6 +101,7 @@ pub fn build_session_manager(
         permission_mode,
         None,
         cron_scheduler,
+        mcp_subscription,
         // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
         // 聚合：registry + bg shell 执行），由本装配点构造后注入（全路径引用）；
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
@@ -171,7 +174,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
     let (oauth_event_tx, oauth_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::event::AcpEvent>();
-    let mcp_pool: Option<Arc<dyn McpPoolPort>> = if bare {
+    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare {
         None
     } else {
         let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
@@ -226,6 +229,12 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         });
         Some(pool)
     };
+    // 订阅端口同源复用：同一 McpClientPool 同时承担 McpPoolPort（命令面）与
+    // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
+    let mcp_pool: Option<Arc<dyn McpPoolPort>> =
+        mcp_pool_concrete.clone().map(|p| p as Arc<dyn McpPoolPort>);
+    let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> =
+        mcp_pool_concrete.map(|p| p as Arc<dyn McpSubscriptionPort>);
 
     // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
     let tool_search_index: Arc<dyn ToolSearchPort> =
@@ -295,6 +304,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         &peri_config,
         permission_mode.clone(),
         cron_scheduler.clone(),
+        mcp_subscription,
         skills.clone(),
     );
 

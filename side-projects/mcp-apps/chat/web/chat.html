@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>聊天室 · @agent 唤醒 demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #ededed;
+    height: 100vh; display: flex; justify-content: center;
+  }
+  .app {
+    width: 420px; max-width: 100vw; height: 100vh;
+    display: flex; flex-direction: column;
+    background: #f5f5f5;
+    border-left: 1px solid #e0e0e0; border-right: 1px solid #e0e0e0;
+  }
+  /* ── 头部 ── */
+  header {
+    background: #2b2b2b; color: #fff; padding: 14px 16px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 6px;
+    background: #07c160; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 18px; color: #fff; flex-shrink: 0;
+  }
+  .title { flex: 1; }
+  .title h1 { font-size: 16px; font-weight: 600; }
+  .status { font-size: 12px; color: #a8a8a8; margin-top: 2px; }
+  .status.online { color: #07c160; }
+  .status.typing { color: #f5c518; }
+  /* ── 消息区 ── */
+  #messages {
+    flex: 1; overflow-y: auto; padding: 16px 12px;
+    display: flex; flex-direction: column; gap: 14px;
+    background: #f5f5f5;
+  }
+  .msg { display: flex; gap: 8px; max-width: 100%; }
+  .msg .bubble {
+    max-width: 72%; padding: 9px 12px; border-radius: 8px;
+    font-size: 14px; line-height: 1.5; word-break: break-word;
+    position: relative; white-space: pre-wrap;
+  }
+  .msg.user { flex-direction: row-reverse; }
+  .msg.user .bubble { background: #95ec69; }
+  .msg.agent .bubble { background: #fff; }
+  .msg .time {
+    font-size: 10px; color: #b0b0b0; align-self: flex-end; flex-shrink: 0;
+  }
+  .mention {
+    background: #f5c518; color: #333; border-radius: 4px;
+    padding: 0 3px; font-weight: 600;
+  }
+  .typing-indicator { display: none; align-items: center; gap: 4px; padding: 2px 4px; }
+  .typing-indicator .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #b0b0b0;
+    animation: blink 1.2s infinite;
+  }
+  .typing-indicator .dot:nth-child(2) { animation-delay: .2s; }
+  .typing-indicator .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  /* ── 输入区 ── */
+  footer {
+    background: #f5f5f5; border-top: 1px solid #e0e0e0;
+    padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end;
+  }
+  textarea {
+    flex: 1; resize: none; border: 1px solid #ddd; border-radius: 6px;
+    padding: 9px 10px; font-size: 14px; font-family: inherit; outline: none;
+    min-height: 40px; max-height: 120px; background: #fff;
+  }
+  textarea:focus { border-color: #07c160; }
+  button#send {
+    background: #07c160; color: #fff; border: none; border-radius: 6px;
+    padding: 10px 18px; font-size: 14px; cursor: pointer;
+  }
+  button#send:disabled { background: #9fd8b8; cursor: not-allowed; }
+  .hint { font-size: 11px; color: #999; padding: 4px 14px 2px; }
+  .hint code { background: #e8e8e8; border-radius: 3px; padding: 1px 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="avatar">🤖</div>
+    <div class="title">
+      <h1>工作群 · general</h1>
+      <div class="status online" id="status">agent 在线（MCP 已连接）</div>
+    </div>
+  </header>
+
+  <div id="messages">
+    <div class="msg agent">
+      <div class="bubble">大家好，我是 agent。在输入框里 <span class="mention">@agent</span> 发消息，我就会收到通知并自动回复。</div>
+      <div class="time"></div>
+    </div>
+  </div>
+
+  <div class="typing-indicator" id="typing">
+    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+  </div>
+
+  <div class="hint">提示：输入 <code>@agent 你好</code> 触发订阅通知（<code>notifications/resources/updated</code>）</div>
+  <footer>
+    <textarea id="input" placeholder="输入消息，@agent 唤醒 agent…"></textarea>
+    <button id="send">发送</button>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const ROOM = "general";
+const el = {
+  messages: document.getElementById("messages"),
+  input: document.getElementById("input"),
+  send: document.getElementById("send"),
+  status: document.getElementById("status"),
+  typing: document.getElementById("typing"),
+};
+
+let lastTs = Date.now();       // 轮询增量游标
+let awaitingAgent = false;     // 已 @agent、等回复中
+let pollTimer = null;
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 渲染一条消息（@agent 高亮） */
+function appendMessage(msg) {
+  const row = document.createElement("div");
+  row.className = `msg ${msg.sender}`;
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = escapeHtml(msg.text).replace(/@agent\b/g, '<span class="mention">@agent</span>');
+
+  const time = document.createElement("div");
+  time.className = "time";
+  time.textContent = fmtTime(msg.ts);
+
+  row.appendChild(bubble);
+  row.appendChild(time);
+  el.messages.appendChild(row);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  return row;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+/** 轮询新消息；出现 agent 消息则结束"正在输入"状态 */
+async function poll() {
+  try {
+    const res = await fetch(`/api/messages?room=${ROOM}&after=${lastTs}`);
+    const data = await res.json();
+    lastTs = data.serverTs ?? Date.now();
+    const agentMsg = data.messages.filter((m) => m.sender === "agent");
+    if (agentMsg.length > 0 && awaitingAgent) {
+      awaitingAgent = false;
+      setTyping(false);
+      el.status.className = "status online";
+      el.status.textContent = "agent 在线（MCP 已连接）";
+    }
+    for (const m of data.messages) appendMessage(m);
+  } catch (e) {
+    // 网络抖动忽略，下一轮重试
+  }
+}
+
+async function sendMessage() {
+  const text = el.input.value.trim();
+  if (!text) return;
+  el.input.value = "";
+  el.send.disabled = true;
+
+  // 先本地乐观显示自己的消息
+  const optimistic = {
+    id: -Date.now(), room: ROOM, sender: "user", text, ts: Date.now(), mentionsAgent: /@agent\b/.test(text),
+  };
+  appendMessage(optimistic);
+
+  const res = await fetch("/api/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ room: ROOM, text }),
+  });
+  const data = await res.json();
+  el.send.disabled = false;
+
+  if (data.message?.mentionsAgent) {
+    // 已唤醒 agent：进入"正在输入"状态
+    awaitingAgent = true;
+    setTyping(true);
+    el.status.className = "status typing";
+    el.status.textContent = "agent 正在输入…";
+  }
+  // 立即轮询一次，随后保持 1s 轮询（有 agent 消息即停）
+  await poll();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 1000);
+}
+
+function setTyping(on) {
+  el.typing.style.display = on ? "flex" : "none";
+}
+
+el.send.addEventListener("click", sendMessage);
+el.input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// 启动轮询
+pollTimer = setInterval(poll, 1000);
+</script>
+</body>
+</html>

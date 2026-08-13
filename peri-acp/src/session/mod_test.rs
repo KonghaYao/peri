@@ -79,6 +79,7 @@ fn make_manager_with_cron_option(
             Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
                 as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
         }),
+        None, // MCP 订阅端口（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
     )
