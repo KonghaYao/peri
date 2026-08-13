@@ -209,8 +209,8 @@ impl Broadcaster {
             Some(BackpressureAction::Close) => {
                 let bytes = self.bytes_of(conn_id).await;
                 warn!(
-                    conn_id, bytes,
-                    "broadcast backpressure hard threshold exceeded; closing connection"
+                    conn_id,
+                    bytes, "broadcast backpressure hard threshold exceeded; closing connection"
                 );
                 self.close_conn(conn_id).await;
             }
@@ -249,7 +249,10 @@ impl Broadcaster {
         let mut kept: VecDeque<(DocId, Vec<u8>)> = VecDeque::new();
         let mut kept_bytes = 0usize;
         while let Some((doc, update)) = pending.pop_front() {
-            match tx.try_send(OutboundMsg::Frame(encode_update_frame(doc.clone(), update.clone()))) {
+            match tx.try_send(OutboundMsg::Frame(encode_update_frame(
+                doc.clone(),
+                update.clone(),
+            ))) {
                 Ok(()) => continue,
                 Err(TrySendError::Full(_)) => {
                     // 慢消费者：本帧与剩余帧全部保留（保持序，push_back 不颠倒
@@ -293,13 +296,11 @@ impl Broadcaster {
         let tx = sub.tx.clone();
         let frames: Vec<OutboundMsg> = by_doc
             .into_iter()
-            .map(|(doc, updates)| {
-                match merge_updates_v1(&updates) {
-                    Ok(merged) => OutboundMsg::Frame(encode_update_frame(doc, merged)),
-                    Err(e) => {
-                        warn!(conn_id, error = ?e, "update merge failed; falling back to first frame");
-                        OutboundMsg::Frame(encode_update_frame(doc, updates[0].clone()))
-                    }
+            .map(|(doc, updates)| match merge_updates_v1(&updates) {
+                Ok(merged) => OutboundMsg::Frame(encode_update_frame(doc, merged)),
+                Err(e) => {
+                    warn!(conn_id, error = ?e, "update merge failed; falling back to first frame");
+                    OutboundMsg::Frame(encode_update_frame(doc, updates[0].clone()))
                 }
             })
             .collect();

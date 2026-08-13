@@ -16,6 +16,42 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActionEnvelope {
+    /// 创建持久化 project（workspace 的兼容后继）。
+    #[serde(rename = "project/create", rename_all = "camelCase")]
+    ProjectCreate {
+        command_id: String,
+        payload: ProjectCreatePayload,
+    },
+    /// 归档持久化 project；已有 session 不做物理删除。
+    #[serde(rename = "project/archive", rename_all = "camelCase")]
+    ProjectArchive {
+        command_id: String,
+        payload: ProjectArchivePayload,
+    },
+    /// 在 project 下创建持久化 logical session 并激活 ACP runtime。
+    #[serde(rename = "session/create", rename_all = "camelCase")]
+    PersistedSessionCreate {
+        command_id: String,
+        payload: PersistedSessionCreatePayload,
+    },
+    /// 打开持久化 logical session；必要时新建 runtime 并 session/load。
+    #[serde(rename = "session/open", rename_all = "camelCase")]
+    PersistedSessionOpen {
+        command_id: String,
+        payload: PersistedSessionOpenPayload,
+    },
+    /// 修改 hub 侧展示名，不修改 ACP ThreadStore title。
+    #[serde(rename = "session/rename", rename_all = "camelCase")]
+    PersistedSessionRename {
+        command_id: String,
+        payload: PersistedSessionRenamePayload,
+    },
+    /// 将 ACP 历史会话显式加入某个 project 的持久侧边栏。
+    #[serde(rename = "session/import", rename_all = "camelCase")]
+    PersistedSessionImport {
+        command_id: String,
+        payload: PersistedSessionImportPayload,
+    },
     /// 创建对话；`instance_id` 缺省 = 本机（§4.3）。
     #[serde(rename = "chat/create", rename_all = "camelCase")]
     Create {
@@ -100,6 +136,12 @@ impl ActionEnvelope {
     /// 对照用于 §4.8 action type 收窄检查）。
     pub fn type_str(&self) -> &'static str {
         match self {
+            ActionEnvelope::ProjectCreate { .. } => "project/create",
+            ActionEnvelope::ProjectArchive { .. } => "project/archive",
+            ActionEnvelope::PersistedSessionCreate { .. } => "session/create",
+            ActionEnvelope::PersistedSessionOpen { .. } => "session/open",
+            ActionEnvelope::PersistedSessionRename { .. } => "session/rename",
+            ActionEnvelope::PersistedSessionImport { .. } => "session/import",
             ActionEnvelope::Create { .. } => "chat/create",
             ActionEnvelope::Load { .. } => "chat/load",
             ActionEnvelope::Close { .. } => "chat/close",
@@ -114,6 +156,47 @@ impl ActionEnvelope {
             ActionEnvelope::SessionList { .. } => "session/list",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCreatePayload {
+    pub name: String,
+    pub cwd: String,
+    pub instance_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectArchivePayload {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSessionCreatePayload {
+    pub project_id: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSessionOpenPayload {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSessionRenamePayload {
+    pub session_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSessionImportPayload {
+    pub project_id: String,
+    pub acp_session_id: String,
 }
 
 /// `chat/create` payload；`instance_id`/`cwd`/`title` 均可缺省，服务端按

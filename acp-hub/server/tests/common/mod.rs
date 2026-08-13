@@ -191,10 +191,7 @@ fn write_tokens_file(path: &Path, records: &[(String, &str, String)]) {
 /// fake `peri`：server 默认 ACP 命令 `peri acp`（M1 常量），instance 经 PATH
 /// 查找；脚本 exec test-child（argv 透传，test-child 忽略未知参数）。
 fn write_fake_peri(dir: &Path, test_child: &Path) {
-    let script = format!(
-        "#!/bin/sh\nexec '{}' \"$@\"\n",
-        test_child.display()
-    );
+    let script = format!("#!/bin/sh\nexec '{}' \"$@\"\n", test_child.display());
     let p = dir.join("peri");
     fs::write(&p, script).expect("write fake peri");
     #[cfg(unix)]
@@ -249,7 +246,13 @@ impl ServerProc {
             cmd.args(["--config"]).arg(cfg);
         }
         cmd.arg("run")
-            .args(["--listen", listen, "--listen-port", &env.port.to_string(), "--data-dir"])
+            .args([
+                "--listen",
+                listen,
+                "--listen-port",
+                &env.port.to_string(),
+                "--data-dir",
+            ])
             .arg(&env.data_dir)
             .args(["--config-dir"])
             .arg(&env.config_dir)
@@ -619,9 +622,11 @@ impl WsClient {
             token: token.to_string(),
         }))
         .await?;
-        self.send(&Frame::YsyncSubscribe(acp_hub_proto::ysync::YsyncSubscribe {
-            docs: docs.iter().map(|d| d.parse().unwrap()).collect(),
-        }))
+        self.send(&Frame::YsyncSubscribe(
+            acp_hub_proto::ysync::YsyncSubscribe {
+                docs: docs.iter().map(|d| d.parse().unwrap()).collect(),
+            },
+        ))
         .await?;
         let mut snapshots = Vec::new();
         let ready = self
@@ -641,11 +646,7 @@ impl WsClient {
     }
 
     /// 连接 + 认证 + 订阅 + ready（一条龙；返回注册表快照帧如订阅了 registry）。
-    pub async fn connect_client(
-        port: u16,
-        token: &str,
-        docs: &[&str],
-    ) -> Result<WsClient, String> {
+    pub async fn connect_client(port: u16, token: &str, docs: &[&str]) -> Result<WsClient, String> {
         let mut c = WsClient::connect(port).await?;
         let (_snap, _ready) = c.handshake(token, docs).await?;
         Ok(c)
@@ -656,10 +657,7 @@ impl WsClient {
 /// Accepted、执行器异步回 committed/error——create/prompt/cancel/close
 /// 全时序均为两段）。返回终态 `ActionAck`（committed/duplicate 等）或
 /// `ActionError`，由调用方判定。
-pub async fn wait_terminal(
-    c: &mut WsClient,
-    timeout: Duration,
-) -> Result<Frame, String> {
+pub async fn wait_terminal(c: &mut WsClient, timeout: Duration) -> Result<Frame, String> {
     loop {
         match c
             .recv_until(
@@ -713,8 +711,7 @@ pub fn doc_from_snapshots(frames: &[Frame], doc_name: &str) -> Result<yrs::Doc, 
     if bytes.is_empty() {
         return Err(format!("快照中无 doc {doc_name}"));
     }
-    let merged = yrs::merge_updates_v1(&[bytes])
-        .map_err(|e| format!("merge updates 失败: {e}"))?;
+    let merged = yrs::merge_updates_v1(&[bytes]).map_err(|e| format!("merge updates 失败: {e}"))?;
     let update = yrs::Update::decode_v1(&merged).map_err(|e| format!("update 解码失败: {e}"))?;
     let doc = yrs::Doc::new();
     doc.transact_mut()
@@ -730,8 +727,7 @@ pub fn doc_from_snapshots(frames: &[Frame], doc_name: &str) -> Result<yrs::Doc, 
 pub fn root_str(doc: &yrs::Doc, key: &str) -> Option<String> {
     let txn = doc.transact();
     let root = txn.get_map("root")?;
-    root.get(&txn, key)
-        .and_then(|v| v.cast::<String>().ok())
+    root.get(&txn, key).and_then(|v| v.cast::<String>().ok())
 }
 
 /// root.instances/<instance_id>/<field> 字符串读取。
@@ -739,7 +735,10 @@ pub fn instance_field(doc: &yrs::Doc, instance_id: &str, field: &str) -> Option<
     let txn = doc.transact();
     let root = txn.get_map("root")?;
     let instances = root.get(&txn, "instances")?.cast::<yrs::MapRef>().ok()?;
-    let m = instances.get(&txn, instance_id)?.cast::<yrs::MapRef>().ok()?;
+    let m = instances
+        .get(&txn, instance_id)?
+        .cast::<yrs::MapRef>()
+        .ok()?;
     m.get(&txn, field).and_then(|v| v.cast::<String>().ok())
 }
 
@@ -757,7 +756,10 @@ pub fn chat_ids(doc: &yrs::Doc) -> Vec<String> {
     let txn = doc.transact();
     let mut out = Vec::new();
     if let Some(root) = txn.get_map("root") {
-        if let Some(m) = root.get(&txn, "chats").and_then(|v| v.cast::<yrs::MapRef>().ok()) {
+        if let Some(m) = root
+            .get(&txn, "chats")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        {
             for k in m.keys(&txn) {
                 out.push(k.to_string());
             }

@@ -46,9 +46,7 @@ use uuid::Uuid;
 
 use crate::config::FsyncMode;
 
-use crate::persist::update_log::{
-    read_blob, write_blob, BlobReadError, CORRUPT_DIR,
-};
+use crate::persist::update_log::{read_blob, write_blob, BlobReadError, CORRUPT_DIR};
 use crate::persist::{DegradedFlag, StoreError};
 
 /// outbox 日志文件名（§2 目录布局）。
@@ -505,12 +503,16 @@ impl OutboxStore {
             .ok_or_else(|| self.not_found(id))?;
         let chat_id = self.index.get(&id).expect("checked").chat_id;
         if from != OutboxStatus::DeliveryUnknown {
-            return self.reject(id, from, match verdict {
-                DeliveryVerdict::ConfirmedDelivered => OutboxStatus::Completed,
-                DeliveryVerdict::ConfirmedNotDelivered | DeliveryVerdict::StillUnknown => {
-                    OutboxStatus::DeliveryUnknown
-                }
-            });
+            return self.reject(
+                id,
+                from,
+                match verdict {
+                    DeliveryVerdict::ConfirmedDelivered => OutboxStatus::Completed,
+                    DeliveryVerdict::ConfirmedNotDelivered | DeliveryVerdict::StillUnknown => {
+                        OutboxStatus::DeliveryUnknown
+                    }
+                },
+            );
         }
         tracing::info!(
             event = "outbox.resolve", command_id = %id, chat_id = %chat_id,
@@ -615,7 +617,8 @@ impl OutboxStore {
                         }
                         Err(e) => {
                             // JSON 结构非法 → 损坏（§5.4 同纪律）。
-                            let artifact = self.handle_corruption(pos, &format!("json parse failed: {e}"))?;
+                            let artifact =
+                                self.handle_corruption(pos, &format!("json parse failed: {e}"))?;
                             result.truncated = Some(artifact.info);
                             result.corrupt_artifacts.push(artifact.path);
                             result.degraded = true;
@@ -671,11 +674,10 @@ impl OutboxStore {
                 path: self.path.clone(),
                 source: e,
             })?;
-        f.read_to_end(&mut segment)
-            .map_err(|e| StoreError::Io {
-                path: self.path.clone(),
-                source: e,
-            })?;
+        f.read_to_end(&mut segment).map_err(|e| StoreError::Io {
+            path: self.path.clone(),
+            source: e,
+        })?;
         let artifact = self
             .corrupt_dir
             .join(format!("{}.{offset}.bin", OUTBOX_LOG_FILE));
@@ -698,16 +700,16 @@ impl OutboxStore {
             path: self.path.clone(),
             source: std::io::Error::new(std::io::ErrorKind::NotConnected, "outbox closed"),
         })?;
-        file.set_len(offset)
-            .map_err(|e| StoreError::Io {
-                path: self.path.clone(),
-                source: e,
-            })?;
+        file.set_len(offset).map_err(|e| StoreError::Io {
+            path: self.path.clone(),
+            source: e,
+        })?;
         file.sync_data().map_err(|e| StoreError::Io {
             path: self.path.clone(),
             source: e,
         })?;
-        self.degraded.set(format!("outbox log tail truncated at {offset}: {detail}"));
+        self.degraded
+            .set(format!("outbox log tail truncated at {offset}: {detail}"));
         warn!(
             path = %self.path.display(), offset, bytes_kept, reason = detail,
             "outbox log tail truncated; corrupt segment preserved"
@@ -740,8 +742,7 @@ impl OutboxStore {
             .iter()
             .filter(|(_, r)| r.status.is_terminal())
             .filter(|(_, r)| {
-                r.updated_at + chrono::Duration::from_std(self.retention).unwrap_or_default()
-                    <= now
+                r.updated_at + chrono::Duration::from_std(self.retention).unwrap_or_default() <= now
             })
             .map(|(id, _)| *id)
             .collect();
@@ -808,7 +809,8 @@ impl OutboxStore {
             })?;
         }
         if let Err(e) = tmp.sync_all() {
-            self.degraded.set(format!("outbox compaction tmp fsync failed: {e}"));
+            self.degraded
+                .set(format!("outbox compaction tmp fsync failed: {e}"));
             warn!(error = %e, "outbox compaction tmp fsync failed; store degraded");
             return Err(StoreError::Io {
                 path: tmp_path.clone(),
@@ -817,7 +819,8 @@ impl OutboxStore {
         }
         drop(tmp);
         if let Err(e) = fs::rename(&tmp_path, &path) {
-            self.degraded.set(format!("outbox compaction rename failed: {e}"));
+            self.degraded
+                .set(format!("outbox compaction rename failed: {e}"));
             warn!(error = %e, "outbox compaction rename failed; store degraded");
             return Err(StoreError::Io {
                 path: path.clone(),
@@ -956,12 +959,7 @@ impl OutboxStore {
     }
 
     /// 非法迁移：`InvalidTransition` 拒绝（不写盘，§5.2 不静默）。
-    fn reject(
-        &self,
-        id: Uuid,
-        from: OutboxStatus,
-        to: OutboxStatus,
-    ) -> Result<(), StoreError> {
+    fn reject(&self, id: Uuid, from: OutboxStatus, to: OutboxStatus) -> Result<(), StoreError> {
         warn!(
             command_id = %id, from = ?from, to = ?to,
             "invalid outbox transition rejected"

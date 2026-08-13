@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::web::{content_type, header_end, is_ws_upgrade, request_path, route, serve, ASSETS};
+use crate::web::{cookie_value, valid_loopback_host};
 
 /// 请求行解析：常规 GET 路径。
 #[test]
@@ -61,6 +62,15 @@ fn ws_upgrade_detection() {
     assert!(!is_ws_upgrade(plain));
 }
 
+#[test]
+fn auth_contract_host_and_cookie_parsing() {
+    assert!(valid_loopback_host("127.0.0.1:8456"));
+    assert!(valid_loopback_host("localhost:8456"));
+    assert!(valid_loopback_host("[::1]:8456"));
+    assert!(!valid_loopback_host("evil.example:8456"));
+    assert_eq!(cookie_value("x=1; acp_hub_session=opaque; y=2", "acp_hub_session").as_deref(), Some("opaque"));
+}
+
 /// 路由表：面板为唯一页面（/、/index.html、旧链接 /panel.html 同源），
 /// 资产表非空且含 js/css，未知路径 404。
 #[test]
@@ -97,7 +107,10 @@ fn route_resolves_static_assets() {
 #[test]
 fn content_type_by_extension() {
     assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
-    assert_eq!(content_type("assets/app.js"), "text/javascript; charset=utf-8");
+    assert_eq!(
+        content_type("assets/app.js"),
+        "text/javascript; charset=utf-8"
+    );
     assert_eq!(content_type("assets/style.css"), "text/css; charset=utf-8");
     assert_eq!(content_type("icon.svg"), "image/svg+xml");
     assert_eq!(content_type("icon.png"), "image/png");
@@ -115,7 +128,9 @@ async fn serve_returns_index() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, "GET / HTTP/1.1\r\nHost: test\r\n\r\n").await.unwrap();
+        serve(stream, "GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .await
+            .unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
@@ -124,7 +139,10 @@ async fn serve_returns_index() {
 
     let text = String::from_utf8(buf).unwrap();
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
-    assert!(text.contains("Content-Type: text/html; charset=utf-8"), "{text:?}");
+    assert!(
+        text.contains("Content-Type: text/html; charset=utf-8"),
+        "{text:?}"
+    );
     assert!(text.contains("acp-hub Web 面板"), "{text:?}");
     assert!(text.contains("</html>"), "{text:?}");
 }
@@ -136,9 +154,12 @@ async fn serve_returns_404() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, "GET /no-such-resource HTTP/1.1\r\nHost: test\r\n\r\n")
-            .await
-            .unwrap();
+        serve(
+            stream,
+            "GET /no-such-resource HTTP/1.1\r\nHost: test\r\n\r\n",
+        )
+        .await
+        .unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
@@ -155,13 +176,21 @@ async fn serve_returns_404() {
 #[tokio::test]
 async fn serve_handles_query() {
     // 取资产表中第一个 js 作为探测目标（hash 文件名不硬编码）。
-    let js = ASSETS.iter().find(|a| a.url.ends_with(".js")).expect("有 js 产物");
+    let js = ASSETS
+        .iter()
+        .find(|a| a.url.ends_with(".js"))
+        .expect("有 js 产物");
     let path = format!("/{}?t=1", js.url);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, &format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n")).await.unwrap();
+        serve(
+            stream,
+            &format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n"),
+        )
+        .await
+        .unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     let mut buf = Vec::new();
@@ -170,7 +199,10 @@ async fn serve_handles_query() {
 
     let text = String::from_utf8(buf).unwrap();
     assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text:?}");
-    assert!(text.contains("Content-Type: text/javascript; charset=utf-8"), "{text:?}");
+    assert!(
+        text.contains("Content-Type: text/javascript; charset=utf-8"),
+        "{text:?}"
+    );
     // 响应体与内嵌字节一致（Content-Length 精确匹配）。
     let body_start = text.find("\r\n\r\n").map(|i| i + 4).expect("有头部结束符");
     assert_eq!(&text.as_bytes()[body_start..], js.bytes);

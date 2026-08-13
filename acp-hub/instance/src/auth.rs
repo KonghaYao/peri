@@ -19,8 +19,8 @@ use thiserror::Error;
 
 use acp_hub_proto::conn::AuthResponse;
 use acp_hub_proto::hmac::{
-    derive_mac_key, generate_challenge_nonce, mac_input, verify_mac, CHALLENGE_NONCE_LEN,
-    HmacError, CONNECTION_CONTEXT_LEN,
+    derive_mac_key, generate_challenge_nonce, mac_input, verify_mac, HmacError,
+    CHALLENGE_NONCE_LEN, CONNECTION_CONTEXT_LEN,
 };
 use acp_hub_proto::instance::InstanceHello;
 use acp_hub_proto::version::PROTOCOL_VERSION;
@@ -85,14 +85,16 @@ impl AuthClient {
         if trimmed.len() != TOKEN_B64_LEN {
             return Err(AuthError::BadToken);
         }
-        let bytes: [u8; CHALLENGE_NONCE_LEN] =
-            base64::engine::general_purpose::STANDARD
-                .decode(&trimmed)
-                .map_err(|_| AuthError::BadToken)?
-                .try_into()
-                .map_err(|_| AuthError::BadToken)?;
+        let bytes: [u8; CHALLENGE_NONCE_LEN] = base64::engine::general_purpose::STANDARD
+            .decode(&trimmed)
+            .map_err(|_| AuthError::BadToken)?
+            .try_into()
+            .map_err(|_| AuthError::BadToken)?;
         let key = derive_mac_key(&bytes, ROLE);
-        Ok(AuthClient { token: trimmed, key })
+        Ok(AuthClient {
+            token: trimmed,
+            key,
+        })
     }
 
     /// 开启一次握手：生成**新 nonce**（每次连接新生成，§9.2 挑战新鲜性）。
@@ -132,18 +134,12 @@ impl AuthSession {
     /// 作为 MAC 输入；`hmac` 的 base64 合法性/长度/匹配由 [`verify_mac`] 内建
     /// 常量时间比较处理。
     pub fn verify_auth_response(&self, resp: &AuthResponse) -> Result<(), AuthError> {
-        let context: [u8; CONNECTION_CONTEXT_LEN] =
-            base64::engine::general_purpose::STANDARD
-                .decode(&resp.connection_context)
-                .map_err(|e| AuthError::Malformed(format!("connection_context: {e}")))?
-                .try_into()
-                .map_err(|_| AuthError::Malformed("connection_context 非 32B".to_string()))?;
-        let input = mac_input(
-            &self.nonce,
-            &context,
-            &PROTOCOL_VERSION.to_string(),
-            ROLE,
-        );
+        let context: [u8; CONNECTION_CONTEXT_LEN] = base64::engine::general_purpose::STANDARD
+            .decode(&resp.connection_context)
+            .map_err(|e| AuthError::Malformed(format!("connection_context: {e}")))?
+            .try_into()
+            .map_err(|_| AuthError::Malformed("connection_context 非 32B".to_string()))?;
+        let input = mac_input(&self.nonce, &context, &PROTOCOL_VERSION.to_string(), ROLE);
         verify_mac(&self.auth.key, &input, &resp.hmac)?;
         Ok(())
     }

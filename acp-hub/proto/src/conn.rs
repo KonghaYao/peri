@@ -111,9 +111,7 @@ impl FromStr for DocId {
     type Err = DocIdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (prefix, sid) = s
-            .split_once(':')
-            .ok_or_else(|| DocIdError(s.to_string()))?;
+        let (prefix, sid) = s.split_once(':').ok_or_else(|| DocIdError(s.to_string()))?;
         if prefix != "chat" && prefix != "session" && prefix != "hub" {
             return Err(DocIdError(s.to_string()));
         }

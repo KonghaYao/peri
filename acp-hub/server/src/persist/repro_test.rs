@@ -6,12 +6,10 @@ use acp_hub_proto::conn::DocId;
 use tempfile::tempdir;
 
 use crate::config::FsyncMode;
-use crate::persist::outbox::{
-    CommandType, NewOutboxRecord, OutboxStore, RetryableClass,
-};
-use crate::persist::{DegradedFlag, StoreError};
+use crate::persist::outbox::{CommandType, NewOutboxRecord, OutboxStore, RetryableClass};
 use crate::persist::update_log::UpdateLog;
 use crate::persist::watermark::WatermarkStore;
+use crate::persist::{DegradedFlag, StoreError};
 
 fn chat_doc(chat_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
     (DocId::chat(&chat_id.to_string()), payload.to_vec())
@@ -23,8 +21,8 @@ fn chat_doc(chat_id: &uuid::Uuid, payload: &[u8]) -> (DocId, Vec<u8>) {
 #[tokio::test]
 async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
     use crate::persist::store::Store;
-    use crate::persist::PersistConfig;
     use crate::persist::store::CHATS_DIR;
+    use crate::persist::PersistConfig;
 
     let dir = tempdir().unwrap();
     let sid = uuid::Uuid::new_v4();
@@ -47,16 +45,24 @@ async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
         for seq in 1..=3u64 {
             log.append(1, seq, &[(d1.0.clone(), &d1.1)]).await.unwrap();
         }
-        log.compact([(d1.0.clone(), b"full-snapshot".to_vec())].into_iter().collect())
-            .await
-            .unwrap();
+        log.compact(
+            [(d1.0.clone(), b"full-snapshot".to_vec())]
+                .into_iter()
+                .collect(),
+        )
+        .await
+        .unwrap();
         for seq in 4..=6u64 {
             log.append(1, seq, &[(d1.0.clone(), &d1.1)]).await.unwrap();
         }
         drop(log);
     }
     // 阶段 2：破坏日志首条记录的 len 字段（结构损坏）
-    let path = dir.path().join(CHATS_DIR).join(sid.to_string()).join("updates.log");
+    let path = dir
+        .path()
+        .join(CHATS_DIR)
+        .join(sid.to_string())
+        .join("updates.log");
     let data = std::fs::read(&path).unwrap();
     let mut corrupted = data.clone();
     corrupted[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -84,8 +90,14 @@ async fn repro1_mid_log_corruption_silently_truncates_newer_records() {
         "BUG: corruption not reported: {result:?}"
     );
     // 快照点 3 之上的记录 4..=6 按尾部截断语义丢弃，但损坏必须可见
-    let corrupt_dir = dir.path().join(CHATS_DIR).join(sid.to_string()).join("corrupt");
-    let n = std::fs::read_dir(&corrupt_dir).map(|rd| rd.count()).unwrap_or(0);
+    let corrupt_dir = dir
+        .path()
+        .join(CHATS_DIR)
+        .join(sid.to_string())
+        .join("corrupt");
+    let n = std::fs::read_dir(&corrupt_dir)
+        .map(|rd| rd.count())
+        .unwrap_or(0);
     assert!(n >= 1, "corrupt segment should be preserved (got {n})");
     // 且日志应截断于损坏点（而非整日志清空后空文件）——日志保留损坏点前的
     // 完好记录（此处损坏点在 offset 0，日志应为空但信号存在）
@@ -99,29 +111,52 @@ async fn repro3_replay_double_counts_records() {
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"payload");
     let degraded = Arc::new(DegradedFlag::new());
-    let wm = Arc::new(WatermarkStore::open(dir.path(), FsyncMode::PerCommit, degraded.clone()));
+    let wm = Arc::new(WatermarkStore::open(
+        dir.path(),
+        FsyncMode::PerCommit,
+        degraded.clone(),
+    ));
     let mut log = UpdateLog::open(
-        dir.path(), sid, wm.clone(), FsyncMode::PerCommit,
-        64 * 1024 * 1024, std::time::Duration::from_secs(24 * 3600), degraded.clone(),
+        dir.path(),
+        sid,
+        wm.clone(),
+        FsyncMode::PerCommit,
+        64 * 1024 * 1024,
+        std::time::Duration::from_secs(24 * 3600),
+        degraded.clone(),
     )
     .unwrap();
     for seq in 1..=3u64 {
         log.append(1, seq, &[(d1.0.clone(), &d1.1)]).await.unwrap();
     }
-    assert_eq!(log.stats().records, 3, "precondition: 3 records after append");
+    assert_eq!(
+        log.stats().records,
+        3,
+        "precondition: 3 records after append"
+    );
     // 重新打开（probe_tail 计数 3）→ replay 再 +3 → 6
     drop(log);
     let degraded2 = Arc::new(DegradedFlag::new());
-    let wm2 = Arc::new(WatermarkStore::open(dir.path(), FsyncMode::PerCommit, degraded2.clone()));
+    let wm2 = Arc::new(WatermarkStore::open(
+        dir.path(),
+        FsyncMode::PerCommit,
+        degraded2.clone(),
+    ));
     let mut log2 = UpdateLog::open(
-        dir.path(), sid, wm2.clone(), FsyncMode::PerCommit,
-        64 * 1024 * 1024, std::time::Duration::from_secs(24 * 3600), degraded2.clone(),
+        dir.path(),
+        sid,
+        wm2.clone(),
+        FsyncMode::PerCommit,
+        64 * 1024 * 1024,
+        std::time::Duration::from_secs(24 * 3600),
+        degraded2.clone(),
     )
     .unwrap();
     let outcome = log2.replay().unwrap();
     assert_eq!(outcome.records.len(), 3);
     assert_eq!(
-        log2.stats().records, 3,
+        log2.stats().records,
+        3,
         "BUG CONFIRMED: stats.records after replay = {} (expected 3)",
         log2.stats().records
     );
@@ -136,16 +171,22 @@ fn repro5b_outbox_compact_permissions_not_0600() {
     let dir = tempdir().unwrap();
     let degraded = Arc::new(DegradedFlag::new());
     let mut ob = OutboxStore::open(
-        dir.path(), FsyncMode::PerCommit,
-        std::time::Duration::from_secs(7 * 86_400), degraded.clone(),
+        dir.path(),
+        FsyncMode::PerCommit,
+        std::time::Duration::from_secs(7 * 86_400),
+        degraded.clone(),
     )
     .unwrap();
     let sid = uuid::Uuid::new_v4();
     let cid = uuid::Uuid::new_v4();
     ob.insert(NewOutboxRecord {
-        command_id: cid, chat_id: sid, command_type: CommandType::Create,
-        turn_id: None, retryable_class: RetryableClass::SafeToRedeliver,
-    }).unwrap();
+        command_id: cid,
+        chat_id: sid,
+        command_type: CommandType::Create,
+        turn_id: None,
+        retryable_class: RetryableClass::SafeToRedeliver,
+    })
+    .unwrap();
     ob.mark_accepted(cid).unwrap();
     ob.mark_intent_durable(cid).unwrap();
     ob.mark_dispatched(cid, chrono::Utc::now()).unwrap();
@@ -155,18 +196,30 @@ fn repro5b_outbox_compact_permissions_not_0600() {
     // 到期清理触发压缩：updated_at 改不了，用短 retention 重开
     drop(ob);
     let mut ob2 = OutboxStore::open(
-        dir.path(), FsyncMode::PerCommit,
-        std::time::Duration::from_secs(1), degraded,
-    ).unwrap();
+        dir.path(),
+        FsyncMode::PerCommit,
+        std::time::Duration::from_secs(1),
+        degraded,
+    )
+    .unwrap();
     ob2.replay_from_disk().unwrap();
     // 等 1.2s 让 updated_at 超过 1s retention
     std::thread::sleep(std::time::Duration::from_millis(1200));
     let stats = ob2.cleanup(chrono::Utc::now(), true);
-    assert!(stats.removed >= 1, "precondition: cleanup removed records (stats={stats:?})");
+    assert!(
+        stats.removed >= 1,
+        "precondition: cleanup removed records (stats={stats:?})"
+    );
     assert!(stats.compressed, "precondition: compaction happened");
     let mode = std::fs::metadata(dir.path().join("outbox.log"))
-        .unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "outbox.log permissions should be 0600 after compaction (got {mode:o})");
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "outbox.log permissions should be 0600 after compaction (got {mode:o})"
+    );
 }
 
 /// 疑点 5c（P2）：corrupt/ 段文件权限非 0600（fs::write 默认 umask 0644，
@@ -179,10 +232,19 @@ async fn repro5c_corrupt_segment_permissions_not_0600() {
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"payload");
     let degraded = Arc::new(DegradedFlag::new());
-    let wm = Arc::new(WatermarkStore::open(dir.path(), FsyncMode::PerCommit, degraded.clone()));
+    let wm = Arc::new(WatermarkStore::open(
+        dir.path(),
+        FsyncMode::PerCommit,
+        degraded.clone(),
+    ));
     let mut log = UpdateLog::open(
-        dir.path(), sid, wm.clone(), FsyncMode::PerCommit,
-        64 * 1024 * 1024, std::time::Duration::from_secs(24 * 3600), degraded.clone(),
+        dir.path(),
+        sid,
+        wm.clone(),
+        FsyncMode::PerCommit,
+        64 * 1024 * 1024,
+        std::time::Duration::from_secs(24 * 3600),
+        degraded.clone(),
     )
     .unwrap();
     log.append(1, 1, &[(d1.0.clone(), &d1.1)]).await.unwrap();
@@ -196,18 +258,33 @@ async fn repro5c_corrupt_segment_permissions_not_0600() {
     corrupted[8 + len1 + 8] ^= 0xFF;
     std::fs::write(&path, &corrupted).unwrap();
     let degraded2 = Arc::new(DegradedFlag::new());
-    let wm2 = Arc::new(WatermarkStore::open(dir.path(), FsyncMode::PerCommit, degraded2.clone()));
+    let wm2 = Arc::new(WatermarkStore::open(
+        dir.path(),
+        FsyncMode::PerCommit,
+        degraded2.clone(),
+    ));
     let mut log2 = UpdateLog::open(
-        dir.path(), sid, wm2.clone(), FsyncMode::PerCommit,
-        64 * 1024 * 1024, std::time::Duration::from_secs(24 * 3600), degraded2.clone(),
+        dir.path(),
+        sid,
+        wm2.clone(),
+        FsyncMode::PerCommit,
+        64 * 1024 * 1024,
+        std::time::Duration::from_secs(24 * 3600),
+        degraded2.clone(),
     )
     .unwrap();
     let outcome = log2.replay().unwrap();
     assert!(outcome.truncated.is_some());
-    let artifacts: Vec<_> = std::fs::read_dir(dir.path().join("corrupt")).unwrap().flatten().collect();
+    let artifacts: Vec<_> = std::fs::read_dir(dir.path().join("corrupt"))
+        .unwrap()
+        .flatten()
+        .collect();
     assert!(!artifacts.is_empty());
     let mode = artifacts[0].metadata().unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "corrupt segment permissions should be 0600 (got {mode:o})");
+    assert_eq!(
+        mode, 0o600,
+        "corrupt segment permissions should be 0600 (got {mode:o})"
+    );
 }
 
 /// 疑点 5（P2）：compact 后 updates.snapshot 文件权限不是 0600（tmp 文件
@@ -220,22 +297,38 @@ async fn repro5_snapshot_permissions_not_0600() {
     let sid = uuid::Uuid::new_v4();
     let d1 = chat_doc(&sid, b"payload");
     let degraded = Arc::new(DegradedFlag::new());
-    let wm = Arc::new(WatermarkStore::open(dir.path(), FsyncMode::PerCommit, degraded.clone()));
+    let wm = Arc::new(WatermarkStore::open(
+        dir.path(),
+        FsyncMode::PerCommit,
+        degraded.clone(),
+    ));
     let mut log = UpdateLog::open(
-        dir.path(), sid, wm.clone(), FsyncMode::PerCommit,
-        64 * 1024 * 1024, std::time::Duration::from_secs(24 * 3600), degraded.clone(),
+        dir.path(),
+        sid,
+        wm.clone(),
+        FsyncMode::PerCommit,
+        64 * 1024 * 1024,
+        std::time::Duration::from_secs(24 * 3600),
+        degraded.clone(),
     )
     .unwrap();
     log.append(1, 1, &[(d1.0.clone(), &d1.1)]).await.unwrap();
-    log.compact([(d1.0.clone(), b"secret-doc-content".to_vec())].into_iter().collect())
-        .await
-        .unwrap();
+    log.compact(
+        [(d1.0.clone(), b"secret-doc-content".to_vec())]
+            .into_iter()
+            .collect(),
+    )
+    .await
+    .unwrap();
     let mode = std::fs::metadata(dir.path().join("updates.snapshot"))
         .unwrap()
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(mode, 0o600, "snapshot permissions should be 0600 (got {mode:o})");
+    assert_eq!(
+        mode, 0o600,
+        "snapshot permissions should be 0600 (got {mode:o})"
+    );
 }
 
 /// 疑点 6（P2）：mark_failed 注释声称 projection_committed → failed 合法，
@@ -246,8 +339,10 @@ fn repro6_projection_committed_to_failed_rejected() {
     let dir = tempdir().unwrap();
     let degraded = Arc::new(DegradedFlag::new());
     let mut outbox = OutboxStore::open(
-        dir.path(), FsyncMode::PerCommit,
-        std::time::Duration::from_secs(7 * 86_400), degraded,
+        dir.path(),
+        FsyncMode::PerCommit,
+        std::time::Duration::from_secs(7 * 86_400),
+        degraded,
     )
     .unwrap();
     let sid = uuid::Uuid::new_v4();

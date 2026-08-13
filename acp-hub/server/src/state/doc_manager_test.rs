@@ -133,7 +133,9 @@ fn replay_delta(chat: &str, seq: u64, text: &str) -> NormalizedEvent {
 }
 
 async fn open(mgr: &DocManager, chat: &str) {
-    mgr.open_chat(chat, "m1", Some("t"), None, None).await.unwrap();
+    mgr.open_chat(chat, "m1", Some("t"), None, None)
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -166,14 +168,20 @@ async fn batch_merges_deltas_into_single_transaction() {
             .iter()
             .filter(|(d, _)| *d == DocId::chat("s1"))
             .count();
-        assert_eq!(deltas, 2, "仅 user_message 已落盘（+初始化基线），批次未 flush");
+        assert_eq!(
+            deltas, 2,
+            "仅 user_message 已落盘（+初始化基线），批次未 flush"
+        );
     }
     // 推进 16ms → 批次 flush 为一次 chat 事务（一个 update）。
     tokio::time::advance(TokioDuration::from_millis(20)).await;
     tokio::task::yield_now().await;
     for h in handles {
         let r = h.await.expect("submit task panic");
-        assert!(matches!(r, SubmitResult::Applied(_)), "delta 提交应确认 Applied");
+        assert!(
+            matches!(r, SubmitResult::Applied(_)),
+            "delta 提交应确认 Applied"
+        );
     }
     {
         let updates = sink.updates.lock().await;
@@ -330,10 +338,7 @@ async fn try_reserve_slots_released_after_writer_consumes() {
     // 释放占用的名额（coordinator 执行器消费后调用）。
     mgr.release_reserve("s1").await;
     mgr.release_reserve("s1").await;
-    assert!(
-        mgr.try_reserve("s1").await,
-        "P1-1: 释放后名额必须恢复"
-    );
+    assert!(mgr.try_reserve("s1").await, "P1-1: 释放后名额必须恢复");
     // 不存在的 chat：no-op 不 panic。
     mgr.release_reserve("nope").await;
 }
@@ -413,7 +418,12 @@ async fn command_update_title_and_chat_terminal() {
     let mgr = DocManager::new(cfg(), Arc::new(MemSink::default()));
     open(&mgr, "s1").await;
     let r = mgr
-        .submit_command("s1", DocCommand::UpdateTitle { title: "新标题".into() })
+        .submit_command(
+            "s1",
+            DocCommand::UpdateTitle {
+                title: "新标题".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
     let r = mgr
@@ -434,8 +444,8 @@ async fn command_update_title_and_chat_terminal() {
 
 #[tokio::test(start_paused = true)]
 async fn command_apply_session_list_projects_idempotent_and_self_heals() {
-    use yrs::{Map, MapRef, ReadTxn, Transact};
     use acp_hub_proto::schema::SessionSummaryProjection;
+    use yrs::{Map, MapRef, ReadTxn, Transact};
 
     // 镜像从 MemSink 落盘记录重放（含 writer 启动基线——基线只走 sink，
     // 不经广播通道；真实客户端经 gateway 快照获得同源基线）。
@@ -483,22 +493,31 @@ async fn command_apply_session_list_projects_idempotent_and_self_heals() {
             .unwrap();
         assert_eq!(sessions.iter(&txn).count(), 2);
         let a = sessions.get(&txn, "a").unwrap().cast::<MapRef>().unwrap();
-        assert_eq!(a.get(&txn, "title").unwrap().cast::<String>().unwrap(), "会话A");
+        assert_eq!(
+            a.get(&txn, "title").unwrap().cast::<String>().unwrap(),
+            "会话A"
+        );
     }
 
     // 幂等：同列表再提交 → 仍 Applied（diff 无变化，无额外写入）。
     let r = mgr
-        .submit_command("s1", DocCommand::RegistryApplySessions {
-            entries: vec![sum("a", "会话A", "t0"), sum("b", "会话B", "t1")],
-        })
+        .submit_command(
+            "s1",
+            DocCommand::RegistryApplySessions {
+                entries: vec![sum("a", "会话A", "t0"), sum("b", "会话B", "t1")],
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
 
     // 全量同步：b 更新字段、a 不在响应中 → 旧条目删除（§6.3 自愈）。
     let _ = mgr
-        .submit_command("s1", DocCommand::RegistryApplySessions {
-            entries: vec![sum("b", "会话B-改", "t2")],
-        })
+        .submit_command(
+            "s1",
+            DocCommand::RegistryApplySessions {
+                entries: vec![sum("b", "会话B-改", "t2")],
+            },
+        )
         .await;
     drain(&sink, &mirror).await;
     {
@@ -512,7 +531,10 @@ async fn command_apply_session_list_projects_idempotent_and_self_heals() {
         assert_eq!(sessions.iter(&txn).count(), 1, "响应中不存在的旧条目应删除");
         assert!(sessions.get(&txn, "a").is_none());
         let b = sessions.get(&txn, "b").unwrap().cast::<MapRef>().unwrap();
-        assert_eq!(b.get(&txn, "title").unwrap().cast::<String>().unwrap(), "会话B-改");
+        assert_eq!(
+            b.get(&txn, "title").unwrap().cast::<String>().unwrap(),
+            "会话B-改"
+        );
     }
 }
 
@@ -521,8 +543,8 @@ async fn command_apply_session_list_projects_idempotent_and_self_heals() {
 /// 收集 remove；否则孤儿 key 永存、渲染层按 key 逐条渲染 → 重复条目。
 #[test]
 fn session_list_orphan_key_removed_by_full_sync() {
-    use acp_hub_proto::schema::SessionSummaryProjection;
     use crate::state::session_list;
+    use acp_hub_proto::schema::SessionSummaryProjection;
     use yrs::{Map, ReadTxn, Transact, WriteTxn};
 
     let doc = yrs::Doc::new();
@@ -582,7 +604,11 @@ fn session_list_orphan_key_removed_by_full_sync() {
         .unwrap();
     assert_eq!(sessions.iter(&txn).count(), 1, "孤儿删除后只剩 1 条");
     assert!(sessions.get(&txn, "old-key").is_none(), "孤儿 key 已删除");
-    let b = sessions.get(&txn, "b").unwrap().cast::<yrs::MapRef>().unwrap();
+    let b = sessions
+        .get(&txn, "b")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(b.get(&txn, "title").unwrap().cast::<String>().unwrap(), "B");
 }
 
@@ -593,8 +619,8 @@ fn session_list_orphan_key_removed_by_full_sync() {
 
 #[tokio::test(start_paused = true)]
 async fn load_replay_command_flow_projects_and_terminates_history() {
-    use yrs::{Array, GetString, Map, ReadTxn, Transact};
     use yrs::updates::decoder::Decode as _;
+    use yrs::{Array, GetString, Map, ReadTxn, Transact};
 
     // 镜像从 MemSink 落盘记录重放（含 writer 启动基线）。
     let sink = MemSink::default();
@@ -618,7 +644,12 @@ async fn load_replay_command_flow_projects_and_terminates_history() {
 
     // 回放模式开始（coordinator 在 session/load 请求前提交）。
     let r = mgr
-        .submit_command("s1", DocCommand::BeginLoadReplay { acp_session_id: "acp-1".into() })
+        .submit_command(
+            "s1",
+            DocCommand::BeginLoadReplay {
+                acp_session_id: "acp-1".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
 
@@ -641,9 +672,7 @@ async fn load_replay_command_flow_projects_and_terminates_history() {
     ));
 
     // 回放结束（load 响应到达后提交）：全部回放 turn 终态化。
-    let r = mgr
-        .submit_command("s1", DocCommand::EndLoadReplay)
-        .await;
+    let r = mgr.submit_command("s1", DocCommand::EndLoadReplay).await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
 
     // 批次 flush（delta 类入队即返回，需推进批次窗口）。
@@ -705,12 +734,18 @@ async fn load_replay_command_flow_projects_and_terminates_history() {
     assert_eq!(entry_text(&u1), "历史问题1");
     let a1 = get_entry("load:1:assistant");
     assert_eq!(entry_text(&a1), "历史回答1");
-    assert_eq!(a1.get(&txn, "status").unwrap().cast::<String>().unwrap(), "completed");
+    assert_eq!(
+        a1.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "completed"
+    );
     let u2 = get_entry("load:3:user");
     assert_eq!(entry_text(&u2), "历史问题2");
     let a2 = get_entry("load:3:assistant");
     assert_eq!(entry_text(&a2), "历史回答2");
-    assert_eq!(a2.get(&txn, "status").unwrap().cast::<String>().unwrap(), "completed");
+    assert_eq!(
+        a2.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "completed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -720,23 +755,27 @@ async fn load_replay_command_flow_projects_and_terminates_history() {
 
 #[tokio::test(start_paused = true)]
 async fn load_replay_first_frame_is_delta_synthesizes_placeholder() {
-    use yrs::{Array, GetString, Map, ReadTxn, Transact};
     use yrs::updates::decoder::Decode as _;
+    use yrs::{Array, GetString, Map, ReadTxn, Transact};
 
     let sink = MemSink::default();
     let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
     open(&mgr, "s1").await;
     let _ = mgr
-        .submit_command("s1", DocCommand::BeginLoadReplay { acp_session_id: "acp-1".into() })
+        .submit_command(
+            "s1",
+            DocCommand::BeginLoadReplay {
+                acp_session_id: "acp-1".into(),
+            },
+        )
         .await;
     // 历史首帧即 agent 增量（真实 peri 重放形态：无 turnId）。
     assert!(matches!(
-        mgr.submit_event(replay_delta("s1", 1, "历史回答（无前置问题）")).await,
+        mgr.submit_event(replay_delta("s1", 1, "历史回答（无前置问题）"))
+            .await,
         SubmitResult::Applied(_)
     ));
-    let _ = mgr
-        .submit_command("s1", DocCommand::EndLoadReplay)
-        .await;
+    let _ = mgr.submit_command("s1", DocCommand::EndLoadReplay).await;
     tokio::time::advance(TokioDuration::from_millis(20)).await;
     tokio::task::yield_now().await;
 
@@ -765,8 +804,16 @@ async fn load_replay_first_frame_is_delta_synthesizes_placeholder() {
         "回放合成不得产生空 id 条目：{keys:?}"
     );
     // 归位 turn = 首帧 seq（`load:1`）。
-    let a = entries.get(&txn, "load:1:assistant").unwrap().cast::<yrs::MapRef>().unwrap();
-    let order = a.get(&txn, "block_order").unwrap().cast::<yrs::ArrayRef>().unwrap();
+    let a = entries
+        .get(&txn, "load:1:assistant")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let order = a
+        .get(&txn, "block_order")
+        .unwrap()
+        .cast::<yrs::ArrayRef>()
+        .unwrap();
     let bid = order.get(&txn, 0).unwrap().cast::<String>().unwrap();
     let text = a
         .get(&txn, "blocks")
@@ -800,7 +847,10 @@ async fn expire_pending_permissions_batch_expires_all() {
     let sink = MemSink::default();
     let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
     open(&mgr, "s1").await;
-    assert!(matches!(mgr.submit_event(user_msg("s1", 1, "t1")).await, SubmitResult::Applied(_)));
+    assert!(matches!(
+        mgr.submit_event(user_msg("s1", 1, "t1")).await,
+        SubmitResult::Applied(_)
+    ));
     // 两条 pending 权限（事件路径投影）。
     for (seq, pid) in [(2u64, "p1"), (3, "p2")] {
         let ev = NormalizedEvent {
@@ -860,7 +910,10 @@ async fn expire_pending_permissions_batch_expires_all() {
             "expired"
         );
         assert!(
-            matches!(pm.get(&txn, "decision"), None | Some(yrs::Out::Any(yrs::Any::Null))),
+            matches!(
+                pm.get(&txn, "decision"),
+                None | Some(yrs::Out::Any(yrs::Any::Null))
+            ),
             "decision 保持 null"
         );
     }
@@ -893,12 +946,22 @@ async fn mark_turn_cancelling_sets_cancelling_state() {
     ));
     // cancel 前置：accepting → cancelling。
     let r = mgr
-        .submit_command("s1", DocCommand::MarkTurnCancelling { turn_id: "t1".into() })
+        .submit_command(
+            "s1",
+            DocCommand::MarkTurnCancelling {
+                turn_id: "t1".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
     // 幂等重发（状态已是 cancelling，非终态仍可再置——幂等无副作用）。
     let r = mgr
-        .submit_command("s1", DocCommand::MarkTurnCancelling { turn_id: "t1".into() })
+        .submit_command(
+            "s1",
+            DocCommand::MarkTurnCancelling {
+                turn_id: "t1".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(_)));
     // 终态后拒绝（SetTurnTerminal → cancelled → MarkTurnCancelling 守卫）。
@@ -913,9 +976,17 @@ async fn mark_turn_cancelling_sets_cancelling_state() {
         )
         .await;
     let r = mgr
-        .submit_command("s1", DocCommand::MarkTurnCancelling { turn_id: "t1".into() })
+        .submit_command(
+            "s1",
+            DocCommand::MarkTurnCancelling {
+                turn_id: "t1".into(),
+            },
+        )
         .await;
-    assert!(matches!(r, SubmitResult::Applied(a) if !a.applied), "终态后 cancel 前置拒绝");
+    assert!(
+        matches!(r, SubmitResult::Applied(a) if !a.applied),
+        "终态后 cancel 前置拒绝"
+    );
 
     tokio::time::advance(TokioDuration::from_millis(20)).await;
     tokio::task::yield_now().await;
@@ -933,9 +1004,16 @@ async fn mark_turn_cancelling_sets_cancelling_state() {
     drop(updates);
     let txn = mirror.transact();
     let root = txn.get_map("root").unwrap();
-    let sm = root.get(&txn, "session").unwrap().cast::<yrs::MapRef>().unwrap();
+    let sm = root
+        .get(&txn, "session")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
-        sm.get(&txn, "active_turn_status").unwrap().cast::<String>().unwrap(),
+        sm.get(&txn, "active_turn_status")
+            .unwrap()
+            .cast::<String>()
+            .unwrap(),
         "cancelled",
         "终态保持（cancel 前置不覆盖终态）"
     );
@@ -953,17 +1031,32 @@ async fn set_agent_session_id_writes_agent_projection() {
     open(&mgr, "s1").await;
     // session/new 绑定建立路径（create 无 load_session）。
     let r = mgr
-        .submit_command("s1", DocCommand::SetAgentSessionId { acp_session_id: "acp-new".into() })
+        .submit_command(
+            "s1",
+            DocCommand::SetAgentSessionId {
+                acp_session_id: "acp-new".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
     // load 切换：BeginLoadReplay 同步更新 agent.acp_session_id。
     let r = mgr
-        .submit_command("s1", DocCommand::BeginLoadReplay { acp_session_id: "acp-loaded".into() })
+        .submit_command(
+            "s1",
+            DocCommand::BeginLoadReplay {
+                acp_session_id: "acp-loaded".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
     // load 失败恢复：SetAgentSessionId 写回旧值。
     let r = mgr
-        .submit_command("s1", DocCommand::SetAgentSessionId { acp_session_id: "acp-prev".into() })
+        .submit_command(
+            "s1",
+            DocCommand::SetAgentSessionId {
+                acp_session_id: "acp-prev".into(),
+            },
+        )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if a.applied));
 
@@ -983,9 +1076,16 @@ async fn set_agent_session_id_writes_agent_projection() {
     drop(updates);
     let txn = mirror.transact();
     let root = txn.get_map("root").unwrap();
-    let am = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    let am = root
+        .get(&txn, "agent")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
-        am.get(&txn, "acp_session_id").unwrap().cast::<String>().unwrap(),
+        am.get(&txn, "acp_session_id")
+            .unwrap()
+            .cast::<String>()
+            .unwrap(),
         "acp-prev",
         "恢复路径写回旧值（镜像以最后写入为准）"
     );
@@ -1039,7 +1139,10 @@ async fn open_chat_idempotent_and_close_rejects_submit() {
     mgr.close_chat("s1").await.unwrap();
     // close 后提交 → ChatNotFound。
     let r = mgr.submit_event(user_msg("s1", 1, "t1")).await;
-    assert!(matches!(r, SubmitResult::Rejected(SubmitError::ChatNotFound)));
+    assert!(matches!(
+        r,
+        SubmitResult::Rejected(SubmitError::ChatNotFound)
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,9 +1320,15 @@ async fn resume_after_gap_uncalibratable_rejected() {
         },
     };
     let r = mgr.submit_event(e).await;
-    assert!(matches!(r, SubmitResult::Applied(a) if !a.applied), "epoch 变化帧应被拒绝");
+    assert!(
+        matches!(r, SubmitResult::Applied(a) if !a.applied),
+        "epoch 变化帧应被拒绝"
+    );
     // 不可校准：ResumeAfterGap → Rejected（保持 gap 呈现——只能经 load
     // 显式重建消除，不得误标为已追平）。
     let r = mgr.submit_command("s1", DocCommand::ResumeAfterGap).await;
-    assert!(matches!(r, SubmitResult::Rejected(_)), "uncalibratable 拒绝恢复");
+    assert!(
+        matches!(r, SubmitResult::Rejected(_)),
+        "uncalibratable 拒绝恢复"
+    );
 }

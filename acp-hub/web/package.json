@@ -6,6 +6,8 @@
   "description": "acp-hub 前端（验证台 + Web 面板）：SolidJS + Tailwind，vite 构建产物由 acp-hub-server 编译期内嵌静态部署",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test tests/*.test.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },

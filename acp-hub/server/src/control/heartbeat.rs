@@ -146,10 +146,7 @@ mod heartbeat_test {
 
     #[test]
     fn driver_pong_extends_window() {
-        let mut d = HeartbeatDriver::new(
-            Duration::from_secs(5),
-            Duration::from_secs(15),
-        );
+        let mut d = HeartbeatDriver::new(Duration::from_secs(5), Duration::from_secs(15));
         let t0 = Instant::now();
         // 14s 未 pong：未超时。
         assert!(!d.check_timeout(t0 + Duration::from_secs(14)));

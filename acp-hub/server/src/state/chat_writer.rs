@@ -108,10 +108,7 @@ pub fn tool_call_exists<T: ReadTxn>(txn: &T, tool_call_id: &str) -> bool {
 }
 
 /// 读取 tool_call 投影（聚合器 upsert 前读取以保留未覆盖字段）。
-pub fn tool_call_projection<T: ReadTxn>(
-    txn: &T,
-    tool_call_id: &str,
-) -> Option<ToolCallProjection> {
+pub fn tool_call_projection<T: ReadTxn>(txn: &T, tool_call_id: &str) -> Option<ToolCallProjection> {
     let root = root_map_read(txn)?;
     let calls = root.get(txn, "tool_calls")?.cast::<yrs::MapRef>().ok()?;
     let map = calls.get(txn, tool_call_id)?.cast::<yrs::MapRef>().ok()?;
@@ -119,10 +116,8 @@ pub fn tool_call_projection<T: ReadTxn>(
 }
 
 fn proj_from_map<T: ReadTxn>(txn: &T, map: &yrs::MapRef) -> ToolCallProjection {
-    let str_or = |key: &str| -> Option<String> {
-        map.get(txn, key)
-            .and_then(|v| v.cast::<String>().ok())
-    };
+    let str_or =
+        |key: &str| -> Option<String> { map.get(txn, key).and_then(|v| v.cast::<String>().ok()) };
     ToolCallProjection {
         tool_call_id: str_or("tool_call_id").unwrap_or_default(),
         turn_id: str_or("turn_id").unwrap_or_default(),
@@ -133,10 +128,13 @@ fn proj_from_map<T: ReadTxn>(txn: &T, map: &yrs::MapRef) -> ToolCallProjection {
             .unwrap_or(ToolCallStatus::Pending),
         arguments: map.get(txn, "arguments").and_then(out_any).map(any_to_json),
         result: map.get(txn, "result").and_then(out_any).map(any_to_json),
-        public_error: map.get(txn, "public_error").and_then(|v| v.cast::<yrs::MapRef>().ok()).map(|_| PublicError {
-            code: str_or("public_error_code").unwrap_or_default(),
-            message: str_or("public_error_message").unwrap_or_default(),
-        }),
+        public_error: map
+            .get(txn, "public_error")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+            .map(|_| PublicError {
+                code: str_or("public_error_code").unwrap_or_default(),
+                message: str_or("public_error_message").unwrap_or_default(),
+            }),
         permission_id: str_or("permission_id"),
     }
 }
@@ -169,14 +167,12 @@ fn any_to_json(a: yrs::Any) -> serde_json::Value {
 
 /// 读取 entries MapRef（写入遍历/读取用）。
 pub fn entries_map(txn: &mut TransactionCtx<'_>) -> yrs::MapRef {
-    root_map(txn)
-        .get_or_init::<_, yrs::MapRef>(txn, "entries")
+    root_map(txn).get_or_init::<_, yrs::MapRef>(txn, "entries")
 }
 
 /// 读取 tool_calls MapRef。
 pub fn tool_calls_map(txn: &mut TransactionCtx<'_>) -> yrs::MapRef {
-    root_map(txn)
-        .get_or_init::<_, yrs::MapRef>(txn, "tool_calls")
+    root_map(txn).get_or_init::<_, yrs::MapRef>(txn, "tool_calls")
 }
 
 /// 读取 entry_order ArrayRef。
@@ -248,21 +244,18 @@ pub fn create_user_entry(
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
     // 同 turn_id 的 user entry 已存在 → 跳过。
-    if entries
-        .iter(txn)
-        .any(|(_, v)| {
-            v.cast::<yrs::MapRef>().ok().map(|m| {
-                m.get(txn, "role")
-                    .and_then(|r| r.cast::<String>().ok())
+    if entries.iter(txn).any(|(_, v)| {
+        v.cast::<yrs::MapRef>().ok().map(|m| {
+            m.get(txn, "role")
+                .and_then(|r| r.cast::<String>().ok())
+                .as_deref()
+                == Some("user")
+                && m.get(txn, "turn_id")
+                    .and_then(|t| t.cast::<String>().ok())
                     .as_deref()
-                    == Some("user")
-                    && m.get(txn, "turn_id")
-                        .and_then(|t| t.cast::<String>().ok())
-                        .as_deref()
-                        == Some(turn_id)
-            }) == Some(true)
-        })
-    {
+                    == Some(turn_id)
+        }) == Some(true)
+    }) {
         return false;
     }
     let entry = ChatEntry {
@@ -335,7 +328,9 @@ pub fn append_block(
         return false;
     };
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -418,7 +413,9 @@ pub fn append_text_delta(
     kind: ContentKind,
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -428,7 +425,8 @@ pub fn append_text_delta(
         Some(v) => {
             // 已有块：定位 Y.Text 追加。
             if let Some(text) = v.cast::<yrs::MapRef>().ok().and_then(|m| {
-                m.get(txn, "text").and_then(|t| t.cast::<yrs::TextRef>().ok())
+                m.get(txn, "text")
+                    .and_then(|t| t.cast::<yrs::TextRef>().ok())
             }) {
                 text.push(txn, delta);
             }
@@ -471,18 +469,14 @@ pub fn set_reasoning_visibility(
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
     // 收集块所在 entry（先遍历收集再写入，避免 iter 借用与写借用冲突）。
-    let target_entry = entries
-        .iter(txn)
-        .find_map(|(_, v)| {
-            v.cast::<yrs::MapRef>()
-                .ok()
-                .filter(|m| {
-                    m.get(txn, "blocks")
-                        .and_then(|b| b.cast::<yrs::MapRef>().ok())
-                        .map(|blocks| blocks.get(txn, block_id).is_some())
-                        .unwrap_or(false)
-                })
-        });
+    let target_entry = entries.iter(txn).find_map(|(_, v)| {
+        v.cast::<yrs::MapRef>().ok().filter(|m| {
+            m.get(txn, "blocks")
+                .and_then(|b| b.cast::<yrs::MapRef>().ok())
+                .map(|blocks| blocks.get(txn, block_id).is_some())
+                .unwrap_or(false)
+        })
+    });
     match target_entry {
         Some(entry_map) => {
             let blocks = entry_map.get_or_init::<_, yrs::MapRef>(txn, "blocks");
@@ -546,12 +540,7 @@ fn insert_opt_json(
     };
 }
 
-fn write_public_error(
-    txn: &mut TransactionCtx<'_>,
-    map: &yrs::MapRef,
-    key: &str,
-    e: &PublicError,
-) {
+fn write_public_error(txn: &mut TransactionCtx<'_>, map: &yrs::MapRef, key: &str, e: &PublicError) {
     let em = map.insert(txn, key, yrs::MapPrelim::default());
     em.insert(txn, "code", e.code.clone());
     em.insert(txn, "message", e.message.clone());
@@ -568,7 +557,9 @@ pub fn migrate_entry_terminal(
     error: Option<&PublicError>,
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -602,7 +593,8 @@ pub fn set_active_turn(
                 .and_then(|t| t.cast::<String>().ok())
                 .as_deref()
                 != Some(a.turn_id.as_str())
-                || sm.get(txn, "active_turn_status")
+                || sm
+                    .get(txn, "active_turn_status")
                     .and_then(|t| t.cast::<String>().ok())
                     != Some(turn_status_str(a.turn_status).to_string());
             if changed {

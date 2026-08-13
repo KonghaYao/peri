@@ -59,7 +59,8 @@ impl ViewStore for YrsViewStore {
     }
 
     fn apply_update(&self, update: &[u8]) -> Result<(), ViewStoreError> {
-        let parsed = Update::decode_v1(update).map_err(|e| ViewStoreError::UpdateDecode(e.to_string()))?;
+        let parsed =
+            Update::decode_v1(update).map_err(|e| ViewStoreError::UpdateDecode(e.to_string()))?;
         self.doc
             .transact_mut()
             .apply_update(parsed)
@@ -74,9 +75,7 @@ impl ViewStore for YrsViewStore {
                 let _ = tx.send(e.update.clone());
             })
             .unwrap_or_else(|e| panic!("observe_update failed: {e}"));
-        ViewStoreSubscription {
-            subscription: sub,
-        }
+        ViewStoreSubscription { subscription: sub }
     }
 
     fn with_txn<R>(&mut self, f: impl FnOnce(&mut TransactionCtx<'_>) -> R) -> R {

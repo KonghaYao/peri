@@ -30,7 +30,9 @@ async fn test_registry() -> (RegistryState, Arc<DocManager>) {
 async fn register_and_bind_resolve() {
     let (reg, _doc) = test_registry().await;
     let reg = ChatRegistry::new(reg);
-    reg.register("s1", "m1", Some("title"), "/", None).await.unwrap();
+    reg.register("s1", "m1", Some("title"), "/", None)
+        .await
+        .unwrap();
     let e = reg.entry("s1").await.unwrap();
     assert_eq!(e.state, ChatState::Accepting);
     assert_eq!(e.instance_id, "m1");
@@ -114,7 +116,10 @@ async fn pending_close_offline() {
     let reg = ChatRegistry::new(reg);
     reg.register("s1", "m1", None, "/", None).await.unwrap();
     reg.request_close_offline("s1").await.unwrap();
-    assert_eq!(reg.entry("s1").await.unwrap().state, ChatState::PendingClose);
+    assert_eq!(
+        reg.entry("s1").await.unwrap().state,
+        ChatState::PendingClose
+    );
     assert!(reg.pending_close_chats().await.contains(&"s1".to_string()));
     // close 完成后清 pending_close（§7.6）。
     reg.transition("s1", ChatState::Closed).await.unwrap();
@@ -187,7 +192,10 @@ async fn active_turn_touch_and_idle() {
     // 登记 → idle 为微小正时长（远小于 1s）。
     reg.set_active_turn("s1", "t1").await;
     let idle = reg.active_turn_idle("s1").await.expect("登记后有 idle");
-    assert!(idle < Duration::from_secs(1), "刚登记 idle 应微小（got {idle:?}）");
+    assert!(
+        idle < Duration::from_secs(1),
+        "刚登记 idle 应微小（got {idle:?}）"
+    );
     // touch 续命：sleep 30ms 后 touch → idle 重置回微小值（增量窗口续期）。
     tokio::time::sleep(Duration::from_millis(30)).await;
     reg.touch_active_turn("s1").await;

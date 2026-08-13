@@ -56,7 +56,10 @@ pub enum ContentBlock {
         text: String,
         visibility: BlockVisibility,
     },
-    ToolCall { block_id: String, tool_call_id: String },
+    ToolCall {
+        block_id: String,
+        tool_call_id: String,
+    },
     /// 只存引用，不嵌入内容。
     Resource {
         block_id: String,

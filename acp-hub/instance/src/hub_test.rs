@@ -4,9 +4,7 @@
 use super::*;
 use std::time::Duration;
 
-use acp_hub_proto::hmac::{
-    compute_mac, derive_mac_key, mac_input, CHALLENGE_NONCE_LEN,
-};
+use acp_hub_proto::hmac::{compute_mac, derive_mac_key, mac_input, CHALLENGE_NONCE_LEN};
 use acp_hub_proto::instance::InstanceHello;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
@@ -48,7 +46,11 @@ fn valid_auth_response(hello: &InstanceHello) -> acp_hub_proto::conn::AuthRespon
 
 /// 测试配置（短超时/短间隔加速）。
 fn test_config(addr: std::net::SocketAddr, data_dir: &Path) -> InstanceConfig {
-    let mut c = InstanceConfig::new(format!("ws://{addr}/instance"), TOKEN.to_string(), data_dir.to_path_buf());
+    let mut c = InstanceConfig::new(
+        format!("ws://{addr}/instance"),
+        TOKEN.to_string(),
+        data_dir.to_path_buf(),
+    );
     c.heartbeat_interval = Duration::from_millis(300);
     c.reconnect_base = Duration::from_millis(200);
     c.reconnect_max = Duration::from_secs(1);
@@ -99,7 +101,9 @@ async fn handshake_server(ws: Ws) -> (SplitSink, SplitStream, InstanceHello) {
     };
     let resp = valid_auth_response(&hello);
     ws.send(Message::Text(
-        serde_json::to_string(&Frame::AuthResponse(resp)).unwrap().into(),
+        serde_json::to_string(&Frame::AuthResponse(resp))
+            .unwrap()
+            .into(),
     ))
     .await
     .unwrap();
@@ -108,11 +112,9 @@ async fn handshake_server(ws: Ws) -> (SplitSink, SplitStream, InstanceHello) {
 }
 
 async fn send_frame(sink: &mut SplitSink, frame: &Frame) {
-    sink.send(Message::Text(
-        serde_json::to_string(frame).unwrap().into(),
-    ))
-    .await
-    .unwrap();
+    sink.send(Message::Text(serde_json::to_string(frame).unwrap().into()))
+        .await
+        .unwrap();
 }
 
 /// 读取下一帧（忽略未知/畸形帧；流结束 → panic）。
@@ -205,7 +207,10 @@ async fn test_full_flow_spawn_event_heartbeat_kill_exit() {
     // heartbeat（T2）：alive_sessions 含 s1。
     match next_frame(&mut stream).await {
         Frame::InstanceHeartbeat(h) => {
-            assert!(h.alive_sessions.contains(&"s1".to_string()), "alive 应含 s1");
+            assert!(
+                h.alive_sessions.contains(&"s1".to_string()),
+                "alive 应含 s1"
+            );
             assert_eq!(h.load, 20, "load = min(100, alive×20)");
         }
         other => panic!("期待 heartbeat，收到 {other:?}"),
@@ -261,7 +266,9 @@ async fn test_spawn_before_auth_is_dropped() {
         }
     }
     ws.send(Message::Text(
-        serde_json::to_string(&spawn_frame("c1", "s1", "echo x; sleep 30")).unwrap().into(),
+        serde_json::to_string(&spawn_frame("c1", "s1", "echo x; sleep 30"))
+            .unwrap()
+            .into(),
     ))
     .await
     .unwrap();
@@ -345,9 +352,17 @@ async fn test_buffer_sync_resync() {
 
     // --- 连接 2：hello 携带缓冲水位 → auth → buffer_sync 补推 → 实时 event ---
     let (sink2, mut s2, hello2) = handshake_server(accept_ws(&listener).await).await;
-    assert_eq!(hello2.buffered, Some(true), "有缓冲时必须上报 buffered=true");
+    assert_eq!(
+        hello2.buffered,
+        Some(true),
+        "有缓冲时必须上报 buffered=true"
+    );
     let epochs = hello2.stream_epochs.as_ref().unwrap();
-    assert_eq!(epochs.get("s1"), Some(&1), "stream_epochs 应含存活 session 的 epoch");
+    assert_eq!(
+        epochs.get("s1"),
+        Some(&1),
+        "stream_epochs 应含存活 session 的 epoch"
+    );
 
     // buffer_sync：from_seq=1（last_sent_seq+1）、frames seq 升序 1..3、epoch=1。
     let sync = loop {
@@ -377,12 +392,10 @@ async fn test_buffer_sync_resync() {
     // 脚本自然退出 → process_exit（在线路径）。
     match next_frame(&mut s2).await {
         Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
-        Frame::InstanceHeartbeat(_) => {
-            match next_frame(&mut s2).await {
-                Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
-                other => panic!("期待 process_exit，收到 {other:?}"),
-            }
-        }
+        Frame::InstanceHeartbeat(_) => match next_frame(&mut s2).await {
+            Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
+            other => panic!("期待 process_exit，收到 {other:?}"),
+        },
         other => panic!("期待 process_exit，收到 {other:?}"),
     }
 
@@ -404,7 +417,8 @@ async fn test_epoch_increment_on_rebuild() {
     let config = test_config(addr, dir.path());
 
     let hub = tokio::spawn(run(config));
-    let script = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; sleep 30"#;
+    let script =
+        r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; sleep 30"#;
 
     // 连接 1：spawn（epoch=1）→ event(seq=1) → kill → process_exit → 重建 spawn
     // （epoch=2）→ event(seq=1, epoch=2)。
@@ -476,7 +490,8 @@ async fn test_two_sessions_isolated_seqs() {
     let (mut sink, mut stream, _hello) = handshake_server(accept_ws(&listener).await).await;
 
     let script = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":2}}'; sleep 30"#;
-    let script2 = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s2","n":1}}'; sleep 30"#;
+    let script2 =
+        r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s2","n":1}}'; sleep 30"#;
     send_frame(&mut sink, &spawn_frame("c1", "s1", script)).await;
     send_frame(&mut sink, &spawn_frame("c2", "s2", script2)).await;
 

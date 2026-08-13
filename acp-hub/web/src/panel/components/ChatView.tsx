@@ -12,6 +12,9 @@
 import { ChatHeader } from './ChatHeader';
 import { Composer } from './Composer';
 import { MessageList } from './MessageList';
+import { Show } from 'solid-js';
+import { selectedSessionId } from '../store';
+import { EmptyState } from '../../ui/EmptyState';
 
 type ChatViewProps = {
   onOpenNavigation?: () => void;
@@ -25,8 +28,10 @@ export function ChatView(props: ChatViewProps) {
         onOpenNavigation={props.onOpenNavigation}
         onOpenStatus={props.onOpenStatus}
       />
-      <MessageList />
-      <Composer />
+      <Show when={selectedSessionId()} fallback={<EmptyState title="今天想做什么？" description="从左侧项目中新建或打开一个会话。acp-hub 会恢复对应的 ACP 上下文。" />}>
+        <MessageList />
+        <Composer />
+      </Show>
     </section>
   );
 }

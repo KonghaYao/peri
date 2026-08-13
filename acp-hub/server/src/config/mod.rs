@@ -395,9 +395,7 @@ impl Config {
             ));
         }
         if self.listen_port == 0 {
-            return Err(ConfigError::Invariant(
-                "listen_port 必须非 0".to_string(),
-            ));
+            return Err(ConfigError::Invariant("listen_port 必须非 0".to_string()));
         }
         for (name, d) in [
             ("heartbeat_interval", self.heartbeat_interval),
@@ -536,11 +534,10 @@ fn load_file(path: &Path) -> Result<FileConfig, ConfigError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let file: FileConfig =
-        toml::from_str(&content).map_err(|source| ConfigError::ParseConfig {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let file: FileConfig = toml::from_str(&content).map_err(|source| ConfigError::ParseConfig {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(file)
 }
 

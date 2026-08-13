@@ -41,7 +41,7 @@ anyhow = "1.0"
 thiserror = "2"
 
 # --- Utilities ---
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs-next = "2"
 
@@ -64,6 +64,7 @@ yrs = "0.27"
 
 # --- Config / 解析 ---
 toml = "0.8"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 
 # --- ACP 协议 schema ---

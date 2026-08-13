@@ -91,9 +91,8 @@ impl DiskSegment {
 
     /// 追加一条记录并 flush（读句柄可见性 + 崩溃即弃语义）。
     fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let len = u32::try_from(bytes.len()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "帧过长（>4GB）")
-        })?;
+        let len = u32::try_from(bytes.len())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "帧过长（>4GB）"))?;
         self.writer.write_all(&len.to_be_bytes())?;
         self.writer.write_all(bytes)?;
         self.writer.flush()?;
@@ -125,7 +124,10 @@ impl DiskSegment {
         let mut body = vec![0u8; len];
         r.read_exact(&mut body)?;
         let bf: BufferedFrame = serde_json::from_slice(&body).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("缓冲文件损坏: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("缓冲文件损坏: {e}"),
+            )
         })?;
         *out_len = 4 + len;
         Ok(Some(bf))
@@ -143,7 +145,6 @@ impl DiskSegment {
             None => Ok(None),
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -297,12 +298,7 @@ impl Buffer {
 
     /// 入缓冲（断线路径）。单帧超限 → [`PushOutcome::Oversize`]（跳过 + gap，
     /// seq 不消耗——调用方按 `Oversize` 处理缺口计数）。
-    pub fn push(
-        &mut self,
-        chat_id: &str,
-        seq: u64,
-        frame: serde_json::Value,
-    ) -> PushOutcome {
+    pub fn push(&mut self, chat_id: &str, seq: u64, frame: serde_json::Value) -> PushOutcome {
         let entry = self
             .chats
             .entry(chat_id.to_string())
@@ -319,8 +315,7 @@ impl Buffer {
             return PushOutcome::Oversize;
         }
         let size = bytes.len();
-        if entry.mem_bytes + size <= self.mem_bytes_limit
-            && entry.mem.len() < self.mem_frames_limit
+        if entry.mem_bytes + size <= self.mem_bytes_limit && entry.mem.len() < self.mem_frames_limit
         {
             entry.mem_bytes += size;
             entry.mem.push_back((bf, size));
@@ -368,9 +363,7 @@ impl Buffer {
 
     /// 任一 session 有待补推帧（`hello.buffered`，§6.3）。
     pub fn has_any_pending(&self) -> bool {
-        self.chats
-            .values()
-            .any(|e| e.total_frames > 0)
+        self.chats.values().any(|e| e.total_frames > 0)
     }
 
     /// 补推批次：从 pending 首部（内存优先，跨磁盘段）取最多 `max_frames` 帧、

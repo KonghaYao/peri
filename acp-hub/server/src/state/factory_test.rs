@@ -25,9 +25,21 @@ fn create_chat_doc_has_full_structure() {
         root_map.get(&txn, "projection_version"),
         Some(yrs::Out::Any(0u32.into()))
     );
-    assert!(root_map.get(&txn, "entries").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "tool_calls").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "entry_order").unwrap().cast::<yrs::ArrayRef>().is_ok());
+    assert!(root_map
+        .get(&txn, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "tool_calls")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "entry_order")
+        .unwrap()
+        .cast::<yrs::ArrayRef>()
+        .is_ok());
     drop(txn);
 
     let txn = pair.session.transact();
@@ -37,10 +49,26 @@ fn create_chat_doc_has_full_structure() {
         root_map.get(&txn, "schema_version"),
         Some(yrs::Out::Any(1u32.into()))
     );
-    assert!(root_map.get(&txn, "session").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "pending_permissions").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().is_ok());
+    assert!(root_map
+        .get(&txn, "session")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "agent")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "pending_permissions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "sessions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
 }
 
 #[test]
@@ -113,11 +141,23 @@ fn registry_doc_has_global_status() {
     let root_map = txn.get_map(ROOT).unwrap();
     assert_eq!(
         root_map.get(&txn, "schema_version"),
-        Some(yrs::Out::Any(1u32.into()))
+        Some(yrs::Out::Any(2u32.into()))
     );
-    assert!(root_map.get(&txn, "instances").unwrap().cast::<yrs::MapRef>().is_ok());
-    assert!(root_map.get(&txn, "chats").unwrap().cast::<yrs::MapRef>().is_ok());
-    let global = root_map.get(&txn, "global").unwrap().cast::<yrs::MapRef>().unwrap();
+    assert!(root_map
+        .get(&txn, "instances")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    assert!(root_map
+        .get(&txn, "chats")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .is_ok());
+    let global = root_map
+        .get(&txn, "global")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         global.get(&txn, "status"),
         Some(yrs::Out::Any("healthy".into()))

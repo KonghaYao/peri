@@ -15,8 +15,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use yrs::updates::decoder::Decode as _;
 use yrs::{Map, ReadTxn, Transact};
 
@@ -61,9 +61,7 @@ async fn start_server() -> TestServer {
     cfg.binding_timeout = Duration::from_secs(5);
 
     let mut token_store = TokenStore::load(&cfg.config_dir.join(TOKENS_FILE)).unwrap();
-    let instance_rec = token_store
-        .generate(TokenRole::Instance, "local")
-        .unwrap();
+    let instance_rec = token_store.generate(TokenRole::Instance, "local").unwrap();
     let client_rec = token_store.generate(TokenRole::Full, "tui").unwrap();
     let auth = Arc::new(tokio::sync::Mutex::new(AuthService::new(token_store)));
 
@@ -93,9 +91,7 @@ async fn start_server() -> TestServer {
 
 /// 工具：ws 连接（split stream）上的下一帧（文本）。
 type SplitWs<'a> = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 /// 工具：等待下一帧 ActionAck（跳过心跳 keep_alive 与状态广播——投影
@@ -161,7 +157,10 @@ async fn client_handshake_snapshot_then_ready() {
     match snap {
         Frame::YsyncUpdate(u) => {
             assert_eq!(u.doc, acp_hub_proto::conn::DocId::REGISTRY);
-            assert!(u.projection_version.is_some(), "快照必带 projection_version");
+            assert!(
+                u.projection_version.is_some(),
+                "快照必带 projection_version"
+            );
             // 快照可解码。
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&u.update)
@@ -173,7 +172,9 @@ async fn client_handshake_snapshot_then_ready() {
     let ready = next_frame(&mut stream).await;
     match ready {
         Frame::Ready(r) => {
-            assert!(r.projection_versions.contains_key(&acp_hub_proto::conn::DocId::REGISTRY));
+            assert!(r
+                .projection_versions
+                .contains_key(&acp_hub_proto::conn::DocId::REGISTRY));
         }
         other => panic!("expected ready, got {other:?}"),
     }
@@ -211,11 +212,10 @@ async fn client_bad_token_closed_no_data() {
 
 /// fake instance：hello（nonce + 双向认证校验）→ 帧循环（spawn/JSON-RPC
 /// 应答）。
-async fn fake_instance_connect(server: &TestServer) -> (
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) {
+async fn fake_instance_connect(
+    server: &TestServer,
+) -> (tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,)
+{
     let url = format!("ws://{}/", server.addr);
     let (ws, _) = connect_async(url).await.unwrap();
     let (mut sink, mut stream) = ws.split();
@@ -345,7 +345,10 @@ async fn instance_hello_populates_registry_instances_projection() {
                         // token name（机器名）即 instance_id（gateway 认证后
                         // ctx.name）；start_server 以 "local" 生成 instance token。
                         assert_eq!(mm.get(&txn, "id"), Some(yrs::Out::Any("local".into())));
-                        assert_eq!(mm.get(&txn, "hostname"), Some(yrs::Out::Any("local".into())));
+                        assert_eq!(
+                            mm.get(&txn, "hostname"),
+                            Some(yrs::Out::Any("local".into()))
+                        );
                         assert_eq!(mm.get(&txn, "status"), Some(yrs::Out::Any("online".into())));
                         assert_eq!(mm.get(&txn, "chat_count"), Some(yrs::Out::Any(0f64.into())));
                         instances_seen = true;
@@ -357,7 +360,10 @@ async fn instance_hello_populates_registry_instances_projection() {
             other => panic!("unexpected frame while waiting for registry instances: {other:?}"),
         }
     }
-    assert!(instances_seen, "hello 后 hub:registry instances 投影应非空（§7.1 接线）");
+    assert!(
+        instances_seen,
+        "hello 后 hub:registry instances 投影应非空（§7.1 接线）"
+    );
     drop(csink);
     let _ = cstream;
 }
@@ -445,7 +451,10 @@ async fn e2e_create_prompt_event_broadcast() {
         .await
         .unwrap();
     // 快照 + ready。
-    assert!(matches!(next_frame(&mut cstream).await, Frame::YsyncUpdate(_)));
+    assert!(matches!(
+        next_frame(&mut cstream).await,
+        Frame::YsyncUpdate(_)
+    ));
     assert!(matches!(next_frame(&mut cstream).await, Frame::Ready(_)));
 
     // ---- client session/create ----
@@ -724,21 +733,21 @@ async fn e2e_create_prompt_event_broadcast() {
     let mut got_committed = false;
     for _ in 0..12 {
         match tokio::time::timeout(Duration::from_secs(5), cstream.next()).await {
-            Ok(Some(Ok(Message::Text(t)))) => {
-                match Frame::parse(&t) {
-                    Ok(Frame::YsyncUpdate(u)) if u.doc == acp_hub_proto::conn::DocId::chat(&chat_id) => {
-                        got_broadcast = true;
-                    }
-                    Ok(Frame::ActionAck(a)) if a.status == acp_hub_proto::ack::AckStatus::Committed => {
-                        got_committed = true;
-                    }
-                    Ok(Frame::KeepAlive(_)) | Ok(Frame::Pong(_)) => {}
-                    Ok(other) => {
-                        panic!("unexpected frame during committed/broadcast wait: {other:?}");
-                    }
-                    Err(_) => continue,
+            Ok(Some(Ok(Message::Text(t)))) => match Frame::parse(&t) {
+                Ok(Frame::YsyncUpdate(u))
+                    if u.doc == acp_hub_proto::conn::DocId::chat(&chat_id) =>
+                {
+                    got_broadcast = true;
                 }
-            }
+                Ok(Frame::ActionAck(a)) if a.status == acp_hub_proto::ack::AckStatus::Committed => {
+                    got_committed = true;
+                }
+                Ok(Frame::KeepAlive(_)) | Ok(Frame::Pong(_)) => {}
+                Ok(other) => {
+                    panic!("unexpected frame during committed/broadcast wait: {other:?}");
+                }
+                Err(_) => continue,
+            },
             other => panic!("unexpected: {other:?}"),
         }
         if got_broadcast && got_committed {
@@ -792,17 +801,20 @@ async fn instance_disconnect_gaps_chat() {
     // 用 coordinator 直接登记一个 session（hub 内部句柄）。
     let hub = server._hub_keep.clone();
     let sid = uuid::Uuid::new_v4().to_string();
-    hub.chats.register(&sid, "local", Some("t"), "/", None).await.unwrap();
-    hub.doc.open_chat(&sid, "local", Some("t"), None, None).await.unwrap();
+    hub.chats
+        .register(&sid, "local", Some("t"), "/", None)
+        .await
+        .unwrap();
+    hub.doc
+        .open_chat(&sid, "local", Some("t"), None, None)
+        .await
+        .unwrap();
     hub.chats.bind(&sid, "acp-disc").await.unwrap();
     hub.chats.set_active_turn(&sid, "t1").await;
     let _ = hub;
 
     // 断开 instance（Close 帧）→ gateway 触发 on_instance_disconnect。
-    msink
-        .send(Message::Close(None))
-        .await
-        .unwrap();
+    msink.send(Message::Close(None)).await.unwrap();
     // 等待清理完成（轮询 session 状态）。
     let mut gapped = false;
     for _ in 0..50 {
@@ -814,6 +826,9 @@ async fn instance_disconnect_gaps_chat() {
             }
         }
     }
-    assert!(gapped, "session should be gapped after instance disconnect (§8.2)");
+    assert!(
+        gapped,
+        "session should be gapped after instance disconnect (§8.2)"
+    );
     let _ = mstream;
 }

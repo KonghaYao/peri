@@ -245,15 +245,14 @@ impl WatermarkStore {
                 });
             }
         }
-        crate::persist::update_log::sync_dir(
-            self.path.parent().expect("chat dir"),
-        )?;
+        crate::persist::update_log::sync_dir(self.path.parent().expect("chat dir"))?;
         Ok(())
     }
 
     /// 落盘失败：degraded + 告警（绝不静默，§8.4）。
     fn fail(&self, detail: &str) {
-        self.degraded.set(format!("watermark write failed: {detail}"));
+        self.degraded
+            .set(format!("watermark write failed: {detail}"));
         warn!(
             path = %self.path.display(), reason = detail,
             "watermark write failed; store degraded"
@@ -271,7 +270,13 @@ impl WatermarkStore {
         log_tail: Option<(u32, u64)>,
     ) -> (Watermark, Option<AlignmentWarning>) {
         let (aligned, warning) = match (wm, log_tail) {
-            (None, Some((le, ls))) => (Watermark { epoch: le, last_seq: ls }, None),
+            (None, Some((le, ls))) => (
+                Watermark {
+                    epoch: le,
+                    last_seq: ls,
+                },
+                None,
+            ),
             (None, None) => (Watermark::default(), None),
             (Some(w), None) => (w, None),
             (Some(w), Some((le, ls))) => {
@@ -281,7 +286,10 @@ impl WatermarkStore {
                     } else {
                         let seq = w.last_seq.min(ls);
                         (
-                            Watermark { epoch: le, last_seq: seq },
+                            Watermark {
+                                epoch: le,
+                                last_seq: seq,
+                            },
                             Some(AlignmentWarning::SeqMismatch {
                                 watermark_seq: w.last_seq,
                                 log_seq: ls,

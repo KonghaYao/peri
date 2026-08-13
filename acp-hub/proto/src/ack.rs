@@ -31,6 +31,12 @@ pub struct ActionAck {
     pub turn_id: Option<String>,
     /// `chat/create` 的 committed 必须携带（server 生成 id 的唯一告知路径）。
     pub chat_id: Option<String>,
+    /// project 管理 action 的持久化 project id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// project/session 管理 action 的 hub logical session id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// 新建会话类 action（`chat/create`/`chat/session-new`）的 committed 可携带
     /// 新 ACP 会话 id（session/new 响应）；前端据此刷新会话列表「当前」标记
     /// （跨任务契约 §3）。其余 action 恒为 None。

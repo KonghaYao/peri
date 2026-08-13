@@ -7,20 +7,19 @@ use tokio::sync::mpsc;
 
 use acp_hub_proto::action::PromptChatPayload;
 use acp_hub_proto::conn::DocId;
-use acp_hub_proto::ysync::{YsyncSubscribe, YsyncUnsubscribe};
 use acp_hub_proto::frame::Frame;
+use acp_hub_proto::ysync::{YsyncSubscribe, YsyncUnsubscribe};
 
 use crate::auth::{ConnectionCtx, TokenRole};
 use crate::channel::CommandCoordinator;
-use crate::channel::DEFAULT_ACP_CMD;
 use crate::channel::RelayEventHandler;
-use crate::channel::{ChannelDeps, DispatchOutcome, ChatChannel};
-use crate::control::StoreSink;
-use crate::control::InstanceRegistry;
+use crate::channel::DEFAULT_ACP_CMD;
+use crate::channel::{ChannelDeps, ChatChannel, DispatchOutcome};
 use crate::control::ChatRegistry;
+use crate::control::InstanceRegistry;
+use crate::control::StoreSink;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager};
-
 
 fn ctx(name: &str) -> ConnectionCtx {
     ConnectionCtx {
@@ -102,11 +101,19 @@ async fn first_frame_must_be_subscribe_or_action() {
     let mut ch = ChatChannel::new(ctx("c"));
     let (tx, _rx) = mpsc::channel(8);
     // 首帧 pong → 断开（1011）。
-    let o = ch.dispatch(Frame::Pong(acp_hub_proto::conn::Pong {}), &deps, tx.clone()).await;
+    let o = ch
+        .dispatch(Frame::Pong(acp_hub_proto::conn::Pong {}), &deps, tx.clone())
+        .await;
     assert!(matches!(o, DispatchOutcome::Disconnect(1011)));
     // 新连接：首帧 auth 类（S→C 帧）→ 断开。
     let mut ch2 = ChatChannel::new(ctx("c"));
-    let o = ch2.dispatch(Frame::KeepAlive(acp_hub_proto::conn::KeepAlive {}), &deps, tx).await;
+    let o = ch2
+        .dispatch(
+            Frame::KeepAlive(acp_hub_proto::conn::KeepAlive {}),
+            &deps,
+            tx,
+        )
+        .await;
     assert!(matches!(o, DispatchOutcome::Disconnect(1011)));
 }
 

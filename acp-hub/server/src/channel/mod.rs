@@ -18,11 +18,11 @@ mod gateway;
 mod relay_event_handler;
 
 pub use broadcaster::{
-    BackpressureAction, Broadcaster, OutboundMsg, SubError, decide_backpressure,
+    decide_backpressure, BackpressureAction, Broadcaster, OutboundMsg, SubError,
 };
+pub use chat_channel::{ChannelDeps, ChatChannel, DispatchOutcome};
 pub use command_coordinator::{CommandCoordinator, ExecCmd, SubmitAck};
 pub use command_coordinator::{DEFAULT_ACP_CMD, DEFAULT_INSTANCE_ID};
 pub use connection_registry::{ConnHandle, ConnId, ConnectionRegistry, RegistryFull};
 pub use gateway::{Gateway, GatewayError};
 pub use relay_event_handler::{ConsumeResult, PendingRpc, RelayError, RelayEventHandler};
-pub use chat_channel::{ChannelDeps, DispatchOutcome, ChatChannel};

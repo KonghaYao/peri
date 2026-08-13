@@ -31,8 +31,12 @@ async fn mirror_snapshot_rebuilds_from_log() {
     // 打开 session 并写入一条事件（聚合器投影 → sink 落盘 → 镜像）。
     // 控制类命令挂落盘应答（§8.2）→ 持久化前置：Store 目录须先建（StoreSink
     // 落盘按 session 目录路由）。
-    store.create_chat(uuid::Uuid::parse_str(sid).unwrap()).unwrap();
-    doc.open_chat(sid, "m1", Some("t"), None, None).await.unwrap();
+    store
+        .create_chat(uuid::Uuid::parse_str(sid).unwrap())
+        .unwrap();
+    doc.open_chat(sid, "m1", Some("t"), None, None)
+        .await
+        .unwrap();
     // 先建立 active turn（§6.5 服务端单写）：MessageDelta 受终态守卫约束
     // （§6.3 无活动 turn → UnknownTurn 拒绝）。
     let reg = doc
@@ -64,7 +68,10 @@ async fn mirror_snapshot_rebuilds_from_log() {
         },
     };
     let r = doc.submit_event(ev).await;
-    assert!(matches!(r, crate::state::doc_manager::SubmitResult::Applied(_)));
+    assert!(matches!(
+        r,
+        crate::state::doc_manager::SubmitResult::Applied(_)
+    ));
     // delta 类事件入队即返（§8.2 微批次不逐事件应答）：轮询快照等待
     // flush（16ms 窗口 + 落盘 + 镜像应用）——Factory 初始化 update（pv=0）
     // 与事件 update 同批入广播流，以 projection_version >= 1 判定事件已
@@ -90,7 +97,9 @@ async fn mirror_snapshot_rebuilds_from_log() {
         if let Some(d) = docs.get(&DocId::chat(sid)) {
             let txn = d.transact();
             let root = txn.get_map("root").expect("root");
-            let entries = root.get(&txn, "entries").and_then(|v| v.cast::<yrs::MapRef>().ok());
+            let entries = root
+                .get(&txn, "entries")
+                .and_then(|v| v.cast::<yrs::MapRef>().ok());
             eprintln!("[dbg] entries map present: {}", entries.is_some());
             if let Some(m) = entries {
                 let keys: Vec<String> = m.keys(&txn).map(|k| k.to_string()).collect();
@@ -111,7 +120,10 @@ async fn mirror_snapshot_rebuilds_from_log() {
         .await
         .expect("rebuilt mirror has chat doc");
     eprintln!("[dbg] state2={} v2={}", state2.len(), v2);
-    assert!(!state2.is_empty(), "重启后镜像应含已落盘内容（P3 视图恢复）");
+    assert!(
+        !state2.is_empty(),
+        "重启后镜像应含已落盘内容（P3 视图恢复）"
+    );
     // 内容一致：合并后的 state 应包含文本。
     let bytes = state2;
     assert!(!bytes.is_empty());
@@ -136,7 +148,10 @@ async fn registry_update_persisted_and_replayed() {
     let store2 = Arc::new(Store::open(&persist_cfg2(&tmp)).unwrap());
     store2.recover().await;
     let sink2 = Arc::new(StoreSink::new(store2.clone()).await.unwrap());
-    let (state, _) = sink2.snapshot(&DocId::REGISTRY).await.expect("registry mirror");
+    let (state, _) = sink2
+        .snapshot(&DocId::REGISTRY)
+        .await
+        .expect("registry mirror");
     assert!(!state.is_empty());
     let _ = (store, sink);
 }
@@ -247,7 +262,11 @@ async fn hub_assemble_smoke_ready_sequence() {
     store.recover().await;
 
     // 装配（§8.6）：StoreSink → DocManager → 注册表/协调器/广播器 → Gateway。
-    let hub = Arc::new(crate::control::Hub::assemble(&cfg, store, auth).await.unwrap());
+    let hub = Arc::new(
+        crate::control::Hub::assemble(&cfg, store, auth)
+            .await
+            .unwrap(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let gateway = hub.gateway.clone();
@@ -288,7 +307,10 @@ async fn hub_assemble_smoke_ready_sequence() {
     match snap {
         acp_hub_proto::frame::Frame::YsyncUpdate(u) => {
             assert_eq!(u.doc, DocId::REGISTRY);
-            assert!(u.projection_version.is_some(), "快照必带 projection_version");
+            assert!(
+                u.projection_version.is_some(),
+                "快照必带 projection_version"
+            );
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&u.update)
                 .unwrap();
@@ -308,7 +330,10 @@ async fn hub_assemble_smoke_ready_sequence() {
     // Degraded 入口（§17.2 + §8.4.1 不变量 4）：装配后（instance 重连对账
     // 前）Restarting 门禁——拒绝新 committed 承诺；instance 重连（hello）
     // 对账后开门 → Healthy。
-    assert!(!hub.can_accept_committed(), "Restarting 期间不得接受新 committed（§8.4.1 不变量 4）");
+    assert!(
+        !hub.can_accept_committed(),
+        "Restarting 期间不得接受新 committed（§8.4.1 不变量 4）"
+    );
     hub.registry.clear_restarting().await.unwrap();
     assert!(hub.can_accept_committed());
 

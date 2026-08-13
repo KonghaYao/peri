@@ -160,11 +160,9 @@ fn run_with(
         let signal = async {
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigint = signal(SignalKind::interrupt())
-                    .expect("install SIGINT handler");
-                let mut sigterm = signal(SignalKind::terminate())
-                    .expect("install SIGTERM handler");
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+                let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
                 tokio::select! {
                     _ = sigint.recv() => {}
                     _ = sigterm.recv() => {}
@@ -206,14 +204,28 @@ fn token_command(config: Option<PathBuf>, json_log: bool, args: TokenArgs) -> an
             let rec = store.generate(role, &name)?;
             // 完整 token 仅 stdout 打印一次（供复制到 instance/TUI 配置）。
             println!("{}", rec.token);
-            audit("token.generate", None, Some(&rec.id), "ok", start.elapsed(), None);
+            audit(
+                "token.generate",
+                None,
+                Some(&rec.id),
+                "ok",
+                start.elapsed(),
+                None,
+            );
         }
         TokenArgs::Revoke { token_id } => {
             let start = Instant::now();
             match store.revoke(&token_id)? {
                 Some(rec) => {
                     println!("revoked {}", rec.id);
-                    audit("token.revoke", None, Some(&rec.id), "ok", start.elapsed(), None);
+                    audit(
+                        "token.revoke",
+                        None,
+                        Some(&rec.id),
+                        "ok",
+                        start.elapsed(),
+                        None,
+                    );
                 }
                 None => {
                     eprintln!("[acp-hub-server] token {token_id} 不存在或已吊销（幂等）");

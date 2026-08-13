@@ -1,14 +1,18 @@
 //! M1 帧集白名单测试：§4.8 向量 6（未知 t / 方向约束）+ 收窄矩阵。
 
 use crate::frame::FrameTag;
-use crate::whitelist::{
-    m1_allows, m1_allows_action_type, m1_check, Direction, M1Check, Role,
-};
+use crate::whitelist::{m1_allows, m1_allows_action_type, m1_check, Direction, M1Check, Role};
 
 /// 客户端面：C→S 允许集合（§9.1）。
 #[test]
 fn client_inbound_m1_set() {
-    for tag in ["action", "ysync.subscribe", "ysync.unsubscribe", "pong", "auth"] {
+    for tag in [
+        "action",
+        "ysync.subscribe",
+        "ysync.unsubscribe",
+        "pong",
+        "auth",
+    ] {
         assert_eq!(
             m1_check(FrameTag(tag), Role::Client, Direction::Inbound),
             M1Check::Allowed,
@@ -16,13 +20,23 @@ fn client_inbound_m1_set() {
         );
     }
     // 布尔便捷形式一致
-    assert!(m1_allows(FrameTag("action"), Role::Client, Direction::Inbound));
+    assert!(m1_allows(
+        FrameTag("action"),
+        Role::Client,
+        Direction::Inbound
+    ));
 }
 
 /// 客户端面：S→C 允许集合（§9.1）。
 #[test]
 fn client_outbound_m1_set() {
-    for tag in ["action_ack", "action_error", "ysync.update", "ready", "keep_alive"] {
+    for tag in [
+        "action_ack",
+        "action_error",
+        "ysync.update",
+        "ready",
+        "keep_alive",
+    ] {
         assert_eq!(
             m1_check(FrameTag(tag), Role::Client, Direction::Outbound),
             M1Check::Allowed,
@@ -35,11 +49,7 @@ fn client_outbound_m1_set() {
 #[test]
 fn client_uplink_ysync_update_rejected() {
     assert_eq!(
-        m1_check(
-            FrameTag("ysync.update"),
-            Role::Client,
-            Direction::Inbound
-        ),
+        m1_check(FrameTag("ysync.update"), Role::Client, Direction::Inbound),
         M1Check::DirectionRejected
     );
     assert!(!m1_allows(
@@ -143,13 +153,19 @@ fn m1_action_type_subset() {
         "workspace/create",
         "workspace/remove",
         "session/list",
+        "project/create",
+        "project/archive",
+        "session/create",
+        "session/open",
+        "session/rename",
+        "session/import",
     ] {
         assert!(m1_allows_action_type(t), "{t} 应在 M1");
     }
     for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 10);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 16);
 }
 
 /// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与

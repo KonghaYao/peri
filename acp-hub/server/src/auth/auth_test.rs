@@ -113,10 +113,7 @@ fn assert_audit_redacted(text: &str, tokens: &[&str]) {
             }
         }
         for t in tokens {
-            assert!(
-                !line.contains(t),
-                "审计日志泄露 token 材料: {line}"
-            );
+            assert!(!line.contains(t), "审计日志泄露 token 材料: {line}");
         }
     }
 }
@@ -144,7 +141,11 @@ fn t1_generate() {
     // 落盘 → 重载一致
     let reloaded = TokenStore::load(&dir.path().join("tokens.toml")).unwrap();
     assert_eq!(reloaded.len(), 2);
-    let reloaded_rec = reloaded.list().into_iter().find(|i| i.id == rec.id).unwrap();
+    let reloaded_rec = reloaded
+        .list()
+        .into_iter()
+        .find(|i| i.id == rec.id)
+        .unwrap();
     assert_eq!(reloaded_rec.role, TokenRole::Instance);
     assert_eq!(reloaded_rec.name, "desktop-01");
 }
@@ -164,7 +165,10 @@ fn t2_validate() {
 
     // 未知 → UnknownToken
     assert!(matches!(
-        store.validate("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", TokenRole::Instance),
+        store.validate(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            TokenRole::Instance
+        ),
         Err(AuthError::UnknownToken)
     ));
 
@@ -234,7 +238,10 @@ fn t4_atomic_write_failure_keeps_original() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     let err = store.generate(TokenRole::Full, "tui").unwrap_err();
     assert!(
-        matches!(err, crate::auth::StoreError::Io(_) | crate::auth::StoreError::Persist(_)),
+        matches!(
+            err,
+            crate::auth::StoreError::Io(_) | crate::auth::StoreError::Persist(_)
+        ),
         "只读目录写失败应报错: {err}"
     );
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -266,7 +273,8 @@ fn t5_mtime_reload() {
     std::fs::write(&path, content).unwrap();
     // 强制 mtime 前进（部分文件系统时间戳精度低，避免同值漏检）
     let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    f.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
     drop(f);
 
     // 下一次 validate 拒绝被吊销 token（mtime 变化触发重载）
@@ -286,10 +294,14 @@ fn t5_mtime_reload_bad_file_keeps_old_state() {
 
     std::fs::write(&path, "not valid toml {{{").unwrap();
     let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    f.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
     drop(f);
 
-    assert!(store.validate(&rec.token, TokenRole::Instance).is_ok(), "坏文件不应导致服务中断");
+    assert!(
+        store.validate(&rec.token, TokenRole::Instance).is_ok(),
+        "坏文件不应导致服务中断"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -363,12 +375,21 @@ fn t8_redaction() {
 
     // 1. TokenInfo 无 token 字段（结构保证）：Debug 输出不含 token 本体
     let info = &store.list()[0];
-    assert!(!format!("{info:?}").contains(&token), "TokenInfo 泄露 token");
-    assert!(!info.to_string().contains(&token), "TokenInfo Display 泄露 token");
+    assert!(
+        !format!("{info:?}").contains(&token),
+        "TokenInfo 泄露 token"
+    );
+    assert!(
+        !info.to_string().contains(&token),
+        "TokenInfo Display 泄露 token"
+    );
 
     // 2. AuthError Display 不含凭证材料
     let err = store.validate(&token, TokenRole::Instance).unwrap_err();
-    assert!(!err.to_string().contains(&token), "AuthError Display 泄露 token");
+    assert!(
+        !err.to_string().contains(&token),
+        "AuthError Display 泄露 token"
+    );
 
     // 3. 审计事件（认证失败路径）字段 ⊆ 白名单且不含 token
     let mut svc = AuthService::new(store);
@@ -406,7 +427,10 @@ async fn failure_audit_carries_total_snapshot() {
             peer(),
         ))
     });
-    assert!(log.contains("auth_failed_total"), "失败审计应携带快照: {log}");
+    assert!(
+        log.contains("auth_failed_total"),
+        "失败审计应携带快照: {log}"
+    );
     let v: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
     let fields = v["fields"].as_object().unwrap();
     assert_eq!(fields["auth_failed_total"].as_u64(), Some(1));
@@ -429,17 +453,37 @@ async fn h1_success_path() {
 
     // 独立重算（proto 原语）
     let token_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&rec.token).unwrap().try_into().unwrap();
+        .decode(&rec.token)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let nonce_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&nonce_b64).unwrap().try_into().unwrap();
+        .decode(&nonce_b64)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let ctx_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&ok.response.connection_context).unwrap().try_into().unwrap();
+        .decode(&ok.response.connection_context)
+        .unwrap()
+        .try_into()
+        .unwrap();
 
     let key = derive_mac_key(&token_bytes, "instance");
-    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "instance");
+    let input = mac_input(
+        &nonce_bytes,
+        &ctx_bytes,
+        &PROTOCOL_VERSION.to_string(),
+        "instance",
+    );
     let expected = base64::engine::general_purpose::STANDARD.encode(compute_mac(&key, &input));
-    assert_eq!(ok.response.hmac, expected, "auth_response.hmac 与独立重算一致");
-    assert!(verify_mac(&key, &input, &ok.response.hmac).is_ok(), "verify_mac 常量时间路径通过");
+    assert_eq!(
+        ok.response.hmac, expected,
+        "auth_response.hmac 与独立重算一致"
+    );
+    assert!(
+        verify_mac(&key, &input, &ok.response.hmac).is_ok(),
+        "verify_mac 常量时间路径通过"
+    );
 
     // ctx 绑定信息
     assert_eq!(ok.ctx.token_id, rec.id);
@@ -487,10 +531,7 @@ async fn h3_replay_nonce() {
         .is_ok());
     // 同 nonce 二次 hello → 重放拒绝（即使 token 正确）
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_instance(
-            &make_hello(&rec.token, &nonce_b64),
-            peer(),
-        ))
+        block_on(svc.authenticate_instance(&make_hello(&rec.token, &nonce_b64), peer()))
     });
     assert!(matches!(result, Err(AuthError::ReplayNonce)));
     assert_audit_redacted(&log, &[]);
@@ -580,10 +621,7 @@ async fn h6_role_mismatch() {
     // client token 提交 instance/hello → RoleMismatch
     let client = svc.store_mut().generate(TokenRole::Full, "tui").unwrap();
     let (result, log) = with_capture(|| {
-        block_on(svc.authenticate_instance(
-            &make_hello(&client.token, &new_nonce_b64()),
-            peer(),
-        ))
+        block_on(svc.authenticate_instance(&make_hello(&client.token, &new_nonce_b64()), peer()))
     });
     assert!(matches!(
         result,
@@ -595,7 +633,12 @@ async fn h6_role_mismatch() {
     // instance token 提交 client 认证 → RoleMismatch
     let instance = svc.store_mut().generate(TokenRole::Instance, "m1").unwrap();
     let result = svc
-        .authenticate_client(&Auth { token: instance.token.clone() }, peer())
+        .authenticate_client(
+            &Auth {
+                token: instance.token.clone(),
+            },
+            peer(),
+        )
         .await;
     assert!(matches!(
         result,
@@ -604,11 +647,19 @@ async fn h6_role_mismatch() {
 
     // full token 通过 client 认证（含 read-only）
     let ok = svc
-        .authenticate_client(&Auth { token: client.token.clone() }, peer())
+        .authenticate_client(
+            &Auth {
+                token: client.token.clone(),
+            },
+            peer(),
+        )
         .await
         .unwrap();
     assert_eq!(ok.wire_role(), Role::Client);
-    let ro = svc.store_mut().generate(TokenRole::ReadOnly, "web").unwrap();
+    let ro = svc
+        .store_mut()
+        .generate(TokenRole::ReadOnly, "web")
+        .unwrap();
     let ok = svc
         .authenticate_client(&Auth { token: ro.token }, peer())
         .await
@@ -633,15 +684,29 @@ async fn h7_version_binding() {
         .unwrap();
 
     let token_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&rec.token).unwrap().try_into().unwrap();
+        .decode(&rec.token)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let nonce_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&nonce_b64).unwrap().try_into().unwrap();
+        .decode(&nonce_b64)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let ctx_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
-        .decode(&ok.response.connection_context).unwrap().try_into().unwrap();
+        .decode(&ok.response.connection_context)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let key = derive_mac_key(&token_bytes, "instance");
 
     // 正确版本通过
-    let input = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "instance");
+    let input = mac_input(
+        &nonce_bytes,
+        &ctx_bytes,
+        &PROTOCOL_VERSION.to_string(),
+        "instance",
+    );
     assert!(verify_mac(&key, &input, &ok.response.hmac).is_ok());
 
     // 错误版本 → Mismatch（版本绑定天然拒绝，§4.5）
@@ -652,7 +717,12 @@ async fn h7_version_binding() {
     ));
 
     // 错误角色 → Mismatch（角色绑定）
-    let wrong_role = mac_input(&nonce_bytes, &ctx_bytes, &PROTOCOL_VERSION.to_string(), "client");
+    let wrong_role = mac_input(
+        &nonce_bytes,
+        &ctx_bytes,
+        &PROTOCOL_VERSION.to_string(),
+        "client",
+    );
     assert!(matches!(
         verify_mac(&key, &wrong_role, &ok.response.hmac),
         Err(acp_hub_proto::hmac::HmacError::Mismatch)
@@ -690,7 +760,12 @@ async fn h9_failure_counting() {
     // 3 次未知 token 失败（instance + client 面）
     for _ in 0..3 {
         let _ = svc
-            .authenticate_client(&Auth { token: "no-such-token".into() }, peer())
+            .authenticate_client(
+                &Auth {
+                    token: "no-such-token".into(),
+                },
+                peer(),
+            )
             .await;
     }
     assert_eq!(svc.stats().failures_for(UNKNOWN_TOKEN_ID), 3);
@@ -707,7 +782,11 @@ async fn h9_failure_counting() {
         .authenticate_instance(&make_hello(&rec.token, &new_nonce_b64()), peer())
         .await;
     assert_eq!(svc.stats().failures_for(&rec.id), 1, "吊销与未知分开计数");
-    assert_eq!(svc.stats().failures_for(UNKNOWN_TOKEN_ID), 3, "未知计数不受影响");
+    assert_eq!(
+        svc.stats().failures_for(UNKNOWN_TOKEN_ID),
+        3,
+        "未知计数不受影响"
+    );
     assert_eq!(svc.stats().total_failures(), 5);
 }
 
@@ -718,7 +797,10 @@ async fn h9_failure_counting() {
 fn h10_close_code() {
     assert_eq!(acp_hub_proto::conn::CLOSE_CONFIG_FATAL, 4502);
     // 非回环拒绝用 1011（§5 决策），与认证失败码区分。
-    assert_ne!(acp_hub_proto::conn::CLOSE_CONFIG_FATAL, acp_hub_proto::conn::CLOSE_GENERIC_FAILURE);
+    assert_ne!(
+        acp_hub_proto::conn::CLOSE_CONFIG_FATAL,
+        acp_hub_proto::conn::CLOSE_GENERIC_FAILURE
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +822,10 @@ fn bootstrap_instance_token() {
     let mut store2 = new_store(&dir.path().join("sub"));
     std::fs::create_dir_all(dir.path().join("sub")).unwrap();
     store2.generate(TokenRole::Full, "tui").unwrap();
-    let rec2 = store2.ensure_instance_token().unwrap().expect("应生成 instance token");
+    let rec2 = store2
+        .ensure_instance_token()
+        .unwrap()
+        .expect("应生成 instance token");
     assert_eq!(rec2.role, TokenRole::Instance);
 }
 
@@ -751,7 +836,10 @@ fn bootstrap_instance_token() {
 async fn client_ctx_fields() {
     let dir = tempdir().unwrap();
     let mut svc = AuthService::new(new_store(dir.path()));
-    let rec = svc.store_mut().generate(TokenRole::Full, "桌面 TUI").unwrap();
+    let rec = svc
+        .store_mut()
+        .generate(TokenRole::Full, "桌面 TUI")
+        .unwrap();
     let ctx = svc
         .authenticate_client(&Auth { token: rec.token }, peer())
         .await
@@ -792,4 +880,43 @@ fn token_info_from_record() {
     assert_eq!(info.name, rec.name);
     assert_eq!(info.created_at, rec.created_at);
     assert_eq!(info.revoked, rec.revoked);
+}
+
+#[test]
+fn browser_session_is_opaque_logout_and_revocation_aware() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = new_store(dir.path());
+    let rec = store.generate(TokenRole::Full, "browser").unwrap();
+    let mut svc = AuthService::new(store);
+    let (sid, ctx) = svc.create_browser_session(&rec.token).unwrap();
+    assert!(sid.len() >= 43 && !sid.contains(&rec.token));
+    assert_eq!(ctx.token_id, rec.id);
+    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_ok());
+    assert!(svc.delete_browser_session(&sid));
+    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_err());
+    let (sid, _) = svc.create_browser_session(&rec.token).unwrap();
+    svc.store_mut().revoke(&rec.id).unwrap();
+    assert!(svc.validate_browser_session(&sid, "127.0.0.1:1".parse().unwrap()).is_err());
+}
+
+#[test]
+fn browser_session_rejects_instance_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = new_store(dir.path());
+    let rec = store.generate(TokenRole::Instance, "machine").unwrap();
+    let mut svc = AuthService::new(store);
+    assert!(svc.create_browser_session(&rec.token).is_err());
+}
+
+#[test]
+fn external_cli_revoke_is_seen_by_open_identity_revalidation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tokens.toml");
+    let mut external = TokenStore::load(&path).unwrap();
+    let rec = external.generate(TokenRole::Full, "browser").unwrap();
+    let mut svc = AuthService::new(TokenStore::load(&path).unwrap());
+    assert!(svc.revalidate_client_identity(&rec.id, TokenRole::Full).is_ok());
+    std::thread::sleep(Duration::from_millis(10));
+    external.revoke(&rec.id).unwrap();
+    assert!(svc.revalidate_client_identity(&rec.id, TokenRole::Full).is_err());
 }

@@ -40,16 +40,16 @@ pub mod whitelist;
 pub mod ysync;
 
 // 公开面收敛：线协议帧类型从 frame 层直接可用。
-pub use ack::{ActionAck, ActionError, AckStatus, ErrorCode};
+pub use ack::{AckStatus, ActionAck, ActionError, ErrorCode};
 pub use action::{ActionEnvelope, CancelChatPayload, CloseChatPayload, CreateChatPayload};
 pub use conn::{Auth, AuthResponse, DocId, KeepAlive, Pong, Ready};
 pub use event::EventFrame;
 pub use frame::{Frame, FrameTag, ProtoError};
-pub use session::SessionListFrame;
 pub use instance::{
     BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello,
     InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
+pub use session::SessionListFrame;
 pub use version::{
     CHAT_DOC_SCHEMA_VERSION, PROTOCOL_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
     SESSION_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,

@@ -18,7 +18,12 @@ const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:8456/instance";
 /// 默认数据目录：`~/.local/share/acp-hub/instance/`（§10/§16 语义）。
 fn default_data_dir() -> PathBuf {
     dirs_next::home_dir()
-        .map(|h| h.join(".local").join("share").join("acp-hub").join("instance"))
+        .map(|h| {
+            h.join(".local")
+                .join("share")
+                .join("acp-hub")
+                .join("instance")
+        })
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

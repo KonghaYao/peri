@@ -30,11 +30,16 @@
 //! 设计稿：`docs/plans/f3-persist.md`；权威：`docs/architecture.md`
 //! §4.4/§4.5.1/§8.4/§8.4.1/§8.5/§16/§17.2。
 
+pub mod metadata;
 pub mod outbox;
 pub mod store;
 pub mod update_log;
 pub mod watermark;
 
+#[cfg(test)]
+mod metadata_test;
+#[cfg(test)]
+mod outbox_test;
 #[cfg(test)]
 #[cfg(test)]
 mod repro_test;
@@ -44,8 +49,6 @@ mod store_test;
 mod update_log_test;
 #[cfg(test)]
 mod watermark_test;
-#[cfg(test)]
-mod outbox_test;
 
 use std::path::PathBuf;
 
@@ -278,7 +281,7 @@ impl Default for DegradedFlag {
     }
 }
 
-pub use store::{BudgetReport, EvictionCandidate, ChatStore, Store};
+pub use store::{BudgetReport, ChatStore, EvictionCandidate, Store};
 pub use update_log::{
     CorruptionInfo, LogRecord, ReplayOutcome, Snapshot, UpdateLog, UpdateLogStats,
 };
