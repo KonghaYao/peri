@@ -696,6 +696,7 @@ image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime
 image-preview-loading = [Image: { $name }]
 image-preview-degraded = 仅受管理目录（~/.peri/images）内的图片可自动预览
 image-preview-error = 无法预览此图片
+image-preview-no-protocol = 当前终端不支持图片显示（Kitty graphics），仅显示文本信息
 
 # ---- 消息条目状态后备文案（spec §4.1：符号的文本后备）----
 msg-status-running = 运行中
