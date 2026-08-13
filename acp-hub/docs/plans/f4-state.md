@@ -126,7 +126,7 @@ pub enum EventBody {
     },
 
     /// 工具调用开始 → Chat Doc tool_calls（按 tool_call_id 创建，幂等）。
-    /// 字段: turn_id, tool_call_id, name, arguments?, created_at
+    /// 字段: turn_id, tool_call_id, name, status, arguments?, created_at
     ToolCallStarted {
         turn_id: String,
         tool_call_id: String,
@@ -135,8 +135,9 @@ pub enum EventBody {
         created_at: String,
     },
 
-    /// 工具调用更新 → tool_calls upsert（M1：arguments 全量覆盖；状态位不在此迁移）。
-    /// 字段: turn_id, tool_call_id, arguments?
+    /// 工具调用更新 → tool_calls upsert（arguments 有值时全量覆盖，缺省保留旧值；status? 经
+    /// 服务端单调状态机迁移，旧事件缺失 status 时仅更新参数）。
+    /// 字段: turn_id, tool_call_id, status?, arguments?
     ToolCallUpdated {
         turn_id: String,
         tool_call_id: String,
@@ -144,7 +145,8 @@ pub enum EventBody {
     },
 
     /// 工具调用完成 → tool_calls 状态迁移 Completed/Error（upsert）。
-    /// 超大 result 仅保留受授权资源引用（截断策略见 §9.5）。
+    /// 超大 result 不写内容；ToolCallProjection 显式记录 result_omitted 与
+    /// result_bytes，避免与 ACP 真正返回空结果混淆（截断策略见 §9.5）。
     /// 字段: turn_id, tool_call_id, result?, public_error?
     ToolCallCompleted {
         turn_id: String,
@@ -154,11 +156,14 @@ pub enum EventBody {
     },
 
     /// 权限请求 → Session Doc pending_permissions（按 permission_id upsert）。
-    /// 字段: permission_id, turn_id, tool_call_id?, title, description?, options, expires_at
+    /// 字段: permission_id, turn_id, tool_call_id?, tool?, title, description?, options, expires_at
     PermissionRequested {
         permission_id: String,
         turn_id: String,
         tool_call_id: Option<String>,
+        /// 官方 request 内完整 toolCall 快照；permission-first 时与权限投影
+        /// 同一 seq 原子创建工具卡。旧日志缺失时默认 None。
+        tool: Option<PermissionToolSnapshot>,
         title: String,
         description: Option<String>,
         options: Vec<PermissionOptions>,
@@ -537,6 +542,7 @@ pub enum ApplyReason {
     CalibrationDone,
     /// 缺少必要关联信息（关联 turn/tool_call/permission 未知），§6.3。
     UnknownTurn, UnknownToolCall, UnknownPermission,
+    AwaitingPermissionGuard,
     /// 防御性：epoch 与当前流不一致（§4.5.1 帧直接丢弃并计数）。
     EpochMismatch,
     /// 防御性：seq 回退（低于 last_seq；补推纪律下不应出现，§8.5）。

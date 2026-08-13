@@ -81,6 +81,19 @@ pub struct ToolCallProjection {
     pub arguments: Option<serde_json::Value>,
     /// 超大结果仅保留受授权资源引用。
     pub result: Option<serde_json::Value>,
+    /// Hub intentionally omitted the result because its serialized projection
+    /// exceeded the public tool-result budget. None on legacy snapshots.
+    #[serde(default)]
+    pub result_omitted: Option<bool>,
+    /// Compact JSON byte length observed before omission/retention.
+    #[serde(default)]
+    pub result_bytes: Option<u64>,
     pub public_error: Option<PublicError>,
     pub permission_id: Option<String>,
+    /// Hub-observed start time. Optional for snapshots written before schema support.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Hub-observed terminal time. This is not an ACP-reported execution metric.
+    #[serde(default)]
+    pub completed_at: Option<String>,
 }

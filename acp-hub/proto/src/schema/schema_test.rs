@@ -48,8 +48,12 @@ fn chat_root() -> ChatDocRoot {
             status: ToolCallStatus::Completed,
             arguments: Some(serde_json::json!({"cmd": "ls"})),
             result: Some(serde_json::json!({"output": "x"})),
+            result_omitted: Some(false),
+            result_bytes: Some(14),
             public_error: None,
             permission_id: None,
+            started_at: Some("2026-08-07T00:00:00Z".into()),
+            completed_at: Some("2026-08-07T00:00:01Z".into()),
         },
     );
     ChatDocRoot {
@@ -59,6 +63,28 @@ fn chat_root() -> ChatDocRoot {
         entries,
         tool_calls,
     }
+}
+
+#[test]
+fn tool_call_observation_times_are_additive_camel_case_fields() {
+    let value = serde_json::to_value(chat_root().tool_calls.remove("tc1").unwrap()).unwrap();
+    assert_eq!(value["startedAt"], "2026-08-07T00:00:00Z");
+    assert_eq!(value["completedAt"], "2026-08-07T00:00:01Z");
+    assert_eq!(value["resultOmitted"], false);
+    assert_eq!(value["resultBytes"], 14);
+
+    let legacy = serde_json::json!({
+        "toolCallId": "tc-old", "turnId": "t", "name": "shell", "status": "pending",
+        "arguments": null, "result": null, "publicError": null, "permissionId": null
+    });
+    let decoded: ToolCallProjection = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.started_at, None);
+    assert_eq!(decoded.completed_at, None);
+    assert_eq!(decoded.result_omitted, None);
+    assert_eq!(decoded.result_bytes, None);
+
+    let reencoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(reencoded["resultOmitted"], serde_json::Value::Null);
 }
 
 fn control_root() -> SessionDocRoot {

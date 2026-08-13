@@ -28,6 +28,18 @@ pub enum ActionEnvelope {
         command_id: String,
         payload: ProjectArchivePayload,
     },
+    /// 恢复已归档 project；不创建或复制其 session。
+    #[serde(rename = "project/restore", rename_all = "camelCase")]
+    ProjectRestore {
+        command_id: String,
+        payload: ProjectArchivePayload,
+    },
+    /// 修改 project 展示名；cwd 与 instance binding 保持不变。
+    #[serde(rename = "project/rename", rename_all = "camelCase")]
+    ProjectRename {
+        command_id: String,
+        payload: ProjectRenamePayload,
+    },
     /// 在 project 下创建持久化 logical session 并激活 ACP runtime。
     #[serde(rename = "session/create", rename_all = "camelCase")]
     PersistedSessionCreate {
@@ -138,6 +150,8 @@ impl ActionEnvelope {
         match self {
             ActionEnvelope::ProjectCreate { .. } => "project/create",
             ActionEnvelope::ProjectArchive { .. } => "project/archive",
+            ActionEnvelope::ProjectRestore { .. } => "project/restore",
+            ActionEnvelope::ProjectRename { .. } => "project/rename",
             ActionEnvelope::PersistedSessionCreate { .. } => "session/create",
             ActionEnvelope::PersistedSessionOpen { .. } => "session/open",
             ActionEnvelope::PersistedSessionRename { .. } => "session/rename",
@@ -170,6 +184,13 @@ pub struct ProjectCreatePayload {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectArchivePayload {
     pub project_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRenamePayload {
+    pub project_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

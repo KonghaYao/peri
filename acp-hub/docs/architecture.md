@@ -60,7 +60,9 @@ Web UI 使用四层身份，禁止互换：`project_id` 是左栏分组，`proje
 
 左栏 catalog 只展示来源为 `hub`（经 `session/create` 建立）或 `imported`（用户经 `session/import` 明确加入）的 project session。ACP `session/list` 的其余历史仅作为按 project cwd 分面的导入候选，不得在启动或轮询时自动进入侧边栏；旧版自动迁移记录标为 `legacy_hidden`，保留数据但不投影。
 
-`<data_dir>/metadata.sqlite3` 是 project/project session 元数据与全局 metadata command 去重的唯一事实源；现有 per-chat update/outbox/watermark 与 `registry.log` 保持原崩溃恢复语义。Registry v2 的 `projects`、`project_sessions` 是 SQLite 的只读广播投影。project/session mutation 的 committed Ack 必须跨过 SQLite 提交与 Registry 投影屏障；ACP 副作用结果不确定时进入 `reconciliation_required`，不得自动重试 `session/new`。
+`<data_dir>/metadata.sqlite3` 是 project/project session 元数据与全局 metadata command 去重的唯一事实源；现有 per-chat update/outbox/watermark 保持原崩溃恢复语义。Registry v2 的 `projects`、`project_sessions` 是 SQLite 的只读广播投影。project/session mutation 的 committed Ack 必须跨过 SQLite 提交与 Registry 投影屏障；ACP 副作用结果不确定时进入 `reconciliation_required`，不得自动重试 `session/new`。`project/rename` 只更新展示名并保持 project id、cwd、instance binding 与所有 session identity 不变。project 的“删除”在用户界面中始终是可逆归档：`project/archive` 设置 `archived_at`，`project/restore` 清除该字段，三类 project mutation 都复用全局 commandId 去重与投影屏障；不会删除 project session、ACP thread 或工作目录文件。任何 project session 仍绑定非终态 runtime 时，归档必须拒绝；无法读取元数据或验证 runtime 状态时同样 fail-closed，避免把仍在工作的 agent 从导航中隐藏。
+
+Registry 视图采用 `<data_dir>/registry.snapshot` + `<data_dir>/registry.log` 增量记录恢复。增量日志超过 8 MiB 后，server 把当前**可见值图**物化到一个新的 Yjs Doc，丢弃只影响历史合并而不影响当前投影的 tombstone/历史 item，再以 tmp → fsync → rename → 目录 fsync 发布快照；快照通过 blob CRC 与 Yjs decode 读回验证后才轮换日志。首次从旧的纯日志格式迁移时，原日志保留为权限 `0600` 的 `registry.log.legacy-v1`，供兼容窗口内人工回滚；后续压缩原子截断增量日志。启动时先应用快照再应用增量；若增量尾部是半写或 CRC 损坏，只截断到最后一条完整记录，损坏快照则 fail-fast，不静默重建。
 
 浏览器认证通过同源 `POST/GET/DELETE /api/auth/session` 建立内存 opaque session，并只下发 `HttpOnly; SameSite=Strict; Path=/` Cookie。Web 不在 URL、Web Storage 或 WS 首帧保存/发送 bearer token。Cookie attach 与存量连接按心跳重新校验 token id、撤销状态和当前 role；loopback HTTP 校验 Host/Origin，instance HMAC 与旧 CLI wire-token 流程保持兼容。
 
@@ -120,7 +122,7 @@ instance 是 **dumb pipe**，但「不做协议理解」需精确化——缓冲
 **无法提取 sessionId 的帧**：丢弃并记本地缺口计数（随 `instance/hello` 上报）。
 
 **instance 进程本身崩溃**【审查：运维 P0-2】：
-- ACP 子进程随 daemon 死亡（沿用 `kill_on_drop` 语义，现 child.rs:45）——其上 chat 全部中断（同断线语义，见 §7.5）；
+- 正常退出由 `shutdown_all` + `kill_on_drop` 终止 ACP 进程树；daemon 被 `SIGKILL` 时 Drop 无法运行，ACP 进程组可能残留。instance data-dir 持有非阻塞独占 owner lock，watermark 同时记录 data-dir `(dev,ino)` 与进程组 leader 出生指纹；下次启动只在两者精确匹配时发 `SIGKILL`。旧 watermark、目录副本、PID/PGID 复用或指纹不可读都 fail closed 为不发信号，仍上报 `buffer_lost` 交给 server 对账；
 - 内存缓冲与磁盘溢出缓冲**不跨重启保留**（重启后 `hello` 上报 `buffer_lost: true`）；
 - 每 chat `seq` 计数器与 `stream_epoch` 绑定（daemon 重启后 epoch +1、seq 可重置，§4.5.1【顾问：P0-2】）。
 
@@ -423,9 +425,13 @@ struct ToolCallProjection {
     name: String,
     status: Pending | AwaitingPermission | Running | Completed | Error | Cancelled,
     arguments: Option<Value>,       // 过滤内部/敏感字段后投影
-    result: Option<Value>,          // 超大结果仅保留受授权资源引用
+    result: Option<Value>,          // 仅在公开投影预算内保留
+    result_omitted: Option<bool>,   // true=省略，false=明确未省略，None=旧记录未知
+    result_bytes: Option<u64>,      // Hub 观测到的紧凑 JSON 字节数；不含内容
     public_error: Option<PublicError>,
     permission_id: Option<String>,
+    started_at: Option<String>,     // Hub 观测时间；旧快照可空
+    completed_at: Option<String>,
 }
 ```
 
@@ -495,7 +501,7 @@ struct RegistryDocRoot {
 | `user_message_chunk` / 服务端单写注册 | `user_message` |
 | `prompt_complete` / `agent_message_complete` | `turn_completed` |
 | `session_error` | `turn_failed` |
-| `tool_call` / `tool_call_update`（按 status 细分） | `tool_call_started` / `tool_call_completed` / `tool_call_failed` |
+| `tool_call` / `tool_call_update`（按 status 细分） | `tool_call_started` / `tool_call_updated` / `tool_call_completed`；pending/in_progress 映射为权威非终态 |
 | `permission_request` / `permission_response` | `permission_requested` / `permission_resolved` |
 | `session_update` / `available_commands_update` | `session_updated` |
 | `session_list` 响应 | `session_list`（agent 磁盘历史，全量同步投影） |
@@ -533,7 +539,8 @@ M1 核心闭环，新增正式时序（现有 router.rs 的「spawn → initiali
 |-----------|---------------|---------|
 | 文本增量 | Chat Doc entry block | 追加（微批次合并，§6.4） |
 | 思考/推理增量 | Chat Doc reasoning block | 按可见性写 `summary`/`hidden`，hidden 绝不发给无权客户端 |
-| 工具调用开始/更新/完成 | Chat Doc `tool_calls` | 按 `toolCallId` upsert；超大结果只保留受授权资源引用 |
+| 工具调用开始/更新/完成 | Chat Doc `tool_calls` | 按 `toolCallId` upsert；状态与证据均单调迁移：缺省 arguments 不清空旧输入，普通更新/完成不可越过权限等待，首个终态拥有 result/error/completedAt 且不可被晚到帧覆盖；超大结果只记录省略事实与字节数 |
+| 权限请求/决议/过期 | Control Doc `pending_permissions` + Chat Doc `tool_calls` | 官方 permission request 保留完整 `toolCall` 快照；即使先于普通 tool 通知到达，也在同一 seq 原子创建可达工具卡并进入 awaitingPermission。稍后正式通知只补全字段，不越过等待或重开终态；allow 恢复 running，deny/expire 进入 cancelled；旧事件缺快照或未知可选关联时仍不抑制权限请求 |
 | 权限请求/解决/过期 | Control Doc `pending_permissions` | 按 `permissionId` upsert；决议写 `decision`（CAS，§7.4） |
 | Agent status/capabilities/session info | Control Doc `agent`/`session` | 覆盖当前状态；能力未确认前保持不可用 |
 | `session_list` 响应 | Control Doc `sessions` | agent 磁盘历史，全量同步（幂等，10s 轮询），响应中不存在的旧条目删除（自愈） |

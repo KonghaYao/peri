@@ -126,16 +126,37 @@ fn proj_from_map<T: ReadTxn>(txn: &T, map: &yrs::MapRef) -> ToolCallProjection {
             .as_deref()
             .map(status_from_str)
             .unwrap_or(ToolCallStatus::Pending),
-        arguments: map.get(txn, "arguments").and_then(out_any).map(any_to_json),
-        result: map.get(txn, "result").and_then(out_any).map(any_to_json),
+        arguments: map
+            .get(txn, "arguments")
+            .and_then(out_any)
+            .and_then(non_null_json),
+        result: map
+            .get(txn, "result")
+            .and_then(out_any)
+            .and_then(non_null_json),
+        result_omitted: map
+            .get(txn, "result_omitted")
+            .and_then(|value| value.cast::<bool>().ok()),
+        result_bytes: map
+            .get(txn, "result_bytes")
+            .and_then(|value| value.cast::<f64>().ok())
+            .and_then(|value| (value >= 0.0 && value <= u64::MAX as f64).then_some(value as u64)),
         public_error: map
             .get(txn, "public_error")
             .and_then(|v| v.cast::<yrs::MapRef>().ok())
-            .map(|_| PublicError {
-                code: str_or("public_error_code").unwrap_or_default(),
-                message: str_or("public_error_message").unwrap_or_default(),
+            .map(|error| PublicError {
+                code: error
+                    .get(txn, "code")
+                    .and_then(|v| v.cast::<String>().ok())
+                    .unwrap_or_default(),
+                message: error
+                    .get(txn, "message")
+                    .and_then(|v| v.cast::<String>().ok())
+                    .unwrap_or_default(),
             }),
         permission_id: str_or("permission_id"),
+        started_at: str_or("started_at"),
+        completed_at: str_or("completed_at"),
     }
 }
 
@@ -145,6 +166,10 @@ fn out_any(v: yrs::Out) -> Option<yrs::Any> {
         yrs::Out::Any(a) => Some(a),
         _ => None,
     }
+}
+
+fn non_null_json(value: yrs::Any) -> Option<serde_json::Value> {
+    (!matches!(value, yrs::Any::Null)).then(|| any_to_json(value))
 }
 
 fn status_from_str(s: &str) -> ToolCallStatus {
@@ -509,6 +534,14 @@ pub fn upsert_tool_call(
     cm.insert(txn, "status", tool_call_status_str(tc.status));
     insert_opt_json(txn, &cm, "arguments", tc.arguments.as_ref());
     insert_opt_json(txn, &cm, "result", tc.result.as_ref());
+    match tc.result_omitted {
+        Some(value) => cm.insert(txn, "result_omitted", value),
+        None => cm.insert(txn, "result_omitted", yrs::Any::Null),
+    };
+    match tc.result_bytes {
+        Some(value) => cm.insert(txn, "result_bytes", value as f64),
+        None => cm.insert(txn, "result_bytes", yrs::Any::Null),
+    };
     match &tc.public_error {
         Some(e) => write_public_error(txn, &cm, "public_error", e),
         None => {
@@ -519,7 +552,53 @@ pub fn upsert_tool_call(
         Some(p) => cm.insert(txn, "permission_id", p.clone()),
         None => cm.insert(txn, "permission_id", yrs::Any::Null),
     };
+    match &tc.started_at {
+        Some(value) => cm.insert(txn, "started_at", value.clone()),
+        None => cm.insert(txn, "started_at", yrs::Any::Null),
+    };
+    match &tc.completed_at {
+        Some(value) => cm.insert(txn, "completed_at", value.clone()),
+        None => cm.insert(txn, "completed_at", yrs::Any::Null),
+    };
     created
+}
+
+/// Cancel every non-terminal tool belonging to a turn. Used only when the turn itself reaches
+/// a cancellation/interruption terminal so cards cannot remain visually running forever.
+pub fn cancel_nonterminal_tools_for_turn(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    turn_id: &str,
+) -> usize {
+    let calls = root.get_or_init::<_, yrs::MapRef>(txn, "tool_calls");
+    let ids: Vec<String> = calls.iter(txn).map(|(id, _)| id.to_string()).collect();
+    let mut migrated = 0;
+    for id in ids {
+        let Some(tool) = calls
+            .get(txn, id.as_str())
+            .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        else {
+            continue;
+        };
+        let linked_turn = tool
+            .get(txn, "turn_id")
+            .and_then(|value| value.cast::<String>().ok());
+        let status = tool
+            .get(txn, "status")
+            .and_then(|value| value.cast::<String>().ok())
+            .unwrap_or_default();
+        if linked_turn.as_deref() == Some(turn_id)
+            && !matches!(status.as_str(), "completed" | "error" | "cancelled")
+        {
+            tool.insert(
+                txn,
+                "status",
+                tool_call_status_str(ToolCallStatus::Cancelled),
+            );
+            migrated += 1;
+        }
+    }
+    migrated
 }
 
 fn insert_opt_json(

@@ -6,8 +6,8 @@
 //! - 随机端口（bind :0 后读出）、独立 temp 数据/配置目录；
 //! - tokens.toml 直接构造（§9.2.1：TokenStore 文件格式，与 CLI `token
 //!   generate` 等价，避免污染用户 `~/.config/acp-hub`）；
-//! - server / instance / test-child 子进程 spawn 与 Drop 清理（进程组 SIGKILL，
-//!   防残留；instance 残留 ACP 进程经 watermark.json 的 pgid 清理）；
+//! - server / instance / test-child 子进程 spawn 与 Drop 清理（测试自身持有的
+//!   进程组句柄直接 SIGKILL；instance 崩溃残留由生产启动所有权校验清理）；
 //! - ws 客户端 helper（tokio-tungstenite + 认证握手 + 读帧/发帧/自动 pong）；
 //! - yjs 快照解析 helper（base64 update → yrs::Doc）。
 //!
@@ -150,25 +150,6 @@ impl TestEnv {
         let p = self.config_dir.join("config.toml");
         fs::write(&p, toml_body).unwrap();
         p
-    }
-
-    /// 清理 instance 数据目录中水位记录的残留 ACP 进程组（§8 启动清理同源；
-    /// Drop 兜底）。
-    pub fn cleanup_instance_leftovers(&self) {
-        let wm = self.instance_data_dir.join("watermark.json");
-        if let Ok(content) = fs::read_to_string(&wm) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(sessions) = v.get("sessions").and_then(|s| s.as_object()) {
-                    for s in sessions.values() {
-                        if let Some(pgid) = s.get("pgid").and_then(|p| p.as_i64()) {
-                            if pgid > 0 {
-                                sys::kill_group(pgid as i32, 9);
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

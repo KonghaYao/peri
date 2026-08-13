@@ -237,6 +237,8 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     match action {
         ActionEnvelope::ProjectCreate { command_id, .. }
         | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::ProjectRestore { command_id, .. }
+        | ActionEnvelope::ProjectRename { command_id, .. }
         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
         | ActionEnvelope::PersistedSessionRename { command_id, .. }

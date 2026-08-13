@@ -42,8 +42,8 @@ export class DocStore {
     try {
       const bytes = base64ToBytes(frame.update);
       Y.applyUpdate(doc, bytes); // v1，与 server encode_state_as_update_v1 对齐
-    } catch (err) {
-      console.warn(`applyUpdateFrame 失败（doc=${frame.doc}）`, err);
+    } catch {
+      console.warn(`applyUpdateFrame 失败（doc=${frame.doc}, update_length=${frame.update.length}）`);
     }
     this.scheduleRender(frame.doc);
   }
@@ -100,6 +100,17 @@ function getNum(m: Y.Map<unknown> | null, key: string): number | null {
   if (v === undefined || v === null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Convert nested Yjs values into inert plain data for presentation. The server
+ * already redacts tool projections; this layer must not parse or execute them. */
+function yValue(value: unknown): unknown {
+  if (value instanceof Y.Map) {
+    return Object.fromEntries([...value.entries()].map(([key, item]) => [key, yValue(item)]));
+  }
+  if (value instanceof Y.Array) return value.toArray().map(yValue);
+  if (value instanceof Y.Text) return value.toString();
+  return value;
 }
 
 // ── 渲染结果类型 ────────────────────────────────────────────────────────
@@ -182,6 +193,15 @@ export interface ToolCallInfo {
   toolCallId: string | null;
   name: string | null;
   status: string | null;
+  arguments: unknown;
+  result: unknown;
+  /** null means a legacy projection that did not record omission provenance. */
+  resultOmitted: boolean | null;
+  resultBytes: number | null;
+  publicError: { code: string | null; message: string | null } | null;
+  /** Hub-observed event timestamps; absent on legacy projections. */
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 export interface ResourceInfo {
@@ -433,6 +453,23 @@ export function renderChat(doc: Y.Doc): ChatView {
   const entriesMap = asMap(root.get('entries'));
   const toolCalls = asMap(root.get('tool_calls'));
   const out: ChatEntry[] = [];
+  const referencedToolIds = new Set<string>();
+
+  const readToolCall = (tcId: string, tcm: Y.Map<unknown> | null): ToolCallInfo => ({
+    toolCallId: tcId,
+    name: getStr(tcm, 'name'),
+    status: getStr(tcm, 'status'),
+    arguments: yValue(tcm?.get('arguments')),
+    result: yValue(tcm?.get('result')),
+    resultOmitted: tcm?.has('result_omitted') ? tcm.get('result_omitted') === true : null,
+    resultBytes: getNum(tcm, 'result_bytes'),
+    publicError: (() => {
+      const error = asMap(tcm?.get('public_error'));
+      return error ? { code: getStr(error, 'code'), message: getStr(error, 'message') } : null;
+    })(),
+    startedAt: getStr(tcm, 'started_at'),
+    completedAt: getStr(tcm, 'completed_at'),
+  });
 
   if (order) {
     order.toArray().forEach((entryId) => {
@@ -480,11 +517,8 @@ export function renderChat(doc: Y.Doc): ChatView {
             const tcId = bm.get('tool_call_id') as string | null;
             const tc = tcId && toolCalls ? toolCalls.get(tcId) : null;
             const tcm = asMap(tc);
-            item.toolCalls.push({
-              toolCallId: tcId,
-              name: getStr(tcm, 'name'),
-              status: getStr(tcm, 'status'),
-            });
+            if (tcId) referencedToolIds.add(tcId);
+            item.toolCalls.push(readToolCall(tcId || '', tcm));
           } else if (kind === 'resource') {
             item.resources.push({
               resourceId: bm.get('resource_id') as string | null,
@@ -497,6 +531,26 @@ export function renderChat(doc: Y.Doc): ChatView {
       out.push(item);
     });
   }
+
+  // Compatibility repair for snapshots written before tool blocks were projected. Attach only
+  // exact turn-id matches to an assistant entry; never infer from text/title or map adjacency.
+  // Stable sorting keeps Y.Map iteration order from changing the visual history.
+  const assistantByTurn = new Map(
+    out
+      .filter((entry) => entry.role === 'assistant' && entry.turnId)
+      .map((entry) => [entry.turnId as string, entry]),
+  );
+  const legacyOrphans: Array<{ id: string; turnId: string; startedAt: string; map: Y.Map<unknown> }> = [];
+  toolCalls?.forEach((value, id) => {
+    if (referencedToolIds.has(id)) return;
+    const map = asMap(value);
+    const turnId = getStr(map, 'turn_id');
+    if (!map || !turnId || !assistantByTurn.has(turnId)) return;
+    legacyOrphans.push({ id, turnId, startedAt: getStr(map, 'started_at') || '', map });
+  });
+  legacyOrphans
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))
+    .forEach((orphan) => assistantByTurn.get(orphan.turnId)?.toolCalls.push(readToolCall(orphan.id, orphan.map)));
 
   return {
     schemaVersion: root.get('schema_version'),
@@ -566,6 +620,9 @@ export function renderControl(doc: Y.Doc): ControlView {
     perms.forEach((p) => {
       const pm = asMap(p);
       if (!pm) return;
+      // The server retains resolved/expired records for CAS idempotency. This selector exposes
+      // actionable requests only so history cannot strand the permission bar or its decision lock.
+      if (getStr(pm, 'status') !== 'pending') return;
       result.pendingPermissions.push({
         permissionId: getStr(pm, 'permission_id'),
         turnId: getStr(pm, 'turn_id'),

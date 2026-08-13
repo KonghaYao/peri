@@ -14,7 +14,8 @@
 //! - **环形滑窗**：每 session 常驻内存最后 500 条（在线与断线均写入），兜底
 //!   server 崩溃前已收未落盘段（`ring_snapshot` 查询接口备用，冲突 2）；
 //! - **水位**：`{data_dir}/watermark.json`（0600）：epoch 跨重启单调（§4.5.1
-//!   判定正确性前提）、pgid 供启动清理残留、last_seq 诊断参考（权威在 server）。
+//!   判定正确性前提）、pgid + leader 出生指纹 + data-dir 身份供可证明
+//!   所有权的启动清理，last_seq 仅作诊断参考（权威在 server）。
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -569,11 +570,29 @@ pub enum WatermarkError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatermarkFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir_identity: Option<DataDirIdentity>,
     pub chats: HashMap<String, SessionWatermark>,
 }
 
-/// 单 session 水位（§4.4.3）。
+/// Unix data-dir identity. A copied directory must not inherit process ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+/// Opaque platform process birth identity for the process-group leader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessFingerprint {
+    pub platform: String,
+    pub birth: String,
+}
+
+/// 单 session 水位（§4.4.3）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionWatermark {
     /// 流纪元（§4.5.1）。
@@ -582,9 +601,12 @@ pub struct SessionWatermark {
     pub last_seq: u64,
     /// 进程组 id（启动清理残留用；0 = 无）。
     pub pgid: i32,
+    /// Exact leader birth identity. Missing means cleanup authority is unproven.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_fingerprint: Option<ProcessFingerprint>,
 }
 
-/// 水位存储：epoch 跨重启单调 + pgid 启动清理（§4.4.3）。
+/// 水位存储：epoch 跨重启单调 + 可验证的进程所有权（§4.4.3）。
 ///
 /// 写盘用临时文件 + rename（原子，0600）；「last_seq 高频不落盘」由调用方
 /// 控制 record 频率（epoch 变更时才写）。
@@ -615,14 +637,28 @@ impl Watermark {
         self.state.chats.get(chat_id).map(|s| s.epoch)
     }
 
-    /// 水位中记录的全部 pgid（启动清理残留用，§8）。
-    pub fn pgids(&self) -> Vec<i32> {
+    /// Runtime ownership records retained for startup cleanup.
+    pub fn runtime_records(&self) -> Vec<(i32, Option<ProcessFingerprint>)> {
         self.state
             .chats
             .values()
-            .map(|s| s.pgid)
-            .filter(|p| *p > 0)
+            .filter(|s| s.pgid > 0)
+            .map(|s| (s.pgid, s.process_fingerprint.clone()))
             .collect()
+    }
+
+    pub fn data_dir_identity(&self) -> Option<DataDirIdentity> {
+        self.state.data_dir_identity
+    }
+
+    /// Consume all stale cleanup authority while preserving epoch/sequence history.
+    pub fn finalize_startup(&mut self, identity: DataDirIdentity) -> Result<(), WatermarkError> {
+        self.state.data_dir_identity = Some(identity);
+        for session in self.state.chats.values_mut() {
+            session.pgid = 0;
+            session.process_fingerprint = None;
+        }
+        self.write()
     }
 
     /// 写盘：临时文件（0600）+ rename（原子，§4.4.3【决策】）。
@@ -650,6 +686,7 @@ impl Watermark {
         epoch: u64,
         last_seq: u64,
         pgid: i32,
+        process_fingerprint: Option<ProcessFingerprint>,
     ) -> Result<(), WatermarkError> {
         self.state.chats.insert(
             chat_id.to_string(),
@@ -657,6 +694,7 @@ impl Watermark {
                 epoch,
                 last_seq,
                 pgid,
+                process_fingerprint,
             },
         );
         self.write()

@@ -443,6 +443,8 @@ impl Gateway {
                                     let command_id = match action {
                                         ActionEnvelope::ProjectCreate { command_id, .. }
                                         | ActionEnvelope::ProjectArchive { command_id, .. }
+                                        | ActionEnvelope::ProjectRestore { command_id, .. }
+                                        | ActionEnvelope::ProjectRename { command_id, .. }
                                         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
                                         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
                                         | ActionEnvelope::PersistedSessionRename { command_id, .. }
@@ -952,6 +954,8 @@ fn action_error_committed_rejected(action: &ActionEnvelope) -> ActionError {
     let command_id = match action {
         ActionEnvelope::ProjectCreate { command_id, .. }
         | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::ProjectRestore { command_id, .. }
+        | ActionEnvelope::ProjectRename { command_id, .. }
         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
         | ActionEnvelope::PersistedSessionRename { command_id, .. }

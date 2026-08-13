@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWrit
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::buffer::ProcessFingerprint;
 use crate::error::extract_session_id;
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,100 @@ pub mod sys {
     pub fn kill_group(pgid: i32, sig: i32) -> bool {
         // SAFETY: kill(2) 无内存安全问题；参数为合法 i32 信号号与进程组 id。
         unsafe { kill(-pgid, sig) == 0 }
+    }
+}
+
+/// Read the process-group leader's birth identity and verify it still owns `pgid`.
+/// Any unavailable or ambiguous platform evidence fails closed with `None`.
+#[cfg(target_os = "macos")]
+pub fn process_fingerprint(pgid: i32) -> Option<ProcessFingerprint> {
+    if pgid <= 0 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: buffer is valid for `size`; proc_pidinfo initializes it on exact-size success.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pgid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    // SAFETY: exact-size success above initialized the full struct.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pgid as u32 || info.pbi_pgid != pgid as u32 {
+        return None;
+    }
+    Some(ProcessFingerprint {
+        platform: "macos-proc-bsdinfo-v1".to_string(),
+        birth: format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_fingerprint(pgid: i32) -> Option<ProcessFingerprint> {
+    if pgid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pgid}/stat")).ok()?;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    linux_process_fingerprint(&stat, pgid, &boot_id)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_fingerprint(stat: &str, pgid: i32, boot_id: &str) -> Option<ProcessFingerprint> {
+    let tail = stat.rsplit_once(") ")?.1;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    let process_group: i32 = fields.get(2)?.parse().ok()?;
+    let start_ticks = fields.get(19)?;
+    if process_group != pgid || boot_id.trim().is_empty() {
+        return None;
+    }
+    Some(ProcessFingerprint {
+        platform: "linux-proc-stat-v1".to_string(),
+        birth: format!("{}:{}", boot_id.trim(), start_ticks),
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn process_fingerprint(_pgid: i32) -> Option<ProcessFingerprint> {
+    None
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn test_linux_stat_parser_handles_spaces_and_right_parenthesis_in_comm() {
+        let mut fields = vec!["0"; 21];
+        fields[0] = "S"; // field 3: state
+        fields[1] = "1"; // field 4: ppid
+        fields[2] = "42"; // field 5: pgrp
+        fields[19] = "777"; // field 22: starttime
+        let stat = format!("42 (worker ) name) {}", fields.join(" "));
+        let fingerprint = linux_process_fingerprint(&stat, 42, "boot-id\n").unwrap();
+        assert_eq!(fingerprint.birth, "boot-id:777");
+    }
+
+    #[test]
+    fn test_linux_stat_parser_rejects_non_leader_and_missing_boot_identity() {
+        let mut fields = vec!["0"; 21];
+        fields[0] = "S";
+        fields[1] = "1";
+        fields[2] = "41";
+        fields[19] = "777";
+        let stat = format!("42 (worker) {}", fields.join(" "));
+        assert_eq!(linux_process_fingerprint(&stat, 42, "boot-id"), None);
+        fields[2] = "42";
+        let leader = format!("42 (worker) {}", fields.join(" "));
+        assert_eq!(linux_process_fingerprint(&leader, 42, "  "), None);
     }
 }
 

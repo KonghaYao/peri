@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration as TokioDuration};
+use yrs::{Map, ReadTxn, Transact};
 
 use acp_hub_proto::conn::DocId;
-use acp_hub_proto::schema::ChatSummary;
+use acp_hub_proto::schema::{ChatSummary, ToolCallStatus};
 
 use crate::state::doc_manager::{
     BatchConfig, DocCommand, DocManager, PersistError, SubmitError, SubmitResult, UpdateSink,
@@ -226,6 +227,7 @@ async fn control_event_flushes_buffered_batch_first() {
             turn_id: "t1".to_string(),
             tool_call_id: "tc1".to_string(),
             name: "shell".to_string(),
+            status: ToolCallStatus::Pending,
             arguments: Some(json!({})),
             created_at: "2026-08-07T00:00:00Z".to_string(),
         },
@@ -276,6 +278,7 @@ async fn concurrent_submits_no_panic_and_serial_equivalent() {
                         turn_id: "t1".to_string(),
                         tool_call_id: format!("tc{i}"),
                         name: "n".to_string(),
+                        status: ToolCallStatus::Pending,
                         arguments: None,
                         created_at: "2026-08-07T00:00:00Z".to_string(),
                     },
@@ -382,6 +385,7 @@ async fn command_permission_resolve_cas() {
             permission_id: "p1".to_string(),
             turn_id: "t1".to_string(),
             tool_call_id: None,
+            tool: None,
             title: "允许".to_string(),
             description: None,
             options: vec![],
@@ -411,6 +415,87 @@ async fn command_permission_resolve_cas() {
         )
         .await;
     assert!(matches!(r, SubmitResult::Applied(a) if !a.applied));
+}
+
+#[tokio::test(start_paused = true)]
+async fn command_permission_resolution_updates_linked_tool_projection() {
+    let sink = MemSink::default();
+    let mgr = DocManager::new(cfg(), Arc::new(sink.clone()));
+    open(&mgr, "s1").await;
+    assert!(matches!(
+        mgr.submit_event(user_msg("s1", 1, "t1")).await,
+        SubmitResult::Applied(_)
+    ));
+    let started = NormalizedEvent {
+        chat_id: "s1".into(),
+        seq: 2,
+        epoch: 0,
+        ts: "2026-08-07T00:00:00Z".into(),
+        body: EventBody::ToolCallStarted {
+            turn_id: "t1".into(),
+            tool_call_id: "tc1".into(),
+            name: "shell".into(),
+            status: ToolCallStatus::Running,
+            arguments: None,
+            created_at: "2026-08-07T00:00:00Z".into(),
+        },
+    };
+    assert!(matches!(mgr.submit_event(started).await, SubmitResult::Applied(a) if a.applied));
+    let requested = NormalizedEvent {
+        chat_id: "s1".into(),
+        seq: 3,
+        epoch: 0,
+        ts: "2026-08-07T00:00:00Z".into(),
+        body: EventBody::PermissionRequested {
+            permission_id: "p1".into(),
+            turn_id: "t1".into(),
+            tool_call_id: Some("tc1".into()),
+            tool: None,
+            title: "允许".into(),
+            description: None,
+            options: vec![],
+            expires_at: "2026-08-07T00:05:00Z".into(),
+        },
+    };
+    assert!(matches!(mgr.submit_event(requested).await, SubmitResult::Applied(a) if a.applied));
+    assert!(matches!(
+        mgr.submit_command(
+            "s1",
+            DocCommand::ResolvePermission {
+                permission_id: "p1".into(),
+                decision: acp_hub_proto::action::PermissionDecision::Deny,
+            },
+        )
+        .await,
+        SubmitResult::Applied(a) if a.applied
+    ));
+
+    tokio::task::yield_now().await;
+    use yrs::updates::decoder::Decode as _;
+    let mirror = yrs::Doc::new();
+    for (doc, update) in sink.updates.lock().await.iter() {
+        if *doc == DocId::chat("s1") {
+            let mut txn = mirror.transact_mut();
+            txn.apply_update(yrs::Update::decode_v1(update).unwrap())
+                .unwrap();
+        }
+    }
+    let txn = mirror.transact();
+    let root = txn.get_map("root").unwrap();
+    let calls = root
+        .get(&txn, "tool_calls")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let tool = calls
+        .get(&txn, "tc1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(
+        tool.get(&txn, "status").unwrap().cast::<String>().unwrap(),
+        "cancelled"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -862,6 +947,7 @@ async fn expire_pending_permissions_batch_expires_all() {
                 permission_id: pid.to_string(),
                 turn_id: "t1".to_string(),
                 tool_call_id: None,
+                tool: None,
                 title: "允许".to_string(),
                 description: None,
                 options: vec![],

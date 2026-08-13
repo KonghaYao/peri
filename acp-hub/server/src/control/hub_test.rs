@@ -11,6 +11,145 @@ use crate::control::StoreSink;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager, UpdateSink};
 
+fn registry_update(value: &str) -> Vec<u8> {
+    use yrs::{Map, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    let mut txn = doc.transact_mut();
+    txn.get_or_insert_map("root")
+        .insert(&mut txn, "test_value", value.to_string());
+    drop(txn);
+    crate::state::view_store::encode_state_as_update(&doc)
+}
+
+fn registry_value(doc: &yrs::Doc) -> Option<String> {
+    use yrs::{Map, ReadTxn, Transact};
+    let txn = doc.transact();
+    txn.get_map("root")?
+        .get(&txn, "test_value")?
+        .cast::<String>()
+        .ok()
+}
+
+#[test]
+fn registry_snapshot_compaction_reopens_and_keeps_files_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let tmp = dir.path().join(super::REGISTRY_SNAPSHOT_TMP_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let legacy = dir.path().join(super::REGISTRY_LEGACY_BACKUP_FILE);
+    let update = registry_update("current");
+    super::append_registry_record(&log, &update).unwrap();
+
+    super::compact_registry_log(&snapshot, &tmp, &log, &legacy, &update).unwrap();
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+    assert!(!tmp.exists());
+    assert!(legacy.exists(), "first migration keeps legacy rollback log");
+    assert!(std::fs::metadata(&legacy).unwrap().len() > 0);
+    for path in [&snapshot, &log, &legacy] {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 0);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("current")
+    );
+}
+
+#[test]
+fn registry_recovery_tolerates_snapshot_plus_pre_compaction_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let tmp = dir.path().join(super::REGISTRY_SNAPSHOT_TMP_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let legacy = dir.path().join(super::REGISTRY_LEGACY_BACKUP_FILE);
+    let update = registry_update("same state");
+    super::compact_registry_log(&snapshot, &tmp, &log, &legacy, &update).unwrap();
+    // Simulate a crash immediately after snapshot rename but before the old
+    // log was truncated. Applying the same Yjs operation twice is idempotent.
+    super::append_registry_record(&log, &update).unwrap();
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 1);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("same state")
+    );
+}
+
+#[test]
+fn registry_recovery_physically_truncates_a_corrupt_tail() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let update = registry_update("valid");
+    super::append_registry_record(&log, &update).unwrap();
+    let valid_len = std::fs::metadata(&log).unwrap().len();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(&[1, 2, 3, 4])
+        .unwrap();
+
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 1);
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), valid_len);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("valid")
+    );
+}
+
+#[test]
+fn registry_materialization_discards_history_and_preserves_visible_nested_state() {
+    use yrs::{Map, ReadTxn, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    for revision in 0..2_000 {
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map("root");
+        root.insert(&mut txn, "volatile", format!("revision-{revision:04}"));
+        let extension = root.get_or_init::<_, yrs::MapRef>(&mut txn, "future_extension");
+        extension.insert(&mut txn, "kept", revision);
+    }
+    let historical = crate::state::view_store::encode_state_as_update(&doc);
+    let compact = super::materialize_registry_update(&crate::state::Factory::new(), &doc).unwrap();
+    assert!(
+        compact.len() * 20 < historical.len(),
+        "materialized snapshot should discard Yjs history: {} vs {} bytes",
+        compact.len(),
+        historical.len()
+    );
+
+    let reopened = yrs::Doc::new();
+    super::apply_update(&reopened, &compact);
+    let txn = reopened.transact();
+    let root = txn.get_map("root").unwrap();
+    assert_eq!(
+        root.get(&txn, "volatile")
+            .and_then(|v| v.cast::<String>().ok())
+            .as_deref(),
+        Some("revision-1999")
+    );
+    let extension = root
+        .get(&txn, "future_extension")
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    assert_eq!(
+        extension
+            .get(&txn, "kept")
+            .and_then(|v| v.cast::<i64>().ok()),
+        Some(1_999)
+    );
+}
+
 async fn env() -> (tempfile::TempDir, Arc<Store>, Arc<StoreSink>, DocManager) {
     let tmp = tempfile::tempdir().unwrap();
     let persist_cfg = PersistConfig {

@@ -328,12 +328,48 @@ impl CommandCoordinator {
                 }
             }
             ActionEnvelope::ProjectArchive { payload, .. } => {
-                if !matches!(projects.metadata().project(&payload.project_id).await, Ok(Some(ref p)) if p.archived_at.is_none())
-                {
+                let project_exists = matches!(projects.metadata().project(&payload.project_id).await, Ok(Some(ref p)) if p.archived_at.is_none());
+                if !project_exists {
                     return SubmitAck::Failed(action_error(
                         command_id,
                         ErrorCode::InvalidState,
                         "project not found or archived",
+                        false,
+                    ));
+                }
+                if self
+                    .inner
+                    .chats
+                    .has_live_workspace(&payload.project_id)
+                    .await
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "project has a running session; close it before archiving",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::ProjectRestore { payload, .. } => {
+                if !matches!(projects.metadata().project(&payload.project_id).await, Ok(Some(ref p)) if p.archived_at.is_some())
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "archived project not found",
+                        false,
+                    ));
+                }
+            }
+            ActionEnvelope::ProjectRename { payload, .. } => {
+                if payload.name.trim().is_empty()
+                    || !matches!(projects.metadata().project(&payload.project_id).await, Ok(Some(ref p)) if p.archived_at.is_none())
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::InvalidState,
+                        "active project not found or name empty",
                         false,
                     ));
                 }
@@ -464,7 +500,11 @@ impl CommandCoordinator {
             _ => unreachable!(),
         }
         let (project_hint, session_hint) = match &action {
-            ActionEnvelope::ProjectArchive { payload, .. } => {
+            ActionEnvelope::ProjectArchive { payload, .. }
+            | ActionEnvelope::ProjectRestore { payload, .. } => {
+                (Some(payload.project_id.as_str()), None)
+            }
+            ActionEnvelope::ProjectRename { payload, .. } => {
                 (Some(payload.project_id.as_str()), None)
             }
             ActionEnvelope::PersistedSessionCreate { payload, .. } => {
@@ -776,6 +816,168 @@ impl CommandCoordinator {
                         &cmd,
                         ErrorCode::AgentUnavailable,
                         "project archive projection pending",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "committed",
+                        Some(&payload.project_id),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "project command finalize failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    Some(&payload.project_id),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            ActionEnvelope::ProjectRestore { payload, .. } => {
+                if projects
+                    .restore_project_metadata(&payload.project_id)
+                    .await
+                    .is_err()
+                    || projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "projection_pending",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                {
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "reconciliation_required",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            Some("restore_projection_failed"),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project restore requires reconciliation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects.reproject().await.is_err() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project restore projection pending",
+                        true,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects
+                    .metadata()
+                    .update_command(
+                        &command_id,
+                        "committed",
+                        Some(&payload.project_id),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return SubmitAck::Failed(action_error(
+                        command_id,
+                        ErrorCode::AgentUnavailable,
+                        "project command finalize failed",
+                        true,
+                    ));
+                }
+                self.send_metadata_ack(
+                    &cmd,
+                    AckStatus::Committed,
+                    Some(&payload.project_id),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            ActionEnvelope::ProjectRename { payload, .. } => {
+                if projects
+                    .rename_project_metadata(&payload.project_id, payload.name.trim())
+                    .await
+                    .is_err()
+                    || projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "projection_pending",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                {
+                    let _ = projects
+                        .metadata()
+                        .update_command(
+                            &command_id,
+                            "reconciliation_required",
+                            Some(&payload.project_id),
+                            None,
+                            None,
+                            None,
+                            Some("project_rename_projection_failed"),
+                        )
+                        .await;
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project rename requires reconciliation",
+                        false,
+                    )
+                    .await;
+                    return SubmitAck::Handled;
+                }
+                if projects.reproject().await.is_err() {
+                    self.send_error(
+                        &cmd,
+                        ErrorCode::AgentUnavailable,
+                        "project rename projection pending",
                         true,
                     )
                     .await;
@@ -1410,6 +1612,8 @@ impl CommandCoordinator {
             action,
             ActionEnvelope::ProjectCreate { .. }
                 | ActionEnvelope::ProjectArchive { .. }
+                | ActionEnvelope::ProjectRestore { .. }
+                | ActionEnvelope::ProjectRename { .. }
                 | ActionEnvelope::PersistedSessionCreate { .. }
                 | ActionEnvelope::PersistedSessionOpen { .. }
                 | ActionEnvelope::PersistedSessionRename { .. }
@@ -2173,6 +2377,7 @@ impl CommandCoordinator {
                                 None
                             };
                     }
+                    me.refresh_catalog_titles(&entries).await;
                     audit(
                         "session.list",
                         Some(&cmd_id),
@@ -4247,6 +4452,7 @@ impl CommandCoordinator {
                 for e in &mut entries {
                     e.cwd = cwd.to_string();
                 }
+                self.refresh_catalog_titles(&entries).await;
                 if let Err(e) = self.inner.chats.registry().apply_sessions(entries).await {
                     warn!(chat_id, instance_id, error = ?e, "session poll apply failed");
                 }
@@ -4257,6 +4463,14 @@ impl CommandCoordinator {
                 self.inner.relay.cancel_rpc(&rpc_id).await;
                 debug!(chat_id, "session poll timeout");
             }
+        }
+    }
+
+    async fn refresh_catalog_titles(&self, entries: &[SessionSummaryProjection]) {
+        let projects = self.inner.projects.read().await.clone();
+        let Some(projects) = projects else { return };
+        if let Err(error) = projects.refresh_acp_titles(entries).await {
+            warn!(error = ?error, "ACP session title metadata refresh failed");
         }
     }
 }
@@ -4295,6 +4509,8 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     match action {
         ActionEnvelope::ProjectCreate { command_id, .. }
         | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::ProjectRestore { command_id, .. }
+        | ActionEnvelope::ProjectRename { command_id, .. }
         | ActionEnvelope::PersistedSessionCreate { command_id, .. }
         | ActionEnvelope::PersistedSessionOpen { command_id, .. }
         | ActionEnvelope::PersistedSessionRename { command_id, .. }
@@ -4325,6 +4541,8 @@ fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
         ActionEnvelope::Create { .. } => None,
         ActionEnvelope::ProjectCreate { .. }
         | ActionEnvelope::ProjectArchive { .. }
+        | ActionEnvelope::ProjectRestore { .. }
+        | ActionEnvelope::ProjectRename { .. }
         | ActionEnvelope::PersistedSessionCreate { .. }
         | ActionEnvelope::PersistedSessionOpen { .. }
         | ActionEnvelope::PersistedSessionRename { .. } => None,

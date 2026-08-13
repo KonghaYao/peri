@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import solid from 'vite-plugin-solid';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -9,6 +9,12 @@ import tailwindcss from '@tailwindcss/vite';
 const rootDir = import.meta.dirname;
 export default defineConfig({
   plugins: [solid(), tailwindcss()],
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
+    setupFiles: ['./src/test/setup.ts'],
+    restoreMocks: true,
+  },
   build: {
     outDir: 'dist',
     rollupOptions: {

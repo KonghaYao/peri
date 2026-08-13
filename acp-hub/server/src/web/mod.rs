@@ -19,12 +19,12 @@
 //! 持任何动态端点，页面的 ws 探测直连 hub 的 ws 时序（无 token 会被 1011
 //! 关闭，见面板内连接逻辑，如实展示，不造假）。
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use crate::auth::{AuthService, BROWSER_COOKIE};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use crate::auth::{AuthService, BROWSER_COOKIE};
 
 const MAX_HTTP_HEAD: usize = 16 * 1024;
 const MAX_HTTP_BODY: usize = 4 * 1024;
@@ -121,33 +121,97 @@ pub(crate) async fn serve(mut stream: TcpStream, head: &str) -> std::io::Result<
     stream.shutdown().await
 }
 
-pub(crate) async fn serve_http(mut stream: TcpStream, peer: SocketAddr, auth: Arc<Mutex<AuthService>>) -> std::io::Result<()> {
+pub(crate) async fn serve_http(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    auth: Arc<Mutex<AuthService>>,
+) -> std::io::Result<()> {
     let deadline = tokio::time::Instant::now() + HTTP_READ_TIMEOUT;
     let mut buf = Vec::with_capacity(2048);
     let head_end = loop {
-        if buf.len() >= MAX_HTTP_HEAD { return write_http(&mut stream, "431 Request Header Fields Too Large", "text/plain", b"bad request", &[]).await; }
+        if buf.len() >= MAX_HTTP_HEAD {
+            return write_http(
+                &mut stream,
+                "431 Request Header Fields Too Large",
+                "text/plain",
+                b"bad request",
+                &[],
+            )
+            .await;
+        }
         let mut chunk = [0u8; 1024];
         let n = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
-            Ok(result) => result?, Err(_) => return write_http(&mut stream, "408 Request Timeout", "text/plain", b"timeout", &[]).await,
+            Ok(result) => result?,
+            Err(_) => {
+                return write_http(
+                    &mut stream,
+                    "408 Request Timeout",
+                    "text/plain",
+                    b"timeout",
+                    &[],
+                )
+                .await
+            }
         };
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > MAX_HTTP_HEAD && header_end(&buf).is_none() { return write_http(&mut stream, "431 Request Header Fields Too Large", "text/plain", b"bad request", &[]).await; }
-        if let Some(end) = header_end(&buf) { break end + 4; }
+        if buf.len() > MAX_HTTP_HEAD && header_end(&buf).is_none() {
+            return write_http(
+                &mut stream,
+                "431 Request Header Fields Too Large",
+                "text/plain",
+                b"bad request",
+                &[],
+            )
+            .await;
+        }
+        if let Some(end) = header_end(&buf) {
+            break end + 4;
+        }
     };
-    if head_end > MAX_HTTP_HEAD { return write_http(&mut stream, "431 Request Header Fields Too Large", "text/plain", b"bad request", &[]).await; }
-    let head = match std::str::from_utf8(&buf[..head_end]) { Ok(v) => v.to_string(), Err(_) => return write_http(&mut stream, "400 Bad Request", "text/plain", b"bad request", &[]).await };
+    if head_end > MAX_HTTP_HEAD {
+        return write_http(
+            &mut stream,
+            "431 Request Header Fields Too Large",
+            "text/plain",
+            b"bad request",
+            &[],
+        )
+        .await;
+    }
+    let head = match std::str::from_utf8(&buf[..head_end]) {
+        Ok(v) => v.to_string(),
+        Err(_) => {
+            return write_http(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain",
+                b"bad request",
+                &[],
+            )
+            .await
+        }
+    };
     let mut lines = head.split("\r\n");
     let request = lines.next().unwrap_or_default();
     let mut request_parts = request.split_whitespace();
     let method = request_parts.next().unwrap_or_default();
-    let path = request_parts.next().unwrap_or_default().split('?').next().unwrap_or_default();
+    let path = request_parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
     let mut host = None;
     let mut origin = None;
     let mut cookie = None;
     let mut content_length = 0usize;
     for line in lines {
-        let Some((name, value)) = line.split_once(':') else { continue };
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
         match name.trim().to_ascii_lowercase().as_str() {
             "host" => host = Some(value.trim()),
             "origin" => origin = Some(value.trim()),
@@ -156,60 +220,232 @@ pub(crate) async fn serve_http(mut stream: TcpStream, peer: SocketAddr, auth: Ar
             _ => {}
         }
     }
-    if path != "/api/auth/session" { return serve_static_consumed(stream, method, path).await; }
-    if !peer.ip().is_loopback() || !valid_loopback_host(host.unwrap_or_default()) || !valid_origin(origin, host.unwrap_or_default()) {
-        return write_http(&mut stream, "403 Forbidden", "application/json", br#"{"error":"forbidden"}"#, &security_headers()).await;
+    if path != "/api/auth/session" {
+        return serve_static_consumed(stream, method, path).await;
     }
-    if content_length > MAX_HTTP_BODY { return write_http(&mut stream, "413 Payload Too Large", "application/json", br#"{"error":"too_large"}"#, &security_headers()).await; }
+    if !peer.ip().is_loopback()
+        || !valid_loopback_host(host.unwrap_or_default())
+        || !valid_origin(origin, host.unwrap_or_default())
+    {
+        return write_http(
+            &mut stream,
+            "403 Forbidden",
+            "application/json",
+            br#"{"error":"forbidden"}"#,
+            &security_headers(),
+        )
+        .await;
+    }
+    if content_length > MAX_HTTP_BODY {
+        return write_http(
+            &mut stream,
+            "413 Payload Too Large",
+            "application/json",
+            br#"{"error":"too_large"}"#,
+            &security_headers(),
+        )
+        .await;
+    }
     while buf.len() - head_end < content_length {
         let mut chunk = [0u8; 1024];
         let n = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
-            Ok(result) => result?, Err(_) => return write_http(&mut stream, "408 Request Timeout", "application/json", br#"{"error":"timeout"}"#, &security_headers()).await,
+            Ok(result) => result?,
+            Err(_) => {
+                return write_http(
+                    &mut stream,
+                    "408 Request Timeout",
+                    "application/json",
+                    br#"{"error":"timeout"}"#,
+                    &security_headers(),
+                )
+                .await
+            }
         };
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.len() - head_end > MAX_HTTP_BODY { return write_http(&mut stream, "413 Payload Too Large", "application/json", br#"{"error":"too_large"}"#, &security_headers()).await; }
+        if buf.len() - head_end > MAX_HTTP_BODY {
+            return write_http(
+                &mut stream,
+                "413 Payload Too Large",
+                "application/json",
+                br#"{"error":"too_large"}"#,
+                &security_headers(),
+            )
+            .await;
+        }
     }
-    if buf.len() - head_end < content_length { return write_http(&mut stream, "400 Bad Request", "application/json", br#"{"error":"short_body"}"#, &security_headers()).await; }
+    if buf.len() - head_end < content_length {
+        return write_http(
+            &mut stream,
+            "400 Bad Request",
+            "application/json",
+            br#"{"error":"short_body"}"#,
+            &security_headers(),
+        )
+        .await;
+    }
     let response = match method {
         "POST" => {
-            let body: serde_json::Value = serde_json::from_slice(&buf[head_end..head_end + content_length.min(buf.len() - head_end)]).unwrap_or_default();
-            match body.get("token").and_then(|v| v.as_str()).and_then(|token| auth.try_lock().ok().and_then(|mut a| a.create_browser_session(token).ok())) {
-                Some((sid, ctx)) => ("200 OK", serde_json::to_vec(&serde_json::json!({"authenticated":true,"role":ctx.role.as_str()})).unwrap(), vec![("Set-Cookie".to_string(), format!("{BROWSER_COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/"))]),
-                None => ("401 Unauthorized", br#"{"authenticated":false}"#.to_vec(), vec![]),
+            let body: serde_json::Value = serde_json::from_slice(
+                &buf[head_end..head_end + content_length.min(buf.len() - head_end)],
+            )
+            .unwrap_or_default();
+            match body
+                .get("token")
+                .and_then(|v| v.as_str())
+                .and_then(|token| {
+                    auth.try_lock()
+                        .ok()
+                        .and_then(|mut a| a.create_browser_session(token).ok())
+                }) {
+                Some((sid, ctx)) => (
+                    "200 OK",
+                    serde_json::to_vec(
+                        &serde_json::json!({"authenticated":true,"role":ctx.role.as_str()}),
+                    )
+                    .unwrap(),
+                    vec![(
+                        "Set-Cookie".to_string(),
+                        format!("{BROWSER_COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/"),
+                    )],
+                ),
+                None => (
+                    "401 Unauthorized",
+                    br#"{"authenticated":false}"#.to_vec(),
+                    vec![],
+                ),
             }
         }
-        "GET" => match cookie.as_deref().and_then(|sid| auth.try_lock().ok().and_then(|mut a| a.validate_browser_session(sid, peer).ok())) {
-            Some(ctx) => ("200 OK", serde_json::to_vec(&serde_json::json!({"authenticated":true,"role":ctx.role.as_str()})).unwrap(), vec![]),
-            None => ("401 Unauthorized", br#"{"authenticated":false}"#.to_vec(), vec![]),
+        "GET" => match cookie.as_deref().and_then(|sid| {
+            auth.try_lock()
+                .ok()
+                .and_then(|mut a| a.validate_browser_session(sid, peer).ok())
+        }) {
+            Some(ctx) => (
+                "200 OK",
+                serde_json::to_vec(
+                    &serde_json::json!({"authenticated":true,"role":ctx.role.as_str()}),
+                )
+                .unwrap(),
+                vec![],
+            ),
+            None => (
+                "401 Unauthorized",
+                br#"{"authenticated":false}"#.to_vec(),
+                vec![],
+            ),
         },
         "DELETE" => {
-            if let Some(sid) = cookie.as_deref() { if let Ok(mut a) = auth.try_lock() { a.delete_browser_session(sid); } }
-            ("204 No Content", Vec::new(), vec![("Set-Cookie".to_string(), format!("{BROWSER_COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/"))])
+            if let Some(sid) = cookie.as_deref() {
+                if let Ok(mut a) = auth.try_lock() {
+                    a.delete_browser_session(sid);
+                }
+            }
+            (
+                "204 No Content",
+                Vec::new(),
+                vec![(
+                    "Set-Cookie".to_string(),
+                    format!("{BROWSER_COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/"),
+                )],
+            )
         }
-        _ => ("405 Method Not Allowed", br#"{"error":"method"}"#.to_vec(), vec![]),
+        _ => (
+            "405 Method Not Allowed",
+            br#"{"error":"method"}"#.to_vec(),
+            vec![],
+        ),
     };
     let mut extra = security_headers();
     extra.extend(response.2);
-    write_http(&mut stream, response.0, "application/json", &response.1, &extra).await
+    write_http(
+        &mut stream,
+        response.0,
+        "application/json",
+        &response.1,
+        &extra,
+    )
+    .await
 }
 
-async fn serve_static_consumed(mut stream: TcpStream, method: &str, path: &str) -> std::io::Result<()> {
+async fn serve_static_consumed(
+    mut stream: TcpStream,
+    method: &str,
+    path: &str,
+) -> std::io::Result<()> {
     let found = if method == "GET" { route(path) } else { None };
-    match found { Some((_, ct, body)) => write_http(&mut stream, "200 OK", ct, body, &security_headers()).await, None => write_http(&mut stream, "404 Not Found", "text/plain", b"404 Not Found\n", &security_headers()).await }
+    match found {
+        Some((_, ct, body)) => {
+            write_http(&mut stream, "200 OK", ct, body, &security_headers()).await
+        }
+        None => {
+            write_http(
+                &mut stream,
+                "404 Not Found",
+                "text/plain",
+                b"404 Not Found\n",
+                &security_headers(),
+            )
+            .await
+        }
+    }
 }
-async fn write_http(stream: &mut TcpStream, status: &str, ct: &str, body: &[u8], headers: &[(String, String)]) -> std::io::Result<()> {
-    let mut head = format!("HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
-    for (k,v) in headers { head.push_str(k.as_ref()); head.push_str(": "); head.push_str(v.as_ref()); head.push_str("\r\n"); }
-    head.push_str("\r\n"); stream.write_all(head.as_bytes()).await?; stream.write_all(body).await?; stream.shutdown().await
+async fn write_http(
+    stream: &mut TcpStream,
+    status: &str,
+    ct: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+) -> std::io::Result<()> {
+    let mut head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        head.push_str(k.as_ref());
+        head.push_str(": ");
+        head.push_str(v.as_ref());
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.shutdown().await
 }
-fn security_headers() -> Vec<(String, String)> { vec![("Cache-Control".into(),"no-store".into()),("X-Content-Type-Options".into(),"nosniff".into()),("Content-Security-Policy".into(),"default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*".into()),("Referrer-Policy".into(),"no-referrer".into()),("X-Frame-Options".into(),"DENY".into())] }
+fn security_headers() -> Vec<(String, String)> {
+    vec![
+        ("Cache-Control".into(), "no-store".into()),
+        ("X-Content-Type-Options".into(), "nosniff".into()),
+        (
+            "Content-Security-Policy".into(),
+            "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*".into(),
+        ),
+        ("Referrer-Policy".into(), "no-referrer".into()),
+        ("X-Frame-Options".into(), "DENY".into()),
+    ]
+}
 pub(crate) fn valid_loopback_host(host: &str) -> bool {
-    let h = if let Some(rest) = host.strip_prefix('[') { rest.split(']').next().unwrap_or("") } else { host.split(':').next().unwrap_or("") };
-    matches!(h,"localhost"|"127.0.0.1"|"::1")
+    let h = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    matches!(h, "localhost" | "127.0.0.1" | "::1")
 }
-fn valid_origin(origin: Option<&str>, host: &str) -> bool { origin.map(|o| o == format!("http://{host}")).unwrap_or(true) }
-pub(crate) fn cookie_value(header: &str, name: &str) -> Option<String> { header.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k,_)| *k==name).map(|(_,v)| v.to_string()) }
+fn valid_origin(origin: Option<&str>, host: &str) -> bool {
+    origin
+        .map(|o| o == format!("http://{host}"))
+        .unwrap_or(true)
+}
+pub(crate) fn cookie_value(header: &str, name: &str) -> Option<String> {
+    header
+        .split(';')
+        .filter_map(|p| p.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.to_string())
+}
 
 #[cfg(test)]
 #[path = "web_test.rs"]

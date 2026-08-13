@@ -81,6 +81,12 @@ export const projectCreate = (name: string, cwd: string, instanceId?: string) =>
 export const projectArchive = (projectId: string) =>
   action('project/archive', { projectId });
 
+export const projectRestore = (projectId: string) =>
+  action('project/restore', { projectId });
+
+export const projectRename = (projectId: string, name: string) =>
+  action('project/rename', { projectId, name });
+
 export const persistedSessionCreate = (projectId: string, title?: string) => {
   const payload: Record<string, unknown> = { projectId };
   if (title) payload.title = title;

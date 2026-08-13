@@ -9,6 +9,7 @@
 
 use yrs::{Array, Map, ReadTxn, Transact, WriteTxn};
 
+use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::schema::{
     ActiveTurnProjection, ChatStatus, EntryKind, EntryRole, EntryStatus, PermissionOptions,
     PermissionStatus, PublicError, ToolCallProjection, ToolCallStatus, TurnStatus,
@@ -62,6 +63,8 @@ pub enum ApplyReason {
     /// 终态守卫：turn 处于 cancelling/completed/failed/cancelled，晚到增量丢弃
     /// （§6.3）。
     TurnTerminalGuard,
+    /// 工具仍等待权限时收到完成帧。消费 seq 但拒绝矛盾的完成证据。
+    AwaitingPermissionGuard,
     /// interrupted 状态下：非终态事件丢弃；或终态事件缺重放序依据（§6.3
     /// 例外）。
     InterruptedGuard,
@@ -263,7 +266,7 @@ impl Aggregator {
                     EntryKind::Message,
                     EntryRole::Assistant,
                     Some(&turn_id),
-                    "",
+                    &ev.ts,
                 );
                 chat_writer::append_text_delta(
                     txn,
@@ -297,7 +300,7 @@ impl Aggregator {
                     EntryKind::Message,
                     EntryRole::Assistant,
                     Some(&turn_id),
-                    "",
+                    &ev.ts,
                 );
                 chat_writer::append_text_delta(
                     txn,
@@ -531,10 +534,16 @@ impl Aggregator {
                 Ok(())
             }
             EventBody::ToolCallStarted { tool_call_id, .. } => {
-                // 幂等：tool_call_id 已存在 → 跳过。
+                // 普通重复 start 幂等跳过。唯一例外是 permission-first：官方
+                // request 已用同 id 合成 awaitingPermission 工具，稍后正式
+                // tool_call 可补全 name/arguments，但不得回退状态或覆盖终态。
                 let txn = pair.chat.transact();
-                if chat_writer::tool_call_exists(&txn, tool_call_id) {
-                    return Err(ApplyReason::DuplicateIdempotent);
+                if let Some(existing) = chat_writer::tool_call_projection(&txn, tool_call_id) {
+                    if existing.permission_id.is_none()
+                        || existing.status != ToolCallStatus::AwaitingPermission
+                    {
+                        return Err(ApplyReason::DuplicateIdempotent);
+                    }
                 }
                 if !pair.stream.replay_active {
                     self.judge_turn_guard(active, &ev.body)?;
@@ -546,8 +555,19 @@ impl Aggregator {
                     self.judge_turn_guard(active, &ev.body)?;
                 }
                 let txn = pair.chat.transact();
-                if !chat_writer::tool_call_exists(&txn, tool_call_id) {
-                    return Err(ApplyReason::UnknownToolCall);
+                match chat_writer::tool_call_projection(&txn, tool_call_id) {
+                    None => return Err(ApplyReason::UnknownToolCall),
+                    Some(existing)
+                        if matches!(
+                            existing.status,
+                            ToolCallStatus::Completed
+                                | ToolCallStatus::Error
+                                | ToolCallStatus::Cancelled
+                        ) =>
+                    {
+                        return Err(ApplyReason::DuplicateIdempotent);
+                    }
+                    Some(_) => {}
                 }
                 Ok(())
             }
@@ -556,8 +576,22 @@ impl Aggregator {
                     self.judge_turn_guard(active, &ev.body)?;
                 }
                 let txn = pair.chat.transact();
-                if !chat_writer::tool_call_exists(&txn, tool_call_id) {
-                    return Err(ApplyReason::UnknownToolCall);
+                match chat_writer::tool_call_projection(&txn, tool_call_id) {
+                    None => return Err(ApplyReason::UnknownToolCall),
+                    Some(existing)
+                        if matches!(
+                            existing.status,
+                            ToolCallStatus::Completed
+                                | ToolCallStatus::Error
+                                | ToolCallStatus::Cancelled
+                        ) =>
+                    {
+                        return Err(ApplyReason::DuplicateIdempotent);
+                    }
+                    Some(existing) if existing.status == ToolCallStatus::AwaitingPermission => {
+                        return Err(ApplyReason::AwaitingPermissionGuard);
+                    }
+                    Some(_) => {}
                 }
                 Ok(())
             }
@@ -699,17 +733,72 @@ impl Aggregator {
             .unwrap_or(false)
     }
 
+    fn permission_context<T: ReadTxn>(
+        &self,
+        txn: &T,
+        permission_id: &str,
+    ) -> Option<(String, Option<String>)> {
+        let root = chat_writer::root_map_read(txn)?;
+        let permissions = root
+            .get(txn, "pending_permissions")?
+            .cast::<yrs::MapRef>()
+            .ok()?;
+        let permission = permissions
+            .get(txn, permission_id)?
+            .cast::<yrs::MapRef>()
+            .ok()?;
+        let status = permission
+            .get(txn, "status")
+            .and_then(|value| value.cast::<String>().ok())
+            .unwrap_or_default();
+        let tool_call_id = permission
+            .get(txn, "tool_call_id")
+            .and_then(|value| value.cast::<String>().ok());
+        Some((status, tool_call_id))
+    }
+
     /// 应用（写入）：chat → control 顺序（§6.4）。
     ///
     /// 事务纪律：禁止跨 await 持有（§7.4）；同一 doc 的并发事务会 panic，
     /// 故预读（upsert 保留字段）在开写事务前完成，CAS 类写入自开事务。
     fn write(&self, pair: &mut DocPair, ev: &NormalizedEvent) {
+        // Permission resolution events only carry a permission id. Resolve their optional
+        // tool link before opening the chat transaction; the aggregator is the serialized
+        // single writer, so a pending snapshot cannot race the following CAS.
+        let permission_link = match &ev.body {
+            EventBody::PermissionResolved { permission_id, .. }
+            | EventBody::PermissionExpired { permission_id } => {
+                let txn = pair.session.transact();
+                self.permission_context(&txn, permission_id)
+            }
+            _ => None,
+        };
+        let linked_pending_count = permission_link
+            .as_ref()
+            .and_then(|(_, tool_call_id)| tool_call_id.as_deref())
+            .map(|tool_call_id| permission::pending_count_for_tool(pair, tool_call_id))
+            .unwrap_or(0);
         // 预读：chat 侧 upsert 需要保留的现有投影（开写事务前完成）。
         let pre_read = match &ev.body {
-            EventBody::ToolCallUpdated { tool_call_id, .. }
+            EventBody::ToolCallStarted { tool_call_id, .. }
+            | EventBody::ToolCallUpdated { tool_call_id, .. }
             | EventBody::ToolCallCompleted { tool_call_id, .. } => {
                 let txn = pair.chat.transact();
                 chat_writer::tool_call_projection(&txn, tool_call_id)
+            }
+            EventBody::PermissionRequested {
+                tool_call_id: Some(tool_call_id),
+                ..
+            } => {
+                let txn = pair.chat.transact();
+                chat_writer::tool_call_projection(&txn, tool_call_id)
+            }
+            EventBody::PermissionResolved { .. } | EventBody::PermissionExpired { .. } => {
+                let txn = pair.chat.transact();
+                permission_link
+                    .as_ref()
+                    .and_then(|(_, tool_call_id)| tool_call_id.as_deref())
+                    .and_then(|tool_call_id| chat_writer::tool_call_projection(&txn, tool_call_id))
             }
             _ => None,
         };
@@ -723,7 +812,9 @@ impl Aggregator {
             && pair.stream.replay_turn.is_none()
             && matches!(
                 ev.body,
-                EventBody::MessageDelta { .. } | EventBody::ReasoningDelta { .. }
+                EventBody::MessageDelta { .. }
+                    | EventBody::ReasoningDelta { .. }
+                    | EventBody::ToolCallStarted { .. }
             ) {
             let t = format!("load:{}", ev.seq);
             pair.stream.replay_turn = Some(t.clone());
@@ -748,6 +839,13 @@ impl Aggregator {
                 ..
             } => Some(self.resolve_entry_ids(pair, turn_id, entry_id, block_id, "reasoning")),
             _ => None,
+        };
+        let resolved_tool_turn = match &ev.body {
+            EventBody::ToolCallStarted { turn_id, .. } if turn_id.is_empty() => {
+                self.resolve_entry_ids(pair, turn_id, "", "", "tool").0
+            }
+            EventBody::ToolCallStarted { turn_id, .. } => turn_id.clone(),
+            _ => String::new(),
         };
         // 预读：回放模式（§8.5）历史 user 消息的归位 turn（chat 事务前
         // 计算——事务借用与 stream 可变借用互斥，§7.4）。
@@ -785,7 +883,7 @@ impl Aggregator {
                         EntryKind::Message,
                         EntryRole::Assistant,
                         Some(&turn_id),
-                        "",
+                        &ev.ts,
                     );
                     chat_writer::append_text_delta(
                         &mut txn,
@@ -808,7 +906,7 @@ impl Aggregator {
                         EntryKind::Message,
                         EntryRole::Assistant,
                         Some(&turn_id),
-                        "",
+                        &ev.ts,
                     );
                     chat_writer::append_text_delta(
                         &mut txn,
@@ -847,52 +945,114 @@ impl Aggregator {
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
                 EventBody::ToolCallStarted {
-                    turn_id,
                     tool_call_id,
                     name,
+                    status,
                     arguments,
+                    created_at,
                     ..
                 } => {
-                    let tc = ToolCallProjection {
-                        tool_call_id: tool_call_id.clone(),
-                        turn_id: turn_id.clone(),
-                        name: name.clone(),
-                        status: ToolCallStatus::Pending,
-                        arguments: arguments.clone(),
-                        result: None,
-                        public_error: None,
-                        permission_id: None,
+                    let turn_id = &resolved_tool_turn;
+                    let tc = if let Some(mut existing) = pre_read.clone() {
+                        existing.name = name.clone();
+                        if arguments.is_some() {
+                            existing.arguments = arguments.clone();
+                        }
+                        existing.status = advance_tool_status(existing.status, *status, false);
+                        existing
+                    } else {
+                        ToolCallProjection {
+                            tool_call_id: tool_call_id.clone(),
+                            turn_id: turn_id.clone(),
+                            name: name.clone(),
+                            status: *status,
+                            arguments: arguments.clone(),
+                            result: None,
+                            result_omitted: Some(false),
+                            result_bytes: None,
+                            public_error: None,
+                            permission_id: None,
+                            // session/load emits fresh notifications for historical
+                            // calls but does not carry original execution timestamps.
+                            // Do not manufacture a replay-duration from transport speed.
+                            started_at: (!replay_active).then(|| created_at.clone()),
+                            completed_at: None,
+                        }
                     };
                     chat_writer::upsert_tool_call(&mut txn, &root, &tc);
+                    let entry_id = format!("{turn_id}:assistant");
+                    chat_writer::ensure_entry_with_blocks(
+                        &mut txn,
+                        &root,
+                        &entry_id,
+                        EntryKind::Message,
+                        EntryRole::Assistant,
+                        Some(turn_id),
+                        &ev.ts,
+                    );
+                    chat_writer::append_block(
+                        &mut txn,
+                        &root,
+                        &entry_id,
+                        acp_hub_proto::schema::ContentBlock::ToolCall {
+                            block_id: format!("tool:{tool_call_id}"),
+                            tool_call_id: tool_call_id.clone(),
+                        },
+                    );
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
-                EventBody::ToolCallUpdated { arguments, .. } => {
-                    // 现有投影上 arguments 全量覆盖（M1，§3.2）。
+                EventBody::ToolCallUpdated {
+                    status, arguments, ..
+                } => {
+                    // ACP 提供 arguments 时全量覆盖；缺省表示“未提供”，不能
+                    // 清空先前输入证据。状态只允许服务端定义的单向迁移。
                     let mut tc = pre_read.clone().unwrap_or_else(default_tool_call);
-                    tc.arguments = arguments.clone();
+                    if arguments.is_some() {
+                        tc.arguments = arguments.clone();
+                    }
+                    if let Some(next) = status {
+                        tc.status = advance_tool_status(tc.status, *next, false);
+                    }
                     chat_writer::upsert_tool_call(&mut txn, &root, &tc);
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
                 EventBody::ToolCallCompleted {
                     result,
                     public_error,
+                    completed_at,
                     ..
                 } => {
                     let mut tc = pre_read.clone().unwrap_or_else(default_tool_call);
-                    tc.status = if public_error.is_some() {
+                    let terminal = if public_error.is_some() {
                         ToolCallStatus::Error
                     } else {
                         ToolCallStatus::Completed
                     };
-                    // 超大 result 截断（§9.5：只做大小预算，不写超限内容）。
-                    tc.result = result.clone().filter(|v| {
-                        serde_json::to_vec(v)
-                            .map(|b| b.len() <= TOOL_RESULT_MAX_BYTES)
-                            .unwrap_or(false)
-                    });
-                    tc.public_error = public_error.clone();
-                    chat_writer::upsert_tool_call(&mut txn, &root, &tc);
-                    chat_writer::bump_projection_version(&mut txn, &root);
+                    let previous_status = tc.status;
+                    tc.status = advance_tool_status(tc.status, terminal, false);
+                    if tc.status != previous_status {
+                        // 序列化一次：超限时不保留内容，但投影明确说明是省略而非空结果。
+                        let serialized_bytes = result
+                            .as_ref()
+                            .and_then(|value| serde_json::to_vec(value).ok())
+                            .map(|bytes| bytes.len());
+                        let result_omitted = result.is_some()
+                            && serialized_bytes
+                                .map(|size| size > TOOL_RESULT_MAX_BYTES)
+                                .unwrap_or(true);
+                        tc.result_omitted = Some(result_omitted);
+                        tc.result_bytes =
+                            serialized_bytes.and_then(|size| u64::try_from(size).ok());
+                        tc.result = if result_omitted { None } else { result.clone() };
+                        tc.public_error = public_error.clone();
+                        tc.completed_at = (!replay_active).then(|| completed_at.clone());
+                        chat_writer::upsert_tool_call(&mut txn, &root, &tc);
+                        chat_writer::bump_projection_version(&mut txn, &root);
+                    } else {
+                        // Awaiting permission blocks ordinary completion, just as it
+                        // blocks running updates. Do not persist a result/completion
+                        // timestamp that would contradict the visible lifecycle.
+                    }
                 }
                 EventBody::TurnTerminal {
                     turn_id,
@@ -916,13 +1076,102 @@ impl Aggregator {
                         completed_at,
                         public_error.as_ref(),
                     );
+                    if matches!(status, TurnStatus::Cancelled | TurnStatus::Interrupted) {
+                        chat_writer::cancel_nonterminal_tools_for_turn(&mut txn, &root, turn_id);
+                    }
                     chat_writer::bump_projection_version(&mut txn, &root);
                 }
+                EventBody::PermissionRequested {
+                    permission_id,
+                    tool_call_id,
+                    tool,
+                    turn_id,
+                    ..
+                } => {
+                    if let Some(tool_call_id) = tool_call_id {
+                        let synthesized = tool.as_ref().and_then(|snapshot| {
+                            (snapshot.tool_call_id == *tool_call_id && !turn_id.is_empty()).then(
+                                || ToolCallProjection {
+                                    tool_call_id: tool_call_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    name: snapshot.name.clone(),
+                                    status: ToolCallStatus::AwaitingPermission,
+                                    arguments: snapshot.arguments.clone(),
+                                    result: None,
+                                    result_omitted: Some(false),
+                                    result_bytes: None,
+                                    public_error: None,
+                                    permission_id: Some(permission_id.clone()),
+                                    started_at: (!replay_active).then(|| ev.ts.clone()),
+                                    completed_at: None,
+                                },
+                            )
+                        });
+                        if let Some(mut tc) = pre_read.clone().or(synthesized) {
+                            tc.status = advance_tool_status(
+                                tc.status,
+                                ToolCallStatus::AwaitingPermission,
+                                true,
+                            );
+                            tc.permission_id = Some(permission_id.clone());
+                            chat_writer::upsert_tool_call(&mut txn, &root, &tc);
+                            let entry_id = format!("{}:assistant", tc.turn_id);
+                            chat_writer::ensure_entry_with_blocks(
+                                &mut txn,
+                                &root,
+                                &entry_id,
+                                EntryKind::Message,
+                                EntryRole::Assistant,
+                                Some(&tc.turn_id),
+                                &ev.ts,
+                            );
+                            chat_writer::append_block(
+                                &mut txn,
+                                &root,
+                                &entry_id,
+                                acp_hub_proto::schema::ContentBlock::ToolCall {
+                                    block_id: format!("tool:{tool_call_id}"),
+                                    tool_call_id: tool_call_id.clone(),
+                                },
+                            );
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                }
+                EventBody::PermissionResolved { decision, .. } => {
+                    if permission_link
+                        .as_ref()
+                        .is_some_and(|(status, _)| status == "pending")
+                    {
+                        if let Some(mut tc) = pre_read.clone() {
+                            let next = match decision {
+                                PermissionDecision::Allow if linked_pending_count > 1 => {
+                                    ToolCallStatus::AwaitingPermission
+                                }
+                                PermissionDecision::Allow => ToolCallStatus::Running,
+                                PermissionDecision::Deny => ToolCallStatus::Cancelled,
+                            };
+                            tc.status = advance_tool_status(tc.status, next, true);
+                            chat_writer::upsert_tool_call(&mut txn, &root, &tc);
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                }
+                EventBody::PermissionExpired { .. } => {
+                    if permission_link
+                        .as_ref()
+                        .is_some_and(|(status, _)| status == "pending")
+                    {
+                        if let Some(mut tc) = pre_read.clone() {
+                            tc.status =
+                                advance_tool_status(tc.status, ToolCallStatus::Cancelled, true);
+                            chat_writer::upsert_tool_call(&mut txn, &root, &tc);
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                }
                 // 不涉 chat doc 的事件：无 chat 写入。
-                EventBody::PermissionRequested { .. }
-                | EventBody::PermissionResolved { .. }
-                | EventBody::PermissionExpired { .. }
-                | EventBody::AgentStatus { .. }
+                EventBody::AgentStatus { .. }
                 | EventBody::AgentConfig { .. }
                 | EventBody::AgentUsage { .. }
                 | EventBody::Capabilities { .. }
@@ -946,7 +1195,14 @@ impl Aggregator {
                     let no_pending_left = permission::pending_count(pair) == 0;
                     let mut txn = pair.session_txn();
                     let root = txn.get_or_insert_map(ROOT);
-                    if no_pending_left {
+                    if *decision == PermissionDecision::Deny {
+                        chat_writer::set_active_turn_status_if(
+                            &mut txn,
+                            &root,
+                            "awaitingPermission",
+                            "cancelled",
+                        );
+                    } else if no_pending_left {
                         chat_writer::set_active_turn_status_if(
                             &mut txn,
                             &root,
@@ -1024,6 +1280,7 @@ impl Aggregator {
                         description,
                         options,
                         expires_at,
+                        ..
                     } => {
                         write_permission_request(
                             &mut txn,
@@ -1142,9 +1399,33 @@ impl Aggregator {
                             chat_writer::bump_projection_version(&mut txn, &root);
                         }
                     }
-                    EventBody::ToolCallStarted { .. }
-                    | EventBody::ToolCallUpdated { .. }
-                    | EventBody::ToolCallCompleted { .. }
+                    EventBody::ToolCallStarted { status, .. } => {
+                        if !replay_active
+                            && *status == ToolCallStatus::Running
+                            && chat_writer::set_active_turn_status_if(
+                                &mut txn,
+                                &root,
+                                "accepting",
+                                "running",
+                            )
+                        {
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                    EventBody::ToolCallUpdated { status, .. } => {
+                        if !replay_active
+                            && *status == Some(ToolCallStatus::Running)
+                            && chat_writer::set_active_turn_status_if(
+                                &mut txn,
+                                &root,
+                                "accepting",
+                                "running",
+                            )
+                        {
+                            chat_writer::bump_projection_version(&mut txn, &root);
+                        }
+                    }
+                    EventBody::ToolCallCompleted { .. }
                     | EventBody::PermissionResolved { .. }
                     | EventBody::PermissionExpired { .. } => {
                         // 纯 chat 事件或已在外层单独处理（CAS）：无 control
@@ -1164,9 +1445,33 @@ fn default_tool_call() -> ToolCallProjection {
         status: ToolCallStatus::Pending,
         arguments: None,
         result: None,
+        result_omitted: None,
+        result_bytes: None,
         public_error: None,
         permission_id: None,
+        started_at: None,
+        completed_at: None,
     }
+}
+
+fn advance_tool_status(
+    current: ToolCallStatus,
+    incoming: ToolCallStatus,
+    permission_event: bool,
+) -> ToolCallStatus {
+    if matches!(
+        current,
+        ToolCallStatus::Completed | ToolCallStatus::Error | ToolCallStatus::Cancelled
+    ) {
+        return current;
+    }
+    if current == ToolCallStatus::AwaitingPermission && !permission_event {
+        return current;
+    }
+    if current == ToolCallStatus::Running && incoming == ToolCallStatus::Pending {
+        return current;
+    }
+    incoming
 }
 
 // ---------------------------------------------------------------------------

@@ -20,10 +20,10 @@
 //! - **心跳**：每 `heartbeat_interval` 发 `instance/heartbeat { load,
 //!   alive_sessions }`（load = min(100, alive×20)【决策】，§17.1 无精确语义）；
 //! - **孤儿清理三层**（§8）：kill_on_drop（Drop）→ 进程组 kill（kill 指令）→
-//!   启动时水位 pgid SIGKILL + buffer/ 目录删除（崩溃路径）。
+//!   启动时水位所有权验证后的进程组 SIGKILL + buffer/ 目录删除（崩溃路径）。
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -40,7 +40,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::auth::{AuthClient, AuthSession, HelloCtx};
-use crate::buffer::{Buffer, RingBuffer, Watermark};
+use crate::buffer::{Buffer, DataDirIdentity, RingBuffer, Watermark};
 use crate::child::{self, AcpProcess, ChildOutput};
 use crate::transport::{
     self, SendError, StoppedReason, TransportConfig, TransportEvent, TransportHandle,
@@ -122,6 +122,8 @@ struct ChatEntry {
 
 /// daemon 共享状态（std Mutex 保护——临界区均为同步短操作，不跨 await）。
 struct HubState {
+    /// Retains exclusive ownership of the instance data directory for daemon lifetime.
+    _owner_lock: InstanceOwnerLock,
     chats: StdMutex<HashMap<String, ChatEntry>>,
     buffer: StdMutex<Buffer>,
     rings: StdMutex<HashMap<String, RingBuffer>>,
@@ -146,31 +148,83 @@ struct HubState {
 // 启动清理（§8 第三层：崩溃路径）
 // ---------------------------------------------------------------------------
 
-/// 启动清理：残留 pgid SIGKILL（ESRCH 忽略）+ buffer/ 目录删除（§3.3 缓冲不
-/// 跨重启）。返回 (水位, buffer_lost)——`buffer_lost` = 发现上代运行残留
-/// （水位非空或 buffer 目录存在），首次运行 false。
-pub fn startup_cleanup(config: &InstanceConfig) -> anyhow::Result<(Watermark, bool)> {
+/// 启动清理：只有 data-dir 身份与 leader 出生指纹同时匹配才会
+/// SIGKILL 进程组；旧格式、目录副本和 PID 复用都 fail closed。无论是否
+/// 可安全发信号，发现上代运行记录或 buffer 都会返回 `buffer_lost=true`
+/// 供 server 权威对账。
+struct InstanceOwnerLock {
+    _file: File,
+}
+
+impl InstanceOwnerLock {
+    fn acquire(data_dir: &Path) -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let path = data_dir.join("instance.owner.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        // SAFETY: flock operates on a valid owned fd and does not access Rust memory.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            anyhow::bail!("instance data directory is already owned by another daemon");
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+#[cfg(unix)]
+fn data_dir_identity(path: &Path) -> anyhow::Result<DataDirIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path)?;
+    Ok(DataDirIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn startup_cleanup(
+    config: &InstanceConfig,
+) -> anyhow::Result<(Watermark, bool, InstanceOwnerLock)> {
     fs::create_dir_all(&config.data_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&config.data_dir, fs::Permissions::from_mode(0o700));
     }
-    let watermark = Watermark::load(&config.data_dir)?;
+    let owner_lock = InstanceOwnerLock::acquire(&config.data_dir)?;
+    let identity = data_dir_identity(&config.data_dir)?;
+    let mut watermark = Watermark::load(&config.data_dir)?;
     let buffer_dir = config.data_dir.join("buffer");
-    let buffer_lost = !watermark.pgids().is_empty() || buffer_dir.exists();
+    let runtime_records = watermark.runtime_records();
+    let buffer_lost = !runtime_records.is_empty() || buffer_dir.exists();
 
-    for pgid in watermark.pgids() {
-        // §8 步骤 2：对水位记录的上代残留进程组 SIGKILL（pid 重用风险 M1 接受，
-        // 权威对账在 server 侧【决策】）。
-        child::sys::kill_group(pgid, child::sys::SIGKILL);
-        tracing::info!(target: "acp_hub::instance", pgid, "启动清理：残留进程组 SIGKILL");
+    let directory_matches = watermark.data_dir_identity() == Some(identity);
+    for (pgid, expected) in runtime_records {
+        let actual = child::process_fingerprint(pgid);
+        if directory_matches && expected.is_some() && expected == actual {
+            let signalled = child::sys::kill_group(pgid, child::sys::SIGKILL);
+            tracing::info!(target: "acp_hub::instance", pgid, signalled,
+                "启动清理：已验证所有权的残留进程组");
+        } else {
+            tracing::warn!(target: "acp_hub::instance", pgid, directory_matches,
+                fingerprint_present = expected.is_some(), process_matches = expected.is_some() && expected == actual,
+                "启动清理：所有权无法证明，跳过信号");
+        }
     }
     if buffer_dir.exists() {
         fs::remove_dir_all(&buffer_dir)?;
         tracing::info!(target: "acp_hub::instance", "启动清理：删除残留缓冲目录");
     }
-    Ok((watermark, buffer_lost))
+    watermark.finalize_startup(identity)?;
+    Ok((watermark, buffer_lost, owner_lock))
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +269,7 @@ fn validate_env(env: &HashMap<String, String>, extra: &[String]) -> Result<(), &
 /// 启动 instance daemon 主循环（阻塞直到 transport 停止 / ctrl_c / 错误）。
 pub async fn run(config: InstanceConfig) -> anyhow::Result<()> {
     // 0. 启动清理（§8 第三层）→ 水位 + buffer_lost。
-    let (watermark, buffer_lost) = startup_cleanup(&config)?;
+    let (watermark, buffer_lost, owner_lock) = startup_cleanup(&config)?;
 
     // 1. 认证客户端（token fail-fast）。
     let auth_client = AuthClient::new(config.token.clone())?;
@@ -251,6 +305,7 @@ pub async fn run(config: InstanceConfig) -> anyhow::Result<()> {
         })
         .unwrap_or_else(|| "unknown".to_string());
     let state = Arc::new(HubState {
+        _owner_lock: owner_lock,
         chats: StdMutex::new(HashMap::new()),
         buffer: StdMutex::new(Buffer::new(
             config.mem_buffer_bytes,
@@ -569,9 +624,10 @@ async fn handle_spawn(state: &HubState, handle: &TransportHandle, spawn: Instanc
             }
             // 水位：epoch 变更写盘（§4.4.3 更新时机）。
             let pgid = acp.pgid();
+            let process_fingerprint = child::process_fingerprint(pgid);
             {
                 let mut wm = state.watermark.lock().expect("watermark mutex poisoned");
-                if let Err(e) = wm.record(&sid, epoch, 0, pgid) {
+                if let Err(e) = wm.record(&sid, epoch, 0, pgid, process_fingerprint) {
                     tracing::error!(target: "acp_hub::instance", chat_id = %sid, error = %e,
                         "水位写入失败");
                 }
@@ -751,7 +807,7 @@ async fn forward_child_output(
                     let epoch = entry.epoch;
                     let last_seq = entry.last_sent_seq;
                     let mut wm = state.watermark.lock().expect("watermark mutex poisoned");
-                    if let Err(e) = wm.record(&sid, epoch, last_seq, 0) {
+                    if let Err(e) = wm.record(&sid, epoch, last_seq, 0, None) {
                         tracing::error!(target: "acp_hub::instance", chat_id = %sid,
                             error = %e, "水位写入失败");
                     }

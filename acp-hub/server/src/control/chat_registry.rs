@@ -268,6 +268,15 @@ impl ChatRegistry {
         self.inner.chats.read().await.get(chat_id).cloned()
     }
 
+    /// Whether a project/workspace still owns any non-terminal runtime.
+    /// Project archival uses this in-memory runtime authority rather than the
+    /// persisted `last_chat_id` hint, which can be stale after close/restart.
+    pub async fn has_live_workspace(&self, workspace_id: &str) -> bool {
+        self.inner.chats.read().await.values().any(|chat| {
+            chat.workspace_id.as_deref() == Some(workspace_id) && !chat.state.is_terminal()
+        })
+    }
+
     /// instance offline 时的 close（§7.6）：返回 pending_close 标记（Registry
     /// 状态写回）；kill 补发由重连对账完成。
     pub async fn request_close_offline(&self, chat_id: &str) -> Result<(), ChatError> {
