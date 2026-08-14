@@ -16,7 +16,11 @@ pub use loader::{
 use peri_acp_types::{mcp_skills::McpSkillRegistry, skills::SkillOrigin};
 use peri_agent::{
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{
+        prompt_sections::{PromptSection, PromptSectionZone},
+        r#trait::Middleware,
+        state::MiddlewareState,
+    },
     tools::BaseTool,
 };
 
@@ -110,7 +114,63 @@ pub struct SkillsMiddleware {
     mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
 
+// ─── 13_skills 段落持有（波 4 演进 C3，设计 §3.1.1 归属全景 / §3.1.2）───────
+
+/// discovery 协议 markdown 文本（13_skills 段落动态部分）。
+///
+/// 由**代码事实**生成（设计 §3.1.2「协议细节按实际装配动态生成」）：
+/// - roots 优先级顺序 = [`resolve_skill_roots`] 的构造顺序
+///   （User → Global → Project → Plugin → Builtin，先到先得）；
+/// - 扫描深度与单 root 目录数上限 = [`MAX_SCAN_DEPTH`] /
+///   [`MAX_SKILLS_DIRS_PER_ROOT`]（loader 常量，格式化注入——常量变更
+///   段落自动跟随，防手写硬编码漂移）。
+///
+/// 实例级装配路径（`with_global_dir` / `with_user_dir` 等）不进入段落——
+/// 渲染面静态声明（冻结渲染）与链收集同源，无需装配参数注入（决策记录
+/// C3 D3 落地边界）。
+pub fn format_discovery_protocol() -> String {
+    let roots = [
+        "1. `~/.claude/skills/` — user-level skills (highest priority)",
+        "2. Global `skillsDir` configured in `~/.peri/settings.json`",
+        "3. `{cwd}/.claude/skills/` — project-level skills",
+        "4. Plugin skills declared in plugin manifests",
+        "5. **Builtin** — compile-time bundled skills shipped with the product (listed by `DiscoverSkillsTool` with `source: \"builtin\"`)",
+    ];
+    let mut lines: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
+    lines.push(String::new());
+    lines.push(format!(
+        "Each skill root is scanned recursively up to {MAX_SCAN_DEPTH} levels deep (max {MAX_SKILLS_DIRS_PER_ROOT} directories per root). A directory containing `SKILL.md` is treated as a leaf — its subdirectories are not scanned. Symlinks are followed with cycle detection."
+    ));
+    lines.join("\n")
+}
+
 impl SkillsMiddleware {
+    /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
+    ///
+    /// 13_skills 段 = 机制说明（`sections/13_skills.md`，include_str 零拷贝，
+    /// 文件留在 `peri-acp/prompts/sections/`）+ 动态 discovery 协议
+    /// （[`format_discovery_protocol`]，按 loader 代码事实生成——段落文件
+    /// 不再硬编码 roots 优先级 / 扫描深度细节，防失同步，设计 §3.1.2）。
+    ///
+    /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
+    /// （收集即装配）——关闭 SkillsMiddleware → 13_skills 段落 +
+    /// SkillTool/DiscoverSkillsTool 同时消失（盲区闭合）。
+    pub fn sections() -> Vec<PromptSection> {
+        let mut content = String::with_capacity(2048);
+        content.push_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../peri-acp/prompts/sections/13_skills.md"
+        )));
+        content.push_str("\n\n");
+        content.push_str(&format_discovery_protocol());
+        vec![PromptSection::dynamic(
+            "13_skills",
+            PromptSectionZone::Uncached,
+            5, // C1 D2 编号事实：gated 13=5（11_subagent=4 之后）
+            content,
+        )]
+    }
+
     pub fn new() -> Self {
         Self {
             project_skills_dir: None,
@@ -312,6 +372,11 @@ impl Default for SkillsMiddleware {
 impl Middleware for SkillsMiddleware {
     fn name(&self) -> &str {
         "SkillsMiddleware"
+    }
+
+    /// 声明持有的系统提示词段落（13_skills，内容载体；装配期收集，契约 2）。
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        Self::sections()
     }
 
     fn prompt_contribution(&self) -> Option<String> {

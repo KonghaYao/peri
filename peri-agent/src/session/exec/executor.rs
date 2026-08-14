@@ -48,10 +48,7 @@
 //!   `LoopResult::Error` 分支先发 `AgentExecutionFailed` 事件再判断 stop_reason
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"
 
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use tokio::sync::oneshot as exec_oneshot;
 
@@ -67,7 +64,6 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::debug;
 
 use peri_acp_types::event_data::PredictionAction;
-use peri_acp_types::permission::PermissionMode;
 use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind, TaskManager};
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
@@ -82,15 +78,13 @@ use crate::tools::ToolInvocationResolver;
 // intercept_immediate_command / InterceptRequest / spawn_event_pump /
 // SpawnPumpRequest / PumpHandle / collect_result / CollectRequest /
 // close_channel / wait_for_pump / build_and_execute_agent_v2 /
-// V2ExecuteRequest / StageBuildFn / ExecOutcome / ModeNoticeBooking /
-// mark_permission_mode_notified / DefaultBgForkSpawner —— executor_test.rs
-// 通过 `super::` 访问的符号路径保持不变。
+// V2ExecuteRequest / StageBuildFn / ExecOutcome / DefaultBgForkSpawner ——
+// executor_test.rs 通过 `super::` 访问的符号路径保持不变。
 pub use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
-    mark_permission_mode_notified, spawn_event_pump, wait_for_pump, CollectRequest,
-    CommandLookupFn, DefaultBgForkSpawner, ExecOutcome, ForwarderLauncherFn, InterceptRequest,
-    ModeNoticeBooking, ParentToolsFactory, PumpHandle, SpawnPumpRequest, StageBuildFn,
-    V2ExecuteRequest,
+    spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, DefaultBgForkSpawner,
+    ExecOutcome, ForwarderLauncherFn, InterceptRequest, ParentToolsFactory, PumpHandle,
+    SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
 };
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
@@ -150,12 +144,6 @@ pub struct FrozenSessionData {
     /// Frozen content of CLAUDE.local.md, None if no file.
     /// v2 FrozenContext 未包含 local_md，保留此处。
     claude_local_md: Option<Arc<str>>,
-    /// 子 agent / fork / workflow agent 复用的冻结 system prompt
-    /// （不含 16_workflow section，见 [`FrozenSessionData::subagent_system_prompt`]）。
-    ///
-    /// 仅当 `workflow_enabled`（主链可用）时额外渲染并存 Some；workflow 关闭时
-    /// 两版字节相同，存 None 回退到 `system_prompt()`，避免重复占用。
-    subagent_system_prompt: Option<Arc<str>>,
 }
 
 impl FrozenSessionData {
@@ -166,12 +154,10 @@ impl FrozenSessionData {
     pub fn from_frozen_parts(
         v2_frozen: crate::session::FrozenContext,
         claude_local_md: Option<Arc<str>>,
-        subagent_system_prompt: Option<Arc<str>>,
     ) -> Self {
         Self {
             v2_frozen,
             claude_local_md,
-            subagent_system_prompt,
         }
     }
 
@@ -183,17 +169,6 @@ impl FrozenSessionData {
     /// 会话内冻结的完整 system prompt 字符串。
     pub fn system_prompt(&self) -> &str {
         &self.v2_frozen.system_prompt
-    }
-
-    /// 子 agent / fork / workflow agent 复用的冻结 system prompt（无 16_workflow）。
-    ///
-    /// 与 `system_prompt()` 同源、同冻结时机（session 创建），仅能力声明不同：
-    /// 这些链不注册 WorkflowTool，不得宣称 workflow 可用（P2-2026-08-02）。
-    /// workflow_enabled=false（print mode）时与 `system_prompt()` 字节相同。
-    pub fn subagent_system_prompt(&self) -> &str {
-        self.subagent_system_prompt
-            .as_deref()
-            .unwrap_or(&self.v2_frozen.system_prompt)
     }
 
     /// 冻结的 CLAUDE.md 内容（已解析 `@import`），无文件时为 None。
@@ -230,6 +205,14 @@ impl FrozenSessionData {
     /// 会话创建时的语言偏好（如 "zh-CN"、"en"）。None 表示 auto-detect。
     pub fn language(&self) -> Option<&str> {
         self.v2_frozen.language.as_deref()
+    }
+
+    /// 会话级 MetaHarness 冻结状态（段落覆盖 + middleware 关闭集合）。
+    ///
+    /// 单一事实源为 `v2_frozen.meta_harness`——本 accessor 委托存储，不维护
+    /// 第二份副本（设计 §2.3；防止双事实源漂移）。
+    pub fn meta_harness(&self) -> &peri_acp_types::meta_harness::MetaHarnessState {
+        &self.v2_frozen.meta_harness
     }
 }
 
@@ -394,6 +377,12 @@ pub struct SessionContext {
     /// 构造——生产不可达，print mode 已走 session/new 构建，None 时回落
     /// 最小 FrozenSessionData）。
     pub frozen_fallback_builder: Option<FrozenFallbackBuilder>,
+
+    /// 会话级 MetaHarness 状态投影（段落覆盖 + middleware 关闭集合）。
+    ///
+    /// 由 ACP 宿主从当前 session 的冻结数据投影（`FrozenSessionData::meta_harness()`），
+    /// 禁止从每 turn 的当前配置重建（ARC-FROZEN-001 / 设计 §2.5-2.6）。
+    pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 }
 
 /// Per-turn computed configuration derived from [`SessionContext`].
@@ -449,73 +438,6 @@ pub struct TurnInput {
     /// EventBus forwarder 启动器（ACP 宿主持有 Langfuse bridge 构造；
     /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
     pub forwarder_launcher: ForwarderLauncherFn,
-}
-
-/// 各 PermissionMode 的模型可见语义说明（与 10_hitl.md 的机制描述一致）。
-fn permission_mode_semantics(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Default => {
-            "Sensitive tool calls (Bash, Write, Edit, WebFetch, WebSearch, mcp__*, cron_register, ...) require explicit user approval."
-        }
-        PermissionMode::AcceptEdit => {
-            "Write, Edit and folder_operations are auto-approved; other sensitive tools still require explicit approval."
-        }
-        PermissionMode::AutoMode => {
-            "An LLM classifier decides each sensitive tool call; approval falls back to the user when the classifier is unsure."
-        }
-        PermissionMode::Bypass => "All tool calls are allowed without approval.",
-    }
-}
-
-/// 权限模式名（含 Default，与 `display_name` 的空字符串区分）。
-fn permission_mode_name(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Default => "Default",
-        PermissionMode::AcceptEdit => "Accept Edit",
-        PermissionMode::AutoMode => "Auto Mode",
-        PermissionMode::Bypass => "Bypass",
-    }
-}
-
-/// 未通知过的哨兵值：session 创建后首个模型可见 turn 需向模型公开初始
-/// PermissionMode（10_hitl 不含 mode snapshot、Bypass 时 10_hitl 不渲染）。
-/// 真实 mode 值为 0..=4（见 `PermissionMode` repr），不会碰撞。
-pub const PERMISSION_MODE_NEVER_NOTIFIED: u8 = u8::MAX;
-
-/// 检测 PermissionMode 是否变化；变化时返回受控通知文本（**纯检测，不记账**）。
-///
-/// D2：mode 会话内切换后，于下一可消费 turn 以受控 runtime event 通知模型，
-/// 不重建 frozen system prompt，也不改变正在执行 batch 的 mode snapshot。
-/// `last_notified` 记录"上次已随消息入队通知的 mode"：初始化为
-/// [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵，首轮返回"当前模式"初始说明；
-/// 之后返回"模式切换"说明。返回值不含保留 tag（由调用方包裹
-/// `<system-reminder>`），语义文本与 10_hitl.md 的机制说明一致。
-///
-/// 记账由 [`mark_permission_mode_notified`] 在通知文本**随消息推入模型可见
-/// v2 MessageQueue 后**执行（executor_helpers Phase 6 入队点）：本 turn 在
-/// 入队前失败/取消时不记账，下一 turn 重新检测仍会生成通知（可重试，不丢失）。
-pub(crate) fn permission_mode_notice_if_changed(
-    current: PermissionMode,
-    last_notified: &AtomicU8,
-) -> Option<String> {
-    let cur = current as u8;
-    let last = last_notified.load(Ordering::Relaxed);
-    if last == cur {
-        return None;
-    }
-    if last == PERMISSION_MODE_NEVER_NOTIFIED {
-        Some(format!(
-            "Current permission mode: {}: {}",
-            permission_mode_name(current),
-            permission_mode_semantics(current)
-        ))
-    } else {
-        Some(format!(
-            "Permission mode changed to {}: {}",
-            permission_mode_name(current),
-            permission_mode_semantics(current)
-        ))
-    }
 }
 
 /// /bg 命令事件的 envelope 身份标记（agent_id 槽位）。
@@ -950,10 +872,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         frozen_skill_summary: frozen
             .as_ref()
             .and_then(|f| f.skill_summary().map(String::from)),
-        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本（P2-2026-08-02）
-        frozen_system_prompt: frozen
-            .as_ref()
-            .map(|f| f.subagent_system_prompt().to_string()),
+        // fork/bg-fork 复用的冻结 prompt（16_workflow 已删除（C2），子面向
+        // 与主 prompt 字节相同，直接复用主 prompt）
+        frozen_system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
         bg_event_tx: &bg_event_tx_for_cmd,
@@ -968,44 +889,16 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     }
 
     let trace_input = content.text_content();
-    // D2：PermissionMode 会话内切换后，于下一可消费 turn 以受控 runtime event
-    // 通知模型（不重建 frozen system prompt）。last-notified 值存于 session 级
-    // AcpSession（跨 turn 持久）；print mode 等无 SessionAccess 场景不注入。
-    // 与 incoming_recalls 共用 `<system-reminder>` 受控容器，但不属于 recall
-    // 语义（keepgoing 清空 recall 时通知仍注入）。
-    //
-    // [P3] 此处只做纯检测生成文本，**不记账**：`ModeNoticeBooking` 随 agent_input
-    // 下传，executor_helpers 在 Phase 6 把消息推入模型可见 v2 MessageQueue 时
-    // 才调用 `mark_permission_mode_notified`。本 turn 在入队前失败/取消不会
-    // 丢失通知——下一 turn 重新检测仍会生成（可重复重试，恰好可见一次）。
-    // 初始 mode（哨兵状态）同样经此路径在首个模型可见 turn 公开一次。
-    let mode_notice_booking: Option<ModeNoticeBooking> = ctx
-        .session_access
-        .as_ref()
-        .and_then(|sa| sa.last_notified_permission_mode(&ctx.session_id))
-        .and_then(|last| {
-            permission_mode_notice_if_changed(ctx.permission_mode.load(), &last).map(|text| {
-                ModeNoticeBooking {
-                    text,
-                    last_notified: last,
-                    mode: ctx.permission_mode.load(),
-                }
-            })
-        });
-    let mode_notice = mode_notice_booking.as_ref().map(|b| b.text.clone());
-    let agent_input = if incoming_recalls.is_empty() && mode_notice.is_none() {
+    // 演进 1（meta-harness 波 4）：permission_mode 运行时通知注入已整体删除。
+    // 模型对权限模式的感知仅经 10_hitl 段落（HumanInTheLoopMiddleware 持有）
+    // 的机制说明——mode 会话内切换不再注入 `<system-reminder>` 通知。
+    // 此处仅保留 incoming_recalls 的受控容器注入语义。
+    let agent_input = if incoming_recalls.is_empty() {
         AgentInput::blocks(content)
     } else {
-        let mut reminder_parts: Vec<String> = Vec::new();
-        if !incoming_recalls.is_empty() {
-            reminder_parts.push(incoming_recalls.join("\n"));
-        }
-        if let Some(notice) = mode_notice {
-            reminder_parts.push(notice);
-        }
         let reminder_text = format!(
             "<system-reminder>\n{}\n</system-reminder>",
-            reminder_parts.join("\n\n")
+            incoming_recalls.join("\n")
         );
         let mut blocks = content.content_blocks();
         blocks.push(ContentBlock::text(reminder_text));
@@ -1078,7 +971,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         &v2_message_queue,
         async_router.clone(),
         task_manager_for_cmd,
-        mode_notice_booking,
         continuation,
         stage_build,
         forwarder_launcher,
@@ -1126,14 +1018,12 @@ async fn build_and_execute_agent(
     v2_message_queue: &MessageQueue,
     async_router: Option<AsyncRouter>,
     task_manager: Arc<dyn TaskManager>,
-    mode_notice_booking: Option<ModeNoticeBooking>,
     continuation: bool,
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
 ) -> ExecOutcome {
     let (
         system_prompt,
-        subagent_system_prompt,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
@@ -1142,7 +1032,6 @@ async fn build_and_execute_agent(
         // 使用 session 创建时冻结的数据，跳过重建
         (
             f.system_prompt().to_string(),
-            Some(f.subagent_system_prompt().to_string()),
             f.claude_md().map(|s| s.to_string()),
             f.claude_local_md().map(|s| s.to_string()),
             f.skill_summary().map(|s| s.to_string()),
@@ -1157,7 +1046,6 @@ async fn build_and_execute_agent(
                 let frozen_data = builder(turn.cwd, turn.language.as_deref());
                 (
                     frozen_data.system_prompt().to_string(),
-                    Some(frozen_data.subagent_system_prompt().to_string()),
                     frozen_data.claude_md().map(|s| s.to_string()),
                     frozen_data.claude_local_md().map(|s| s.to_string()),
                     frozen_data.skill_summary().map(|s| s.to_string()),
@@ -1173,13 +1061,13 @@ async fn build_and_execute_agent(
                         skill_summary: Arc::from(""),
                         date: Arc::from(Local::now().format("%Y-%m-%d").to_string()),
                         language: turn.language.clone().map(Arc::from),
+                        // 防御性回退：无冻结数据时 MetaHarness 状态为空（无覆盖、无关闭）
+                        meta_harness: peri_acp_types::meta_harness::MetaHarnessState::default(),
                     },
-                    None,
                     None,
                 );
                 (
                     empty.system_prompt().to_string(),
-                    Some(empty.subagent_system_prompt().to_string()),
                     empty.claude_md().map(|s| s.to_string()),
                     empty.claude_local_md().map(|s| s.to_string()),
                     empty.skill_summary().map(|s| s.to_string()),
@@ -1415,11 +1303,9 @@ async fn build_and_execute_agent(
         history,
         cached_llm: cached_llm.cloned(),
         task_manager: task_manager_opt,
-        mode_notice_booking,
         continuation,
         // ── stage 装配输入（透传 StageBuildRequest）──
         system_prompt,
-        subagent_system_prompt,
         frozen: FrozenData {
             claude_md: frozen_claude_md,
             claude_local_md: frozen_claude_local_md,

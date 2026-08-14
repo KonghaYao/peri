@@ -48,7 +48,10 @@ use peri_agent::session::factory::{
     AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn, SystemPromptBuilder,
 };
 
+// 渲染面收集（middlewares 段声明）位于 ACP 宿主装配面 session/mod.rs
+// （§0 边 2 豁免），本模块只消费收集结果，不触碰 middlewares
 use crate::prompt::{PromptEnv, PromptFeatures, PromptTemplate};
+use crate::session::build_collected_sections;
 
 /// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
 /// `build_stage_context`（stage 装配本体，`peri-agent/src/session/exec/stage_builder.rs`）。
@@ -75,7 +78,6 @@ pub(crate) fn build_stage_context(
     compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
     cached_llm: Option<&CachedLlmInstances>,
     system_prompt: String,
-    subagent_system_prompt: Option<String>,
     frozen: FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
@@ -134,45 +136,55 @@ pub(crate) fn build_stage_context(
         .and_then(|sa| sa.mcp_skill_registry(&ctx.session_id));
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
-    // workflow_enabled 与正式实现 WorkflowMiddlewareAdaptor 条件注册共用同一
-    // 条件源（workflow_executor.is_some()），保证 prompt 声明与工具注册一致。
     let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
-        let permission_mode = Arc::clone(&ctx.permission_mode);
-        let workflow_enabled = ctx.workflow_executor.is_some();
         let skills = Arc::clone(&ctx.skills);
         let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
+        // 冻结期 MetaHarness 状态（同源注入：重渲染与冻结渲染同一覆盖源，
+        // 禁止双轨不一致——设计 §2.4）。
+        let meta_harness = ctx.meta_harness.clone();
+        // 冻结语言（C2 起语言段由 LangMiddleware 持有，重渲染与冻结渲染
+        // 同源注入；修复 --agent override 路径语言段丢失的历史不一致）
+        let language = ctx.language.clone();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
-            let features = PromptFeatures::detect(permission_mode.load(), workflow_enabled);
-            let template = ov.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
+            // C3：detect 无参（hitl/subagent/skills gate 随段落实体迁移至
+            // 持有者装配判定，permission_mode 不再参与 gate 判定）
+            let features = PromptFeatures::detect();
+            // 波 4 演进（C2/C3）：收集结果 = 渲染面静态声明（冻结 disabled
+            // 集合 + overrides + 冻结语言驱动）——与链收集同一事实源，禁止
+            // 双轨。
+            let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
+            let template = PromptTemplate::new(&meta_harness, &collected);
             let env = PromptEnv::detect(cwd);
-            template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs, None)
+            template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs)
         })
     };
 
     // ── 注入面：SubAgent system prompt 构建器 ──
-    // PromptFeatures::detect_without_workflow（subagent / fork 链不注册
-    // WorkflowTool，不得宣称 workflow 可用）；frozen date / language 注入。
+    // frozen date / language 注入（16_workflow 已删除，无子面向 feature 差异）。
     let system_builder: SystemPromptBuilder = {
         let frozen_date_for_sub = frozen.date.clone();
         let frozen_language_for_sub = ctx.language.clone();
         let skills_for_sub = Arc::clone(&ctx.skills);
-        let features_for_sub = PromptFeatures::detect_without_workflow(ctx.permission_mode.load());
-        let template_for_sub = PromptTemplate::new();
+        // C3：detect 无参（子链渲染继承主链冻结 disabled 集合驱动的收集
+        // 结果，11_subagent 段存在性不变——设计 §3.5.1 步骤 4 子链语义）
+        let features_for_sub = PromptFeatures::detect();
+        // 冻结期 MetaHarness 状态（与主重渲染同源；禁止回退默认空状态）。
+        let meta_harness_for_sub = ctx.meta_harness.clone();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
-            let t =
-                overrides.map_or_else(|| template_for_sub.clone(), PromptTemplate::with_overrides);
+            // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
+            // overrides；与主重渲染同一事实源）。
+            let collected = build_collected_sections(
+                &meta_harness_for_sub,
+                overrides,
+                frozen_language_for_sub.as_deref(),
+            );
+            let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
             let env = if let Some(ref date) = frozen_date_for_sub {
                 PromptEnv::with_frozen_date(cwd_dir, date)
             } else {
                 PromptEnv::detect(cwd_dir)
             };
-            t.render(
-                &env,
-                &features_for_sub,
-                skills_for_sub.as_ref(),
-                &[],
-                frozen_language_for_sub.as_deref(),
-            )
+            t.render(&env, &features_for_sub, skills_for_sub.as_ref(), &[])
         })
     };
 
@@ -242,6 +254,9 @@ pub(crate) fn build_stage_context(
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,
         compact_post_hook,
+        // MetaHarness：装配期关闭集合（源自会话冻结状态投影
+        // `SessionContext::meta_harness`，与段落覆盖同源——设计 §2.5）。
+        meta_harness_disabled: ctx.meta_harness.disabled_middlewares.clone(),
     };
 
     // 调用 peri_agent 正式 stage 装配本体（透传 V2AgentOutput）
@@ -250,7 +265,6 @@ pub(crate) fn build_stage_context(
         assembler,
         cached_llm,
         system_prompt,
-        subagent_system_prompt,
         frozen,
         event_handler,
         agent_overrides,

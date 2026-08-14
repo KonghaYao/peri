@@ -24,6 +24,7 @@
 //! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext/BgForkRequest）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
+//! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
@@ -47,6 +48,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod mcp_skills;
 pub mod messages;
+pub mod meta_harness;
 pub mod model;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;

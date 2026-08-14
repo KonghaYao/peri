@@ -37,31 +37,41 @@ use crate::{
 pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<dyn Middleware>> {
     let mut middlewares: Vec<Box<dyn Middleware>> = Vec::new();
 
+    // MetaHarness（设计 §2.5）：子链独立装配，关闭面同样生效——
+    // 关闭的 middleware 不构造、不进链（构造副作用也不存在）。
+    let disabled = &config.meta_harness_disabled;
+
     // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
     // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。
-    let mut agents_md = AgentsMdMiddleware::new();
-    if let Some(main) = config.frozen_claude_md {
-        agents_md = agents_md.with_frozen_content(main, config.frozen_claude_local_md);
+    if !disabled.contains("AgentsMdMiddleware") {
+        let mut agents_md = AgentsMdMiddleware::new();
+        if let Some(main) = config.frozen_claude_md {
+            agents_md = agents_md.with_frozen_content(main, config.frozen_claude_local_md);
+        }
+        middlewares.push(Box::new(agents_md));
     }
-    middlewares.push(Box::new(agents_md));
 
     // [TRAP] 同上：SubAgent 复用 frozen skill summary。
-    let mut skills = SkillsMiddleware::new().with_global_config();
-    if let Some(summary) = config.frozen_skill_summary {
-        skills = skills.with_frozen_summary(summary);
+    if !disabled.contains("SkillsMiddleware") {
+        let mut skills = SkillsMiddleware::new().with_global_config();
+        if let Some(summary) = config.frozen_skill_summary {
+            skills = skills.with_frozen_summary(summary);
+        }
+        middlewares.push(Box::new(skills));
     }
-    middlewares.push(Box::new(skills));
 
-    if !config.skill_names.is_empty() {
+    if !config.skill_names.is_empty() && !disabled.contains("SkillPreloadMiddleware") {
         middlewares.push(Box::new(SkillPreloadMiddleware::new(
             config.skill_names,
             &config.cwd,
         )));
     }
-    middlewares.push(Box::new(TodoMiddleware::new({
-        let (tx, _rx) = mpsc::channel(8);
-        tx
-    })));
+    if !disabled.contains("TodoMiddleware") {
+        middlewares.push(Box::new(TodoMiddleware::new({
+            let (tx, _rx) = mpsc::channel(8);
+            tx
+        })));
+    }
     middlewares
 }
 
@@ -130,7 +140,8 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
                     ctx.frozen_claude_md.clone(),
                     ctx.frozen_claude_local_md.clone(),
                     ctx.frozen_skill_summary.clone(),
-                );
+                )
+                .with_meta_harness_disabled(ctx.meta_harness_disabled.clone());
         let mut chain = MiddlewareChain::new();
         for mw in build_subagent_middlewares(config) {
             chain.add(mw);

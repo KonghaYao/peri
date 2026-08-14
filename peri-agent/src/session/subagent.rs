@@ -19,6 +19,7 @@
 //!   date 取自 `parent.store().frozen`，不重新读取磁盘）；
 //! - agent_status 收尾语义与迁移前一致：done / cancelled / error。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -105,6 +106,9 @@ pub struct SubagentChainContext {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary（父 session copy）
     pub frozen_skill_summary: Option<String>,
+    /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
+    /// 子链独立装配，必须同样过滤——设计 §2.5）。
+    pub meta_harness_disabled: HashSet<String>,
 }
 
 /// 子 agent 中间件链装配器：由中间件层提供实现。
@@ -509,6 +513,10 @@ async fn spawn_subagent_impl(
             .map(|s| Arc::from(s.as_str()))
             .unwrap_or_default(),
         language: parent.and_then(|p| p.store().frozen.language.clone()),
+        // MetaHarness 冻结状态随父 session 复制（ARC-FROZEN-001：不重读配置/磁盘）
+        meta_harness: parent
+            .map(|p| p.store().frozen.meta_harness.clone())
+            .unwrap_or_default(),
     };
     let (session, v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
@@ -692,13 +700,21 @@ fn build_subagent_session_v2(
         };
     }
 
-    // 子链装配（frozen 数据注入链上下文；链序由 assembler 实现方保持）
+    // 子链装配（frozen 数据注入链上下文；链序由 assembler 实现方保持）。
+    // meta_harness_disabled 从 frozen 状态投影（spawn/resume 两条路径都复制
+    // 父 meta_harness，子链独立装配必须同样过滤——设计 §2.5）。
     let chain = chain_assembler.assemble(&SubagentChainContext {
         cwd: cwd.clone(),
         skill_names,
         frozen_claude_md,
         frozen_claude_local_md,
         frozen_skill_summary,
+        meta_harness_disabled: session
+            .store()
+            .frozen
+            .meta_harness
+            .disabled_middlewares
+            .clone(),
     });
 
     // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
@@ -908,6 +924,10 @@ async fn resume_subagent_impl(
             .map(|s| Arc::from(s.as_str()))
             .unwrap_or_default(),
         language: parent.and_then(|p| p.store().frozen.language.clone()),
+        // MetaHarness 冻结状态随父 session 复制（resume 路径，ARC-FROZEN-001）
+        meta_harness: parent
+            .map(|p| p.store().frozen.meta_harness.clone())
+            .unwrap_or_default(),
     };
 
     // 4. cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的

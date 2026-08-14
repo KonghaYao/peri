@@ -4,7 +4,7 @@ use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
     hitl::BatchItem,
-    middleware::state::MiddlewareState,
+    middleware::{prompt_sections::PromptSection, state::MiddlewareState},
     tools::BaseTool,
 };
 
@@ -183,6 +183,21 @@ pub trait Middleware: Send + Sync {
     /// 不再通过 `prepend_message` 注入——保持 prompt cache 前缀稳定。
     fn prompt_contribution(&self) -> Option<String> {
         None
+    }
+
+    // ── 段落持有（波 4 演进基础设施，设计 §3.1.1 拆分持有契约 2/4）──
+
+    /// 声明此中间件持有的系统提示词段落（内容载体）。
+    ///
+    /// 语义边界（设计 §3.5）：middleware 仅作内容载体——段落渲染仍走
+    /// `PromptTemplate` 段落装配渲染（按位置属性 + 段内序号 + gate），
+    /// 本方法**不是** `prompt_contribution`（首轮一次性通知）的替代通道。
+    ///
+    /// 契约 4（运行时缺失防御）：未提供段落（默认空列表）或提供空内容 =
+    /// 跳过渲染不 fail；DefaultSystemPromptMiddleware / LangMiddleware
+    /// 演进后默认总是装配，除非显式关闭。
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        Vec::new()
     }
 
     // ── Session 生命周期 ──

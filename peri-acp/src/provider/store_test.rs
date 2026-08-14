@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::PathBuf;
 
 use serial_test::serial;
 
@@ -20,6 +21,18 @@ struct ConfigPathGuard;
 impl Drop for ConfigPathGuard {
     fn drop(&mut self) {
         super::set_global_config_path(None);
+    }
+}
+
+/// RAII guard：测试结束时恢复进程 cwd。
+///
+/// `load()` 的工作区合并依赖 `std::env::current_dir()`（`workspace_config_path`），
+/// 完整接线测试必须临时切换 cwd；guard 保证任何退出路径都恢复原目录。
+struct CwdGuard(PathBuf);
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
     }
 }
 
@@ -138,6 +151,70 @@ fn test_redirect_load_reads_override_file() {
     assert_eq!(cfg.config.active_alias, "sonnet");
     assert_eq!(cfg.config.providers.len(), 1);
     assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
+}
+
+/// [Q5 契约] `load()` 生产接线：全局 + 工作区双文件 → meta_harness 逐 key 合并生效。
+///
+/// 设计 §2.1/3.3：meta_harness 合并是专属特例（逐 key 而非整体覆盖），且必须经
+/// 生产入口 `load()` 生效（`merge_overrides` 特例分支 + `store.rs:74` 接线）。
+/// advisor 复审后补此契约测试：锁定"全局其余 key 保留、同 key 工作区覆盖"的
+/// 完整链路，防止未来重构破坏生产接线（单元级 merge 用例见 config_test）。
+#[test]
+#[serial]
+fn test_load_merges_meta_harness_per_key() {
+    let _guard = ConfigPathGuard;
+    let _cwd_guard = CwdGuard(std::env::current_dir().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+
+    // 全局配置：01_intro=true、WebMiddleware=false
+    let global_dir = tmp.path().join("global");
+    write_settings(
+        &global_dir,
+        r#"{
+        "config": {
+            "meta_harness": {
+                "01_intro": true,
+                "WebMiddleware": false
+            }
+        }
+    }"#,
+    );
+    let global_target = global_dir.join(".peri").join("settings.json");
+    super::set_global_config_path(Some(global_target));
+
+    // 工作区配置（cwd 临时切到 ws 目录）：同 key 覆盖 + 新 key 追加
+    let ws_dir = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    write_settings(
+        &ws_dir,
+        r#"{
+        "config": {
+            "meta_harness": {
+                "01_intro": false,
+                "TerminalMiddleware": false
+            }
+        }
+    }"#,
+    );
+    std::env::set_current_dir(&ws_dir).unwrap();
+
+    let cfg = super::load().unwrap();
+    let map = cfg.config.meta_harness.expect("merge 后 meta_harness 存在");
+    assert_eq!(
+        map.get("01_intro"),
+        Some(&false),
+        "同 key：工作区覆盖全局（逐 key 合并）"
+    );
+    assert_eq!(
+        map.get("TerminalMiddleware"),
+        Some(&false),
+        "新 key：追加保留"
+    );
+    assert_eq!(
+        map.get("WebMiddleware"),
+        Some(&false),
+        "全局其余 key 保留（非整体覆盖）"
+    );
 }
 
 #[test]

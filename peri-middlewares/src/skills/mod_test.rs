@@ -459,3 +459,77 @@ async fn test_mcp_registry_merged_into_cache_and_kept_out_of_contribution() {
         "DiscoverSkillsTool 视角含 mcp 条目（source 标注）: {parsed}"
     );
 }
+
+// ─── 13_skills 段落持有（波 4 演进 C3）────────────────────────────────────
+
+/// discovery 协议与 loader 常量同源（防手写硬编码漂移）：输出包含
+/// `MAX_SCAN_DEPTH` / `MAX_SKILLS_DIRS_PER_ROOT` 的格式化值。
+#[test]
+fn discovery_protocol_uses_loader_constants() {
+    let text = format_discovery_protocol();
+    assert!(
+        text.contains(&format!(
+            "scanned recursively up to {MAX_SCAN_DEPTH} levels deep (max {MAX_SKILLS_DIRS_PER_ROOT} directories per root)"
+        )),
+        "扫描参数应来自 loader 常量: {text}"
+    );
+    // 常量变更时本测试自动失效（而不是段落文本悄悄漂移）
+    assert_eq!(MAX_SCAN_DEPTH, 6);
+    assert_eq!(MAX_SKILLS_DIRS_PER_ROOT, 1000);
+}
+
+/// discovery roots 优先级顺序与 `resolve_skill_roots` 一致
+/// （User → Global → Project → Plugin → Builtin，先到先得）。
+#[test]
+fn discovery_protocol_root_order_matches_resolve_skill_roots() {
+    let text = format_discovery_protocol();
+    let user = text.find("user-level skills (highest priority)").unwrap();
+    let global = text.find("Global `skillsDir`").unwrap();
+    let project = text
+        .find("`{cwd}/.claude/skills/` — project-level skills")
+        .unwrap();
+    let plugin = text
+        .find("Plugin skills declared in plugin manifests")
+        .unwrap();
+    let builtin = text.find("**Builtin**").unwrap();
+    assert!(
+        user < global && global < project && project < plugin && plugin < builtin,
+        "roots 优先级顺序应匹配 resolve_skill_roots: {user} < {global} < {project} < {plugin} < {builtin}"
+    );
+}
+
+/// 13_skills 段落声明：位置属性（Uncached order=5）+ 机制说明保留 +
+/// 动态 discovery 后缀。
+#[test]
+fn skills_section_declaration_shape() {
+    let sections = SkillsMiddleware::sections();
+    assert_eq!(sections.len(), 1, "13_skills 段应唯一");
+    let section = &sections[0];
+    assert_eq!(section.id, "13_skills");
+    assert_eq!(section.zone, PromptSectionZone::Uncached);
+    assert_eq!(section.order, 5);
+    let content = section.content.as_str();
+    assert!(
+        content.contains("# Skills"),
+        "机制说明标题应保留（include_str 零拷贝）"
+    );
+    assert!(
+        content.contains("## Skill loading protocol"),
+        "loading 协议机制说明保留"
+    );
+    assert!(
+        content.contains(
+            "Skills are loaded from the following roots in priority order (first match wins):"
+        ),
+        "discovery 小节引导保留（动态内容后缀拼接）"
+    );
+    // 段落文件不再硬编码协议细节（失同步防线）
+    let file_content = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../peri-acp/prompts/sections/13_skills.md"
+    ));
+    assert!(
+        !file_content.contains("Each skill root is scanned recursively"),
+        "13_skills.md 不应再硬编码扫描参数（由 loader 常量生成）"
+    );
+}

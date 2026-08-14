@@ -6,70 +6,53 @@
 //! Sections are loaded from `prompts/sections/` directory using
 //! `include_str!` with paths relative to the peri-acp crate root.
 
-use peri_acp_types::agents::AgentOverrides;
-use peri_acp_types::permission::PermissionMode;
+use std::sync::Arc;
+
 use peri_acp_types::ports::SkillsPort;
+use peri_agent::middleware::{PromptSection, PromptSectionContent, PromptSectionZone};
 
 /// 控制 Feature-gated 提示词段落的注入。
 ///
 /// 这是 session 创建时冻结的 capability snapshot（capability descriptor 的
 /// prompt 侧投影）：prompt section 可见性、ACP builder 的条件工具注册与
-/// deferred-tool 搜索发现必须由同一条件源导出（见 `FeatureGate::Workflow`
-/// 与 `builder.rs` 的 `workflow_executor.is_some()` 注册条件）。
+/// deferred-tool 搜索发现必须由同一条件源导出。
+///
+/// 波 4 演进（C2/C3）：基础段（01-06 / 07_runtime / persona / language）与
+/// gated 段（10_hitl / 11_subagent / 13_skills）已全部迁移至功能 middleware
+/// 持有——gate = 持有者是否在链上（收集即装配，契约 3），不再经本结构
+/// 判定；`permission_mode` 不再参与任何 gate 判定。本结构仅保留
+/// 15_channel 的硬编码判定（无持有 middleware，gate 恒 false 直至未来
+/// channel middleware 装配，设计 §3.1.1）。
 #[derive(Debug, Clone, Copy)]
 pub struct PromptFeatures {
-    pub hitl_enabled: bool,
-    pub subagent_enabled: bool,
-    pub skills_enabled: bool,
     /// Channel 消息桥接是否是可用的运行时能力。
     ///
     /// 恒为 `false`：`ChannelOwner` 未在生产路径装配，channel 消息与 channel
     /// MCP 工具不会进入运行时上下文，15_channel 只是未来启用时的格式文档，
     /// 不得被宣称为当前可用能力（D6 残余，见 plan §13；未实现 tag 转义）。
     pub channel_enabled: bool,
-    /// Workflow 编排能力是否可用（`workflow_executor.is_some()`）。
-    ///
-    /// `false` 时 16_workflow section 不渲染，WorkflowTool 不注册、
-    /// 不可搜索（print mode 等无 executor 的场景）。
-    pub workflow_enabled: bool,
 }
 
 impl PromptFeatures {
-    /// 根据权限模式与 workflow executor 可用性推断功能开关。
+    /// 生产默认配置（仅 channel gate：15_channel 无持有者，恒关闭）。
     ///
-    /// `workflow_enabled` 必须来自运行时注册条件（`workflow_executor.is_some()`），
-    /// 与 `builder.rs` 的条件注册、ToolSearch 索引共用同一事实源，不得另写布尔副本。
-    pub fn detect(permission_mode: PermissionMode, workflow_enabled: bool) -> Self {
+    /// 波 4 演进（C3，决策记录 C3 D4）：hitl/subagent/skills gate 已随段落
+    /// 实体迁移至「持有 middleware 是否在链上」（收集即装配，契约 3），
+    /// `permission_mode` 不再是 gate 判定输入——签名无参化。
+    pub fn detect() -> Self {
         Self {
-            hitl_enabled: permission_mode != PermissionMode::Bypass,
-            subagent_enabled: true,
-            skills_enabled: true,
             // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02，
             // 与 plan §13 D6 残余保持一致，不宣称已修复）。
             channel_enabled: false,
-            workflow_enabled,
         }
     }
 
-    /// 子 agent / fork / workflow agent 的 capability snapshot：Workflow 恒不宣称可用。
-    ///
-    /// 这些链不注册 WorkflowTool（`builder.rs` 的 WorkflowMiddlewareAdaptor 只进
-    /// 主链；subagent / fork / workflow agent 均传 `shared_tools: None`），因此
-    /// prompt 侧必须关闭 16_workflow，与工具注册、SearchExtraTools 三面一致
-    /// （P2-2026-08-02 pre-commit review）。
-    pub fn detect_without_workflow(permission_mode: PermissionMode) -> Self {
-        Self::detect(permission_mode, false)
-    }
-
-    /// 全部关闭的配置（用于测试）
+    /// 全部关闭的配置（用于测试；与 `detect` 语义等价——仅 channel gate，
+    /// 恒 false）
     #[cfg(test)]
     pub fn none() -> Self {
         Self {
-            hitl_enabled: false,
-            subagent_enabled: false,
-            skills_enabled: false,
             channel_enabled: false,
-            workflow_enabled: false,
         }
     }
 }
@@ -132,306 +115,257 @@ impl PromptEnv {
     }
 }
 
-/// 系统提示词渲染层（固定顺序，不可互换）。
+/// 功能门控标识——将 section 与 PromptFeatures 字段显式关联。
 ///
-/// `prompt_mode: full` / persona override 只能替换 [`PromptLayer::PersonaDomain`]；
-/// 其余层在任何 override 分支下都必须原样渲染（见 `render()`）。
-/// 层是 section 级别的边界归类，不逐句拆分 section 内容。
-///
-/// 层标记只定义 persona override 的替换边界，与 FeatureGate 正交：
-/// 归入某层的 section 若同时是 gated section（见 `GATED_SECTIONS`），
-/// 其渲染仍由 FeatureGate 决定——例如 10_hitl 归 SafetyAuthorization 层，
-/// 但 Hitl 未装配或 Bypass 模式时会被跳过，这属于 feature 门控而非层可移除。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptLayer {
-    /// 安全与授权：防御性安全限制、secret 规则、破坏性 Git 保护、授权说明。
-    /// 任何 persona override 都不得移除。
-    SafetyAuthorization,
-    /// 稳定工程行为：任务执行准则、工具调用纪律、语气。
-    /// 默认不可由 agent body 整体覆盖。
-    EngineeringBehavior,
-    /// 能力契约：只声明当前实际注册、可调用的能力。
-    CapabilityContract,
-    /// 运行时状态边界：冻结环境快照与受控 runtime-event 语义说明。
-    RuntimeStateBoundary,
-    /// persona / domain instructions：唯一允许 full-style override 替换的层。
-    PersonaDomain,
-}
-
-/// 功能门控标识——将 section 与 PromptFeatures 字段显式关联
+/// 波 4 演进（C3）：Hitl/Subagent/Skills 变体已随段落实体迁移删除
+/// （gate = 持有 middleware 是否在链上，收集即装配，契约 3）；仅剩
+/// Channel（15_channel 无持有者，gate 恒 false）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeatureGate {
-    Hitl,
-    Subagent,
-    Skills,
     Channel,
-    Workflow,
 }
 
 impl FeatureGate {
     const fn is_enabled(&self, f: &PromptFeatures) -> bool {
         match self {
-            Self::Hitl => f.hitl_enabled,
-            Self::Subagent => f.subagent_enabled,
-            Self::Skills => f.skills_enabled,
             Self::Channel => f.channel_enabled,
-            Self::Workflow => f.workflow_enabled,
         }
     }
 }
 
-/// 不可替换层 section（01-06）—— 在 boundary 之前，Anthropic 缓存命中区域。
+/// 功能门控 section + 对应门控标识（按声明顺序渲染）。
 ///
-/// 这些 section 属于 SafetyAuthorization / EngineeringBehavior / CapabilityContract 层，
-/// `prompt_mode: full` 与 persona override 都不得移除它们。
-const IMMUTABLE_SECTIONS: [(&str, PromptLayer); 6] = [
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/01_intro.md"
-        )),
-        PromptLayer::SafetyAuthorization,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/02_system.md"
-        )),
-        PromptLayer::SafetyAuthorization,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/03_doing_tasks.md"
-        )),
-        PromptLayer::EngineeringBehavior,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/04_actions.md"
-        )),
-        PromptLayer::SafetyAuthorization,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/05_using_tools.md"
-        )),
-        PromptLayer::EngineeringBehavior,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/06_tone_style.md"
-        )),
-        PromptLayer::EngineeringBehavior,
-    ),
-];
+/// section 是否渲染由 FeatureGate 决定：Channel 未装配时对应 section 被
+/// 跳过。这是 feature 门控行为——full/extend 分支都不改变这些 gate。
+///
+/// 元素形态：(ID, 内容, Gate, 段内序号)。ID 供 MetaHarness 段落覆盖定位
+/// （设计 §2.4）。
+///
+/// 波 4 演进（C2/C3）：基础段（01-06 / 07_runtime / persona / language）
+/// 与 gated 段（10_hitl / 11_subagent / 13_skills）已迁移至 middleware
+/// 持有（`DefaultSystemPromptMiddleware` / `LangMiddleware` /
+/// `HumanInTheLoopMiddleware` / `SubAgentMiddleware` / `SkillsMiddleware`），
+/// 本数组仅剩无持有者的 15_channel（非缓存区段内序号 6，07_runtime=1 与
+/// 已迁移 gated 10=3/11=4/13=5 之后、language=7 之前——编号不重排，
+/// C1 D2 编号事实）；16_workflow 已整段删除（ultracode skill 完整覆盖，
+/// 设计 §3.1.2）。
+type GatedSection = (&'static str, &'static str, FeatureGate, u16);
 
-/// 始终启用的**非前缀缓存区** section（07, 14）—— 在 boundary 之后。
-///
-/// 命名澄清（P2-10）：这里不叫 "dynamic"——会话级冻结，绝不每轮重建；
-/// "非缓存区"指位于 Anthropic 前缀缓存命中区域之外、每次请求都会重新
-/// 发送给 provider（见 `FrozenSessionData`）。真正的 per-turn 状态必须走
-/// 显式运行时注入通道（如 `permission_mode_notice_if_changed`），
-/// 不能靠把 section 放在 boundary 之后获得。
-const ALWAYS_UNCACHED_SECTIONS: [(&str, PromptLayer); 2] = [
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/07_env.md"
-        )),
-        PromptLayer::RuntimeStateBoundary,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/14_system_reminder.md"
-        )),
-        PromptLayer::RuntimeStateBoundary,
-    ),
-];
-
-/// 功能门控 section + 对应门控标识 + 层归属（按声明顺序渲染）。
-///
-/// 层归属仅标记内容性质（如 10_hitl 归 SafetyAuthorization 层），
-/// section 是否渲染仍由 FeatureGate 决定：Hitl/Subagent/Skills/Channel/Workflow
-/// 未装配时对应 section 被跳过。这是 feature 门控行为，不是 persona
-/// override 可移除的层——full/extend 分支都不改变这些 gate。
-const GATED_SECTIONS: [(&str, FeatureGate, PromptLayer); 5] = [
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/10_hitl.md"
-        )),
-        FeatureGate::Hitl,
-        PromptLayer::SafetyAuthorization,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/11_subagent.md"
-        )),
-        FeatureGate::Subagent,
-        PromptLayer::CapabilityContract,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/13_skills.md"
-        )),
-        FeatureGate::Skills,
-        PromptLayer::CapabilityContract,
-    ),
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/15_channel.md"
-        )),
-        FeatureGate::Channel,
-        PromptLayer::CapabilityContract,
-    ),
-    // 16_workflow：由 workflow_enabled（= workflow_executor.is_some()）门控，
-    // 与 builder.rs 的 WorkflowMiddlewareAdaptor 条件注册、ToolSearch 索引
-    // 发现共用同一条件源。print mode（无 executor）时三面同时关闭。
-    (
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/sections/16_workflow.md"
-        )),
-        FeatureGate::Workflow,
-        PromptLayer::CapabilityContract,
-    ),
-];
+const GATED_SECTIONS: [GatedSection; 1] = [(
+    "15_channel",
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/prompts/sections/15_channel.md"
+    )),
+    FeatureGate::Channel,
+    6,
+)];
 
 /// 结构化系统提示词模板
 ///
-/// 渲染按固定层顺序进行（见 [`PromptLayer`]）：
-/// 不可替换层（SafetyAuthorization → EngineeringBehavior → CapabilityContract，
-/// boundary 之前）→ PersonaDomain（boundary 之后）→ RuntimeStateBoundary →
-/// gated sections → Language。
-/// `with_overrides()` 返回带 overrides 的新模板（增量 patch，不复建 section 结构）。
-/// `render()` 按照与 `build_system_prompt()` 完全相同的顺序和分隔符拼接。
+/// 渲染按固定段落顺序进行：缓存区段落（zone=Cached，01-06）→ 非缓存区
+/// 段落（zone=Uncached：persona → 07_runtime → gated 段落 → language，
+/// 按段内序号 + gate 判定）。`render()` 按"位置 + 段内序号"顺序拼接
+/// （构造期物化，与全部构造点一致的顺序和分隔符）。
+///
+/// MetaHarness（设计 §2.4）：`new(state, collected)` 构造期按段落 ID 将覆盖
+/// 内容合入 resolved sections——render 阶段只迭代已解析内容，无查表开销、
+/// 不读盘。
+///
+/// 波 4 演进（设计 §3.1.1 拆分持有契约 2/4）：`collected` 为收集的
+/// middleware 持有段落（链侧 `MiddlewareChain::collect_prompt_sections` /
+/// 渲染面 `crate::session::build_collected_sections` 静态声明——渲染面
+/// 收集位于 ACP 宿主装配面 `session/mod.rs`，§0 边 2 豁免）——按 ID 覆盖
+/// 编译期内置段落（位置属性以持有者声明为准，gate 随收集即装配）；C2/C3
+/// 起基础段（01-06 / 07_runtime / persona / language）与 gated 段
+/// （10_hitl / 11_subagent / 13_skills）唯一来源为收集结果；内置数组仅剩
+/// 无持有者的
+/// 15_channel（gate 恒 false，C3 后状态）。
 #[derive(Debug, Clone)]
 pub struct PromptTemplate {
-    /// 预计算的 AgentOverrides 块（空字符串 = 无 overrides）
-    overrides_block: String,
-    /// prompt_mode = "full" 时，存储 agent body 作为 PersonaDomain 层内容；
-    /// 只替换 persona/domain instructions 层，绝不跳过不可替换层。
-    /// 注意：full 模式的 persona body 仍在 boundary 之后，不进入缓存前缀。
-    full_body: Option<String>,
+    /// 已解析的缓存区段落（zone=Cached，01-06，按段内序号升序）。
+    cached_sections: Vec<ResolvedSection>,
+    /// 已解析的非缓存区段落（zone=Uncached：persona + 07_runtime + gated +
+    /// 收集段 + language，按段内序号升序）。
+    uncached_sections: Vec<ResolvedSection>,
+}
+
+/// 段落内容来源（实现裁定 Q2：内置静态文本零拷贝借用，覆盖全文持 Arc）。
+#[derive(Debug, Clone)]
+enum SectionContent {
+    /// 内置段落（`include_str!` 静态文本，零拷贝）
+    Builtin(&'static str),
+    /// MetaHarness 覆盖全文（冻结期扫描 `.peri/meta/<id>.md`）
+    Override(Arc<str>),
+    /// middleware 动态生成的段落全文（装配期收集，`PromptSectionContent::Dynamic`）
+    Dynamic(String),
+}
+
+impl SectionContent {
+    /// 渲染用文本视图
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Builtin(s) => s,
+            Self::Override(s) => s,
+            Self::Dynamic(s) => s,
+        }
+    }
+}
+
+/// 段落渲染条件（gate 判定来源）。
+///
+/// C3 后语义（设计 §3.1.1 拆分持有契约 3）：middleware 收集段落（持有者
+/// 已在链上）恒渲染（收集即装配）；内置数组仅剩 15_channel（无持有者），
+/// gate 由 [`PromptFeatures`] 硬编码判定（恒 false）。
+#[derive(Debug, Clone, Copy)]
+enum SectionGate {
+    /// 恒渲染（middleware 收集段）
+    Always,
+    /// 由 [`PromptFeatures`] 字段硬编码判定（15_channel，无持有者）
+    Feature(FeatureGate),
+}
+
+impl SectionGate {
+    const fn is_enabled(&self, f: &PromptFeatures) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Feature(gate) => gate.is_enabled(f),
+        }
+    }
+}
+
+/// 构造期解析后的段落（`id` 为段落覆盖与持有权迁移的定位键，渲染只消费
+/// zone/order/content/gate）。
+#[derive(Debug, Clone)]
+struct ResolvedSection {
+    id: &'static str,
+    zone: PromptSectionZone,
+    order: u16,
+    content: SectionContent,
+    gate: SectionGate,
 }
 
 impl PromptTemplate {
-    /// 创建基础模板（无 agent overrides）
-    pub fn new() -> Self {
-        Self {
-            overrides_block: String::new(),
-            full_body: None,
+    /// 创建基础模板（无 agent overrides）。
+    ///
+    /// 构造期物化：
+    /// 1. 编译期内置数组（`GATED_SECTIONS`，仅无持有者的 15_channel）→
+    ///    带位置属性（zone + 段内序号）与 gate 的段落声明；
+    /// 2. `collected`（middleware 持有段落：链收集 `collect_prompt_sections`
+    ///    / 渲染面静态声明 `crate::session::build_collected_sections`）按 ID
+    ///    覆盖内置段落——
+    ///    位置属性以持有者声明为准，gate = Always（收集即持有者已装配，
+    ///    契约 3）；C2/C3 起基础段（01-06 / 07_runtime / persona / language）
+    ///    与 gated 段（10_hitl / 11_subagent / 13_skills）唯一来源为收集
+    ///    结果（数组已删除，禁止双轨）；
+    /// 3. `state.section_overrides` 按 ID 替换内容（覆盖 = 替换持有者对应段落
+    ///    贡献，机制与持有者无关，设计 §2.4）；
+    /// 4. 空内容段落过滤（契约 4：未提供内容 = 跳过渲染不 fail），按
+    ///    "位置 + 段内序号"排序（契约 2：不依赖 middleware 链序）。
+    ///
+    /// 改动收敛到 `new` 一处：render 签名与全部调用点分隔符语义不变。
+    pub fn new(
+        state: &peri_acp_types::meta_harness::MetaHarnessState,
+        collected: &[PromptSection],
+    ) -> Self {
+        // 1. 内置数组 → 段落声明（ID 即文件名去 .md，位置属性 + gate 显式化）
+        let mut sections: Vec<ResolvedSection> = Vec::with_capacity(1 + collected.len());
+        for (id, content, gate, order) in GATED_SECTIONS.iter() {
+            sections.push(ResolvedSection {
+                id,
+                zone: PromptSectionZone::Uncached,
+                // 非缓存区段内序号（C1 D2 编号事实）：persona(0) / 07_runtime(1)
+                // 由收集段持有；已迁移 gated 10=3 / 11=4 / 13=5 同由持有者
+                // 声明；15_channel=6 显式声明（编号不重排）
+                order: *order,
+                content: SectionContent::Builtin(content),
+                gate: SectionGate::Feature(*gate),
+            });
         }
-    }
+        // 2. 收集段落按 ID 覆盖内置（位置属性以持有者声明为准）
+        for section in collected {
+            let resolved = ResolvedSection {
+                id: section.id,
+                zone: section.zone,
+                order: section.order,
+                content: match &section.content {
+                    PromptSectionContent::Builtin(s) => SectionContent::Builtin(s),
+                    PromptSectionContent::Dynamic(s) => SectionContent::Dynamic(s.clone()),
+                },
+                gate: SectionGate::Always, // 收集即持有者已装配（契约 3）
+            };
+            match sections.iter_mut().find(|s| s.id == section.id) {
+                Some(existing) => *existing = resolved,
+                None => sections.push(resolved),
+            }
+        }
+        // 3. MetaHarness 覆盖合并（覆盖 = 替换持有者对应段落贡献，覆盖优先）
+        for section in &mut sections {
+            if let Some(overridden) = state.section_overrides.get(section.id) {
+                section.content = SectionContent::Override(Arc::clone(overridden));
+            }
+        }
+        // 4. 空内容过滤（契约 4）+ 按"位置 + 段内序号"排序（契约 2；stable
+        //    排序保持同位置同序号的声明顺序）
+        sections.retain(|s| !s.content.as_str().is_empty());
+        sections.sort_by_key(|s| (s.zone, s.order));
 
-    /// 创建带 AgentOverrides 的模板。
-    ///
-    /// 用于 SubAgent define 路径：无需重建 section 结构，仅预计算 overrides 文本。
-    /// 调用 `build_agent_overrides_block()`（与当前 build_system_prompt 使用同一函数）。
-    ///
-    /// `mode: "full"` 时，`persona` 作为 PersonaDomain 层整体替换；
-    /// 不可替换层（安全/工程/能力/运行时边界）仍然渲染，tone/proactiveness
-    /// 不拼接（full 语义：body 全权负责 PersonaDomain 层）。
-    pub fn with_overrides(overrides: &AgentOverrides) -> Self {
-        let is_full_mode = overrides.mode.as_deref() == Some("full");
-        let full_body = if is_full_mode {
-            overrides.persona.clone()
-        } else {
-            None
-        };
-        // full 模式下 overrides_block 不拼接（body 直接作为 PersonaDomain 层内容）
-        let overrides_block = if is_full_mode {
-            String::new()
-        } else {
-            build_agent_overrides_block(overrides)
-        };
+        let mut cached_sections = Vec::new();
+        let mut uncached_sections = Vec::new();
+        for section in sections {
+            match section.zone {
+                PromptSectionZone::Cached => cached_sections.push(section),
+                PromptSectionZone::Uncached => uncached_sections.push(section),
+            }
+        }
         Self {
-            overrides_block,
-            full_body,
+            cached_sections,
+            uncached_sections,
         }
     }
 
     /// 渲染完整系统提示词
     ///
-    /// 拼接顺序（固定层顺序，full 只替换 PersonaDomain 层，不跳过其它层）：
-    ///  1. 不可替换层（IMMUTABLE_SECTIONS）：SafetyAuthorization(01,02,04) →
-    ///     EngineeringBehavior(03,05,06)——任何 override 分支都执行；
-    ///  2. BOUNDARY；
-    ///  3. PersonaDomain 层：full → full_body；extend/无 overrides → overrides_block；
-    ///  4. RuntimeStateBoundary(07,14)；
-    ///  5. gated sections（10,11,13,15,16，按 FeatureGate）；其中 10_hitl 归
-    ///     SafetyAuthorization 层仅为内容归类，可见性仍由 Hitl gate 决定；
-    ///     16_workflow 由 Workflow gate 决定（workflow_enabled）；
-    ///  6. Language。
+    /// 拼接顺序（固定顺序，persona 是普通收集段，不特判）：
+    ///  1. 缓存区段落（zone=Cached：01-06，按段内序号）——任何 override
+    ///     分支都执行；
+    ///  2. 非缓存区段落（zone=Uncached：persona → 07_runtime → gated →
+    ///     language，按段内序号，按 gate 判定）。
     ///
     /// 之后应用占位符替换（cwd, is_git_repo, platform, os_version, date, available_agents）。
+    ///
+    /// 波 4 演进（C2）：boundary 文本标记删除（设计 §3.5.2 步骤 1）——缓存
+    /// 区划分由段落位置属性（zone）承担装配机制，不再生成提示词文本标记；
+    /// Language 段由 LangMiddleware 持有（经 collected 注入），不再有
+    /// language 参数。
     pub fn render(
         &self,
         env: &PromptEnv,
         features: &PromptFeatures,
         skills: &dyn SkillsPort,
         extra_agent_dirs: &[std::path::PathBuf],
-        language: Option<&str>,
     ) -> String {
-        use std::fmt::Write;
         let mut result = String::new();
 
-        // 1. 不可替换层（SafetyAuthorization → EngineeringBehavior → CapabilityContract）
+        // 1. 缓存区段落（01-06，段内序号升序）
         //    无条件渲染：`prompt_mode: full` / persona override 不得移除。
-        for (i, (section, _layer)) in IMMUTABLE_SECTIONS.iter().enumerate() {
+        for (i, section) in self.cached_sections.iter().enumerate() {
             if i > 0 {
                 result.push_str("\n\n");
             }
-            result.push_str(section);
+            result.push_str(section.content.as_str());
         }
 
-        // 2. 边界标记（位置对 full/extend 完全一致，保持缓存前缀确定）
-        result.push_str("\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
-
-        // 3. PersonaDomain 层（边界之后）：full 替换为 full_body；
-        //    extend/无 overrides 使用 overrides_block（可为空）。
-        if let Some(ref body) = self.full_body {
-            result.push_str("\n\n");
-            result.push_str(body.trim());
-        } else if !self.overrides_block.is_empty() {
-            result.push_str("\n\n");
-            result.push_str(&self.overrides_block);
-        }
-
-        // 4. RuntimeStateBoundary 层（07 → 14）
-        for (section, _layer) in &ALWAYS_UNCACHED_SECTIONS {
-            result.push_str("\n\n");
-            result.push_str(section);
-        }
-
-        // 5. 功能门控 sections（按 GATED_SECTIONS 声明顺序遍历）
-        for &(section, gate, _layer) in &GATED_SECTIONS {
-            if gate.is_enabled(features) {
+        // 2. 非缓存区段落（persona → 07_runtime → gated → language，按段内
+        //    序号升序；gate 判定：内置 gated 段按 PromptFeatures，收集段恒渲染）
+        for section in &self.uncached_sections {
+            if section.gate.is_enabled(features) {
                 result.push_str("\n\n");
-                result.push_str(section);
+                result.push_str(section.content.as_str());
             }
         }
 
-        // Language 指令（动态，边界之后保留缓存前缀）
-        if let Some(lang) = language {
-            let lang_name = map_language_to_instruction(lang);
-            result.push_str("\n\n# Language\n\n");
-            let _ = write!(
-                result,
-                "Always respond in {}. Use {} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form (e.g. API names, function/variable/type names, CLI tool names, library names, file paths, HTTP status codes, configuration keys, git commands).",
-                lang_name, lang_name
-            );
-        }
-
-        // 占位符替换（顺序与 build_system_prompt 完全一致）
+        // 占位符替换（顺序与全部构造点一致）
         result
             .replace("{{cwd}}", &env.cwd)
             .replace(
@@ -450,7 +384,10 @@ impl PromptTemplate {
 
 impl Default for PromptTemplate {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            &peri_acp_types::meta_harness::MetaHarnessState::default(),
+            &[],
+        )
     }
 }
 
@@ -487,56 +424,6 @@ fn format_available_agents(
     lines.join("\n")
 }
 
-/// 构建系统提示词。
-///
-/// 从 `prompts/sections/` 目录按固定层顺序加载段落（见 [`PromptLayer`]）：
-/// 不可替换层（01-06）始终包含；feature-gated 段落（10-11, 13, 15-16）按 `PromptFeatures`
-/// 条件注入；环境占位符替换为运行时值。
-///
-/// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，
-/// 注入到 PersonaDomain 层（边界标记之后）；`prompt_mode: full` 时 body
-/// 仅替换 PersonaDomain 层，不可替换层仍保留；为 `None` 时覆盖块为空。
-pub fn build_system_prompt(
-    overrides: Option<&AgentOverrides>,
-    cwd: &str,
-    features: PromptFeatures,
-    skills: &dyn SkillsPort,
-    extra_agent_dirs: &[std::path::PathBuf],
-    frozen_date: Option<&str>,
-    language: Option<&str>,
-) -> String {
-    let template = overrides.map_or_else(PromptTemplate::new, PromptTemplate::with_overrides);
-    let env = if let Some(date) = frozen_date {
-        PromptEnv::with_frozen_date(cwd, date)
-    } else {
-        PromptEnv::detect(cwd)
-    };
-    template.render(&env, &features, skills, extra_agent_dirs, language)
-}
-
-/// 将 `AgentOverrides` 拼成注入到提示词顶部的覆盖块。
-///
-/// 只包含非空字段，末尾加两个换行使其与后续默认内容自然分隔。
-fn build_agent_overrides_block(ov: &AgentOverrides) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(persona) = &ov.persona {
-        parts.push(persona.trim().to_string());
-    }
-    if let Some(tone) = &ov.tone {
-        parts.push(format!("# Tone and style\n{}", tone.trim()));
-    }
-    if let Some(proactiveness) = &ov.proactiveness {
-        parts.push(format!("# Proactiveness\n{}", proactiveness.trim()));
-    }
-
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n\n", parts.join("\n\n"))
-    }
-}
-
 fn os_version_string() -> String {
     #[cfg(target_os = "macos")]
     {
@@ -565,17 +452,6 @@ fn os_version_string() -> String {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         std::env::consts::OS.to_string()
-    }
-}
-
-/// Map language code to human-readable instruction string.
-fn map_language_to_instruction(lang: &str) -> &str {
-    match lang {
-        "zh-CN" | "zh" => "Simplified Chinese",
-        "zh-TW" => "Traditional Chinese",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        _ => lang,
     }
 }
 

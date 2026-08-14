@@ -96,3 +96,61 @@ fn test_session_store_set_is_git_repo() {
     store.set_is_git_repo(false);
     assert!(!store.is_git_repo());
 }
+
+#[test]
+fn test_frozen_context_builder_meta_harness_defaults_empty() {
+    let ctx = FrozenContext::builder().build();
+    assert!(
+        ctx.meta_harness.section_overrides.is_empty(),
+        "默认 MetaHarness 无段落覆盖"
+    );
+    assert!(
+        ctx.meta_harness.disabled_middlewares.is_empty(),
+        "默认 MetaHarness 无关闭 middleware"
+    );
+}
+
+#[test]
+fn test_frozen_context_builder_meta_harness_full() {
+    let mut state = peri_acp_types::meta_harness::MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert("01_intro".to_string(), Arc::from("custom intro"));
+    state
+        .disabled_middlewares
+        .insert("WebMiddleware".to_string());
+    let ctx = FrozenContext::builder()
+        .system_prompt("prompt")
+        .meta_harness(state.clone())
+        .build();
+    assert_eq!(
+        ctx.meta_harness.section_overrides.get("01_intro"),
+        state.section_overrides.get("01_intro"),
+        "builder 保留段落覆盖"
+    );
+    assert_eq!(
+        ctx.meta_harness.disabled_middlewares, state.disabled_middlewares,
+        "builder 保留关闭集合"
+    );
+}
+
+#[test]
+fn test_frozen_context_clone_shares_meta_harness_arcs() {
+    let mut state = peri_acp_types::meta_harness::MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert("01_intro".to_string(), Arc::from("custom intro"));
+    let ctx = FrozenContext::builder().meta_harness(state).build();
+    let cloned = ctx.clone();
+    assert!(
+        Arc::ptr_eq(
+            ctx.meta_harness.section_overrides.get("01_intro").unwrap(),
+            cloned
+                .meta_harness
+                .section_overrides
+                .get("01_intro")
+                .unwrap(),
+        ),
+        "clone 后 override 的 Arc<str> 共享底层分配"
+    );
+}

@@ -74,6 +74,13 @@ pub(crate) async fn run(params: PromptExecParams) {
     let provider_snapshot = ctx.provider.read().clone();
     let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
 
+    // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
+    // 当前配置重建；frozen None（防御路径）回落默认空状态）。设计 §2.5-2.6。
+    let meta_harness = frozen
+        .as_ref()
+        .map(|f| f.meta_harness().clone())
+        .unwrap_or_default();
+
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
     // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面。
@@ -102,9 +109,8 @@ pub(crate) async fn run(params: PromptExecParams) {
             cancel: Some(cancel.clone()),
             // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
             // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            system_prompt: frozen
-                .as_ref()
-                .map(|f| f.subagent_system_prompt().to_string()),
+            // （16_workflow 已删除（C2），主 prompt 即子面向唯一版本。）
+            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
             broker: None,
             permission_mode: None,
             frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
@@ -116,6 +122,7 @@ pub(crate) async fn run(params: PromptExecParams) {
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
                 Arc::clone(&ctx.skills),
+                meta_harness.clone(),
             ),
             model_factory: crate::host::workflow_agent::build_model_factory(
                 &ctx.provider,
@@ -123,9 +130,10 @@ pub(crate) async fn run(params: PromptExecParams) {
             ),
             middleware_factory: Arc::clone(&ctx.workflow_middleware_factory),
             system_prompt_fallback:
-                crate::host::workflow_agent::build_workflow_system_prompt_fallback(Arc::clone(
-                    &ctx.skills,
-                )),
+                crate::host::workflow_agent::build_workflow_system_prompt_fallback(
+                    Arc::clone(&ctx.skills),
+                    meta_harness.clone(),
+                ),
             forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
             publish_hook: Some(crate::host::workflow_agent::build_publish_hook(
                 &ctx.controller,
@@ -133,6 +141,9 @@ pub(crate) async fn run(params: PromptExecParams) {
             // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
             langfuse_hooks: None,
             langfuse_event_handler: None,
+            // MetaHarness：装配期关闭集合（与段落覆盖同源，见上方 meta_harness
+            // 投影——设计 §2.5）。
+            meta_harness_disabled: meta_harness.disabled_middlewares.clone(),
         },
     );
 
@@ -345,9 +356,8 @@ pub(crate) async fn run(params: PromptExecParams) {
         let sm = ctx.session_manager.clone();
         let roots = ctx.plugin_skill_roots.clone();
         let dirs = ctx.plugin_agent_dirs.clone();
-        let wf = true; // create_executor 返回 Arc（非 Option），原 ctx.workflow_executor.is_some() 恒真
         Some(Arc::new(move |cwd, _language| {
-            sm.build_frozen_data(cwd, &roots, &dirs, wf)
+            sm.build_frozen_data(cwd, &roots, &dirs)
         }))
     };
 
@@ -402,6 +412,7 @@ pub(crate) async fn run(params: PromptExecParams) {
         allow_await_wake: false,
         continuation_notify: None, // stdio 无 continuation scheduler
         frozen_fallback_builder,
+        meta_harness,
     };
 
     // ── L5：TurnInput 注入面（Langfuse hooks / stage 装配桥 / forwarder）──
@@ -481,7 +492,6 @@ pub(crate) async fn run(params: PromptExecParams) {
             compact_post_hook,
             sbr.cached_llm.as_ref(),
             sbr.system_prompt,
-            sbr.subagent_system_prompt,
             sbr.frozen,
             sbr.event_handler,
             sbr.agent_overrides,

@@ -227,3 +227,223 @@ fn serde_deprecated_fields_absorbed_into_extra() {
     assert!(cfg.extra.contains_key("thinking"));
     assert!(cfg.extra.contains_key("context_1m"));
 }
+
+// ─── meta_harness（设计 §2.1）───────────────────────────────────────────────
+
+fn mh(entries: &[(&str, bool)]) -> HashMap<String, bool> {
+    entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
+#[test]
+fn meta_harness_defaults_to_none() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.meta_harness, None);
+    // 缺省不改变旧配置解析
+    let json = r#"{"active_alias":"haiku"}"#;
+    let parsed: AppConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.meta_harness, None);
+    // serde roundtrip：None 不序列化该字段
+    let value = serde_json::to_value(&cfg).unwrap();
+    assert!(!value.as_object().unwrap().contains_key("meta_harness"));
+}
+
+#[test]
+fn meta_harness_deserializes_bool_entries() {
+    let json = r#"{
+        "meta_harness": {
+            "01_intro": true,
+            "05_using_tools": false,
+            "WebMiddleware": false,
+            "FilesystemMiddleware": true
+        }
+    }"#;
+    let cfg: AppConfig = serde_json::from_str(json).unwrap();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("01_intro"), Some(&true));
+    assert_eq!(map.get("05_using_tools"), Some(&false));
+    assert_eq!(map.get("WebMiddleware"), Some(&false));
+    assert_eq!(map.get("FilesystemMiddleware"), Some(&true));
+}
+
+#[test]
+fn meta_harness_roundtrip_preserves_values() {
+    let cfg = AppConfig {
+        meta_harness: Some(mh(&[
+            ("01_intro", true),
+            ("WebMiddleware", false),
+            ("10_hitl", false),
+        ])),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&cfg).unwrap();
+    let back: AppConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.meta_harness, cfg.meta_harness);
+}
+
+#[test]
+fn meta_harness_merges_per_key() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        ..make_global()
+    };
+    let workspace = AppConfig {
+        meta_harness: Some(mh(&[
+            ("01_intro", false),           // 同 key：workspace 覆盖 global
+            ("TerminalMiddleware", false), // 新 key：保留并追加
+        ])),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    let map = global.meta_harness.unwrap();
+    assert_eq!(
+        map.get("01_intro"),
+        Some(&false),
+        "workspace 同 key 覆盖 global"
+    );
+    assert_eq!(map.get("TerminalMiddleware"), Some(&false));
+    assert_eq!(
+        map.get("WebMiddleware"),
+        Some(&false),
+        "global 其余 key 保留"
+    );
+}
+
+#[test]
+fn meta_harness_false_overrides_true() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("WebMiddleware", true)])),
+        ..make_global()
+    };
+    let workspace = AppConfig {
+        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert_eq!(
+        global.meta_harness.unwrap().get("WebMiddleware"),
+        Some(&false)
+    );
+}
+
+#[test]
+fn meta_harness_true_restores_middleware() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        ..make_global()
+    };
+    let workspace = AppConfig {
+        meta_harness: Some(mh(&[("WebMiddleware", true)])),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert_eq!(
+        global.meta_harness.unwrap().get("WebMiddleware"),
+        Some(&true)
+    );
+}
+
+#[test]
+fn section_false_is_valid() {
+    // 段落 ID + false = 显式不覆盖，合法保留（双向语义，设计 §2.1）
+    let json = r#"{"meta_harness":{"01_intro":false}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    assert_eq!(cfg.meta_harness.unwrap().get("01_intro"), Some(&false));
+}
+
+#[test]
+fn middleware_true_is_valid() {
+    // middleware 名 + true = 显式恢复装配，合法保留
+    let json = r#"{"meta_harness":{"WebMiddleware":true}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    assert_eq!(cfg.meta_harness.unwrap().get("WebMiddleware"), Some(&true));
+}
+
+#[test]
+fn unknown_key_warns_and_is_ignored() {
+    let json = r#"{"meta_harness":{"NotAMiddleware":false,"01_intro":true}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert!(!map.contains_key("NotAMiddleware"), "未知 key 被移除");
+    assert_eq!(map.get("01_intro"), Some(&true), "已知 key 保留");
+}
+
+#[test]
+fn unknown_key_only_in_workspace_is_ignored_on_merge() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", true)])),
+        ..make_global()
+    };
+    // workspace 经 load_from 已校验，未知 key 不存在；merge 本身只做逐 key 覆盖
+    let workspace = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", false)])),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    assert_eq!(global.meta_harness.unwrap().get("01_intro"), Some(&false));
+}
+
+#[test]
+fn env_still_replaces_whole_map() {
+    // 对照：meta_harness 逐 key 合并是专属特例，env 仍整体覆盖
+    let mut global = AppConfig {
+        env: Some(HashMap::from([("FOO".to_string(), "bar".to_string())])),
+        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        ..make_global()
+    };
+    let workspace = AppConfig {
+        env: Some(HashMap::from([("BAZ".to_string(), "qux".to_string())])),
+        meta_harness: Some(mh(&[("01_intro", false)])),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    let env = global.env.unwrap();
+    assert!(!env.contains_key("FOO"), "env 整体覆盖，global FOO 消失");
+    assert_eq!(env.get("BAZ"), Some(&"qux".to_string()));
+    let mh_map = global.meta_harness.unwrap();
+    assert_eq!(mh_map.get("01_intro"), Some(&false));
+    assert_eq!(
+        mh_map.get("WebMiddleware"),
+        Some(&false),
+        "meta_harness 逐 key 合并，global key 保留"
+    );
+}
+
+#[test]
+fn meta_harness_project_none_preserves_global() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", true)])),
+        ..make_global()
+    };
+    let workspace = AppConfig::default(); // meta_harness = None
+    global.merge_overrides(workspace);
+    assert_eq!(global.meta_harness.unwrap().get("01_intro"), Some(&true));
+}
+
+#[test]
+fn meta_harness_project_empty_does_not_delete_global_keys() {
+    let mut global = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        ..make_global()
+    };
+    // workspace 显式空 map：不提供删除语义，global key 全部保留
+    let workspace = AppConfig {
+        meta_harness: Some(HashMap::new()),
+        ..Default::default()
+    };
+    global.merge_overrides(workspace);
+    let map = global.meta_harness.unwrap();
+    assert_eq!(map.get("01_intro"), Some(&true));
+    assert_eq!(map.get("WebMiddleware"), Some(&false));
+}
+
+#[test]
+fn meta_harness_empty_map_kept_as_some() {
+    // serde roundtrip 不隐式改写用户配置：空 map 保留为 Some(empty)
+    let json = r#"{"meta_harness":{}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    assert_eq!(cfg.meta_harness, Some(HashMap::new()));
+}

@@ -21,7 +21,6 @@ use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
     compact::CompactConfig,
-    permission::PermissionMode,
     ports::{SkillsPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
@@ -105,46 +104,70 @@ pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
 /// system prompt fallback 渲染闭包构造（`PromptTemplate` 渲染面；skills 经
 /// 注入的 [`SkillsPort`] 访问——与宿主装配点注入的端口实现同一类型）。
 ///
-/// workflow agent 链不注册 WorkflowTool（无嵌套 workflow），fallback 渲染
-/// 关闭 workflow section，与工具注册一致（P2-2026-08-02）。
+/// 16_workflow 已删除（C2），workflow agent 渲染与主链共用同一段落来源；
+/// `meta_harness` 为冻结期 MetaHarnessState（随调用点从 `FrozenSessionData`
+/// 注入，段落覆盖与主会话同源——禁止重读配置，设计 §2.4）。
 pub(crate) fn build_workflow_system_prompt_fallback(
     skills: Arc<dyn SkillsPort>,
+    meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 ) -> WorkflowSystemPromptFallback {
     Arc::new(
         move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>| {
-            let features =
-                crate::prompt::PromptFeatures::detect_without_workflow(PermissionMode::Bypass);
-            let template = crate::prompt::PromptTemplate::new();
+            // C3：detect 无参（gate 判定随段落实体迁移至持有者装配判定；
+            // workflow 渲染与主链共用同一段落来源——C2 决定）
+            let features = crate::prompt::PromptFeatures::detect();
+            // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + 冻结语言
+            // 驱动；fallback 无 overrides）。
+            // advisor 裁决 B（2026-08-14）：workflow agent 链不装配
+            // HumanInTheLoopMiddleware（broker: None），10_hitl 描述的是主
+            // 会话审批机制——对 workflow 模型是误导性指令；presence-is-the-gate
+            // 契约要求在无 HITL 的渲染路径排除该段（C3 D5 决策修订）。
+            let collected =
+                crate::session::build_collected_sections(&meta_harness, None, frozen_language)
+                    .into_iter()
+                    .filter(|s| s.id != "10_hitl")
+                    .collect::<Vec<_>>();
+            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
             let env = if let Some(date) = frozen_date {
                 crate::prompt::PromptEnv::with_frozen_date(cwd, date)
             } else {
                 crate::prompt::PromptEnv::detect(cwd)
             };
-            template.render(&env, &features, skills.as_ref(), &[], frozen_language)
+            template.render(&env, &features, skills.as_ref(), &[])
         },
     )
 }
 
 /// workflow `agentType` 指定时的 subagent prompt 渲染器。
 ///
-/// 与主链注入的 `system_builder` 使用相同的 PromptTemplate override 语义，但始终
-/// 关闭 workflow section，确保 prompt 声明与 workflow agent 的工具集一致。
+/// 与主链注入的 `system_builder` 使用相同的 PromptTemplate 语义；
+/// 16_workflow 已删除（C2），无子面向 feature 差异。
+///
+/// `meta_harness` 为冻结期 MetaHarnessState（同源注入，见
+/// `build_workflow_system_prompt_fallback`）。
 pub(crate) fn build_workflow_agent_prompt_builder(
     skills: Arc<dyn SkillsPort>,
+    meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 ) -> WorkflowAgentPromptBuilder {
     Arc::new(
         move |overrides: Option<&AgentOverrides>, cwd, frozen_date, frozen_language| {
-            let features =
-                crate::prompt::PromptFeatures::detect_without_workflow(PermissionMode::Bypass);
-            let template = overrides.map_or_else(
-                crate::prompt::PromptTemplate::new,
-                crate::prompt::PromptTemplate::with_overrides,
-            );
+            // C3：detect 无参（同 build_workflow_system_prompt_fallback）
+            let features = crate::prompt::PromptFeatures::detect();
+            // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + overrides +
+            // 冻结语言驱动；persona 段内容依赖 overrides，调用期计算）。
+            // advisor 裁决 B：workflow 链无 HumanInTheLoopMiddleware，
+            // 排除 10_hitl（同 build_workflow_system_prompt_fallback）。
+            let collected =
+                crate::session::build_collected_sections(&meta_harness, overrides, frozen_language)
+                    .into_iter()
+                    .filter(|s| s.id != "10_hitl")
+                    .collect::<Vec<_>>();
+            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
             let env = frozen_date.map_or_else(
                 || crate::prompt::PromptEnv::detect(cwd),
                 |date| crate::prompt::PromptEnv::with_frozen_date(cwd, date),
             );
-            template.render(&env, &features, skills.as_ref(), &[], frozen_language)
+            template.render(&env, &features, skills.as_ref(), &[])
         },
     )
 }
@@ -184,9 +207,9 @@ pub(crate) fn create_session_workflow_middleware(
         session_id: Some(session_id.to_string()),
         compact_config: Some(compact_config),
         cancel: None,
-        // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-        // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-        system_prompt: Some(frozen_data.subagent_system_prompt().to_string()),
+        // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
+        // 直接复用主冻结 prompt（subagent_system_prompt 字段已随 C5 移除）。
+        system_prompt: Some(frozen_data.system_prompt().to_string()),
         broker: None,
         permission_mode: None,
         frozen_date: Some(frozen_data.date().to_string()),
@@ -194,16 +217,25 @@ pub(crate) fn create_session_workflow_middleware(
         thread_store: None,
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
-        agent_prompt_builder: build_workflow_agent_prompt_builder(Arc::clone(&skills)),
+        agent_prompt_builder: build_workflow_agent_prompt_builder(
+            Arc::clone(&skills),
+            frozen_data.meta_harness().clone(),
+        ),
         model_factory: build_model_factory(&provider, peri_config),
         middleware_factory: Arc::clone(&middleware_factory),
-        system_prompt_fallback: build_workflow_system_prompt_fallback(skills),
+        system_prompt_fallback: build_workflow_system_prompt_fallback(
+            skills,
+            frozen_data.meta_harness().clone(),
+        ),
         forwarder_launcher: build_workflow_forwarder_launcher(),
         publish_hook,
         // Langfuse 观测：与迁移前一致（调用点均传 None，workflow agent 路径
         // 未启用遥测；注入面预留，未来接线经 LangfuseHooks 构造）。
         langfuse_hooks: None,
         langfuse_event_handler: None,
+        // MetaHarness：装配期关闭集合（源自同一冻结数据，与段落覆盖同源——
+        // 设计 §2.5，禁止重读配置）。
+        meta_harness_disabled: frozen_data.meta_harness().disabled_middlewares.clone(),
     });
     let (notification_tx, _) = tokio::sync::broadcast::channel(32);
     Some(middleware_factory.build_workflow_middleware(

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -604,7 +604,7 @@ pub fn cancel_all_in<'a>(runtimes: impl IntoIterator<Item = &'a HashMap<ThreadId
 ///
 /// 依赖反转（§0）：executor 迁入 peri-agent 后不再引用 ACP `SessionManager`
 /// 类型，改为经本端口访问会话级状态（v2 MessageQueue / inbox / task manager /
-/// permission-mode 记账 / goal / 子 agent 注册表 / cron bridge）。
+/// goal / 子 agent 注册表 / cron bridge）。
 /// ACP 侧 `SessionManager` 实现本端口；print mode / 测试等无 session 场景
 /// 为 `None`（调用方保持原 None 语义，仅读路径可用时生效）。
 pub trait SessionAccessPort: Send + Sync {
@@ -626,9 +626,6 @@ pub trait SessionAccessPort: Send + Sync {
 
     /// 会话级后台任务管理器（`AcpSession.task_manager`）。
     fn task_manager(&self, session_id: &str) -> Option<Arc<dyn crate::tasks::TaskManager>>;
-
-    /// 最近一次已通知模型的 PermissionMode（D2 记账值，跨 turn 持久）。
-    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>>;
 
     /// 会话级 GoalController（`AcpSession.goal_state`）。
     fn goal_controller(&self, session_id: &str) -> Option<Arc<dyn crate::goal::GoalController>>;
