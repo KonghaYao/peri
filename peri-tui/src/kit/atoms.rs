@@ -16,6 +16,7 @@ use crate::kit::workflow_snapshot::WorkflowSnapshot;
 use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
+use ratatui_kit::ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -281,6 +282,12 @@ pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None
 /// 扫描嵌套 `view_models` 渲染。Esc 关闭面板后保留（重开仍显示同一 agent）。
 pub static SELECTED_SUBAGENT_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 当前弹窗的屏幕矩形（上一帧渲染写入）——供鼠标遮挡判定区分「弹窗内/外」：
+/// 居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区滚轮放行（见
+/// mouse_router::occludes_scroll）。写入用 write_no_update（判定读取不依赖
+/// 订阅唤醒，与 PANEL_SCROLL_OWNER 同模式）；无弹窗/自定位小层（ModelQuickSwitch
+/// 不登记矩形）时为 None → 保守遮挡。
+pub static POPUP_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
 /// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
 /// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
 pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =

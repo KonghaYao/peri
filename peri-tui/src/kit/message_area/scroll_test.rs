@@ -532,7 +532,8 @@ fn test_entry_click_target_wrapped_header_all_visual_rows_hit() {
 // 纯函数表达，测试直调锁定（计划 D5 退化路径）。
 //
 // [S3 已知限制] 遮挡复位（handle_event is_occluded 分支：弹窗/面板激活时
-// gesture/scrollbar_drag/text_sel 同步清理，scroll.rs 548-559）不可测：
+// gesture/scrollbar_drag/text_sel 同步清理，scroll.rs 548-571；弹窗矩形外
+// 滚轮放行由 mouse_router::occludes_scroll 集中判定）不可测：
 // is_occluded 虽是全局 atom（POPUP_KIND/ACTIVE_PANEL 可注入，mouse_router
 // 自身有测试），但 handle_event 的 State 参数无法构造——遮挡分支行为由
 // 代码审查覆盖（04-review 已核查清理点），gesture 生命周期语义由下方

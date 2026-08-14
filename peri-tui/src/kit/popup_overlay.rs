@@ -26,7 +26,10 @@ use crate::kit::popups::{
     model_quick_switch::ModelQuickSwitchPopup, oauth_popup::OAuthPopup, rewind_popup::RewindPopup,
 };
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{prelude::*, ratatui::layout::Constraint};
+use ratatui_kit::{
+    prelude::*,
+    ratatui::layout::{Constraint, Rect},
+};
 
 /// 弹窗覆盖层组件。
 ///
@@ -48,7 +51,11 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         // 小弹出层：组件内部按 MODEL_SWITCH_ANCHOR 自定位（锚定在状态栏模型段上方），
         // 不走居中 render_popup。
-        Some(PopupKind::ModelQuickSwitch) => element!(ModelQuickSwitchPopup()).into(),
+        Some(PopupKind::ModelQuickSwitch) => {
+            // 自定位小层不登记矩形——POPUP_AREA=None，滚轮保持保守遮挡
+            *atoms::POPUP_AREA.state().write_no_update() = None;
+            element!(ModelQuickSwitchPopup()).into()
+        }
         None => render_empty(),
     }
 }
@@ -63,6 +70,12 @@ fn render_popup(p: AnyElement<'static>, term_w: u16, term_h: u16) -> AnyElement<
     let x = term_w.saturating_sub(width) / 2;
     let y = term_h.saturating_sub(height) / 2;
 
+    // 登记弹窗屏幕矩形——mouse_router::occludes_scroll 按坐标区分「弹窗内/外」，
+    // 弹窗外滚轮放行给消息区（HITL 审批弹窗打开时可滚动 chat 查看上下文）。
+    // 渲染路径写 atom 用 write_no_update（判定读取不依赖订阅唤醒），
+    // 与 PANEL_SCROLL_OWNER 同模式，避免渲染中 wake 自激。
+    *atoms::POPUP_AREA.state().write_no_update() = Some(Rect::new(x, y, width, height));
+
     element!(
         Positioned(x: x, y: y, width: width, height: height, clear: true) {
             Center(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
@@ -75,6 +88,8 @@ fn render_popup(p: AnyElement<'static>, term_w: u16, term_h: u16) -> AnyElement<
 
 /// 空覆盖——无弹窗激活时返回零尺寸 Positioned，避免默认 View/Fragment 布局参与父级 flex。
 fn render_empty() -> AnyElement<'static> {
+    // 清除弹窗矩形登记，防止旧矩形残留错误放行滚轮
+    *atoms::POPUP_AREA.state().write_no_update() = None;
     element!(Positioned(x: 0u16, y: 0u16, width: 0u16, height: 0u16, clear: false)).into()
 }
 
