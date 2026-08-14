@@ -3,8 +3,14 @@
 //! 背景组件（消息区/输入区/状态栏）原先各自维护"是否被弹窗/面板遮挡"的
 //! 手动检查，且判定不一致（消息区/输入区漏 ACTIVE_PANEL）。本模块集中
 //! 定义遮挡集。见 spec/issues/2026-08-01-tui-mouse-multi-layer-conflict.md（方案 A1）。
+//!
+//! 滚轮例外：居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区仍可见——
+//! 用户希望在审批弹窗打开时滚动 chat 查看上下文。`occludes_scroll(x, y)`
+//! 按鼠标坐标判定滚轮是否遮挡（弹窗矩形外放行）；点击类事件不受影响，
+//! 仍由 `is_occluded` 全遮挡。
 
-use crate::kit::atoms::{ACTIVE_PANEL, POPUP_KIND};
+use crate::kit::atoms::{ACTIVE_PANEL, POPUP_AREA, POPUP_KIND};
+use ratatui_kit::ratatui::layout::Rect;
 
 /// 任何前景模态层（弹窗/面板）激活时返回 true，背景组件应让路（返回 `EventResult::Ignored`）。
 ///
@@ -13,16 +19,45 @@ pub fn is_occluded() -> bool {
     POPUP_KIND.state().read().is_some() || ACTIVE_PANEL.state().read().is_some()
 }
 
+/// 弹窗打开时，滚轮事件在该屏幕坐标是否仍应被遮挡。
+///
+/// 与 `is_occluded` 的关系：调用方在 `is_occluded()` 为 true 时用它进一步
+/// 区分「弹窗内/外」，只放行弹窗矩形外的滚轮：
+/// - 面板（ACTIVE_PANEL）打开 → 遮挡（面板占据整屏，无背景可滚）
+/// - 弹窗打开且鼠标落在 `POPUP_AREA` 矩形内 → 遮挡（滚轮归弹窗/无效）
+/// - 弹窗打开且鼠标在矩形外 → 放行（消息区滚轮生效）
+/// - 弹窗矩形未知（自定位小层如 ModelQuickSwitch 未登记）→ 保守遮挡
+pub fn occludes_scroll(x: u16, y: u16) -> bool {
+    if ACTIVE_PANEL.state().read().is_some() {
+        return true;
+    }
+    if POPUP_KIND.state().read().is_none() {
+        return false;
+    }
+    match *POPUP_AREA.state().read() {
+        None => true,
+        Some(rect) => rect_contains(x, y, rect),
+    }
+}
+
+fn rect_contains(x: u16, y: u16, rect: Rect) -> bool {
+    let right = rect.x.saturating_add(rect.width);
+    let bottom = rect.y.saturating_add(rect.height);
+    x >= rect.x && x < right && y >= rect.y && y < bottom
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::panel_types::PanelKind;
-    use crate::kit::atoms::{ACTIVE_PANEL, POPUP_KIND, PopupKind};
+    use crate::kit::atoms::{ACTIVE_PANEL, POPUP_AREA, POPUP_KIND, PopupKind};
+    use ratatui_kit::ratatui::layout::Rect;
     use serial_test::serial;
 
     /// 清理全局 atom，防止测试间污染（仿 input_area_test reset 模式）。
     fn reset() {
         *POPUP_KIND.state().write() = None;
         *ACTIVE_PANEL.state().write() = None;
+        *POPUP_AREA.state().write() = None;
     }
 
     #[test]
@@ -46,5 +81,60 @@ mod tests {
         reset();
         *ACTIVE_PANEL.state().write() = Some(PanelKind::Config);
         assert!(super::is_occluded());
+    }
+
+    // ── occludes_scroll：弹窗外滚轮放行 ─────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn scroll_no_popup_or_panel_not_occluded() {
+        reset();
+        assert!(!super::occludes_scroll(1, 1));
+    }
+
+    #[test]
+    #[serial]
+    fn scroll_inside_popup_rect_occluded() {
+        reset();
+        *POPUP_KIND.state().write() = Some(PopupKind::Hitl);
+        *POPUP_AREA.state().write() = Some(Rect::new(10, 5, 60, 20));
+        // 矩形内部（含边界：x=10..69, y=5..24）
+        assert!(super::occludes_scroll(10, 5));
+        assert!(super::occludes_scroll(69, 24));
+        // 边界外 1 格
+        assert!(!super::occludes_scroll(9, 5));
+        assert!(!super::occludes_scroll(70, 24));
+        assert!(!super::occludes_scroll(10, 4));
+        assert!(!super::occludes_scroll(10, 25));
+    }
+
+    #[test]
+    #[serial]
+    fn scroll_outside_popup_rect_passthrough() {
+        reset();
+        *POPUP_KIND.state().write() = Some(PopupKind::Hitl);
+        *POPUP_AREA.state().write() = Some(Rect::new(10, 5, 60, 20));
+        assert!(!super::occludes_scroll(0, 0));
+        assert!(!super::occludes_scroll(100, 30));
+    }
+
+    #[test]
+    #[serial]
+    fn scroll_popup_without_registered_rect_occluded() {
+        reset();
+        // ModelQuickSwitch 等自定位小层不登记 POPUP_AREA → 保守遮挡
+        *POPUP_KIND.state().write() = Some(PopupKind::ModelQuickSwitch);
+        assert!(super::occludes_scroll(0, 0));
+        assert!(super::occludes_scroll(100, 30));
+    }
+
+    #[test]
+    #[serial]
+    fn scroll_panel_open_occluded() {
+        reset();
+        *ACTIVE_PANEL.state().write() = Some(PanelKind::Config);
+        *POPUP_AREA.state().write() = Some(Rect::new(10, 5, 60, 20));
+        assert!(super::occludes_scroll(0, 0));
+        assert!(super::occludes_scroll(10, 5));
     }
 }

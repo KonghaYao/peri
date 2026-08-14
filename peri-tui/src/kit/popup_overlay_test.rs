@@ -9,6 +9,7 @@ use serial_test::serial;
 fn setup_atoms() {
     crate::kit::atoms::init_atoms();
     *atoms::POPUP_KIND.state().write() = None;
+    *atoms::POPUP_AREA.state().write() = None;
 }
 
 #[test]
