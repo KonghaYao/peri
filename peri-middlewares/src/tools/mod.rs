@@ -12,7 +12,7 @@ pub use filesystem::{
     EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
 };
 use peri_agent::tools::BaseTool;
-pub use todo::{TodoItem, TodoStatus, TodoWriteTool};
+pub use todo::{TodoItem, TodoState, TodoStatus, TodoWriteTool};
 
 /// 严格解析 JSON 数值参数（工具共享，禁止静默回退）。
 ///

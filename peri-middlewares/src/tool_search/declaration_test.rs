@@ -251,7 +251,10 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     )));
     tools.push(Arc::new(AskUserTool::new(Arc::new(NoopBroker))));
     let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<crate::tools::TodoItem>>(8);
-    tools.push(Arc::new(TodoWriteTool::new(tx)));
+    tools.push(Arc::new(TodoWriteTool::new(
+        tx,
+        Arc::new(tokio::sync::Mutex::new(crate::tools::TodoState::default())),
+    )));
     // 2 skills：SkillTool/DiscoverSkillsTool
     let cached: Arc<std::sync::RwLock<Option<Vec<SkillMetadata>>>> =
         Arc::new(std::sync::RwLock::new(None));
