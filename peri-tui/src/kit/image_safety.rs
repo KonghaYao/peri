@@ -355,6 +355,21 @@ pub fn classify_url(url: &str) -> UrlKind {
 mod tests {
     use super::*;
 
+    /// 跨平台 symlink 创建（unix: `symlink` / windows: `symlink_file`）。
+    fn make_symlink(
+        target: impl AsRef<std::path::Path>,
+        link: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+
     /// 最小合法 PNG 构造（签名 + IHDR + IEND，CRC 正确）；仅 header 即可被
     /// `read_header_info` 解析，无需真实像素数据。
     fn make_png(width: u32, height: u32) -> Vec<u8> {
@@ -439,7 +454,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let file = write_file(&root, "a.png", b"x");
         let link = dir.path().join("link.png");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
+        make_symlink(&file, &link).unwrap();
         // canonicalize 解析 symlink 后仍落在受管理目录内 → Managed（§6.2-3）。
         let (grade, canonical) = grade_path_with_root(&link, &root);
         assert_eq!(grade, PathGrade::Managed);
@@ -458,7 +473,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let file = write_file(&outside, "a.png", b"x");
         let link = root.join("escape.png");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
+        make_symlink(&file, &link).unwrap();
         // symlink 指向目录外 → 降级 Manual（§6.2-3）。
         let (grade, canonical) = grade_path_with_root(&link, &root);
         assert_eq!(grade, PathGrade::Manual);

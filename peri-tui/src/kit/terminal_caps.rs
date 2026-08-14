@@ -145,17 +145,21 @@ pub fn detect_graphics_protocol_from(get: &dyn Fn(&str) -> Option<String>) -> Gr
 
     // Windows ConPTY 会剥 APC（kitty protocol 依赖 APC），恒 None。
     #[cfg(target_os = "windows")]
-    return GraphicsProtocol::None;
+    {
+        return GraphicsProtocol::None;
+    }
 
     // 品牌映射（大小写不敏感小写比较）；tmux / 未知 / 未设置 → None（安全默认）。
-    match get("TERM_PROGRAM")
+    // 仅非 Windows 编译（Windows 已在上方恒 None 早退，避免 unreachable code）。
+    #[cfg(not(target_os = "windows"))]
+    return match get("TERM_PROGRAM")
         .map(|v| v.to_ascii_lowercase())
         .as_deref()
     {
         Some("kitty" | "ghostty" | "wezterm" | "warp") => GraphicsProtocol::Kitty,
         Some("iterm.app") => GraphicsProtocol::ITerm2,
         _ => GraphicsProtocol::None,
-    }
+    };
 }
 
 /// 可注入环境读取器的探测实现（便于单测，不触碰真实 env）。
