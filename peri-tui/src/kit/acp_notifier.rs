@@ -265,7 +265,7 @@ fn forward_notification(bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>, n:
         } => {
             let decoded = AcpEventData::decode(&event, data);
             if matches!(decoded, AcpEventData::Unknown { .. }) {
-                debug!(event = %event, "kit ACP notifier: unknown unstable-event, dropping");
+                debug!(event = %event, "kit ACP notifier: unknown unstable_event, dropping");
                 return;
             }
             let wrapped = wrap_with_session(decoded, session_id);

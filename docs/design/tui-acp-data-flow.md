@@ -570,7 +570,7 @@ Agent 完成 ReAct 循环后，Executor 调用 `EventSink.push_done(stop_reason,
 
 此外，Agent turn 可能被挂起（idle/await_wake），此时发送 `AcpEventData::TurnSuspended`：归档 current_turn → committed，停止 loading，但**不** `drain_input_buffer`（Agent 保持存活，等待后续唤醒继续）。
 
-> **历史**：旧版通过 `peri/unstable-event` 通道发送自定义 `turn-done` / `turn-interrupted` 事件，已于 2026-07-08 废弃，统一改为 ACP 标准 `StopReason` 通道。
+> **历史**：旧版通过 `peri/unstable_event` 通道发送自定义 `turn-done` / `turn-interrupted` 事件，已于 2026-07-08 废弃，统一改为 ACP 标准 `StopReason` 通道。
 
 ```mermaid
 sequenceDiagram
@@ -891,14 +891,14 @@ INPUT_BUFFER 清空
 | 回合完成 | `push_done` → `peri/agent_event_done` | `AcpNotification::AgentDone { stop_reason: "end_turn" }` → `TurnDone` | current_turn VMs push_back → committed |
 | 回合中断 | `push_done` → `peri/agent_event_done` | `AcpNotification::AgentDone { stop_reason: "cancelled" }` → `TurnInterrupted` | 若 current_turn 为空（零产出）→ 撤销用户气泡 + 恢复输入框文本；若有内容 → deactivate + 归档到 committed |
 | 回合挂起 | `peri/agent_event` | `AcpEvent` → `TurnSuspended` | 归档 current_turn → committed，不 drain_input_buffer |
-| Bg 回调气泡 | `peri/unstable-event` | `AcpEventData::BgCallbackBubble` | flush current_turn → committed，等待后续 LocalUserBubble 推送用户气泡 |
+| Bg 回调气泡 | `peri/unstable_event` | `AcpEventData::BgCallbackBubble` | flush current_turn → committed，等待后续 LocalUserBubble 推送用户气泡 |
 | Rewind 完成 | `peri/agent_event` | `AcpEvent::RewindCompleted` → `RewindCompleted` | 反序列化 messages_json 替换 committed |
-| 后台任务启动 | `peri/unstable-event` | `BgTaskStarted` | 写入 BG_TASKS / BG_DISPLAY atoms |
-| 后台任务完成 | `peri/unstable-event` | `BgTaskCompleted` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 完成 + NOTIFICATION |
-| 后台任务取消 | `peri/unstable-event` | `BgTaskCancelled` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 失败 |
-| 插件快照 | `peri/unstable-event` | `PluginSnapshot` | 写入 PLUGIN_LIST atom |
-| 插件操作结果 | `peri/unstable-event` | `PluginActionResult` | 写入 NOTIFICATION（3s 消失） |
-| 插件搜索结果 | `peri/unstable-event` | `PluginSearchResult` | 写入 PLUGIN_SEARCH_RESULTS atom |
+| 后台任务启动 | `peri/unstable_event` | `BgTaskStarted` | 写入 BG_TASKS / BG_DISPLAY atoms |
+| 后台任务完成 | `peri/unstable_event` | `BgTaskCompleted` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 完成 + NOTIFICATION |
+| 后台任务取消 | `peri/unstable_event` | `BgTaskCancelled` | 从 BG_TASKS 移除 + 标记 BG_DISPLAY 失败 |
+| 插件快照 | `peri/unstable_event` | `PluginSnapshot` | 写入 PLUGIN_LIST atom |
+| 插件操作结果 | `peri/unstable_event` | `PluginActionResult` | 写入 NOTIFICATION（3s 消失） |
+| 插件搜索结果 | `peri/unstable_event` | `PluginSearchResult` | 写入 PLUGIN_SEARCH_RESULTS atom |
 | Prediction | `AcpNotification::PredictionReady` | `Prediction` | 写入 PREDICTION atom |
 ---
 

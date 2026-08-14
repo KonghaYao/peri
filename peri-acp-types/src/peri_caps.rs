@@ -16,12 +16,6 @@ pub struct PeriCaps {
     /// 控制 `ContentChunk._meta.periReplay` / `ToolCall._meta.periReplay` / `ToolCallUpdate._meta.periReplay`
     #[serde(default)]
     pub replay: bool,
-    /// 控制 `params._peri.sourceAgentId`
-    #[serde(default)]
-    pub source_agent_id: bool,
-    /// 控制 `peri/agent_event` 通道中 `AcpEvent::StateSnapshotMeta` 的发送
-    #[serde(default)]
-    pub context_usage: bool,
     /// 控制 `peri/agent_event` 通知通道的发送（Category ③ 全部）
     #[serde(default)]
     pub agent_event: bool,
@@ -34,9 +28,6 @@ pub struct PeriCaps {
     /// 控制 `peri/prediction_ready` 预测输入的发送
     #[serde(default)]
     pub prediction: bool,
-    /// 控制 `peri/hitl_pending` HITL 审批通知的发送
-    #[serde(default)]
-    pub hitl_pending: bool,
     /// 控制 `AvailableCommandsUpdate.availableCommands` 中界面性命令条目的广播
     /// （help / clear / mode / lang / exit / history 等，由 TUI 本地处理）。
     /// TUI（全 cap / mpsc 内部路径）声明后广播，外部客户端不声明则不收到。
@@ -54,13 +45,10 @@ impl PeriCaps {
             token_stats: meta_bool(meta, "peri.tokenStats"),
             skill_names: meta_bool(meta, "peri.skillNames"),
             replay: meta_bool(meta, "peri.replay"),
-            source_agent_id: meta_bool(meta, "peri.sourceAgentId"),
-            context_usage: meta_bool(meta, "peri.contextUsage"),
             agent_event: meta_bool(meta, "peri.agentEvent"),
             agent_event_done: meta_bool(meta, "peri.agentEventDone"),
             unstable_event: meta_bool(meta, "peri.unstableEvent"),
             prediction: meta_bool(meta, "peri.prediction"),
-            hitl_pending: meta_bool(meta, "peri.hitlPending"),
             ui_commands: meta_bool(meta, "peri.uiCommands"),
         }
     }
@@ -71,11 +59,6 @@ impl PeriCaps {
         m.insert("peri.tokenStats".into(), Value::Bool(self.token_stats));
         m.insert("peri.skillNames".into(), Value::Bool(self.skill_names));
         m.insert("peri.replay".into(), Value::Bool(self.replay));
-        m.insert(
-            "peri.sourceAgentId".into(),
-            Value::Bool(self.source_agent_id),
-        );
-        m.insert("peri.contextUsage".into(), Value::Bool(self.context_usage));
         m.insert("peri.agentEvent".into(), Value::Bool(self.agent_event));
         m.insert(
             "peri.agentEventDone".into(),
@@ -86,7 +69,6 @@ impl PeriCaps {
             Value::Bool(self.unstable_event),
         );
         m.insert("peri.prediction".into(), Value::Bool(self.prediction));
-        m.insert("peri.hitlPending".into(), Value::Bool(self.hitl_pending));
         m.insert("peri.uiCommands".into(), Value::Bool(self.ui_commands));
         m
     }
@@ -98,13 +80,10 @@ impl PeriCaps {
             token_stats: true,
             skill_names: true,
             replay: true,
-            source_agent_id: true,
-            context_usage: true,
             agent_event: true,
             agent_event_done: true,
             unstable_event: true,
             prediction: true,
-            hitl_pending: true,
             ui_commands: true,
         }
     }
