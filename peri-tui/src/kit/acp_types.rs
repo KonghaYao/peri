@@ -1440,7 +1440,7 @@ impl AcpEventData {
             "turn-done" => AcpEventData::TurnDone,
             "turn-interrupted" => {
                 let reason = data["reason"].as_str().unwrap_or("").to_string();
-                // requestId 为可选字段：unstable-event 通道当前未发射 turn-interrupted
+                // requestId 为可选字段：unstable_event 通道当前未发射 turn-interrupted
                 // （router 返回 None），保留解析以兼容未来启用（协议文档已标注）。
                 let request_id = data["requestId"].as_str().map(String::from);
                 AcpEventData::TurnInterrupted { reason, request_id }

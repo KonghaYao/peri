@@ -52,7 +52,7 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 /// - `peri/agent_event` — AcpEvent DTO 序列化（TUI-only events，categories ②③）
 ///
 /// Additionally, each event is routed through the event router to emit
-/// `peri/unstable-event` notifications for new-protocol consumers.
+/// `peri/unstable_event` notifications for new-protocol consumers.
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
     caps_registry: Arc<DashMap<String, PeriCaps>>,
@@ -69,12 +69,12 @@ impl TransportEventSink {
         }
     }
 
-    /// Push a `{event, data}` custom event through `peri/unstable-event` channel.
+    /// Push a `{event, data}` custom event through `peri/unstable_event` channel.
     ///
     /// Used by the event router to emit new-protocol events alongside the
     /// existing `peri/agent_event` path. The envelope is a JSON-RPC notification:
     /// ```json
-    /// {"jsonrpc":"2.0","method":"peri/unstable-event","params":{"event":"...","data":{...}}}
+    /// {"jsonrpc":"2.0","method":"peri/unstable_event","params":{"event":"...","data":{...}}}
     /// ```
     pub async fn push_unstable_event(
         &self,
@@ -88,7 +88,7 @@ impl TransportEventSink {
             "data": data,
         });
         self.transport
-            .send_notification("peri/unstable-event", payload)
+            .send_notification("peri/unstable_event", payload)
             .await
     }
 }
@@ -135,10 +135,8 @@ impl EventSink for TransportEventSink {
                 tracing::debug!(
                     target: "acp.event_sink",
                     session_id = %session_id,
-                    caps.source_agent_id = %caps.source_agent_id,
-                    caps.agent_event = %caps.agent_event,
                     mapped.source_agent_id = ?m.source_agent_id,
-                    "push_event: caps check for source_agent_id injection"
+                    "push_event: source_agent_id injection"
                 );
                 // _peri.sourceAgentId 是事件路由语义字段，不应受 caps gating——
                 // 否则 SubAgent 内部工具事件无法路由到正确的卡片容器。
@@ -568,5 +566,27 @@ mod tests {
             transport.notifications.lock().unwrap().is_empty(),
             "未声明 agent_event cap 时不应发出通知"
         );
+    }
+
+    /// push_unstable_event 通道 method 命名统一为 snake_case（2026-08-14 整顿）。
+    #[tokio::test]
+    async fn push_unstable_event_uses_snake_case_method() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        let _ = sink
+            .push_unstable_event(
+                "s1",
+                "plugin-action-result".into(),
+                serde_json::json!({"ok": true}),
+            )
+            .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1, "应发出恰好 1 条通知");
+        let (method, _params) = &notifications[0];
+        assert_eq!(method, "peri/unstable_event");
     }
 }

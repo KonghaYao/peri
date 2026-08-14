@@ -1328,7 +1328,7 @@ async fn push_plugin_action_result(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-action-result");
@@ -1354,7 +1354,7 @@ async fn push_plugin_snapshot(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-snapshot");
@@ -1383,7 +1383,7 @@ async fn push_plugin_search_result(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-search-result");
