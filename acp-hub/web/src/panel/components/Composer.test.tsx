@@ -5,13 +5,14 @@ import {
   setChatStatusSignal,
   setOpeningSession,
   setProjectSessions,
+  setPromptDeliveryReady,
   setRuntimeDocsState,
   setSelectedCid,
   setSelectedSessionId,
 } from '../store';
 import { setPrincipalRole } from '../lib/auth-state';
-import { failMessageDelivery, markMessageDeliveryUncertain, resetMessageDelivery, setComposerDraft, startMessageDelivery } from '../lib/message-delivery';
-import { resetRuntimeControls, startRuntimeControl } from '../lib/runtime-control';
+import { markMessageDeliveryUncertain, resetMessageDelivery, setComposerDraft, startMessageDelivery } from '../lib/message-delivery';
+import { markRuntimeControlUncertain, resetRuntimeControls, startRuntimeControl } from '../lib/runtime-control';
 import { Composer } from './Composer';
 
 function resetStore() {
@@ -25,10 +26,12 @@ function resetStore() {
   setRuntimeDocsState({ chat: false, control: false });
   resetMessageDelivery();
   setProjectSessions([]);
+  setPromptDeliveryReady(false);
 }
 
 function selectReadyChat() {
   setPrincipalRole('full');
+  setPromptDeliveryReady(true);
   setSelectedSessionId('session-1');
   setSelectedCid('chat-1');
   setChatStatusSignal({ 'chat-1': 'active' });
@@ -83,30 +86,29 @@ describe('Composer', () => {
     setChatHead({ chat: { chatId: 'chat-1', title: 'Chat', status: 'active', activeTurnId: 'turn-1', createdAt: null, updatedAt: null }, agent: null, activeTurn: { turnId: 'turn-1', turnStatus: 'running', updatedAt: null }, pendingPermissions: [] });
     startRuntimeControl('cancel-1', 'chat-1', 'cancel');
     render(() => <Composer />);
-    expect(screen.getByRole('button', { name: '停止生成' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '正在停止生成' })).toBeDisabled();
   });
 
-  it('restores uncertain message text and keeps same-request recovery visible', async () => {
+  it('turns an uncertain stop into an enabled same-request recovery control', () => {
+    selectReadyChat();
+    setChatHead({ chat: { chatId: 'chat-1', title: 'Chat', status: 'active', activeTurnId: 'turn-1', createdAt: null, updatedAt: null }, agent: null, activeTurn: { turnId: 'turn-1', turnStatus: 'running', updatedAt: null }, pendingPermissions: [] });
+    startRuntimeControl('cancel-uncertain', 'chat-1', 'cancel');
+    markRuntimeControlUncertain('cancel-uncertain');
+    render(() => <Composer />);
+    const retry = screen.getByRole('button', { name: '使用原请求重新确认停止' });
+    expect(retry).toBeEnabled();
+    expect(retry).toHaveClass('composer-action--uncertain');
+  });
+
+  it('keeps an uncertain message out of the editor while the outbox owns it', async () => {
     selectReadyChat();
     setComposerDraft('session-1', 'preserved draft');
     startMessageDelivery('cmd-1', 'preserved draft', 'session-1', 'chat-1');
     markMessageDeliveryUncertain('cmd-1');
     render(() => <Composer />);
-    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('preserved draft'));
-    expect(screen.getByRole('alert')).toHaveTextContent('结果尚未确认');
-    expect(screen.getByRole('button', { name: '使用同一请求重新确认' })).toBeInTheDocument();
-  });
-
-  it('returns a definite failure to editing without promising an invalid same-request retry', async () => {
-    selectReadyChat();
-    setComposerDraft('session-1', 'fix and send again');
-    startMessageDelivery('cmd-failed', 'fix and send again', 'session-1', 'chat-1');
-    failMessageDelivery('cmd-failed', '服务器已明确拒绝该请求');
-    render(() => <Composer />);
-    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('fix and send again'));
-    expect(screen.getByRole('alert')).toHaveTextContent('消息未发送');
-    expect(screen.queryByRole('button', { name: '使用同一请求重新确认' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '返回编辑' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue(''));
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(screen.queryByText('结果尚未确认')).not.toBeInTheDocument();
   });
 
   it('isolates drafts and recovery surfaces by persisted session identity', async () => {

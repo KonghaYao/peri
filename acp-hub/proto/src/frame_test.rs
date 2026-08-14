@@ -99,6 +99,12 @@ fn all_frames() -> Vec<Frame> {
                 project_id: "p1".into(),
             },
         }),
+        Frame::Action(ActionEnvelope::PersistedSessionPromptStatus {
+            command_id: "prompt-status-1".into(),
+            payload: PersistedSessionOpenPayload {
+                session_id: "hs1".into(),
+            },
+        }),
         // --- action 方法面（§4.3，含 M2/M3 保留类型） ---
         Frame::Action(ActionEnvelope::Create {
             command_id: "c1".into(),
@@ -174,6 +180,21 @@ fn all_frames() -> Vec<Frame> {
             retryable: true,
             retry_after_ms: Some(1000),
         }),
+        Frame::PromptStatus(crate::session::PromptStatusFrame {
+            command_id: "prompt-status-1".into(),
+            session_id: "hs1".into(),
+            runtime_restored: false,
+            truncated: false,
+            evidence_incomplete: false,
+            prompts: vec![crate::session::PromptStatusItem {
+                command_id: "c4".into(),
+                turn_id: Some("t1".into()),
+                status: crate::session::PromptDeliveryStatus::DeliveryUnknown,
+                created_at: "2026-08-14T00:00:00Z".into(),
+                updated_at: "2026-08-14T00:00:01Z".into(),
+                error_code: None,
+            }],
+        }),
         // --- 连接生命周期 ---
         Frame::Event(EventFrame {
             chat_id: "s1".into(),
@@ -189,6 +210,7 @@ fn all_frames() -> Vec<Frame> {
                 m.insert(DocId::REGISTRY, 2u32);
                 m
             },
+            negotiated_capabilities: vec!["prompt-status-v1".into()],
         }),
         Frame::Auth(Auth {
             token: "tok".into(),
@@ -200,6 +222,7 @@ fn all_frames() -> Vec<Frame> {
         // --- y-sync ---
         Frame::YsyncSubscribe(YsyncSubscribe {
             docs: vec![DocId::chat("s1"), DocId::session("s1")],
+            client_capabilities: vec!["prompt-status-v1".into()],
         }),
         Frame::YsyncUnsubscribe(YsyncUnsubscribe {
             docs: vec![DocId::chat("s1")],
@@ -381,7 +404,7 @@ fn known_tag_bad_payload_is_malformed_not_unsupported() {
 #[test]
 fn every_frame_tag_is_registered() {
     let registered: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
-    assert_eq!(registered.len(), 26, "§3.2 全表应有 26 个 tag");
+    assert_eq!(registered.len(), 27, "§3.2 全表应有 27 个 tag");
     for frame in all_frames() {
         assert!(
             registered.contains(&frame.tag().0),
@@ -419,6 +442,62 @@ fn ysync_update_projection_version_shape() {
     });
     let v: serde_json::Value = serde_json::to_value(&delta).unwrap();
     assert!(v.get("projectionVersion").is_none(), "增量不携带投影版本");
+}
+
+/// `DELIVERY_UNKNOWN` 是独立稳定码：线格式固定为 SCREAMING_SNAKE_CASE，且
+/// 非幂等命令的未知交付状态绝不可自动重试。
+#[test]
+fn delivery_unknown_error_code_roundtrip_and_retryability() {
+    let value = serde_json::to_value(ErrorCode::DeliveryUnknown).unwrap();
+    assert_eq!(value, "DELIVERY_UNKNOWN");
+    assert_eq!(
+        serde_json::from_value::<ErrorCode>(value).unwrap(),
+        ErrorCode::DeliveryUnknown
+    );
+    assert!(!ErrorCode::DeliveryUnknown.default_retryable());
+}
+
+/// 能力协商字段是 additive：旧 JSON 缺字段时解码为空且重编码不增加字段；新
+/// JSON 使用 camelCase，并完整 round-trip。
+#[test]
+fn capability_negotiation_fields_are_backward_compatible() {
+    let old_subscribe = Frame::parse(r#"{"t":"ysync.subscribe","docs":["chat:s1"]}"#).unwrap();
+    let Frame::YsyncSubscribe(old_subscribe) = old_subscribe else {
+        panic!("expected ysync.subscribe");
+    };
+    assert!(old_subscribe.client_capabilities.is_empty());
+    let old_subscribe_json = serde_json::to_value(Frame::YsyncSubscribe(old_subscribe)).unwrap();
+    assert!(old_subscribe_json.get("clientCapabilities").is_none());
+
+    let old_ready = Frame::parse(r#"{"t":"ready","projectionVersions":{}}"#).unwrap();
+    let Frame::Ready(old_ready) = old_ready else {
+        panic!("expected ready");
+    };
+    assert!(old_ready.negotiated_capabilities.is_empty());
+    let old_ready_json = serde_json::to_value(Frame::Ready(old_ready)).unwrap();
+    assert!(old_ready_json.get("negotiatedCapabilities").is_none());
+
+    let subscribe = Frame::YsyncSubscribe(YsyncSubscribe {
+        docs: vec![DocId::chat("s1")],
+        client_capabilities: vec!["prompt-status-v1".into()],
+    });
+    let subscribe_json = serde_json::to_value(&subscribe).unwrap();
+    assert_eq!(subscribe_json["clientCapabilities"][0], "prompt-status-v1");
+    assert_eq!(
+        Frame::parse(&serde_json::to_string(&subscribe).unwrap()).unwrap(),
+        subscribe
+    );
+
+    let ready = Frame::Ready(Ready {
+        projection_versions: HashMap::new(),
+        negotiated_capabilities: vec!["prompt-status-v1".into()],
+    });
+    let ready_json = serde_json::to_value(&ready).unwrap();
+    assert_eq!(ready_json["negotiatedCapabilities"][0], "prompt-status-v1");
+    assert_eq!(
+        Frame::parse(&serde_json::to_string(&ready).unwrap()).unwrap(),
+        ready
+    );
 }
 
 /// `DocId::REGISTRY` 必须等于 `hub:registry`（§5.2 表），且与

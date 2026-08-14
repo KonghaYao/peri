@@ -542,6 +542,9 @@ impl WsClient {
             .send(&Frame::YsyncSubscribe(
                 acp_hub_proto::ysync::YsyncSubscribe {
                     docs: docs.iter().map(|d| d.parse().unwrap()).collect(),
+                    client_capabilities: vec![
+                        acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()
+                    ],
                 },
             ))
             .await?;
@@ -682,6 +685,7 @@ impl WsClient {
         self.send(&Frame::YsyncSubscribe(
             acp_hub_proto::ysync::YsyncSubscribe {
                 docs: docs.iter().map(|d| d.parse().unwrap()).collect(),
+                client_capabilities: vec![acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()],
             },
         ))
         .await?;

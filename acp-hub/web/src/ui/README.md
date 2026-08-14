@@ -22,6 +22,7 @@
 | `Tooltip` | delayed pointer/immediate keyboard supplemental help, disabled-control hover support and Escape dismissal |
 | `breakpoints.ts` | the behavior/CSS compact and phone viewport contract |
 | `keyboard.ts` | platform-aware display labels for shared primary-modifier shortcuts |
+| `base.css` | product-owned box model and native element normalization; no token, primitive or feature visuals |
 | `primitives.css` | the public visual entry point; imports tokens and owns every primitive's standalone base/state styles |
 | `tokens.css` | the sole reusable design-token source for colors, type, elevation and layout; imported by `primitives.css` |
 
@@ -30,7 +31,7 @@
 1. Feature code imports from `../../ui`, never an implementation file.
 2. Component-only props must be consumed with `splitProps`; they must not appear in rendered DOM.
 3. Do not add a primitive for a single screen. Promote a pattern after it recurs or when behavior (focus, keyboard, busy state, ARIA) must be correct everywhere.
-4. Apps import `primitives.css`, which imports `tokens.css`. Reusable color, typography, elevation and component-state styles never depend on `styles.css`; that file owns only panel/feature layout and contextual overrides. Feature components do not introduce near-duplicate hex values.
+4. The app stylesheet imports `base.css` before `primitives.css`; primitives then import `tokens.css`. This file order is the cascade contract: browser baseline → tokens/primitives → panel feature layout and contextual overrides. Reusable color, typography, elevation and component-state styles never depend on `styles.css`. Feature components do not introduce near-duplicate hex values or generic utility-class recipes.
 5. A primitive test renders the real Solid component in jsdom and verifies keyboard/focus/ARIA/prop behavior. Pure selector tests are supplementary, not substitutes.
 6. Destructive domain operations remain confirmation flows in features; the primitive supplies mechanics, not business permission.
 7. Responsive JavaScript imports viewport contracts from `breakpoints.ts`; do not duplicate viewport literals in features. Compact (`≤959px`) makes navigation modal, medium (`960–1199px`) keeps navigation structural but tightens density, and wide (`≥1200px`) restores the full reading rhythm. CSS mirrors both shared thresholds and source contracts guard them.
@@ -39,3 +40,8 @@
 10. Feature components provide icon geometry through `Icon`; they do not render bare SVG canvases or repeat paint and sizing rules. Flex layout belongs to the wrapper actually participating in layout—for example, a tooltip-wrapped Composer action aligns through `.ui-tooltip-anchor`, not a hidden child margin.
 
 Run `bun run test` and `bun run build` before changing the public surface.
+
+The authenticated visual-state harness is documented separately in
+`src/visual-fixture/README.md`. It consumes these primitives and real feature
+components, but is excluded from the production entry and embedded server
+assets by executable contracts.

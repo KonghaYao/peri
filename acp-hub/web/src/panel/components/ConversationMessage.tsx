@@ -42,6 +42,18 @@ export function ConversationMessage(props: { entry: ChatEntry }) {
         <Show when={resource.resourceId}><code title={resource.resourceId || undefined}>{resource.resourceId}</code></Show>
       </section>}</For>
       <Show when={entry().error}>{(error) => <section class="message-error" role="alert" aria-label="消息错误"><code>{error().code || 'UNKNOWN'}{error().message ? `: ${error().message}` : ''}</code></section>}</Show>
+      <Show when={role() === 'user' && entry().deliveryState === 'delivery_unknown'}>
+        <section class="message-delivery-warning" role="alert">
+          <strong>投递结果未知</strong>
+          <span>这条消息可能已经执行。为避免重复操作，系统不会自动重发。</span>
+        </section>
+      </Show>
+      <Show when={role() === 'user' && entry().deliveryState === 'failed_not_delivered'}>
+        <section class="message-delivery-warning" role="status">
+          <strong>消息未投递</strong>
+          <span>服务器确认 ACP 未执行这条消息，可以复制后重新发送。</span>
+        </section>
+      </Show>
       <Show when={role() === 'assistant' && entry().text && !streaming()}><div class="message-actions"><CopyButton text={entry().text} label="复制回答" /></div></Show>
       <Show when={empty()}><LoadingDots /><span class="sr-only">正在生成回答</span></Show>
     </div>

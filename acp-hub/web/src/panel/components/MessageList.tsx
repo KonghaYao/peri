@@ -10,7 +10,7 @@
 // permission decision 值（allow/deny、按钮顺序）均不变。
 
 import { createEffect, createSignal, For, Show } from 'solid-js';
-import { chatEntries, permissions, resolvePermission, retryPersistentAction, runtimeDocsHydrated } from '../store';
+import { chatEntries, permissions, promptRecovery, resolvePermission, retryMessageSubmission, retryPersistentAction, runtimeDocsHydrated, selectedCid } from '../store';
 import { readOnly } from '../lib/auth-state';
 import { messageActivity, nextFollowState } from '../lib/message-follow.mjs';
 import { messageTime } from '../lib/message-time.mjs';
@@ -18,6 +18,9 @@ import { Button } from '../../ui';
 import { PermissionQueue } from './PermissionQueue';
 import { ConversationMessage } from './ConversationMessage';
 import { permissionDecisions } from '../lib/permission-delivery';
+import { dismissFailedMessageDelivery, messageSubmission } from '../lib/message-delivery';
+import { MessageOutbox } from './MessageOutbox';
+import { PromptRecoveryNotice } from './PromptRecoveryNotice';
 
 
 // ── 权限条 ──────────────────────────────────────────────────────────────
@@ -42,13 +45,19 @@ export function MessageList() {
   const [hasNewContent, setHasNewContent] = createSignal(false);
   let areaRef: HTMLDivElement | undefined;
   let previousActivity = '';
+  const outboxForChat = () => {
+    const submission = messageSubmission();
+    return submission?.chatId === selectedCid() && !submission.projected ? submission : null;
+  };
 
   // 自动吸底（用户上滚时暂停）——算法与阈值（40px）保持不变
   createEffect(() => {
     const list = chatEntries();
-    const activity = messageActivity(list);
+    const outbox = outboxForChat();
+    const outboxActivity = outbox ? `${outbox.commandId}:${outbox.phase}` : '';
+    const activity = `${messageActivity(list)}|${outboxActivity}`;
     const follow = nextFollowState({ stick: stick(), hasNewContent: hasNewContent(), previousActivity, activity });
-    if (follow.stick && areaRef && list.length) {
+    if (follow.stick && areaRef && (list.length || outbox)) {
       areaRef.scrollTop = areaRef.scrollHeight;
     }
     setHasNewContent(follow.hasNewContent);
@@ -78,12 +87,13 @@ export function MessageList() {
         const el = e.currentTarget;
         setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
       }}
-      class="ui-scrollbar min-h-0 flex-1 overflow-y-auto"
+      class="ui-scrollbar message-list-scroll"
     >
       <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">{completionAnnouncement()}</div>
       {/* 居中正文列：宽屏 max-w 820px 居中留白（§3.13 验收 8），窄屏 16px
           padding；上 24px 按 §3.4，底部 156px 留白等 F7 Composer 悬浮 */}
-      <div class="mx-auto w-full max-w-[820px] px-4 pt-6 pb-6">
+      <div class="message-list-content">
+        <PromptRecoveryNotice recovery={promptRecovery()} />
         <PermissionBar />
         <Show when={!runtimeDocsHydrated()}>
           <div class="conversation-placeholder" role="status">
@@ -92,7 +102,7 @@ export function MessageList() {
             <p>正在从 acp-hub server 恢复消息与运行状态…</p>
           </div>
         </Show>
-        <Show when={runtimeDocsHydrated() && chatEntries().length === 0}>
+        <Show when={runtimeDocsHydrated() && chatEntries().length === 0 && !outboxForChat()}>
           <div class="conversation-placeholder conversation-placeholder--empty">
             <span class="conversation-placeholder__mark" aria-hidden="true">✦</span>
             <strong>开始这段对话</strong>
@@ -102,6 +112,9 @@ export function MessageList() {
         <For each={chatEntries()}>
           {(entry) => <ConversationMessage entry={entry} />}
         </For>
+        <Show when={outboxForChat()}>{(submission) =>
+          <MessageOutbox submission={submission()} onRetry={retryMessageSubmission} onEdit={dismissFailedMessageDelivery} />
+        }</Show>
       </div>
     </section>
     <Show when={!stick() || hasNewContent()}><Button type="button" size="compact" class="jump-latest" onClick={jumpToLatest}>{hasNewContent() ? '↓ 有新内容' : '↓ 回到底部'}</Button></Show>

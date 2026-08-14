@@ -24,6 +24,22 @@ describe('renderRegistry project session catalog', () => {
 });
 
 describe('renderChat tool projection', () => {
+  it('reads exact prompt identity while keeping legacy entries compatible', () => {
+    const doc = new Y.Doc();
+    const root = doc.getMap<unknown>('root');
+    const order = new Y.Array<string>();
+    const entries = new Y.Map<unknown>();
+    root.set('entry_order', order); root.set('entries', entries);
+    for (const [id, source] of [['current', 'command-1'], ['legacy', null]] as const) {
+      const entry = new Y.Map<unknown>();
+      entry.set('created_at', '2026-08-14T00:00:00Z');
+      entry.set('blocks', new Y.Map<unknown>()); entry.set('block_order', new Y.Array<string>());
+      if (source) entry.set('source_command_id', source);
+      entries.set(id, entry); order.push([id]);
+    }
+    expect(renderChat(doc).entries.map((entry) => entry.sourceCommandId)).toEqual(['command-1', null]);
+  });
+
   it('preserves server-projected arguments, result and public error', () => {
     const doc = new Y.Doc();
     const root = doc.getMap<unknown>('root');

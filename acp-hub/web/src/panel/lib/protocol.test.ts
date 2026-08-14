@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parse } from './protocol';
+import { CAP_PROMPT_DELIVERY_V2, parse, subscribe } from './protocol';
 
 describe('downstream protocol envelope parsing', () => {
   it('accepts a structurally valid known frame', () => {
@@ -32,6 +32,25 @@ describe('downstream protocol envelope parsing', () => {
       .toMatchObject({ t: 'action_ack', commandId: 'c', status: 'duplicate', sessionId: 's', chatId: 'chat', futureField: true });
     expect(parse('{"t":"ysync.update","doc":"hub:registry","update":"AAAA","projectionVersion":2}'))
       .toEqual({ t: 'ysync.update', doc: 'hub:registry', update: 'AAAA', projectionVersion: 2 });
+  });
+
+  it('declares prompt delivery capability and validates the negotiated echo', () => {
+    expect(subscribe(['hub:registry'])).toEqual({
+      t: 'ysync.subscribe',
+      docs: ['hub:registry'],
+      clientCapabilities: [CAP_PROMPT_DELIVERY_V2],
+    });
+    expect(parse('{"t":"ready","projectionVersions":{},"negotiatedCapabilities":["prompt-delivery-v2"]}'))
+      .toMatchObject({ negotiatedCapabilities: [CAP_PROMPT_DELIVERY_V2] });
+    expect(parse('{"t":"ready","projectionVersions":{},"negotiatedCapabilities":[7]}')).toBeNull();
+  });
+
+  it('decodes body-free prompt recovery evidence and rejects false runtime claims', () => {
+    expect(parse('{"t":"prompt_status","commandId":"q1","sessionId":"s1","runtimeRestored":false,"truncated":false,"evidenceIncomplete":false,"prompts":[{"commandId":"p1","status":"delivery_unknown","createdAt":"2026-08-14T00:00:00Z","updatedAt":"2026-08-14T00:00:01Z"}]}'))
+      .toMatchObject({ t: 'prompt_status', sessionId: 's1', runtimeRestored: false, prompts: [{ commandId: 'p1', status: 'delivery_unknown' }] });
+    expect(parse('{"t":"prompt_status","commandId":"q1","sessionId":"s1","runtimeRestored":true,"truncated":false,"evidenceIncomplete":false,"prompts":[]}')).toBeNull();
+    expect(parse('{"t":"prompt_status","commandId":"q1","sessionId":"s1","runtimeRestored":false,"truncated":false,"evidenceIncomplete":false,"prompts":[{"commandId":"p1","status":"completed","createdAt":"x","updatedAt":"x","message":"secret"}]}')).toBeNull();
+    expect(parse('{"t":"prompt_status","commandId":"q1","sessionId":"s1","runtimeRestored":false,"truncated":false,"evidenceIncomplete":false,"prompts":[],"message":"secret"}')).toBeNull();
   });
 
   it.each([

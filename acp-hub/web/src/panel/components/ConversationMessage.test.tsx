@@ -5,7 +5,7 @@ import { ConversationMessage } from './ConversationMessage';
 
 function entry(overrides: Partial<ChatEntry> = {}): ChatEntry {
   return {
-    id: 'entry-1', turnId: 'turn-1', kind: 'message', role: 'assistant', status: 'completed', authorUserId: null,
+    id: 'entry-1', turnId: 'turn-1', kind: 'message', role: 'assistant', status: 'completed', authorUserId: null, sourceCommandId: null,
     createdAt: '2026-08-13T12:00:00Z', completedAt: '2026-08-13T12:00:01Z', text: '', reasoning: [], toolCalls: [], resources: [], error: null,
     ...overrides,
   };
@@ -59,5 +59,17 @@ describe('ConversationMessage', () => {
     render(() => <ConversationMessage entry={entry({ status: 'pending' })} />);
     expect(screen.getByText('正在生成回答')).toHaveClass('sr-only');
     expect(document.querySelectorAll('.message-loading')).toHaveLength(1);
+  });
+
+  it('keeps a reloaded unknown user delivery visibly blocked from retry', () => {
+    render(() => <ConversationMessage entry={entry({
+      role: 'user',
+      status: 'pending',
+      text: 'potentially executed prompt',
+      deliveryState: 'delivery_unknown',
+      deliveryErrorCode: 'DELIVERY_UNKNOWN',
+    })} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('投递结果未知');
+    expect(screen.getByRole('alert')).toHaveTextContent('不会自动重发');
   });
 });

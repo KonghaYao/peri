@@ -27,6 +27,16 @@ pub enum ContentKind {
     Reasoning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEntryRegistration {
+    Created,
+    /// A legacy same-turn entry was safely linked to the Hub command that owns
+    /// the persisted outbox turn.
+    Correlated,
+    Duplicate,
+    SourceCommandConflict,
+}
+
 // ---------------------------------------------------------------------------
 // 枚举值域（schema 镜像 serde camelCase 字符串）
 // ---------------------------------------------------------------------------
@@ -231,6 +241,10 @@ pub fn ensure_entry(txn: &mut TransactionCtx<'_>, root: &yrs::MapRef, entry: &Ch
         Some(u) => entry_map.insert(txn, "author_user_id", u.clone()),
         None => entry_map.insert(txn, "author_user_id", yrs::Any::Null),
     };
+    match &entry.source_command_id {
+        Some(command_id) => entry_map.insert(txn, "source_command_id", command_id.clone()),
+        None => entry_map.insert(txn, "source_command_id", yrs::Any::Null),
+    };
     entry_map.insert(txn, "created_at", entry.created_at.clone());
     match &entry.completed_at {
         Some(t) => entry_map.insert(txn, "completed_at", t.clone()),
@@ -265,12 +279,14 @@ pub fn create_user_entry(
     entry_id: &str,
     text: &str,
     author_user_id: Option<&str>,
+    source_command_id: Option<&str>,
     created_at: &str,
-) -> bool {
+) -> UserEntryRegistration {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    // 同 turn_id 的 user entry 已存在 → 跳过。
-    if entries.iter(txn).any(|(_, v)| {
-        v.cast::<yrs::MapRef>().ok().map(|m| {
+    // 同 turn_id 的 user entry 已存在。Hub command may backfill only an
+    // absent identity; an existing different identity is never overwritten.
+    if let Some(existing) = entries.iter(txn).find_map(|(_, v)| {
+        v.cast::<yrs::MapRef>().ok().filter(|m| {
             m.get(txn, "role")
                 .and_then(|r| r.cast::<String>().ok())
                 .as_deref()
@@ -279,9 +295,22 @@ pub fn create_user_entry(
                     .and_then(|t| t.cast::<String>().ok())
                     .as_deref()
                     == Some(turn_id)
-        }) == Some(true)
+        })
     }) {
-        return false;
+        return match source_command_id {
+            None => UserEntryRegistration::Duplicate,
+            Some(command_id) => match existing
+                .get(txn, "source_command_id")
+                .and_then(|value| value.cast::<String>().ok())
+            {
+                Some(current) if current == command_id => UserEntryRegistration::Duplicate,
+                Some(_) => UserEntryRegistration::SourceCommandConflict,
+                None => {
+                    existing.insert(txn, "source_command_id", command_id.to_string());
+                    UserEntryRegistration::Correlated
+                }
+            },
+        };
     }
     let entry = ChatEntry {
         entry_id: entry_id.to_string(),
@@ -290,6 +319,7 @@ pub fn create_user_entry(
         role: EntryRole::User,
         status: EntryStatus::Completed,
         author_user_id: author_user_id.map(|s| s.to_string()),
+        source_command_id: source_command_id.map(str::to_string),
         created_at: created_at.to_string(),
         completed_at: Some(created_at.to_string()),
         block_order: vec![format!("{entry_id}:text")],
@@ -304,7 +334,157 @@ pub fn create_user_entry(
         .collect(),
         error: None,
     };
-    ensure_entry(txn, root, &entry)
+    if ensure_entry(txn, root, &entry) {
+        UserEntryRegistration::Created
+    } else {
+        UserEntryRegistration::Duplicate
+    }
+}
+
+/// Create the prompt-delivery-v2 user entry before ACP dispatch. The body is
+/// durable in the chat projection while the outbox retains only the matching
+/// fingerprint. A replay is idempotent only when command, turn and fingerprint
+/// all match; any mismatch fails closed.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pending_prompt_entry(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    turn_id: &str,
+    entry_id: &str,
+    text: &str,
+    author_user_id: Option<&str>,
+    source_command_id: &str,
+    payload_fingerprint: &str,
+    created_at: &str,
+) -> UserEntryRegistration {
+    let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
+    if let Some(existing) = entries.iter(txn).find_map(|(_, value)| {
+        value.cast::<yrs::MapRef>().ok().filter(|map| {
+            map.get(txn, "role")
+                .and_then(|role| role.cast::<String>().ok())
+                .as_deref()
+                == Some("user")
+                && map
+                    .get(txn, "turn_id")
+                    .and_then(|turn| turn.cast::<String>().ok())
+                    .as_deref()
+                    == Some(turn_id)
+        })
+    }) {
+        let same_command = existing
+            .get(txn, "source_command_id")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref()
+            == Some(source_command_id);
+        let same_fingerprint = existing
+            .get(txn, "payload_fingerprint")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref()
+            == Some(payload_fingerprint);
+        return if same_command && same_fingerprint {
+            UserEntryRegistration::Duplicate
+        } else {
+            UserEntryRegistration::SourceCommandConflict
+        };
+    }
+
+    let entry = ChatEntry {
+        entry_id: entry_id.to_string(),
+        turn_id: Some(turn_id.to_string()),
+        kind: EntryKind::Message,
+        role: EntryRole::User,
+        status: EntryStatus::Pending,
+        author_user_id: author_user_id.map(str::to_string),
+        source_command_id: Some(source_command_id.to_string()),
+        created_at: created_at.to_string(),
+        completed_at: None,
+        block_order: vec![format!("{entry_id}:text")],
+        blocks: [(
+            format!("{entry_id}:text"),
+            ContentBlock::Text {
+                block_id: format!("{entry_id}:text"),
+                text: text.to_string(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        error: None,
+    };
+    if !ensure_entry(txn, root, &entry) {
+        return UserEntryRegistration::Duplicate;
+    }
+    if let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    {
+        entry_map.insert(txn, "delivery_schema_version", 2_i64);
+        entry_map.insert(txn, "delivery_state", "pending");
+        entry_map.insert(txn, "delivery_error_code", yrs::Any::Null);
+        entry_map.insert(txn, "payload_fingerprint", payload_fingerprint.to_string());
+    }
+    UserEntryRegistration::Created
+}
+
+/// Transition Hub-owned prompt delivery evidence on the existing user entry.
+/// Returns false for duplicate state or non-v2/unknown entries.
+pub fn set_prompt_entry_delivery(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    entry_id: &str,
+    delivery_state: &str,
+    delivery_error_code: Option<&str>,
+    completed_at: Option<&str>,
+) -> bool {
+    if !matches!(
+        delivery_state,
+        "pending" | "completed" | "failed_not_delivered" | "delivery_unknown"
+    ) {
+        return false;
+    }
+    let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    else {
+        return false;
+    };
+    let is_v2 = entry_map
+        .get(txn, "delivery_schema_version")
+        .and_then(|value| value.cast::<i64>().ok())
+        == Some(2);
+    if !is_v2 {
+        return false;
+    }
+    let previous = entry_map
+        .get(txn, "delivery_state")
+        .and_then(|value| value.cast::<String>().ok());
+    let previous_error = entry_map
+        .get(txn, "delivery_error_code")
+        .and_then(|value| value.cast::<String>().ok());
+    if previous.as_deref() == Some(delivery_state)
+        && previous_error.as_deref() == delivery_error_code
+    {
+        return false;
+    }
+    entry_map.insert(txn, "delivery_state", delivery_state.to_string());
+    match delivery_error_code {
+        Some(code) => entry_map.insert(txn, "delivery_error_code", code.to_string()),
+        None => entry_map.insert(txn, "delivery_error_code", yrs::Any::Null),
+    };
+    if delivery_state == "completed" {
+        entry_map.insert(txn, "status", entry_status_str(EntryStatus::Completed));
+        match completed_at {
+            Some(at) => entry_map.insert(txn, "completed_at", at.to_string()),
+            None => entry_map.insert(txn, "completed_at", yrs::Any::Null),
+        };
+    } else if delivery_state == "failed_not_delivered" {
+        entry_map.insert(txn, "status", entry_status_str(EntryStatus::Error));
+        match completed_at {
+            Some(at) => entry_map.insert(txn, "completed_at", at.to_string()),
+            None => entry_map.insert(txn, "completed_at", yrs::Any::Null),
+        };
+    }
+    true
 }
 
 /// 创建 assistant/system entry 骨架 + 首块（message_delta 的 entry 未知时由
@@ -749,4 +929,78 @@ pub fn projection_version<T: ReadTxn>(txn: &T) -> u32 {
         .and_then(|root| root.get(txn, "projection_version"))
         .and_then(|v| v.cast::<u32>().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod source_command_tests {
+    use super::*;
+    use yrs::{Map, Transact};
+
+    #[test]
+    fn user_entry_source_command_backfill_is_exact_and_conflict_safe() {
+        let doc = yrs::Doc::new();
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map(ROOT);
+        assert_eq!(
+            create_user_entry(&mut txn, &root, "t", "t:user", "same", None, None, "now"),
+            UserEntryRegistration::Created
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-1"),
+                "now"
+            ),
+            UserEntryRegistration::Correlated
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-1"),
+                "now"
+            ),
+            UserEntryRegistration::Duplicate
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-2"),
+                "now"
+            ),
+            UserEntryRegistration::SourceCommandConflict
+        );
+        let entries = root
+            .get(&txn, "entries")
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap();
+        let entry = entries
+            .get(&txn, "t:user")
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap();
+        assert_eq!(
+            entry
+                .get(&txn, "source_command_id")
+                .unwrap()
+                .cast::<String>()
+                .unwrap(),
+            "cmd-1"
+        );
+    }
 }

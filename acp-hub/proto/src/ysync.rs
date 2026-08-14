@@ -9,12 +9,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::conn::DocId;
 
+/// Browser/server capability required for the conservative prompt delivery
+/// pipeline. Capabilities are negotiated on the first subscription and bound
+/// to that connection; actions cannot self-assert them.
+pub const CAP_PROMPT_DELIVERY_V2: &str = "prompt-delivery-v2";
+
 /// `ysync.subscribe`：订阅指定 Doc 的更新（多 session 视图必需，§4.2）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct YsyncSubscribe {
     /// `["chat:{sid}", ...]` 形态的 doc 名列表。
     pub docs: Vec<DocId>,
+    /// 客户端支持的可选协议能力。缺失等价于空集合，保持旧客户端兼容；空集合
+    /// 不上行，避免改变既有 JSON 形态。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_capabilities: Vec<String>,
 }
 
 /// `ysync.unsubscribe`：退订（§4.2）。

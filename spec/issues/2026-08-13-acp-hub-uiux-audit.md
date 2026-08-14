@@ -923,6 +923,19 @@ Verification:
 - The reader keeps the existing restrained hierarchy intentionally: user text is an inert, right-aligned surface; completed assistant content uses safe Markdown on the open reading plane; streaming assistant content remains plain text so partial Markdown cannot restructure the page.
 - Reasoning is collapsed by default. Tool calls retain their existing tested disclosure. Resources are named, inert facts with full identifiers available, while projected errors are explicit named alerts rather than anonymous colored blocks.
 - Empty assistant projections expose one screen-reader progress label. Streaming dots themselves are hidden and use a product-owned reduced-motion-aware keyframe instead of depending on a Tailwind implementation detail.
+
+### 2026-08-14 style ownership convergence
+
+- Removed the Tailwind build dependency after the last three utility strings were replaced by semantic chat/message layout classes.
+- Added a product-owned browser baseline so box model, form inheritance, native hidden semantics and content normalization are explicit contracts rather than an accidental Tailwind Preflight dependency.
+- Styling ownership is now ordered and executable: `ui/base.css` → `ui/primitives.css`/tokens → feature `styles.css`. Architecture tests reject Tailwind wiring and DOM-coupled message layout selectors.
+
+### 2026-08-14 deterministic authenticated UI fixture
+
+- Added a Vite-development-only UI state harness that renders the real Solid `AppShell`, catalog, conversation, permissions, recovery/error and terminal/read-only surfaces from deterministic synthetic facts.
+- The harness does not call `AuthGate`, cookie bootstrap or WebSocket transport and never mutates private transport readiness. Its controls verify visual, focus, disclosure and lock semantics; server mutations remain covered by protocol/integration tests.
+- Production exclusion is executable: the normal Vite input/build manifest and emitted artifacts exclude the fixture, while the Rust Web route test rejects `/visual-fixture.html` and scans embedded assets for fixture markers.
+- The browser contract records geometry, overflow, content-state and breakpoint facts across desktop, compact and phone viewports without introducing brittle pixel snapshots.
 - Feature styles now use semantic `conversation-message`, `message-reasoning`, `message-resource` and `message-error` classes rather than embedding high-density utility strings into the domain component.
 
 Verification:
@@ -1032,3 +1045,173 @@ Verification:
 - `cd acp-hub/web && bun run build` — production build passed at 113 modules: `index-BlfhNvtp.js` is 219.62 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
 - `bun run typecheck` and `git diff --check` passed.
 - The loopback deployment now serves those exact assets. Its shell and fingerprinted-resource cache policies, CSP/`nosniff`/frame denial, clean persistence recovery and local instance reconnection were confirmed by a fresh HTTP/log probe.
+
+### 2026-08-14 — Authentication changes destroy the previous UI identity
+
+- Logout, rejected/invalid auth status, `auth_error` and WebSocket 4502 now converge on one idempotent authenticated-session reset. Mutation authority is revoked before old transport callbacks are settled.
+- The reset clears the complete server-derived surface: Registry chats/projects/sessions, selected logical/runtime identity, chat/control projections, permissions, runtime status, connection diagnostics, heartbeat, subscription summary, Ack/error logs, persistent problems and transient notifications. Ordinary reconnect deliberately does not use this destructive path.
+- Transient feedback moved into a `ToastStore` that owns every expiry handle. Reset cancels the handles before clearing the records, so an old-principal callback cannot mutate or remove feedback created after re-login.
+- AuthGate performs the same cleanup defensively when consuming an invalidation and before installing any newly authenticated principal. The duplicate call is intentional and tested for idempotence; a late HTTP response remains fenced by request epoch.
+- The remembered logical-session id remains a local navigation preference rather than projection data. Reopening it after login still requires an authorized server `session/open` and cannot reveal the old Y.Doc by itself.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 53/53 architecture/state contracts and 208/208 Vitest tests across 33 files passed.
+- `cd acp-hub/web && bun run build` — production build passed at 114 modules: `index-CltG8RfC.js` is 220.14 kB and `index-C4jJyeZk.css` is 50.02 kB before gzip.
+- The restarted loopback service recovered 143 chats without degradation, reauthenticated the local instance and serves those exact assets. The shell retains `Cache-Control: no-store`, CSP, `nosniff`, frame denial and no-referrer headers.
+
+### 2026-08-14 — Login help follows the server that is actually running
+
+- The login screen no longer assumes `~/.config/acp-hub/tokens.toml` or that the user is inside the source tree. The loopback auth endpoint supplies the exact token file selected by runtime Config and a shell-quoted generation command using the running server executable plus its effective config directory.
+- The descriptor is intentionally credential-free: only `tokenFile` and `generateCommand` are serialized. It contains no bearer, token record, token id, name or file contents; the browser parser accepts only two non-empty strings and otherwise refuses to guess a path.
+- Unauthenticated status still returns the setup hint, so a first-time user can recover without already possessing a token. The UI provides a tested copy action for the exact generation command and retains the “printed once / never log or commit” warning.
+- AuthService lock contention is now a retryable 503 with `Retry-After`, on both status and login. It can no longer appear as 401 and tell a user that a correct token is invalid.
+
+Verification:
+
+- `cd acp-hub/web && bun run test` — 54/54 architecture/state contracts and 218/218 Vitest tests across 34 files passed.
+- `cd acp-hub/web && bun run build` — production build passed at 115 modules: `index-DtBpamN4.js` is 221.17 kB and `index-CBgKAe6-.css` is 50.09 kB before gzip.
+- `cd acp-hub && cargo test -p acp-hub-server --lib` — 410/410 server tests passed.
+- `cd acp-hub && cargo clippy --workspace --all-targets -- -D warnings` and `git diff --check` passed.
+- The final build exposed and fixed a cache-classification edge case: Rollup URL-safe hashes may end in `-`; the server now recognizes that valid fingerprint without treating fixed-name assets as immutable.
+- The restarted loopback service recovered 143 chats without degradation and reconnected the local instance. A credential-free live probe returned 401 plus the authoritative setup descriptor, `Cache-Control: no-store`, `nosniff`, and immutable caching for `index-DtBpamN4.js`.
+
+### 2026-08-14 — Startup truth matches process reality
+
+- `acp-hub` now has a concise README that routes first-time operators through deterministic startup, the server-authoritative token hint, the four-identity session model, data locations, verification commands and the explicit loopback-only deployment boundary. The old `ui.md` is labeled as a historical pre-refactor baseline so its removed `ConnectCard`, three-column rail and URL/sessionStorage bearer assumptions cannot be mistaken for current contracts.
+- The Web HTTP module and Gateway comments now describe the actual bounded static/auth surface rather than claiming that every non-WebSocket request is a static GET. A real socket login regression generates a full token and proves the 200 response contains only `authenticated`, `role` and credential-free `setup`; neither bearer, token id nor record name may be reflected.
+- `dev.sh` no longer trusts a pre-existing `web/dist`: every run rebuilds Web and Rust before launch, preventing an old UI/protocol bundle from silently pairing with new server code. It launches exact binaries instead of `cargo run`, records their direct PIDs, and removes the repository-wide `pkill -f` cleanup that could terminate another acp-hub.
+- Readiness is evidence-based. Each run writes PID-scoped logs, waits for the current server's listening event, then waits for both the server-side `instance connected` event and the instance-side authenticated replay transition before printing “全部就绪”. Port/owner-lock conflicts fail with the relevant log and leave the already-running service untouched.
+
+Verification:
+
+- Web HTTP/auth focused suite passed 22/22, including successful-login credential non-reflection.
+- `cargo test -p acp-hub-server --lib` passed 411/411; `cargo clippy --workspace --all-targets -- -D warnings`, `bash -n dev.sh` and `git diff --check` passed.
+- A live conflict run exited 1 before readiness and preserved the existing listener. After gracefully stopping the old process, the revised script rebuilt the exact `index-DtBpamN4.js` / `index-CBgKAe6-.css` assets, recovered 143 chats with `degraded=false`, observed the listener, authenticated the local instance and only then announced readiness.
+- In-app visual inspection remains unavailable because the browser URL policy rejects loopback navigation; no alternate browser or policy workaround was used. Socket, DOM-unit and production-build evidence remain green, but this is not claimed as a fresh visual screenshot.
+
+### 2026-08-14 — Development startup is credential-safe and configuration-coherent
+
+- The bootstrap instance credential no longer leaks into redirected stderr. Interactive manual startup retains the one-time recovery display, while log files, pipes, service managers and `dev.sh` receive only the private `tokens.toml` path. The instance continues to read the `0600` file directly; it never depends on scraping logs.
+- `dev.sh` establishes `umask 077` before creating logs, token copies and runtime directories. Existing `.tmp/*.log` files were checked against every current token without printing secrets, found to contain zero matches, and hardened in place to `0600` rather than deleted.
+- Custom endpoint configuration is now one coherent value chain. `ACP_HUB_LISTEN_ADDR` and `ACP_HUB_LISTEN_PORT` derive the server listener, instance `--server-url` and printed Web URL; `ACP_HUB_SERVER_URL` remains an explicit cross-host override. Before this fix, a custom-port server could report listening while the instance silently contacted the default 8456 service and failed 4502.
+- Cleanup is idempotent and signal-specific: INT/TERM translate to exit codes, the EXIT trap performs one cleanup, and only direct recorded children are waited. Required tool checks fail early with the missing command name.
+- `scripts/dev-contract-test.sh` makes the startup composition executable: shared endpoint derivation, explicit instance URL, private umask, run-scoped logs, idempotent cleanup, no global `pkill`, and no stale-dist shortcut are all regression barriers.
+
+Verification:
+
+- Binary notice tests passed 2/2; full server library passed 411/411; workspace Clippy with warnings denied, shell syntax, dev contract and diff checks passed.
+- A real first-start process probe used a temporary config/data directory and redirected stderr: listener ready, token generated, token mode `0600`, one non-secret path hint, and zero bearer matches in the log.
+- A real custom-chain run used isolated config/data/instance directories plus port 18458. It reached two-sided authenticated readiness on 18458; directory modes were `0700`, token/server-log/instance-log modes were `0600`, and neither log contained the generated credential. Ctrl+C produced one cleanup and both processes exited gracefully.
+
+### 2026-08-14 — Stop remains recoverable when delivery is uncertain
+
+- The Composer already replaces Send with Stop while the server projects an active turn, and runtime controls retain their original `commandId` across timeout or disconnect. The remaining failure was local discoverability: an uncertain Stop became disabled in place, while its safe recovery action existed only in the separate error center.
+- The same primary control now expresses the whole cancel lifecycle. `sending` and `accepted` render a locked “正在停止生成”; `confirmed` waits for server projection truth; `uncertain` becomes an enabled “使用原请求重新确认停止” control and delegates to `CommandTracker.retry`, which reuses the exact original frame and `commandId` rather than creating a second cancellation.
+- A warning treatment makes the exceptional recovery state visible without introducing a second competing action. Its hover color is a named UI-library token; the stylesheet contract parses every source stylesheet and rejects undeclared `var(...)` references.
+- Component coverage proves that an active turn has no Send control, an in-flight Stop is locked, and an uncertain Stop is enabled with the recovery label. The source-level P0 contract now prevents future refactors from hiding this recovery behind a disabled button.
+- The earlier mobile audit findings remain closed by current architecture: Dialog renders through a document Portal, so drawer transforms cannot clip its fixed backdrop, and logout belongs to the sidebar footer rather than a fixed viewport control over the Composer.
+
+Verification:
+
+- Focused Composer/runtime/command tests passed 31/31.
+- `cd acp-hub/web && bun run test` — TypeScript passed, 54/54 Node architecture contracts passed, and 219/219 Vitest module/Solid DOM/Yjs tests passed across 34 files.
+- `cd acp-hub/web && bun run build` — production build passed at 115 modules: `index-DyUOL9jj.js` is 221.48 kB and `index-BsUYPpPL.css` is 50.26 kB before gzip.
+- `git diff --check` passed.
+
+### 2026-08-14 — Development startup fails fast and uses one endpoint truth
+
+- A second `dev.sh` invocation previously rebuilt Web and Rust before discovering the existing server through a low-level SQLite owner-lock error. The script now checks the complete target TCP port before any build or spawn and gives one direct choice: open the existing page or stop the port owner. It never kills or takes over that process.
+- The computed listen address, port, config directory and data directory are now passed explicitly to `acp-hub-server run`. The instance URL and printed Web URL derive from the same address/port values, closing the remaining gap where shell output could diverge from a config-file-selected listener.
+- Port inspection is a diagnostic convenience, not the concurrency authority. A bind race still fails closed in server startup, and the metadata process lock remains the durable single-owner barrier.
+- The executable shell contract requires the port guard to occur before the Web build and requires all four explicit server arguments. This complements, rather than replaces, the real isolated process probe.
+
+Verification:
+
+- `bash -n dev.sh` and `scripts/dev-contract-test.sh` passed.
+- With the production 8456 listener active, a second run exited 1 in the preflight, printed the occupied-port guidance and emitted no “构建 Web 前端” line.
+- An isolated run with temporary config/data directories and port 18459 reached listener readiness and two-sided instance authentication. Server, instance and printed URL all used 18459; both processes then handled Ctrl+C gracefully.
+
+### 2026-08-14 — Prompt delivery converges by exact durable identity
+
+- A submitted prompt now remains a first-class user-shaped outbox item inside the message flow. The input is cleared for a clean writing surface, but the full text stays visible with explicit sending, accepted, syncing, uncertain or failed state; it is never hidden behind a short toast or duplicated in the Composer.
+- Rust and physical Yjs chat entries carry an additive optional `source_command_id` for Hub-originated user prompts. ACP replay and legacy snapshots keep it absent. A legacy same-turn entry can be correlated only while the identity is missing; a different existing identity is an integrity conflict and is never overwritten.
+- Reconciliation is exact: equal text, timing or turn position cannot make the local outbox disappear. Web requires the originating command id in the server-persisted projection.
+- Projection and terminal Ack form two independent release barriers. Projection hides the local duplicate; terminal Ack releases the global send lock. This remains correct whichever arrives first and prevents a narrow second-prompt race before active-turn control state becomes visible.
+- Uncertain recovery uses the original command id. A definite rejection offers copy and explicit “返回编辑”; only that explicit action restores the source to the draft. If the durable projection already exists, a later error cannot falsely resurrect it as unsent.
+- User-entry projection persistence failure terminates as delivery-unknown because ACP dispatch may already have happened and the exact durable entry is absent. After ACP L3 succeeds, terminal control/chat projection is a separate barrier: persistence failure records a non-retryable failed command and cannot continue toward a false committed Ack.
+
+Verification:
+
+- `cargo test -p acp-hub-proto` passed 36 unit and 5 contract tests.
+- `cargo test -p acp-hub-server --lib` passed 413/413; the full suite required loopback permission outside the sandbox.
+- `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` and `git diff --check` passed.
+- `cd acp-hub/web && bun run test` passed 54/54 Node architecture contracts and 225/225 Vitest tests across 35 files.
+- `cd acp-hub/web && bun run build` passed at 116 modules: JavaScript 222.45 kB and CSS 51.46 kB before gzip.
+
+### 2026-08-14 — ACP success is not UI commit until terminal truth is durable
+
+- Prompt and cancel completion no longer discard the result of `SetTurnTerminal`. The coordinator advances `delivery_confirmed → projection_committed → completed` only after the control/chat terminal update is durably stored.
+- Exact replay is narrowly defined as the same turn and the same terminal status. A different active turn or a contradictory persisted terminal status is an integrity conflict, never an idempotent success.
+- Once ACP has executed, a terminal projection failure is deliberately non-retryable: the outbox records terminal `failed` evidence and the client receives one error instead of a misleading committed Ack or an unsafe retry invitation.
+- Cancel inactivity timeout remains `delivery_unknown`; its best-effort view cleanup cannot emit a second verdict or overwrite the uncertain delivery state.
+- The coordinator test environment now supports precise post-dispatch persistence failure injection. The regression waits until the user-entry barrier has completed, fails only the terminal update, and proves that no committed frame is emitted.
+
+Verification:
+
+- The exact terminal idempotency unit test passed.
+- The full post-ACP persistence-failure flow test passed and asserted a non-retryable error plus durable failed outbox evidence.
+- `cargo test -p acp-hub-server --lib` passed 415/415 outside the sandbox for loopback tests.
+
+### 2026-08-14 — Restart-visible prompt recovery has a single-authority design gate
+
+- Architecture review rejected the tempting shortcut of copying “latest command status” into the SQLite session row or Registry. That would make catalog metadata a second outbox writer and create an unresolvable cross-store commit claim.
+- The accepted direction is append-only logical-session→historical-runtime provenance plus an authenticated read-only query. SQLite stores identity/provenance only; per-chat outbox remains delivery authority; persisted docs remain projection authority.
+- The public status is conservative and evidence-based. Missing or contradictory evidence becomes `delivery_unknown`; an old chat id never implies a restored runtime or ACP process.
+- Implementation is intentionally gated on bounded per-chat outbox enumeration, activation-before-prompt ordering, exact terminal lookup, authorization from logical session ownership, retention semantics and crash-boundary tests. The complete gate is recorded in `docs/design/prompt-recovery-provenance.md`.
+
+### 2026-08-14 — Restart-visible prompt recovery is implemented without a second authority
+
+- SQLite schema v5 now records append-only logical-session→runtime provenance. Session finalization writes provenance in its transaction, live-runtime reuse records it before command commit, and v4 migration backfills the last runtime before restart recovery clears that process-local hint.
+- The authenticated `session/prompt-status` action accepts only a logical session id. Server-side provenance resolves historical chats and joins per-chat outbox delivery evidence with exact `source_command_id` and turn-terminal Yjs evidence. Read-only tokens may use this body-free query; their mutation gate remains closed.
+- Public normalization is conservative: completion requires exact user projection, exact terminal projection and durable completed outbox state. Missing or partial facts remain projected/delivery-unknown. Missing, corrupt or retention-pruned stores set `evidenceIncomplete`; the UI never renders an empty response as an all-clear under that condition.
+- The response is bounded to 200 entries with unresolved facts retained first, always states `runtimeRestored=false`, and contains no prompt body, raw error, ACP frame or internal recovery payload. The browser parser rejects body-bearing known frames.
+- Session activation and reconnect trigger the query through `CommandTracker`; timeout is a safely replayable read and becomes persistent recovery feedback rather than a transient toast.
+
+Verification:
+
+- `cargo test -p acp-hub-proto` passed 36 unit and 5 contract tests.
+- `cargo test -p acp-hub-server --lib` passed 421/421 outside the sandbox for loopback tests.
+- `cargo clippy --workspace --all-targets -- -D warnings`, Rust formatting and `git diff --check` passed.
+- `cd acp-hub/web && bun run test` passed 54/54 Node architecture contracts and 229/229 Vitest tests across 36 files; typecheck passed.
+- `bun run build` passed at 117 modules: JavaScript 225.71 kB and CSS 52.43 kB before gzip.
+
+### 2026-08-14 — Prompt delivery v2 closes the duplicate-execution window
+
+- Browser and server now negotiate `prompt-delivery-v2` on the first
+  subscription. An old tab cannot submit a prompt into semantics it would
+  misread as safely retryable.
+- The user body is durably projected as a Pending chat entry before dispatch;
+  the command outbox stores only an exact canonical fingerprint. Reload no
+  longer depends on browser memory to preserve the text.
+- A durable no-redelivery barrier is written before the instance writer can
+  receive the frame. Any error, timeout or restart after that point becomes
+  stable `DELIVERY_UNKNOWN` and never exposes retry or return-to-edit.
+- Only durable Completed replay is `duplicate`. In-flight same-command retries
+  observe the original execution through bounded watchers, while a different
+  payload under the same id is rejected.
+- Startup reconciliation closes every orphaned prompt state before the gateway
+  accepts clients: v2 pre-barrier work is definite non-delivery; legacy intent
+  and all post-barrier work are delivery-unknown.
+- Recovered user messages expose their delivery verdict in the chat document;
+  the Web UI shows an explicit blocked warning after reload.
+
+Verification:
+
+- Proto: 38 unit + 5 contract tests passed.
+- Server: 428/428 library tests plus all main, auth-contract, integration,
+  product-flow and resilience tests passed, including loopback gateway
+  coverage.
+- Web: 57 Node contracts + 242 Vitest tests passed; typecheck and the
+  production-boundary build passed.
+- Workspace clippy with warnings denied and Rust formatting passed.

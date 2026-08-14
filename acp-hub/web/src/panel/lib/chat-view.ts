@@ -22,6 +22,11 @@ export interface ChatEntry {
   role: string | null;
   status: string | null;
   authorUserId: string | null;
+  sourceCommandId: string | null;
+  deliverySchemaVersion?: number | null;
+  deliveryState?: string | null;
+  deliveryErrorCode?: string | null;
+  payloadFingerprint?: string | null;
   createdAt: string;
   completedAt: string | null;
   text: string;
@@ -68,6 +73,11 @@ export function renderChat(doc: Y.Doc): ChatView {
       role: getStr(map, 'role'),
       status: getStr(map, 'status'),
       authorUserId: getStr(map, 'author_user_id'),
+      sourceCommandId: getStr(map, 'source_command_id'),
+      deliverySchemaVersion: getNum(map, 'delivery_schema_version'),
+      deliveryState: getStr(map, 'delivery_state'),
+      deliveryErrorCode: getStr(map, 'delivery_error_code'),
+      payloadFingerprint: getStr(map, 'payload_fingerprint'),
       createdAt: safeTime(map.get('created_at')),
       completedAt: getStr(map, 'completed_at'),
       text: '',

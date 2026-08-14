@@ -144,6 +144,7 @@ async fn client_handshake_snapshot_then_ready() {
         serde_json::to_string(&Frame::YsyncSubscribe(
             acp_hub_proto::ysync::YsyncSubscribe {
                 docs: vec![acp_hub_proto::conn::DocId::REGISTRY],
+                client_capabilities: Vec::new(),
             },
         ))
         .unwrap()
@@ -310,6 +311,9 @@ async fn instance_hello_populates_registry_instances_projection() {
             serde_json::to_string(&Frame::YsyncSubscribe(
                 acp_hub_proto::ysync::YsyncSubscribe {
                     docs: vec![acp_hub_proto::conn::DocId::REGISTRY],
+                    client_capabilities: vec![
+                        acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()
+                    ],
                 },
             ))
             .unwrap()
@@ -443,6 +447,9 @@ async fn e2e_create_prompt_event_broadcast() {
             serde_json::to_string(&Frame::YsyncSubscribe(
                 acp_hub_proto::ysync::YsyncSubscribe {
                     docs: vec![acp_hub_proto::conn::DocId::REGISTRY],
+                    client_capabilities: vec![
+                        acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()
+                    ],
                 },
             ))
             .unwrap()
@@ -609,6 +616,9 @@ async fn e2e_create_prompt_event_broadcast() {
             serde_json::to_string(&Frame::YsyncSubscribe(
                 acp_hub_proto::ysync::YsyncSubscribe {
                     docs: vec![acp_hub_proto::conn::DocId::chat(&chat_id)],
+                    client_capabilities: vec![
+                        acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()
+                    ],
                 },
             ))
             .unwrap()

@@ -45,6 +45,10 @@ pub struct AuthResponse {
 #[serde(rename_all = "camelCase")]
 pub struct Ready {
     pub projection_versions: HashMap<DocId, u32>,
+    /// server 与客户端协商成功的能力集合。缺失等价于空集合，保持旧 server
+    /// `ready` 帧可解码；空集合不下发，维持旧 JSON 形态。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub negotiated_capabilities: Vec<String>,
 }
 
 /// `keep_alive` 帧载荷：S→C 心跳（§4.7，载荷为 ping）。

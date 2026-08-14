@@ -1,7 +1,7 @@
 //! 前端构建产物（web/dist）→ 编译期内嵌资源表生成器。
 //!
-//! acp-hub 前端是独立 vite 工程（web/，SolidJS + Tailwind，多页：验证台
-//! `/` + Web 面板 `/panel.html`），构建产物 dist/ 不提交 git。本脚本在
+//! acp-hub 前端是独立 Vite 工程（web/，SolidJS，唯一生产入口 `/`；
+//! `/panel.html` 只是兼容路由），构建产物 dist/ 不提交 git。本脚本在
 //! 编译期扫描 dist/：把全部文件复制进 OUT_DIR 并生成 assets.rs
 //! （Asset 表，字节经 include_bytes! 引用，零运行时文件 IO、零新依赖），
 //! server/src/web/mod.rs 以 include!(concat!(env!("OUT_DIR"), "/assets.rs"))

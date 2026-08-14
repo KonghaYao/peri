@@ -8,11 +8,11 @@
 // 对话操作（新建/新会话/取消/关闭）已收敛到左侧对话列表区。
 
 import { Show } from 'solid-js';
-import { cancelTurn, chatHead, chatStatusSignal, isTerminal, navigateProjectSession, openingSessionId, projectSessions, retryMessageSubmission, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, turnActive } from '../store';
+import { cancelTurn, chatHead, chatStatusSignal, isTerminal, navigateProjectSession, openingSessionId, projectSessions, promptDeliveryReady, retryPersistentAction, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, turnActive } from '../store';
 import { readOnly } from '../lib/auth-state';
-import { composerDraft, dismissFailedMessageDelivery, messageSubmission, setComposerDraft } from '../lib/message-delivery';
+import { composerDraft, messageSubmission, setComposerDraft } from '../lib/message-delivery';
 import { runtimeControlFor } from '../lib/runtime-control';
-import { Button, CopyButton, Icon, IconButton, Textarea } from '../../ui';
+import { Button, Icon, IconButton, Textarea } from '../../ui';
 
 /** tokens 数值 → "12k"/"200k" 缩写（>=1000 取 k；非法值 → null）。 */
 function fmtTokens(n: number | null): string | null {
@@ -35,12 +35,31 @@ export function Composer() {
     const control = runtimeControlFor(selectedCid());
     return control?.kind === 'cancel' ? control : null;
   };
-  const cancelLocked = () => !!cancelControl() && cancelControl()?.phase !== 'failed';
-  const inputDisabled = () => !selectedCid() || !runtimeDocsHydrated() || terminal() || !!openingSessionId() || readOnly() || turnActive() || !!messageSubmission();
+  const cancelLocked = () => {
+    const phase = cancelControl()?.phase;
+    return phase === 'sending' || phase === 'accepted' || phase === 'confirmed';
+  };
+  const cancelLabel = () => {
+    const phase = cancelControl()?.phase;
+    if (phase === 'sending' || phase === 'accepted') return '正在停止生成';
+    if (phase === 'uncertain') return '使用原请求重新确认停止';
+    if (phase === 'confirmed') return '等待 Agent 停止';
+    return '停止生成';
+  };
+  const requestCancel = () => {
+    const control = cancelControl();
+    if (control?.phase === 'uncertain') {
+      retryPersistentAction(control.commandId);
+      return;
+    }
+    cancelTurn();
+  };
+  const inputDisabled = () => !selectedCid() || !runtimeDocsHydrated() || terminal() || !!openingSessionId() || readOnly() || !promptDeliveryReady() || turnActive() || !!messageSubmission();
   const inputPlaceholder = () =>
     readOnly() ? '只读模式' : openingSessionId() ? '正在打开会话…' : !selectedCid()
       ? '先从左侧选择或新建会话'
       : !runtimeDocsHydrated() ? '正在载入会话…'
+      : !promptDeliveryReady() ? '服务器需要升级后才能安全发送消息'
       : terminal()
         ? '对话已结束（历史只读）'
         : turnActive() ? 'Agent 正在工作，可随时停止' : submissionForSession() ? '正在确认当前消息…' : submissionInAnotherSession() ? '另一会话的消息仍在确认…' : '给 Agent 发消息';
@@ -114,20 +133,12 @@ export function Composer() {
               <Icon><path d="M10 16V4" /><path d="M5 9l5-5 5 5" /></Icon>
             </IconButton>
           }>
-            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={cancelTurn} disabled={cancelLocked() || readOnly()} busy={cancelControl()?.phase === 'sending' || cancelControl()?.phase === 'accepted'} label={cancelControl()?.phase === 'uncertain' ? '停止结果尚未确认' : '停止生成'} class="composer-action composer-action--stop">
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={requestCancel} disabled={cancelLocked() || readOnly()} busy={cancelControl()?.phase === 'sending' || cancelControl()?.phase === 'accepted'} label={cancelLabel()} class={`composer-action composer-action--stop ${cancelControl()?.phase === 'uncertain' ? 'composer-action--uncertain' : ''}`}>
               <Show when={!cancelControl() || cancelControl()?.phase === 'uncertain' || cancelControl()?.phase === 'confirmed'}><span aria-hidden="true" /></Show>
             </IconButton>
           </Show>
         </div>
       </section>
-      <Show when={submissionForSession()}>{(submission) =>
-        <section class={`submission-state submission-state--${submission().phase}`} role={submission().phase === 'failed' || submission().phase === 'uncertain' ? 'alert' : 'status'}>
-          <div class="submission-state__body"><strong>{submission().phase === 'uncertain' ? '结果尚未确认' : submission().phase === 'failed' ? '消息未发送' : '正在提交消息'}</strong><p>{submission().detail || '在服务器确认前，我们会保留这条消息。'}</p><details><summary>查看原消息</summary><pre>{submission().text}</pre></details></div>
-          <Show when={submission().phase === 'failed' || submission().phase === 'uncertain'}>
-            <div class="submission-state__actions"><CopyButton text={submission().text} label="复制原文" size="compact" /><Show when={submission().retryable}><Button variant="primary" size="compact" onClick={retryMessageSubmission}>使用同一请求重新确认</Button></Show><Show when={submission().phase === 'failed'}><Button size="compact" onClick={dismissFailedMessageDelivery}>返回编辑</Button></Show></div>
-          </Show>
-        </section>
-      }</Show>
       <Show when={submissionInAnotherSession()}>{(submission) =>
         <section class="submission-state submission-state--foreign" role="status">
           <div class="submission-state__body"><strong>另一会话仍在确认</strong><p>“{pendingSessionTitle()}”还有一条消息等待服务器终态。为避免重复执行，确认完成前暂不发送新消息。</p></div>

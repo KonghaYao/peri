@@ -227,6 +227,99 @@ fn permission_recovery_clears_after_confirmed_delivery() {
 }
 
 #[test]
+fn prompt_restart_reconciliation_never_redelivers_across_the_barrier() {
+    let dir = tempdir().unwrap();
+    let chat_id = uuid::Uuid::new_v4();
+    let mut outbox = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+
+    let accepted = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(accepted.clone()).unwrap();
+    outbox.mark_accepted(accepted.command_id).unwrap();
+    outbox
+        .set_prompt_payload_fingerprint(accepted.command_id, "accepted-fingerprint".into())
+        .unwrap();
+
+    let safe_intent = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(safe_intent.clone()).unwrap();
+    outbox.mark_accepted(safe_intent.command_id).unwrap();
+    outbox
+        .mark_prompt_intent_durable(safe_intent.command_id, "safe-fingerprint".into())
+        .unwrap();
+
+    let barrier = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(barrier.clone()).unwrap();
+    outbox.mark_accepted(barrier.command_id).unwrap();
+    outbox
+        .mark_prompt_intent_durable(barrier.command_id, "barrier-fingerprint".into())
+        .unwrap();
+    outbox
+        .mark_dispatch_barrier(barrier.command_id, Utc::now())
+        .unwrap();
+
+    let legacy = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(legacy.clone()).unwrap();
+    outbox.mark_accepted(legacy.command_id).unwrap();
+    outbox.mark_intent_durable(legacy.command_id).unwrap();
+
+    let projected = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(projected.clone()).unwrap();
+    outbox.mark_accepted(projected.command_id).unwrap();
+    outbox.mark_intent_durable(projected.command_id).unwrap();
+    outbox
+        .mark_dispatched(projected.command_id, Utc::now())
+        .unwrap();
+    outbox
+        .mark_delivery_confirmed(projected.command_id)
+        .unwrap();
+    outbox
+        .mark_projection_committed(projected.command_id)
+        .unwrap();
+
+    let repairable = new_rec(chat_id, CommandType::Prompt);
+    outbox.insert(repairable.clone()).unwrap();
+    outbox.mark_accepted(repairable.command_id).unwrap();
+    outbox
+        .mark_prompt_intent_durable(repairable.command_id, "repair-fingerprint".into())
+        .unwrap();
+    outbox
+        .mark_dispatch_barrier(repairable.command_id, Utc::now())
+        .unwrap();
+    outbox
+        .mark_dispatched(repairable.command_id, Utc::now())
+        .unwrap();
+    outbox
+        .mark_delivery_confirmed(repairable.command_id)
+        .unwrap();
+
+    let terminal = std::collections::HashSet::from([repairable.command_id]);
+
+    assert_eq!(
+        outbox
+            .reconcile_prompt_delivery_after_restart(&terminal)
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        outbox.get(accepted.command_id).unwrap().status,
+        OutboxStatus::Failed
+    );
+    assert_eq!(
+        outbox.get(safe_intent.command_id).unwrap().status,
+        OutboxStatus::Failed
+    );
+    for id in [barrier.command_id, legacy.command_id, projected.command_id] {
+        let record = outbox.get(id).unwrap();
+        assert_eq!(record.status, OutboxStatus::DeliveryUnknown);
+        assert_eq!(record.last_error.as_ref().unwrap().code, "DELIVERY_UNKNOWN");
+        assert!(!record.last_error.as_ref().unwrap().retryable);
+    }
+    assert_eq!(
+        outbox.get(repairable.command_id).unwrap().status,
+        OutboxStatus::Completed
+    );
+}
+
+#[test]
 fn legacy_outbox_record_without_recovery_field_still_decodes() {
     let command_id = uuid::Uuid::new_v4();
     let chat_id = uuid::Uuid::new_v4();
@@ -576,6 +669,9 @@ fn t8_replay_entries_apply_in_order() {
         updated_at: Utc::now(),
         last_error: None,
         attempt_count: 1,
+        delivery_protocol_version: None,
+        payload_fingerprint: None,
+        dispatch_barrier_at: None,
         recovery: None,
     };
     let stats = ob.replay([
@@ -591,4 +687,61 @@ fn t8_replay_entries_apply_in_order() {
     assert_eq!(stats.updated, 1, "Dispatched overwrites Accepted");
     assert_eq!(stats.removed, 1);
     assert_eq!(ob.get(id).unwrap().status, OutboxStatus::IntentDurable);
+}
+
+#[test]
+fn prompt_v2_barrier_is_additive_durable_and_never_retryable() {
+    let dir = tempdir().unwrap();
+    let sid = uuid::Uuid::new_v4();
+    let mut ob = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+    let rec = new_rec(sid, CommandType::Prompt);
+    ob.insert(rec.clone()).unwrap();
+    ob.mark_accepted(rec.command_id).unwrap();
+    ob.mark_prompt_intent_durable(rec.command_id, "sha256:abc".into())
+        .unwrap();
+    let barrier = Utc::now();
+    ob.mark_dispatch_barrier(rec.command_id, barrier).unwrap();
+
+    let current = ob.get(rec.command_id).unwrap();
+    assert_eq!(current.status, OutboxStatus::IntentDurable);
+    assert_eq!(current.delivery_protocol_version, Some(2));
+    assert_eq!(current.payload_fingerprint.as_deref(), Some("sha256:abc"));
+    assert_eq!(current.dispatch_barrier_at, Some(barrier));
+
+    ob.mark_failed(rec.command_id, retryable_err()).unwrap();
+    assert_eq!(
+        ob.get(rec.command_id).unwrap().status,
+        OutboxStatus::DeliveryUnknown
+    );
+
+    let mut reopened = test_outbox(dir.path(), Duration::from_secs(7 * 86_400));
+    reopened.replay_from_disk().unwrap();
+    let durable = reopened.get(rec.command_id).unwrap();
+    assert_eq!(durable.status, OutboxStatus::DeliveryUnknown);
+    assert_eq!(durable.delivery_protocol_version, Some(2));
+    assert_eq!(durable.payload_fingerprint.as_deref(), Some("sha256:abc"));
+    assert_eq!(durable.dispatch_barrier_at, Some(barrier));
+}
+
+#[test]
+fn legacy_record_without_v2_fields_still_decodes() {
+    let id = uuid::Uuid::new_v4();
+    let chat = uuid::Uuid::new_v4();
+    let json = serde_json::json!({
+        "commandId": id,
+        "chatId": chat,
+        "commandType": "chat/prompt",
+        "turnId": null,
+        "status": "intent_durable",
+        "retryableClass": "no_auto_redeliver",
+        "dispatchedAt": null,
+        "createdAt": Utc::now(),
+        "updatedAt": Utc::now(),
+        "lastError": null,
+        "attemptCount": 0
+    });
+    let record: OutboxRecord = serde_json::from_value(json).unwrap();
+    assert_eq!(record.delivery_protocol_version, None);
+    assert_eq!(record.payload_fingerprint, None);
+    assert_eq!(record.dispatch_barrier_at, None);
 }

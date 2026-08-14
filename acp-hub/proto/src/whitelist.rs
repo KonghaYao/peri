@@ -47,6 +47,7 @@ pub static FRAME_TAGS: &[FrameTag] = &[
     FrameTag("instance/forward_ack"),
     FrameTag("instance/process_exit"),
     FrameTag("session_list"),
+    FrameTag("prompt_status"),
 ];
 
 /// 连接侧角色（由 token 解析，§9.5：token 即身份）。
@@ -95,6 +96,7 @@ pub const M1_ACTION_TYPES: &[&str] = &[
     "session/restore",
     "session/import",
     "session/discover",
+    "session/prompt-status",
     "chat/create",
     "chat/load",
     "chat/prompt",
@@ -151,6 +153,7 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
             | "instance/kill_ack"
             | "instance/forward_ack"
             | "instance/process_exit"
+            | "prompt_status"
     );
     if !in_m1_frame_set {
         return M1Check::NotInM1;
@@ -164,7 +167,12 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
             ),
             Direction::Outbound => matches!(
                 tag.0,
-                "action_ack" | "action_error" | "ysync.update" | "ready" | "keep_alive"
+                "action_ack"
+                    | "action_error"
+                    | "ysync.update"
+                    | "ready"
+                    | "keep_alive"
+                    | "prompt_status"
             ),
         },
         Role::Instance => match dir {

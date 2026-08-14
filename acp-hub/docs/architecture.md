@@ -74,9 +74,15 @@ Registry 视图采用 `<data_dir>/registry.snapshot` + `<data_dir>/registry.log`
 
 浏览器认证通过同源 `POST/GET/DELETE /api/auth/session` 建立内存 opaque session，并下发 `HttpOnly; SameSite=Strict; Path=/; Max-Age=28800` Cookie，与服务端 8 小时 TTL 对齐。Web 不在 URL、Web Storage 或 WS 首帧保存/发送 bearer token。Cookie attach 与存量连接按心跳重新校验 token id、撤销状态和当前 role；instance HMAC 与旧 CLI wire-token 流程保持兼容。
 
+首次 bootstrap instance token 只允许在 server stderr 直连交互终端时显示一次；stderr 被日志文件、管道、service manager 或开发脚本重定向时，输出只能包含受 `0600` 保护的 `tokens.toml` 路径，禁止复制 token 本体到日志。instance 由文件读取该凭据，不依赖日志抓取。
+
+登录帮助由 server 的权威运行时 `Config` 派生，不得由 Web 猜测 XDG 默认值。`GET/POST /api/auth/session` 的成功与 401 响应可附带 credential-free `setup { tokenFile, generateCommand }`；字段只描述当前进程实际使用的 token 文件和带精确 config-dir/可执行文件的生成命令，不得包含 token 内容、token id、名称或文件数据。浏览器严格解析这两个非空字符串，畸形/缺失时只显示无路径的通用命令。AuthService `try_lock` 竞争在 GET/POST 上返回 `503 auth_busy` 与 `Retry-After`，不得坍缩成 401 并归罪正确凭证。
+
 浏览器收到 `auth_error` 或认证终态关闭码时，必须原子完成运行态清理、principal 撤销与登录失效事件发布。失效事件是单一 `{id, reason}` 值，禁止拆成可独立漂移的 epoch/reason signals；清理 Y.Doc、草稿和连接状态不得抹掉它。登录页持续展示原因，直到重新认证成功或用户显式退出。普通 401 status bootstrap 可保持安静，但已登录会话的撤销不能退化成无解释的登录表单。
 
 `auth-state` 是 principal、read-only policy 与失效事件的唯一前端事实源；feature 组件直接读取该窄接口，store 只在 action guard 和连接失效编排中消费，不得 re-export 第二入口。`AuthGate` 为每个 status/login 请求分配单调 request epoch；WebSocket 失效、退出或后续请求会使旧 HTTP 结果失效，晚到 200 不得恢复已撤销会话。HTTP 200 只有在 role 精确解析为 `full`/`read-only` 时才能进入应用，未知或缺失 role 必须 fail closed。
+
+浏览器必须区分**连接世代**与**身份世代**。普通 WebSocket reconnect 保留当前逻辑会话、Registry/Chat 投影与可对账 command，以便快照重放后连续工作；logout、`auth_error`、4502 或新的 HTTP principal 成功安装之前则必须经过同一个幂等 authenticated-session reset：先撤销内存 role 并 fence 旧 socket，随后清空全部 server-derived catalog/chat/control/diagnostic signal、command/delivery 状态和 Y.Doc，最后取消并清空所有 transient notification timer。旧身份排队的 rAF、WebSocket callback、command timeout 或 toast expiry 均不得写入新身份界面；本地 remembered session 只是恢复偏好，实际 reopen 仍必须由新 principal 经 server 授权。
 
 loopback 认证 HTTP 面是封闭协议：只接受 HTTP/1.1；POST/DELETE 必须携带与 Host 精确一致的 Origin；POST 只接受 `application/json`（可选 UTF-8 charset）和显式非零 Content-Length；GET/DELETE 禁止 body。重复 Host/Origin/Cookie/Content-Type/Content-Length、任何 Transfer-Encoding、非法 JSON、长度不符与尾随 body 字节均 fail-closed。所有认证响应包含 `Cache-Control: no-store`、`Pragma: no-cache` 与 `X-Content-Type-Options: nosniff`，且永不反射 bearer token。
 
@@ -459,6 +465,7 @@ struct ChatEntry {
     role: User | Assistant | System,
     status: Pending | Streaming | Completed | Cancelled | Error,
     author_user_id: Option<String>,
+    source_command_id: Option<String>, // Hub browser prompt correlation; ACP replay/legacy entries are None
     created_at: String,
     completed_at: Option<String>,
     block_order: Vec<String>,       // Y.Array<String>
@@ -490,6 +497,26 @@ struct ToolCallProjection {
 ```
 
 物理映射：根对象/`entries`/`blocks`/`tool_calls` 用 `Y.Map`；顺序索引用 `Y.Array<String>`；流式文本用 `Y.Text`（避免每个 token 替换完整字符串）；删除采用领域 tombstone，不由客户端物理删除权威记录。
+
+`source_command_id` 是 schema v1 的 additive optional extension，不提高根
+`schema_version`：旧快照/ACP 回放条目按缺失读取，旧客户端忽略未知键。只有 Hub
+在 `chat/prompt` 的服务端单写注册路径写入；同 turn 重放可补齐缺失值，但不同已存值
+属于关联冲突，必须拒绝覆盖并进入 delivery-unknown 处置。
+
+### 5.3.1 Logical session prompt recovery provenance
+
+SQLite schema v5 只增加 `session_runtime_history(session_id, chat_id,
+activated_at, retired_at)` 身份历史；它不复制 outbox 状态，也不宣称旧 runtime
+仍存活。`session/prompt-status` 是认证后的只读查询，client 只能提交 logical
+`sessionId`，历史 chat id 由 server 从 catalog provenance 解析，不能被任意探测。
+
+查询以 per-chat outbox 为 delivery authority，以 Chat/Session Doc 为 projection
+authority，只公开 command/turn id、安全时间、稳定错误码和
+`projected|completed|failed|delivery_unknown`。响应永远带
+`runtimeRestored=false`；历史 store/投影缺失或损坏时必须带
+`evidenceIncomplete=true`，空列表不得解释为没有未决消息。结果最多 200 条，
+截断时未决状态优先保留。完整契约见
+[`docs/design/prompt-recovery-provenance.md`](design/prompt-recovery-provenance.md)。
 
 ### 5.4 Control Doc schema（chat §5.3）
 
@@ -614,6 +641,13 @@ M1 核心闭环，新增正式时序（现有 router.rs 的「spawn → initiali
 - 不对 token 逐条创建日志或 trace；仅在聚合窗口、工具/权限状态和 turn 终态形成可观测的状态变化。
 
 **提交点纪律**【审查：架构 P0-1】：user entry 的写入顺序为「outbox 记录落盘 → 下发 ACP → L1+L2 投递确认 → 投影 user entry → committed Ack」（§4.4）；聚合器对 `user_message` 事件的幂等仍以 `turnId` 判定。
+
+prompt 的终态提交还必须满足第二个持久屏障：ACP L3 返回后，control
+`active_turn` 与 assistant 终态 update 经 DocManager 落盘成功（或被证明为
+同一 turn、同一终态的幂等重放），outbox 才可进入
+`projection_committed → completed`。turn 不匹配、已有不同终态、writer 拒绝或
+持久化失败都必须返回非 retryable error 并保留 failed outbox 证据；禁止忽略
+DocManager 结果后发送 committed Ack。
 
 **旧 turn 未完成时新 prompt 的裁决**【审查：开发 P2】：对齐 chat `applyUserMessage`——旧 assistant entry 置 `cancelled`（不向 ACP 发 cancel），新 prompt 正常转发；ACP 侧旧请求的终态事件到达时因 turnId 不匹配被终态守卫拒绝，收敛于旧 entry 的 cancelled 状态。
 

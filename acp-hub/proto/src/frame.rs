@@ -19,6 +19,7 @@ use crate::instance::{
     InstanceHello, InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn,
     InstanceSpawnAck,
 };
+use crate::session::PromptStatusFrame;
 use crate::session::SessionListFrame;
 use crate::whitelist::FRAME_TAGS;
 use crate::ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
@@ -129,6 +130,9 @@ pub enum Frame {
     /// S→C 按需会话列表查询结果（§6.3：agent 侧真实数据源，非轮询投影）。
     #[serde(rename = "session_list")]
     SessionList(SessionListFrame),
+    /// S→C 持久 logical session 的安全 prompt delivery 摘要。
+    #[serde(rename = "prompt_status")]
+    PromptStatus(PromptStatusFrame),
     /// M→S ACP 进程退出事件（§4.5）。
     #[serde(rename = "instance/process_exit")]
     InstanceProcessExit(InstanceProcessExit),
@@ -183,6 +187,7 @@ impl Frame {
             Frame::InstanceForwardAck(_) => FrameTag("instance/forward_ack"),
             Frame::InstanceProcessExit(_) => FrameTag("instance/process_exit"),
             Frame::SessionList(_) => FrameTag("session_list"),
+            Frame::PromptStatus(_) => FrameTag("prompt_status"),
         }
     }
 }

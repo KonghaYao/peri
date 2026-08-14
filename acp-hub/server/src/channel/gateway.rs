@@ -82,6 +82,7 @@ pub struct Gateway {
     registry: RegistryState,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
+    auth_setup: crate::web::BrowserAuthSetup,
 }
 
 impl Gateway {
@@ -99,6 +100,7 @@ impl Gateway {
     ) -> Self {
         let heartbeat_interval = cfg.heartbeat_interval;
         let heartbeat_timeout = heartbeat_interval * 3;
+        let auth_setup = crate::web::BrowserAuthSetup::from_config(&cfg);
         Gateway {
             cfg,
             auth,
@@ -110,6 +112,7 @@ impl Gateway {
             registry,
             heartbeat_interval,
             heartbeat_timeout,
+            auth_setup,
         }
     }
 
@@ -152,7 +155,8 @@ impl Gateway {
             drop(stream);
             return;
         }
-        // 2. 静态分支（§web 验证台）：非 ws 升级请求 → 内嵌静态资源；ws 升级
+        // 2. HTTP 分支（内嵌 Web + cookie auth bootstrap）：非 ws 升级请求
+        // 交给 bounded HTTP surface；ws 升级
         //    请求原样走后续握手。窥探（peek 不消费数据，握手字节不受影响）
         //    首段：定位 `\r\n\r\n` 后查 `upgrade: websocket`；头部碎片未齐时
         //    短等补齐（HEAD_PROBE_TIMEOUT），避免把碎片到达的 ws 握手误判。
@@ -187,8 +191,11 @@ impl Gateway {
             None => false,
         };
         if !is_ws {
-            // HTTP 静态分支：不进配额/注册表（§8.6 只面向 ws 连接）。
-            if let Err(e) = crate::web::serve_http(stream, peer, self.auth.clone()).await {
+            // HTTP 分支：不进配额/注册表（§8.6 只面向 ws 连接）。
+            if let Err(e) =
+                crate::web::serve_http(stream, peer, self.auth.clone(), self.auth_setup.clone())
+                    .await
+            {
                 debug!(peer = %peer, error = ?e, "static serve failed");
             }
             return;
@@ -452,6 +459,7 @@ impl Gateway {
                                         | ActionEnvelope::PersistedSessionRestore { command_id, .. }
                                         | ActionEnvelope::PersistedSessionImport { command_id, .. }
                                         | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
                                         | ActionEnvelope::Create { command_id, .. }
                                         | ActionEnvelope::Load { command_id, .. }
                                         | ActionEnvelope::Close { command_id, .. }
@@ -489,7 +497,11 @@ impl Gateway {
                             // 重试；Restarting 期间机器未对账，禁止控制操作，
                             // §8.4.1 不变量 4）。
                             if let Frame::Action(action) = &frame {
-                                if !self.can_accept_committed() {
+                                let read_only_query = matches!(
+                                    action,
+                                    ActionEnvelope::PersistedSessionPromptStatus { .. }
+                                );
+                                if !read_only_query && !self.can_accept_committed() {
                                     let _ = out_tx
                                         .send(OutboundMsg::Frame(Frame::ActionError(
                                             action_error_committed_rejected(action),
@@ -622,6 +634,7 @@ impl Gateway {
                     // ready 握手（§4.6 步骤 4）→ mark_ready → flush 缓冲。
                     let ready = Frame::Ready(acp_hub_proto::conn::Ready {
                         projection_versions: versions,
+                        negotiated_capabilities: channel.negotiated_capabilities(),
                     });
                     if out_tx.send(OutboundMsg::Frame(ready)).await.is_err() {
                         return Some(1011);
@@ -629,15 +642,19 @@ impl Gateway {
                     let flushed = channel.mark_ready();
                     // flush 缓冲 Action（§4.6 步骤 4；ready 后正常 submit 路径）。
                     for action in flushed {
-                        if let DispatchOutcome::Send(msgs) = channel
+                        match channel
                             .dispatch(Frame::Action(action), &self.deps, out_tx.clone())
                             .await
                         {
-                            for m in msgs {
-                                if out_tx.send(m).await.is_err() {
-                                    return Some(1011);
+                            DispatchOutcome::Send(msgs) => {
+                                for m in msgs {
+                                    if out_tx.send(m).await.is_err() {
+                                        return Some(1011);
+                                    }
                                 }
                             }
+                            DispatchOutcome::Disconnect(code) => return Some(code),
+                            _ => {}
                         }
                     }
                 }
@@ -966,6 +983,7 @@ fn action_error_committed_rejected(action: &ActionEnvelope) -> ActionError {
         | ActionEnvelope::PersistedSessionRestore { command_id, .. }
         | ActionEnvelope::PersistedSessionImport { command_id, .. }
         | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
         | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }

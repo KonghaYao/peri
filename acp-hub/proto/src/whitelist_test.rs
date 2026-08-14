@@ -36,6 +36,7 @@ fn client_outbound_m1_set() {
         "ysync.update",
         "ready",
         "keep_alive",
+        "prompt_status",
     ] {
         assert_eq!(
             m1_check(FrameTag(tag), Role::Client, Direction::Outbound),
@@ -164,21 +165,22 @@ fn m1_action_type_subset() {
         "session/restore",
         "session/import",
         "session/discover",
+        "session/prompt-status",
     ] {
         assert!(m1_allows_action_type(t), "{t} 应在 M1");
     }
     for t in ["events/subscribe", "events/unsubscribe"] {
         assert!(!m1_allows_action_type(t), "{t} 应不在 M1");
     }
-    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 21);
+    assert_eq!(crate::whitelist::M1_ACTION_TYPES.len(), 22);
 }
 
-/// 全量注册表：26 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与
+/// 全量注册表：27 个 tag 且与 §3.2 表一致（含 M2/M3 保留帧与
 /// instance/forward 系，冲突 1 裁决）。
 #[test]
 fn frame_tag_registry_completeness() {
     let tags: Vec<&str> = crate::whitelist::FRAME_TAGS.iter().map(|t| t.0).collect();
-    assert_eq!(tags.len(), 26);
+    assert_eq!(tags.len(), 27);
     for expected in [
         "action",
         "action_ack",
@@ -206,6 +208,7 @@ fn frame_tag_registry_completeness() {
         "instance/forward_ack",
         "instance/process_exit",
         "session_list",
+        "prompt_status",
     ] {
         assert!(tags.contains(&expected), "缺少注册 tag {expected}");
     }

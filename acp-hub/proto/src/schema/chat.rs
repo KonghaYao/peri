@@ -34,6 +34,11 @@ pub struct ChatEntry {
     pub role: EntryRole,
     pub status: EntryStatus,
     pub author_user_id: Option<String>,
+    /// Hub browser action that created this user entry. Additive and absent on
+    /// ACP replay, assistant/system entries, and snapshots written before the
+    /// correlation contract.
+    #[serde(default)]
+    pub source_command_id: Option<String>,
     /// RFC3339。
     pub created_at: String,
     pub completed_at: Option<String>,
