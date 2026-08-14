@@ -246,6 +246,37 @@ async fn test_invoke_require_completion_畸形值_视为缺省保留() {
 }
 
 #[tokio::test]
+async fn test_invoke_require_completion_畸形值_全completed_仍自动解除() {
+    // 解除条件（全部 completed）无条件成立：畸形值保留只限定于"未全部完成"，
+    // 标记开启时传畸形值且列表全 completed → 仍应自动解除
+    let (tool, state) = make_tool();
+    tool.invoke(
+        serde_json::json!({
+            "requireCompletion": true,
+            "todos": pending_items()
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    tool.invoke(
+        serde_json::json!({
+            "requireCompletion": "yes",
+            "todos": [
+                { "content": "A", "status": "completed" },
+                { "content": "B", "status": "completed" }
+            ]
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    let guard = state.lock().await;
+    assert!(!guard.require_completion, "全 completed 应无条件自动解除");
+}
+
+#[tokio::test]
 async fn test_invoke_all_completed_自动解除标记() {
     let (tool, state) = make_tool();
     tool.invoke(
