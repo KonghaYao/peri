@@ -144,9 +144,10 @@ pub fn detect_graphics_protocol_from(get: &dyn Fn(&str) -> Option<String>) -> Gr
     }
 
     // Windows ConPTY 会剥 APC（kitty protocol 依赖 APC），恒 None。
+    // 作为尾表达式（下方品牌映射仅非 Windows 编译，Windows 下此即函数尾）。
     #[cfg(target_os = "windows")]
     {
-        return GraphicsProtocol::None;
+        GraphicsProtocol::None
     }
 
     // 品牌映射（大小写不敏感小写比较）；tmux / 未知 / 未设置 → None（安全默认）。
