@@ -171,6 +171,8 @@ fn test_keepgoing_rect_follows_scroll() {
 // ── T4：@image 行交互（image-p0-p1-spec §4）──────────────────────────────
 
 /// 最小合法 PNG（签名 + IHDR + IEND，CRC 正确）——T5 校验仅需 header。
+/// 仅 macOS `open` 命令测试使用，cfg 对齐避免其他平台 dead-code。
+#[cfg(target_os = "macos")]
 const TINY_PNG: &[u8] =
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x00IEND\xaeB\x60\x82";
 
