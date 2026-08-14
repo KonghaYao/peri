@@ -3,8 +3,8 @@
 > 本文件是「外部 MCP server ↔ view 层」透传信道的设计定稿，回答一个问题：**ACP 只有一条连接，多个 MCP server 的数据（App 交互、工具结果、通知）如何在这条信道上分离路由，保证数据正确送达正确的接收方。**
 >
 > 最后核对：2026-08-14
-> 状态：设计定稿（对应 `mcp-connector-guide-v2.md` §9.2「信道划分（未定稿）」的定稿替代）
-> 关联文档：`docs/design/mcp-connector-guide-v2.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
+> 状态：**设计定稿但无实施计划**——本文为 MCP Apps 专属设计（guide §6、§9.2）；MCP Apps 当前搁置（guide §9.6 决策），实施与否随其评估结果
+> 关联文档：`docs/design/mcp-connector-guide-v2.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地、§9.6 支持度矩阵）；`docs/design/peri-acp-protocol.md`（ACP 协议）
 > 本文是设计说明，不是规范；不搬运规范原文。
 
 ## 目录
@@ -281,7 +281,7 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 | 3 | App Host：id 映射（L3 → L1/L2）与 `tools/call` 路由（复用 `McpClientPool` + HITL） | 同上 | 1、2 |
 | 4 | `peri/mcp/resource`：`resources/read` 透传（复用 `resource_tool.rs`） | 同上 | 1 |
 | 5 | 桥 JS：信封编解码 + L2 → L1 映射 + 版本分支 | TUI webview 方案（guide §9.5 方案 A） | 2、3 |
-| 6 | 工具结果事件携带 `ui.resourceUri`（若未落地） | 事件链 tool_result | guide §9.4 |
+| 6 | 工具结果事件携带 `ui.resourceUri`（**确认未落地**：`tool_bridge.rs` 未读取 `Tool._meta`） | 事件链 tool_result | guide §9.4 |
 
 **rmcp 侧支持情况（已调查，rmcp 3.1.2）**：无 MCP Apps 专用 handler（`ui/*` 消息在规范上不走 MCP 连接，由宿主侧 App Host 逻辑处理，见 §6）；但全部透传基础已在——第 0 项能力声明（`ExtensionCapabilities`）、`on_custom_request` / `on_custom_notification` 扩展点（默认 `-32601` 拒绝，安全）、`send_custom_notification`（`mcp_notify.rs` 已用）、`Tool._meta`（`_meta.ui.resourceUri` 可透传）、`resources/read`（`resource_tool.rs` 已用）。
 

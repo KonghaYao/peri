@@ -557,7 +557,7 @@ sequenceDiagram
 
 ### 9.2 信道划分（已定稿）
 
-传输层为纯 JSON-RPC 2.0（Request / Notification / Response，无 frame 概念）。现有 ACP 方法名空间：`session/*`、`plugin/*`、`peri/agent_event*`、`mcp/oauth_*`、`marketplace/*`、`elicitation/create` 等。MCP 数据到达 view 的透传通道**设计已定稿**：`docs/design/mcp-multiplexing.md`（单 ACP 连接上的多路数据分离——信封结构、三层 id 映射、App 会话鉴权、分流规则、错误语义、可靠性）。定稿要点：
+传输层为纯 JSON-RPC 2.0（Request / Notification / Response，无 frame 概念）。现有 ACP 方法名空间：`session/*`、`plugin/*`、`peri/agent_event*`、`mcp/oauth_*`、`marketplace/*`、`elicitation/create` 等。MCP 数据到达 view 的透传通道**设计已定稿**：`docs/design/mcp-multiplexing.md`（单 ACP 连接上的多路数据分离——信封结构、三层 id 映射、App 会话鉴权、分流规则、错误语义、可靠性）。该设计为 **MCP Apps 专属**，MCP Apps 当前搁置（§9.6）——设计定稿但**无实施计划**，实施与否随其评估结果。定稿要点：
 
 1. 透传的 `payload` **必须保留 MCP 原始消息**（view 侧剥信封即得原文，与 App postMessage 层直接对接）。
 2. **外层方法名统一包装**：`peri/mcp/app`（App 交互，双向）+ `peri/mcp/resource`（`ui://` 内容读取）。信封携带路由元数据（`serverId` / `appSessionId` / `protocolVersion`）。原「倾向裸传 MCP 原文」已否决，理由：方法名空间平铺共享需白名单、`mcp/` 前缀已被 `mcp/oauth_*` 占用、参照系 grok-build 亦为包装（详见 mcp-multiplexing.md §3.1）。
@@ -600,6 +600,30 @@ TUI 没有 DOM / iframe 渲染能力，纯文本终端无法直接渲染 HTML Ap
 - 协议层约 1–2 周（纯 JSON-RPC + 事件路由，可完全单测）。
 - webview 集成约 2–4 周（主要成本在平台差异与焦点 / 布局）。
 - 收益：与 ChatGPT / Claude / VS Code / Goose 生态协议对齐，一次实现，全端通用。
+
+### 9.6 MCP 能力支持度矩阵（2026-08-14 核查）
+
+peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线决策（已支持项细节见 §9.1，未支持项均无代码落点）：
+
+| 能力面 | 状态 | 路线 | 备注 |
+| --- | --- | --- | --- |
+| Tools（list / call + HITL + deferred） | ✅ 完整 | — | 桥接 + DiscoverMCP |
+| Resources（list / read + `skill://`） | ✅ 完整 | — | 含技能注入（§7.4） |
+| Subscriptions（2026-07-28 `listen`） | ✅ 完整 | — | 通知进 agent 不进 view |
+| 自定义通知（双向） | ✅ 完整 | — | `on_custom_notification` + `send_custom_notification` |
+| 连接 / 传输 / OAuth / 重连 | ✅ 完整 | — | stdio + Streamable HTTP |
+| Prompts（list / get） | ❌ 未实现 | **不做（永远）** | server 的 prompt 不可达 |
+| Sampling | ❌ 未实现（显式拒绝 `-32601`） | **不做（永远）** | server 请求 LLM 直接失败 |
+| Roots | ❌ 未实现 | **不做（永远）** | 不向 server 暴露工作目录 |
+| Tasks（正式扩展） | ❌ 未实现 | **不做（永远）** | rmcp 模型齐全，不接 |
+| Elicitation（SEP-1036 正式扩展） | ❌ 未实现（默认 Decline） | **搁置（可能做）** | 与 ACP `elicitation/create` 撞名（§9.2） |
+| MCP Apps（正式扩展） | ❌ 未实现 | **搁置（可能做）** | 设计定稿 `mcp-multiplexing.md`（§9.2），**无实施计划**；前置：能力声明、`ui.resourceUri` 透传 |
+| WebSocket 传输 | ❌ 未接 | **隔离**（不接入主链路） | rmcp 支持（`ws.rs`）；peri 仅 stdio + HTTP，需要时走独立路径 |
+| Progress / Cancelled 通知 | ❌ 未处理 | 不做 | 长任务进度、优雅取消不可见 |
+| Logging（`logging/message` / `set_level`） | ❌ 未处理 | 不做 | |
+| Resource templates / complete | ❌ 未接 | 不做 | |
+
+**决策记录**：Prompts / Sampling / Roots / Tasks 明确**永远不会做**（2026-08-14）；Elicitation 与 MCP Apps 搁置待评估；WebSocket 传输隔离；其余未支持项不做。
 
 ## 10. 参考
 
