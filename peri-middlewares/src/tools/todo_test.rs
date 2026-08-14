@@ -39,9 +39,18 @@ fn test_parameters_contains_require_completion() {
         params["properties"]["requireCompletion"]["type"], "boolean",
         "parameters 应声明顶层 requireCompletion 布尔参数"
     );
-    assert_eq!(
-        params["properties"]["requireCompletion"]["default"], false,
-        "requireCompletion 默认应为 false"
+    assert!(
+        params["properties"]["requireCompletion"]
+            .get("default")
+            .is_none(),
+        "缺省保留语义下不应声明 default（防止 provider 回填默认值静默解除标记）"
+    );
+    let desc = params["properties"]["requireCompletion"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        desc.contains("Omit it when updating the list to keep the previous setting"),
+        "description 应说明缺省保留语义"
     );
 }
 
@@ -204,6 +213,36 @@ async fn test_invoke_require_completion_false_解除标记() {
     .unwrap();
     let guard = state.lock().await;
     assert!(!guard.require_completion, "显式 false 应解除标记");
+}
+
+#[tokio::test]
+async fn test_invoke_require_completion_畸形值_视为缺省保留() {
+    let (tool, state) = make_tool();
+    tool.invoke(
+        serde_json::json!({
+            "requireCompletion": true,
+            "todos": pending_items()
+        }),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    // 非布尔畸形值（字符串 / null）→ 视为缺省，保留已有标记，不静默解除
+    for bad in [serde_json::json!("yes"), serde_json::Value::Null] {
+        let mut input = serde_json::json!({ "todos": pending_items() });
+        input["requireCompletion"] = bad.clone();
+        let result = tool
+            .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
+            .await;
+        assert!(result.is_ok(), "畸形值不应报错");
+        let guard = state.lock().await;
+        assert!(
+            guard.require_completion,
+            "畸形值应视为缺省保留标记（当前 {:?}）",
+            bad
+        );
+    }
 }
 
 #[tokio::test]

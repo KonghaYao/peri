@@ -63,7 +63,9 @@ impl Middleware for TodoMiddleware {
         state: &mut dyn peri_agent::middleware::state::MiddlewareState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
-        // 1. 前面已有 block_continue（如 HookMiddleware stop block / GoalMiddleware）→ 不干预
+        // 1. 前面已有 block_continue → 不干预，尊重优先级（防御性 guard：
+        // 链序中 Todo 在 Hook/Goal 之前，当前实际看不到它们的 block；
+        // 若未来链序前移出现会设 block_continue 的中间件，此处生效）
         if output.block_continue.is_some() {
             return Ok(output.clone());
         }

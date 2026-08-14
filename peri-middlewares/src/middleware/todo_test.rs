@@ -185,8 +185,12 @@ async fn test_after_agent_steering_解除后_不再拦截() {
     let mw = TodoMiddleware::new(tx);
     let mut state = AgentState::new("/tmp");
 
-    // 经 TodoWrite 创建并开启标记
-    let tool = mw.collect_tools("/tmp").remove(0);
+    // 经 TodoWrite 创建并开启标记（按名取工具，不依赖链序）
+    let tool = mw
+        .collect_tools("/tmp")
+        .into_iter()
+        .find(|t| t.name() == "TodoWrite")
+        .expect("TodoMiddleware 应提供 TodoWrite 工具");
     tool.invoke(
         serde_json::json!({
             "requireCompletion": true,
