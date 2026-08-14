@@ -142,8 +142,7 @@ impl BaseTool for TodoWriteTool {
             "properties": {
                 "requireCompletion": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Require every item to be marked status=\"completed\" before you end the turn. When set, if you stop with unfinished items, the system injects the current todo state and asks you to mark them completed. Set to false (or mark all items completed) to release"
+                    "description": "Require every item to be marked status=\"completed\" before you end the turn. When set, if you stop with unfinished items, the system injects the current todo state and asks you to mark them completed. Omit it when updating the list to keep the previous setting; set to false (or mark all items completed) to release"
                 },
                 "todos": {
                     "type": "array",
@@ -181,12 +180,12 @@ impl BaseTool for TodoWriteTool {
         let items: Vec<TodoItem> = serde_json::from_value(input["todos"].clone())
             .map_err(|e| format!("TodoWrite: invalid input: {e}"))?;
 
-        // requireCompletion：显式传值更新标记，缺省保留已有标记
-        // （agent 中途更新列表时不带参数，不应丢失创建时的要求）
-        let require_completion = input
-            .get("requireCompletion")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // requireCompletion：显式布尔值更新标记；缺省或非布尔（畸形值）保留已有标记
+        // （agent 中途更新列表时不带参数，不应丢失创建时的要求；畸形值不静默解除）
+        let require_completion = match input.get("requireCompletion") {
+            Some(v) => v.as_bool(),
+            None => None,
+        };
 
         // 对比新旧列表，生成变更摘要
         let summary = {
@@ -197,17 +196,15 @@ impl BaseTool for TodoWriteTool {
         // 全量覆盖；同步维护 require_completion 标记：
         // - 全部 completed（或清空列表）→ 标记使命完成，自动解除
         // - 显式 true → 开启；显式 false → 解除
-        // - 未携带参数且未全部完成 → 保留已有标记（中途更新列表不丢失创建时的要求）
+        // - 缺省 / 畸形值且未全部完成 → 保留已有标记
         {
             let mut guard = self.state.lock().await;
             guard.items = items.clone();
             let all_done = items.iter().all(|i| i.status == TodoStatus::Completed);
             if all_done {
                 guard.require_completion = false;
-            } else if require_completion {
-                guard.require_completion = true;
-            } else if input.get("requireCompletion").is_some() {
-                guard.require_completion = false;
+            } else if let Some(flag) = require_completion {
+                guard.require_completion = flag;
             }
         }
 
