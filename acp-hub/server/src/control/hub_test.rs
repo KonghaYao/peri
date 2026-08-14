@@ -164,6 +164,72 @@ async fn env() -> (tempfile::TempDir, Arc<Store>, Arc<StoreSink>, DocManager) {
 }
 
 #[tokio::test]
+async fn startup_reconciliation_persists_prompt_delivery_into_recovered_mirror() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Map, ReadTxn, Transact};
+
+    let (_tmp, store, sink, doc) = env().await;
+    let sid = "12121212-1212-1212-1212-121212121212";
+    store
+        .create_chat(uuid::Uuid::parse_str(sid).unwrap())
+        .unwrap();
+    doc.open_chat(sid, "m1", Some("t"), None, None)
+        .await
+        .unwrap();
+    let result = doc
+        .submit_command(
+            sid,
+            crate::state::doc_manager::DocCommand::RegisterPendingPromptEntry {
+                turn_id: "turn-1".into(),
+                entry_id: "turn-1:user".into(),
+                text: "durable prompt".into(),
+                author_user_id: None,
+                source_command_id: uuid::Uuid::new_v4().to_string(),
+                payload_fingerprint: "fingerprint".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        crate::state::doc_manager::SubmitResult::Applied(_)
+    ));
+
+    assert!(sink
+        .reconcile_prompt_entry_delivery(
+            sid,
+            "turn-1:user",
+            "delivery_unknown",
+            Some("DELIVERY_UNKNOWN"),
+        )
+        .await
+        .unwrap());
+    let (update, _) = sink.snapshot(&DocId::chat(sid)).await.unwrap();
+    let recovered = yrs::Doc::new();
+    recovered
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&update).unwrap())
+        .unwrap();
+    let txn = recovered.transact();
+    let root = txn.get_map("root").unwrap();
+    let entries = root
+        .get(&txn, "entries")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    let entry = entries
+        .get(&txn, "turn-1:user")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    assert_eq!(
+        entry
+            .get(&txn, "delivery_state")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref(),
+        Some("delivery_unknown")
+    );
+}
+
+#[tokio::test]
 async fn mirror_snapshot_rebuilds_from_log() {
     let (tmp, store, sink, doc) = env().await;
     let sid = "11111111-1111-1111-1111-111111111111";
@@ -186,6 +252,7 @@ async fn mirror_snapshot_rebuilds_from_log() {
                 entry_id: "t1:user".into(),
                 text: "prompt".into(),
                 author_user_id: None,
+                source_command_id: "hub-test-command".into(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -433,6 +500,7 @@ async fn hub_assemble_smoke_ready_sequence() {
         serde_json::to_string(&acp_hub_proto::frame::Frame::YsyncSubscribe(
             acp_hub_proto::ysync::YsyncSubscribe {
                 docs: vec![DocId::REGISTRY],
+                client_capabilities: Vec::new(),
             },
         ))
         .unwrap()

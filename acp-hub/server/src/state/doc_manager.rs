@@ -127,7 +127,28 @@ pub enum DocCommand {
         entry_id: String,
         text: String,
         author_user_id: Option<String>,
+        source_command_id: String,
         created_at: String,
+    },
+    /// prompt-delivery-v2 authoritative body projection. This durable Pending
+    /// entry is written before the external dispatch barrier and keyed by the
+    /// same command identity/fingerprint as the outbox.
+    RegisterPendingPromptEntry {
+        turn_id: String,
+        entry_id: String,
+        text: String,
+        author_user_id: Option<String>,
+        source_command_id: String,
+        payload_fingerprint: String,
+        created_at: String,
+    },
+    /// Update delivery evidence on the same Hub-owned user entry without
+    /// conflating delivery verdict with the turn/assistant state machine.
+    SetPromptEntryDelivery {
+        entry_id: String,
+        delivery_state: String,
+        delivery_error_code: Option<String>,
+        completed_at: Option<String>,
     },
     /// 权限 CAS：resolve（pending → resolved 原子一次；§7.4 规则 4）。
     ResolvePermission {
@@ -869,41 +890,52 @@ async fn apply_command(
             entry_id,
             text,
             author_user_id,
+            source_command_id,
             created_at,
         } => {
             let mut txn = pair.chat_txn();
             let root = txn.get_or_insert_map(crate::state::factory::ROOT);
-            let created = chat_writer::create_user_entry(
+            let registration = chat_writer::create_user_entry(
                 &mut txn,
                 &root,
                 turn_id,
                 entry_id,
                 text,
                 author_user_id.as_deref(),
+                Some(source_command_id),
                 created_at,
             );
-            let mut applied = ApplyResult {
-                applied: true,
-                reason: None,
-            };
-            if !created {
-                applied = ApplyResult {
+            let applied = match registration {
+                chat_writer::UserEntryRegistration::Created
+                | chat_writer::UserEntryRegistration::Correlated => ApplyResult {
+                    applied: true,
+                    reason: None,
+                },
+                chat_writer::UserEntryRegistration::Duplicate => ApplyResult {
                     applied: false,
                     reason: Some(ApplyReason::DuplicateIdempotent),
-                };
+                },
+                chat_writer::UserEntryRegistration::SourceCommandConflict => ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::SourceCommandConflict),
+                },
+            };
+            if applied.applied {
+                chat_writer::bump_projection_version(&mut txn, &root);
             }
-            chat_writer::bump_projection_version(&mut txn, &root);
             drop(txn);
             // control 侧：active_turn 注册（§7.2 accepting）。
-            let mut txn = pair.session_txn();
-            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
-            let active = ActiveTurnProjection {
-                turn_id: turn_id.clone(),
-                turn_status: TurnStatus::Accepting,
-                updated_at: created_at.clone(),
-            };
-            chat_writer::set_active_turn(&mut txn, &root, Some(&active));
-            chat_writer::bump_projection_version(&mut txn, &root);
+            if applied.reason != Some(ApplyReason::SourceCommandConflict) {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                let active = ActiveTurnProjection {
+                    turn_id: turn_id.clone(),
+                    turn_status: TurnStatus::Accepting,
+                    updated_at: created_at.clone(),
+                };
+                chat_writer::set_active_turn(&mut txn, &root, Some(&active));
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
             applied
         }
         DocCommand::ResolvePermission {
@@ -978,6 +1010,84 @@ async fn apply_command(
                     applied: false,
                     reason: Some(ApplyReason::UnknownPermission),
                 },
+            }
+        }
+        DocCommand::RegisterPendingPromptEntry {
+            turn_id,
+            entry_id,
+            text,
+            author_user_id,
+            source_command_id,
+            payload_fingerprint,
+            created_at,
+        } => {
+            let mut txn = pair.chat_txn();
+            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+            let registration = chat_writer::create_pending_prompt_entry(
+                &mut txn,
+                &root,
+                turn_id,
+                entry_id,
+                text,
+                author_user_id.as_deref(),
+                source_command_id,
+                payload_fingerprint,
+                created_at,
+            );
+            let applied = match registration {
+                chat_writer::UserEntryRegistration::Created
+                | chat_writer::UserEntryRegistration::Correlated => ApplyResult {
+                    applied: true,
+                    reason: None,
+                },
+                chat_writer::UserEntryRegistration::Duplicate => ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::DuplicateIdempotent),
+                },
+                chat_writer::UserEntryRegistration::SourceCommandConflict => ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::SourceCommandConflict),
+                },
+            };
+            if applied.applied {
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            drop(txn);
+            if applied.reason != Some(ApplyReason::SourceCommandConflict) {
+                let mut txn = pair.session_txn();
+                let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+                let active = ActiveTurnProjection {
+                    turn_id: turn_id.clone(),
+                    turn_status: TurnStatus::Accepting,
+                    updated_at: created_at.clone(),
+                };
+                chat_writer::set_active_turn(&mut txn, &root, Some(&active));
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            applied
+        }
+        DocCommand::SetPromptEntryDelivery {
+            entry_id,
+            delivery_state,
+            delivery_error_code,
+            completed_at,
+        } => {
+            let mut txn = pair.chat_txn();
+            let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+            let applied = chat_writer::set_prompt_entry_delivery(
+                &mut txn,
+                &root,
+                entry_id,
+                delivery_state,
+                delivery_error_code.as_deref(),
+                completed_at.as_deref(),
+            );
+            if applied {
+                chat_writer::bump_projection_version(&mut txn, &root);
+            }
+            ApplyResult {
+                applied,
+                reason: (!applied).then_some(ApplyReason::DuplicateIdempotent),
             }
         }
         DocCommand::ExpirePermission { permission_id } => {
@@ -1117,12 +1227,17 @@ async fn apply_command(
         } => {
             // 终态守卫（§7.2）：active_turn 存在、turn_id 匹配且非终态才迁移。
             let (active_tid, active_status) = read_session_active_turn(pair);
-            let should_terminate = active_tid.as_deref() == Some(turn_id.as_str())
-                && !is_terminal_turn(&active_status);
-            if !should_terminate {
+            let requested_status = chat_writer::turn_status_str(*status);
+            let same_turn = active_tid.as_deref() == Some(turn_id.as_str());
+            if same_turn && active_status == requested_status {
                 ApplyResult {
                     applied: false,
-                    reason: Some(ApplyReason::TurnTerminalGuard),
+                    reason: Some(ApplyReason::DuplicateIdempotent),
+                }
+            } else if !same_turn || is_terminal_turn(&active_status) {
+                ApplyResult {
+                    applied: false,
+                    reason: Some(ApplyReason::TerminalProjectionConflict),
                 }
             } else {
                 // control 侧：active_turn 终态迁移（§7.2）。
@@ -1391,6 +1506,8 @@ async fn apply_command(
 fn command_kind(cmd: &DocCommand) -> &'static str {
     match cmd {
         DocCommand::RegisterUserEntry { .. } => "register_user_entry",
+        DocCommand::RegisterPendingPromptEntry { .. } => "register_pending_prompt_entry",
+        DocCommand::SetPromptEntryDelivery { .. } => "set_prompt_entry_delivery",
         DocCommand::ResolvePermission { .. } => "resolve_permission",
         DocCommand::ExpirePermission { .. } => "expire_permission",
         DocCommand::ExpirePendingPermissions => "expire_pending_permissions",

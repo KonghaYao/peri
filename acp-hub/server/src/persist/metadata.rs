@@ -16,7 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const METADATA_DB_FILE: &str = "metadata.sqlite3";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations(
@@ -108,6 +108,21 @@ CREATE INDEX IF NOT EXISTS project_sessions_archived_updated_idx
   ON project_sessions(archived_at, updated_at DESC);
 "#;
 
+const MIGRATION_V5: &str = r#"
+CREATE TABLE session_runtime_history(
+  session_id TEXT NOT NULL REFERENCES project_sessions(id) ON DELETE CASCADE,
+  chat_id TEXT NOT NULL,
+  activated_at TEXT NOT NULL,
+  retired_at TEXT,
+  PRIMARY KEY(session_id,chat_id)
+);
+CREATE INDEX session_runtime_history_session_activated_idx
+  ON session_runtime_history(session_id,activated_at DESC);
+INSERT OR IGNORE INTO session_runtime_history(session_id,chat_id,activated_at,retired_at)
+  SELECT id,last_chat_id,COALESCE(last_opened_at,updated_at),NULL
+  FROM project_sessions WHERE last_chat_id IS NOT NULL;
+"#;
+
 #[derive(Debug, Error)]
 pub enum MetadataError {
     #[error("metadata database error: {0}")]
@@ -162,6 +177,14 @@ pub struct MetadataSnapshot {
     pub generation: i64,
     pub projects: Vec<ProjectRecord>,
     pub sessions: Vec<ProjectSessionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRuntimeRecord {
+    pub session_id: String,
+    pub chat_id: String,
+    pub activated_at: String,
+    pub retired_at: Option<String>,
 }
 
 impl ProjectSessionRecord {
@@ -331,6 +354,19 @@ impl MetadataStore {
                 sqlx::query(statement).execute(&mut *tx).await?;
             }
             sqlx::query("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)")
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        if found < 5 {
+            for statement in MIGRATION_V5
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                sqlx::query(statement).execute(&mut *tx).await?;
+            }
+            sqlx::query("INSERT INTO schema_migrations(version,applied_at) VALUES(5,?)")
                 .bind(now())
                 .execute(&mut *tx)
                 .await?;
@@ -645,6 +681,8 @@ impl MetadataStore {
         let ts = now();
         sqlx::query("UPDATE project_sessions SET acp_session_id=?,acp_title=COALESCE(?,acp_title),lifecycle='ready',last_chat_id=?,last_opened_at=?,updated_at=?,failure_code=NULL WHERE id=?")
             .bind(acp).bind(title).bind(chat).bind(&ts).bind(&ts).bind(id).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO session_runtime_history(session_id,chat_id,activated_at,retired_at) VALUES(?,?,?,NULL) ON CONFLICT(session_id,chat_id) DO NOTHING")
+            .bind(id).bind(chat).bind(&ts).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM session_activations WHERE session_id=?")
             .bind(id)
             .execute(&mut *tx)
@@ -670,6 +708,8 @@ impl MetadataStore {
         if session.rows_affected() != 1 {
             return Err(MetadataError::NotFound(format!("session {session_id}")));
         }
+        sqlx::query("INSERT INTO session_runtime_history(session_id,chat_id,activated_at,retired_at) VALUES(?,?,?,NULL) ON CONFLICT(session_id,chat_id) DO NOTHING")
+            .bind(session_id).bind(chat).bind(&ts).execute(&mut *tx).await?;
         let command = sqlx::query("UPDATE metadata_commands SET phase='projection_pending',project_id=?,session_id=?,chat_id=?,acp_session_id=?,error_code=NULL,updated_at=? WHERE command_id=?")
             .bind(project_id).bind(session_id).bind(chat).bind(acp).bind(&ts).bind(command_id).execute(&mut *tx).await?;
         if command.rows_affected() != 1 {
@@ -751,6 +791,53 @@ impl MetadataStore {
         .execute(&self.pool)
         .await?;
         self.bump_generation().await
+    }
+
+    /// Persist logical-session → runtime provenance. This relation carries no
+    /// delivery status and never asserts that the runtime remains alive.
+    pub async fn record_session_runtime(&self, session_id: &str, chat_id: &str) -> Result<()> {
+        let ts = now();
+        let result = sqlx::query(
+            "INSERT INTO session_runtime_history(session_id,chat_id,activated_at,retired_at) VALUES(?,?,?,NULL) ON CONFLICT(session_id,chat_id) DO NOTHING",
+        )
+        .bind(session_id)
+        .bind(chat_id)
+        .bind(ts)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM session_runtime_history WHERE session_id=? AND chat_id=?",
+            )
+            .bind(session_id)
+            .bind(chat_id)
+            .fetch_one(&self.pool)
+            .await?;
+            if exists != 1 {
+                return Err(MetadataError::InvalidState(format!(
+                    "runtime provenance missing for session {session_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn session_runtimes(&self, session_id: &str) -> Result<Vec<SessionRuntimeRecord>> {
+        let rows = sqlx::query(
+            "SELECT session_id,chat_id,activated_at,retired_at FROM session_runtime_history WHERE session_id=? ORDER BY activated_at DESC,chat_id DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SessionRuntimeRecord {
+                session_id: row.get(0),
+                chat_id: row.get(1),
+                activated_at: row.get(2),
+                retired_at: row.get(3),
+            })
+            .collect())
     }
 
     pub async fn rename_session(&self, id: &str, name: &str) -> Result<()> {

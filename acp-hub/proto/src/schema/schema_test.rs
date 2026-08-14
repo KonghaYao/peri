@@ -31,6 +31,7 @@ fn chat_root() -> ChatDocRoot {
             role: EntryRole::Assistant,
             status: EntryStatus::Completed,
             author_user_id: None,
+            source_command_id: None,
             created_at: "2026-08-07T00:00:00Z".into(),
             completed_at: Some("2026-08-07T00:00:01Z".into()),
             block_order: vec!["b1".into()],
@@ -63,6 +64,20 @@ fn chat_root() -> ChatDocRoot {
         entries,
         tool_calls,
     }
+}
+
+#[test]
+fn chat_entry_source_command_id_is_an_additive_camel_case_field() {
+    let mut root = chat_root();
+    let entry = root.entries.get_mut("t1:assistant").unwrap();
+    entry.source_command_id = Some("command-1".into());
+    let value = serde_json::to_value(entry).unwrap();
+    assert_eq!(value["sourceCommandId"], "command-1");
+
+    let mut legacy = value.as_object().unwrap().clone();
+    legacy.remove("sourceCommandId");
+    let decoded: ChatEntry = serde_json::from_value(legacy.into()).unwrap();
+    assert_eq!(decoded.source_command_id, None);
 }
 
 #[test]

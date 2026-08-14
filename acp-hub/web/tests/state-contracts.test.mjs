@@ -18,7 +18,7 @@ const canMutate = (role) => role === 'full';
 
 test('source stylesheets are structurally valid and consume only declared design tokens', () => {
   const source = join(import.meta.dirname, '..', 'src');
-  const files = ['styles.css', 'ui/primitives.css', 'ui/tokens.css'];
+  const files = ['styles.css', 'ui/base.css', 'ui/primitives.css', 'ui/tokens.css'];
   const roots = files.map((file) => {
     const css = readFileSync(join(source, file), 'utf8');
     const strict = transform({ filename: file, code: Buffer.from(css), errorRecovery: false });
@@ -33,8 +33,18 @@ test('source stylesheets are structurally valid and consume only declared design
   }
   const tokenSource = readFileSync(join(source, 'ui', 'tokens.css'), 'utf8');
   const defined = new Set([...tokenSource.matchAll(/(--[\w-]+)\s*:/g)].map((match) => match[1]));
-  const used = new Set(files.slice(0, 2).flatMap((file) => [...readFileSync(join(source, file), 'utf8').matchAll(/var\((--[\w-]+)/g)].map((match) => match[1])));
+  const used = new Set(files.slice(0, 3).flatMap((file) => [...readFileSync(join(source, file), 'utf8').matchAll(/var\((--[\w-]+)/g)].map((match) => match[1])));
   assert.deepEqual([...used].filter((token) => !defined.has(token)).sort(), []);
+});
+
+test('visual fixture isolation and overlay geometry remain part of the default gate', () => {
+  const root = join(import.meta.dirname, '..');
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const fixtureCss = readFileSync(join(root, 'src', 'visual-fixture', 'fixture.css'), 'utf8');
+  assert.match(pkg.scripts.test, /verify-production-boundary\.mjs/);
+  assert.match(fixtureCss, /\.visual-fixture-rail\s*\{[^}]*z-index:20/s);
+  assert.match(fixtureCss, /@media\(max-width:640px\)[\s\S]*\.visual-fixture-root~\.ui-toast-viewport\{top:54px\}/);
+  assert.match(readFileSync(join(root, 'src', 'visual-fixture', 'main.tsx'), 'utf8'), /authenticated-app visual-fixture-root/);
 });
 
 test('Composer and quick start have one neutral keyboard-focus owner and no stale selectors', () => {
@@ -76,6 +86,8 @@ test('prompt recovery is owned by CommandTracker rather than an ad-hoc frame cac
   assert.match(store, /commands\.retry\(current\.commandId, sendFrame\)/);
   assert.doesNotMatch(store, /retryableMessageFrame|retryableQuickStartFrame/);
   assert.match(delivery, /if \(currentSubmission\(\)\) return false/);
+  assert.match(delivery, /sourceCommandIds\.has\(current\.commandId\)/);
+  assert.doesNotMatch(delivery, /entry\.text\s*===\s*current\.text|current\.text\s*===\s*entry\.text/);
   assert.doesNotMatch(delivery, /export const composerDrafts/);
 });
 
@@ -320,6 +332,8 @@ test('P0 interaction architecture cannot regress to hidden cancel or viewport-br
   const styles = readFileSync(join(import.meta.dirname, '..', 'src', 'styles.css'), 'utf8');
   assert.match(composer, /cancelTurn/);
   assert.match(composer, /停止生成/);
+  assert.match(composer, /control\?\.phase === 'uncertain'[\s\S]*?retryPersistentAction\(control\.commandId\)/);
+  assert.match(composer, /使用原请求重新确认停止/);
   assert.match(dialog, /<Portal>/);
   assert.match(sidebar, /sidebar-footer/);
   assert.doesNotMatch(styles, /logout-button[^}]*position\s*:\s*fixed/s);
@@ -432,7 +446,7 @@ test('reusable design tokens have one UI-library source', () => {
   const styles = readFileSync(join(root, 'styles.css'), 'utf8');
   const primitives = readFileSync(join(root, 'ui', 'primitives.css'), 'utf8');
   const tokens = readFileSync(join(root, 'ui', 'tokens.css'), 'utf8');
-  assert.match(styles, /^@import 'tailwindcss';\n@import '\.\/ui\/primitives\.css';/);
+  assert.match(styles, /^@import '\.\/ui\/base\.css';\n@import '\.\/ui\/primitives\.css';/);
   assert.doesNotMatch(styles, /@import '\.\/ui\/tokens\.css'/);
   assert.match(primitives, /^@import '\.\/tokens\.css';/);
   assert.doesNotMatch(styles, /:root\s*\{/);
@@ -445,6 +459,76 @@ test('reusable design tokens have one UI-library source', () => {
     .map((file) => readFileSync(join(root, 'panel', 'components', file), 'utf8'))];
   const referenced = new Set(sourceFiles.flatMap((source) => [...source.matchAll(/var\(--([a-z0-9-]+)/gi)].map((match) => match[1])));
   assert.deepEqual([...referenced].filter((token) => !declared.has(token)), []);
+});
+
+test('product CSS owns its browser baseline and semantic layout without Tailwind', () => {
+  const root = join(import.meta.dirname, '..');
+  const source = join(root, 'src');
+  const styles = readFileSync(join(source, 'styles.css'), 'utf8');
+  const base = readFileSync(join(source, 'ui', 'base.css'), 'utf8');
+  const chatView = readFileSync(join(source, 'panel', 'components', 'ChatView.tsx'), 'utf8');
+  const messageList = readFileSync(join(source, 'panel', 'components', 'MessageList.tsx'), 'utf8');
+  const manifest = readFileSync(join(root, 'package.json'), 'utf8');
+  const vite = readFileSync(join(root, 'vite.config.ts'), 'utf8');
+
+  for (const current of [styles, manifest, vite]) assert.doesNotMatch(current, /@?tailwindcss/i);
+  assert.match(base, /\*[^]*box model[^]*\*\//i);
+  assert.match(base, /box-sizing:\s*border-box/);
+  assert.match(base, /margin:\s*0/);
+  assert.match(base, /padding:\s*0/);
+  assert.match(base, /border:\s*0 solid/);
+  assert.match(base, /\[hidden\]:where\(:not\(\[hidden=until-found\]\)\)\s*\{\s*display:\s*none\s*!important/);
+  assert.match(base, /button,\s*input,\s*select,\s*optgroup,\s*textarea/);
+  assert.match(base, /background-color:\s*transparent/);
+  assert.match(base, /border-radius:\s*0/);
+  assert.match(base, /h1,\s*h2,\s*h3,\s*h4,\s*h5,\s*h6/);
+  assert.match(base, /code,\s*kbd,\s*samp,\s*pre\s*\{[^}]*font-family:\s*var\(--font-mono\)/s);
+  assert.match(base, /ol,\s*ul,\s*menu\s*\{\s*list-style:\s*none/);
+  assert.match(base, /img,\s*svg,\s*video,\s*canvas,\s*audio/);
+  assert.match(base, /summary\s*\{\s*display:\s*list-item/);
+
+  assert.match(chatView, /class="chat-view"/);
+  assert.doesNotMatch(chatView, /class="flex h-full min-h-0 flex-col"/);
+  assert.match(messageList, /class="ui-scrollbar message-list-scroll"/);
+  assert.match(messageList, /class="message-list-content"/);
+  assert.doesNotMatch(messageList, /min-h-0 flex-1 overflow-y-auto|mx-auto w-full max-w-\[820px\] px-4 pt-6 pb-6/);
+  assert.match(styles, /\.chat-view\s*\{[^}]*display:\s*flex[^}]*height:\s*100%[^}]*min-height:\s*0[^}]*flex-direction:\s*column/s);
+  assert.match(styles, /\.message-list-scroll\s*\{[^}]*min-height:\s*0[^}]*flex:\s*1[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.message-list-content\s*\{[^}]*width:\s*100%[^}]*max-width:\s*820px[^}]*margin-inline:\s*auto[^}]*padding:\s*24px 16px/s);
+  assert.doesNotMatch(styles, /\.message-list-shell>section>div/);
+});
+
+test('the visual fixture is a development-only entry and cannot bypass production auth', () => {
+  const root = join(import.meta.dirname, '..');
+  const index = readFileSync(join(root, 'index.html'), 'utf8');
+  const fixture = readFileSync(join(root, 'visual-fixture.html'), 'utf8');
+  const vite = readFileSync(join(root, 'vite.config.ts'), 'utf8');
+  const productionMain = readFileSync(join(root, 'src', 'panel', 'main.tsx'), 'utf8');
+  const authGate = readFileSync(join(root, 'src', 'panel', 'components', 'AuthGate.tsx'), 'utf8');
+  const fixtureMain = readFileSync(join(root, 'src', 'visual-fixture', 'main.tsx'), 'utf8');
+  const scenarios = readFileSync(join(root, 'src', 'visual-fixture', 'scenarios.ts'), 'utf8');
+
+  assert.match(index, /src="\/src\/panel\/main\.tsx"/);
+  assert.doesNotMatch(index, /visual-fixture/);
+  assert.match(fixture, /src="\/src\/visual-fixture\/main\.tsx"/);
+  assert.doesNotMatch(fixture, /panel\/main|AuthGate/);
+  assert.match(vite, /input:\s*\{[^}]*index:\s*resolve\(rootDir, 'index\.html'\)/s);
+  assert.doesNotMatch(vite, /visual-fixture/);
+  for (const source of [productionMain, authGate]) {
+    assert.doesNotMatch(source, /visual-fixture|fixtureScenario|VITE_.*FIXTURE|scenario=.*auth/i);
+  }
+  assert.doesNotMatch(fixtureMain, /AuthGate|connectWithCookie|api\/auth\/session|token/i);
+  assert.match(fixtureMain, /installVisualScenario/);
+  for (const id of ['catalog', 'conversation', 'permission-streaming', 'recovery-errors', 'terminal-readonly']) {
+    assert.match(scenarios, new RegExp(`['"]${id}['"]`));
+  }
+  assert.match(scenarios, /DEFAULT_VISUAL_SCENARIO\s*=\s*['"]conversation['"]/);
+  assert.match(scenarios, /action:\s*['"]login['"]/);
+  assert.doesNotMatch(scenarios, /action:\s*['"]reconnect['"]/);
+  const visualContract = readFileSync(join(root, 'scripts', 'visual-contract.mjs'), 'utf8');
+  assert.match(visualContract, /export const assertVisualContract/);
+  assert.match(visualContract, /navigator\.language/);
+  assert.match(visualContract, /resolvedOptions\(\)\.timeZone/);
 });
 
 test('primitive visuals are standalone and do not leak into feature styles', () => {
@@ -601,7 +685,7 @@ test('authentication invalidation survives UI cleanup and reaches the login surf
   const gate = readFileSync(join(root, 'components', 'AuthGate.tsx'), 'utf8');
   const authState = readFileSync(join(root, 'lib', 'auth-state.ts'), 'utf8');
   const invalidator = store.slice(store.indexOf('function invalidateAuthentication('), store.indexOf('export function cancelTurn'));
-  assert.ok(invalidator.indexOf('clearUiSession()') < invalidator.indexOf('publishAuthInvalidation(reason)'));
+  assert.ok(invalidator.indexOf('resetAuthenticatedSession()') < invalidator.indexOf('publishAuthInvalidation(reason)'));
   assert.match(authState, /setInvalidation\(\{ id: \+\+invalidationSequence, reason \}\)/);
   assert.match(authState, /setInvalidation\(null\)/);
   assert.doesNotMatch(authState, /authInvalidated|authInvalidationReason/);
@@ -616,6 +700,45 @@ test('authentication invalidation survives UI cleanup and reaches the login surf
     assert.match(feature, /from '\.\.\/lib\/auth-state'/, file);
     assert.doesNotMatch(feature, /import \{[^}]*\breadOnly\b[^}]*\} from '\.\.\/store'/, file);
   }
+});
+
+test('authenticated-session cleanup is a complete identity boundary, not reconnect cleanup', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const store = readFileSync(join(root, 'store.ts'), 'utf8');
+  const gate = readFileSync(join(root, 'components', 'AuthGate.tsx'), 'utf8');
+  const toastStore = readFileSync(join(root, 'lib', 'toast-store.ts'), 'utf8');
+  const disconnect = store.slice(store.indexOf('export function disconnect()'), store.indexOf('export function resetAuthenticatedSession()'));
+  const reset = store.slice(store.indexOf('export function resetAuthenticatedSession()'), store.indexOf('export function navigateProjectSession'));
+
+  assert.doesNotMatch(disconnect, /setProjects|setProjectSessions|setChats|store\.clear|toastStore\.clear/);
+  for (const statement of [
+    'installPrincipalRole(null)', 'setConnState', 'setHeartbeatCount(0)', 'setGlobalStatus',
+    'setSubscribedDocs', 'setAckLog', 'setErrorLog', 'setChats', 'setSelectedCid',
+    'setSelectedSessionId', 'setChatEntries', 'setChatHead', 'setPermissions',
+    'setRuntimeDocsState', 'setChatStatusSignal', 'setProjects', 'setProjectSessions',
+    'setImportableSessions', 'resetMessageDelivery', 'sessionActivation.reset',
+    'resetRuntimeControls', 'setPersistentErrors', 'commands.reset',
+    'resetPermissionDecisions', 'setConnectionProblem', 'store.clear', 'toastStore.clear',
+  ]) assert.match(reset, new RegExp(statement.replace(/[().]/g, '\\$&')), statement);
+  assert.ok(reset.indexOf('installPrincipalRole(null)') < reset.indexOf('disconnect()'));
+  assert.ok(reset.indexOf('store.clear()') < reset.indexOf('toastStore.clear()'));
+  assert.match(toastStore, /for \(const timer of this\.timers\.values\(\)\) clearTimeout\(timer\)/);
+  assert.match(toastStore, /this\.timers\.clear\(\)/);
+  assert.match(gate, /resetAuthenticatedSession\(\);\s*installPrincipalRole\(role\)/);
+  assert.match(gate, /const event = authInvalidation\(\);[\s\S]*?resetAuthenticatedSession\(\);[\s\S]*?setState\('signed-out'\)/);
+});
+
+test('login setup is server-authoritative and credential-free', () => {
+  const root = join(import.meta.dirname, '..', 'src', 'panel');
+  const gate = readFileSync(join(root, 'components', 'AuthGate.tsx'), 'utf8');
+  const parser = readFileSync(join(root, 'lib', 'auth-setup.ts'), 'utf8');
+  assert.match(gate, /parseAuthSetup/);
+  assert.match(gate, /setup\(\)\?\.generateCommand/);
+  assert.match(gate, /setup\(\)\?\.tokenFile|hint\(\)\.tokenFile/);
+  assert.doesNotMatch(gate, /~\/\.config\/acp-hub|cargo run -p acp-hub-server/);
+  assert.match(parser, /typeof tokenFile !== 'string'/);
+  assert.match(parser, /typeof generateCommand !== 'string'/);
+  assert.doesNotMatch(parser, /tokenId|token_id|bearer/);
 });
 
 test('global session search matches durable metadata and excludes empty queries', () => {

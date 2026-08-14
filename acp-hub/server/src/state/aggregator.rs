@@ -60,6 +60,13 @@ impl ApplyResult {
 pub enum ApplyReason {
     /// 幂等键（turn_id/entry_id/tool_call_id/permission_id）已存在，重放跳过。
     DuplicateIdempotent,
+    /// A Hub user entry already carries a different browser command identity.
+    /// Never overwrite it: this is persisted-correlation corruption, not a
+    /// normal duplicate.
+    SourceCommandConflict,
+    /// A control-plane terminal command targets another turn or contradicts
+    /// an already persisted terminal state.
+    TerminalProjectionConflict,
     /// 权限已经记录为同一 decision；调用方可用仍存在的 ACP request 回投材料
     /// 恢复一次明确未送达的 response。相反 decision 不得进入此分支。
     PermissionDecisionReplay,
@@ -249,7 +256,16 @@ impl Aggregator {
             let t = format!("load:{}", ev.seq);
             stream.replay_turn = Some(t.clone());
             stream.replay_turns.push(t.clone());
-            chat_writer::create_user_entry(txn, &root, &t, &format!("{t}:user"), "", None, &ev.ts);
+            chat_writer::create_user_entry(
+                txn,
+                &root,
+                &t,
+                &format!("{t}:user"),
+                "",
+                None,
+                None,
+                &ev.ts,
+            );
             chat_writer::bump_projection_version(txn, &root);
         }
         match &ev.body {
@@ -871,7 +887,7 @@ impl Aggregator {
             let root = txn.get_or_insert_map(ROOT);
             // 回放合成占位 user entry（预读区已分配 turn，§8.5）。
             if let Some((t, e)) = &replay_synth {
-                chat_writer::create_user_entry(&mut txn, &root, t, e, "", None, &ev.ts);
+                chat_writer::create_user_entry(&mut txn, &root, t, e, "", None, None, &ev.ts);
                 chat_writer::bump_projection_version(&mut txn, &root);
             }
             match &ev.body {
@@ -943,6 +959,7 @@ impl Aggregator {
                         &replay_entry,
                         text,
                         author_user_id.as_deref(),
+                        None,
                         created_at,
                     );
                     chat_writer::bump_projection_version(&mut txn, &root);

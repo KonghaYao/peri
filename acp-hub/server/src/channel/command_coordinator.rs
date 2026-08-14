@@ -17,6 +17,7 @@
 //! `AGENT_UNAVAILABLE`(retryable) + 清理半创建状态（补发 kill，§6.2）。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -24,13 +25,16 @@ use chrono::Utc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, warn};
 use uuid::Uuid;
+use yrs::updates::decoder::Decode as _;
+use yrs::{Map as _, ReadTxn as _, Transact as _};
 
 use acp_hub_proto::ack::{AckStatus, ActionAck, ActionError, ErrorCode};
-use acp_hub_proto::action::{ActionEnvelope, CreateChatPayload};
+use acp_hub_proto::action::{ActionEnvelope, CreateChatPayload, PromptChatPayload};
 use acp_hub_proto::frame::Frame;
 use acp_hub_proto::instance::{InstanceKill, InstanceSpawn};
 use acp_hub_proto::schema::{SessionSummaryProjection, TurnStatus};
 use acp_hub_proto::session::SessionListFrame;
+use acp_hub_proto::session::{PromptDeliveryStatus, PromptStatusFrame, PromptStatusItem};
 
 use crate::auth::audit::audit;
 use crate::auth::ConnectionCtx;
@@ -144,6 +148,16 @@ struct CoordInner {
     /// L3 确认超时（§4.4 路径 B 默认 30s；测试注入短值）。
     l3_timeout: Duration,
     projects: RwLock<Option<ProjectService>>,
+    history_sink: RwLock<Option<Arc<crate::control::StoreSink>>>,
+    /// Process-local observers attached by same-command reconciliation. Durable
+    /// restart truth remains the outbox; this map only fans a live terminal
+    /// result to replacement connections.
+    terminal_watchers: Mutex<HashMap<Uuid, Vec<mpsc::Sender<OutboundMsg>>>>,
+    /// Process-local terminal fallback when the durable terminal append itself
+    /// fails. Restart reconciliation repairs the outbox before gateway ready;
+    /// this map prevents observers from hanging during the current process.
+    terminal_failures: Mutex<HashMap<Uuid, ActionError>>,
+    terminal_failure_overflow: AtomicBool,
 }
 
 struct LoadFlightGuard {
@@ -251,12 +265,20 @@ impl CommandCoordinator {
                 discoveries_in_flight: StdMutex::new(HashSet::new()),
                 l3_timeout,
                 projects: RwLock::new(None),
+                history_sink: RwLock::new(None),
+                terminal_watchers: Mutex::new(HashMap::new()),
+                terminal_failures: Mutex::new(HashMap::new()),
+                terminal_failure_overflow: AtomicBool::new(false),
             }),
         }
     }
 
     pub async fn install_project_service(&self, projects: ProjectService) {
         *self.inner.projects.write().await = Some(projects);
+    }
+
+    pub async fn install_history_sink(&self, sink: Arc<crate::control::StoreSink>) {
+        *self.inner.history_sink.write().await = Some(sink);
     }
 
     /// 工作区注册表（hub 装配：启动恢复重建）。
@@ -287,6 +309,100 @@ impl CommandCoordinator {
         for (k, v) in idx {
             cur.entry(k).or_insert(v);
         }
+    }
+
+    /// Reconcile prompt outbox and exact v2 chat projection evidence before
+    /// the gateway accepts clients. This is the only startup point where both
+    /// durable stores are available; process-local watchers/executors do not
+    /// participate in the decision.
+    pub async fn reconcile_prompt_delivery_after_restart(&self) -> Result<(), String> {
+        let Some(sink) = self.inner.history_sink.read().await.clone() else {
+            return Err("history sink unavailable during prompt reconciliation".into());
+        };
+        for (chat_id, store) in self.inner.store.chats_snapshot() {
+            let chat_id_text = chat_id.to_string();
+            let evidence = prompt_projection_evidence(
+                sink.snapshot(&acp_hub_proto::conn::DocId::chat(&chat_id_text))
+                    .await,
+                sink.snapshot(&acp_hub_proto::conn::DocId::session(&chat_id_text))
+                    .await,
+            )
+            .map(|(evidence, _)| evidence)
+            .unwrap_or_default();
+            let records = store
+                .outbox()
+                .lock()
+                .await
+                .records()
+                .filter(|record| record.command_type == CommandType::Prompt)
+                .cloned()
+                .collect::<Vec<_>>();
+            let exact_terminal = records
+                .iter()
+                .filter_map(|record| {
+                    let projected = evidence.get(&record.command_id)?;
+                    exact_prompt_terminal_evidence(record, projected).then_some(record.command_id)
+                })
+                .collect::<HashSet<_>>();
+            store
+                .outbox()
+                .lock()
+                .await
+                .reconcile_prompt_delivery_after_restart(&exact_terminal)
+                .map_err(|error| error.to_string())?;
+
+            let reconciled = store
+                .outbox()
+                .lock()
+                .await
+                .records()
+                .filter(|record| record.command_type == CommandType::Prompt)
+                .cloned()
+                .collect::<Vec<_>>();
+            let known = reconciled
+                .iter()
+                .map(|record| record.command_id)
+                .collect::<HashSet<_>>();
+            for record in reconciled {
+                let Some(turn_id) = record.turn_id else {
+                    continue;
+                };
+                let (state, code) = match record.status {
+                    OutboxStatus::Completed => ("completed", None),
+                    OutboxStatus::Failed => (
+                        "failed_not_delivered",
+                        record.last_error.as_ref().map(|error| error.code.as_str()),
+                    ),
+                    OutboxStatus::DeliveryUnknown => ("delivery_unknown", Some("DELIVERY_UNKNOWN")),
+                    _ => continue,
+                };
+                sink.reconcile_prompt_entry_delivery(
+                    &chat_id_text,
+                    &format!("{turn_id}:user"),
+                    state,
+                    code,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            for (command_id, projected) in evidence {
+                if known.contains(&command_id) || !is_v2_pending_orphan(&projected) {
+                    continue;
+                }
+                let Some(entry_id) = projected.entry_id else {
+                    continue;
+                };
+                sink.reconcile_prompt_entry_delivery(
+                    &chat_id_text,
+                    &entry_id,
+                    "failed_not_delivered",
+                    Some("AGENT_UNAVAILABLE"),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     async fn submit_metadata_action(
@@ -709,7 +825,7 @@ impl CommandCoordinator {
             Err(_) => {
                 return SubmitAck::Failed(action_error(
                     command_id,
-                    ErrorCode::AgentUnavailable,
+                    ErrorCode::DeliveryUnknown,
                     "metadata command persist failed",
                     true,
                 ))
@@ -831,7 +947,7 @@ impl CommandCoordinator {
                             .await;
                         self.send_error(
                             &cmd,
-                            ErrorCode::AgentUnavailable,
+                            ErrorCode::DeliveryUnknown,
                             "project persist/projection failed",
                             false,
                         )
@@ -1432,17 +1548,22 @@ impl CommandCoordinator {
                 if let Some(chat) = live_chat.as_deref() {
                     if projects
                         .metadata()
-                        .update_command(
-                            &command_id,
-                            "committed",
-                            Some(&session.project_id),
-                            Some(&session.id),
-                            Some(chat),
-                            Some(&acp_id),
-                            None,
-                        )
+                        .record_session_runtime(&session.id, chat)
                         .await
                         .is_err()
+                        || projects
+                            .metadata()
+                            .update_command(
+                                &command_id,
+                                "committed",
+                                Some(&session.project_id),
+                                Some(&session.id),
+                                Some(chat),
+                                Some(&acp_id),
+                                None,
+                            )
+                            .await
+                            .is_err()
                     {
                         return SubmitAck::Failed(action_error(
                             command_id,
@@ -1864,6 +1985,12 @@ impl CommandCoordinator {
                 .await;
         }
 
+        if let ActionEnvelope::PersistedSessionPromptStatus { .. } = &action {
+            return self
+                .exec_prompt_status(ctx, &action, tx, &command_id_str)
+                .await;
+        }
+
         if let ActionEnvelope::PersistedSessionDiscover { .. } = &action {
             return self.exec_project_session_discover(ctx, action, tx).await;
         }
@@ -1934,10 +2061,56 @@ impl CommandCoordinator {
                                 DedupVerdict::RedeliverUnknown => {
                                     return SubmitAck::Failed(action_error(
                                         command_id_str,
-                                        ErrorCode::AgentUnavailable,
+                                        ErrorCode::DeliveryUnknown,
                                         "delivery unknown; automatic retry not permitted (path B)",
                                         false,
                                     ))
+                                }
+                                DedupVerdict::InProgress => {
+                                    if self.inner.terminal_failure_overflow.load(Ordering::Acquire)
+                                    {
+                                        return SubmitAck::Failed(action_error(
+                                            command_id_str,
+                                            ErrorCode::DeliveryUnknown,
+                                            "delivery terminal storage is degraded; observer attachment is blocked",
+                                            false,
+                                        ));
+                                    }
+                                    if let Some(error) = self
+                                        .inner
+                                        .terminal_failures
+                                        .lock()
+                                        .await
+                                        .get(&command_id)
+                                        .cloned()
+                                    {
+                                        return SubmitAck::Failed(error);
+                                    }
+                                    let mut watchers = self.inner.terminal_watchers.lock().await;
+                                    if let Some(latest) = s_store.outbox_get(command_id).await {
+                                        if let Some(replay) = terminal_replay(
+                                            command_id_str.clone(),
+                                            &latest,
+                                            Some(sid.to_string()),
+                                        ) {
+                                            return replay;
+                                        }
+                                    }
+                                    if !attach_terminal_watcher_locked(
+                                        &mut watchers,
+                                        command_id,
+                                        tx.clone(),
+                                    ) {
+                                        return SubmitAck::Failed(action_error(
+                                            command_id_str,
+                                            ErrorCode::RateLimited,
+                                            "too many command observers",
+                                            false,
+                                        ));
+                                    }
+                                    return SubmitAck::Accepted {
+                                        command_id: command_id_str,
+                                    };
                                 }
                                 DedupVerdict::Proceed => {}
                             }
@@ -2007,7 +2180,7 @@ impl CommandCoordinator {
                 if rec.status != OutboxStatus::IntentDurable {
                     return SubmitAck::Failed(action_error(
                         command_id_str,
-                        ErrorCode::AgentUnavailable,
+                        ErrorCode::DeliveryUnknown,
                         "permission delivery result is unknown; automatic retry is not permitted",
                         false,
                     ));
@@ -2021,7 +2194,7 @@ impl CommandCoordinator {
                 {
                     return SubmitAck::Failed(action_error(
                         command_id_str,
-                        ErrorCode::AgentUnavailable,
+                        ErrorCode::DeliveryUnknown,
                         "the original runtime no longer exists; permission delivery requires operator reconciliation",
                         false,
                     ));
@@ -2057,10 +2230,70 @@ impl CommandCoordinator {
                     DedupVerdict::RedeliverUnknown => {
                         return SubmitAck::Failed(action_error(
                             command_id_str,
-                            ErrorCode::AgentUnavailable,
+                            ErrorCode::DeliveryUnknown,
                             "delivery unknown; automatic retry not permitted (path B)",
                             false,
                         ))
+                    }
+                    DedupVerdict::InProgress => {
+                        if self.inner.terminal_failure_overflow.load(Ordering::Acquire) {
+                            return SubmitAck::Failed(action_error(
+                                command_id_str,
+                                ErrorCode::DeliveryUnknown,
+                                "delivery terminal storage is degraded; observer attachment is blocked",
+                                false,
+                            ));
+                        }
+                        if let Some(error) = self
+                            .inner
+                            .terminal_failures
+                            .lock()
+                            .await
+                            .get(&command_id)
+                            .cloned()
+                        {
+                            return SubmitAck::Failed(error);
+                        }
+                        if let ActionEnvelope::Prompt { payload, .. } = &action {
+                            let incoming = match prompt_payload_fingerprint(payload) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return SubmitAck::Failed(action_error(
+                                        command_id_str,
+                                        ErrorCode::InvalidState,
+                                        &format!("prompt fingerprint failed: {error}"),
+                                        false,
+                                    ));
+                                }
+                            };
+                            if rec.payload_fingerprint.as_deref() != Some(incoming.as_str()) {
+                                return SubmitAck::Failed(action_error(
+                                    command_id_str,
+                                    ErrorCode::InvalidState,
+                                    "commandId payload conflicts with durable prompt intent",
+                                    false,
+                                ));
+                            }
+                        }
+                        let mut watchers = self.inner.terminal_watchers.lock().await;
+                        if let Some(latest) = store.outbox_get(command_id).await {
+                            if let Some(replay) =
+                                terminal_replay(command_id_str.clone(), &latest, None)
+                            {
+                                return replay;
+                            }
+                        }
+                        if !attach_terminal_watcher_locked(&mut watchers, command_id, tx.clone()) {
+                            return SubmitAck::Failed(action_error(
+                                command_id_str,
+                                ErrorCode::RateLimited,
+                                "too many command observers",
+                                false,
+                            ));
+                        }
+                        return SubmitAck::Accepted {
+                            command_id: command_id_str,
+                        };
                     }
                     DedupVerdict::Proceed => {}
                 }
@@ -2109,13 +2342,68 @@ impl CommandCoordinator {
             // 执行器 mark_intent_durable 要求前置 Accepted）。
             if let Err(e) = store.outbox().lock().await.mark_accepted(command_id) {
                 warn!(chat_id = %chat_id, command_id = %command_id, error = ?e, "outbox mark_accepted failed");
+                let _ = store.outbox().lock().await.mark_failed(
+                    command_id,
+                    LastError::from_error_code(ErrorCode::AgentUnavailable),
+                );
                 self.inner.doc.release_reserve(&chat_id_str).await;
                 return SubmitAck::Failed(action_error(
                     command_id_str,
                     ErrorCode::AgentUnavailable,
                     "outbox mark_accepted failed",
-                    true,
+                    false,
                 ));
+            }
+            if let ActionEnvelope::Prompt { payload, .. } = &action {
+                let fingerprint = match prompt_payload_fingerprint(payload) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = store.outbox().lock().await.mark_failed(
+                            command_id,
+                            LastError::from_error_code(ErrorCode::InvalidState),
+                        );
+                        self.inner.doc.release_reserve(&chat_id_str).await;
+                        return SubmitAck::Failed(action_error(
+                            command_id_str,
+                            ErrorCode::InvalidState,
+                            &format!("prompt fingerprint failed: {error}"),
+                            false,
+                        ));
+                    }
+                };
+                if let Err(error) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .set_prompt_payload_fingerprint(command_id, fingerprint)
+                {
+                    warn!(chat_id = %chat_id, command_id = %command_id, error = ?error, "prompt fingerprint persist failed");
+                    let terminal_persisted = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_failed(
+                            command_id,
+                            LastError::from_error_code(ErrorCode::AgentUnavailable),
+                        )
+                        .is_ok();
+                    if !terminal_persisted {
+                        self.inner
+                            .terminal_failure_overflow
+                            .store(true, Ordering::Release);
+                    }
+                    self.inner.doc.release_reserve(&chat_id_str).await;
+                    return SubmitAck::Failed(action_error(
+                        command_id_str,
+                        if terminal_persisted {
+                            ErrorCode::AgentUnavailable
+                        } else {
+                            ErrorCode::DeliveryUnknown
+                        },
+                        "prompt identity could not be durably established",
+                        false,
+                    ));
+                }
             }
         }
 
@@ -2133,6 +2421,10 @@ impl CommandCoordinator {
         };
         if !queued {
             // 入队失败（执行器已退出）：补偿释放名额（§7.4 reserve/release 配对）。
+            let _ = store.outbox().lock().await.mark_failed(
+                command_id,
+                LastError::from_error_code(ErrorCode::RateLimited),
+            );
             self.inner.doc.release_reserve(&chat_id_str).await;
             return SubmitAck::Failed(action_error(
                 command_id_str,
@@ -2498,7 +2790,7 @@ impl CommandCoordinator {
                         warn!(error = ?e, "workspace remove registry write failed");
                         self.send_error(
                             &cmd,
-                            ErrorCode::AgentUnavailable,
+                            ErrorCode::DeliveryUnknown,
                             "workspace registry write failed",
                             true,
                         )
@@ -2661,6 +2953,171 @@ impl CommandCoordinator {
         });
         SubmitAck::Accepted {
             command_id: command_id.to_string(),
+        }
+    }
+
+    /// Read-only, body-free recovery view for a logical session. Authorization
+    /// begins at the catalog identity; historical chat ids are resolved only
+    /// from server-owned provenance.
+    async fn exec_prompt_status(
+        &self,
+        _ctx: &ConnectionCtx,
+        action: &ActionEnvelope,
+        tx: mpsc::Sender<OutboundMsg>,
+        command_id: &str,
+    ) -> SubmitAck {
+        let ActionEnvelope::PersistedSessionPromptStatus { payload, .. } = action else {
+            unreachable!("dispatch guarantees session/prompt-status")
+        };
+        let Some(projects) = self.inner.projects.read().await.clone() else {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::AgentUnavailable,
+                "project catalog unavailable",
+                true,
+            ));
+        };
+        let Some(session) = projects
+            .metadata()
+            .session(&payload.session_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|session| session.origin != "legacy_hidden")
+        else {
+            return SubmitAck::Failed(action_error(
+                command_id.to_string(),
+                ErrorCode::InvalidState,
+                "session not found",
+                false,
+            ));
+        };
+        let runtimes = match projects.metadata().session_runtimes(&session.id).await {
+            Ok(runtimes) => runtimes,
+            Err(_) => {
+                return SubmitAck::Failed(action_error(
+                    command_id.to_string(),
+                    ErrorCode::AgentUnavailable,
+                    "session runtime history unavailable",
+                    true,
+                ))
+            }
+        };
+        let sink = self.inner.history_sink.read().await.clone();
+        let store = self.inner.store.clone();
+        let session_id = session.id;
+        let response_command_id = command_id.to_string();
+        tokio::spawn(async move {
+            let mut prompts_by_command = HashMap::<String, PromptStatusItem>::new();
+            let mut evidence_incomplete = sink.is_none();
+            for runtime in runtimes {
+                let Ok(chat_id) = Uuid::parse_str(&runtime.chat_id) else {
+                    evidence_incomplete = true;
+                    continue;
+                };
+                let Some(chat_store) = store.chat(chat_id) else {
+                    evidence_incomplete = true;
+                    continue;
+                };
+                let evidence = if let Some(sink) = &sink {
+                    let evidence = prompt_projection_evidence(
+                        sink.snapshot(&acp_hub_proto::conn::DocId::chat(&runtime.chat_id))
+                            .await,
+                        sink.snapshot(&acp_hub_proto::conn::DocId::session(&runtime.chat_id))
+                            .await,
+                    );
+                    match evidence {
+                        Some((evidence, complete)) => {
+                            evidence_incomplete |= !complete;
+                            evidence
+                        }
+                        None => {
+                            evidence_incomplete = true;
+                            HashMap::new()
+                        }
+                    }
+                } else {
+                    HashMap::new()
+                };
+                for record in chat_store.outbox_records().await {
+                    if record.command_type != CommandType::Prompt {
+                        continue;
+                    }
+                    let projection = evidence.get(&record.command_id).cloned();
+                    let item = normalize_prompt_status(record, projection.as_ref());
+                    match prompts_by_command.entry(item.command_id.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(item);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            evidence_incomplete = true;
+                            Self::merge_conflicting_prompt_status(entry.get_mut(), item);
+                        }
+                    }
+                }
+            }
+            let mut prompts = prompts_by_command.into_values().collect::<Vec<_>>();
+            prompts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            const LIMIT: usize = 200;
+            let truncated = prompts.len() > LIMIT;
+            if truncated {
+                let mut unresolved = prompts
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.status,
+                            PromptDeliveryStatus::DeliveryUnknown | PromptDeliveryStatus::Projected
+                        )
+                    })
+                    .take(LIMIT)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let unresolved_ids = unresolved
+                    .iter()
+                    .map(|item| item.command_id.clone())
+                    .collect::<HashSet<_>>();
+                let remaining = LIMIT.saturating_sub(unresolved.len());
+                unresolved.extend(
+                    prompts
+                        .into_iter()
+                        .filter(|item| !unresolved_ids.contains(&item.command_id))
+                        .take(remaining),
+                );
+                prompts = unresolved;
+            }
+            let _ = tx
+                .send(OutboundMsg::Frame(Frame::PromptStatus(PromptStatusFrame {
+                    command_id: response_command_id,
+                    session_id,
+                    runtime_restored: false,
+                    truncated,
+                    evidence_incomplete,
+                    prompts,
+                })))
+                .await;
+        });
+        SubmitAck::Accepted {
+            command_id: command_id.to_string(),
+        }
+    }
+
+    /// Global command ids are expected to be unique. If historical stores violate
+    /// that invariant, emit one conservative fact rather than duplicate or choose
+    /// whichever store happened to be iterated first.
+    fn merge_conflicting_prompt_status(
+        existing: &mut PromptStatusItem,
+        conflicting: PromptStatusItem,
+    ) {
+        existing.status = PromptDeliveryStatus::DeliveryUnknown;
+        existing.error_code = None;
+        if existing.turn_id != conflicting.turn_id {
+            existing.turn_id = None;
+        }
+        if conflicting.created_at < existing.created_at {
+            existing.created_at = conflicting.created_at;
+        }
+        if conflicting.updated_at > existing.updated_at {
+            existing.updated_at = conflicting.updated_at;
         }
     }
 
@@ -3558,23 +4015,117 @@ impl CommandCoordinator {
             .await
             .and_then(|r| r.turn_id)
             .unwrap_or_else(uuid::Uuid::new_v4);
-        // 1. intent durable（§4.4 提交点纪律第一步）。
-        if let Err(e) = store.outbox().lock().await.mark_intent_durable(command_id) {
-            warn!(chat_id, error = ?e, "mark_intent_durable failed");
+        let entry_id = format!("{turn_id}:user");
+        let fingerprint = match prompt_payload_fingerprint(payload) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                warn!(chat_id, error = ?error, "prompt fingerprint failed");
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::InvalidState,
+                    "prompt fingerprint failed",
+                )
+                .await;
+                return;
+            }
+        };
+        // 1. Persist the authoritative Pending body before any external
+        // side-effect barrier. The chat projection and outbox share command,
+        // turn and fingerprint evidence but intentionally remain separate
+        // crash-reconcilable stores.
+        let created_at = Utc::now().to_rfc3339();
+        match self
+            .inner
+            .doc
+            .submit_command(
+                chat_id,
+                DocCommand::RegisterPendingPromptEntry {
+                    turn_id: turn_id.to_string(),
+                    entry_id: entry_id.clone(),
+                    text: payload.message.clone(),
+                    author_user_id: None,
+                    source_command_id: command_id_str.clone(),
+                    payload_fingerprint: fingerprint.clone(),
+                    created_at,
+                },
+            )
+            .await
+        {
+            SubmitResult::Applied(result)
+                if result.reason == Some(ApplyReason::SourceCommandConflict) =>
+            {
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::InvalidState,
+                    "prompt identity conflicts with durable projection",
+                )
+                .await;
+                return;
+            }
+            SubmitResult::PersistFailed => {
+                self.fail_retryable(
+                    chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::AgentUnavailable,
+                    "pending prompt projection persist failed",
+                )
+                .await;
+                return;
+            }
+            SubmitResult::Rejected(SubmitError::ChatNotFound) => {
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
+                    cmd,
+                    ErrorCode::ChatNotFound,
+                    "chat not found",
+                )
+                .await;
+                return;
+            }
+            _ => {}
+        }
+        if let Err(e) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_prompt_intent_durable(command_id, fingerprint)
+        {
+            warn!(chat_id, error = ?e, "mark_prompt_intent_durable failed");
+            self.fail_terminal(
+                chat_id,
+                command_id,
+                cmd,
+                ErrorCode::AgentUnavailable,
+                "prompt intent could not be persisted",
+            )
+            .await;
             return;
         }
         // 2. binding 校验 + 翻译（rpcId 登记，§4.4）。
         let Some(entry) = self.inner.chats.entry(chat_id).await else {
-            self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
-                .await;
+            self.fail_terminal(
+                chat_id,
+                command_id,
+                cmd,
+                ErrorCode::ChatNotFound,
+                "chat not found",
+            )
+            .await;
             return;
         };
         let Some(acp_session_id) = entry.session_id.clone() else {
-            self.send_error(
+            self.fail_terminal(
+                chat_id,
+                command_id,
                 cmd,
                 ErrorCode::InvalidState,
                 "chat binding not established",
-                false,
             )
             .await;
             return;
@@ -3589,21 +4140,23 @@ impl CommandCoordinator {
         ) {
             Ok(OutboundMessage::JsonRpc(v)) => v,
             Ok(_) => {
-                self.send_error(
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
                     cmd,
                     ErrorCode::InvalidState,
                     "unexpected outbound shape",
-                    false,
                 )
                 .await;
                 return;
             }
             Err(e) => {
-                self.send_error(
+                self.fail_terminal(
+                    chat_id,
+                    command_id,
                     cmd,
                     ErrorCode::InvalidState,
                     &format!("translate failed: {e}"),
-                    false,
                 )
                 .await;
                 return;
@@ -3615,19 +4168,57 @@ impl CommandCoordinator {
             .relay
             .register_rpc(&rpc_id, command_id_str.clone())
             .await;
-        // 3. 下发（L1+L2：forward_ack = M1 转发确认，§4.4）。
+        // 3. Persist the no-redelivery barrier before the frame can enter the
+        // instance writer. Any ambiguity after this point is DeliveryUnknown.
+        if let Err(error) = store
+            .outbox()
+            .lock()
+            .await
+            .mark_dispatch_barrier(command_id, Utc::now())
+        {
+            warn!(chat_id, error = ?error, "mark_dispatch_barrier failed");
+            self.inner.relay.cancel_rpc(&rpc_id).await;
+            self.fail_terminal(
+                chat_id,
+                command_id,
+                cmd,
+                ErrorCode::AgentUnavailable,
+                "prompt dispatch barrier could not be persisted",
+            )
+            .await;
+            return;
+        }
         if let Err(e) = self
             .inner
             .instance
             .forward_rpc(&instance_id, chat_id, &msg)
             .await
         {
-            self.fail_retryable(
-                chat_id,
-                command_id,
+            warn!(chat_id, error = ?e, "prompt forward outcome unknown after barrier");
+            self.inner.relay.cancel_rpc(&rpc_id).await;
+            let _ = store
+                .outbox()
+                .lock()
+                .await
+                .mark_delivery_unknown(command_id);
+            let _ = self
+                .inner
+                .doc
+                .submit_command(
+                    chat_id,
+                    DocCommand::SetPromptEntryDelivery {
+                        entry_id: entry_id.clone(),
+                        delivery_state: "delivery_unknown".to_string(),
+                        delivery_error_code: Some("DELIVERY_UNKNOWN".to_string()),
+                        completed_at: None,
+                    },
+                )
+                .await;
+            self.send_error(
                 cmd,
-                instance_error_code(&e),
-                "forward failed",
+                ErrorCode::DeliveryUnknown,
+                "prompt may have executed; retry is blocked",
+                false,
             )
             .await;
             return;
@@ -3639,36 +4230,34 @@ impl CommandCoordinator {
             .mark_dispatched(command_id, Utc::now())
         {
             warn!(chat_id, error = ?e, "mark_dispatched failed");
+            self.inner.relay.cancel_rpc(&rpc_id).await;
+            let _ = store
+                .outbox()
+                .lock()
+                .await
+                .mark_delivery_unknown(command_id);
+            let _ = self
+                .inner
+                .doc
+                .submit_command(
+                    chat_id,
+                    DocCommand::SetPromptEntryDelivery {
+                        entry_id: entry_id.clone(),
+                        delivery_state: "delivery_unknown".to_string(),
+                        delivery_error_code: Some("DELIVERY_UNKNOWN".to_string()),
+                        completed_at: None,
+                    },
+                )
+                .await;
+            self.send_error(
+                cmd,
+                ErrorCode::DeliveryUnknown,
+                "prompt was accepted by the instance but its delivery state could not be persisted",
+                false,
+            )
+            .await;
             return;
         }
-        // 4. 投影 user entry（L1+L2 后，§6.4 提交点纪律；服务端单写，§6.5）。
-        let entry_id = format!("{turn_id}:user");
-        let created_at = Utc::now().to_rfc3339();
-        match self
-            .inner
-            .doc
-            .submit_command(
-                chat_id,
-                DocCommand::RegisterUserEntry {
-                    turn_id: turn_id.to_string(),
-                    entry_id: entry_id.clone(),
-                    text: payload.message.clone(),
-                    author_user_id: None,
-                    created_at: created_at.clone(),
-                },
-            )
-            .await
-        {
-            SubmitResult::Rejected(SubmitError::ChatNotFound) => {
-                self.send_error(cmd, ErrorCode::ChatNotFound, "chat not found", false)
-                    .await;
-                return;
-            }
-            SubmitResult::PersistFailed => {
-                warn!(chat_id, "user entry projection persist failed (degraded)");
-            }
-            _ => {}
-        };
         self.inner
             .chats
             .set_active_turn(chat_id, &turn_id.to_string())
@@ -3717,12 +4306,23 @@ impl CommandCoordinator {
             Ok(response) => {
                 let is_error = response.get("error").is_some();
                 if is_error {
-                    self.fail_terminal(
+                    let _ = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_delivery_unknown(command_id);
+                    self.set_prompt_delivery_for_command(
                         chat_id,
                         command_id,
+                        "delivery_unknown",
+                        Some("DELIVERY_UNKNOWN"),
+                    )
+                    .await;
+                    self.send_error(
                         cmd,
-                        ErrorCode::AgentUnavailable,
-                        "agent rejected prompt (L3 error)",
+                        ErrorCode::DeliveryUnknown,
+                        "ACP returned an error after accepting the prompt; replay is blocked",
+                        false,
                     )
                     .await;
                     // 活动 turn 清理：L3 error 也是 turn 的终结（§7.2 终态
@@ -3737,6 +4337,26 @@ impl CommandCoordinator {
                     .mark_delivery_confirmed(command_id)
                 {
                     warn!(chat_id, error = ?e, "mark_delivery_confirmed failed");
+                    let _ = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_delivery_unknown(command_id);
+                    self.set_prompt_delivery_for_command(
+                        chat_id,
+                        command_id,
+                        "delivery_unknown",
+                        Some("DELIVERY_UNKNOWN"),
+                    )
+                    .await;
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    self.send_error(
+                        cmd,
+                        ErrorCode::DeliveryUnknown,
+                        "prompt completed but its delivery confirmation could not be persisted",
+                        false,
+                    )
+                    .await;
                     return;
                 }
                 // 终态注入（§7.2 宿主驱动 turn 模型；照抄 @fenix/chat-channel
@@ -3755,8 +4375,50 @@ impl CommandCoordinator {
                     "failed" | "error" => TurnStatus::Failed,
                     _ => TurnStatus::Completed,
                 };
-                self.inject_turn_terminal(chat_id, &turn_id.to_string(), terminal_status)
+                if !self
+                    .persist_turn_terminal(
+                        chat_id,
+                        &turn_id.to_string(),
+                        terminal_status,
+                        command_id,
+                        cmd,
+                    )
+                    .await
+                {
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    return;
+                }
+                let completed_at = Utc::now().to_rfc3339();
+                if matches!(
+                    self.inner
+                        .doc
+                        .submit_command(
+                            chat_id,
+                            DocCommand::SetPromptEntryDelivery {
+                                entry_id: entry_id.clone(),
+                                delivery_state: "completed".to_string(),
+                                delivery_error_code: None,
+                                completed_at: Some(completed_at),
+                            },
+                        )
+                        .await,
+                    SubmitResult::PersistFailed | SubmitResult::Rejected(_)
+                ) {
+                    let _ = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_delivery_unknown(command_id);
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    self.send_error(
+                        cmd,
+                        ErrorCode::DeliveryUnknown,
+                        "prompt completed but durable projection is uncertain",
+                        false,
+                    )
                     .await;
+                    return;
+                }
                 if let Err(e) = store
                     .outbox()
                     .lock()
@@ -3764,10 +4426,36 @@ impl CommandCoordinator {
                     .mark_projection_committed(command_id)
                 {
                     warn!(chat_id, error = ?e, "mark_projection_committed failed");
+                    let _ = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_delivery_unknown(command_id);
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    self.send_error(
+                        cmd,
+                        ErrorCode::DeliveryUnknown,
+                        "prompt projection exists but its commit barrier is uncertain",
+                        false,
+                    )
+                    .await;
                     return;
                 }
                 if let Err(e) = store.outbox().lock().await.mark_completed(command_id) {
                     warn!(chat_id, error = ?e, "mark_completed failed");
+                    let _ = store
+                        .outbox()
+                        .lock()
+                        .await
+                        .mark_delivery_unknown(command_id);
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    self.send_error(
+                        cmd,
+                        ErrorCode::DeliveryUnknown,
+                        "prompt projection is durable but command completion is uncertain",
+                        false,
+                    )
+                    .await;
                     return;
                 }
                 self.inner.chats.clear_active_turn(chat_id).await;
@@ -3793,14 +4481,26 @@ impl CommandCoordinator {
                     .mark_delivery_unknown(command_id)
                 {
                     warn!(chat_id, error = ?e, "mark_delivery_unknown failed");
-                    return;
                 }
                 // 活动 turn 清理：delivery_unknown 时 turn 无法终结（§7.2），
                 // 但不得阻塞后续 load——表项清除，投影保留（前端可见 pending）。
                 self.inner.chats.clear_active_turn(chat_id).await;
+                let _ = self
+                    .inner
+                    .doc
+                    .submit_command(
+                        chat_id,
+                        DocCommand::SetPromptEntryDelivery {
+                            entry_id,
+                            delivery_state: "delivery_unknown".to_string(),
+                            delivery_error_code: Some("DELIVERY_UNKNOWN".to_string()),
+                            completed_at: None,
+                        },
+                    )
+                    .await;
                 self.send_error(
                     cmd,
-                    ErrorCode::AgentUnavailable,
+                    ErrorCode::DeliveryUnknown,
                     "delivery unknown; automatic retry not permitted (path B)",
                     false,
                 )
@@ -4291,8 +4991,19 @@ impl CommandCoordinator {
                 return;
             }
             if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
-                self.inject_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
-                    .await;
+                if !self
+                    .persist_turn_terminal(
+                        chat_id,
+                        &turn_id,
+                        TurnStatus::Cancelled,
+                        command_id,
+                        cmd,
+                    )
+                    .await
+                {
+                    self.inner.chats.clear_active_turn(chat_id).await;
+                    return;
+                }
                 // 活动 turn 清理：Cancelled 已注入（终态），表项须随终态
                 // 清除（§7.2）——否则滞留阻塞后续 load。
                 self.inner.chats.clear_active_turn(chat_id).await;
@@ -4368,14 +5079,19 @@ impl CommandCoordinator {
                 // 视图/登记不得永久阻塞）。
                 if matches!(cmd.action, ActionEnvelope::Cancel { .. }) {
                     if let Some(turn_id) = self.inner.chats.active_turn(chat_id).await {
-                        self.inject_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
+                        // The command verdict is already delivery_unknown. The
+                        // terminal view below is cleanup evidence only; it must
+                        // not attempt a second outbox transition or emit a
+                        // second action_error.
+                        let _ = self
+                            .submit_turn_terminal(chat_id, &turn_id, TurnStatus::Cancelled)
                             .await;
                         self.inner.chats.clear_active_turn(chat_id).await;
                     }
                 }
                 self.send_error(
                     cmd,
-                    ErrorCode::AgentUnavailable,
+                    ErrorCode::DeliveryUnknown,
                     "delivery unknown; automatic retry not permitted (path B)",
                     false,
                 )
@@ -4389,9 +5105,69 @@ impl CommandCoordinator {
     /// 语义同聚合器 TurnTerminal 事件分支：active_turn 匹配且非终态 → 终态
     /// 迁移 + assistant entry 迁移。真实 peri 无独立终态通知——prompt L3
     /// 响应 stopReason / cancel 发送成功即触发。
-    async fn inject_turn_terminal(&self, chat_id: &str, turn_id: &str, status: TurnStatus) {
-        let _ = self
-            .inner
+    async fn persist_turn_terminal(
+        &self,
+        chat_id: &str,
+        turn_id: &str,
+        status: TurnStatus,
+        command_id: uuid::Uuid,
+        cmd: &ExecCmd,
+    ) -> bool {
+        match self.submit_turn_terminal(chat_id, turn_id, status).await {
+            SubmitResult::Applied(result)
+                if result.applied || result.reason == Some(ApplyReason::DuplicateIdempotent) =>
+            {
+                true
+            }
+            SubmitResult::Applied(_) | SubmitResult::Rejected(_) | SubmitResult::PersistFailed => {
+                let Some(store) = self
+                    .inner
+                    .store
+                    .chat(chat_uuid(chat_id).unwrap_or_default())
+                else {
+                    self.send_error(
+                        cmd,
+                        ErrorCode::DeliveryUnknown,
+                        "prompt executed but its terminal projection could not be recorded",
+                        false,
+                    )
+                    .await;
+                    return false;
+                };
+                if let Err(err) = store
+                    .outbox()
+                    .lock()
+                    .await
+                    .mark_delivery_unknown(command_id)
+                {
+                    warn!(chat_id, error = ?err, "terminal projection failure could not be recorded");
+                }
+                self.set_prompt_delivery_for_command(
+                    chat_id,
+                    command_id,
+                    "delivery_unknown",
+                    Some("DELIVERY_UNKNOWN"),
+                )
+                .await;
+                self.send_error(
+                    cmd,
+                    ErrorCode::DeliveryUnknown,
+                    "prompt executed but its terminal projection was not durably committed",
+                    false,
+                )
+                .await;
+                false
+            }
+        }
+    }
+
+    async fn submit_turn_terminal(
+        &self,
+        chat_id: &str,
+        turn_id: &str,
+        status: TurnStatus,
+    ) -> SubmitResult {
+        self.inner
             .doc
             .submit_command(
                 chat_id,
@@ -4401,7 +5177,7 @@ impl CommandCoordinator {
                     completed_at: Utc::now().to_rfc3339(),
                 },
             )
-            .await;
+            .await
     }
 
     /// close 执行（§4.3「关闭并 kill 对应 ACP 进程」；offline 语义 §7.6）。
@@ -4834,7 +5610,7 @@ impl CommandCoordinator {
                             .mark_delivery_unknown(command_id);
                         self.send_error(
                             cmd,
-                            ErrorCode::AgentUnavailable,
+                            ErrorCode::DeliveryUnknown,
                             "delivery unknown; automatic retry not permitted (path B)",
                             false,
                         )
@@ -4887,7 +5663,35 @@ impl CommandCoordinator {
         if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
             warn!(chat_id, error = ?e, "mark_failed failed");
         }
+        let status = store
+            .outbox_get(command_id)
+            .await
+            .map(|record| record.status);
+        if status == Some(OutboxStatus::DeliveryUnknown) {
+            self.set_prompt_delivery_for_command(
+                chat_id,
+                command_id,
+                "delivery_unknown",
+                Some("DELIVERY_UNKNOWN"),
+            )
+            .await;
+            self.send_error(
+                cmd,
+                ErrorCode::DeliveryUnknown,
+                "delivery may have occurred; automatic retry is blocked",
+                false,
+            )
+            .await;
+            return;
+        }
         let _ = store.outbox().lock().await.clear_for_retry(command_id);
+        self.set_prompt_delivery_for_command(
+            chat_id,
+            command_id,
+            "failed_not_delivered",
+            Some(error_code_name(code)),
+        )
+        .await;
         let retryable = code.default_retryable();
         self.send_error(cmd, code, message, retryable).await;
     }
@@ -4914,6 +5718,27 @@ impl CommandCoordinator {
         if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
             warn!(chat_id, error = ?e, "mark recoverable failure failed");
         }
+        if store
+            .outbox_get(command_id)
+            .await
+            .is_some_and(|record| record.status == OutboxStatus::DeliveryUnknown)
+        {
+            self.set_prompt_delivery_for_command(
+                chat_id,
+                command_id,
+                "delivery_unknown",
+                Some("DELIVERY_UNKNOWN"),
+            )
+            .await;
+            self.send_error(
+                cmd,
+                ErrorCode::DeliveryUnknown,
+                "delivery may have occurred; automatic retry is blocked",
+                false,
+            )
+            .await;
+            return;
+        }
         self.send_error(cmd, code, message, code.default_retryable())
             .await;
     }
@@ -4939,7 +5764,96 @@ impl CommandCoordinator {
         if let Err(e) = store.outbox().lock().await.mark_failed(command_id, last) {
             warn!(chat_id, error = ?e, "mark_failed failed");
         }
-        self.send_error(cmd, code, message, false).await;
+        let delivery_unknown = store
+            .outbox_get(command_id)
+            .await
+            .is_some_and(|record| record.status == OutboxStatus::DeliveryUnknown);
+        if delivery_unknown {
+            self.set_prompt_delivery_for_command(
+                chat_id,
+                command_id,
+                "delivery_unknown",
+                Some("DELIVERY_UNKNOWN"),
+            )
+            .await;
+            self.send_error(
+                cmd,
+                ErrorCode::DeliveryUnknown,
+                "delivery may have occurred; automatic retry is blocked",
+                false,
+            )
+            .await;
+        } else {
+            self.set_prompt_delivery_for_command(
+                chat_id,
+                command_id,
+                "failed_not_delivered",
+                Some(error_code_name(code)),
+            )
+            .await;
+            self.send_error(cmd, code, message, false).await;
+        }
+    }
+
+    async fn set_prompt_delivery_for_command(
+        &self,
+        chat_id: &str,
+        command_id: Uuid,
+        delivery_state: &str,
+        delivery_error_code: Option<&str>,
+    ) {
+        let Some(store) = self
+            .inner
+            .store
+            .chat(chat_uuid(chat_id).unwrap_or_default())
+        else {
+            return;
+        };
+        let Some(record) = store.outbox_get(command_id).await else {
+            return;
+        };
+        if record.command_type != CommandType::Prompt {
+            return;
+        }
+        let Some(turn_id) = record.turn_id else {
+            return;
+        };
+        let result = self
+            .inner
+            .doc
+            .submit_command(
+                chat_id,
+                DocCommand::SetPromptEntryDelivery {
+                    entry_id: format!("{turn_id}:user"),
+                    delivery_state: delivery_state.to_string(),
+                    delivery_error_code: delivery_error_code.map(str::to_string),
+                    completed_at: None,
+                },
+            )
+            .await;
+        if matches!(result, SubmitResult::PersistFailed) {
+            warn!(chat_id, %command_id, "prompt delivery projection persist failed");
+        }
+    }
+
+    async fn publish_terminal_watchers(
+        &self,
+        command_id: Uuid,
+        msg: OutboundMsg,
+        original: &mpsc::Sender<OutboundMsg>,
+    ) {
+        let watchers = self
+            .inner
+            .terminal_watchers
+            .lock()
+            .await
+            .remove(&command_id)
+            .unwrap_or_default();
+        for watcher in watchers {
+            if !watcher.same_channel(original) && !watcher.is_closed() {
+                let _ = watcher.send(msg.clone()).await;
+            }
+        }
     }
 
     async fn send_error(&self, cmd: &ExecCmd, code: ErrorCode, message: &str, retryable: bool) {
@@ -4952,29 +5866,56 @@ impl CommandCoordinator {
             std::time::Duration::ZERO,
             None,
         );
-        let _ = cmd
-            .tx
-            .send(OutboundMsg::Frame(Frame::ActionError(action_error(
-                command_id, code, message, retryable,
-            ))))
-            .await;
+        let error = action_error(command_id.clone(), code, message, retryable);
+        if code == ErrorCode::DeliveryUnknown {
+            if let Ok(id) = Uuid::parse_str(&command_id) {
+                let durable = if let Some(store) = self
+                    .inner
+                    .store
+                    .chat(chat_uuid(&cmd.chat_id).unwrap_or_default())
+                {
+                    store
+                        .outbox_get(id)
+                        .await
+                        .is_some_and(|record| record.status == OutboxStatus::DeliveryUnknown)
+                } else {
+                    false
+                };
+                if !durable {
+                    let mut failures = self.inner.terminal_failures.lock().await;
+                    if failures.len() >= 1_024 && !failures.contains_key(&id) {
+                        self.inner
+                            .terminal_failure_overflow
+                            .store(true, Ordering::Release);
+                    } else {
+                        failures.insert(id, error.clone());
+                    }
+                }
+            }
+        }
+        let outbound = OutboundMsg::Frame(Frame::ActionError(error));
+        let _ = cmd.tx.send(outbound.clone()).await;
+        if let Ok(id) = Uuid::parse_str(&command_id) {
+            self.publish_terminal_watchers(id, outbound, &cmd.tx).await;
+        }
     }
 
     async fn send_committed(&self, cmd: &ExecCmd, turn_id: Option<&str>, chat_id: Option<&str>) {
         let command_id = extract_command_id(&cmd.action).unwrap_or_default();
-        let _ = cmd
-            .tx
-            .send(OutboundMsg::Frame(Frame::ActionAck(ActionAck {
-                command_id,
-                status: AckStatus::Committed,
-                turn_id: turn_id.map(str::to_string),
-                chat_id: chat_id.map(str::to_string),
-                project_id: None,
-                session_id: None,
-                acp_session_id: None,
-                committed_projection_version: None,
-            })))
-            .await;
+        let outbound = OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+            command_id: command_id.clone(),
+            status: AckStatus::Committed,
+            turn_id: turn_id.map(str::to_string),
+            chat_id: chat_id.map(str::to_string),
+            project_id: None,
+            session_id: None,
+            acp_session_id: None,
+            committed_projection_version: None,
+        }));
+        let _ = cmd.tx.send(outbound.clone()).await;
+        if let Ok(id) = Uuid::parse_str(&command_id) {
+            self.publish_terminal_watchers(id, outbound, &cmd.tx).await;
+        }
     }
 
     // ── session/list 轮询（§6.3：10s 全量同步投影，服务端侧）─────────────
@@ -5087,6 +6028,193 @@ impl CommandCoordinator {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct PromptProjectionEvidence {
+    projected: bool,
+    terminal: bool,
+    entry_id: Option<String>,
+    turn_id: Option<Uuid>,
+    delivery_schema_version: Option<i64>,
+    delivery_state: Option<String>,
+    payload_fingerprint: Option<String>,
+    conflicted: bool,
+}
+
+fn exact_prompt_terminal_evidence(
+    record: &crate::persist::outbox::OutboxRecord,
+    projected: &PromptProjectionEvidence,
+) -> bool {
+    projected.projected
+        && !projected.conflicted
+        && projected.terminal
+        && projected.delivery_schema_version == Some(2)
+        && projected.turn_id == record.turn_id
+        && projected.payload_fingerprint.is_some()
+        && projected.payload_fingerprint.as_deref() == record.payload_fingerprint.as_deref()
+}
+
+fn is_v2_pending_orphan(projected: &PromptProjectionEvidence) -> bool {
+    projected.delivery_schema_version == Some(2)
+        && !projected.conflicted
+        && projected.payload_fingerprint.is_some()
+        && projected.delivery_state.as_deref() == Some("pending")
+}
+
+fn prompt_projection_evidence(
+    chat_snapshot: Option<(Vec<u8>, u32)>,
+    session_snapshot: Option<(Vec<u8>, u32)>,
+) -> Option<(HashMap<Uuid, PromptProjectionEvidence>, bool)> {
+    let mut evidence = HashMap::<Uuid, PromptProjectionEvidence>::new();
+    let (chat_update, _) = chat_snapshot?;
+    let chat = yrs::Doc::new();
+    let update = yrs::Update::decode_v1(&chat_update).ok()?;
+    chat.transact_mut().apply_update(update).ok()?;
+    let txn = chat.transact();
+    let root = txn.get_map(crate::state::factory::ROOT)?;
+    let entries = root
+        .get(&txn, "entries")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())?;
+    let mut turns = HashMap::<String, Uuid>::new();
+    let mut terminal_turns = HashSet::<String>::new();
+    for (entry_id, value) in entries.iter(&txn) {
+        let Ok(entry) = value.cast::<yrs::MapRef>() else {
+            continue;
+        };
+        let role = entry
+            .get(&txn, "role")
+            .and_then(|value| value.cast::<String>().ok());
+        let turn_id = entry
+            .get(&txn, "turn_id")
+            .and_then(|value| value.cast::<String>().ok());
+        if role.as_deref() == Some("assistant") {
+            let status = entry
+                .get(&txn, "status")
+                .and_then(|value| value.cast::<String>().ok());
+            if status
+                .as_deref()
+                .is_some_and(|status| matches!(status, "completed" | "error" | "cancelled"))
+            {
+                if let Some(turn_id) = turn_id {
+                    terminal_turns.insert(turn_id);
+                }
+            }
+            continue;
+        }
+        if role.as_deref() != Some("user") {
+            continue;
+        }
+        let Some(command_id) = entry
+            .get(&txn, "source_command_id")
+            .and_then(|value| value.cast::<String>().ok())
+            .and_then(|value| Uuid::parse_str(&value).ok())
+        else {
+            continue;
+        };
+        let candidate_entry_id = entry_id.to_string();
+        let candidate_turn_id = turn_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let candidate_schema = entry
+            .get(&txn, "delivery_schema_version")
+            .and_then(|value| value.cast::<i64>().ok());
+        let candidate_state = entry
+            .get(&txn, "delivery_state")
+            .and_then(|value| value.cast::<String>().ok());
+        let candidate_fingerprint = entry
+            .get(&txn, "payload_fingerprint")
+            .and_then(|value| value.cast::<String>().ok());
+        let item = evidence.entry(command_id).or_default();
+        if item.projected
+            && (item.entry_id.as_deref() != Some(candidate_entry_id.as_str())
+                || item.turn_id != candidate_turn_id
+                || item.payload_fingerprint != candidate_fingerprint)
+        {
+            item.conflicted = true;
+        }
+        item.projected = true;
+        item.entry_id = Some(candidate_entry_id);
+        item.turn_id = candidate_turn_id;
+        item.delivery_schema_version = candidate_schema;
+        item.delivery_state = candidate_state;
+        item.payload_fingerprint = candidate_fingerprint;
+        if let Some(turn_id) = turn_id {
+            turns.insert(turn_id, command_id);
+        }
+    }
+    for turn in terminal_turns {
+        if let Some(command_id) = turns.get(&turn).copied() {
+            evidence.entry(command_id).or_default().terminal = true;
+        }
+    }
+    drop(txn);
+
+    let mut complete = session_snapshot.is_some();
+    if let Some((session_update, _)) = session_snapshot {
+        let session = yrs::Doc::new();
+        if let Ok(update) = yrs::Update::decode_v1(&session_update) {
+            if session.transact_mut().apply_update(update).is_ok() {
+                let txn = session.transact();
+                if let Some(map) = txn
+                    .get_map(crate::state::factory::ROOT)
+                    .and_then(|root| root.get(&txn, "session"))
+                    .and_then(|value| value.cast::<yrs::MapRef>().ok())
+                {
+                    let turn_id = map
+                        .get(&txn, "active_turn_id")
+                        .and_then(|value| value.cast::<String>().ok());
+                    let status = map
+                        .get(&txn, "active_turn_status")
+                        .and_then(|value| value.cast::<String>().ok());
+                    if status.as_deref().is_some_and(|status| {
+                        matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+                    }) {
+                        if let Some(command_id) = turn_id.and_then(|turn| turns.get(&turn).copied())
+                        {
+                            evidence.entry(command_id).or_default().terminal = true;
+                        }
+                    }
+                } else {
+                    complete = false;
+                }
+            } else {
+                complete = false;
+            }
+        } else {
+            complete = false;
+        }
+    }
+    Some((evidence, complete))
+}
+
+fn normalize_prompt_status(
+    record: crate::persist::outbox::OutboxRecord,
+    projection: Option<&PromptProjectionEvidence>,
+) -> PromptStatusItem {
+    let projection = projection.cloned().unwrap_or_default();
+    let status = match record.status {
+        OutboxStatus::DeliveryUnknown => PromptDeliveryStatus::DeliveryUnknown,
+        OutboxStatus::Completed if projection.projected && projection.terminal => {
+            PromptDeliveryStatus::Completed
+        }
+        OutboxStatus::Failed => PromptDeliveryStatus::Failed,
+        _ if projection.projected => PromptDeliveryStatus::Projected,
+        _ => PromptDeliveryStatus::DeliveryUnknown,
+    };
+    PromptStatusItem {
+        command_id: record.command_id.to_string(),
+        turn_id: record.turn_id.map(|turn| turn.to_string()),
+        status,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+        error_code: matches!(
+            status,
+            PromptDeliveryStatus::Failed | PromptDeliveryStatus::DeliveryUnknown
+        )
+        .then(|| record.last_error.map(|error| error.code))
+        .flatten(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -5130,6 +6258,7 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionRestore { command_id, .. }
         | ActionEnvelope::PersistedSessionImport { command_id, .. }
         | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
         | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
@@ -5143,6 +6272,49 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::WorkspaceRemove { command_id, .. }
         | ActionEnvelope::SessionList { command_id, .. } => Some(command_id.clone()),
     }
+}
+
+fn prompt_payload_fingerprint(payload: &PromptChatPayload) -> Result<String, MetadataError> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CanonicalPromptPayload<'a> {
+        action_type: &'static str,
+        chat_id: &'a str,
+        message: &'a str,
+        effort: Option<&'a str>,
+    }
+    payload_hash(&CanonicalPromptPayload {
+        action_type: "chat/prompt",
+        chat_id: &payload.chat_id,
+        message: &payload.message,
+        effort: payload.effort.as_deref(),
+    })
+}
+
+/// Caller holds the watcher mutex across the durable terminal re-read and
+/// this insertion. Terminal publication acquires the same mutex, making
+/// attach-vs-publish a single ordering decision rather than a double-send
+/// race.
+fn attach_terminal_watcher_locked(
+    watchers: &mut HashMap<Uuid, Vec<mpsc::Sender<OutboundMsg>>>,
+    command_id: Uuid,
+    tx: mpsc::Sender<OutboundMsg>,
+) -> bool {
+    const MAX_PER_COMMAND: usize = 8;
+    const MAX_GLOBAL: usize = 256;
+    watchers
+        .values_mut()
+        .for_each(|senders| senders.retain(|sender| !sender.is_closed()));
+    let total = watchers.values().map(Vec::len).sum::<usize>();
+    let entry = watchers.entry(command_id).or_default();
+    if entry.iter().any(|sender| sender.same_channel(&tx)) {
+        return true;
+    }
+    if entry.len() >= MAX_PER_COMMAND || total >= MAX_GLOBAL {
+        return false;
+    }
+    entry.push(tx);
+    true
 }
 
 fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
@@ -5165,6 +6337,7 @@ fn extract_chat_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionRestore { .. } => None,
         ActionEnvelope::PersistedSessionImport { .. } => None,
         ActionEnvelope::PersistedSessionDiscover { .. } => None,
+        ActionEnvelope::PersistedSessionPromptStatus { .. } => None,
         ActionEnvelope::SubscribeEvents { .. } | ActionEnvelope::UnsubscribeEvents { .. } => None,
         // workspace 管理命令 / session/list 按需查询：submit 层直接执行
         // （不解析 chat_id）。
@@ -5188,7 +6361,51 @@ fn dedup_verdict(rec: &crate::persist::outbox::OutboxRecord) -> DedupVerdict {
                 DedupVerdict::RedeliverUnknown
             }
         }
-        _ => DedupVerdict::Duplicate,
+        OutboxStatus::Received
+        | OutboxStatus::Accepted
+        | OutboxStatus::IntentDurable
+        | OutboxStatus::Dispatched
+        | OutboxStatus::DeliveryConfirmed
+        | OutboxStatus::ProjectionCommitted => DedupVerdict::InProgress,
+    }
+}
+
+fn terminal_replay(
+    command_id: String,
+    rec: &crate::persist::outbox::OutboxRecord,
+    chat_id: Option<String>,
+) -> Option<SubmitAck> {
+    match rec.status {
+        OutboxStatus::Completed => Some(SubmitAck::Duplicate(ActionAck {
+            command_id,
+            status: AckStatus::Duplicate,
+            turn_id: rec.turn_id.map(|turn| turn.to_string()),
+            chat_id,
+            project_id: None,
+            session_id: None,
+            acp_session_id: None,
+            committed_projection_version: None,
+        })),
+        OutboxStatus::Failed => {
+            let error = rec
+                .last_error
+                .clone()
+                .unwrap_or_else(|| LastError::from_error_code(ErrorCode::InvalidState));
+            Some(SubmitAck::Failed(ActionError {
+                command_id,
+                code: error_code_from_str(&error.code),
+                message: "command previously failed; retry not permitted".to_string(),
+                retryable: error.retryable,
+                retry_after_ms: None,
+            }))
+        }
+        OutboxStatus::DeliveryUnknown => Some(SubmitAck::Failed(action_error(
+            command_id,
+            ErrorCode::DeliveryUnknown,
+            "delivery outcome is unknown; retry is blocked",
+            false,
+        ))),
+        _ => None,
     }
 }
 
@@ -5216,6 +6433,7 @@ enum DedupVerdict {
     Duplicate,
     RedeliverFailed,
     RedeliverUnknown,
+    InProgress,
     Proceed,
 }
 
@@ -5247,8 +6465,26 @@ fn error_code_from_str(s: &str) -> ErrorCode {
         "INVALID_STATE" => ErrorCode::InvalidState,
         "RATE_LIMITED" => ErrorCode::RateLimited,
         "AGENT_UNAVAILABLE" => ErrorCode::AgentUnavailable,
+        "DELIVERY_UNKNOWN" => ErrorCode::DeliveryUnknown,
         "PAYLOAD_TOO_LARGE" => ErrorCode::PayloadTooLarge,
         _ => ErrorCode::InvalidState,
+    }
+}
+
+fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::Unauthenticated => "UNAUTHENTICATED",
+        ErrorCode::Forbidden => "FORBIDDEN",
+        ErrorCode::ChatNotFound => "CHAT_NOT_FOUND",
+        ErrorCode::InstanceOffline => "INSTANCE_OFFLINE",
+        ErrorCode::VersionConflict => "VERSION_CONFLICT",
+        ErrorCode::InvalidState => "INVALID_STATE",
+        ErrorCode::RateLimited => "RATE_LIMITED",
+        ErrorCode::AgentUnavailable => "AGENT_UNAVAILABLE",
+        ErrorCode::DeliveryUnknown => "DELIVERY_UNKNOWN",
+        ErrorCode::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+        ErrorCode::UnsupportedFrame => "UNSUPPORTED_FRAME",
+        _ => "INVALID_STATE",
     }
 }
 

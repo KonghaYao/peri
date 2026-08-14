@@ -8,16 +8,18 @@
 //! 2026-08-07 主管修复 P1-1（writer 消费后名额释放）：「队列满」测试改为
 //! 先占满名额（try_reserve ×64 不提交）再验证第 65 次 RATE_LIMITED。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use tokio::sync::mpsc;
 use yrs::updates::decoder::Decode;
 use yrs::{Map, ReadTxn, Transact};
 
 use acp_hub_proto::ack::{AckStatus, ActionError, ErrorCode};
 use acp_hub_proto::action::{
-    ActionEnvelope, CreateChatPayload, PersistedSessionImportPayload,
+    ActionEnvelope, CreateChatPayload, PersistedSessionImportPayload, PersistedSessionOpenPayload,
     PersistedSessionRenamePayload, ProjectArchivePayload, ProjectCreatePayload, PromptChatPayload,
     ResolvePermissionPayload,
 };
@@ -32,8 +34,11 @@ use crate::control::StoreSink;
 use crate::control::{ChatRegistry, ChatState, ProjectService};
 use crate::control::{InstanceAck, InstanceConn, InstanceRegistry};
 use crate::persist::metadata::MetadataStore;
+use crate::persist::outbox::{
+    CommandType, LastError, NewOutboxRecord, OutboxStatus, RetryableClass,
+};
 use crate::persist::{PersistConfig, Store};
-use crate::state::doc_manager::{BatchConfig, DocManager};
+use crate::state::doc_manager::{BatchConfig, DocManager, PersistError, UpdateSink};
 
 /// 测试用固定 UUID session id（coordinator 要求 UUID 形态，§4.3）。
 const S1: &str = "00000000-0000-0000-0000-000000000001";
@@ -53,10 +58,31 @@ struct Env {
     metadata: Arc<MetadataStore>,
     /// 落盘 sink（session doc 镜像快照断言用）。
     sink: Arc<StoreSink>,
+    /// 精确故障注入：默认透传 StoreSink，置位后拒绝新的 Doc update。
+    sink_fail: Arc<AtomicBool>,
     /// instance 连接发送侧（测试读下行帧）。
     instance_rx: mpsc::Receiver<OutboundMsg>,
     /// instance 连接发送句柄（on_disconnect 句柄比对用）。
     instance_tx: mpsc::Sender<OutboundMsg>,
+}
+
+struct FaultSink {
+    inner: Arc<StoreSink>,
+    fail: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl UpdateSink for FaultSink {
+    async fn persist_update(
+        &self,
+        doc: acp_hub_proto::conn::DocId,
+        update: Vec<u8>,
+    ) -> Result<(), PersistError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(PersistError("injected persistence failure".into()));
+        }
+        self.inner.persist_update(doc, update).await
+    }
 }
 
 fn ctx(name: &str) -> ConnectionCtx {
@@ -79,7 +105,14 @@ async fn env() -> Env {
     let store = Arc::new(Store::open(&persist_cfg).unwrap());
     store.recover().await;
     let sink = Arc::new(StoreSink::new(store.clone()).await.unwrap());
-    let doc = Arc::new(DocManager::new(BatchConfig::default(), sink.clone()));
+    let sink_fail = Arc::new(AtomicBool::new(false));
+    let doc = Arc::new(DocManager::new(
+        BatchConfig::default(),
+        Arc::new(FaultSink {
+            inner: sink.clone(),
+            fail: sink_fail.clone(),
+        }),
+    ));
     let registry = doc.registry();
     let chats = ChatRegistry::new(registry);
     let instance = Arc::new(InstanceRegistry::new(
@@ -110,6 +143,7 @@ async fn env() -> Env {
     coordinator
         .install_project_service(ProjectService::new(metadata.clone(), doc.registry()))
         .await;
+    coordinator.install_history_sink(sink.clone()).await;
     // instance 上线（hello）。
     let (instance_tx, instance_rx) = mpsc::channel(64);
     instance
@@ -140,6 +174,7 @@ async fn env() -> Env {
         coordinator,
         metadata,
         sink,
+        sink_fail,
         instance_rx,
         instance_tx,
     }
@@ -647,7 +682,7 @@ async fn first_dispatched_prompt_seeds_the_hub_catalog_title() {
 }
 
 #[tokio::test]
-async fn dedup_duplicate_ack() {
+async fn in_flight_prompt_replay_is_accepted_observer_not_false_duplicate() {
     let env = env().await;
     bound_session(&env, S1, "acp-1").await;
     let (tx, rx) = mpsc::channel(16);
@@ -658,20 +693,83 @@ async fn dedup_duplicate_ack() {
         .submit(&ctx("c"), prompt_action(&cid, S1), tx.clone())
         .await;
     assert!(matches!(first, SubmitAck::Accepted { .. }), "{first:?}");
-    // 二次提交同 commandId → duplicate（不重复调用 Agent）。
+    // 二次提交同 commandId attaches to the one in-flight execution. It is
+    // nonterminal Accepted, never a false committed/duplicate claim.
     let second = env
         .coordinator
         .submit(&ctx("c"), prompt_action(&cid, S1), tx.clone())
         .await;
-    match second {
-        SubmitAck::Duplicate(ack) => {
-            assert_eq!(ack.command_id, cid);
-            assert!(ack.turn_id.is_some(), "duplicate 必带原 turnId");
-        }
-        other => panic!("expected duplicate, got {other:?}"),
-    }
+    assert!(matches!(
+        second,
+        SubmitAck::Accepted { ref command_id } if command_id == &cid
+    ));
     drop(tx);
     drop(rx);
+}
+
+#[tokio::test]
+async fn in_memory_unknown_verdict_prevents_observer_hang_when_terminal_append_failed() {
+    let env = env().await;
+    bound_session(&env, S1, "acp-1").await;
+    let cid = uuid::Uuid::new_v4();
+    let action = prompt_action(&cid.to_string(), S1);
+    let store = env.store.chat(uuid::Uuid::parse_str(S1).unwrap()).unwrap();
+    store
+        .outbox()
+        .lock()
+        .await
+        .insert(NewOutboxRecord {
+            command_id: cid,
+            chat_id: uuid::Uuid::parse_str(S1).unwrap(),
+            command_type: CommandType::Prompt,
+            turn_id: Some(uuid::Uuid::new_v4()),
+            retryable_class: RetryableClass::NoAutoRedeliver,
+        })
+        .unwrap();
+    store.outbox().lock().await.mark_accepted(cid).unwrap();
+    let fingerprint = match &action {
+        ActionEnvelope::Prompt { payload, .. } => {
+            super::prompt_payload_fingerprint(payload).unwrap()
+        }
+        _ => unreachable!(),
+    };
+    store
+        .outbox()
+        .lock()
+        .await
+        .set_prompt_payload_fingerprint(cid, fingerprint)
+        .unwrap();
+
+    let (first_tx, mut first_rx) = mpsc::channel(4);
+    let cmd = super::ExecCmd {
+        ctx: ctx("original"),
+        chat_id: S1.into(),
+        action: action.clone(),
+        tx: first_tx,
+    };
+    env.coordinator
+        .send_error(
+            &cmd,
+            ErrorCode::DeliveryUnknown,
+            "durable terminal append failed",
+            false,
+        )
+        .await;
+    assert!(matches!(
+        first_rx.recv().await,
+        Some(OutboundMsg::Frame(Frame::ActionError(ref error)))
+            if error.code == ErrorCode::DeliveryUnknown
+    ));
+
+    let (retry_tx, _retry_rx) = mpsc::channel(4);
+    let replay = env
+        .coordinator
+        .submit(&ctx("retry"), action, retry_tx)
+        .await;
+    assert!(matches!(
+        replay,
+        SubmitAck::Failed(ref error) if error.code == ErrorCode::DeliveryUnknown
+    ));
 }
 
 #[tokio::test]
@@ -871,6 +969,7 @@ async fn resolve_duplicate_and_unknown() {
                 entry_id: "t1:user".into(),
                 text: "hi".into(),
                 author_user_id: None,
+                source_command_id: "permission-command".into(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -1042,6 +1141,7 @@ async fn setup_active_turn(env: &Env, sid: &str) {
                 entry_id: "t1:user".into(),
                 text: "hi".into(),
                 author_user_id: None,
+                source_command_id: "active-turn-command".into(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -1357,7 +1457,7 @@ async fn persisted_permission_recovery_without_runtime_fails_closed() {
         .await
     {
         SubmitAck::Failed(error) => {
-            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::DeliveryUnknown);
             assert!(!error.retryable);
             assert!(error.message.contains("delivery result is unknown"));
         }
@@ -1377,7 +1477,7 @@ async fn persisted_permission_recovery_without_runtime_fails_closed() {
     env.chats.transition(S2, ChatState::Ended).await.unwrap();
     match env.coordinator.submit(&ctx("c"), action, tx).await {
         SubmitAck::Failed(error) => {
-            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert_eq!(error.code, acp_hub_proto::ack::ErrorCode::DeliveryUnknown);
             assert!(!error.retryable);
             assert!(error.message.contains("operator reconciliation"));
         }
@@ -2668,14 +2768,47 @@ async fn drive_prompt_l3(env: &mut Env, sid: &str, acp: &str, stop_reason: Optio
         env.chats.active_turn(sid).await.is_none(),
         "终态后活动 turn 表项必须清理"
     );
+    // The real prompt coordinator must project the originating command id so
+    // Web can replace its local outbox only with this exact durable entry.
+    let (chat_snapshot, _) = env
+        .sink
+        .snapshot(&acp_hub_proto::conn::DocId::chat(sid))
+        .await
+        .expect("chat 镜像快照");
+    use yrs::updates::decoder::Decode as _;
+    use yrs::{Map as _, ReadTxn as _, Transact as _};
+    let chat_mirror = yrs::Doc::new();
+    let chat_update = yrs::Update::decode_v1(&chat_snapshot).unwrap();
+    chat_mirror
+        .transact_mut()
+        .apply_update(chat_update)
+        .unwrap();
+    let chat_txn = chat_mirror.transact();
+    let chat_root = chat_txn.get_map("root").unwrap();
+    let entries = chat_root
+        .get(&chat_txn, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert!(
+        entries.iter(&chat_txn).any(|(_, value)| {
+            value
+                .cast::<yrs::MapRef>()
+                .ok()
+                .and_then(|entry| entry.get(&chat_txn, "source_command_id"))
+                .and_then(|value| value.cast::<String>().ok())
+                .as_deref()
+                == Some(cid.as_str())
+        }),
+        "prompt user entry carries exact source command id"
+    );
+    drop(chat_txn);
     // session doc 镜像：active_turn_status。
     let (snapshot, _) = env
         .sink
         .snapshot(&acp_hub_proto::conn::DocId::session(sid))
         .await
         .expect("session 镜像快照");
-    use yrs::updates::decoder::Decode as _;
-    use yrs::{Map as _, ReadTxn as _, Transact as _};
     let mirror = yrs::Doc::new();
     let parsed = yrs::Update::decode_v1(&snapshot).unwrap();
     mirror.transact_mut().apply_update(parsed).unwrap();
@@ -2708,6 +2841,290 @@ async fn prompt_l3_stop_reason_maps_turn_terminal() {
         completed, "completed",
         "无 stopReason → turn 终态 Completed"
     );
+}
+
+/// ACP 已返回成功，但 control/chat 终态 update 无法落盘时，command 不得越过
+/// 第二个持久屏障。客户端收到明确的非重试错误，outbox 留下 failed 证据，且
+/// committed Ack 永远不会被发送。
+#[tokio::test]
+async fn prompt_terminal_projection_failure_never_commits() {
+    let mut env = env().await;
+    bound_session(&env, S4, "acp-terminal-persist-failure").await;
+    let (tx, mut rx) = mpsc::channel(16);
+    let cid = uuid::Uuid::new_v4().to_string();
+    let result = env
+        .coordinator
+        .submit(&ctx("c"), prompt_action(&cid, S4), tx)
+        .await;
+    assert!(matches!(result, SubmitAck::Accepted { .. }), "{result:?}");
+
+    let forward = tokio::time::timeout(Duration::from_secs(2), env.instance_rx.recv())
+        .await
+        .expect("forward received")
+        .expect("instance channel alive");
+    let rpc_id = match forward {
+        OutboundMsg::Frame(Frame::InstanceForward(forward)) => {
+            env.instance
+                .on_ack(
+                    "local",
+                    &forward.command_id,
+                    InstanceAck::Forward(InstanceForwardAck {
+                        command_id: forward.command_id.clone(),
+                        chat_id: forward.chat_id.clone(),
+                        ok: true,
+                        error: None,
+                    }),
+                )
+                .await;
+            forward.frame["id"].as_str().unwrap().to_string()
+        }
+        other => panic!("expected instance forward, got {other:?}"),
+    };
+
+    // 等待协调器越过 L1+L2、user entry 持久化和 active-turn 注册，避免把
+    // 故障误注入前一个屏障。
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if env.chats.active_turn(S4).await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("user entry projection completed");
+    // 只让随后的 terminal update 失败。
+    env.sink_fail.store(true, Ordering::SeqCst);
+    let response = acp_hub_proto::instance::InstanceEvent {
+        chat_id: S4.into(),
+        epoch: 0,
+        seq: 2,
+        frame: serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {},
+        }),
+    };
+    let consumed = env.relay.on_instance_event("local", &response).await;
+    assert!(
+        matches!(consumed, crate::channel::ConsumeResult::RpcConfirmed { .. }),
+        "{consumed:?}"
+    );
+
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(OutboundMsg::Frame(Frame::ActionError(error)))) => {
+            assert_eq!(error.code, ErrorCode::DeliveryUnknown);
+            assert!(!error.retryable);
+        }
+        other => panic!("expected non-retryable action_error, got {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "terminal failure must not emit committed"
+    );
+
+    let command_id = uuid::Uuid::parse_str(&cid).unwrap();
+    let record = env
+        .store
+        .chat(uuid::Uuid::parse_str(S4).unwrap())
+        .unwrap()
+        .outbox_get(command_id)
+        .await
+        .expect("failed command evidence persisted");
+    assert_eq!(
+        record.status,
+        crate::persist::outbox::OutboxStatus::DeliveryUnknown
+    );
+    assert_eq!(
+        record.last_error.as_ref().map(|error| error.retryable),
+        Some(false)
+    );
+}
+
+#[test]
+fn prompt_recovery_normalization_is_conservative_and_body_free() {
+    let now = chrono::Utc::now();
+    let record = |status, last_error| crate::persist::outbox::OutboxRecord {
+        command_id: uuid::Uuid::new_v4(),
+        chat_id: uuid::Uuid::new_v4(),
+        command_type: CommandType::Prompt,
+        turn_id: Some(uuid::Uuid::new_v4()),
+        status,
+        retryable_class: RetryableClass::NoAutoRedeliver,
+        dispatched_at: Some(now),
+        created_at: now,
+        updated_at: now,
+        last_error,
+        attempt_count: 1,
+        delivery_protocol_version: None,
+        payload_fingerprint: None,
+        dispatch_barrier_at: None,
+        recovery: None,
+    };
+    let completed_without_terminal = super::normalize_prompt_status(
+        record(OutboxStatus::Completed, None),
+        Some(&super::PromptProjectionEvidence {
+            projected: true,
+            terminal: false,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        completed_without_terminal.status,
+        acp_hub_proto::session::PromptDeliveryStatus::Projected
+    );
+    let no_projection =
+        super::normalize_prompt_status(record(OutboxStatus::DeliveryConfirmed, None), None);
+    assert_eq!(
+        no_projection.status,
+        acp_hub_proto::session::PromptDeliveryStatus::DeliveryUnknown
+    );
+    let failed = super::normalize_prompt_status(
+        record(
+            OutboxStatus::Failed,
+            Some(LastError {
+                code: "AGENT_UNAVAILABLE".into(),
+                retryable: false,
+                at: now,
+            }),
+        ),
+        None,
+    );
+    assert_eq!(
+        failed.status,
+        acp_hub_proto::session::PromptDeliveryStatus::Failed
+    );
+    let serialized = serde_json::to_string(&failed).unwrap();
+    assert!(!serialized.contains("message"));
+    assert!(!serialized.contains("recovery"));
+}
+
+#[test]
+fn startup_prompt_evidence_requires_exact_turn_and_only_pending_entries_are_orphans() {
+    let now = chrono::Utc::now();
+    let command_id = uuid::Uuid::new_v4();
+    let turn_id = uuid::Uuid::new_v4();
+    let record = crate::persist::outbox::OutboxRecord {
+        command_id,
+        chat_id: uuid::Uuid::new_v4(),
+        command_type: CommandType::Prompt,
+        turn_id: Some(turn_id),
+        status: OutboxStatus::DeliveryConfirmed,
+        retryable_class: RetryableClass::NoAutoRedeliver,
+        dispatched_at: Some(now),
+        created_at: now,
+        updated_at: now,
+        last_error: None,
+        attempt_count: 1,
+        delivery_protocol_version: Some(2),
+        payload_fingerprint: Some("fingerprint".into()),
+        dispatch_barrier_at: Some(now),
+        recovery: None,
+    };
+    let mut evidence = super::PromptProjectionEvidence {
+        projected: true,
+        terminal: true,
+        entry_id: Some(format!("{turn_id}:user")),
+        turn_id: Some(uuid::Uuid::new_v4()),
+        delivery_schema_version: Some(2),
+        delivery_state: Some("completed".into()),
+        payload_fingerprint: Some("fingerprint".into()),
+        conflicted: false,
+    };
+    assert!(!super::exact_prompt_terminal_evidence(&record, &evidence));
+    evidence.turn_id = Some(turn_id);
+    assert!(super::exact_prompt_terminal_evidence(&record, &evidence));
+    assert!(!super::is_v2_pending_orphan(&evidence));
+    evidence.delivery_state = Some("pending".into());
+    assert!(super::is_v2_pending_orphan(&evidence));
+}
+
+#[test]
+fn duplicate_historical_command_identity_degrades_to_one_unknown_fact() {
+    let mut existing = acp_hub_proto::session::PromptStatusItem {
+        command_id: "same-command".into(),
+        turn_id: Some("turn-a".into()),
+        status: acp_hub_proto::session::PromptDeliveryStatus::Completed,
+        created_at: "2026-08-14T00:00:01Z".into(),
+        updated_at: "2026-08-14T00:00:02Z".into(),
+        error_code: None,
+    };
+    super::CommandCoordinator::merge_conflicting_prompt_status(
+        &mut existing,
+        acp_hub_proto::session::PromptStatusItem {
+            command_id: "same-command".into(),
+            turn_id: Some("turn-b".into()),
+            status: acp_hub_proto::session::PromptDeliveryStatus::Failed,
+            created_at: "2026-08-14T00:00:00Z".into(),
+            updated_at: "2026-08-14T00:00:03Z".into(),
+            error_code: Some("AGENT_UNAVAILABLE".into()),
+        },
+    );
+    assert_eq!(
+        existing.status,
+        acp_hub_proto::session::PromptDeliveryStatus::DeliveryUnknown
+    );
+    assert_eq!(existing.turn_id, None);
+    assert_eq!(existing.created_at, "2026-08-14T00:00:00Z");
+    assert_eq!(existing.updated_at, "2026-08-14T00:00:03Z");
+    assert_eq!(existing.error_code, None);
+}
+
+#[tokio::test]
+async fn persisted_session_prompt_status_joins_catalog_outbox_and_exact_projection() {
+    let mut env = env().await;
+    assert_eq!(
+        drive_prompt_l3(&mut env, S3, "acp-3", None).await,
+        "completed"
+    );
+    env.metadata
+        .create_project("p1", "Demo", "/", "local")
+        .await
+        .unwrap();
+    env.metadata
+        .create_pending_session("logical-query", "p1", None)
+        .await
+        .unwrap();
+    env.metadata
+        .finalize_session("logical-query", "acp-3", None, S3)
+        .await
+        .unwrap();
+
+    let query_id = uuid::Uuid::new_v4().to_string();
+    let (tx, mut rx) = mpsc::channel(4);
+    let result = env
+        .coordinator
+        .submit(
+            &ctx("read-only-query"),
+            ActionEnvelope::PersistedSessionPromptStatus {
+                command_id: query_id.clone(),
+                payload: PersistedSessionOpenPayload {
+                    session_id: "logical-query".into(),
+                },
+            },
+            tx,
+        )
+        .await;
+    assert!(matches!(result, SubmitAck::Accepted { .. }));
+    let response = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let OutboundMsg::Frame(Frame::PromptStatus(status)) = response else {
+        panic!("expected prompt_status response")
+    };
+    assert_eq!(status.command_id, query_id);
+    assert_eq!(status.session_id, "logical-query");
+    assert!(!status.runtime_restored);
+    assert!(!status.evidence_incomplete);
+    assert_eq!(status.prompts.len(), 1);
+    assert_eq!(
+        status.prompts[0].status,
+        acp_hub_proto::session::PromptDeliveryStatus::Completed
+    );
+    let public_json = serde_json::to_value(status).unwrap();
+    assert!(public_json.get("message").is_none());
+    assert!(public_json.get("recovery").is_none());
 }
 
 /// L3 error（agent 拒绝 prompt）→ error ack（AgentUnavailable，可重试）+
@@ -2777,7 +3194,7 @@ async fn prompt_l3_error_clears_active_turn() {
     match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
         Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
             assert_eq!(e.command_id, cid);
-            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::DeliveryUnknown);
             assert!(
                 !e.retryable,
                 "L3 error 是终态失败（fail_terminal，不可重试）"
@@ -2975,7 +3392,7 @@ async fn prompt_l3_no_timeout_while_active() {
 }
 
 /// #3 无增量窗口耗尽：L3 窗口（500ms）内无任何 touch → delivery_unknown
-/// （error AgentUnavailable "delivery unknown"，路径 B 不可重试）+ 活动 turn
+/// （stable DELIVERY_UNKNOWN，路径 B 不可重试）+ 活动 turn
 /// 表项清理（§7.2）。
 #[tokio::test]
 async fn prompt_l3_inactivity_timeout_delivery_unknown() {
@@ -3013,7 +3430,7 @@ async fn prompt_l3_inactivity_timeout_delivery_unknown() {
     match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
         Ok(Some(OutboundMsg::Frame(Frame::ActionError(e)))) => {
             assert_eq!(e.command_id, cid);
-            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::AgentUnavailable);
+            assert_eq!(e.code, acp_hub_proto::ack::ErrorCode::DeliveryUnknown);
             assert!(
                 e.message.contains("delivery unknown"),
                 "错误消息应含 delivery unknown（got {}）",

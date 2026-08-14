@@ -161,6 +161,11 @@ impl Hub {
         ));
         let projects = ProjectService::new(metadata.clone(), registry.clone());
         coordinator.install_project_service(projects.clone()).await;
+        coordinator.install_history_sink(sink.clone()).await;
+        coordinator
+            .reconcile_prompt_delivery_after_restart()
+            .await
+            .map_err(HubError::Store)?;
         // §4.4：create 全局去重索引（跨 server 重启有效）——store 已完成
         // recover（main 前置），从 outbox 重建后才接受连接。
         coordinator.rebuild_create_index().await;
@@ -553,6 +558,50 @@ impl StoreSink {
         let state = encode_state_as_update(d);
         let version = projection_version(d);
         Some((state, version))
+    }
+
+    /// Startup-only cross-store repair for a Hub-owned v2 prompt entry. The
+    /// mirror is already reconstructed at this point; the generated delta is
+    /// appended through the normal UpdateSink durability path before the
+    /// gateway can accept clients.
+    pub async fn reconcile_prompt_entry_delivery(
+        &self,
+        chat_id: &str,
+        entry_id: &str,
+        delivery_state: &str,
+        delivery_error_code: Option<&str>,
+    ) -> Result<bool, HubError> {
+        let doc_id = DocId::chat(chat_id);
+        let update = {
+            let mut docs = self.docs.write().await;
+            let Some(doc) = docs.get_mut(&doc_id) else {
+                return Ok(false);
+            };
+            let before = doc.transact().state_vector();
+            let changed = {
+                let mut txn = doc.transact_mut();
+                let Some(root) = txn.get_map(crate::state::factory::ROOT) else {
+                    return Ok(false);
+                };
+                crate::state::chat_writer::set_prompt_entry_delivery(
+                    &mut txn,
+                    &root,
+                    entry_id,
+                    delivery_state,
+                    delivery_error_code,
+                    None,
+                )
+            };
+            if !changed {
+                return Ok(false);
+            }
+            let update = doc.transact().encode_state_as_update_v1(&before);
+            update
+        };
+        self.persist_update(doc_id, update)
+            .await
+            .map_err(|error| HubError::Store(error.to_string()))?;
+        Ok(true)
     }
 
     /// 镜像更新广播订阅（hub 装配时 broadcaster attach）。

@@ -32,7 +32,7 @@
 //! `INSTANCE_OFFLINE`）。投递前（received/accepted/intent_durable）的
 //! retryable 失败 → tombstone 清除（允许重发重新执行，设计稿 §5.2 原语义）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
@@ -206,6 +206,19 @@ pub struct OutboxRecord {
     pub last_error: Option<LastError>,
     /// 投递尝试次数（§17.1 指标；每次进入 `dispatched` +1）。
     pub attempt_count: u32,
+    /// Hub prompt delivery contract version. `None` identifies legacy records
+    /// whose pre-ack `intent_durable` state cannot prove that ACP was untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_protocol_version: Option<u16>,
+    /// SHA-256 of the canonical typed prompt payload. This is equality evidence
+    /// only; user message text must never be copied into the outbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_fingerprint: Option<String>,
+    /// Durable no-redelivery barrier. When present, an ACP dispatch may have
+    /// begun even while `status` is still `intent_durable`; any ambiguous
+    /// outcome must converge to `delivery_unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_barrier_at: Option<DateTime<Utc>>,
     /// 非幂等命令在明确未投递时安全恢复所需的最小证据。
     /// 可选以保持旧 outbox 记录的向后兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -403,6 +416,9 @@ impl OutboxStore {
             updated_at: now,
             last_error: None,
             attempt_count: 0,
+            delivery_protocol_version: None,
+            payload_fingerprint: None,
+            dispatch_barrier_at: None,
             recovery: None,
         };
         self.append_record(&record)
@@ -418,6 +434,96 @@ impl OutboxStore {
     /// `accepted → intent_durable`（意图落盘，§4.4 提交点纪律第一步）。
     pub fn mark_intent_durable(&mut self, id: Uuid) -> Result<(), StoreError> {
         self.transition(id, OutboxStatus::IntentDurable, |_| {})
+    }
+
+    /// Establish prompt-delivery-v2 intent and its body-free equality proof in
+    /// the same durable record transition. The caller must already have
+    /// persisted the matching Pending user projection.
+    pub fn mark_prompt_intent_durable(
+        &mut self,
+        id: Uuid,
+        payload_fingerprint: String,
+    ) -> Result<(), StoreError> {
+        if payload_fingerprint.is_empty() {
+            return Err(StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("empty prompt payload fingerprint for command {id}"),
+            });
+        }
+        if self
+            .index
+            .get(&id)
+            .and_then(|record| record.payload_fingerprint.as_deref())
+            .is_some_and(|existing| existing != payload_fingerprint)
+        {
+            return Err(StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("conflicting prompt payload fingerprint for command {id}"),
+            });
+        }
+        self.transition(id, OutboxStatus::IntentDurable, |record| {
+            record.delivery_protocol_version = Some(2);
+            record.payload_fingerprint = Some(payload_fingerprint);
+            record.dispatch_barrier_at = None;
+        })
+    }
+
+    /// Attach body-free equality evidence while the command is Accepted so a
+    /// concurrent same-id retry can be validated before the executor reaches
+    /// the Pending projection barrier.
+    pub fn set_prompt_payload_fingerprint(
+        &mut self,
+        id: Uuid,
+        payload_fingerprint: String,
+    ) -> Result<(), StoreError> {
+        let mut record = self
+            .index
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| self.not_found(id))?;
+        if record.status != OutboxStatus::Accepted || payload_fingerprint.is_empty() {
+            return self.reject(id, record.status, OutboxStatus::Accepted);
+        }
+        match record.payload_fingerprint.as_deref() {
+            Some(existing) if existing == payload_fingerprint => return Ok(()),
+            Some(_) => {
+                return Err(StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!("conflicting prompt payload fingerprint for command {id}"),
+                })
+            }
+            None => {}
+        }
+        record.payload_fingerprint = Some(payload_fingerprint);
+        record.updated_at = Utc::now();
+        self.append_record(&record)
+    }
+
+    /// Persist the no-redelivery barrier before the frame can enter the
+    /// instance writer. This deliberately does not change `status`:
+    /// `intent_durable + dispatch_barrier_at` is the additive effective
+    /// Dispatching state and remains readable by older binaries.
+    pub fn mark_dispatch_barrier(&mut self, id: Uuid, at: DateTime<Utc>) -> Result<(), StoreError> {
+        let mut record = self
+            .index
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| self.not_found(id))?;
+        if record.status != OutboxStatus::IntentDurable
+            || record.delivery_protocol_version != Some(2)
+            || record
+                .payload_fingerprint
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return self.reject(id, record.status, OutboxStatus::Dispatched);
+        }
+        if record.dispatch_barrier_at.is_some() {
+            return Ok(());
+        }
+        record.dispatch_barrier_at = Some(at);
+        record.updated_at = at;
+        self.append_record(&record)
     }
 
     /// 为已落盘意图附加恢复证据。证据与 commandId 同一条记录
@@ -514,6 +620,19 @@ impl OutboxStore {
             return self.reject(id, from, OutboxStatus::Failed);
         }
         if err.retryable {
+            // Once the v2 dispatch barrier is durable, even an
+            // `intent_durable` record may already have entered the instance
+            // writer. Never tombstone or rewind it on an ambiguous transport
+            // error: doing so would authorize a second ACP execution.
+            if self
+                .index
+                .get(&id)
+                .is_some_and(|record| record.dispatch_barrier_at.is_some())
+            {
+                return self.transition(id, OutboxStatus::DeliveryUnknown, |record| {
+                    record.last_error = Some(err);
+                });
+            }
             // H1 裁决：投递后回退；投递前 tombstone 清除。
             if matches!(
                 from,
@@ -551,7 +670,11 @@ impl OutboxStore {
 
     /// `dispatched → delivery_unknown`（L2 后 L3 不可得，M1 路径 B，§5.3）。
     pub fn mark_delivery_unknown(&mut self, id: Uuid) -> Result<(), StoreError> {
-        self.transition(id, OutboxStatus::DeliveryUnknown, |_| {})
+        self.transition(id, OutboxStatus::DeliveryUnknown, |record| {
+            record.last_error = Some(LastError::from_error_code(
+                acp_hub_proto::ack::ErrorCode::DeliveryUnknown,
+            ));
+        })
     }
 
     /// server 重启时收敛带恢复证据的未终态命令。进程内
@@ -576,6 +699,78 @@ impl OutboxStore {
             self.transition(*id, OutboxStatus::DeliveryUnknown, |_| {})?;
         }
         Ok(ids.len())
+    }
+
+    /// Converge prompt-delivery records before the gateway accepts clients.
+    ///
+    /// A v2 prompt that never crossed the durable dispatch barrier is known
+    /// not to have reached ACP and becomes a deterministic failure. Legacy
+    /// intent records and every post-barrier state are ambiguous and therefore
+    /// become `delivery_unknown`; they must never be automatically replayed.
+    pub fn reconcile_prompt_delivery_after_restart(
+        &mut self,
+        exact_terminal_evidence: &HashSet<Uuid>,
+    ) -> Result<usize, StoreError> {
+        let decisions = self
+            .index
+            .values()
+            .filter(|record| record.command_type == CommandType::Prompt)
+            .filter_map(|record| {
+                let target = match record.status {
+                    OutboxStatus::Received | OutboxStatus::Accepted => OutboxStatus::Failed,
+                    OutboxStatus::IntentDurable
+                        if record.delivery_protocol_version == Some(2)
+                            && record.dispatch_barrier_at.is_none() =>
+                    {
+                        OutboxStatus::Failed
+                    }
+                    OutboxStatus::DeliveryConfirmed | OutboxStatus::ProjectionCommitted
+                        if record.delivery_protocol_version == Some(2)
+                            && record.payload_fingerprint.is_some()
+                            && exact_terminal_evidence.contains(&record.command_id) =>
+                    {
+                        OutboxStatus::Completed
+                    }
+                    OutboxStatus::IntentDurable
+                    | OutboxStatus::Dispatched
+                    | OutboxStatus::DeliveryConfirmed
+                    | OutboxStatus::ProjectionCommitted => OutboxStatus::DeliveryUnknown,
+                    OutboxStatus::Completed
+                    | OutboxStatus::Failed
+                    | OutboxStatus::DeliveryUnknown => return None,
+                };
+                Some((record.command_id, target))
+            })
+            .collect::<Vec<_>>();
+
+        for (id, target) in &decisions {
+            match target {
+                OutboxStatus::Failed => self.transition(*id, OutboxStatus::Failed, |record| {
+                    record.last_error = Some(LastError::from_error_code(
+                        acp_hub_proto::ack::ErrorCode::AgentUnavailable,
+                    ));
+                    if let Some(error) = record.last_error.as_mut() {
+                        error.retryable = false;
+                    }
+                })?,
+                OutboxStatus::DeliveryUnknown => {
+                    self.transition(*id, OutboxStatus::DeliveryUnknown, |record| {
+                        record.last_error = Some(LastError::from_error_code(
+                            acp_hub_proto::ack::ErrorCode::DeliveryUnknown,
+                        ));
+                    })?;
+                }
+                OutboxStatus::Completed => {
+                    let current = self.get(*id).expect("reconciliation record exists").status;
+                    if current == OutboxStatus::DeliveryConfirmed {
+                        self.mark_projection_committed(*id)?;
+                    }
+                    self.mark_completed(*id)?;
+                }
+                _ => unreachable!("restart reconciliation only writes terminal decisions"),
+            }
+        }
+        Ok(decisions.len())
     }
 
     /// delivery_unknown 人工裁决（§5.3 runbook；审计日志由本方法写入）：
@@ -1090,9 +1285,11 @@ fn allowed_transition(from: OutboxStatus, to: OutboxStatus) -> bool {
             | (IntentDurable, Failed)
             | (Dispatched, DeliveryConfirmed)
             | (Dispatched, DeliveryUnknown)
+            | (DeliveryConfirmed, DeliveryUnknown)
             // H1 扩展：投递后非 retryable 失败 → failed（§4.4 重试分类）。
             | (Dispatched, Failed)
             | (DeliveryConfirmed, ProjectionCommitted)
+            | (ProjectionCommitted, DeliveryUnknown)
             | (DeliveryConfirmed, Failed)
             | (ProjectionCommitted, Completed)
             // H1 裁决：投影落盘后业务失败（action_error，非 retryable）→

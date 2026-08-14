@@ -49,7 +49,7 @@ pub use instance::{
     BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHeartbeat, InstanceHello,
     InstanceKill, InstanceKillAck, InstanceProcessExit, InstanceSpawn, InstanceSpawnAck,
 };
-pub use session::SessionListFrame;
+pub use session::{PromptDeliveryStatus, PromptStatusFrame, PromptStatusItem, SessionListFrame};
 pub use version::{
     CHAT_DOC_SCHEMA_VERSION, PROTOCOL_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
     SESSION_DOC_SCHEMA_VERSION, Y_UPDATE_ENCODING_VERSION,
@@ -57,4 +57,7 @@ pub use version::{
 pub use whitelist::{
     m1_allows, m1_allows_action_type, m1_check, Direction, M1Check, Role, M1_ACTION_TYPES,
 };
-pub use ysync::{YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate};
+pub use ysync::{
+    YsyncAwareness, YsyncSubscribe, YsyncSync, YsyncUnsubscribe, YsyncUpdate,
+    CAP_PROMPT_DELIVERY_V2,
+};

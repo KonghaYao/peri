@@ -359,6 +359,7 @@ async fn command_register_user_entry_then_submit_duplicate() {
         entry_id: "t1:user".to_string(),
         text: "hi".to_string(),
         author_user_id: None,
+        source_command_id: "command-1".to_string(),
         created_at: "2026-08-07T00:00:00Z".to_string(),
     };
     let r = mgr.submit_command("s1", cmd.clone()).await;
@@ -366,6 +367,26 @@ async fn command_register_user_entry_then_submit_duplicate() {
     // 重复注册 → 幂等拒绝。
     let r = mgr.submit_command("s1", cmd).await;
     assert!(matches!(r, SubmitResult::Applied(a) if !a.applied));
+}
+
+#[tokio::test(start_paused = true)]
+async fn command_register_user_entry_rejects_a_different_source_command() {
+    let mgr = DocManager::new(cfg(), Arc::new(MemSink::default()));
+    open(&mgr, "s1").await;
+    let command = |source: &str| DocCommand::RegisterUserEntry {
+        turn_id: "t1".into(),
+        entry_id: "t1:user".into(),
+        text: "same".into(),
+        author_user_id: None,
+        source_command_id: source.into(),
+        created_at: "now".into(),
+    };
+    assert!(
+        matches!(mgr.submit_command("s1", command("cmd-1")).await, SubmitResult::Applied(a) if a.applied)
+    );
+    assert!(
+        matches!(mgr.submit_command("s1", command("cmd-2")).await, SubmitResult::Applied(a) if a.reason == Some(crate::state::aggregator::ApplyReason::SourceCommandConflict))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -721,6 +742,7 @@ async fn load_replay_command_flow_projects_and_terminates_history() {
                 entry_id: "old-turn:user".into(),
                 text: "旧会话内容".into(),
                 author_user_id: None,
+                source_command_id: "old-command".into(),
                 created_at: "2026-08-10T00:00:00Z".into(),
             },
         )
@@ -1024,6 +1046,7 @@ async fn mark_turn_cancelling_sets_cancelling_state() {
                 entry_id: "t1:user".into(),
                 text: "hi".into(),
                 author_user_id: None,
+                source_command_id: "cancel-command".into(),
                 created_at: "2026-08-10T00:00:00Z".into(),
             },
         )
@@ -1103,6 +1126,59 @@ async fn mark_turn_cancelling_sets_cancelling_state() {
         "cancelled",
         "终态保持（cancel 前置不覆盖终态）"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_terminal_is_idempotent_only_for_the_same_persisted_outcome() {
+    let mgr = DocManager::new(cfg(), Arc::new(MemSink::default()));
+    open(&mgr, "s1").await;
+    let register = DocCommand::RegisterUserEntry {
+        turn_id: "t1".into(),
+        entry_id: "t1:user".into(),
+        text: "hi".into(),
+        author_user_id: None,
+        source_command_id: "command-1".into(),
+        created_at: "2026-08-14T00:00:00Z".into(),
+    };
+    assert!(matches!(
+        mgr.submit_command("s1", register).await,
+        SubmitResult::Applied(result) if result.applied
+    ));
+    let terminal = |status| DocCommand::SetTurnTerminal {
+        turn_id: "t1".into(),
+        status,
+        completed_at: "2026-08-14T00:00:01Z".into(),
+    };
+    assert!(matches!(
+        mgr.submit_command(
+            "s1",
+            terminal(acp_hub_proto::schema::TurnStatus::Completed),
+        )
+        .await,
+        SubmitResult::Applied(result) if result.applied
+    ));
+    assert!(matches!(
+        mgr.submit_command(
+            "s1",
+            terminal(acp_hub_proto::schema::TurnStatus::Completed),
+        )
+        .await,
+        SubmitResult::Applied(result)
+            if !result.applied
+                && result.reason
+                    == Some(crate::state::aggregator::ApplyReason::DuplicateIdempotent)
+    ));
+    assert!(matches!(
+        mgr.submit_command(
+            "s1",
+            terminal(acp_hub_proto::schema::TurnStatus::Failed),
+        )
+        .await,
+        SubmitResult::Applied(result)
+            if !result.applied
+                && result.reason
+                    == Some(crate::state::aggregator::ApplyReason::TerminalProjectionConflict)
+    ));
 }
 
 // ---------------------------------------------------------------------------

@@ -209,6 +209,7 @@ async fn subscribe_first_and_second() {
     let (tx, _rx) = mpsc::channel(8);
     let sub1 = Frame::YsyncSubscribe(YsyncSubscribe {
         docs: vec![DocId::chat("s1")],
+        client_capabilities: Vec::new(),
     });
     match ch.dispatch(sub1, &deps, tx.clone()).await {
         DispatchOutcome::Subscribe { first, docs } => {
@@ -220,6 +221,7 @@ async fn subscribe_first_and_second() {
     // 二次订阅：非 first。
     let sub2 = Frame::YsyncSubscribe(YsyncSubscribe {
         docs: vec![DocId::chat("s2")],
+        client_capabilities: Vec::new(),
     });
     match ch.dispatch(sub2, &deps, tx.clone()).await {
         DispatchOutcome::Subscribe { first, .. } => assert!(!first),
@@ -233,6 +235,130 @@ async fn subscribe_first_and_second() {
         DispatchOutcome::Unsubscribe { docs } => assert_eq!(docs.len(), 1),
         other => panic!("expected unsubscribe, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn prompt_delivery_capability_is_connection_bound_and_fail_closed() {
+    let env = env().await;
+    let deps = ChannelDeps {
+        coordinator: env.coordinator.clone(),
+        broadcast: env.broadcast.clone(),
+        instance: env.instance.clone(),
+        chats: Arc::new(env.chats.clone()),
+        conns: env.conns.clone(),
+    };
+    let prompt = || {
+        Frame::Action(acp_hub_proto::action::ActionEnvelope::Prompt {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            payload: PromptChatPayload {
+                chat_id: "missing-chat".into(),
+                message: "must not dispatch".into(),
+                effort: None,
+            },
+        })
+    };
+    let (tx, _rx) = mpsc::channel(8);
+
+    let mut legacy = ChatChannel::new(ctx("legacy"));
+    legacy
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: vec![DocId::REGISTRY],
+                client_capabilities: Vec::new(),
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    legacy.mark_ready();
+    assert!(matches!(
+        legacy.dispatch(prompt(), &deps, tx.clone()).await,
+        DispatchOutcome::Disconnect(4502)
+    ));
+
+    let mut empty_first = ChatChannel::new(ctx("empty-first"));
+    empty_first
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: Vec::new(),
+                client_capabilities: Vec::new(),
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    empty_first
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: vec![DocId::REGISTRY],
+                client_capabilities: vec![acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()],
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    assert!(empty_first.negotiated_capabilities().is_empty());
+    empty_first.mark_ready();
+    assert!(matches!(
+        empty_first.dispatch(prompt(), &deps, tx.clone()).await,
+        DispatchOutcome::Disconnect(4502)
+    ));
+
+    let mut unsubscribe_all = ChatChannel::new(ctx("unsubscribe-all"));
+    unsubscribe_all
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: vec![DocId::REGISTRY],
+                client_capabilities: Vec::new(),
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    unsubscribe_all
+        .dispatch(
+            Frame::YsyncUnsubscribe(acp_hub_proto::ysync::YsyncUnsubscribe {
+                docs: vec![DocId::REGISTRY],
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    unsubscribe_all
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: vec![DocId::REGISTRY],
+                client_capabilities: vec![acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()],
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    assert!(unsubscribe_all.negotiated_capabilities().is_empty());
+
+    let mut current = ChatChannel::new(ctx("current"));
+    current
+        .dispatch(
+            Frame::YsyncSubscribe(YsyncSubscribe {
+                docs: vec![DocId::REGISTRY],
+                client_capabilities: vec![
+                    acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string(),
+                    "untrusted-future-capability".to_string(),
+                ],
+            }),
+            &deps,
+            tx.clone(),
+        )
+        .await;
+    assert_eq!(
+        current.negotiated_capabilities(),
+        vec![acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()]
+    );
+    current.mark_ready();
+    assert!(!matches!(
+        current.dispatch(prompt(), &deps, tx).await,
+        DispatchOutcome::Disconnect(4502)
+    ));
 }
 
 #[tokio::test]
@@ -251,6 +377,7 @@ async fn upstream_ysync_update_rejected() {
     ch.dispatch(
         Frame::YsyncSubscribe(YsyncSubscribe {
             docs: vec![DocId::REGISTRY],
+            client_capabilities: Vec::new(),
         }),
         &deps,
         tx.clone(),
@@ -297,6 +424,7 @@ async fn readonly_cannot_send_action() {
     ch.dispatch(
         Frame::YsyncSubscribe(YsyncSubscribe {
             docs: vec![DocId::REGISTRY],
+            client_capabilities: Vec::new(),
         }),
         &deps,
         tx.clone(),
@@ -320,5 +448,55 @@ async fn readonly_cannot_send_action() {
             other => panic!("expected error, got {other:?}"),
         },
         other => panic!("expected send, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn readonly_can_request_body_free_prompt_recovery_but_not_mutate() {
+    let env = env().await;
+    let deps = ChannelDeps {
+        coordinator: env.coordinator.clone(),
+        broadcast: env.broadcast.clone(),
+        instance: env.instance.clone(),
+        chats: Arc::new(env.chats.clone()),
+        conns: env.conns.clone(),
+    };
+    let mut ro_ctx = ctx("ro-query");
+    ro_ctx.role = TokenRole::ReadOnly;
+    let mut ch = ChatChannel::new(ro_ctx);
+    let (tx, _rx) = mpsc::channel(8);
+    ch.dispatch(
+        Frame::YsyncSubscribe(YsyncSubscribe {
+            docs: vec![DocId::REGISTRY],
+            client_capabilities: Vec::new(),
+        }),
+        &deps,
+        tx.clone(),
+    )
+    .await;
+    ch.mark_ready();
+    let outcome = ch
+        .dispatch(
+            Frame::Action(
+                acp_hub_proto::action::ActionEnvelope::PersistedSessionPromptStatus {
+                    command_id: uuid::Uuid::new_v4().to_string(),
+                    payload: acp_hub_proto::action::PersistedSessionOpenPayload {
+                        session_id: "logical-session".into(),
+                    },
+                },
+            ),
+            &deps,
+            tx,
+        )
+        .await;
+    match outcome {
+        DispatchOutcome::Send(messages) => match &messages[0] {
+            crate::channel::OutboundMsg::Frame(Frame::ActionError(error)) => assert_ne!(
+                error.message, "read-only token cannot send actions",
+                "the reviewed body-free query must pass the read-only gate"
+            ),
+            other => panic!("expected catalog availability error, got {other:?}"),
+        },
+        other => panic!("expected coordinator response, got {other:?}"),
     }
 }

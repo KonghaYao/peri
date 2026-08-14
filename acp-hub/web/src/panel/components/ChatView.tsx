@@ -32,7 +32,7 @@ type ChatViewProps = {
 export function ChatView(props: ChatViewProps) {
   const activeProjects = createMemo(() => projects().filter((project) => !project.archivedAt));
   return (
-    <section class="flex h-full min-h-0 flex-col">
+    <section class="chat-view">
       <ChatHeader
         onOpenNavigation={props.onOpenNavigation}
         onOpenStatus={props.onOpenStatus}

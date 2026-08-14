@@ -6,8 +6,10 @@
   "description": "acp-hub SolidJS Web client and tested UI component library",
   "scripts": {
     "dev": "vite",
+    "visual:dev": "vite --host 127.0.0.1",
+    "verify:production-boundary": "node scripts/verify-production-boundary.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsc --noEmit && node --test tests/*.test.mjs && vitest run",
+    "test": "tsc --noEmit && node --test tests/*.test.mjs && vitest run && node scripts/verify-production-boundary.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -17,13 +19,11 @@
   },
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
-    "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
     "@types/node": "^26.2.0",
     "jsdom": "^30.0.1",
     "lightningcss": "^1.33.0",
     "postcss": "^8.5.26",
-    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
     "vite-plugin-solid": "^2.11.14",

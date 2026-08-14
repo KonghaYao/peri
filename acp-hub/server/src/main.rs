@@ -11,6 +11,7 @@
 //! `run` 为默认子命令（常驻进程主形态）；`token` 子命令组管理凭据（直写
 //! `<config_dir>/tokens.toml`，0600）。
 
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -110,8 +111,8 @@ fn run_with(
     let mut token_store = TokenStore::load(&cfg.config_dir.join(TOKENS_FILE))?;
     if let Some(rec) = token_store.ensure_instance_token()? {
         eprintln!(
-            "[acp-hub-server] 已自动生成 bootstrap instance token（仅本次打印，请妥善保存）:\n{}",
-            rec.token
+            "{}",
+            bootstrap_token_notice(&cfg.config_dir, &rec.token, std::io::stderr().is_terminal())
         );
         audit(
             "token.generate",
@@ -175,6 +176,19 @@ fn run_with(
         };
         hub.run_server(&cfg, signal).await
     })
+}
+
+fn bootstrap_token_notice(config_dir: &std::path::Path, token: &str, interactive: bool) -> String {
+    if interactive {
+        format!(
+            "[acp-hub-server] 已自动生成 bootstrap instance token（仅本次打印，请妥善保存）:\n{token}"
+        )
+    } else {
+        format!(
+            "[acp-hub-server] 已生成 bootstrap instance token；stderr 非交互终端，密钥未写入日志。记录保存在 {}",
+            config_dir.join(TOKENS_FILE).display()
+        )
+    }
 }
 
 /// token 子命令：加载配置（定位 config_dir）→ 操作 tokens.toml。
@@ -242,4 +256,28 @@ fn token_command(config: Option<PathBuf>, json_log: bool, args: TokenArgs) -> an
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bootstrap_token_notice;
+
+    #[test]
+    fn redirected_bootstrap_notice_never_contains_the_token() {
+        let secret = "bootstrap-secret-must-not-reach-logs";
+        let notice = bootstrap_token_notice(std::path::Path::new("/tmp/acp hub"), secret, false);
+
+        assert!(!notice.contains(secret));
+        assert!(notice.contains("/tmp/acp hub/tokens.toml"));
+        assert!(notice.contains("密钥未写入日志"));
+    }
+
+    #[test]
+    fn interactive_bootstrap_notice_keeps_the_one_time_recovery_path() {
+        let secret = "terminal-only-bootstrap-secret";
+        let notice = bootstrap_token_notice(std::path::Path::new("/unused"), secret, true);
+
+        assert!(notice.contains(secret));
+        assert!(notice.contains("仅本次打印"));
+    }
 }

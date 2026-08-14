@@ -1,5 +1,5 @@
-//! web 静态分支测试：请求行解析、upgrade 判定、路由与 Content-Type 映射、
-//! 以及真实 socket 上的响应（TcpListener/TcpStream 直连，零新依赖）。
+//! Web HTTP surface tests: bounded cookie auth, request parsing, upgrade
+//! detection, static routing/cache policy and real socket responses.
 //!
 //! 路由断言面向 vite 构建产物（web/dist，build.rs 编译期内嵌）：页面入口
 //! 固定（/、/panel.html），assets 文件名带内容 hash —— 测试遍历 ASSETS
@@ -12,11 +12,19 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::auth::{AuthService, TokenStore};
+use crate::auth::{AuthService, TokenRole, TokenStore};
 use crate::web::{
     cache_headers_for_static, cookie_value, is_json_content_type, serve_http, valid_loopback_host,
 };
-use crate::web::{content_type, header_end, is_ws_upgrade, request_path, route, serve, ASSETS};
+use crate::web::{
+    content_type, header_end, is_ws_upgrade, request_path, route, serve, BrowserAuthSetup, ASSETS,
+};
+
+fn test_auth_setup(dir: &std::path::Path) -> BrowserAuthSetup {
+    let mut cfg = crate::config::Config::defaults();
+    cfg.config_dir = dir.to_path_buf();
+    BrowserAuthSetup::from_config(&cfg)
+}
 
 async fn auth_socket_response(request: &str) -> String {
     let dir = tempdir().unwrap();
@@ -27,7 +35,9 @@ async fn auth_socket_response(request: &str) -> String {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        serve_http(stream, peer, auth).await.unwrap();
+        serve_http(stream, peer, auth, test_auth_setup(dir.path()))
+            .await
+            .unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     client.write_all(request.as_bytes()).await.unwrap();
@@ -44,9 +54,10 @@ async fn auth_socket_response_fragments(parts: &[&[u8]]) -> String {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let setup = test_auth_setup(dir.path());
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        serve_http(stream, peer, auth).await.unwrap();
+        serve_http(stream, peer, auth, setup).await.unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     for part in parts {
@@ -132,6 +143,136 @@ fn auth_json_content_type_is_closed() {
     assert!(!is_json_content_type(
         "application/json; charset=utf-8; charset=utf-8"
     ));
+}
+
+#[test]
+fn browser_auth_setup_uses_authoritative_config_dir_and_shell_quotes_it() {
+    let mut cfg = crate::config::Config::defaults();
+    cfg.config_dir = std::path::PathBuf::from("/tmp/acp hub/operator's config");
+
+    let setup = BrowserAuthSetup::from_parts(&cfg, "/opt/acp hub/bin/acp-hub-server");
+    let json = serde_json::to_value(setup).unwrap();
+
+    assert_eq!(
+        json["tokenFile"],
+        "/tmp/acp hub/operator's config/tokens.toml"
+    );
+    assert_eq!(
+        json["generateCommand"],
+        "ACP_HUB_CONFIG_DIR='/tmp/acp hub/operator'\\''s config' '/opt/acp hub/bin/acp-hub-server' token generate --name web --role full"
+    );
+    assert_eq!(json.as_object().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn unauthenticated_status_returns_credential_free_setup_hint() {
+    let response = auth_socket_response(
+        "GET /api/auth/session HTTP/1.1\r\nHost: 127.0.0.1:8456\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(response.contains("\"authenticated\":false"));
+    assert!(response.contains("\"tokenFile\":"));
+    assert!(response.contains("tokens.toml"));
+    assert!(response.contains("\"generateCommand\":"));
+    assert!(!response.contains("token_id"));
+    assert!(!response.contains("tokenId"));
+}
+
+#[tokio::test]
+async fn successful_login_never_reflects_the_bearer_or_token_record() {
+    let dir = tempdir().unwrap();
+    let token_path = dir.path().join("tokens.toml");
+    let mut token_store = TokenStore::load(&token_path).unwrap();
+    let record = token_store
+        .generate(TokenRole::Full, "browser-secret-name")
+        .unwrap();
+    let bearer = record.token.clone();
+    let token_id = record.id.clone();
+    let auth = Arc::new(Mutex::new(AuthService::new(token_store)));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let setup = test_auth_setup(dir.path());
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        serve_http(stream, peer, auth, setup).await.unwrap();
+    });
+
+    let body = serde_json::json!({ "token": bearer }).to_string();
+    let request = format!(
+        "POST /api/auth/session HTTP/1.1\r\nHost: 127.0.0.1:8456\r\nOrigin: http://127.0.0.1:8456\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut bytes = Vec::new();
+    client.read_to_end(&mut bytes).await.unwrap();
+    server.await.unwrap();
+    let response = String::from_utf8(bytes).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("Set-Cookie: acp_hub_session="));
+    assert!(!response.contains(&record.token));
+    assert!(!response.contains(&token_id));
+    assert!(!response.contains("browser-secret-name"));
+    let response_body = response.split_once("\r\n\r\n").unwrap().1;
+    let json: serde_json::Value = serde_json::from_str(response_body).unwrap();
+    let keys = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        ["authenticated", "role", "setup"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    );
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["role"], "full");
+}
+
+#[tokio::test]
+async fn auth_lock_contention_is_service_unavailable_not_bad_credentials() {
+    let dir = tempdir().unwrap();
+    let auth = Arc::new(Mutex::new(AuthService::new(
+        TokenStore::load(&dir.path().join("tokens.toml")).unwrap(),
+    )));
+    let guard = auth.lock().await;
+    let body = r#"{"token":"well-formed-but-not-inspected"}"#;
+    let requests = [
+        format!(
+            "POST /api/auth/session HTTP/1.1\r\nHost: 127.0.0.1:8456\r\nOrigin: http://127.0.0.1:8456\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        "GET /api/auth/session HTTP/1.1\r\nHost: 127.0.0.1:8456\r\nCookie: acp_hub_session=opaque\r\nContent-Length: 0\r\n\r\n".to_string(),
+    ];
+    for request in requests {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let setup = test_auth_setup(dir.path());
+        let server_auth = auth.clone();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            serve_http(stream, peer, server_auth, setup).await.unwrap();
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).await.unwrap();
+        server.await.unwrap();
+        let response = String::from_utf8(bytes).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(response.contains("Retry-After: 1\r\n"));
+        assert!(response.contains("\"error\":\"auth_busy\""));
+        assert!(response.contains("\"setup\":"));
+        assert!(!response.contains("401 Unauthorized"));
+    }
+    drop(guard);
 }
 
 #[tokio::test]
@@ -308,6 +449,15 @@ fn route_resolves_static_assets() {
 
     assert_eq!(route("/instance"), None);
     assert_eq!(route("/favicon.ico"), None);
+    assert_eq!(route("/visual-fixture.html"), None);
+    for asset in ASSETS {
+        assert!(
+            !asset.url.contains("visual-fixture")
+                && !String::from_utf8_lossy(asset.bytes).contains("UI 状态验收台"),
+            "development fixture must not be embedded in production asset {}",
+            asset.url,
+        );
+    }
 }
 
 /// Content-Type 按扩展名映射；未识别回 octet-stream。
@@ -358,6 +508,18 @@ fn static_cache_policy_separates_entry_documents_from_hashed_assets() {
             "fixed-name assets must remain upgrade-safe: {unhashed}"
         );
     }
+
+    assert_eq!(
+        cache_headers_for_static(
+            "/assets/index-CBgKAe6-.css",
+            Some("assets/index-CBgKAe6-.css")
+        ),
+        vec![(
+            "Cache-Control".into(),
+            "public, max-age=31536000, immutable".into()
+        )],
+        "Rollup URL-safe hashes may end in a dash"
+    );
 }
 
 #[tokio::test]

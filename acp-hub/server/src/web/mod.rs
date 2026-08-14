@@ -1,11 +1,13 @@
-//! Web 前端（静态资源）：非 ws 升级请求的 HTTP GET → 内嵌静态页。
+//! Web 前端与浏览器认证入口。
 //!
 //! 定位：gateway 在回环检查（§9.5）之后、配额注册（§8.6）之前分流
 //! （`channel/gateway.rs` 连接任务步骤 2）：头部含 `upgrade: websocket`
-//! 的请求原样走 `accept_async`（ws 时序不变，§4.6），其余普通 HTTP 一律
-//! 交给本模块——不进配额/注册表，不产生占位连接。
+//! 的请求原样走 WebSocket 握手（ws 时序不变，§4.6），其余普通 HTTP 一律
+//! 交给本模块——不进连接配额/注册表，不产生占位连接。HTTP 面只包含两类
+//! 路由：内嵌 Vite 静态资源，以及同源 `/api/auth/session` 的 bounded
+//! GET/POST/DELETE cookie bootstrap。
 //!
-//! 前端是独立 vite 工程（`web/`，SolidJS + Tailwind），Web 面板为唯一
+//! 前端是独立 Vite 工程（`web/`，SolidJS），Web 面板为唯一
 //! 页面（`/` 即面板入口）；构建产物 `web/dist/` 由 `build.rs` 在编译期
 //! 扫描并生成内嵌资源表（`assets.rs`，字节经 include_bytes! 引用，零
 //! 运行时文件 IO、零新依赖）。产物文件名带内容 hash，本模块按实际文件
@@ -14,12 +16,14 @@
 //! 路径与非 GET 方法一律 404。Content-Type 按扩展名手工映射；响应固定
 //! `Connection: close` + `Content-Length`，写毕 `shutdown()`。
 //!
-//! 设计约束：最小实现（浏览器验证用），不做 URL 解码/query 处理——资源名
-//! 纯 ASCII（vite hash 文件名），取请求行 path 段（去 query）即可；不支
-//! 持任何动态端点，页面的 ws 探测直连 hub 的 ws 时序（无 token 会被 1011
-//! 关闭，见面板内连接逻辑，如实展示，不造假）。
+//! 设计约束：静态资源名不做 URL 解码，取请求行 path 段（去 query）查内嵌
+//! 清单。认证端点使用独立的有限 HTTP/1.1 解析：限制头/body/读取总时长，
+//! 拒绝 chunked/重复 framing，校验 loopback Host 与同源 Origin，并固定
+//! `no-store` 安全头。浏览器 bearer 只出现在登录请求 body；成功后仅使用
+//! HttpOnly opaque cookie，WebSocket 不持有或重放 bearer。
 
-use crate::auth::{AuthService, BROWSER_COOKIE, BROWSER_SESSION_TTL_SECS};
+use crate::auth::{AuthService, BROWSER_COOKIE, BROWSER_SESSION_TTL_SECS, TOKENS_FILE};
+use crate::config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,6 +40,47 @@ include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 #[serde(deny_unknown_fields)]
 struct BrowserLoginRequest {
     token: String,
+}
+
+/// Credential-free setup metadata for the loopback login surface.
+///
+/// This descriptor is derived from the authoritative runtime Config before any
+/// auth lock is acquired. It never contains token records, ids or file data.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserAuthSetup {
+    token_file: String,
+    generate_command: String,
+}
+
+impl BrowserAuthSetup {
+    pub(crate) fn from_config(cfg: &Config) -> Self {
+        let executable = std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "acp-hub-server".to_string());
+        Self::from_parts(cfg, &executable)
+    }
+
+    fn from_parts(cfg: &Config, executable: &str) -> Self {
+        let config_dir = cfg.config_dir.to_string_lossy();
+        Self {
+            token_file: cfg
+                .config_dir
+                .join(TOKENS_FILE)
+                .to_string_lossy()
+                .into_owned(),
+            generate_command: format!(
+                "ACP_HUB_CONFIG_DIR={} {} token generate --name web --role full",
+                shell_single_quote(&config_dir),
+                shell_single_quote(executable),
+            ),
+        }
+    }
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// 静态资源路由表：URL 路径 → 产物相对路径。`/`、`/index.html` 与旧链接
@@ -131,6 +176,7 @@ pub(crate) async fn serve_http(
     mut stream: TcpStream,
     peer: SocketAddr,
     auth: Arc<Mutex<AuthService>>,
+    auth_setup: BrowserAuthSetup,
 ) -> std::io::Result<()> {
     let deadline = tokio::time::Instant::now() + HTTP_READ_TIMEOUT;
     let mut buf = Vec::with_capacity(2048);
@@ -451,15 +497,12 @@ pub(crate) async fn serve_http(
                     .await;
                 }
             };
-            match auth
-                .try_lock()
-                .ok()
-                .and_then(|mut a| a.create_browser_session(&body.token).ok())
-            {
-                Some((sid, ctx)) => (
+            match auth.try_lock() {
+                Ok(mut auth) => match auth.create_browser_session(&body.token) {
+                    Ok((sid, ctx)) => (
                     "200 OK",
                     serde_json::to_vec(
-                        &serde_json::json!({"authenticated":true,"role":ctx.role.as_str()}),
+                        &serde_json::json!({"authenticated":true,"role":ctx.role.as_str(),"setup":auth_setup}),
                     )
                     .unwrap(),
                     vec![(
@@ -468,30 +511,46 @@ pub(crate) async fn serve_http(
                             "{BROWSER_COOKIE}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={BROWSER_SESSION_TTL_SECS}"
                         ),
                     )],
-                ),
-                None => (
-                    "401 Unauthorized",
-                    br#"{"authenticated":false}"#.to_vec(),
-                    vec![],
+                    ),
+                    Err(_) => (
+                        "401 Unauthorized",
+                        serde_json::to_vec(&serde_json::json!({"authenticated":false,"setup":auth_setup})).unwrap(),
+                        vec![],
+                    ),
+                },
+                Err(_) => (
+                    "503 Service Unavailable",
+                    serde_json::to_vec(&serde_json::json!({"error":"auth_busy","setup":auth_setup})).unwrap(),
+                    vec![("Retry-After".to_string(), "1".to_string())],
                 ),
             }
         }
-        "GET" => match cookie.as_deref().and_then(|sid| {
-            auth.try_lock()
-                .ok()
-                .and_then(|mut a| a.validate_browser_session(sid, peer).ok())
-        }) {
-            Some(ctx) => (
-                "200 OK",
-                serde_json::to_vec(
-                    &serde_json::json!({"authenticated":true,"role":ctx.role.as_str()}),
-                )
-                .unwrap(),
-                vec![],
-            ),
+        "GET" => match cookie.as_deref() {
+            Some(sid) => match auth.try_lock() {
+                Ok(mut auth) => match auth.validate_browser_session(sid, peer) {
+                    Ok(ctx) => (
+                        "200 OK",
+                        serde_json::to_vec(
+                            &serde_json::json!({"authenticated":true,"role":ctx.role.as_str(),"setup":auth_setup}),
+                        )
+                        .unwrap(),
+                        vec![],
+                    ),
+                    Err(_) => (
+                        "401 Unauthorized",
+                        serde_json::to_vec(&serde_json::json!({"authenticated":false,"setup":auth_setup})).unwrap(),
+                        vec![],
+                    ),
+                },
+                Err(_) => (
+                    "503 Service Unavailable",
+                    serde_json::to_vec(&serde_json::json!({"error":"auth_busy","setup":auth_setup})).unwrap(),
+                    vec![("Retry-After".to_string(), "1".to_string())],
+                ),
+            },
             None => (
                 "401 Unauthorized",
-                br#"{"authenticated":false}"#.to_vec(),
+                serde_json::to_vec(&serde_json::json!({"authenticated":false,"setup":auth_setup})).unwrap(),
                 vec![],
             ),
         },
@@ -585,7 +644,10 @@ fn is_fingerprinted_asset(name: &str) -> bool {
         return false;
     };
     let stem = file_name.split('.').next().unwrap_or_default();
-    let Some((_, fingerprint)) = stem.rsplit_once('-') else {
+    // Rollup's URL-safe base64 hash alphabet includes `-`, including as the
+    // final character (for example `index-CBgKAe6-.css`). Split at the first
+    // separator so a trailing hash character is not mistaken for a delimiter.
+    let Some((_, fingerprint)) = stem.split_once('-') else {
         return false;
     };
     fingerprint.len() >= 8

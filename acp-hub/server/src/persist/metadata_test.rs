@@ -42,6 +42,7 @@ async fn v2_catalog_migrates_additively_to_current_schema() {
         store.session("unknown").await.unwrap().is_none(),
         "the archive column must also be queryable after an additive migration"
     );
+    assert!(store.session_runtimes("unknown").await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -67,6 +68,76 @@ async fn fresh_open_reopen_and_crud() {
     let reopened = MetadataStore::open(dir.path()).await.unwrap();
     assert_eq!(reopened.list_projects().await.unwrap().len(), 1);
     assert_eq!(reopened.list_sessions().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn runtime_history_is_append_only_identity_not_liveness() {
+    let dir = tempdir().unwrap();
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .create_pending_session("s1", "p1", None)
+        .await
+        .unwrap();
+    store.record_session_runtime("s1", "chat-1").await.unwrap();
+    store.record_session_runtime("s1", "chat-1").await.unwrap();
+    store.record_session_runtime("s1", "chat-2").await.unwrap();
+    let history = store.session_runtimes("s1").await.unwrap();
+    assert_eq!(history.len(), 2, "same runtime provenance is idempotent");
+    assert!(history.iter().all(|record| record.retired_at.is_none()));
+
+    store.recover_after_restart().await.unwrap();
+    assert_eq!(
+        store.session_runtimes("s1").await.unwrap().len(),
+        2,
+        "restart clears active hints, not historical provenance"
+    );
+}
+
+#[tokio::test]
+async fn v4_migration_backfills_the_last_known_runtime_before_restart_clears_the_hint() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.sqlite3");
+    let store = MetadataStore::open(dir.path()).await.unwrap();
+    store
+        .create_project("p1", "Demo", dir.path().to_str().unwrap(), "local")
+        .await
+        .unwrap();
+    store
+        .create_pending_session("s1", "p1", None)
+        .await
+        .unwrap();
+    store
+        .finalize_session("s1", "acp-1", None, "chat-before-v5")
+        .await
+        .unwrap();
+    drop(store);
+
+    let mut connection =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}?mode=rw", path.display()))
+            .await
+            .unwrap();
+    connection
+        .execute("DROP INDEX session_runtime_history_session_activated_idx")
+        .await
+        .unwrap();
+    connection
+        .execute("DROP TABLE session_runtime_history")
+        .await
+        .unwrap();
+    connection
+        .execute("DELETE FROM schema_migrations WHERE version=5")
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let migrated = MetadataStore::open(dir.path()).await.unwrap();
+    let history = migrated.session_runtimes("s1").await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].chat_id, "chat-before-v5");
 }
 
 #[tokio::test]

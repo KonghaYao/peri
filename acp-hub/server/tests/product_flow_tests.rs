@@ -433,6 +433,7 @@ async fn web_project_session_survives_restart_and_rebinds_exact_acp_id() -> Resu
         .send(&Frame::YsyncSubscribe(
             acp_hub_proto::ysync::YsyncSubscribe {
                 docs: vec![restored_chat_doc.parse().expect("valid chat doc id")],
+                client_capabilities: vec![acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2.to_string()],
             },
         ))
         .await?;

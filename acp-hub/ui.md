@@ -1,4 +1,11 @@
-## acp-hub UI 高保真改造计划
+## acp-hub UI 高保真改造计划（历史基线，已归档）
+
+> 本文件记录 2026-08-13 重构前的视觉基线与早期迁移草案，**不是当前实现契约**。
+> 其中 `ConnectCard`、三栏 `StatusRail`、URL/sessionStorage token、仅前端改造等
+> 假设已经失效。当前架构、安全边界与验证证据以
+> [`docs/architecture.md`](docs/architecture.md) 和
+> [`spec/issues/2026-08-13-acp-hub-uiux-audit.md`](../spec/issues/2026-08-13-acp-hub-uiux-audit.md)
+> 为准；新工作不得从本文件复制认证或组件约束。
 
 ### 已确认范围
 

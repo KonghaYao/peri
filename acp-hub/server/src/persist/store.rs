@@ -131,6 +131,12 @@ impl ChatStore {
     pub async fn outbox_get(&self, command_id: Uuid) -> Option<OutboxRecord> {
         self.outbox.lock().await.get(command_id).cloned()
     }
+
+    /// Internal recovery query material. Callers must project only reviewed
+    /// safe fields; `OutboxRecord::recovery` is never a wire response.
+    pub async fn outbox_records(&self) -> Vec<OutboxRecord> {
+        self.outbox.lock().await.records().cloned().collect()
+    }
 }
 
 /// 磁盘预算报告（§9.2）。

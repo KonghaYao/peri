@@ -27,12 +27,14 @@ import { retainLiveRuntimeHints } from './lib/recovery-state.mjs';
 import { connectionTransition } from './lib/connection-state.mjs';
 import { CommandTracker } from './lib/command-tracker';
 import { SessionActivation, type OpeningSession, type OpenSessionCallbacks } from './lib/session-activation';
-import { principalRole, publishAuthInvalidation, readOnly } from './lib/auth-state';
-import { acceptMessageDelivery, completeMessageDelivery, failMessageDelivery, markMessageDeliveryUncertain, messageSubmission, resetMessageDelivery, retryMessageDelivery, startMessageDelivery } from './lib/message-delivery';
+import { installPrincipalRole, principalRole, publishAuthInvalidation, readOnly } from './lib/auth-state';
+import { acceptMessageDelivery, blockUnknownMessageDelivery, completeMessageDelivery, failMessageDelivery, markMessageDeliveryUncertain, messageSubmission, reconcileMessageProjection, resetMessageDelivery, retryMessageDelivery, startMessageDelivery } from './lib/message-delivery';
 import { settleLateQuickStart } from './lib/quick-start-delivery';
 import { acceptRuntimeControl, confirmRuntimeControl, failRuntimeControl, markRuntimeControlUncertain, reconcileRuntimeControl, resetRuntimeControls, retryRuntimeControl, runtimeControlBusy, startRuntimeControl } from './lib/runtime-control';
 import { failPermissionDecision, markPermissionDecisionUncertain, resetPermissionDecisions, retainProjectedPermissions, retryPermissionDecision, startPermissionDecision, type PermissionDecision } from './lib/permission-delivery';
 import { CatalogActions } from './lib/catalog-actions';
+import { ToastStore } from './lib/toast-store';
+import type { PromptStatusItem } from './lib/protocol';
 
 const ACK_TIMEOUT_MS = 30000;
 
@@ -46,6 +48,7 @@ export const [connState, setConnState] = createSignal<{ text: string; kind: 'idl
 export const [heartbeatCount, setHeartbeatCount] = createSignal(0);
 export const [globalStatus, setGlobalStatus] = createSignal('');
 export const [subscribedDocs, setSubscribedDocs] = createSignal('—');
+export const [promptDeliveryReady, setPromptDeliveryReady] = createSignal(false);
 export const [ackLog, setAckLog] = createSignal<string[]>([]);
 export const [errorLog, setErrorLog] = createSignal<string[]>([]);
 export const [chats, setChats] = createSignal<ChatInfo[]>([]);
@@ -64,7 +67,8 @@ export const [runtimeDocsState, setRuntimeDocsState] = createSignal<RuntimeDocsS
 export const runtimeDocsHydrated = () => runtimeDocsState().chat && runtimeDocsState().control;
 /** 当前选中的工作区 id（null = 全部）：左栏对话/会话按此过滤。 */
 export const [chatStatusSignal, setChatStatusSignal] = createSignal<Record<string, string>>({});
-export const [toasts, setToasts] = createSignal<{ id: number; msg: string }[]>([]);
+const toastStore = new ToastStore();
+export const toasts = toastStore.records;
 export interface PersistentError { id: number; title: string; detail: string; commandId: string | null; retryable: boolean; retrying: boolean }
 export const [persistentErrors, setPersistentErrors] = createSignal<PersistentError[]>([]);
 export const turnActive = () => isTurnActive(chatHead()?.activeTurn);
@@ -73,6 +77,15 @@ export const [connectionProblem, setConnectionProblem] = createSignal<Connection
 export const [restoringSessionId, setRestoringSessionId] = createSignal<string | null>(null);
 export const [creatingSessionProjectId, setCreatingSessionProjectId] = createSignal<string | null>(null);
 export const [discoveringSessionsProjectId, setDiscoveringSessionsProjectId] = createSignal<string | null>(null);
+export interface PromptRecoveryView {
+  sessionId: string;
+  loading: boolean;
+  truncated: boolean;
+  evidenceIncomplete: boolean;
+  error: string | null;
+  prompts: PromptStatusItem[];
+}
+export const [promptRecovery, setPromptRecovery] = createSignal<PromptRecoveryView | null>(null);
 
 // ── 内部状态 ────────────────────────────────────────────────────────────
 
@@ -121,16 +134,12 @@ const commands = new CommandTracker<ActionFrame, Ack, ActionError>({
   ),
 });
 
-let toastSeq = 0;
+let problemSeq = 0;
 
 // ── toast ───────────────────────────────────────────────────────────────
 
 export function toast(msg: string): void {
-  const id = ++toastSeq;
-  setToasts((list) => [...list, { id, msg }]);
-  setTimeout(() => {
-    setToasts((list) => list.filter((t) => t.id !== id));
-  }, 2500);
+  toastStore.show(msg);
 }
 
 export function dismissPersistentError(id: number): void {
@@ -154,7 +163,7 @@ export function retainPersistentErrors(items: PersistentError[], next: Persisten
 
 function persistActionProblem(title: string, detail: string, commandId?: string): void {
   setPersistentErrors((items) => retainPersistentErrors(items, {
-    id: ++toastSeq, title, detail, commandId: commandId || null, retryable: !!commandId && commands.hasUncertain(commandId), retrying: false,
+    id: ++problemSeq, title, detail, commandId: commandId || null, retryable: !!commandId && commands.hasUncertain(commandId), retrying: false,
   }));
 }
 
@@ -169,7 +178,7 @@ export function reportTransportIssue(issue: WsProtocolIssue): void {
   setPersistentErrors((items) => {
     const withoutDuplicate = items.filter((item) => item.title !== problem.title);
     return retainPersistentErrors(withoutDuplicate, {
-      id: ++toastSeq,
+      id: ++problemSeq,
       ...problem,
       commandId: null,
       retryable: false,
@@ -286,6 +295,21 @@ function onFrame(frame: Record<string, unknown>): void {
     case 'action_error':
       onActionError(frame as ActionError);
       break;
+    case 'prompt_status': {
+      const response = frame as { commandId: string; sessionId: string; truncated: boolean; evidenceIncomplete: boolean; prompts: PromptStatusItem[] };
+      if (response.sessionId === selectedSessionId()) {
+        setPromptRecovery({
+          sessionId: response.sessionId,
+          loading: false,
+          truncated: response.truncated,
+          evidenceIncomplete: response.evidenceIncomplete,
+          error: null,
+          prompts: response.prompts,
+        });
+      }
+      commands.acknowledge({ commandId: response.commandId, status: 'committed' });
+      break;
+    }
     case 'auth_error':
       invalidateAuthentication('访问令牌已失效、被撤销或服务器已重启，需要重新登录。');
       break;
@@ -321,6 +345,7 @@ const ERROR_REASONS: Record<string, string> = {
   UNSUPPORTED_FRAME: '不支持的操作',
   UNAUTHENTICATED: '未认证',
   INVALID_STATE: '非法状态',
+  DELIVERY_UNKNOWN: '投递结果未知',
 };
 
 function onActionError(err: ActionError): void {
@@ -357,6 +382,9 @@ store.onUpdate = (docId: string): void => {
   if (currentCid && docId === H.chatDoc(currentCid)) {
     const conv = renderChat(store.docFor(docId));
     setChatEntries(conv.entries);
+    reconcileMessageProjection(new Set(conv.entries
+      .map((entry) => entry.sourceCommandId)
+      .filter((commandId): commandId is string => commandId !== null)));
     setRuntimeDocsState((state) => ({ ...state, chat: true }));
     return;
   }
@@ -383,6 +411,7 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
   }
   switch (state) {
     case 'connecting':
+      setPromptDeliveryReady(false);
       break;
     case 'open':
       // 已发 auth；认证后首帧必须是 ysync.subscribe 或 action ——
@@ -390,7 +419,12 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       sendSubscribe();
       break;
     case 'ready':
+      setPromptDeliveryReady(
+        Array.isArray(detail.negotiatedCapabilities)
+          && detail.negotiatedCapabilities.includes(H.CAP_PROMPT_DELIVERY_V2),
+      );
       if (registryReceived) reconcileSessionNavigation(projectSessions());
+      if (selectedSessionId()) requestPromptRecovery(selectedSessionId()!);
       setSubscribedDocs(
         detail.projectionVersions
           ? Object.keys(detail.projectionVersions as Record<string, unknown>).join('、')
@@ -408,6 +442,7 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       sessionActivation.connectionLost();
       if (detail.code === 4502) {
         invalidateAuthentication('浏览器会话已失效、访问令牌被撤销，或服务器认证配置发生变化。请重新登录。');
+        break;
       }
       toast(
         `连接终止（${detail.code}）：` +
@@ -473,6 +508,7 @@ function clearCurrentSelection(): void {
   setChatHead(null);
   setPermissions([]);
   setRuntimeDocsState({ chat: false, control: false });
+  setPromptRecovery(null);
   forgetRememberedSession();
 }
 
@@ -480,6 +516,28 @@ function activateSession(sessionId: string, chatId: string): void {
   setSelectedSessionId(sessionId);
   rememberSession(sessionId);
   selectChat(chatId);
+  requestPromptRecovery(sessionId);
+}
+
+function requestPromptRecovery(sessionId: string): void {
+  if (!ready) return;
+  if (promptRecovery()?.sessionId === sessionId && promptRecovery()?.loading) return;
+  setPromptRecovery({ sessionId, loading: true, truncated: false, evidenceIncomplete: false, error: null, prompts: [] });
+  const frame = H.persistedSessionPromptStatus(sessionId);
+  sendAction(frame, '读取消息恢复状态', {
+    cb: () => undefined,
+    retryOnUncertain: true,
+    onTimeout: () => {
+      if (selectedSessionId() === sessionId) {
+        setPromptRecovery({ sessionId, loading: false, truncated: false, evidenceIncomplete: true, error: '恢复状态查询超时；这是只读操作，可以安全重试。', prompts: [] });
+      }
+    },
+    onError: (failure) => {
+      if (selectedSessionId() === sessionId) {
+        setPromptRecovery({ sessionId, loading: false, truncated: false, evidenceIncomplete: true, error: failure.message || '暂时无法读取历史恢复状态。', prompts: [] });
+      }
+    },
+  });
 }
 
 const sessionActivation = new SessionActivation({
@@ -557,6 +615,7 @@ export function disconnect(): void {
   commands.settleConnectionLoss();
   connectionEpoch += 1;
   ready = false;
+  setPromptDeliveryReady(false);
   sessionActivation.connectionLost();
   if (ws) {
     ws.close();
@@ -565,18 +624,32 @@ export function disconnect(): void {
   setBusy(false);
 }
 
-export function clearUiSession(): void {
+export function resetAuthenticatedSession(): void {
+  // Revoke mutation authority before settling callbacks from the old transport.
+  // This function is intentionally idempotent: both the invalidation producer
+  // and AuthGate consumer call it to make the identity boundary fail closed.
+  installPrincipalRole(null);
   disconnect();
   currentCid = null;
+  setConnState({ text: '未连接', kind: 'idle' });
+  setHeartbeatCount(0);
+  setGlobalStatus('');
+  setSubscribedDocs('—');
+  setPromptDeliveryReady(false);
+  setAckLog([]);
+  setErrorLog([]);
+  setChats([]);
   setSelectedCid(null);
   setSelectedSessionId(null);
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
   setRuntimeDocsState({ chat: false, control: false });
+  setChatStatusSignal({});
   setProjects([]);
   setProjectSessions([]);
   setImportableSessions([]);
+  setPromptRecovery(null);
   resetMessageDelivery();
   sessionActivation.reset();
   resetRuntimeControls();
@@ -587,6 +660,9 @@ export function clearUiSession(): void {
   setConnectionProblem(null);
   registryReceived = false;
   store.clear();
+  // Keep this last: disconnect/reset callbacks are allowed to publish feedback,
+  // but no notification from the previous principal may survive this boundary.
+  toastStore.clear();
 }
 
 export function navigateProjectSession(sessionId: string, callbacks: OpenSessionCallbacks = {}): boolean {
@@ -596,7 +672,8 @@ export function navigateProjectSession(sessionId: string, callbacks: OpenSession
 // ── 用户动作 → action ──────────────────────────────────────────────────
 
 export function sendMessage(text: string, effort?: string): boolean {
-  if (!ready || readOnly() || openingSessionId() || turnActive() || messageSubmission()) {
+  if (!ready || !promptDeliveryReady() || readOnly() || openingSessionId() || turnActive() || messageSubmission()) {
+    if (!promptDeliveryReady()) { toast('服务器尚未启用安全消息投递，请刷新或升级 server'); return false; }
     if (readOnly()) { toast('只读模式不能发送消息'); return false; }
     if (openingSessionId()) { toast('会话正在打开'); return false; }
     if (turnActive()) { toast('Agent 正在工作，可先停止当前任务'); return false; }
@@ -626,7 +703,9 @@ export function sendMessage(text: string, effort?: string): boolean {
     retryOnUncertain: true,
     onAccepted: () => acceptMessageDelivery(frame.commandId),
     onTimeout: () => markMessageDeliveryUncertain(frame.commandId),
-    onError: (err) => failMessageDelivery(frame.commandId, err.message || '消息提交失败'),
+    onError: (err) => err.code === 'DELIVERY_UNKNOWN'
+      ? blockUnknownMessageDelivery(frame.commandId, err.message)
+      : failMessageDelivery(frame.commandId, err.message || '消息提交失败'),
     cb: (ack) => completeMessageDelivery(frame.commandId, ack.status),
   });
   return sent;
@@ -642,7 +721,7 @@ export function retryMessageSubmission(): void {
 }
 
 function invalidateAuthentication(reason: string): void {
-  clearUiSession();
+  resetAuthenticatedSession();
   publishAuthInvalidation(reason);
 }
 

@@ -82,6 +82,12 @@ pub struct ChatChannel {
     pending: VecDeque<ActionEnvelope>,
     /// ysync.subscribe 状态（§4.2）。
     subscriptions: HashSet<DocId>,
+    /// First subscribe has been consumed even when it contained zero docs or
+    /// later subscriptions were removed. Capability negotiation is one-shot.
+    subscription_seen: bool,
+    /// Capabilities negotiated from the first subscription and permanently
+    /// bound to this authenticated connection.
+    negotiated_capabilities: HashSet<String>,
 }
 
 impl ChatChannel {
@@ -93,6 +99,8 @@ impl ChatChannel {
             first_frame: true,
             pending: VecDeque::new(),
             subscriptions: HashSet::new(),
+            subscription_seen: false,
+            negotiated_capabilities: HashSet::new(),
         }
     }
 
@@ -117,7 +125,17 @@ impl ChatChannel {
             Frame::Action(action) => self.dispatch_action(action, deps, tx).await,
             Frame::YsyncSubscribe(sub) => {
                 let docs = sub.docs.clone();
-                let first = self.subscriptions.is_empty();
+                let first = !self.subscription_seen;
+                if first {
+                    self.subscription_seen = true;
+                    self.negotiated_capabilities = sub
+                        .client_capabilities
+                        .into_iter()
+                        .filter(|capability| {
+                            capability == acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2
+                        })
+                        .collect();
+                }
                 for d in &docs {
                     self.subscriptions.insert(d.clone());
                 }
@@ -170,7 +188,8 @@ impl ChatChannel {
                 },
             ))]);
         }
-        if !self.ctx.can_send_action() {
+        let read_only_query = matches!(action, ActionEnvelope::PersistedSessionPromptStatus { .. });
+        if !self.ctx.can_send_action() && !read_only_query {
             // read-only 档位（§9.2.2：M1 即强制，仅读）。
             return DispatchOutcome::Send(vec![OutboundMsg::Frame(unsupported_frame(
                 "read-only token cannot send actions",
@@ -191,6 +210,18 @@ impl ChatChannel {
             }
             self.pending.push_back(action);
             return DispatchOutcome::None;
+        }
+        // Prompt delivery v2 is a safety capability, not a UI feature flag.
+        // Evaluate only after Ready so an Action-first client can buffer until
+        // its first subscription negotiates capabilities. An old tab must
+        // never enter the new pipeline and later interpret delivery-unknown as
+        // “not sent”, so close before coordinator mutation.
+        if matches!(action, ActionEnvelope::Prompt { .. }) && !self.supports_prompt_delivery_v2() {
+            tracing::warn!(
+                token_id = %self.ctx.token_id,
+                "prompt rejected before mutation: client lacks prompt-delivery-v2"
+            );
+            return DispatchOutcome::Disconnect(4502);
         }
         match deps.coordinator.submit(&self.ctx, action, tx).await {
             SubmitAck::Accepted { command_id } => {
@@ -231,6 +262,23 @@ impl ChatChannel {
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
+
+    /// Negotiated capabilities returned in `ready`. Sorted output keeps wire
+    /// fixtures deterministic.
+    pub fn negotiated_capabilities(&self) -> Vec<String> {
+        let mut capabilities = self
+            .negotiated_capabilities
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        capabilities.sort();
+        capabilities
+    }
+
+    pub fn supports_prompt_delivery_v2(&self) -> bool {
+        self.negotiated_capabilities
+            .contains(acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2)
+    }
 }
 
 fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
@@ -246,6 +294,7 @@ fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
         | ActionEnvelope::PersistedSessionRestore { command_id, .. }
         | ActionEnvelope::PersistedSessionImport { command_id, .. }
         | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
         | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }

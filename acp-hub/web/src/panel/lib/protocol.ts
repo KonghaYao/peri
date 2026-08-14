@@ -12,6 +12,7 @@
 
 /** 注册表 doc id（与 proto/src/conn.rs 的 DocId::REGISTRY 对齐），常驻订阅。 */
 export const DOC_REGISTRY = 'hub:registry';
+export const CAP_PROMPT_DELIVERY_V2 = 'prompt-delivery-v2';
 
 /** chat 派生 doc id（订阅字段透明字符串，前缀区分投影）。 */
 export const chatDoc = (sid: string): string => `chat:${sid}`;
@@ -28,7 +29,11 @@ export const newCommandId = (): string => crypto.randomUUID();
 export const auth = (token: string) => ({ t: 'auth', token });
 
 /** ysync 订阅：字段名 `docs`；首个订阅后 server 推各 doc 快照 + ready。 */
-export const subscribe = (docs: string[]) => ({ t: 'ysync.subscribe', docs });
+export const subscribe = (docs: string[]) => ({
+  t: 'ysync.subscribe',
+  docs,
+  clientCapabilities: [CAP_PROMPT_DELIVERY_V2],
+});
 
 /** ysync 退订：幂等，重复退订无副作用。 */
 export const unsubscribe = (docs: string[]) => ({ t: 'ysync.unsubscribe', docs });
@@ -111,6 +116,9 @@ export const persistedSessionImport = (projectId: string, acpSessionId: string) 
 export const persistedSessionDiscover = (projectId: string) =>
   action('session/discover', { projectId });
 
+export const persistedSessionPromptStatus = (sessionId: string) =>
+  action('session/prompt-status', { sessionId });
+
 /** 按需查询指定对话的 ACP 会话列表（§6.3）：server 从 chat record 解析
  *  cwd 向 agent 侧发 session/list RPC，结果经 `session_list` 下行帧回投
  *  （agent 侧是真实数据源，非轮询投影过滤）。 */
@@ -153,10 +161,11 @@ export const resolvePermission = (chatId: string, permissionId: string, decision
  * the browser message callback and silently stop processing that delivery. */
 export type DownstreamFrame =
   | { t: 'keep_alive' }
-  | { t: 'ready'; projectionVersions: Record<string, number> }
+  | { t: 'ready'; projectionVersions: Record<string, number>; negotiatedCapabilities?: string[] }
   | { t: 'ysync.update'; doc: string; update: string; projectionVersion?: number }
   | { t: 'action_ack'; commandId: string; status: 'accepted' | 'committed' | 'duplicate'; turnId?: string; chatId?: string; projectId?: string; sessionId?: string; acpSessionId?: string; committedProjectionVersion?: number }
   | { t: 'action_error'; commandId: string; code: string; message: string; retryable: boolean; retryAfterMs?: number }
+  | { t: 'prompt_status'; commandId: string; sessionId: string; runtimeRestored: false; truncated: boolean; evidenceIncomplete: boolean; prompts: PromptStatusItem[] }
   | { t: 'auth_error'; [key: string]: unknown }
   | { t: string; [key: string]: unknown };
 
@@ -182,6 +191,9 @@ function decodeKnownFrame(frame: Record<string, unknown>): DownstreamFrame | nul
       return { t: 'keep_alive' };
     case 'ready': {
       if (!isProjectionVersions(frame.projectionVersions)) return null;
+      if (frame.negotiatedCapabilities !== undefined
+        && (!Array.isArray(frame.negotiatedCapabilities)
+          || !frame.negotiatedCapabilities.every(nonEmptyString))) return null;
       return frame as DownstreamFrame;
     }
     case 'ysync.update':
@@ -197,11 +209,37 @@ function decodeKnownFrame(frame: Record<string, unknown>): DownstreamFrame | nul
       if (!nonEmptyString(frame.commandId) || !nonEmptyString(frame.code) || typeof frame.message !== 'string' || typeof frame.retryable !== 'boolean') return null;
       if (frame.retryAfterMs !== undefined && !nonNegativeInteger(frame.retryAfterMs)) return null;
       return frame as DownstreamFrame;
+    case 'prompt_status':
+      if (!nonEmptyString(frame.commandId) || !nonEmptyString(frame.sessionId)) return null;
+      if (['message', 'text', 'prompt', 'recovery'].some((key) => key in frame)) return null;
+      if (frame.runtimeRestored !== false || typeof frame.truncated !== 'boolean' || typeof frame.evidenceIncomplete !== 'boolean' || !Array.isArray(frame.prompts)) return null;
+      if (!frame.prompts.every(isPromptStatusItem)) return null;
+      return frame as DownstreamFrame;
     case 'auth_error':
       return frame as DownstreamFrame;
     default:
       return frame as DownstreamFrame;
   }
+}
+
+export interface PromptStatusItem {
+  commandId: string;
+  turnId?: string;
+  status: 'projected' | 'completed' | 'failed' | 'delivery_unknown';
+  createdAt: string;
+  updatedAt: string;
+  errorCode?: string;
+}
+
+function isPromptStatusItem(value: unknown): value is PromptStatusItem {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (['message', 'text', 'prompt', 'recovery'].some((key) => key in item)) return false;
+  return nonEmptyString(item.commandId)
+    && optionalStrings(item, ['turnId', 'errorCode'])
+    && ['projected', 'completed', 'failed', 'delivery_unknown'].includes(String(item.status))
+    && nonEmptyString(item.createdAt)
+    && nonEmptyString(item.updatedAt);
 }
 
 const nonEmptyString = (value: unknown): value is string => typeof value === 'string' && !!value.trim();

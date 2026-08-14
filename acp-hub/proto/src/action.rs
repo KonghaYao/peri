@@ -83,6 +83,13 @@ pub enum ActionEnvelope {
         command_id: String,
         payload: ProjectArchivePayload,
     },
+    /// 读取一个持久 logical session 的安全 prompt delivery 摘要。服务端仅
+    /// 通过 session 身份解析历史 runtime；client 不得指定任意 chat id。
+    #[serde(rename = "session/prompt-status", rename_all = "camelCase")]
+    PersistedSessionPromptStatus {
+        command_id: String,
+        payload: PersistedSessionOpenPayload,
+    },
     /// 创建对话；`instance_id` 缺省 = 本机（§4.3）。
     #[serde(rename = "chat/create", rename_all = "camelCase")]
     Create {
@@ -178,6 +185,7 @@ impl ActionEnvelope {
             ActionEnvelope::PersistedSessionRestore { .. } => "session/restore",
             ActionEnvelope::PersistedSessionImport { .. } => "session/import",
             ActionEnvelope::PersistedSessionDiscover { .. } => "session/discover",
+            ActionEnvelope::PersistedSessionPromptStatus { .. } => "session/prompt-status",
             ActionEnvelope::Create { .. } => "chat/create",
             ActionEnvelope::Load { .. } => "chat/load",
             ActionEnvelope::Close { .. } => "chat/close",

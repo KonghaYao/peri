@@ -196,6 +196,7 @@ async fn t12_body() -> Result<(), String> {
     c.send(&Frame::YsyncSubscribe(
         acp_hub_proto::ysync::YsyncSubscribe {
             docs: vec!["hub:registry".parse().unwrap()],
+            client_capabilities: Vec::new(),
         },
     ))
     .await?;
