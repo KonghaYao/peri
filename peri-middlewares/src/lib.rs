@@ -32,11 +32,13 @@ pub use claude_agent_parser::{
 pub mod ask_user;
 pub mod attribution;
 pub mod cron;
+pub mod default_system_prompt;
 pub mod error_suggest;
 pub mod hitl;
 pub mod hooks;
 pub mod lsp;
 pub mod mcp;
+pub mod meta_harness;
 pub mod middleware;
 pub mod plugin;
 pub use plugin::{
@@ -61,6 +63,7 @@ pub use ask_user::{
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
+pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 pub use goal_middleware::GoalMiddleware;
 pub use hitl::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,

@@ -77,12 +77,17 @@ pub fn load() -> Result<PeriConfig> {
 }
 
 /// 从指定路径加载配置
+///
+/// 解析成功后对 `config.meta_harness` 做解析期校验（未知 key warn + 忽略，
+/// 见 [`super::config::AppConfig::validate_meta_harness`]）——warn 不 fail，
+/// 不改变既有 `Result` 语义。
 pub fn load_from(path: &Path) -> Result<PeriConfig> {
     if !path.exists() {
         return Ok(PeriConfig::default());
     }
     let content = std::fs::read_to_string(path)?;
-    let cfg: PeriConfig = serde_json::from_str(&content)?;
+    let mut cfg: PeriConfig = serde_json::from_str(&content)?;
+    cfg.config.validate_meta_harness();
     Ok(cfg)
 }
 

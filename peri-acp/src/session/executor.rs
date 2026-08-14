@@ -19,5 +19,4 @@ pub use peri_agent::session::exec::executor::{
     run_session_loop, AutoClassifierFactory, ContinuationRequest, FrozenFallbackBuilder,
     FrozenSessionData, LangfuseHooks, LangfuseTurnEndHook, PredictionError, PromptResult,
     PromptStopReason, SessionContext, SubagentLlmFactory, TurnInput,
-    PERMISSION_MODE_NEVER_NOTIFIED,
 };

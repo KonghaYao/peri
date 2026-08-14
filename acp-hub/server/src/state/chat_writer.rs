@@ -27,6 +27,16 @@ pub enum ContentKind {
     Reasoning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEntryRegistration {
+    Created,
+    /// A legacy same-turn entry was safely linked to the Hub command that owns
+    /// the persisted outbox turn.
+    Correlated,
+    Duplicate,
+    SourceCommandConflict,
+}
+
 // ---------------------------------------------------------------------------
 // 枚举值域（schema 镜像 serde camelCase 字符串）
 // ---------------------------------------------------------------------------
@@ -108,10 +118,7 @@ pub fn tool_call_exists<T: ReadTxn>(txn: &T, tool_call_id: &str) -> bool {
 }
 
 /// 读取 tool_call 投影（聚合器 upsert 前读取以保留未覆盖字段）。
-pub fn tool_call_projection<T: ReadTxn>(
-    txn: &T,
-    tool_call_id: &str,
-) -> Option<ToolCallProjection> {
+pub fn tool_call_projection<T: ReadTxn>(txn: &T, tool_call_id: &str) -> Option<ToolCallProjection> {
     let root = root_map_read(txn)?;
     let calls = root.get(txn, "tool_calls")?.cast::<yrs::MapRef>().ok()?;
     let map = calls.get(txn, tool_call_id)?.cast::<yrs::MapRef>().ok()?;
@@ -119,10 +126,8 @@ pub fn tool_call_projection<T: ReadTxn>(
 }
 
 fn proj_from_map<T: ReadTxn>(txn: &T, map: &yrs::MapRef) -> ToolCallProjection {
-    let str_or = |key: &str| -> Option<String> {
-        map.get(txn, key)
-            .and_then(|v| v.cast::<String>().ok())
-    };
+    let str_or =
+        |key: &str| -> Option<String> { map.get(txn, key).and_then(|v| v.cast::<String>().ok()) };
     ToolCallProjection {
         tool_call_id: str_or("tool_call_id").unwrap_or_default(),
         turn_id: str_or("turn_id").unwrap_or_default(),
@@ -131,13 +136,37 @@ fn proj_from_map<T: ReadTxn>(txn: &T, map: &yrs::MapRef) -> ToolCallProjection {
             .as_deref()
             .map(status_from_str)
             .unwrap_or(ToolCallStatus::Pending),
-        arguments: map.get(txn, "arguments").and_then(out_any).map(any_to_json),
-        result: map.get(txn, "result").and_then(out_any).map(any_to_json),
-        public_error: map.get(txn, "public_error").and_then(|v| v.cast::<yrs::MapRef>().ok()).map(|_| PublicError {
-            code: str_or("public_error_code").unwrap_or_default(),
-            message: str_or("public_error_message").unwrap_or_default(),
-        }),
+        arguments: map
+            .get(txn, "arguments")
+            .and_then(out_any)
+            .and_then(non_null_json),
+        result: map
+            .get(txn, "result")
+            .and_then(out_any)
+            .and_then(non_null_json),
+        result_omitted: map
+            .get(txn, "result_omitted")
+            .and_then(|value| value.cast::<bool>().ok()),
+        result_bytes: map
+            .get(txn, "result_bytes")
+            .and_then(|value| value.cast::<f64>().ok())
+            .and_then(|value| (value >= 0.0 && value <= u64::MAX as f64).then_some(value as u64)),
+        public_error: map
+            .get(txn, "public_error")
+            .and_then(|v| v.cast::<yrs::MapRef>().ok())
+            .map(|error| PublicError {
+                code: error
+                    .get(txn, "code")
+                    .and_then(|v| v.cast::<String>().ok())
+                    .unwrap_or_default(),
+                message: error
+                    .get(txn, "message")
+                    .and_then(|v| v.cast::<String>().ok())
+                    .unwrap_or_default(),
+            }),
         permission_id: str_or("permission_id"),
+        started_at: str_or("started_at"),
+        completed_at: str_or("completed_at"),
     }
 }
 
@@ -147,6 +176,10 @@ fn out_any(v: yrs::Out) -> Option<yrs::Any> {
         yrs::Out::Any(a) => Some(a),
         _ => None,
     }
+}
+
+fn non_null_json(value: yrs::Any) -> Option<serde_json::Value> {
+    (!matches!(value, yrs::Any::Null)).then(|| any_to_json(value))
 }
 
 fn status_from_str(s: &str) -> ToolCallStatus {
@@ -169,14 +202,12 @@ fn any_to_json(a: yrs::Any) -> serde_json::Value {
 
 /// 读取 entries MapRef（写入遍历/读取用）。
 pub fn entries_map(txn: &mut TransactionCtx<'_>) -> yrs::MapRef {
-    root_map(txn)
-        .get_or_init::<_, yrs::MapRef>(txn, "entries")
+    root_map(txn).get_or_init::<_, yrs::MapRef>(txn, "entries")
 }
 
 /// 读取 tool_calls MapRef。
 pub fn tool_calls_map(txn: &mut TransactionCtx<'_>) -> yrs::MapRef {
-    root_map(txn)
-        .get_or_init::<_, yrs::MapRef>(txn, "tool_calls")
+    root_map(txn).get_or_init::<_, yrs::MapRef>(txn, "tool_calls")
 }
 
 /// 读取 entry_order ArrayRef。
@@ -209,6 +240,10 @@ pub fn ensure_entry(txn: &mut TransactionCtx<'_>, root: &yrs::MapRef, entry: &Ch
     match &entry.author_user_id {
         Some(u) => entry_map.insert(txn, "author_user_id", u.clone()),
         None => entry_map.insert(txn, "author_user_id", yrs::Any::Null),
+    };
+    match &entry.source_command_id {
+        Some(command_id) => entry_map.insert(txn, "source_command_id", command_id.clone()),
+        None => entry_map.insert(txn, "source_command_id", yrs::Any::Null),
     };
     entry_map.insert(txn, "created_at", entry.created_at.clone());
     match &entry.completed_at {
@@ -244,26 +279,38 @@ pub fn create_user_entry(
     entry_id: &str,
     text: &str,
     author_user_id: Option<&str>,
+    source_command_id: Option<&str>,
     created_at: &str,
-) -> bool {
+) -> UserEntryRegistration {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    // 同 turn_id 的 user entry 已存在 → 跳过。
-    if entries
-        .iter(txn)
-        .any(|(_, v)| {
-            v.cast::<yrs::MapRef>().ok().map(|m| {
-                m.get(txn, "role")
-                    .and_then(|r| r.cast::<String>().ok())
+    // 同 turn_id 的 user entry 已存在。Hub command may backfill only an
+    // absent identity; an existing different identity is never overwritten.
+    if let Some(existing) = entries.iter(txn).find_map(|(_, v)| {
+        v.cast::<yrs::MapRef>().ok().filter(|m| {
+            m.get(txn, "role")
+                .and_then(|r| r.cast::<String>().ok())
+                .as_deref()
+                == Some("user")
+                && m.get(txn, "turn_id")
+                    .and_then(|t| t.cast::<String>().ok())
                     .as_deref()
-                    == Some("user")
-                    && m.get(txn, "turn_id")
-                        .and_then(|t| t.cast::<String>().ok())
-                        .as_deref()
-                        == Some(turn_id)
-            }) == Some(true)
+                    == Some(turn_id)
         })
-    {
-        return false;
+    }) {
+        return match source_command_id {
+            None => UserEntryRegistration::Duplicate,
+            Some(command_id) => match existing
+                .get(txn, "source_command_id")
+                .and_then(|value| value.cast::<String>().ok())
+            {
+                Some(current) if current == command_id => UserEntryRegistration::Duplicate,
+                Some(_) => UserEntryRegistration::SourceCommandConflict,
+                None => {
+                    existing.insert(txn, "source_command_id", command_id.to_string());
+                    UserEntryRegistration::Correlated
+                }
+            },
+        };
     }
     let entry = ChatEntry {
         entry_id: entry_id.to_string(),
@@ -272,6 +319,7 @@ pub fn create_user_entry(
         role: EntryRole::User,
         status: EntryStatus::Completed,
         author_user_id: author_user_id.map(|s| s.to_string()),
+        source_command_id: source_command_id.map(str::to_string),
         created_at: created_at.to_string(),
         completed_at: Some(created_at.to_string()),
         block_order: vec![format!("{entry_id}:text")],
@@ -286,7 +334,157 @@ pub fn create_user_entry(
         .collect(),
         error: None,
     };
-    ensure_entry(txn, root, &entry)
+    if ensure_entry(txn, root, &entry) {
+        UserEntryRegistration::Created
+    } else {
+        UserEntryRegistration::Duplicate
+    }
+}
+
+/// Create the prompt-delivery-v2 user entry before ACP dispatch. The body is
+/// durable in the chat projection while the outbox retains only the matching
+/// fingerprint. A replay is idempotent only when command, turn and fingerprint
+/// all match; any mismatch fails closed.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pending_prompt_entry(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    turn_id: &str,
+    entry_id: &str,
+    text: &str,
+    author_user_id: Option<&str>,
+    source_command_id: &str,
+    payload_fingerprint: &str,
+    created_at: &str,
+) -> UserEntryRegistration {
+    let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
+    if let Some(existing) = entries.iter(txn).find_map(|(_, value)| {
+        value.cast::<yrs::MapRef>().ok().filter(|map| {
+            map.get(txn, "role")
+                .and_then(|role| role.cast::<String>().ok())
+                .as_deref()
+                == Some("user")
+                && map
+                    .get(txn, "turn_id")
+                    .and_then(|turn| turn.cast::<String>().ok())
+                    .as_deref()
+                    == Some(turn_id)
+        })
+    }) {
+        let same_command = existing
+            .get(txn, "source_command_id")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref()
+            == Some(source_command_id);
+        let same_fingerprint = existing
+            .get(txn, "payload_fingerprint")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref()
+            == Some(payload_fingerprint);
+        return if same_command && same_fingerprint {
+            UserEntryRegistration::Duplicate
+        } else {
+            UserEntryRegistration::SourceCommandConflict
+        };
+    }
+
+    let entry = ChatEntry {
+        entry_id: entry_id.to_string(),
+        turn_id: Some(turn_id.to_string()),
+        kind: EntryKind::Message,
+        role: EntryRole::User,
+        status: EntryStatus::Pending,
+        author_user_id: author_user_id.map(str::to_string),
+        source_command_id: Some(source_command_id.to_string()),
+        created_at: created_at.to_string(),
+        completed_at: None,
+        block_order: vec![format!("{entry_id}:text")],
+        blocks: [(
+            format!("{entry_id}:text"),
+            ContentBlock::Text {
+                block_id: format!("{entry_id}:text"),
+                text: text.to_string(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        error: None,
+    };
+    if !ensure_entry(txn, root, &entry) {
+        return UserEntryRegistration::Duplicate;
+    }
+    if let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    {
+        entry_map.insert(txn, "delivery_schema_version", 2_i64);
+        entry_map.insert(txn, "delivery_state", "pending");
+        entry_map.insert(txn, "delivery_error_code", yrs::Any::Null);
+        entry_map.insert(txn, "payload_fingerprint", payload_fingerprint.to_string());
+    }
+    UserEntryRegistration::Created
+}
+
+/// Transition Hub-owned prompt delivery evidence on the existing user entry.
+/// Returns false for duplicate state or non-v2/unknown entries.
+pub fn set_prompt_entry_delivery(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    entry_id: &str,
+    delivery_state: &str,
+    delivery_error_code: Option<&str>,
+    completed_at: Option<&str>,
+) -> bool {
+    if !matches!(
+        delivery_state,
+        "pending" | "completed" | "failed_not_delivered" | "delivery_unknown"
+    ) {
+        return false;
+    }
+    let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    else {
+        return false;
+    };
+    let is_v2 = entry_map
+        .get(txn, "delivery_schema_version")
+        .and_then(|value| value.cast::<i64>().ok())
+        == Some(2);
+    if !is_v2 {
+        return false;
+    }
+    let previous = entry_map
+        .get(txn, "delivery_state")
+        .and_then(|value| value.cast::<String>().ok());
+    let previous_error = entry_map
+        .get(txn, "delivery_error_code")
+        .and_then(|value| value.cast::<String>().ok());
+    if previous.as_deref() == Some(delivery_state)
+        && previous_error.as_deref() == delivery_error_code
+    {
+        return false;
+    }
+    entry_map.insert(txn, "delivery_state", delivery_state.to_string());
+    match delivery_error_code {
+        Some(code) => entry_map.insert(txn, "delivery_error_code", code.to_string()),
+        None => entry_map.insert(txn, "delivery_error_code", yrs::Any::Null),
+    };
+    if delivery_state == "completed" {
+        entry_map.insert(txn, "status", entry_status_str(EntryStatus::Completed));
+        match completed_at {
+            Some(at) => entry_map.insert(txn, "completed_at", at.to_string()),
+            None => entry_map.insert(txn, "completed_at", yrs::Any::Null),
+        };
+    } else if delivery_state == "failed_not_delivered" {
+        entry_map.insert(txn, "status", entry_status_str(EntryStatus::Error));
+        match completed_at {
+            Some(at) => entry_map.insert(txn, "completed_at", at.to_string()),
+            None => entry_map.insert(txn, "completed_at", yrs::Any::Null),
+        };
+    }
+    true
 }
 
 /// 创建 assistant/system entry 骨架 + 首块（message_delta 的 entry 未知时由
@@ -335,7 +533,9 @@ pub fn append_block(
         return false;
     };
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -418,7 +618,9 @@ pub fn append_text_delta(
     kind: ContentKind,
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -428,7 +630,8 @@ pub fn append_text_delta(
         Some(v) => {
             // 已有块：定位 Y.Text 追加。
             if let Some(text) = v.cast::<yrs::MapRef>().ok().and_then(|m| {
-                m.get(txn, "text").and_then(|t| t.cast::<yrs::TextRef>().ok())
+                m.get(txn, "text")
+                    .and_then(|t| t.cast::<yrs::TextRef>().ok())
             }) {
                 text.push(txn, delta);
             }
@@ -471,18 +674,14 @@ pub fn set_reasoning_visibility(
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
     // 收集块所在 entry（先遍历收集再写入，避免 iter 借用与写借用冲突）。
-    let target_entry = entries
-        .iter(txn)
-        .find_map(|(_, v)| {
-            v.cast::<yrs::MapRef>()
-                .ok()
-                .filter(|m| {
-                    m.get(txn, "blocks")
-                        .and_then(|b| b.cast::<yrs::MapRef>().ok())
-                        .map(|blocks| blocks.get(txn, block_id).is_some())
-                        .unwrap_or(false)
-                })
-        });
+    let target_entry = entries.iter(txn).find_map(|(_, v)| {
+        v.cast::<yrs::MapRef>().ok().filter(|m| {
+            m.get(txn, "blocks")
+                .and_then(|b| b.cast::<yrs::MapRef>().ok())
+                .map(|blocks| blocks.get(txn, block_id).is_some())
+                .unwrap_or(false)
+        })
+    });
     match target_entry {
         Some(entry_map) => {
             let blocks = entry_map.get_or_init::<_, yrs::MapRef>(txn, "blocks");
@@ -515,6 +714,14 @@ pub fn upsert_tool_call(
     cm.insert(txn, "status", tool_call_status_str(tc.status));
     insert_opt_json(txn, &cm, "arguments", tc.arguments.as_ref());
     insert_opt_json(txn, &cm, "result", tc.result.as_ref());
+    match tc.result_omitted {
+        Some(value) => cm.insert(txn, "result_omitted", value),
+        None => cm.insert(txn, "result_omitted", yrs::Any::Null),
+    };
+    match tc.result_bytes {
+        Some(value) => cm.insert(txn, "result_bytes", value as f64),
+        None => cm.insert(txn, "result_bytes", yrs::Any::Null),
+    };
     match &tc.public_error {
         Some(e) => write_public_error(txn, &cm, "public_error", e),
         None => {
@@ -525,7 +732,53 @@ pub fn upsert_tool_call(
         Some(p) => cm.insert(txn, "permission_id", p.clone()),
         None => cm.insert(txn, "permission_id", yrs::Any::Null),
     };
+    match &tc.started_at {
+        Some(value) => cm.insert(txn, "started_at", value.clone()),
+        None => cm.insert(txn, "started_at", yrs::Any::Null),
+    };
+    match &tc.completed_at {
+        Some(value) => cm.insert(txn, "completed_at", value.clone()),
+        None => cm.insert(txn, "completed_at", yrs::Any::Null),
+    };
     created
+}
+
+/// Cancel every non-terminal tool belonging to a turn. Used only when the turn itself reaches
+/// a cancellation/interruption terminal so cards cannot remain visually running forever.
+pub fn cancel_nonterminal_tools_for_turn(
+    txn: &mut TransactionCtx<'_>,
+    root: &yrs::MapRef,
+    turn_id: &str,
+) -> usize {
+    let calls = root.get_or_init::<_, yrs::MapRef>(txn, "tool_calls");
+    let ids: Vec<String> = calls.iter(txn).map(|(id, _)| id.to_string()).collect();
+    let mut migrated = 0;
+    for id in ids {
+        let Some(tool) = calls
+            .get(txn, id.as_str())
+            .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        else {
+            continue;
+        };
+        let linked_turn = tool
+            .get(txn, "turn_id")
+            .and_then(|value| value.cast::<String>().ok());
+        let status = tool
+            .get(txn, "status")
+            .and_then(|value| value.cast::<String>().ok())
+            .unwrap_or_default();
+        if linked_turn.as_deref() == Some(turn_id)
+            && !matches!(status.as_str(), "completed" | "error" | "cancelled")
+        {
+            tool.insert(
+                txn,
+                "status",
+                tool_call_status_str(ToolCallStatus::Cancelled),
+            );
+            migrated += 1;
+        }
+    }
+    migrated
 }
 
 fn insert_opt_json(
@@ -546,12 +799,7 @@ fn insert_opt_json(
     };
 }
 
-fn write_public_error(
-    txn: &mut TransactionCtx<'_>,
-    map: &yrs::MapRef,
-    key: &str,
-    e: &PublicError,
-) {
+fn write_public_error(txn: &mut TransactionCtx<'_>, map: &yrs::MapRef, key: &str, e: &PublicError) {
     let em = map.insert(txn, key, yrs::MapPrelim::default());
     em.insert(txn, "code", e.code.clone());
     em.insert(txn, "message", e.message.clone());
@@ -568,7 +816,9 @@ pub fn migrate_entry_terminal(
     error: Option<&PublicError>,
 ) -> bool {
     let entries = root.get_or_init::<_, yrs::MapRef>(txn, "entries");
-    let Some(entry_map) = entries.get(txn, entry_id).and_then(|v| v.cast::<yrs::MapRef>().ok())
+    let Some(entry_map) = entries
+        .get(txn, entry_id)
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
     else {
         return false;
     };
@@ -602,7 +852,8 @@ pub fn set_active_turn(
                 .and_then(|t| t.cast::<String>().ok())
                 .as_deref()
                 != Some(a.turn_id.as_str())
-                || sm.get(txn, "active_turn_status")
+                || sm
+                    .get(txn, "active_turn_status")
                     .and_then(|t| t.cast::<String>().ok())
                     != Some(turn_status_str(a.turn_status).to_string());
             if changed {
@@ -678,4 +929,78 @@ pub fn projection_version<T: ReadTxn>(txn: &T) -> u32 {
         .and_then(|root| root.get(txn, "projection_version"))
         .and_then(|v| v.cast::<u32>().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod source_command_tests {
+    use super::*;
+    use yrs::{Map, Transact};
+
+    #[test]
+    fn user_entry_source_command_backfill_is_exact_and_conflict_safe() {
+        let doc = yrs::Doc::new();
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map(ROOT);
+        assert_eq!(
+            create_user_entry(&mut txn, &root, "t", "t:user", "same", None, None, "now"),
+            UserEntryRegistration::Created
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-1"),
+                "now"
+            ),
+            UserEntryRegistration::Correlated
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-1"),
+                "now"
+            ),
+            UserEntryRegistration::Duplicate
+        );
+        assert_eq!(
+            create_user_entry(
+                &mut txn,
+                &root,
+                "t",
+                "t:user",
+                "same",
+                None,
+                Some("cmd-2"),
+                "now"
+            ),
+            UserEntryRegistration::SourceCommandConflict
+        );
+        let entries = root
+            .get(&txn, "entries")
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap();
+        let entry = entries
+            .get(&txn, "t:user")
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap();
+        assert_eq!(
+            entry
+                .get(&txn, "source_command_id")
+                .unwrap()
+                .cast::<String>()
+                .unwrap(),
+            "cmd-1"
+        );
+    }
 }

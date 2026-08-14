@@ -20,7 +20,9 @@ fn test_collect_tools_empty_pool() {
     let pool = Arc::new(McpClientPool::new_empty());
     let mw = McpMiddleware::new(pool);
     let tools = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
-    assert!(tools.is_empty());
+    // 空池无桥接工具/资源工具，仅 DiscoverMCP（只读查询，无条件注册）
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name(), "DiscoverMCP");
 }
 
 // ─── first_turn_reminder：首 turn 概览 ───────────────────────────────────────
@@ -324,4 +326,204 @@ fn test_tool_search_hint_once_per_instance() {
             round + 1
         );
     }
+}
+
+// ─── before_agent：MCP skill 发现投映（验收 7/13/14）────────────────────────
+
+use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry, ServerDiscoveryState};
+use peri_agent::{agent::state::AgentState, agent::AgentCancellationToken};
+use rmcp::model::Resource;
+
+fn insert_skill_handle(
+    pool: &McpClientPool,
+    name: &str,
+    resources: Vec<Resource>,
+) -> Arc<McpClientHandle> {
+    let handle = Arc::new(McpClientHandle {
+        name: name.to_string(),
+        peer: None,
+        tools: vec![],
+        resources,
+        status: ClientStatus::Connected,
+        oauth_status: OAuthStatus::default(),
+        source: None,
+        url: None,
+        channel_capable: false,
+    });
+    pool.clients
+        .write()
+        .insert(name.to_string(), Arc::clone(&handle));
+    handle
+}
+
+/// 轮询等待发现任务完成（peer=None 时任务体无 await，一旦被调度立即完成）。
+async fn wait_discovered(reg: &McpSkillRegistry, server: &str) {
+    for _ in 0..200 {
+        if matches!(
+            reg.discovery_state(server),
+            Some(ServerDiscoveryState::Discovered { .. })
+        ) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("等待 Discovered 超时: {:?}", reg.discovery_state(server));
+}
+
+/// 投影 → Started 置位；同 handle 第二轮不重复 spawn；peer=None 任务完成后
+/// 变 Discovered{[]}；全程 state 无消息推送（验收 13 半边）。
+#[tokio::test]
+async fn before_agent_marks_started_then_completes_silently() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let handle = insert_skill_handle(
+        &pool,
+        "srv",
+        vec![Resource::new("skill://demo/SKILL.md", "d")],
+    );
+    let reg = Arc::new(McpSkillRegistry::new());
+    let mw = McpMiddleware::new(Arc::clone(&pool))
+        .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
+    let mut state = AgentState::new("/tmp");
+
+    // 第一轮：同步置 Started（同 handle）
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    let token: HandleToken = handle.clone();
+    match reg.discovery_state("srv") {
+        Some(ServerDiscoveryState::Started { handle: h }) => {
+            assert!(Arc::ptr_eq(&h, &token), "Started 应持 pool 中的 handle");
+        }
+        other => panic!("应 Started: {other:?}"),
+    }
+    assert_eq!(state.messages().len(), 0, "before_agent 静默（验收 13）");
+
+    // 第二轮（current_thread runtime：spawn 任务尚未被调度，投影仍见 Started）：
+    // 不重复 spawn——状态仍 Started 且 handle 不变
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    match reg.discovery_state("srv") {
+        Some(ServerDiscoveryState::Started { handle: h }) => {
+            assert!(
+                Arc::ptr_eq(&h, &token),
+                "不重复 spawn：仍 Started 同 handle"
+            );
+        }
+        other => panic!("应仍 Started: {other:?}"),
+    }
+    assert_eq!(state.messages().len(), 0);
+
+    // peer=None → 发现任务完成后 Discovered{[]}（失败=空条目，不重试）
+    wait_discovered(&reg, "srv").await;
+    match reg.discovery_state("srv") {
+        Some(ServerDiscoveryState::Discovered { entries, .. }) => {
+            assert!(entries.is_empty(), "peer 缺失 → 空条目");
+        }
+        other => panic!("应 Discovered(空): {other:?}"),
+    }
+    assert_eq!(state.messages().len(), 0, "发现完成仍静默");
+}
+
+/// 断连：pool 条目移除 → before_agent 投影移除 registry 条目并触发
+/// on_change（恰好一次）。
+#[tokio::test]
+async fn before_agent_disconnect_removes_entry_and_fires_on_change() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    insert_skill_handle(&pool, "srv", vec![]);
+    let reg = Arc::new(McpSkillRegistry::new());
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cb_counter = Arc::clone(&counter);
+    reg.set_on_change(Some(Arc::new(move || {
+        cb_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })));
+    let mw = McpMiddleware::new(Arc::clone(&pool))
+        .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
+    let mut state = AgentState::new("/tmp");
+
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    assert!(reg.discovery_state("srv").is_some(), "首轮投影应置位");
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 断连：移除 pool 条目 → 投影清理 registry
+    pool.clients.write().remove("srv");
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    assert!(
+        reg.discovery_state("srv").is_none(),
+        "断连后 registry 条目应移除"
+    );
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "断连移除应触发 on_change 恰一次"
+    );
+    assert_eq!(state.messages().len(), 0, "断连清理静默");
+}
+
+/// 重连（新 Arc handle → token 变化）：before_agent 重新置 Started。
+#[tokio::test]
+async fn before_agent_reconnect_new_handle_rescans() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let reg = Arc::new(McpSkillRegistry::new());
+    let mw = McpMiddleware::new(Arc::clone(&pool))
+        .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
+    let mut state = AgentState::new("/tmp");
+
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    let h1_token: HandleToken = h1.clone();
+    match reg.discovery_state("srv") {
+        Some(ServerDiscoveryState::Started { handle }) => {
+            assert!(Arc::ptr_eq(&handle, &h1_token));
+        }
+        other => panic!("应 Started: {other:?}"),
+    }
+
+    // 断连移除
+    pool.clients.write().remove("srv");
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    assert!(reg.discovery_state("srv").is_none());
+
+    // 重连：新 Arc handle（token 变）→ 重新 Started
+    let h2 = insert_skill_handle(&pool, "srv", vec![]);
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    let h2_token: HandleToken = h2.clone();
+    match reg.discovery_state("srv") {
+        Some(ServerDiscoveryState::Started { handle }) => {
+            assert!(Arc::ptr_eq(&handle, &h2_token), "重连后应持新 handle");
+            assert!(
+                !Arc::ptr_eq(&handle, &h1_token),
+                "新 handle 不应与旧 handle 同址"
+            );
+        }
+        other => panic!("应重新 Started: {other:?}"),
+    }
+    assert_eq!(state.messages().len(), 0);
+}
+
+/// cancel token 已触发 → before_agent 零动作（不投影、不置位）。
+#[tokio::test]
+async fn before_agent_cancelled_token_noop() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    insert_skill_handle(&pool, "srv", vec![]);
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cancel = AgentCancellationToken::new();
+    cancel.cancel();
+    let mw =
+        McpMiddleware::new(Arc::clone(&pool)).with_skill_discovery(Some(Arc::clone(&reg)), cancel);
+    let mut state = AgentState::new("/tmp");
+
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    assert!(
+        reg.discovery_state("srv").is_none(),
+        "cancel 已触发不应置位"
+    );
+    assert_eq!(state.messages().len(), 0);
+}
+
+/// registry 未装配（默认 new()）→ before_agent 直接返回（无发现行为）。
+#[tokio::test]
+async fn before_agent_without_registry_noop() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    insert_skill_handle(&pool, "srv", vec![]);
+    let mw = McpMiddleware::new(pool);
+    let mut state = AgentState::new("/tmp");
+    Middleware::before_agent(&mw, &mut state).await.unwrap();
+    assert_eq!(state.messages().len(), 0);
 }

@@ -98,8 +98,11 @@ fn c1_explicit_config_path() {
 fn c1_explicit_config_missing() {
     let home = tempdir().unwrap();
     let cli = cli_with_dirs(home.path());
-    let err = Config::load(&cli, Some(PathBuf::from("/nonexistent/config.toml").as_path()))
-        .unwrap_err();
+    let err = Config::load(
+        &cli,
+        Some(PathBuf::from("/nonexistent/config.toml").as_path()),
+    )
+    .unwrap_err();
     assert!(matches!(err, ConfigError::MissingConfig(_)));
 }
 
@@ -154,7 +157,11 @@ log_level = "debug"
 
     assert_eq!(cfg.listen_addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(cfg.listen_port, 9999);
-    assert_eq!(cfg.data_dir, PathBuf::from("/tmp/data"), "CLI 未覆盖 → 文件生效");
+    assert_eq!(
+        cfg.data_dir,
+        PathBuf::from("/tmp/data"),
+        "CLI 未覆盖 → 文件生效"
+    );
     assert_eq!(
         cfg.config_dir,
         home.path().join("config"),
@@ -294,7 +301,10 @@ fn c5_duration_parse_matrix() {
     assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
     assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
     assert_eq!(parse_duration("16ms").unwrap(), Duration::from_millis(16));
-    assert_eq!(parse_duration("24h").unwrap(), Duration::from_secs(24 * 3600));
+    assert_eq!(
+        parse_duration("24h").unwrap(),
+        Duration::from_secs(24 * 3600)
+    );
     assert_eq!(
         parse_duration("90d").unwrap(),
         Duration::from_secs(90 * 86_400)
@@ -477,6 +487,9 @@ fn xdg_dir_resolution() {
 
     std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config");
     std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data");
-    assert_eq!(default_config_dir(), PathBuf::from("/tmp/xdg-config/acp-hub"));
+    assert_eq!(
+        default_config_dir(),
+        PathBuf::from("/tmp/xdg-config/acp-hub")
+    );
     assert_eq!(default_data_dir(), PathBuf::from("/tmp/xdg-data/acp-hub"));
 }

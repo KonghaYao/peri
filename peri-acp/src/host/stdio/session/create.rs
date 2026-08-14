@@ -112,12 +112,13 @@ pub(crate) async fn handle_new(
     );
     // Push AvailableCommandsUpdate notification
     commands::send_available_commands(
-        ctx.skills.as_ref(),
+        &ctx.skills,
         &cwd_for_skills,
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
         &peri_caps,
+        ctx.session_manager.mcp_skill_registry_for(&sid),
     );
     Ok(())
 }
@@ -194,12 +195,13 @@ pub(crate) async fn handle_load(
 
     // Scan skills for AvailableCommands notification
     commands::send_available_commands(
-        ctx.skills.as_ref(),
+        &ctx.skills,
         &cwd_for_skills,
         &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
         &caps,
+        ctx.session_manager.mcp_skill_registry_for(&sid),
     );
     Ok(())
 }

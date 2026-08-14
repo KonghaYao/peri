@@ -3,12 +3,16 @@
 // 由 ChatView 拆出（右区三区之一）：悬浮大圆角卡片，textarea 自动增高
 // （max 180px 后内部滚动），Enter 发送 / Shift+Enter 换行（含 IME
 // 组合态防护）；底部工具行显示模型 / effort / 上下文占用（均来自 agent
-// map，server 写入的真实配置，缺失以 — 兜底），空间不足时依次隐藏
-// 上下文、effort 文案，发送按钮始终保留。
+// map，server 写入的真实配置）收进一个安静的运行标识，完整值
+// 通过 title 可发现；发送 / 停止主动作始终保留。
 // 对话操作（新建/新会话/取消/关闭）已收敛到左侧对话列表区。
 
-import { createSignal } from 'solid-js';
-import { chatHead, chatStatusSignal, isTerminal, selectedCid, sendMessage } from '../store';
+import { Show } from 'solid-js';
+import { cancelTurn, chatHead, chatStatusSignal, isTerminal, navigateProjectSession, openingSessionId, projectSessions, promptDeliveryReady, retryPersistentAction, runtimeDocsHydrated, selectedCid, selectedSessionId, sendMessage, turnActive } from '../store';
+import { readOnly } from '../lib/auth-state';
+import { composerDraft, messageSubmission, setComposerDraft } from '../lib/message-delivery';
+import { runtimeControlFor } from '../lib/runtime-control';
+import { Button, Icon, IconButton, Textarea } from '../../ui';
 
 /** tokens 数值 → "12k"/"200k" 缩写（>=1000 取 k；非法值 → null）。 */
 function fmtTokens(n: number | null): string | null {
@@ -18,17 +22,47 @@ function fmtTokens(n: number | null): string | null {
 }
 
 export function Composer() {
-  const [msg, setMsg] = createSignal('');
   let taRef: HTMLTextAreaElement | undefined;
+  const submissionForSession = () => messageSubmission()?.sessionId === selectedSessionId() ? messageSubmission() : null;
+  const submissionInAnotherSession = () => messageSubmission() && !submissionForSession() ? messageSubmission() : null;
+  const pendingSessionTitle = () => {
+    const submission = submissionInAnotherSession();
+    return projectSessions().find((session) => session.id === submission?.sessionId)?.title || '另一会话';
+  };
 
   const terminal = () => isTerminal(chatStatusSignal()[selectedCid() ?? '']);
-  const inputDisabled = () => !selectedCid() || terminal();
+  const cancelControl = () => {
+    const control = runtimeControlFor(selectedCid());
+    return control?.kind === 'cancel' ? control : null;
+  };
+  const cancelLocked = () => {
+    const phase = cancelControl()?.phase;
+    return phase === 'sending' || phase === 'accepted' || phase === 'confirmed';
+  };
+  const cancelLabel = () => {
+    const phase = cancelControl()?.phase;
+    if (phase === 'sending' || phase === 'accepted') return '正在停止生成';
+    if (phase === 'uncertain') return '使用原请求重新确认停止';
+    if (phase === 'confirmed') return '等待 Agent 停止';
+    return '停止生成';
+  };
+  const requestCancel = () => {
+    const control = cancelControl();
+    if (control?.phase === 'uncertain') {
+      retryPersistentAction(control.commandId);
+      return;
+    }
+    cancelTurn();
+  };
+  const inputDisabled = () => !selectedCid() || !runtimeDocsHydrated() || terminal() || !!openingSessionId() || readOnly() || !promptDeliveryReady() || turnActive() || !!messageSubmission();
   const inputPlaceholder = () =>
-    !selectedCid()
-      ? '输入消息，Enter 发送（需先选中对话）'
+    readOnly() ? '只读模式' : openingSessionId() ? '正在打开会话…' : !selectedCid()
+      ? '先从左侧选择或新建会话'
+      : !runtimeDocsHydrated() ? '正在载入会话…'
+      : !promptDeliveryReady() ? '服务器需要升级后才能安全发送消息'
       : terminal()
         ? '对话已结束（历史只读）'
-        : '输入消息，Enter 发送（需先选中对话）';
+        : turnActive() ? 'Agent 正在工作，可随时停止' : submissionForSession() ? '正在确认当前消息…' : submissionInAnotherSession() ? '另一会话的消息仍在确认…' : '给 Agent 发消息';
 
   // 信息行三个真实值（agent map，server 写入；缺失 → —）。
   const model = () => chatHead()?.agent?.model || '—';
@@ -41,10 +75,17 @@ export function Composer() {
     if (used === null || cap === null) return '—';
     return `${used}/${cap}`;
   };
+  const runtimeSummary = () => {
+    const parts = [`模型 ${model()}`];
+    if (effort() !== '—') parts.push(`推理强度 ${effort()}`);
+    if (ctxText() !== '—') parts.push(`上下文 ${ctxText()}`);
+    return parts.join(' · ');
+  };
 
   function submit() {
-    const text = msg().trim();
+    const text = composerDraft(selectedSessionId()).trim();
     if (!text) return;
+    if (!sendMessage(text)) return;
     if (taRef) {
       // 先同步清空 DOM 值再测量：value 绑定是延迟 effect，若在
       // setMsg('') 后立即测 scrollHeight 会测到旧多行文本的高度，
@@ -53,25 +94,22 @@ export function Composer() {
       taRef.style.height = 'auto';
       taRef.style.height = `${taRef.scrollHeight}px`;
     }
-    setMsg('');
-    sendMessage(text);
   }
 
   return (
-    <div class="mx-auto w-full max-w-[var(--composer-max)] px-5 pb-5 max-[480px]:px-2.5 max-[480px]:pb-[max(10px,env(safe-area-inset-bottom))]">
+    <div class="composer-wrap">
       <section
         aria-disabled={inputDisabled()}
-        class="rounded-[var(--composer-radius)] border border-[var(--border-strong)] bg-[var(--surface)] shadow-[var(--shadow-float)] transition-colors duration-[120ms] ease-out focus-within:border-[var(--accent)] max-[480px]:rounded-[20px]"
+        class="composer-surface"
       >
-        <textarea
+        <Textarea
           ref={taRef}
-          value={msg()}
+          autoResize
+          maxHeight={180}
+          value={composerDraft(selectedSessionId())}
           onInput={(e) => {
             const el = e.currentTarget;
-            setMsg(el.value);
-            // 有限自动增高：先复位再取 scrollHeight，max-h-[180px] + 内部滚动兜底
-            el.style.height = 'auto';
-            el.style.height = `${el.scrollHeight}px`;
+            setComposerDraft(selectedSessionId(), el.value);
           }}
           onKeyDown={(e) => {
             if (e.isComposing) return; // IME 组合确认回车不误发
@@ -83,42 +121,30 @@ export function Composer() {
           placeholder={inputPlaceholder()}
           disabled={inputDisabled()}
           spellcheck={false}
-          class="ui-scrollbar block h-[52px] min-h-[52px] max-h-[180px] w-full resize-none overflow-y-auto bg-transparent px-[18px] pt-4 pb-2 text-[15px] leading-[23px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] disabled:bg-transparent disabled:text-[var(--text-secondary)] disabled:placeholder:text-[var(--text-muted)]"
+          class="composer-input ui-scrollbar"
         />
-        <div class="flex h-11 items-center gap-2 pl-[14px] pr-2.5">
-          <span class="min-w-0 truncate text-xs text-[var(--text-muted)]" title={model()}>
-            模型：{model()}
+        <div class="composer-toolbar">
+          <span class="composer-runtime" title={runtimeSummary()} aria-label={runtimeSummary()}>
+            <span aria-hidden="true" />{model()}
           </span>
-          <span class="shrink-0 text-xs text-[var(--text-muted)] max-[480px]:hidden" title="推理强度（agent 侧真实配置，只读）">
-            effort：{effort()}
-          </span>
-          <span class="shrink-0 text-xs text-[var(--text-muted)] max-lg:hidden" title="上下文占用">
-            上下文：{ctxText()}
-          </span>
-          <button
-            type="button"
-            onClick={submit}
-            disabled={inputDisabled()}
-            aria-label="发送"
-            title="发送"
-            class="ml-auto flex size-10 shrink-0 items-center justify-center rounded-full bg-[var(--btn-primary)] text-white transition-colors duration-[120ms] ease-out enabled:hover:bg-[var(--btn-primary-hover)] disabled:cursor-not-allowed disabled:bg-[var(--border-subtle)] disabled:text-[var(--text-faint)]"
-          >
-            <svg
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="h-5 w-5"
-              aria-hidden="true"
-            >
-              <path d="M10 16V4" />
-              <path d="M5 9l5-5 5 5" />
-            </svg>
-          </button>
+          <span class="composer-shortcut" aria-hidden="true">Enter 发送 · Shift + Enter 换行</span>
+          <Show when={turnActive()} fallback={
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={submit} disabled={inputDisabled() || !composerDraft(selectedSessionId()).trim()} label="发送" class="composer-action">
+              <Icon><path d="M10 16V4" /><path d="M5 9l5-5 5 5" /></Icon>
+            </IconButton>
+          }>
+            <IconButton tooltipPlacement="end" variant="primary" type="button" onClick={requestCancel} disabled={cancelLocked() || readOnly()} busy={cancelControl()?.phase === 'sending' || cancelControl()?.phase === 'accepted'} label={cancelLabel()} class={`composer-action composer-action--stop ${cancelControl()?.phase === 'uncertain' ? 'composer-action--uncertain' : ''}`}>
+              <Show when={!cancelControl() || cancelControl()?.phase === 'uncertain' || cancelControl()?.phase === 'confirmed'}><span aria-hidden="true" /></Show>
+            </IconButton>
+          </Show>
         </div>
       </section>
+      <Show when={submissionInAnotherSession()}>{(submission) =>
+        <section class="submission-state submission-state--foreign" role="status">
+          <div class="submission-state__body"><strong>另一会话仍在确认</strong><p>“{pendingSessionTitle()}”还有一条消息等待服务器终态。为避免重复执行，确认完成前暂不发送新消息。</p></div>
+          <div class="submission-state__actions"><Button size="compact" onClick={() => navigateProjectSession(submission().sessionId)}>返回该会话</Button></div>
+        </section>
+      }</Show>
     </div>
   );
 }

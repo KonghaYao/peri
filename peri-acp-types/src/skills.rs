@@ -19,6 +19,15 @@ pub enum SkillSource {
     Plugin,
     /// 随二进制分发的内置 skill（include_str! 编译期嵌入）
     Builtin,
+    /// MCP 服务器经 `skill://` 资源发现的远端 skill
+    Mcp,
+}
+
+/// Skill 来源定位信息（仅远端来源填写；本地 skill 为 None）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillOrigin {
+    /// 来自 MCP 服务器 `skill://` 资源（uri 为发现时的资源 URI）
+    Mcp { server: String, uri: String },
 }
 
 /// 带 source 标签的 skill 根目录
@@ -40,6 +49,10 @@ pub struct SkillMetadata {
     pub source: SkillSource,
     /// 仅 Plugin source 填，其他为 None
     pub plugin_name: Option<String>,
+    /// 远端来源定位（仅 Mcp source 填，其余 None）
+    pub origin: Option<SkillOrigin>,
+    /// 已读入的 SKILL.md 全文（仅 Mcp source 填，本地为 None）
+    pub content: Option<String>,
 }
 
 impl Default for SkillMetadata {
@@ -50,6 +63,8 @@ impl Default for SkillMetadata {
             path: PathBuf::new(),
             source: SkillSource::Project,
             plugin_name: None,
+            origin: None,
+            content: None,
         }
     }
 }

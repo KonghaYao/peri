@@ -4,9 +4,7 @@
 use super::*;
 use std::time::Duration;
 
-use acp_hub_proto::hmac::{
-    compute_mac, derive_mac_key, mac_input, CHALLENGE_NONCE_LEN,
-};
+use acp_hub_proto::hmac::{compute_mac, derive_mac_key, mac_input, CHALLENGE_NONCE_LEN};
 use acp_hub_proto::instance::InstanceHello;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
@@ -15,6 +13,171 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+async fn spawn_cleanup_target(session_id: &str) -> (Arc<AcpProcess>, i32) {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let command = vec!["sh".to_string(), "-c".to_string(), "sleep 60".to_string()];
+    let process = child::spawn(&command, ".", None, session_id, tx)
+        .await
+        .unwrap();
+    let pgid = process.pgid();
+    assert!(child::sys::kill_group(pgid, 0), "测试进程组必须存活");
+    (process, pgid)
+}
+
+async fn wait_group_exit(pgid: i32) -> bool {
+    for _ in 0..50 {
+        if !child::sys::kill_group(pgid, 0) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+fn prepare_owned_watermark(
+    path: &Path,
+    pgid: i32,
+    fingerprint: Option<crate::buffer::ProcessFingerprint>,
+) {
+    let identity = data_dir_identity(path).unwrap();
+    let mut watermark = Watermark::load(path).unwrap();
+    watermark.finalize_startup(identity).unwrap();
+    watermark
+        .record("cleanup-target", 4, 9, pgid, fingerprint)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_startup_cleanup_kills_only_exact_owned_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_process, pgid) = spawn_cleanup_target("owned").await;
+    prepare_owned_watermark(dir.path(), pgid, child::process_fingerprint(pgid));
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (watermark, buffer_lost, _lock) = startup_cleanup(&config).unwrap();
+    assert!(buffer_lost, "持久运行记录必须上报 buffer_lost");
+    assert!(wait_group_exit(pgid).await, "精确所有权匹配必须清理进程组");
+    assert!(
+        watermark.runtime_records().is_empty(),
+        "清理权必须一次性消费"
+    );
+    assert_eq!(
+        watermark.epoch_of("cleanup-target"),
+        Some(4),
+        "epoch 历史必须保留"
+    );
+    let reopened = Watermark::load(dir.path()).unwrap();
+    assert_eq!(
+        reopened.data_dir_identity(),
+        Some(data_dir_identity(dir.path()).unwrap())
+    );
+    assert!(reopened.runtime_records().is_empty());
+}
+
+#[tokio::test]
+async fn test_startup_cleanup_skips_copied_directory_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_process, pgid) = spawn_cleanup_target("copied").await;
+    prepare_owned_watermark(dir.path(), pgid, child::process_fingerprint(pgid));
+    let original = Watermark::load(dir.path())
+        .unwrap()
+        .data_dir_identity()
+        .unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("watermark.json")).unwrap())
+            .unwrap();
+    json["dataDirIdentity"]["inode"] = serde_json::json!(original.inode.saturating_add(1));
+    fs::write(
+        dir.path().join("watermark.json"),
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (_watermark, buffer_lost, _lock) = startup_cleanup(&config).unwrap();
+    assert!(buffer_lost);
+    assert!(child::sys::kill_group(pgid, 0), "目录副本不得继承清理权");
+    child::sys::kill_group(pgid, child::sys::SIGKILL);
+    assert!(wait_group_exit(pgid).await);
+}
+
+#[tokio::test]
+async fn test_startup_cleanup_skips_legacy_unfingerprinted_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_process, pgid) = spawn_cleanup_target("legacy").await;
+    prepare_owned_watermark(dir.path(), pgid, None);
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (_watermark, buffer_lost, _lock) = startup_cleanup(&config).unwrap();
+    assert!(buffer_lost);
+    assert!(
+        child::sys::kill_group(pgid, 0),
+        "旧格式不能证明所有权，不得发信号"
+    );
+    child::sys::kill_group(pgid, child::sys::SIGKILL);
+    assert!(wait_group_exit(pgid).await);
+}
+
+#[tokio::test]
+async fn test_startup_cleanup_skips_reused_pgid_with_different_birth_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_process, pgid) = spawn_cleanup_target("reused-pgid").await;
+    let mut fingerprint = child::process_fingerprint(pgid).expect("测试平台应支持出生指纹");
+    fingerprint.birth.push_str(":different-process");
+    prepare_owned_watermark(dir.path(), pgid, Some(fingerprint));
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (_watermark, buffer_lost, _lock) = startup_cleanup(&config).unwrap();
+    assert!(buffer_lost);
+    assert!(
+        child::sys::kill_group(pgid, 0),
+        "相同 PGID 但不同出生身份不得发信号"
+    );
+    child::sys::kill_group(pgid, child::sys::SIGKILL);
+    assert!(wait_group_exit(pgid).await);
+}
+
+#[test]
+fn test_startup_cleanup_treats_missing_leader_as_already_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_pgid = i32::MAX;
+    prepare_owned_watermark(
+        dir.path(),
+        missing_pgid,
+        Some(crate::buffer::ProcessFingerprint {
+            platform: "missing-test".into(),
+            birth: "gone".into(),
+        }),
+    );
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (watermark, buffer_lost, _lock) = startup_cleanup(&config).unwrap();
+    assert!(buffer_lost);
+    assert!(
+        watermark.runtime_records().is_empty(),
+        "不存在的 leader 应安全消费旧清理权"
+    );
+}
+
+#[test]
+fn test_startup_cleanup_rejects_second_daemon_for_same_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config("127.0.0.1:1".parse().unwrap(), dir.path());
+    let (_watermark, _lost, _lock) = startup_cleanup(&config).unwrap();
+    let error = startup_cleanup(&config)
+        .err()
+        .expect("第二个 daemon 必须被拒绝");
+    assert!(
+        error.to_string().contains("already owned"),
+        "unexpected: {error}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(dir.path().join("instance.owner.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "owner lock 必须是 0600");
+    }
+}
 
 fn token_bytes() -> [u8; CHALLENGE_NONCE_LEN] {
     base64::engine::general_purpose::STANDARD
@@ -48,7 +211,11 @@ fn valid_auth_response(hello: &InstanceHello) -> acp_hub_proto::conn::AuthRespon
 
 /// 测试配置（短超时/短间隔加速）。
 fn test_config(addr: std::net::SocketAddr, data_dir: &Path) -> InstanceConfig {
-    let mut c = InstanceConfig::new(format!("ws://{addr}/instance"), TOKEN.to_string(), data_dir.to_path_buf());
+    let mut c = InstanceConfig::new(
+        format!("ws://{addr}/instance"),
+        TOKEN.to_string(),
+        data_dir.to_path_buf(),
+    );
     c.heartbeat_interval = Duration::from_millis(300);
     c.reconnect_base = Duration::from_millis(200);
     c.reconnect_max = Duration::from_secs(1);
@@ -99,7 +266,9 @@ async fn handshake_server(ws: Ws) -> (SplitSink, SplitStream, InstanceHello) {
     };
     let resp = valid_auth_response(&hello);
     ws.send(Message::Text(
-        serde_json::to_string(&Frame::AuthResponse(resp)).unwrap().into(),
+        serde_json::to_string(&Frame::AuthResponse(resp))
+            .unwrap()
+            .into(),
     ))
     .await
     .unwrap();
@@ -108,11 +277,9 @@ async fn handshake_server(ws: Ws) -> (SplitSink, SplitStream, InstanceHello) {
 }
 
 async fn send_frame(sink: &mut SplitSink, frame: &Frame) {
-    sink.send(Message::Text(
-        serde_json::to_string(frame).unwrap().into(),
-    ))
-    .await
-    .unwrap();
+    sink.send(Message::Text(serde_json::to_string(frame).unwrap().into()))
+        .await
+        .unwrap();
 }
 
 /// 读取下一帧（忽略未知/畸形帧；流结束 → panic）。
@@ -205,7 +372,10 @@ async fn test_full_flow_spawn_event_heartbeat_kill_exit() {
     // heartbeat（T2）：alive_sessions 含 s1。
     match next_frame(&mut stream).await {
         Frame::InstanceHeartbeat(h) => {
-            assert!(h.alive_sessions.contains(&"s1".to_string()), "alive 应含 s1");
+            assert!(
+                h.alive_sessions.contains(&"s1".to_string()),
+                "alive 应含 s1"
+            );
             assert_eq!(h.load, 20, "load = min(100, alive×20)");
         }
         other => panic!("期待 heartbeat，收到 {other:?}"),
@@ -261,7 +431,9 @@ async fn test_spawn_before_auth_is_dropped() {
         }
     }
     ws.send(Message::Text(
-        serde_json::to_string(&spawn_frame("c1", "s1", "echo x; sleep 30")).unwrap().into(),
+        serde_json::to_string(&spawn_frame("c1", "s1", "echo x; sleep 30"))
+            .unwrap()
+            .into(),
     ))
     .await
     .unwrap();
@@ -345,9 +517,17 @@ async fn test_buffer_sync_resync() {
 
     // --- 连接 2：hello 携带缓冲水位 → auth → buffer_sync 补推 → 实时 event ---
     let (sink2, mut s2, hello2) = handshake_server(accept_ws(&listener).await).await;
-    assert_eq!(hello2.buffered, Some(true), "有缓冲时必须上报 buffered=true");
+    assert_eq!(
+        hello2.buffered,
+        Some(true),
+        "有缓冲时必须上报 buffered=true"
+    );
     let epochs = hello2.stream_epochs.as_ref().unwrap();
-    assert_eq!(epochs.get("s1"), Some(&1), "stream_epochs 应含存活 session 的 epoch");
+    assert_eq!(
+        epochs.get("s1"),
+        Some(&1),
+        "stream_epochs 应含存活 session 的 epoch"
+    );
 
     // buffer_sync：from_seq=1（last_sent_seq+1）、frames seq 升序 1..3、epoch=1。
     let sync = loop {
@@ -377,12 +557,10 @@ async fn test_buffer_sync_resync() {
     // 脚本自然退出 → process_exit（在线路径）。
     match next_frame(&mut s2).await {
         Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
-        Frame::InstanceHeartbeat(_) => {
-            match next_frame(&mut s2).await {
-                Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
-                other => panic!("期待 process_exit，收到 {other:?}"),
-            }
-        }
+        Frame::InstanceHeartbeat(_) => match next_frame(&mut s2).await {
+            Frame::InstanceProcessExit(e) => assert_eq!(e.chat_id, "s1"),
+            other => panic!("期待 process_exit，收到 {other:?}"),
+        },
         other => panic!("期待 process_exit，收到 {other:?}"),
     }
 
@@ -404,7 +582,8 @@ async fn test_epoch_increment_on_rebuild() {
     let config = test_config(addr, dir.path());
 
     let hub = tokio::spawn(run(config));
-    let script = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; sleep 30"#;
+    let script =
+        r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; sleep 30"#;
 
     // 连接 1：spawn（epoch=1）→ event(seq=1) → kill → process_exit → 重建 spawn
     // （epoch=2）→ event(seq=1, epoch=2)。
@@ -476,7 +655,8 @@ async fn test_two_sessions_isolated_seqs() {
     let (mut sink, mut stream, _hello) = handshake_server(accept_ws(&listener).await).await;
 
     let script = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":1}}'; echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s1","n":2}}'; sleep 30"#;
-    let script2 = r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s2","n":1}}'; sleep 30"#;
+    let script2 =
+        r#"echo '{"jsonrpc":"2.0","method":"m","params":{"sessionId":"s2","n":1}}'; sleep 30"#;
     send_frame(&mut sink, &spawn_frame("c1", "s1", script)).await;
     send_frame(&mut sink, &spawn_frame("c2", "s2", script2)).await;
 

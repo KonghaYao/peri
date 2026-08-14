@@ -12,7 +12,10 @@
 //! 渲染、Langfuse bridge、compact hooks 与 tool resolver 全部经
 //! [`StageBuildInput`] 注入面接入。
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use parking_lot::RwLock;
 use peri_acp_types::{
@@ -27,6 +30,7 @@ use peri_acp_types::{
     identity::AgentId,
     interaction::{ChannelState, UserInteractionBroker},
     lsp::LspServerConfig,
+    mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
     ports::{LspPoolPort, McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort},
     session::{CronOwner, MessageQueue, SessionInbox},
@@ -147,12 +151,22 @@ pub struct StageBuildInput {
     /// session 级 cron bridge 惰性启动器（SessionManager 路径；无则走
     /// print 模式 turn 级 CronOwner）
     pub launch_cron_bridge: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// session 级 MCP 订阅 inbox 惰性注册器（SessionManager 路径；无则
+    /// 安全 no-op——订阅通知不唤醒 print 模式单次进程）
+    pub launch_mcp_subscription: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// 会话级 MCP skill 远端注册表（SessionAccessPort 投影；None = print
+    /// 模式，跳过发现与合并）。
+    pub mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     /// tool invocation resolver（wrapper-aware canonical resolver）
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     /// compact 前置 hook（hook_groups 非空时 ACP 装配点构造）
     pub compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     /// compact 后置 hook（hook_groups 非空时 ACP 装配点构造）
     pub compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
+    /// 装配期关闭的 middleware 名集合（源自会话冻结状态
+    /// `SessionContext::meta_harness.disabled_middlewares` 投影；
+    /// 顶层链过滤——设计 §2.5）。
+    pub meta_harness_disabled: HashSet<String>,
 }
 
 /// 后台任务完成事件的独立发送端（跨 turn 存活；L3：注入 SubagentHost）
@@ -190,6 +204,42 @@ pub(crate) struct AcpAgentOutput {
     /// 后台任务完成事件的发送端（L3：注入 SubagentHost，子 agent bg 事件经此
     /// 通道到达 executor_helpers 的 bg event pump）
     pub bg_event_tx: BgEventTx,
+}
+
+/// 构造 session/turn 级工具视图（MetaHarness 设计 §2.5 关闭语义防御面）。
+///
+/// 基础 `shared_tools` 是宿主级共享 registry（当前唯一写入点是
+/// `AskUserQuestion`，装配期 insert；middleware 工具从不写入——只经
+/// `chain.collect_tools()` 进入本函数产出的每 turn 本地视图，见
+/// `MIDDLEWARE_TOOL_NAMES` 注释的事实核查）。本函数从基础表复制时剔除
+/// "middleware 静态工具名且不在当前链工具集合"的条目，再 merge 当前链
+/// 工具：disabled session 的本地视图不得看到残留的 middleware 工具，
+/// enabled session 视图不受影响。动态 MCP bridge 工具
+/// （`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
+fn build_session_tool_view(
+    shared_tools: &RwLock<BTreeMap<String, Arc<dyn BaseTool>>>,
+    middleware_tools: Vec<Box<dyn BaseTool>>,
+) -> SharedToolMap {
+    let live_names: HashSet<&str> = middleware_tools.iter().map(|t| t.name()).collect();
+    let mut local: BTreeMap<String, Arc<dyn BaseTool>> = shared_tools
+        .read()
+        .iter()
+        .filter(|(name, _)| {
+            // 剔除按名匹配（工具对象不携带来源信息）：非 middleware 来源的
+            // 同名工具（如 plugin/外部注册的 "Bash"）在对应 middleware 关闭
+            // 时也会被剔出本地视图——保守方向（宁可误伤不可泄漏），
+            // `live_names` 保护当前链注册的同名工具。
+            !peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES.contains(&name.as_str())
+                || live_names.contains(name.as_str())
+        })
+        .map(|(k, v)| (k.clone(), Arc::clone(v)))
+        .collect();
+    for tool in middleware_tools {
+        let arc: Arc<dyn BaseTool> = Arc::from(tool);
+        // 使用 insert：有状态工具（如 SubAgentTool）需每 turn 更新。
+        local.insert(arc.name().to_string(), arc);
+    }
+    Arc::new(RwLock::new(local))
 }
 
 /// Agent 装配产物（v2 builder 直接消费，P5.3 抽取）
@@ -232,7 +282,6 @@ pub(crate) fn build_agent(
     input: &StageBuildInput,
     assembler: &dyn MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
     system_prompt: String,
-    subagent_system_prompt: Option<String>,
     frozen: FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
@@ -286,11 +335,9 @@ pub(crate) fn build_agent(
     retry_events.set(Some(Arc::clone(&event_handler)));
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
-    // [P2-2026-08-02] fork / subagent 复用的冻结 prompt 必须是"无 16_workflow"
-    // 版本（`FrozenSessionData::subagent_system_prompt`）：fork 链不注册
-    // WorkflowTool（shared_tools: None），继承带 workflow 声明的 parent frozen
-    // prompt 会造成 prompt 与能力矛盾。调用方未提供时回退到主 prompt（防御）。
-    let system_prompt_for_sub = subagent_system_prompt.unwrap_or_else(|| system_prompt.clone());
+    // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同（无二次
+    // 渲染版本），直接复用主 prompt。
+    let system_prompt_for_sub = system_prompt.clone();
 
     // 应用 agent overrides 到系统提示词
     let system_prompt = agent_overrides.as_ref().map_or_else(
@@ -377,11 +424,20 @@ pub(crate) fn build_agent(
             plugin_loaded,
             hook_groups,
             session_start_source,
+            mcp_skill_registry: input.mcp_skill_registry.clone(),
             cron_scheduler,
             mcp_pool,
             channel_state,
             tool_search_index,
             shared_tools: shared_tools.clone(),
+            // MetaHarness：装配期关闭集合（源自会话冻结状态投影，
+            // 顶层链过滤——设计 §2.5；禁止从每 turn 当前配置重建）。
+            meta_harness_disabled: input.meta_harness_disabled.clone(),
+            // 波 4 演进 2：基础段持有者（DefaultSystemPromptMiddleware 的
+            // persona 内容源 = 与 render_system_prompt 同一份 agent_overrides；
+            // LangMiddleware 的语言内容源 = 冻结语言，保证链收集与渲染一致）。
+            agent_overrides: agent_overrides.clone(),
+            language: input.language.clone(),
             lsp_servers,
             lsp_pool: input.lsp_pool.clone(),
             workflow_executor: workflow_executor.clone(),
@@ -516,7 +572,6 @@ pub fn build_stage_context(
     assembler: &dyn MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
     cached_llm: Option<&CachedLlmInstances>,
     system_prompt: String,
-    subagent_system_prompt: Option<String>,
     frozen: FrozenData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
@@ -558,7 +613,6 @@ pub fn build_stage_context(
         input,
         assembler,
         system_prompt,
-        subagent_system_prompt.clone(),
         frozen.clone(),
         event_handler,
         agent_overrides,
@@ -669,6 +723,12 @@ pub fn build_stage_context(
         }
     }
 
+    // MCP 订阅 inbox 惰性注册（幂等；SessionManager 路径注册到订阅端口，
+    // 无 SessionManager 时 no-op——print 模式不接收外部订阅通知唤醒）
+    if let Some(ref launch) = input.launch_mcp_subscription {
+        launch(&session_id);
+    }
+
     let turn = session.start_turn();
     let transcript = session.transcript();
     let queue = session.queue().clone();
@@ -717,7 +777,10 @@ pub fn build_stage_context(
                 .claude_local_md
                 .as_ref()
                 .map(|s| Arc::new(s.to_string())),
-            frozen_system_prompt: subagent_system_prompt.as_ref().map(|s| Arc::new(s.clone())),
+            // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同；
+            // 主 session 挂载 host 时恒 None（spawn 主路径从 parent session
+            // 直接读取 frozen system_prompt，不经本字段）。
+            frozen_system_prompt: None,
             parent_thread_id: thread_persistence.parent_thread_id.clone(),
             frozen_claude_md: frozen.claude_md.as_ref().map(|s| Arc::new(s.clone())),
             frozen_skill_summary: frozen.skill_summary.as_ref().map(|s| Arc::new(s.clone())),
@@ -737,22 +800,23 @@ pub fn build_stage_context(
     // （bg subagent 不注册 TaskManager，BgTaskArea 无运行条目，
     // issue 2026-08-06-e2e-bg-task-area-entry-missing）。每轮重建，顺序不可调换。
     // 已存在的同名工具不覆盖（deferred tools 优先保留外部注册版本）。
-    {
-        let middleware_tools = chain.collect_tools(&cwd);
-        let mut tools = shared_tools.write();
-        for tool in middleware_tools {
-            let arc: Arc<dyn BaseTool> = Arc::from(tool);
-            // 使用 insert：有状态工具（如 SubAgentTool）需每 turn 更新。
-            tools.insert(arc.name().to_string(), arc);
-        }
-    }
+    //
+    // MetaHarness（设计 §2.5）：session/turn 级工具视图——基础 shared_tools
+    // 是宿主级共享 registry（唯一写入点是 AskUserQuestion；middleware 工具
+    // 从不写入，只经本调用 merge 进每轮重建的本地视图）。从基础表复制时
+    // 剔除"middleware 静态工具名且不在当前链工具集合"的条目（防御面，
+    // 决策记录见 `MIDDLEWARE_TOOL_NAMES` 注释）——disabled session 的
+    // 本地视图不得看到残留的 middleware 工具。动态 MCP bridge 工具
+    // （`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
+    let session_tools: SharedToolMap =
+        build_session_tool_view(&shared_tools, chain.collect_tools(&cwd));
 
     // 构造 StageContext（builder 构造晚于工具注入：chain 在
     // collect_tools 借用后被 move 进 builder，顺序不可调换）
     let mut builder = StageContext::builder(turn, transcript, queue)
         .with_agent_id(main_agent_id)
         .with_llm(react_llm)
-        .with_tools(shared_tools)
+        .with_tools(session_tools)
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
@@ -816,5 +880,80 @@ mod builder_v2_tests {
         let ctx =
             StageContext::builder(turn, session.transcript(), session.queue().clone()).build();
         assert_eq!(ctx.runtime.llm.model_name(), "null");
+    }
+
+    /// MetaHarness（设计 §2.5 关闭语义防御面）：session/turn 级工具视图——
+    /// disabled session 的本地视图不得看到共享表中残留的 middleware 工具；
+    /// enabled session 视图不受影响；非 middleware 外部工具
+    /// （AskUserQuestion 等）始终保留。
+    #[test]
+    fn test_build_session_tool_view_isolates_disabled_sessions() {
+        use peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES;
+
+        fn fake_tool(name: &'static str) -> Arc<dyn BaseTool> {
+            Arc::new(NamedTool(name))
+        }
+
+        // 基础共享表：人工构造"共享表含 middleware 工具名"的防御面场景
+        //（当前代码事实下仅 AskUserQuestion 写入共享表，此处模拟将来
+        // 注册面变化）+ 非 middleware 外部工具（AskUserQuestion）。
+        let base: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        {
+            let mut map = base.write();
+            map.insert("WebFetch".to_string(), fake_tool("WebFetch"));
+            map.insert("WebSearch".to_string(), fake_tool("WebSearch"));
+            map.insert("Bash".to_string(), fake_tool("Bash"));
+            map.insert("AskUserQuestion".to_string(), fake_tool("AskUserQuestion"));
+        }
+        assert!(MIDDLEWARE_TOOL_NAMES.contains(&"WebFetch"));
+        assert!(MIDDLEWARE_TOOL_NAMES.contains(&"Bash"));
+
+        // disabled session：当前链无 Web 工具 → 视图不得含 WebFetch/WebSearch
+        let middleware_tools: Vec<Box<dyn BaseTool>> = vec![];
+        let view = build_session_tool_view(&base, middleware_tools);
+        let view_map = view.read();
+        assert!(!view_map.contains_key("WebFetch"), "残留 WebFetch 泄漏");
+        assert!(!view_map.contains_key("WebSearch"), "残留 WebSearch 泄漏");
+        assert!(!view_map.contains_key("Bash"), "残留 Bash 泄漏");
+        assert!(
+            view_map.contains_key("AskUserQuestion"),
+            "非 middleware 外部工具必须保留"
+        );
+        drop(view_map);
+
+        // enabled session：当前链含 Web 工具 → 视图含（覆盖为基础实例或新实例）
+        let middleware_tools: Vec<Box<dyn BaseTool>> = vec![Box::new(NamedTool("WebFetch"))];
+        let view = build_session_tool_view(&base, middleware_tools);
+        assert!(view.read().contains_key("WebFetch"));
+        assert!(view.read().contains_key("AskUserQuestion"));
+
+        // 基础共享表不受视图构造影响（跨 session 隔离不改写全局表）
+        assert!(base.read().contains_key("WebFetch"));
+    }
+
+    /// 测试桩工具（仅 name 有效）。
+    struct NamedTool(&'static str);
+    #[async_trait::async_trait]
+    impl BaseTool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        fn is_direct(&self) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
     }
 }

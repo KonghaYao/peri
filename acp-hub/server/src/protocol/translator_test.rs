@@ -38,7 +38,10 @@ fn prompt_translation() {
             assert!(v["params"].get("cwd").is_none());
             // agent-client-protocol（peri acp 实测）：prompt 为 ContentBlock
             // 序列，非 message 字符串；无 turnId（宿主侧归位，§7.2）。
-            assert_eq!(v["params"]["prompt"], json!([{ "type": "text", "text": "hello" }]));
+            assert_eq!(
+                v["params"]["prompt"],
+                json!([{ "type": "text", "text": "hello" }])
+            );
             assert!(v["params"].get("message").is_none());
             assert!(v["params"].get("turnId").is_none());
             // effort 缺省 → 不写入 params（agent 默认档位，跨任务契约 §2）。
@@ -254,7 +257,10 @@ fn permission_response_rpc_allow_empty_options_cancelled() {
         "空 options 时不得序列化 optionId: null"
     );
     let serialized = serde_json::to_string(&v["result"]["outcome"]).unwrap();
-    assert!(!serialized.contains("null"), "序列化结果不得含 null: {serialized}");
+    assert!(
+        !serialized.contains("null"),
+        "序列化结果不得含 null: {serialized}"
+    );
 }
 
 #[test]
@@ -381,8 +387,5 @@ fn cwd_too_long_rejected() {
 
 #[test]
 fn cwd_empty_rejected() {
-    assert!(matches!(
-        validate_cwd(""),
-        Err(TranslateError::MissingCwd)
-    ));
+    assert!(matches!(validate_cwd(""), Err(TranslateError::MissingCwd)));
 }

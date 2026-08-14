@@ -17,3 +17,8 @@ Status values:
 - "pending": Not yet started
 - "in_progress": Currently being worked on
 - "completed": Finished successfully
+
+requireCompletion (optional):
+- Set `"requireCompletion": true` to require every item to be marked "completed" before you end the turn.
+- While set, if you stop with unfinished items, the system will show the current todo state and continue the turn until you mark them completed.
+- Omit the parameter on later updates to keep the previous setting; set it to false (or mark all items completed) to release the requirement.

@@ -11,18 +11,21 @@
 //! tombstone，不由客户端物理删除权威记录。
 
 mod chat;
-mod registry;
 mod control;
+mod registry;
 
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod schema_test;
 
 pub use chat::{ChatDocRoot, ChatEntry, ContentBlock, ToolCallProjection};
-pub use registry::{InstanceView, RegistryDocRoot, RegistryGlobal, ChatSummary, WorkspaceSummary};
 pub use control::{
-    ActiveTurnProjection, AgentStatusProjection, PermissionProjection,
-    SessionDocRoot, ChatInfoProjection, SessionSummaryProjection,
+    ActiveTurnProjection, AgentStatusProjection, ChatInfoProjection, PermissionProjection,
+    SessionDocRoot, SessionSummaryProjection,
+};
+pub use registry::{
+    ChatSummary, InstanceView, ProjectSessionSummary, ProjectSummary, RegistryDocRoot,
+    RegistryGlobal, WorkspaceSummary,
 };
 
 use serde::{Deserialize, Serialize};

@@ -8,7 +8,8 @@ use serde_json::json;
 
 use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::schema::{
-    ActiveTurnProjection, BlockVisibility, PermissionOptions, ChatStatus, TurnStatus,
+    ActiveTurnProjection, BlockVisibility, ChatStatus, PermissionOptions, ToolCallStatus,
+    TurnStatus,
 };
 
 use yrs::{GetString, Map, Transact, WriteTxn};
@@ -58,6 +59,7 @@ fn tool_started(turn: &str, id: &str) -> EventBody {
         turn_id: turn.to_string(),
         tool_call_id: id.to_string(),
         name: "shell".to_string(),
+        status: ToolCallStatus::Pending,
         arguments: Some(json!({"cmd": "ls"})),
         created_at: "2026-08-07T00:00:00Z".to_string(),
     }
@@ -77,6 +79,7 @@ fn permission_requested(id: &str, turn: &str) -> EventBody {
         permission_id: id.to_string(),
         turn_id: turn.to_string(),
         tool_call_id: None,
+        tool: None,
         title: "允许执行".to_string(),
         description: None,
         options: vec![PermissionOptions::AllowOnce],
@@ -101,6 +104,34 @@ fn tool_call_count(pair: &DocPair) -> usize {
         .and_then(|v| v.cast::<yrs::MapRef>().ok())
         .map(|m| m.len(&txn) as usize)
         .unwrap_or(0)
+}
+
+fn tool_call(pair: &DocPair, id: &str) -> acp_hub_proto::schema::ToolCallProjection {
+    let txn = pair.chat.transact();
+    chat_writer::tool_call_projection(&txn, id).expect("tool call projection")
+}
+
+fn entry_has_tool_block(pair: &DocPair, entry_id: &str, tool_call_id: &str) -> bool {
+    let txn = pair.chat.transact();
+    chat_writer::root_map_read(&txn)
+        .and_then(|root| root.get(&txn, "entries"))
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .and_then(|entries| entries.get(&txn, entry_id))
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .and_then(|entry| entry.get(&txn, "blocks"))
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .map(|blocks| {
+            blocks.iter(&txn).any(|(_, value)| {
+                value
+                    .cast::<yrs::MapRef>()
+                    .ok()
+                    .and_then(|block| block.get(&txn, "tool_call_id"))
+                    .and_then(|value| value.cast::<String>().ok())
+                    .as_deref()
+                    == Some(tool_call_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn permission_count(pair: &DocPair) -> usize {
@@ -155,23 +186,28 @@ fn replay_same_business_key_new_seq_is_duplicate_idempotent() {
     let mut p = pair();
     let mut agg = Aggregator;
     // 同一 user turn 以不同 seq 重放（ACP 侧重发 user_message_chunk）。
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hello"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hello")))
+            .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 2, user_msg("t1", "t1:user", "hello")));
     assert_eq!(r.reason, Some(ApplyReason::DuplicateIdempotent));
     assert_eq!(entry_count(&p), 1);
 
     // tool_call started 重放（不同 seq）：幂等键拒绝，不重复创建。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 3, tool_started("t1", "tc1")))
-        .applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 3, tool_started("t1", "tc1")))
+            .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 4, tool_started("t1", "tc1")));
     assert_eq!(r.reason, Some(ApplyReason::DuplicateIdempotent));
     assert_eq!(tool_call_count(&p), 1);
 
     // permission requested 重放（不同 seq）：幂等键拒绝。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 5, permission_requested("p1", "t1")))
-        .applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 5, permission_requested("p1", "t1")))
+            .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 6, permission_requested("p1", "t1")));
     assert_eq!(r.reason, Some(ApplyReason::DuplicateIdempotent));
     assert_eq!(permission_count(&p), 1);
@@ -185,7 +221,10 @@ fn replay_same_business_key_new_seq_is_duplicate_idempotent() {
 fn user_message_turn_id_idempotent() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 2, user_msg("t1", "t1:user", "a")));
     assert_eq!(r.reason, Some(ApplyReason::DuplicateIdempotent));
     assert_eq!(entry_count(&p), 1);
@@ -200,11 +239,21 @@ fn terminal_turn_drops_late_deltas() {
     let mut p = pair();
     let mut agg = Aggregator;
     // turn 注册 + 内容 + 终态。
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "out")))
-        .applied);
-    let r = agg.apply(&mut p, &ev("s1", 3, turn_terminal("t1", TurnStatus::Cancelled)));
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "out"))
+        )
+        .applied
+    );
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 3, turn_terminal("t1", TurnStatus::Cancelled)),
+    );
     assert!(r.applied);
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
 
@@ -221,11 +270,16 @@ fn terminal_turn_drops_late_deltas() {
     // 晚到 tool_call updated → TurnTerminalGuard。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 6, EventBody::ToolCallUpdated {
-            turn_id: "t1".into(),
-            tool_call_id: "tc1".into(),
-            arguments: Some(json!({"x": 1})),
-        }),
+        &ev(
+            "s1",
+            6,
+            EventBody::ToolCallUpdated {
+                turn_id: "t1".into(),
+                tool_call_id: "tc1".into(),
+                status: None,
+                arguments: Some(json!({"x": 1})),
+            },
+        ),
     );
     assert_eq!(r.reason, Some(ApplyReason::TurnTerminalGuard));
 }
@@ -234,7 +288,10 @@ fn terminal_turn_drops_late_deltas() {
 fn cancelling_turn_drops_late_deltas() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
     // 手动置 cancelling（命令路径通常如此；此处直接写 active_turn）。
     {
         let mut txn = p.session_txn();
@@ -249,10 +306,16 @@ fn cancelling_turn_drops_late_deltas() {
             }),
         );
     }
-    let r = agg.apply(&mut p, &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "x")));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "x")),
+    );
     assert_eq!(r.reason, Some(ApplyReason::TurnTerminalGuard));
     // cancelling → 终态事件应用（状态机迁移，§7.2）。
-    let r = agg.apply(&mut p, &ev("s1", 3, turn_terminal("t1", TurnStatus::Cancelled)));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 3, turn_terminal("t1", TurnStatus::Cancelled)),
+    );
     assert!(r.applied);
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
 }
@@ -265,30 +328,52 @@ fn cancelling_turn_drops_late_deltas() {
 fn interrupted_calibration_exactly_once() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
     // 断链：turn 置 interrupted（命令路径语义，聚合器事件亦支持）。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, turn_terminal("t1", TurnStatus::Interrupted)))
-        .applied);
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 2, turn_terminal("t1", TurnStatus::Interrupted))
+        )
+        .applied
+    );
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Interrupted));
 
     // interrupted 状态下：非终态事件 → InterruptedGuard。
-    let r = agg.apply(&mut p, &ev("s1", 3, msg_delta("t1", "t1:assistant", "b1", "x")));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 3, msg_delta("t1", "t1:assistant", "b1", "x")),
+    );
     assert_eq!(r.reason, Some(ApplyReason::InterruptedGuard));
 
     // 带重放序依据（seq 单调）的终态事件 → 恰一次校准。
-    let r = agg.apply(&mut p, &ev("s1", 4, turn_terminal("t1", TurnStatus::Completed)));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 4, turn_terminal("t1", TurnStatus::Completed)),
+    );
     assert!(r.applied);
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Completed));
 
     // 校准后：任何同 turn 终态事件（高序）→ CalibrationDone。
-    let r = agg.apply(&mut p, &ev("s1", 5, turn_terminal("t1", TurnStatus::Completed)));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 5, turn_terminal("t1", TurnStatus::Completed)),
+    );
     assert_eq!(r.reason, Some(ApplyReason::CalibrationDone));
-    let r = agg.apply(&mut p, &ev("s1", 6, turn_terminal("t1", TurnStatus::Failed)));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 6, turn_terminal("t1", TurnStatus::Failed)),
+    );
     assert_eq!(r.reason, Some(ApplyReason::CalibrationDone));
 
     // 校准后 delta → TurnTerminalGuard（状态位已非 interrupted）。
-    let r = agg.apply(&mut p, &ev("s1", 7, msg_delta("t1", "t1:assistant", "b1", "x")));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 7, msg_delta("t1", "t1:assistant", "b1", "x")),
+    );
     assert_eq!(r.reason, Some(ApplyReason::TurnTerminalGuard));
 }
 
@@ -296,12 +381,22 @@ fn interrupted_calibration_exactly_once() {
 fn interrupted_low_seq_terminal_rejected() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 5, turn_terminal("t1", TurnStatus::Interrupted)))
-        .applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 5, turn_terminal("t1", TurnStatus::Interrupted))
+        )
+        .applied
+    );
     // 乱序补推（seq 回退）→ SeqOutOfOrder（步骤 2 水位拒绝，§9.2）。
-    let r = agg.apply(&mut p, &ev("s1", 3, turn_terminal("t1", TurnStatus::Completed)));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 3, turn_terminal("t1", TurnStatus::Completed)),
+    );
     assert_eq!(r.reason, Some(ApplyReason::SeqOutOfOrder));
     // active_turn 仍为 interrupted（未被迁移）。
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Interrupted));
@@ -316,17 +411,29 @@ fn gap_count_increments_on_seq_jump_and_clears_on_catchup() {
     let mut p = pair();
     let mut agg = Aggregator;
     // seq 连续：无 gap。
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
-    assert!(agg.apply(&mut p, &ev("s1", 2, user_msg("t2", "t2:user", "b"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, user_msg("t2", "t2:user", "b")))
+            .applied
+    );
     assert_eq!(p.stream.gap_count, 0);
     assert!(!p.stream.gap_dirty);
     // seq 跳变：gap_count += 跳变。
-    assert!(agg.apply(&mut p, &ev("s1", 5, user_msg("t3", "t3:user", "c"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 5, user_msg("t3", "t3:user", "c")))
+            .applied
+    );
     assert_eq!(p.stream.gap_count, 2); // 期望 3，到达 5 → +2
     assert!(p.stream.gap_dirty);
     assert_eq!(p.stream.last_seq, 5);
     // 连续追平：清零 + 上报标记。
-    assert!(agg.apply(&mut p, &ev("s1", 6, user_msg("t4", "t4:user", "d"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 6, user_msg("t4", "t4:user", "d")))
+            .applied
+    );
     assert_eq!(p.stream.gap_count, 0);
     assert!(p.stream.gap_dirty);
 }
@@ -335,7 +442,10 @@ fn gap_count_increments_on_seq_jump_and_clears_on_catchup() {
 fn epoch_mismatch_marks_uncalibratable_and_rejects() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     // 新纪元帧：EpochMismatch + uncalibratable。
     let e = NormalizedEvent {
         chat_id: "s1".into(),
@@ -399,7 +509,11 @@ fn fresh_chat_first_event_adopts_epoch_baseline() {
             body: msg_delta("t1", "t1:assistant", "b1", "chunk_1"),
         },
     );
-    assert!(r.applied, "首事件应基线采纳并应用，实际 reason={:?}", r.reason);
+    assert!(
+        r.applied,
+        "首事件应基线采纳并应用，实际 reason={:?}",
+        r.reason
+    );
     assert_eq!(p.stream.epoch, 1);
     assert!(!p.stream.uncalibratable, "基线采纳不得置不可校准缺口");
     assert_eq!(p.stream.last_seq, 3);
@@ -426,7 +540,10 @@ fn fresh_chat_first_event_adopts_epoch_baseline() {
 fn seq_out_of_order_rejected() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 3, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 3, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 2, user_msg("t2", "t2:user", "b")));
     assert_eq!(r.reason, Some(ApplyReason::SeqOutOfOrder));
 }
@@ -439,18 +556,26 @@ fn seq_out_of_order_rejected() {
 fn closed_chat_rejects_new_events() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     // SessionInfo 置 closed。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 2, EventBody::SessionInfo {
-                title: None,
-                status: Some(ChatStatus::Closed),
-                active_turn_id: None,
-            })
+            &ev(
+                "s1",
+                2,
+                EventBody::SessionInfo {
+                    title: None,
+                    status: Some(ChatStatus::Closed),
+                    active_turn_id: None,
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     let r = agg.apply(&mut p, &ev("s1", 3, user_msg("t2", "t2:user", "b")));
     assert_eq!(r.reason, Some(ApplyReason::ChatClosed));
 }
@@ -463,24 +588,36 @@ fn closed_chat_rejects_new_events() {
 fn unknown_tool_call_and_permission_rejected() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     // tool_call updated 引用未知 tool_call_id → UnknownToolCall。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 2, EventBody::ToolCallUpdated {
-            turn_id: "t1".into(),
-            tool_call_id: "nope".into(),
-            arguments: None,
-        }),
+        &ev(
+            "s1",
+            2,
+            EventBody::ToolCallUpdated {
+                turn_id: "t1".into(),
+                tool_call_id: "nope".into(),
+                status: None,
+                arguments: None,
+            },
+        ),
     );
     assert_eq!(r.reason, Some(ApplyReason::UnknownToolCall));
     // permission resolved 引用未知 permission_id → UnknownPermission。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 3, EventBody::PermissionResolved {
-            permission_id: "nope".into(),
-            decision: PermissionDecision::Allow,
-        }),
+        &ev(
+            "s1",
+            3,
+            EventBody::PermissionResolved {
+                permission_id: "nope".into(),
+                decision: PermissionDecision::Allow,
+            },
+        ),
     );
     assert_eq!(r.reason, Some(ApplyReason::UnknownPermission));
 }
@@ -490,7 +627,10 @@ fn unknown_turn_rejected_for_delta() {
     let mut p = pair();
     let mut agg = Aggregator;
     // 无 active_turn 时 delta 到达：turn 未知（§9.2 步骤 6）。
-    let r = agg.apply(&mut p, &ev("s1", 1, msg_delta("t1", "t1:assistant", "b1", "x")));
+    let r = agg.apply(
+        &mut p,
+        &ev("s1", 1, msg_delta("t1", "t1:assistant", "b1", "x")),
+    );
     assert_eq!(r.reason, Some(ApplyReason::UnknownTurn));
 }
 
@@ -502,28 +642,168 @@ fn unknown_turn_rejected_for_delta() {
 fn oversized_tool_result_truncated() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
-        .applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
+            .applied
+    );
     let big = json!({"data": "x".repeat(5000)});
+    let big_bytes = serde_json::to_vec(&big).unwrap().len() as f64;
     let r = agg.apply(
         &mut p,
-        &ev("s1", 3, EventBody::ToolCallCompleted {
-            turn_id: "t1".into(),
-            tool_call_id: "tc1".into(),
-            result: Some(big),
-            public_error: None,
-        }),
+        &ev(
+            "s1",
+            3,
+            EventBody::ToolCallCompleted {
+                turn_id: "t1".into(),
+                tool_call_id: "tc1".into(),
+                result: Some(big),
+                public_error: None,
+                completed_at: "2026-08-07T00:00:01Z".into(),
+            },
+        ),
     );
     assert!(r.applied);
     // result 超阈值 → 不写（None）。
     let txn = p.chat.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let calls = root.get(&txn, "tool_calls").unwrap().cast::<yrs::MapRef>().unwrap();
-    let cm = calls.get(&txn, "tc1").unwrap().cast::<yrs::MapRef>().unwrap();
+    let calls = root
+        .get(&txn, "tool_calls")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let cm = calls
+        .get(&txn, "tc1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(cm.get(&txn, "result"), Some(yrs::Out::Any(yrs::Any::Null)));
+    assert_eq!(
+        cm.get(&txn, "result_omitted")
+            .and_then(|value| value.cast::<bool>().ok()),
+        Some(true)
+    );
+    assert_eq!(
+        cm.get(&txn, "result_bytes")
+            .and_then(|value| value.cast::<f64>().ok()),
+        Some(big_bytes)
+    );
+    assert_eq!(
+        cm.get(&txn, "started_at")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref(),
+        Some("2026-08-07T00:00:00Z")
+    );
+    assert_eq!(
+        cm.get(&txn, "completed_at")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref(),
+        Some("2026-08-07T00:00:01Z")
+    );
     let _ = root;
+}
+
+#[test]
+fn retained_and_absent_tool_results_have_distinct_projection_facts() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "kept")))
+            .applied
+    );
+    let kept = json!({"ok": true});
+    let kept_bytes = serde_json::to_vec(&kept).unwrap().len() as f64;
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev(
+                "s1",
+                3,
+                EventBody::ToolCallCompleted {
+                    turn_id: "t1".into(),
+                    tool_call_id: "kept".into(),
+                    result: Some(kept),
+                    public_error: None,
+                    completed_at: "2026-08-07T00:00:01Z".into(),
+                }
+            )
+        )
+        .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 4, tool_started("t1", "empty")))
+            .applied
+    );
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev(
+                "s1",
+                5,
+                EventBody::ToolCallCompleted {
+                    turn_id: "t1".into(),
+                    tool_call_id: "empty".into(),
+                    result: None,
+                    public_error: None,
+                    completed_at: "2026-08-07T00:00:02Z".into(),
+                }
+            )
+        )
+        .applied
+    );
+
+    let txn = p.chat.transact();
+    let root = chat_writer::root_map_read(&txn).unwrap();
+    let calls = root
+        .get(&txn, "tool_calls")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let kept = calls
+        .get(&txn, "kept")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(
+        kept.get(&txn, "result_omitted")
+            .and_then(|v| v.cast::<bool>().ok()),
+        Some(false)
+    );
+    assert_eq!(
+        kept.get(&txn, "result_bytes")
+            .and_then(|v| v.cast::<f64>().ok()),
+        Some(kept_bytes)
+    );
+    assert_ne!(
+        kept.get(&txn, "result"),
+        Some(yrs::Out::Any(yrs::Any::Null))
+    );
+    let empty = calls
+        .get(&txn, "empty")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(
+        empty
+            .get(&txn, "result_omitted")
+            .and_then(|v| v.cast::<bool>().ok()),
+        Some(false)
+    );
+    assert_eq!(
+        empty.get(&txn, "result_bytes"),
+        Some(yrs::Out::Any(yrs::Any::Null))
+    );
+    assert_eq!(
+        empty.get(&txn, "result"),
+        Some(yrs::Out::Any(yrs::Any::Null))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +832,10 @@ fn chat_transaction_precedes_control() {
 
     let mut agg = Aggregator;
     // user_message 同时写 chat（entry）+ session（active_turn）。
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
     // 顺序断言：chat update 先于 session update。
     let mut seqs = Vec::new();
     while let Ok(s) = rx.try_recv() {
@@ -575,7 +858,10 @@ fn batch_merges_deltas_into_single_transaction() {
     let mut p = pair();
     // 先注册 turn（active_turn 存在，避免 UnknownTurn）。
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
     // 观察回调计数（每次事务提交 +1）。
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let doc = p.chat.clone();
@@ -598,11 +884,31 @@ fn batch_merges_deltas_into_single_transaction() {
     // 文本已追加。
     let txn = p.chat.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let entries = root.get(&txn, "entries").unwrap().cast::<yrs::MapRef>().unwrap();
-    let em = entries.get(&txn, "t1:assistant").unwrap().cast::<yrs::MapRef>().unwrap();
-    let blocks = em.get(&txn, "blocks").unwrap().cast::<yrs::MapRef>().unwrap();
-    let bm = blocks.get(&txn, "b1").unwrap().cast::<yrs::MapRef>().unwrap();
-    let text = bm.get(&txn, "text").unwrap().cast::<yrs::TextRef>().unwrap();
+    let entries = root
+        .get(&txn, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let em = entries
+        .get(&txn, "t1:assistant")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let blocks = em
+        .get(&txn, "blocks")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let bm = blocks
+        .get(&txn, "b1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let text = bm
+        .get(&txn, "text")
+        .unwrap()
+        .cast::<yrs::TextRef>()
+        .unwrap();
     assert_eq!(text.get_string(&txn), "xxxx");
     let _ = root;
 }
@@ -615,25 +921,49 @@ fn batch_merges_deltas_into_single_transaction() {
 fn reasoning_visibility_written() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 2, EventBody::ReasoningDelta {
-                turn_id: "t1".into(),
-                entry_id: "t1:assistant".into(),
-                block_id: "r1".into(),
-                text: "think".into(),
-                visibility: BlockVisibility::Hidden,
-            })
+            &ev(
+                "s1",
+                2,
+                EventBody::ReasoningDelta {
+                    turn_id: "t1".into(),
+                    entry_id: "t1:assistant".into(),
+                    block_id: "r1".into(),
+                    text: "think".into(),
+                    visibility: BlockVisibility::Hidden,
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     let txn = p.chat.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let entries = root.get(&txn, "entries").unwrap().cast::<yrs::MapRef>().unwrap();
-    let em = entries.get(&txn, "t1:assistant").unwrap().cast::<yrs::MapRef>().unwrap();
-    let blocks = em.get(&txn, "blocks").unwrap().cast::<yrs::MapRef>().unwrap();
-    let bm = blocks.get(&txn, "r1").unwrap().cast::<yrs::MapRef>().unwrap();
+    let entries = root
+        .get(&txn, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let em = entries
+        .get(&txn, "t1:assistant")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let blocks = em
+        .get(&txn, "blocks")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let bm = blocks
+        .get(&txn, "r1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         bm.get(&txn, "visibility"),
         Some(yrs::Out::Any("hidden".into()))
@@ -649,7 +979,10 @@ fn reasoning_visibility_written() {
 fn view_store_roundtrip() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "hi")))
+            .applied
+    );
 
     let store = YrsViewStore::new(&p.chat);
     let snapshot = store.encode_state_as_update();
@@ -661,7 +994,11 @@ fn view_store_roundtrip() {
     store2.apply_update(&snapshot).unwrap();
     let txn2 = doc2.transact();
     let root2 = chat_writer::root_map_read(&txn2).unwrap();
-    let entries2 = root2.get(&txn2, "entries").unwrap().cast::<yrs::MapRef>().unwrap();
+    let entries2 = root2
+        .get(&txn2, "entries")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(entries2.len(&txn2), 1);
     let _ = root2;
 }
@@ -683,30 +1020,41 @@ fn session_list_full_sync_removes_stale() {
         bound_chat_id: None,
     };
     // 第一轮：s1/s2。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 1, EventBody::SessionListResponse {
-                entries: vec![sum("s1", "a"), sum("s2", "b")],
-            })
+            &ev(
+                "s1",
+                1,
+                EventBody::SessionListResponse {
+                    entries: vec![sum("s1", "a"), sum("s2", "b")],
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     // 第二轮：s1 变化、s2 缺失（旧条目删除）、s3 新增。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 2, EventBody::SessionListResponse {
-                entries: vec![sum("s1", "a2"), sum("s3", "c")],
-            })
+            &ev(
+                "s1",
+                2,
+                EventBody::SessionListResponse {
+                    entries: vec![sum("s1", "a2"), sum("s3", "c")],
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     let txn = p.session.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let sessions = root.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().unwrap();
-    let keys: std::collections::BTreeSet<&str> = sessions
-        .iter(&txn)
-        .map(|(k, _)| k)
-        .collect();
+    let sessions = root
+        .get(&txn, "sessions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    let keys: std::collections::BTreeSet<&str> = sessions.iter(&txn).map(|(k, _)| k).collect();
     assert_eq!(keys, ["s1", "s3"].into_iter().collect());
     let _ = root;
 }
@@ -727,9 +1075,18 @@ fn projection_version_increments_per_apply() {
             .unwrap_or(0)
     };
     assert_eq!(read(&p), 0);
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     assert_eq!(read(&p), 1);
-    assert!(agg.apply(&mut p, &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "x"))).applied);
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "x"))
+        )
+        .applied
+    );
     assert_eq!(read(&p), 2);
     // 拒绝的事件不 bump。
     let r = agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")));
@@ -739,8 +1096,14 @@ fn projection_version_increments_per_apply() {
 
 #[test]
 fn session_status_str_matches_schema() {
-    assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Active), "active");
-    assert_eq!(crate::state::aggregator::chat_status_str(ChatStatus::Crashed), "crashed");
+    assert_eq!(
+        crate::state::aggregator::chat_status_str(ChatStatus::Active),
+        "active"
+    );
+    assert_eq!(
+        crate::state::aggregator::chat_status_str(ChatStatus::Crashed),
+        "crashed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -752,59 +1115,67 @@ fn session_status_str_matches_schema() {
 fn permission_requested_advances_turn_to_awaiting_permission() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Accepting));
     // 权限请求发出 → 宿主等待决议（accepting → awaitingPermission）。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
-        .applied);
-    assert_eq!(
-        active_turn_status(&p),
-        Some(TurnStatus::AwaitingPermission)
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+            .applied
     );
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
     // 无关 turn 的权限请求被拒绝（防御：judge 终态守卫按 active_turn 校验），
     // 状态不受影响。
     let r = agg.apply(&mut p, &ev("s1", 3, permission_requested("p9", "t9")));
     assert!(!r.applied, "无关 turn 的权限请求应拒绝");
-    assert_eq!(
-        active_turn_status(&p),
-        Some(TurnStatus::AwaitingPermission)
-    );
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
 }
 
 #[test]
 fn permission_resolved_last_pending_advances_turn_to_running() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
-        .applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 3, permission_requested("p2", "t1")))
-        .applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 3, permission_requested("p2", "t1")))
+            .applied
+    );
     assert_eq!(permission_count(&p), 2);
     // 决议 p1：仍有 p2 pending → 保持 awaitingPermission。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 4, EventBody::PermissionResolved {
-            permission_id: "p1".into(),
-            decision: PermissionDecision::Allow,
-        }),
+        &ev(
+            "s1",
+            4,
+            EventBody::PermissionResolved {
+                permission_id: "p1".into(),
+                decision: PermissionDecision::Allow,
+            },
+        ),
     );
     assert!(r.applied);
-    assert_eq!(
-        active_turn_status(&p),
-        Some(TurnStatus::AwaitingPermission)
-    );
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
     // 决议 p2：无 pending → awaitingPermission → running（参考实现
     // resolve(allow) 语义）。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 5, EventBody::PermissionResolved {
-            permission_id: "p2".into(),
-            decision: PermissionDecision::Allow,
-        }),
+        &ev(
+            "s1",
+            5,
+            EventBody::PermissionResolved {
+                permission_id: "p2".into(),
+                decision: PermissionDecision::Allow,
+            },
+        ),
     );
     assert!(r.applied);
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
@@ -812,23 +1183,450 @@ fn permission_resolved_last_pending_advances_turn_to_running() {
 }
 
 #[test]
+fn linked_tool_lifecycle_is_monotonic_across_updates_and_permission() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
+            .applied
+    );
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Pending);
+    assert!(entry_has_tool_block(&p, "t1:assistant", "tc1"));
+
+    let running = EventBody::ToolCallUpdated {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        status: Some(ToolCallStatus::Running),
+        arguments: Some(json!({"cmd": "pwd"})),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 3, running)).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Running);
+
+    let stale_pending = EventBody::ToolCallUpdated {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        status: Some(ToolCallStatus::Pending),
+        arguments: None,
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 4, stale_pending)).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Running);
+
+    let permission = EventBody::PermissionRequested {
+        permission_id: "p1".into(),
+        turn_id: "t1".into(),
+        tool_call_id: Some("tc1".into()),
+        tool: None,
+        title: "允许执行".into(),
+        description: None,
+        options: vec![PermissionOptions::AllowOnce],
+        expires_at: "2026-08-07T00:05:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 5, permission)).applied);
+    let waiting = tool_call(&p, "tc1");
+    assert_eq!(waiting.status, ToolCallStatus::AwaitingPermission);
+    assert_eq!(waiting.permission_id.as_deref(), Some("p1"));
+
+    let late_running = EventBody::ToolCallUpdated {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        status: Some(ToolCallStatus::Running),
+        arguments: Some(json!({"cmd": "pwd", "late": true})),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 6, late_running)).applied);
+    assert_eq!(
+        tool_call(&p, "tc1").status,
+        ToolCallStatus::AwaitingPermission
+    );
+
+    let allow = EventBody::PermissionResolved {
+        permission_id: "p1".into(),
+        decision: PermissionDecision::Allow,
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 7, allow)).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Running);
+
+    let completed = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        result: Some(json!({"ok": true})),
+        public_error: None,
+        completed_at: "2026-08-07T00:00:02Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 8, completed)).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Completed);
+}
+
+#[test]
+fn tool_evidence_is_monotonic_across_sparse_and_late_frames() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
+            .applied
+    );
+
+    let sparse = EventBody::ToolCallUpdated {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        status: Some(ToolCallStatus::Running),
+        arguments: None,
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 3, sparse)).applied);
+    assert_eq!(tool_call(&p, "tc1").arguments, Some(json!({"cmd": "ls"})));
+
+    let permission = EventBody::PermissionRequested {
+        permission_id: "p1".into(),
+        turn_id: "t1".into(),
+        tool_call_id: Some("tc1".into()),
+        tool: None,
+        title: "允许执行".into(),
+        description: None,
+        options: vec![PermissionOptions::AllowOnce],
+        expires_at: "2026-08-07T00:05:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 4, permission)).applied);
+
+    let premature = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        result: Some(json!({"should_not_exist": true})),
+        public_error: None,
+        completed_at: "2026-08-07T00:00:02Z".into(),
+    };
+    let premature_result = agg.apply(&mut p, &ev("s1", 5, premature));
+    assert!(!premature_result.applied);
+    assert_eq!(
+        premature_result.reason,
+        Some(ApplyReason::AwaitingPermissionGuard)
+    );
+    let waiting = tool_call(&p, "tc1");
+    assert_eq!(waiting.status, ToolCallStatus::AwaitingPermission);
+    assert_eq!(waiting.result, None);
+    assert_eq!(waiting.completed_at, None);
+
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev(
+                "s1",
+                6,
+                EventBody::PermissionResolved {
+                    permission_id: "p1".into(),
+                    decision: PermissionDecision::Allow,
+                },
+            ),
+        )
+        .applied
+    );
+    let completed = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        result: Some(json!({"ok": true})),
+        public_error: None,
+        completed_at: "2026-08-07T00:00:03Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 7, completed)).applied);
+    let first_terminal = tool_call(&p, "tc1");
+    assert_eq!(first_terminal.status, ToolCallStatus::Completed);
+    assert_eq!(first_terminal.result, Some(json!({"ok": true})));
+
+    let late_error = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        result: None,
+        public_error: Some(acp_hub_proto::schema::PublicError {
+            code: "late".into(),
+            message: "must not overwrite".into(),
+        }),
+        completed_at: "2026-08-07T00:00:04Z".into(),
+    };
+    let late = agg.apply(&mut p, &ev("s1", 8, late_error));
+    assert!(!late.applied);
+    assert_eq!(late.reason, Some(ApplyReason::DuplicateIdempotent));
+    assert_eq!(tool_call(&p, "tc1"), first_terminal);
+}
+
+#[test]
+fn tool_error_projection_roundtrips_nested_public_error() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc-error")))
+            .applied
+    );
+    let failed = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc-error".into(),
+        result: None,
+        public_error: Some(acp_hub_proto::schema::PublicError {
+            code: "exit_1".into(),
+            message: "command failed".into(),
+        }),
+        completed_at: "2026-08-07T00:00:02Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 3, failed)).applied);
+    assert_eq!(
+        tool_call(&p, "tc-error").public_error,
+        Some(acp_hub_proto::schema::PublicError {
+            code: "exit_1".into(),
+            message: "command failed".into(),
+        })
+    );
+}
+
+#[test]
+fn permission_first_atomically_synthesizes_reachable_tool_card() {
+    use crate::state::normalized::PermissionToolSnapshot;
+
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+
+    let permission = EventBody::PermissionRequested {
+        permission_id: "p-first".into(),
+        turn_id: "t1".into(),
+        tool_call_id: Some("tc-first".into()),
+        tool: Some(PermissionToolSnapshot {
+            tool_call_id: "tc-first".into(),
+            name: "run command".into(),
+            arguments: Some(json!({"cmd": "cargo test"})),
+        }),
+        title: "允许执行".into(),
+        description: None,
+        options: vec![PermissionOptions::AllowOnce],
+        expires_at: "2026-08-07T00:05:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 2, permission)).applied);
+
+    let tool = tool_call(&p, "tc-first");
+    assert_eq!(tool.turn_id, "t1");
+    assert_eq!(tool.name, "run command");
+    assert_eq!(tool.arguments, Some(json!({"cmd": "cargo test"})));
+    assert_eq!(tool.status, ToolCallStatus::AwaitingPermission);
+    assert_eq!(tool.permission_id.as_deref(), Some("p-first"));
+    assert!(entry_has_tool_block(&p, "t1:assistant", "tc-first"));
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
+
+    let official_start = EventBody::ToolCallStarted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc-first".into(),
+        name: "run command (resolved)".into(),
+        status: ToolCallStatus::Running,
+        arguments: Some(json!({"cmd": "cargo test", "all": true})),
+        created_at: "2026-08-07T00:00:01Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 3, official_start)).applied);
+    let enriched = tool_call(&p, "tc-first");
+    assert_eq!(enriched.name, "run command (resolved)");
+    assert_eq!(
+        enriched.arguments,
+        Some(json!({"cmd": "cargo test", "all": true}))
+    );
+    assert_eq!(enriched.status, ToolCallStatus::AwaitingPermission);
+    assert_eq!(enriched.permission_id.as_deref(), Some("p-first"));
+    assert!(entry_has_tool_block(&p, "t1:assistant", "tc-first"));
+}
+
+#[test]
+fn running_tool_start_advances_accepting_turn_without_content_delta() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    let started = EventBody::ToolCallStarted {
+        turn_id: "t1".into(),
+        tool_call_id: "tc1".into(),
+        name: "shell".into(),
+        status: ToolCallStatus::Running,
+        arguments: None,
+        created_at: "2026-08-07T00:00:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 2, started)).applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
+}
+
+#[test]
+fn replay_starting_with_tool_call_synthesizes_turn_and_reachable_block() {
+    let mut p = pair();
+    p.stream.replay_active = true;
+    let mut agg = Aggregator;
+    let started = EventBody::ToolCallStarted {
+        turn_id: String::new(),
+        tool_call_id: "replayed-tool".into(),
+        name: "shell".into(),
+        status: ToolCallStatus::Running,
+        arguments: Some(json!({"cmd": "pwd"})),
+        created_at: "2026-08-07T00:00:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 1, started)).applied);
+    let tool = tool_call(&p, "replayed-tool");
+    assert_eq!(tool.turn_id, "load:1");
+    assert_eq!(tool.started_at, None, "回放通知时间不是原执行开始时间");
+    assert!(entry_has_tool_block(
+        &p,
+        "load:1:assistant",
+        "replayed-tool"
+    ));
+
+    let completed = EventBody::ToolCallCompleted {
+        turn_id: String::new(),
+        tool_call_id: "replayed-tool".into(),
+        result: Some(json!({"ok": true})),
+        public_error: None,
+        completed_at: "2026-08-07T00:00:05Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 2, completed)).applied);
+    let tool = tool_call(&p, "replayed-tool");
+    assert_eq!(tool.status, ToolCallStatus::Completed);
+    assert_eq!(tool.result, Some(json!({"ok": true})));
+    assert_eq!(tool.completed_at, None, "回放通知时间不是原执行完成时间");
+}
+
+#[test]
+fn linked_permission_deny_cancels_tool_and_turn() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
+            .applied
+    );
+    let request = EventBody::PermissionRequested {
+        permission_id: "p1".into(),
+        turn_id: "t1".into(),
+        tool_call_id: Some("tc1".into()),
+        tool: None,
+        title: "允许执行".into(),
+        description: None,
+        options: vec![PermissionOptions::AllowOnce],
+        expires_at: "2026-08-07T00:05:00Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 3, request)).applied);
+    let deny = EventBody::PermissionResolved {
+        permission_id: "p1".into(),
+        decision: PermissionDecision::Deny,
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 4, deny)).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Cancelled);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
+}
+
+#[test]
+fn tool_waits_until_its_last_linked_permission_is_allowed() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "tc1")))
+            .applied
+    );
+    for (seq, id) in [(3, "p1"), (4, "p2")] {
+        let request = EventBody::PermissionRequested {
+            permission_id: id.into(),
+            turn_id: "t1".into(),
+            tool_call_id: Some("tc1".into()),
+            tool: None,
+            title: "允许执行".into(),
+            description: None,
+            options: vec![PermissionOptions::AllowOnce],
+            expires_at: "2026-08-07T00:05:00Z".into(),
+        };
+        assert!(agg.apply(&mut p, &ev("s1", seq, request)).applied);
+    }
+    let allow = |id: &str| EventBody::PermissionResolved {
+        permission_id: id.into(),
+        decision: PermissionDecision::Allow,
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 5, allow("p1"))).applied);
+    assert_eq!(
+        tool_call(&p, "tc1").status,
+        ToolCallStatus::AwaitingPermission
+    );
+    assert!(agg.apply(&mut p, &ev("s1", 6, allow("p2"))).applied);
+    assert_eq!(tool_call(&p, "tc1").status, ToolCallStatus::Running);
+}
+
+#[test]
+fn cancelled_turn_converges_every_nonterminal_tool_without_overwriting_completed() {
+    let mut p = pair();
+    let mut agg = Aggregator;
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, tool_started("t1", "running")))
+            .applied
+    );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 3, tool_started("t1", "done")))
+            .applied
+    );
+    let completed = EventBody::ToolCallCompleted {
+        turn_id: "t1".into(),
+        tool_call_id: "done".into(),
+        result: None,
+        public_error: None,
+        completed_at: "2026-08-07T00:00:01Z".into(),
+    };
+    assert!(agg.apply(&mut p, &ev("s1", 4, completed)).applied);
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 5, turn_terminal("t1", TurnStatus::Cancelled)),
+        )
+        .applied
+    );
+    assert_eq!(tool_call(&p, "running").status, ToolCallStatus::Cancelled);
+    assert_eq!(tool_call(&p, "done").status, ToolCallStatus::Completed);
+}
+
+#[test]
 fn permission_expired_last_pending_cancels_turn() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
-        .applied);
-    assert_eq!(
-        active_turn_status(&p),
-        Some(TurnStatus::AwaitingPermission)
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
     );
+    assert!(
+        agg.apply(&mut p, &ev("s1", 2, permission_requested("p1", "t1")))
+            .applied
+    );
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
     // 未决议权限过期 → 该 turn 取消（参考实现 expire 语义）。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 3, EventBody::PermissionExpired {
-            permission_id: "p1".into(),
-        }),
+        &ev(
+            "s1",
+            3,
+            EventBody::PermissionExpired {
+                permission_id: "p1".into(),
+            },
+        ),
     );
     assert!(r.applied);
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
@@ -836,10 +1634,14 @@ fn permission_expired_last_pending_cancels_turn() {
     // 条件不满足）。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 4, EventBody::PermissionResolved {
-            permission_id: "p1".into(),
-            decision: PermissionDecision::Allow,
-        }),
+        &ev(
+            "s1",
+            4,
+            EventBody::PermissionResolved {
+                permission_id: "p1".into(),
+                decision: PermissionDecision::Allow,
+            },
+        ),
     );
     assert!(r.applied, "CAS 幂等：已 expired 的决议 applied（不迁移）");
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Cancelled));
@@ -849,30 +1651,43 @@ fn permission_expired_last_pending_cancels_turn() {
 fn content_delta_advances_turn_from_accepting_to_running() {
     let mut p = pair();
     let mut agg = Aggregator;
-    assert!(agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a"))).applied);
+    assert!(
+        agg.apply(&mut p, &ev("s1", 1, user_msg("t1", "t1:user", "a")))
+            .applied
+    );
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Accepting));
     // 首条内容增量 → accepting → running（参考实现：首条内容即 turn 开始
     // 运行）。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "chunk")))
-        .applied);
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 2, msg_delta("t1", "t1:assistant", "b1", "chunk"))
+        )
+        .applied
+    );
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
     // 后续增量不再迁移（已 running，条件不满足；状态保持）。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 3, msg_delta("t1", "t1:assistant", "b1", "more")))
-        .applied);
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 3, msg_delta("t1", "t1:assistant", "b1", "more"))
+        )
+        .applied
+    );
     assert_eq!(active_turn_status(&p), Some(TurnStatus::Running));
     // awaitingPermission 状态下增量到达不覆盖（等决议语义，§7.2）。
-    assert!(agg
-        .apply(&mut p, &ev("s1", 4, permission_requested("p1", "t1")))
-        .applied);
-    assert_eq!(
-        active_turn_status(&p),
-        Some(TurnStatus::AwaitingPermission)
+    assert!(
+        agg.apply(&mut p, &ev("s1", 4, permission_requested("p1", "t1")))
+            .applied
     );
-    assert!(agg
-        .apply(&mut p, &ev("s1", 5, msg_delta("t1", "t1:assistant", "b1", "after-perm")))
-        .applied);
+    assert_eq!(active_turn_status(&p), Some(TurnStatus::AwaitingPermission));
+    assert!(
+        agg.apply(
+            &mut p,
+            &ev("s1", 5, msg_delta("t1", "t1:assistant", "b1", "after-perm"))
+        )
+        .applied
+    );
     assert_eq!(
         active_turn_status(&p),
         Some(TurnStatus::AwaitingPermission),
@@ -898,12 +1713,16 @@ fn replay_first_delta_synthesizes_placeholder_turn() {
     // 合成空文本 user 占位 turn 后归位。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 1, EventBody::MessageDelta {
-            turn_id: String::new(),
-            entry_id: String::new(),
-            block_id: String::new(),
-            text: "chunk_1".into(),
-        }),
+        &ev(
+            "s1",
+            1,
+            EventBody::MessageDelta {
+                turn_id: String::new(),
+                entry_id: String::new(),
+                block_id: String::new(),
+                text: "chunk_1".into(),
+            },
+        ),
     );
     assert!(r.applied);
     // 占位 turn 已建立：user 占位 + assistant 增量两条 entry，无空 id。
@@ -923,13 +1742,17 @@ fn replay_first_delta_synthesizes_placeholder_turn() {
     // 后续同 turn 增量归位到同一占位 turn（不重复合成）。
     let r = agg.apply(
         &mut p,
-        &ev("s1", 2, EventBody::ReasoningDelta {
-            turn_id: String::new(),
-            entry_id: String::new(),
-            block_id: String::new(),
-            text: "thinking".into(),
-            visibility: BlockVisibility::Summary,
-        }),
+        &ev(
+            "s1",
+            2,
+            EventBody::ReasoningDelta {
+                turn_id: String::new(),
+                entry_id: String::new(),
+                block_id: String::new(),
+                text: "thinking".into(),
+                visibility: BlockVisibility::Summary,
+            },
+        ),
     );
     assert!(r.applied);
     assert_eq!(entry_count(&p), 2, "同 turn 增量不重复合成");
@@ -944,28 +1767,42 @@ fn agent_config_partial_update_none_keeps_existing() {
     let mut p = pair();
     let mut agg = Aggregator;
     // 首轮写入 model/effort。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 1, EventBody::AgentConfig {
-                model: Some("claude-sonnet-4-5".into()),
-                effort: Some("high".into()),
-            })
+            &ev(
+                "s1",
+                1,
+                EventBody::AgentConfig {
+                    model: Some("claude-sonnet-4-5".into()),
+                    effort: Some("high".into()),
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     // 部分更新：model 为 None 不覆盖既有值，effort 更新。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 2, EventBody::AgentConfig {
-                model: None,
-                effort: Some("low".into()),
-            })
+            &ev(
+                "s1",
+                2,
+                EventBody::AgentConfig {
+                    model: None,
+                    effort: Some("low".into()),
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     let txn = p.session.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    let agent = root
+        .get(&txn, "agent")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
         "claude-sonnet-4-5",
@@ -984,41 +1821,63 @@ fn agent_usage_snapshot_overwrites() {
     let mut p = pair();
     let mut agg = Aggregator;
     // 先经 AgentStatus 写模型/用量，再被 usage_update 快照覆盖。
-    assert!(agg
-        .apply(
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 1, EventBody::AgentStatus {
-                status: "running".into(),
-                public_error: None,
-                model: Some("claude-sonnet-4-5".into()),
-                context_window: Some(200_000),
-                context_used: Some(42_000),
-            })
+            &ev(
+                "s1",
+                1,
+                EventBody::AgentStatus {
+                    status: "running".into(),
+                    public_error: None,
+                    model: Some("claude-sonnet-4-5".into()),
+                    context_window: Some(200_000),
+                    context_used: Some(42_000),
+                }
+            )
         )
-        .applied);
-    assert!(agg
-        .apply(
+        .applied
+    );
+    assert!(
+        agg.apply(
             &mut p,
-            &ev("s1", 2, EventBody::AgentUsage {
-                context_window: 200_000,
-                context_used: 88_888,
-            })
+            &ev(
+                "s1",
+                2,
+                EventBody::AgentUsage {
+                    context_window: 200_000,
+                    context_used: 88_888,
+                }
+            )
         )
-        .applied);
+        .applied
+    );
     let txn = p.session.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    let agent = root
+        .get(&txn, "agent")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         agent.get(&txn, "model").unwrap().cast::<String>().unwrap(),
         "claude-sonnet-4-5",
         "usage_update 不动 model"
     );
     assert_eq!(
-        agent.get(&txn, "context_window").unwrap().cast::<u32>().unwrap(),
+        agent
+            .get(&txn, "context_window")
+            .unwrap()
+            .cast::<u32>()
+            .unwrap(),
         200_000
     );
     assert_eq!(
-        agent.get(&txn, "context_used").unwrap().cast::<u32>().unwrap(),
+        agent
+            .get(&txn, "context_used")
+            .unwrap()
+            .cast::<u32>()
+            .unwrap(),
         88_888,
         "usage_update 全量覆盖 context_used"
     );

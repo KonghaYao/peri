@@ -15,7 +15,7 @@ pub const CHAT_DOC_SCHEMA_VERSION: u32 = 1;
 pub const SESSION_DOC_SCHEMA_VERSION: u32 = 1;
 
 /// Registry Doc 结构版本（§5.5 未给数值，【决策】取 1）。
-pub const REGISTRY_DOC_SCHEMA_VERSION: u32 = 1;
+pub const REGISTRY_DOC_SCHEMA_VERSION: u32 = 2;
 
 /// y-sync update 编码版本（§4.1「固定 update 编码版本 v1」）。
 pub const Y_UPDATE_ENCODING_VERSION: u32 = 1;

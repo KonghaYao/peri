@@ -172,6 +172,7 @@ impl WorkspaceRegistry {
         match self.inner.registry.list_workspaces().await {
             Ok(list) => {
                 let mut ws = self.inner.workspaces.write().await;
+                ws.clear();
                 for s in &list {
                     ws.insert(s.id.clone(), WorkspaceRecord::from_summary(s));
                 }

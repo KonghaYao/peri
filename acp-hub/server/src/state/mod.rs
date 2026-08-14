@@ -55,7 +55,7 @@ pub use doc_manager::{
 pub use doc_pair::{DocPair, StreamState};
 pub use factory::{DocKind, Factory, FactoryError};
 pub use normalized::{EventBody, NormalizedEvent};
-pub use permission::{resolve, expire, CasOutcome};
+pub use permission::{expire, resolve, CasOutcome};
 pub use registry::{DegradeCause, RegistryError, RegistryState};
 pub use session_list::{apply_diff, diff, SessionListDiff};
 pub use view_store::{

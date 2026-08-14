@@ -679,6 +679,25 @@ msg-copy-md = 复制
 msg-tip-prefix =   ⎿  提示: 
 msg-todo-available =  (可开始)
 
+# ---- @image 行（image-p0-p1-spec §4 T4）----
+# 用户气泡 `@image <path>` 行的 meta 行文案；$name 为文件名（hover 时为绝对路径），
+# $size 为人类可读大小（user-image-size-*）或缺失文案（user-image-missing）。
+user-image-meta = [Image: { $name } · { $size }]
+user-image-missing = 缺失
+user-image-size-bytes = { $count } B
+user-image-size-kb = { $count } KB
+user-image-size-mb = { $count } MB
+user-image-open-failed = 打开图片失败
+
+# ---- 图片预览浮层（image-p0-p1-spec §7 T7）----
+# 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、
+# 解码中行、手工路径降级提示、校验/解码失败固定文案（不显示原因细节）。
+image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime }]
+image-preview-loading = [Image: { $name }]
+image-preview-degraded = 仅受管理目录（~/.peri/images）内的图片可自动预览
+image-preview-error = 无法预览此图片
+image-preview-no-protocol = 当前终端不支持图片显示（Kitty graphics），仅显示文本信息
+
 # ---- 消息条目状态后备文案（spec §4.1：符号的文本后备）----
 msg-status-running = 运行中
 msg-status-done = 完成

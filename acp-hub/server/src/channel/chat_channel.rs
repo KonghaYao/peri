@@ -21,11 +21,11 @@ use acp_hub_proto::frame::Frame;
 use acp_hub_proto::whitelist::m1_allows_action_type;
 
 use crate::auth::ConnectionCtx;
+use crate::channel::ConnectionRegistry;
 use crate::channel::{Broadcaster, OutboundMsg};
 use crate::channel::{CommandCoordinator, SubmitAck};
-use crate::channel::ConnectionRegistry;
-use crate::control::InstanceRegistry;
 use crate::control::ChatRegistry;
+use crate::control::InstanceRegistry;
 
 /// ready 前 Action 缓冲上限（§4.6：上限 = 命令队列上限 64，§7.4 规则 1）。
 pub const PENDING_ACTION_LIMIT: usize = 64;
@@ -82,6 +82,12 @@ pub struct ChatChannel {
     pending: VecDeque<ActionEnvelope>,
     /// ysync.subscribe 状态（§4.2）。
     subscriptions: HashSet<DocId>,
+    /// First subscribe has been consumed even when it contained zero docs or
+    /// later subscriptions were removed. Capability negotiation is one-shot.
+    subscription_seen: bool,
+    /// Capabilities negotiated from the first subscription and permanently
+    /// bound to this authenticated connection.
+    negotiated_capabilities: HashSet<String>,
 }
 
 impl ChatChannel {
@@ -93,6 +99,8 @@ impl ChatChannel {
             first_frame: true,
             pending: VecDeque::new(),
             subscriptions: HashSet::new(),
+            subscription_seen: false,
+            negotiated_capabilities: HashSet::new(),
         }
     }
 
@@ -108,10 +116,7 @@ impl ChatChannel {
         // 首帧纪律（§6）：认证后首帧必须是 ysync.subscribe/action。
         if self.first_frame {
             self.first_frame = false;
-            let ok = matches!(
-                frame,
-                Frame::Action(_) | Frame::YsyncSubscribe(_)
-            );
+            let ok = matches!(frame, Frame::Action(_) | Frame::YsyncSubscribe(_));
             if !ok {
                 return DispatchOutcome::Disconnect(1011);
             }
@@ -120,7 +125,17 @@ impl ChatChannel {
             Frame::Action(action) => self.dispatch_action(action, deps, tx).await,
             Frame::YsyncSubscribe(sub) => {
                 let docs = sub.docs.clone();
-                let first = self.subscriptions.is_empty();
+                let first = !self.subscription_seen;
+                if first {
+                    self.subscription_seen = true;
+                    self.negotiated_capabilities = sub
+                        .client_capabilities
+                        .into_iter()
+                        .filter(|capability| {
+                            capability == acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2
+                        })
+                        .collect();
+                }
                 for d in &docs {
                     self.subscriptions.insert(d.clone());
                 }
@@ -135,11 +150,9 @@ impl ChatChannel {
             }
             // 上行 ysync.update：方向拒绝（§5.6 server 是唯一写入者；客户端
             // 无写租约）→ UNSUPPORTED_FRAME（§4.8 不静默）。
-            Frame::YsyncUpdate(_) => {
-                DispatchOutcome::Send(vec![OutboundMsg::Frame(unsupported_frame(
-                    "ysync.update is server-to-client only",
-                ))])
-            }
+            Frame::YsyncUpdate(_) => DispatchOutcome::Send(vec![OutboundMsg::Frame(
+                unsupported_frame("ysync.update is server-to-client only"),
+            )]),
             // 其余 S→C 帧上行（ready/keep_alive/action_ack/action_error 等）
             // 协议违规 → UNSUPPORTED_FRAME。
             other => {
@@ -175,7 +188,8 @@ impl ChatChannel {
                 },
             ))]);
         }
-        if !self.ctx.can_send_action() {
+        let read_only_query = matches!(action, ActionEnvelope::PersistedSessionPromptStatus { .. });
+        if !self.ctx.can_send_action() && !read_only_query {
             // read-only 档位（§9.2.2：M1 即强制，仅读）。
             return DispatchOutcome::Send(vec![OutboundMsg::Frame(unsupported_frame(
                 "read-only token cannot send actions",
@@ -197,23 +211,38 @@ impl ChatChannel {
             self.pending.push_back(action);
             return DispatchOutcome::None;
         }
+        // Prompt delivery v2 is a safety capability, not a UI feature flag.
+        // Evaluate only after Ready so an Action-first client can buffer until
+        // its first subscription negotiates capabilities. An old tab must
+        // never enter the new pipeline and later interpret delivery-unknown as
+        // “not sent”, so close before coordinator mutation.
+        if matches!(action, ActionEnvelope::Prompt { .. }) && !self.supports_prompt_delivery_v2() {
+            tracing::warn!(
+                token_id = %self.ctx.token_id,
+                "prompt rejected before mutation: client lacks prompt-delivery-v2"
+            );
+            return DispatchOutcome::Disconnect(4502);
+        }
         match deps.coordinator.submit(&self.ctx, action, tx).await {
-            SubmitAck::Accepted { command_id } => DispatchOutcome::Send(vec![
-                OutboundMsg::Frame(Frame::ActionAck(ActionAck {
+            SubmitAck::Accepted { command_id } => {
+                DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionAck(ActionAck {
                     command_id,
                     status: AckStatus::Accepted,
                     turn_id: None,
                     chat_id: None,
+                    project_id: None,
+                    session_id: None,
                     acp_session_id: None,
                     committed_projection_version: None,
-                })),
-            ]),
+                }))])
+            }
             SubmitAck::Duplicate(ack) => {
                 DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionAck(ack))])
             }
             SubmitAck::Failed(err) => {
                 DispatchOutcome::Send(vec![OutboundMsg::Frame(Frame::ActionError(err))])
             }
+            SubmitAck::Handled => DispatchOutcome::None,
         }
     }
 
@@ -233,11 +262,40 @@ impl ChatChannel {
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
+
+    /// Negotiated capabilities returned in `ready`. Sorted output keeps wire
+    /// fixtures deterministic.
+    pub fn negotiated_capabilities(&self) -> Vec<String> {
+        let mut capabilities = self
+            .negotiated_capabilities
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        capabilities.sort();
+        capabilities
+    }
+
+    pub fn supports_prompt_delivery_v2(&self) -> bool {
+        self.negotiated_capabilities
+            .contains(acp_hub_proto::ysync::CAP_PROMPT_DELIVERY_V2)
+    }
 }
 
 fn extract_command_id(action: &ActionEnvelope) -> Option<String> {
     match action {
-        ActionEnvelope::Create { command_id, .. }
+        ActionEnvelope::ProjectCreate { command_id, .. }
+        | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::ProjectRestore { command_id, .. }
+        | ActionEnvelope::ProjectRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionCreate { command_id, .. }
+        | ActionEnvelope::PersistedSessionOpen { command_id, .. }
+        | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionRestore { command_id, .. }
+        | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
+        | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }

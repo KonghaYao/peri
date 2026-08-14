@@ -5,9 +5,9 @@
 //! 可验证（架构 §9.2 顾问3：「测试向量必须以字节级定义」）。
 
 use crate::hmac::{
-    compute_mac, derive_mac_key, generate_challenge_nonce, generate_connection_context,
-    mac_input, verify_mac, HmacError, SeenNonces, CHALLENGE_NONCE_LEN, HMAC_OUTPUT_LEN,
-    CONNECTION_CONTEXT_LEN,
+    compute_mac, derive_mac_key, generate_challenge_nonce, generate_connection_context, mac_input,
+    verify_mac, HmacError, SeenNonces, CHALLENGE_NONCE_LEN, CONNECTION_CONTEXT_LEN,
+    HMAC_OUTPUT_LEN,
 };
 use base64::Engine as _;
 
@@ -36,10 +36,14 @@ fn hmac_byte_level_vector() {
     assert_eq!(
         hex(&input),
         concat!(
-            "0020", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "0020", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "0001", "31",
-            "0008", "696e7374616e6365",
+            "0020",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0020",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0001",
+            "31",
+            "0008",
+            "696e7374616e6365",
         )
     );
 

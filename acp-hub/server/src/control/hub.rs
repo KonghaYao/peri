@@ -8,7 +8,8 @@
 //! 未提供时本 feature 装配薄 adapter）：
 //!
 //! - 落盘：chat/control update → `ChatStore::append_update`（水位同步推进）；
-//!   registry update → `<data_dir>/registry.log`（blob 格式，复用 persist
+//!   registry update → `<data_dir>/registry.snapshot` + bounded
+//!   `<data_dir>/registry.log`（blob 格式，复用 persist
 //!   `read_blob`/`write_blob`）；
 //! - **快照镜像**：启动时从 `Store` 恢复产物（`ChatReplay`：快照 + 日志
 //!   记录）重建 yrs 镜像，运行期 `persist_update` 时同步应用——gateway 快照
@@ -18,7 +19,8 @@
 //!   同源同 clientID，客户端应用无 CRDT 分叉。
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::Seek;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,30 +30,38 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use acp_hub_proto::conn::DocId;
+use yrs::types::AsPrelim;
+use yrs::updates::decoder::Decode as _;
 use yrs::{Map, ReadTxn, Transact};
 
 use crate::channel::Broadcaster;
+use crate::channel::ChannelDeps;
 use crate::channel::CommandCoordinator;
 use crate::channel::ConnectionRegistry;
 use crate::channel::Gateway;
 use crate::channel::RelayEventHandler;
-use crate::channel::ChannelDeps;
 use crate::config::Config;
 use crate::control::ChatRegistry;
 use crate::control::InstanceRegistry;
-use crate::persist::update_log::{read_blob, write_blob};
+use crate::control::ProjectService;
+use crate::persist::metadata::MetadataStore;
+use crate::persist::update_log::{read_blob, sync_dir, write_blob};
 use crate::persist::Store;
 use crate::state::doc_manager::{BatchConfig, DocManager, DocUpdate, PersistError, UpdateSink};
 use crate::state::factory::{DocKind, Factory};
 use crate::state::registry::{DegradeCause, RegistryState};
 use crate::state::view_store::encode_state_as_update;
 use acp_hub_proto::version::{
-    CHAT_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION,
+    CHAT_DOC_SCHEMA_VERSION, REGISTRY_DOC_SCHEMA_VERSION, SESSION_DOC_SCHEMA_VERSION,
 };
 
 /// registry 更新日志文件名（`<data_dir>/registry.log`，blob 格式；§8.4 同
 /// fsync 纪律）。
 pub const REGISTRY_LOG_FILE: &str = "registry.log";
+pub const REGISTRY_SNAPSHOT_FILE: &str = "registry.snapshot";
+const REGISTRY_SNAPSHOT_TMP_FILE: &str = "registry.snapshot.tmp";
+const REGISTRY_LEGACY_BACKUP_FILE: &str = "registry.log.legacy-v1";
+const REGISTRY_COMPACT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// hub 装配/运行错误。
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +103,8 @@ pub struct Hub {
     pub auth: Arc<tokio::sync::Mutex<crate::auth::AuthService>>,
     /// Registry 状态源（§17.2 degraded 判定 / §8.4.1 恢复门禁）。
     pub registry: RegistryState,
+    pub metadata: Arc<MetadataStore>,
+    pub projects: ProjectService,
 }
 
 impl Hub {
@@ -117,6 +129,11 @@ impl Hub {
             sink.recovered_registry_doc(),
         ));
         let registry = doc.registry();
+        let metadata = Arc::new(
+            MetadataStore::open(store.data_dir())
+                .await
+                .map_err(|e| HubError::Store(e.to_string()))?,
+        );
         // 3. 注册表/协调器/广播器。
         let chats = Arc::new(ChatRegistry::new(registry.clone()));
         let instance = Arc::new(InstanceRegistry::new(
@@ -142,12 +159,35 @@ impl Hub {
             cfg.initialize_timeout,
             cfg.binding_timeout,
         ));
+        let projects = ProjectService::new(metadata.clone(), registry.clone());
+        coordinator.install_project_service(projects.clone()).await;
+        coordinator.install_history_sink(sink.clone()).await;
+        coordinator
+            .reconcile_prompt_delivery_after_restart()
+            .await
+            .map_err(HubError::Store)?;
         // §4.4：create 全局去重索引（跨 server 重启有效）——store 已完成
         // recover（main 前置），从 outbox 重建后才接受连接。
         coordinator.rebuild_create_index().await;
         // §6.3 workspace 扩展：工作区内存注册表从 Registry Doc 重建（跨
         // 重启后 create 携带 workspace_id 仍能解析 cwd）。
         coordinator.rebuild_workspaces().await;
+        projects
+            .import_legacy_workspaces()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        projects
+            .import_legacy_sessions()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        metadata
+            .recover_after_restart()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        projects
+            .reproject()
+            .await
+            .map_err(|e| HubError::Store(e.to_string()))?;
         // §6.3：session/list 轮询（10s 全量同步投影；server 侧，见
         // CommandCoordinator::spawn_session_poller 决策注释）。
         coordinator.spawn_session_poller();
@@ -185,13 +225,9 @@ impl Hub {
         // ACP 进程在重启时必然全部终止——非终态统一标记 ended（Ended =
         // "ACP 进程退出（终态，视图保留）"），面板显示"已结束"而非误导为
         // 可对话；终态（ended/closed/crashed）保持不变。清单在
-        // with_recovered_registry 之后独立重放提取（registry.log 每次调用
-        // 重新读文件重放，不与 writer 的异步写入共享状态）。
+        // 清单由 StoreSink 的唯一恢复 pass 缓存；不再为装配阶段重复扫描日志。
         {
-            let stale = sink
-                .recovered_registry_doc()
-                .map(|d| Self::enum_stale_registry_chats(&d))
-                .unwrap_or_default();
+            let stale = sink.recovered_stale_chats().to_vec();
             let mut marked = 0usize;
             for chat_id in stale {
                 match registry.set_chat_status(&chat_id, "ended").await {
@@ -200,7 +236,10 @@ impl Hub {
                 }
             }
             if marked > 0 {
-                info!(count = marked, "startup reconcile: stale chats marked ended");
+                info!(
+                    count = marked,
+                    "startup reconcile: stale chats marked ended"
+                );
             }
         }
         Ok(Hub {
@@ -216,6 +255,8 @@ impl Hub {
             gateway,
             auth,
             registry,
+            metadata,
+            projects,
         })
     }
 
@@ -339,6 +380,14 @@ pub struct StoreSink {
     seq: RwLock<HashMap<String, (u32, u64)>>,
     /// registry 独立日志文件。
     registry_log: PathBuf,
+    registry_snapshot: PathBuf,
+    registry_snapshot_tmp: PathBuf,
+    registry_legacy_backup: PathBuf,
+    registry_io: tokio::sync::Mutex<()>,
+    /// 启动时已经合并好的单条全量 state。DocManager 与 stale-chat 对账
+    /// 各自应用这一条，而不是反复扫描整个历史日志。
+    recovered_registry_update: Option<Vec<u8>>,
+    recovered_stale_chats: Vec<String>,
 }
 
 impl StoreSink {
@@ -347,15 +396,40 @@ impl StoreSink {
         let factory = Factory::new();
         let data_dir = store.data_dir().to_path_buf();
         let registry_log = data_dir.join(REGISTRY_LOG_FILE);
+        let registry_snapshot = data_dir.join(REGISTRY_SNAPSHOT_FILE);
+        let registry_snapshot_tmp = data_dir.join(REGISTRY_SNAPSHOT_TMP_FILE);
+        let registry_legacy_backup = data_dir.join(REGISTRY_LEGACY_BACKUP_FILE);
+        if registry_snapshot_tmp.exists() {
+            std::fs::remove_file(&registry_snapshot_tmp)
+                .map_err(|e| HubError::Store(format!("remove stale registry snapshot tmp: {e}")))?;
+        }
+        let recovered = recover_registry_doc(&factory, &registry_snapshot, &registry_log)?;
+        let recovered_registry_update = recovered.doc.as_ref().map(encode_state_as_update);
+        let recovered_stale_chats = recovered
+            .doc
+            .as_ref()
+            .map(Hub::enum_stale_registry_chats)
+            .unwrap_or_default();
+        let mut initial_docs = HashMap::new();
+        if let Some(doc) = recovered.doc {
+            initial_docs.insert(DocId::REGISTRY, doc);
+        }
         let sink = StoreSink {
             store,
             factory,
-            docs: RwLock::new(HashMap::new()),
+            docs: RwLock::new(initial_docs),
             broadcast: RwLock::new(Vec::new()),
             seq: RwLock::new(HashMap::new()),
             registry_log,
+            registry_snapshot,
+            registry_snapshot_tmp,
+            registry_legacy_backup,
+            registry_io: tokio::sync::Mutex::new(()),
+            recovered_registry_update,
+            recovered_stale_chats,
         };
-        sink.rebuild_mirror().await?;
+        sink.rebuild_mirror(recovered.records).await?;
+        sink.compact_registry_if_needed().await?;
         Ok(sink)
     }
 
@@ -364,34 +438,21 @@ impl StoreSink {
     /// doc）。供 DocManager 装配注入，避免 writer 与历史结构的 CRDT LWW
     /// 冲突（镜像内容不可见）。
     pub fn recovered_registry_doc(&self) -> Option<yrs::Doc> {
-        let records = read_registry_log(&self.registry_log);
-        if records.is_empty() {
-            return None;
-        }
+        let update = self.recovered_registry_update.as_ref()?;
         let doc = yrs::Doc::new();
-        for r in &records {
-            apply_update(&doc, r);
-        }
+        apply_update(&doc, update);
         Some(doc)
+    }
+
+    fn recovered_stale_chats(&self) -> &[String] {
+        &self.recovered_stale_chats
     }
 
     /// 启动重建：逐 chat 从 `ChatReplay`（快照 + 日志记录）应用；
     /// registry 从独立日志重放。
-    async fn rebuild_mirror(&self) -> Result<(), HubError> {
+    async fn rebuild_mirror(&self, registry_records: usize) -> Result<(), HubError> {
         let mut docs = self.docs.write().await;
         let mut seq = self.seq.write().await;
-        // registry 先（重放独立日志）。
-        let registry_records = read_registry_log(&self.registry_log);
-        // 【修复】registry.log 为空（首次启动）时不预建镜像：此时 writer 的
-        // 启动基线（全量结构）会走惰性创建（create_mirror_doc 先应用基线、
-        // 后 patch_missing 补缺），镜像与 writer 同一 client、无 CRDT LWW
-        // 冲突；若此处用 ensure_schema 预建结构（另一 client），writer 后续
-        // 增量引用的结构会被同键 LWW 覆盖（client id 排序恒输），镜像内容
-        // 永久不可见。
-        if !registry_records.is_empty() {
-            let reg = create_mirror_doc(&self.factory, DocKind::Registry, &registry_records);
-            docs.insert(DocId::REGISTRY, reg);
-        }
         // 各 session：快照 + 日志记录。
         for (sid, replay) in self.replay_by_chat() {
             let mut chat_updates: Vec<Vec<u8>> = Vec::new();
@@ -424,8 +485,38 @@ impl StoreSink {
         }
         info!(
             chats = docs.len() / 2,
-            registry_records = registry_records.len(),
-            "sink mirror rebuilt"
+            registry_records, "sink mirror rebuilt"
+        );
+        Ok(())
+    }
+
+    async fn compact_registry_if_needed(&self) -> Result<(), HubError> {
+        let bytes = std::fs::metadata(&self.registry_log)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if bytes <= REGISTRY_COMPACT_BYTES {
+            return Ok(());
+        }
+        let _guard = self.registry_io.lock().await;
+        let update = {
+            let docs = self.docs.read().await;
+            docs.get(&DocId::REGISTRY)
+                .map(|doc| materialize_registry_update(&self.factory, doc))
+                .transpose()?
+        };
+        let Some(update) = update else { return Ok(()) };
+        compact_registry_log(
+            &self.registry_snapshot,
+            &self.registry_snapshot_tmp,
+            &self.registry_log,
+            &self.registry_legacy_backup,
+            &update,
+        )
+        .map_err(|e| HubError::Store(format!("registry compact failed: {e}")))?;
+        info!(
+            old_bytes = bytes,
+            snapshot_bytes = update.len(),
+            "registry log compacted"
         );
         Ok(())
     }
@@ -469,6 +560,50 @@ impl StoreSink {
         Some((state, version))
     }
 
+    /// Startup-only cross-store repair for a Hub-owned v2 prompt entry. The
+    /// mirror is already reconstructed at this point; the generated delta is
+    /// appended through the normal UpdateSink durability path before the
+    /// gateway can accept clients.
+    pub async fn reconcile_prompt_entry_delivery(
+        &self,
+        chat_id: &str,
+        entry_id: &str,
+        delivery_state: &str,
+        delivery_error_code: Option<&str>,
+    ) -> Result<bool, HubError> {
+        let doc_id = DocId::chat(chat_id);
+        let update = {
+            let mut docs = self.docs.write().await;
+            let Some(doc) = docs.get_mut(&doc_id) else {
+                return Ok(false);
+            };
+            let before = doc.transact().state_vector();
+            let changed = {
+                let mut txn = doc.transact_mut();
+                let Some(root) = txn.get_map(crate::state::factory::ROOT) else {
+                    return Ok(false);
+                };
+                crate::state::chat_writer::set_prompt_entry_delivery(
+                    &mut txn,
+                    &root,
+                    entry_id,
+                    delivery_state,
+                    delivery_error_code,
+                    None,
+                )
+            };
+            if !changed {
+                return Ok(false);
+            }
+            let update = doc.transact().encode_state_as_update_v1(&before);
+            update
+        };
+        self.persist_update(doc_id, update)
+            .await
+            .map_err(|error| HubError::Store(error.to_string()))?;
+        Ok(true)
+    }
+
     /// 镜像更新广播订阅（hub 装配时 broadcaster attach）。
     pub async fn subscribe(&self) -> mpsc::UnboundedReceiver<DocUpdate> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -495,7 +630,8 @@ impl UpdateSink for StoreSink {
                 };
                 match kind {
                     Some(kind) => {
-                        let d = create_mirror_doc(&self.factory, kind, std::slice::from_ref(&update));
+                        let d =
+                            create_mirror_doc(&self.factory, kind, std::slice::from_ref(&update));
                         docs.insert(doc.clone(), d);
                     }
                     None => return Err(PersistError(format!("unknown doc: {doc}"))),
@@ -531,15 +667,38 @@ impl UpdateSink for StoreSink {
                     seqs.insert(sid.to_string(), next);
                     next
                 };
-                chat
-                    .append_update(epoch, seq, &[(doc.clone(), update.as_slice())])
+                chat.append_update(epoch, seq, &[(doc.clone(), update.as_slice())])
                     .await
                     .map_err(|e| PersistError(e.to_string()))
             }
             "hub:registry" => {
                 // registry 独立日志（blob 格式，§8.4 同 fsync 纪律）。
+                let _guard = self.registry_io.lock().await;
                 append_registry_record(&self.registry_log, &update)
-                    .map_err(|e| PersistError(e.to_string()))
+                    .map_err(|e| PersistError(e.to_string()))?;
+                let bytes = std::fs::metadata(&self.registry_log)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if bytes > REGISTRY_COMPACT_BYTES {
+                    let snapshot = {
+                        let docs = self.docs.read().await;
+                        docs.get(&DocId::REGISTRY)
+                            .map(|doc| materialize_registry_update(&self.factory, doc))
+                            .transpose()
+                            .map_err(|e| PersistError(e.to_string()))?
+                    };
+                    if let Some(snapshot) = snapshot {
+                        compact_registry_log(
+                            &self.registry_snapshot,
+                            &self.registry_snapshot_tmp,
+                            &self.registry_log,
+                            &self.registry_legacy_backup,
+                            &snapshot,
+                        )
+                        .map_err(|e| PersistError(e.to_string()))?;
+                    }
+                }
+                Ok(())
             }
             other => Err(PersistError(format!("unknown doc: {other}"))),
         };
@@ -559,11 +718,7 @@ impl UpdateSink for StoreSink {
 /// `projection_version` 恒 0）。先应用业务 update 后，以 `schema_version`
 /// 占位使 [`Factory::ensure_schema`] 走「已有版本」分支（`patch_missing`
 /// 只补缺失键、不覆盖已有业务值）。
-fn create_mirror_doc(
-    factory: &Factory,
-    kind: DocKind,
-    updates: &[Vec<u8>],
-) -> yrs::Doc {
+fn create_mirror_doc(factory: &Factory, kind: DocKind, updates: &[Vec<u8>]) -> yrs::Doc {
     let mut doc = yrs::Doc::new();
     for update in updates {
         apply_update(&doc, update);
@@ -614,32 +769,173 @@ fn apply_update(doc: &yrs::Doc, update: &[u8]) {
     }
 }
 
+/// Rebuild the visible Registry value graph in a fresh Yjs document.
+///
+/// A regular state update retains every historical item and tombstone. The
+/// Registry has a server-authoritative, map-shaped schema, so carrying that
+/// history forever only makes restart and initial subscription progressively
+/// slower. `AsPrelim` recursively copies the currently visible shared values
+/// while assigning fresh CRDT identities; old updates remain recoverable in
+/// `registry.log.legacy-v1` during the compatibility window.
+fn materialize_registry_update(factory: &Factory, source: &yrs::Doc) -> Result<Vec<u8>, HubError> {
+    let values = {
+        let txn = source.transact();
+        let root = txn
+            .get_map(crate::state::factory::ROOT)
+            .ok_or_else(|| HubError::Store("registry snapshot has no root map".into()))?;
+        root.iter(&txn)
+            .map(|(key, value)| (key.to_string(), value.as_prelim(&txn)))
+            .collect::<Vec<_>>()
+    };
+    let mut materialized = yrs::Doc::new();
+    {
+        use yrs::WriteTxn;
+        let mut txn = materialized.transact_mut();
+        let root = txn.get_or_insert_map(crate::state::factory::ROOT);
+        for (key, value) in values {
+            root.insert(&mut txn, key, value);
+        }
+    }
+    factory
+        .ensure_schema(&mut materialized, DocKind::Registry)
+        .map_err(|error| HubError::Store(format!("materialize registry schema: {error}")))?;
+    Ok(encode_state_as_update(&materialized))
+}
+
 /// registry 日志追加（tmp → fsync → rename → 目录 fsync，§8.4 纪律）。
 fn append_registry_record(path: &std::path::Path, update: &[u8]) -> std::io::Result<()> {
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    set_private_file(&f)?;
     write_blob(&mut f, update)?;
     f.sync_data()?;
     Ok(())
 }
 
 /// registry 日志重放（损坏尾部截断 + 告警，§8.4）。
-fn read_registry_log(path: &std::path::Path) -> Vec<Vec<u8>> {
-    let mut records = Vec::new();
-    let mut f = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return records,
-    };
-    loop {
-        match read_blob(&mut f) {
-            Ok(Some(body)) => records.push(body),
-            Ok(None) => break,
-            Err(e) => {
-                warn!(path = %path.display(), error = ?e, "registry log corrupt; tail truncated");
-                break;
+struct RegistryRecovery {
+    doc: Option<yrs::Doc>,
+    records: usize,
+}
+
+fn recover_registry_doc(
+    factory: &Factory,
+    snapshot: &std::path::Path,
+    log: &std::path::Path,
+) -> Result<RegistryRecovery, HubError> {
+    let mut updates = Vec::new();
+    if snapshot.exists() {
+        let mut file = File::open(snapshot).map_err(|e| HubError::Store(e.to_string()))?;
+        match read_blob(&mut file) {
+            Ok(Some(body)) => updates.push(body),
+            Ok(None) => return Err(HubError::Store("registry snapshot is empty".into())),
+            Err(error) => {
+                return Err(HubError::Store(format!(
+                    "registry snapshot corrupt: {error:?}"
+                )))
             }
         }
     }
-    records
+    let mut records = 0usize;
+    if log.exists() {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(log)
+            .map_err(|e| HubError::Store(e.to_string()))?;
+        set_private_file(&file).map_err(|e| HubError::Store(e.to_string()))?;
+        let file_len = file
+            .metadata()
+            .map_err(|e| HubError::Store(e.to_string()))?
+            .len();
+        loop {
+            let valid_end = file
+                .stream_position()
+                .map_err(|e| HubError::Store(e.to_string()))?;
+            match read_blob(&mut file) {
+                Ok(Some(body)) => {
+                    updates.push(body);
+                    records += 1;
+                }
+                Ok(None) if valid_end == file_len => break,
+                Ok(None) => {
+                    warn!(path = %log.display(), valid_end, "registry log partial header truncated");
+                    file.set_len(valid_end)
+                        .map_err(|e| HubError::Store(e.to_string()))?;
+                    break;
+                }
+                Err(error) => {
+                    warn!(path = %log.display(), valid_end, error = ?error, "registry log corrupt tail truncated");
+                    file.set_len(valid_end)
+                        .map_err(|e| HubError::Store(e.to_string()))?;
+                    break;
+                }
+            }
+        }
+    }
+    let doc = if updates.is_empty() {
+        None
+    } else {
+        Some(create_mirror_doc(factory, DocKind::Registry, &updates))
+    };
+    Ok(RegistryRecovery { doc, records })
+}
+
+fn compact_registry_log(
+    snapshot: &std::path::Path,
+    tmp: &std::path::Path,
+    log: &std::path::Path,
+    legacy_backup: &std::path::Path,
+    update: &[u8],
+) -> std::io::Result<()> {
+    let dir = snapshot
+        .parent()
+        .ok_or_else(|| std::io::Error::other("registry snapshot has no parent"))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(tmp)?;
+    set_private_file(&file)?;
+    write_blob(&mut file, update)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, snapshot)?;
+    sync_dir(dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Read-after-rename validates length, CRC and Yjs decoding before the only
+    // destructive step (log truncation).
+    let mut verify = File::open(snapshot)?;
+    let body = read_blob(&mut verify)
+        .map_err(|e| std::io::Error::other(format!("snapshot verify: {e:?}")))?
+        .ok_or_else(|| std::io::Error::other("snapshot verify: empty"))?;
+    yrs::Update::decode_v1(&body)
+        .map_err(|e| std::io::Error::other(format!("snapshot Yjs decode: {e:?}")))?;
+    let first_snapshot =
+        !legacy_backup.exists() && std::fs::metadata(log).map(|m| m.len() > 0).unwrap_or(false);
+    if first_snapshot {
+        std::fs::rename(log, legacy_backup)?;
+        let backup = File::open(legacy_backup)?;
+        set_private_file(&backup)?;
+        backup.sync_all()?;
+    }
+    let log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log)?;
+    set_private_file(&log_file)?;
+    log_file.sync_all()?;
+    sync_dir(dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(())
+}
+
+fn set_private_file(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

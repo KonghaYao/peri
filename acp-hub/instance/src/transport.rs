@@ -17,8 +17,8 @@
 //!   `last_sent_seq`）；断线时队列中未写入帧的确认全部以 `SendError` 返回
 //!   （帧未发出，hub 转缓冲路径，不丢帧）。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -172,9 +172,7 @@ impl TransportHandle {
     pub async fn send_acked(&self, frame: Frame) -> Result<(), SendError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.dispatch(Outbound::Acked(frame, ack_tx)).await?;
-        ack_rx
-            .await
-            .map_err(|_| SendError::Disconnected)?
+        ack_rx.await.map_err(|_| SendError::Disconnected)?
     }
 
     async fn dispatch(&self, out: Outbound) -> Result<(), SendError> {
@@ -281,7 +279,9 @@ where
                 continue;
             }
         };
-        let Some(ws) = ws else { unreachable!("Authenticated 分支必有 ws") };
+        let Some(ws) = ws else {
+            unreachable!("Authenticated 分支必有 ws")
+        };
 
         // 帧读写循环（writer + reader 双任务）。
         let exit = frame_loop(ws, &events, &handle, &mut cancel).await;
@@ -310,10 +310,7 @@ where
 }
 
 /// 可取消的退避等待。
-async fn sleep_cancellable(
-    cancel: &mut watch::Receiver<bool>,
-    d: Duration,
-) -> Result<(), ()> {
+async fn sleep_cancellable(cancel: &mut watch::Receiver<bool>, d: Duration) -> Result<(), ()> {
     if *cancel.borrow() {
         return Err(());
     }
@@ -404,12 +401,13 @@ async fn close_with_timeout(
     ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     reason: &str,
 ) {
-    let _ = tokio::time::timeout(Duration::from_secs(1), ws.close(Some(
-        tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
             code: CLOSE_CONFIG_FATAL.into(),
             reason: reason.into(),
-        },
-    )))
+        })),
+    )
     .await;
 }
 

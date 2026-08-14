@@ -887,13 +887,18 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let _handle = self.stages.on_stage_start(
+        let handle = self.stages.on_stage_start(
             MAIN_AGENT_KEY,
             stage,
             &self.trace_id,
             turn_id,
             &self.agent_observation_id,
         );
+        // 工具批次归属 Act 阶段:ToolStart 先于 StageStarted(Act) 到达时,
+        // batch parent 冻结在旧 stage(stage-reason),Act 开始后重挂到 stage-act
+        if stage == Stage::Act {
+            self.tool_batch.on_act_stage_start(&handle.span_id);
+        }
         // SpanCreate 延迟到 on_stage_end：仅在 duration > 0 时发送
     }
 
@@ -1286,6 +1291,19 @@ impl LangfuseTracer {
         let handle = self
             .stages
             .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
+        // 工具批次归属 Act 阶段:ToolStart 先于 StageStarted(Act) 到达时,
+        // batch parent 冻结在旧 stage(stage-reason),Act 开始后重挂到 stage-act
+        if stage == Stage::Act {
+            match self.subagent.ownership(agent_id) {
+                Ownership::Main => self.tool_batch.on_act_stage_start(&handle.span_id),
+                Ownership::Subagent => {
+                    self.subagent
+                        .tool_batch_mut(agent_id)
+                        .on_act_stage_start(&handle.span_id);
+                }
+                Ownership::Unknown => {}
+            }
+        }
         Some(handle)
     }
 

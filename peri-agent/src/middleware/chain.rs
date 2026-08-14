@@ -1,7 +1,7 @@
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{prompt_sections::PromptSection, r#trait::Middleware, state::MiddlewareState},
     tools::BaseTool,
 };
 
@@ -44,6 +44,23 @@ impl MiddlewareChain {
         self.middlewares
             .iter()
             .flat_map(|m| m.collect_tools(cwd))
+            .collect()
+    }
+
+    /// 装配期段落收集（设计 §3.1.1 拆分持有契约 2）：收集链上全部 middleware
+    /// 持有的系统提示词段落。
+    ///
+    /// 语义边界（设计 §3.5）：middleware 仅作内容载体——收集结果由渲染面
+    /// （`PromptTemplate`）按"位置属性 + 段内序号"排序装配，**不依赖
+    /// middleware 链序**（blueprint 会变，链序不可作顺序契约）；本方法不是
+    /// `prompt_contribution`（首轮一次性通知）的收集通道。
+    ///
+    /// 契约 3（gate 原子迁移）：收集到的段落即持有者已装配（gate 开启）；
+    /// 契约 4（运行时缺失防御）：middleware 未提供段落（默认空）不 fail。
+    pub fn collect_prompt_sections(&self) -> Vec<PromptSection> {
+        self.middlewares
+            .iter()
+            .flat_map(|m| m.prompt_sections())
             .collect()
     }
 

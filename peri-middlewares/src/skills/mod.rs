@@ -13,9 +13,14 @@ pub use loader::{
     scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
     MAX_SKILLS_DIRS_PER_ROOT,
 };
+use peri_acp_types::{mcp_skills::McpSkillRegistry, skills::SkillOrigin};
 use peri_agent::{
     error::AgentResult,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{
+        prompt_sections::{PromptSection, PromptSectionZone},
+        r#trait::Middleware,
+        state::MiddlewareState,
+    },
     tools::BaseTool,
 };
 
@@ -71,6 +76,16 @@ pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界）
+pub fn annotate_mcp_content(meta: &SkillMetadata, content: &str) -> String {
+    match &meta.origin {
+        Some(SkillOrigin::Mcp { server, uri }) => {
+            format!("This skill is served by MCP server \"{server}\", uri: {uri}.\n\n{content}")
+        }
+        _ => content.to_string(),
+    }
+}
+
 /// SkillsMiddleware - 渐进式 Skills 摘要注入
 ///
 /// 在 `before_agent` 时扫描 skills 目录，将所有 skill 的 name + description
@@ -94,9 +109,68 @@ pub struct SkillsMiddleware {
     /// Session 级 skills 列表缓存：非 frozen 路径由 before_agent 填充，
     /// frozen 路径由工具首次调用时惰性扫描并写入。
     cached_skills: Arc<RwLock<Option<Vec<SkillMetadata>>>>,
+    /// MCP 远端技能注册表（None = 仅本地扫描；发现条目合并进 cached_skills
+    /// 供 SkillTool / DiscoverSkillsTool 可见，不进 prompt contribution）。
+    mcp_registry: Option<Arc<McpSkillRegistry>>,
+}
+
+// ─── 13_skills 段落持有（波 4 演进 C3，设计 §3.1.1 归属全景 / §3.1.2）───────
+
+/// discovery 协议 markdown 文本（13_skills 段落动态部分）。
+///
+/// 由**代码事实**生成（设计 §3.1.2「协议细节按实际装配动态生成」）：
+/// - roots 优先级顺序 = [`resolve_skill_roots`] 的构造顺序
+///   （User → Global → Project → Plugin → Builtin，先到先得）；
+/// - 扫描深度与单 root 目录数上限 = [`MAX_SCAN_DEPTH`] /
+///   [`MAX_SKILLS_DIRS_PER_ROOT`]（loader 常量，格式化注入——常量变更
+///   段落自动跟随，防手写硬编码漂移）。
+///
+/// 实例级装配路径（`with_global_dir` / `with_user_dir` 等）不进入段落——
+/// 渲染面静态声明（冻结渲染）与链收集同源，无需装配参数注入（决策记录
+/// C3 D3 落地边界）。
+pub fn format_discovery_protocol() -> String {
+    let roots = [
+        "1. `~/.claude/skills/` — user-level skills (highest priority)",
+        "2. Global `skillsDir` configured in `~/.peri/settings.json`",
+        "3. `{cwd}/.claude/skills/` — project-level skills",
+        "4. Plugin skills declared in plugin manifests",
+        "5. **Builtin** — compile-time bundled skills shipped with the product (listed by `DiscoverSkillsTool` with `source: \"builtin\"`)",
+    ];
+    let mut lines: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
+    lines.push(String::new());
+    lines.push(format!(
+        "Each skill root is scanned recursively up to {MAX_SCAN_DEPTH} levels deep (max {MAX_SKILLS_DIRS_PER_ROOT} directories per root). A directory containing `SKILL.md` is treated as a leaf — its subdirectories are not scanned. Symlinks are followed with cycle detection."
+    ));
+    lines.join("\n")
 }
 
 impl SkillsMiddleware {
+    /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
+    ///
+    /// 13_skills 段 = 机制说明（`sections/13_skills.md`，include_str 零拷贝，
+    /// 文件留在 `peri-acp/prompts/sections/`）+ 动态 discovery 协议
+    /// （[`format_discovery_protocol`]，按 loader 代码事实生成——段落文件
+    /// 不再硬编码 roots 优先级 / 扫描深度细节，防失同步，设计 §3.1.2）。
+    ///
+    /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
+    /// （收集即装配）——关闭 SkillsMiddleware → 13_skills 段落 +
+    /// SkillTool/DiscoverSkillsTool 同时消失（盲区闭合）。
+    pub fn sections() -> Vec<PromptSection> {
+        let mut content = String::with_capacity(2048);
+        content.push_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../peri-acp/prompts/sections/13_skills.md"
+        )));
+        content.push_str("\n\n");
+        content.push_str(&format_discovery_protocol());
+        vec![PromptSection::dynamic(
+            "13_skills",
+            PromptSectionZone::Uncached,
+            5, // C1 D2 编号事实：gated 13=5（11_subagent=4 之后）
+            content,
+        )]
+    }
+
     pub fn new() -> Self {
         Self {
             project_skills_dir: None,
@@ -107,6 +181,7 @@ impl SkillsMiddleware {
             disable_bundled: false,
             cached_contribution: Arc::new(RwLock::new(None)),
             cached_skills: Arc::new(RwLock::new(None)),
+            mcp_registry: None,
         }
     }
 
@@ -140,6 +215,13 @@ impl SkillsMiddleware {
     /// 插件 skills 优先级低于项目级，同名先到先得
     pub fn with_plugin_roots(mut self, roots: Vec<SkillRoot>) -> Self {
         self.plugin_roots = roots;
+        self
+    }
+
+    /// 注入 MCP 远端技能注册表（None = 仅本地扫描；默认 None，
+    /// `new()` 签名与既有测试/构造点不变）。
+    pub fn with_mcp_registry(mut self, reg: Option<Arc<McpSkillRegistry>>) -> Self {
+        self.mcp_registry = reg;
         self
     }
 
@@ -268,6 +350,7 @@ impl SkillsMiddleware {
                 SkillSource::Project => "project",
                 SkillSource::Plugin => "plugin",
                 SkillSource::Builtin => "builtin",
+                SkillSource::Mcp => "mcp",
             };
             lines.push(format!("- **{}** [{}]", skill.name, source));
         }
@@ -291,6 +374,11 @@ impl Middleware for SkillsMiddleware {
         "SkillsMiddleware"
     }
 
+    /// 声明持有的系统提示词段落（13_skills，内容载体；装配期收集，契约 2）。
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        Self::sections()
+    }
+
     fn prompt_contribution(&self) -> Option<String> {
         self.cached_contribution.read().unwrap().clone()
     }
@@ -307,12 +395,26 @@ impl Middleware for SkillsMiddleware {
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
         // 扫描 skills 并缓存 structured metadata（frozen/non-frozen 两条路径都需要，避免工具调用时懒扫描）
         let roots = self.resolve_roots(state.cwd());
-        let skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
+        let mut skills = tokio::task::spawn_blocking(move || scan_skill_roots(&roots))
             .await
             .map_err(|e| peri_agent::error::AgentError::MiddlewareError {
                 middleware: "SkillsMiddleware".to_string(),
                 reason: format!("spawn_blocking 失败: {e}"),
             })?;
+
+        // 分源合并（DD-4）：本地扫描结果 + 远端 MCP registry 条目。
+        // 小写名去重、本地优先（MCP 只追加不覆盖）；每次 before_agent 全量
+        // 重建，MCP 条目不会被后续本地扫描覆盖。
+        if let Some(reg) = &self.mcp_registry {
+            let mut seen: std::collections::HashSet<String> =
+                skills.iter().map(|s| s.name.to_lowercase()).collect();
+            for m in reg.all_skills() {
+                if seen.insert(m.name.to_lowercase()) {
+                    skills.push(m);
+                }
+            }
+        }
+
         *self.cached_skills.write().unwrap() = if skills.is_empty() {
             None
         } else {
@@ -329,12 +431,23 @@ impl Middleware for SkillsMiddleware {
             return Ok(());
         }
 
-        // non-frozen 路径：根据扫描结果生成摘要并缓存
+        // non-frozen 路径：根据扫描结果生成摘要并缓存。
+        // MCP 条目不进 prompt contribution（验收 9）——工具可见面由
+        // cached_skills 覆盖（SkillTool / DiscoverSkillsTool 共享同缓存）。
         let skills_ref = self.cached_skills.read().unwrap();
         match skills_ref.as_ref() {
-            Some(skills_list) if !skills_list.is_empty() => {
-                let summary = Self::build_summary(skills_list);
-                *self.cached_contribution.write().unwrap() = Some(summary);
+            Some(skills_list) => {
+                let local: Vec<SkillMetadata> = skills_list
+                    .iter()
+                    .filter(|s| !matches!(s.source, SkillSource::Mcp))
+                    .cloned()
+                    .collect();
+                if !local.is_empty() {
+                    let summary = Self::build_summary(&local);
+                    *self.cached_contribution.write().unwrap() = Some(summary);
+                } else {
+                    *self.cached_contribution.write().unwrap() = None;
+                }
             }
             _ => {
                 *self.cached_contribution.write().unwrap() = None;

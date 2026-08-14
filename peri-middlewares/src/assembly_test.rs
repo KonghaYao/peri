@@ -156,6 +156,7 @@ fn base_context() -> AssemblyContext {
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
         session_start_source: None,
+        mcp_skill_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
         channel_state: None,
@@ -183,6 +184,9 @@ fn base_context() -> AssemblyContext {
         system_builder,
         todo_tx,
         goal_controller: None,
+        meta_harness_disabled: std::collections::HashSet::new(),
+        agent_overrides: None,
+        language: None,
     }
 }
 
@@ -232,7 +236,8 @@ fn make_lsp_config() -> LspServerConfig {
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
-/// 蓝本槽位顺序 = 行为契约（7 组 19 槽，禁止重排）。
+/// 蓝本槽位顺序 = 行为契约（7 组 21 槽，禁止重排；波 4 演进 C2 新增
+/// DefaultSystemPrompt / Lang 于第一组首位——渲染排序不依赖链序，契约 2）。
 #[test]
 fn blueprint_sequence_is_canonical() {
     let slots = production_blueprint();
@@ -241,6 +246,8 @@ fn blueprint_sequence_is_canonical() {
         names,
         vec![
             // 第一组：上下文注入器
+            "DefaultSystemPrompt",
+            "Lang",
             "AgentsMd",
             "AgentDefine",
             "Plugin",
@@ -274,6 +281,8 @@ fn blueprint_sequence_is_canonical() {
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
     match slot {
+        ChainSlot::DefaultSystemPrompt => "DefaultSystemPrompt",
+        ChainSlot::Lang => "Lang",
         ChainSlot::AgentsMd => "AgentsMd",
         ChainSlot::AgentDefine => "AgentDefine",
         ChainSlot::Plugin => "Plugin",
@@ -305,6 +314,8 @@ fn default_config_produces_canonical_chain() {
     assert_eq!(
         assemble_names(&ctx),
         vec![
+            "DefaultSystemPromptMiddleware",
+            "LangMiddleware",
             "AgentsMdMiddleware",
             "AgentDefineMiddleware",
             "PluginMiddleware",
@@ -339,7 +350,7 @@ fn permission_mode_keeps_chain_shape() {
         let names = assemble_names(&ctx);
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
-            Some(13),
+            Some(15),
             "mode {mode:?}: HITL 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
@@ -539,6 +550,8 @@ fn full_config_chain_order() {
     assert_eq!(
         names,
         vec![
+            "DefaultSystemPromptMiddleware",
+            "LangMiddleware",
             "AgentsMdMiddleware",
             "AgentDefineMiddleware",
             "PluginMiddleware",
@@ -621,4 +634,631 @@ fn workflow_agent_type_rejects_unknown_definition() {
         .unwrap_err();
 
     assert!(error.contains("cannot find agent definition 'does-not-exist'"));
+}
+
+// ─── MetaHarness（设计 §2.5）：middleware 关闭契约测试 ────────────────────────
+
+use peri_acp_types::meta_harness::{MIDDLEWARE_NAMES, MIDDLEWARE_TOOL_NAMES};
+use peri_agent::agent::workflow::WorkflowAgentContext;
+
+/// 装配并返回链上中间件 collect_tools 的工具名集合。
+fn assemble_tool_names(ctx: &AssemblyContext) -> Vec<String> {
+    let out = build_middleware_chain(&ProductionChainAssembler, ctx);
+    out.chain
+        .collect_tools(&ctx.cwd)
+        .into_iter()
+        .map(|t| t.name().to_string())
+        .collect()
+}
+
+/// 每个已知 middleware 名单独禁用：链上不出现、空 disabled 时完整链序不变。
+#[test]
+fn meta_harness_disables_each_known_middleware() {
+    let baseline = assemble_names(&base_context());
+    for name in MIDDLEWARE_NAMES {
+        let mut ctx = base_context();
+        ctx.meta_harness_disabled.insert(name.to_string());
+        let names = assemble_names(&ctx);
+        assert!(
+            !names.iter().any(|n| n == name),
+            "disabled {name} 后仍出现在链上: {names:?}"
+        );
+    }
+    // 空 disabled 与默认配置完全一致（default_config_produces_canonical_chain 的
+    // 基线由本断言再次锁定，防止过滤逻辑误伤未禁用 middleware）。
+    assert_eq!(assemble_names(&base_context()), baseline);
+}
+
+/// 条件注册 middleware：即使运行条件满足，disabled 后也不构造（构造副作用
+/// 语义——不构造实例、不设置 notifier）。
+#[test]
+fn meta_harness_disables_conditional_middleware_despite_conditions() {
+    // MCP：pool 存在 + disabled → 不注册（notifier 不设置）
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
+    ctx.meta_harness_disabled
+        .insert("McpMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(!names.iter().any(|n| n == "McpMiddleware"), "{names:?}");
+
+    // Workflow：executor 存在 + disabled → 不注册 adaptor
+    let mut ctx = base_context();
+    ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
+    ctx.meta_harness_disabled
+        .insert("WorkflowMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(
+        !names.iter().any(|n| n == "WorkflowMiddleware"),
+        "{names:?}"
+    );
+
+    // LSP：配置存在 + disabled → 不注册
+    let mut ctx = base_context();
+    ctx.lsp_servers = vec![make_lsp_config()];
+    ctx.meta_harness_disabled
+        .insert("LspMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(!names.iter().any(|n| n == "LspMiddleware"), "{names:?}");
+
+    // Goal：controller 存在 + disabled → 不注册
+    let mut ctx = base_context();
+    ctx.goal_controller = Some(Arc::new(FakeGoalController));
+    ctx.meta_harness_disabled
+        .insert("GoalMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(!names.iter().any(|n| n == "GoalMiddleware"), "{names:?}");
+
+    // Hook：hook group 存在 + disabled → 全部组不展开
+    let mut ctx = base_context();
+    ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
+    ctx.meta_harness_disabled
+        .insert("HookMiddleware".to_string());
+    let names = assemble_names(&ctx);
+    assert!(!names.iter().any(|n| n == "HookMiddleware"), "{names:?}");
+}
+
+/// SubAgentMiddleware 关闭 → 关联构造联动置空（parent_tools 不注入、
+/// subagent_mw 槽位 None、链上不注册、SubAgent 工具消失——禁止半开状态）。
+#[test]
+fn meta_harness_disables_subagent_middleware_fully() {
+    let mut ctx = base_context();
+    ctx.meta_harness_disabled
+        .insert("SubAgentMiddleware".to_string());
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+
+    assert!(
+        out.subagent_mw.is_none(),
+        "SubAgentMiddleware 关闭后 subagent_mw 槽位必须为 None"
+    );
+    let names: Vec<&str> = out.chain.names();
+    assert!(
+        !names.contains(&"SubAgentMiddleware"),
+        "链上不应出现 SubAgentMiddleware: {names:?}"
+    );
+    let tool_names: Vec<String> = out
+        .chain
+        .collect_tools(&ctx.cwd)
+        .into_iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    assert!(
+        !tool_names
+            .iter()
+            .any(|n| n == "Agent" || n == "AgentResult"),
+        "SubAgent 工具不应出现: {tool_names:?}"
+    );
+}
+
+/// 工具连坐语义：关闭持有 middleware 后其全部工具从链收集结果消失。
+#[test]
+fn meta_harness_disabled_tools_removed_from_chain() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "FilesystemMiddleware",
+            &["Read", "Write", "Edit", "Glob", "Grep", "folder_operations"],
+        ),
+        ("TerminalMiddleware", &["Bash"]),
+        ("WebMiddleware", &["WebFetch", "WebSearch"]),
+        ("SkillsMiddleware", &["SkillTool", "DiscoverSkillsTool"]),
+        ("SubAgentMiddleware", &["Agent", "AgentResult"]),
+    ];
+    for (mw, expected_gone) in cases {
+        let mut ctx = base_context();
+        ctx.meta_harness_disabled.insert(mw.to_string());
+        let tool_names = assemble_tool_names(&ctx);
+        for tool in *expected_gone {
+            assert!(
+                !tool_names.iter().any(|n| n == tool),
+                "disabled {mw} 后工具 {tool} 仍可见: {tool_names:?}"
+            );
+        }
+    }
+}
+
+/// AskUserQuestion 不在关闭面：全部 middleware 禁用后仍注册到 shared_tools。
+#[test]
+fn meta_harness_ask_user_tool_always_registered() {
+    let mut ctx = base_context();
+    for name in MIDDLEWARE_NAMES {
+        ctx.meta_harness_disabled.insert(name.to_string());
+    }
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    assert!(
+        out.subagent_mw.is_none(),
+        "全部禁用时 subagent_mw 应为 None"
+    );
+    assert!(
+        ctx.shared_tools.read().contains_key("AskUserQuestion"),
+        "AskUserQuestion 不在关闭面（核心交互工具），必须始终注册"
+    );
+}
+
+/// parent_tools（子 agent 继承工具）按持有 middleware 分支过滤：
+/// 关闭 Filesystem/Terminal/Web 后 SubAgent 继承工具中无对应工具。
+#[test]
+fn meta_harness_disabled_parent_tools_filtered() {
+    use crate::subagent::SubAgentMiddleware;
+
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "FilesystemMiddleware",
+            &["Read", "Write", "Edit", "Glob", "Grep", "folder_operations"],
+        ),
+        ("TerminalMiddleware", &["Bash"]),
+        ("WebMiddleware", &["WebFetch", "WebSearch"]),
+    ];
+    for (mw, expected_gone) in cases {
+        let mut ctx = base_context();
+        ctx.meta_harness_disabled.insert(mw.to_string());
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let subagent = out
+            .subagent_mw
+            .expect("parent_tools 过滤测试需要 SubAgentMiddleware")
+            .downcast_arc::<SubAgentMiddleware>()
+            .unwrap_or_else(|_| panic!("装配产物必须可还原为 SubAgentMiddleware"));
+        let tool = subagent.build_tool("/tmp/contract-test");
+        let parent_names: Vec<&str> = tool.parent_tools.iter().map(|t| t.name()).collect();
+        for tool_name in *expected_gone {
+            assert!(
+                !parent_names.contains(tool_name),
+                "disabled {mw} 后 parent_tools 仍含 {tool_name}: {parent_names:?}"
+            );
+        }
+    }
+
+    // SubAgentMiddleware 关闭 → parent_tools 完全不构造（subagent_mw 槽位 None）
+    let mut ctx = base_context();
+    ctx.meta_harness_disabled
+        .insert("SubAgentMiddleware".to_string());
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    assert!(
+        out.subagent_mw.is_none(),
+        "SubAgentMiddleware 关闭后 parent_tools 不应注入（槽位联动置空）"
+    );
+}
+
+/// `MIDDLEWARE_NAMES` 常量与 production_blueprint 的 21 个槽位 name 一一对应
+/// （常量集合漂移即装配面缺失/多余条目）。
+#[test]
+fn middleware_names_match_production_blueprint() {
+    let blueprint = production_blueprint();
+    let slot_names: std::collections::HashSet<&str> =
+        blueprint.iter().map(slot_middleware_name).collect();
+    let const_names: std::collections::HashSet<&str> = MIDDLEWARE_NAMES.iter().copied().collect();
+    assert_eq!(
+        slot_names, const_names,
+        "MIDDLEWARE_NAMES 必须与 production_blueprint 槽位完全一致"
+    );
+}
+
+/// 槽位 → middleware `name()` 返回值映射（与 assembly.rs 装配分支一一对应）。
+fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
+    match slot {
+        ChainSlot::DefaultSystemPrompt => "DefaultSystemPromptMiddleware",
+        ChainSlot::Lang => "LangMiddleware",
+        ChainSlot::AgentsMd => "AgentsMdMiddleware",
+        ChainSlot::AgentDefine => "AgentDefineMiddleware",
+        ChainSlot::Plugin => "PluginMiddleware",
+        ChainSlot::Skills => "SkillsMiddleware",
+        ChainSlot::SkillPreload => "SkillPreloadMiddleware",
+        ChainSlot::AtMention => "AtMentionMiddleware",
+        ChainSlot::Image => "ImageMiddleware",
+        ChainSlot::Filesystem => "FilesystemMiddleware",
+        ChainSlot::GitAttribution => "GitAttributionMiddleware",
+        ChainSlot::Terminal => "TerminalMiddleware",
+        ChainSlot::Web => "WebMiddleware",
+        ChainSlot::Todo => "TodoMiddleware",
+        ChainSlot::Cron => "CronMiddleware",
+        ChainSlot::Hook => "HookMiddleware",
+        ChainSlot::Hitl => "HumanInTheLoopMiddleware",
+        ChainSlot::SubAgent => "SubAgentMiddleware",
+        ChainSlot::Mcp => "McpMiddleware",
+        ChainSlot::Workflow => "WorkflowMiddleware",
+        ChainSlot::ToolSearch => "ToolSearch",
+        ChainSlot::Lsp => "LspMiddleware",
+        ChainSlot::Goal => "GoalMiddleware",
+    }
+}
+
+/// `MIDDLEWARE_TOOL_NAMES` 常量与各 middleware 静态工具名并集一致
+/// （工具名漂移即防御剔除面失真；新增 middleware 工具须同步两处）。
+#[test]
+fn middleware_tool_names_match_static_tool_sets() {
+    use crate::middleware::{FilesystemMiddleware, TerminalMiddleware};
+
+    let static_tools: std::collections::HashSet<&str> = FilesystemMiddleware::tool_names()
+        .into_iter()
+        .chain(TerminalMiddleware::tool_names())
+        .chain([
+            // WebMiddleware
+            "WebFetch",
+            "WebSearch",
+            // SkillsMiddleware
+            "SkillTool",
+            "DiscoverSkillsTool",
+            // SubAgentMiddleware
+            "Agent",
+            "AgentResult",
+            // WorkflowMiddleware（peri-workflow::tool::WorkflowTool）
+            "Workflow",
+            // TodoMiddleware
+            "TodoWrite",
+            // ToolSearch
+            "ToolSearch",
+            "SearchExtraTools",
+            "ExecuteExtraTool",
+            "artifact",
+            // LspMiddleware
+            "LSP",
+            // GoalMiddleware
+            "goal",
+            // McpMiddleware（静态部分）
+            "DiscoverMCP",
+            "mcp_read_resource",
+        ])
+        .collect();
+    let const_tools: std::collections::HashSet<&str> =
+        MIDDLEWARE_TOOL_NAMES.iter().copied().collect();
+    assert_eq!(
+        static_tools, const_tools,
+        "MIDDLEWARE_TOOL_NAMES 必须与各 middleware 静态工具名并集一致"
+    );
+}
+
+// ── Workflow agent 链过滤（设计 §2.5 第 3 装配入口）───────────────────────────
+
+fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
+    let model_factory: peri_agent::agent::workflow::factory::WorkflowModelFactory =
+        Arc::new(|_model, _max_tokens, _observer| unimplemented!("契约测试不调用"));
+    let prompt_builder: peri_agent::agent::workflow::factory::WorkflowAgentPromptBuilder =
+        Arc::new(|_, _, _, _| String::new());
+    let fallback: peri_agent::agent::workflow::factory::WorkflowSystemPromptFallback =
+        Arc::new(|_, _, _| String::new());
+    let forwarder: peri_agent::session::exec::executor_helpers::ForwarderLauncherFn =
+        Arc::new(|_, _, _| {});
+    WorkflowAgentContext {
+        cwd: "/tmp/contract-test".to_string(),
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
+        session_id: None,
+        compact_config: None,
+        cancel: None,
+        system_prompt: None,
+        broker: None,
+        permission_mode: None,
+        frozen_date: None,
+        frozen_language: None,
+        thread_store: None,
+        progress_tx: None,
+        subagent_ctx_builder: None,
+        agent_prompt_builder: prompt_builder,
+        model_factory,
+        middleware_factory: default_workflow_middleware_factory(),
+        system_prompt_fallback: fallback,
+        forwarder_launcher: forwarder,
+        publish_hook: None,
+        langfuse_hooks: None,
+        langfuse_event_handler: None,
+        meta_harness_disabled: disabled.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Workflow agent 工具列表按 disabled 集合连坐过滤。
+#[test]
+fn workflow_build_tools_filters_disabled() {
+    let factory = default_workflow_middleware_factory();
+    // 全开：fs + terminal + web + skills 工具齐全
+    let all = factory.build_tools("/tmp/contract-test", &std::collections::HashSet::new());
+    let all_names: Vec<&str> = all.iter().map(|t| t.name()).collect();
+    for expected in [
+        "Read",
+        "Bash",
+        "WebFetch",
+        "WebSearch",
+        "SkillTool",
+        "DiscoverSkillsTool",
+    ] {
+        assert!(
+            all_names.contains(&expected),
+            "全开时工具 {expected} 应存在: {all_names:?}"
+        );
+    }
+
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "FilesystemMiddleware",
+            &["Read", "Write", "Edit", "Glob", "Grep"],
+        ),
+        ("TerminalMiddleware", &["Bash"]),
+        ("WebMiddleware", &["WebFetch", "WebSearch"]),
+        ("SkillsMiddleware", &["SkillTool", "DiscoverSkillsTool"]),
+    ];
+    for (mw, expected_gone) in cases {
+        let disabled: std::collections::HashSet<String> = std::iter::once(mw.to_string()).collect();
+        let tools = factory.build_tools("/tmp/contract-test", &disabled);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        for tool in *expected_gone {
+            assert!(
+                !names.contains(tool),
+                "workflow disabled {mw} 后工具 {tool} 仍存在: {names:?}"
+            );
+        }
+    }
+}
+
+/// Workflow agent 中间件链按 disabled 集合过滤，未禁用项保持原相对顺序。
+#[test]
+fn workflow_build_middlewares_filters_disabled() {
+    let factory = default_workflow_middleware_factory();
+    // 全开：完整链序（与迁移前一致，顺序是行为契约）
+    let all = factory.build_middlewares(
+        &workflow_context_with_disabled(&[]),
+        "contract-model",
+        &["test-skill".to_string()],
+    );
+    let all_names: Vec<&str> = all.iter().map(|m| m.name()).collect();
+    assert_eq!(
+        all_names,
+        vec![
+            "AgentsMdMiddleware",
+            "SkillsMiddleware",
+            "SkillPreloadMiddleware",
+            "FilesystemMiddleware",
+            "GitAttributionMiddleware",
+            "TerminalMiddleware",
+            "WebMiddleware",
+            "TodoMiddleware",
+            "HumanInTheLoopMiddleware",
+        ]
+    );
+
+    // 逐个禁用：链上消失；剩余项相对顺序不变
+    for mw in [
+        "AgentsMdMiddleware",
+        "SkillsMiddleware",
+        "SkillPreloadMiddleware",
+        "FilesystemMiddleware",
+        "GitAttributionMiddleware",
+        "TerminalMiddleware",
+        "WebMiddleware",
+        "TodoMiddleware",
+        "HumanInTheLoopMiddleware",
+    ] {
+        let middlewares = factory.build_middlewares(
+            &workflow_context_with_disabled(&[mw]),
+            "contract-model",
+            &["test-skill".to_string()],
+        );
+        let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
+        assert!(
+            !names.contains(&mw),
+            "workflow disabled {mw} 后仍出现在链上: {names:?}"
+        );
+        // 未禁用项保持原顺序
+        let baseline: Vec<&str> = all_names.iter().copied().filter(|n| *n != mw).collect();
+        assert_eq!(names, baseline, "disabled {mw} 后剩余顺序漂移");
+    }
+}
+
+// ─── 波 4 演进 C2/C3：段落持有者（基础段 + gated 段）────────────────────
+
+use crate::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
+use crate::hitl::HumanInTheLoopMiddleware;
+use crate::skills::SkillsMiddleware;
+use crate::subagent::SubAgentMiddleware;
+
+/// C2/C3 契约 3：链收集与渲染面静态声明一致（单一事实源，禁止双轨）——
+/// 链上各段落持有者收集的段落（ID + 内容）与同一输入下的静态段声明
+/// 逐项一致（C3：gated 段 10/11/13 持有者并入）。
+#[test]
+fn c2_chain_collection_matches_static_declaration() {
+    let mut ctx = base_context();
+    let overrides = AgentOverrides {
+        persona: Some("chain persona".into()),
+        tone: Some("chain tone".into()),
+        proactiveness: None,
+        mode: None,
+    };
+    ctx.agent_overrides = Some(overrides.clone());
+    ctx.language = Some("zh-CN".to_string());
+
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let collected = out.chain.collect_prompt_sections();
+
+    let expected = DefaultSystemPromptMiddleware::sections(Some(&overrides))
+        .into_iter()
+        .chain(LangMiddleware::sections(Some("zh-CN")))
+        .chain(HumanInTheLoopMiddleware::sections())
+        .chain(SubAgentMiddleware::sections())
+        .chain(SkillsMiddleware::sections())
+        .collect::<Vec<_>>();
+
+    assert_eq!(collected.len(), expected.len(), "链收集段数与静态声明一致");
+    for expect in &expected {
+        let actual = collected
+            .iter()
+            .find(|s| s.id == expect.id)
+            .unwrap_or_else(|| panic!("链收集缺少段落 {}", expect.id));
+        assert_eq!(actual.content.as_str(), expect.content.as_str());
+        assert_eq!(actual.zone, expect.zone);
+        assert_eq!(actual.order, expect.order);
+    }
+    // persona / language 动态内容按同一输入生成（内容一致 = 禁止双轨）
+    assert!(
+        collected
+            .iter()
+            .find(|s| s.id == "persona")
+            .unwrap()
+            .content
+            .as_str()
+            .contains("chain persona"),
+        "链收集 persona 内容与渲染面一致"
+    );
+}
+
+/// C2 契约 3：关闭 DefaultSystemPromptMiddleware / LangMiddleware → 链上
+/// 无持有者、收集结果无对应段落（基础段 + persona / language 全部消失）。
+#[test]
+fn c2_disable_holders_removes_sections_from_chain() {
+    let mut ctx = base_context();
+    ctx.meta_harness_disabled
+        .insert("DefaultSystemPromptMiddleware".to_string());
+    ctx.meta_harness_disabled
+        .insert("LangMiddleware".to_string());
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+
+    let names: Vec<&str> = out.chain.names();
+    assert!(
+        !names.contains(&"DefaultSystemPromptMiddleware"),
+        "关闭后 DefaultSystemPromptMiddleware 不应在链上: {names:?}"
+    );
+    assert!(
+        !names.contains(&"LangMiddleware"),
+        "关闭后 LangMiddleware 不应在链上: {names:?}"
+    );
+    let collected_ids: Vec<&str> = out
+        .chain
+        .collect_prompt_sections()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(
+        !collected_ids.contains(&"01_intro")
+            && !collected_ids.contains(&"07_runtime")
+            && !collected_ids.contains(&"persona")
+            && !collected_ids.contains(&"language"),
+        "关闭持有者后其段落不应被收集: {collected_ids:?}"
+    );
+}
+
+/// 盲区闭合（任务 4，契约 3）：关闭 gated 段持有者 → 段落与工具同时消失。
+/// - 关闭 HumanInTheLoopMiddleware → 10_hitl 段落消失（HITL 无 collect_tools 工具，
+///   仅验证段落）；
+/// - 关闭 SubAgentMiddleware → 11_subagent 段落 + Agent/AgentResult 工具同时消失；
+/// - 关闭 SkillsMiddleware → 13_skills 段落 + SkillTool/DiscoverSkillsTool 同时消失。
+///
+/// 段落关闭盲区（3.4 记载：关闭后段落仍渲染内置内容）随本批闭合。
+#[test]
+fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
+    // 基线：默认装配下三段全部收集
+    let baseline_ctx = base_context();
+    let baseline_ids: Vec<&str> = build_middleware_chain(&ProductionChainAssembler, &baseline_ctx)
+        .chain
+        .collect_prompt_sections()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    for id in ["10_hitl", "11_subagent", "13_skills"] {
+        assert!(
+            baseline_ids.contains(&id),
+            "基线装配应收集 {id}: {baseline_ids:?}"
+        );
+    }
+
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "HumanInTheLoopMiddleware",
+            "10_hitl",
+            &[], // HITL 无 collect_tools 工具
+        ),
+        (
+            "SubAgentMiddleware",
+            "11_subagent",
+            &["Agent", "AgentResult"],
+        ),
+        (
+            "SkillsMiddleware",
+            "13_skills",
+            &["SkillTool", "DiscoverSkillsTool"],
+        ),
+    ];
+    for (mw, section_id, gone_tools) in cases {
+        let mut ctx = base_context();
+        ctx.meta_harness_disabled.insert(mw.to_string());
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let collected_ids: Vec<&str> = out
+            .chain
+            .collect_prompt_sections()
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(
+            !collected_ids.contains(section_id),
+            "关闭 {mw} 后段落 {section_id} 不应被收集: {collected_ids:?}"
+        );
+        let tool_names: Vec<String> = out
+            .chain
+            .collect_tools(&ctx.cwd)
+            .into_iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        for tool in *gone_tools {
+            assert!(
+                !tool_names.iter().any(|n| n == tool),
+                "关闭 {mw} 后工具 {tool} 仍可见: {tool_names:?}"
+            );
+        }
+    }
+}
+
+/// 链收集与 `project_enabled_sections` 投影一致性（契约 3 显式视图）：
+/// 链上收集到的 gated 段落 ID 集合 == 映射表投影（持有者在链上 → 段落开启）。
+#[test]
+fn chain_collected_gated_sections_match_projection() {
+    use peri_agent::middleware::project_enabled_sections;
+    use std::collections::HashSet;
+
+    // 默认装配：持有者全部在链 → 投影包含全部三个 gated 段
+    let ctx = base_context();
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let names: HashSet<&str> = out.chain.names().into_iter().collect();
+    let projected = project_enabled_sections(&names);
+    for id in ["10_hitl", "11_subagent", "13_skills"] {
+        assert!(
+            projected.contains(id),
+            "持有者装配时投影应开启 {id}: {projected:?}"
+        );
+    }
+    // 关闭 SubAgentMiddleware → 投影与链收集同时失去 11_subagent
+    let mut ctx = base_context();
+    ctx.meta_harness_disabled
+        .insert("SubAgentMiddleware".to_string());
+    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let names: HashSet<&str> = out.chain.names().into_iter().collect();
+    let projected = project_enabled_sections(&names);
+    assert!(
+        !projected.contains("11_subagent"),
+        "关闭 SubAgentMiddleware 后投影应关闭 11_subagent: {projected:?}"
+    );
+    let collected_ids: HashSet<&str> = out
+        .chain
+        .collect_prompt_sections()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(
+        !collected_ids.contains("11_subagent"),
+        "链收集与投影一致（11_subagent 消失）: {collected_ids:?}"
+    );
 }

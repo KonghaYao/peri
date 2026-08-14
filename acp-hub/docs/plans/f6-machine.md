@@ -246,12 +246,12 @@ pub struct RingBuffer { frames: VecDeque<BufferedFrame>, cap: usize }  // 默认
 `{data_dir}/watermark.json`（0600）：
 
 ```json
-{ "sessions": { "<session_id>": { "epoch": 2, "last_seq": 137, "pgid": 4321 } } }
+{ "dataDirIdentity": { "device": 1, "inode": 2 }, "chats": { "<session_id>": { "epoch": 2, "lastSeq": 137, "pgid": 4321, "processFingerprint": { "platform": "macos-proc-bsdinfo-v1", "birth": "..." } } } }
 ```
 
-- **用途**：a) epoch 跨重启单调（重启/重建后 `epoch = 水位 epoch + 1`，防止与 server 持久化的旧 `(epoch, last_seq)` 混淆为同代际——§4.5.1 判定的正确性前提）；b) `pgid` 供启动时清理上代残留（§8）；c) `last_seq` 为诊断参考（非权威，权威在 server 侧 f3-persist 水位）。
+- **用途**：a) epoch 跨重启单调（重启/重建后 `epoch = 水位 epoch + 1`，防止与 server 持久化的旧 `(epoch, last_seq)` 混淆为同代际——§4.5.1 判定的正确性前提）；b) `pgid` + process fingerprint + data-dir identity 供启动时证明上代进程组所有权（§8）；c) `last_seq` 为诊断参考（非权威，权威在 server 侧 f3-persist 水位）。
 - **更新时机**：epoch 变更时（spawn 新 session / 进程重建 / 进程退出）写盘（append 语义用临时文件 + rename【决策】）；last_seq 高频不落盘。
-- **重启加载**：读水位 → `buffer/` 目录整体删除（buffer_lost: true 语义，§3.3）→ 对水位中记录的 pgid 执行 `kill(-pgid, SIGKILL)`（ESRCH 忽略，安全幂等）→ 重启后首次 spawn 某 session_id 时 `epoch = 水位 + 1`。
+- **重启加载**：非阻塞独占 data-dir owner lock → 读水位 → `buffer/` 目录整体删除（buffer_lost: true 语义，§3.3）→ 仅当目录 `(dev,ino)` 与 leader 出生指纹都精确匹配时执行 `kill(-pgid, SIGKILL)`。旧格式、目录副本、PID 复用或平台读取失败都 fail closed 为不发信号，仍向 server 报 `buffer_lost` 对账。然后一次性清空运行清理权，保留 epoch/lastSeq。
 
 ### 4.5 auth.rs —— machine 侧双向认证（占位 → 实体）
 
@@ -333,8 +333,7 @@ pub fn verify_auth_response(&self, nonce: &[u8; 32], resp: &AuthResponse) -> Res
 
 1. **kill_on_drop**（正常路径）：daemon 优雅退出 / session 句柄 drop → 直接子进程被杀（沿用 child.rs:45 语义）。
 2. **进程组 kill**（session 级路径）：spawn 时 `process_group(0)`，kill 走 `kill(-pgid)` → 整棵进程树（ACP + 其孙进程）一并终止；防止 kill ACP 后孙进程（shell/工具）成孤儿。
-3. **启动时清理残留**（daemon 崩溃路径，§7.5 步骤 2 的 machine 侧补充）：水位文件记录 pgid；启动时对残留 pgid `kill(-pgid, SIGKILL)`（ESRCH 忽略）+ 删除 `buffer/` 目录。server 侧「对已标记 interrupted 但 machine 声称存活」的 session 下发 `machine/kill`（§7.5 步骤 3）是**主兜底**（覆盖水位丢失/pid 重用等 machine 侧不可靠场景）；本设计双层都做，P9 验收（kill -9 machine daemon 演练）任一闭环即可。
-   - pid 重用风险【决策】：M1 接受（水位清理是尽力而为的补充，权威对账在 server 侧）。
+3. **启动时清理残留**（daemon 崩溃路径，§7.5 步骤 2 的 machine 侧补充）：水位文件记录 pgid、leader 出生指纹与 data-dir 身份；启动时只对身份全部精确匹配的残留进程组 `kill(-pgid, SIGKILL)` + 删除 `buffer/` 目录。server 侧权威对账仍是身份无法证明时的主兜底。
 
 ---
 
@@ -386,7 +385,7 @@ machine 侧只消费 §16 中与 machine 相关的默认值（来源 `proto::Def
 | T9 | process_exit | 正常退出 code 0 / `--crash-after` 崩溃 code 1 → 上报 `(session_id, code)`；会话条目保留供重建 | hub 集成 |
 | T10 | buffer_sync 补推（§8.5） | 断线 → 缓冲 → 重连认证 → `from_seq = last_sent+1`、帧按 seq 升序分批 → 补推期间新帧续接 → pending 清空转实时；全程顺序断言 | hub 集成（stub server 模拟断线） |
 | T11 | 双向认证（§9.2） | hello 每次新 nonce；正确 auth_response → Authenticated；伪造 HMAC/错误长度 → Failed + 审计日志；认证通过前收到 spawn → 不执行 + 计数 | auth 单测 + hub 集成 |
-| T12 | 孤儿清理（§7.5） | drop 后进程死（kill_on_drop）；启动时水位残留 pgid 被杀（ESRCH 安全）；buffer/ 目录启动时删除 | child/启动集成 |
+| T12 | 孤儿清理（§7.5） | drop 后进程死（kill_on_drop）；启动只清理目录身份 + leader 出生指纹精确匹配的残留组；旧格式/目录副本/出生指纹不同均不发信号；同目录第二 daemon 被锁拒绝 | child/启动集成 |
 | T13 | 水位（§5.3） | epoch 变更持久化；重启加载 epoch+1、seq 重置；`buffer_lost: true` 上报 | hub 单测（tempfile） |
 | T14 | 全链路 E2E | stub ws server 驱动：hello → auth_response → spawn → 帧转发（machine/event 带 seq/epoch）→ 断线缓冲 → 重连补推 → kill → process_exit | 集成（`bin/test_child.rs` + stub server） |
 

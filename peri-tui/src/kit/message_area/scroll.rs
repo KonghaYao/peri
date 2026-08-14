@@ -556,7 +556,19 @@ pub(super) fn handle_event(
                 // 用 write() 触发 wake，渲染清除高亮，避免弹窗关闭后选区残留。
                 text_sel.write().clear();
             }
-            return EventResult::Ignored;
+            // [弹窗滚轮放行] 居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区
+            // 仍可见——滚轮事件在弹窗矩形外放行给消息区滚动（审批弹窗打开时
+            // 用户仍可滚动 chat 查看上下文）；点击类事件保持遮挡（避免误触发
+            // 文本选区起点/按钮）。
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) && !mouse_router::occludes_scroll(mouse.column, mouse.row)
+            {
+                // 放行：落入下方区域判定与滚动处理
+            } else {
+                return EventResult::Ignored;
+            }
         }
         // 光标移动无操作——提前返回，不触发任何 state 写入或渲染
         if matches!(mouse.kind, MouseEventKind::Moved) {

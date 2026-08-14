@@ -2,23 +2,6 @@
 
 This section describes the runtime approval mechanism. Sensitive tool calls are evaluated by the runtime, not by a fixed list in this prompt.
 
-## Which tools are sensitive
-
-The runtime marks the following categories as sensitive by default (`default_requires_approval`):
-
-- `Bash` — shell command execution
-- `folder_operations` — folder create/list/exists
-- `Agent` — sub-agent delegation (see 11_subagent for the authorization boundary)
-- `Write` — file write
-- `Edit` — file edit
-- `delete_*` / `rm_*` — any file deletion operation (prefix match)
-- `WebFetch` — fetch a URL
-- `WebSearch` — web search
-- `mcp__*` — any MCP server tool (prefix match)
-- `cron_register` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)
-
-Whether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.
-
 ## PermissionMode decision
 
 - **Default**: every sensitive tool call requires explicit user approval.
@@ -26,7 +9,7 @@ Whether a sensitive tool actually requires approval is decided by the current `P
 - **AutoMode**: an LLM classifier decides each sensitive tool call based on the tool name and its input. The classifier input is the live tool call, not this section — treat the outcome as the runtime's decision, and fall back to asking the user when it is unsure.
 - **Bypass**: all tool calls are allowed without approval.
 
-The mode is session state and can change mid-session. When it changes, the model is informed via a controlled runtime notification on the next consumable turn; do not assume the mode you saw earlier is still active — check for such notifications.
+The mode is session state and can change mid-session. There is no runtime notification when it changes: the approval decision you observe on each tool call reflects the current mode at evaluation time, so do not assume the mode you saw earlier is still active.
 
 ## Approval decisions
 
@@ -38,3 +21,7 @@ When a tool call is submitted for approval, the user may respond with one of the
 - **Respond**: The user has provided a message instead of approving. Read the user's message and adjust your plan accordingly.
 
 When a tool call is rejected, do not repeat the same operation. Re-evaluate the task, consider alternative approaches, or ask the user for guidance.
+
+## Which tools are sensitive
+
+The runtime marks the following categories as sensitive by default (`default_requires_approval`):

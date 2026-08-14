@@ -120,9 +120,8 @@ pub fn read_current<T: ReadTxn>(
     };
     for (key, v) in sessions.iter(txn) {
         if let Ok(m) = v.cast::<yrs::MapRef>() {
-            let str_or = |k: &str| -> Option<String> {
-                m.get(txn, k).and_then(|x| x.cast::<String>().ok())
-            };
+            let str_or =
+                |k: &str| -> Option<String> { m.get(txn, k).and_then(|x| x.cast::<String>().ok()) };
             let entry = SessionSummaryProjection {
                 session_id: str_or("session_id").unwrap_or_else(|| key.to_string()),
                 title: str_or("title").unwrap_or_default(),

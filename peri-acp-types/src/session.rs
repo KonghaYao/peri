@@ -7,13 +7,14 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::command::PromptStopReason;
+use crate::mcp_skills::McpSkillRegistry;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
 
@@ -112,6 +113,8 @@ pub enum MessageSource {
     ShellComplete,
     /// Goal steering（中途纠正）
     GoalSteering,
+    /// Todo steering（requireCompletion 续跑提醒）
+    TodoSteering,
     /// Cron 定时触发
     CronTrigger,
     /// Stop hook feedback
@@ -603,7 +606,7 @@ pub fn cancel_all_in<'a>(runtimes: impl IntoIterator<Item = &'a HashMap<ThreadId
 ///
 /// 依赖反转（§0）：executor 迁入 peri-agent 后不再引用 ACP `SessionManager`
 /// 类型，改为经本端口访问会话级状态（v2 MessageQueue / inbox / task manager /
-/// permission-mode 记账 / goal / 子 agent 注册表 / cron bridge）。
+/// goal / 子 agent 注册表 / cron bridge）。
 /// ACP 侧 `SessionManager` 实现本端口；print mode / 测试等无 session 场景
 /// 为 `None`（调用方保持原 None 语义，仅读路径可用时生效）。
 pub trait SessionAccessPort: Send + Sync {
@@ -626,9 +629,6 @@ pub trait SessionAccessPort: Send + Sync {
     /// 会话级后台任务管理器（`AcpSession.task_manager`）。
     fn task_manager(&self, session_id: &str) -> Option<Arc<dyn crate::tasks::TaskManager>>;
 
-    /// 最近一次已通知模型的 PermissionMode（D2 记账值，跨 turn 持久）。
-    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>>;
-
     /// 会话级 GoalController（`AcpSession.goal_state`）。
     fn goal_controller(&self, session_id: &str) -> Option<Arc<dyn crate::goal::GoalController>>;
 
@@ -645,4 +645,20 @@ pub trait SessionAccessPort: Send + Sync {
     /// 确保 session 级 cron bridge 已启动（lazy-init，幂等；见
     /// `SessionManager::cron_bridge_for`）。
     fn cron_bridge_for(&self, session_id: &str) -> bool;
+
+    /// 确保 session 级 MCP 订阅 inbox 已注册（lazy-init，幂等；见
+    /// `SessionManager::mcp_subscription_for`）。
+    ///
+    /// 默认实现返回 false（print mode / 未装配端口时安全 no-op）。
+    fn mcp_subscription_for(&self, _session_id: &str) -> bool {
+        false
+    }
+
+    /// 会话级 MCP skill 远端注册表（AcpSession 持有；发现任务写入，
+    /// Skills 侧读取合并）。
+    ///
+    /// 默认实现返回 None（print mode / 未装配端口时安全 no-op）。
+    fn mcp_skill_registry(&self, _session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        None
+    }
 }

@@ -265,6 +265,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         allow_await_wake: false,
         continuation_notify: None,
         frozen_fallback_builder: None,
+        meta_harness: Default::default(),
     }
 }
 
@@ -303,6 +304,7 @@ async fn make_session_context_with_manager(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         None,
+        None, // MCP 订阅端口（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
     );
@@ -333,7 +335,6 @@ fn make_stage_build(ctx: &SessionContext) -> StageBuildFn {
             compact_post_hook,
             sbr.cached_llm.as_ref(),
             sbr.system_prompt,
-            sbr.subagent_system_prompt,
             sbr.frozen,
             sbr.event_handler,
             sbr.agent_overrides,
@@ -574,6 +575,7 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         None,
+        None,
         Arc::new(SkillsProvider),
     )
 }
@@ -591,8 +593,8 @@ async fn test_frozen_session_data_build_is_deterministic() {
     let mgr = make_manager(&tmp);
     let cwd = "/tmp";
 
-    let a = mgr.build_frozen_data(cwd, &[], &[], true);
-    let b = mgr.build_frozen_data(cwd, &[], &[], true);
+    let a = mgr.build_frozen_data(cwd, &[], &[]);
+    let b = mgr.build_frozen_data(cwd, &[], &[]);
 
     assert_eq!(
         a.system_prompt(),
@@ -626,7 +628,7 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     )
     .unwrap();
 
-    let frozen = mgr.build_frozen_data(cwd, &[], &[], true);
+    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
 
     let frozen_prompt = frozen.system_prompt().to_string();
     let frozen_summary = frozen.skill_summary().map(|s| s.to_string());
@@ -659,76 +661,313 @@ async fn test_frozen_system_prompt_immune_to_disk_changes() {
     );
 }
 
-/// [回归测试] workflow capability 在 session 冻结时决定 16_workflow section。
-///
-/// 历史背景（审计 prompt-sections-audit.md P1-5 / 阶段 3 完成判据）：
-/// `workflow_executor: None`（-p print mode）时 prompt 不得声明 Workflow；
-/// `Some` 时声明存在。`build_frozen_data` 的 workflow_enabled 输入
-/// 来自同一条件源（`workflow_executor.is_some()`），与 builder 注册、
-/// ToolSearch 发现三面一致。
+/// [回归测试] 16_workflow 已整段删除（波 4 演进 C2）：冻结 prompt 恒不
+/// 声明 Workflow（ultracode skill 完整承载 WorkflowTool 指引，设计 §3.1.2）；
+/// `build_frozen_data` 的 workflow_enabled 参数随 gate 清理删除。
 #[tokio::test]
-async fn test_frozen_prompt_workflow_section_gated_by_workflow_enabled() {
+async fn test_frozen_prompt_never_claims_workflow() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
     let cwd = "/tmp";
 
-    let enabled = mgr.build_frozen_data(cwd, &[], &[], true);
+    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
 
     assert!(
-        enabled.system_prompt().contains("Workflow Orchestration"),
-        "workflow_enabled=true 时 16_workflow section 应渲染"
-    );
-
-    let disabled = mgr.build_frozen_data(cwd, &[], &[], false);
-
-    assert!(
-        !disabled.system_prompt().contains("Workflow Orchestration"),
-        "workflow_enabled=false（print mode）时 16_workflow section 不应渲染"
+        !frozen.system_prompt().contains("Workflow Orchestration"),
+        "16_workflow 段落已删除：冻结 prompt 不得声明 Workflow"
     );
 }
 
-/// [回归测试] 子 agent / fork / workflow agent 复用的冻结 prompt 不宣称 workflow。
-///
-/// 历史背景（P2-2026-08-02 pre-commit review）：`features_for_sub` 与 fork
-/// 继承的 parent frozen prompt 会把 16_workflow section 保留为可用，但
-/// subagent / fork / workflow agent 三条路径均传 `shared_tools: None`、无
-/// WorkflowTool；agent.md 又准确说明不继承 Workflow extension tools，造成
-/// prompt 与能力矛盾（system prompt / 工具注册 / SearchExtraTools 三面不一致）。
-///
-/// 修复后 `FrozenSessionData` 同时冻结主 prompt（workflow 声明，主 ACP/stdio
-/// 链真实注册 WorkflowTool）与子面向 prompt（无 16_workflow section）：
-/// subagent 的 system_builder、fork/bg-fork 继承、workflow agent 复用的
-/// 都是后者；workflow_enabled=false（print mode）时两版字节相同。
+/// [回归测试] 子 agent / fork / workflow agent 复用的冻结 prompt 与主
+/// prompt 字节相同（16_workflow 已删除，无子面向 feature 差异）。
 #[tokio::test]
-async fn test_frozen_subagent_prompt_never_claims_workflow() {
+async fn test_frozen_subagent_prompt_identical_to_main() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
     let cwd = "/tmp";
 
-    // 主链 workflow 可用：主 prompt 声明，子面向 prompt 不声明
-    let enabled = mgr.build_frozen_data(cwd, &[], &[], true);
+    let frozen = mgr.build_frozen_data(cwd, &[], &[]);
 
     assert!(
-        enabled.system_prompt().contains("Workflow Orchestration"),
-        "主链 workflow 可用时主 prompt 应声明（主 ACP/stdio 仍可用）"
+        !frozen.system_prompt().contains("Workflow Orchestration"),
+        "16_workflow 段落已删除：冻结 prompt 不得声明 Workflow"
     );
+    // 子面向 prompt 字段已随 C5 移除：子 agent / fork / workflow agent
+    // 直接复用主冻结 prompt（16_workflow 删除后两版字节相同的语义固化）。
     assert!(
-        !enabled
-            .subagent_system_prompt()
-            .contains("Workflow Orchestration"),
-        "子 agent / fork / workflow agent 复用的冻结 prompt 不得声明 Workflow"
+        !frozen.system_prompt().is_empty(),
+        "主冻结 prompt 非空（子面向唯一复用来源）"
+    );
+}
+
+/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配
+/// HumanInTheLoopMiddleware（broker: None），10_hitl 描述的是主会话审批
+/// 机制，对 workflow 模型是误导性指令——workflow 渲染路径（fallback +
+/// agentType builder）必须排除 10_hitl，兑现 presence-is-the-gate 契约
+/// （C3 D5 决策修订，design §3.1.1 契约 3 / §3.5 语义边界）。
+#[tokio::test]
+async fn test_workflow_prompt_excludes_hitl_section() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_manager(&tmp);
+    let frozen = mgr.build_frozen_data("/tmp", &[], &[]);
+
+    // 主链冻结 prompt 保留 10_hitl（HumanInTheLoopMiddleware 默认装配）
+    assert!(
+        frozen.system_prompt().contains("Human-in-the-Loop (HITL)"),
+        "主链冻结 prompt 应保留 10_hitl（HITL middleware 默认装配）"
     );
 
-    // print mode（workflow 不可用）：主 prompt 无 workflow，两版一致
-    let disabled = mgr.build_frozen_data(cwd, &[], &[], false);
-
+    let skills: Arc<dyn peri_acp_types::ports::SkillsPort> = Arc::new(SkillsProvider);
+    let fallback = crate::host::workflow_agent::build_workflow_system_prompt_fallback(
+        Arc::clone(&skills),
+        frozen.meta_harness().clone(),
+    );
+    let prompt = fallback("/tmp", Some("2026-01-01"), frozen.language());
     assert!(
-        !disabled.system_prompt().contains("Workflow Orchestration"),
-        "print mode 主 prompt 不应声明 Workflow"
+        !prompt.contains("Human-in-the-Loop (HITL)"),
+        "workflow 链无 HumanInTheLoopMiddleware：提示词不得包含 10_hitl"
     );
-    assert_eq!(
-        disabled.subagent_system_prompt(),
-        disabled.system_prompt(),
-        "workflow 关闭时子面向 prompt 与主 prompt 应字节相同"
+
+    // agentType builder（workflow 子 agent）同样排除
+    let builder = crate::host::workflow_agent::build_workflow_agent_prompt_builder(
+        Arc::clone(&skills),
+        frozen.meta_harness().clone(),
     );
+    let agent_prompt = builder(None, "/tmp", Some("2026-01-01"), frozen.language());
+    assert!(
+        !agent_prompt.contains("Human-in-the-Loop (HITL)"),
+        "workflow agentType builder 同样不得包含 10_hitl"
+    );
+}
+
+// ── P2-1（实施质量审查）：链收集 vs 渲染面静态声明直接对拍 ─────────────────
+
+/// 最小 ReactLLM fake（装配路径不调用 LLM）。
+struct ParityFakeLlm;
+
+#[async_trait]
+impl peri_agent::agent::react::ReactLLM for ParityFakeLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[peri_agent::messages::BaseMessage],
+        _tools: &[&dyn peri_agent::tools::BaseTool],
+        _streaming: Option<peri_agent::agent::react::StreamingContext>,
+    ) -> peri_agent::error::AgentResult<peri_agent::agent::react::Reasoning> {
+        unimplemented!("对拍测试不调用 LLM")
+    }
+}
+
+/// 最小 Model fake（HITL auto-classifier 构造消费，不调用）。
+struct ParityFakeModel;
+
+#[async_trait]
+impl peri_model::Model for ParityFakeModel {
+    fn capabilities(&self) -> peri_model::ModelCapabilities {
+        peri_model::ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> peri_model::ModelResult<peri_model::ModelStream> {
+        unimplemented!("对拍测试不调用模型")
+    }
+}
+
+/// 最小 AgentEventHandler fake。
+struct ParityFakeEventHandler;
+
+impl peri_agent::agent::events::AgentEventHandler for ParityFakeEventHandler {
+    fn on_event(&self, _event: peri_agent::agent::events::ExecutorEvent) {}
+}
+
+/// 构造最小 AssemblyContext（复刻 peri-middlewares assembly_test base_context
+/// 的段落持有者相关字段；条件注册字段全部关闭——对拍只关心持有者槽位）。
+fn make_parity_context(
+    disabled: &[&str],
+    overrides: Option<peri_acp_types::agents::AgentOverrides>,
+    language: Option<String>,
+) -> peri_agent::session::factory::AssemblyContext {
+    use std::collections::BTreeMap;
+
+    use parking_lot::RwLock;
+    use peri_acp_types::tools::TodoItem;
+    use peri_agent::{
+        agent::{async_tasks::TaskManager, AgentCancellationToken},
+        tools::BaseTool,
+    };
+
+    let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<TodoItem>>(8);
+    let (bg_event_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
+        Arc::new(RwLock::new(BTreeMap::new()));
+    let llm_factory = Arc::new(|_model_alias: Option<&str>| {
+        Box::new(ParityFakeLlm) as Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
+    });
+
+    peri_agent::session::factory::AssemblyContext {
+        cwd: "/tmp/parity-test".to_string(),
+        cancel: AgentCancellationToken::new(),
+        broker: Arc::new(NoopBroker),
+        permission_mode: SharedPermissionMode::new(PermissionMode::Default),
+        model_name: "parity-model".to_string(),
+        provider_name: "parity-provider".to_string(),
+        auxiliary_model: None,
+        auto_classifier_model: Arc::new(tokio::sync::Mutex::new(
+            Box::new(ParityFakeModel) as Box<dyn peri_model::Model>
+        )),
+        claude_md_excludes: Vec::new(),
+        preload_skills: Vec::new(),
+        plugin_skill_roots: Vec::new(),
+        plugin_loaded: Vec::new(),
+        hook_groups: Vec::new(),
+        session_start_source: None,
+        mcp_skill_registry: None,
+        cron_scheduler: None,
+        mcp_pool: None,
+        channel_state: None,
+        tool_search_index: Arc::new(ToolSearchIndex::new()),
+        shared_tools,
+        lsp_servers: Vec::new(),
+        lsp_pool: None,
+        workflow_executor: None,
+        workflow_middleware: None,
+        event_handler: Arc::new(ParityFakeEventHandler),
+        task_manager: Arc::new(TaskManager::new()),
+        bg_event_tx,
+        on_bg_complete: None,
+        langfuse_bridge: None,
+        thread_store: None,
+        parent_thread_id: None,
+        register_runtime: None,
+        deregister_runtime: None,
+        child_handler_factory: None,
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
+        system_prompt_for_sub: String::new(),
+        llm_factory,
+        system_builder: Arc::new(
+            |_ov: Option<&peri_acp_types::agents::AgentOverrides>, _cwd: &str| String::new(),
+        ),
+        todo_tx,
+        goal_controller: None,
+        meta_harness_disabled: disabled.iter().map(|s| s.to_string()).collect(),
+        agent_overrides: overrides,
+        language,
+    }
+}
+
+/// P2-1（实施质量审查）：链收集与渲染面静态声明**直接对拍**——同一 disabled
+/// 状态 / overrides / language 下，真实装配链的 `collect_prompt_sections` 与
+/// 渲染面 `build_collected_sections` 段落 (id, zone, order, 内容) 集合相等。
+///
+/// 锁定不变式：「5 个段落持有者的装配条件全部只按 disabled 集合过滤」。
+/// 若未来装配条件因非 disabled 原因排除某持有者（链收集少段而静态声明仍
+/// 收集），本测试立即失败——冻结提示词与链状态静默失同步的前哨。
+#[test]
+fn chain_collection_parity_with_build_collected_sections() {
+    use peri_acp_types::agents::AgentOverrides;
+    use peri_acp_types::meta_harness::MetaHarnessState;
+    use peri_agent::session::factory::build_middleware_chain;
+    use peri_middlewares::assembly::ProductionChainAssembler;
+
+    let cases = &[
+        ("默认装配", None, None, &[] as &[&str]),
+        (
+            "关闭 gated 持有者",
+            None,
+            None,
+            &[
+                "HumanInTheLoopMiddleware",
+                "SubAgentMiddleware",
+                "SkillsMiddleware",
+            ],
+        ),
+        (
+            "关闭基础持有者",
+            None,
+            None,
+            &["DefaultSystemPromptMiddleware", "LangMiddleware"],
+        ),
+        (
+            "关闭全部持有者",
+            None,
+            None,
+            &[
+                "DefaultSystemPromptMiddleware",
+                "LangMiddleware",
+                "HumanInTheLoopMiddleware",
+                "SubAgentMiddleware",
+                "SkillsMiddleware",
+            ],
+        ),
+        (
+            "persona + 语言注入",
+            Some(AgentOverrides {
+                persona: Some("parity persona".into()),
+                tone: Some("parity tone".into()),
+                proactiveness: None,
+                mode: None,
+            }),
+            Some("zh-CN".to_string()),
+            &[],
+        ),
+    ];
+
+    for (name, overrides, language, disabled) in cases {
+        let ctx = make_parity_context(disabled, overrides.clone(), language.clone());
+        let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+        let mut chain_sections: Vec<(String, u16, u16, String)> = out
+            .chain
+            .collect_prompt_sections()
+            .into_iter()
+            .map(|s| {
+                (
+                    s.id.to_string(),
+                    s.zone as u16,
+                    s.order,
+                    s.content.as_str().to_string(),
+                )
+            })
+            .collect();
+
+        let state = MetaHarnessState {
+            disabled_middlewares: disabled.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut declared: Vec<(String, u16, u16, String)> =
+            crate::session::build_collected_sections(
+                &state,
+                overrides.as_ref(),
+                language.as_deref(),
+            )
+            .into_iter()
+            .map(|s| {
+                (
+                    s.id.to_string(),
+                    s.zone as u16,
+                    s.order,
+                    s.content.as_str().to_string(),
+                )
+            })
+            .collect();
+
+        // 集合对拍（契约 2：收集不承诺顺序——链收集按 middleware 链序、
+        // 静态声明按持有者声明序，渲染面统一按 (zone, order) 排序；此处
+        // 只锁定「同状态下收集到的段落集合相等」，顺序由渲染面位置属性
+        // 测试独立锁定）。
+        chain_sections.sort();
+        declared.sort();
+        assert_eq!(
+            chain_sections, declared,
+            "case [{name}]：链收集与静态声明必须一致（同一 disabled 状态）"
+        );
+    }
 }

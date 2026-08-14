@@ -8,6 +8,7 @@ use crate::provider::LlmProvider;
 use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
+use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
 use peri_acp_types::store::ThreadStore;
@@ -95,9 +96,9 @@ pub(super) async fn init_stdio_context(
             scheduler,
         )))
     };
+    let mcp_pool_concrete = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
     let mcp_pool: Option<Arc<dyn McpPoolPort>> = {
-        let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-        let pool_clone = pool.clone();
+        let pool_clone = mcp_pool_concrete.clone();
         let cwd_clone = cwd.clone();
         let claude_home_clone = claude_dir.clone();
         let (init_tx, _init_rx) =
@@ -113,7 +114,7 @@ pub(super) async fn init_stdio_context(
             )
             .await;
         });
-        Some(pool)
+        Some(mcp_pool_concrete.clone())
     };
     let tool_search_index: Arc<dyn ToolSearchPort> =
         Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
@@ -165,6 +166,7 @@ pub(super) async fn init_stdio_context(
             &peri_config_arc,
             permission_mode.clone(),
             cron_scheduler.clone(),
+            Some(mcp_pool_concrete.clone() as Arc<dyn McpSubscriptionPort>),
             skills.clone(),
         )
     };

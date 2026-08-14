@@ -242,6 +242,22 @@ pub(crate) struct CopyButtonInfo {
     pub(super) x_end: u16,
 }
 
+/// @image 行的渲染期信息（image-p0-p1-spec §4 T4；VmCacheSlot 内持有，
+/// rebuild 时随 lines 重建）。供 MessageArea 构建点击/hover 屏幕映射。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImageLineInfo {
+    /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）。
+    pub(super) logical_idx: usize,
+    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标 + hover 显示。
+    pub(super) path: String,
+    /// 受管理目录内（~/.peri/images）→ 自动预览候选；手工路径 → 仅文本
+    /// （差异在 T7 预览，本任务显示层两者一致，§6.1 Q6）。
+    pub(super) managed: bool,
+    /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
+    /// hover 时不再 stat（§4.4 stat 时机取舍）。
+    pub(super) size_text: String,
+}
+
 /// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
 /// `mark_copy_message` 同一计数方式）。短消息直接选中复制即可，不渲染按钮，
 /// 避免每条消息都出现一行按钮造成视觉噪音。
@@ -510,9 +526,10 @@ fn strip_diff_gutter(text: &str) -> Option<String> {
 /// markdown 内容末尾追加一行 md 复制按钮，并返回按钮的布局信息（供点击检测）。
 /// 嵌套渲染（历史 SubAgentGroup 递归 / subagent 详情面板）传 false。
 ///
-/// 返回三元组 `(lines, copy_button, interaction_layout)`——第三项仅 pending
+/// 返回四元组 `(lines, copy_button, interaction_layout, image_lines)`——第三项仅 pending
 /// 的 interaction block（§6.8）有值（选项行布局，供视口 post-pass 高亮与
-/// 点击热区）；其余变体恒 None。
+/// 点击热区）；第四项仅 UserBubble 的 @image 行有值（§4 T4，点击/hover 映射）；
+/// 其余变体恒 None / 空 Vec。
 pub(crate) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -522,17 +539,27 @@ pub(crate) fn vm_to_lines_cached(
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
     Option<InteractionLayout>,
+    Vec<ImageLineInfo>,
 ) {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
-            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行。
-            // reasoning 是过程 entry，不自行增加空行；若后接正文，正文前导空行
-            // 负责分隔。空 bubble（无 text 无 reasoning）仍返回 0 行。
+            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行；
+            // 节拍空行带竖线前缀（左缘时间线不断链）。reasoning 是过程 entry，
+            // 不自行增加空行；若后接正文，正文前导空行负责分隔。空 bubble
+            // （无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
-                return (lines, None, None);
+                return (lines, None, None, Vec::new());
             }
+
+            // AI 正文竖线颜色——正文行与前后 turn 节拍空行共用；主题值在
+            // guard 生命周期内复制（TUI-THEME-001），不跨渲染路径持有读锁。
+            let (md_text_fg, line_color) = {
+                let theme_guard = peri_theme::atoms::THEME_ATOM.state();
+                let theme = theme_guard.read();
+                (theme.component.markdown.text, theme.semantic.accent)
+            };
 
             // 推理块（§6.3）——视觉独立 entry
             if let Some(ref reasoning) = data.reasoning {
@@ -543,12 +570,8 @@ pub(crate) fn vm_to_lines_cached(
 
             // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
             if !data.text.is_empty() {
-                lines.push(Line::default());
-                let theme_guard = peri_theme::atoms::THEME_ATOM.state();
-                let theme = theme_guard.read();
-                let md_text_fg = theme.component.markdown.text;
-                // AI 正文续行竖线使用主题主色。
-                let line_color = theme.semantic.accent;
+                // 前导空行带竖线前缀（与正文同色）——turn 节拍空行不断链。
+                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let segments = crate::kit::markdown::parse_markdown_cached(
@@ -558,15 +581,40 @@ pub(crate) fn vm_to_lines_cached(
                     md_text_fg,
                     md_cache,
                 );
-                for (seg_idx, seg) in segments.into_iter().enumerate() {
-                    // segment 之间加空行（表格 ↔ 文本边界）
-                    if seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()) {
+                let mut prev_seg: Option<&crate::kit::markdown::MarkdownSegment> = None;
+                for (seg_idx, seg) in segments.iter().enumerate() {
+                    // segment 之间加空行（表格 ↔ 文本边界；T3 §3.5 图片间隙规则）：
+                    // - 行内图片前后无间隙（拆段后前后片段仍属同一视觉段落）
+                    // - 独占图片段连续（同段多图已在 convert 层合并为单段，
+                    //   P1-1）仅首段前加；跨段独立图片走默认规则（前后空行）
+                    // - 其余保持现有逻辑（首段 / 前段末行为空行时不加）
+                    let gap = match (prev_seg, seg) {
+                        (_, crate::kit::markdown::MarkdownSegment::Image(img))
+                            if !img.standalone =>
+                        {
+                            false
+                        }
+                        (Some(crate::kit::markdown::MarkdownSegment::Image(p)), _)
+                            if !p.standalone =>
+                        {
+                            false
+                        }
+                        _ => seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()),
+                    };
+                    if gap {
                         lines.push(prefixed_cont_line(grid, line_color, Line::default()));
                     }
                     match seg {
                         crate::kit::markdown::MarkdownSegment::Text(seg_lines) => {
                             for line in seg_lines {
-                                lines.push(prefixed_cont_line(grid, line_color, line));
+                                lines.push(prefixed_cont_line(grid, line_color, line.clone()));
+                            }
+                        }
+                        crate::kit::markdown::MarkdownSegment::Image(img) => {
+                            // 降级行已在 convert 阶段折行（wrap_styled_line），
+                            // 前缀/空行逻辑与 Text 分支一致。
+                            for line in &img.lines {
+                                lines.push(prefixed_cont_line(grid, line_color, line.clone()));
                             }
                         }
                         crate::kit::markdown::MarkdownSegment::Table(data) => {
@@ -575,7 +623,7 @@ pub(crate) fn vm_to_lines_cached(
                             // 行文字使用终端默认色，而非纯白
                             table_theme.row_style = Style::default();
                             let table_lines = crate::kit::markdown::table_data_to_lines(
-                                &data,
+                                data,
                                 &table_theme,
                                 grid.content_width(),
                             );
@@ -584,6 +632,7 @@ pub(crate) fn vm_to_lines_cached(
                             }
                         }
                     }
+                    prev_seg = Some(seg);
                 }
             }
 
@@ -623,31 +672,55 @@ pub(crate) fn vm_to_lines_cached(
             };
 
             if !data.text.is_empty() {
-                lines.push(Line::default());
+                // 尾随空行同样带竖线前缀——turn 节拍对称且左缘时间线不断链。
+                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
             }
 
-            (lines, copy_button, None)
+            (lines, copy_button, None, Vec::new())
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
-                return (render_reminder_condensed(info, grid), None, None);
+                return (
+                    render_reminder_condensed(info, grid),
+                    None,
+                    None,
+                    Vec::new(),
+                );
             }
-            (render_user_bubble_lines(data, grid), None, None)
+            let (lines, image_lines) = render_user_bubble_lines(data, grid);
+            (lines, None, None, image_lines)
         }
-        TuiRenderUnit::TuiToolCard(data) => (render_tool_card_lines(data, grid), None, None),
-        TuiRenderUnit::TuiSystemNote(data) => (render_system_note_lines(data, grid), None, None),
-        TuiRenderUnit::TuiSubAgentGroup(data) => {
-            (render_subagent_group_lines(data, grid), None, None)
+        TuiRenderUnit::TuiToolCard(data) => {
+            (render_tool_card_lines(data, grid), None, None, Vec::new())
         }
-        TuiRenderUnit::TuiCollapsedGroup(data) => {
-            (render_collapsed_group_lines(data, grid), None, None)
+        TuiRenderUnit::TuiSystemNote(data) => {
+            (render_system_note_lines(data, grid), None, None, Vec::new())
         }
-        TuiRenderUnit::TuiDivider(data) => (render_divider_lines(data, grid), None, None),
+        TuiRenderUnit::TuiSubAgentGroup(data) => (
+            render_subagent_group_lines(data, grid),
+            None,
+            None,
+            Vec::new(),
+        ),
+        TuiRenderUnit::TuiCollapsedGroup(data) => (
+            render_collapsed_group_lines(data, grid),
+            None,
+            None,
+            Vec::new(),
+        ),
+        TuiRenderUnit::TuiDivider(data) => {
+            (render_divider_lines(data, grid), None, None, Vec::new())
+        }
         TuiRenderUnit::TuiAskUserBlock(data) => {
             let (lines, layout) = render_ask_user_block_lines(data, grid);
-            (lines, None, layout)
+            (lines, None, layout, Vec::new())
         }
-        TuiRenderUnit::TuiTodoSummary(data) => (render_todo_summary_lines(data, grid), None, None),
+        TuiRenderUnit::TuiTodoSummary(data) => (
+            render_todo_summary_lines(data, grid),
+            None,
+            None,
+            Vec::new(),
+        ),
     }
 }
 
@@ -655,47 +728,94 @@ pub(crate) fn vm_to_lines_cached(
 
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///
-/// - 首行 1 个空行（§3.2 turn 节拍），正文行 `[│][gap]` 与其余 entry 同起点。
+/// - 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，左缘时间线不断链；
+///   正文行 `[│][gap]` 与其余 entry 同起点。
 /// - 保留用户换行；长 prompt 最多 `USER_BODY_MAX_LINES` 个视觉行，
-///   超出显示 `… +N lines`（§6.1）。
+///   超出显示 `… +N lines`（§6.1）。`USER_BODY_MAX_LINES` 计数包含
+///   @image meta 行（§4.4）。
 /// - 正文左侧竖线使用 text.secondary；slash command / `@mention` 局部强调（accent.user）。
+/// - T4（image-p0-p1-spec §4）：`@image <path>` 行识别为 meta 行
+///   `[Image: {文件名} · {大小}]`（不解析像素），返回 [`ImageLineInfo`]
+///   列表供点击/hover 屏幕映射。
 fn render_user_bubble_lines(
     data: &crate::kit::tui_render_unit::TuiUserBubble,
     grid: &GridSpec,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<ImageLineInfo>) {
     let sem = THEME_ATOM.state().read().semantic;
     // 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role，
     // 提取文本为空）→ 渲染 0 行——不产生 turn 节拍空行，避免 thinking
     // 底下出现悬空空行（§3.2 节拍只属于真实 user prompt）。
     if data.text.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）。
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）；空行带竖线前缀
+    // （与正文同色），左缘时间线在节拍空行处不断链。
+    let mut lines: Vec<Line<'static>> = vec![prefixed_cont_line(
+        grid,
+        sem.text.secondary,
+        Line::default(),
+    )];
 
     // 正文：保留用户换行；每行按 display width 折行成「视觉行」（§6.1 口径），
     // 最多 USER_BODY_MAX_LINES 个视觉行，超出显示 `… +N lines`（§12：grapheme
-    // + display width，CJK/emoji 不被从中间切开）。
-    let visual_lines: Vec<String> = data
-        .text
-        .lines()
-        .flat_map(|l| crate::truncate::wrap_by_width(l, grid.content_width()))
-        .collect();
-    let total = visual_lines.len();
-    let shown = total.min(USER_BODY_MAX_LINES);
-    for raw in &visual_lines[..shown] {
-        lines.push(Line::from({
+    // + display width，CJK/emoji 不被从中间切开）。@image 行在 wrap **之前**
+    // 识别（§4.4），渲染为 meta 行（文件名 · 大小），同样计入行数上限。
+    // [stat 时机] metadata 只在 rebuild 路径执行（本函数仅 rebuild 时调用）；
+    // 文件大小变化不触发 rebuild（hash 不含 stat），下次内容变化自然刷新（§4.4）。
+    let mut image_lines: Vec<ImageLineInfo> = Vec::new();
+    let mut visual_count = 0usize; // 已渲染视觉行
+    let mut total = 0usize; // 全部视觉行（含超限部分，用于 `… +N lines`）
+    for raw in data.text.lines() {
+        let is_image = parse_image_line(raw);
+        if let Some(path) = &is_image {
+            let (display_path, size_text, managed, meta_text) = build_image_meta_info(path, None);
+            let meta_visuals = wrap_by_width(&meta_text, grid.content_width());
+            total += meta_visuals.len();
+            if visual_count >= USER_BODY_MAX_LINES {
+                continue;
+            }
+            let take = (USER_BODY_MAX_LINES - visual_count).min(meta_visuals.len());
+            let logical_idx = lines.len();
+            for m in &meta_visuals[..take] {
+                let mut spans = cont_prefix(grid, sem.text.secondary);
+                spans.push(Span::styled(
+                    m.clone(),
+                    Style::default().fg(sem.text.primary),
+                ));
+                lines.push(Line::from(spans));
+            }
+            visual_count += take;
+            // 仅完整渲染的 meta 行进入命中映射（被截断的行点击区域与渲染
+            // 位置错位——与 footer keepgoing 超宽跳过同一原则）。
+            if take == meta_visuals.len() {
+                image_lines.push(ImageLineInfo {
+                    logical_idx,
+                    path: display_path,
+                    managed,
+                    size_text,
+                });
+            }
+            continue;
+        }
+        let wrapped = wrap_by_width(raw, grid.content_width());
+        total += wrapped.len();
+        if visual_count >= USER_BODY_MAX_LINES {
+            continue;
+        }
+        let take = (USER_BODY_MAX_LINES - visual_count).min(wrapped.len());
+        for w in &wrapped[..take] {
             let mut spans = cont_prefix(grid, sem.text.secondary);
-            spans.extend(emphasize_user_line(raw, grid, &sem));
-            spans
-        }));
+            spans.extend(emphasize_user_line(w, grid, &sem));
+            lines.push(Line::from(spans));
+        }
+        visual_count += take;
     }
-    if total > shown {
+    if total > USER_BODY_MAX_LINES {
         let more = i18n::tr_args(
             "render-more-lines",
             &[(
                 "count".to_string(),
-                FluentValue::from((total - shown) as u64),
+                FluentValue::from((total - USER_BODY_MAX_LINES) as u64),
             )],
         );
         let mut spans = cont_prefix(grid, sem.text.secondary);
@@ -703,9 +823,124 @@ fn render_user_bubble_lines(
         lines.push(Line::from(spans));
     }
     // §3.2：user 尾部 1 空行（turn 节拍对称）——分隔后续 thinking/tool；
-    // assistant 正文仍由自身前导空行建立正文块边界。
-    lines.push(Line::from(""));
-    lines
+    // assistant 正文仍由自身前导空行建立正文块边界。尾随空行同样带竖线前缀，
+    // 左缘时间线连续。
+    lines.push(prefixed_cont_line(
+        grid,
+        sem.text.secondary,
+        Line::default(),
+    ));
+    (lines, image_lines)
+}
+
+/// @image 行识别（§4.4）：原始行（wrap 之前）`trim_start` 后以 `@image ` 开头
+/// 且剩余路径非空 → 图片行。返回路径（trim 后）；非图片行返回 None
+/// （`@image` 无路径 / `@imagefoo` 普通文本 / `@image ` 中间空格 → 走原
+/// `emphasize_user_line` 路径）。
+///
+/// `pub(crate)` 供 T7（image_overlay.rs focus 触发源）复用同一判定，避免漂移。
+pub(crate) fn parse_image_line(raw: &str) -> Option<String> {
+    let rest = raw.trim_start().strip_prefix("@image ")?;
+    let path = rest.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// 人类可读文件大小（§4.4）：B/KB/MB（1024 进制，KB/MB 一位小数）。
+/// 自实现辅助（spec §4.4 约定放 render.rs 私有 fn）。
+fn human_size(bytes: u64) -> String {
+    let (key, value): (&str, FluentValue<'_>) = if bytes < 1024 {
+        ("user-image-size-bytes", FluentValue::from(bytes))
+    } else if bytes < 1024 * 1024 {
+        (
+            "user-image-size-kb",
+            FluentValue::from(format!("{:.1}", bytes as f64 / 1024.0)),
+        )
+    } else {
+        (
+            "user-image-size-mb",
+            FluentValue::from(format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))),
+        )
+    };
+    i18n::tr_args(key, &[("count".to_string(), value)])
+}
+
+/// @image 行 meta 信息构建（§4.4）：
+/// - meta 文本 `[Image: {文件名} · {大小}]`——文件名 = path 的 `file_name()`，
+///   大小 = `std::fs::metadata` 的 `len()`（人类可读 B/KB/MB，**不解析像素**）；
+/// - `metadata` 失败（文件被删）→ `missing` 文案（i18n key）；
+/// - 显示层级（§6.1 Q6）：受管理与手工路径**显示一致**（文件名 + 大小，不暴露
+///   绝对路径——§6.2-5 路径泄漏约束）；managed 标志仅记录供 T7 预览资格判定；
+/// - 路径进终端前过 T5 `sanitize_for_terminal`（控制字符过滤，§6.2-4）。
+///
+/// 返回 `(display_path, size_text, managed, meta_text)`——`size_text` 供 hover
+/// 渲染复用（hover 时不再 stat，§4.4 stat 时机取舍）。
+///
+/// `managed_root` 为受管理根注入版（生产传 None 用 `~/.peri/images`；测试用
+/// tempdir 模拟）。
+pub(crate) fn build_image_meta_info(
+    path: &str,
+    managed_root: Option<&std::path::Path>,
+) -> (String, String, bool, String) {
+    let path_buf = std::path::Path::new(path);
+    let (grade, canonical) = match managed_root {
+        Some(root) => crate::kit::image_safety::grade_path_with_root(path_buf, root),
+        None => crate::kit::image_safety::grade_path(path_buf),
+    };
+    let display_path = canonical
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let name = path_buf
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let size_text = match std::fs::metadata(path) {
+        Ok(md) if md.is_file() => human_size(md.len()),
+        _ => i18n::tr("user-image-missing"),
+    };
+    let meta_text = i18n::tr_args(
+        "user-image-meta",
+        &[
+            ("name".to_string(), FluentValue::from(name)),
+            ("size".to_string(), FluentValue::from(size_text.clone())),
+        ],
+    );
+    let meta_text = crate::kit::image_safety::sanitize_for_terminal(&meta_text).into_owned();
+    (
+        display_path,
+        size_text,
+        grade == crate::kit::image_safety::PathGrade::Managed,
+        meta_text,
+    )
+}
+
+/// @image 行 hover 渲染（§4.4）：`[Image: {绝对路径} · {size}]` + accent 高亮
+/// （复用 `emphasize_user_line` 的 `sem.accents.user` 样式）。视口 post-pass
+/// 每帧调用（仅 hover 行构建）；单行截断（truncate 而非 wrap）——布局稳定，
+/// 不因路径变长改变行高。
+pub(crate) fn render_image_hover_line(
+    hover: &crate::kit::message_area::ImageHoverState,
+    grid: &GridSpec,
+    sem: &peri_theme::semantic::SemanticTokens,
+) -> Line<'static> {
+    let text = i18n::tr_args(
+        "user-image-meta",
+        &[
+            ("name".to_string(), FluentValue::from(hover.path.as_str())),
+            (
+                "size".to_string(),
+                FluentValue::from(hover.size_text.as_str()),
+            ),
+        ],
+    );
+    // §4.6 path 显示注入：路径进终端前过 T5 sanitize（控制字符过滤）。
+    let text = crate::kit::image_safety::sanitize_for_terminal(&text);
+    let clipped = truncate_by_width(&text, grid.content_width());
+    let mut spans = cont_prefix(grid, sem.text.secondary);
+    spans.push(Span::styled(clipped, Style::default().fg(sem.accents.user)));
+    Line::from(spans)
 }
 
 /// 用户正文行的局部强调（§6.1）：`@mention` / `/command` token 用 accent.user，

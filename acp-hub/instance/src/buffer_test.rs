@@ -17,11 +17,11 @@ fn control_frame(n: u64) -> serde_json::Value {
 /// 小预算缓冲池（测试用）。
 fn small_buffer(dir: &Path) -> Buffer {
     Buffer::new(
-        200,          // mem_bytes_limit（小）
-        1000,         // mem_frames_limit
-        400,          // total_bytes_limit（小，触发丢弃）
-        1000,         // total_frames_limit
-        10_000,       // max_frame_bytes
+        200,    // mem_bytes_limit（小）
+        1000,   // mem_frames_limit
+        400,    // total_bytes_limit（小，触发丢弃）
+        1000,   // total_frames_limit
+        10_000, // max_frame_bytes
         dir.join("buffer"),
     )
 }
@@ -47,7 +47,10 @@ fn test_buckets_are_isolated() {
     let (from, frames) = buf.drain_batch("s1", 10, 1 << 20).unwrap();
     assert_eq!(from, 1);
     assert_eq!(frames.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![1, 2]);
-    assert!(buf.has_pending("s1"), "drain 是 peek 语义：未 commit 仍视为 pending");
+    assert!(
+        buf.has_pending("s1"),
+        "drain 是 peek 语义：未 commit 仍视为 pending"
+    );
     assert!(buf.has_pending("s2"), "s2 不受 s1 影响");
 }
 
@@ -91,7 +94,10 @@ fn test_evict_prefers_event_frames() {
     let (_, frames) = buf.drain_batch("s1", 100, 1 << 20).unwrap();
     let kinds: Vec<FrameKind> = frames.iter().map(|f| classify_frame(&f.frame)).collect();
     assert!(
-        kinds.iter().take(frames.len() - 1).all(|k| *k == FrameKind::Control),
+        kinds
+            .iter()
+            .take(frames.len() - 1)
+            .all(|k| *k == FrameKind::Control),
         "超预算时事件帧优先丢弃，控制帧最后丢弃；剩余: {kinds:?}"
     );
     assert!(budget_used > 0);
@@ -123,7 +129,14 @@ fn test_evict_control_when_no_event_left() {
 #[test]
 fn test_oversize_skipped_with_gap_count() {
     let dir = setup();
-    let mut buf = Buffer::new(10_000, 10_000, 1 << 20, 10_000, 100, dir.path().join("buffer"));
+    let mut buf = Buffer::new(
+        10_000,
+        10_000,
+        1 << 20,
+        10_000,
+        100,
+        dir.path().join("buffer"),
+    );
     let big = serde_json::json!({"payload": {"sessionId": "s1", "blob": "x".repeat(200)}});
     assert_eq!(buf.push("s1", 1, big), PushOutcome::Oversize);
     assert!(!buf.has_pending("s1"), "超限帧不入缓冲");
@@ -134,7 +147,14 @@ fn test_oversize_skipped_with_gap_count() {
 #[test]
 fn test_frames_limit_eviction() {
     let dir = setup();
-    let mut buf = Buffer::new(10_000, 10_000, 1 << 20, 3, 10_000, dir.path().join("buffer"));
+    let mut buf = Buffer::new(
+        10_000,
+        10_000,
+        1 << 20,
+        3,
+        10_000,
+        dir.path().join("buffer"),
+    );
     for i in 1..=5u64 {
         buf.push("s1", i, event_frame(i));
     }
@@ -215,7 +235,10 @@ fn test_clear_all_on_startup() {
     buf.push("s1", 1, event_frame(1));
     assert!(dir.path().join("buffer").exists());
     buf.clear_all();
-    assert!(!dir.path().join("buffer").exists(), "启动清理删除 buffer/ 目录（§3.3）");
+    assert!(
+        !dir.path().join("buffer").exists(),
+        "启动清理删除 buffer/ 目录（§3.3）"
+    );
     assert!(!buf.has_any_pending());
 }
 
@@ -312,16 +335,21 @@ fn test_watermark_roundtrip() {
     let dir = setup();
     let mut wm = Watermark::load(dir.path()).unwrap();
     assert_eq!(wm.epoch_of("s1"), None);
-    wm.record("s1", 2, 137, 4321).unwrap();
-    wm.record("s2", 1, 5, 900).unwrap();
+    let fingerprint = ProcessFingerprint {
+        platform: "test-v1".into(),
+        birth: "123".into(),
+    };
+    wm.record("s1", 2, 137, 4321, Some(fingerprint.clone()))
+        .unwrap();
+    wm.record("s2", 1, 5, 900, None).unwrap();
 
     let wm2 = Watermark::load(dir.path()).unwrap();
     assert_eq!(wm2.epoch_of("s1"), Some(2));
     assert_eq!(wm2.epoch_of("s2"), Some(1));
     assert_eq!(wm2.epoch_of("nope"), None);
-    let mut pgids = wm2.pgids();
-    pgids.sort();
-    assert_eq!(pgids, vec![900, 4321]);
+    let mut records = wm2.runtime_records();
+    records.sort_by_key(|record| record.0);
+    assert_eq!(records, vec![(900, None), (4321, Some(fingerprint))]);
 
     #[cfg(unix)]
     {
@@ -340,7 +368,27 @@ fn test_watermark_corrupt_file_falls_back_empty() {
     let dir = setup();
     fs::write(dir.path().join("watermark.json"), "{corrupt json").unwrap();
     let wm = Watermark::load(dir.path()).unwrap();
-    assert_eq!(wm.epoch_of("s1"), None, "损坏水位按空水位处理（不阻塞启动）");
+    assert_eq!(
+        wm.epoch_of("s1"),
+        None,
+        "损坏水位按空水位处理（不阻塞启动）"
+    );
+}
+
+#[test]
+fn test_watermark_legacy_runtime_identity_is_untrusted() {
+    let dir = setup();
+    fs::write(
+        dir.path().join("watermark.json"),
+        r#"{
+      "chats": {"s1": {"epoch": 3, "lastSeq": 8, "pgid": 4321}}
+    }"#,
+    )
+    .unwrap();
+    let wm = Watermark::load(dir.path()).unwrap();
+    assert_eq!(wm.epoch_of("s1"), Some(3));
+    assert_eq!(wm.data_dir_identity(), None);
+    assert_eq!(wm.runtime_records(), vec![(4321, None)]);
 }
 
 #[test]
@@ -348,7 +396,7 @@ fn test_watermark_epoch_monotonic() {
     // epoch 跨重启单调：record 后 epoch_of 返回记录值，调用方负责 +1。
     let dir = setup();
     let mut wm = Watermark::load(dir.path()).unwrap();
-    wm.record("s1", 1, 0, 10).unwrap();
+    wm.record("s1", 1, 0, 10, None).unwrap();
     let next = wm.epoch_of("s1").map_or(1, |e| e + 1);
     assert_eq!(next, 2);
 }

@@ -23,6 +23,7 @@ use base64::Engine as _;
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -34,14 +35,14 @@ use acp_hub_proto::conn::Auth;
 use acp_hub_proto::frame::{Frame, ProtoError};
 use acp_hub_proto::instance::InstanceHello;
 use acp_hub_proto::schema::{InstanceStatus, InstanceView};
-use acp_hub_proto::whitelist::{Direction, Role, m1_allows_action_type, m1_check};
+use acp_hub_proto::whitelist::{m1_allows_action_type, m1_check, Direction, Role};
 
 use crate::auth::audit::audit;
 use crate::auth::AuthService;
 use crate::channel::OutboundMsg;
-use crate::channel::{ConnectionRegistry, ConnId};
 use crate::channel::RelayEventHandler;
-use crate::channel::{ChannelDeps, DispatchOutcome, ChatChannel};
+use crate::channel::{ChannelDeps, ChatChannel, DispatchOutcome};
+use crate::channel::{ConnId, ConnectionRegistry};
 use crate::config::Config;
 use crate::control::HeartbeatDriver;
 use crate::control::StoreSink;
@@ -81,6 +82,7 @@ pub struct Gateway {
     registry: RegistryState,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
+    auth_setup: crate::web::BrowserAuthSetup,
 }
 
 impl Gateway {
@@ -98,6 +100,7 @@ impl Gateway {
     ) -> Self {
         let heartbeat_interval = cfg.heartbeat_interval;
         let heartbeat_timeout = heartbeat_interval * 3;
+        let auth_setup = crate::web::BrowserAuthSetup::from_config(&cfg);
         Gateway {
             cfg,
             auth,
@@ -109,6 +112,7 @@ impl Gateway {
             registry,
             heartbeat_interval,
             heartbeat_timeout,
+            auth_setup,
         }
     }
 
@@ -140,6 +144,7 @@ impl Gateway {
     }
 
     /// 连接任务（每连接一个）。
+    #[allow(clippy::result_large_err)] // tungstenite handshake callback fixes the public error shape.
     async fn connection_task(&self, stream: TcpStream, peer: SocketAddr) {
         // 1. 非回环拒绝（§9.5：Config::allow_peer；不进注册表）。
         if !self.cfg.allow_peer(&peer) {
@@ -150,7 +155,8 @@ impl Gateway {
             drop(stream);
             return;
         }
-        // 2. 静态分支（§web 验证台）：非 ws 升级请求 → 内嵌静态资源；ws 升级
+        // 2. HTTP 分支（内嵌 Web + cookie auth bootstrap）：非 ws 升级请求
+        // 交给 bounded HTTP surface；ws 升级
         //    请求原样走后续握手。窥探（peek 不消费数据，握手字节不受影响）
         //    首段：定位 `\r\n\r\n` 后查 `upgrade: websocket`；头部碎片未齐时
         //    短等补齐（HEAD_PROBE_TIMEOUT），避免把碎片到达的 ws 握手误判。
@@ -180,14 +186,16 @@ impl Gateway {
                 }
             }
         };
-        let head_text = String::from_utf8_lossy(&peeked[..head_len]);
         let is_ws = match head_end {
             Some(end) => crate::web::is_ws_upgrade(&peeked[..end]),
             None => false,
         };
         if !is_ws {
-            // HTTP 静态分支：不进配额/注册表（§8.6 只面向 ws 连接）。
-            if let Err(e) = crate::web::serve(stream, &head_text).await {
+            // HTTP 分支：不进配额/注册表（§8.6 只面向 ws 连接）。
+            if let Err(e) =
+                crate::web::serve_http(stream, peer, self.auth.clone(), self.auth_setup.clone())
+                    .await
+            {
                 debug!(peer = %peer, error = ?e, "static serve failed");
             }
             return;
@@ -211,7 +219,42 @@ impl Gateway {
         };
 
         // 4. ws 握手。
-        let ws = match tokio_tungstenite::accept_async(stream).await {
+        let cookie_principal = Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured = cookie_principal.clone();
+        let ws = match accept_hdr_async(
+            stream,
+            move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                  resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let host = req
+                    .headers()
+                    .get("host")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+                if !crate::web::valid_loopback_host(host)
+                    || origin
+                        .map(|o| o != format!("http://{host}"))
+                        .unwrap_or(false)
+                {
+                    return Err(
+                        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(
+                            Some("forbidden".into()),
+                        ),
+                    );
+                }
+                if let Some(cookie) = req
+                    .headers()
+                    .get("cookie")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| crate::web::cookie_value(v, crate::auth::BROWSER_COOKIE))
+                {
+                    *captured.lock().unwrap() = Some(cookie);
+                }
+                Ok(resp)
+            },
+        )
+        .await
+        {
             Ok(ws) => ws,
             Err(e) => {
                 debug!(peer = %peer, error = ?e, "ws handshake failed");
@@ -221,7 +264,20 @@ impl Gateway {
         };
         let (mut ws_sink, mut ws_stream) = ws.split();
 
-        // 5. 首帧等待（10s 超时，§4.6）。
+        let captured_cookie = { cookie_principal.lock().unwrap().clone() };
+        let cookie_ctx = match captured_cookie {
+            Some(sid) => match self.auth.lock().await.validate_browser_session(&sid, peer) {
+                Ok(ctx) => Some((sid, ctx)),
+                Err(_) => {
+                    self.finish_connection(conn_id, &mut ws_sink, 4502, "invalid browser session")
+                        .await;
+                    return;
+                }
+            },
+            None => None,
+        };
+
+        // 5. Cookie-authenticated clients may start directly with subscribe/action.
         let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, ws_stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => match Frame::parse(&text) {
                 Ok(f) => f,
@@ -249,6 +305,18 @@ impl Gateway {
         };
 
         // 6. 角色分派。
+        if let Some((sid, ctx)) = cookie_ctx {
+            self.handle_authenticated_client_connection(
+                conn_id,
+                ws_sink,
+                ws_stream,
+                ctx,
+                Some(sid),
+                Some(first),
+            )
+            .await;
+            return;
+        }
         match first {
             Frame::Auth(auth) => {
                 self.handle_client_connection(conn_id, ws_sink, ws_stream, peer, auth)
@@ -259,8 +327,13 @@ impl Gateway {
                     .await;
             }
             _ => {
-                self.finish_connection(conn_id, &mut ws_sink, 1011, "first frame must be auth or instance/hello")
-                    .await;
+                self.finish_connection(
+                    conn_id,
+                    &mut ws_sink,
+                    1011,
+                    "first frame must be auth or instance/hello",
+                )
+                .await;
             }
         }
     }
@@ -270,11 +343,10 @@ impl Gateway {
         &self,
         conn_id: ConnId,
         mut ws_sink: futures::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
-        mut ws_stream: futures::stream::SplitStream<WebSocketStream<TcpStream>>,
+        ws_stream: futures::stream::SplitStream<WebSocketStream<TcpStream>>,
         peer: SocketAddr,
         auth: Auth,
     ) {
-        let (out_tx, mut out_rx) = mpsc::channel::<OutboundMsg>(256);
         // 认证（§4.6 步骤 3；失败断开 + 计数在 AuthService 内，§9.2）。
         let ctx = {
             let mut auth_service = self.auth.lock().await;
@@ -293,15 +365,49 @@ impl Gateway {
                 }
             }
         };
+        self.handle_authenticated_client_connection(conn_id, ws_sink, ws_stream, ctx, None, None)
+            .await;
+    }
+
+    async fn handle_authenticated_client_connection(
+        &self,
+        conn_id: ConnId,
+        mut ws_sink: futures::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
+        mut ws_stream: futures::stream::SplitStream<WebSocketStream<TcpStream>>,
+        ctx: crate::auth::ConnectionCtx,
+        browser_session: Option<String>,
+        first_frame: Option<Frame>,
+    ) {
+        let peer = ctx.peer;
+        let (out_tx, mut out_rx) = mpsc::channel::<OutboundMsg>(256);
         self.conns.upgrade(conn_id, ctx.clone());
-        audit("conn.open", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
+        audit(
+            "conn.open",
+            None,
+            Some(&ctx.token_id),
+            "ok",
+            Duration::ZERO,
+            None,
+        );
         info!(conn_id, token_id = %ctx.token_id, peer = %peer, "client connected");
 
-        let mut channel = ChatChannel::new(ctx);
+        let mut channel = ChatChannel::new(ctx.clone());
         let mut heartbeat = HeartbeatDriver::new(self.heartbeat_interval, self.heartbeat_timeout);
         let mut ticker = tokio::time::interval(self.heartbeat_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
+
+        if let Some(frame) = first_frame {
+            let outcome = channel.dispatch(frame, &self.deps, out_tx.clone()).await;
+            if let Some(code) = self
+                .apply_outcome(&mut channel, &out_tx, conn_id, outcome)
+                .await
+            {
+                self.finish_connection(conn_id, &mut ws_sink, code, "client connection closed")
+                    .await;
+                return;
+            }
+        }
 
         let deps = self.deps.clone();
         let close_code = loop {
@@ -342,7 +448,19 @@ impl Gateway {
                             if let Frame::Action(action) = &frame {
                                 if !m1_allows_action_type(action.type_str()) {
                                     let command_id = match action {
-                                        ActionEnvelope::Create { command_id, .. }
+                                        ActionEnvelope::ProjectCreate { command_id, .. }
+                                        | ActionEnvelope::ProjectArchive { command_id, .. }
+                                        | ActionEnvelope::ProjectRestore { command_id, .. }
+                                        | ActionEnvelope::ProjectRename { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionCreate { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionOpen { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionRename { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionArchive { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionRestore { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionImport { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+                                        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
+                                        | ActionEnvelope::Create { command_id, .. }
                                         | ActionEnvelope::Load { command_id, .. }
                                         | ActionEnvelope::Close { command_id, .. }
                                         | ActionEnvelope::Prompt { command_id, .. }
@@ -379,7 +497,11 @@ impl Gateway {
                             // 重试；Restarting 期间机器未对账，禁止控制操作，
                             // §8.4.1 不变量 4）。
                             if let Frame::Action(action) = &frame {
-                                if !self.can_accept_committed() {
+                                let read_only_query = matches!(
+                                    action,
+                                    ActionEnvelope::PersistedSessionPromptStatus { .. }
+                                );
+                                if !read_only_query && !self.can_accept_committed() {
                                     let _ = out_tx
                                         .send(OutboundMsg::Frame(Frame::ActionError(
                                             action_error_committed_rejected(action),
@@ -408,6 +530,12 @@ impl Gateway {
                     }
                 }
                 _ = ticker.tick() => {
+                    let valid = if let Some(sid) = browser_session.as_deref() {
+                        self.auth.lock().await.validate_browser_session(sid, peer).map(|_| ())
+                    } else {
+                        self.auth.lock().await.revalidate_client_identity(&ctx.token_id, ctx.role)
+                    };
+                    if valid.is_err() { break 4502; }
                     // keep_alive（§4.7：每 interval 下发；pong 超时 → 4501）。
                     let now = std::time::Instant::now();
                     if heartbeat.should_send_keepalive(now) {
@@ -435,8 +563,13 @@ impl Gateway {
             }
         };
 
-        self.finish_connection(conn_id, &mut ws_sink, close_code, "client connection closed")
-            .await;
+        self.finish_connection(
+            conn_id,
+            &mut ws_sink,
+            close_code,
+            "client connection closed",
+        )
+        .await;
     }
 
     /// 分派结果副作用执行（gateway 侧：打开 doc + 快照 + ready + flush）。
@@ -467,7 +600,11 @@ impl Gateway {
                             Some(e) => (e.instance_id.clone(), e.title.clone()),
                             None => (String::new(), String::new()),
                         };
-                        if let Err(e) = self.doc.open_chat(cid, &instance_id, Some(&title), None, None).await {
+                        if let Err(e) = self
+                            .doc
+                            .open_chat(cid, &instance_id, Some(&title), None, None)
+                            .await
+                        {
                             warn!(conn_id, chat_id = cid, error = ?e, "open chat failed");
                         }
                     }
@@ -497,6 +634,7 @@ impl Gateway {
                     // ready 握手（§4.6 步骤 4）→ mark_ready → flush 缓冲。
                     let ready = Frame::Ready(acp_hub_proto::conn::Ready {
                         projection_versions: versions,
+                        negotiated_capabilities: channel.negotiated_capabilities(),
                     });
                     if out_tx.send(OutboundMsg::Frame(ready)).await.is_err() {
                         return Some(1011);
@@ -504,15 +642,19 @@ impl Gateway {
                     let flushed = channel.mark_ready();
                     // flush 缓冲 Action（§4.6 步骤 4；ready 后正常 submit 路径）。
                     for action in flushed {
-                        if let DispatchOutcome::Send(msgs) = channel
+                        match channel
                             .dispatch(Frame::Action(action), &self.deps, out_tx.clone())
                             .await
                         {
-                            for m in msgs {
-                                if out_tx.send(m).await.is_err() {
-                                    return Some(1011);
+                            DispatchOutcome::Send(msgs) => {
+                                for m in msgs {
+                                    if out_tx.send(m).await.is_err() {
+                                        return Some(1011);
+                                    }
                                 }
                             }
+                            DispatchOutcome::Disconnect(code) => return Some(code),
+                            _ => {}
                         }
                     }
                 }
@@ -578,7 +720,14 @@ impl Gateway {
                 &hello,
             )
             .await;
-        audit("instance.hello", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
+        audit(
+            "instance.hello",
+            None,
+            Some(&ctx.token_id),
+            "ok",
+            Duration::ZERO,
+            None,
+        );
         info!(
             conn_id, instance_id = %instance_id, hostname = %hello.hostname,
             fenced = outcome.fenced_previous,
@@ -601,15 +750,25 @@ impl Gateway {
             warn!(instance_id = %instance_id, error = ?e, "registry instance upsert failed (hello)");
         }
         // 孤儿清理钩子（§7.5：已中断/终态但 instance 声称存活 → 补发 kill）。
-        self.deps.instance.cleanup_orphans(&instance_id, &outcome).await;
+        self.deps
+            .instance
+            .cleanup_orphans(&instance_id, &outcome)
+            .await;
         // §8.4.1 不变量 4：instance 重连（hello）对账后开门——Restarting →
         // Healthy（或 Degraded，若其他条件仍活跃；幂等）。
         if let Err(e) = self.registry.clear_restarting().await {
             warn!(instance_id = %instance_id, error = ?e, "clear_restarting failed (registry write)");
         }
 
+        let mut auth_ticker = tokio::time::interval(self.heartbeat_interval);
+        auth_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        auth_ticker.tick().await;
+
         let close_code = loop {
             tokio::select! {
+                _ = auth_ticker.tick() => {
+                    if self.auth.lock().await.revalidate_instance_identity(&ctx.token_id).is_err() { break 4502; }
+                }
                 msg = ws_stream.next() => {
                     let Some(msg) = msg else { break 1011 };
                     match msg {
@@ -726,9 +885,21 @@ impl Gateway {
                 warn!(instance_id = %instance_id, error = ?e, "instance disconnect cleanup failed");
             }
         }
-        audit("conn.close", None, Some(&ctx.token_id), "ok", Duration::ZERO, None);
-        self.finish_connection(conn_id, &mut ws_sink, close_code, "instance connection closed")
-            .await;
+        audit(
+            "conn.close",
+            None,
+            Some(&ctx.token_id),
+            "ok",
+            Duration::ZERO,
+            None,
+        );
+        self.finish_connection(
+            conn_id,
+            &mut ws_sink,
+            close_code,
+            "instance connection closed",
+        )
+        .await;
     }
 
     /// 连接收尾：关闭 ws + 释放配额 + 广播订阅清理。
@@ -767,7 +938,10 @@ async fn send_frame(
     frame: &Frame,
 ) -> Result<(), ()> {
     let text = serde_json::to_string(frame).map_err(|_| ())?;
-    ws_sink.send(Message::Text(text.into())).await.map_err(|_| ())
+    ws_sink
+        .send(Message::Text(text.into()))
+        .await
+        .map_err(|_| ())
 }
 
 /// u16 关闭码 → tungstenite CloseCode（§4.7 应用码 4500–4502 属保留区）。
@@ -798,7 +972,19 @@ fn doc_cid(doc: &acp_hub_proto::conn::DocId) -> Option<&str> {
 /// 语义同源，retryable；§9.3 脱敏——不回显 payload）。
 fn action_error_committed_rejected(action: &ActionEnvelope) -> ActionError {
     let command_id = match action {
-        ActionEnvelope::Create { command_id, .. }
+        ActionEnvelope::ProjectCreate { command_id, .. }
+        | ActionEnvelope::ProjectArchive { command_id, .. }
+        | ActionEnvelope::ProjectRestore { command_id, .. }
+        | ActionEnvelope::ProjectRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionCreate { command_id, .. }
+        | ActionEnvelope::PersistedSessionOpen { command_id, .. }
+        | ActionEnvelope::PersistedSessionRename { command_id, .. }
+        | ActionEnvelope::PersistedSessionArchive { command_id, .. }
+        | ActionEnvelope::PersistedSessionRestore { command_id, .. }
+        | ActionEnvelope::PersistedSessionImport { command_id, .. }
+        | ActionEnvelope::PersistedSessionDiscover { command_id, .. }
+        | ActionEnvelope::PersistedSessionPromptStatus { command_id, .. }
+        | ActionEnvelope::Create { command_id, .. }
         | ActionEnvelope::Load { command_id, .. }
         | ActionEnvelope::Close { command_id, .. }
         | ActionEnvelope::Prompt { command_id, .. }

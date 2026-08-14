@@ -378,3 +378,151 @@ fn test_find_and_load_skill_not_found_in_empty_list() {
 }
 
 use std::path::PathBuf;
+
+// ─── MCP 分源可见（Slice 4）────────────────────────────────────────────────
+
+use peri_acp_types::{mcp_skills::mcp_skill_name, skills::SkillOrigin};
+
+/// 构造 fake Mcp SkillMetadata（content 已缓存，模拟发现任务写入 registry 后
+/// 经 SkillsMiddleware 合并进 cached_skills 的条目）。
+fn fake_mcp_skill(server: &str, skill: &str) -> SkillMetadata {
+    SkillMetadata {
+        name: mcp_skill_name(server, skill),
+        description: format!("MCP skill {skill}"),
+        path: PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("skill://{server}/{skill}/SKILL.md"),
+        }),
+        content: Some(format!("# Hello\n\nBody of {skill}.\n")),
+    }
+}
+
+fn make_skill_tool_with_entries(entries: Vec<SkillMetadata>) -> SkillTool {
+    let cached = Arc::new(RwLock::new(Some(entries)));
+    SkillTool::new(cached)
+}
+
+#[tokio::test]
+async fn test_skill_tool_loads_mcp_skill_from_cache() {
+    // Arrange: cached_skills 含 MCP 条目（content Some）
+    let tool = make_skill_tool_with_entries(vec![fake_mcp_skill("demo", "hello")]);
+    let input = json!({"skill_name": "mcp__demo__hello"});
+
+    // Act
+    let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
+
+    // Assert: 零 RPC 取缓存全文 + 来源标注（server 名 + uri）
+    assert!(result.is_ok(), "MCP skill 按全名加载应成功");
+    let content = result.unwrap();
+    assert!(content.contains("Body of hello."), "应含缓存正文");
+    assert!(
+        content.contains("This skill is served by MCP server \"demo\""),
+        "应含来源标注 server 名，实际: {content}"
+    );
+    assert!(
+        content.contains("uri: skill://demo/hello/SKILL.md"),
+        "应含来源标注 uri，实际: {content}"
+    );
+}
+
+/// `load_skill_content` 的 Mcp content-None 防御分支（发现任务写入时 content
+/// 恒为 Some，理论不可达）：必须走既有 not-found 错误路径，不得 panic /
+/// 误读磁盘。
+#[test]
+fn test_load_skill_content_mcp_content_none_returns_not_found() {
+    let mut skill = fake_mcp_skill("demo", "hello");
+    skill.content = None;
+
+    let result = load_skill_content(&skill);
+
+    assert!(result.is_err(), "content 缺失应返回错误");
+    assert!(
+        result.unwrap_err().to_string().contains("not found"),
+        "应走既有 not-found 错误路径"
+    );
+}
+
+#[tokio::test]
+async fn test_skill_tool_loads_mcp_skill_by_alias() {
+    // Arrange: `<server>:<skill>` 别名（DD-3 规则表第二行）
+    let tool = make_skill_tool_with_entries(vec![fake_mcp_skill("demo", "hello")]);
+    let input = json!({"skill_name": "demo:hello"});
+
+    // Act
+    let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
+
+    // Assert: 同命中
+    assert!(result.is_ok(), "demo:hello 别名应命中 MCP 条目");
+    let content = result.unwrap();
+    assert!(content.contains("Body of hello."));
+    assert!(content.contains("This skill is served by MCP server \"demo\""));
+}
+
+#[tokio::test]
+async fn test_skill_tool_mixed_cache_mcp_alias_and_local_namespace() {
+    // Arrange: 混合缓存——MCP 条目 + 本地 skill（磁盘）
+    let (_temp, skill_dir, _) = setup_temp_skill_dir();
+    let root = SkillRoot {
+        path: skill_dir.parent().unwrap().to_path_buf(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    };
+    let mut entries = scan_skill_roots(&[root]);
+    entries.push(fake_mcp_skill("demo", "hello"));
+    let tool = make_skill_tool_with_entries(entries);
+    let cwd = skill_dir.parent().unwrap().to_str().unwrap();
+
+    // Act 1: 别名命中 MCP（在剥前缀之前）
+    let mcp_result = tool
+        .invoke(
+            json!({"skill_name": "demo:hello"}),
+            ToolContext::new(&[], cwd),
+        )
+        .await;
+    assert!(mcp_result.is_ok());
+    assert!(mcp_result
+        .unwrap()
+        .contains("This skill is served by MCP server"));
+
+    // Act 2: 本地 plugin 命名空间不受别名分支影响（mcp__ns__test-skill 未命中
+    // → 继续走既有磁盘剥前缀路径）
+    let local_result = tool
+        .invoke(
+            json!({"skill_name": "ns:test-skill"}),
+            ToolContext::new(&[], cwd),
+        )
+        .await;
+    assert!(
+        local_result.is_ok(),
+        "本地命名空间剥前缀匹配不应被别名分支破坏"
+    );
+    let local_content = local_result.unwrap();
+    assert!(local_content.contains("Test Skill"));
+    assert!(
+        !local_content.contains("This skill is served by MCP server"),
+        "本地 skill 不应带 MCP 来源标注"
+    );
+}
+
+#[tokio::test]
+async fn test_discover_skills_includes_mcp_source() {
+    // Arrange: cached_skills 含 MCP 条目
+    let entries = vec![fake_mcp_skill("demo", "hello")];
+    let cached = Arc::new(RwLock::new(Some(entries)));
+    let tool = DiscoverSkillsTool::new(cached);
+
+    // Act
+    let result = tool.invoke(json!({}), ToolContext::new(&[], "/tmp")).await;
+
+    // Assert: 输出含 source: "mcp" 条目
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("输出应为 JSON 数组");
+    let arr = parsed.as_array().expect("应为数组");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "mcp__demo__hello");
+    assert_eq!(arr[0]["source"], "mcp");
+}

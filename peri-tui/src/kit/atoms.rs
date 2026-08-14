@@ -16,7 +16,10 @@ use crate::kit::workflow_snapshot::WorkflowSnapshot;
 use chrono::{DateTime, Utc};
 use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPreview};
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
+use ratatui_kit::ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -26,8 +29,10 @@ use crate::app::setup_wizard::SetupWizardState;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::hitl_response::HitlResponseAction;
+use crate::kit::image_safety::{ImageMeta, PathGrade};
 use crate::kit::rewind_action::RewindAction;
 use crate::kit::submit_request::SubmitRequest;
+use image::DynamicImage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
@@ -277,6 +282,17 @@ pub static ACTIVE_PANEL: AtomStatic<Option<PanelKind>> = AtomStatic::new(|| None
 /// 扫描嵌套 `view_models` 渲染。Esc 关闭面板后保留（重开仍显示同一 agent）。
 pub static SELECTED_SUBAGENT_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
+/// 当前弹窗的屏幕矩形（上一帧渲染写入）——供鼠标遮挡判定区分「弹窗内/外」：
+/// 居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区滚轮放行（见
+/// mouse_router::occludes_scroll）。写入用 write_no_update（判定读取不依赖
+/// 订阅唤醒，与 PANEL_SCROLL_OWNER 同模式）；无弹窗/自定位小层（ModelQuickSwitch
+/// 不登记矩形）时为 None → 保守遮挡。
+pub static POPUP_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
+/// 当前激活面板的整体屏幕矩形（上一帧渲染写入，PanelOverlay 的 AreaTracker
+/// 回填）——供鼠标遮挡判定区分「面板内/外」：面板打开时，面板区域外（消息区
+/// 可见部分）滚轮放行给 chat 滚动（见 mouse_router::occludes_scroll）。
+/// 写入用 write_no_update；无面板/尚未渲染时为 None → 保守遮挡。
+pub static PANEL_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
 /// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
 /// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
 pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =
@@ -404,6 +420,9 @@ pub static WORKFLOW_SNAPSHOT: AtomStatic<Option<WorkflowSnapshot>> = AtomStatic:
 
 pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
 pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
+/// MCP 远端 skill 名称列表（`mcp__<server>__<skill>` 形态）。
+/// 由 kit notifier 在收到 `meta.mcpSkillNames` 后写入，slash 归类 McpSkill。
+pub static MCP_SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
 /// ACP 服务器下发的可用 slash 命令列表（含 skills）。
 /// 键 = 命令名（不含 / 前缀），值 = 描述。
 /// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入。
@@ -422,6 +441,49 @@ pub static COPY_MESSAGE_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| 
 /// keepgoing 按钮防抖截止时间——点击后短时间内禁用按钮，避免连续误触
 /// 触发多轮空跑。超过此刻后恢复可点击。
 pub static KEEPGOING_BLOCKED_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
+
+/// @image 行 hover 状态（T4 §4.4）：Moved 事件命中变化时由消息区 handler
+/// 写入（写入自动唤醒订阅者重渲染），渲染 body 读取决定 meta 行是否显示
+/// 绝对路径 + accent 高亮；移出/遮挡 → None 恢复默认渲染。仅当「命中集合
+/// 变化」时写入——防高频 Moved 风暴（§4.6）。
+pub(crate) static IMAGE_HOVER: AtomStatic<Option<crate::kit::message_area::ImageHoverState>> =
+    AtomStatic::new(|| None);
+
+/// 图片预览状态机（image-p0-p1-spec §7.3 T7）：写入边界为事件/effect 与后台
+/// 解码线程，渲染 body 只读（TUI-RENDER-001）。默认 `Idle`（无预览）。
+#[derive(Debug, Clone, Default)]
+pub enum ImagePreviewState {
+    #[default]
+    Idle,
+    /// 后台解码中（T5 全链校验已通过；`grade` 为分级结果）。
+    Loading { path: PathBuf, grade: PathGrade },
+    /// 解码完成：像素数据以 `Arc` 共享给 overlay 渲染（同路径重复请求复用）。
+    Ready {
+        path: PathBuf,
+        meta: ImageMeta,
+        img: Arc<DynamicImage>,
+    },
+    /// 手工路径/非受管理目录（§6.1 Q6）：仅文本 meta 行降级，不触发解码。
+    Degraded { path: PathBuf, reason: String },
+    /// 校验/解码失败：固定错误文案（安全降级，reason 仅内部诊断，不含路径）。
+    Error { path: PathBuf, reason: String },
+}
+
+pub static IMAGE_PREVIEW_STATE: AtomStatic<ImagePreviewState> =
+    AtomStatic::new(ImagePreviewState::default);
+
+/// 输入区快照（§7.3 cursor 触发源）：input_area 渲染 body 每帧
+/// `write_no_update` 写入（同 keepgoing_rect 模式，TUI-RENDER-001 派生缓存），
+/// overlay 组件经渲染循环读取最新值。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InputSnapshot {
+    /// 输入区当前全文。
+    pub text: String,
+    /// 光标位置（字符索引，非字节）。
+    pub cursor_char: usize,
+}
+
+pub static INPUT_SNAPSHOT: AtomStatic<InputSnapshot> = AtomStatic::new(InputSnapshot::default);
 
 /// 渲染心跳计数器——后台任务每 5 秒 +1，确保 render loop 周期性唤醒。
 /// 即使终端无输入、atom 无变化，也能防止 `futures::select` 在 EventStream 阻塞时

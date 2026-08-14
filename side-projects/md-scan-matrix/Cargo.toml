@@ -1,0 +1,14 @@
+[package]
+name = "md-scan-matrix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 与 ratatui-kit-markdown 0.3.0 固定依赖同一版本族（0.12.x），保证 Tag 类型一致
+pulldown-cmark = "0.12"
+ratatui-kit-markdown = "0.3.0"
+# 直接依赖 ratatui 以便构造/投影 Line<Span>（rk_parse 输出类型）
+ratatui = "0.30"
+
+# 独立实验 crate，与主 workspace 完全隔离（主 workspace members 不含 side-projects）
+[workspace]

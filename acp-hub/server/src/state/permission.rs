@@ -112,6 +112,95 @@ pub fn pending_count(pair: &DocPair) -> usize {
         .count()
 }
 
+pub fn pending_count_for_tool(pair: &DocPair, tool_call_id: &str) -> usize {
+    let txn = pair.session.transact();
+    let Some(root) = chat_writer::root_map_read(&txn) else {
+        return 0;
+    };
+    let Some(permissions) = root
+        .get(&txn, "pending_permissions")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    else {
+        return 0;
+    };
+    permissions
+        .iter(&txn)
+        .filter(|(_, value)| {
+            let Ok(permission) = value.clone().cast::<yrs::MapRef>() else {
+                return false;
+            };
+            let status = permission
+                .get(&txn, "status")
+                .and_then(|value| value.cast::<String>().ok());
+            let linked = permission
+                .get(&txn, "tool_call_id")
+                .and_then(|value| value.cast::<String>().ok());
+            status.as_deref() == Some("pending") && linked.as_deref() == Some(tool_call_id)
+        })
+        .count()
+}
+
+/// Read the pending record's optional tool link before a control-path CAS.
+pub fn context(
+    pair: &DocPair,
+    permission_id: &str,
+) -> Option<(String, Option<String>, Option<PermissionDecision>)> {
+    let txn = pair.session.transact();
+    let root = chat_writer::root_map_read(&txn)?;
+    let permissions = root
+        .get(&txn, "pending_permissions")?
+        .cast::<yrs::MapRef>()
+        .ok()?;
+    let permission = permissions
+        .get(&txn, permission_id)?
+        .cast::<yrs::MapRef>()
+        .ok()?;
+    let status = permission
+        .get(&txn, "status")
+        .and_then(|value| value.cast::<String>().ok())
+        .unwrap_or_default();
+    let tool_call_id = permission
+        .get(&txn, "tool_call_id")
+        .and_then(|value| value.cast::<String>().ok());
+    let decision = permission
+        .get(&txn, "decision")
+        .and_then(|value| value.cast::<String>().ok())
+        .and_then(|value| match value.as_str() {
+            "allow" => Some(PermissionDecision::Allow),
+            "deny" => Some(PermissionDecision::Deny),
+            _ => None,
+        });
+    Some((status, tool_call_id, decision))
+}
+
+pub fn pending_tool_ids(pair: &DocPair) -> Vec<String> {
+    let txn = pair.session.transact();
+    let Some(root) = chat_writer::root_map_read(&txn) else {
+        return Vec::new();
+    };
+    let Some(permissions) = root
+        .get(&txn, "pending_permissions")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+    else {
+        return Vec::new();
+    };
+    permissions
+        .iter(&txn)
+        .filter_map(|(_, value)| {
+            let permission = value.cast::<yrs::MapRef>().ok()?;
+            let status = permission
+                .get(&txn, "status")
+                .and_then(|value| value.cast::<String>().ok())?;
+            if status != "pending" {
+                return None;
+            }
+            permission
+                .get(&txn, "tool_call_id")
+                .and_then(|value| value.cast::<String>().ok())
+        })
+        .collect()
+}
+
 fn cas_migrate(
     txn: &mut TransactionCtx<'_>,
     root: &yrs::MapRef,
@@ -133,11 +222,19 @@ fn cas_migrate(
         "pending" => {
             match decision {
                 Some(d) => {
-                    pm.insert(txn, "status", permission_status_str(PermissionStatus::Resolved));
+                    pm.insert(
+                        txn,
+                        "status",
+                        permission_status_str(PermissionStatus::Resolved),
+                    );
                     pm.insert(txn, "decision", decision_str(d));
                 }
                 None => {
-                    pm.insert(txn, "status", permission_status_str(PermissionStatus::Expired));
+                    pm.insert(
+                        txn,
+                        "status",
+                        permission_status_str(PermissionStatus::Expired),
+                    );
                     // decision 保持 null（§5.4）。
                 }
             }

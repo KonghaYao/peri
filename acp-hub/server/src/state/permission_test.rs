@@ -28,7 +28,11 @@ fn pair_with_permission(id: &str) -> DocPair {
 fn read_status_and_decision(p: &DocPair, id: &str) -> (String, Option<yrs::Out>) {
     let txn = p.session.transact();
     let root = chat_writer::root_map_read(&txn).unwrap();
-    let perms = root.get(&txn, "pending_permissions").unwrap().cast::<yrs::MapRef>().unwrap();
+    let perms = root
+        .get(&txn, "pending_permissions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     let pm = perms.get(&txn, id).unwrap().cast::<yrs::MapRef>().unwrap();
     let status = pm
         .get(&txn, "status")
@@ -41,13 +45,19 @@ fn read_status_and_decision(p: &DocPair, id: &str) -> (String, Option<yrs::Out>)
 #[test]
 fn resolve_pending_migrates_once_with_decision() {
     let mut p = pair_with_permission("p1");
-    assert_eq!(resolve(&mut p, "p1", PermissionDecision::Allow), CasOutcome::Migrated);
+    assert_eq!(
+        resolve(&mut p, "p1", PermissionDecision::Allow),
+        CasOutcome::Migrated
+    );
     let (status, decision) = read_status_and_decision(&p, "p1");
     assert_eq!(status, "resolved");
     assert_eq!(decision, Some(yrs::Out::Any("allow".into())));
 
     // 重复 resolve → Duplicate（不覆盖）。
-    assert_eq!(resolve(&mut p, "p1", PermissionDecision::Deny), CasOutcome::Duplicate);
+    assert_eq!(
+        resolve(&mut p, "p1", PermissionDecision::Deny),
+        CasOutcome::Duplicate
+    );
     let (status, decision) = read_status_and_decision(&p, "p1");
     assert_eq!(status, "resolved");
     assert_eq!(decision, Some(yrs::Out::Any("allow".into())));
@@ -59,7 +69,10 @@ fn resolve_expired_returns_expired() {
     // 先 expire。
     assert_eq!(expire(&mut p, "p1"), CasOutcome::Migrated);
     // resolve 已过期 → Expired，decision 保持 null。
-    assert_eq!(resolve(&mut p, "p1", PermissionDecision::Allow), CasOutcome::Expired);
+    assert_eq!(
+        resolve(&mut p, "p1", PermissionDecision::Allow),
+        CasOutcome::Expired
+    );
     let (status, decision) = read_status_and_decision(&p, "p1");
     assert_eq!(status, "expired");
     assert_eq!(decision, Some(yrs::Out::Any(yrs::Any::Null)));
@@ -79,7 +92,10 @@ fn expire_pending_keeps_decision_null() {
 #[test]
 fn expire_resolved_returns_duplicate() {
     let mut p = pair_with_permission("p1");
-    assert_eq!(resolve(&mut p, "p1", PermissionDecision::Allow), CasOutcome::Migrated);
+    assert_eq!(
+        resolve(&mut p, "p1", PermissionDecision::Allow),
+        CasOutcome::Migrated
+    );
     // 已 resolved 再 expire → Duplicate（不覆盖已裁决）。
     assert_eq!(expire(&mut p, "p1"), CasOutcome::Duplicate);
     let (status, decision) = read_status_and_decision(&p, "p1");
@@ -90,6 +106,9 @@ fn expire_resolved_returns_duplicate() {
 #[test]
 fn unknown_permission_returns_unknown() {
     let mut p = Factory::new().create_chat_doc();
-    assert_eq!(resolve(&mut p, "nope", PermissionDecision::Allow), CasOutcome::Unknown);
+    assert_eq!(
+        resolve(&mut p, "nope", PermissionDecision::Allow),
+        CasOutcome::Unknown
+    );
     assert_eq!(expire(&mut p, "nope"), CasOutcome::Unknown);
 }

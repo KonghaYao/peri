@@ -4,6 +4,7 @@ pub mod channel_handler;
 pub mod client;
 pub mod client_oauth;
 pub mod config;
+pub mod discover_tool;
 // ClientInitializeError 来自 rmcp crate（504 bytes），无法修改其定义
 #[allow(clippy::result_large_err)]
 pub mod initialize;
@@ -12,6 +13,7 @@ pub mod middleware;
 pub mod oauth_flow;
 pub mod reconnect;
 pub mod resource_tool;
+pub(crate) mod skill_discovery;
 pub mod tool_bridge;
 pub mod transport;
 

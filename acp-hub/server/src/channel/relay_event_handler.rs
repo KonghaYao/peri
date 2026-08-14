@@ -24,17 +24,17 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, info, warn};
 
+use acp_hub_proto::action::PermissionDecision;
 use acp_hub_proto::instance::{InstanceBufferSync, InstanceEvent, InstanceProcessExit};
 use acp_hub_proto::schema::PermissionOptions;
 
 use crate::protocol::{
-    AcpChannel, NormalizeOutcome, PERMISSION_TIMEOUT, PermissionRequestFields,
-    extract_session_id,
+    extract_session_id, AcpChannel, NormalizeOutcome, PermissionRequestFields, PERMISSION_TIMEOUT,
 };
+use crate::state::doc_manager::DocCommand;
 use crate::state::doc_manager::{DocManager, SubmitError, SubmitResult};
 use crate::state::normalized::NormalizedEvent;
 use crate::state::registry::{DegradeCause, RegistryState};
-use crate::state::doc_manager::DocCommand;
 
 use crate::control::InstanceRegistry;
 use crate::control::{ChatRegistry, ChatState};
@@ -100,7 +100,7 @@ pub struct PendingRpc {
 
 /// pending_permission 表条目（#1：官方 `session/request_permission` 响应回
 /// 投数据；key = server 生成 permission_id）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PendingPermissionReq {
     /// agent 的 request id（响应帧 id 原样回显）。
     pub request_id: serde_json::Value,
@@ -108,6 +108,11 @@ pub struct PendingPermissionReq {
     pub options: Vec<serde_json::Value>,
     /// 归属 chat（断链/进程退出清理用）。
     pub chat_id: String,
+    /// 首次裁决的 commandId。明确未送达时只允许这一条命令
+    /// 恢复，防止新 commandId 把同一安全副作用重放。
+    resolving_command_id: Option<String>,
+    /// 与 `resolving_command_id` 绑定的原始决策。
+    resolving_decision: Option<PermissionDecision>,
 }
 
 /// instance 入站事件消费（§4.5）。
@@ -271,7 +276,11 @@ impl RelayEventHandler {
     /// → 逐帧按 from_seq 连续性投递（乱序/重复丢弃计数——聚合器幂等兜底）→
     /// 排空完成判定（设计稿决策 4：server 不做额外结束帧；gap 的精确计数与
     /// 追平清除由 F4 聚合器 `judge_stream`/gap_dirty → registry 写回）。
-    pub async fn on_buffer_sync(&self, instance_id: &str, sync: &InstanceBufferSync) -> ConsumeResult {
+    pub async fn on_buffer_sync(
+        &self,
+        instance_id: &str,
+        sync: &InstanceBufferSync,
+    ) -> ConsumeResult {
         // 1. epoch 校验（与 server 记录不一致即拒绝该批，§4.5.1）。
         if let Some(expected) = self
             .inner
@@ -330,16 +339,14 @@ impl RelayEventHandler {
                 .channel
                 .normalize(&hub_chat_id, sync.epoch, bf.seq, &now, &bf.frame)
             {
-                NormalizeOutcome::Event(nev) => {
-                    match self.submit(&hub_chat_id, *nev).await {
-                        ConsumeResult::Delivered { .. } => delivered += 1,
-                        ConsumeResult::Dropped { reason } => {
-                            rejected += 1;
-                            self.count_dropped(reason);
-                        }
-                        _ => {}
+                NormalizeOutcome::Event(nev) => match self.submit(&hub_chat_id, *nev).await {
+                    ConsumeResult::Delivered { .. } => delivered += 1,
+                    ConsumeResult::Dropped { reason } => {
+                        rejected += 1;
+                        self.count_dropped(reason);
                     }
-                }
+                    _ => {}
+                },
                 // #1 官方 request_permission：登记 pending 表 + 投递投影
                 // （补推路径同构，与实时帧一致）。
                 NormalizeOutcome::PermissionRequest(req) => {
@@ -370,8 +377,11 @@ impl RelayEventHandler {
             self.inner.chats.touch_active_turn(&hub_chat_id).await;
         }
         debug!(
-            chat_id = hub_chat_id, epoch = sync.epoch, from_seq = sync.from_seq,
-            delivered, rejected,
+            chat_id = hub_chat_id,
+            epoch = sync.epoch,
+            from_seq = sync.from_seq,
+            delivered,
+            rejected,
             "buffer_sync consumed"
         );
         // 补推追平（§7.3/§8.5）：缓冲完整（无乱序/重复丢弃）且至少一帧
@@ -400,11 +410,7 @@ impl RelayEventHandler {
     /// chat 置 gap 标记（registry；缺口数量由补推时聚合器精确计算）、
     /// 状态迁移 Gap。
     pub async fn on_instance_disconnect(&self, instance_id: &str) -> Result<(), RelayError> {
-        let chats = self
-            .inner
-            .chats
-            .chats_for_instance(instance_id)
-            .await;
+        let chats = self.inner.chats.chats_for_instance(instance_id).await;
         let mut interrupted = 0usize;
         let mut gapped = 0usize;
         for (chat_id, state) in &chats {
@@ -447,11 +453,7 @@ impl RelayEventHandler {
                 .await
                 .retain(|_, v| v.chat_id != *chat_id);
             // gap 标记（§8.2/§7.3：补推完成、seq 追平后清除）。
-            let _ = self
-                .inner
-                .registry
-                .set_chat_gap(chat_id, Some(0))
-                .await;
+            let _ = self.inner.registry.set_chat_gap(chat_id, Some(0)).await;
             let _ = self
                 .inner
                 .registry
@@ -468,7 +470,10 @@ impl RelayEventHandler {
             }
         }
         info!(
-            instance_id, chats = chats.len(), interrupted, gapped,
+            instance_id,
+            chats = chats.len(),
+            interrupted,
+            gapped,
             "instance disconnect cleanup complete"
         );
         Ok(())
@@ -477,7 +482,11 @@ impl RelayEventHandler {
     /// `instance/process_exit` 消费（§4.5）：终态写视图（F4 `SetChatTerminal`）、
     /// chat 状态迁移（ended/crashed，§7.3）；不再接受新事件（聚合器终态
     /// 守卫，§8.2）。
-    pub async fn on_process_exit(&self, instance_id: &str, exit: &InstanceProcessExit) -> ConsumeResult {
+    pub async fn on_process_exit(
+        &self,
+        instance_id: &str,
+        exit: &InstanceProcessExit,
+    ) -> ConsumeResult {
         let _ = instance_id;
         // 信封 chat_id = instance 进程归属（hub chat id，spawn 时确立，
         // §4.5.1），无 binding 翻译（进程生命周期事件不携带 ACP 帧）。
@@ -501,10 +510,7 @@ impl RelayEventHandler {
         let _ = self
             .inner
             .doc
-            .submit_command(
-                &hub_chat_id,
-                DocCommand::SetChatTerminal { status },
-            )
+            .submit_command(&hub_chat_id, DocCommand::SetChatTerminal { status })
             .await;
         let _ = self.inner.chats.transition(&hub_chat_id, state).await;
         self.inner.chats.clear_active_turn(&hub_chat_id).await;
@@ -543,9 +549,16 @@ impl RelayEventHandler {
                 request_id: req.request_id.clone(),
                 options: req.options.clone(),
                 chat_id: chat_id.to_string(),
+                resolving_command_id: None,
+                resolving_decision: None,
             },
         );
-        let turn_id = self.inner.chats.active_turn(chat_id).await.unwrap_or_default();
+        let turn_id = self
+            .inner
+            .chats
+            .active_turn(chat_id)
+            .await
+            .unwrap_or_default();
         let nev = NormalizedEvent {
             chat_id: chat_id.to_string(),
             seq,
@@ -555,6 +568,7 @@ impl RelayEventHandler {
                 permission_id: req.permission_id.clone(),
                 turn_id,
                 tool_call_id: req.tool_call_id.clone(),
+                tool: Some(req.tool.clone()),
                 title: req.title.clone(),
                 description: req.description.clone(),
                 options: permission_option_kinds(&req.options),
@@ -564,19 +578,50 @@ impl RelayEventHandler {
         self.submit(chat_id, nev).await
     }
 
-    /// resolve 取表（coordinator 出站响应；一次性 remove——官方轨唯一消费
-    /// 点，未命中 = 原始形态权限流，走旧轨）。
-    pub async fn take_pending_permission(
-        &self,
-        permission_id: &str,
-    ) -> Option<PendingPermissionReq> {
-        self.inner.pending_permissions.write().await.remove(permission_id)
+    /// 读取官方 request 回投材料。发送成功前不得移除：明确未送达时，同一
+    /// decision + commandId 需要复用它恢复；相反 decision 不得消费它。
+    pub async fn pending_permission(&self, permission_id: &str) -> Option<PendingPermissionReq> {
+        self.inner
+            .pending_permissions
+            .read()
+            .await
+            .get(permission_id)
+            .cloned()
     }
 
-    /// 表项移除（CAS Duplicate 分支清理；幂等无害——duplicate 不触发
-    /// take，表项滞留至断链，remove 防泄漏）。
+    /// 申领官方 permission response 的唯一投递权。
+    ///
+    /// 首次决策会将 `(commandId, decision)` 绑定到 request；后续只有
+    /// 完全相同的命令才能在明确未送达后恢复。其他 commandId 或相反
+    /// decision 均不得获取响应材料。
+    pub async fn claim_pending_permission(
+        &self,
+        permission_id: &str,
+        command_id: &str,
+        decision: PermissionDecision,
+    ) -> Option<PendingPermissionReq> {
+        let mut pending = self.inner.pending_permissions.write().await;
+        let request = pending.get_mut(permission_id)?;
+        match (&request.resolving_command_id, request.resolving_decision) {
+            (None, None) => {
+                request.resolving_command_id = Some(command_id.to_string());
+                request.resolving_decision = Some(decision);
+            }
+            (Some(existing_id), Some(existing_decision))
+                if existing_id == command_id && existing_decision == decision => {}
+            _ => return None,
+        }
+        Some(request.clone())
+    }
+
+    /// 投递确认后移除表项；幂等无害。未确认前必须保留，
+    /// 以便原 `(commandId, decision)` 在明确未送达时恢复。
     pub async fn remove_pending_permission(&self, permission_id: &str) {
-        self.inner.pending_permissions.write().await.remove(permission_id);
+        self.inner
+            .pending_permissions
+            .write()
+            .await
+            .remove(permission_id);
     }
 
     /// rpcId 登记（coordinator 调用；返回等待侧 oneshot）。

@@ -54,6 +54,11 @@ pub const UNKNOWN_TOKEN_ID: &str = "<unknown>";
 /// bootstrap 机器即「缺省本机」路由目标（§4.3 P5），否则 client 不带
 /// instanceId 的 create 会命中 `UnknownInstance("local")`（E3 链路断点）。
 pub const BOOTSTRAP_INSTANCE_NAME: &str = "local";
+pub const BROWSER_COOKIE: &str = "acp_hub_session";
+pub(crate) const BROWSER_SESSION_TTL_SECS: u64 = 8 * 3600;
+const BROWSER_SESSION_TTL: std::time::Duration =
+    std::time::Duration::from_secs(BROWSER_SESSION_TTL_SECS);
+const BROWSER_SESSION_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------
 // TokenRole（token 三级角色，§9.2.2 + §9.5）
@@ -378,7 +383,11 @@ impl TokenStore {
 
     /// 校验：常量时间比较 + 角色精确匹配 + 吊销态；**每次调用先按 mtime
     /// 惰性重载**（§4.3.3）。宽限期轮换：新旧 token 并存期间同时有效。
-    pub fn validate(&mut self, candidate: &str, required: TokenRole) -> Result<TokenRecord, AuthError> {
+    pub fn validate(
+        &mut self,
+        candidate: &str,
+        required: TokenRole,
+    ) -> Result<TokenRecord, AuthError> {
         self.maybe_reload();
         for r in &self.records {
             if r.revoked {
@@ -429,6 +438,20 @@ impl TokenStore {
             }
         }
         Err(AuthError::UnknownToken)
+    }
+
+    pub fn validate_client_id(&mut self, id: &str) -> Result<TokenRecord, AuthError> {
+        self.maybe_reload();
+        match self.records.iter().find(|r| r.id == id) {
+            Some(r) if r.revoked => Err(AuthError::RevokedToken {
+                token_id: id.to_string(),
+            }),
+            Some(r) if r.role == TokenRole::Instance => Err(AuthError::RoleMismatch {
+                token_id: id.to_string(),
+            }),
+            Some(r) => Ok(r.clone()),
+            None => Err(AuthError::UnknownToken),
+        }
     }
 
     /// §3.3/§4.3.4 启动 bootstrap：不存在任何未吊销 instance 角色 token 时
@@ -691,6 +714,13 @@ pub struct AuthService {
     store: TokenStore,
     nonces: NonceRegistry,
     stats: AuthStats,
+    browser_sessions: HashMap<String, BrowserSession>,
+}
+
+#[derive(Clone)]
+struct BrowserSession {
+    token_id: String,
+    expires_at: Instant,
 }
 
 impl AuthService {
@@ -700,7 +730,87 @@ impl AuthService {
             store,
             nonces: NonceRegistry::new(),
             stats: AuthStats::default(),
+            browser_sessions: HashMap::new(),
         }
+    }
+
+    pub fn create_browser_session(
+        &mut self,
+        bearer: &str,
+    ) -> Result<(String, ConnectionCtx), AuthError> {
+        self.sweep_browser_sessions();
+        let record = self.store.validate_client(bearer)?;
+        if self.browser_sessions.len() >= BROWSER_SESSION_CAPACITY {
+            if let Some(oldest) = self
+                .browser_sessions
+                .iter()
+                .min_by_key(|(_, s)| s.expires_at)
+                .map(|(id, _)| id.clone())
+            {
+                self.browser_sessions.remove(&oldest);
+            }
+        }
+        let mut raw = [0u8; 32];
+        rand::rng().fill_bytes(&mut raw);
+        let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        self.browser_sessions.insert(
+            id.clone(),
+            BrowserSession {
+                token_id: record.id.clone(),
+                expires_at: Instant::now() + BROWSER_SESSION_TTL,
+            },
+        );
+        Ok((id, browser_ctx(record, "127.0.0.1:0".parse().unwrap())))
+    }
+
+    pub fn validate_browser_session(
+        &mut self,
+        id: &str,
+        peer: SocketAddr,
+    ) -> Result<ConnectionCtx, AuthError> {
+        self.sweep_browser_sessions();
+        let token_id = self
+            .browser_sessions
+            .get(id)
+            .ok_or(AuthError::UnknownToken)?
+            .token_id
+            .clone();
+        let record = self.store.validate_client_id(&token_id)?;
+        Ok(browser_ctx(record, peer))
+    }
+
+    pub fn delete_browser_session(&mut self, id: &str) -> bool {
+        self.browser_sessions.remove(id).is_some()
+    }
+    pub fn revalidate_client_identity(
+        &mut self,
+        token_id: &str,
+        expected_role: TokenRole,
+    ) -> Result<(), AuthError> {
+        let record = self.store.validate_client_id(token_id)?;
+        if record.role != expected_role {
+            return Err(AuthError::RoleMismatch {
+                token_id: token_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+    pub fn revalidate_instance_identity(&mut self, token_id: &str) -> Result<(), AuthError> {
+        self.store.maybe_reload();
+        match self.store.records.iter().find(|r| r.id == token_id) {
+            Some(r) if !r.revoked && r.role == TokenRole::Instance => Ok(()),
+            Some(r) if r.revoked => Err(AuthError::RevokedToken {
+                token_id: token_id.to_string(),
+            }),
+            Some(_) => Err(AuthError::RoleMismatch {
+                token_id: token_id.to_string(),
+            }),
+            None => Err(AuthError::UnknownToken),
+        }
+    }
+    fn sweep_browser_sessions(&mut self) {
+        let now = Instant::now();
+        self.browser_sessions.retain(|_, s| s.expires_at > now);
     }
 
     /// 失败计数视图（审计/指标聚合）。
@@ -738,20 +848,10 @@ impl AuthService {
         match self.nonces.check_and_mark(&nonce, Instant::now()) {
             NonceVerdict::Accepted => {}
             NonceVerdict::Replay => {
-                return Err(self.fail_auth(
-                    "auth.instance",
-                    None,
-                    AuthError::ReplayNonce,
-                    start,
-                ))
+                return Err(self.fail_auth("auth.instance", None, AuthError::ReplayNonce, start))
             }
             NonceVerdict::Expired => {
-                return Err(self.fail_auth(
-                    "auth.instance",
-                    None,
-                    AuthError::ExpiredNonce,
-                    start,
-                ))
+                return Err(self.fail_auth("auth.instance", None, AuthError::ExpiredNonce, start))
             }
         }
         // 3. token 校验（角色必须为 Instance）。
@@ -785,7 +885,14 @@ impl AuthService {
             hostname: Some(hello.hostname.clone()),
             established_at: Utc::now(),
         };
-        audit("auth.instance", None, Some(&record.id), "ok", start.elapsed(), None);
+        audit(
+            "auth.instance",
+            None,
+            Some(&record.id),
+            "ok",
+            start.elapsed(),
+            None,
+        );
         Ok(InstanceAuthOk {
             ctx,
             response: AuthResponse {
@@ -821,14 +928,27 @@ impl AuthService {
             hostname: None,
             established_at: Utc::now(),
         };
-        audit("auth.client", None, Some(&record.id), "ok", start.elapsed(), None);
+        audit(
+            "auth.client",
+            None,
+            Some(&record.id),
+            "ok",
+            start.elapsed(),
+            None,
+        );
         Ok(ctx)
     }
 
     /// 失败路径统一处理：计数（未知 token → [`UNKNOWN_TOKEN_ID`]）+ 审计
     /// `auth.* failed`（携带 `auth_failed_total` 快照，§4.8）+ 原样返回错误
     /// （不静默，§9.2 失败语义）。
-    fn fail_auth(&self, action: &str, token_id: Option<&str>, err: AuthError, start: Instant) -> AuthError {
+    fn fail_auth(
+        &self,
+        action: &str,
+        token_id: Option<&str>,
+        err: AuthError,
+        start: Instant,
+    ) -> AuthError {
         let key = token_id.unwrap_or(UNKNOWN_TOKEN_ID);
         self.stats.record_failure(key);
         audit(
@@ -840,6 +960,17 @@ impl AuthService {
             Some(self.stats.total_failures()),
         );
         err
+    }
+}
+
+fn browser_ctx(record: TokenRecord, peer: SocketAddr) -> ConnectionCtx {
+    ConnectionCtx {
+        token_id: record.id,
+        role: record.role,
+        name: record.name,
+        peer,
+        hostname: None,
+        established_at: Utc::now(),
     }
 }
 

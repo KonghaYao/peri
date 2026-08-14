@@ -9,27 +9,56 @@ use tokio::sync::{mpsc, Mutex};
 
 pub use peri_acp_types::tools::{TodoItem, TodoStatus};
 
+// ─── TodoState ────────────────────────────────────────────────────────────────
+
+/// Todo 共享状态（TodoWriteTool 写入 + TodoMiddleware after_agent 读取）。
+///
+/// `require_completion`：agent 创建 todo 时通过 `TodoWrite({ requireCompletion: true })`
+/// 构建的标记。开启后 agent 停止轮若仍存在未完成项，TodoMiddleware 会像 goal 一样
+/// 注入当前 todo 状态并 block_continue 续跑，直到全部 completed（自动解除）或
+/// agent 显式传 `requireCompletion: false`。
+#[derive(Debug, Default)]
+pub struct TodoState {
+    pub items: Vec<TodoItem>,
+    pub require_completion: bool,
+}
+
+/// 渲染当前 todo 状态文本（注入 steering 用）
+pub(crate) fn render_todo_status(items: &[TodoItem]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let status = match item.status {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+        };
+        lines.push(format!("[{i}] [{status}] {}", item.content));
+    }
+    lines.join("\n")
+}
+
 // ─── TodoWriteTool ────────────────────────────────────────────────────────────
 
 const TODO_WRITE_DESCRIPTION: &str = include_str!("descriptions/todo.md");
 
 /// TodoWrite 工具：全量覆盖 todo 列表，并通过 channel 通知 TUI 侧
 pub struct TodoWriteTool {
-    todos: Arc<Mutex<Vec<TodoItem>>>,
+    /// 共享状态（与 TodoMiddleware after_agent 同源，工具实例重建不丢状态）
+    state: Arc<Mutex<TodoState>>,
     notify_tx: Option<mpsc::Sender<Vec<TodoItem>>>,
 }
 
 impl TodoWriteTool {
-    pub fn new(notify_tx: mpsc::Sender<Vec<TodoItem>>) -> Self {
+    pub fn new(notify_tx: mpsc::Sender<Vec<TodoItem>>, state: Arc<Mutex<TodoState>>) -> Self {
         Self {
-            todos: Arc::new(Mutex::new(Vec::new())),
+            state,
             notify_tx: Some(notify_tx),
         }
     }
 
     /// 获取当前 todo 列表的快照
     pub async fn snapshot(&self) -> Vec<TodoItem> {
-        self.todos.lock().await.clone()
+        self.state.lock().await.items.clone()
     }
 }
 
@@ -111,6 +140,10 @@ impl BaseTool for TodoWriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "requireCompletion": {
+                    "type": "boolean",
+                    "description": "Require every item to be marked status=\"completed\" before you end the turn. When set, if you stop with unfinished items, the system injects the current todo state and asks you to mark them completed. Omit it when updating the list to keep the previous setting; set to false (or mark all items completed) to release"
+                },
                 "todos": {
                     "type": "array",
                     "description": "The complete todo list (replaces all previous items). Include ALL items in every call, not just new or changed ones. Items not included will be removed",
@@ -147,16 +180,32 @@ impl BaseTool for TodoWriteTool {
         let items: Vec<TodoItem> = serde_json::from_value(input["todos"].clone())
             .map_err(|e| format!("TodoWrite: invalid input: {e}"))?;
 
-        // 对比新旧列表，生成变更摘要
-        let summary = {
-            let old = self.todos.lock().await;
-            summarize_changes(&old, &items)
+        // requireCompletion：显式布尔值更新标记；缺省或非布尔（畸形值）保留已有标记
+        // （agent 中途更新列表时不带参数，不应丢失创建时的要求；畸形值不静默解除）
+        let require_completion = match input.get("requireCompletion") {
+            Some(v) => v.as_bool(),
+            None => None,
         };
 
-        // 全量覆盖
+        // 对比新旧列表，生成变更摘要
+        let summary = {
+            let old = self.state.lock().await;
+            summarize_changes(&old.items, &items)
+        };
+
+        // 全量覆盖；同步维护 require_completion 标记：
+        // - 全部 completed（或清空列表）→ 标记使命完成，自动解除
+        // - 显式 true → 开启；显式 false → 解除
+        // - 缺省 / 畸形值且未全部完成 → 保留已有标记
         {
-            let mut guard = self.todos.lock().await;
-            *guard = items.clone();
+            let mut guard = self.state.lock().await;
+            guard.items = items.clone();
+            let all_done = items.iter().all(|i| i.status == TodoStatus::Completed);
+            if all_done {
+                guard.require_completion = false;
+            } else if let Some(flag) = require_completion {
+                guard.require_completion = flag;
+            }
         }
 
         // 通知 TUI；channel 关闭时说明 TUI 已退出，记录 warn 后继续（不影响工具返回值）

@@ -54,7 +54,11 @@ fn test_begin_generates_fresh_nonce() {
     let client = AuthClient::new(test_token()).unwrap();
     let a = client.begin();
     let b = client.begin();
-    assert_ne!(a.nonce(), b.nonce(), "每次握手必须新 nonce（§9.2 挑战新鲜性）");
+    assert_ne!(
+        a.nonce(),
+        b.nonce(),
+        "每次握手必须新 nonce（§9.2 挑战新鲜性）"
+    );
     assert_eq!(a.nonce().len(), CHALLENGE_NONCE_LEN);
 }
 
@@ -74,10 +78,15 @@ fn test_build_hello_fields() {
     assert_eq!(hello.hostname, "h1");
     assert_eq!(hello.buffered, Some(true));
     assert_eq!(hello.buffer_lost, Some(false));
-    assert_eq!(hello.stream_epochs, Some(HashMap::from([("s1".to_string(), 2u64)])));
+    assert_eq!(
+        hello.stream_epochs,
+        Some(HashMap::from([("s1".to_string(), 2u64)]))
+    );
     // nonce 为本次连接 nonce 的 base64。
     assert_eq!(
-        base64::engine::general_purpose::STANDARD.decode(&hello.nonce).unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode(&hello.nonce)
+            .unwrap(),
         session.nonce().as_slice()
     );
 }

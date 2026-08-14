@@ -79,6 +79,81 @@ fn make_manager_with_cron_option(
             Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
                 as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
         }),
+        None, // MCP 订阅端口（测试无）
+        None, // 无 bg 场景：fallback NoopTaskManager
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+    )
+}
+
+/// 测试用 MCP 订阅端口：与真实实现（McpClientPool）同构——注册表为
+/// session_id → InboxHandle 的 HashMap（insert 天然幂等）；另记录注销调用。
+#[derive(Default)]
+struct FakeMcpSubscriptionPort {
+    inboxes:
+        std::sync::Mutex<std::collections::HashMap<String, peri_acp_types::session::InboxHandle>>,
+    unregistered: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeMcpSubscriptionPort {
+    fn inbox_count(&self) -> usize {
+        self.inboxes.lock().unwrap().len()
+    }
+
+    fn has_inbox(&self, session_id: &str) -> bool {
+        self.inboxes.lock().unwrap().contains_key(session_id)
+    }
+
+    fn unregistered(&self) -> Vec<String> {
+        self.unregistered.lock().unwrap().clone()
+    }
+}
+
+impl peri_acp_types::mcp::McpSubscriptionPort for FakeMcpSubscriptionPort {
+    fn register_inbox(&self, session_id: &str, handle: peri_acp_types::session::InboxHandle) {
+        self.inboxes
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), handle);
+    }
+
+    fn unregister_inbox(&self, session_id: &str) {
+        self.inboxes.lock().unwrap().remove(session_id);
+        self.unregistered
+            .lock()
+            .unwrap()
+            .push(session_id.to_string());
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// 同 make_session_manager，仅 MCP 订阅端口参数按需注入（mcp_subscription_for 测试用）。
+fn make_manager_with_mcp_subscription(
+    tmp: &tempfile::TempDir,
+    mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
+) -> SessionManager {
+    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    SessionManager::new(
+        thread_store,
+        provider,
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None, // cron 调度器（测试无）
+        mcp_subscription,
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
     )
@@ -138,7 +213,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp);
 
-    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[], true);
+    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[]);
     assert!(
         !frozen.system_prompt().is_empty(),
         "frozen system_prompt 不应为空"
@@ -148,34 +223,6 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     assert_eq!(date_chars.len(), 10, "日期长度应为 10");
     assert_eq!(date_chars[4], '-', "第 5 个字符应为连字符");
     assert_eq!(date_chars[7], '-', "第 8 个字符应为连字符");
-}
-
-/// [回归测试] last_notified_permission_mode 初始化为"未通知过"哨兵。
-///
-/// 历史背景（D2 / P3-2026-08-02）：10_hitl 不含 mode snapshot、Bypass 时
-/// 10_hitl 不渲染，初始 mode 从不向模型公开。旧实现把 last_notified 初始化为
-/// session 创建时的全局 mode，使首轮不产生通知——初始 mode 因此永久不可见。
-/// 修复后初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`] 哨兵：首个模型可见
-/// turn 公开初始 mode 一次，入队记账后不再重复；真实 mode 值（0..=4）
-/// 不会与哨兵碰撞。
-#[tokio::test]
-async fn test_last_notified_permission_mode_initialized_to_never_notified() {
-    use std::sync::atomic::Ordering;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp); // make_session_manager 全局 mode = Bypass
-    let session_id = "test-last-notified-init";
-
-    mgr.ensure_session(session_id, "/tmp");
-    let last = mgr
-        .get_session(session_id)
-        .map(|s| s.last_notified_permission_mode.load(Ordering::Relaxed))
-        .expect("ensure_session 后应存在 AcpSession");
-    assert_eq!(
-        last,
-        super::executor::PERMISSION_MODE_NEVER_NOTIFIED,
-        "last_notified 应初始化为'未通知过'哨兵（首个模型可见 turn 公开初始 mode）"
-    );
 }
 
 /// 验证 cancel_cascade_children_for 在 session 不存在时不 panic
@@ -352,5 +399,361 @@ async fn test_pending_caps_double_fallback_semantics() {
         ensured,
         peri_acp_types::PeriCaps::all_enabled(),
         "ensure 未协商 → all_enabled"
+    );
+}
+
+// ── mcp_subscription_for（2026-07-28 subscriptions/listen 订阅 inbox 注册）───
+
+/// mcp_subscription_for：首次调用惰性注册，重复调用幂等（只注册一次、不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for_幂等注册() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    let session_id = "test-mcp-sub-idempotent";
+    mgr.ensure_session(session_id, "/tmp");
+
+    assert!(
+        mgr.mcp_subscription_for(session_id),
+        "session 存在时首次调用应返回 true"
+    );
+    assert_eq!(port.inbox_count(), 1, "首次调用应注册一个 inbox");
+    assert!(
+        mgr.mcp_subscription_for(session_id),
+        "重复调用应仍返回 true（不 panic）"
+    );
+    assert_eq!(
+        port.inbox_count(),
+        1,
+        "重复调用不得重复注册（insert 幂等，注册表条目不增长）"
+    );
+    assert!(port.has_inbox(session_id), "inbox 应保留在注册表中");
+    assert!(port.unregistered().is_empty(), "注册后未 close 前不应注销");
+}
+
+/// mcp_subscription_for：session 不存在时返回 false（不注册、不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for_session不存在返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    assert!(!mgr.mcp_subscription_for("non-existent"));
+    assert_eq!(port.inbox_count(), 0, "session 不存在时不得注册");
+}
+
+/// mcp_subscription_for：close_session 后返回 false，且端口收到 unregister_inbox。
+#[tokio::test]
+async fn test_mcp_subscription_for_close_session后返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let port = Arc::new(FakeMcpSubscriptionPort::default());
+    let mgr = make_manager_with_mcp_subscription(
+        &tmp,
+        Some(port.clone() as Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>),
+    );
+    let session_id = "test-mcp-sub-close";
+    mgr.ensure_session(session_id, "/tmp");
+    assert!(mgr.mcp_subscription_for(session_id));
+
+    mgr.close_session(session_id).await.unwrap();
+    assert!(
+        !mgr.mcp_subscription_for(session_id),
+        "close_session 后应返回 false"
+    );
+    assert_eq!(
+        port.unregistered(),
+        vec![session_id.to_string()],
+        "close_session 必须注销 inbox（通知不再唤醒已关闭的会话）"
+    );
+    assert!(
+        !port.has_inbox(session_id),
+        "注销后注册表中不得残留该 session 条目"
+    );
+}
+
+/// mcp_subscription_for：未注入端口时返回 false（不 panic）。
+#[tokio::test]
+async fn test_mcp_subscription_for未注入端口返回false() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    let session_id = "test-mcp-sub-no-port";
+    mgr.ensure_session(session_id, "/tmp");
+    assert!(
+        !mgr.mcp_subscription_for(session_id),
+        "未配置端口时应返回 false"
+    );
+}
+
+/// MCP skill registry 生命周期（验收 14 半边）：ensure_session 后投影同 Arc、
+/// 各 session 隔离；close_session 并把 manager/句柄 drop 干净后 Weak 升级失败
+/// （registry 随 session 释放，无全局挂点）。
+#[tokio::test]
+async fn test_mcp_skill_registry_lifecycle_released_on_close() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    let session_id = "test-registry-lifecycle";
+    mgr.ensure_session(session_id, "/tmp");
+
+    let reg = mgr
+        .mcp_skill_registry_for(session_id)
+        .expect("ensure_session 后应能取到 registry Arc");
+    // 同一 session 重复投影必须返回同一底层 registry（每轮透传语义）
+    assert!(
+        Arc::ptr_eq(
+            &reg,
+            &mgr.mcp_skill_registry_for(session_id)
+                .expect("重复投影仍应命中")
+        ),
+        "同 session 每轮投影同一 registry"
+    );
+
+    // 不同 session 各自独立 registry（session 级隔离）
+    mgr.ensure_session("other-registry-session", "/tmp");
+    assert!(
+        !Arc::ptr_eq(
+            &reg,
+            &mgr.mcp_skill_registry_for("other-registry-session")
+                .expect("另一 session 应有自己的 registry")
+        ),
+        "不同 session 不得共享同一 registry"
+    );
+
+    let weak = Arc::downgrade(&reg);
+
+    // close_session + 把 manager 与句柄 drop 干净（session 对象不得被测试变量
+    // 继续持有）后，registry 必须释放
+    mgr.close_session(session_id).await.unwrap();
+    drop(reg);
+    drop(mgr);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "close_session 后 registry Arc 必须释放（无全局挂点）"
+    );
+}
+
+// ─── MetaHarness 冻结状态（设计 §2.3）───────────────────────────────────────
+
+use std::collections::HashMap;
+
+fn mh_cfg(entries: &[(&str, bool)]) -> HashMap<String, bool> {
+    entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
+fn default_state() -> peri_acp_types::meta_harness::MetaHarnessState {
+    peri_acp_types::meta_harness::MetaHarnessState::default()
+}
+
+#[test]
+fn build_meta_harness_state_empty_config_is_default() {
+    let state = super::build_meta_harness_state(None, HashMap::new());
+    assert_eq!(state, default_state());
+    let state = super::build_meta_harness_state(Some(&HashMap::new()), HashMap::new());
+    assert_eq!(state, default_state());
+}
+
+#[test]
+fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
+    let mut docs = HashMap::new();
+    docs.insert("01_intro".to_string(), "custom intro".to_string());
+    let state = super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), docs);
+    assert_eq!(
+        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
+        Some("custom intro")
+    );
+    assert!(state.disabled_middlewares.is_empty());
+}
+
+#[test]
+fn build_meta_harness_state_section_true_without_doc_warns_and_ignores() {
+    let state =
+        super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), HashMap::new());
+    assert!(
+        state.section_overrides.is_empty(),
+        "文档缺失时忽略覆盖（保持内置段落）"
+    );
+}
+
+#[test]
+fn build_meta_harness_state_section_false_does_not_override() {
+    let mut docs = HashMap::new();
+    docs.insert("01_intro".to_string(), "custom intro".to_string());
+    let state = super::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", false)])), docs);
+    assert!(
+        state.section_overrides.is_empty(),
+        "section + false = 显式不覆盖，即使文档存在"
+    );
+}
+
+#[test]
+fn build_meta_harness_state_middleware_false_enters_disabled() {
+    let state =
+        super::build_meta_harness_state(Some(&mh_cfg(&[("WebMiddleware", false)])), HashMap::new());
+    assert!(state.disabled_middlewares.contains("WebMiddleware"));
+    assert!(state.section_overrides.is_empty());
+}
+
+#[test]
+fn build_meta_harness_state_middleware_true_not_disabled() {
+    let state =
+        super::build_meta_harness_state(Some(&mh_cfg(&[("WebMiddleware", true)])), HashMap::new());
+    assert!(
+        state.disabled_middlewares.is_empty(),
+        "middleware + true = 显式恢复装配"
+    );
+}
+
+#[test]
+fn build_meta_harness_state_mixed_entries() {
+    let mut docs = HashMap::new();
+    docs.insert("01_intro".to_string(), "intro".to_string());
+    docs.insert("05_using_tools".to_string(), "tools".to_string());
+    let state = super::build_meta_harness_state(
+        Some(&mh_cfg(&[
+            ("01_intro", true),
+            ("05_using_tools", false),
+            ("WebMiddleware", false),
+            ("FilesystemMiddleware", true),
+        ])),
+        docs,
+    );
+    assert_eq!(state.section_overrides.len(), 1, "仅 true+文档存在 进入");
+    assert!(state.section_overrides.contains_key("01_intro"));
+    assert!(!state.section_overrides.contains_key("05_using_tools"));
+    assert_eq!(state.disabled_middlewares.len(), 1);
+    assert!(state.disabled_middlewares.contains("WebMiddleware"));
+    assert!(!state.disabled_middlewares.contains("FilesystemMiddleware"));
+}
+
+/// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
+/// 主 prompt 与 SubAgent 无 workflow prompt 共用同一覆盖。
+#[tokio::test]
+async fn test_build_frozen_data_applies_meta_harness_state() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_string();
+    // .peri/meta/01_intro.md 与 .peri/meta/05_using_tools.md
+    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    std::fs::write(meta_dir.join("01_intro.md"), "CUSTOM-INTRO-BODY").unwrap();
+    std::fs::write(meta_dir.join("05_using_tools.md"), "CUSTOM-TOOLS-BODY").unwrap();
+
+    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    peri_config.config.meta_harness = Some(mh_cfg(&[
+        ("01_intro", true),
+        ("05_using_tools", true),
+        ("WebMiddleware", false),
+    ]));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mgr = SessionManager::new(
+        thread_store,
+        provider,
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+    );
+
+    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
+    let state = frozen.meta_harness();
+    assert_eq!(
+        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
+        Some("CUSTOM-INTRO-BODY"),
+        "冻结状态包含段落覆盖"
+    );
+    assert_eq!(
+        state
+            .section_overrides
+            .get("05_using_tools")
+            .map(|s| s.as_ref()),
+        Some("CUSTOM-TOOLS-BODY")
+    );
+    assert!(
+        state.disabled_middlewares.contains("WebMiddleware"),
+        "冻结状态包含关闭集合"
+    );
+    // 主 prompt 应用覆盖（SubAgent / fork / workflow agent 直接复用主
+    // prompt——子面向字段已随 C5 移除，无独立断言对象）
+    assert!(
+        frozen.system_prompt().contains("CUSTOM-INTRO-BODY"),
+        "主 prompt 应用覆盖"
+    );
+    // accessor 与 v2_frozen 返回同一状态（单事实源）
+    assert_eq!(
+        frozen.meta_harness(),
+        &frozen.v2_frozen().meta_harness,
+        "accessor 与 FrozenContext 字段一致"
+    );
+}
+
+/// 冻结语义：构造后修改/删除 .peri/meta 文件，已构造的 frozen data 不变；
+/// 新建（重新 build_frozen_data）才看到新内容。
+#[tokio::test]
+async fn test_frozen_data_does_not_reread_meta_docs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().to_str().unwrap().to_string();
+    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    std::fs::write(meta_dir.join("01_intro.md"), "V1-BODY").unwrap();
+
+    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    peri_config.config.meta_harness = Some(mh_cfg(&[("01_intro", true)]));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mgr = SessionManager::new(
+        thread_store,
+        provider,
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+    );
+
+    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
+    assert!(frozen.system_prompt().contains("V1-BODY"));
+
+    // 删除文件并重建：已构造的 frozen 不变；新 build 才看到变化（无覆盖）
+    std::fs::remove_file(meta_dir.join("01_intro.md")).unwrap();
+    assert!(
+        frozen.system_prompt().contains("V1-BODY"),
+        "已冻结的 prompt 不因磁盘变化而变（ARC-FROZEN-001）"
+    );
+    let frozen2 = mgr.build_frozen_data(&cwd, &[], &[]);
+    assert!(
+        !frozen2.system_prompt().contains("V1-BODY"),
+        "新会话（新 build）才反映变更"
+    );
+    assert!(
+        frozen2.meta_harness().section_overrides.is_empty(),
+        "文档删除后新冻结状态无覆盖"
     );
 }

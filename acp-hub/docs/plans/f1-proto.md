@@ -377,9 +377,13 @@ pub struct ToolCallProjection {
     pub name: String,
     pub status: ToolCallStatus,
     pub arguments: Option<serde_json::Value>,   // 过滤内部/敏感字段后投影
-    pub result: Option<serde_json::Value>,      // 超大结果仅保留受授权资源引用
+    pub result: Option<serde_json::Value>,      // 仅在公开投影预算内保留
+    pub result_omitted: Option<bool>,           // true/false 为明确事实，None 为旧记录
+    pub result_bytes: Option<u64>,              // 紧凑 JSON 字节数，不含内容
     pub public_error: Option<PublicError>,
     pub permission_id: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
 }
 ```
 

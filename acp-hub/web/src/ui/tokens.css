@@ -1,0 +1,70 @@
+/* acp-hub Solid UI design tokens.
+   This file is the single source of truth for reusable color, typography,
+   elevation, and layout values. Feature CSS consumes variables only. */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --app-bg: #ffffff;
+  --sidebar-bg: #f7f7f6;
+  --surface: #ffffff;
+  --surface-muted: #f4f4f3;
+  --surface-translucent: rgb(255 255 255 / 94%);
+  --surface-header: rgb(255 255 255 / 92%);
+  --surface-hover-translucent: rgb(255 255 255 / 60%);
+  --empty-mark-bg: #f1f1ee;
+  --empty-mark-fg: #494945;
+  --scrim: rgb(20 20 19 / 22%);
+
+  /* Borders */
+  --border-subtle: #e4e4e1;
+  --border-strong: #d5d5d1;
+  --divider: #ececea;
+  --danger-border: rgb(199 68 68 / 28%);
+  --warning-border: rgb(163 101 22 / 35%);
+  --composer-border: #dededb;
+
+  /* Text */
+  --text-primary: #20201f;
+  --text-secondary: #60605d;
+  --text-muted: #686864;
+  --text-faint: #b4b4b0;
+  --link: #315f96;
+  --link-decoration: rgb(49 95 150 / 35%);
+
+  /* Interaction and feedback */
+  --accent: #62625e;
+  --hover: #eeeeed;
+  --selected: #e9e9e7;
+  --focus-ring: #62625e;
+  --success: #26895c;
+  --success-soft: #eaf6ef;
+  --warning: #a36516;
+  --warning-strong: #81500f;
+  --warning-soft: #fff5df;
+  --danger: #c74444;
+  --danger-soft: #fff0ef;
+  --btn-primary: #252524;
+  --btn-primary-hover: #111110;
+  --scrollbar-thumb: #cececa;
+
+  /* Elevation */
+  --shadow-popover: 0 16px 42px rgb(25 25 24 / 14%), 0 2px 8px rgb(25 25 24 / 8%);
+  --shadow-float: 0 8px 24px rgb(25 25 24 / 7%), 0 1px 4px rgb(25 25 24 / 5%);
+  --shadow-form: 0 6px 18px rgb(30 30 28 / 5%);
+  --shadow-auth: 0 18px 60px rgb(30 30 28 / 8%);
+  --shadow-recovery: 0 6px 18px rgb(25 25 24 / 6%);
+
+  /* Layout */
+  --composer-radius: 24px;
+  --composer-max: 864px;
+
+  /* Typography */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    'SFMono-Regular', 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+}

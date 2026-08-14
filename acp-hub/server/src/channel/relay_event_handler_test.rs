@@ -9,14 +9,12 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use acp_hub_proto::instance::{
-    BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHello,
-};
+use acp_hub_proto::instance::{BufferedFrame, InstanceBufferSync, InstanceEvent, InstanceHello};
 
 use crate::channel::{ConsumeResult, RelayEventHandler};
+use crate::control::ChatRegistry;
 use crate::control::StoreSink;
 use crate::control::{InstanceConn, InstanceRegistry};
-use crate::control::ChatRegistry;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager};
 
@@ -74,8 +72,13 @@ async fn env() -> Env {
     // 打开 session + binding（relay 投递前提）。chat store 记录须存在
     // （StoreSink 落盘按 chat 归属解析；生产中由 create 流程建立）。
     let _ = store.create_chat(uuid::Uuid::parse_str(S1).unwrap());
-    doc.open_chat(S1, "local", Some("t"), None, None).await.unwrap();
-    chats.register(S1, "local", Some("t"), "/", None).await.unwrap();
+    doc.open_chat(S1, "local", Some("t"), None, None)
+        .await
+        .unwrap();
+    chats
+        .register(S1, "local", Some("t"), "/", None)
+        .await
+        .unwrap();
     chats.bind(S1, "acp-1").await.unwrap();
     Env {
         _tmp: tmp,
@@ -101,10 +104,18 @@ fn ev(seq: u64, frame: serde_json::Value) -> InstanceEvent {
 async fn epoch_mismatch_dropped() {
     let env = env().await;
     // hello 登记 epoch=0；帧 epoch=1 → 丢弃（§4.5.1 防御）。
-    let mut e = ev(1, json!({"type": "agent_message_chunk", "payload": {"turnId": "t1", "entryId": "e", "blockId": "b", "text": "x"}}));
+    let mut e = ev(
+        1,
+        json!({"type": "agent_message_chunk", "payload": {"turnId": "t1", "entryId": "e", "blockId": "b", "text": "x"}}),
+    );
     e.epoch = 1;
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Dropped { reason: "epoch_mismatch" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped {
+            reason: "epoch_mismatch"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -120,7 +131,12 @@ async fn binding_missing_dropped() {
         }),
     );
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Dropped { reason: "binding_missing" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped {
+            reason: "binding_missing"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -138,7 +154,12 @@ async fn binding_mismatch_dropped() {
     );
     e.chat_id = "s2".into();
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Dropped { reason: "binding_missing" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped {
+            reason: "binding_missing"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -154,7 +175,12 @@ async fn event_delivered_to_aggregator() {
     );
     let r = env.relay.on_instance_event("local", &e).await;
     match r {
-        ConsumeResult::Delivered { chat_id, kind, seq, applied } => {
+        ConsumeResult::Delivered {
+            chat_id,
+            kind,
+            seq,
+            applied,
+        } => {
             assert_eq!(chat_id, S1);
             assert_eq!(kind, "message_delta");
             assert_eq!(seq, 1);
@@ -178,7 +204,12 @@ async fn unknown_frame_dropped_counted() {
         }),
     );
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Dropped { reason: "unsupported_frame" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::Dropped {
+            reason: "unsupported_frame"
+        }
+    ));
     assert!(env.relay.dropped_total() >= 1);
 }
 
@@ -199,7 +230,12 @@ async fn buffer_sync_epoch_mismatch_rejects_batch() {
         }],
     };
     let r = env.relay.on_buffer_sync("local", &sync).await;
-    assert!(matches!(r, ConsumeResult::BatchRejected { reason: "buffer_sync_epoch_mismatch" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::BatchRejected {
+            reason: "buffer_sync_epoch_mismatch"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -220,7 +256,12 @@ async fn buffer_sync_out_of_order_frames_dropped() {
         }],
     };
     let r = env.relay.on_buffer_sync("local", &sync).await;
-    assert!(matches!(r, ConsumeResult::BatchRejected { reason: "all_frames_rejected" }));
+    assert!(matches!(
+        r,
+        ConsumeResult::BatchRejected {
+            reason: "all_frames_rejected"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -261,10 +302,16 @@ async fn rpc_response_confirms_coordinator() {
     let env = env().await;
     // coordinator 登记 rpc → relay 匹配响应 → oneshot 通知。
     let rx = env.relay.register_rpc("hub-1", "c1".into()).await;
-    let e = ev(7, json!({"jsonrpc": "2.0", "id": "hub-1", "result": {"ok": true}}));
+    let e = ev(
+        7,
+        json!({"jsonrpc": "2.0", "id": "hub-1", "result": {"ok": true}}),
+    );
     let r = env.relay.on_instance_event("local", &e).await;
     match r {
-        ConsumeResult::RpcConfirmed { command_id, response } => {
+        ConsumeResult::RpcConfirmed {
+            command_id,
+            response,
+        } => {
             assert_eq!(command_id, "c1");
             assert_eq!(response["result"]["ok"], json!(true));
         }
@@ -349,22 +396,24 @@ async fn request_permission_registered_and_delivered() {
     // （take 命中且 request_id/options 回读一致）。
     let e = ev(2, official_permission_frame());
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    assert!(
+        matches!(r, ConsumeResult::Delivered { applied: true, .. }),
+        "{r:?}"
+    );
     // 投影已写（pending_permissions 有条目；permission_id 由 server 生成）。
     let perms = mirror_pending_permissions(&env).await;
     assert_eq!(perms.len(), 1, "权限投影写入 control doc");
     let pid = perms[0].0.clone();
-    // take 命中且回读一致；一次性 remove。
-    let taken = env
-        .relay
-        .take_pending_permission(&pid)
-        .await
-        .expect("take 命中");
+    // 回读命中且一致；确认 delivery 前必须可重复读取。
+    let taken = env.relay.pending_permission(&pid).await.expect("read 命中");
     assert_eq!(taken.request_id, json!(5), "agent request id 原样");
     assert_eq!(taken.options.len(), 1);
     assert_eq!(taken.options[0]["optionId"], json!("allow-once"));
     assert_eq!(taken.chat_id, S1);
-    assert!(env.relay.take_pending_permission(&pid).await.is_none(), "一次性 remove");
+    assert!(
+        env.relay.pending_permission(&pid).await.is_some(),
+        "delivery 前保留回投材料"
+    );
 }
 
 #[tokio::test]
@@ -386,7 +435,10 @@ async fn request_permission_turn_id_injected() {
     // turn_id == "t1"（对齐 327-342 的镜像断言写法）。
     let e = ev(2, official_permission_frame());
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    assert!(
+        matches!(r, ConsumeResult::Delivered { applied: true, .. }),
+        "{r:?}"
+    );
     let perms = mirror_pending_permissions(&env).await;
     assert_eq!(perms.len(), 1);
     assert_eq!(perms[0].1, "t1", "turn_id 从 active_turns 表注入");
@@ -410,13 +462,16 @@ async fn request_permission_before_active_turn_empty_turn_id() {
     // 注意：不调用 chats.set_active_turn——registry 表保持无登记。
     let e = ev(2, official_permission_frame());
     let r = env.relay.on_instance_event("local", &e).await;
-    assert!(matches!(r, ConsumeResult::Delivered { applied: true, .. }), "{r:?}");
+    assert!(
+        matches!(r, ConsumeResult::Delivered { applied: true, .. }),
+        "{r:?}"
+    );
     let perms = mirror_pending_permissions(&env).await;
     assert_eq!(perms.len(), 1, "权限仍投影");
     assert_eq!(perms[0].1, "", "registry 无 active turn → turn_id 空串");
     assert!(
-        env.relay.take_pending_permission(&perms[0].0).await.is_some(),
-        "take 仍命中（功能不丢）"
+        env.relay.pending_permission(&perms[0].0).await.is_some(),
+        "read 仍命中（功能不丢）"
     );
 }
 
@@ -467,7 +522,10 @@ async fn disconnect_cleanup_interrupts_turn_and_gaps() {
         .cast::<yrs::MapRef>()
         .unwrap();
     assert_eq!(
-        sm.get(&txn, "active_turn_status").unwrap().cast::<String>().unwrap(),
+        sm.get(&txn, "active_turn_status")
+            .unwrap()
+            .cast::<String>()
+            .unwrap(),
         "interrupted",
         "断链 → 活动 turn interrupted（§7.1）"
     );
@@ -476,7 +534,11 @@ async fn disconnect_cleanup_interrupts_turn_and_gaps() {
         .unwrap()
         .cast::<yrs::MapRef>()
         .unwrap();
-    let pm = perms.get(&txn, "p1").unwrap().cast::<yrs::MapRef>().unwrap();
+    let pm = perms
+        .get(&txn, "p1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         pm.get(&txn, "status").unwrap().cast::<String>().unwrap(),
         "expired",
@@ -492,7 +554,13 @@ async fn process_exit_sets_terminal() {
         code: 0,
     };
     let r = env.relay.on_process_exit("local", &exit).await;
-    assert!(matches!(r, ConsumeResult::Delivered { kind: "process_exit", .. }));
+    assert!(matches!(
+        r,
+        ConsumeResult::Delivered {
+            kind: "process_exit",
+            ..
+        }
+    ));
     let e = env.chats.entry(S1).await.unwrap();
     assert_eq!(e.state, crate::control::ChatState::Ended);
 }
@@ -609,7 +677,9 @@ async fn agent_status_without_session_id_delivered() {
     );
     let r = env.relay.on_instance_event("local", &e).await;
     match r {
-        ConsumeResult::Delivered { chat_id, applied, .. } => {
+        ConsumeResult::Delivered {
+            chat_id, applied, ..
+        } => {
             assert_eq!(chat_id, S1, "信封 chat 兜底归属");
             assert!(applied, "agent/status 应投递（聚合器接受）");
         }
@@ -628,7 +698,11 @@ async fn agent_status_without_session_id_delivered() {
     mirror.transact_mut().apply_update(parsed).unwrap();
     let txn = mirror.transact();
     let root = txn.get_map("root").unwrap();
-    let agent = root.get(&txn, "agent").unwrap().cast::<yrs::MapRef>().unwrap();
+    let agent = root
+        .get(&txn, "agent")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(
         agent.get(&txn, "status").unwrap().cast::<String>().unwrap(),
         "busy",
@@ -649,7 +723,9 @@ async fn raw_frame_without_session_id_still_dropped() {
     let r = env.relay.on_instance_event("local", &e).await;
     assert!(matches!(
         r,
-        ConsumeResult::Dropped { reason: "binding_missing" }
+        ConsumeResult::Dropped {
+            reason: "binding_missing"
+        }
     ));
 }
 
@@ -716,7 +792,10 @@ async fn buffer_sync_uncalibratable_keeps_gap() {
         }],
     };
     let r = env.relay.on_buffer_sync("local", &sync).await;
-    assert!(matches!(r, ConsumeResult::Delivered { .. }), "补推帧投递（聚合器拒绝，relay 不感知）");
+    assert!(
+        matches!(r, ConsumeResult::Delivered { .. }),
+        "补推帧投递（聚合器拒绝，relay 不感知）"
+    );
     // 保持 Gap + gap 占位（不可校准缺口只能经 session/load 显式重建消除）。
     assert_eq!(
         env.chats.entry(S1).await.unwrap().state,

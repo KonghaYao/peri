@@ -5,11 +5,10 @@ use std::collections::HashMap;
 use crate::action::PermissionDecision;
 use crate::schema::{
     ActiveTurnProjection, AgentStatusProjection, BlockVisibility, ChatDocRoot, ChatEntry,
-    ContentBlock, EntryKind, EntryRole, EntryStatus, GlobalStatus, InstanceStatus,
-    InstanceView, PermissionOptions, PermissionProjection, PermissionStatus, PublicError,
-    RegistryDocRoot, RegistryGlobal, SessionDocRoot, ChatInfoProjection,
-    ChatStatus, ChatSummary, SessionSummaryProjection, ToolCallProjection,
-    ToolCallStatus, TurnStatus,
+    ChatInfoProjection, ChatStatus, ChatSummary, ContentBlock, EntryKind, EntryRole, EntryStatus,
+    GlobalStatus, InstanceStatus, InstanceView, PermissionOptions, PermissionProjection,
+    PermissionStatus, PublicError, RegistryDocRoot, RegistryGlobal, SessionDocRoot,
+    SessionSummaryProjection, ToolCallProjection, ToolCallStatus, TurnStatus,
 };
 
 fn chat_root() -> ChatDocRoot {
@@ -32,6 +31,7 @@ fn chat_root() -> ChatDocRoot {
             role: EntryRole::Assistant,
             status: EntryStatus::Completed,
             author_user_id: None,
+            source_command_id: None,
             created_at: "2026-08-07T00:00:00Z".into(),
             completed_at: Some("2026-08-07T00:00:01Z".into()),
             block_order: vec!["b1".into()],
@@ -49,8 +49,12 @@ fn chat_root() -> ChatDocRoot {
             status: ToolCallStatus::Completed,
             arguments: Some(serde_json::json!({"cmd": "ls"})),
             result: Some(serde_json::json!({"output": "x"})),
+            result_omitted: Some(false),
+            result_bytes: Some(14),
             public_error: None,
             permission_id: None,
+            started_at: Some("2026-08-07T00:00:00Z".into()),
+            completed_at: Some("2026-08-07T00:00:01Z".into()),
         },
     );
     ChatDocRoot {
@@ -60,6 +64,42 @@ fn chat_root() -> ChatDocRoot {
         entries,
         tool_calls,
     }
+}
+
+#[test]
+fn chat_entry_source_command_id_is_an_additive_camel_case_field() {
+    let mut root = chat_root();
+    let entry = root.entries.get_mut("t1:assistant").unwrap();
+    entry.source_command_id = Some("command-1".into());
+    let value = serde_json::to_value(entry).unwrap();
+    assert_eq!(value["sourceCommandId"], "command-1");
+
+    let mut legacy = value.as_object().unwrap().clone();
+    legacy.remove("sourceCommandId");
+    let decoded: ChatEntry = serde_json::from_value(legacy.into()).unwrap();
+    assert_eq!(decoded.source_command_id, None);
+}
+
+#[test]
+fn tool_call_observation_times_are_additive_camel_case_fields() {
+    let value = serde_json::to_value(chat_root().tool_calls.remove("tc1").unwrap()).unwrap();
+    assert_eq!(value["startedAt"], "2026-08-07T00:00:00Z");
+    assert_eq!(value["completedAt"], "2026-08-07T00:00:01Z");
+    assert_eq!(value["resultOmitted"], false);
+    assert_eq!(value["resultBytes"], 14);
+
+    let legacy = serde_json::json!({
+        "toolCallId": "tc-old", "turnId": "t", "name": "shell", "status": "pending",
+        "arguments": null, "result": null, "publicError": null, "permissionId": null
+    });
+    let decoded: ToolCallProjection = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.started_at, None);
+    assert_eq!(decoded.completed_at, None);
+    assert_eq!(decoded.result_omitted, None);
+    assert_eq!(decoded.result_bytes, None);
+
+    let reencoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(reencoded["resultOmitted"], serde_json::Value::Null);
 }
 
 fn control_root() -> SessionDocRoot {
@@ -151,6 +191,8 @@ fn registry_root() -> RegistryDocRoot {
         schema_version: crate::version::REGISTRY_DOC_SCHEMA_VERSION,
         instances,
         chats,
+        projects: HashMap::new(),
+        project_sessions: HashMap::new(),
         global: RegistryGlobal {
             status: GlobalStatus::Healthy,
         },
@@ -172,7 +214,10 @@ fn doc_root_camel_case_field_names() {
     assert_eq!(session["chat"]["activeTurnId"], "t1");
     assert_eq!(session["agent"]["sessionId"], "acp-1");
     assert_eq!(session["activeTurn"]["turnStatus"], "running");
-    assert_eq!(session["pendingPermissions"]["p1"]["options"][0], "allowOnce");
+    assert_eq!(
+        session["pendingPermissions"]["p1"]["options"][0],
+        "allowOnce"
+    );
     assert!(session.get("sessions").is_some());
 
     let registry = serde_json::to_value(registry_root()).unwrap();
@@ -185,17 +230,50 @@ fn doc_root_camel_case_field_names() {
 /// 跨 Doc 枚举序列化形态（camelCase；`PermissionDecision` 为 snake_case，§4.2）。
 #[test]
 fn enum_serialized_shapes() {
-    assert_eq!(serde_json::to_string(&EntryKind::Message).unwrap(), "\"message\"");
-    assert_eq!(serde_json::to_string(&EntryRole::Assistant).unwrap(), "\"assistant\"");
-    assert_eq!(serde_json::to_string(&EntryStatus::Streaming).unwrap(), "\"streaming\"");
-    assert_eq!(serde_json::to_string(&ToolCallStatus::AwaitingPermission).unwrap(), "\"awaitingPermission\"");
-    assert_eq!(serde_json::to_string(&TurnStatus::AwaitingPermission).unwrap(), "\"awaitingPermission\"");
-    assert_eq!(serde_json::to_string(&ChatStatus::Crashed).unwrap(), "\"crashed\"");
-    assert_eq!(serde_json::to_string(&InstanceStatus::Offline).unwrap(), "\"offline\"");
-    assert_eq!(serde_json::to_string(&GlobalStatus::Degraded).unwrap(), "\"degraded\"");
-    assert_eq!(serde_json::to_string(&PermissionOptions::AllowSession).unwrap(), "\"allowSession\"");
-    assert_eq!(serde_json::to_string(&PermissionStatus::Expired).unwrap(), "\"expired\"");
-    assert_eq!(serde_json::to_string(&BlockVisibility::Hidden).unwrap(), "\"hidden\"");
+    assert_eq!(
+        serde_json::to_string(&EntryKind::Message).unwrap(),
+        "\"message\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EntryRole::Assistant).unwrap(),
+        "\"assistant\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EntryStatus::Streaming).unwrap(),
+        "\"streaming\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ToolCallStatus::AwaitingPermission).unwrap(),
+        "\"awaitingPermission\""
+    );
+    assert_eq!(
+        serde_json::to_string(&TurnStatus::AwaitingPermission).unwrap(),
+        "\"awaitingPermission\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ChatStatus::Crashed).unwrap(),
+        "\"crashed\""
+    );
+    assert_eq!(
+        serde_json::to_string(&InstanceStatus::Offline).unwrap(),
+        "\"offline\""
+    );
+    assert_eq!(
+        serde_json::to_string(&GlobalStatus::Degraded).unwrap(),
+        "\"degraded\""
+    );
+    assert_eq!(
+        serde_json::to_string(&PermissionOptions::AllowSession).unwrap(),
+        "\"allowSession\""
+    );
+    assert_eq!(
+        serde_json::to_string(&PermissionStatus::Expired).unwrap(),
+        "\"expired\""
+    );
+    assert_eq!(
+        serde_json::to_string(&BlockVisibility::Hidden).unwrap(),
+        "\"hidden\""
+    );
     // PermissionDecision 供 §7 schema 复用（§4.2：snake_case）
     assert_eq!(
         serde_json::to_string(&PermissionDecision::Deny).unwrap(),
@@ -217,19 +295,18 @@ fn content_block_kind_tag() {
     assert_eq!(v["kind"], "tool_call");
     assert_eq!(v["tool_call_id"], "tc1");
 
-    let text: serde_json::Value =
-        serde_json::to_value(ContentBlock::Text {
-            block_id: "b2".into(),
-            text: "hi".into(),
-        })
-        .unwrap();
+    let text: serde_json::Value = serde_json::to_value(ContentBlock::Text {
+        block_id: "b2".into(),
+        text: "hi".into(),
+    })
+    .unwrap();
     assert_eq!(text["kind"], "text");
 
     // 反序列化判别（字段名 = rust 名，见上注）
     let back: ContentBlock =
         serde_json::from_value(serde_json::json!({"kind": "resource", "block_id": "b3",
             "resource_id": "r1", "media_type": "text/plain", "name": "a.txt"}))
-            .unwrap();
+        .unwrap();
     assert_eq!(
         back,
         ContentBlock::Resource {
@@ -245,8 +322,7 @@ fn content_block_kind_tag() {
 #[test]
 fn schema_roots_full_roundtrip() {
     let chat = chat_root();
-    let back: ChatDocRoot =
-        serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
+    let back: ChatDocRoot = serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
     assert_eq!(back, chat);
 
     let session = control_root();
@@ -270,8 +346,5 @@ fn public_error_roundtrip() {
     let v = serde_json::to_value(&err).unwrap();
     assert_eq!(v["code"], "AGENT_UNAVAILABLE");
     assert_eq!(v["message"], "redacted");
-    assert_eq!(
-        serde_json::from_value::<PublicError>(v).unwrap(),
-        err
-    );
+    assert_eq!(serde_json::from_value::<PublicError>(v).unwrap(), err);
 }

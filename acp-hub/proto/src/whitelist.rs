@@ -47,6 +47,7 @@ pub static FRAME_TAGS: &[FrameTag] = &[
     FrameTag("instance/forward_ack"),
     FrameTag("instance/process_exit"),
     FrameTag("session_list"),
+    FrameTag("prompt_status"),
 ];
 
 /// 连接侧角色（由 token 解析，§9.5：token 即身份）。
@@ -84,6 +85,18 @@ pub enum M1Check {
 /// `chat/load`（原 M2 预留）于 §8.5 启用：当前对话内切换 ACP 会话
 /// （会话是进程内实体——load 不新建进程，无两阶段创建语义）。
 pub const M1_ACTION_TYPES: &[&str] = &[
+    "project/create",
+    "project/archive",
+    "project/restore",
+    "project/rename",
+    "session/create",
+    "session/open",
+    "session/rename",
+    "session/archive",
+    "session/restore",
+    "session/import",
+    "session/discover",
+    "session/prompt-status",
     "chat/create",
     "chat/load",
     "chat/prompt",
@@ -140,6 +153,7 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
             | "instance/kill_ack"
             | "instance/forward_ack"
             | "instance/process_exit"
+            | "prompt_status"
     );
     if !in_m1_frame_set {
         return M1Check::NotInM1;
@@ -153,7 +167,12 @@ pub fn m1_check(tag: FrameTag, role: Role, dir: Direction) -> M1Check {
             ),
             Direction::Outbound => matches!(
                 tag.0,
-                "action_ack" | "action_error" | "ysync.update" | "ready" | "keep_alive"
+                "action_ack"
+                    | "action_error"
+                    | "ysync.update"
+                    | "ready"
+                    | "keep_alive"
+                    | "prompt_status"
             ),
         },
         Role::Instance => match dir {

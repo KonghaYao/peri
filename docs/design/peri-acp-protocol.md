@@ -8,7 +8,7 @@ ACP 协议分为标准 ACP 方法（TUI → 服务）与 ACP 事件通知（服�
 
 **标准 ACP（JSON-RPC 方法）**：TUI 调用，ACP 执行并返回。覆盖会话生命周期、prompt 提交、配置/权限控制、插件管理、后台任务与工作流控制。请求-响应语义——发一个请求，收一个结果。
 
-**ACP 事件通知**：当前 TUI 的主事件面是标准 `session/update` 和 `peri/agent_event`。`peri/unstable-event` 只保留兼容或特定扩展用途，不作为通用 Agent → TUI 事件管道；完整链路见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
+**ACP 事件通知**：当前 TUI 的主事件面是标准 `session/update` 和 `peri/agent_event`。`peri/unstable_event` 只保留兼容或特定扩展用途，不作为通用 Agent → TUI 事件管道；完整链路见 `docs/standards/architecture-contracts.md` 的 ARC-EVENT-001。
 
 这些消息复用传输通道；transport 只负责编解码和分发，不解释 Agent 业务语义。
 
@@ -94,7 +94,7 @@ ACP 事件映射 / EventSink
     └─ `peri/agent_event_done`：turn 终止通知
 ```
 
-`peri/unstable-event` 不参与上述通用链路；其剩余兼容/扩展用途不应作为新 Agent 事件的目标通道。
+`peri/unstable_event` 不参与上述通用链路；其剩余兼容/扩展用途不应作为新 Agent 事件的目标通道。
 
 ### 3.2 通知格式
 
@@ -119,7 +119,7 @@ ACP 事件映射 / EventSink
 
 ### 4.1 流式事件（高频，每秒数十次）
 
-> **已迁移至标准 ACP `session/update` 通道**。以下事件不再走 `peri/unstable-event`，改由 `map_event()` Category ① 映射为标准 ACP `SessionUpdate` 通知（`ContentChunk` / `ToolCall` / `ToolCallUpdate`）。TUI 侧通过 `acp_notifier.rs` 的 `handle_session_update` 处理。
+> **已迁移至标准 ACP `session/update` 通道**。以下事件不再走 `peri/unstable_event`，改由 `map_event()` Category ① 映射为标准 ACP `SessionUpdate` 通知（`ContentChunk` / `ToolCall` / `ToolCallUpdate`）。TUI 侧通过 `acp_notifier.rs` 的 `handle_session_update` 处理。
 
 | 原事件名 | SessionUpdate tag | 语义 |
 |----------|-------------------|------|
@@ -144,7 +144,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ### 4.3 兼容与扩展事件
 
-`peri/unstable-event` 不再承载 v2 Agent 事件映射。它仅保留给兼容或特定扩展用途；新增 Agent 事件必须经 ARC-EVENT-001 规定的 `session/update` 或 `peri/agent_event` 链路接入。
+`peri/unstable_event` 不再承载 v2 Agent 事件映射。它仅保留给兼容或特定扩展用途；新增 Agent 事件必须经 ARC-EVENT-001 规定的 `session/update` 或 `peri/agent_event` 链路接入。
 
 ---
 
@@ -166,7 +166,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 | 标准 ACP notification | `session/update` | `{method: "session/update", params: {sessionId, update}}` | 服务 → 客户端流式与使用量更新 |
 | TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | 服务 → TUI 低频状态、结构与扩展事件 |
 | 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
-| 兼容/扩展 | `peri/unstable-event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
+| 兼容/扩展 | `peri/unstable_event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
 | 输入预测 | `peri/prediction_ready` | `{method: "peri/prediction_ready", params: {sessionId, text, actions}}` | 服务 → 客户端输入预测建议 |
 | Turn 结束信号 | `peri/agent_event_done` | `{method: "peri/agent_event_done", params: {sessionId, stopReason, requestId?}}` | 服务 → 客户端 turn 完成（wire 字段为 camelCase `stopReason`；`requestId` 可选，仅提交 prompt 时携带时回带） |
 
@@ -181,4 +181,4 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ## 7. 兼容性
 
-`peri/unstable-event` 的遗留兼容 payload 可能随协议演进变化；新事件应优先使用 `session/update` 或 `peri/agent_event`。修改既有 wire payload 时，必须同步更新 ACP 与 TUI 两侧解析，并按 ARC-EVENT-001 验证完整事件链路。
+`peri/unstable_event` 的遗留兼容 payload 可能随协议演进变化；新事件应优先使用 `session/update` 或 `peri/agent_event`。修改既有 wire payload 时，必须同步更新 ACP 与 TUI 两侧解析，并按 ARC-EVENT-001 验证完整事件链路。

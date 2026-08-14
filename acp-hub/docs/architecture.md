@@ -1,7 +1,7 @@
 # acp-hub 架构设计（权威版）
 
-> 状态：v2.4 设计定稿（吸收三轮 advisor 成熟度审查修订）
-> 日期：2026-08-07
+> 状态：v2.5（补充 Web project session 与浏览器认证契约）
+> 日期：2026-08-12
 > 定位：acp-hub 独立项目的架构基准文档。与 peri 的唯一耦合点是 ACP 进程（协议线格式），本设计不依赖 peri 的任何 crate 与部署形态。
 > 来源：三轮对抗面试（产品/用户角度）收敛裁决 + 参考实现 `@fenix/chat-channel`（`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel`，实现基线 `docs/arch/19-yjs-chat-streaming.md`，ADR `spec/global/adr/2026-08-04-chat-channel-package-design.md`）+ 三视角对抗审查（架构师/高级开发工程师/高级运维工程师，2026-08-07）+ 三轮 advisor 成熟度审查（2026-08-07，opus，第三轮评级：**可开工**）。v2.1 修订项以「【审查】」标注；v2.2 以「【顾问】」；v2.3 以「【顾问2】」；v2.4 以「【顾问3】」。advisor 关于「删除 HMAC 双向认证」的删减建议**被否决**（§9.2 保留，v2.3 补齐协议级规范，v2.4 补齐线格式精度）。
 > 约定：引用 chat-channel 处标注其文档章节号（如「chat §5.2」），实现时以该仓库为对照基线。
@@ -53,6 +53,78 @@
 ---
 
 ## 3. 系统拓扑与组件
+
+### 3.0 Web project session 扩展
+
+Web UI 使用四层身份，禁止互换：`project_id` 是左栏分组，`project_session_id` 是 SQLite 持久入口，ACP `session_id` 是 agent 的 durable thread，`chat_id` 是一次 server/ACP runtime。`last_chat_id` 只作运行期提示；重启后打开持久入口必须以精确 ACP session id 走 `session/load`，不得复活旧进程或根据标题猜测。
+
+该恢复不变量的端到端验收必须跨过 ACP stdin wire，而不能只比较 Ack 回显或 SQLite 投影：隔离产品旅程需证明重启后的新 ACP 进程只收到一次 `session/load`，其 `params.sessionId` 与重启前持久化的 durable ACP id 完全一致，并在该 runtime 上成功继续 prompt/Yjs 投影。生产 instance 仍只统计 ACP stderr，不记录正文；wire 观察仅允许测试专用 ACP fixture 写入其临时目录。
+
+左栏 catalog 只展示来源为 `hub`（经 `session/create` 建立）或 `imported`（用户经 `session/import` 明确加入）的 project session。ACP `session/list` 的其余历史仅作为按 project cwd 分面的导入候选，不得在启动或轮询时自动进入侧边栏；旧版自动迁移记录标为 `legacy_hidden`，保留数据但不投影。
+
+导入候选的冷启动入口是 project 级 `session/discover {projectId}`，不能要求用户先创建或打开一个 Hub 会话。server 优先复用同 instance/cwd 的非终态 runtime；没有可复用 runtime 时，建立一个不进入 ChatRegistry 常规 chat map、Registry chat map 或 SQLite catalog 的私有 ACP 进程，依次执行 `initialize`、`session/list` 并在投影候选后 `instance/kill`。该临时进程只在 ChatRegistry 的心跳 ownership 集合中登记为 server-owned，避免被孤儿清理竞态提前终止；同一 project 的 discovery 必须 single-flight。discovery 本身绝不创建 ACP session、Hub project session 或侧边栏条目，只有用户后续确认的 `session/import` 才写入 catalog。
+
+导入是显式的选择、事实复核、提交三阶段流程。复核只展示 ACP `session/list` 与 project catalog 已实际提供的标题、更新时间、完整 `acp_session_id` 和精确 cwd；当前协议没有消息摘要时，UI 必须明确说明内容预览不可用，不得从标题推断或伪造预览。搜索或 Registry 刷新使候选离开当前结果后，旧选择立即失效且不可提交。提交期间锁定查询与选择；服务端明确拒绝和 delivery unknown 必须显示不同恢复建议，后者只能使用原 `commandId` 重新确认。
+
+`<data_dir>/metadata.sqlite3` 是 project/project session 元数据与全局 metadata command 去重的唯一事实源；现有 per-chat update/outbox/watermark 保持原崩溃恢复语义。Registry v2 的 `projects`、`project_sessions` 是 SQLite 的只读广播投影。project/session mutation 的 committed Ack 必须跨过 SQLite 提交与 Registry 投影屏障；ACP 副作用结果不确定时进入 `reconciliation_required`，不得自动重试 `session/new`。`project/rename` 只更新展示名并保持 project id、cwd、instance binding 与所有 session identity 不变。project 与 project session 的“删除”在用户界面中始终是可逆归档：`project/archive|restore` 和 `session/archive|restore` 只设置或清除各自独立的 `archived_at`，复用全局 commandId 去重与投影屏障；session 的 `lifecycle`、ACP thread、消息历史、runtime chat 文档和工作目录文件均不因此改变或删除。归档 session 后，Web 必须从导航、搜索、上次打开恢复候选中排除它，恢复后才重新可见。任何 project session 仍绑定非终态 runtime 时，归档 project 或 session 都必须拒绝；无法读取元数据或验证 runtime 状态时同样 fail-closed，避免把仍在工作的 agent 从导航中隐藏。
+
+project session 的展示名同时保留三类不同来源，优先级固定为用户 `custom_name` → 有意义的 ACP `acp_title` → Hub 从首条已安全下发 prompt 生成的 `hub_title` → ACP 默认标题 → `新对话`。`hub_title` 只给 `origin='hub'` 的目录项写一次，使用首个非空行、Unicode 字符边界和 60 字符上限；它不调用 ACP rename，也不覆盖用户别名。后续 `session/list` 返回真实 ACP 标题时，ACP 事实自然接管展示。该分层避免多个新会话长期不可辨识，同时不伪造跨进程标题同步。
+
+Registry 视图采用 `<data_dir>/registry.snapshot` + `<data_dir>/registry.log` 增量记录恢复。增量日志超过 8 MiB 后，server 把当前**可见值图**物化到一个新的 Yjs Doc，丢弃只影响历史合并而不影响当前投影的 tombstone/历史 item，再以 tmp → fsync → rename → 目录 fsync 发布快照；快照通过 blob CRC 与 Yjs decode 读回验证后才轮换日志。首次从旧的纯日志格式迁移时，原日志保留为权限 `0600` 的 `registry.log.legacy-v1`，供兼容窗口内人工回滚；后续压缩原子截断增量日志。启动时先应用快照再应用增量；若增量尾部是半写或 CRC 损坏，只截断到最后一条完整记录，损坏快照则 fail-fast，不静默重建。
+
+浏览器认证通过同源 `POST/GET/DELETE /api/auth/session` 建立内存 opaque session，并下发 `HttpOnly; SameSite=Strict; Path=/; Max-Age=28800` Cookie，与服务端 8 小时 TTL 对齐。Web 不在 URL、Web Storage 或 WS 首帧保存/发送 bearer token。Cookie attach 与存量连接按心跳重新校验 token id、撤销状态和当前 role；instance HMAC 与旧 CLI wire-token 流程保持兼容。
+
+首次 bootstrap instance token 只允许在 server stderr 直连交互终端时显示一次；stderr 被日志文件、管道、service manager 或开发脚本重定向时，输出只能包含受 `0600` 保护的 `tokens.toml` 路径，禁止复制 token 本体到日志。instance 由文件读取该凭据，不依赖日志抓取。
+
+登录帮助由 server 的权威运行时 `Config` 派生，不得由 Web 猜测 XDG 默认值。`GET/POST /api/auth/session` 的成功与 401 响应可附带 credential-free `setup { tokenFile, generateCommand }`；字段只描述当前进程实际使用的 token 文件和带精确 config-dir/可执行文件的生成命令，不得包含 token 内容、token id、名称或文件数据。浏览器严格解析这两个非空字符串，畸形/缺失时只显示无路径的通用命令。AuthService `try_lock` 竞争在 GET/POST 上返回 `503 auth_busy` 与 `Retry-After`，不得坍缩成 401 并归罪正确凭证。
+
+浏览器收到 `auth_error` 或认证终态关闭码时，必须原子完成运行态清理、principal 撤销与登录失效事件发布。失效事件是单一 `{id, reason}` 值，禁止拆成可独立漂移的 epoch/reason signals；清理 Y.Doc、草稿和连接状态不得抹掉它。登录页持续展示原因，直到重新认证成功或用户显式退出。普通 401 status bootstrap 可保持安静，但已登录会话的撤销不能退化成无解释的登录表单。
+
+`auth-state` 是 principal、read-only policy 与失效事件的唯一前端事实源；feature 组件直接读取该窄接口，store 只在 action guard 和连接失效编排中消费，不得 re-export 第二入口。`AuthGate` 为每个 status/login 请求分配单调 request epoch；WebSocket 失效、退出或后续请求会使旧 HTTP 结果失效，晚到 200 不得恢复已撤销会话。HTTP 200 只有在 role 精确解析为 `full`/`read-only` 时才能进入应用，未知或缺失 role 必须 fail closed。
+
+浏览器必须区分**连接世代**与**身份世代**。普通 WebSocket reconnect 保留当前逻辑会话、Registry/Chat 投影与可对账 command，以便快照重放后连续工作；logout、`auth_error`、4502 或新的 HTTP principal 成功安装之前则必须经过同一个幂等 authenticated-session reset：先撤销内存 role 并 fence 旧 socket，随后清空全部 server-derived catalog/chat/control/diagnostic signal、command/delivery 状态和 Y.Doc，最后取消并清空所有 transient notification timer。旧身份排队的 rAF、WebSocket callback、command timeout 或 toast expiry 均不得写入新身份界面；本地 remembered session 只是恢复偏好，实际 reopen 仍必须由新 principal 经 server 授权。
+
+loopback 认证 HTTP 面是封闭协议：只接受 HTTP/1.1；POST/DELETE 必须携带与 Host 精确一致的 Origin；POST 只接受 `application/json`（可选 UTF-8 charset）和显式非零 Content-Length；GET/DELETE 禁止 body。重复 Host/Origin/Cookie/Content-Type/Content-Length、任何 Transfer-Encoding、非法 JSON、长度不符与尾随 body 字节均 fail-closed。所有认证响应包含 `Cache-Control: no-store`、`Pragma: no-cache` 与 `X-Content-Type-Options: nosniff`，且永不反射 bearer token。
+
+静态资源缓存以构建身份而非扩展名分类。页面入口 `/`、`/index.html`、兼容入口 `/panel.html`、404 与任何固定名资源使用 `Cache-Control: no-store`，确保 server 重启或协议升级后不会继续启动旧 Web 客户端。只有已命中内嵌资源表、位于 `/assets/` 且文件末段包含至少 8 字节构建指纹的 Vite 产物，才使用 `public, max-age=31536000, immutable`；不存在的 `/assets/*` 或未来固定名 public asset 不得继承 immutable。静态 `HEAD` 与 `GET` 共享状态、Content-Type、Content-Length、安全头和缓存分类，但 HEAD 不发送响应体，供健康检查与部署探针准确判断入口/资源存在性。缓存头与 CSP、nosniff、frame/referrer 安全头分别组装，所有静态响应继续携带安全头。
+
+Web action 的连接期生命周期由单一 `CommandTracker` module 所有：发送成功后登记 timer，`accepted` 只表示排队且不得释放命令，`committed`/`duplicate`/`action_error` 才是终态。超时或连接中断统一转为“结果尚未确认”；只有声明支持安全对账的 metadata action 才保留原始 frame，并且重试必须复用同一 `commandId`。晚到终态可以清除对账记录，但不得再次调用已超时的业务 continuation。Solid store 只提供 transport adapter 和领域 callback，不得自行维护第二套 pending/timer/uncertain map。
+
+project/session 目录动作的浏览器策略由 `CatalogActions` deep module 单一所有。它统一执行连接、权限与未确认 metadata 门控，构造目录命令，声明可对账 mutation 的同一 `commandId` 重试策略，并只在 `committed`/`duplicate` 后触发本地导航副作用。Solid store 只注入 transport、toast、错误持久化和选中态清理适配器；不得重新直接构造 `project/create|archive|restore|rename` 或 `session/rename|archive|restore|import|discover`，避免等价目录动作产生不同的超时文案、终态语义或权限边界。`session/create`、`session/open` 与 quick start 因包含 runtime 激活/导航状态机，仍由其各自的深模块与 store 编排，不归入纯目录 mutation。
+
+终态业务副作用只能由 dispatch 时注册的 callback 执行一次；全局 Ack/Error handler 只负责日志、错误中心与调用 tracker。`action_error` 即使在 timeout/disconnect 后晚到，也可通过原 callback 把匹配的本地状态收敛为明确失败；晚到 committed/duplicate 不运行 callback，只能消除不确定证据。消息提交可安全清除其匹配的恢复卡，但 quick start 禁止在此时自动切换 runtime 或发送首条消息，必须提示用户从 server-authoritative 侧栏重新打开。非重试 action 的 late-error callback 只保留一个 Ack timeout 窗口，随后释放。
+
+WebSocket 在 `send` 瞬间拒绝 frame 时，transport adapter 只调用该 action 注册的 `onError` 一次且不在 tracker 登记 pending。调用方不得在检查 `sendAction(...) === false` 后再重复失败 transition；同步拒绝、server `action_error` 和晚到明确错误必须共享同一领域失败 callback。
+
+`accepted` Ack 可被安全重放但对领域 callback 幂等：同一 pending command 的 loading/accepted transition 至多执行一次，timer 仍保持到终态。权限决策的 command→permission 关联只存在于它注册的闭包中，不得另建全局 shadow map；明确失败由该闭包释放精确 permission lock，成功则等待 server projection 移除请求。
+
+连接丢失只能调用一次 `CommandTracker::settleConnectionLoss` 来扇出各 action 注册的领域 callback；消息草稿恢复、quick-start 保留、权限锁定与 session-open 不切换当前会话均由对应 callback 结算且至多一次。`onStatus` 的 `reconnecting`/`fatal`/`closed` 分支不得再次直接修改这些 action 状态，否则同一断线会被解释两次。
+
+WebSocket 生命周期的动作门控与可见连接状态由 `connectionTransition` module 统一解释。`connecting`、认证后 `open` 与 `reconnecting` 都必须保持 `ready=false,busy=true`；只有收到 server `ready` 才原子切换为 `ready=true,busy=false`。`fatal`/`closed` 同时关闭动作门控与连接 busy，并生成唯一的恢复问题。Store 负责 command、导航与认证等领域副作用，不得在各状态分支另写一套 `ready`/`busy`/status 判定。
+
+Web 下行 JSON 边界同时保持形状安全与协议前向兼容：只有**文本帧**中的非数组 object 且含非空字符串 `t` 的 envelope 才能进入 WebSocket 分发；binary、`null`、JSON primitive、array、缺失/非字符串 tag 一律视为 malformed，只记录类别与长度，不记录原文。未知字符串 tag 仍原样交由 store 安全忽略，避免旧 Web 客户端因新 server 的可选帧而崩溃；但浏览器实际消费的 `ready`、`ysync.update`、`action_ack` 与 `action_error` 必须在传输边界按 Rust wire schema 严格解码。Ack 只接受非空字符串 command/可选身份和 `accepted|committed|duplicate`，error 只接受字符串 code/message 与布尔 retryable，projection version 只接受非负安全整数，Yjs update 必须同时满足合法 DocId 与 base64。已知 tag 的畸形值不得进入 tracker、导航或 DocStore。传输适配器隔离单次业务/状态回调异常，使后续合法帧仍可处理；原生 `WebSocket.send` 的同步失败必须返回 `false`，上层不得把该 command 登记为已发送。协议异常进入有界、可关闭的持久错误中心，且诊断永不携带 payload、token 或浏览器抛出的潜在敏感错误正文。
+
+Web 的 Yjs 边界按文档身份拆分。`DocStore` 只拥有 doc identity、v1 update 应用和 rAF 合帧；`registry-view`、`chat-view`、`control-view` 分别且唯一解释 `hub:registry`、`chat:{id}`、`session:{id}`，共享 helper 只做无领域语义的 Yjs 值读取。兼容 barrel 不得包含解析实现，feature 应直接依赖其所属领域类型。`DocStore.clear()` 是连接世代屏障：注销、认证失效或连接替换后，旧世代已排队的 rAF callback 不得渲染新 doc，也不得消费新世代相同 doc id 的待渲染标记。
+
+Web 权限面必须完整呈现同一 Control Doc 中全部 `pending_permissions`，不能只显示迭代顺序中的第一项。请求按有效 `expires_at` 升序、再按 `permission_id` 稳定排序；界面一次聚焦一个决策并显示当前位置/总数，用户切换查看不得隐式提交。当前项以 `permission_id` 保持身份，投影插入其他请求时不跳题；当前项消失后才选择同位置的下一项。每个 `permission_id` 的 pending/uncertain 锁相互独立，缺失 id 的畸形投影必须 fail closed，禁止发送空 id 决议。明确未送达且 server 标记 retryable 的失败只允许在原权限卡使用保存的原 `commandId` 与原 decision 重试；超时、断线或 `dispatched` 后结果未知必须继续锁定且不得出现重试按钮。
+
+Web 消息阅读器把滚动/跟随策略与单条消息语义分离：`MessageList` 只拥有文档水合、权限队列、自动吸底与完成播报；`ConversationMessage` 统一拥有 user/system/assistant 角色层级以及 reasoning、Markdown、tool、resource、error、copy 证据层。用户和流式正文保持纯文本，只有已终态的 assistant 正文进入安全 Markdown 渲染；流式动画对辅助技术隐藏，完成状态由列表级原子播报一次。错误证据使用可命名 alert，reasoning 默认折叠，资源只展示 server 投影事实，不推断链接或可执行行为。
+
+Web 消息投递恢复由 `message-delivery` module 单一所有：它原子维护一个全局未裁决 submission 与按 durable session id 隔离的草稿，仅暴露单 session 草稿读写以及 command-correlated 的 start/accepted/uncertain/failed/retrying/terminal/reset 领域动作。`start` 必须在模块内部拒绝覆盖未裁决提交；uncertain/failed 只在目标草稿为空时恢复原文，不覆盖用户更新；committed/duplicate 只清除仍等于原文的恢复草稿。Composer 不读取整张草稿表，store 不维护第二套 signal/setter 或重实现 correlation。
+
+Web 的逻辑会话导航由 `SessionNavigator` 状态机唯一裁决。Registry catalog、连接 ready、只读策略、用户打开请求、终态 Ack、失败/超时和本地 runtime 复用都必须作为事件进入该模块；它只输出 `request-open`、`activate`、`forget-preference` 三类效果。只有与当前 `session/open` command 精确匹配的 `committed`/`duplicate` Ack 可以切换 logical session 与 runtime chat；超时后的晚到 Ack仍交给 `CommandTracker` 完成对账，但不得移动 UI。组件不自行分支“只读复用 vs. 可写打开”，localStorage 也只作为恢复偏好而非会话事实源。
+
+`SessionActivation` 是 session create/open/restore/quick-start 的单一应用层 façade。它组合 `SessionNavigator` 与 quick-start delivery 状态机，统一连接/角色/metadata uncertainty/single-flight 门控、命令构造、终态身份校验和导航 effect；Solid store 只注入 transport、当前投影、订阅激活与可见错误效果，不得直接构造 `session/create` 或 `session/open`。空会话创建只有同时收到非空 logical `sessionId` 与 runtime `chatId` 才能切换选择；committed/duplicate 缺失任一身份视为协议完整性故障，保持原选中态并等待 Registry 权威投影，禁止形成只有逻辑会话而没有可订阅 runtime 的半状态。quick start 必须先完成同一原子 activation，再提交完整保留的首条消息。
+
+Registry 中的 `active_chat_id` 只证明某个 runtime 仍可复用，不证明当前浏览器已经选择、水合或能够向它输入。侧栏未选中的 live runtime 必须显示为“运行中，可切换”；只有当前选中、非终态且完成 Chat/Control 两份文档水合的 runtime 才能宣称“可输入”。默认标题必须在 sidebar、search 与 header 使用同一稳定身份消歧规则，避免多个“新对话”在切换后失去可识别性。
+
+Web 组件库以 `src/ui/index.ts` 和 `src/ui/primitives.css` 为唯一公共代码/视觉入口。`primitives.css` 自包含地引入 `tokens.css`，基础组件必须独立拥有默认、交互、禁用、错误、焦点与响应式触控状态；产品 `styles.css` 只允许页面布局和有明确父级语境的覆盖，不得重新定义独立 `.ui-*` 基类。Feature 组件不得深层导入 UI 实现、创建裸 SVG canvas，或依赖产品样式才能让 Dialog、Drawer、Button、Field、Menu、Tooltip、Status、Toast 等基础能力正确渲染。该边界由源码架构契约与真实 Solid DOM 测试共同执行。
+
+源样式必须在测试中通过 Lightning CSS 的无错误恢复严格解析，并由 PostCSS AST 检查媒体查询结构与设计令牌引用。Composer 与 quick-start 的容器焦点外观只能由一条共享规则拥有：指针焦点保持中性，只有内部输入命中 `:focus-visible` 时才显示高对比键盘焦点环；Feature 样式不得重新引入已淘汰的焦点令牌或失效选择器。
+
+选中 runtime 后，Web 必须分别确认 `chat:{chat_id}` 与 `session:{chat_id}` 两份 server-authoritative Y.Doc 已至少应用一帧，才可以宣称“可输入”并开放 Composer。切换 runtime 会清空该 hydration 证据；断线不会抹掉已渲染历史，但任何新 runtime 都不得把初始空数组误当成空会话。控制文档已经投影出的待决权限高于普通载入文案；两份文档都到齐且消息确认为空后，UI 才显示首次消息引导。
+
+Composer 草稿以持久 `project_session_id` 隔离，而不是跟随临时 `chat_id` 或组件实例。切换会话时不得把源会话文本带入目标会话，返回源会话必须恢复原稿；登出或认证失效则清空全部草稿。消息提交状态同时携带 `command_id`、`project_session_id` 与 `chat_id`：发送失败或连接结果未知时只把原文恢复到所属会话，其他会话只能看到不含原文的全局单飞提示；`uncertain` 状态不可被直接关闭或以新 command 重发，晚到终态也只能结算原提交。
 
 ### 3.1 拓扑
 
@@ -110,7 +182,7 @@ instance 是 **dumb pipe**，但「不做协议理解」需精确化——缓冲
 **无法提取 sessionId 的帧**：丢弃并记本地缺口计数（随 `instance/hello` 上报）。
 
 **instance 进程本身崩溃**【审查：运维 P0-2】：
-- ACP 子进程随 daemon 死亡（沿用 `kill_on_drop` 语义，现 child.rs:45）——其上 chat 全部中断（同断线语义，见 §7.5）；
+- 正常退出由 `shutdown_all` + `kill_on_drop` 终止 ACP 进程树；daemon 被 `SIGKILL` 时 Drop 无法运行，ACP 进程组可能残留。instance data-dir 持有非阻塞独占 owner lock，watermark 同时记录 data-dir `(dev,ino)` 与进程组 leader 出生指纹；下次启动只在两者精确匹配时发 `SIGKILL`。旧 watermark、目录副本、PID/PGID 复用或指纹不可读都 fail closed 为不发信号，仍上报 `buffer_lost` 交给 server 对账；
 - 内存缓冲与磁盘溢出缓冲**不跨重启保留**（重启后 `hello` 上报 `buffer_lost: true`）；
 - 每 chat `seq` 计数器与 `stream_epoch` 绑定（daemon 重启后 epoch +1、seq 可重置，§4.5.1【顾问：P0-2】）。
 
@@ -245,7 +317,7 @@ delivery_confirmed → projection_committed → completed（终态）
 | `chat/prompt` | outbox 落盘后、投递前 | `dispatched=false` | 重发重新投递（客户端重试窗口内） |
 | `chat/prompt` | 投递后（L1+L2 达成）、投影前 | `dispatched=true` | 重发返回 `duplicate` + turnId，**不重复调用 Agent**（outbox 兜底，提交顺序不可倒置）；恢复时该记录按 delivery_unknown 裁决：路径 A 以关联 ID 查询，路径 B 展示「结果未知」并走对账/人工【顾问2】 |
 | `chat/cancel` | 同 prompt | 同 prompt | 同 prompt；`cancelling` 状态幂等迁移 |
-| `permission/resolve` | 同 prompt | 同 prompt | 同 prompt；CAS 已迁移则返回 `duplicate`【审查：开发 P2】 |
+| `permission/resolve` | 同 prompt | 同 prompt | 官方 `session/request_permission` 在明确未投递时保留 request 回投材料，且只允许原 `(commandId, decision)` 在同一存活 runtime 恢复；其他命令返回 `duplicate`。已进入 `dispatched` 的结果未知不自动重放；server 重启后旧 runtime 终止，持久证据仅用于人工对账。遗留私有轨无可证明恢复材料，明确未投递也返回非 retryable 终态错误，不谎报安全重试【审查：开发 P2】 |
 | `chat/close` | outbox 落盘后 | 同 prompt | 重发；instance offline 时走 §7.6 `pending_close` |
 
 **重试分类**：`AGENT_UNAVAILABLE` / `INSTANCE_OFFLINE` → `retryable=true`（可自动重试，须复用同一 commandId）；`INVALID_STATE` / `FORBIDDEN` / `SESSION_NOT_FOUND` → `retryable=false`（重试不会改变结果）。
@@ -393,6 +465,7 @@ struct ChatEntry {
     role: User | Assistant | System,
     status: Pending | Streaming | Completed | Cancelled | Error,
     author_user_id: Option<String>,
+    source_command_id: Option<String>, // Hub browser prompt correlation; ACP replay/legacy entries are None
     created_at: String,
     completed_at: Option<String>,
     block_order: Vec<String>,       // Y.Array<String>
@@ -413,13 +486,37 @@ struct ToolCallProjection {
     name: String,
     status: Pending | AwaitingPermission | Running | Completed | Error | Cancelled,
     arguments: Option<Value>,       // 过滤内部/敏感字段后投影
-    result: Option<Value>,          // 超大结果仅保留受授权资源引用
+    result: Option<Value>,          // 仅在公开投影预算内保留
+    result_omitted: Option<bool>,   // true=省略，false=明确未省略，None=旧记录未知
+    result_bytes: Option<u64>,      // Hub 观测到的紧凑 JSON 字节数；不含内容
     public_error: Option<PublicError>,
     permission_id: Option<String>,
+    started_at: Option<String>,     // Hub 观测时间；旧快照可空
+    completed_at: Option<String>,
 }
 ```
 
 物理映射：根对象/`entries`/`blocks`/`tool_calls` 用 `Y.Map`；顺序索引用 `Y.Array<String>`；流式文本用 `Y.Text`（避免每个 token 替换完整字符串）；删除采用领域 tombstone，不由客户端物理删除权威记录。
+
+`source_command_id` 是 schema v1 的 additive optional extension，不提高根
+`schema_version`：旧快照/ACP 回放条目按缺失读取，旧客户端忽略未知键。只有 Hub
+在 `chat/prompt` 的服务端单写注册路径写入；同 turn 重放可补齐缺失值，但不同已存值
+属于关联冲突，必须拒绝覆盖并进入 delivery-unknown 处置。
+
+### 5.3.1 Logical session prompt recovery provenance
+
+SQLite schema v5 只增加 `session_runtime_history(session_id, chat_id,
+activated_at, retired_at)` 身份历史；它不复制 outbox 状态，也不宣称旧 runtime
+仍存活。`session/prompt-status` 是认证后的只读查询，client 只能提交 logical
+`sessionId`，历史 chat id 由 server 从 catalog provenance 解析，不能被任意探测。
+
+查询以 per-chat outbox 为 delivery authority，以 Chat/Session Doc 为 projection
+authority，只公开 command/turn id、安全时间、稳定错误码和
+`projected|completed|failed|delivery_unknown`。响应永远带
+`runtimeRestored=false`；历史 store/投影缺失或损坏时必须带
+`evidenceIncomplete=true`，空列表不得解释为没有未决消息。结果最多 200 条，
+截断时未决状态优先保留。完整契约见
+[`docs/design/prompt-recovery-provenance.md`](design/prompt-recovery-provenance.md)。
 
 ### 5.4 Control Doc schema（chat §5.3）
 
@@ -485,7 +582,7 @@ struct RegistryDocRoot {
 | `user_message_chunk` / 服务端单写注册 | `user_message` |
 | `prompt_complete` / `agent_message_complete` | `turn_completed` |
 | `session_error` | `turn_failed` |
-| `tool_call` / `tool_call_update`（按 status 细分） | `tool_call_started` / `tool_call_completed` / `tool_call_failed` |
+| `tool_call` / `tool_call_update`（按 status 细分） | `tool_call_started` / `tool_call_updated` / `tool_call_completed`；pending/in_progress 映射为权威非终态 |
 | `permission_request` / `permission_response` | `permission_requested` / `permission_resolved` |
 | `session_update` / `available_commands_update` | `session_updated` |
 | `session_list` 响应 | `session_list`（agent 磁盘历史，全量同步投影） |
@@ -523,7 +620,8 @@ M1 核心闭环，新增正式时序（现有 router.rs 的「spawn → initiali
 |-----------|---------------|---------|
 | 文本增量 | Chat Doc entry block | 追加（微批次合并，§6.4） |
 | 思考/推理增量 | Chat Doc reasoning block | 按可见性写 `summary`/`hidden`，hidden 绝不发给无权客户端 |
-| 工具调用开始/更新/完成 | Chat Doc `tool_calls` | 按 `toolCallId` upsert；超大结果只保留受授权资源引用 |
+| 工具调用开始/更新/完成 | Chat Doc `tool_calls` | 按 `toolCallId` upsert；状态与证据均单调迁移：缺省 arguments 不清空旧输入，普通更新/完成不可越过权限等待，首个终态拥有 result/error/completedAt 且不可被晚到帧覆盖；超大结果只记录省略事实与字节数 |
+| 权限请求/决议/过期 | Control Doc `pending_permissions` + Chat Doc `tool_calls` | 官方 permission request 保留完整 `toolCall` 快照；即使先于普通 tool 通知到达，也在同一 seq 原子创建可达工具卡并进入 awaitingPermission。稍后正式通知只补全字段，不越过等待或重开终态；allow 恢复 running，deny/expire 进入 cancelled；旧事件缺快照或未知可选关联时仍不抑制权限请求 |
 | 权限请求/解决/过期 | Control Doc `pending_permissions` | 按 `permissionId` upsert；决议写 `decision`（CAS，§7.4） |
 | Agent status/capabilities/session info | Control Doc `agent`/`session` | 覆盖当前状态；能力未确认前保持不可用 |
 | `session_list` 响应 | Control Doc `sessions` | agent 磁盘历史，全量同步（幂等，10s 轮询），响应中不存在的旧条目删除（自愈） |
@@ -543,6 +641,13 @@ M1 核心闭环，新增正式时序（现有 router.rs 的「spawn → initiali
 - 不对 token 逐条创建日志或 trace；仅在聚合窗口、工具/权限状态和 turn 终态形成可观测的状态变化。
 
 **提交点纪律**【审查：架构 P0-1】：user entry 的写入顺序为「outbox 记录落盘 → 下发 ACP → L1+L2 投递确认 → 投影 user entry → committed Ack」（§4.4）；聚合器对 `user_message` 事件的幂等仍以 `turnId` 判定。
+
+prompt 的终态提交还必须满足第二个持久屏障：ACP L3 返回后，control
+`active_turn` 与 assistant 终态 update 经 DocManager 落盘成功（或被证明为
+同一 turn、同一终态的幂等重放），outbox 才可进入
+`projection_committed → completed`。turn 不匹配、已有不同终态、writer 拒绝或
+持久化失败都必须返回非 retryable error 并保留 failed outbox 证据；禁止忽略
+DocManager 结果后发送 committed Ack。
 
 **旧 turn 未完成时新 prompt 的裁决**【审查：开发 P2】：对齐 chat `applyUserMessage`——旧 assistant entry 置 `cancelled`（不向 ACP 发 cancel），新 prompt 正常转发；ACP 侧旧请求的终态事件到达时因 turnId 不匹配被终态守卫拒绝，收敛于旧 entry 的 cancelled 状态。
 
@@ -620,7 +725,7 @@ chat/create 或 load ──► accepting ──► ... （turn 状态机驱动�
 1. 同一 chat 的命令按**有界队列严格串行**执行（上限默认 64，超出返回 `RATE_LIMITED`）；串行性由进程内队列保证。
 2. 默认每 chat**仅一个活动 turn**；若未来支持并行 turn，必须先引入独立 branch/thread 聚合，不能直接放宽约束。
 3. `commandId` 去重记录持久化（§4.4），覆盖客户端最大重试窗口与 server 重启。
-4. **Permission resolution 使用 compare-and-set**：仅 `pending → resolved` 原子迁移一次，重复或过期回答返回幂等结果（`duplicate` ack）；迁移成功后才向 ACP 进程发 `permission.resolve`。
+4. **Permission resolution 使用 compare-and-set**：仅 `pending → resolved` 原子迁移一次，重复或过期回答返回幂等结果（`duplicate` ack）；迁移成功后才向 ACP 进程发 `permission.resolve`。官方 request 在首次裁决时同时申领 `(commandId, decision)` 唯一投递权；明确未送达只能以同一 commandId 和同一 decision 在同一存活 runtime 恢复，新 commandId 即使决策相同也不得重放安全副作用。`dispatched` 之后没有确认的结果属于 delivery unknown；server 重启后旧 runtime 按§8.3 终止，因此恢复证据不授权自动重放，只供运维对账。
 5. 标题更新等非 Agent 操作可独立排队，但仍经服务端命令写入；不能借 YJS client update 绕过授权。
 
 **每 chat 单写者（Y.Doc 写入串行化）**【审查：开发 P0-2】：

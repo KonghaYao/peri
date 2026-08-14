@@ -480,3 +480,95 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
     let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
 }
+
+// ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────
+
+/// 同源收敛：`scan_agents` / `scan_agents_with_extra_dirs` 与渲染面 catalog
+/// （`SkillsPort::agents` → `scan_agents_detailed`）同一实现——投影（丢弃
+/// capability）必须逐项一致，防止提示词 catalog 与子链实际可用 agent 不一致。
+#[test]
+fn scan_agents_matches_scan_agents_detailed_projection() {
+    use tempfile::tempdir;
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("code-reviewer.md"),
+        "---\nname: code-reviewer\ndescription: Reviews code quality\n---\n\nYou are a reviewer.\n",
+    )
+    .unwrap();
+    let nested = agents_dir.join("analyst").join("agent.md");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::write(
+        nested,
+        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nYou are an analyst.\n",
+    )
+    .unwrap();
+
+    let cwd = dir.path().to_str().unwrap();
+    let plain = scan_agents(cwd);
+    let detailed: Vec<(String, String, String)> = scan_agents_detailed(cwd, &[])
+        .into_iter()
+        .map(|(id, name, desc, _)| (id, name, desc))
+        .collect();
+    assert_eq!(
+        plain, detailed,
+        "scan_agents 应为 scan_agents_detailed 的投影（同源共享实现）"
+    );
+    // 额外目录路径同样一致
+    let extra = tempdir().unwrap();
+    std::fs::write(
+        extra.path().join("plugin-agent.md"),
+        "---\nname: plugin-a\ndescription: Plugin agent\n---\n\nPlugin.\n",
+    )
+    .unwrap();
+    let plain_extra = scan_agents_with_extra_dirs(cwd, &[extra.path().to_path_buf()]);
+    let detailed_extra: Vec<(String, String, String)> =
+        scan_agents_detailed(cwd, &[extra.path().to_path_buf()])
+            .into_iter()
+            .map(|(id, name, desc, _)| (id, name, desc))
+            .collect();
+    assert_eq!(
+        plain_extra, detailed_extra,
+        "scan_agents_with_extra_dirs 应为 scan_agents_detailed 的投影"
+    );
+}
+
+/// 11_subagent 段落声明：位置属性（Uncached order=4）+ 含占位符的 Builtin
+/// 内容（catalog 替换留在渲染层，设计 §3.5.1 步骤 2）。
+#[test]
+fn subagent_section_declaration_shape() {
+    let sections = SubAgentMiddleware::sections();
+    assert_eq!(sections.len(), 1, "11_subagent 段应唯一");
+    let section = &sections[0];
+    assert_eq!(section.id, "11_subagent");
+    assert_eq!(section.zone, PromptSectionZone::Uncached);
+    assert_eq!(section.order, 4);
+    let content = section.content.as_str();
+    assert!(
+        content.contains("# SubAgent Delegation"),
+        "委托机制说明保留"
+    );
+    assert!(
+        content.contains("{{available_agents}}"),
+        "catalog 占位符保留（渲染层替换）"
+    );
+    assert!(
+        content.contains("## Authorization boundary"),
+        "授权边界保留（10_hitl 交叉引用依赖）"
+    );
+    // Selection Guide 已重构：无具体任务→agent 映射（仓库级调度建议由
+    // catalog 承载），通用原则保留
+    assert!(
+        !content.contains("**Standard pipelines**"),
+        "Standard pipelines 具体建议已删除"
+    );
+    assert!(
+        !content.contains("Code implementation / editing / refactoring"),
+        "具体任务→agent 映射已删除"
+    );
+    assert!(
+        content.contains("pick a specialized agent"),
+        "通用选择原则保留"
+    );
+}

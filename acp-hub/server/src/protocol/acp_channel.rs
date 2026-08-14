@@ -23,9 +23,9 @@ use chrono::DateTime;
 use serde_json::Value;
 
 use acp_hub_proto::action::PermissionDecision;
-use acp_hub_proto::schema::{BlockVisibility, PublicError, ChatStatus, TurnStatus};
+use acp_hub_proto::schema::{BlockVisibility, ChatStatus, PublicError, ToolCallStatus, TurnStatus};
 
-use crate::state::normalized::{EventBody, NormalizedEvent};
+use crate::state::normalized::{EventBody, NormalizedEvent, PermissionToolSnapshot};
 
 /// 权限请求超时（§16/§7.1：5min，`expires_at` 由 server 权威时钟注入，§4.7）。
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -49,6 +49,9 @@ pub struct PermissionRequestFields {
     pub permission_id: String,
     /// toolCall.toolCallId（透传 → 投影 tool_call_id）。
     pub tool_call_id: Option<String>,
+    /// 官方 request 自带完整 toolCall；保留 rawInput，使 permission-first
+    /// 顺序仍能原子投影可理解、可审计的工具卡。
+    pub tool: PermissionToolSnapshot,
     pub title: String,
     /// 官方无 description 字段 → None。
     pub description: Option<String>,
@@ -77,7 +80,7 @@ pub enum NormalizeOutcome {
     /// 官方 `session/request_permission` request（agent→client，带 id，须回
     /// 响应；#1 权限机制官方化）。由 relay 登记 pending_permissions 表并
     /// 投递 `PermissionRequested` 事件，coordinator resolve 时回官方响应帧。
-    PermissionRequest(PermissionRequestFields),
+    PermissionRequest(Box<PermissionRequestFields>),
     /// 丢弃 + 原因（调用方计数，不 panic 不静默，§4.8 精神）。
     Dropped(DropReason),
 }
@@ -247,10 +250,9 @@ impl AcpChannel {
                 Err(MapError::Unsupported) => {
                     NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                 }
-                Err(MapError::MissingField) => {
-                    NormalizeOutcome::Dropped(DropReason::MissingField)
-                }
-            };        }
+                Err(MapError::MissingField) => NormalizeOutcome::Dropped(DropReason::MissingField),
+            };
+        }
         // agent 状态通知（`agent/status`）。
         if method == "agent/status" {
             return NormalizeOutcome::Event(Box::new(NormalizedEvent {
@@ -278,10 +280,8 @@ impl AcpChannel {
                 return NormalizeOutcome::Dropped(DropReason::MissingField);
             };
             return match self.normalize_request_permission(id, &params) {
-                Ok(req) => NormalizeOutcome::PermissionRequest(req),
-                Err(MapError::MissingField) => {
-                    NormalizeOutcome::Dropped(DropReason::MissingField)
-                }
+                Ok(req) => NormalizeOutcome::PermissionRequest(Box::new(req)),
+                Err(MapError::MissingField) => NormalizeOutcome::Dropped(DropReason::MissingField),
                 Err(MapError::Unsupported) => {
                     NormalizeOutcome::Dropped(DropReason::UnsupportedFrame)
                 }
@@ -310,8 +310,8 @@ impl AcpChannel {
             .get("toolCall")
             .and_then(Value::as_object)
             .ok_or(MapError::MissingField)?;
-        let tool_call_id = string_field(tool_call, "toolCallId", "tool_call_id")
-            .ok_or(MapError::MissingField)?;
+        let tool_call_id =
+            string_field(tool_call, "toolCallId", "tool_call_id").ok_or(MapError::MissingField)?;
         let options = params
             .get("options")
             .and_then(Value::as_array)
@@ -322,12 +322,17 @@ impl AcpChannel {
                 return Err(MapError::MissingField);
             }
         }
-        let title = string_field(tool_call, "title", "title")
-            .unwrap_or_else(|| tool_call_id.clone());
+        let title =
+            string_field(tool_call, "title", "title").unwrap_or_else(|| tool_call_id.clone());
         Ok(PermissionRequestFields {
             request_id: request_id.clone(),
             permission_id: uuid::Uuid::new_v4().to_string(),
-            tool_call_id: Some(tool_call_id),
+            tool_call_id: Some(tool_call_id.clone()),
+            tool: PermissionToolSnapshot {
+                tool_call_id,
+                name: title.clone(),
+                arguments: tool_call.get("rawInput").cloned(),
+            },
             title,
             description: None,
             options: options.clone(),
@@ -347,8 +352,8 @@ impl AcpChannel {
         now_rfc3339: &str,
     ) -> Result<EventBody, MapError> {
         use EventBody as B;
-        let kind = string_field(update, "sessionUpdate", "sessionUpdate")
-            .ok_or(MapError::MissingField)?;
+        let kind =
+            string_field(update, "sessionUpdate", "sessionUpdate").ok_or(MapError::MissingField)?;
         let content_text = || {
             // extractContent：优先 update.content，回退 update.text。
             update
@@ -403,17 +408,16 @@ impl AcpChannel {
                     return Err(MapError::MissingField);
                 }
                 match string_field(update, "status", "status").as_deref() {
-                    Some("completed") | Some("complete") | Some("done") => {
-                        B::ToolCallCompleted {
-                            turn_id: String::new(),
-                            tool_call_id,
-                            result: update
-                                .get("rawOutput")
-                                .or_else(|| update.get("output"))
-                                .cloned(),
-                            public_error: None,
-                        }
-                    }
+                    Some("completed") | Some("complete") | Some("done") => B::ToolCallCompleted {
+                        turn_id: String::new(),
+                        tool_call_id,
+                        result: update
+                            .get("rawOutput")
+                            .or_else(|| update.get("output"))
+                            .cloned(),
+                        public_error: None,
+                        completed_at: now_rfc3339.to_string(),
+                    },
                     // #2：官方 failed 终态（ToolCallStatus 值域
                     // pending/in_progress/completed/failed）；error 为兼容
                     // 别名（同为 ToolCallCompleted + public_error）。
@@ -426,16 +430,30 @@ impl AcpChannel {
                             message: string_field(update, "title", "title")
                                 .unwrap_or_else(|| "Tool call failed".to_string()),
                         }),
+                        completed_at: now_rfc3339.to_string(),
                     },
-                    _ => B::ToolCallStarted {
-                        turn_id: String::new(),
-                        tool_call_id,
-                        name: string_field(update, "title", "title")
-                            .or_else(|| string_field(update, "name", "name"))
-                            .unwrap_or_default(),
-                        arguments: update.get("rawInput").cloned(),
-                        created_at: now_rfc3339.to_string(),
-                    },
+                    status => {
+                        let status = nonterminal_tool_status(status);
+                        if kind == "tool_call_update" {
+                            B::ToolCallUpdated {
+                                turn_id: String::new(),
+                                tool_call_id,
+                                status: Some(status),
+                                arguments: update.get("rawInput").cloned(),
+                            }
+                        } else {
+                            B::ToolCallStarted {
+                                turn_id: String::new(),
+                                tool_call_id,
+                                name: string_field(update, "title", "title")
+                                    .or_else(|| string_field(update, "name", "name"))
+                                    .unwrap_or_default(),
+                                status,
+                                arguments: update.get("rawInput").cloned(),
+                                created_at: now_rfc3339.to_string(),
+                            }
+                        }
+                    }
                 }
             }
             // session 元信息（title 等；peri 实测仅 updatedAt，其余缺省不覆盖）。
@@ -464,11 +482,13 @@ impl AcpChannel {
             "usage_update" => B::AgentUsage {
                 context_window: number_field(update, "size", "size")
                     .ok_or(MapError::MissingField)?,
-                context_used: number_field(update, "used", "used")
-                    .ok_or(MapError::MissingField)?,
+                context_used: number_field(update, "used", "used").ok_or(MapError::MissingField)?,
             },
             // M1 无需投影的会话级元数据（命令菜单/模式/计划）。
-            "available_commands_update" | "current_mode_update" | "plan" | "plan_update"
+            "available_commands_update"
+            | "current_mode_update"
+            | "plan"
+            | "plan_update"
             | "plan_removed" => {
                 return Err(MapError::Unsupported);
             }
@@ -545,6 +565,9 @@ impl AcpChannel {
                 turn_id: required(payload, "turnId", "turn_id")?,
                 tool_call_id: required(payload, "toolCallId", "tool_call_id")?,
                 name: string_field(payload, "name", "name").unwrap_or_default(),
+                status: nonterminal_tool_status(
+                    string_field(payload, "status", "status").as_deref(),
+                ),
                 arguments: opt_json(payload, "arguments"),
                 created_at: string_field(payload, "createdAt", "created_at")
                     .unwrap_or_else(|| now_rfc3339.to_string()),
@@ -554,17 +577,18 @@ impl AcpChannel {
                 let tool_call_id = required(payload, "toolCallId", "tool_call_id")?;
                 if matches!(status.as_str(), "completed" | "error" | "failed") {
                     B::ToolCallCompleted {
-                        turn_id: string_field(payload, "turnId", "turn_id")
-                            .unwrap_or_default(),
+                        turn_id: string_field(payload, "turnId", "turn_id").unwrap_or_default(),
                         tool_call_id,
                         result: opt_json(payload, "result"),
                         public_error: public_error(payload),
+                        completed_at: now_rfc3339.to_string(),
                     }
                 } else {
                     // running / streaming / 其余：M1 arguments 全量覆盖（§6.1 表）。
                     B::ToolCallUpdated {
                         turn_id: string_field(payload, "turnId", "turn_id").unwrap_or_default(),
                         tool_call_id,
+                        status: Some(nonterminal_tool_status(Some(status.as_str()))),
                         arguments: opt_json(payload, "arguments"),
                     }
                 }
@@ -582,6 +606,7 @@ impl AcpChannel {
                     permission_id: required(payload, "permissionId", "permission_id")?,
                     turn_id: required(payload, "turnId", "turn_id")?,
                     tool_call_id: string_field(payload, "toolCallId", "tool_call_id"),
+                    tool: None,
                     title: string_field(payload, "title", "title").unwrap_or_default(),
                     description: string_field(payload, "description", "description"),
                     options: permission_options(payload),
@@ -603,16 +628,16 @@ impl AcpChannel {
             // ---- Session 元信息 / 能力（§5.4，部分更新）----
             "session_update" => B::SessionInfo {
                 title: string_field(payload, "title", "title"),
-                status: string_field(payload, "status", "status").as_deref().and_then(
-                    |s| match s {
+                status: string_field(payload, "status", "status")
+                    .as_deref()
+                    .and_then(|s| match s {
                         "accepting" => Some(ChatStatus::Accepting),
                         "active" => Some(ChatStatus::Active),
                         "ended" => Some(ChatStatus::Ended),
                         "closed" => Some(ChatStatus::Closed),
                         "crashed" => Some(ChatStatus::Crashed),
                         _ => None,
-                    },
-                ),
+                    }),
                 active_turn_id: string_field(payload, "activeTurnId", "active_turn_id"),
             },
             "available_commands_update" => B::Capabilities {
@@ -645,12 +670,11 @@ impl AcpChannel {
                             .filter_map(|v| {
                                 let o = v.as_object()?;
                                 let id = string_field(o, "sessionId", "session_id")?;
-                                let title =
-                                    string_field(o, "title", "title").unwrap_or_default();
+                                let title = string_field(o, "title", "title").unwrap_or_default();
                                 let status =
                                     string_field(o, "status", "status").unwrap_or_default();
-                                let updated_at = string_field(o, "updatedAt", "updated_at")
-                                    .unwrap_or_default();
+                                let updated_at =
+                                    string_field(o, "updatedAt", "updated_at").unwrap_or_default();
                                 Some(acp_hub_proto::schema::SessionSummaryProjection {
                                     session_id: id,
                                     title,
@@ -710,21 +734,23 @@ fn field(obj: &serde_json::Map<String, Value>, names: &[&str]) -> Option<String>
         .find_map(|n| obj.get(*n).and_then(Value::as_str).map(str::to_string))
 }
 
-fn string_field(
-    obj: &serde_json::Map<String, Value>,
-    camel: &str,
-    snake: &str,
-) -> Option<String> {
+fn string_field(obj: &serde_json::Map<String, Value>, camel: &str, snake: &str) -> Option<String> {
     field(obj, &[camel, snake])
+}
+
+/// Normalize ACP's non-terminal aliases. Terminal values are handled by callers before this
+/// helper; unknown or absent values remain pending for backward compatibility.
+fn nonterminal_tool_status(status: Option<&str>) -> ToolCallStatus {
+    match status {
+        Some("in_progress" | "running" | "streaming") => ToolCallStatus::Running,
+        Some("awaiting_permission" | "awaitingPermission") => ToolCallStatus::AwaitingPermission,
+        _ => ToolCallStatus::Pending,
+    }
 }
 
 /// 非负整数提取（camelCase 优先，snake_case 回退）：负数/超 u32 上限 →
 /// None（缺省语义，不整体拒绝——§6.3 仅必填字段缺失才 MissingField）。
-fn number_field(
-    obj: &serde_json::Map<String, Value>,
-    camel: &str,
-    snake: &str,
-) -> Option<u32> {
+fn number_field(obj: &serde_json::Map<String, Value>, camel: &str, snake: &str) -> Option<u32> {
     [camel, snake]
         .iter()
         .find_map(|n| obj.get(*n).and_then(Value::as_u64))
@@ -767,7 +793,9 @@ fn public_error(obj: &serde_json::Map<String, Value>) -> Option<PublicError> {
     })
 }
 
-fn permission_options(obj: &serde_json::Map<String, Value>) -> Vec<acp_hub_proto::schema::PermissionOptions> {
+fn permission_options(
+    obj: &serde_json::Map<String, Value>,
+) -> Vec<acp_hub_proto::schema::PermissionOptions> {
     use acp_hub_proto::schema::PermissionOptions as O;
     obj.get("options")
         .and_then(Value::as_array)
@@ -827,9 +855,7 @@ fn extract_model_name(label: &str) -> String {
 ///
 /// 两条消费路径共用：`config_option_update` 通知（map_acp_update）与
 /// session/new 响应体（coordinator，handle_new 不发通知、响应即唯一路径）。
-pub fn extract_agent_config(
-    options: &[serde_json::Value],
-) -> (Option<String>, Option<String>) {
+pub fn extract_agent_config(options: &[serde_json::Value]) -> (Option<String>, Option<String>) {
     let model = options.iter().find_map(|o| {
         let o = o.as_object()?;
         if o.get("id").and_then(Value::as_str) != Some("model") {

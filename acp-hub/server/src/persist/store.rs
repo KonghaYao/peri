@@ -131,6 +131,12 @@ impl ChatStore {
     pub async fn outbox_get(&self, command_id: Uuid) -> Option<OutboxRecord> {
         self.outbox.lock().await.get(command_id).cloned()
     }
+
+    /// Internal recovery query material. Callers must project only reviewed
+    /// safe fields; `OutboxRecord::recovery` is never a wire response.
+    pub async fn outbox_records(&self) -> Vec<OutboxRecord> {
+        self.outbox.lock().await.records().cloned().collect()
+    }
 }
 
 /// 磁盘预算报告（§9.2）。
@@ -209,7 +215,12 @@ impl Store {
     /// 恢复编排（§8.4.1 不变量 1-2；完成 = outbox 索引可用 + 水位已对齐）。
     /// 幂等：重复调用返回首次结果。
     pub async fn recover(&self) -> RecoveryResult {
-        if let Some(r) = self.last_result.read().expect("last_result lock poisoned").clone() {
+        if let Some(r) = self
+            .last_result
+            .read()
+            .expect("last_result lock poisoned")
+            .clone()
+        {
             return r;
         }
         let result = self.recover_once();
@@ -258,7 +269,8 @@ impl Store {
                         chat_id = %chat_id, path = %dir.display(), error = %e,
                         "chat recover failed; store degraded"
                     );
-                    self.degraded.set(format!("chat {chat_id} recover failed: {e}"));
+                    self.degraded
+                        .set(format!("chat {chat_id} recover failed: {e}"));
                     result.degraded = true;
                     continue;
                 }
@@ -330,9 +342,19 @@ impl Store {
             });
             result.truncated_total_bytes += t.bytes_kept;
         }
-        result.corrupt_artifacts.extend(outbox_replay.corrupt_artifacts);
+        result
+            .corrupt_artifacts
+            .extend(outbox_replay.corrupt_artifacts);
         if outbox_replay.degraded {
             result.degraded = true;
+        }
+        let reconciled = outbox.reconcile_recovery_after_restart()?;
+        if reconciled > 0 {
+            warn!(
+                chat_id = %chat_id,
+                commands = reconciled,
+                "permission recovery commands moved to delivery_unknown after restart"
+            );
         }
         // 4. update 日志回放（§4.4）：快照基线选择 + 尾部截断。
         let mut update_log = UpdateLog::open(
@@ -371,11 +393,12 @@ impl Store {
             // 在首个损坏点会低估 last_seq，提前截断会把损坏点之后的完好记录
             // 静默清空——绕过 §8.4 的告警/degraded/诊断保留契约。探测到损坏
             // 时交给 replay 走完整信号路径。
-            if !update_log.tail_probe_corrupted() && update_log.last_seq() <= s.last_applied_seq
-            {
+            if !update_log.tail_probe_corrupted() && update_log.last_seq() <= s.last_applied_seq {
                 match update_log.truncate_after_snapshot() {
                     Ok(()) => {}
-                    Err(e) => warn!(chat_id = %chat_id, error = %e, "log truncate after snapshot failed"),
+                    Err(e) => {
+                        warn!(chat_id = %chat_id, error = %e, "log truncate after snapshot failed")
+                    }
                 }
             }
         }
@@ -524,11 +547,7 @@ impl Store {
     ///
     /// 返回 `Ok(true)` = 已归档；`Ok(false)` = 条件不满足（原因经
     /// `tracing::debug!` 记录，不告警——未届满属正常时序）。
-    pub fn archive_chat(
-        &self,
-        chat_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> Result<bool, StoreError> {
+    pub fn archive_chat(&self, chat_id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
         let chat = match self.chat(chat_id) {
             Some(s) => s,
             None => return Err(StoreError::ChatNotFound { chat_id }),
@@ -540,9 +559,7 @@ impl Store {
                 return Ok(false);
             }
         };
-        if closed_at
-            + chrono::Duration::from_std(self.config.archive_retention)
-                .unwrap_or_default()
+        if closed_at + chrono::Duration::from_std(self.config.archive_retention).unwrap_or_default()
             > now
         {
             debug!(chat_id = %chat_id, "archive skipped: retention not elapsed");
@@ -559,11 +576,10 @@ impl Store {
         }
         let src = self.data_dir.join(CHATS_DIR).join(chat_id.to_string());
         let dst = self.data_dir.join(ARCHIVE_DIR).join(chat_id.to_string());
-        fs::create_dir_all(dst.parent().expect("archive dir"))
-            .map_err(|e| StoreError::Io {
-                path: dst.clone(),
-                source: e,
-            })?;
+        fs::create_dir_all(dst.parent().expect("archive dir")).map_err(|e| StoreError::Io {
+            path: dst.clone(),
+            source: e,
+        })?;
         fs::rename(&src, &dst).map_err(|e| StoreError::Io {
             path: src.clone(),
             source: e,
@@ -615,13 +631,16 @@ impl Store {
         };
         if exceeded {
             warn!(
-                event = "disk_budget.exceeded", used, limit,
+                event = "disk_budget.exceeded",
+                used,
+                limit,
                 candidates = candidates.len(),
                 "disk budget exceeded"
             );
             if candidates.is_empty() {
-                self.degraded
-                    .set(format!("disk budget exceeded ({used}B > {limit}B) with no eviction candidates"));
+                self.degraded.set(format!(
+                    "disk budget exceeded ({used}B > {limit}B) with no eviction candidates"
+                ));
             }
         }
         BudgetReport {
@@ -689,7 +708,10 @@ impl Store {
 
     /// 最近一次恢复结果（幂等 recover 的缓存；未恢复 = `None`）。
     pub fn last_recovery(&self) -> Option<RecoveryResult> {
-        self.last_result.read().expect("last_result lock poisoned").clone()
+        self.last_result
+            .read()
+            .expect("last_result lock poisoned")
+            .clone()
     }
 
     /// chat 回放产物（doc-manager 应用，不变量 3）。
@@ -730,11 +752,9 @@ fn set_dir_permissions(dir: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            StoreError::Io {
-                path: dir.to_path_buf(),
-                source: e,
-            }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| StoreError::Io {
+            path: dir.to_path_buf(),
+            source: e,
         })
     }
     #[cfg(not(unix))]

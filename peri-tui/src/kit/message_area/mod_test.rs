@@ -168,6 +168,142 @@ fn test_keepgoing_rect_follows_scroll() {
     assert_eq!(rect, Some((4, 18, 13)));
 }
 
+// ── T4：@image 行交互（image-p0-p1-spec §4）──────────────────────────────
+
+/// 最小合法 PNG（签名 + IHDR + IEND，CRC 正确）——T5 校验仅需 header。
+/// 仅 macOS `open` 命令测试使用，cfg 对齐避免其他平台 dead-code。
+#[cfg(target_os = "macos")]
+const TINY_PNG: &[u8] =
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x00IEND\xaeB\x60\x82";
+
+fn hit_at(row: u16, x_start: u16, x_end: u16) -> ImageLineHit {
+    ImageLineHit {
+        row,
+        x_start,
+        x_end,
+        slot_index: 0,
+        vm_hash: 7,
+        path: "/tmp/a.png".to_string(),
+        managed: false,
+        size_text: "45 B".to_string(),
+        logical_idx: 1,
+    }
+}
+
+/// open 命令参数化（§6.2-6）：macOS `open` + 路径单参数，无 shell 拼接；
+/// stdout/stderr 重定向 null（detach 不阻塞 TUI）。
+#[test]
+#[cfg(target_os = "macos")]
+fn test_build_open_command_parametrized_no_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a b.png"); // 空格路径——shell 拼接会断裂
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let cmd =
+        build_open_command(file.to_str().unwrap()).expect("合法 PNG + .png 扩展名应通过 T5 校验");
+    assert_eq!(cmd.get_program(), "open", "macOS 用 open");
+    let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+    assert_eq!(
+        args,
+        vec![file.as_os_str()],
+        "路径必须作为单参数传递（禁止 shell 拼接）"
+    );
+    // stdout/stderr 已由 build_open_command 内部重定向 null（Stdio::null）——
+    // 本工具链无 get_stdout 读取 API，命令参数化（program + 单参数）已锁定
+    // 无 shell 拼接的核心约束。
+}
+
+/// T5 校验失败（文件不存在）→ ValidationFailed（不 spawn）。
+#[test]
+#[cfg(target_os = "macos")]
+fn test_build_open_command_missing_file_rejected() {
+    assert!(matches!(
+        build_open_command("/nonexistent/path/x.png"),
+        Err(OpenImageError::ValidationFailed)
+    ));
+}
+
+/// T5 校验失败（非图片扩展名）→ ValidationFailed。
+#[test]
+#[cfg(target_os = "macos")]
+fn test_build_open_command_bad_extension_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("note.txt");
+    std::fs::write(&f, "hello").unwrap();
+    assert!(matches!(
+        build_open_command(f.to_str().unwrap()),
+        Err(OpenImageError::ValidationFailed)
+    ));
+}
+
+/// [P2-7] 成功 spawn 路径：`build_open_command_with` 注入 `/bin/echo`（不依赖
+/// 真实 Finder）——合法 PNG 通过 T5 校验后命令可 spawn，返回码 0。
+#[test]
+#[cfg(target_os = "macos")]
+fn test_build_open_command_success_spawns() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.png");
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let mut cmd = build_open_command_with(file.to_str().unwrap(), "/bin/echo")
+        .expect("合法 PNG 应通过 T5 校验并构造命令");
+    let status = cmd
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .expect("注入二进制可 spawn");
+    assert!(status.success(), "成功路径 spawn 应成功");
+}
+
+/// hover 目标解析：命中 → Some（状态字段透传）；移出/越界/遮挡 → None。
+#[test]
+fn test_hover_target_for() {
+    let hits = vec![hit_at(10, 2, 20), hit_at(11, 2, 20)];
+    let st = hover_target_for(&hits, 5, 10, false).expect("命中行 10");
+    assert_eq!(st.row, 10);
+    assert_eq!(st.logical_idx, 1);
+    assert_eq!(st.path, "/tmp/a.png");
+    assert_eq!(st.size_text, "45 B");
+
+    assert!(
+        hover_target_for(&hits, 5, 11, false).is_some(),
+        "命中第二行"
+    );
+    assert!(hover_target_for(&hits, 5, 9, false).is_none(), "行不匹配");
+    assert!(
+        hover_target_for(&hits, 1, 10, false).is_none(),
+        "x_start 之前"
+    );
+    assert!(
+        hover_target_for(&hits, 20, 10, false).is_none(),
+        "x_end 不含（半开区间）"
+    );
+    assert!(
+        hover_target_for(&hits, 5, 10, true).is_none(),
+        "遮挡时不响应"
+    );
+}
+
+/// try_open_image 校验失败分支：NOTIFICATION 提示（paste-truncated 通知模式），
+/// 不 spawn。成功分支会真实打开 Finder，不在测试中执行（§4.6 macOS 手工验证）。
+#[test]
+#[cfg(target_os = "macos")]
+fn test_try_open_image_validation_failure_notifies() {
+    crate::i18n::init(Some("en"));
+    // 清空遗留通知（测试间原子污染防御）
+    *crate::kit::atoms::NOTIFICATION.state().write() = None;
+    let ok = try_open_image("/nonexistent/path/x.png");
+    assert!(!ok, "校验失败不 spawn");
+    // [TRAP] Notification 非 Clone——guard 内提取 message 字段后 drop。
+    let msg = crate::kit::atoms::NOTIFICATION
+        .state()
+        .read()
+        .as_ref()
+        .map(|n| n.message.clone());
+    assert_eq!(
+        msg.as_deref(),
+        Some(crate::i18n::tr("user-image-open-failed").as_str()),
+        "校验失败 → NOTIFICATION 提示"
+    );
+}
+
 #[test]
 fn test_keepgoing_rect_scrolled_out_returns_none() {
     // scroll_y = 10 → 按钮行 2 + 3 + 2 - 10 = -3 < area.y(2) → 滚出视口

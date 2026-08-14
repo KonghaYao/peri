@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use crate::kit::atoms;
 use crate::kit::bg_task_area::BgTaskArea;
 use crate::kit::event_handlers;
+use crate::kit::image_overlay::ImageOverlay;
 use crate::kit::layout::SessionColumn;
 use crate::kit::popup_overlay::PopupOverlay;
 use crate::kit::setup_wizard::SetupWizard;
@@ -135,6 +136,10 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         )
                         BgTaskArea()
                     }
+                    // 图片预览浮层（T7）：与 PopupOverlay 同级、不参与 flex；
+                    // 挂载在 PopupOverlay 之前（弹窗后绘制、覆盖其上），遮挡时
+                    // 预览自身置 Idle（§7.5 隐藏语义），二者不会同时可见。
+                    ImageOverlay()
                     PopupOverlay()
                 }
             }

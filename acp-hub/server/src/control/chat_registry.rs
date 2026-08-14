@@ -51,7 +51,10 @@ impl ChatState {
 
     /// 是否终态（ended/closed/crashed；§8.2「不再接受该 chat 的新事件」）。
     pub fn is_terminal(self) -> bool {
-        matches!(self, ChatState::Ended | ChatState::Closed | ChatState::Crashed)
+        matches!(
+            self,
+            ChatState::Ended | ChatState::Closed | ChatState::Crashed
+        )
     }
 }
 
@@ -131,6 +134,10 @@ struct ChatInner {
     /// interrupted」。coordinator 登记、relay touch 续命、断链清理消费；
     /// #3 last_activity 增量窗口计时）。
     active_turns: RwLock<HashMap<String, ActiveTurnEntry>>,
+    /// 不投影到 Registry 的短生命周期 ACP 进程。仅用于 project 级
+    /// session discovery；心跳对账必须把它们视为受 server 管理，避免当作
+    /// 孤儿提前 kill。
+    ephemeral_chats: RwLock<HashSet<String>>,
     registry: RegistryState,
 }
 
@@ -143,6 +150,7 @@ impl ChatRegistry {
                 bindings: RwLock::new(HashMap::new()),
                 pending_close: RwLock::new(HashSet::new()),
                 active_turns: RwLock::new(HashMap::new()),
+                ephemeral_chats: RwLock::new(HashSet::new()),
                 registry,
             }),
         }
@@ -232,12 +240,7 @@ impl ChatRegistry {
     /// binding 查询（RelayEventHandler/ACPChannel 投递前校验，§6.1 规则 5：
     /// session_id 只用于协议投递，不能成为 Doc 名/广播频道/缓存键）。
     pub async fn resolve(&self, session_id: &str) -> Option<String> {
-        self.inner
-            .bindings
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
+        self.inner.bindings.read().await.get(session_id).cloned()
     }
 
     /// 会话切换（§8.5 当前对话内 load）：把 chat 的**当前会话**切到
@@ -270,6 +273,29 @@ impl ChatRegistry {
         self.inner.chats.read().await.get(chat_id).cloned()
     }
 
+    /// Whether a project/workspace still owns any non-terminal runtime.
+    /// Project archival uses this in-memory runtime authority rather than the
+    /// persisted `last_chat_id` hint, which can be stale after close/restart.
+    pub async fn has_live_workspace(&self, workspace_id: &str) -> bool {
+        self.inner.chats.read().await.values().any(|chat| {
+            chat.workspace_id.as_deref() == Some(workspace_id) && !chat.state.is_terminal()
+        })
+    }
+
+    /// Runtime authority for a durable ACP session. Persisted last_chat_id is
+    /// only a hint; archival must inspect the in-memory binding and chat state.
+    pub async fn has_live_acp_session(&self, session_id: &str) -> bool {
+        let Some(chat_id) = self.inner.bindings.read().await.get(session_id).cloned() else {
+            return false;
+        };
+        self.inner
+            .chats
+            .read()
+            .await
+            .get(&chat_id)
+            .is_some_and(|chat| !chat.state.is_terminal())
+    }
+
     /// instance offline 时的 close（§7.6）：返回 pending_close 标记（Registry
     /// 状态写回）；kill 补发由重连对账完成。
     pub async fn request_close_offline(&self, chat_id: &str) -> Result<(), ChatError> {
@@ -289,23 +315,24 @@ impl ChatRegistry {
             .registry
             .set_chat_status(chat_id, ChatState::PendingClose.as_str())
             .await?;
-        warn!(chat_id, "chat close deferred: instance offline (pending_close)");
+        warn!(
+            chat_id,
+            "chat close deferred: instance offline (pending_close)"
+        );
         Ok(())
     }
 
     /// 状态迁移 + Registry 写回（§7.3/§7.6；终态不可逆，防御性检查）。
-    pub async fn transition(
-        &self,
-        chat_id: &str,
-        state: ChatState,
-    ) -> Result<(), ChatError> {
+    pub async fn transition(&self, chat_id: &str, state: ChatState) -> Result<(), ChatError> {
         let mut chats = self.inner.chats.write().await;
         let Some(entry) = chats.get_mut(chat_id) else {
             return Err(ChatError::NotFound(chat_id.to_string()));
         };
         if entry.state.is_terminal() && entry.state != state {
             warn!(
-                chat_id, from = entry.state.as_str(), to = state.as_str(),
+                chat_id,
+                from = entry.state.as_str(),
+                to = state.as_str(),
                 "chat terminal state transition rejected (防御)"
             );
             return Ok(());
@@ -364,6 +391,18 @@ impl ChatRegistry {
             .collect()
     }
 
+    pub async fn register_ephemeral(&self, chat_id: &str) {
+        self.inner
+            .ephemeral_chats
+            .write()
+            .await
+            .insert(chat_id.to_string());
+    }
+
+    pub async fn unregister_ephemeral(&self, chat_id: &str) {
+        self.inner.ephemeral_chats.write().await.remove(chat_id);
+    }
+
     /// 重连对账（§8.3 步骤 5）：alive_sessions 与 Registry 比对 → 摘要 +
     /// 待 kill 清单（意外存活 §7.5 裁决 + pending_close 补发 §7.6）。
     pub async fn reconcile_alive(
@@ -379,9 +418,14 @@ impl ChatRegistry {
             .map(|(id, e)| (id.clone(), e.clone()))
             .collect();
         let pending_close = self.inner.pending_close.read().await.clone();
+        let ephemeral = self.inner.ephemeral_chats.read().await.clone();
         drop(chats);
 
         for cid in alive {
+            if ephemeral.contains(cid) {
+                report.alive.push(cid.clone());
+                continue;
+            }
             match registered.get(cid) {
                 Some(e) if e.state.is_terminal() => {
                     // server 已标记终态但 instance 声称存活 → 意外存活，kill 裁决

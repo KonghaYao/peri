@@ -61,7 +61,13 @@ fn diff_no_change_is_noop() {
     let current = map_of(&[sum("s1", "a", "t0"), sum("s2", "b", "t0")]);
     let incoming = vec![sum("s1", "a", "t0"), sum("s2", "b", "t0")];
     let d = diff(&current, &incoming);
-    assert_eq!(d, SessionListDiff { upsert: vec![], remove: vec![] });
+    assert_eq!(
+        d,
+        SessionListDiff {
+            upsert: vec![],
+            remove: vec![]
+        }
+    );
 }
 
 #[test]
@@ -96,13 +102,18 @@ fn apply_diff_writes_and_removes() {
     // 断言 Map 与响应一致。
     let txn = pair.session.transact();
     let root = txn.get_map(ROOT).unwrap();
-    let sessions = root.get(&txn, "sessions").unwrap().cast::<yrs::MapRef>().unwrap();
+    let sessions = root
+        .get(&txn, "sessions")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
     assert_eq!(sessions.len(&txn), 1);
-    let sm = sessions.get(&txn, "s1").unwrap().cast::<yrs::MapRef>().unwrap();
-    assert_eq!(
-        sm.get(&txn, "title"),
-        Some(yrs::Out::Any("a".into()))
-    );
+    let sm = sessions
+        .get(&txn, "s1")
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    assert_eq!(sm.get(&txn, "title"), Some(yrs::Out::Any("a".into())));
     assert!(sessions.get(&txn, "s2").is_none());
 }
 
@@ -143,7 +154,10 @@ fn diff_per_cwd_full_sync_isolated() {
     // 同 cwd 全量同步：s2 不在响应 → 删；s3 跨 cwd 且无轮询面 → 保留。
     assert_eq!(d.remove, vec!["s2".to_string()]);
     // upsert：s1 字段变化、s4 新增；s3 不变。
-    assert!(d.upsert.iter().any(|e| e.session_id == "s1" && e.updated_at == "t1"));
+    assert!(d
+        .upsert
+        .iter()
+        .any(|e| e.session_id == "s1" && e.updated_at == "t1"));
     assert!(d.upsert.iter().any(|e| e.session_id == "s4"));
     assert!(!d.upsert.iter().any(|e| e.session_id == "s3"));
 }

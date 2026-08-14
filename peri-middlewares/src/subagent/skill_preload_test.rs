@@ -5,6 +5,13 @@ use tempfile::tempdir;
 
 use super::*;
 
+use std::sync::Arc;
+
+use peri_acp_types::{
+    mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry},
+    skills::{SkillMetadata, SkillOrigin},
+};
+
 fn write_skill(dir: &std::path::Path, name: &str, desc: &str) {
     let skill_dir = dir.join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -13,6 +20,27 @@ fn write_skill(dir: &std::path::Path, name: &str, desc: &str) {
         name, desc, name, name
     );
     std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+/// seed registry：Started + Completed 造 Discovered 条目（模拟发现任务完成态）。
+fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> {
+    let reg = Arc::new(McpSkillRegistry::new());
+    let handle: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: mcp_skill_name(server, skill),
+        description: format!("MCP skill {skill}"),
+        path: std::path::PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("skill://{server}/{skill}/SKILL.md"),
+        }),
+        content: Some(format!("# Hello\n\nBody of {skill}.\n")),
+    };
+    reg.mark_discovery_started(server, handle.clone());
+    reg.mark_discovery_completed(server, handle, vec![meta]);
+    reg
 }
 
 #[tokio::test]
@@ -412,5 +440,223 @@ async fn test_preload_loads_builtin_skill_content() {
         tool_result_content.contains("Artifact"),
         "ToolResult 应含 BUILTIN_SKILLS 的 SKILL.md 全文，实际: {}",
         tool_result_content
+    );
+}
+
+// ─── MCP registry 触发注入（Slice 5）───────────────────────────────────────
+
+#[tokio::test]
+async fn test_preload_mcp_skill_injects_annotated_content() {
+    // Arrange: seed registry（Discovered 条目）→ 用户消息 /mcp__demo__hello
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("use /mcp__demo__hello"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: 1 Human + 1 Ai + 1 Tool = 3 条；ToolResult 含来源标注（验收 12）
+    assert_eq!(state.messages().len(), 3, "registry 命中应注入 Ai + Tool");
+    let tool_content = state.messages()[2].content();
+    assert!(tool_content.contains("Body of hello."), "应含缓存正文");
+    assert!(
+        tool_content.contains("This skill is served by MCP server \"demo\""),
+        "应含来源标注 server 名，实际: {tool_content}"
+    );
+    assert!(
+        tool_content.contains("skill://demo/hello/SKILL.md"),
+        "应含来源标注 uri，实际: {tool_content}"
+    );
+}
+
+#[tokio::test]
+async fn test_preload_mcp_skill_by_alias() {
+    // Arrange: /demo:hello 别名（registry.find 的 <server>:<skill> 分支）
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/demo:hello 帮我"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert
+    assert_eq!(state.messages().len(), 3, "别名命中应注入 Ai + Tool");
+    let tool_content = state.messages()[2].content();
+    assert!(tool_content.contains("Body of hello."));
+    assert!(tool_content.contains("This skill is served by MCP server \"demo\""));
+}
+
+#[tokio::test]
+async fn test_preload_mcp_skill_unmatched_silently_skipped() {
+    // Arrange: registry 装配但 /nonexistent 未命中（registry 与本地磁盘均无）
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/nonexistent 不存在"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: 未命中静默跳过（无注入消息，仅原始 Human）
+    assert_eq!(
+        state.messages().len(),
+        1,
+        "未命中应静默跳过，不注入任何消息"
+    );
+}
+
+#[tokio::test]
+async fn test_preload_mixed_registry_and_local_skills() {
+    // Arrange: registry（demo:hello）+ 本地 tempdir skill 并存
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    write_skill(&skills_dir, "local-skill", "本地技能");
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/local-skill /demo:hello 帮我"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: 1 Human + 1 Ai + 2 Tool = 4 条；两路各自命中
+    assert_eq!(state.messages().len(), 4, "本地与 MCP 应各自注入一条 Tool");
+    let tool_contents: Vec<String> = state
+        .messages()
+        .iter()
+        .skip(1)
+        .map(|m| m.content())
+        .collect();
+    assert!(
+        tool_contents
+            .iter()
+            .any(|c| c.contains("Skill content for local-skill")),
+        "本地 skill 应照旧命中"
+    );
+    assert!(
+        tool_contents
+            .iter()
+            .any(|c| c.contains("This skill is served by MCP server \"demo\"")),
+        "MCP skill 应命中并带来源标注"
+    );
+}
+
+/// 磁盘解析位置保留回归（组 D）：miss 夹在命中之间时，注入顺序必须等于
+/// 用户原始输入顺序（旧 filter_map 实现会把后续磁盘命中错位消费到 miss 的
+/// 槽位上）。
+#[tokio::test]
+async fn test_preload_preserves_input_order_with_miss_in_between() {
+    // Arrange: 输入 [/miss-a, /mcp__demo__hello(registry 命中), /local-b(磁盘命中)]
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    write_skill(&skills_dir, "local-b", "本地技能 B");
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human(
+        "/miss-a /mcp__demo__hello /local-b 帮我",
+    ));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: 1 Human + 1 Ai + 2 Tool；注入顺序 = 输入顺序（miss-a 静默跳过）
+    assert_eq!(
+        state.messages().len(),
+        4,
+        "应注入 2 个 skill（Ai + 2 Tool）"
+    );
+    let tool_calls = state.messages()[1].tool_calls();
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(
+        tool_calls[0].arguments["skill_name"].as_str(),
+        Some("mcp__demo__hello"),
+        "第一个注入应为 registry 命中的 mcp skill（miss-a 不得占用其槽位）"
+    );
+    assert_eq!(
+        tool_calls[1].arguments["skill_name"].as_str(),
+        Some("local-b"),
+        "第二个注入应为磁盘命中的 local-b（miss-a 不得错位消费磁盘条目）"
+    );
+    assert!(
+        state.messages()[2].content().contains("Body of hello."),
+        "Tool 顺序应与 Ai tool_calls 一致（mcp 内容）"
+    );
+    assert!(
+        state.messages()[3]
+            .content()
+            .contains("Skill content for local-b"),
+        "Tool 顺序应与 Ai tool_calls 一致（本地内容）"
+    );
+}
+
+/// OQ1 回归：`mcp__` 前缀 token 在 registry miss 时不得回退磁盘——即使本地
+/// 磁盘存在同名 skill 也不注入（`mcp__` 前缀是 MCP 身份，防误注入本地同名
+/// 内容）。
+#[tokio::test]
+async fn test_preload_mcp_prefixed_registry_miss_skips_disk_fallback() {
+    // Arrange: registry 无 mcp__demo__hello（只 seed 了 demo/other）；本地磁盘
+    // 存在同名 skill `mcp__demo__hello`。
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    write_skill(&skills_dir, "mcp__demo__hello", "本地同名 skill");
+    let reg = seed_registry_with_skill("demo", "other");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/mcp__demo__hello 帮我"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: registry miss → 跳过，不回退磁盘（不注入任何消息，仅原始 Human）
+    assert_eq!(
+        state.messages().len(),
+        1,
+        "mcp__ 前缀 registry miss 应跳过，不得注入本地同名 skill 内容"
+    );
+}
+
+/// 组 E 评审回归：`<x>:<y>` 别名 registry miss 保持既有磁盘回退（对齐
+/// plugin 命名空间语义，skill_preload.rs 注释契约）——registry 无
+/// `ns:test-skill` 条目时，本地磁盘同名 skill 仍应经 preload 注入内容。
+#[tokio::test]
+async fn test_preload_alias_miss_falls_back_to_local_disk_skill() {
+    // Arrange: registry 只 seed 了 demo/hello；本地 tempdir 存在命名空间
+    // 后缀形态的 skill 目录 `test-skill`（磁盘目录名不含 `:`——NTFS/APFS
+    // 均禁止 `:` 作为目录名字符，插件命名空间 skill 在磁盘上即无前缀目录，
+    // 别名 `<ns>:<name>` 经 rsplit_once(':') 后缀回退命中）。
+    let dir = tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+    write_skill(&skills_dir, "test-skill", "命名空间技能");
+    let reg = seed_registry_with_skill("demo", "hello");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/ns:test-skill 帮我"));
+
+    // Act
+    mw.before_agent(&mut state).await.unwrap();
+
+    // Assert: 别名 miss → 磁盘回退注入本地内容（1 Human + 1 Ai + 1 Tool）
+    assert_eq!(state.messages().len(), 3, "别名 miss 应回退磁盘注入");
+    let tool_content = state.messages()[2].content();
+    assert!(
+        tool_content.contains("Skill content for test-skill"),
+        "应注入本地 skill 内容，实际: {tool_content}"
     );
 }

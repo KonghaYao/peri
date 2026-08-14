@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -6,12 +9,30 @@ use ratatui_kit_markdown::{MarkdownTheme, ParsedBlock};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::kit::image_safety::{UrlKind, classify_url, sanitize_for_terminal};
+
 use super::code_block::code_block_lines;
 use super::heading::heading_line;
 use super::list::list_item_line;
+use super::scan::ImageInfo;
 use super::span_style::apply_span_styles;
 use super::table::compute_table_col_widths;
-use super::types::{MarkdownSegment, TableData};
+use super::types::{ImageSegment, MarkdownSegment, TableData};
+
+// ── 图片 token 侧表查表（T3）────────────────────────────────────────
+
+/// token → `ImageInfo` 索引查表（token 唯一性由 T2 `replace_images` 保证）。
+///
+/// token 文本即 T2 占位符（`\u{0}IMG{n}\u{0}`）；`rk_parse` 的 Text 事件可能
+/// 把 token 与相邻文本合并进同一 span（pulldown 合并连续普通文本），因此
+/// convert 侧是**子串扫描 + 查表**而非整 span 精确匹配。
+pub(crate) fn image_lookup(infos: &[ImageInfo]) -> HashMap<&str, usize> {
+    infos
+        .iter()
+        .enumerate()
+        .map(|(i, info)| (info.token.as_str(), i))
+        .collect()
+}
 
 // ── 块级转换 ────────────────────────────────────────────────────────
 
@@ -123,10 +144,20 @@ pub(crate) fn convert_to_segments(
     theme: &MarkdownTheme,
     max_width: usize,
     base_fg: ratatui::style::Color,
+    image_infos: &[ImageInfo],
+    lookup: &HashMap<&str, usize>,
 ) -> Vec<MarkdownSegment> {
     let mut state = ConvertState::default();
     let base_style = Style::default().fg(base_fg);
-    convert_to_segments_with_state(blocks, theme, max_width, base_style, &mut state)
+    convert_to_segments_with_state(
+        blocks,
+        theme,
+        max_width,
+        base_style,
+        &mut state,
+        image_infos,
+        lookup,
+    )
 }
 
 /// 与 `convert_to_segments` 同逻辑，但接受外部 `state` 以支持续跑。
@@ -145,6 +176,8 @@ pub(crate) fn convert_to_segments_with_state(
     max_width: usize,
     base_style: Style,
     state: &mut ConvertState,
+    image_infos: &[ImageInfo],
+    lookup: &HashMap<&str, usize>,
 ) -> Vec<MarkdownSegment> {
     for (i, block) in blocks.iter().enumerate() {
         if i < state.processed_block_count {
@@ -174,10 +207,19 @@ pub(crate) fn convert_to_segments_with_state(
 
         match block {
             ParsedBlock::Heading(level, line) => {
-                state.current_text.extend(wrap_styled_line(
+                // [P0-1 修复] 标题内图片 token 在 span 层替换为降级文案（与
+                // 表格单元格同一策略：不拆段、保持标题结构/样式完整）——
+                // 否则 NUL 包裹 token 宽度为 0，标题渲染为空行（内容丢失）。
+                let line = replace_line_tokens(
                     &heading_line(level, line, theme),
-                    max_width,
-                ));
+                    lookup,
+                    image_infos,
+                    theme,
+                    base_style,
+                );
+                state
+                    .current_text
+                    .extend(wrap_styled_line(&line, max_width));
             }
             ParsedBlock::Paragraph(para_lines) => {
                 // 检测「可能是表头行」的 Paragraph：首行以 | 开头，
@@ -190,11 +232,79 @@ pub(crate) fn convert_to_segments_with_state(
                 {
                     state.has_potential_table_header = true;
                 }
+                // [T3 图片拆段] 占位 token 替换为 Image 段（spec §3.4）。
+                // standalone：段落剔除全部命中 token 后仅剩空白 → 段级间距；
+                // 否则行内混排，拆段 flush 出独立 Text 段 + Image 段。
+                let standalone = para_lines.iter().all(|l| line_is_only_images(l, lookup));
+                // [P1-1 修复] 同段多图合并：standalone 段内连续图片合并为
+                // **一个** Image 段（lines 多行、段内无空行），与跨段
+                // （`\n\n` 分隔的独立段落）区分——render 层 gap 规则据此
+                // 对跨段独立图片加空行（§3.5「独占段前后有空行」）。
+                let mut pending_image: Option<usize> = None;
                 for line in para_lines {
-                    state.current_text.extend(wrap_styled_line(
-                        &style_line(line, theme, base_style),
-                        max_width,
-                    ));
+                    let parts = split_line_by_tokens(line, lookup);
+                    if parts.is_empty() {
+                        // 快速路径：无图片（常见路径，与 T2 前行为一致）
+                        state.current_text.extend(wrap_styled_line(
+                            &style_line(line, theme, base_style),
+                            max_width,
+                        ));
+                        continue;
+                    }
+                    for part in parts {
+                        match part {
+                            LinePart::Text(frag) => {
+                                // 独占段内仅空白的片段（如 `![a](u) ![b](v)` 图间空格）
+                                // 不累积：保持连续独占 Image 段，避免 render 层间隙误判
+                                // （§3.5：独占段连续无间隙、仅首段前加）。
+                                if standalone
+                                    && frag
+                                        .spans
+                                        .iter()
+                                        .all(|s| s.content.as_ref().trim().is_empty())
+                                {
+                                    continue;
+                                }
+                                // 行内混排：后续图片不与该段前图合并。
+                                pending_image = None;
+                                state.current_text.extend(wrap_styled_line(
+                                    &style_line(&frag, theme, base_style),
+                                    max_width,
+                                ));
+                            }
+                            LinePart::Image { idx } => {
+                                // 锚点处 flush 已累积文本为独立 Text 段
+                                // （拆段不破坏块间距：段落间距空行仍在 current_text
+                                // 缓冲层，segment 间间隙由 render.rs §3.5 规则接管）。
+                                trim_trailing_blanks(&mut state.current_text);
+                                if !state.current_text.is_empty() {
+                                    state.segments.push(MarkdownSegment::Text(std::mem::take(
+                                        &mut state.current_text,
+                                    )));
+                                    pending_image = None;
+                                }
+                                let info = &image_infos[idx];
+                                let seg = build_image_segment(
+                                    info, standalone, theme, base_style, max_width,
+                                );
+                                if standalone {
+                                    if let Some(img_idx) = pending_image
+                                        && let MarkdownSegment::Image(prev) =
+                                            &mut state.segments[img_idx]
+                                    {
+                                        // 同段多图：降级行追加到已合并段
+                                        // （段内连续，无空行）。
+                                        prev.lines.extend(seg.lines);
+                                    } else {
+                                        state.segments.push(MarkdownSegment::Image(seg));
+                                        pending_image = Some(state.segments.len() - 1);
+                                    }
+                                } else {
+                                    state.segments.push(MarkdownSegment::Image(seg));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
@@ -205,10 +315,18 @@ pub(crate) fn convert_to_segments_with_state(
                 }
             }
             ParsedBlock::ListItem(item) => {
-                state.current_text.extend(wrap_styled_line(
+                // [P0-1 修复] 列表项内图片 token 在 span 层替换为降级文案
+                // （同 Heading 分支；列表标记 `• ` 保留，图片可见）。
+                let line = replace_line_tokens(
                     &list_item_line(item, theme, base_style),
-                    max_width,
-                ));
+                    lookup,
+                    image_infos,
+                    theme,
+                    base_style,
+                );
+                state
+                    .current_text
+                    .extend(wrap_styled_line(&line, max_width));
             }
             ParsedBlock::Rule => {
                 let rule_char = "─".repeat(max_width.min(80));
@@ -223,11 +341,19 @@ pub(crate) fn convert_to_segments_with_state(
                         &mut state.current_text,
                     )));
                 }
+                // [T3 表格单元格] P0 不拆段：单元格内 token 在 span 样式层替换为
+                // 降级文案 span（spec §3.6 验收：单元格显示降级文案、结构完整）。
+                // 替换必须在列宽计算之前（宽度按降级文案计）。
+                let headers = replace_cell_tokens(headers, lookup, image_infos, theme, base_style);
+                let rows = rows
+                    .iter()
+                    .map(|row| replace_cell_tokens(row, lookup, image_infos, theme, base_style))
+                    .collect::<Vec<_>>();
                 let col_widths =
-                    compute_table_col_widths(headers, rows, alignments.len(), max_width);
+                    compute_table_col_widths(&headers, &rows, alignments.len(), max_width);
                 state.segments.push(MarkdownSegment::Table(TableData {
-                    headers: headers.clone(),
-                    rows: rows.clone(),
+                    headers,
+                    rows,
                     alignments: alignments.clone(),
                     col_widths,
                 }));
@@ -313,4 +439,288 @@ pub(super) fn wrap_styled_line(line: &Line<'static>, max_width: usize) -> Vec<Li
             )
         })
         .collect()
+}
+
+// ── 图片拆段（T3）────────────────────────────────────────────────────
+
+/// 按占位 token 切分后的行片段。
+enum LinePart {
+    /// 非图片文本片段（保留原 span 样式）。
+    Text(Line<'static>),
+    /// 图片锚点（`image_infos[idx]`）。
+    Image { idx: usize },
+}
+
+/// 在文本中查找下一个占位 token（`\u{0}IMG{n}\u{0}`，T2 格式）的字节区间。
+///
+/// token 全部为 ASCII（NUL/IMG/数字），字节级扫描安全；返回 `(start, end)`
+/// 均为 token 边界，可安全用于 `content[start..end]` 切片。
+fn find_token_at(content: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = content.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == 0 && bytes.get(i + 1..i + 4) == Some(b"IMG") {
+            let mut j = i + 4;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 4 && bytes.get(j) == Some(&0) {
+                return Some((i, j + 1));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 将一行 spans 按命中 token 切分为片段序列（文本/图片交替）。
+///
+/// 查表 miss（形如 `\u{0}IMG{n}\u{0}` 但 side table 无此 token，S3 §4.5 G3）
+/// 按普通文本原样保留。无命中返回空 Vec（调用方走快速路径）。
+fn split_line_by_tokens(line: &Line<'static>, lookup: &HashMap<&str, usize>) -> Vec<LinePart> {
+    let mut parts: Vec<LinePart> = Vec::new();
+    let mut buf: Vec<Span<'static>> = Vec::new();
+    for span in &line.spans {
+        let content: &str = span.content.as_ref();
+        // 快速路径：无 NUL 即无 token（NUL 是 token 包裹符，用户输入几乎不可能含）
+        if !content.contains('\u{0}') {
+            buf.push(span.clone());
+            continue;
+        }
+        let mut pos = 0usize;
+        while let Some((start, end)) = find_token_at(content, pos) {
+            if start > pos {
+                buf.push(Span::styled(content[pos..start].to_string(), span.style));
+            }
+            if let Some(&idx) = lookup.get(&content[start..end]) {
+                if !buf.is_empty() {
+                    parts.push(LinePart::Text(Line::from(std::mem::take(&mut buf))));
+                }
+                parts.push(LinePart::Image { idx });
+            } else {
+                // G3 兜底：按普通文本原样显示
+                buf.push(Span::styled(content[start..end].to_string(), span.style));
+            }
+            pos = end;
+        }
+        if pos < content.len() {
+            buf.push(Span::styled(content[pos..].to_string(), span.style));
+        }
+    }
+    if !buf.is_empty() {
+        parts.push(LinePart::Text(Line::from(buf)));
+    }
+    parts
+}
+
+/// 行是否「仅含图片」：剔除全部命中 token 后只剩空白（spec §3.4-2 独占判定）。
+fn line_is_only_images(line: &Line<'static>, lookup: &HashMap<&str, usize>) -> bool {
+    line.spans.iter().all(|span| {
+        let content: &str = span.content.as_ref();
+        if !content.contains('\u{0}') {
+            return content.trim().is_empty();
+        }
+        let mut pos = 0usize;
+        while let Some((start, end)) = find_token_at(content, pos) {
+            if !content[pos..start].trim().is_empty() {
+                return false;
+            }
+            if !lookup.contains_key(&content[start..end]) {
+                return false; // 查表 miss 的字面文本视为普通内容
+            }
+            pos = end;
+        }
+        content[pos..].trim().is_empty()
+    })
+}
+
+/// 展示字段截断：字符数（非字节/宽度）超过 `max` 时截断并追加 `…`
+/// （spec §3.4-4：alt ≤ 64 字符、url 显示 ≤ 200 字符）。
+fn truncate_chars(s: &str, max: usize) -> Cow<'_, str> {
+    if s.chars().count() <= max {
+        Cow::Borrowed(s)
+    } else {
+        Cow::Owned(format!("{}…", s.chars().take(max).collect::<String>()))
+    }
+}
+
+/// 图片降级文案 spans（§8.1 R4 三式）：标签 span 用正文 base_style，
+/// url span 用 theme.link_style（下划线，链接语义）。展示字段先过 T5
+/// 控制字符过滤 + 长度截断。
+fn image_degraded_spans(
+    info: &ImageInfo,
+    theme: &MarkdownTheme,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    let sanitized_alt = sanitize_for_terminal(&info.alt);
+    let alt = truncate_chars(&sanitized_alt, 64);
+    let sanitized_url = sanitize_for_terminal(&info.url);
+    let url = truncate_chars(&sanitized_url, 200);
+    // scheme 分类用原始 url（截断可能破坏 scheme 前缀）
+    let is_remote = classify_url(&info.url) == UrlKind::RemoteHttp;
+    let label: String = if is_remote {
+        if alt.is_empty() {
+            "[Remote image] ".to_string()
+        } else {
+            format!("[Remote image: {alt}] ")
+        }
+    } else if alt.is_empty() {
+        "[Image] ".to_string()
+    } else {
+        format!("[Image: {alt}] ")
+    };
+    vec![
+        Span::styled(label, base_style),
+        Span::styled(format!("({url})"), theme.link_style),
+    ]
+}
+
+/// 构建 Image 段（spec §3.3）：类型化字段 + convert 阶段折行的降级行。
+fn build_image_segment(
+    info: &ImageInfo,
+    standalone: bool,
+    theme: &MarkdownTheme,
+    base_style: Style,
+    max_width: usize,
+) -> ImageSegment {
+    let spans = image_degraded_spans(info, theme, base_style);
+    let lines = wrap_styled_line(&Line::from(spans), max_width);
+    ImageSegment {
+        alt: truncate_chars(&sanitize_for_terminal(&info.alt), 64).into_owned(),
+        url: truncate_chars(&sanitize_for_terminal(&info.url), 200).into_owned(),
+        title: (!info.title.is_empty())
+            .then(|| truncate_chars(&sanitize_for_terminal(&info.title), 200).into_owned()),
+        is_remote: classify_url(&info.url) == UrlKind::RemoteHttp,
+        standalone,
+        byte_start: info.byte_start,
+        byte_end: info.byte_end,
+        lines,
+    }
+}
+
+/// 行内 span 层的 token → 降级文案替换（P0-1：Heading/ListItem 分支）。
+///
+/// 与表格单元格同一策略——不拆段、保持块结构完整（标题样式/列表标记保留），
+/// 图片渲染为 [`image_degraded_spans`] 降级文案。查表 miss 按字面文本保留。
+fn replace_line_tokens(
+    line: &Line<'static>,
+    lookup: &HashMap<&str, usize>,
+    image_infos: &[ImageInfo],
+    theme: &MarkdownTheme,
+    base_style: Style,
+) -> Line<'static> {
+    Line::from(replace_spans(
+        &line.spans,
+        lookup,
+        image_infos,
+        theme,
+        base_style,
+    ))
+}
+
+/// span 序列中的 token → 降级文案替换（表格单元格 / 标题 / 列表项共用）。
+/// 查表 miss 按字面文本保留（G3 语义，与 [`split_line_by_tokens`] 一致）。
+fn replace_spans(
+    spans: &[Span<'static>],
+    lookup: &HashMap<&str, usize>,
+    image_infos: &[ImageInfo],
+    theme: &MarkdownTheme,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let content: &str = span.content.as_ref();
+        if !content.contains('\u{0}') {
+            out.push(span.clone());
+            continue;
+        }
+        let mut pos = 0usize;
+        while let Some((start, end)) = find_token_at(content, pos) {
+            if start > pos {
+                out.push(Span::styled(content[pos..start].to_string(), span.style));
+            }
+            if let Some(&idx) = lookup.get(&content[start..end]) {
+                out.extend(image_degraded_spans(&image_infos[idx], theme, base_style));
+            } else {
+                out.push(Span::styled(content[start..end].to_string(), span.style));
+            }
+            pos = end;
+        }
+        if pos < content.len() {
+            out.push(Span::styled(content[pos..].to_string(), span.style));
+        }
+    }
+    out
+}
+
+/// 表格单元格内的 token → 降级文案 span 替换（P0 不拆段，保持单元格结构）。
+///
+/// 替换发生在列宽计算**之前**：`compute_table_col_widths` 按降级文案宽度计列，
+/// 避免单元格内容溢出。查表 miss 按字面文本保留。
+fn replace_cell_tokens(
+    cells: &[Vec<Span<'static>>],
+    lookup: &HashMap<&str, usize>,
+    image_infos: &[ImageInfo],
+    theme: &MarkdownTheme,
+    base_style: Style,
+) -> Vec<Vec<Span<'static>>> {
+    cells
+        .iter()
+        .map(|cell| replace_spans(cell, lookup, image_infos, theme, base_style))
+        .collect()
+}
+
+/// [缓存安全] 已处理块中含命中图片 token 时，persist 前回滚全部增量状态。
+///
+/// [Why] 图片拆段会把已累积文本 flush 出 `current_text`（Text/Image 段），
+/// 打破「无 Table 时全部文本都累积在 current_text」的续跑前提——续跑时
+/// 已 flush 的段无法重建，输出会丢段。因此含图片的文本**不参与增量续跑**：
+/// 图片闭合后每帧全量重跑（S1 §6.2 结论：图片语法出现率低，接受 O(N)；
+/// §8.1 R3「正确性优先于增量性能」）。
+///
+/// 无图片的流式路径不受影响：本检查为 NUL 预检快速路径（O(span 内容)）。
+pub(crate) fn rollback_image_blocks(
+    blocks: &[ParsedBlock],
+    state: &mut ConvertState,
+    lookup: &HashMap<&str, usize>,
+) {
+    let n = state.processed_block_count;
+    if blocks[..n].iter().any(|b| block_contains_image(b, lookup)) {
+        state.processed_block_count = 0;
+        state.prev_was_list_item = false;
+        state.current_text.clear();
+        state.block_line_ends.clear();
+    }
+}
+
+/// 块中是否含 side table 命中的图片 token（CodeBlock/Rule 不含——代码块内
+/// 图片语法不替换；Table 已由 `has_table_in_processed_blocks` 恒失效）。
+fn block_contains_image(block: &ParsedBlock, lookup: &HashMap<&str, usize>) -> bool {
+    match block {
+        ParsedBlock::Paragraph(lines) => lines.iter().any(|l| line_contains_image(l, lookup)),
+        ParsedBlock::Heading(_, line) => line_contains_image(line, lookup),
+        ParsedBlock::ListItem(item) => spans_contain_image(&item.spans, lookup),
+        ParsedBlock::Table(..) | ParsedBlock::CodeBlock(..) | ParsedBlock::Rule => false,
+    }
+}
+
+fn line_contains_image(line: &Line<'static>, lookup: &HashMap<&str, usize>) -> bool {
+    spans_contain_image(&line.spans, lookup)
+}
+
+fn spans_contain_image(spans: &[Span<'static>], lookup: &HashMap<&str, usize>) -> bool {
+    spans.iter().any(|span| {
+        let content: &str = span.content.as_ref();
+        if !content.contains('\u{0}') {
+            return false;
+        }
+        let mut pos = 0usize;
+        while let Some((start, end)) = find_token_at(content, pos) {
+            if lookup.contains_key(&content[start..end]) {
+                return true;
+            }
+            pos = end;
+        }
+        false
+    })
 }

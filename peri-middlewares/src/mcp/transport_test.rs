@@ -9,6 +9,7 @@ fn test_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        subscriptions: None,
         source: None,
     }
 }

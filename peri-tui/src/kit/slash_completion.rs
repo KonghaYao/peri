@@ -33,6 +33,22 @@ pub enum SlashActionKind {
     Panel,
     Command,
     Skill,
+    McpSkill,
+}
+
+/// Slash 条目按 kind 的静态语义色（S16：三层 slash 用颜色区分，不用方括号标签）。
+/// McpSkill 用 `semantic.model_info`（spec 允许「主题中专门 token」，
+/// `semantic.status.info` 不存在——不加 peri-theme 新字段，零范围蔓延）。
+pub(crate) fn slash_kind_color(
+    kind: &SlashActionKind,
+    semantic: &peri_theme::semantic::SemanticTokens,
+) -> ratatui::style::Color {
+    match kind {
+        SlashActionKind::Panel => semantic.border.active,
+        SlashActionKind::Command => semantic.text.muted,
+        SlashActionKind::Skill => semantic.status.warning,
+        SlashActionKind::McpSkill => semantic.model_info,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -209,11 +225,7 @@ pub fn SlashCompletion(
             let marker = if selected { "> " } else { "  " };
 
             // S16：三层 slash 用颜色区分，不用方括号标签
-            let tier_color = match item.kind {
-                SlashActionKind::Panel => semantic.border.active,
-                SlashActionKind::Command => semantic.text.muted,
-                SlashActionKind::Skill => semantic.status.warning,
-            };
+            let tier_color = slash_kind_color(&item.kind, &semantic);
 
             let line_style = if selected {
                 Style::default()
@@ -277,4 +289,42 @@ pub fn SlashCompletion(
             Text(text: text_render)
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peri_theme::prelude::dark_theme;
+
+    fn semantic() -> peri_theme::semantic::SemanticTokens {
+        dark_theme().semantic
+    }
+
+    #[test]
+    fn test_slash_kind_color_mcp_skill_uses_model_info() {
+        let s = semantic();
+        assert_eq!(
+            slash_kind_color(&SlashActionKind::McpSkill, &s),
+            s.model_info,
+            "McpSkill 应映射 semantic.model_info"
+        );
+    }
+
+    /// 回归：既有 Panel/Command/Skill 映射不变（渲染行为除新增色外不变）。
+    #[test]
+    fn test_slash_kind_color_existing_kinds_unchanged() {
+        let s = semantic();
+        assert_eq!(
+            slash_kind_color(&SlashActionKind::Panel, &s),
+            s.border.active
+        );
+        assert_eq!(
+            slash_kind_color(&SlashActionKind::Command, &s),
+            s.text.muted
+        );
+        assert_eq!(
+            slash_kind_color(&SlashActionKind::Skill, &s),
+            s.status.warning
+        );
+    }
 }

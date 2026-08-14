@@ -59,7 +59,15 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
 
     /// 装配 workflow agent 工具列表（filesystem / terminal / web / skills tools；
     /// 仅 project-level skills，与迁移前行为一致）。
-    fn build_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>>;
+    ///
+    /// `disabled` 为装配期关闭的 middleware 名集合（源自父会话冻结状态
+    /// `WorkflowAgentContext::meta_harness_disabled`，设计 §2.5）——关闭的
+    /// middleware 连坐，其工具不进入列表。
+    fn build_tools(
+        &self,
+        cwd: &str,
+        disabled: &std::collections::HashSet<String>,
+    ) -> Vec<Box<dyn BaseTool>>;
 
     /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。
     /// 定义中的 `tools: []` / `disallowedTools` 边界由调用方先行检查。

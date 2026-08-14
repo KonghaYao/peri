@@ -68,6 +68,43 @@ fn test_flush_returns_batch_and_tools() {
 }
 
 #[test]
+fn test_on_act_stage_start_reparents_existing_batch() {
+    let mut tb = ToolBatch::new();
+    // ToolStart 先于 StageStarted(Act) 到达:parent 冻结为旧 stage(stage-reason)
+    tb.on_tool_start("call_1", "Bash", serde_json::json!({}), &dummy_parent());
+    // StageStarted(Act) 到达 → 重挂到 stage-act
+    tb.on_act_stage_start("span_stage_act_new");
+    let flush = tb.flush();
+    assert_eq!(
+        flush.parent_observation_id, "span_stage_act_new",
+        "batch parent 应重挂到 stage-act"
+    );
+}
+
+#[test]
+fn test_on_act_stage_start_noop_without_batch() {
+    let mut tb = ToolBatch::new();
+    // batch 未创建时 Act 开始:不 panic;后续 on_tool_start 创建 batch 时
+    // 直接透传当前 stage-act 作为 parent
+    tb.on_act_stage_start("span_stage_act_new");
+    let r = tb.on_tool_start(
+        "call_1",
+        "Bash",
+        serde_json::json!({}),
+        "span_stage_act_new",
+    );
+    assert!(
+        r.parent_span_id.starts_with("batch_"),
+        "工具仍挂 batch span"
+    );
+    let flush = tb.flush();
+    assert_eq!(
+        flush.parent_observation_id, "span_stage_act_new",
+        "flush 透传 on_tool_start 传入的 stage-act parent"
+    );
+}
+
+#[test]
 fn test_is_agent_tool() {
     let mut tb = ToolBatch::new();
     tb.on_tool_start(

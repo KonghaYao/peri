@@ -15,11 +15,13 @@
 //! - `table`：compute_table_col_widths（最长不可断词约束）、table_data_to_lines
 //!   （智能断词换行 + unicode 网格线渲染）
 //! - `convert`：convert_to_segments（块级分发）
+//! - `scan`：图片前置扫描 + 占位替换（P0，T2）
 
 mod code_block;
 mod convert;
 mod heading;
 mod list;
+mod scan;
 mod span_style;
 mod table;
 pub mod types;
@@ -31,7 +33,7 @@ use ratatui_kit::{ComponentTheme, prelude::Palette};
 use ratatui_kit_markdown::{MarkdownTheme, parse_markdown as rk_parse};
 
 pub use table::table_data_to_lines;
-pub use types::{MarkdownSegment, TableData};
+pub use types::{ImageSegment, MarkdownSegment, TableData};
 
 // ── 公开 API ───────────────────────────────────────────────────────
 
@@ -50,9 +52,22 @@ pub fn parse_markdown(
     // 但 peri-tui 仍保留兜底：流式期间偶发 fence 计数为奇数时，主动补一个闭合 fence，
     // 保证未闭合代码块内容不被丢弃。简单按行扫描，3+ backtick 开头记一次 fence。
     let sanitized = ensure_closed_code_fences(input);
-    let parsed = rk_parse(&sanitized);
+    // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
+    // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
+    // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
+    let (placeholder, image_infos) =
+        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let parsed = rk_parse(&placeholder);
     let theme = MarkdownTheme::from_palette(&palette);
-    convert::convert_to_segments(&parsed.blocks, &theme, max_width, base_fg)
+    let lookup = convert::image_lookup(&image_infos);
+    convert::convert_to_segments(
+        &parsed.blocks,
+        &theme,
+        max_width,
+        base_fg,
+        &image_infos,
+        &lookup,
+    )
 }
 
 /// 检测未闭合 fenced code block：逐行统计 ``` fence 数，奇数则末尾补一个闭合 fence。
@@ -79,13 +94,16 @@ fn ensure_closed_code_fences(input: &str) -> Cow<'_, str> {
 // 前面已闭合的 block（如已闭合的 ``` 代码块、已结束的 paragraph）内容完全不变。
 //
 // [契机] pulldown-cmark 是确定性解析器：相同文本前缀 → 相同 blocks 前缀（流式
-// 追加在末尾，只能影响尾部块）。因此只要检测 `sanitized.starts_with(cache.stable_text)`，
-// 就能复用上次处理到 `cache.stable_state.processed_block_count` 的累积状态，仅处理新增 block。
+// 追加在末尾，只能影响尾部块）。因此只要检测
+// `placeholder.starts_with(cache.stable_text)`（placeholder = sanitize + 图片
+// 占位替换后的 rk_parse 输入，S1 §2.3：缓存键必须是替换后文本，否则图片
+// 闭合瞬间会静默复用旧 blocks），就能复用上次处理到
+// `cache.stable_state.processed_block_count` 的累积状态，仅处理新增 block。
 //
 // [稳定前缀契约] 持久化（persist）前必须回滚「尾部不稳定块」
 // （convert::rollback_trailing_unstable）：
 //   1. 尾部连续空段落（列表哨兵，追加后移位/消失）——回滚
-//   2. 最后一个非空块：sanitized 不以空行（\n\n）结尾时回滚（段落同行/soft-break
+//   2. 最后一个非空块：placeholder 不以空行（\n\n）结尾时回滚（段落同行/soft-break
 //      增长、列表项 lazy continuation、标题同行增长、缩进/未闭合代码块行数增长、
 //      `---`→`---x` 类型翻转、表头翻转的尾块场景）
 // 回滚后 processed_block_count 停在「稳定边界」处，续跑时重新处理尾部块——
@@ -105,8 +123,8 @@ fn ensure_closed_code_fences(input: &str) -> Cow<'_, str> {
 /// 单个 markdown 渲染缓存（每个 AssistantBubble / UserBubble 一个）。
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownRenderCache {
-    /// 已稳定处理的文本前缀（上次 persist 的 sanitized text，可为任意结尾——
-    /// 正确性由 persist 前回滚尾部不稳定块保证）。
+    /// 已稳定处理的文本前缀（上次 persist 的**占位替换后**文本——rk_parse
+    /// 实际输入，可为任意结尾；正确性由 persist 前回滚尾部不稳定块保证）。
     /// 空字符串表示缓存无效。
     stable_text: String,
     /// 上次处理 stable_text 时的 vis_width。
@@ -154,9 +172,17 @@ pub fn parse_markdown_cached(
         return vec![];
     }
     let sanitized = ensure_closed_code_fences(input);
-    let parsed = rk_parse(&sanitized);
+    // [图片前置扫描] 同 parse_markdown：sanitize 之后、rk_parse 之前替换为占位
+    // token。占位替换后的文本是 rk_parse 输入，**也是缓存键**（S1 §2.3：
+    // 占位替换必须参与缓存键，否则图片闭合瞬间 placeholder 前缀断裂时会
+    // 静默复用旧 blocks——正确性硬要求，不是优化）。side table 供 T3 convert
+    // 查表（token → ImageInfo）。
+    let (placeholder, image_infos) =
+        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let parsed = rk_parse(&placeholder);
     let theme = MarkdownTheme::from_palette(&palette);
     let base_style = ratatui::style::Style::default().fg(base_fg);
+    let lookup = convert::image_lookup(&image_infos);
 
     // 判断是否能复用 stable_state
     // [Table 缓存失效] Table 是动态块：追加行会改变同一 block 的内容（headers/rows），
@@ -167,7 +193,7 @@ pub fn parse_markdown_cached(
     // 分隔符到达后同一文本前缀翻转为 Table（中间块场景；尾块场景由 persist 前回滚覆盖）。
     // 此时缓存的 processed_block_count 与旧 Paragraph block 绑定，但 block 类型已变——
     // 必须全量重跑，否则原始 pipe 格式永久残留。
-    let prefix_delta = sanitized.strip_prefix(&cache.stable_text);
+    let prefix_delta = placeholder.strip_prefix(&cache.stable_text);
     let can_reuse = cache.has_stable_prefix()
         && cache.stable_width == max_width as u16
         && cache.stable_palette == palette
@@ -191,6 +217,8 @@ pub fn parse_markdown_cached(
         max_width,
         base_style,
         &mut state,
+        &image_infos,
+        &lookup,
     );
 
     // 持久化：先回滚「尾部不稳定块」，再写回缓存。
@@ -199,13 +227,20 @@ pub fn parse_markdown_cached(
     // 现在任意输入都持久化：回滚保证续跑正确性，散文场景也能命中缓存增量续跑。
     // [回归修复] 尾部空段落（列表哨兵）由 rollback 统一回滚——替代早期实现的
     // trailing_empties 剔除（只处理尾部空段，且需要手动修正 prev_was_list_item）。
-    convert::rollback_trailing_unstable(&parsed.blocks, &mut state, sanitized.ends_with("\n\n"));
+    // 空行判定基于 placeholder：占位 token 单行无换行，与 sanitized 判定等价
+    // （S1 §4）。
+    convert::rollback_trailing_unstable(&parsed.blocks, &mut state, placeholder.ends_with("\n\n"));
+    // [T3 图片缓存安全] 已处理块含图片时回滚全部增量状态：图片拆段 flush 出
+    // current_text（Text/Image 段），续跑无法重建已 flush 段 → 含图片文本不
+    // 参与增量续跑，每帧全量重跑（S1 §6.2：图片语法出现率低，O(N) 可接受；
+    // §8.1 R3 正确性优先）。无图片消息不受影响（NUL 预检快速路径）。
+    convert::rollback_image_blocks(&parsed.blocks, &mut state, &lookup);
     if let Some(delta) = prefix_delta {
         // 文本前缀未变（含宽度/主题变化但文本相同）：stable_text 增量扩展，
         // 摊销 O(delta) 而非每 token O(N) 拷贝。
         cache.stable_text.push_str(delta);
     } else {
-        cache.stable_text = sanitized.into_owned();
+        cache.stable_text = placeholder;
     }
     cache.stable_width = max_width as u16;
     cache.stable_palette = palette;

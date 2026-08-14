@@ -27,11 +27,30 @@ fn all_text(lines: &[Line<'static>]) -> String {
     lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
 }
 
+/// 空白分隔行判定：无 spans，或 spans 全部为网格前缀列（outer 空 / `│` / gap），
+/// 无正文内容——§3.2 turn 节拍空行现在带竖线前缀，不再是 `spans.is_empty()`。
+fn is_blank_separator(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|s| {
+        let c = s.content.as_ref();
+        c.trim().is_empty() || c == "\u{2502}"
+    })
+}
+
+/// 行是否有正文内容（前缀列不算正文）。
+fn has_body_content(line: &Line<'static>) -> bool {
+    !is_blank_separator(line)
+}
+
+/// 空白分隔行 + 竖线前缀（§3.2：turn 节拍空行不断链左缘时间线）。
+fn is_rail_blank(line: &Line<'static>) -> bool {
+    is_blank_separator(line) && line.spans.iter().any(|s| s.content.as_ref() == "\u{2502}")
+}
+
 /// 首个非空渲染行的文本（跳过 leading 空行）。
 fn header_of(lines: &[Line<'static>]) -> String {
     lines
         .iter()
-        .find(|l| l.spans.iter().any(|s| !s.content.is_empty()))
+        .find(|l| has_body_content(l))
         .map(line_text)
         .unwrap_or_default()
 }
@@ -41,7 +60,7 @@ fn header_of(lines: &[Line<'static>]) -> String {
 fn body_vline_count(lines: &[Line<'static>]) -> usize {
     lines
         .iter()
-        .skip_while(|l| !l.spans.iter().any(|s| !s.content.is_empty()))
+        .skip_while(|l| !has_body_content(l))
         .skip(1)
         .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "\u{2502}"))
         .count()
@@ -51,7 +70,7 @@ fn body_vline_count(lines: &[Line<'static>]) -> usize {
 fn nth_nonempty_line(lines: &[Line<'static>], n: usize) -> Line<'static> {
     lines
         .iter()
-        .filter(|l| l.spans.iter().any(|s| !s.content.is_empty()))
+        .filter(|l| has_body_content(l))
         .nth(n)
         .cloned()
         .unwrap_or_default()
@@ -401,10 +420,13 @@ fn test_vertical_rhythm_blank_lines() {
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into())),
         &grid,
     );
-    assert!(user_lines[0].spans.is_empty(), "user 前应有 1 空行");
     assert!(
-        user_lines.last().is_some_and(|l| l.spans.is_empty()),
-        "user 后应有 1 空行（turn 节拍对称）"
+        is_rail_blank(&user_lines[0]),
+        "user 前应有 1 空行（带竖线前缀，时间线不断链）"
+    );
+    assert!(
+        user_lines.last().is_some_and(is_rail_blank),
+        "user 后应有 1 空行（turn 节拍对称且带竖线前缀）"
     );
     let header = header_of(&user_lines);
     assert!(
@@ -429,14 +451,12 @@ fn test_vertical_rhythm_blank_lines() {
         &grid,
     );
     assert!(
-        assistant_lines[0].spans.is_empty(),
-        "assistant 正文前应有 1 空行"
+        is_rail_blank(&assistant_lines[0]),
+        "assistant 正文前应有 1 空行（带竖线前缀，时间线不断链）"
     );
     assert!(
-        assistant_lines
-            .last()
-            .is_some_and(|line| line.spans.is_empty()),
-        "assistant 正文后应有 1 空行"
+        assistant_lines.last().is_some_and(is_rail_blank),
+        "assistant 正文后应有 1 空行（带竖线前缀）"
     );
 
     // 工具行之间无空行：completed + expanded 展开体（首行 + 输出行）无内部空行
@@ -488,10 +508,13 @@ fn test_empty_user_bubble_renders_zero_lines() {
     let real_user =
         TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into()));
     let real_lines = vm_to_lines(&real_user, &grid);
-    assert!(real_lines[0].spans.is_empty(), "非空 user 前应有 1 空行");
     assert!(
-        real_lines.last().is_some_and(|l| l.spans.is_empty()),
-        "非空 user 后应有 1 空行"
+        is_rail_blank(&real_lines[0]),
+        "非空 user 前应有 1 空行（带竖线前缀）"
+    );
+    assert!(
+        real_lines.last().is_some_and(is_rail_blank),
+        "非空 user 后应有 1 空行（带竖线前缀）"
     );
 }
 
@@ -512,8 +535,8 @@ fn test_user_long_prompt_capped_at_six_lines() {
     // 1 空行 + 6 正文 + 1 `… +6 lines` + 1 尾部空行（无 role label 行）
     assert_eq!(lines.len(), 9, "6 行上限 + 省略行 + 尾部空行，其余截断");
     assert!(
-        lines.last().is_some_and(|l| l.spans.is_empty()),
-        "尾部空行（turn 节拍对称）"
+        lines.last().is_some_and(is_rail_blank),
+        "尾部空行（turn 节拍对称，带竖线前缀）"
     );
     let last = line_text(&lines[lines.len() - 2]);
     assert!(
@@ -2046,7 +2069,7 @@ fn test_assistant_bubble_renders_copy_button() {
     let grid = GridSpec::grid_for(80);
     let vm = assistant_bubble_with_text(&"x".repeat(401), 1);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, btn, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, btn, _, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let btn = btn.expect("超过 400 字符的 AssistantBubble 应返回按钮布局");
     let btn_line = &lines[btn.logical_idx];
@@ -2078,7 +2101,8 @@ fn test_copy_button_hidden_when_narrow() {
     crate::i18n::init(Some("en"));
     let vm = assistant_bubble_with_text(&"x".repeat(401), 2);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, btn, _) = super::vm_to_lines_cached(&vm, &GridSpec::grid_for(3), &mut cache, true);
+    let (lines, btn, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(3), &mut cache, true);
 
     assert!(btn.is_none(), "宽度不足时不应返回按钮布局");
     let text = all_text(&lines);
@@ -2090,7 +2114,8 @@ fn test_copy_button_hidden_when_narrow() {
 fn test_copy_button_hidden_for_empty_text() {
     let vm = assistant_bubble_with_text("", 3);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, btn, _) = super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+    let (lines, btn, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
     assert!(lines.is_empty());
     assert!(btn.is_none());
@@ -2106,7 +2131,8 @@ fn test_copy_button_hidden_for_user_bubble() {
         source: None,
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, btn, _) = super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+    let (lines, btn, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
     let text = all_text(&lines);
     assert!(!text.contains("Copy"), "UserBubble 不应包含复制按钮文本");
@@ -2130,7 +2156,7 @@ fn test_copy_button_hidden_for_short_text() {
     for text in ["hello world".to_string(), "x".repeat(400)] {
         let vm = assistant_bubble_with_text(&text, 6);
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-        let (lines, btn, _) =
+        let (lines, btn, _, _) =
             super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
 
         assert!(btn.is_none(), "≤400 字符不应返回按钮布局");
@@ -2318,7 +2344,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
 
     // Wide（120）：正文末行右对齐含 12.4s，行总宽铺满到消息区右缘（term-1）
     let wide = mk(120);
-    let last = wide.iter().rev().find(|l| !l.spans.is_empty()).unwrap();
+    let last = wide.iter().rev().find(|l| has_body_content(l)).unwrap();
     let text = line_text(last);
     assert!(text.contains("12.4s"), "Wide 应显示 12.4s，实际 {text:?}");
     let g = GridSpec::grid_for(120);
@@ -2333,7 +2359,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
     let last = std_lines
         .iter()
         .rev()
-        .find(|l| !l.spans.is_empty())
+        .find(|l| has_body_content(l))
         .unwrap();
     let text = line_text(last);
     assert!(
@@ -2390,7 +2416,7 @@ fn test_interaction_pending_permission_layout() {
     let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
     let grid = GridSpec::grid_for(80); // Standard，横向选项
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let text = all_text(&lines);
     assert!(text.contains("Approval required"), "标题行应含 FTL 文案");
@@ -2419,7 +2445,7 @@ fn test_interaction_pending_narrow_vertical_options() {
     let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
     let grid = GridSpec::grid_for(30); // Narrow
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let text = all_text(&lines);
     assert!(text.contains("[Allow once]"), "垂直排列第一项");
@@ -2444,7 +2470,7 @@ fn test_interaction_completed_single_line_result() {
     let vm = TuiRenderUnit::TuiAskUserBlock(completed_block("Allowed once"));
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, layout) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let text = all_text(&lines);
     assert!(text.contains("Allowed once"), "结果行含 result 文案");
@@ -2467,7 +2493,7 @@ fn test_interaction_completed_expanded_shows_question() {
     let vm = TuiRenderUnit::TuiAskUserBlock(b);
     let grid = GridSpec::grid_for(80);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
-    let (lines, _, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    let (lines, _, _, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     let text = all_text(&lines);
     assert!(text.contains("Deny"), "结果行");
@@ -3070,4 +3096,361 @@ fn test_semantic_wrapped_md_line_strips_prefix() {
         !joined.contains('\u{2502}'),
         "语义复制不含竖线字符，实际: {joined:?}"
     );
+}
+
+// ── T3：Image segment 渲染层（│ 前缀 + 段间隙规则）────────────────────
+
+/// 独占图片段：渲染输出带 │ 前缀、独占段前后各有一空行（§3.5 间隙规则）。
+#[test]
+fn test_image_standalone_segment_rendering() {
+    let vm = assistant_bubble_with_text("before\n\n![a](u)\n\nafter", 7);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let img_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: a] (u)"))
+        .expect("应渲染出降级行 [Image: a] (u)");
+    assert!(
+        texts[img_idx].contains('\u{2502}'),
+        "Image 段行应带 │ 前缀，实际: {:?}",
+        texts[img_idx]
+    );
+    assert!(is_blank_separator(&lines[img_idx - 1]), "独占段前应有空行");
+    assert!(is_blank_separator(&lines[img_idx + 1]), "独占段后应有空行");
+}
+
+/// 行内图片段：前后无空行（拆段后仍属同一视觉段落，§3.5 行内规则）。
+#[test]
+fn test_image_inline_segment_no_gap() {
+    let vm = assistant_bubble_with_text("before ![a](u) after", 8);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let img_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: a] (u)"))
+        .expect("应渲染出降级行");
+    assert!(
+        !is_blank_separator(&lines[img_idx - 1]),
+        "行内图片段前不应有空行，实际: {:?}",
+        texts[img_idx - 1]
+    );
+    assert!(
+        !is_blank_separator(&lines[img_idx + 1]),
+        "行内图片段后不应有空行，实际: {:?}",
+        texts[img_idx + 1]
+    );
+    // 前后文本保留在同一连续流中（无竖线之外的内容丢失）
+    assert!(
+        texts[img_idx - 1].contains("before "),
+        "行内图片前文本应保留"
+    );
+    assert!(
+        texts[img_idx + 1].contains(" after"),
+        "行内图片后文本应保留"
+    );
+}
+
+/// [P1-1 回归] 跨段独立图片 `![a](u)\n\n![b](v)`：两降级行之间必须有空行
+/// （§3.5「独占段前后有空行」）——同段多图已在 convert 层合并为单段，
+/// 此处 [Image, Image] 跨段走默认 gap 规则。
+#[test]
+fn test_image_cross_paragraph_rendering() {
+    let vm = assistant_bubble_with_text("![a](u)\n\n![b](v)", 7);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let a_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: a] (u)"))
+        .expect("应渲染出第一张降级行");
+    let b_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: b] (v)"))
+        .expect("应渲染出第二张降级行");
+    assert_eq!(
+        b_idx - a_idx,
+        2,
+        "两降级行之间应有恰好 1 空行，实际: {:?}",
+        &texts[a_idx..b_idx]
+    );
+    assert!(
+        is_blank_separator(&lines[a_idx + 1]),
+        "跨段独立图片之间应有空行（P1-1）"
+    );
+}
+
+/// [P1-1] 同段多图 `![a](u) ![b](v)`：合并为单段 → 两降级行连续无空行
+/// （convert 层合并，render 层默认规则不误加空行）。
+#[test]
+fn test_image_same_paragraph_multiple_no_gap() {
+    let vm = assistant_bubble_with_text("![a](u) ![b](v)", 7);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let a_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: a] (u)"))
+        .expect("应渲染出第一张降级行");
+    let b_idx = texts
+        .iter()
+        .position(|t| t.contains("[Image: b] (v)"))
+        .expect("应渲染出第二张降级行");
+    assert_eq!(b_idx - a_idx, 1, "同段多图之间无空行（P1-1）");
+}
+
+// ── T4：用户气泡 @image 行（image-p0-p1-spec §4）────────────────────────
+
+/// 最小合法 PNG（签名 + IHDR + IEND，CRC 正确）——T5 校验仅需 header，
+/// 无需真实像素数据。
+const TINY_PNG: &[u8] =
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x00IEND\xaeB\x60\x82";
+
+/// @image 行 → meta 行（文件名 · 大小）；绝对路径不直接出现在默认渲染行
+/// （§6.2-5 路径泄漏约束）。
+#[test]
+fn test_user_image_line_renders_meta() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.png");
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("@image {}", file.display())));
+    let lines = vm_to_lines(&vm, &grid);
+    let text = all_text(&lines);
+    assert!(
+        text.contains("[Image: a.png · "),
+        "meta 前缀（文件名 · 大小），实际: {text:?}"
+    );
+    assert!(text.contains(" B"), "大小跟随 meta（B 档），实际: {text:?}");
+    let abs = file.canonicalize().unwrap();
+    assert!(
+        !text.contains(abs.to_str().unwrap()),
+        "默认渲染行不暴露绝对路径，实际: {text:?}"
+    );
+}
+
+/// 大小格式三档（B/KB/MB，§4.4 human_size）。
+#[test]
+fn test_user_image_size_formats() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let tiny = dir.path().join("tiny.png");
+    std::fs::write(&tiny, TINY_PNG).unwrap();
+    let mid = dir.path().join("mid.png");
+    std::fs::write(&mid, vec![b'x'; 2048]).unwrap(); // 2.0 KB（显示层不校验格式）
+    let big = dir.path().join("big.png");
+    std::fs::write(&big, vec![b'y'; 3 * 1024 * 1024]).unwrap(); // 3.0 MB
+
+    let grid = GridSpec::grid_for(120);
+    let text_of = |name: &str| {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!(
+            "@image {}",
+            dir.path().join(name).display()
+        )));
+        all_text(&vm_to_lines(&vm, &grid))
+    };
+    assert!(
+        text_of("tiny.png").contains(" · 45 B]"),
+        "B 档（TINY_PNG 45 字节），实际: {:?}",
+        text_of("tiny.png")
+    );
+    assert!(
+        text_of("mid.png").contains(" · 2.0 KB]"),
+        "KB 档，实际: {:?}",
+        text_of("mid.png")
+    );
+    assert!(
+        text_of("big.png").contains(" · 3.0 MB]"),
+        "MB 档，实际: {:?}",
+        text_of("big.png")
+    );
+}
+
+/// 文件不存在 → missing 文案（i18n key）。
+#[test]
+fn test_user_image_missing() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("@image /no/such/file.png".into()));
+    let lines = vm_to_lines(&vm, &grid);
+    let text = all_text(&lines);
+    assert!(
+        text.contains("file.png · missing"),
+        "缺失文案，实际: {text:?}"
+    );
+}
+
+/// 非图片行（@image 无路径 / @imagefoo / @image 中间空格）→ 走原
+/// emphasize_user_line 路径（原样渲染，不产生 meta 行）。
+#[test]
+fn test_user_image_line_negative_cases() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    for text in ["@image", "@imagefoo", "@image ", " @image "] {
+        let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text.into()));
+        let lines = vm_to_lines(&vm, &grid);
+        // 剥离网格前缀列（outer 空 / │ / gap）后应与输入完全一致——
+        // 走原 emphasize_user_line 路径，无 meta 替换。
+        let body = strip_visual_prefix(&lines[1], &line_text(&lines[1]), &grid, 1);
+        assert_eq!(
+            body, text,
+            "非图片行原样渲染，实际 {body:?}（输入 {text:?}）"
+        );
+        assert!(
+            !all_text(&lines).contains("Image:"),
+            "不产生 meta 行，实际: {:?}（输入 {text:?}）",
+            all_text(&lines)
+        );
+    }
+}
+
+/// 受管理与手工路径渲染文本一致（显示层不暴露绝对路径、无差异化文案；
+/// §6.1 Q6——差异仅在 T7 预览资格）。
+#[test]
+fn test_user_image_managed_and_manual_same_rendering() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let managed_root = dir.path().join(".peri").join("images");
+    std::fs::create_dir_all(&managed_root).unwrap();
+    let managed_file = managed_root.join("m.png");
+    std::fs::write(&managed_file, TINY_PNG).unwrap();
+    let manual_dir = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&manual_dir).unwrap();
+    let manual_file = manual_dir.join("m.png"); // 同名文件
+    std::fs::write(&manual_file, TINY_PNG).unwrap();
+
+    let grid = GridSpec::grid_for(120);
+    let render = |path: &std::path::Path| {
+        let vm =
+            TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("@image {}", path.display())));
+        all_text(&vm_to_lines(&vm, &grid))
+    };
+    assert_eq!(
+        render(&managed_file),
+        render(&manual_file),
+        "受管理与手工路径显示层一致"
+    );
+}
+
+/// build_image_meta_info 分级（managed_root 注入版）：Managed/Manual/Other
+/// 判定 + missing 文案 + meta 文本组装。
+#[test]
+fn test_build_image_meta_info_grading() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".peri").join("images");
+    std::fs::create_dir_all(&root).unwrap();
+    let managed = root.join("a.png");
+    std::fs::write(&managed, TINY_PNG).unwrap();
+    let (display, size, is_managed, meta) =
+        build_image_meta_info(managed.to_str().unwrap(), Some(&root));
+    assert!(is_managed, "受管理目录内 → Managed");
+    assert!(meta.contains("a.png"), "meta 含文件名，实际 {meta:?}");
+    assert!(size.contains("B"), "大小文案，实际 {size:?}");
+    assert!(meta.contains(&size), "meta 含大小文案，实际 {meta:?}");
+    assert!(
+        !meta.contains(display.trim_start_matches('/')),
+        "meta 不暴露路径（仅文件名），实际 {meta:?}"
+    );
+
+    let manual = dir.path().join("b.png");
+    std::fs::write(&manual, TINY_PNG).unwrap();
+    let (_, _, is_managed2, _) = build_image_meta_info(manual.to_str().unwrap(), Some(&root));
+    assert!(!is_managed2, "目录外 → Manual");
+
+    let gone = dir.path().join("gone.png");
+    let (_, size3, is_managed3, meta3) = build_image_meta_info(gone.to_str().unwrap(), Some(&root));
+    assert!(!is_managed3, "不存在 → Other（非 Managed）");
+    assert_eq!(size3, "missing");
+    assert!(meta3.contains("missing"));
+}
+
+/// vm_to_lines_cached 收集 image_lines（logical_idx / path / managed / size_text）。
+#[test]
+fn test_user_image_line_info_collected() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.png");
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!(
+        "@image {}\nhello",
+        file.display()
+    )));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+    assert_eq!(image_lines.len(), 1, "仅 @image 行产生映射信息");
+    let info = &image_lines[0];
+    assert_eq!(info.logical_idx, 1, "首行是 turn 节拍空行，meta 行在索引 1");
+    assert_eq!(
+        info.path,
+        file.canonicalize().unwrap().to_str().unwrap(),
+        "展示路径为 canonicalize 后路径"
+    );
+    assert!(!info.managed);
+    assert!(info.size_text.contains("B"));
+    assert!(all_text(&lines).contains("[Image: a.png ·"));
+}
+
+/// hover 行渲染：绝对路径 + accent 高亮（sem.accents.user）+ 单行截断。
+#[test]
+fn test_render_image_hover_line_absolute_path_highlight() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
+    let hover = crate::kit::message_area::ImageHoverState {
+        row: 5,
+        slot_index: 0,
+        logical_idx: 1,
+        vm_hash: 7,
+        path: "/long/path/to/very/deep/directory/a.png".into(),
+        size_text: "45 B".into(),
+    };
+    let line = super::render_image_hover_line(&hover, &grid, &sem);
+    let text = line_text(&line);
+    assert!(
+        text.contains("/long/path/to/very/deep/directory/a.png"),
+        "hover 显示绝对路径，实际 {text:?}"
+    );
+    assert!(text.contains("45 B"), "大小文案保留，实际 {text:?}");
+    let emphasized = line
+        .spans
+        .iter()
+        .filter(|s| s.style.fg == Some(sem.accents.user))
+        .count();
+    assert!(emphasized > 0, "hover 行 accent 高亮（sem.accents.user）");
+}
+
+/// hover 行超宽截断：不折行（布局稳定，§4.4 单行口径）。
+#[test]
+fn test_render_image_hover_line_truncates() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(40); // content = 34
+    let sem = THEME_ATOM.state().read().semantic;
+    let hover = crate::kit::message_area::ImageHoverState {
+        row: 5,
+        slot_index: 0,
+        logical_idx: 1,
+        vm_hash: 7,
+        path: "/this/is/a/very/long/absolute/path/with/many/segments/a.png".into(),
+        size_text: "45 B".into(),
+    };
+    let line = super::render_image_hover_line(&hover, &grid, &sem);
+    let text = line_text(&line);
+    assert!(
+        text.width() <= grid.cont_prefix_width() + grid.content_width() + 1,
+        "hover 行截断到 content 宽度（含前缀列；truncate 省略号 +1），实际宽度 {}: {text:?}",
+        text.width()
+    );
+    assert!(!text.ends_with("a.png"), "超宽时尾部被截断，实际 {text:?}");
 }

@@ -1,76 +1,111 @@
 // acp-hub Web 面板 —— 装配与编排（SolidJS 响应式 store）。
 //
 // 流程（M3 方案 §4，移植自原 main.js）：
-//   1. 连接 → auth（ws-client 首帧纪律）→ ysync.subscribe ["hub:registry"]
+//   1. HttpOnly Cookie 鉴权 → ysync.subscribe ["hub:registry"]
 //      → 快照 + ready → UI 启用。
 //   2. registry 渲染 → 左栏实例/对话。
 //   3. 点击对话 → subscribe ["chat:{cid}","session:{cid}"] → 快照渲染历史
 //      → 增量实时更新（yjs 流式）。
-//   4. 发送消息 → chat/prompt（commandId 记入 pendingAcks）→ 输入框清空。
-//      用户消息气泡依赖 agent 回显（server 单写者，本地不造假）。
+//   4. 发送消息 → chat/prompt（CommandTracker 跟踪 accepted→terminal）;
+//      用户消息依赖 server 投影，本地只保留可恢复的提交状态。
 //   5. create committed ack（带 chatId）→ 自动订阅 chat:{cid} 并选中。
 //   6. 断线：4500/4501/4502 停止并提示；1011/1013 指数退避重连（ws-client），
 //      重连后重放订阅（快照兜底）。
-//
-// token 解析优先级（M3 §4）：URL ?token= → sessionStorage（避免落盘明文）
-// → 输入框粘贴。
 
 import { createSignal } from 'solid-js';
 import type { Setter } from 'solid-js';
 import * as H from './lib/protocol';
-import { DocStore, renderChat, renderControl, renderRegistry } from './lib/yjs';
-import type { ChatEntry, ChatInfo, ControlView, InstanceInfo, SessionSummaryInfo, WorkspaceInfo } from './lib/yjs';
+import { DocStore } from './lib/doc-store';
+import { renderChat, type ChatEntry } from './lib/chat-view';
+import { renderControl, type ControlView } from './lib/control-view';
+import { renderRegistry, type ChatInfo, type ProjectInfo, type ProjectSessionInfo, type SessionSummaryInfo } from './lib/registry-view';
 import { WsClient } from './lib/ws-client';
-import type { ConnStatus, ConnDetail } from './lib/ws-client';
+import type { ConnStatus, ConnDetail, WsProtocolIssue } from './lib/ws-client';
+import { unimportedSessions } from './lib/session-import.mjs';
+import { isTurnActive } from './lib/action-state.mjs';
+import { retainLiveRuntimeHints } from './lib/recovery-state.mjs';
+import { connectionTransition } from './lib/connection-state.mjs';
+import { CommandTracker } from './lib/command-tracker';
+import { SessionActivation, type OpeningSession, type OpenSessionCallbacks } from './lib/session-activation';
+import { installPrincipalRole, principalRole, publishAuthInvalidation, readOnly } from './lib/auth-state';
+import { acceptMessageDelivery, blockUnknownMessageDelivery, completeMessageDelivery, failMessageDelivery, markMessageDeliveryUncertain, messageSubmission, reconcileMessageProjection, resetMessageDelivery, retryMessageDelivery, startMessageDelivery } from './lib/message-delivery';
+import { settleLateQuickStart } from './lib/quick-start-delivery';
+import { acceptRuntimeControl, confirmRuntimeControl, failRuntimeControl, markRuntimeControlUncertain, reconcileRuntimeControl, resetRuntimeControls, retryRuntimeControl, runtimeControlBusy, startRuntimeControl } from './lib/runtime-control';
+import { failPermissionDecision, markPermissionDecisionUncertain, resetPermissionDecisions, retainProjectedPermissions, retryPermissionDecision, startPermissionDecision, type PermissionDecision } from './lib/permission-delivery';
+import { CatalogActions } from './lib/catalog-actions';
+import { ToastStore } from './lib/toast-store';
+import type { PromptStatusItem } from './lib/protocol';
 
-const TOKEN_KEY = 'acp-hub-token';
 const ACK_TIMEOUT_MS = 30000;
 
 // ── UI 信号（组件消费）─────────────────────────────────────────────────
 
-export const [tokenInput, setTokenInput] = createSignal('');
 export const [busy, setBusy] = createSignal(false);
-export const [connState, setConnState] = createSignal<{ text: string; kind: string }>({
+export const [connState, setConnState] = createSignal<{ text: string; kind: 'idle' | 'ok' | 'warn' | 'err' }>({
   text: '未连接',
-  kind: '',
+  kind: 'idle',
 });
 export const [heartbeatCount, setHeartbeatCount] = createSignal(0);
 export const [globalStatus, setGlobalStatus] = createSignal('');
 export const [subscribedDocs, setSubscribedDocs] = createSignal('—');
+export const [promptDeliveryReady, setPromptDeliveryReady] = createSignal(false);
 export const [ackLog, setAckLog] = createSignal<string[]>([]);
 export const [errorLog, setErrorLog] = createSignal<string[]>([]);
-export const [instances, setInstances] = createSignal<InstanceInfo[]>([]);
 export const [chats, setChats] = createSignal<ChatInfo[]>([]);
 export const [selectedCid, setSelectedCid] = createSignal<string | null>(null);
 export const [chatEntries, setChatEntries] = createSignal<ChatEntry[]>([]);
 export const [chatHead, setChatHead] = createSignal<ControlView | null>(null);
 export const [permissions, setPermissions] = createSignal<ControlView['pendingPermissions']>([]);
-/** ACP 会话（§6.3 按需查询）：**按对话隔离缓存**——切换对话时向 agent 侧
- *  发 session/list 查询（真实数据源），结果存 `chatId → 列表`；切回对话
- *  复用缓存，10s 定时刷新当前对话。不再依赖 Registry Doc sessions 投影。 */
-export const [sessionsByChat, setSessionsByChat] = createSignal<Record<string, SessionSummaryInfo[]>>({});
-/** 当前选中对话的会话列表（跟随当前对话展示；未选对话 → []）。 */
-export const currentSessions = (): SessionSummaryInfo[] => {
-  const cid = selectedCid();
-  return cid ? sessionsByChat()[cid] ?? [] : [];
-};
-/** 工作区定义（Registry Doc workspaces，§6.3 workspace 扩展）。 */
-export const [workspaces, setWorkspaces] = createSignal<WorkspaceInfo[]>([]);
+export const [projects, setProjects] = createSignal<ProjectInfo[]>([]);
+export const [projectSessions, setProjectSessions] = createSignal<ProjectSessionInfo[]>([]);
+export const [importableSessions, setImportableSessions] = createSignal<SessionSummaryInfo[]>([]);
+export const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
+export const [openingSession, setOpeningSession] = createSignal<OpeningSession | null>(null);
+export const openingSessionId = () => openingSession()?.sessionId ?? null;
+export interface RuntimeDocsState { chat: boolean; control: boolean }
+export const [runtimeDocsState, setRuntimeDocsState] = createSignal<RuntimeDocsState>({ chat: false, control: false });
+export const runtimeDocsHydrated = () => runtimeDocsState().chat && runtimeDocsState().control;
 /** 当前选中的工作区 id（null = 全部）：左栏对话/会话按此过滤。 */
-export const [selectedWsId, setSelectedWsId] = createSignal<string | null>(null);
 export const [chatStatusSignal, setChatStatusSignal] = createSignal<Record<string, string>>({});
-export const [toasts, setToasts] = createSignal<{ id: number; msg: string }[]>([]);
+const toastStore = new ToastStore();
+export const toasts = toastStore.records;
+export interface PersistentError { id: number; title: string; detail: string; commandId: string | null; retryable: boolean; retrying: boolean }
+export const [persistentErrors, setPersistentErrors] = createSignal<PersistentError[]>([]);
+export const turnActive = () => isTurnActive(chatHead()?.activeTurn);
+export interface ConnectionProblem { code: number | null; title: string; detail: string; action: 'reconnect' | 'login' | null }
+export const [connectionProblem, setConnectionProblem] = createSignal<ConnectionProblem | null>(null);
+export const [restoringSessionId, setRestoringSessionId] = createSignal<string | null>(null);
+export const [creatingSessionProjectId, setCreatingSessionProjectId] = createSignal<string | null>(null);
+export const [discoveringSessionsProjectId, setDiscoveringSessionsProjectId] = createSignal<string | null>(null);
+export interface PromptRecoveryView {
+  sessionId: string;
+  loading: boolean;
+  truncated: boolean;
+  evidenceIncomplete: boolean;
+  error: string | null;
+  prompts: PromptStatusItem[];
+}
+export const [promptRecovery, setPromptRecovery] = createSignal<PromptRecoveryView | null>(null);
 
 // ── 内部状态 ────────────────────────────────────────────────────────────
 
 const store = new DocStore(); // docId → Y.Doc
 let ws: WsClient | null = null; // 当前 WsClient
+let connectionEpoch = 0; // 隔离被替换连接的延迟 status/frame 回调
 let currentCid: string | null = null; // 选中对话（重连后恢复订阅）
 let ready = false; // ready 门控：就绪后才发 action
-const pendingAcks = new Map<string, { label: string; cb?: (ack: Ack) => void; timer: ReturnType<typeof setTimeout> }>();
-// 每个 chat 只接受最近一次 session/list 响应，防止切换/load 后的旧响应
-// 晚到并覆盖「当前」标记。
-const latestSessionQueries = new Map<string, string>();
+type ActionFrame = ReturnType<typeof H.action>;
+interface ActionOptions {
+  cb?: (ack: Ack) => void;
+  onAccepted?: (ack: Ack) => void;
+  onTimeout?: () => void;
+  onError?: (err: ActionError) => void;
+  retryOnUncertain?: boolean;
+  retryOnError?: boolean;
+}
+const [uncertainMetadataCount, setUncertainMetadataCount] = createSignal(0);
+const LAST_SESSION_KEY = 'acp-hub:last-session';
+let registryReceived = false;
 
 interface Ack {
   commandId?: string;
@@ -84,38 +119,88 @@ interface ActionError {
   commandId?: string;
   code?: string;
   message?: string;
+  retryable?: boolean;
 }
 
-let toastSeq = 0;
+const commands = new CommandTracker<ActionFrame, Ack, ActionError>({
+  timeoutMs: ACK_TIMEOUT_MS,
+  onUncertainCountChange: setUncertainMetadataCount,
+  onFallbackUncertain: (request, reason) => persistActionProblem(
+    '结果尚未确认',
+    reason === 'disconnect'
+      ? `${request.label} 在连接中断前未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`
+      : `${request.label} 已超过 30 秒未收到终态回复。服务器可能仍会完成操作，请先等待状态同步，不要盲目重复执行。`,
+    request.frame.commandId,
+  ),
+});
+
+let problemSeq = 0;
 
 // ── toast ───────────────────────────────────────────────────────────────
 
 export function toast(msg: string): void {
-  const id = ++toastSeq;
-  setToasts((list) => [...list, { id, msg }]);
-  setTimeout(() => {
-    setToasts((list) => list.filter((t) => t.id !== id));
-  }, 2500);
+  toastStore.show(msg);
 }
 
-// ── token 解析 ──────────────────────────────────────────────────────────
+export function dismissPersistentError(id: number): void {
+  setPersistentErrors((items) => {
+    const target = items.find((item) => item.id === id);
+    if (target?.commandId) commands.forget(target.commandId);
+    return items.filter((item) => item.id !== id);
+  });
+}
 
-function resolveToken(): string {
-  const params = new URLSearchParams(window.location.search);
-  const fromUrl = params.get('token');
-  if (fromUrl) {
-    // base64 token 含 `+`，URL query 中 `+` 被解码为空格——还原之。
-    const fixed = fromUrl.replace(/ /g, '+');
-    // URL token 是一次性入口：写入 sessionStorage 供刷新复用，随后从
-    // URL 中清理（避免明文留在地址栏/历史）。
-    sessionStorage.setItem(TOKEN_KEY, fixed);
-    params.delete('token');
-    const qs = params.toString();
-    const next = window.location.pathname + (qs ? '?' + qs : '');
-    window.history.replaceState(null, '', next);
-    return fixed;
+export function retainPersistentErrors(items: PersistentError[], next: PersistentError): PersistentError[] {
+  const merged = [...items.filter((item) => !next.commandId || item.commandId !== next.commandId), next];
+  const protectedErrors = merged.filter((item) => item.retryable || item.retrying);
+  const ordinarySlots = Math.max(0, 5 - protectedErrors.length);
+  const retainedOrdinaryIds = new Set((ordinarySlots === 0 ? [] : merged
+    .filter((item) => !item.retryable && !item.retrying)
+    .slice(-ordinarySlots))
+    .map((item) => item.id));
+  return merged.filter((item) => item.retryable || item.retrying || retainedOrdinaryIds.has(item.id));
+}
+
+function persistActionProblem(title: string, detail: string, commandId?: string): void {
+  setPersistentErrors((items) => retainPersistentErrors(items, {
+    id: ++problemSeq, title, detail, commandId: commandId || null, retryable: !!commandId && commands.hasUncertain(commandId), retrying: false,
+  }));
+}
+
+export function reportTransportIssue(issue: WsProtocolIssue): void {
+  const problem = issue.kind === 'non_text_frame'
+    ? { title: '收到不支持的服务器数据', detail: `WebSocket 下行帧不是文本（${issue.size} 字节），已安全忽略且未记录其内容。` }
+    : issue.kind === 'malformed_frame'
+      ? { title: '收到格式错误的服务器数据', detail: `WebSocket 下行文本无法识别（${issue.size} 个字符），已安全忽略且未记录其内容。` }
+      : issue.kind === 'send_error'
+        ? { title: '数据未能写入连接', detail: '浏览器连接在发送瞬间失效。相关操作没有被登记为已发送；消息草稿和可恢复状态仍会保留。' }
+        : { title: '页面未能处理服务器更新', detail: `浏览器的 ${issue.callback === 'frame' ? '下行数据' : '连接状态'} 处理发生异常。连接仍保持，后续更新会继续处理。` };
+  setPersistentErrors((items) => {
+    const withoutDuplicate = items.filter((item) => item.title !== problem.title);
+    return retainPersistentErrors(withoutDuplicate, {
+      id: ++problemSeq,
+      ...problem,
+      commandId: null,
+      retryable: false,
+      retrying: false,
+    });
+  });
+}
+
+export function retryPersistentAction(commandId: string): boolean {
+  if (!commands.hasUncertain(commandId) || !ready) {
+    toast(!commands.hasUncertain(commandId) ? '此操作不能安全重试' : '连接未就绪，暂时不能重新确认');
+    return false;
   }
-  return sessionStorage.getItem(TOKEN_KEY) || '';
+  if (commands.hasPending(commandId)) return false;
+  const sent = commands.retry(commandId, sendFrame) === 'sent';
+  if (sent) setPersistentErrors((items) => items.map((item) => item.commandId === commandId
+    ? { ...item, title: '正在重新确认', detail: '正在使用原 commandId 查询或完成此操作，不会创建第二个请求。', retryable: false, retrying: true }
+    : item));
+  if (sent) retryRuntimeControl(commandId);
+  if (sent) retryPermissionDecision(commandId);
+  else persistActionProblem('重新确认尚未发送', '连接未就绪。原请求仍被保留，请恢复连接后再次确认。', commandId);
+  return sent;
 }
 
 // ── 订阅集合：registry 常驻 + 当前对话（chat + control 双 doc）─────────
@@ -143,11 +228,17 @@ export function isTerminal(status: string | undefined): boolean {
   return status === 'ended' || status === 'closed' || status === 'crashed';
 }
 
+function reconcileCurrentRuntimeControl(control: ControlView | null = chatHead()): void {
+  if (!currentCid) return;
+  reconcileRuntimeControl(
+    currentCid,
+    isTurnActive(control?.activeTurn),
+    isTerminal(chatStatusSignal()[currentCid]),
+  );
+}
+
 export function selectChat(cid: string): void {
-  if (cid === currentCid) {
-    querySessions(cid);
-    return;
-  }
+  if (cid === currentCid) return;
   const previousCid = currentCid;
   if (previousCid && ws) {
     ws.send(H.unsubscribe([H.chatDoc(previousCid), H.sessionDoc(previousCid)]));
@@ -155,58 +246,40 @@ export function selectChat(cid: string): void {
   currentCid = cid;
   setSelectedCid(cid);
   sendSubscribe(); // unsubscribe/subscribe 按 WebSocket 顺序生效，快照到达后渲染
-  // 对话切换：清空旧渲染，等快照到达后重新填充。ACP 会话（sessions）是
-  // **按对话隔离**的（§6.3）：切对话 → 立即按需查询该对话的会话列表 +
-  // 启动 10s 定时刷新（agent 侧真实数据源）。
+  // Runtime docs switch only after the logical session activation commits.
   setChatEntries([]);
   setChatHead(null);
   setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
   setSubscribedDocs('—'); // 订阅清单等下一帧 ready 刷新（简单置空亦可）
-  restartSessionPoll(cid);
-}
-
-// ── session/list 按需查询（§6.3）────────────────────────────────────────
-
-let sessionTimer: ReturnType<typeof setInterval> | null = null;
-
-/** 切换对话时调用：立即查询一次 + 10s 定时刷新当前对话的会话列表。
- *  定时器随对话切换重建（上一对话的刷新立即停止——会话按对话隔离）。 */
-function restartSessionPoll(cid: string): void {
-  if (sessionTimer) {
-    clearInterval(sessionTimer);
-    sessionTimer = null;
-  }
-  querySessions(cid);
-  sessionTimer = setInterval(() => querySessions(cid), 10000);
-}
-
-/** 发 session/list 查询（无副作用；结果经 session_list 帧更新缓存）。 */
-function querySessions(cid: string): void {
-  if (!ws) return;
-  const frame = H.sessionList(cid);
-  latestSessionQueries.set(cid, frame.commandId);
-  if (!ws.send(frame)) latestSessionQueries.delete(cid);
-}
-
-/** 手动刷新当前对话的会话列表（不重置定时器/订阅/渲染）。 */
-export function refreshSessions(): void {
-  if (currentCid) querySessions(currentCid);
 }
 
 // ── ack 表 ──────────────────────────────────────────────────────────────
 
 // 发送 action 并登记 ack 回调；ready 前不发（server 会缓冲，但面板
 // 以 ready 门控保证可预期）。
-function sendAction(frame: ReturnType<typeof H.action>, label: string, cb?: (ack: Ack) => void): void {
-  if (!ws || !ws.send(frame)) {
+function sendFrame(frame: ActionFrame): boolean { return !!ws?.send(frame); }
+
+function sendAction(frame: ActionFrame, label: string, options: ActionOptions = {}): boolean {
+  const result = commands.dispatch({
+    frame,
+    label,
+    callbacks: {
+      onAccepted: options.onAccepted,
+      onTerminal: options.cb,
+      onError: options.onError,
+      retryOnUncertain: options.retryOnUncertain,
+      retryOnError: options.retryOnError,
+      onUncertain: options.onTimeout,
+    },
+  }, sendFrame);
+  if (result !== 'sent') {
+    if (result === 'already_pending') return false;
     toast(`连接未就绪，无法发送 ${label}`);
-    return;
+    options.onError?.({ commandId: frame.commandId, code: 'UNAVAILABLE', message: '连接未就绪', retryable: true });
+    return false;
   }
-  const timer = setTimeout(() => {
-    pendingAcks.delete(frame.commandId);
-    toast(`ack 超时（30s）: ${label} ${frame.commandId.slice(0, 8)}…`);
-  }, ACK_TIMEOUT_MS);
-  pendingAcks.set(frame.commandId, { label, cb, timer });
+  return true;
 }
 
 // ── 下行帧分发 ──────────────────────────────────────────────────────────
@@ -222,15 +295,24 @@ function onFrame(frame: Record<string, unknown>): void {
     case 'action_error':
       onActionError(frame as ActionError);
       break;
-    case 'session_list': {
-      // 按需查询结果（§6.3）：更新该对话的会话缓存（按对话隔离）。
-      const f = frame as { commandId?: string; chatId?: string; sessions?: SessionSummaryInfo[] };
-      const chatId = f.chatId;
-      if (chatId && f.commandId === latestSessionQueries.get(chatId)) {
-        setSessionsByChat((prev) => ({ ...prev, [chatId]: f.sessions ?? [] }));
+    case 'prompt_status': {
+      const response = frame as { commandId: string; sessionId: string; truncated: boolean; evidenceIncomplete: boolean; prompts: PromptStatusItem[] };
+      if (response.sessionId === selectedSessionId()) {
+        setPromptRecovery({
+          sessionId: response.sessionId,
+          loading: false,
+          truncated: response.truncated,
+          evidenceIncomplete: response.evidenceIncomplete,
+          error: null,
+          prompts: response.prompts,
+        });
       }
+      commands.acknowledge({ commandId: response.commandId, status: 'committed' });
       break;
     }
+    case 'auth_error':
+      invalidateAuthentication('访问令牌已失效、被撤销或服务器已重启，需要重新登录。');
+      break;
     default:
       break; // 未知帧忽略（协议演进兼容）
   }
@@ -238,19 +320,17 @@ function onFrame(frame: Record<string, unknown>): void {
 
 function onAck(ack: Ack): void {
   showAck(ack);
-  const pending = pendingAcks.get(ack.commandId || '');
-  if (pending) {
-    clearTimeout(pending.timer);
-    pendingAcks.delete(ack.commandId || '');
-    if (typeof pending.cb === 'function') pending.cb(ack);
+  const disposition = commands.acknowledge(ack);
+  // A terminal acknowledgement that arrives after timeout/disconnect can
+  // reconcile local uncertainty, but must not replay an expired continuation.
+  if (disposition === 'late_terminal') {
+    const completedSubmission = messageSubmission();
+    if (completedSubmission && ack.commandId) completeMessageDelivery(ack.commandId, ack.status);
+    if (ack.commandId) settleLateQuickStart(ack.commandId, ack.status, ack.sessionId, ack.chatId);
+    if (ack.commandId && confirmRuntimeControl(ack.commandId, ack.status)) reconcileCurrentRuntimeControl();
   }
-  // create 的 committed ack 携带 server 生成的 chatId —— 唯一告知
-  // 路径：自动补订阅 chat:{cid}/session:{cid} 并选中。§8.5 激活语义：
-  // 点击已打开的历史会话时 server 同样回 committed + 既有 chatId——
-  // 此处统一切换选中（不新建重复对话）。
-  if (ack.status === 'committed' && ack.chatId && ack.chatId !== currentCid) {
-    toast(`已打开对话: ${ack.chatId.slice(0, 8)}…`);
-    selectChat(ack.chatId);
+  if (ack.status !== 'accepted' && ack.commandId) {
+    setPersistentErrors((items) => items.filter((item) => item.commandId !== ack.commandId));
   }
 }
 
@@ -265,21 +345,15 @@ const ERROR_REASONS: Record<string, string> = {
   UNSUPPORTED_FRAME: '不支持的操作',
   UNAUTHENTICATED: '未认证',
   INVALID_STATE: '非法状态',
+  DELIVERY_UNKNOWN: '投递结果未知',
 };
 
 function onActionError(err: ActionError): void {
-  console.error('[panel] action 错误:', JSON.stringify(err));
+  console.error(`[panel] action 错误 code=${err.code || 'UNKNOWN'} command=${err.commandId ? 'present' : 'absent'}`);
   showActionError(err);
-  const pending = pendingAcks.get(err.commandId || '');
-  if (pending) {
-    clearTimeout(pending.timer);
-    pendingAcks.delete(err.commandId || '');
-  }
+  commands.fail(err);
   const reason = err.code ? ERROR_REASONS[err.code] : undefined;
-  toast(
-    (err.code || 'ACTION_ERROR') + (reason ? `：${reason}` : '') +
-    (err.message ? `（${err.message}）` : ''),
-  );
+  persistActionProblem(reason || err.code || '操作失败', err.message || '服务器未提供更多信息。', err.commandId);
 }
 
 // ── 渲染入口（store.onUpdate：rAF 合帧后每个被更新 doc 调一次）──────────
@@ -291,77 +365,85 @@ store.onUpdate = (docId: string): void => {
     const statusMap: Record<string, string> = {};
     reg.chats.forEach((s) => {
       statusMap[s.id] = s.status || '';
+      if (isTerminal(s.status || undefined)) reconcileRuntimeControl(s.id, true, true);
     });
     setChatStatusSignal(statusMap);
-    setInstances(reg.instances);
     setChats(reg.chats);
     setGlobalStatus(reg.globalStatus);
     // 工作区定义（§6.3 workspace 扩展）：左栏过滤依据。
-    setWorkspaces(reg.workspaces);
-    // ACP 会话列表不再取 Registry Doc sessions 投影（§6.3 按需查询）：
-    // 切换对话时向 agent 侧发 session/list，结果按对话缓存（sessionsByChat）。
-    // server 轮询投影保留（不破坏既有消费方），前端展示以按需查询为准。
+    setProjects(reg.projects);
+    const projectedSessions = retainLiveRuntimeHints(reg.projectSessions, reg.chats) as ProjectSessionInfo[];
+    setProjectSessions(projectedSessions);
+    setImportableSessions(unimportedSessions(reg.sessions, reg.projectSessions));
+    registryReceived = true;
+    reconcileSessionNavigation(projectedSessions);
     return;
   }
   if (currentCid && docId === H.chatDoc(currentCid)) {
     const conv = renderChat(store.docFor(docId));
     setChatEntries(conv.entries);
+    reconcileMessageProjection(new Set(conv.entries
+      .map((entry) => entry.sourceCommandId)
+      .filter((commandId): commandId is string => commandId !== null)));
+    setRuntimeDocsState((state) => ({ ...state, chat: true }));
     return;
   }
   if (currentCid && docId === H.sessionDoc(currentCid)) {
     const ctrl = renderControl(store.docFor(docId));
     setChatHead(ctrl);
     setPermissions(ctrl.pendingPermissions);
+    setRuntimeDocsState((state) => ({ ...state, control: true }));
+    const visiblePermissionIds = new Set(ctrl.pendingPermissions.map((item) => item.permissionId).filter((id): id is string => !!id));
+    retainProjectedPermissions(visiblePermissionIds);
+    reconcileCurrentRuntimeControl(ctrl);
   }
 };
 
 // ── 连接状态机回调（ws-client）─────────────────────────────────────────
 
 function onStatus(state: ConnStatus, detail: ConnDetail): void {
+  const transition = connectionTransition(state, detail, !!principalRole());
+  if (transition) {
+    ready = transition.ready;
+    setBusy(transition.busy);
+    setConnState(transition.status);
+    setConnectionProblem(transition.problem);
+  }
   switch (state) {
     case 'connecting':
-      ready = false;
-      setConnState({ text: '连接中…', kind: '' });
+      setPromptDeliveryReady(false);
       break;
     case 'open':
       // 已发 auth；认证后首帧必须是 ysync.subscribe 或 action ——
       // 立即重放订阅（首次连接与重连同一路径，快照兜底）。
-      ready = false;
-      setConnState({ text: '已认证', kind: 'ok' });
       sendSubscribe();
       break;
     case 'ready':
-      ready = true;
-      setConnState({ text: '就绪', kind: 'ok' });
+      setPromptDeliveryReady(
+        Array.isArray(detail.negotiatedCapabilities)
+          && detail.negotiatedCapabilities.includes(H.CAP_PROMPT_DELIVERY_V2),
+      );
+      if (registryReceived) reconcileSessionNavigation(projectSessions());
+      if (selectedSessionId()) requestPromptRecovery(selectedSessionId()!);
       setSubscribedDocs(
         detail.projectionVersions
           ? Object.keys(detail.projectionVersions as Record<string, unknown>).join('、')
           : '—',
       );
-      // 重连后恢复当前对话的会话轮询（若之前有选中对话）。
-      if (currentCid) restartSessionPoll(currentCid);
-      toast('连接就绪');
       break;
     case 'heartbeat':
       setHeartbeatCount((c) => c + 1);
       break;
     case 'reconnecting':
-      setConnState({
-        text: `重连中（${Math.round((detail.retryMs || 0) / 1000)}s 后）`,
-        kind: 'warn',
-      });
+      commands.settleConnectionLoss();
       break;
     case 'fatal':
-      ready = false;
-      if (sessionTimer) {
-        clearInterval(sessionTimer);
-        sessionTimer = null;
+      commands.settleConnectionLoss();
+      sessionActivation.connectionLost();
+      if (detail.code === 4502) {
+        invalidateAuthentication('浏览器会话已失效、访问令牌被撤销，或服务器认证配置发生变化。请重新登录。');
+        break;
       }
-      // connect() 置 busy(true) 后无任何路径恢复（closed 仅由用户主动
-      // disconnect 触发，那里已 setBusy(false)）→ 必须在此恢复按钮，
-      // 否则 4500/4501/4502 后 connect/disconnect 双双 disabled 无法重连。
-      setBusy(false);
-      setConnState({ text: `已停止（${detail.code}）`, kind: 'err' });
       toast(
         `连接终止（${detail.code}）：` +
         (detail.code === 4500 ? '实例离线' :
@@ -371,8 +453,8 @@ function onStatus(state: ConnStatus, detail: ConnDetail): void {
       );
       break;
     case 'closed':
-      ready = false;
-      setConnState({ text: '已断开', kind: '' });
+      commands.settleConnectionLoss();
+      sessionActivation.connectionLost();
       break;
     default:
       break;
@@ -384,162 +466,267 @@ function wsUrl(): string {
   return scheme + window.location.host + '/';
 }
 
-export function connect(token: string): void {
-  if (!token) {
-    toast('请先粘贴 token（或 ?token= 传入）');
-    return;
-  }
-  sessionStorage.setItem(TOKEN_KEY, token);
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
-  pendingAcks.forEach((p) => clearTimeout(p.timer));
-  pendingAcks.clear();
-  ws = new WsClient({
+export function connectWithCookie(): void {
+  commands.settleConnectionLoss();
+  const epoch = ++connectionEpoch;
+  if (ws) ws.close();
+  const client = new WsClient({
     url: wsUrl(),
-    token,
-    onStatus,
-    onFrame,
+    onStatus: (state, detail) => { if (epoch === connectionEpoch) onStatus(state, detail); },
+    onFrame: (frame) => { if (epoch === connectionEpoch) onFrame(frame); },
+    onProtocolIssue: (issue) => { if (epoch === connectionEpoch) reportTransportIssue(issue); },
   });
-  ws.connect();
+  ws = client;
+  client.connect();
   setBusy(true);
+  setConnectionProblem(null);
 }
 
+export function reconnect(): void { connectWithCookie(); }
+
+function rememberSession(sessionId: string): void {
+  try { window.localStorage.setItem(LAST_SESSION_KEY, sessionId); } catch { /* 浏览器禁用存储时退化为手动选择 */ }
+}
+
+function readRememberedSession(): string | null {
+  let preferred: string | null = null;
+  try { preferred = window.localStorage.getItem(LAST_SESSION_KEY); } catch { /* 手动选择兜底 */ }
+  return preferred;
+}
+
+function forgetRememberedSession(): void {
+  try { window.localStorage.removeItem(LAST_SESSION_KEY); } catch { /* UI preference only */ }
+}
+
+function clearCurrentSelection(): void {
+  setSelectedSessionId(null);
+  const previousCid = currentCid;
+  if (previousCid && ws) ws.send(H.unsubscribe([H.chatDoc(previousCid), H.sessionDoc(previousCid)]));
+  currentCid = null;
+  setSelectedCid(null);
+  setChatEntries([]);
+  setChatHead(null);
+  setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
+  setPromptRecovery(null);
+  forgetRememberedSession();
+}
+
+function activateSession(sessionId: string, chatId: string): void {
+  setSelectedSessionId(sessionId);
+  rememberSession(sessionId);
+  selectChat(chatId);
+  requestPromptRecovery(sessionId);
+}
+
+function requestPromptRecovery(sessionId: string): void {
+  if (!ready) return;
+  if (promptRecovery()?.sessionId === sessionId && promptRecovery()?.loading) return;
+  setPromptRecovery({ sessionId, loading: true, truncated: false, evidenceIncomplete: false, error: null, prompts: [] });
+  const frame = H.persistedSessionPromptStatus(sessionId);
+  sendAction(frame, '读取消息恢复状态', {
+    cb: () => undefined,
+    retryOnUncertain: true,
+    onTimeout: () => {
+      if (selectedSessionId() === sessionId) {
+        setPromptRecovery({ sessionId, loading: false, truncated: false, evidenceIncomplete: true, error: '恢复状态查询超时；这是只读操作，可以安全重试。', prompts: [] });
+      }
+    },
+    onError: (failure) => {
+      if (selectedSessionId() === sessionId) {
+        setPromptRecovery({ sessionId, loading: false, truncated: false, evidenceIncomplete: true, error: failure.message || '暂时无法读取历史恢复状态。', prompts: [] });
+      }
+    },
+  });
+}
+
+const sessionActivation = new SessionActivation({
+  isReady: () => ready,
+  isReadOnly: readOnly,
+  hasUncertainMetadata: () => !!uncertainMetadataCount(),
+  hasMessageSubmission: () => !!messageSubmission(),
+  creatingProjectId: creatingSessionProjectId,
+  setCreatingProjectId: setCreatingSessionProjectId,
+  sessions: projectSessions,
+  selectedSessionId,
+  currentChatId: () => currentCid,
+  preferredSessionId: readRememberedSession,
+  send: sendAction,
+  retry: (commandId) => commands.retry(commandId, sendFrame) ?? 'missing',
+  hasUncertainCommand: (commandId) => commands.hasUncertain(commandId),
+  activate: activateSession,
+  forgetPreference: forgetRememberedSession,
+  sendFirstMessage: (text) => sendMessage(text),
+  onNavigationChange: (snapshot) => {
+    setOpeningSession(snapshot.opening);
+    setRestoringSessionId(snapshot.restoringSessionId);
+  },
+  toast,
+  persistProblem: persistActionProblem,
+});
+
+function reconcileSessionNavigation(sessions: ProjectSessionInfo[]): void {
+  sessionActivation.reconcileCatalog(sessions);
+}
+
+const catalogActions = new CatalogActions({
+  isReady: () => ready,
+  isReadOnly: readOnly,
+  hasUncertainMetadata: () => !!uncertainMetadataCount(),
+  send: sendAction,
+  toast,
+  persistProblem: persistActionProblem,
+  onProjectArchived: (projectId) => {
+    const selected = projectSessions().find((session) => session.id === selectedSessionId());
+    if (selected?.projectId === projectId) clearCurrentSelection();
+  },
+  onSessionArchived: (sessionId) => {
+    if (selectedSessionId() === sessionId) clearCurrentSelection();
+  },
+  discoveringProjectId: discoveringSessionsProjectId,
+  setDiscoveringProjectId: setDiscoveringSessionsProjectId,
+});
+
+export const createProject = (name: string, cwd: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.createProject(name, cwd, { onCommitted, onFailed });
+export const archiveProject = (projectId: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.archiveProject(projectId, { onCommitted, onFailed });
+export const restoreProject = (projectId: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.restoreProject(projectId, { onCommitted, onFailed });
+export const renameProject = (projectId: string, name: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.renameProject(projectId, name, { onCommitted, onFailed });
+
+export const createProjectSession = (projectId: string, title?: string): boolean => sessionActivation.create(projectId, title);
+export const createSessionWithFirstMessage = (projectId: string, text: string): boolean => sessionActivation.quickStart(projectId, text);
+export const retryQuickStart = (): void => sessionActivation.retryQuickStart();
+
+export const renameProjectSession = (sessionId: string, name: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.renameSession(sessionId, name, { onCommitted, onFailed });
+export const archiveProjectSession = (sessionId: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.setSessionArchived(sessionId, true, { onCommitted, onFailed });
+export const restoreProjectSession = (sessionId: string, onCommitted?: () => void, onFailed?: () => void) =>
+  catalogActions.setSessionArchived(sessionId, false, { onCommitted, onFailed });
+export const importProjectSession = (projectId: string, acpSessionId: string, onCommitted?: () => void, onFailed?: (kind: 'failed' | 'uncertain') => void) =>
+  catalogActions.importSession(projectId, acpSessionId, onCommitted, onFailed);
+export const discoverProjectSessions = (projectId: string, onCommitted?: () => void, onFailed?: (message: string) => void) =>
+  catalogActions.discoverSessions(projectId, onCommitted, onFailed);
+
 export function disconnect(): void {
-  if (sessionTimer) {
-    clearInterval(sessionTimer);
-    sessionTimer = null;
-  }
+  commands.settleConnectionLoss();
+  connectionEpoch += 1;
+  ready = false;
+  setPromptDeliveryReady(false);
+  sessionActivation.connectionLost();
   if (ws) {
     ws.close();
     ws = null;
   }
-  pendingAcks.forEach((p) => clearTimeout(p.timer));
-  pendingAcks.clear();
   setBusy(false);
+}
+
+export function resetAuthenticatedSession(): void {
+  // Revoke mutation authority before settling callbacks from the old transport.
+  // This function is intentionally idempotent: both the invalidation producer
+  // and AuthGate consumer call it to make the identity boundary fail closed.
+  installPrincipalRole(null);
+  disconnect();
+  currentCid = null;
+  setConnState({ text: '未连接', kind: 'idle' });
+  setHeartbeatCount(0);
+  setGlobalStatus('');
+  setSubscribedDocs('—');
+  setPromptDeliveryReady(false);
+  setAckLog([]);
+  setErrorLog([]);
+  setChats([]);
+  setSelectedCid(null);
+  setSelectedSessionId(null);
+  setChatEntries([]);
+  setChatHead(null);
+  setPermissions([]);
+  setRuntimeDocsState({ chat: false, control: false });
+  setChatStatusSignal({});
+  setProjects([]);
+  setProjectSessions([]);
+  setImportableSessions([]);
+  setPromptRecovery(null);
+  resetMessageDelivery();
+  sessionActivation.reset();
+  resetRuntimeControls();
+  setDiscoveringSessionsProjectId(null);
+  setPersistentErrors([]);
+  commands.reset();
+  resetPermissionDecisions();
+  setConnectionProblem(null);
+  registryReceived = false;
+  store.clear();
+  // Keep this last: disconnect/reset callbacks are allowed to publish feedback,
+  // but no notification from the previous principal may survive this boundary.
+  toastStore.clear();
+}
+
+export function navigateProjectSession(sessionId: string, callbacks: OpenSessionCallbacks = {}): boolean {
+  return sessionActivation.navigate(sessionId, callbacks);
 }
 
 // ── 用户动作 → action ──────────────────────────────────────────────────
 
-export function sendMessage(text: string, effort?: string): void {
-  if (!ready) {
+export function sendMessage(text: string, effort?: string): boolean {
+  if (!ready || !promptDeliveryReady() || readOnly() || openingSessionId() || turnActive() || messageSubmission()) {
+    if (!promptDeliveryReady()) { toast('服务器尚未启用安全消息投递，请刷新或升级 server'); return false; }
+    if (readOnly()) { toast('只读模式不能发送消息'); return false; }
+    if (openingSessionId()) { toast('会话正在打开'); return false; }
+    if (turnActive()) { toast('Agent 正在工作，可先停止当前任务'); return false; }
+    if (messageSubmission()) { toast('上一条消息仍在确认中'); return false; }
     toast('连接未就绪，稍后再试');
-    return;
+    return false;
   }
   if (!currentCid) {
     toast('请先选择对话');
-    return;
+    return false;
+  }
+  const sessionId = selectedSessionId();
+  if (!sessionId) {
+    toast('持久会话尚未就绪');
+    return false;
   }
   if (isTerminal(chatStatusSignal()[currentCid])) {
     toast('对话已结束，不能发送消息');
-    return;
+    return false;
   }
-  // 输入框已清空；用户消息气泡依赖 agent 回显（server 单写者，
-  // 本地不造假，保证多标签页一致性）。effort 透传推理强度（若有）。
-  sendAction(H.prompt(currentCid, text, effort), 'prompt', (ack) => {
-    if (ack.status === 'committed' && ack.turnId) {
-      toast(`消息已提交，turn=${ack.turnId.slice(0, 8)}…`);
-    }
+  const frame = H.prompt(currentCid, text, effort);
+  if (!startMessageDelivery(frame.commandId, text, sessionId, currentCid)) {
+    toast('上一条消息仍在确认中');
+    return false;
+  }
+  const sent = sendAction(frame, 'prompt', {
+    retryOnUncertain: true,
+    onAccepted: () => acceptMessageDelivery(frame.commandId),
+    onTimeout: () => markMessageDeliveryUncertain(frame.commandId),
+    onError: (err) => err.code === 'DELIVERY_UNKNOWN'
+      ? blockUnknownMessageDelivery(frame.commandId, err.message)
+      : failMessageDelivery(frame.commandId, err.message || '消息提交失败'),
+    cb: (ack) => completeMessageDelivery(frame.commandId, ack.status),
   });
+  return sent;
 }
 
-export function newChat(): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  // instanceId/cwd 留空 = 本机；选中 workspace 时携带 workspace_id →
-  // server 继承其 cwd（§6.3 workspace 扩展）。
-  const wsId = selectedWsId();
-  sendAction(H.createChat(undefined, undefined, wsId || undefined), 'create', (ack) => {
-    // chatId 已在 onAck 里统一处理（自动订阅选中）
-    if (!ack.chatId) toast('create committed 缺少 chatId');
-  });
+export function retryMessageSubmission(): void {
+  const current = messageSubmission();
+  if (!current || current.phase !== 'uncertain' || !commands.hasUncertain(current.commandId)) return;
+  if (!ready) return toast('连接未就绪，暂时不能重新确认');
+  const result = commands.retry(current.commandId, sendFrame);
+  if (result === 'sent') retryMessageDelivery(current.commandId);
+  else toast('连接未就绪，原请求仍已保留');
 }
 
-/** 点击 ACP 历史会话（§8.5 会话切换）：会话是**进程内实体**——在当前
- *  对话（其 ACP 进程）内 load 目标历史会话，**不新建对话/进程**。
- *  需先选中一个活跃对话（终态对话的进程已退出，无法切换）。 */
-export function openAcpSession(acpSessionId: string, title?: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  const cid = currentCid;
-  if (!cid) {
-    toast('请先选择对话（会话在当前对话内切换）');
-    return;
-  }
-  if (isTerminal(chatStatusSignal()[cid])) {
-    toast('对话已结束，不能切换会话');
-    return;
-  }
-  sendAction(H.loadChat(cid, acpSessionId), 'load', (ack) => {
-    if (ack.status === 'committed') {
-      toast(`已切换到会话 ${title || acpSessionId.slice(0, 8)}…`);
-      // 会话列表的「当前」标记已变化 → 重新查询一次。
-      querySessions(cid);
-    }
-  });
-}
-
-/** 当前对话内新建 ACP 会话（chat/session-new，§8.5）：会话是**进程内实体**——
- *  不新建对话/进程。committed 后刷新会话列表（tooltip「当前」标记更新）；
- *  错误由 onActionError 统一 toast。 */
-export function newSession(): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  const cid = currentCid;
-  if (!cid) {
-    toast('请先选择对话（新会话在当前对话内创建）');
-    return;
-  }
-  if (isTerminal(chatStatusSignal()[cid])) {
-    toast('对话已结束，不能新建会话');
-    return;
-  }
-  sendAction(H.sessionNew(cid), 'session/new', (ack) => {
-    if (ack.status === 'committed') {
-      toast('新会话已创建');
-      // 会话列表的「当前」标记已变化 → 重新查询一次。
-      querySessions(cid);
-    }
-  });
-}
-
-/** 新建工作区（§6.3 workspace 扩展）：定义本地目录 cwd，其下新建对话继承。
- *  cwd 须为已存在的绝对路径（server 校验：形态 + 目录存在性）。 */
-export function createWorkspace(name: string, cwd: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  sendAction(H.workspaceCreate(name, cwd), 'workspace/create', (ack) => {
-    if (ack.status === 'committed') {
-      toast('工作区已创建');
-    }
-  });
-}
-
-/** 删除工作区定义（不影响已建对话/会话）。 */
-export function removeWorkspace(workspaceId: string): void {
-  if (!ready) {
-    toast('连接未就绪，稍后再试');
-    return;
-  }
-  sendAction(H.workspaceRemove(workspaceId), 'workspace/remove', (ack) => {
-    if (ack.status === 'committed') {
-      toast('工作区已删除');
-      if (selectedWsId() === workspaceId) setSelectedWsId(null);
-    }
-  });
+function invalidateAuthentication(reason: string): void {
+  resetAuthenticatedSession();
+  publishAuthInvalidation(reason);
 }
 
 export function cancelTurn(): void {
-  if (!ready) {
+  if (!ready || readOnly()) {
     toast('连接未就绪，稍后再试');
     return;
   }
@@ -548,29 +735,71 @@ export function cancelTurn(): void {
     toast('对话已结束，无需取消');
     return;
   }
-  sendAction(H.cancel(currentCid), 'cancel');
+  const chatId = currentCid;
+  const frame = H.cancel(chatId);
+  if (!startRuntimeControl(frame.commandId, chatId, 'cancel')) return toast('此运行实例已有控制请求正在确认');
+  sendAction(frame, 'cancel', {
+    retryOnUncertain: true,
+    onAccepted: () => acceptRuntimeControl(frame.commandId),
+    cb: (ack) => { if (confirmRuntimeControl(frame.commandId, ack.status)) reconcileCurrentRuntimeControl(); },
+    onError: (error) => failRuntimeControl(frame.commandId, error.message || '无法停止当前生成。'),
+    onTimeout: () => {
+      markRuntimeControlUncertain(frame.commandId);
+      persistActionProblem('停止结果尚未确认', '停止请求可能仍在执行。请使用原请求重新确认，不要连续提交新的停止操作。', frame.commandId);
+    },
+  });
 }
 
-export function closeChat(): void {
-  if (!ready) {
+export function closeChat(onFinished?: () => void): boolean {
+  if (!ready || readOnly()) {
     toast('连接未就绪，稍后再试');
-    return;
+    return false;
   }
-  if (!currentCid) return;
+  if (!currentCid || runtimeControlBusy(currentCid)) return false;
   if (isTerminal(chatStatusSignal()[currentCid])) {
     toast('对话已结束，无需关闭');
-    return;
+    return false;
   }
-  sendAction(H.close(currentCid), 'close');
+  const chatId = currentCid;
+  const frame = H.close(chatId);
+  if (!startRuntimeControl(frame.commandId, chatId, 'close')) return false;
+  return sendAction(frame, '关闭运行实例', {
+    retryOnUncertain: true,
+    onAccepted: () => acceptRuntimeControl(frame.commandId),
+    cb: (ack) => {
+      if (!confirmRuntimeControl(frame.commandId, ack.status)) return;
+      reconcileCurrentRuntimeControl();
+      onFinished?.();
+      toast('运行实例已关闭，会话仍保存在项目中');
+    },
+    onError: (error) => failRuntimeControl(frame.commandId, error.message || '无法关闭运行实例。'),
+    onTimeout: () => {
+      markRuntimeControlUncertain(frame.commandId);
+      onFinished?.();
+      persistActionProblem('关闭结果尚未确认', '运行实例可能已经关闭。左侧持久会话不会被删除；请使用原请求重新确认。', frame.commandId);
+    },
+  });
 }
 
-export function resolvePermission(permissionId: string, decision: string): void {
-  if (!ready) {
+export function resolvePermission(permissionId: string, decision: PermissionDecision): void {
+  if (!ready || readOnly()) {
+    if (readOnly()) return toast('只读模式不能处理权限请求');
     toast('连接未就绪，稍后再试');
     return;
   }
   if (!currentCid) return;
-  sendAction(H.resolvePermission(currentCid, permissionId, decision), 'resolve');
+  const frame = H.resolvePermission(currentCid, permissionId, decision);
+  if (!startPermissionDecision(frame.commandId, permissionId, decision)) return;
+  sendAction(frame, 'resolve', {
+    retryOnError: true,
+    onError: (error) => error.retryable
+      ? markPermissionDecisionUncertain(frame.commandId, true)
+      : failPermissionDecision(frame.commandId),
+    onTimeout: () => {
+      markPermissionDecisionUncertain(frame.commandId);
+      persistActionProblem('权限决策结果尚未确认', '请等待请求从界面消失或返回错误，不要提交相反决策。', frame.commandId);
+    },
+  });
 }
 
 // ── 日志（最近 ack / 最近错误，最多保留 5 条）──────────────────────────
@@ -596,8 +825,5 @@ function showActionError(err: ActionError): void {
 
 // ── 装配 ────────────────────────────────────────────────────────────────
 
-const initialToken = resolveToken();
-setTokenInput(initialToken);
-// 有 token 即自动连接（URL ?token= 或 sessionStorage 记忆），刷新/重开
-// 页面无需再手动点「连接」；无 token 时保持原手动连接入口。
-if (initialToken) connect(initialToken);
+// Browser UI authenticates through AuthGate and an HttpOnly cookie. The legacy
+// credential is recovered from URL or Web Storage here.

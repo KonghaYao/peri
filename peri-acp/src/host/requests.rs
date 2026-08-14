@@ -127,7 +127,6 @@ pub(crate) async fn handle_request(
                 &cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
 
             // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
@@ -168,16 +167,22 @@ pub(crate) async fn handle_request(
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
                 .config_options(config_options);
-            // Scan skills for AvailableCommands
-            let skills = cfg.skills.available_skills(&cwd, &cfg.plugin_skill_roots);
-
+            // Scan skills for AvailableCommands（本地 + MCP 合并，DD-5）
             // 将暂存的 peri caps 关联到新 session。
             // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
             // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
             let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
 
-            send_available_commands_update(transport.as_ref(), &session_id, &skills, &peri_caps)
-                .await;
+            send_available_commands_update(
+                transport,
+                &session_id,
+                &cfg.skills,
+                &cwd,
+                &cfg.plugin_skill_roots,
+                &peri_caps,
+                cfg.session_manager.mcp_skill_registry_for(&session_id),
+            )
+            .await;
 
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
@@ -299,7 +304,6 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
@@ -375,10 +379,17 @@ pub(crate) async fn handle_request(
             let resp = LoadSessionResponse::new()
                 .modes(modes)
                 .config_options(config_options);
-            // Scan skills for AvailableCommands (same as session/new)
-            let skills = cfg.skills.available_skills(cwd, &cfg.plugin_skill_roots);
-            send_available_commands_update(transport.as_ref(), req_session_id, &skills, &caps)
-                .await;
+            // Scan skills for AvailableCommands (same as session/new；本地 + MCP 合并)
+            send_available_commands_update(
+                transport,
+                req_session_id,
+                &cfg.skills,
+                cwd,
+                &cfg.plugin_skill_roots,
+                &caps,
+                cfg.session_manager.mcp_skill_registry_for(req_session_id),
+            )
+            .await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -604,7 +615,6 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, req_session_id, &frozen_data);
@@ -685,7 +695,6 @@ pub(crate) async fn handle_request(
                 cwd,
                 &cfg.plugin_skill_roots,
                 &cfg.plugin_agent_dirs,
-                true, // workflow_enabled：session 路径随后创建 WorkflowMiddleware
             );
             let workflow_middleware =
                 create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
@@ -1315,7 +1324,7 @@ async fn push_plugin_action_result(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-action-result");
@@ -1341,7 +1350,7 @@ async fn push_plugin_snapshot(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-snapshot");
@@ -1370,7 +1379,7 @@ async fn push_plugin_search_result(
         "data": data,
     });
     if let Err(e) = transport
-        .send_notification("peri/unstable-event", envelope)
+        .send_notification("peri/unstable_event", envelope)
         .await
     {
         tracing::warn!(error = %e, "Failed to push plugin-search-result");

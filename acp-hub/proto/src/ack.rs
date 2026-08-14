@@ -31,6 +31,12 @@ pub struct ActionAck {
     pub turn_id: Option<String>,
     /// `chat/create` 的 committed 必须携带（server 生成 id 的唯一告知路径）。
     pub chat_id: Option<String>,
+    /// project 管理 action 的持久化 project id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// project/session 管理 action 的 hub logical session id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// 新建会话类 action（`chat/create`/`chat/session-new`）的 committed 可携带
     /// 新 ACP 会话 id（session/new 响应）；前端据此刷新会话列表「当前」标记
     /// （跨任务契约 §3）。其余 action 恒为 None。
@@ -54,7 +60,7 @@ pub struct ActionError {
     pub retry_after_ms: Option<u64>,
 }
 
-/// 稳定错误码（§4.4 九码 + §4.8 的 `UNSUPPORTED_FRAME`）。
+/// 稳定错误码（§4.4 + §4.8 的 `UNSUPPORTED_FRAME`）。
 ///
 /// 封闭集合：文档无 `INTERNAL` 等内部码——内部错误不直接上协议，经脱敏映射
 /// 到现有码（§9.3）。`#[non_exhaustive]` 防御性扩展，新增码必须走文档修订。
@@ -78,6 +84,11 @@ pub enum ErrorCode {
     RateLimited,
     /// ACP 进程不可用（spawn 失败/超时等）。
     AgentUnavailable,
+    /// 非幂等命令可能已产生外部效果，但 server 无法确认最终交付结果。
+    ///
+    /// 客户端不得自动重放，也不得把它降级成「确定未发送」；必须等待投影恢复
+    /// 或由用户显式裁决。
+    DeliveryUnknown,
     /// 载荷超上限（端到端 1MB/4KB，§9.3）。
     PayloadTooLarge,
     /// 白名单外 `t` → 稳定错误（§4.8），并计数不静默。
@@ -86,7 +97,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// retryable 分类事实源（§4.4）：`AGENT_UNAVAILABLE`/`INSTANCE_OFFLINE` →
-    /// `true`；`INVALID_STATE`/`FORBIDDEN`/`CHAT_NOT_FOUND` → `false`。
+    /// `true`；`DELIVERY_UNKNOWN` 及确定性拒绝 → `false`。
     ///
     /// 供两端对齐（server 裁决 + 客户端提示），不做协议字段默认。
     pub fn default_retryable(self) -> bool {
@@ -98,6 +109,7 @@ impl ErrorCode {
             | ErrorCode::VersionConflict
             | ErrorCode::InvalidState
             | ErrorCode::RateLimited
+            | ErrorCode::DeliveryUnknown
             | ErrorCode::PayloadTooLarge
             | ErrorCode::UnsupportedFrame => false,
         }

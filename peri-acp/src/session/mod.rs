@@ -32,12 +32,13 @@ pub use retry_events::RetryEventForwarder;
 
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, atomic::AtomicU8, Arc},
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use chrono::Utc;
 use dashmap::DashMap;
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::{
@@ -47,8 +48,6 @@ use peri_acp_types::{
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::PeriCaps;
-
-use executor::PERMISSION_MODE_NEVER_NOTIFIED;
 
 use crate::{
     provider::{config::PeriConfig, LlmProvider},
@@ -76,14 +75,6 @@ pub struct AcpSession {
     pub model_alias: String,
     /// 每会话独立的权限模式
     pub permission_mode: Arc<SharedPermissionMode>,
-    /// 最近一次已通知模型的 PermissionMode（跨 turn 持久）。
-    ///
-    /// D2：mode 会话内切换后，executor 在下一可消费 turn 以受控 runtime
-    /// event 通知模型，不重建 frozen system prompt。此原子值记录"上次已随
-    /// 消息入队通知的 mode"；初始化为 [`PERMISSION_MODE_NEVER_NOTIFIED`]
-    /// 哨兵，使首个模型可见 turn 向模型公开初始 mode（10_hitl 不含 mode
-    /// snapshot、Bypass 时不渲染 10_hitl），随后 mode 切换各通知一次。
-    pub last_notified_permission_mode: Arc<AtomicU8>,
     /// 运行时 agent 实例（根 agent + 子 agent）
     pub active_agents: HashMap<ThreadId, AgentRuntime>,
     /// Goal steering 状态（session 级，跨 prompt 共享）
@@ -116,6 +107,9 @@ pub struct AcpSession {
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
     /// 用户 prompt 注入 inbox 唤醒 loop（而非在 prompt lock 上阻塞）。
     pub idle_suspended: Arc<AtomicBool>,
+    /// Session 级 MCP skill 远端注册表（发现任务写入，Skills 侧读取合并；
+    /// 随本结构 drop 释放，杜绝全局挂点——验收 14）。
+    pub mcp_skill_registry: Arc<McpSkillRegistry>,
 }
 
 struct SessionManagerInner {
@@ -135,6 +129,9 @@ struct SessionManagerInner {
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
+    /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
+    pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
@@ -157,6 +154,7 @@ impl SessionManager {
         permission_mode: Arc<SharedPermissionMode>,
         agent_overrides: Option<AgentOverrides>,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+        mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
         skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
     ) -> Self {
@@ -171,6 +169,7 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                mcp_subscription,
                 skills,
                 task_manager_factory,
             }),
@@ -236,9 +235,6 @@ impl SessionManager {
             provider_id,
             model_alias,
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
-            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
@@ -249,6 +245,7 @@ impl SessionManager {
             cron_bridge: None,
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
+            mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -275,9 +272,6 @@ impl SessionManager {
                 .unwrap_or_default(),
             model_alias: self.inner.peri_config.config.active_alias.clone(),
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
-            // 初始化为"未通知过"哨兵：首个模型可见 turn 公开初始 mode（D2，
-            // 见 PERMISSION_MODE_NEVER_NOTIFIED）；入队后由 executor 记账。
-            last_notified_permission_mode: Arc::new(AtomicU8::new(PERMISSION_MODE_NEVER_NOTIFIED)),
             active_agents: HashMap::new(),
             goal_state: crate::session::goal_state::GoalState::new(
                 Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
@@ -288,10 +282,15 @@ impl SessionManager {
             cron_bridge: None,
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
+            mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
         }
     }
 
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
+        // 注销 MCP 订阅 inbox（通知不再唤醒已关闭的会话）
+        if let Some(port) = &self.inner.mcp_subscription {
+            port.unregister_inbox(session_id);
+        }
         if let Some((_, session)) = self.inner.sessions.remove(session_id) {
             // 取消所有运行时 agent 实例（终止执行归 Agent 层，L5）
             peri_acp_types::session::cancel_all_agents(session.active_agents.values());
@@ -434,9 +433,10 @@ impl SessionManager {
 
     /// 构建会话级 frozen 数据（统一构造入口，消除 TUI/stdio 重复 5 处）。
     ///
-    /// `workflow_enabled`：会话创建时 Workflow executor 是否可用。
-    /// TUI/stdio 正常路径恒为 true（prompt 执行时无条件创建 executor）；
-    /// print mode 不经过此入口（直接调 `FrozenSessionData::build` 传 false）。
+    /// 波 4 演进（C2/C5）：16_workflow 已整段删除（ultracode skill 完整覆盖，
+    /// 设计 §3.1.2），子面向 prompt 与主 prompt 字节相同——不再二次渲染；
+    /// `subagent_system_prompt` 字段已随 C5 移除，子面向直接复用
+    /// `system_prompt()`；`workflow_enabled` 参数随 gate 清理删除。
     ///
     /// L5：渲染面（CLAUDE.md 解析 / skills 摘要 / prompt 模板）随
     /// `FrozenSessionData::build` 留在 ACP（§0 渲染是 ACP 协议面职责），
@@ -446,11 +446,9 @@ impl SessionManager {
         cwd: &str,
         plugin_skill_roots: &[peri_acp_types::skills::SkillRoot],
         plugin_agent_dirs: &[std::path::PathBuf],
-        workflow_enabled: bool,
     ) -> crate::session::executor::FrozenSessionData {
         let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let frozen_language = self.inner.peri_config.config.language.clone();
-        let pm = self.inner.permission_mode.load();
         let (claude_md, claude_local_md) =
             peri_middlewares::AgentsMdMiddleware::read_frozen_content(cwd);
         // 一次性读取 disableBundledSkills 并冻结到 frozen_skill_summary
@@ -462,34 +460,34 @@ impl SessionManager {
             disable_bundled,
         );
 
-        let features = crate::prompt::PromptFeatures::detect(pm, workflow_enabled);
-        let template = crate::prompt::PromptTemplate::new();
+        // MetaHarness（设计 §2.3）：冻结期一次读取合并后的 settings + 扫描
+        // `.peri/meta/*.md`，构建状态后随冻结载体传播；主 prompt 与 SubAgent
+        // 无 workflow 版共用同一状态（同源一致性，防双轨不一致）。
+        let meta_harness_state = build_meta_harness_state(
+            self.inner.peri_config.config.meta_harness.as_ref(),
+            peri_middlewares::meta_harness::scan_harness_docs(cwd),
+        );
+
+        let features = crate::prompt::PromptFeatures::detect();
+        // 波 4 演进（C2）：收集结果 = 渲染面静态声明（冻结 disabled 集合 +
+        // overrides + 冻结语言驱动，`build_collected_sections`）——基础段
+        // （01-06 / 07_runtime / persona）与 language 段由
+        // DefaultSystemPromptMiddleware / LangMiddleware 持有，链未装配的
+        // 冻结渲染经同一事实源获得与装配一致的段落（决策记录 D3）。
+        let collected =
+            build_collected_sections(&meta_harness_state, None, frozen_language.as_deref());
+        let template = crate::prompt::PromptTemplate::new(&meta_harness_state, &collected);
         let env = crate::prompt::PromptEnv::with_frozen_date(cwd, &frozen_date);
         let system_prompt = template.render(
             &env,
             &features,
             self.inner.skills.as_ref(),
             plugin_agent_dirs,
-            frozen_language.as_deref(),
         );
 
-        // 子 agent / fork / workflow agent 复用的冻结 prompt（P2-2026-08-02）：
-        // 这些链不注册 WorkflowTool（shared_tools: None），主链冻结 prompt 中
-        // 的 16_workflow section 不得被 fork 继承或 workflow agent 复用。
-        // 仅在 workflow_enabled 时多渲染一次（session 创建时一次性，不违反
-        // ARC-FROZEN-001 的每 turn 重建禁令）；workflow 关闭时两版相同。
-        let subagent_system_prompt = if workflow_enabled {
-            let sub_features = crate::prompt::PromptFeatures::detect_without_workflow(pm);
-            Some(Arc::from(template.render(
-                &env,
-                &sub_features,
-                self.inner.skills.as_ref(),
-                plugin_agent_dirs,
-                frozen_language.as_deref(),
-            )))
-        } else {
-            None
-        };
+        // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
+        // 不再二次渲染——`FrozenSessionData` 无子面向字段（C5 移除），
+        // 子 agent / fork / workflow agent 直接复用 `system_prompt()`。
 
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
@@ -498,12 +496,12 @@ impl SessionManager {
             skill_summary: skill_summary.map(Arc::from).unwrap_or_default(),
             date: Arc::from(frozen_date),
             language: frozen_language.map(|l| Arc::from(l.to_string())),
+            meta_harness: meta_harness_state,
         };
 
         crate::session::executor::FrozenSessionData::from_frozen_parts(
             v2_frozen,
             claude_local_md.map(Arc::from),
-            subagent_system_prompt,
         )
     }
 
@@ -534,6 +532,17 @@ impl SessionManager {
             .sessions
             .get(session_id)
             .map(|s| s.goal_state.clone())
+    }
+
+    /// 取指定 session 的 MCP skill 远端注册表句柄（SessionAccessPort 投影用）。
+    ///
+    /// 内部 Arc 共享，clone 廉价；session 不存在时返回 None。
+    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    pub fn mcp_skill_registry_for(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.mcp_skill_registry.clone())
     }
 
     /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
@@ -618,6 +627,27 @@ impl SessionManager {
         true
     }
 
+    /// 确保指定 session 的 MCP 订阅 inbox 已注册（lazy-init，幂等）。
+    ///
+    /// 首次调用：把 session 级 inbox handle 注册到 `McpSubscriptionPort`
+    /// （peri-middlewares 实现侧维护 session_id → inbox 注册表）。此后每
+    /// turn 重复调用均为 no-op（HashMap insert 幂等）。注册跨 turn 存活，
+    /// close_session 时经 [`SessionManager::close_session`] 注销。
+    ///
+    /// session 不存在或端口未配置时返回 false。
+    pub fn mcp_subscription_for(&self, session_id: &str) -> bool {
+        let port = match &self.inner.mcp_subscription {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        let Some(inbox) = self.session_inbox_for(session_id) else {
+            return false;
+        };
+        port.register_inbox(session_id, inbox.handle());
+        tracing::trace!(session_id = %session_id, "MCP 订阅 inbox 已注册");
+        true
+    }
+
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。
     pub fn cancel_cascade_children_for(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
@@ -640,6 +670,106 @@ impl AcpSession {
     pub fn cancel_all_agents(&self) {
         peri_acp_types::session::cancel_all_agents(self.active_agents.values());
     }
+}
+
+/// 渲染面收集结果静态声明（波 4 演进 2，决策记录 D3 / C3 D4）。
+///
+/// 全部 `PromptTemplate` 构造点（冻结渲染 / 主重渲染 / SubAgent builder /
+/// workflow fallback / workflow agent builder / 测试 helper）统一经本函数
+/// 计算收集结果：`DefaultSystemPromptMiddleware` / `LangMiddleware` 与
+/// gated 段持有者（`HumanInTheLoopMiddleware` / `SubAgentMiddleware` /
+/// `SkillsMiddleware`）不在 `state.disabled_middlewares` 时收集对应段落。
+/// 与链侧 `MiddlewareChain::collect_prompt_sections()` 调用同一段声明函数
+/// （`peri_middlewares` 各持有者）——**单一事实源，禁止双轨**；冻结状态
+/// 驱动使链未装配的构造点（如 session/new 冻结渲染）也能得到与装配一致
+/// 的段落（ARC-FROZEN-001 语义保持）。
+///
+/// 契约 3（gate 原子迁移，C2/C3 落地）：全部迁移段 gate = 持有 middleware
+/// 是否在链上——本函数按冻结 disabled 集合判定装配面，收集即装配。
+///
+/// 落点说明（layer-imports 依赖门）：函数体直接引用 `peri_middlewares`
+/// 各持有者的段声明——本模块为 §0 边 2 豁免的 ACP 宿主装配面
+/// （`scripts/import-exemptions.conf`，与 `scan_harness_docs` 同模式），
+/// 渲染核心 `prompt/mod.rs` 不持有 middlewares 引用。
+pub(crate) fn build_collected_sections(
+    state: &peri_acp_types::meta_harness::MetaHarnessState,
+    overrides: Option<&AgentOverrides>,
+    language: Option<&str>,
+) -> Vec<peri_agent::middleware::PromptSection> {
+    let mut collected = Vec::new();
+    if !state
+        .disabled_middlewares
+        .contains("DefaultSystemPromptMiddleware")
+    {
+        collected.extend(
+            peri_middlewares::default_system_prompt::DefaultSystemPromptMiddleware::sections(
+                overrides,
+            ),
+        );
+    }
+    if !state.disabled_middlewares.contains("LangMiddleware") {
+        collected
+            .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
+    }
+    if !state
+        .disabled_middlewares
+        .contains("HumanInTheLoopMiddleware")
+    {
+        collected.extend(peri_middlewares::hitl::HumanInTheLoopMiddleware::sections());
+    }
+    if !state.disabled_middlewares.contains("SubAgentMiddleware") {
+        collected.extend(peri_middlewares::subagent::SubAgentMiddleware::sections());
+    }
+    if !state.disabled_middlewares.contains("SkillsMiddleware") {
+        collected.extend(peri_middlewares::skills::SkillsMiddleware::sections());
+    }
+    collected
+}
+
+/// 由合并后的 meta_harness 配置与扫描结果构建冻结期 MetaHarnessState
+/// （设计 §2.3；纯函数，不读盘——`build_frozen_data` 是唯一扫描入口）。
+///
+/// 组合规则：
+/// - section + true + 文档存在 → `section_overrides`；
+/// - section + true + 文档缺失 → warn + 忽略（保持内置段落）；
+/// - section + false → 显式不覆盖；
+/// - middleware + false → `disabled_middlewares`；
+/// - middleware + true → 不放入 disabled（显式恢复）。
+fn build_meta_harness_state(
+    config: Option<&HashMap<String, bool>>,
+    docs: HashMap<String, String>,
+) -> peri_acp_types::meta_harness::MetaHarnessState {
+    use peri_acp_types::meta_harness::{MetaHarnessState, MIDDLEWARE_NAMES, SECTION_IDS};
+
+    let mut state = MetaHarnessState::default();
+    let Some(config) = config else {
+        return state;
+    };
+    for (key, enabled) in config {
+        if SECTION_IDS.contains(&key.as_str()) {
+            if *enabled {
+                match docs.get(key) {
+                    Some(content) => {
+                        state
+                            .section_overrides
+                            .insert(key.clone(), Arc::from(content.as_str()));
+                    }
+                    None => {
+                        tracing::warn!(
+                            section = %key,
+                            "meta_harness: section enabled but no .peri/meta/{key}.md, keeping builtin"
+                        );
+                    }
+                }
+            }
+            // section + false：显式不覆盖，静默
+        } else if MIDDLEWARE_NAMES.contains(&key.as_str()) && !*enabled {
+            state.disabled_middlewares.insert(key.clone());
+            // middleware + true：显式恢复装配，静默
+        }
+        // 未知 key 已在解析期校验移除（provider::config::validate_meta_harness）
+    }
+    state
 }
 
 #[cfg(test)]
@@ -680,13 +810,6 @@ impl SessionAccessPort for SessionManager {
             .sessions
             .get(session_id)
             .map(|s| s.task_manager.clone())
-    }
-
-    fn last_notified_permission_mode(&self, session_id: &str) -> Option<Arc<AtomicU8>> {
-        self.inner
-            .sessions
-            .get(session_id)
-            .map(|s| s.last_notified_permission_mode.clone())
     }
 
     fn goal_controller(
@@ -745,5 +868,13 @@ impl SessionAccessPort for SessionManager {
 
     fn cron_bridge_for(&self, session_id: &str) -> bool {
         SessionManager::cron_bridge_for(self, session_id)
+    }
+
+    fn mcp_subscription_for(&self, session_id: &str) -> bool {
+        SessionManager::mcp_subscription_for(self, session_id)
+    }
+
+    fn mcp_skill_registry(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        self.mcp_skill_registry_for(session_id)
     }
 }

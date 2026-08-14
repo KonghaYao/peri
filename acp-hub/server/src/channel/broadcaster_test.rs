@@ -143,8 +143,7 @@ async fn soft_threshold_merges_updates() {
         pending.1.len()
     );
     use yrs::updates::decoder::Decode as _;
-    yrs::Update::decode_v1(&pending.1)
-        .expect("merged pending update decodable");
+    yrs::Update::decode_v1(&pending.1).expect("merged pending update decodable");
     drop(subs);
     handle.abort();
 }
@@ -167,13 +166,22 @@ async fn slow_consumer_preserves_frame_order() {
     // f1 填满队列（发出）；f2 因队列满保留；f3 到达不触发 flush（字节 < soft）
     // → 两帧均按到达顺序保留在 pending。
     in_tx
-        .send(DocUpdate { doc: doc.clone(), update: fake_update(1, 200) })
+        .send(DocUpdate {
+            doc: doc.clone(),
+            update: fake_update(1, 200),
+        })
         .unwrap();
     in_tx
-        .send(DocUpdate { doc: doc.clone(), update: u2.clone() })
+        .send(DocUpdate {
+            doc: doc.clone(),
+            update: u2.clone(),
+        })
         .unwrap();
     in_tx
-        .send(DocUpdate { doc: doc.clone(), update: u3.clone() })
+        .send(DocUpdate {
+            doc: doc.clone(),
+            update: u3.clone(),
+        })
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 

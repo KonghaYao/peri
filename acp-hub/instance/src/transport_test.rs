@@ -5,11 +5,11 @@ use super::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use base64::Engine as _;
 use acp_hub_proto::hmac::{
     compute_mac, derive_mac_key, generate_connection_context, mac_input, CHALLENGE_NONCE_LEN,
 };
 use acp_hub_proto::instance::{InstanceHeartbeat, InstanceHello};
+use base64::Engine as _;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
@@ -48,7 +48,12 @@ fn valid_auth_response(hello: &InstanceHello) -> acp_hub_proto::conn::AuthRespon
         .unwrap();
     let context = generate_connection_context();
     let key = derive_mac_key(&token_bytes(), "instance");
-    let input = mac_input(&nonce, &context, &acp_hub_proto::version::PROTOCOL_VERSION.to_string(), "instance");
+    let input = mac_input(
+        &nonce,
+        &context,
+        &acp_hub_proto::version::PROTOCOL_VERSION.to_string(),
+        "instance",
+    );
     let mac = compute_mac(&key, &input);
     acp_hub_proto::conn::AuthResponse {
         connection_context: base64::engine::general_purpose::STANDARD.encode(context),
@@ -59,7 +64,9 @@ fn valid_auth_response(hello: &InstanceHello) -> acp_hub_proto::conn::AuthRespon
 /// 伪造 auth_response（错误 MAC）。
 fn forged_auth_response(hello: &InstanceHello) -> acp_hub_proto::conn::AuthResponse {
     let mut r = valid_auth_response(hello);
-    let bytes = base64::engine::general_purpose::STANDARD.decode(&r.hmac).unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&r.hmac)
+        .unwrap();
     let mut forged = bytes;
     forged[0] ^= 0xFF;
     r.hmac = base64::engine::general_purpose::STANDARD.encode(forged);
@@ -216,7 +223,10 @@ async fn test_reconnect_backoff_sequence() {
 
     // 事件序列：Connected / Disconnected 交替（握手失败 → Retry）。
     let events = drain_events(&mut events_rx).await;
-    assert!(matches!(events.first(), Some(TransportEvent::Connected)), "首个事件应为 Connected，实际 {events:?}");
+    assert!(
+        matches!(events.first(), Some(TransportEvent::Connected)),
+        "首个事件应为 Connected，实际 {events:?}"
+    );
     assert!(events
         .iter()
         .any(|e| matches!(e, TransportEvent::Disconnected)));
@@ -273,7 +283,11 @@ async fn test_backoff_reset_after_auth() {
                 let Some(h) = hello else { return };
                 let resp = valid_auth_response(&h);
                 let _ = ws
-                    .send(Message::Text(serde_json::to_string(&Frame::AuthResponse(resp)).unwrap().into()))
+                    .send(Message::Text(
+                        serde_json::to_string(&Frame::AuthResponse(resp))
+                            .unwrap()
+                            .into(),
+                    ))
                     .await;
                 // 保持连接片刻（虚拟时间 100ms）后关闭 → instance 断线重连。
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -297,7 +311,11 @@ async fn test_backoff_reset_after_auth() {
             break;
         }
     }
-    assert!(conns.len() >= 4, "应观察到 4 次连接，实际 {:?}", conns.len());
+    assert!(
+        conns.len() >= 4,
+        "应观察到 4 次连接，实际 {:?}",
+        conns.len()
+    );
 
     // 前两次失败：间隔 1s、2s（退避增长中）。
     let t1 = conns.iter().find(|(n, _)| *n == 1).unwrap().1;
@@ -363,10 +381,12 @@ async fn test_close_4502_stops_reconnect() {
     });
 
     let events = collect_events(&mut events_rx, Duration::from_secs(3)).await;
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, TransportEvent::Stopped(StoppedReason::ConfigFatal))),
-        "4502 关闭 → Stopped(ConfigFatal)，事件: {events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, TransportEvent::Stopped(StoppedReason::ConfigFatal))),
+        "4502 关闭 → Stopped(ConfigFatal)，事件: {events:?}"
+    );
     // run 应已返回（不再重连）。
     let _ = task.await.expect("run 正常返回");
     drop(handle);
@@ -399,7 +419,9 @@ async fn test_auth_failure_stops() {
                         let resp = forged_auth_response(&h);
                         let _ = ws
                             .send(Message::Text(
-                                serde_json::to_string(&Frame::AuthResponse(resp)).unwrap().into(),
+                                serde_json::to_string(&Frame::AuthResponse(resp))
+                                    .unwrap()
+                                    .into(),
                             ))
                             .await;
                         break;
@@ -466,10 +488,12 @@ async fn test_connect_refused_then_success() {
     }
     assert!(!accs.is_empty(), "stub 应观察到连接（退避重连成功）");
     let events = drain_events(&mut events_rx).await;
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, TransportEvent::Connected)),
-        "连接被拒后应退避重连成功，事件: {events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, TransportEvent::Connected)),
+        "连接被拒后应退避重连成功，事件: {events:?}"
+    );
 
     handle.shutdown();
     task.abort();

@@ -4,15 +4,15 @@
 
 ## 决策
 
-**标准有的走标准，真没有的才自定义。** `peri/unstable-event` 自定义事件仅用于 ACP v1 `session/update` 无法覆盖的场景。
+**标准有的走标准，真没有的才自定义。** `peri/unstable_event` 自定义事件仅用于 ACP v1 `session/update` 无法覆盖的场景。
 
 ## 原则
 
 新增 Agent → TUI 事件时的判断流程：
 
 1. 查 ACP v1 `SessionUpdate` 枚举是否有对应 tag
-2. 有 → 走标准 `session/update` 通知，**不在 `peri/unstable-event` 重复定义**
-3. 没有 → `peri/unstable-event` 自定义事件
+2. 有 → 走标准 `session/update` 通知，**不在 `peri/unstable_event` 重复定义**
+3. 没有 → `peri/unstable_event` 自定义事件
 
 ## 全量审计（24 个自定义事件 → 保留 13 个）
 

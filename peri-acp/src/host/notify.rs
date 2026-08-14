@@ -2,12 +2,15 @@
 //! session update notifications. Extracted from original acp_server.rs (2026-05-20 split).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
-use agent_client_protocol::schema::v1::{AvailableCommandsUpdate, SessionUpdate};
+use agent_client_protocol::schema::v1::SessionUpdate;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::ports::SkillsPort;
 use peri_acp_types::session::MessageSource;
-use peri_acp_types::skills::SkillMetadata;
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
@@ -189,30 +192,77 @@ pub(crate) async fn send_config_option_update(
 }
 
 /// Push an `AvailableCommandsUpdate` notification for the given session.
+///
+/// 本地 + MCP 合并构建（DD-5 共享纯函数）；registry Some 时注册 on_change
+/// 回调——发现完成/条目变化后经 `tokio::spawn` 异步重发（回调捕获 Weak
+/// 防引用环；发送失败仅 error 日志，现有语义）。
 pub(crate) async fn send_available_commands_update(
-    transport: &dyn crate::transport::AcpTransport,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
-    skills: &[SkillMetadata],
+    skills_port: &Arc<dyn SkillsPort>,
+    cwd: &str,
+    plugin_skill_roots: &[SkillRoot],
     caps: &PeriCaps,
+    registry: Option<Arc<McpSkillRegistry>>,
 ) {
     if session_id.is_empty() {
         return;
     }
-    let commands = crate::dispatch::build_available_commands(skills);
-    let update = if caps.skill_names {
-        let meta = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
-        SessionUpdate::AvailableCommandsUpdate(
-            AvailableCommandsUpdate::new(commands).meta(
-                serde_json::json!({"skillNames": meta})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-    } else {
-        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands))
-    };
-    let update_value = match serde_json::to_value(&update) {
+    let local = skills_port.available_skills(cwd, plugin_skill_roots);
+    let mcp = registry
+        .as_ref()
+        .map(|reg| reg.all_skills())
+        .unwrap_or_default();
+    let update = crate::dispatch::commands::build_available_commands_update(&local, &mcp, caps);
+
+    // 发现完成/条目变化 → 重发（防引用环：捕获 Weak；session 销毁后
+    // upgrade 失败即静默返回）。
+    if let Some(reg) = &registry {
+        let weak = Arc::downgrade(reg);
+        let transport = Arc::clone(transport);
+        let skills_port = Arc::clone(skills_port);
+        let cwd = cwd.to_string();
+        let plugin_skill_roots = plugin_skill_roots.to_vec();
+        let caps = caps.clone();
+        let session_id = session_id.to_string();
+        reg.set_on_change(Some(Arc::new(move || {
+            let Some(reg) = weak.upgrade() else {
+                return;
+            };
+            let transport = Arc::clone(&transport);
+            let skills_port = Arc::clone(&skills_port);
+            let cwd = cwd.clone();
+            let plugin_skill_roots = plugin_skill_roots.clone();
+            let caps = caps.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                let local = skills_port.available_skills(&cwd, &plugin_skill_roots);
+                let mcp = reg.all_skills();
+                let update =
+                    crate::dispatch::commands::build_available_commands_update(&local, &mcp, &caps);
+                let update_value =
+                    match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Failed to serialize AvailableCommandsUpdate"
+                            );
+                            return;
+                        }
+                    };
+                // Use {"update": ..., "sessionId": ...} format — same as TransportEventSink —
+                // so that handle_session_update_peri on the TUI side can parse via params.get("update").
+                let payload = serde_json::json!({
+                    "sessionId": session_id,
+                    "update": update_value,
+                });
+                let _ = transport.send_notification("session/update", payload).await;
+            });
+        })));
+    }
+
+    let update_value = match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "Failed to serialize AvailableCommandsUpdate");

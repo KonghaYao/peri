@@ -51,7 +51,7 @@ pub enum AcpNotification {
         method: String,
         params: Value,
     },
-    /// A `peri/unstable-event` notification carrying v2 state machine events
+    /// A `peri/unstable_event` notification carrying v2 state machine events
     /// (text-chunk, tool-started, view-commit, turn-done, etc.).
     UnstableEvent {
         session_id: String,
@@ -247,7 +247,7 @@ impl AcpTuiClient {
                         }
                         let _ = notification_tx
                             .send(AcpNotification::SessionUpdate { session_id, params });
-                    } else if method == "peri/unstable-event" {
+                    } else if method == "peri/unstable_event" {
                         let session_id = params
                             .get("sessionId")
                             .and_then(|v| v.as_str())
@@ -262,14 +262,14 @@ impl AcpTuiClient {
                         debug!(
                             session_id = %session_id,
                             event = %event,
-                            "ACP client pump: received unstable-event"
+                            "ACP client pump: received unstable_event"
                         );
                         if !Self::is_current_session(
                             &current_session_id,
                             &deleted_session_ids,
                             &session_id,
                         ) {
-                            debug!(session_id = %session_id, event = %event, "ACP client pump: dropping stale unstable-event");
+                            debug!(session_id = %session_id, event = %event, "ACP client pump: dropping stale unstable_event");
                             continue;
                         }
                         let _ = notification_tx.send(AcpNotification::UnstableEvent {
@@ -772,7 +772,7 @@ mod tests {
             .unwrap()
             .insert("deleted-sess".to_string());
 
-        // 已删除会话的残流通知（agent_event / unstable-event / agent_done）
+        // 已删除会话的残流通知（agent_event / unstable_event / agent_done）
         server_transport
             .send_notification(
                 "peri/agent_event",

@@ -64,7 +64,11 @@ impl ConnectionRegistry {
 
     /// 连接结束释放（幂等：未知 id 静默忽略）。
     pub fn unregister(&self, conn_id: ConnId) {
-        let removed = self.active.lock().expect("conn registry lock poisoned").remove(&conn_id);
+        let removed = self
+            .active
+            .lock()
+            .expect("conn registry lock poisoned")
+            .remove(&conn_id);
         if removed.is_some() {
             tracing::debug!(conn_id, "connection unregistered");
         }
@@ -73,14 +77,22 @@ impl ConnectionRegistry {
     /// 认证后上下文替换（§5「认证前占位，防未认证连接占满配额」：注册时
     /// token_id 为占位值，认证成功后替换为真实身份）。幂等。
     pub fn upgrade(&self, conn_id: ConnId, ctx: ConnectionCtx) {
-        if let Some(entry) = self.active.lock().expect("conn registry lock poisoned").get_mut(&conn_id) {
+        if let Some(entry) = self
+            .active
+            .lock()
+            .expect("conn registry lock poisoned")
+            .get_mut(&conn_id)
+        {
             *entry = ctx;
         }
     }
 
     /// 在线连接数（§17.1 指标）。
     pub fn online(&self) -> usize {
-        self.active.lock().expect("conn registry lock poisoned").len()
+        self.active
+            .lock()
+            .expect("conn registry lock poisoned")
+            .len()
     }
 
     /// 连接上下文查询（审计/诊断）。

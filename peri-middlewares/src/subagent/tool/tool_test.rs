@@ -1564,6 +1564,79 @@ fn test_build_middleware_顺序固定() {
     );
 }
 
+// ─── MetaHarness（设计 §2.5）：子链关闭契约测试 ───────────────────────────────
+
+/// 子链独立装配：关闭的 middleware 不进子链，未禁用项保持原相对顺序。
+#[test]
+fn test_build_middleware_meta_harness_disabled_filters_chain() {
+    let baseline: Vec<String> = build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_agent_def(vec!["a".to_string()], "/tmp"),
+    )
+    .iter()
+    .map(|m| m.name().to_string())
+    .collect();
+    assert_eq!(
+        baseline,
+        vec![
+            "AgentsMdMiddleware".to_string(),
+            "SkillsMiddleware".to_string(),
+            "SkillPreloadMiddleware".to_string(),
+            "TodoMiddleware".to_string()
+        ]
+    );
+
+    let cases: &[&str] = &[
+        "AgentsMdMiddleware",
+        "SkillsMiddleware",
+        "SkillPreloadMiddleware",
+        "TodoMiddleware",
+    ];
+    for mw in cases {
+        let mut disabled = std::collections::HashSet::new();
+        disabled.insert(mw.to_string());
+        let names: Vec<String> = build_subagent_middlewares(
+            SubAgentMiddlewareConfig::for_agent_def(vec!["a".to_string()], "/tmp")
+                .with_meta_harness_disabled(disabled),
+        )
+        .iter()
+        .map(|m| m.name().to_string())
+        .collect();
+        assert!(
+            !names.iter().any(|n| n == mw),
+            "disabled {mw} 后仍出现在子链: {names:?}"
+        );
+        let expected: Vec<String> = baseline.iter().filter(|n| *n != mw).cloned().collect();
+        assert_eq!(names, expected, "disabled {mw} 后剩余顺序漂移");
+    }
+}
+
+/// SkillPreload 关闭：即使 agent 定义声明 skills 也不注册。
+#[test]
+fn test_build_middleware_meta_harness_disabled_skill_preload_suppresses_declared_skills() {
+    let mut disabled = std::collections::HashSet::new();
+    disabled.insert("SkillPreloadMiddleware".to_string());
+    let middlewares = build_subagent_middlewares(
+        SubAgentMiddlewareConfig::for_agent_def(vec!["declared-skill".to_string()], "/tmp")
+            .with_meta_harness_disabled(disabled),
+    );
+    let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
+    assert_eq!(
+        names,
+        vec!["AgentsMdMiddleware", "SkillsMiddleware", "TodoMiddleware"]
+    );
+}
+
+/// 空 disabled 集合（默认）下子链与原行为完全一致（for_fork 3 件套）。
+#[test]
+fn test_build_middleware_meta_harness_default_empty_unchanged() {
+    let middlewares = build_subagent_middlewares(SubAgentMiddlewareConfig::for_fork("/tmp"));
+    let names: Vec<&str> = middlewares.iter().map(|m| m.name()).collect();
+    assert_eq!(
+        names,
+        vec!["AgentsMdMiddleware", "SkillsMiddleware", "TodoMiddleware"]
+    );
+}
+
 // ─── frozen 数据传递测试 ──────────────────────────────────────────────────
 
 use peri_agent::agent::state::AgentState;

@@ -9,9 +9,7 @@ use acp_hub_proto::ack::ErrorCode;
 use acp_hub_proto::Frame;
 use base64::Engine as _;
 
-use common::{
-    fresh_token, wait_until, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET,
-};
+use common::{fresh_token, wait_until, ServerProc, TestEnv, WsClient, RECV_TIMEOUT, TEST_BUDGET};
 
 fn t(name: &str, tag: &str, r: Result<(), String>) {
     match r {
@@ -56,8 +54,7 @@ async fn t06_body() -> Result<(), String> {
     assert_eq!(code, 4502, "坏 token 应以 4502 关闭");
     // 审计计数（server 日志应含 auth.client failed）。
     assert!(
-        s.server
-            .log_contains("auth.client", Duration::from_secs(5)),
+        s.server.log_contains("auth.client", Duration::from_secs(5)),
         "server 应记录认证失败"
     );
     Ok(())
@@ -80,13 +77,13 @@ async fn t06_bad_token_rejected() {
 async fn t07_body() -> Result<(), String> {
     let s = ServerOnly::start(None)?;
     let mut c = WsClient::connect(s.env.port).await?;
-    let (_snap, _ready) = c
-        .handshake(&s.env.client_token, &["hub:registry"])
-        .await?;
+    let (_snap, _ready) = c.handshake(&s.env.client_token, &["hub:registry"]).await?;
     // 未知 tag（不在注册表）。
-    c.send(&Frame::YsyncAwareness(acp_hub_proto::ysync::YsyncAwareness {
-        msg: "AAAA".to_string(),
-    }))
+    c.send(&Frame::YsyncAwareness(
+        acp_hub_proto::ysync::YsyncAwareness {
+            msg: "AAAA".to_string(),
+        },
+    ))
     .await?;
     let e = c
         .recv_until(
@@ -110,7 +107,10 @@ async fn t07_body() -> Result<(), String> {
         .await?;
     // 连接仍存活（未 panic、未断开）。
     let _ = c
-        .recv_until(|f| matches!(f, Frame::KeepAlive(_)), Duration::from_secs(12))
+        .recv_until(
+            |f| matches!(f, Frame::KeepAlive(_)),
+            Duration::from_secs(12),
+        )
         .await?;
     Ok(())
 }
@@ -137,9 +137,8 @@ fn local_non_loopback_ip() -> Option<std::net::IpAddr> {
 }
 
 async fn t08_body() -> Result<(), String> {
-    let ip = local_non_loopback_ip().ok_or_else(|| {
-        "无法获取本机非回环 IP（无出网路由）——用例 SKIP（不判定）".to_string()
-    })?;
+    let ip = local_non_loopback_ip()
+        .ok_or_else(|| "无法获取本机非回环 IP（无出网路由）——用例 SKIP（不判定）".to_string())?;
     if ip.is_loopback() || ip.is_unspecified() {
         return Err("出口 IP 为回环/未指定地址——用例 SKIP（不判定）".to_string());
     }
@@ -153,10 +152,7 @@ async fn t08_body() -> Result<(), String> {
     })
     .await
     .map_err(|_| "非回环连接探测超时（8s）".to_string())?;
-    assert!(
-        rejected,
-        "非回环连接应在默认配置下被拒（握手无响应）"
-    );
+    assert!(rejected, "非回环连接应在默认配置下被拒（握手无响应）");
     // server 日志记录拒绝。
     assert!(
         s.server
@@ -197,9 +193,12 @@ async fn t12_body() -> Result<(), String> {
     // a. 无 token：首帧直接 ysync.subscribe（非 auth/hello）→ 1011 断开
     //    （§4.6 首帧纪律）。
     let mut c = WsClient::connect(port).await?;
-    c.send(&Frame::YsyncSubscribe(acp_hub_proto::ysync::YsyncSubscribe {
-        docs: vec!["hub:registry".parse().unwrap()],
-    }))
+    c.send(&Frame::YsyncSubscribe(
+        acp_hub_proto::ysync::YsyncSubscribe {
+            docs: vec!["hub:registry".parse().unwrap()],
+            client_capabilities: Vec::new(),
+        },
+    ))
     .await?;
     let code = c.recv_close(RECV_TIMEOUT).await?;
     assert_eq!(code, 1011, "无 token 首帧应为 1011");
@@ -216,13 +215,15 @@ async fn t12_body() -> Result<(), String> {
     // c. action 方法面白名单外（events/subscribe，M2 保留）→
     //    UNSUPPORTED_FRAME（§4.8 向量 6：白名单外不静默）。
     let mut c = WsClient::connect_client(port, &s.env.client_token, &["hub:registry"]).await?;
-    c.send(&Frame::Action(acp_hub_proto::action::ActionEnvelope::SubscribeEvents {
-        command_id: uuid::Uuid::new_v4().to_string(),
-        payload: acp_hub_proto::action::SubscribeEventsPayload {
-            chat_id: None,
-            from_seq: None,
+    c.send(&Frame::Action(
+        acp_hub_proto::action::ActionEnvelope::SubscribeEvents {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            payload: acp_hub_proto::action::SubscribeEventsPayload {
+                chat_id: None,
+                from_seq: None,
+            },
         },
-    }))
+    ))
     .await?;
     let e = c
         .recv_until(
@@ -242,8 +243,7 @@ async fn t12_body() -> Result<(), String> {
         buffered: Some(false),
         buffer_lost: None,
         stream_epochs: None,
-        nonce: base64::engine::general_purpose::STANDARD
-            .encode([0u8; 32]),
+        nonce: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
     };
     c.send(&Frame::InstanceHello(hello)).await?;
     let code = c.recv_close(RECV_TIMEOUT).await?;
@@ -258,8 +258,7 @@ async fn t12_body() -> Result<(), String> {
         buffered: Some(false),
         buffer_lost: None,
         stream_epochs: None,
-        nonce: base64::engine::general_purpose::STANDARD
-            .encode([1u8; 32]),
+        nonce: base64::engine::general_purpose::STANDARD.encode([1u8; 32]),
     };
     c.send(&Frame::InstanceHello(hello)).await?;
     let code = c.recv_close(RECV_TIMEOUT).await?;

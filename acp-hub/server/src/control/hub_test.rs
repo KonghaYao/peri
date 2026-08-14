@@ -11,6 +11,145 @@ use crate::control::StoreSink;
 use crate::persist::{PersistConfig, Store};
 use crate::state::doc_manager::{BatchConfig, DocManager, UpdateSink};
 
+fn registry_update(value: &str) -> Vec<u8> {
+    use yrs::{Map, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    let mut txn = doc.transact_mut();
+    txn.get_or_insert_map("root")
+        .insert(&mut txn, "test_value", value.to_string());
+    drop(txn);
+    crate::state::view_store::encode_state_as_update(&doc)
+}
+
+fn registry_value(doc: &yrs::Doc) -> Option<String> {
+    use yrs::{Map, ReadTxn, Transact};
+    let txn = doc.transact();
+    txn.get_map("root")?
+        .get(&txn, "test_value")?
+        .cast::<String>()
+        .ok()
+}
+
+#[test]
+fn registry_snapshot_compaction_reopens_and_keeps_files_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let tmp = dir.path().join(super::REGISTRY_SNAPSHOT_TMP_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let legacy = dir.path().join(super::REGISTRY_LEGACY_BACKUP_FILE);
+    let update = registry_update("current");
+    super::append_registry_record(&log, &update).unwrap();
+
+    super::compact_registry_log(&snapshot, &tmp, &log, &legacy, &update).unwrap();
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+    assert!(!tmp.exists());
+    assert!(legacy.exists(), "first migration keeps legacy rollback log");
+    assert!(std::fs::metadata(&legacy).unwrap().len() > 0);
+    for path in [&snapshot, &log, &legacy] {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 0);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("current")
+    );
+}
+
+#[test]
+fn registry_recovery_tolerates_snapshot_plus_pre_compaction_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let tmp = dir.path().join(super::REGISTRY_SNAPSHOT_TMP_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let legacy = dir.path().join(super::REGISTRY_LEGACY_BACKUP_FILE);
+    let update = registry_update("same state");
+    super::compact_registry_log(&snapshot, &tmp, &log, &legacy, &update).unwrap();
+    // Simulate a crash immediately after snapshot rename but before the old
+    // log was truncated. Applying the same Yjs operation twice is idempotent.
+    super::append_registry_record(&log, &update).unwrap();
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 1);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("same state")
+    );
+}
+
+#[test]
+fn registry_recovery_physically_truncates_a_corrupt_tail() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = dir.path().join(super::REGISTRY_SNAPSHOT_FILE);
+    let log = dir.path().join(super::REGISTRY_LOG_FILE);
+    let update = registry_update("valid");
+    super::append_registry_record(&log, &update).unwrap();
+    let valid_len = std::fs::metadata(&log).unwrap().len();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(&[1, 2, 3, 4])
+        .unwrap();
+
+    let recovered =
+        super::recover_registry_doc(&crate::state::Factory::new(), &snapshot, &log).unwrap();
+    assert_eq!(recovered.records, 1);
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), valid_len);
+    assert_eq!(
+        registry_value(recovered.doc.as_ref().unwrap()).as_deref(),
+        Some("valid")
+    );
+}
+
+#[test]
+fn registry_materialization_discards_history_and_preserves_visible_nested_state() {
+    use yrs::{Map, ReadTxn, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    for revision in 0..2_000 {
+        let mut txn = doc.transact_mut();
+        let root = txn.get_or_insert_map("root");
+        root.insert(&mut txn, "volatile", format!("revision-{revision:04}"));
+        let extension = root.get_or_init::<_, yrs::MapRef>(&mut txn, "future_extension");
+        extension.insert(&mut txn, "kept", revision);
+    }
+    let historical = crate::state::view_store::encode_state_as_update(&doc);
+    let compact = super::materialize_registry_update(&crate::state::Factory::new(), &doc).unwrap();
+    assert!(
+        compact.len() * 20 < historical.len(),
+        "materialized snapshot should discard Yjs history: {} vs {} bytes",
+        compact.len(),
+        historical.len()
+    );
+
+    let reopened = yrs::Doc::new();
+    super::apply_update(&reopened, &compact);
+    let txn = reopened.transact();
+    let root = txn.get_map("root").unwrap();
+    assert_eq!(
+        root.get(&txn, "volatile")
+            .and_then(|v| v.cast::<String>().ok())
+            .as_deref(),
+        Some("revision-1999")
+    );
+    let extension = root
+        .get(&txn, "future_extension")
+        .and_then(|v| v.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    assert_eq!(
+        extension
+            .get(&txn, "kept")
+            .and_then(|v| v.cast::<i64>().ok()),
+        Some(1_999)
+    );
+}
+
 async fn env() -> (tempfile::TempDir, Arc<Store>, Arc<StoreSink>, DocManager) {
     let tmp = tempfile::tempdir().unwrap();
     let persist_cfg = PersistConfig {
@@ -25,14 +164,84 @@ async fn env() -> (tempfile::TempDir, Arc<Store>, Arc<StoreSink>, DocManager) {
 }
 
 #[tokio::test]
+async fn startup_reconciliation_persists_prompt_delivery_into_recovered_mirror() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Map, ReadTxn, Transact};
+
+    let (_tmp, store, sink, doc) = env().await;
+    let sid = "12121212-1212-1212-1212-121212121212";
+    store
+        .create_chat(uuid::Uuid::parse_str(sid).unwrap())
+        .unwrap();
+    doc.open_chat(sid, "m1", Some("t"), None, None)
+        .await
+        .unwrap();
+    let result = doc
+        .submit_command(
+            sid,
+            crate::state::doc_manager::DocCommand::RegisterPendingPromptEntry {
+                turn_id: "turn-1".into(),
+                entry_id: "turn-1:user".into(),
+                text: "durable prompt".into(),
+                author_user_id: None,
+                source_command_id: uuid::Uuid::new_v4().to_string(),
+                payload_fingerprint: "fingerprint".into(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        crate::state::doc_manager::SubmitResult::Applied(_)
+    ));
+
+    assert!(sink
+        .reconcile_prompt_entry_delivery(
+            sid,
+            "turn-1:user",
+            "delivery_unknown",
+            Some("DELIVERY_UNKNOWN"),
+        )
+        .await
+        .unwrap());
+    let (update, _) = sink.snapshot(&DocId::chat(sid)).await.unwrap();
+    let recovered = yrs::Doc::new();
+    recovered
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&update).unwrap())
+        .unwrap();
+    let txn = recovered.transact();
+    let root = txn.get_map("root").unwrap();
+    let entries = root
+        .get(&txn, "entries")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    let entry = entries
+        .get(&txn, "turn-1:user")
+        .and_then(|value| value.cast::<yrs::MapRef>().ok())
+        .unwrap();
+    assert_eq!(
+        entry
+            .get(&txn, "delivery_state")
+            .and_then(|value| value.cast::<String>().ok())
+            .as_deref(),
+        Some("delivery_unknown")
+    );
+}
+
+#[tokio::test]
 async fn mirror_snapshot_rebuilds_from_log() {
     let (tmp, store, sink, doc) = env().await;
     let sid = "11111111-1111-1111-1111-111111111111";
     // 打开 session 并写入一条事件（聚合器投影 → sink 落盘 → 镜像）。
     // 控制类命令挂落盘应答（§8.2）→ 持久化前置：Store 目录须先建（StoreSink
     // 落盘按 session 目录路由）。
-    store.create_chat(uuid::Uuid::parse_str(sid).unwrap()).unwrap();
-    doc.open_chat(sid, "m1", Some("t"), None, None).await.unwrap();
+    store
+        .create_chat(uuid::Uuid::parse_str(sid).unwrap())
+        .unwrap();
+    doc.open_chat(sid, "m1", Some("t"), None, None)
+        .await
+        .unwrap();
     // 先建立 active turn（§6.5 服务端单写）：MessageDelta 受终态守卫约束
     // （§6.3 无活动 turn → UnknownTurn 拒绝）。
     let reg = doc
@@ -43,6 +252,7 @@ async fn mirror_snapshot_rebuilds_from_log() {
                 entry_id: "t1:user".into(),
                 text: "prompt".into(),
                 author_user_id: None,
+                source_command_id: "hub-test-command".into(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -64,7 +274,10 @@ async fn mirror_snapshot_rebuilds_from_log() {
         },
     };
     let r = doc.submit_event(ev).await;
-    assert!(matches!(r, crate::state::doc_manager::SubmitResult::Applied(_)));
+    assert!(matches!(
+        r,
+        crate::state::doc_manager::SubmitResult::Applied(_)
+    ));
     // delta 类事件入队即返（§8.2 微批次不逐事件应答）：轮询快照等待
     // flush（16ms 窗口 + 落盘 + 镜像应用）——Factory 初始化 update（pv=0）
     // 与事件 update 同批入广播流，以 projection_version >= 1 判定事件已
@@ -90,7 +303,9 @@ async fn mirror_snapshot_rebuilds_from_log() {
         if let Some(d) = docs.get(&DocId::chat(sid)) {
             let txn = d.transact();
             let root = txn.get_map("root").expect("root");
-            let entries = root.get(&txn, "entries").and_then(|v| v.cast::<yrs::MapRef>().ok());
+            let entries = root
+                .get(&txn, "entries")
+                .and_then(|v| v.cast::<yrs::MapRef>().ok());
             eprintln!("[dbg] entries map present: {}", entries.is_some());
             if let Some(m) = entries {
                 let keys: Vec<String> = m.keys(&txn).map(|k| k.to_string()).collect();
@@ -111,7 +326,10 @@ async fn mirror_snapshot_rebuilds_from_log() {
         .await
         .expect("rebuilt mirror has chat doc");
     eprintln!("[dbg] state2={} v2={}", state2.len(), v2);
-    assert!(!state2.is_empty(), "重启后镜像应含已落盘内容（P3 视图恢复）");
+    assert!(
+        !state2.is_empty(),
+        "重启后镜像应含已落盘内容（P3 视图恢复）"
+    );
     // 内容一致：合并后的 state 应包含文本。
     let bytes = state2;
     assert!(!bytes.is_empty());
@@ -136,7 +354,10 @@ async fn registry_update_persisted_and_replayed() {
     let store2 = Arc::new(Store::open(&persist_cfg2(&tmp)).unwrap());
     store2.recover().await;
     let sink2 = Arc::new(StoreSink::new(store2.clone()).await.unwrap());
-    let (state, _) = sink2.snapshot(&DocId::REGISTRY).await.expect("registry mirror");
+    let (state, _) = sink2
+        .snapshot(&DocId::REGISTRY)
+        .await
+        .expect("registry mirror");
     assert!(!state.is_empty());
     let _ = (store, sink);
 }
@@ -247,7 +468,11 @@ async fn hub_assemble_smoke_ready_sequence() {
     store.recover().await;
 
     // 装配（§8.6）：StoreSink → DocManager → 注册表/协调器/广播器 → Gateway。
-    let hub = Arc::new(crate::control::Hub::assemble(&cfg, store, auth).await.unwrap());
+    let hub = Arc::new(
+        crate::control::Hub::assemble(&cfg, store, auth)
+            .await
+            .unwrap(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let gateway = hub.gateway.clone();
@@ -275,6 +500,7 @@ async fn hub_assemble_smoke_ready_sequence() {
         serde_json::to_string(&acp_hub_proto::frame::Frame::YsyncSubscribe(
             acp_hub_proto::ysync::YsyncSubscribe {
                 docs: vec![DocId::REGISTRY],
+                client_capabilities: Vec::new(),
             },
         ))
         .unwrap()
@@ -288,7 +514,10 @@ async fn hub_assemble_smoke_ready_sequence() {
     match snap {
         acp_hub_proto::frame::Frame::YsyncUpdate(u) => {
             assert_eq!(u.doc, DocId::REGISTRY);
-            assert!(u.projection_version.is_some(), "快照必带 projection_version");
+            assert!(
+                u.projection_version.is_some(),
+                "快照必带 projection_version"
+            );
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&u.update)
                 .unwrap();
@@ -308,7 +537,10 @@ async fn hub_assemble_smoke_ready_sequence() {
     // Degraded 入口（§17.2 + §8.4.1 不变量 4）：装配后（instance 重连对账
     // 前）Restarting 门禁——拒绝新 committed 承诺；instance 重连（hello）
     // 对账后开门 → Healthy。
-    assert!(!hub.can_accept_committed(), "Restarting 期间不得接受新 committed（§8.4.1 不变量 4）");
+    assert!(
+        !hub.can_accept_committed(),
+        "Restarting 期间不得接受新 committed（§8.4.1 不变量 4）"
+    );
     hub.registry.clear_restarting().await.unwrap();
     assert!(hub.can_accept_committed());
 

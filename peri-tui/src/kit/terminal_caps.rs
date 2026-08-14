@@ -1,10 +1,23 @@
 //! 终端能力探测与符号降级（规格 §4.1 / §12）。
 //!
-//! - [`detect_caps`]：启动时探测一次（NO_COLOR / TERM=dumb / COLORTERM / TERM_PROGRAM），
-//!   写入 `atoms::TERMINAL_CAPS`，进程生命周期内只读。
+//! - [`detect_caps`]：启动时探测一次（NO_COLOR / TERM=dumb / COLORTERM / TERM_PROGRAM /
+//!   PERI_IMAGE / TMUX），写入 `atoms::TERMINAL_CAPS`，进程生命周期内只读。
 //! - [`symbols`]：按 unicode 能力选择 §4.1 的 Unicode 符号集或 ASCII 后备符号集。
 //!
 //! 不变式：任何状态都不能只依赖颜色（§12）——符号集降级表与规格 §4.1 逐条对应。
+
+/// 终端图片协议能力位。ITerm2 保持「检测但 disabled」语义（§6.3）：
+/// 能力位记录存在，但本期任何渲染层都把 ITerm2 视同 None（未验证不启用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphicsProtocol {
+    /// kitty graphics protocol（Kitty / Ghostty / WezTerm / Warp 品牌映射）。
+    Kitty,
+    /// iTerm2 inline image（OSC 1337）。能力位保留，渲染层当前视同 [`None`]。
+    ITerm2,
+    /// 无图片协议——像素渲染不可用，恒降级文本。
+    #[default]
+    None,
+}
 
 /// 终端能力集合。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,16 +30,21 @@ pub struct TerminalCaps {
     pub italic: bool,
     /// 24-bit truecolor 是否可用（无 truecolor 时映射 ANSI 近似值）。
     pub truecolor: bool,
+    /// 图片协议能力（P0/P1 门控位；§6.1 Q5 宁可 false negative 不可 false positive）。
+    /// Default = None：未探测（单测/未知环境）时无像素渲染，安全默认。
+    pub graphics: GraphicsProtocol,
 }
 
 impl Default for TerminalCaps {
     fn default() -> Self {
         // 默认全能力——未探测（如单测环境）时不做任何剥离/降级，保持现状行为。
+        // graphics 例外：默认 None 是刻意的安全默认，防误判污染终端（§6.1 Q5）。
         Self {
             color: true,
             unicode: true,
             italic: true,
             truecolor: true,
+            graphics: GraphicsProtocol::None,
         }
     }
 }
@@ -102,6 +120,49 @@ pub fn detect_caps() -> TerminalCaps {
     detect_caps_from(&|name| std::env::var(name).ok())
 }
 
+/// 图片协议探测：品牌映射 + 环境变量 override（§6.3 E5 / image-p0-p1-spec §1.4）。
+/// 仅启动时调用一次（entry.rs）。
+/// 优先级：`PERI_IMAGE` override > 品牌映射 > None。
+pub fn detect_graphics_protocol_from(get: &dyn Fn(&str) -> Option<String>) -> GraphicsProtocol {
+    // PERI_IMAGE override（最高优先级，值解析为小写）：off=禁用 / kitty=强制 / iterm2=强制。
+    // 空值视为未设置；未知值回落安全默认（宁可 false negative 不可 false positive）。
+    if let Some(value) = get("PERI_IMAGE")
+        && !value.is_empty()
+    {
+        return match value.to_ascii_lowercase().as_str() {
+            "kitty" => GraphicsProtocol::Kitty,
+            "iterm2" => GraphicsProtocol::ITerm2,
+            // "off" 及任何未知值 → None
+            _ => GraphicsProtocol::None,
+        };
+    }
+
+    // TMUX 存在 → None：tmux 内嵌会转发/剥协议序列，即使 TERM_PROGRAM 残留外层
+    // 终端品牌也禁用（矩阵硬性规则，宁可 false negative）。
+    if get("TMUX").is_some() {
+        return GraphicsProtocol::None;
+    }
+
+    // Windows ConPTY 会剥 APC（kitty protocol 依赖 APC），恒 None。
+    // 作为尾表达式（下方品牌映射仅非 Windows 编译，Windows 下此即函数尾）。
+    #[cfg(target_os = "windows")]
+    {
+        GraphicsProtocol::None
+    }
+
+    // 品牌映射（大小写不敏感小写比较）；tmux / 未知 / 未设置 → None（安全默认）。
+    // 仅非 Windows 编译（Windows 已在上方恒 None 早退，避免 unreachable code）。
+    #[cfg(not(target_os = "windows"))]
+    return match get("TERM_PROGRAM")
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("kitty" | "ghostty" | "wezterm" | "warp") => GraphicsProtocol::Kitty,
+        Some("iterm.app") => GraphicsProtocol::ITerm2,
+        _ => GraphicsProtocol::None,
+    };
+}
+
 /// 可注入环境读取器的探测实现（便于单测，不触碰真实 env）。
 fn detect_caps_from(get: &dyn Fn(&str) -> Option<String>) -> TerminalCaps {
     // NO_COLOR 规范：变量存在即禁用颜色（值可为空）。
@@ -143,6 +204,7 @@ fn detect_caps_from(get: &dyn Fn(&str) -> Option<String>) -> TerminalCaps {
         unicode,
         italic,
         truecolor,
+        graphics: detect_graphics_protocol_from(get),
     }
 }
 
@@ -232,6 +294,7 @@ mod tests {
             unicode: true,
             italic: true,
             truecolor: true,
+            graphics: GraphicsProtocol::None,
         };
         let s = symbols(&caps);
         assert_eq!(s.running, "◐");
@@ -256,6 +319,7 @@ mod tests {
             unicode: false,
             italic: false,
             truecolor: false,
+            graphics: GraphicsProtocol::None,
         };
         let s = symbols(&caps);
         assert_eq!(s.running, "*");
@@ -295,5 +359,134 @@ mod tests {
             ..TerminalCaps::default()
         });
         assert_eq!(s.collapsed, s.user_prompt);
+    }
+
+    #[test]
+    fn test_detect_graphics_protocol_peri_image_override() {
+        // PERI_IMAGE=off 最高优先级：任何 TERM_PROGRAM 都禁用
+        for prog in [Some("kitty"), Some("iTerm.app"), Some("tmux"), None] {
+            let caps = detect_graphics_protocol_from(&env_with(&[
+                ("PERI_IMAGE", Some("off")),
+                ("TERM_PROGRAM", prog),
+            ]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::None,
+                "PERI_IMAGE=off 时 TERM_PROGRAM={prog:?} 应禁用"
+            );
+        }
+        // PERI_IMAGE=kitty / iterm2 → 强制对应协议（覆盖品牌映射）
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("PERI_IMAGE", Some("kitty")),
+            ("TERM_PROGRAM", Some("UnknownTerm")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::Kitty);
+        let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("iterm2"))]));
+        assert_eq!(caps, GraphicsProtocol::ITerm2);
+        // 值解析为小写：OFF 也命中 disable
+        let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("OFF"))]));
+        assert_eq!(caps, GraphicsProtocol::None);
+        // 未知值 → 安全默认 None；空值视为未设置
+        let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("halfblock"))]));
+        assert_eq!(caps, GraphicsProtocol::None);
+        // 空值视为未设置 → 回落品牌映射；品牌映射仅非 Windows 生效
+        // （Windows ConPTY 剥 APC，detect 恒 None——见 detect_graphics_protocol_from）
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("PERI_IMAGE", Some("")),
+            ("TERM_PROGRAM", Some("kitty")),
+        ]));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(caps, GraphicsProtocol::Kitty);
+        #[cfg(target_os = "windows")]
+        assert_eq!(caps, GraphicsProtocol::None);
+    }
+
+    /// Windows 契约：ConPTY 剥 APC（kitty 协议依赖 APC），品牌映射恒 None。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_detect_graphics_protocol_brand_mapping_windows_conpty_disables_all() {
+        for prog in [
+            "kitty",
+            "ghostty",
+            "wezterm",
+            "warp",
+            "iTerm.app",
+            "WezTerm",
+        ] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some(prog))]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::None,
+                "Windows 上 TERM_PROGRAM={prog} 应恒 None（ConPTY 剥 APC）"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_detect_graphics_protocol_brand_mapping() {
+        // kitty 系品牌 → Kitty（§6.3 E5 矩阵）
+        for prog in ["kitty", "ghostty", "wezterm", "warp"] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some(prog))]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::Kitty,
+                "TERM_PROGRAM={prog} 应映射 Kitty"
+            );
+        }
+        // iTerm.app → ITerm2（disabled 语义：能力位记录存在，渲染层视同 None）
+        let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some("iTerm.app"))]));
+        assert_eq!(caps, GraphicsProtocol::ITerm2);
+        // 品牌比较大小写不敏感（小写化）
+        let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some("WezTerm"))]));
+        assert_eq!(caps, GraphicsProtocol::Kitty);
+    }
+
+    #[test]
+    fn test_detect_graphics_protocol_none_fallback() {
+        // tmux / 未知 / 无任何 env → None（安全默认，宁可 false negative）
+        for prog in [Some("tmux"), Some("UnknownTerm"), None] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", prog)]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::None,
+                "TERM_PROGRAM={prog:?} 应无协议"
+            );
+        }
+        // TMUX 环境变量存在 → None（即使 TERM_PROGRAM 残留外层终端品牌）
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("TMUX", Some("/tmp/tmux-501/default,123,0")),
+            ("TERM_PROGRAM", Some("kitty")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::None);
+    }
+
+    #[test]
+    fn test_detect_caps_graphics_matches_protocol_detection() {
+        // 组合断言：detect_caps_from 内联的 graphics 与独立探测函数同源一致。
+        let get = env_with(&[("PERI_IMAGE", Some("off")), ("TERM_PROGRAM", Some("kitty"))]);
+        assert_eq!(
+            detect_caps_from(&get).graphics,
+            detect_graphics_protocol_from(&get)
+        );
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::None);
+
+        let get = env_with(&[("TERM_PROGRAM", Some("ghostty"))]);
+        assert_eq!(
+            detect_caps_from(&get).graphics,
+            detect_graphics_protocol_from(&get)
+        );
+        // 品牌映射仅非 Windows 生效（Windows ConPTY 剥 APC 恒 None）
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::Kitty);
+        #[cfg(target_os = "windows")]
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::None);
+
+        let get = env_with(&[("PERI_IMAGE", Some("iterm2"))]);
+        assert_eq!(
+            detect_caps_from(&get).graphics,
+            detect_graphics_protocol_from(&get)
+        );
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::ITerm2);
     }
 }
