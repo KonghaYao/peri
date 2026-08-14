@@ -636,11 +636,13 @@ async fn test_preload_mcp_prefixed_registry_miss_skips_disk_fallback() {
 #[tokio::test]
 async fn test_preload_alias_miss_falls_back_to_local_disk_skill() {
     // Arrange: registry 只 seed 了 demo/hello；本地 tempdir 存在命名空间
-    // 形态的 skill `ns:test-skill`。
+    // 后缀形态的 skill 目录 `test-skill`（磁盘目录名不含 `:`——NTFS/APFS
+    // 均禁止 `:` 作为目录名字符，插件命名空间 skill 在磁盘上即无前缀目录，
+    // 别名 `<ns>:<name>` 经 rsplit_once(':') 后缀回退命中）。
     let dir = tempdir().unwrap();
     let skills_dir = dir.path().join(".claude").join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "ns:test-skill", "命名空间技能");
+    write_skill(&skills_dir, "test-skill", "命名空间技能");
     let reg = seed_registry_with_skill("demo", "hello");
     let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
         .with_mcp_registry(Some(reg));
@@ -654,7 +656,7 @@ async fn test_preload_alias_miss_falls_back_to_local_disk_skill() {
     assert_eq!(state.messages().len(), 3, "别名 miss 应回退磁盘注入");
     let tool_content = state.messages()[2].content();
     assert!(
-        tool_content.contains("Skill content for ns:test-skill"),
+        tool_content.contains("Skill content for test-skill"),
         "应注入本地 skill 内容，实际: {tool_content}"
     );
 }
