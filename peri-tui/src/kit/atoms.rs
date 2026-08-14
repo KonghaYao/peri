@@ -288,6 +288,11 @@ pub static POPUP_KIND: AtomStatic<Option<PopupKind>> = AtomStatic::new(|| None);
 /// 订阅唤醒，与 PANEL_SCROLL_OWNER 同模式）；无弹窗/自定位小层（ModelQuickSwitch
 /// 不登记矩形）时为 None → 保守遮挡。
 pub static POPUP_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
+/// 当前激活面板的整体屏幕矩形（上一帧渲染写入，PanelOverlay 的 AreaTracker
+/// 回填）——供鼠标遮挡判定区分「面板内/外」：面板打开时，面板区域外（消息区
+/// 可见部分）滚轮放行给 chat 滚动（见 mouse_router::occludes_scroll）。
+/// 写入用 write_no_update；无面板/尚未渲染时为 None → 保守遮挡。
+pub static PANEL_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
 /// 面板滚轮仲裁注册表：当前激活面板的滚动槽位（每帧由面板渲染体覆盖写入，
 /// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
 pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =

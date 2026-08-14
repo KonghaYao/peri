@@ -16,6 +16,7 @@
 //! 若 `ACTIVE_PANEL` 为 Some，调用 `close_active_panel`；否则交由子组件。
 
 use crate::kit::atoms;
+use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::panel_registry;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -27,12 +28,24 @@ use ratatui_kit::{
 ///
 /// 订阅 `ACTIVE_PANEL` atom，渲染当前激活面板。无面板时返回空 View。
 /// 同时挂载面板滚轮仲裁 handler（Global+High，先于 ScrollView 的层内处理）
-/// 与渲染帧兜底 flush（消除停手后残留 pending）。
+/// 与渲染帧兜底 flush（消除停手后残留 pending），并登记面板整体区域
+/// （`PANEL_AREA`，供 `mouse_router::occludes_scroll` 区分「面板内/外」滚轮）。
 #[component]
 pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
     let active = *active_panel.read();
     let (_term_w, term_h) = hooks.use_terminal_size();
+    // 面板整体区域（上一帧绘制区域）——遮挡判定用，写入用 write_no_update
+    // （判定读取不依赖订阅唤醒，与 PANEL_SCROLL_OWNER 同模式）
+    let area_tracker = hooks.use_hook(AreaTracker::new);
+    if active.is_some() {
+        if let Some(rect) = area_tracker.rect {
+            *atoms::PANEL_AREA.state().write_no_update() = Some(rect);
+        }
+    } else {
+        // 无面板/首帧未渲染 → 清除登记，防止旧矩形残留错误放行滚轮
+        *atoms::PANEL_AREA.state().write_no_update() = None;
+    }
     hooks.use_event_handler(EventScope::Global, EventPriority::High, |event| {
         crate::kit::panel_scroll::handle_panel_scroll(&event)
     });
