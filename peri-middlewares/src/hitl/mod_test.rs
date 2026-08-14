@@ -432,3 +432,94 @@ async fn test_broker_hang_rejects_with_timeout() {
         err
     );
 }
+
+// ─── 10_hitl 段落持有（波 4 演进 C3）────────────────────────────────────
+
+/// 契约（设计 §3.1.2）：sensitive 条目与 `default_requires_approval` 判定
+/// 一一对应——精确条目按名、前缀条目按前缀探测名必须判定为敏感；代表性
+/// 非敏感工具必须判定为不敏感。列表与判定函数失同步即测试失败。
+#[test]
+fn sensitive_entries_match_default_requires_approval() {
+    for entry in sensitive_tool_entries() {
+        let probe = if entry.prefix_match {
+            format!("{}some_tool", entry.name)
+        } else {
+            entry.name.to_string()
+        };
+        assert!(
+            default_requires_approval(&probe),
+            "条目 `{}`（prefix={}）应在 default_requires_approval 判定为敏感",
+            entry.name,
+            entry.prefix_match
+        );
+    }
+    // 反向抽查：常规工具不敏感（与 test_default_requires_approval 的负例一致）
+    for tool in [
+        "Read",
+        "Glob",
+        "Grep",
+        "TodoWrite",
+        "AskUserQuestion",
+        "cron_list",
+        "cron_remove",
+        "mcp_read_resource",
+    ] {
+        assert!(
+            !default_requires_approval(tool),
+            "{tool} 不应判定为敏感（条目列表与判定函数失同步）"
+        );
+    }
+}
+
+/// 条目集合与判定分支数一致（精确 8 项 + 前缀 3 项 = 11 项；
+/// 变更 `default_requires_approval` 分支时必须同步条目清单）。
+#[test]
+fn sensitive_entries_cover_all_requires_approval_branches() {
+    let entries = sensitive_tool_entries();
+    assert_eq!(
+        entries.len(),
+        11,
+        "条目清单应覆盖 default_requires_approval 全部分支"
+    );
+    // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）
+    let prefix_count = entries.iter().filter(|e| e.prefix_match).count();
+    assert_eq!(prefix_count, 3, "前缀匹配条目应恰好 3 项");
+}
+
+/// 10_hitl 段落声明：位置属性（Uncached order=3）与内容结构（机制说明 +
+/// 动态列表 + 模式决策尾句）。
+#[test]
+fn hitl_section_declaration_shape() {
+    let sections = HumanInTheLoopMiddleware::sections();
+    assert_eq!(sections.len(), 1, "10_hitl 段应唯一");
+    let section = &sections[0];
+    assert_eq!(section.id, "10_hitl");
+    assert_eq!(section.zone, PromptSectionZone::Uncached);
+    assert_eq!(section.order, 3);
+    let content = section.content.as_str();
+    assert!(
+        content.contains("# Human-in-the-Loop (HITL) Approval Mode"),
+        "机制说明标题应保留（include_str 零拷贝）"
+    );
+    assert!(
+        content.contains("## Which tools are sensitive"),
+        "sensitive 小节引导保留"
+    );
+    assert!(
+        content.contains("- `Bash` — shell command execution"),
+        "动态列表按代码事实生成"
+    );
+    assert!(
+        content.contains("Whether a sensitive tool actually requires approval is decided by the current `PermissionMode`"),
+        "模式决策尾句保留"
+    );
+    // 段落文件不再硬编码列表（失同步防线）
+    let file_content = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../peri-acp/prompts/sections/10_hitl.md"
+    ));
+    assert!(
+        !file_content.contains("- `Bash`"),
+        "10_hitl.md 不应再硬编码 sensitive 列表（列表由代码事实生成）"
+    );
+}

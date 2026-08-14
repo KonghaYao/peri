@@ -8,7 +8,11 @@ use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
     error::AgentResult,
     messages::BaseMessage,
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{
+        prompt_sections::{PromptSection, PromptSectionZone},
+        r#trait::Middleware,
+        state::MiddlewareState,
+    },
     session::Session,
     tools::BaseTool,
 };
@@ -50,6 +54,9 @@ pub struct SubAgentMiddlewareConfig {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary。None 时从磁盘读取。
     pub frozen_skill_summary: Option<String>,
+    /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
+    /// 子链独立装配，必须同样过滤——设计 §2.5）。
+    pub meta_harness_disabled: std::collections::HashSet<String>,
 }
 
 impl SubAgentMiddlewareConfig {
@@ -61,6 +68,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            meta_harness_disabled: std::collections::HashSet::new(),
         }
     }
     /// Agent 定义路径配置
@@ -73,7 +81,19 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            meta_harness_disabled: std::collections::HashSet::new(),
         }
+    }
+    /// 注入装配期关闭的 middleware 名集合（MetaHarness，设计 §2.5）。
+    ///
+    /// 子链独立装配：主链关闭的 middleware（AgentsMd/Skills/SkillPreload/
+    /// Todo）必须在子链同样关闭，否则子 agent 仍携带其工具与提示词贡献。
+    pub fn with_meta_harness_disabled(
+        mut self,
+        disabled: std::collections::HashSet<String>,
+    ) -> Self {
+        self.meta_harness_disabled = disabled;
+        self
     }
     /// 注入 main agent 在 session/new 时捕获的 frozen 数据。
     ///
@@ -240,6 +260,29 @@ impl SubAgentMiddleware {
         self.task_manager_available = available;
     }
 
+    /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.5.1
+    /// 步骤 3——文件留在 `peri-acp/prompts/sections/` 由 middleware
+    /// `include_str!`，内容不复制）。
+    ///
+    /// 11_subagent 段为 Builtin 文本，**含 `{{available_agents}}` 占位符**：
+    /// catalog 替换留在渲染层（`format_available_agents`，prompt/mod.rs，
+    /// 设计 §3.5.1 步骤 2——middleware 仅作内容载体，语义边界 ①）。
+    ///
+    /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
+    /// （收集即装配）——关闭 SubAgentMiddleware → 11_subagent 段落 +
+    /// SubAgentTool/AgentResultTool 同时消失（盲区闭合）。
+    pub fn sections() -> Vec<PromptSection> {
+        vec![PromptSection::builtin(
+            "11_subagent",
+            PromptSectionZone::Uncached,
+            4, // C1 D2 编号事实：gated 11=4（10_hitl=3 之后）
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../peri-acp/prompts/sections/11_subagent.md"
+            )),
+        )]
+    }
+
     /// Build SubAgentTool instance (clone Arc fields, do not transfer ownership)
     pub fn build_tool(&self, cwd: &str) -> SubAgentTool {
         let mut tool = SubAgentTool::new(
@@ -275,153 +318,31 @@ impl SubAgentMiddleware {
 
 /// Scan `{cwd}/.claude/agents/` directory, return `(agent_id, name, description)` list.
 /// Built-in agents are included as fallback — project-level agents with the same ID take precedence.
+///
+/// 波 4 演进（C3，设计 §3.5.1 步骤 2）：catalog 同源收敛——本函数委托
+/// [`scan_agents_detailed`]（共享实现，丢弃能力画像字段），与渲染面
+/// catalog（`SkillsPort::agents` → `scan_agents_detailed`）同一事实源，
+/// 防止提示词 catalog 与子链实际可用 agent 不一致。
 pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
-    let mut result = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-
-    // 1. Scan project-level agents (highest priority)
-    let agents_dir = Path::new(cwd).join(".claude").join("agents");
-    if agents_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, path)
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    let id = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, nested)
-                } else {
-                    continue;
-                };
-
-                let content = match std::fs::read_to_string(&file_path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                if let Some(agent) = parse_agent_file(&content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        agent_id.clone()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let description = agent.frontmatter.description.clone();
-                    seen_ids.insert(agent_id.clone());
-                    result.push((agent_id, name, description));
-                }
-            }
-        }
-    }
-
-    // 2. Append built-in agents (project-level agents take precedence by ID)
-    for built_in in list_built_in_agents() {
-        if seen_ids.insert(built_in.agent_id.to_string()) {
-            if let Some(agent) = parse_agent_file(built_in.content) {
-                let name = if agent.frontmatter.name.is_empty() {
-                    built_in.agent_id.to_string()
-                } else {
-                    agent.frontmatter.name.clone()
-                };
-                let description = agent.frontmatter.description.clone();
-                result.push((built_in.agent_id.to_string(), name, description));
-            }
-        }
-    }
-
-    // Sort by agent_id for stable output
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    scan_agents_detailed(cwd, &[])
+        .into_iter()
+        .map(|(id, name, description, _)| (id, name, description))
+        .collect()
 }
 
 /// 扫描 agent 目录，支持额外的插件 agent 搜索路径
 /// 项目级 agent 优先，同名 agent_id 去重时保留先出现的
+///
+/// 波 4 演进（C3）：委托 [`scan_agents_detailed`]（共享实现，见
+/// [`scan_agents`] 注释）。
 pub fn scan_agents_with_extra_dirs(
     cwd: &str,
     extra_dirs: &[PathBuf],
 ) -> Vec<(String, String, String)> {
-    let mut result = scan_agents(cwd);
-    let mut seen_ids: std::collections::HashSet<String> =
-        result.iter().map(|(id, _, _)| id.clone()).collect();
-
-    for dir in extra_dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-
-            let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                let id = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                (id, path)
-            } else if path.is_dir() {
-                let nested = path.join("agent.md");
-                if !nested.is_file() {
-                    continue;
-                }
-                let id = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                (id, nested)
-            } else {
-                continue;
-            };
-
-            // Skip duplicates (CWD + built-in agents already registered)
-            if !seen_ids.insert(agent_id.clone()) {
-                continue;
-            }
-
-            let content = match std::fs::read_to_string(&file_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            if let Some(agent) = parse_agent_file(&content) {
-                let name = if agent.frontmatter.name.is_empty() {
-                    agent_id.clone()
-                } else {
-                    agent.frontmatter.name.clone()
-                };
-                let description = agent.frontmatter.description.clone();
-                result.push((agent_id, name, description));
-            }
-        }
-    }
-
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    scan_agents_detailed(cwd, extra_dirs)
+        .into_iter()
+        .map(|(id, name, description, _)| (id, name, description))
+        .collect()
 }
 
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
@@ -615,6 +536,11 @@ impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware
 impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
         "SubAgentMiddleware"
+    }
+
+    /// 声明持有的系统提示词段落（11_subagent，内容载体；装配期收集，契约 2）。
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        Self::sections()
     }
 
     fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {

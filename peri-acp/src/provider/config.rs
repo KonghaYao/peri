@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use peri_acp_types::meta_harness::{MIDDLEWARE_NAMES, SECTION_IDS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -165,6 +166,13 @@ pub struct AppConfig {
     /// 系统提示词 tone 覆盖
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<String>,
+    /// MetaHarness 控制字段：段落 ID → true（覆盖系统提示词段落）；
+    /// middleware 名 → false（装配期关闭该 middleware）。
+    ///
+    /// 合并语义为 meta_harness **专属逐 key 合并**（`merge_overrides` 特例分支）：
+    /// 项目级同 key 覆盖全局，全局其余 key 保留。无 null/删除语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_harness: Option<HashMap<String, bool>>,
     /// CLAUDE.md 排除 glob 模式列表
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_md_excludes: Option<Vec<String>>,
@@ -210,6 +218,14 @@ impl AppConfig {
         if workspace.skills_dir.is_some() {
             self.skills_dir = workspace.skills_dir;
         }
+        // meta_harness 专属特例：逐 key 合并（项目级同 key 覆盖全局，全局其余
+        // key 保留）。这是与 env 等整体覆盖字段刻意的行为差异（设计 §2.1）；
+        // 不提供 null/删除语义。
+        match (&mut self.meta_harness, workspace.meta_harness) {
+            (Some(global), Some(workspace)) => global.extend(workspace),
+            (None, Some(workspace)) => self.meta_harness = Some(workspace),
+            (_, None) => {}
+        }
         if workspace.env.is_some() {
             self.env = workspace.env;
         }
@@ -238,6 +254,32 @@ impl AppConfig {
         // 保留未知字段
         self.extra.extend(workspace.extra);
     }
+
+    /// MetaHarness 解析期校验（warn 不 fail）：未知 key warn + 移除，已知 key
+    /// 的四种 bool 组合全部保留。
+    ///
+    /// 只校验 key 集合与值语义，**不查文档**——文档存在性校验在冻结期
+    /// （`build_frozen_data`），避免解析期二次读盘（设计 §2.1/2.3）。
+    /// 由 `provider::store::load_from` 在每次 serde 解析成功后调用
+    /// （生产路径唯一解析入口）。
+    pub(crate) fn validate_meta_harness(&mut self) {
+        let Some(map) = self.meta_harness.as_mut() else {
+            return;
+        };
+        let known: std::collections::HashSet<&str> = SECTION_IDS
+            .iter()
+            .chain(MIDDLEWARE_NAMES.iter())
+            .copied()
+            .collect();
+        map.retain(|key, _| {
+            if known.contains(key.as_str()) {
+                true
+            } else {
+                tracing::warn!(key = %key, "meta_harness: unknown key ignored");
+                false
+            }
+        });
+    }
 }
 
 impl Default for AppConfig {
@@ -252,6 +294,7 @@ impl Default for AppConfig {
             language: None,
             persona: None,
             tone: None,
+            meta_harness: None,
             proactiveness: None,
             claude_md_excludes: None,
             show_cache_warning: None,

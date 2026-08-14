@@ -1,10 +1,49 @@
 use super::*;
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::meta_harness::MetaHarnessState;
+use peri_middlewares::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 use peri_middlewares::host_ports::SkillsProvider;
-use peri_middlewares::PermissionMode;
+use peri_middlewares::subagent::SubAgentMiddleware;
+
+/// 构建系统提示词（测试 helper；原 prompt/mod.rs 的同名函数随 §0 边 2
+/// 依赖门收口迁出——收集函数移至宿主装配面 `crate::session::crate::session::build_collected_sections`，
+/// 本 helper 仅测试直接调用，收于测试模块）。
+///
+/// 从持有者段落 + `prompts/sections/` 目录按固定顺序加载段落：基础段落
+/// （01-06 / 07_runtime / persona / language）与 gated 段（10_hitl /
+/// 11_subagent / 13_skills，经 [`crate::session::crate::session::build_collected_sections`]
+/// 收集）始终包含（除非持有 middleware 被关闭）；15_channel 按
+/// `PromptFeatures` 条件注入（gate 恒 false）；环境占位符替换为运行时值。
+///
+/// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个
+/// Persona 段（`DefaultSystemPromptMiddleware` 动态生成）；`prompt_mode:
+/// full` 时 body 仅替换 Persona 段，基础段落仍保留；为 `None` 时覆盖块
+/// 为空（Persona 段不渲染）。
+#[allow(clippy::too_many_arguments)] // 渲染面固定参数集（与生产构造点一致）
+fn build_system_prompt(
+    meta_harness: &MetaHarnessState,
+    overrides: Option<&AgentOverrides>,
+    cwd: &str,
+    features: PromptFeatures,
+    skills: &dyn SkillsPort,
+    extra_agent_dirs: &[std::path::PathBuf],
+    frozen_date: Option<&str>,
+    language: Option<&str>,
+) -> String {
+    let collected = crate::session::build_collected_sections(meta_harness, overrides, language);
+    let template = PromptTemplate::new(meta_harness, &collected);
+    let env = if let Some(date) = frozen_date {
+        PromptEnv::with_frozen_date(cwd, date)
+    } else {
+        PromptEnv::detect(cwd)
+    };
+    template.render(&env, &features, skills, extra_agent_dirs)
+}
 
 #[test]
 fn test_no_overrides_contains_all_sections() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -26,7 +65,7 @@ fn test_no_overrides_contains_all_sections() {
         result.contains("Batch independent tool calls"),
         "应包含 05_using_tools 通用工具纪律（工具条目已迁移至声明段）"
     );
-    assert!(result.contains("<env>"), "应包含 07_env 段落");
+    assert!(result.contains("<env>"), "应包含 07_runtime 段落");
     assert!(
         result.contains("Working directory"),
         "应包含 08_env 替换后结果"
@@ -36,6 +75,7 @@ fn test_no_overrides_contains_all_sections() {
 #[test]
 fn test_no_overrides_no_duplicate_tone_proactiveness() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -50,7 +90,8 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
         1,
         "无 overrides 时 # Tone and style 应仅出现 1 次（来自静态段落）"
     );
-    // "# Proactiveness" 仅出现 1 次（来自 02_system.md 静态段落）
+    // "# Proactiveness" 仅出现 1 次（来自 03_doing_tasks.md 静态段落，
+    // C2：02_system 的 Proactiveness 块已并入 03）
     assert_eq!(
         result.matches("# Proactiveness").count(),
         1,
@@ -66,6 +107,7 @@ fn test_no_overrides_no_duplicate_tone_proactiveness() {
 #[test]
 fn test_no_overrides_no_leading_newlines() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -89,6 +131,7 @@ fn test_with_overrides_uses_override_block() {
         mode: None,
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -97,15 +140,16 @@ fn test_with_overrides_uses_override_block() {
         None,
         None,
     );
-    // overrides 现在在边界标记之后，不再以 persona 开头
-    let boundary = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    // persona 段在缓存区段（01-06）之后（C2：boundary 文本标记已删除，
+    // 位置属性承担划分）
+    let pos_tone_style = result.find("# Tone and style").unwrap();
     assert!(
-        result[boundary..].contains("test persona"),
-        "有 overrides 时边界之后应包含 persona 内容"
+        result[pos_tone_style..].contains("test persona"),
+        "有 overrides 时缓存区段之后应包含 persona 内容"
     );
-    // 静态段应在 persona 之前（边界标记之前）
+    // 静态段（01-06）不应包含 persona 内容
     assert!(
-        !result[..boundary].contains("test persona"),
+        !result[..pos_tone_style].contains("test persona"),
         "persona 不应在缓存段内"
     );
 }
@@ -113,6 +157,7 @@ fn test_with_overrides_uses_override_block() {
 #[test]
 fn test_placeholders_replaced() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/custom/path",
         PromptFeatures::none(),
@@ -128,6 +173,7 @@ fn test_placeholders_replaced() {
 #[test]
 fn test_env_contains_cwd() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/custom/path",
         PromptFeatures::none(),
@@ -140,8 +186,45 @@ fn test_env_contains_cwd() {
 }
 
 #[test]
-fn test_features_none_excludes_all_gated_sections() {
+fn test_features_none_excludes_only_unheld_channel_section() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
+    // C3（gate 原子迁移）：10/11/13 已迁移至功能 middleware 持有——收集段
+    // 恒渲染（gate = 持有者是否在链上，收集即装配，契约 3），与
+    // PromptFeatures 字段无关。
+    assert!(
+        result.contains("Human-in-the-Loop"),
+        "10_hitl 收集段恒渲染（持有者装配即渲染）"
+    );
+    assert!(
+        result.contains("SubAgent Delegation"),
+        "11_subagent 收集段恒渲染"
+    );
+    assert!(
+        result.contains("# Skills"),
+        "13_skills 收集段恒渲染（标题保留）"
+    );
+    // 15_channel 无持有者：gate 恒 false（PromptFeatures::none），不渲染
+    assert!(
+        !result.contains("Channel 频道消息"),
+        "15_channel 无持有者，按 FeatureGate::Channel 门控"
+    );
+}
+
+#[test]
+fn test_hitl_section_rendered_by_holder() {
+    // 10_hitl 由 HumanInTheLoopMiddleware 持有（Dynamic：机制说明 + 按代码
+    // 事实生成的 sensitive 列表）；收集段恒渲染，不依赖 hitl_enabled 字段。
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -151,126 +234,176 @@ fn test_features_none_excludes_all_gated_sections() {
         None,
     );
     assert!(
-        !result.contains("Human-in-the-Loop"),
-        "全关闭时不应包含 HITL 段落"
-    );
-    assert!(
-        !result.contains("SubAgent Delegation"),
-        "全关闭时不应包含 SubAgent 段落"
-    );
-    // 13_skills.md 以 "# Skills\n" 开头，检查标题
-    assert!(
-        !result.contains("\n# Skills\n") && !result.starts_with("# Skills\n"),
-        "全关闭时不应包含 Skills 标题段落"
-    );
-    assert!(
-        !result.contains("Channel 频道消息"),
-        "全关闭时不应包含 Channel 段落"
-    );
-}
-
-#[test]
-fn test_hitl_enabled_includes_hitl_section() {
-    let features = PromptFeatures {
-        hitl_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    assert!(
         result.contains("Human-in-the-Loop"),
-        "hitl_enabled 时应包含 HITL 段落"
+        "10_hitl 段落应由持有者装配渲染"
+    );
+    assert!(
+        result.contains("`Bash` — shell command execution"),
+        "sensitive 列表按 default_requires_approval 代码事实生成"
     );
 }
 
 #[test]
-fn test_subagent_enabled_includes_subagent_section() {
-    let features = PromptFeatures {
-        subagent_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+fn test_subagent_section_rendered_by_holder() {
+    // 11_subagent 由 SubAgentMiddleware 持有（Builtin，含 {{available_agents}}
+    // 占位符——catalog 替换留在渲染层，设计 §3.5.1 步骤 2）。
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         result.contains("SubAgent Delegation"),
-        "subagent_enabled 时应包含 SubAgent 段落"
+        "11_subagent 段落应由持有者装配渲染"
     );
 }
 
 #[test]
-fn test_skills_enabled_includes_skills_section() {
-    let features = PromptFeatures {
-        skills_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+fn test_skills_section_rendered_by_holder() {
+    // 13_skills 由 SkillsMiddleware 持有（Dynamic：机制说明 + 按代码事实
+    // 生成的 discovery 协议）。
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(
         result.contains("# Skills"),
-        "skills_enabled 时应包含 Skills 段落标题"
+        "13_skills 段落标题应由持有者装配渲染"
+    );
+    // discovery 协议按代码事实生成（loader 常量格式化注入，防手写漂移）
+    assert!(
+        result.contains(
+            "Each skill root is scanned recursively up to 6 levels deep (max 1000 directories per root)"
+        ),
+        "discovery 扫描参数应来自 loader 常量（MAX_SCAN_DEPTH / MAX_SKILLS_DIRS_PER_ROOT）"
+    );
+    assert!(
+        result.contains("1. `~/.claude/skills/` — user-level skills (highest priority)"),
+        "discovery roots 优先级应动态生成（User 最高）"
     );
 }
 
+/// 11_subagent 段落重构守护（设计 §3.5.1 步骤 1）：Agent Selection Guide
+/// 删除具体任务→agent 映射（仓库级调度建议由 catalog id/description 承载），
+/// 通用选择原则保留（specialized 优先 / general-purpose 兜底 / access 并行化）。
 #[test]
-fn test_workflow_enabled_includes_workflow_section() {
-    let features = PromptFeatures {
-        workflow_enabled: true,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+fn test_subagent_selection_guide_has_no_specific_mapping() {
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
+    // 具体映射与 pipelines 已删除
     assert!(
-        result.contains("Workflow Orchestration"),
-        "workflow_enabled 时应包含 16_workflow 段落"
+        !result.contains("Code implementation / editing / refactoring / migration"),
+        "Selection Guide 不应含具体任务→agent 映射"
+    );
+    assert!(
+        !result.contains("**Standard pipelines**"),
+        "Standard pipelines 具体建议已删除"
+    );
+    // 通用选择原则保留（不绑定 agent 名）
+    assert!(
+        result.contains("pick a specialized agent. `general-purpose` is a fallback, not a default"),
+        "通用选择原则（specialized 优先 / general-purpose 兜底）应保留"
+    );
+    assert!(
+        result
+            .contains("`readonly` agents may run concurrently, `writes` agents must be sequenced"),
+        "按 access 标签并行化的通用原则应保留"
     );
 }
 
+/// 段落位置顺序守护（契约 2）：非缓存区按段内序号——10_hitl(3) →
+/// 11_subagent(4) → 13_skills(5) → language(7)，不依赖 middleware 链序。
 #[test]
-fn test_workflow_disabled_excludes_workflow_section() {
-    let features = PromptFeatures {
-        workflow_enabled: false,
-        ..PromptFeatures::none()
-    };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+fn test_gated_sections_render_in_position_order() {
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        Some("zh"),
+    );
+    let pos_hitl = result.find("Human-in-the-Loop").unwrap();
+    let pos_subagent = result.find("SubAgent Delegation").unwrap();
+    let pos_skills = result.find("# Skills").unwrap();
+    let pos_lang = result.find("# Language").unwrap();
     assert!(
-        !result.contains("Workflow Orchestration"),
-        "workflow_enabled=false 时不应包含 16_workflow 段落（print mode 等无 executor 场景）"
+        pos_hitl < pos_subagent && pos_subagent < pos_skills && pos_skills < pos_lang,
+        "gated 段按段内序号渲染：{pos_hitl} < {pos_subagent} < {pos_skills} < {pos_lang}"
     );
 }
 
-/// [回归测试] workflow 声明与注册共用同一条件源（阶段 3 capability 契约）。
-///
-/// 历史背景（审计 prompt-sections-audit.md P1-5）：16_workflow 原编入无条件
-/// static sections，而 WorkflowTool 注册严格依赖 `workflow_executor.is_some()`
-/// ——prompt 宣称与真实注册脱节。修复后 `workflow_enabled` 由同一条件源
-/// 导出：prompt section、WorkflowMiddlewareAdaptor::collect_tools、ToolSearch
-/// 索引发现三面一致；此测试锁定 prompt 面，注册/发现面分别由
-/// workflow/mod.rs 与 tool_search/middleware_test.rs 的用例覆盖。
+/// [回归测试] 16_workflow 已整段删除（波 4 演进 C2，ultracode skill 完整
+/// 覆盖——设计 §3.1.2）：渲染输出与 gate 结构均不得再出现 workflow 段落。
 #[test]
-fn test_workflow_gate_marks_capability_contract_layer() {
-    // 16_workflow 必须归 CapabilityContract 层（可被 feature 门控，但不得被
-    // persona override 移除——它不在 IMMUTABLE_SECTIONS 也不在 PersonaDomain）。
-    let (_, gate, layer) = GATED_SECTIONS
-        .iter()
-        .find(|(s, _, _)| s.contains("Workflow Orchestration"))
-        .expect("16_workflow 应位于 GATED_SECTIONS");
-    assert_eq!(*gate, FeatureGate::Workflow);
-    assert_eq!(*layer, PromptLayer::CapabilityContract);
-    // 不可替换层不再包含 workflow 段
+fn test_workflow_section_deleted_entirely() {
+    // GATED_SECTIONS 不再包含 16_workflow（无持有者 gate 清理）
     assert!(
-        !IMMUTABLE_SECTIONS
+        !GATED_SECTIONS
             .iter()
-            .any(|(s, _)| s.contains("Workflow Orchestration")),
-        "16_workflow 不应再位于 IMMUTABLE_SECTIONS"
+            .any(|(id, _, _, _)| id.contains("16_workflow")),
+        "16_workflow 不应再位于 GATED_SECTIONS"
     );
+    // 渲染输出不含 workflow 声明（默认配置 + channel 开启均不含）
+    let features_channel = PromptFeatures {
+        channel_enabled: true,
+    };
+    for features in [PromptFeatures::none(), features_channel] {
+        let result = build_system_prompt(
+            &MetaHarnessState::default(),
+            None,
+            "/tmp",
+            features,
+            &SkillsProvider,
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            !result.contains("Workflow Orchestration"),
+            "16_workflow 段落已删除：任何 gate 组合都不应渲染"
+        );
+    }
 }
 
 #[test]
 fn test_all_features_enabled_includes_all() {
+    // 10/11/13 由持有者装配渲染（收集段恒渲染）；channel_enabled=true 时
+    // 15_channel 渲染（FeatureGate::Channel 判定，无持有者）。
     let features = PromptFeatures {
-        hitl_enabled: true,
-        subagent_enabled: true,
-        skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
     assert!(result.contains("Human-in-the-Loop"), "应包含 HITL 段落");
     assert!(
         result.contains("SubAgent Delegation"),
@@ -278,61 +411,38 @@ fn test_all_features_enabled_includes_all() {
     );
     assert!(result.contains("# Skills"), "应包含 Skills 段落标题");
     assert!(result.contains("Channel 频道消息"), "应包含 Channel 段落");
-    assert!(
-        result.contains("Workflow Orchestration"),
-        "应包含 Workflow 段落"
-    );
 }
 
 #[test]
 fn test_detect_default_values() {
-    let features = PromptFeatures::detect(PermissionMode::Bypass, true);
-    // 默认环境下 hitl_enabled 取决于 permission_mode
-    // 注意：Bypass 模式下 hitl_enabled 为 false
-    assert!(features.subagent_enabled);
-    assert!(features.skills_enabled);
-    // ChannelOwner 未装配：channel 不构成运行时能力（P3-2026-08-02）
+    let features = PromptFeatures::detect();
+    // C3：hitl/subagent/skills gate 已随段落实体迁移（收集即装配，契约 3），
+    // detect 仅剩 channel gate（15_channel 无持有者，恒 false）。
     assert!(
         !features.channel_enabled,
         "detect() 不得把未装配的 channel 宣称为可用能力"
     );
-    // workflow_enabled 来自调用方（workflow_executor.is_some()）
-    assert!(features.workflow_enabled);
-    assert!(!PromptFeatures::detect(PermissionMode::Bypass, false).workflow_enabled);
 }
 
-/// [回归测试] 子 agent / fork / workflow agent 的 prompt features 恒不宣称
-/// workflow；未装配的 channel 不作为运行时能力（P2/P3-2026-08-02）。
+/// [回归测试] 未装配的 channel 不作为运行时能力（P3-2026-08-02）。
 ///
-/// 历史背景（P2 pre-commit review）：subagent / fork / workflow agent 三条
-/// 路径均传 `shared_tools: None`、无 WorkflowTool，但旧 `features_for_sub`
-/// 沿用 `workflow_executor.is_some()`，prompt 仍渲染 16_workflow——与能力
-/// 矛盾。`detect_without_workflow` 锁定子面向 prompt 的 workflow 恒关闭；
-/// 主 agent 的 workflow 声明仍由调用方显式传入（`detect(mode, true)`）。
-///
-/// channel 部分（P3）：`ChannelOwner` 未在生产路径装配，旧 `detect()` 硬编码
-/// `channel_enabled: true` 使 15_channel 被错误呈现为可用能力；现恒为 false。
-/// D6（tag 转义）保持未修复，本测试不宣称其已修复。
+/// 16_workflow 已删除（C2），无子面向 feature 差异；15_channel 恒不渲染。
 #[test]
-fn test_detect_without_workflow_and_channel_gates() {
-    // 即使主链 workflow 可用，子面向 features 也不得宣称 workflow
-    let sub = PromptFeatures::detect_without_workflow(PermissionMode::Default);
+fn test_detect_channel_gate_never_enabled() {
+    let features = PromptFeatures::detect();
     assert!(
-        !sub.workflow_enabled,
-        "子 agent / fork / workflow agent 的 features 恒不得宣称 workflow"
-    );
-    assert!(
-        !sub.channel_enabled,
+        !features.channel_enabled,
         "未装配 ChannelOwner 时 channel 恒不启用"
     );
-    // 主 agent 侧（detect 显式传 workflow 可用性）不受影响
-    let main = PromptFeatures::detect(PermissionMode::Default, true);
-    assert!(main.workflow_enabled, "主 agent 的 workflow 声明保持可用");
-    // 渲染面：子面向 features 渲染不出现 16_workflow / 15_channel
-    let result = build_system_prompt(None, "/tmp", sub, &SkillsProvider, &[], None, None);
-    assert!(
-        !result.contains("Workflow Orchestration"),
-        "子面向 prompt 不得包含 16_workflow"
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
     );
     assert!(
         !result.contains("Channel 频道消息"),
@@ -343,8 +453,9 @@ fn test_detect_without_workflow_and_channel_gates() {
 // ─── boundary marker tests ──────────────────────────────────────────────
 
 #[test]
-fn test_boundary_marker_present() {
+fn test_boundary_marker_removed() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -354,14 +465,15 @@ fn test_boundary_marker_present() {
         None,
     );
     assert!(
-        result.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
-        "system prompt 应包含边界标记"
+        !result.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
+        "波 4 演进（C2）：boundary 文本标记已删除（缓存区划分由段落位置属性承担）"
     );
 }
 
 #[test]
 fn test_boundary_marker_before_dynamic_content() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -370,38 +482,43 @@ fn test_boundary_marker_before_dynamic_content() {
         None,
         None,
     );
-    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    // 06_tone_style 在边界之前
+    // 缓存区段落（01-06）在动态内容段（07_runtime）之前——位置属性
+    // （zone + 段内序号）承担缓存区划分（C2：boundary 文本标记已删除）
+    let pos_tone = result.find("# Tone and style").unwrap();
     assert!(
-        result[..boundary_pos].contains("# Tone and style"),
-        "06_tone_style 应在边界标记之前"
+        result[..pos_tone].contains("# Following conventions"),
+        "02_system 应在 06_tone_style 之前"
     );
-    // 07_env 在边界之后
     assert!(
-        result[boundary_pos..].contains("Working directory"),
-        "07_env 应在边界标记之后"
+        result[pos_tone..].contains("Working directory"),
+        "07_runtime 应在 06_tone_style 之后（缓存区后段）"
     );
 }
 
 #[test]
 fn test_boundary_marker_with_all_features() {
     let features = PromptFeatures {
-        hitl_enabled: true,
-        subagent_enabled: true,
-        skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
-    let result = build_system_prompt(None, "/tmp", features, &SkillsProvider, &[], None, None);
-    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    // feature-gated 段落都应在边界之后
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
+    // feature-gated 段落都在缓存区段（06_tone_style）之后
+    let pos_tone = result.find("# Tone and style").unwrap();
     assert!(
-        result[boundary_pos..].contains("Human-in-the-Loop"),
-        "HITL 段落应在边界标记之后"
+        result[pos_tone..].contains("Human-in-the-Loop"),
+        "HITL 段落应在缓存区段之后"
     );
     assert!(
-        result[boundary_pos..].contains("SubAgent Delegation"),
-        "SubAgent 段落应在边界标记之后"
+        result[pos_tone..].contains("SubAgent Delegation"),
+        "SubAgent 段落应在缓存区段之后"
     );
 }
 
@@ -414,6 +531,7 @@ fn test_overrides_after_boundary_marker() {
         mode: None,
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -422,20 +540,21 @@ fn test_overrides_after_boundary_marker() {
         None,
         None,
     );
-    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    // overrides 应在边界之后，不破坏缓存前缀
+    // Persona 段（persona/tone/proactiveness）在缓存区段之后、07_runtime
+    // 之前（现状顺序保持；C2：boundary 文本标记删除，位置属性承担划分）
+    let pos_tone_style = result.find("# Tone and style").unwrap();
     assert!(
-        result[boundary_pos..].contains("test persona"),
-        "persona 应在边界标记之后"
+        result[pos_tone_style..].contains("test persona"),
+        "persona 应在缓存区段之后"
     );
     assert!(
-        result[boundary_pos..].contains("concise"),
-        "tone 应在边界标记之后"
+        result[pos_tone_style..].contains("concise"),
+        "tone 应在缓存区段之后"
     );
-    // 边界之前不应包含 overrides 内容
+    // 缓存区段（01-06）不应包含 overrides 内容
     assert!(
-        !result[..boundary_pos].contains("test persona"),
-        "persona 不应在边界标记之前（会破坏缓存前缀）"
+        !result[..pos_tone_style].contains("test persona"),
+        "persona 不应在缓存区段内（会破坏缓存前缀）"
     );
 }
 
@@ -460,11 +579,9 @@ fn test_available_agents_placeholder_replaced() {
     )
     .unwrap();
 
-    let features = PromptFeatures {
-        subagent_enabled: true,
-        ..PromptFeatures::none()
-    };
+    let features = PromptFeatures::none();
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
         features,
@@ -495,11 +612,9 @@ fn test_available_agents_placeholder_replaced() {
 fn test_available_agents_placeholder_empty_dir() {
     let dir = tmp_dir("prompt_test_agent_empty");
     // No .claude/agents/ directory at all
-    let features = PromptFeatures {
-        subagent_enabled: true,
-        ..PromptFeatures::none()
-    };
+    let features = PromptFeatures::none();
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
         features,
@@ -519,11 +634,16 @@ fn test_available_agents_placeholder_empty_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// C3（gate 原子迁移）：11_subagent 由 SubAgentMiddleware 持有，收集段恒
+/// 渲染（持有者装配即渲染）——`{{available_agents}}` 占位符在渲染层替换；
+/// 关闭持有者（disabled_middlewares）时段落整体消失（见
+/// `meta_harness_disabling_holder_removes_section`）。
 #[test]
-fn test_available_agents_not_replaced_when_subagent_disabled() {
-    let dir = tmp_dir("prompt_test_agent_disabled");
+fn test_available_agents_replaced_when_subagent_holder_enabled() {
+    let dir = tmp_dir("prompt_test_agent_holder");
     let features = PromptFeatures::none();
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         dir.to_str().unwrap(),
         features,
@@ -533,10 +653,37 @@ fn test_available_agents_not_replaced_when_subagent_disabled() {
         None,
     );
     assert!(
-        !result.contains("SubAgent Delegation"),
-        "SubAgent section should not be included when disabled"
+        result.contains("SubAgent Delegation"),
+        "11_subagent 段落应由持有者装配渲染"
+    );
+    assert!(
+        !result.contains("{{available_agents}}"),
+        "catalog 占位符应在渲染层替换"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 盲区闭合（任务 4）：关闭 SubAgentMiddleware → 11_subagent 段落消失
+/// （渲染面 crate::session::build_collected_sections 冻结 disabled 集合驱动过滤）。
+#[test]
+fn meta_harness_disabling_holder_removes_section() {
+    let mut state = MetaHarnessState::default();
+    state
+        .disabled_middlewares
+        .insert("SubAgentMiddleware".to_string());
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(
+        !result.contains("SubAgent Delegation"),
+        "关闭 SubAgentMiddleware 后 11_subagent 段落应消失（盲区闭合）"
+    );
+    assert!(
+        result.contains("Human-in-the-Loop"),
+        "其他持有者段落不受影响（10_hitl 仍在）"
+    );
+    assert!(
+        result.contains("# Skills"),
+        "其他持有者段落不受影响（13_skills 仍在）"
+    );
 }
 
 #[test]
@@ -607,6 +754,7 @@ fn test_format_available_agents_empty_dir() {
 #[test]
 fn test_language_simplified_chinese_injected() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -633,6 +781,7 @@ fn test_language_simplified_chinese_injected() {
 #[test]
 fn test_language_none_no_injection() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -648,8 +797,9 @@ fn test_language_none_no_injection() {
 }
 
 #[test]
-fn test_language_section_after_boundary_marker() {
+fn test_language_section_after_dynamic_content() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -658,20 +808,24 @@ fn test_language_section_after_boundary_marker() {
         None,
         Some("zh-CN"),
     );
-    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
+    // Language 段在非缓存区最后（07_runtime 之后；C2：boundary 文本标记
+    // 已删除，位置属性承担划分——language 由 LangMiddleware 持有）
+    let pos_runtime = result.find("## System Reminders").unwrap();
     assert!(
-        result[boundary_pos..].contains("# Language"),
-        "Language 段落应在边界标记之后（动态区域，不破坏缓存前缀）"
+        result[pos_runtime..].contains("# Language"),
+        "Language 段落应在 07_runtime 之后（动态区域，不破坏缓存前缀）"
     );
+    let pos_tone = result.find("# Tone and style").unwrap();
     assert!(
-        !result[..boundary_pos].contains("# Language"),
-        "Language 段落不应在边界标记之前（会破坏缓存前缀）"
+        !result[..pos_tone].contains("# Language"),
+        "Language 段落不应在缓存区段内（会破坏缓存前缀）"
     );
 }
 
 #[test]
 fn test_language_zh_maps_to_simplified_chinese() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -689,6 +843,7 @@ fn test_language_zh_maps_to_simplified_chinese() {
 #[test]
 fn test_language_custom_code_passthrough() {
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -725,25 +880,14 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
         mode: None,
     };
 
-    // 覆盖多种 features 组合
+    // 覆盖多种 features 组合（C3：gate 判定仅剩 channel——收集段恒渲染，
+    // 组合保持以验证两条渲染路径在所有 gate 配置下字节一致）
     let features_combos = [
         PromptFeatures::none(),
-        {
-            let mut f = PromptFeatures::none();
-            f.subagent_enabled = true;
-            f
+        PromptFeatures {
+            channel_enabled: true,
         },
-        {
-            let mut f = PromptFeatures::none();
-            f.hitl_enabled = true;
-            f
-        },
-        {
-            let mut f = PromptFeatures::none();
-            f.skills_enabled = true;
-            f
-        },
-        PromptFeatures::detect(PermissionMode::Bypass, true),
+        PromptFeatures::detect(),
     ];
 
     let language_combos: [Option<&str>; 3] = [None, Some("zh-CN"), Some("fr")];
@@ -753,6 +897,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             // No overrides
             {
                 let old = build_system_prompt(
+                    &MetaHarnessState::default(),
                     no_overrides,
                     cwd,
                     *features,
@@ -762,8 +907,17 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     *language,
                 );
                 let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let new =
-                    PromptTemplate::new().render(&env, features, &SkillsProvider, &[], *language);
+                let collected = crate::session::build_collected_sections(
+                    &MetaHarnessState::default(),
+                    no_overrides,
+                    *language,
+                );
+                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+                    &env,
+                    features,
+                    &SkillsProvider,
+                    &[],
+                );
                 assert_eq!(
                     old, new,
                     "byte mismatch: features={:?}, lang={:?}, overrides=None",
@@ -773,6 +927,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             // With non-empty overrides
             {
                 let old = build_system_prompt(
+                    &MetaHarnessState::default(),
                     Some(&with_overrides),
                     cwd,
                     *features,
@@ -782,12 +937,16 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     *language,
                 );
                 let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let new = PromptTemplate::with_overrides(&with_overrides).render(
+                let collected = crate::session::build_collected_sections(
+                    &MetaHarnessState::default(),
+                    Some(&with_overrides),
+                    *language,
+                );
+                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
                     &env,
                     features,
                     &SkillsProvider,
                     &[],
-                    *language,
                 );
                 assert_eq!(
                     old, new,
@@ -798,6 +957,7 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
             // With empty overrides (should behave same as None)
             {
                 let old = build_system_prompt(
+                    &MetaHarnessState::default(),
                     Some(&empty_overrides),
                     cwd,
                     *features,
@@ -807,12 +967,16 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
                     *language,
                 );
                 let env = PromptEnv::with_frozen_date(cwd, frozen_date);
-                let new = PromptTemplate::with_overrides(&empty_overrides).render(
+                let collected = crate::session::build_collected_sections(
+                    &MetaHarnessState::default(),
+                    Some(&empty_overrides),
+                    *language,
+                );
+                let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
                     &env,
                     features,
                     &SkillsProvider,
                     &[],
-                    *language,
                 );
                 assert_eq!(
                     old, new,
@@ -824,32 +988,34 @@ fn test_prompt_template_byte_identical_to_build_system_prompt() {
     }
 }
 
-/// 验证边界标记位置在新旧路径中完全一致
+/// 验证渲染路径字节一致（C2）：build_system_prompt（经
+/// `crate::session::build_collected_sections` 收集）与直接 PromptTemplate + 同一收集结果
+/// 输出逐字节一致；boundary 文本标记已删除（C2 断言）。
 #[test]
-fn test_template_boundary_position_identical() {
+fn test_template_byte_identical_and_no_boundary_marker() {
     let old = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
-        PromptFeatures::detect(PermissionMode::Bypass, true),
+        PromptFeatures::detect(),
         &SkillsProvider,
         &[],
         None,
         None,
     );
     let env = PromptEnv::detect("/tmp");
-    let new = PromptTemplate::new().render(
+    let collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    let new = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
         &env,
-        &PromptFeatures::detect(PermissionMode::Bypass, true),
+        &PromptFeatures::detect(),
         &SkillsProvider,
         &[],
-        None,
     );
-
-    let old_boundary = old.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    let new_boundary = new.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    assert_eq!(
-        old_boundary, new_boundary,
-        "boundary offset must be identical for Anthropic cache hit"
+    assert_eq!(old, new, "两条渲染路径字节一致");
+    assert!(
+        !new.contains("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"),
+        "boundary 文本标记已删除（位置属性承担缓存区划分）"
     );
 }
 
@@ -870,6 +1036,7 @@ fn test_render_full_mode_preserves_immutable_layers() {
         mode: Some("full".into()),
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -911,6 +1078,7 @@ fn test_render_full_mode_preserves_secret_policy() {
         mode: Some("full".into()),
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -938,6 +1106,7 @@ fn test_render_full_mode_preserves_git_guardrails() {
         mode: Some("full".into()),
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -965,6 +1134,7 @@ fn test_render_full_mode_preserves_tool_discipline() {
         mode: Some("full".into()),
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -983,12 +1153,24 @@ fn test_render_full_mode_preserves_tool_discipline() {
     );
 }
 
-/// full 模式的 boundary 前缀偏移必须与 extend 模式完全一致。
+/// full 模式的缓存区前缀必须与 extend 模式完全一致。
 ///
-/// 分层后 full 模式同样渲染不可替换层，边界标记前字节与非 full 相同，
-/// 恢复 Anthropic 前缀缓存命中区域的一致性。
+/// 分层后 full 模式同样渲染不可替换层，缓存区段（01-06，zone=Cached）字节
+/// 与非 full 相同，恢复 Anthropic 前缀缓存命中区域的一致性。
 #[test]
-fn test_render_full_mode_boundary_aligned_with_extend() {
+fn test_render_full_mode_prefix_aligned_with_extend() {
+    // 缓存区前缀 = 01-06 段（持有者事实源）按段内序号连接
+    let cached_prefix: String = {
+        let sections = DefaultSystemPromptMiddleware::sections(None);
+        let mut parts = Vec::new();
+        for s in sections
+            .iter()
+            .filter(|s| s.zone == PromptSectionZone::Cached)
+        {
+            parts.push(s.content.as_str());
+        }
+        parts.join("\n\n")
+    };
     let full_overrides = AgentOverrides {
         persona: Some("You are a custom full-mode agent.".into()),
         tone: None,
@@ -996,6 +1178,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
         mode: Some("full".into()),
     };
     let full = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&full_overrides),
         "/tmp",
         PromptFeatures::none(),
@@ -1005,6 +1188,7 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
         None,
     );
     let extend = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -1013,35 +1197,31 @@ fn test_render_full_mode_boundary_aligned_with_extend() {
         Some("2026-01-01"),
         None,
     );
-    let full_boundary = full.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    let extend_boundary = extend.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    assert_eq!(
-        full_boundary, extend_boundary,
-        "full/extend 的 boundary 偏移应一致"
+    assert!(
+        full.starts_with(&cached_prefix),
+        "full 模式缓存区前缀 = 01-06 段连接（persona 不进入缓存前缀）"
     );
+    assert!(
+        extend.starts_with(&cached_prefix),
+        "extend 模式缓存区前缀 = 01-06 段连接"
+    );
+    // 缓存区段（01-06）字节一致 → 前缀缓存命中区域不随 persona 模式变化
     assert_eq!(
-        &full[..full_boundary],
-        &extend[..extend_boundary],
-        "boundary 之前的不可替换层字节应一致"
+        &full[..cached_prefix.len()],
+        &extend[..cached_prefix.len()],
+        "缓存区前缀字节一致"
     );
 }
 
-/// 验证固定层顺序：SafetyAuthorization → EngineeringBehavior → BOUNDARY →
-/// PersonaDomain → RuntimeStateBoundary → gated sections（含 capability 契约）。
-///
-/// 16_workflow 属 CapabilityContract 层，但作为 gated section 渲染在
-/// boundary 之后（FeatureGate::Workflow 控制可见性，见阶段 3 capability 契约）。
+/// 验证固定层顺序：缓存区段（01-06）→ 07_runtime → gated sections。
 #[test]
 fn test_render_immutable_layer_order() {
     // frozen_date 参数化，避免触发 chrono::Local::now()（testing-standards 4.1 确定性）
     let features = PromptFeatures {
-        hitl_enabled: true,
-        subagent_enabled: true,
-        skills_enabled: true,
         channel_enabled: true,
-        workflow_enabled: true,
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         None,
         "/tmp",
         features,
@@ -1052,24 +1232,19 @@ fn test_render_immutable_layer_order() {
     );
     let safety_pos = result.find("Treat secrets").unwrap(); // 02_system（SafetyAuthorization）
     let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
-    let boundary_pos = result.find("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__").unwrap();
-    let runtime_pos = result.find("<env>").unwrap(); // 07_env（RuntimeStateBoundary）
-    let capability_pos = result.find("Workflow Orchestration").unwrap(); // 16_workflow（CapabilityContract）
+    let runtime_pos = result.find("<env>").unwrap(); // 07_runtime（RuntimeStateBoundary）
+    let gated_pos = result.find("SubAgent Delegation").unwrap(); // 11_subagent（gated）
     assert!(
         safety_pos < engineering_pos,
         "SafetyAuthorization 层应位于 EngineeringBehavior 层之前"
     );
     assert!(
-        engineering_pos < boundary_pos,
-        "不可替换层（工程行为）应位于边界标记之前"
+        engineering_pos < runtime_pos,
+        "不可替换层（工程行为）应位于运行时段（07_runtime）之前"
     );
     assert!(
-        boundary_pos < runtime_pos,
-        "RuntimeStateBoundary 层应位于边界标记之后"
-    );
-    assert!(
-        boundary_pos < capability_pos,
-        "gated capability 段（16_workflow）应位于边界标记之后（feature 门控）"
+        runtime_pos < gated_pos,
+        "07_runtime 应位于 gated 段（11_subagent）之前"
     );
 }
 
@@ -1083,6 +1258,7 @@ fn test_render_full_mode_keeps_env() {
         mode: Some("full".into()),
     };
     let result = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides),
         "/custom/project",
         PromptFeatures::none(),
@@ -1118,6 +1294,7 @@ fn test_render_extend_mode_unchanged() {
         mode: Some("extend".into()),
     };
     let result_none = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides_none),
         "/tmp",
         PromptFeatures::none(),
@@ -1127,6 +1304,7 @@ fn test_render_extend_mode_unchanged() {
         None,
     );
     let result_extend = build_system_prompt(
+        &MetaHarnessState::default(),
         Some(&overrides_extend),
         "/tmp",
         PromptFeatures::none(),
@@ -1262,5 +1440,669 @@ async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() 
     assert!(
         !section_05.contains(decl_line),
         "05 不得与声明段渲染行逐字重复"
+    );
+}
+
+// ─── MetaHarness 段落覆盖（设计 §2.4）───────────────────────────────────────
+
+use std::sync::Arc;
+
+/// 构造只含一个段落覆盖的 MetaHarnessState
+fn override_state(id: &str, content: &str) -> MetaHarnessState {
+    let mut state = MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert(id.to_string(), Arc::from(content.to_string()));
+    state
+}
+
+fn render_with_state(state: &MetaHarnessState, features: PromptFeatures) -> String {
+    build_system_prompt(
+        state,
+        None,
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        None,
+    )
+}
+
+/// 持有者侧段落内容（C2 起基础段由 `DefaultSystemPromptMiddleware` 持有，
+/// 测试以持有者声明为事实源，替代已删除的内置数组）。
+fn holder_section_content(id: &str) -> String {
+    let sections = DefaultSystemPromptMiddleware::sections(None);
+    sections
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap_or_else(|| panic!("段落 {id} 应由 DefaultSystemPromptMiddleware 持有"))
+        .content
+        .as_str()
+        .to_string()
+}
+
+#[test]
+fn meta_harness_override_replaces_section_full_text() {
+    let state = override_state("01_intro", "# Custom Intro\n\n完全替换的角色定义。");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(result.contains("# Custom Intro"), "覆盖内容应出现在输出中");
+    // 内置 01_intro 不再出现：以持有者段落全文为锚点校验
+    let builtin = holder_section_content("01_intro");
+    assert!(
+        !result.contains(&builtin),
+        "内置 01_intro 全文不应再出现在输出中"
+    );
+}
+
+#[test]
+fn meta_harness_override_05_using_tools() {
+    let state = override_state("05_using_tools", "### Tools Discipline\n\n自定义工具纪律。");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(result.contains("自定义工具纪律"), "覆盖内容应出现");
+    let builtin = holder_section_content("05_using_tools");
+    assert!(!result.contains(&builtin), "内置 05_using_tools 不应再出现");
+}
+
+#[test]
+fn meta_harness_unoverridden_section_unchanged() {
+    let state = override_state("01_intro", "custom");
+    let result = render_with_state(&state, PromptFeatures::none());
+    let builtin_02 = holder_section_content("02_system");
+    assert!(result.contains(&builtin_02), "未覆盖的 02_system 字节不变");
+}
+
+#[test]
+fn meta_harness_multiple_overrides_apply_together() {
+    let mut state = MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert("01_intro".to_string(), Arc::from("intro-ovr"));
+    state
+        .section_overrides
+        .insert("05_using_tools".to_string(), Arc::from("tools-ovr"));
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(result.contains("intro-ovr"));
+    assert!(result.contains("tools-ovr"));
+    // 段落顺序不变：01 在 05 之前
+    assert!(
+        result.find("intro-ovr").unwrap() < result.find("tools-ovr").unwrap(),
+        "段落渲染顺序不变（01_intro 在 05_using_tools 之前）"
+    );
+}
+
+#[test]
+fn meta_harness_override_not_trimmed() {
+    // override 内容保留原样（不 trim）：前后空白原样进入输出
+    let state = override_state("01_intro", "\n  # Padded  \n\nbody  \n");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(
+        result.contains("\n  # Padded  \n\nbody  \n"),
+        "覆盖内容不被 trim"
+    );
+}
+
+#[test]
+fn meta_harness_override_placeholders_still_substituted() {
+    // override 内容中的占位符参与渲染期替换（与内置段落同一通道）
+    let state = override_state("01_intro", "cwd={{cwd}} platform={{platform}}");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(result.contains("cwd=/tmp"), "{{cwd}} 被替换");
+    assert!(result.contains("platform="), "{{platform}} 被替换");
+}
+
+#[test]
+fn meta_harness_gated_enabled_shows_override() {
+    // 10_hitl 由 HumanInTheLoopMiddleware 持有（收集即装配）：覆盖 10_hitl
+    // 应生效（覆盖 = 替换持有者对应段落贡献，设计 §2.4 / §3.5.1 步骤 5）。
+    let state = override_state("10_hitl", "HITL-OVERRIDE");
+    let features = PromptFeatures::detect();
+    let result = render_with_state(&state, features);
+    assert!(result.contains("HITL-OVERRIDE"), "持有者装配时显示覆盖内容");
+}
+
+/// 11_subagent 覆盖语义（设计 §3.5.1 步骤 5 / C3 D2 第 6 步）：覆盖 =
+/// 替换 SubAgentMiddleware 持有段落贡献，机制与持有者无关——覆盖全文
+/// 出现、内置全文消失、段落渲染位置不变（仍按段内序号在 10_hitl 与
+/// 13_skills 之间）。
+#[test]
+fn meta_harness_override_11_subagent_replaces_holder_section() {
+    let state = override_state("11_subagent", "SUBAGENT-OVERRIDE");
+    let result = render_with_state(&state, PromptFeatures::detect());
+    assert!(
+        result.contains("SUBAGENT-OVERRIDE"),
+        "覆盖全文应替换持有者段落"
+    );
+    // 内置 11_subagent（含占位符的 Builtin 文本）全文不再出现
+    let builtin = SubAgentMiddleware::sections()[0]
+        .content
+        .as_str()
+        .to_string();
+    assert!(
+        !result.contains(&builtin),
+        "内置 11_subagent 全文不应再出现在输出中"
+    );
+    // 段落顺序不变：11_subagent 位置仍在 10_hitl（order=3）与
+    // 13_skills（order=5）之间
+    let pos_hitl = result
+        .find("## Which tools are sensitive")
+        .expect("10_hitl 机制说明应在");
+    let pos_override = result
+        .find("SUBAGENT-OVERRIDE")
+        .expect("11_subagent 覆盖段应在");
+    let pos_skills = result.find("# Skills").expect("13_skills 机制说明应在");
+    assert!(
+        pos_hitl < pos_override && pos_override < pos_skills,
+        "段落顺序不变（10_hitl < 11_subagent < 13_skills）：{pos_hitl} < {pos_override} < {pos_skills}"
+    );
+}
+
+/// C3（gate 原子迁移）：10_hitl gate = HumanInTheLoopMiddleware 是否在链上，
+/// 不再依赖 permission_mode——`detect()` 无 gate 差异，覆盖恒渲染；关闭
+/// 持有者（disabled_middlewares）才隐藏段落（决策记录 C3 D5）。
+#[test]
+fn meta_harness_gated_override_hidden_only_when_holder_disabled() {
+    let mut state = override_state("10_hitl", "HITL-OVERRIDE");
+    let features = PromptFeatures::detect();
+    // 默认状态：持有者装配（收集段恒渲染）→ 覆盖显示
+    let result = render_with_state(&state, features);
+    assert!(
+        result.contains("HITL-OVERRIDE"),
+        "持有者装配时覆盖应显示（gate 不再依赖 permission_mode）"
+    );
+    // 关闭持有者 → 段落整体消失（覆盖随段落一并隐藏）
+    state
+        .disabled_middlewares
+        .insert("HumanInTheLoopMiddleware".to_string());
+    let result = render_with_state(&state, features);
+    assert!(
+        !result.contains("HITL-OVERRIDE"),
+        "关闭 HumanInTheLoopMiddleware 后 10_hitl（含覆盖）不渲染"
+    );
+}
+
+#[test]
+fn meta_harness_persona_full_keeps_overridden_immutable_sections() {
+    let state = override_state("01_intro", "OVR-INTRO");
+    let overrides = AgentOverrides {
+        persona: Some("You are the full persona".into()),
+        tone: Some("ignored".into()),
+        proactiveness: Some("ignored".into()),
+        mode: Some("full".into()),
+    };
+    let result = build_system_prompt(
+        &state,
+        Some(&overrides),
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        None,
+    );
+    assert!(
+        result.contains("OVR-INTRO"),
+        "full persona 不移除覆盖后的 immutable sections"
+    );
+    assert!(
+        result.contains("You are the full persona"),
+        "full body 渲染"
+    );
+}
+
+#[test]
+fn meta_harness_build_and_template_byte_identical() {
+    // 同源一致性：build_system_prompt 与直接 PromptTemplate render 字节一致
+    let state = override_state("01_intro", "OVR-INTRO");
+    let overrides = AgentOverrides {
+        persona: Some("extend persona".into()),
+        tone: None,
+        proactiveness: None,
+        mode: None,
+    };
+    let features = PromptFeatures::detect();
+    let via_build = build_system_prompt(
+        &state,
+        Some(&overrides),
+        "/tmp",
+        features,
+        &SkillsProvider,
+        &[],
+        Some("2026-01-01"),
+        Some("zh"),
+    );
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let collected = crate::session::build_collected_sections(&state, Some(&overrides), Some("zh"));
+    let via_template =
+        PromptTemplate::new(&state, &collected).render(&env, &features, &SkillsProvider, &[]);
+    assert_eq!(via_build, via_template, "两条渲染路径字节一致");
+}
+
+#[test]
+fn meta_harness_disabled_set_does_not_affect_sections() {
+    // 两动作独立：disabled_middlewares 不影响段落渲染
+    let mut state = MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert("01_intro".to_string(), Arc::from("OVR-INTRO"));
+    state
+        .disabled_middlewares
+        .insert("WebMiddleware".to_string());
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(result.contains("OVR-INTRO"), "disabled 集合不影响覆盖渲染");
+}
+
+#[test]
+fn section_ids_match_arrays_and_holders() {
+    use peri_acp_types::meta_harness::SECTION_IDS;
+
+    // C3：基础段（01-06 / 07_runtime / persona / language）由
+    // DefaultSystemPromptMiddleware / LangMiddleware 持有，gated 段
+    // （10_hitl / 11_subagent / 13_skills）由功能 middleware 持有，
+    // 15_channel 由 GATED_SECTIONS 数组持有——并集必须与 SECTION_IDS
+    // 完全一致（无重复）。
+    let mut actual: Vec<&str> = GATED_SECTIONS
+        .iter()
+        .map(|(id, _, _, _)| *id)
+        .chain(
+            DefaultSystemPromptMiddleware::sections(None)
+                .iter()
+                .map(|s| s.id),
+        )
+        .chain(LangMiddleware::sections(Some("zh")).iter().map(|s| s.id))
+        .chain(
+            peri_middlewares::hitl::HumanInTheLoopMiddleware::sections()
+                .iter()
+                .map(|s| s.id),
+        )
+        .chain(
+            peri_middlewares::subagent::SubAgentMiddleware::sections()
+                .iter()
+                .map(|s| s.id),
+        )
+        .chain(
+            peri_middlewares::skills::SkillsMiddleware::sections()
+                .iter()
+                .map(|s| s.id),
+        )
+        .collect();
+    actual.sort_unstable();
+    let mut expected: Vec<&str> = SECTION_IDS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "SECTION_IDS 与持有者声明 ID 完全一致");
+    // 无重复
+    let mut seen = std::collections::HashSet::new();
+    for id in actual {
+        assert!(seen.insert(id), "duplicate section id: {id}");
+    }
+}
+
+#[test]
+fn meta_harness_override_13_skills_gated() {
+    // C3：13_skills 由 SkillsMiddleware 持有（收集即装配）：覆盖 13_skills
+    // 应生效（持有者装配即渲染）
+    let state = override_state("13_skills", "SKILLS-OVERRIDE");
+    let features = PromptFeatures::detect();
+    let result = render_with_state(&state, features);
+    assert!(result.contains("SKILLS-OVERRIDE"));
+}
+
+/// P2-2（实施质量审查）：persona 段恒声明 + 空内容——无 overrides 时收集的
+/// persona 段内容为空串（渲染面空内容过滤跳过，默认不渲染），但 MetaHarness
+/// 覆盖 `.peri/meta/persona.md` 仍可注入（覆盖合并先于空内容过滤）。
+#[test]
+fn meta_harness_override_persona_without_overrides() {
+    // 1. 无 overrides：persona 段恒声明且内容为空（空内容默认不渲染的前提）
+    let collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    let persona = collected
+        .iter()
+        .find(|s| s.id == "persona")
+        .expect("persona 段应恒声明（D2）");
+    assert!(
+        persona.content.as_str().is_empty(),
+        "无 overrides 时 persona 内容应为空串"
+    );
+    // 2. 无用户配置时覆盖仍可注入：覆盖全文渲染（唯一标记）
+    let state = override_state("persona", "PERSONA-OVERRIDE-NO-CONFIG");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(
+        result.contains("PERSONA-OVERRIDE-NO-CONFIG"),
+        "无 overrides 时 persona 覆盖仍应注入"
+    );
+    // 3. 默认（无覆盖）不渲染空 persona：覆盖标记不出现，段落位置无空残留
+    let default_result = render_with_state(&MetaHarnessState::default(), PromptFeatures::none());
+    assert!(
+        !default_result.contains("PERSONA-OVERRIDE-NO-CONFIG"),
+        "无覆盖时默认输出不含 persona 覆盖标记"
+    );
+}
+
+/// P2-2（实施质量审查）：language 段恒声明 + 空内容——无 `settings.language`
+/// 时收集的 language 段内容为空串（默认不渲染），但 MetaHarness 覆盖
+/// `.peri/meta/language.md` 仍可注入。
+#[test]
+fn meta_harness_override_language_without_config() {
+    // 1. 无语言配置：language 段恒声明且内容为空（空内容默认不渲染的前提）
+    let collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    let language = collected
+        .iter()
+        .find(|s| s.id == "language")
+        .expect("language 段应恒声明（D2）");
+    assert!(
+        language.content.as_str().is_empty(),
+        "无语言配置时 language 内容应为空串"
+    );
+    // 2. 无语言配置时覆盖仍可注入：覆盖全文渲染（唯一标记）
+    let state = override_state("language", "LANGUAGE-OVERRIDE-NO-CONFIG");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(
+        result.contains("LANGUAGE-OVERRIDE-NO-CONFIG"),
+        "无语言配置时 language 覆盖仍应注入"
+    );
+    // 3. 默认（无覆盖）不渲染空 language 段：覆盖标记不出现
+    let default_result = render_with_state(&MetaHarnessState::default(), PromptFeatures::none());
+    assert!(
+        !default_result.contains("LANGUAGE-OVERRIDE-NO-CONFIG"),
+        "无覆盖时默认输出不含 language 覆盖标记"
+    );
+}
+
+// ─── 波 4 段落持有者基础设施（C1）：装配期收集结果合并 ──────────────────
+
+fn collected_section(
+    id: &'static str,
+    zone: PromptSectionZone,
+    order: u16,
+    content: &'static str,
+) -> PromptSection {
+    PromptSection::builtin(id, zone, order, content)
+}
+
+/// 契约 2：收集段落按"位置 + 段内序号"排序渲染，**不依赖链序**。
+///
+/// collected 以乱序传入（zz order=9 在前、aa order=8 在后），渲染必须按
+/// 段内序号升序输出；非缓存区段落在 07_runtime 之后、Language 段之前
+/// （language order=7 < aa order=8 < zz order=9）。
+#[test]
+fn collected_sections_render_in_position_order() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, Some("zh-CN"));
+    // 乱序追加收集段（收集不承诺顺序，排序由渲染面执行）
+    collected.push(collected_section(
+        "zz_collected",
+        PromptSectionZone::Uncached,
+        9,
+        "ZZ-COLLECTED-LATE",
+    ));
+    collected.push(collected_section(
+        "aa_collected",
+        PromptSectionZone::Uncached,
+        8,
+        "AA-COLLECTED-EARLY",
+    ));
+    let features = PromptFeatures::detect();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    let pos_runtime = result.find("## System Reminders").unwrap();
+    let pos_lang = result.find("# Language").unwrap();
+    let pos_aa = result.find("AA-COLLECTED-EARLY").unwrap();
+    let pos_zz = result.find("ZZ-COLLECTED-LATE").unwrap();
+    assert!(
+        pos_runtime < pos_lang && pos_lang < pos_aa && pos_aa < pos_zz,
+        "收集段落按段内序号升序渲染（不依赖收集顺序）：{pos_runtime} < {pos_lang} < {pos_aa} < {pos_zz}"
+    );
+    // 基础段由收集注入（C2：数组已删除，收集结果成为唯一来源）
+    assert!(
+        result.contains("Following conventions"),
+        "02_system 经收集结果渲染"
+    );
+    assert!(
+        result.contains("## System Reminders"),
+        "07_runtime 经收集渲染"
+    );
+}
+
+/// 契约 2 + 收集合并：collected 按 ID 覆盖内置段落，位置属性以持有者声明为准。
+#[test]
+fn collected_section_overrides_builtin_by_id() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    // 01_intro 由收集段按 ID 覆盖（位置属性 Cached + order 1 与持有者一致）
+    collected.retain(|s| s.id != "01_intro");
+    collected.push(collected_section(
+        "01_intro",
+        PromptSectionZone::Cached,
+        1,
+        "COLLECTED-INTRO",
+    ));
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    assert!(result.contains("COLLECTED-INTRO"), "收集段落内容渲染");
+    assert!(
+        !result.contains("Assist with defensive security tasks"),
+        "内置 01_intro 被收集段按 ID 替换"
+    );
+    // 位置：缓存区首位（02_system 之前）——持有者声明的 Cached+1
+    let pos_intro = result.find("COLLECTED-INTRO").unwrap();
+    let pos_system = result.find("Following conventions").unwrap();
+    assert!(
+        pos_intro < pos_system,
+        "收集段位置属性（Cached order=1）生效"
+    );
+}
+
+/// 契约 4：middleware 提供空内容段落 = 跳过渲染不 fail，其余段落不受影响。
+#[test]
+fn collected_empty_content_skipped() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.push(collected_section(
+        "zz_empty",
+        PromptSectionZone::Uncached,
+        8,
+        "",
+    ));
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    assert!(!result.contains("zz_empty"), "空内容段落不渲染");
+    assert!(result.contains("Following conventions"), "其他段落不受影响");
+}
+
+/// 动态内容段落（`PromptSectionContent::Dynamic`）正常渲染。
+#[test]
+fn collected_dynamic_content_rendered() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.push(PromptSection::dynamic(
+        "zz_dyn",
+        PromptSectionZone::Uncached,
+        8,
+        "DYNAMIC-COLLECTED".to_string(),
+    ));
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    assert!(result.contains("DYNAMIC-COLLECTED"), "动态内容段落渲染");
+}
+
+/// 覆盖语义（设计 §2.4/3.5.1 步骤 5）：MetaHarness 覆盖 = 替换持有者对应段落
+/// 贡献——`state.section_overrides` 优先于 collected 内容。
+#[test]
+fn collected_content_merged_with_meta_harness_override() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.retain(|s| s.id != "05_using_tools");
+    collected.push(collected_section(
+        "05_using_tools",
+        PromptSectionZone::Cached,
+        5,
+        "COLLECTED-TOOLS",
+    ));
+    let state = override_state("05_using_tools", "OVERRIDE-TOOLS");
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result =
+        PromptTemplate::new(&state, &collected).render(&env, &features, &SkillsProvider, &[]);
+    assert!(result.contains("OVERRIDE-TOOLS"), "覆盖全文替换持有者段落");
+    assert!(
+        !result.contains("COLLECTED-TOOLS"),
+        "覆盖优先于 collected 内容"
+    );
+}
+
+/// 收集段不受 gate 硬编码影响（gate = 持有者是否在链上，收集即装配）：
+/// `PromptFeatures::none()` 下收集段仍渲染。
+#[test]
+fn collected_sections_render_regardless_of_feature_gates() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.push(collected_section(
+        "zz_collected",
+        PromptSectionZone::Uncached,
+        8,
+        "GATE-FREE-COLLECTED",
+    ));
+    let features = PromptFeatures::none(); // 全部 gate 关闭
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    assert!(result.contains("GATE-FREE-COLLECTED"), "收集段恒渲染");
+    // 对照：未迁移内置 gated 段落（15_channel）仍按硬编码 gate 关闭
+    assert!(
+        !result.contains("Channel 频道消息"),
+        "内置 gated 段（15_channel）不受收集影响，按 PromptFeatures 门控"
+    );
+}
+
+// ─── C 扩展 / E 补测试（2026-08-14 advisor 矩阵缺口）───────────────────────
+
+/// 覆盖语义边界（empty 定义，C 项裁定）：空串覆盖 → `is_empty()` 过滤 →
+/// 段落整体消失（与契约 4"未提供内容 = 跳过渲染"同一路径）。
+#[test]
+fn meta_harness_override_empty_removes_section() {
+    let state = override_state("01_intro", "");
+    let result = render_with_state(&state, PromptFeatures::none());
+    assert!(
+        !result.contains("Assist with defensive security tasks"),
+        "空串覆盖 → 01_intro 经 is_empty 过滤从输出消失"
+    );
+    assert!(result.contains("Following conventions"), "其余段落不受影响");
+}
+
+/// 覆盖语义边界（empty 定义锁定）：空白串覆盖 → `is_empty()` 为 false →
+/// 原样渲染，不 trim 也不消失（与 `meta_harness_override_not_trimmed`
+/// 既定不 trim 语义一致；空白段落保留原位）。
+#[test]
+fn meta_harness_override_whitespace_renders_as_is() {
+    let state = override_state("01_intro", "   ");
+    let result = render_with_state(&state, PromptFeatures::none());
+    // 01_intro 为缓存区首段，渲染结果以其内容开头（无前缀分隔符）
+    assert!(
+        result.starts_with("   "),
+        "空白覆盖原样渲染（不 trim）：{:?}",
+        &result[..result.len().min(24)]
+    );
+    assert!(
+        result.contains("Following conventions"),
+        "空白覆盖不触发空过滤，段落保留"
+    );
+}
+
+/// 收集契约（C 项矩阵）：collected 中重复 ID → 后者覆盖前者（位置属性随
+/// 后者声明），渲染恰好一次。
+#[test]
+fn collected_duplicate_id_last_wins() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.push(collected_section(
+        "zz_dup",
+        PromptSectionZone::Uncached,
+        8,
+        "DUP-FIRST",
+    ));
+    collected.push(collected_section(
+        "zz_dup",
+        PromptSectionZone::Uncached,
+        9,
+        "DUP-SECOND",
+    ));
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    assert!(
+        result.contains("DUP-SECOND") && !result.contains("DUP-FIRST"),
+        "重复 ID 后者覆盖前者"
+    );
+    assert_eq!(
+        result.matches("DUP-SECOND").count(),
+        1,
+        "重复 ID 段渲染恰好一次"
+    );
+}
+
+/// 收集契约（C 项矩阵）：同 (zone, order) 的收集段 → stable 排序保持
+/// 收集声明顺序（`sort_by_key` 稳定，不依赖链序的兜底语义）。
+#[test]
+fn collected_same_zone_order_stable() {
+    let mut collected =
+        crate::session::build_collected_sections(&MetaHarnessState::default(), None, None);
+    collected.push(collected_section(
+        "zz_s1",
+        PromptSectionZone::Uncached,
+        8,
+        "STABLE-FIRST",
+    ));
+    collected.push(collected_section(
+        "zz_s2",
+        PromptSectionZone::Uncached,
+        8,
+        "STABLE-SECOND",
+    ));
+    let features = PromptFeatures::none();
+    let env = PromptEnv::with_frozen_date("/tmp", "2026-01-01");
+    let result = PromptTemplate::new(&MetaHarnessState::default(), &collected).render(
+        &env,
+        &features,
+        &SkillsProvider,
+        &[],
+    );
+    let pos_first = result.find("STABLE-FIRST").unwrap();
+    let pos_second = result.find("STABLE-SECOND").unwrap();
+    assert!(
+        pos_first < pos_second,
+        "同 (zone, order) 稳定排序保持声明顺序：{pos_first} < {pos_second}"
     );
 }

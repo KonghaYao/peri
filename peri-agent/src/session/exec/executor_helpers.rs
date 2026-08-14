@@ -8,8 +8,7 @@
 //! - [`build_and_execute_agent_v2`]：v2 stages 装配与 ReAct 循环驱动（9 个 phase）
 //! - [`collect_result`]：close channel + 等待 pump drain + recall 提取
 //!
-//! 共享类型（原 ACP `executor.rs` 定义）随本文件迁入：[`ExecOutcome`] /
-//! [`ModeNoticeBooking`] / [`mark_permission_mode_notified`]。
+//! 共享类型（原 ACP `executor.rs` 定义）随本文件迁入：[`ExecOutcome`]。
 //!
 //! # 依赖反转（§0）
 //!
@@ -35,10 +34,7 @@
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use peri_acp_types::{
     command::{
@@ -56,7 +52,6 @@ use peri_acp_types::{
     goal::GoalController,
     identity::EventDeliveryClass,
     messages::{BaseMessage, MessageContent},
-    permission::PermissionMode,
     runtime::UnstampedEvent,
     session::PromptResult,
     store::ThreadStore,
@@ -114,28 +109,6 @@ pub struct ExecOutcome {
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
     pub agent_state: AgentState,
-}
-
-/// D2：mode 通知的"检测"与"记账"分离载体。
-///
-/// `text` 已随 agent_input 生成（ACP `run_session_loop`）；`last_notified` / `mode`
-/// 供 [`build_and_execute_agent_v2`] 在 Phase 6 入队点调用
-/// [`mark_permission_mode_notified`]。不直接持有闭包，保持类型简单可测。
-pub struct ModeNoticeBooking {
-    /// 已生成的受控通知文本（与 agent_input 一起入队）。
-    pub text: String,
-    /// session 级 last-notified 原子值。
-    pub last_notified: Arc<AtomicU8>,
-    /// 本次记账的 mode。
-    pub mode: PermissionMode,
-}
-
-/// 通知已随消息入队（模型可消费）后记账：记录"已通知该 mode"。
-///
-/// 只在 ACP `permission_mode_notice_if_changed` 判定有通知、且该通知已随
-/// agent_input 推入 v2 MessageQueue 时调用（见 [`ModeNoticeBooking`]）。
-pub fn mark_permission_mode_notified(last_notified: &AtomicU8, mode: PermissionMode) {
-    last_notified.store(mode as u8, Ordering::Relaxed);
 }
 
 // ── Intercept Request parameter object ─────────────────────────────────────
@@ -377,8 +350,8 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Option<Pr
         frozen_claude_md: req.frozen_claude_md.clone().map(Arc::new),
         frozen_claude_local_md: req.frozen_claude_local_md.clone().map(Arc::new),
         frozen_skill_summary: req.frozen_skill_summary.clone().map(Arc::new),
-        // fork/bg-fork 复用的冻结 prompt 用"无 16_workflow"版本
-        //（P2-2026-08-02）：fork 链不注册 WorkflowTool。
+        // fork/bg-fork 复用的冻结 prompt（16_workflow 已删除（C2），与主
+        // prompt 字节相同）
         frozen_system_prompt: req.frozen_system_prompt.clone().map(Arc::new),
         // 3.0 批 2：/bg fork agent 发起经装配注入的 spawner
         // （命令定义不直接引用 Agent 层 SessionFactory）。
@@ -667,7 +640,6 @@ pub async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str
 pub struct StageBuildRequest {
     pub cached_llm: Option<CachedLlmInstances>,
     pub system_prompt: String,
-    pub subagent_system_prompt: Option<String>,
     pub frozen: FrozenData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
@@ -699,11 +671,9 @@ pub struct V2ExecuteRequest {
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
     pub task_manager: Option<Arc<dyn TaskManager>>,
-    pub mode_notice_booking: Option<ModeNoticeBooking>,
     pub continuation: bool,
     // ── stage 装配输入（透传 StageBuildRequest）──
     pub system_prompt: String,
-    pub subagent_system_prompt: Option<String>,
     pub frozen: FrozenData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
@@ -751,7 +721,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     let (v2_out, new_cache) = (req.stage_build)(StageBuildRequest {
         cached_llm: req.cached_llm,
         system_prompt: req.system_prompt,
-        subagent_system_prompt: req.subagent_system_prompt,
         frozen: req.frozen,
         event_handler: req.event_handler,
         agent_overrides: req.agent_overrides,
@@ -896,19 +865,12 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 空 human 不进入 transcript（保持 keepgoing 的"不写入空 human"约束由
     // 显式分支承担，而非复用 keepgoing 语义）；loop 仅消费已 route 的
     // Defer/Info 消息（bg 结果、workflow 完成等）。
-    // [P3/D2] 记账点：通知文本随本条消息推入模型可见的 v2 MessageQueue 后，
-    // 才标记"已通知该 mode"。入队前失败/取消不记账——下一 turn 重新检测仍会
-    // 生成通知（可重复重试，恰好可见一次）；已入队的消息由 Receive drain_all
-    // 消费进 transcript，不会重复注入也不会丢失。
     if !req.continuation {
         v2_out.context.session.queue.push(QueuedMessage::new(
             MessageKind::Prompt,
             V2MessageSource::UserInput,
             BaseMessage::human(req.agent_input.content),
         ));
-        if let Some(booking) = &req.mode_notice_booking {
-            mark_permission_mode_notified(&booking.last_notified, booking.mode);
-        }
 
         // Phase 6.2: 首轮用户 turn 的一次性受控通知（MCP 概览等）。
         // 仅在首个模型可见 turn（history 为空且非 continuation）触发：收集

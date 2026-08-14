@@ -8,7 +8,11 @@ use peri_agent::{
         ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
         UserInteractionBroker,
     },
-    middleware::{r#trait::Middleware, state::MiddlewareState},
+    middleware::{
+        prompt_sections::{PromptSection, PromptSectionZone},
+        r#trait::Middleware,
+        state::MiddlewareState,
+    },
 };
 
 use crate::tool_search::core_tools::{
@@ -57,6 +61,103 @@ pub fn is_edit_tool(tool_name: &str) -> bool {
     tool_name == TOOL_WRITE || tool_name == TOOL_EDIT || tool_name == TOOL_FOLDER_OPS
 }
 
+// ─── 10_hitl 段落持有（波 4 演进 C3，设计 §3.1.1 归属全景 / §3.1.2）──────────
+
+/// 敏感工具规则的结构化条目（10_hitl 段落动态生成的单一事实源）。
+///
+/// 与 [`default_requires_approval`] 的判定分支一一对应：`prefix_match=false`
+/// 精确匹配工具名，`prefix_match=true` 前缀匹配（渲染为 `` `{name}*` ``）。
+/// 条目顺序 = 段落渲染顺序（现状列表顺序保持）；一致性由测试锁定
+/// （`sensitive_entries_match_default_requires_approval`）。
+#[derive(Debug, Clone, Copy)]
+pub struct SensitiveToolEntry {
+    /// 工具名（精确匹配）或前缀（`prefix_match=true`）
+    pub name: &'static str,
+    /// 敏感原因说明（渲染为 markdown 列表项描述）
+    pub description: &'static str,
+    /// `true` = 前缀匹配（`{name}*`），`false` = 精确匹配
+    pub prefix_match: bool,
+}
+
+/// 敏感工具规则清单（10_hitl 段落内容来源）。
+///
+/// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
+/// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
+    [
+        SensitiveToolEntry {
+            name: TOOL_BASH,
+            description: "shell command execution",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: TOOL_FOLDER_OPS,
+            description: "folder create/list/exists",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: TOOL_AGENT,
+            description: "sub-agent delegation (see 11_subagent for the authorization boundary)",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: TOOL_WRITE,
+            description: "file write",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: TOOL_EDIT,
+            description: "file edit",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: "delete_",
+            description: "any file deletion operation (prefix match)",
+            prefix_match: true,
+        },
+        SensitiveToolEntry {
+            name: "rm_",
+            description: "any file deletion operation (prefix match)",
+            prefix_match: true,
+        },
+        SensitiveToolEntry {
+            name: TOOL_WEBFETCH,
+            description: "fetch a URL",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: TOOL_WEBSEARCH,
+            description: "web search",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: "mcp__",
+            description: "any MCP server tool (prefix match)",
+            prefix_match: true,
+        },
+        SensitiveToolEntry {
+            name: "cron_register",
+            description: "scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
+            prefix_match: false,
+        },
+    ]
+}
+
+/// 渲染敏感工具 markdown 列表（10_hitl 段落动态部分）。
+pub fn format_sensitive_tools() -> String {
+    sensitive_tool_entries()
+        .iter()
+        .map(|e| {
+            if e.prefix_match {
+                format!("- `{}*` — {}", e.name, e.description)
+            } else {
+                format!("- `{}` — {}", e.name, e.description)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ─── ExecuteExtraTool 权限透传 ─────────────────────────────────────────────
 
 /// 获取有效的工具名称
@@ -86,6 +187,36 @@ pub struct HumanInTheLoopMiddleware {
 }
 
 impl HumanInTheLoopMiddleware {
+    /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
+    ///
+    /// 10_hitl 段 = 机制说明（`sections/10_hitl.md`，include_str 零拷贝，
+    /// 文件留在 `peri-acp/prompts/sections/`）+ 动态 sensitive 列表（按
+    /// `default_requires_approval` 代码事实生成，见
+    /// [`sensitive_tool_entries`]）+ 模式决策尾句。Dynamic 内容保证列表与
+    /// 判定函数同源——段落文件不再硬编码列表（设计 §3.1.2）。
+    ///
+    /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
+    /// （收集即装配）——Bypass 模式下本 middleware 仍在链（装配只按
+    /// disabled 集合过滤），10_hitl 照常渲染（决策记录 C3 D5）。
+    pub fn sections() -> Vec<PromptSection> {
+        let mut content = String::with_capacity(2048);
+        content.push_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../peri-acp/prompts/sections/10_hitl.md"
+        )));
+        content.push_str("\n\n");
+        content.push_str(&format_sensitive_tools());
+        content.push_str(
+            "\n\nWhether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.",
+        );
+        vec![PromptSection::dynamic(
+            "10_hitl",
+            PromptSectionZone::Uncached,
+            3, // C1 D2 编号事实：gated 10=3（07_runtime=1 之后）
+            content,
+        )]
+    }
+
     /// 创建启用的 HITL 中间件，使用注入的 broker
     pub fn new(
         broker: Arc<dyn UserInteractionBroker>,
@@ -362,6 +493,11 @@ impl HumanInTheLoopMiddleware {
 impl Middleware for HumanInTheLoopMiddleware {
     fn name(&self) -> &str {
         "HumanInTheLoopMiddleware"
+    }
+
+    /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        Self::sections()
     }
 
     /// 批量工具调用前处理：对一批工具调用一次性收集所有需审批的项，

@@ -26,6 +26,10 @@ pub use peri_acp_types::frozen::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainSlot {
     // ── 第一组：上下文注入器（system prompt 段落 / agent 定义 / 插件 / skills） ──
+    /// DefaultSystemPrompt（基础系统提示词段持有者，波 4 演进 2）
+    DefaultSystemPrompt,
+    /// Lang（语言指令段持有者，波 4 演进 2）
+    Lang,
     /// AgentsMd（CLAUDE.md 指引注入）
     AgentsMd,
     /// AgentDefine（agent 定义注入）
@@ -83,6 +87,8 @@ pub enum ChainSlot {
 pub fn production_blueprint() -> Vec<ChainSlot> {
     vec![
         // 第一组：上下文注入器
+        ChainSlot::DefaultSystemPrompt,
+        ChainSlot::Lang,
         ChainSlot::AgentsMd,
         ChainSlot::AgentDefine,
         ChainSlot::Plugin,
@@ -148,7 +154,7 @@ pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
 // WorkflowMiddlewarePort / CronSchedulerPort）或注入面接入。
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -308,7 +314,9 @@ pub struct AssemblyContext {
     pub frozen_claude_local_md: Option<String>,
     /// 冻结 skills 摘要
     pub frozen_skill_summary: Option<String>,
-    /// 子 agent / fork 复用的冻结 prompt（无 16_workflow 版本）
+    /// 子 agent / fork 复用的冻结 prompt（16_workflow 已删除（C2），与主
+    /// prompt 字节相同；`FrozenSessionData::subagent_system_prompt` 字段已随
+    /// C5 移除，本字段由 stage 装配直接填入主 prompt）
     pub system_prompt_for_sub: String,
     // ── 工厂 ──
     /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
@@ -320,6 +328,17 @@ pub struct AssemblyContext {
     // ── goal ──
     /// Goal 控制器（Some 时在链最后注册 GoalMiddleware）
     pub goal_controller: Option<Arc<dyn GoalController>>,
+    // ── meta_harness（设计 §2.5）──
+    /// 装配期关闭的 middleware 名集合（源自会话冻结状态
+    /// `FrozenSessionData::meta_harness().disabled_middlewares`，
+    /// 禁止从每 turn 当前配置重建——ARC-FROZEN-001）。
+    pub meta_harness_disabled: HashSet<String>,
+    // ── 基础系统提示词段持有者（波 4 演进 2）──
+    /// agent overrides（DefaultSystemPromptMiddleware 的 persona 段内容源；
+    /// 与 render_system_prompt 闭包收到的是同一份值，保证链收集与渲染一致）
+    pub agent_overrides: Option<AgentOverrides>,
+    /// 冻结语言设置（LangMiddleware 的语言段内容源；None = 自动检测）
+    pub language: Option<String>,
 }
 
 /// 链装配产物（stage 装配直接消费）。

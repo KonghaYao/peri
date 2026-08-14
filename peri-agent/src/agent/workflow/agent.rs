@@ -131,6 +131,10 @@ pub struct WorkflowAgentContext {
     /// ACP 宿主——`UnifiedLangfuseEvent` 映射在 Controller 侧，边 8 禁止
     /// 本层直接引用）。
     pub langfuse_event_handler: Option<WorkflowLangfuseEventHandler>,
+    /// 装配期关闭的 middleware 名集合（源自父会话冻结状态
+    /// `FrozenSessionData::meta_harness().disabled_middlewares`，
+    /// 使 workflow agent 链与父会话装配一致——设计 §2.5）。
+    pub meta_harness_disabled: std::collections::HashSet<String>,
 }
 
 /// Workflow agent executor — builds and runs v2 stages for workflow agent() calls.
@@ -185,6 +189,7 @@ pub fn create_default_executor(
         publish_hook: None,
         langfuse_hooks: None,
         langfuse_event_handler: None,
+        meta_harness_disabled: std::collections::HashSet::new(),
     }))
 }
 
@@ -407,7 +412,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 2. 注册工具（端口装配：fs/terminal/web/skills tools，仅 project-level
         // skills——workflow agent 无 plugin_skill_roots）。
-        let mut tools = self.ctx.middleware_factory.build_tools(&self.ctx.cwd);
+        // MetaHarness：disabled 集合源自父会话冻结状态（WorkflowAgentContext
+        // 字段，装配实现据此连坐过滤——设计 §2.5）。
+        let mut tools = self
+            .ctx
+            .middleware_factory
+            .build_tools(&self.ctx.cwd, &self.ctx.meta_harness_disabled);
 
         // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。
         if let Some(definition) = agent_definition.as_ref() {

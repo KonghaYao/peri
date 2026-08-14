@@ -11,18 +11,6 @@ You load skills yourself through the two model-visible tools:
 
 These are the only skill loading tools. There is no `Skill(skill, args)` variant — always pass the name via `skill_name`.
 
-## Skill discovery
-
-Skills are loaded from the following roots in priority order (first match wins):
-
-1. `~/.claude/skills/` — user-level skills (highest priority)
-2. Global `skillsDir` configured in `~/.peri/settings.json`
-3. `{cwd}/.claude/skills/` — project-level skills
-4. Plugin skills declared in plugin manifests
-5. **Builtin** — compile-time bundled skills shipped with the product (listed by `DiscoverSkillsTool` with `source: "builtin"`)
-
-Each skill root is scanned recursively up to 6 levels deep (max 1000 directories per root). A directory containing `SKILL.md` is treated as a leaf — its subdirectories are not scanned. Symlinks are followed with cycle detection.
-
 ## Catalog semantics
 
 - The skill summary in this system prompt is a **frozen snapshot** captured at session start (session/new). Skills added or removed on disk mid-session are NOT reflected in this summary — that is an intentional trade-off for prompt-cache stability.
@@ -39,3 +27,7 @@ Each skill root is scanned recursively up to 6 levels deep (max 1000 directories
 ## Suggesting skills
 
 Many skills go unused because the user does not know they exist. When the user's request matches a skill (for example: planning a feature, debugging a stubborn bug, writing tests, designing an interface, migrating code, brainstorming), mention the skill by name and offer to use it instead of silently proceeding with your default approach. One line is enough — do not push.
+
+## Skill discovery
+
+Skills are loaded from the following roots in priority order (first match wins):

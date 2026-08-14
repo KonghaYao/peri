@@ -10,6 +10,8 @@ use crate::{
     error::{AgentError, AgentResult},
     messages::{BaseMessage, ContentBlock, MessageId},
     middleware::{
+        project_enabled_sections,
+        prompt_sections::{PromptSection, PromptSectionZone},
         r#trait::{Middleware, NoopMiddleware},
         state::MiddlewareState,
     },
@@ -108,6 +110,129 @@ impl Middleware for FailMiddleware {
             reason: "intentional failure".to_string(),
         })
     }
+}
+
+/// 声明段落的中间件（collect_prompt_sections 测试；默认无段落，契约 4）
+struct SectionProvider {
+    name: String,
+    sections: Vec<PromptSection>,
+}
+
+impl SectionProvider {
+    fn new(name: &str, sections: Vec<PromptSection>) -> Self {
+        Self {
+            name: name.to_string(),
+            sections,
+        }
+    }
+}
+
+#[async_trait]
+impl Middleware for SectionProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn prompt_sections(&self) -> Vec<PromptSection> {
+        self.sections.clone()
+    }
+}
+
+#[test]
+fn test_collect_prompt_sections_empty_chain() {
+    let chain = MiddlewareChain::new();
+    assert!(
+        chain.collect_prompt_sections().is_empty(),
+        "空链收集为空（契约 4：未提供段落不 fail）"
+    );
+}
+
+#[test]
+fn test_collect_prompt_sections_gathers_provided_sections() {
+    let mut chain = MiddlewareChain::new();
+    // 无段落的中间件（默认实现）+ 声明段落的中间件混合
+    chain.add(Box::new(OrderRecorder::new(
+        "NoSections",
+        Arc::new(Mutex::new(Vec::new())),
+    )));
+    chain.add(Box::new(SectionProvider::new(
+        "SectionHolder",
+        vec![
+            PromptSection::builtin("10_hitl", PromptSectionZone::Uncached, 3, "hitl"),
+            PromptSection::dynamic("zz_dyn", PromptSectionZone::Uncached, 8, "dyn".to_string()),
+        ],
+    )));
+    chain.add(Box::new(SectionProvider::new("EmptyHolder", vec![])));
+
+    let collected = chain.collect_prompt_sections();
+    let ids: Vec<&str> = collected.iter().map(|s| s.id).collect();
+    assert_eq!(ids, vec!["10_hitl", "zz_dyn"], "仅收集声明段落的中间件");
+    // 内容与位置属性透传
+    let hitl = collected
+        .iter()
+        .find(|s| s.id == "10_hitl")
+        .expect("10_hitl 在收集结果中");
+    assert_eq!(hitl.zone, PromptSectionZone::Uncached);
+    assert_eq!(hitl.order, 3);
+    assert_eq!(hitl.content.as_str(), "hitl");
+    let dyn_section = collected.iter().find(|s| s.id == "zz_dyn").unwrap();
+    assert_eq!(dyn_section.content.as_str(), "dyn", "动态内容透传");
+}
+
+/// 契约 3 投影：段落 gate = 持有 middleware 是否在链上（映射表驱动）。
+#[test]
+fn test_project_enabled_sections_from_chain_names() {
+    use std::collections::HashSet;
+
+    // 空集合 → 无段落开启
+    assert!(project_enabled_sections(&HashSet::new()).is_empty());
+
+    let names: HashSet<&str> = [
+        "SubAgentMiddleware",
+        "SkillsMiddleware",
+        "UnrelatedMiddleware",
+    ]
+    .into_iter()
+    .collect();
+    let enabled = project_enabled_sections(&names);
+    assert!(
+        enabled.contains("11_subagent"),
+        "SubAgentMiddleware 在链上 → 11_subagent 开启"
+    );
+    assert!(
+        enabled.contains("13_skills"),
+        "SkillsMiddleware 在链上 → 13_skills 开启"
+    );
+    assert!(
+        !enabled.contains("10_hitl"),
+        "HumanInTheLoopMiddleware 不在链上 → 10_hitl 关闭"
+    );
+    assert!(
+        !enabled.contains("16_workflow"),
+        "16_workflow 已整段删除（C2，ultracode skill 覆盖），投影恒不含"
+    );
+
+    // 与链收集的一致性：链上持有者提供的段落 = 投影开启的段落
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(SectionProvider::new(
+        "SkillsMiddleware",
+        vec![PromptSection::builtin(
+            "13_skills",
+            PromptSectionZone::Uncached,
+            5,
+            "skills",
+        )],
+    )));
+    let collected_ids: HashSet<&str> = chain
+        .collect_prompt_sections()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    let projected = project_enabled_sections(&chain.names().into_iter().collect::<HashSet<&str>>());
+    assert_eq!(
+        collected_ids, projected,
+        "收集到的段落 = 映射表投影（同一判定，两条路径一致）"
+    );
 }
 
 #[tokio::test]

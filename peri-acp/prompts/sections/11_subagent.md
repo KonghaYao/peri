@@ -23,21 +23,7 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 
 ## Agent Selection Guide
 
-**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** When you find yourself reaching for `general-purpose`, stop and scan the list below first — real usage shows `general-purpose` is over-chosen; it costs more tokens and fails more often than the specialized agent that fits the task.
-
-- **Code implementation / editing / refactoring / migration** → **`coder`** (NOT general-purpose). Built-in memory discipline prevents search loops and context waste.
-- **Code search / codebase exploration / finding patterns** → `explorer` (NOT general-purpose). Read-only, context stays clean.
-- **Architecture design / implementation planning** → `plan`
-- **Code review / quality check** → `code-reviewer`
-- **Web research / documentation lookup** → `web-researcher`
-- **None of the above match** → `general-purpose` — **fallback only**. If you reach for it twice in a row for similar tasks, switch to the specialized agent you missed.
-
-**Standard pipelines** — follow these instead of inventing your own:
-- **Research**: `explorer` (find code) → `plan` (design solution)
-- **Implementation**: `coder` (write code) → `code-reviewer` (review for issues)
-- **Web**: `web-researcher`
-
-**Parallelization**: follow the `[access]` tags above — `[readonly]` agents run concurrently (e.g. explorer, plan), `[writes]` agents (e.g. coder) must be sequenced — never run two `[writes]` agents concurrently on the same codebase, and never run a `[writes]` agent in parallel with a background agent. When in doubt, sequence after writes.
+**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** Choose the agent whose catalog entry (id + description) best fits the task, and prefer a specialized agent over `general-purpose` — real usage shows `general-purpose` is over-chosen; it costs more tokens and fails more often than the specialized agent that fits the task. Follow the catalog's `[access]` tags for parallelization: `readonly` agents may run concurrently, `writes` agents must be sequenced after earlier writes. When in doubt, sequence after writes.
 
 ## Writing the prompt
 

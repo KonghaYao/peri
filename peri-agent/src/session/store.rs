@@ -64,6 +64,9 @@ pub struct FrozenContext {
     pub date: Arc<str>,
     /// 语言偏好（None 表示自动检测）
     pub language: Option<Arc<str>>,
+    /// MetaHarness 冻结状态（段落覆盖 + middleware 关闭集合；会话内不可变，
+    /// SubAgent/fork 复用——见 `docs/design/meta-harness-design.md` §2.3）。
+    pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
 }
 
 impl FrozenContext {
@@ -87,6 +90,7 @@ pub struct FrozenContextBuilder {
     skill_summary: Option<String>,
     date: Option<String>,
     language: Option<Option<String>>,
+    meta_harness: Option<peri_acp_types::meta_harness::MetaHarnessState>,
 }
 
 impl FrozenContextBuilder {
@@ -115,6 +119,12 @@ impl FrozenContextBuilder {
         self
     }
 
+    /// 设置 MetaHarness 冻结状态；未设置时 `build()` 使用默认空状态。
+    pub fn meta_harness(mut self, state: peri_acp_types::meta_harness::MetaHarnessState) -> Self {
+        self.meta_harness = Some(state);
+        self
+    }
+
     pub fn build(self) -> FrozenContext {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
@@ -122,6 +132,7 @@ impl FrozenContextBuilder {
             skill_summary: self.skill_summary.unwrap_or_default().into(),
             date: self.date.unwrap_or_default().into(),
             language: self.language.flatten().map(Into::into),
+            meta_harness: self.meta_harness.unwrap_or_default(),
         }
     }
 }
