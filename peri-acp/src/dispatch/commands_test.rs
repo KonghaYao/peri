@@ -8,14 +8,54 @@ use super::commands::{build_available_commands, build_available_commands_update}
 #[test]
 fn test_build_available_commands_includes_builtins() {
     let cmds = build_available_commands(&[]);
-    // 至少 13 个内置命令
-    assert!(cmds.len() >= 13, "至少 13 条内置命令，实际: {}", cmds.len());
-    // 验证关键命令存在
+    // 基座：仅功能性内置命令（compact/loop）
+    assert_eq!(
+        cmds.len(),
+        2,
+        "应为 2 条功能性内置命令，实际: {}",
+        cmds.len()
+    );
+    // 验证功能性命令存在
     let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
-    assert!(names.contains(&"help"), "help 命令应存在");
-    assert!(names.contains(&"clear"), "clear 命令应存在");
     assert!(names.contains(&"compact"), "compact 命令应存在");
-    assert!(names.contains(&"agents"), "agents 命令应存在");
+    assert!(names.contains(&"loop"), "loop 命令应存在");
+}
+
+/// 界面性命令按 `caps.ui_commands` 门控：TUI（全 cap）广播，外部客户端不广播。
+#[test]
+fn test_ui_commands_gated_by_caps() {
+    // 外部客户端（无 cap）：只有功能性命令
+    let caps_off = PeriCaps::default();
+    let update = build_available_commands_update(&[], &[], &caps_off);
+    let value = serde_json::to_value(&update).unwrap();
+    let names: Vec<&str> = value["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "无 ui_commands cap 时仅功能性命令");
+    for ui_cmd in [
+        "help", "clear", "context", "cost", "mode", "effort", "history", "agents", "rename",
+        "lang", "exit", "cron",
+    ] {
+        assert!(!names.contains(&ui_cmd), "非功能性命令 {ui_cmd} 不应广播");
+    }
+
+    // TUI（全 cap）：附加全部界面性命令
+    let caps_on = PeriCaps::all_enabled();
+    let update = build_available_commands_update(&[], &[], &caps_on);
+    let value = serde_json::to_value(&update).unwrap();
+    let names: Vec<&str> = value["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 13, "全 cap 时 = 2 功能性 + 11 界面性");
+    assert!(names.contains(&"compact"));
+    assert!(names.contains(&"clear"), "clear 应广播（TUI 场景）");
+    assert!(names.contains(&"exit"), "exit 应广播（TUI 场景）");
 }
 
 #[test]
@@ -84,7 +124,7 @@ fn test_build_update_mcp_entries_in_available_commands() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"help"), "内置命令应存在");
+    assert!(names.contains(&"compact"), "内置命令应存在");
     assert!(
         names.contains(&"local-a"),
         "本地 skill 应进 availableCommands"
@@ -93,8 +133,8 @@ fn test_build_update_mcp_entries_in_available_commands() {
         names.contains(&"mcp__demo__hello"),
         "MCP 条目应进 availableCommands（name/description 同构）"
     );
-    // 合并后条目数 = 13 内置 + 1 本地 + 1 MCP
-    assert_eq!(commands.len(), 15, "合并后条目数应为 13 + local + mcp");
+    // 合并后条目数 = 2 功能性 + 11 界面性（全 cap）+ 1 本地 + 1 MCP
+    assert_eq!(commands.len(), 15, "合并后条目数应为 2 + 11 + local + mcp");
     let mcp_entry = commands
         .iter()
         .find(|c| c["name"] == "mcp__demo__hello")

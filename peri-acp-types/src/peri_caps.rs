@@ -37,6 +37,11 @@ pub struct PeriCaps {
     /// 控制 `peri/hitl_pending` HITL 审批通知的发送
     #[serde(default)]
     pub hitl_pending: bool,
+    /// 控制 `AvailableCommandsUpdate.availableCommands` 中界面性命令条目的广播
+    /// （help / clear / mode / lang / exit / history 等，由 TUI 本地处理）。
+    /// TUI（全 cap / mpsc 内部路径）声明后广播，外部客户端不声明则不收到。
+    #[serde(default)]
+    pub ui_commands: bool,
 }
 
 impl PeriCaps {
@@ -56,6 +61,7 @@ impl PeriCaps {
             unstable_event: meta_bool(meta, "peri.unstableEvent"),
             prediction: meta_bool(meta, "peri.prediction"),
             hitl_pending: meta_bool(meta, "peri.hitlPending"),
+            ui_commands: meta_bool(meta, "peri.uiCommands"),
         }
     }
 
@@ -81,6 +87,7 @@ impl PeriCaps {
         );
         m.insert("peri.prediction".into(), Value::Bool(self.prediction));
         m.insert("peri.hitlPending".into(), Value::Bool(self.hitl_pending));
+        m.insert("peri.uiCommands".into(), Value::Bool(self.ui_commands));
         m
     }
 
@@ -98,6 +105,7 @@ impl PeriCaps {
             unstable_event: true,
             prediction: true,
             hitl_pending: true,
+            ui_commands: true,
         }
     }
 }
