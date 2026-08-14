@@ -388,13 +388,40 @@ mod tests {
         // 未知值 → 安全默认 None；空值视为未设置
         let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("halfblock"))]));
         assert_eq!(caps, GraphicsProtocol::None);
+        // 空值视为未设置 → 回落品牌映射；品牌映射仅非 Windows 生效
+        // （Windows ConPTY 剥 APC，detect 恒 None——见 detect_graphics_protocol_from）
         let caps = detect_graphics_protocol_from(&env_with(&[
             ("PERI_IMAGE", Some("")),
             ("TERM_PROGRAM", Some("kitty")),
         ]));
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(caps, GraphicsProtocol::Kitty);
+        #[cfg(target_os = "windows")]
+        assert_eq!(caps, GraphicsProtocol::None);
     }
 
+    /// Windows 契约：ConPTY 剥 APC（kitty 协议依赖 APC），品牌映射恒 None。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_detect_graphics_protocol_brand_mapping_windows_conpty_disables_all() {
+        for prog in [
+            "kitty",
+            "ghostty",
+            "wezterm",
+            "warp",
+            "iTerm.app",
+            "WezTerm",
+        ] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some(prog))]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::None,
+                "Windows 上 TERM_PROGRAM={prog} 应恒 None（ConPTY 剥 APC）"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_detect_graphics_protocol_brand_mapping() {
         // kitty 系品牌 → Kitty（§6.3 E5 矩阵）
@@ -448,7 +475,11 @@ mod tests {
             detect_caps_from(&get).graphics,
             detect_graphics_protocol_from(&get)
         );
+        // 品牌映射仅非 Windows 生效（Windows ConPTY 剥 APC 恒 None）
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::Kitty);
+        #[cfg(target_os = "windows")]
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::None);
 
         let get = env_with(&[("PERI_IMAGE", Some("iterm2"))]);
         assert_eq!(

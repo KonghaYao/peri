@@ -570,7 +570,15 @@ mod tests {
     fn test_validate_directory_is_not_regular_file() {
         let dir = tempfile::tempdir().unwrap();
         let err = validate_image_file(dir.path()).unwrap_err();
-        assert!(matches!(err, ImageSafetyError::NotRegularFile));
+        // Unix 可 open 目录再经 is_file() 判定 → NotRegularFile；Windows 上
+        // File::open(目录) 直接失败 → Io（两种都是"目录不得作为图片通过校验"）。
+        assert!(
+            matches!(
+                err,
+                ImageSafetyError::NotRegularFile | ImageSafetyError::Io(_)
+            ),
+            "目录校验应拒绝，实际: {err:?}"
+        );
     }
 
     #[test]
