@@ -113,6 +113,8 @@ pub enum MessageSource {
     ShellComplete,
     /// Goal steering（中途纠正）
     GoalSteering,
+    /// Todo steering（requireCompletion 续跑提醒）
+    TodoSteering,
     /// Cron 定时触发
     CronTrigger,
     /// Stop hook feedback
