@@ -41,6 +41,8 @@ fn test_from_client_meta_all_true() {
     assert!(caps.unstable_event);
     assert!(caps.prediction);
     assert!(caps.hitl_pending);
+    // meta 未声明 peri.uiCommands → 默认 false
+    assert!(!caps.ui_commands);
 }
 
 #[test]
@@ -103,4 +105,21 @@ fn test_all_enabled() {
     assert!(caps.unstable_event);
     assert!(caps.prediction);
     assert!(caps.hitl_pending);
+    assert!(caps.ui_commands);
+}
+
+#[test]
+fn test_ui_commands_roundtrip() {
+    // 未声明 → false（外部客户端默认不接收界面性命令）
+    let caps = PeriCaps::from_client_meta(&serde_json::json!({}).as_object().unwrap().clone());
+    assert!(!caps.ui_commands);
+    // 声明 peri.uiCommands → true；回显序列化保留
+    let meta = serde_json::json!({ "peri.uiCommands": true });
+    let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
+    assert!(caps.ui_commands);
+    let echo = caps.to_agent_meta();
+    assert_eq!(
+        echo.get("peri.uiCommands"),
+        Some(&serde_json::Value::Bool(true))
+    );
 }

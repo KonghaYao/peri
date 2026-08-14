@@ -4,26 +4,36 @@ use agent_client_protocol_schema::v1::{AvailableCommand, AvailableCommandsUpdate
 use peri_acp_types::skills::SkillMetadata;
 use peri_acp_types::PeriCaps;
 
+/// 界面性命令（TUI 本地处理，`peri-tui` `submit_request.rs` 拦截；无 host
+/// 执行语义）。仅当客户端声明 `peri.uiCommands` cap（TUI）时附加广播——
+/// 外部客户端（IDE 等）收到这些条目无意义，不声明则不传递。
+const UI_COMMANDS: &[(&str, &str)] = &[
+    ("help", "Show available commands and their descriptions"),
+    ("clear", "Clear the current conversation"),
+    ("context", "Display context usage / token statistics"),
+    ("cost", "Show token usage and estimated cost"),
+    ("mode", "Switch the current permission mode"),
+    ("effort", "Configure LLM reasoning/thinking effort"),
+    ("history", "View and resume previous conversations"),
+    ("agents", "Manage sub-agent definitions"),
+    ("rename", "Rename the current session"),
+    ("lang", "Switch display language / locale"),
+    ("exit", "Exit the application"),
+];
+
 /// Build the list of available slash commands for ACP clients,
 /// including discovered skills as command entries using their plain name.
+///
+/// 基座为**功能性**命令（compact / loop）+ skills，对所有客户端广播；
+/// 界面性命令由 [`build_available_commands_update`] 按 `caps.ui_commands`
+/// 门控附加（仅 TUI 场景）。
 pub fn build_available_commands(skills: &[SkillMetadata]) -> Vec<AvailableCommand> {
     let mut commands = vec![
-        AvailableCommand::new("help", "Show available commands and their descriptions"),
-        AvailableCommand::new("clear", "Clear the current conversation"),
         AvailableCommand::new(
             "compact",
             "Compress the conversation history to save context",
         ),
-        AvailableCommand::new("context", "Display context usage / token statistics"),
-        AvailableCommand::new("cost", "Show token usage and estimated cost"),
-        AvailableCommand::new("mode", "Switch the current permission mode"),
-        AvailableCommand::new("effort", "Configure LLM reasoning/thinking effort"),
         AvailableCommand::new("loop", "Control agent iteration loop"),
-        AvailableCommand::new("history", "View and resume previous conversations"),
-        AvailableCommand::new("agents", "Manage sub-agent definitions"),
-        AvailableCommand::new("rename", "Rename the current session"),
-        AvailableCommand::new("lang", "Switch display language / locale"),
-        AvailableCommand::new("exit", "Exit the application"),
     ];
     for skill in skills {
         commands.push(AvailableCommand::new(
@@ -35,8 +45,10 @@ pub fn build_available_commands(skills: &[SkillMetadata]) -> Vec<AvailableComman
 }
 
 /// 本地 + MCP 合并构建 `AvailableCommandsUpdate`（stdio/notify 两路径共用，
-/// DD-5）。availableCommands = 13 内置 + 每 skill 一条（MCP 条目 name/
-/// description 同构）；meta = `skillNames`（仅本地名，MCP 名不进）+
+/// DD-5）。availableCommands = 2 内置功能性（compact / loop）+ 每 skill 一条
+/// （MCP 条目 name/description 同构）；`caps.ui_commands`（TUI 全 cap 声明）
+/// 时附加界面性命令（help / clear / mode / lang / exit 等 11 条）——外部
+/// 客户端不声明则不传递；meta = `skillNames`（仅本地名，MCP 名不进）+
 /// `mcpSkillNames`（mcp 非空时附加，不加 cap 门控——TUI 全 cap，外部客户端
 /// 忽略未知 meta key）。键序不保证（客户端按键解析，顺序非契约）。
 pub(crate) fn build_available_commands_update(
@@ -54,7 +66,14 @@ pub(crate) fn build_available_commands_update(
             merged.push(mcp_skill.clone());
         }
     }
-    let commands = build_available_commands(&merged);
+    let mut commands = build_available_commands(&merged);
+    if caps.ui_commands {
+        commands.extend(
+            UI_COMMANDS
+                .iter()
+                .map(|(name, desc)| AvailableCommand::new(*name, *desc)),
+        );
+    }
 
     let mut meta = serde_json::Map::new();
     if caps.skill_names {
