@@ -101,7 +101,7 @@ pub enum InteractionResponse {
 ///
 /// ```rust,ignore
 /// let broker: Arc<dyn UserInteractionBroker> = Arc::new(TuiInteractionBroker::new(tx));
-/// let hitl = HumanInTheLoopMiddleware::with_shared_mode(
+/// let permission = PermissionMiddleware::with_shared_mode(
 ///     broker.clone(),
 ///     default_requires_approval,
 ///     Arc::new(SharedPermissionMode::new(PermissionMode::Default)),

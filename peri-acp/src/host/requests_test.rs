@@ -11,7 +11,7 @@ use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
 use peri_agent::thread::FilesystemThreadStore;
-use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
+use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
 use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
@@ -1315,4 +1315,128 @@ async fn test_available_commands_update_callback_does_not_hold_strong_ref() {
         "回调不得捕获 registry 强引用（引用环）；upgrade 应为 None"
     );
     assert_eq!(weak.strong_count(), 0, "strong_count 应归零");
+}
+
+#[tokio::test]
+async fn test_mcp_list_requires_negotiated_oauth_capability() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps::default());
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32601);
+    assert_eq!(error.message, "peri.oauth capability not negotiated");
+}
+
+#[tokio::test]
+async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response, json!({ "servers": [] }));
+    assert!(response.to_string().find("url").is_none());
+    assert!(response.to_string().find("error").is_none());
+}
+
+#[tokio::test]
+async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/oauth_start",
+        &json!({ "server_name": "docs" }),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "missing 'flow_id'");
+}
+
+#[tokio::test]
+async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/oauth_callback",
+        &json!({
+            "server_name": "docs",
+            "flow_id": "flow-1",
+            "code": "secret-code",
+            "state": "secret-state"
+        }),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32601);
+    assert!(!error.message.contains("secret-code"));
+    assert!(!error.message.contains("secret-state"));
 }

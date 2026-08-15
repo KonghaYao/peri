@@ -208,14 +208,14 @@ pub(crate) struct AcpAgentOutput {
 
 /// 构造 session/turn 级工具视图（MetaHarness 设计 §2.5 关闭语义防御面）。
 ///
-/// 基础 `shared_tools` 是宿主级共享 registry（当前唯一写入点是
-/// `AskUserQuestion`，装配期 insert；middleware 工具从不写入——只经
-/// `chain.collect_tools()` 进入本函数产出的每 turn 本地视图，见
-/// `MIDDLEWARE_TOOL_NAMES` 注释的事实核查）。本函数从基础表复制时剔除
-/// "middleware 静态工具名且不在当前链工具集合"的条目，再 merge 当前链
-/// 工具：disabled session 的本地视图不得看到残留的 middleware 工具，
-/// enabled session 视图不受影响。动态 MCP bridge 工具
-/// （`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
+/// 基础 `shared_tools` 是宿主级共享 registry（2026-08-15 职责拆分后生产
+/// 路径写入点归零，见 `MIDDLEWARE_TOOL_NAMES` 注释的事实核查更新；
+/// middleware 工具从不写入——只经 `chain.collect_tools()` 进入本函数产出
+/// 的每 turn 本地视图）。本函数从基础表复制时剔除"middleware 静态工具名
+/// 且不在当前链工具集合"的条目，再 merge 当前链工具：disabled session
+/// 的本地视图不得看到残留的 middleware 工具，enabled session 视图不受
+/// 影响。动态 MCP bridge 工具（`mcp__{server}__{tool}`）不进入共享
+/// registry，无需剔除。
 fn build_session_tool_view(
     shared_tools: &RwLock<BTreeMap<String, Arc<dyn BaseTool>>>,
     middleware_tools: Vec<Box<dyn BaseTool>>,
@@ -522,9 +522,10 @@ pub(crate) fn build_agent(
 //
 // run_react_loop 每轮从 shared_tools（SharedToolMap）按名读取工具，
 // 不会每轮重新填充。因此 build_stage_context 内部显式调用
-// chain.collect_tools(cwd) 把 middleware 提供的工具 + register_tool 注册的
-// AskUserQuestion 一次性 merge 到 shared_tools（已存在的同名工具不覆盖，
-// 保留 deferred / 外部注册版本）。
+// chain.collect_tools(cwd) 把 middleware 提供的工具一次性 merge 到
+// shared_tools（2026-08-15 拆分后宿主级 shared_tools 写入点归零，
+// AskUserQuestion 由链上 HumanInTheLoopMiddleware 提供，不再单独
+// register_tool；已存在的同名工具不覆盖，保留 deferred / 外部注册版本）。
 //
 // ## Async Owners
 //
@@ -802,12 +803,12 @@ pub fn build_stage_context(
     // 已存在的同名工具不覆盖（deferred tools 优先保留外部注册版本）。
     //
     // MetaHarness（设计 §2.5）：session/turn 级工具视图——基础 shared_tools
-    // 是宿主级共享 registry（唯一写入点是 AskUserQuestion；middleware 工具
-    // 从不写入，只经本调用 merge 进每轮重建的本地视图）。从基础表复制时
-    // 剔除"middleware 静态工具名且不在当前链工具集合"的条目（防御面，
-    // 决策记录见 `MIDDLEWARE_TOOL_NAMES` 注释）——disabled session 的
-    // 本地视图不得看到残留的 middleware 工具。动态 MCP bridge 工具
-    // （`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
+    // 是宿主级共享 registry（2026-08-15 拆分后生产路径写入点归零；
+    // middleware 工具从不写入，只经本调用 merge 进每轮重建的本地视图）。
+    // 从基础表复制时剔除"middleware 静态工具名且不在当前链工具集合"的
+    // 条目（防御面，决策记录见 `MIDDLEWARE_TOOL_NAMES` 注释）——disabled
+    // session 的本地视图不得看到残留的 middleware 工具。动态 MCP bridge
+    // 工具（`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
     let session_tools: SharedToolMap =
         build_session_tool_view(&shared_tools, chain.collect_tools(&cwd));
 
@@ -884,8 +885,14 @@ mod builder_v2_tests {
 
     /// MetaHarness（设计 §2.5 关闭语义防御面）：session/turn 级工具视图——
     /// disabled session 的本地视图不得看到共享表中残留的 middleware 工具；
-    /// enabled session 视图不受影响；非 middleware 外部工具
-    /// （AskUserQuestion 等）始终保留。
+    /// enabled session 视图不受影响。
+    ///
+    /// 2026-08-15 职责拆分（spec/issues/2026-08-15-permission-hitl-split.md）：
+    /// AskUserQuestion 移入 HumanInTheLoopMiddleware 的 collect_tools 并纳入
+    /// `MIDDLEWARE_TOOL_NAMES` 剔除面；宿主级 shared_tools 生产路径写入点
+    /// 归零。本测试保留"共享表含 middleware 工具名"的人工防御面场景（模拟
+    /// 将来注册面变化），其中 AskUserQuestion 现与其他 middleware 工具同
+    /// 语义：disabled 链无持有者 → 剔除。
     #[test]
     fn test_build_session_tool_view_isolates_disabled_sessions() {
         use peri_acp_types::meta_harness::MIDDLEWARE_TOOL_NAMES;
@@ -895,8 +902,7 @@ mod builder_v2_tests {
         }
 
         // 基础共享表：人工构造"共享表含 middleware 工具名"的防御面场景
-        //（当前代码事实下仅 AskUserQuestion 写入共享表，此处模拟将来
-        // 注册面变化）+ 非 middleware 外部工具（AskUserQuestion）。
+        //（模拟将来注册面变化）+ AskUserQuestion（现同为 middleware 工具）。
         let base: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
             Arc::new(RwLock::new(BTreeMap::new()));
         {
@@ -908,8 +914,9 @@ mod builder_v2_tests {
         }
         assert!(MIDDLEWARE_TOOL_NAMES.contains(&"WebFetch"));
         assert!(MIDDLEWARE_TOOL_NAMES.contains(&"Bash"));
+        assert!(MIDDLEWARE_TOOL_NAMES.contains(&"AskUserQuestion"));
 
-        // disabled session：当前链无 Web 工具 → 视图不得含 WebFetch/WebSearch
+        // disabled session：当前链无 Web/提问工具 → 视图不得含残留条目
         let middleware_tools: Vec<Box<dyn BaseTool>> = vec![];
         let view = build_session_tool_view(&base, middleware_tools);
         let view_map = view.read();
@@ -917,13 +924,16 @@ mod builder_v2_tests {
         assert!(!view_map.contains_key("WebSearch"), "残留 WebSearch 泄漏");
         assert!(!view_map.contains_key("Bash"), "残留 Bash 泄漏");
         assert!(
-            view_map.contains_key("AskUserQuestion"),
-            "非 middleware 外部工具必须保留"
+            !view_map.contains_key("AskUserQuestion"),
+            "残留 AskUserQuestion 泄漏（关闭提问通道后必须消失）"
         );
         drop(view_map);
 
-        // enabled session：当前链含 Web 工具 → 视图含（覆盖为基础实例或新实例）
-        let middleware_tools: Vec<Box<dyn BaseTool>> = vec![Box::new(NamedTool("WebFetch"))];
+        // enabled session：当前链含 Web/提问工具 → 视图含（覆盖为基础实例或新实例）
+        let middleware_tools: Vec<Box<dyn BaseTool>> = vec![
+            Box::new(NamedTool("WebFetch")),
+            Box::new(NamedTool("AskUserQuestion")),
+        ];
         let view = build_session_tool_view(&base, middleware_tools);
         assert!(view.read().contains_key("WebFetch"));
         assert!(view.read().contains_key("AskUserQuestion"));

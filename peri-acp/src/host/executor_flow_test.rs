@@ -700,21 +700,23 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
     );
 }
 
-/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配
-/// HumanInTheLoopMiddleware（broker: None），10_hitl 描述的是主会话审批
-/// 机制，对 workflow 模型是误导性指令——workflow 渲染路径（fallback +
-/// agentType builder）必须排除 10_hitl，兑现 presence-is-the-gate 契约
-/// （C3 D5 决策修订，design §3.1.1 契约 3 / §3.5 语义边界）。
+/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
+/// middleware（broker: None → PermissionMiddleware::disabled()），10_hitl
+/// 描述的是主会话审批机制，对 workflow 模型是误导性指令——workflow 渲染
+/// 路径（fallback + agentType builder）必须排除 10_hitl，兑现
+/// presence-is-the-gate 契约（C3 D5 决策修订，design §3.1.1 契约 3 /
+/// §3.5 语义边界；2026-08-15 拆分：10_hitl 持有者改为 PermissionMiddleware，
+/// 过滤目标段落不变）。
 #[tokio::test]
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
     let frozen = mgr.build_frozen_data("/tmp", &[], &[]);
 
-    // 主链冻结 prompt 保留 10_hitl（HumanInTheLoopMiddleware 默认装配）
+    // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
     assert!(
         frozen.system_prompt().contains("Human-in-the-Loop (HITL)"),
-        "主链冻结 prompt 应保留 10_hitl（HITL middleware 默认装配）"
+        "主链冻结 prompt 应保留 10_hitl（PermissionMiddleware 默认装配）"
     );
 
     let skills: Arc<dyn peri_acp_types::ports::SkillsPort> = Arc::new(SkillsProvider);
@@ -725,7 +727,7 @@ async fn test_workflow_prompt_excludes_hitl_section() {
     let prompt = fallback("/tmp", Some("2026-01-01"), frozen.language());
     assert!(
         !prompt.contains("Human-in-the-Loop (HITL)"),
-        "workflow 链无 HumanInTheLoopMiddleware：提示词不得包含 10_hitl"
+        "workflow 链无审批 middleware：提示词不得包含 10_hitl"
     );
 
     // agentType builder（workflow 子 agent）同样排除
@@ -885,6 +887,7 @@ fn chain_collection_parity_with_build_collected_sections() {
             None,
             None,
             &[
+                "PermissionMiddleware",
                 "HumanInTheLoopMiddleware",
                 "SubAgentMiddleware",
                 "SkillsMiddleware",
@@ -903,6 +906,7 @@ fn chain_collection_parity_with_build_collected_sections() {
             &[
                 "DefaultSystemPromptMiddleware",
                 "LangMiddleware",
+                "PermissionMiddleware",
                 "HumanInTheLoopMiddleware",
                 "SubAgentMiddleware",
                 "SkillsMiddleware",

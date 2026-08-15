@@ -144,11 +144,12 @@ impl FeatureGate {
 /// 波 4 演进（C2/C3）：基础段（01-06 / 07_runtime / persona / language）
 /// 与 gated 段（10_hitl / 11_subagent / 13_skills）已迁移至 middleware
 /// 持有（`DefaultSystemPromptMiddleware` / `LangMiddleware` /
-/// `HumanInTheLoopMiddleware` / `SubAgentMiddleware` / `SkillsMiddleware`），
-/// 本数组仅剩无持有者的 15_channel（非缓存区段内序号 6，07_runtime=1 与
-/// 已迁移 gated 10=3/11=4/13=5 之后、language=7 之前——编号不重排，
-/// C1 D2 编号事实）；16_workflow 已整段删除（ultracode skill 完整覆盖，
-/// 设计 §3.1.2）。
+/// `PermissionMiddleware` / `SubAgentMiddleware` / `SkillsMiddleware`），
+/// 本数组仅剩无持有者的 15_channel（非缓存区段内序号 7，07_runtime=1 与
+/// 已迁移 gated 10=3/11=4/12=5/13=6 之后、language=8 之前——编号不重排，
+/// C1 D2 编号事实；2026-08-15 职责拆分新增 12_ask_user=5 后 13/15/language
+/// 序号顺延，见 `spec/issues/2026-08-15-permission-hitl-split.md`）；
+/// 16_workflow 已整段删除（ultracode skill 完整覆盖，设计 §3.1.2）。
 type GatedSection = (&'static str, &'static str, FeatureGate, u16);
 
 const GATED_SECTIONS: [GatedSection; 1] = [(
@@ -158,7 +159,7 @@ const GATED_SECTIONS: [GatedSection; 1] = [(
         "/prompts/sections/15_channel.md"
     )),
     FeatureGate::Channel,
-    6,
+    7,
 )];
 
 /// 结构化系统提示词模板

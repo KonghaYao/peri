@@ -29,17 +29,15 @@ use crate::{
     cron::{CronMiddleware, CronScheduler, CronSchedulerPortHandle},
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
     error_suggest,
-    hitl::{
-        default_requires_approval, AutoClassifier, HumanInTheLoopMiddleware, LlmAutoClassifier,
-    },
+    hitl::HumanInTheLoopMiddleware,
     hooks::HookMiddleware,
     mcp::{build_tool_bridges, McpClientPool, McpMiddleware, McpResourceTool},
     middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+    permission::{default_requires_approval, AutoClassifier, LlmAutoClassifier, PermissionMiddleware},
     plugin::PluginMiddleware,
     skills::SkillsMiddleware,
     subagent::{SkillPreloadMiddleware, SubAgentMiddleware},
     tool_search::{ToolSearchIndex, ToolSearchMiddleware},
-    tools::AskUserTool,
     workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
     AgentDefineMiddleware, AgentsMdMiddleware, AtMentionMiddleware, GitAttributionMiddleware,
     GoalMiddleware, ImageMiddleware, LspMiddleware,
@@ -186,10 +184,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 _ => broker.clone(),
             };
 
-        // AskUser 工具：使用原始 broker，不使用 MultiplexBroker。
-        // ChannelBroker 对 Questions 立即返回空答案，MultiplexBroker 竞速时 Channel 总是先返回，
-        // 导致 AskUserQuestion 弹窗被绕过。
-        let ask_user_tool = AskUserTool::new(broker.clone());
+        // AskUser 工具（2026-08-15 拆分后）由链上 HumanInTheLoopMiddleware
+        // 的 collect_tools 提供（使用原始 broker 而非 MultiplexBroker——
+        // ChannelBroker 对 Questions 立即返回空答案、MultiplexBroker 竞速时
+        // Channel 总是先返回，导致 AskUserQuestion 弹窗被绕过）；宿主级
+        // shared_tools 不再注册任何工具。
 
         // 父工具集（供子 agent 继承）。MetaHarness：父工具按持有 middleware
         // 分支构造——关闭的 middleware 连坐，其工具不进入 parent_tools
@@ -429,15 +428,27 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         }
                     }
                 }
-                // ── 第五组：HITL + SubAgent（条件中间件） ──
-                ChainSlot::Hitl if disabled.contains("HumanInTheLoopMiddleware") => {}
-                ChainSlot::Hitl => {
-                    chain.add(Box::new(HumanInTheLoopMiddleware::with_shared_mode(
+                // ── 第五组：Permission + AskUser(HITL) + SubAgent（条件中间件） ──
+                // 2026-08-15 职责拆分（spec/issues/2026-08-15-permission-hitl-split.md）：
+                // PermissionMiddleware = 审批钩子（10_hitl 段落）；新
+                // HumanInTheLoopMiddleware = 提问通道（AskUserQuestion 工具 +
+                // 12_ask_user 段落），各自独立关闭——关闭提问 → AskUserQuestion
+                // 不进链 → 每 turn 本地视图不含（"关闭不掉"修复）。
+                ChainSlot::Permission if disabled.contains("PermissionMiddleware") => {}
+                ChainSlot::Permission => {
+                    chain.add(Box::new(PermissionMiddleware::with_shared_mode(
                         effective_broker.clone(),
                         default_requires_approval,
                         permission_mode.clone(),
                         auto_classifier.clone(),
                     )));
+                }
+                ChainSlot::AskUser if disabled.contains("HumanInTheLoopMiddleware") => {}
+                ChainSlot::AskUser => {
+                    // 使用原始 broker（非 MultiplexBroker）：ChannelBroker 对
+                    // Questions 立即返回空答案、Multiplex 竞速时 Channel 先
+                    // 返回，会绕过 TUI 弹窗（既有约束，见 189-192 注释）。
+                    chain.add(Box::new(HumanInTheLoopMiddleware::new(broker.clone())));
                 }
                 // chain 与上层各持一份 SubAgentMiddleware clone：
                 // 链中实例负责 collect_tools 提供 SubAgentTool；原实例由上层
@@ -532,14 +543,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     }
                 }
             }
-        }
-
-        // AskUserTool：v1 通过 register_tool 注册到 executor.self.tools（每轮 execute 合并）。
-        // v2 stages 不调 execute()，改为一次性 insert 到 shared_tools。
-        // 上层随后调 chain.collect_tools merge 时，本工具已存在不会覆盖。
-        {
-            let mut tools = shared_tools.write();
-            tools.insert("AskUserQuestion".to_string(), Arc::new(ask_user_tool));
         }
 
         // 错误感知建议：从 shared_tools 构造 snapshot（所有工具都已注册）
@@ -821,20 +824,33 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
             middlewares.push(Box::new(TodoMiddleware::new(todo_tx)));
         }
 
-        // GAP-03: HITL 审批中间件。
+        // GAP-03: PermissionMiddleware（审批，原 HITL 审批职责）。
         // broker + permission_mode 均 Some 时启用审批（遵循 session 权限模式）；
         // 否则 Bypass（自主后台 agent 默认行为）。
-        if !disabled.contains("HumanInTheLoopMiddleware") {
-            let hitl = match (&ctx.broker, &ctx.permission_mode) {
-                (Some(broker), Some(mode)) => HumanInTheLoopMiddleware::with_shared_mode(
+        if !disabled.contains("PermissionMiddleware") {
+            let permission = match (&ctx.broker, &ctx.permission_mode) {
+                (Some(broker), Some(mode)) => PermissionMiddleware::with_shared_mode(
                     Arc::clone(broker),
                     default_requires_approval,
                     Arc::clone(mode),
                     None, // auto_classifier: workflow agent 不需要 LLM 分类器
                 ),
-                _ => HumanInTheLoopMiddleware::disabled(),
+                _ => PermissionMiddleware::disabled(),
             };
-            middlewares.push(Box::new(hitl));
+            middlewares.push(Box::new(permission));
+        }
+        // 提问通道（新 HumanInTheLoopMiddleware，含 AskUserQuestion）：
+        // workflow agent 的 broker 恒 None（advisor 裁决 B：workflow 链不
+        // 装配 HITL，`workflow_agent.rs` / `agent.rs` 构造点），此处不装配
+        // ——AskUserQuestion 随 2026-08-15 拆分从 workflow agent 消失
+        // （旧行为经宿主级 shared_tools 泄漏 TUI broker 到后台 agent，
+        // 非有意设计，见 spec/issues/2026-08-15-permission-hitl-split.md）。
+        if !disabled.contains("HumanInTheLoopMiddleware") {
+            if let Some(broker) = &ctx.broker {
+                middlewares.push(Box::new(HumanInTheLoopMiddleware::new(Arc::clone(
+                    broker,
+                ))));
+            }
         }
 
         // [v2] CompactMiddleware 已移除——Workflow agent 的自动 compact 由 v2

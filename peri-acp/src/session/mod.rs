@@ -370,6 +370,23 @@ impl SessionManager {
         self.inner.pending_caps.lock().is_some()
     }
 
+    /// 返回当前 ACP 连接在 initialize 阶段协商的进程级能力。
+    /// host 级事件没有 session identity，必须读取此快照而不能回退到任意
+    /// session registry 条目。
+    pub fn negotiated_caps(&self) -> PeriCaps {
+        self.inner.pending_caps.lock().clone().unwrap_or_default()
+    }
+
+    /// Host 请求面的有效能力：stdio/外部连接必须显式协商；未调用
+    /// initialize 的进程内 MPSC/TUI 路径保持历史的全能力语义。
+    pub fn effective_host_caps(&self) -> PeriCaps {
+        self.inner
+            .pending_caps
+            .lock()
+            .clone()
+            .unwrap_or_else(PeriCaps::all_enabled)
+    }
+
     /// session/new 时调用：将暂存的 caps 关联到 session_id，返回 caps 副本。
     /// 如果 initialize 时未声明任何 caps，返回默认值（全 false）。
     ///
@@ -710,6 +727,12 @@ pub(crate) fn build_collected_sections(
     if !state.disabled_middlewares.contains("LangMiddleware") {
         collected
             .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
+    }
+    if !state
+        .disabled_middlewares
+        .contains("PermissionMiddleware")
+    {
+        collected.extend(peri_middlewares::permission::PermissionMiddleware::sections());
     }
     if !state
         .disabled_middlewares

@@ -17,9 +17,7 @@ use peri_agent::{
 #[cfg(unix)]
 use peri_middlewares::hooks::{HookEvent, HookMiddleware, HookType, RegisteredHook};
 use peri_middlewares::{
-    hitl::{
-        default_requires_approval, HumanInTheLoopMiddleware, PermissionMode, SharedPermissionMode,
-    },
+    permission::{default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode},
     ExecuteExtraToolResolver, EXECUTE_EXTRA_TOOL_NAME,
 };
 use serde_json::{json, Value};
@@ -363,7 +361,7 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
     );
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
-    chain.add(Box::new(HumanInTheLoopMiddleware::with_shared_mode(
+    chain.add(Box::new(PermissionMiddleware::with_shared_mode(
         Arc::new(RejectingBroker),
         default_requires_approval,
         SharedPermissionMode::new(PermissionMode::AcceptEdit),

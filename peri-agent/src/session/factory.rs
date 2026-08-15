@@ -61,9 +61,11 @@ pub enum ChainSlot {
     // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
     /// Hook 哨兵：每个非空 hook group 展开一个 HookMiddleware 实例
     Hook,
-    // ── 第五组：HITL + SubAgent（条件中间件） ──
-    /// Hitl（人类在环审批）
-    Hitl,
+    // ── 第五组：Permission + AskUser + SubAgent（条件中间件） ──
+    /// Permission（敏感工具审批，原 Hitl 槽位；2026-08-15 职责拆分）
+    Permission,
+    /// AskUser（提问通道 HumanInTheLoopMiddleware，持有 AskUserQuestion 工具）
+    AskUser,
     /// SubAgent（子 Agent 工具）
     SubAgent,
     // ── 第六组：MCP / Workflow / ToolSearch（工具提供器，条件注册） ──
@@ -106,8 +108,9 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Cron,
         // 第四组：Hook 中间件
         ChainSlot::Hook,
-        // 第五组：HITL + SubAgent
-        ChainSlot::Hitl,
+        // 第五组：Permission + AskUser + SubAgent
+        ChainSlot::Permission,
+        ChainSlot::AskUser,
         ChainSlot::SubAgent,
         // 第六组：MCP / Workflow / ToolSearch
         ChainSlot::Mcp,

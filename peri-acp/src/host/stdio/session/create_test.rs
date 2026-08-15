@@ -83,8 +83,8 @@ fn make_stdio_context(
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let permission_mode = peri_middlewares::hitl::shared_mode::SharedPermissionMode::new(
-        peri_middlewares::hitl::shared_mode::PermissionMode::Bypass,
+    let permission_mode = peri_middlewares::permission::shared_mode::SharedPermissionMode::new(
+        peri_middlewares::permission::shared_mode::PermissionMode::Bypass,
     );
     let cron_scheduler: Arc<dyn CronSchedulerPort> = Arc::new(
         peri_middlewares::cron::CronSchedulerPortHandle(Arc::new(parking_lot::Mutex::new(

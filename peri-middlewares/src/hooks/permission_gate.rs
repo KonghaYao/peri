@@ -11,7 +11,7 @@
 //! - AutoMode: 分类器决定；为避免 hook 系统依赖分类器，AutoMode 下始终触发
 //! - Default: 敏感工具始终弹窗
 
-use crate::hitl::PermissionMode;
+use crate::permission::PermissionMode;
 
 /// 判断当前权限模式下，给定工具是否会触发权限对话框。
 ///
@@ -23,7 +23,7 @@ pub fn needs_permission_dialog(mode: PermissionMode, tool_name: &str) -> bool {
         // Bypass: 所有工具直接放行，无对话框
         PermissionMode::Bypass => false,
         // AcceptEdit: 编辑工具放行，其他弹窗
-        PermissionMode::AcceptEdit => !crate::hitl::is_edit_tool(tool_name),
+        PermissionMode::AcceptEdit => !crate::permission::is_edit_tool(tool_name),
         // AutoMode: 分类器决定；简化处理——当无分类器或 Unsure 时弹窗
         // 为避免 hook 系统依赖分类器，AutoMode 下始终触发 PermissionRequest
         PermissionMode::AutoMode => true,

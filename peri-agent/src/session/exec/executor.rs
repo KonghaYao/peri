@@ -890,7 +890,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
 
     let trace_input = content.text_content();
     // 演进 1（meta-harness 波 4）：permission_mode 运行时通知注入已整体删除。
-    // 模型对权限模式的感知仅经 10_hitl 段落（HumanInTheLoopMiddleware 持有）
+    // 模型对权限模式的感知仅经 10_hitl 段落（PermissionMiddleware 持有）
     // 的机制说明——mode 会话内切换不再注入 `<system-reminder>` 通知。
     // 此处仅保留 incoming_recalls 的受控容器注入语义。
     let agent_input = if incoming_recalls.is_empty() {

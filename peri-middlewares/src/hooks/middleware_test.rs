@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::hitl::{PermissionMode, SharedPermissionMode};
+use crate::permission::{PermissionMode, SharedPermissionMode};
 
 fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {
     RegisteredHook {

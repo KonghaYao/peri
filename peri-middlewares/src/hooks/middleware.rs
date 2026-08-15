@@ -29,7 +29,7 @@ use peri_agent::{
     session::{MessageKind, MessageSource, QueuedMessage},
 };
 
-use crate::hitl::SharedPermissionMode;
+use crate::permission::SharedPermissionMode;
 // HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
 #[allow(unused_imports)]
 use crate::hooks::{
@@ -58,7 +58,7 @@ pub struct HookMiddleware {
     /// None 表示不触发 SessionStart。
     session_start_source: Option<String>,
     /// 判断工具是否需要用户审批。用于 PermissionRequest hook 门控。
-    /// 默认使用 [`crate::hitl::default_requires_approval`]，
+    /// 默认使用 [`crate::permission::default_requires_approval`]，
     /// 可通过 `with_requires_approval` 覆盖。
     requires_approval: fn(&str) -> bool,
     /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
@@ -128,7 +128,7 @@ impl HookMiddleware {
             permission_mode,
             current_model: current_model.into(),
             session_start_source,
-            requires_approval: crate::hitl::default_requires_approval,
+            requires_approval: crate::permission::default_requires_approval,
             stop_block_guard,
         }
     }

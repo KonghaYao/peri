@@ -51,7 +51,7 @@ fn make_tool_call(name: &str) -> ToolCall {
 
 #[tokio::test]
 async fn test_disabled_allows_all() {
-    let mw = HumanInTheLoopMiddleware::disabled();
+    let mw = PermissionMiddleware::disabled();
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -60,7 +60,7 @@ async fn test_disabled_allows_all() {
 
 #[tokio::test]
 async fn test_approve_passes_through() {
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(AutoApproveBroker), default_requires_approval);
+    let mw = PermissionMiddleware::new(Arc::new(AutoApproveBroker), default_requires_approval);
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -69,7 +69,7 @@ async fn test_approve_passes_through() {
 
 #[tokio::test]
 async fn test_reject_returns_error() {
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
+    let mw = PermissionMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await;
@@ -78,7 +78,7 @@ async fn test_reject_returns_error() {
 
 #[tokio::test]
 async fn test_read_file_not_intercepted() {
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
+    let mw = PermissionMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Read");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -160,7 +160,7 @@ async fn test_edit_modifies_input() {
         }
     }
 
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(EditBroker), default_requires_approval);
+    let mw = PermissionMiddleware::new(Arc::new(EditBroker), default_requires_approval);
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
@@ -189,7 +189,7 @@ async fn test_respond_returns_error_with_reason() {
         }
     }
 
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(RespondBroker), default_requires_approval);
+    let mw = PermissionMiddleware::new(Arc::new(RespondBroker), default_requires_approval);
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await;
@@ -234,10 +234,10 @@ impl AutoClassifier for MockClassifier {
 fn make_mw_with_mode(
     mode: PermissionMode,
     classifier: Option<Arc<dyn AutoClassifier>>,
-) -> HumanInTheLoopMiddleware {
+) -> PermissionMiddleware {
     let broker = Arc::new(AutoApproveBroker);
     let shared = SharedPermissionMode::new(mode);
-    HumanInTheLoopMiddleware::with_shared_mode(
+    PermissionMiddleware::with_shared_mode(
         broker,
         default_requires_approval,
         shared,
@@ -412,7 +412,7 @@ async fn test_broker_hang_rejects_with_timeout() {
         }
     }
 
-    let mw = HumanInTheLoopMiddleware::new(Arc::new(HangingBroker), default_requires_approval)
+    let mw = PermissionMiddleware::new(Arc::new(HangingBroker), default_requires_approval)
         .with_broker_timeout(std::time::Duration::from_millis(500));
     let mut state = AgentState::new("/tmp");
     let tc = make_tool_call("Bash");
@@ -490,7 +490,7 @@ fn sensitive_entries_cover_all_requires_approval_branches() {
 /// 动态列表 + 模式决策尾句）。
 #[test]
 fn hitl_section_declaration_shape() {
-    let sections = HumanInTheLoopMiddleware::sections();
+    let sections = PermissionMiddleware::sections();
     assert_eq!(sections.len(), 1, "10_hitl 段应唯一");
     let section = &sections[0];
     assert_eq!(section.id, "10_hitl");
