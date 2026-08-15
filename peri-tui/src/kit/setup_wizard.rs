@@ -1002,19 +1002,26 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
         }
         Enter | Char(' ') => {
             state.submit_error = None;
-            if state.source == SetupSource::MigrateClaudeCode {
-                if !migrate_from_claude_code(state, None) {
-                    state.source = SetupSource::CustomApi;
-                    state.choose_cursor = 0;
-                    state.submit_error = Some(
-                        "迁移失败：未在 ~/.claude/settings.json 中找到有效的 Provider 配置。请确保文件中有 env.ANTHROPIC_API_KEY 或 env.OPENAI_API_KEY。"
-                            .into(),
-                    );
-                    return;
+            match state.source {
+                SetupSource::MigrateClaudeCode => {
+                    if !migrate_from_claude_code(state, None) {
+                        state.source = SetupSource::CustomApi;
+                        state.choose_cursor = 0;
+                        state.submit_error = Some(
+                            "迁移失败：未在 ~/.claude/settings.json 中找到有效的 Provider 配置。请确保文件中有 env.ANTHROPIC_API_KEY 或 env.OPENAI_API_KEY。"
+                                .into(),
+                        );
+                        return;
+                    }
                 }
-            } else {
-                state.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
-                state.active_provider = 0;
+                SetupSource::PeriFreeService => {
+                    state.providers = vec![peri_free_provider()];
+                    state.active_provider = 0;
+                }
+                SetupSource::CustomApi => {
+                    state.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
+                    state.active_provider = 0;
+                }
             }
             state.step = SetupStep::Form;
             state.form_mode = FormMode::Browse;

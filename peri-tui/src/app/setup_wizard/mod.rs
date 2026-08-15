@@ -24,15 +24,21 @@ pub enum SetupStep {
 pub enum SetupSource {
     CustomApi,
     MigrateClaudeCode,
+    PeriFreeService,
 }
 
 impl SetupSource {
-    pub const ALL: [Self; 2] = [Self::CustomApi, Self::MigrateClaudeCode];
+    pub const ALL: [Self; 3] = [
+        Self::CustomApi,
+        Self::MigrateClaudeCode,
+        Self::PeriFreeService,
+    ];
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::CustomApi => "setup-source-custom-api",
             Self::MigrateClaudeCode => "setup-source-migrate",
+            Self::PeriFreeService => "setup-source-peri-free",
         }
     }
 
@@ -40,8 +46,27 @@ impl SetupSource {
         match self {
             Self::CustomApi => "setup-source-custom-desc",
             Self::MigrateClaudeCode => "setup-source-migrate-desc",
+            Self::PeriFreeService => "setup-source-peri-free-desc",
         }
     }
+}
+
+/// Peri Code 免费服务快速配置（与 tavily-search/.peri/settings.json 中的
+/// provider 配置等同：公共网关、固定档位模型）。
+pub const PERI_FREE_BASE_URL: &str = "https://tavily.claude-code-best.win/peri-model";
+pub const PERI_FREE_API_KEY: &str = "public";
+pub const PERI_FREE_PROVIDER_ID: &str = "peri";
+/// 顺序：fable → opus → sonnet → haiku
+pub const PERI_FREE_MODEL_IDS: [&str; 4] = ["peri-fable", "peri-opus", "peri-sonnet", "peri-haiku"];
+
+/// 构造 Peri Code 免费服务的 Provider 快速配置
+pub fn peri_free_provider() -> MigratedProvider {
+    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
+    mp.provider_id = PERI_FREE_PROVIDER_ID.to_string();
+    mp.base_url = PERI_FREE_BASE_URL.to_string();
+    mp.api_key = PERI_FREE_API_KEY.to_string();
+    mp.aliases = PERI_FREE_MODEL_IDS.map(|s| s.to_string());
+    mp
 }
 
 // ── 语言选项 ──────────────────────────────────────────────────────────────────
@@ -392,14 +417,34 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
     }
 
     if !first_id.is_empty() {
-        cfg.config.active_alias = "opus".to_string();
-        if let Some(profile) = cfg.config.profiles.get_mut("opus") {
-            profile.provider = first_id;
+        if state.source == SetupSource::PeriFreeService {
+            apply_peri_free_profiles(&mut cfg.config, &first_id);
+        } else {
+            cfg.config.active_alias = "opus".to_string();
+            if let Some(profile) = cfg.config.profiles.get_mut("opus") {
+                profile.provider = first_id;
+            }
         }
     }
 
     cfg.config.language = Some(state.language.clone());
     cfg
+}
+
+/// 应用 Peri Code 免费服务的档位配置（与 tavily-search/.peri/settings.json
+/// 的 profiles 等同：active_alias=sonnet，各档 effort 固定，provider 绑定）。
+fn apply_peri_free_profiles(cfg: &mut crate::config::AppConfig, provider_id: &str) {
+    cfg.active_alias = "sonnet".to_string();
+    for (alias, effort) in [
+        ("fable", "max"),
+        ("opus", "medium"),
+        ("sonnet", "max"),
+        ("haiku", "low"),
+    ] {
+        let profile = cfg.profiles.get_mut(alias).expect("固定四档 profile");
+        profile.provider = provider_id.to_string();
+        profile.effort = effort.to_string();
+    }
 }
 
 /// 将 setup wizard 结果合并到已有配置并保存
@@ -419,17 +464,33 @@ pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::Per
         }
     }
 
-    let wizard_first_id = wizard_cfg
-        .config
-        .profiles
-        .get("opus")
-        .map(|p| p.provider.clone())
-        .unwrap_or_default();
-    if !wizard_first_id.is_empty() {
-        merged.config.active_alias = wizard_cfg.config.active_alias;
-        if let Some(profile) = merged.config.profiles.get_mut(&merged.config.active_alias) {
-            profile.provider = wizard_first_id;
+    // 合并 wizard 中非默认档位的 profiles（Peri 免费服务会设置全部四档的 effort；
+    // 其余来源仅设置 opus 的 provider，其余档位保持默认不覆盖）
+    let wizard_active = wizard_cfg.config.active_alias.clone();
+    let mut wizard_first_id = String::new();
+    for alias in crate::config::Profiles::ALL {
+        let Some(wp) = wizard_cfg.config.profiles.get(alias) else {
+            continue;
+        };
+        if wp.is_default() {
+            continue;
         }
+        if wizard_first_id.is_empty() && !wp.provider.is_empty() {
+            wizard_first_id = wp.provider.clone();
+        }
+        *merged
+            .config
+            .profiles
+            .get_mut(alias)
+            .expect("固定四档 profile") = wp.clone();
+    }
+    if !wizard_active.is_empty() {
+        merged.config.active_alias = wizard_active;
+    }
+    if !wizard_first_id.is_empty()
+        && let Some(profile) = merged.config.profiles.get_mut(&merged.config.active_alias)
+    {
+        profile.provider = wizard_first_id;
     }
 
     if let Some(lang) = wizard_cfg.config.language {
