@@ -68,6 +68,18 @@ pub trait MiddlewareState: Send + Sync {
     /// 实现者必须返回**同一个** session 级实例（不能每次新建）。
     /// middleware push 的消息（Info / Defer）由 Receive / End 阶段统一消费。
     fn v2_queue(&self) -> &crate::session::MessageQueue;
+
+    /// 返回当前 turn 的本地工具视图（stage_builder 每 turn 构建，含当前链
+    /// 全部工具，包括 deferred tools）。
+    ///
+    /// 默认 `None`（v1 路径 / 测试）；v2 实现（`AgentContext`）返回
+    /// `Some(&StageContext.runtime.tools)`。背景：宿主级 `shared_tools`
+    /// 生产路径写入点归零后恒为空表（`MIDDLEWARE_TOOL_NAMES` 注释），
+    /// `ToolSearchMiddleware` 等消费方必须经此读取本地视图，否则 deferred
+    /// tool 索引永不构建（issue 2026-08-15-workflow-deferred-tool-missing）。
+    fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
+        None
+    }
 }
 
 /// `AgentState` 唯一实现 `MiddlewareState`。

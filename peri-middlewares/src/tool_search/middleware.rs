@@ -62,21 +62,32 @@ impl Middleware for ToolSearchMiddleware {
     }
 
     async fn before_agent(&self, state: &mut dyn MiddlewareState) -> AgentResult<()> {
-        // 检查 shared_tools 是否有变化（MCP 后续连接等场景）
+        // 优先读取 v2 每 turn 本地工具视图（stage_builder 构建，含当前链全部
+        // 工具）；无本地视图时回退宿主级 shared_tools（v1 / 测试路径）。
+        // 背景：宿主级 shared_tools 生产路径写入点归零后恒为空表，仅读它会
+        // 导致 deferred 索引永不构建（issue 2026-08-15-workflow-deferred-
+        // tool-missing）。
         // 一次加锁同时收集 deferred（搜索索引面）与 direct（LLM 可见面，
         // 声明段数据源，design v2 §2.5.2）两个集合。
-        let tools = self.shared_tools.read();
-        let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
-            .iter()
-            .filter(|(_, tool)| !tool.is_direct())
-            .map(|(_, tool)| Arc::clone(tool))
-            .collect();
-        let direct_arcs: Vec<Arc<dyn BaseTool>> = tools
-            .iter()
-            .filter(|(_, tool)| tool.is_direct())
-            .map(|(_, tool)| Arc::clone(tool))
-            .collect();
-        drop(tools);
+        let deferred_arcs: Vec<Arc<dyn BaseTool>>;
+        let direct_arcs: Vec<Arc<dyn BaseTool>>;
+        {
+            let local = state.local_tools();
+            let guard = match local {
+                Some(tools) => tools.read(),
+                None => self.shared_tools.read(),
+            };
+            deferred_arcs = guard
+                .iter()
+                .filter(|(_, tool)| !tool.is_direct())
+                .map(|(_, tool)| Arc::clone(tool))
+                .collect();
+            direct_arcs = guard
+                .iter()
+                .filter(|(_, tool)| tool.is_direct())
+                .map(|(_, tool)| Arc::clone(tool))
+                .collect();
+        }
 
         // P2-2: 用 content_version 比对取代简单 count 比对
         let current_version = self.tool_search_index.content_version();

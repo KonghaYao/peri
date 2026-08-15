@@ -193,6 +193,108 @@ async fn test_workflow_not_discoverable_when_not_registered() {
     );
 }
 
+/// 可测试的 MiddlewareState：local_tools 返回每 turn 本地视图（v2 路径
+/// `AgentContext::from_stage` 语义，`StageContext.runtime.tools`）。
+struct LocalToolsState {
+    local: peri_agent::agent::stages::SharedToolMap,
+}
+
+impl LocalToolsState {
+    fn new(local: peri_agent::agent::stages::SharedToolMap) -> Self {
+        Self { local }
+    }
+}
+
+impl peri_agent::middleware::state::MiddlewareState for LocalToolsState {
+    fn cwd(&self) -> &str {
+        "/tmp"
+    }
+    fn set_cwd(&mut self, _cwd: String) {}
+    fn messages(&self) -> &[peri_agent::messages::BaseMessage] {
+        &[]
+    }
+    fn add_message(&mut self, _message: peri_agent::messages::BaseMessage) {}
+    fn prepend_message(&mut self, _message: peri_agent::messages::BaseMessage) {}
+    fn messages_mut(&mut self) -> &mut Vec<peri_agent::messages::BaseMessage> {
+        unreachable!()
+    }
+    fn current_step(&self) -> usize {
+        0
+    }
+    fn set_current_step(&mut self, _step: usize) {}
+    fn get_context(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn set_context(&mut self, _key: String, _value: String) {}
+    fn token_tracker(&self) -> &peri_agent::agent::token::TokenTracker {
+        unreachable!()
+    }
+    fn token_tracker_mut(&mut self) -> &mut peri_agent::agent::token::TokenTracker {
+        unreachable!()
+    }
+    fn push_recall(&mut self, _item: String) {}
+    fn drain_recall(&mut self) -> Vec<String> {
+        vec![]
+    }
+    fn ancestor_len(&self) -> usize {
+        0
+    }
+    fn store(&self) -> Option<&Arc<dyn peri_agent::thread::ThreadStore>> {
+        None
+    }
+    fn own_thread_id(&self) -> Option<&peri_agent::thread::ThreadId> {
+        None
+    }
+    fn v2_queue(&self) -> &peri_agent::session::MessageQueue {
+        unreachable!()
+    }
+    fn local_tools(&self) -> Option<&peri_agent::agent::stages::SharedToolMap> {
+        Some(&self.local)
+    }
+}
+
+/// [回归测试] 生产路径：宿主级 shared_tools 恒为空（写入点归零），deferred
+/// 工具经 `MiddlewareState::local_tools`（每 turn 本地视图）注入，before_agent
+/// 必须据此构建索引（issue 2026-08-15-workflow-deferred-tool-missing）。
+#[tokio::test]
+async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
+    let index = Arc::new(ToolSearchIndex::new());
+    // 宿主级 shared_tools：生产路径下为空表（assemble.rs 建表后无写点）
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let mw = ToolSearchMiddleware::new(index.clone(), shared);
+
+    // 每 turn 本地视图：含 deferred Workflow 工具（stage_builder 产出语义）
+    let mut local = BTreeMap::new();
+    local.insert(
+        "Workflow".to_string(),
+        Arc::new(MockTool::new("Workflow", "Orchestrate multiple agents")) as Arc<dyn BaseTool>,
+    );
+    local.insert(
+        "Read".to_string(),
+        Arc::new(MockTool::new("Read", "Read a file").with_direct()) as Arc<dyn BaseTool>,
+    );
+    let local_view: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(local));
+
+    let mut state = LocalToolsState::new(local_view);
+    mw.before_agent(&mut state).await.unwrap();
+
+    // 搜索面：Workflow 可被发现
+    let results = index.search("select:Workflow", 10);
+    assert_eq!(
+        results.len(),
+        1,
+        "宿主表为空时也应从每 turn 本地视图构建 deferred 索引"
+    );
+    assert_eq!(results[0].name, "Workflow");
+
+    // prompt 贡献：deferred 列表 + 声明段（direct 工具来自本地视图）
+    let contribution = contribution(&mw).unwrap();
+    assert!(
+        contribution.contains("Workflow"),
+        "prompt 贡献应包含 deferred 工具列表"
+    );
+}
+
 /// 构造含声明工具的测试组件：deferred（CronRegister/mcp） + direct（Read）。
 fn build_declaring_components() -> (
     Arc<ToolSearchIndex>,
