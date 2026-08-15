@@ -107,10 +107,9 @@ impl McpResourceTool {
         // 造成注册名漂移/撞名）。定位不到 → 不回写：skills/get 对已删技能
         // 仍应答，追加会复活已删条目（debug 日志）。
         let mut refreshed_entries = self.registry.skills_of(server_name);
-        let Some(slot) = refreshed_entries
-            .iter_mut()
-            .find(|e| matches!(&e.origin, Some(SkillOrigin::Mcp { uri: u, .. }) if u == &entry_uri))
-        else {
+        let Some(slot) = refreshed_entries.iter_mut().find(
+            |e| matches!(&e.origin, Some(SkillOrigin::Mcp { uri: u, .. }) if u == &entry_uri),
+        ) else {
             tracing::debug!(
                 server = %server_name,
                 %request_uri,
@@ -121,7 +120,10 @@ impl McpResourceTool {
         let original_name = slot.name.clone();
         *slot = meta;
         slot.name = original_name;
-        if self.registry.refresh_entries(server_name, &handle, refreshed_entries) {
+        if self
+            .registry
+            .refresh_entries(server_name, &handle, refreshed_entries)
+        {
             tracing::debug!(
                 server = %server_name,
                 %request_uri,
@@ -241,9 +243,7 @@ impl BaseTool for McpResourceTool {
             }
             return Err(Box::new(ResourceError::VerificationFailed {
                 server: server_name.to_string(),
-                reason: format!(
-                    "资源 {uri} 未列入技能条目的 resources 清单（内容绑定校验失败）"
-                ),
+                reason: format!("资源 {uri} 未列入技能条目的 resources 清单（内容绑定校验失败）"),
             }));
         }
 
@@ -266,15 +266,20 @@ impl BaseTool for McpResourceTool {
                 //    content.uri 查各自 digest。
                 if let Some((entry, SkillBinding::Listed(digest))) = binding {
                     let all_match = !resource_result.contents.is_empty()
-                        && resource_result.contents.iter().all(|content| match content {
-                            rmcp::model::ResourceContents::TextResourceContents {
-                                text, ..
-                            } => verify_digest(text, digest),
-                            rmcp::model::ResourceContents::BlobResourceContents {
-                                blob, ..
-                            } => verify_blob_digest(blob, digest),
-                            _ => false,
-                        });
+                        && resource_result
+                            .contents
+                            .iter()
+                            .all(|content| match content {
+                                rmcp::model::ResourceContents::TextResourceContents {
+                                    text,
+                                    ..
+                                } => verify_digest(text, digest),
+                                rmcp::model::ResourceContents::BlobResourceContents {
+                                    blob,
+                                    ..
+                                } => verify_blob_digest(blob, digest),
+                                _ => false,
+                            });
                     if !all_match {
                         if let Some((content, mime)) = self
                             .recover_via_refresh(peer, server_name, entry, uri)

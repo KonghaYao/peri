@@ -499,9 +499,9 @@ async fn read_skill_resource_text(
         .contents
         .iter()
         .find_map(|content| match content {
-            ResourceContents::TextResourceContents { text, mime_type, .. } => {
-                Some(SkillResourceRead::Text(text.clone(), mime_type.clone()))
-            }
+            ResourceContents::TextResourceContents {
+                text, mime_type, ..
+            } => Some(SkillResourceRead::Text(text.clone(), mime_type.clone())),
             _ => None,
         })
         .unwrap_or(SkillResourceRead::NotText)

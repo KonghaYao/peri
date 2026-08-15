@@ -610,8 +610,7 @@ fn locate_skill_binding_picks_longest_root_and_respects_prefix_boundary() {
         "前缀边界：skill://a 不覆盖 skill://ab/x.md"
     );
     // uri == root：读 SKILL.md 自身
-    let (entry, _) =
-        locate_skill_binding(&entries, "skill://a/b/SKILL.md").expect("根相等应命中");
+    let (entry, _) = locate_skill_binding(&entries, "skill://a/b/SKILL.md").expect("根相等应命中");
     assert_eq!(
         entry.origin,
         Some(SkillOrigin::Mcp {
@@ -645,12 +644,8 @@ fn locate_skill_binding_decision_order_and_scheme_case() {
             digest: "sha256:aa".to_string(),
         }],
     );
-    assert!(
-        locate_skill_binding(std::slice::from_ref(&entry), "file:///tmp/x.md").is_none()
-    );
-    assert!(
-        locate_skill_binding(std::slice::from_ref(&entry), "HTTP://demo/SKILL.md").is_none()
-    );
+    assert!(locate_skill_binding(std::slice::from_ref(&entry), "file:///tmp/x.md").is_none());
+    assert!(locate_skill_binding(std::slice::from_ref(&entry), "HTTP://demo/SKILL.md").is_none());
     // scheme 大小写不敏感：SKILL:// 命中同一条目
     let entry_only = [entry.clone()];
     let (found, binding) =
@@ -979,8 +974,7 @@ async fn read_skill_digest_mismatch_recovers_via_skills_get() {
     );
     let new_digest = format!("sha256:{}", sha256_hex(new_text));
     assert_eq!(
-        skills[0].resources[0].digest,
-        new_digest,
+        skills[0].resources[0].digest, new_digest,
         "registry 条目 digest 应为新条目声明"
     );
 }
@@ -1110,7 +1104,10 @@ async fn read_skill_recovery_handle_mismatch_no_writeback() {
 
     let result = invoke.await.unwrap();
     let out = result.expect("内容已全量校验，仍应返回新内容");
-    assert!(out.contains("# Demo v2"), "应返回恢复后的新内容，实际: {out:?}");
+    assert!(
+        out.contains("# Demo v2"),
+        "应返回恢复后的新内容，实际: {out:?}"
+    );
     // registry 条目未被旧 handle 回写：仍是重连条目
     match reg.discovery_state("srv") {
         Some(ServerDiscoveryState::Discovered { handle, entries }) => {
@@ -1190,7 +1187,10 @@ async fn read_unlisted_recovers_when_new_entry_lists_uri() {
         )
         .await
         .expect("Unlisted 经 skills/get 恢复成功应返回新内容");
-    assert!(out.contains("# Notes v2"), "应返回 notes 内容，实际: {out:?}");
+    assert!(
+        out.contains("# Notes v2"),
+        "应返回 notes 内容，实际: {out:?}"
+    );
     // registry 条目已回写：resources 含 notes.md
     let skills = reg.skills_of("srv");
     assert_eq!(skills.len(), 1);
@@ -1338,7 +1338,8 @@ async fn read_unlisted_recovery_digest_mismatch_rejected() {
     // 重读已发生（request_log 含 notes.md）→ 失败点确在 digest 校验分支
     let log = request_log.lock().unwrap();
     assert!(
-        log.iter().any(|e| e == "resources/read skill://demo/notes.md"),
+        log.iter()
+            .any(|e| e == "resources/read skill://demo/notes.md"),
         "新条目已列出 → 应重读请求资源再做 digest 校验，实际: {log:?}"
     );
     drop(log);
@@ -1416,7 +1417,8 @@ async fn read_unlisted_recovery_new_entry_still_unlisted_rejected() {
     );
     let log = request_log.lock().unwrap();
     assert!(
-        !log.iter().any(|e| e == "resources/read skill://demo/notes.md"),
+        !log.iter()
+            .any(|e| e == "resources/read skill://demo/notes.md"),
         "新条目未列出 → 不重读请求资源即拒绝，实际: {log:?}"
     );
 }
@@ -1472,7 +1474,8 @@ async fn refresh_entry_and_content_digest_mismatch_rejected() {
     assert!(result.is_none(), "digest 不匹配 → 拒绝，实际: {result:?}");
     let log = request_log.lock().unwrap();
     assert!(
-        log.iter().any(|e| e == "resources/read skill://demo/notes.md"),
+        log.iter()
+            .any(|e| e == "resources/read skill://demo/notes.md"),
         "新条目已列出 → 应重读请求资源再做 digest 校验，实际: {log:?}"
     );
 }
@@ -1525,7 +1528,8 @@ async fn refresh_entry_and_content_new_entry_unlisted_rejected() {
     assert!(result.is_none(), "新条目未列出 → 拒绝，实际: {result:?}");
     let log = request_log.lock().unwrap();
     assert!(
-        !log.iter().any(|e| e == "resources/read skill://demo/notes.md"),
+        !log.iter()
+            .any(|e| e == "resources/read skill://demo/notes.md"),
         "新条目未列出 → 不重读请求资源即拒绝，实际: {log:?}"
     );
 }

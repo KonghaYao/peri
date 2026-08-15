@@ -172,7 +172,10 @@ fn parse_uri_skill_scheme_case_insensitive() {
     let meta = parse_mcp_skill_md(SAMPLE_MD, "srv", "SKILL://demo-skill/SKILL.md").unwrap();
     assert_eq!(meta.name, "mcp__srv__demo-skill", "大写 scheme 应同样解析");
     let meta2 = parse_mcp_skill_md(SAMPLE_MD, "srv", "Skill://ns/demo-skill/SKILL.md").unwrap();
-    assert_eq!(meta2.name, "mcp__srv__demo-skill", "混合大小写 scheme 应同样解析");
+    assert_eq!(
+        meta2.name, "mcp__srv__demo-skill",
+        "混合大小写 scheme 应同样解析"
+    );
 }
 
 #[test]

@@ -330,11 +330,7 @@ fn refresh_entries_matching_handle_writes_and_fires_once() {
     complete(&reg, "srv", h.clone(), vec![skill("mcp__srv__a")]);
     assert_eq!(count.load(Ordering::SeqCst), 1);
     // Discovered + 同 handle → 回写成功 + on_change 触发一次
-    assert!(reg.refresh_entries(
-        "srv",
-        &h,
-        vec![skill("mcp__srv__a"), skill("mcp__srv__b")]
-    ));
+    assert!(reg.refresh_entries("srv", &h, vec![skill("mcp__srv__a"), skill("mcp__srv__b")]));
     assert_eq!(count.load(Ordering::SeqCst), 2, "替换触发恰一次");
     let names: Vec<String> = reg
         .skills_of("srv")

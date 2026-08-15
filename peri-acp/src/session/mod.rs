@@ -728,10 +728,7 @@ pub(crate) fn build_collected_sections(
         collected
             .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
     }
-    if !state
-        .disabled_middlewares
-        .contains("PermissionMiddleware")
-    {
+    if !state.disabled_middlewares.contains("PermissionMiddleware") {
         collected.extend(peri_middlewares::permission::PermissionMiddleware::sections());
     }
     if !state
