@@ -173,7 +173,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
     let (oauth_event_tx, oauth_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::event::AcpEvent>();
+        tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
     let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare {
         None
     } else {
@@ -195,24 +195,66 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
             let cb_pool = pool.clone();
             Some(Box::new(move |event: OAuthFlowEvent| match event {
                 OAuthFlowEvent::AuthorizationNeeded {
+                    flow_id,
                     server_name,
                     authorization_url,
                     callback_tx,
                 } => {
-                    cb_pool.register_oauth_callback(&server_name, callback_tx);
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthNeeded {
+                    if !cb_pool.register_oauth_callback(&server_name, &flow_id, callback_tx) {
+                        return;
+                    }
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
+                        flow_id,
                         server_name,
-                        auth_url: authorization_url,
+                        authorization_url,
                     });
                 }
-                OAuthFlowEvent::AuthorizationCompleted { server_name } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthCompleted { server_name });
+                OAuthFlowEvent::AuthorizationCompleted {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Completed {
+                        flow_id,
+                        server_name,
+                    });
                 }
-                OAuthFlowEvent::AuthorizationFailed { server_name, error } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthFailed { server_name, error });
+                OAuthFlowEvent::AuthorizationFailed {
+                    flow_id,
+                    server_name,
+                    failure_kind,
+                    error,
+                } => {
+                    let failure_class = match failure_kind {
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackUnavailable => crate::event::oauth::OAuthFailureClass::CallbackUnavailable,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackTimeout => crate::event::oauth::OAuthFailureClass::CallbackTimeout,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ProviderRejected => crate::event::oauth::OAuthFailureClass::ProviderRejected,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ConnectionFailed => crate::event::oauth::OAuthFailureClass::ConnectionFailed,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::Internal => crate::event::oauth::OAuthFailureClass::Internal,
+                    };
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Failed {
+                        flow_id,
+                        server_name,
+                        failure_class,
+                        legacy_error: error,
+                    });
                 }
-                OAuthFlowEvent::AuthorizationRestored { server_name } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthRestored { server_name });
+                OAuthFlowEvent::AuthorizationCancelled {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Cancelled {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationRestored {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Restored {
+                        flow_id,
+                        server_name,
+                    });
                 }
             }))
         };

@@ -35,9 +35,9 @@ use crate::{
         create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
         AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
-    permission::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::McpClientPool,
+    permission::{PermissionMode, SharedPermissionMode},
     tool_search::ToolSearchIndex,
     tools::TodoItem,
 };
@@ -797,7 +797,8 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
     );
 
     // 关闭 HumanInTheLoopMiddleware：AskUserQuestion 消失；其余不变
-    ctx.meta_harness_disabled.insert("HumanInTheLoopMiddleware".to_string());
+    ctx.meta_harness_disabled
+        .insert("HumanInTheLoopMiddleware".to_string());
     let tool_names = assemble_tool_names(&ctx);
     assert!(
         !tool_names.iter().any(|n| n == "AskUserQuestion"),
@@ -810,7 +811,8 @@ fn meta_harness_ask_user_tool_follows_hitl_disabled() {
 
     // 关闭 PermissionMiddleware 不影响 AskUserQuestion（审批/提问独立开关）
     let mut ctx2 = base_context();
-    ctx2.meta_harness_disabled.insert("PermissionMiddleware".to_string());
+    ctx2.meta_harness_disabled
+        .insert("PermissionMiddleware".to_string());
     let tool_names = assemble_tool_names(&ctx2);
     assert!(
         tool_names.iter().any(|n| n == "AskUserQuestion"),

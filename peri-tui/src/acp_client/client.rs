@@ -231,6 +231,11 @@ impl AcpTuiClient {
                                 });
                             }
                         }
+                    } else if method == "peri/agent_activity" {
+                        // Compact GUI projection. The TUI already owns richer
+                        // native event rendering, so consume this negotiated
+                        // duplicate without forwarding it into the UI loop.
+                        debug!("ACP client pump: ignoring duplicate agent activity projection");
                     } else if method == "session/update" {
                         let session_id = params
                             .get("sessionId")

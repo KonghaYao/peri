@@ -22,12 +22,37 @@ pub struct PeriCaps {
     /// 控制 `peri/agent_event_done`（TurnDone）通知的发送
     #[serde(default)]
     pub agent_event_done: bool,
+    /// 控制 `peri/agent_activity` 隐私安全活动摘要通知。
+    ///
+    /// 与 TUI legacy `agent_event` 不同，本通道禁止携带消息、工具正文、
+    /// 错误文本、路径或 URL，供 Hub/GUI 做持久活动投影。
+    #[serde(default)]
+    pub agent_activity: bool,
+    /// 控制专用 `peri/oauth` MCP OAuth 生命周期通知。
+    ///
+    /// 该能力与 legacy `peri/agent_event` 独立：只允许版本化、有界 DTO，
+    /// authorization URL 仅在需要用户交互的瞬时通知中出现，raw error 与
+    /// callback code/state 永不进入该通道。
+    #[serde(default)]
+    pub oauth: bool,
     /// 控制 `peri/unstable-event` 通知通道的发送（Category ⑤ 全部）
     #[serde(default)]
     pub unstable_event: bool,
     /// 控制 `peri/prediction_ready` 预测输入的发送
     #[serde(default)]
     pub prediction: bool,
+    /// 控制标准 ACP Plan 条目 `_meta.activeForm` 的附加。
+    ///
+    /// 未协商时仍发送标准 Plan content/status；只有显式声明的
+    /// Peri 客户端才会收到经边界限制的“当前进行中”文案。
+    #[serde(default)]
+    pub plan_entry_active_form: bool,
+    /// 控制 Peri 会话回退 RPC（candidates / preview / execute）。
+    ///
+    /// 回退同时修改 transcript 并可选恢复文件，因此默认必须为 false；
+    /// 客户端未声明时三个非标准 RPC 都必须 fail closed。
+    #[serde(default)]
+    pub rewind: bool,
     /// 控制 `AvailableCommandsUpdate.availableCommands` 中界面性命令条目的广播
     /// （help / clear / mode / lang / exit / history 等，由 TUI 本地处理）。
     /// TUI（全 cap / mpsc 内部路径）声明后广播，外部客户端不声明则不收到。
@@ -47,8 +72,12 @@ impl PeriCaps {
             replay: meta_bool(meta, "peri.replay"),
             agent_event: meta_bool(meta, "peri.agentEvent"),
             agent_event_done: meta_bool(meta, "peri.agentEventDone"),
+            agent_activity: meta_bool(meta, "peri.agentActivity"),
+            oauth: meta_bool(meta, "peri.oauth"),
             unstable_event: meta_bool(meta, "peri.unstableEvent"),
             prediction: meta_bool(meta, "peri.prediction"),
+            plan_entry_active_form: meta_bool(meta, "peri.planEntryActiveForm"),
+            rewind: meta_bool(meta, "peri.rewind"),
             ui_commands: meta_bool(meta, "peri.uiCommands"),
         }
     }
@@ -65,10 +94,20 @@ impl PeriCaps {
             Value::Bool(self.agent_event_done),
         );
         m.insert(
+            "peri.agentActivity".into(),
+            Value::Bool(self.agent_activity),
+        );
+        m.insert("peri.oauth".into(), Value::Bool(self.oauth));
+        m.insert(
             "peri.unstableEvent".into(),
             Value::Bool(self.unstable_event),
         );
         m.insert("peri.prediction".into(), Value::Bool(self.prediction));
+        m.insert(
+            "peri.planEntryActiveForm".into(),
+            Value::Bool(self.plan_entry_active_form),
+        );
+        m.insert("peri.rewind".into(), Value::Bool(self.rewind));
         m.insert("peri.uiCommands".into(), Value::Bool(self.ui_commands));
         m
     }
@@ -82,8 +121,12 @@ impl PeriCaps {
             replay: true,
             agent_event: true,
             agent_event_done: true,
+            agent_activity: true,
+            oauth: true,
             unstable_event: true,
             prediction: true,
+            plan_entry_active_form: true,
+            rewind: true,
             ui_commands: true,
         }
     }

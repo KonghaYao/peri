@@ -9,8 +9,12 @@ fn test_default_all_false() {
     assert!(!caps.replay);
     assert!(!caps.agent_event);
     assert!(!caps.agent_event_done);
+    assert!(!caps.agent_activity);
+    assert!(!caps.oauth);
     assert!(!caps.unstable_event);
     assert!(!caps.prediction);
+    assert!(!caps.plan_entry_active_form);
+    assert!(!caps.rewind);
 }
 
 #[test]
@@ -21,8 +25,12 @@ fn test_from_client_meta_all_true() {
         "peri.replay": true,
         "peri.agentEvent": true,
         "peri.agentEventDone": true,
+        "peri.agentActivity": true,
+        "peri.oauth": true,
         "peri.unstableEvent": true,
         "peri.prediction": true,
+        "peri.planEntryActiveForm": true,
+        "peri.rewind": true,
         "peri.hitlPending": true,
         "peri.contextUsage": true,
         "peri.sourceAgentId": true,
@@ -33,8 +41,12 @@ fn test_from_client_meta_all_true() {
     assert!(caps.replay);
     assert!(caps.agent_event);
     assert!(caps.agent_event_done);
+    assert!(caps.agent_activity);
+    assert!(caps.oauth);
     assert!(caps.unstable_event);
     assert!(caps.prediction);
+    assert!(caps.plan_entry_active_form);
+    assert!(caps.rewind);
     // 已删除的 cap key（peri.hitlPending / peri.contextUsage / peri.sourceAgentId）
     // 不再解析，声明也不生效——仅保留 uiCommands 未声明默认 false 语义
     // meta 未声明 peri.uiCommands → 默认 false
@@ -92,8 +104,12 @@ fn test_all_enabled() {
     assert!(caps.replay);
     assert!(caps.agent_event);
     assert!(caps.agent_event_done);
+    assert!(caps.agent_activity);
+    assert!(caps.oauth);
     assert!(caps.unstable_event);
     assert!(caps.prediction);
+    assert!(caps.plan_entry_active_form);
+    assert!(caps.rewind);
     assert!(caps.ui_commands);
 }
 

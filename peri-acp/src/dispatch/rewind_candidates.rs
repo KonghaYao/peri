@@ -42,6 +42,9 @@ pub fn rewind_candidates(session_history: &[BaseMessage]) -> Result<Value, AcpEr
                 "preview": preview.chars().take(200).collect::<String>(),
             }))
         })
+        // Peri capability boundary: a hostile or corrupted history must not
+        // turn a read-only selector into an unbounded response.
+        .take(64)
         .collect();
 
     Ok(json!({ "messages": messages }))

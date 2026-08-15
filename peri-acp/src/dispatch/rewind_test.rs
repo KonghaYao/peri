@@ -77,6 +77,7 @@ async fn test_preview_lists_file_changes_after_target() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
+        "/tmp",
         &sink,
         "test-session",
     )
@@ -87,6 +88,9 @@ async fn test_preview_lists_file_changes_after_target() {
     assert_eq!(changes.len(), 1, "目标之后只有 Write");
     assert_eq!(changes[0]["path"], "new_file.txt");
     assert_eq!(changes[0]["kind"], "write");
+    let fingerprint = result["preview_fingerprint"].as_str().unwrap();
+    assert_eq!(fingerprint.len(), 64);
+    assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }
 
 #[tokio::test]
@@ -98,6 +102,7 @@ async fn test_preview_reverse_order_newest_first() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
+        "/tmp",
         &sink,
         "test-session",
     )
@@ -119,6 +124,7 @@ async fn test_preview_target_not_found_returns_error() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": "nonexistent" }),
         &history,
+        "/tmp",
         &sink,
         "test-session",
     )
@@ -139,6 +145,7 @@ async fn test_preview_no_file_changes_returns_empty_list() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
+        "/tmp",
         &sink,
         "test-session",
     )
@@ -173,6 +180,7 @@ async fn test_preview_extracts_anthropic_tool_use() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
+        "/tmp",
         &sink,
         "test-session",
     )
@@ -184,6 +192,66 @@ async fn test_preview_extracts_anthropic_tool_use() {
     // 同一变更只计一次。
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["path"], "docs/readme.md");
+}
+
+#[tokio::test]
+async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
+    let history = vec![
+        BaseMessage::human("改一下"),
+        BaseMessage::ai_with_tool_calls(
+            "编辑文件",
+            vec![ToolCallRequest {
+                id: "inside".into(),
+                name: "Edit".into(),
+                arguments: serde_json::json!({
+                    "file_path": "/tmp/project/src/../src/lib.rs",
+                    "old_string": "a",
+                    "new_string": "b",
+                }),
+            }],
+        ),
+    ];
+    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+    let target_id = history[0].id().as_uuid().to_string();
+    let result = rewind_preview(
+        &serde_json::json!({ "target_message_id": target_id }),
+        &history,
+        "/tmp/project",
+        &sink,
+        "test-session",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["file_changes"][0]["path"], "src/lib.rs");
+}
+
+#[tokio::test]
+async fn test_preview_rejects_path_outside_session_cwd() {
+    let history = vec![
+        BaseMessage::human("改一下"),
+        BaseMessage::ai_with_tool_calls(
+            "编辑文件",
+            vec![ToolCallRequest {
+                id: "outside".into(),
+                name: "Write".into(),
+                arguments: serde_json::json!({ "file_path": "/tmp/other/secret.txt" }),
+            }],
+        ),
+    ];
+    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+    let target_id = history[0].id().as_uuid().to_string();
+    let error = rewind_preview(
+        &serde_json::json!({ "target_message_id": target_id }),
+        &history,
+        "/tmp/project",
+        &sink,
+        "test-session",
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.message.contains("outside the session cwd"));
 }
 
 /// P0：dispatch 层参数缺 revert_files 时默认 true（与 command RewindArgs 双保险）。

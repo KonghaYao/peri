@@ -340,6 +340,10 @@ pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|
 /// 消费回填输入框；任何失败/取消路径清空。
 pub static REWIND_TARGET_TEXT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
+/// `session/rewind-preview` 返回的内容指纹。执行 RPC 必须原样带回；任何新的
+/// preview 都先清空旧值，避免用户确认已经过期的文件影响范围。
+pub static REWIND_PREVIEW_FINGERPRINT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
 /// 文件回退预算状态——候选 Enter 后由 rewind_consumer 写入：
 /// `Idle` = 未进入预算阶段（候选视图）；`Executing` = 预算为空自动执行或
 /// 用户确认后执行中（弹窗显示"正在回退…"）；`Files(v)` = 待用户确认的预算。

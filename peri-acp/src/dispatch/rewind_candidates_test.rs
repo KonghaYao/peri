@@ -109,3 +109,16 @@ fn test_candidates_newest_first() {
     assert_eq!(messages[0]["preview"], "第二轮问题", "最新在前");
     assert_eq!(messages[1]["preview"], "第一轮问题");
 }
+
+#[test]
+fn test_candidates_are_bounded_to_latest_64_user_messages() {
+    let history = (0..100)
+        .map(|index| BaseMessage::human(format!("message-{index}")))
+        .collect::<Vec<_>>();
+
+    let result = rewind_candidates(&history).unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 64);
+    assert_eq!(messages[0]["preview"], "message-99");
+    assert_eq!(messages[63]["preview"], "message-36");
+}

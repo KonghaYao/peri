@@ -4,10 +4,12 @@
 //! `peri/agent_event` channel. It contains only the fields that TUI consumers need,
 //! avoiding a direct `ExecutorEvent` dependency in the TUI.
 
+pub mod activity;
 mod forwarder;
 #[cfg(test)]
 mod forwarder_test;
 pub mod mapper;
+pub mod oauth;
 
 pub(crate) use self::forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};

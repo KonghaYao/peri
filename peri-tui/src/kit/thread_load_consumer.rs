@@ -146,6 +146,9 @@ async fn handle_load(
     // not found）。新 thread 的首个 turn 完成后服务端会推送新的 preview。
     *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
     *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+        .state()
+        .write() = None;
     *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
         crate::kit::atoms::RewindBudgetState::Idle;
     *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;

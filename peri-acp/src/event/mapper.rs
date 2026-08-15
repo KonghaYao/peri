@@ -134,7 +134,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             let plan_entries: Vec<PlanEntry> = entries
                 .iter()
                 .map(|e| {
-                    PlanEntry::new(
+                    let entry = PlanEntry::new(
                         e.content.clone(),
                         PlanEntryPriority::Medium,
                         match e.status {
@@ -146,7 +146,22 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                                 PlanEntryStatus::Completed
                             }
                         },
-                    )
+                    );
+                    if caps.plan_entry_active_form {
+                        if let Some(active_form) = e
+                            .active_form
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                        {
+                            let mut meta = serde_json::Map::new();
+                            meta.insert(
+                                "activeForm".into(),
+                                serde_json::Value::String(active_form.chars().take(256).collect()),
+                            );
+                            return entry.meta(meta);
+                        }
+                    }
+                    entry
                 })
                 .collect();
             vec![MappedEvent::standard(vec![SessionUpdate::Plan(Plan::new(

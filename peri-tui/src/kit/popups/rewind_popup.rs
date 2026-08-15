@@ -203,12 +203,18 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // 预算确认前 Esc：尚未执行，目标文本不再需要
                             *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
                             *REWIND_TARGET_TEXT.state().write() = None;
+                            *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+                                .state()
+                                .write() = None;
                             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
                             return EventResult::Consumed;
                         }
                         RewindView::Candidates => {
                             close_popup();
                             *REWIND_TARGET_TEXT.state().write() = None;
+                            *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+                                .state()
+                                .write() = None;
                             *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
                             *REWIND_QUERY_ERROR.state().write() = None;
                             return EventResult::Consumed;

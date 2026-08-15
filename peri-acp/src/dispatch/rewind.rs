@@ -5,9 +5,11 @@
 //! - `rewind_execute`：执行回退——复用 `RewindCommand`（截断 + 文件复原 +
 //!   配对校验 + 持久化删除 + RewindCompleted 事件）。
 
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::{
@@ -28,6 +30,11 @@ pub struct RewindArgs {
     /// 与 command/rewind.rs::RewindArgs 保持同一默认语义（P0 双保险）。
     #[serde(default = "default_true")]
     pub revert_files: bool,
+    /// Exact fingerprint returned by `session/rewind-preview`. Execution is a
+    /// destructive operation and therefore never accepts an unpreviewed or
+    /// stale target.
+    #[serde(default)]
+    pub preview_fingerprint: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -41,6 +48,7 @@ fn default_true() -> bool {
 pub async fn rewind_preview(
     params: &Value,
     session_history: &[peri_acp_types::messages::BaseMessage],
+    cwd: &str,
     event_sink: &Arc<dyn EventSink>,
     session_id: &str,
 ) -> Result<Value, AcpError> {
@@ -69,28 +77,138 @@ pub async fn rewind_preview(
         }
     };
 
-    let removed_messages = &session_history[target_idx..];
-    let changes: Vec<Value> = extract_file_changes(removed_messages)
-        .iter()
-        .rev() // 逆序：最新变更在前
-        .map(|fc| {
-            let kind = match fc {
-                crate::session::command::FileChange::Write { .. } => "write",
-                crate::session::command::FileChange::Edit { .. } => "edit",
-            };
-            let path = match fc {
-                crate::session::command::FileChange::Write { path } => path.clone(),
-                crate::session::command::FileChange::Edit { path, .. } => path.clone(),
-            };
-            json!({ "path": path, "kind": kind })
-        })
-        .collect();
+    let (changes, preview_fingerprint) = preview_material(
+        session_id,
+        &args.target_message_id,
+        args.revert_files,
+        cwd,
+        &session_history[target_idx..],
+    )?;
 
     // 截断语义与 RewindCommand 一致：removed = history[target_idx..]（含目标本身）。
     // 目标为 user 消息不含工具调用，故 extract_file_changes 结果只覆盖目标之后的
     // assistant 工具调用。空预算返回空列表（TUI 据此直接执行、不展示预算视图）。
 
-    Ok(json!({ "file_changes": changes }))
+    Ok(json!({
+        "file_changes": changes,
+        "preview_fingerprint": preview_fingerprint,
+    }))
+}
+
+const MAX_FILE_CHANGES: usize = 64;
+const MAX_SAFE_PATH_BYTES: usize = 1024;
+
+#[derive(serde::Serialize)]
+struct SafeFileChange {
+    path: String,
+    kind: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct PreviewFingerprint<'a> {
+    schema: u8,
+    session_id: &'a str,
+    target_message_id: &'a str,
+    revert_files: bool,
+    removed_messages: &'a [peri_acp_types::messages::BaseMessage],
+    file_changes: &'a [SafeFileChange],
+}
+
+fn preview_material(
+    session_id: &str,
+    target_message_id: &str,
+    revert_files: bool,
+    cwd: &str,
+    removed_messages: &[peri_acp_types::messages::BaseMessage],
+) -> Result<(Vec<SafeFileChange>, String), AcpError> {
+    let cwd = normalized_absolute(Path::new(cwd))
+        .ok_or_else(|| AcpError::new(-32602, "rewind preview requires an absolute session cwd"))?;
+    let all_changes = extract_file_changes(removed_messages);
+    if all_changes.len() > MAX_FILE_CHANGES {
+        return Err(AcpError::new(
+            -32602,
+            format!("rewind preview exceeds {MAX_FILE_CHANGES} file changes"),
+        ));
+    }
+    let mut changes = Vec::with_capacity(all_changes.len());
+    for change in all_changes.iter().rev() {
+        let (raw_path, kind) = match change {
+            crate::session::command::FileChange::Write { path } => (path, "write"),
+            crate::session::command::FileChange::Edit { path, .. } => (path, "edit"),
+        };
+        let path = safe_project_relative(&cwd, raw_path)?;
+        changes.push(SafeFileChange { path, kind });
+    }
+    let canonical = serde_json::to_vec(&PreviewFingerprint {
+        schema: 1,
+        session_id,
+        target_message_id,
+        revert_files,
+        removed_messages,
+        file_changes: &changes,
+    })
+    .map_err(|error| AcpError::new(-32603, format!("rewind preview encode failed: {error}")))?;
+    let fingerprint = format!("{:x}", Sha256::digest(canonical));
+    Ok((changes, fingerprint))
+}
+
+fn safe_project_relative(cwd: &Path, raw: &str) -> Result<String, AcpError> {
+    if raw.is_empty()
+        || raw.len() > MAX_SAFE_PATH_BYTES
+        || raw.chars().any(|character| character.is_control())
+    {
+        return Err(AcpError::new(
+            -32602,
+            "rewind preview contains an unsafe path",
+        ));
+    }
+    let raw = Path::new(raw);
+    let absolute = if raw.is_absolute() {
+        normalized_absolute(raw)
+    } else {
+        normalized_absolute(&cwd.join(raw))
+    }
+    .ok_or_else(|| AcpError::new(-32602, "rewind preview contains an unsafe path"))?;
+    let relative = absolute.strip_prefix(cwd).map_err(|_| {
+        AcpError::new(
+            -32602,
+            "rewind preview contains a path outside the session cwd",
+        )
+    })?;
+    if relative.as_os_str().is_empty() {
+        return Err(AcpError::new(
+            -32602,
+            "rewind preview contains an unsafe path",
+        ));
+    }
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| AcpError::new(-32602, "rewind preview contains a non-UTF-8 path"))?;
+    if relative.len() > MAX_SAFE_PATH_BYTES {
+        return Err(AcpError::new(-32602, "rewind preview path is too long"));
+    }
+    Ok(relative.to_string())
+}
+
+fn normalized_absolute(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Some(normalized)
 }
 
 /// 执行回退：复用 `RewindCommand`（Immediate 命令）。
@@ -118,7 +236,7 @@ pub async fn rewind_execute(
     // P0 修复：参数预验证。RewindCommand 内部解析失败只发 RewindError 事件
     // 且本函数仍返回成功——这里前置解析，参数错误直接以 RPC 错误形式返回，
     // TUI 才能感知并展示失败。
-    let _args: RewindArgs = serde_json::from_value(params.clone())
+    let args: RewindArgs = serde_json::from_value(params.clone())
         .map_err(|e| AcpError::new(-32602, format!("rewind 参数解析失败: {e}")))?;
 
     let session_id = params
@@ -127,6 +245,35 @@ pub async fn rewind_execute(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_string();
+
+    let target_idx = session_history
+        .iter()
+        .position(|message| message.id().as_uuid().to_string() == args.target_message_id)
+        .ok_or_else(|| {
+            AcpError::new(
+                -32602,
+                format!("rewind: 未找到目标消息 {}", args.target_message_id),
+            )
+        })?;
+    let (_, expected_fingerprint) = preview_material(
+        &session_id,
+        &args.target_message_id,
+        args.revert_files,
+        cwd,
+        &session_history[target_idx..],
+    )?;
+    let supplied_fingerprint = args.preview_fingerprint.as_deref().ok_or_else(|| {
+        AcpError::new(
+            -32602,
+            "rewind requires preview_fingerprint from session/rewind-preview",
+        )
+    })?;
+    if supplied_fingerprint != expected_fingerprint {
+        return Err(AcpError::new(
+            -32602,
+            "rewind preview is stale; request a new preview before executing",
+        ));
+    }
 
     let ctx = CommandContext {
         session_id: session_id.clone(),

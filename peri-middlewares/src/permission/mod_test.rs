@@ -237,12 +237,7 @@ fn make_mw_with_mode(
 ) -> PermissionMiddleware {
     let broker = Arc::new(AutoApproveBroker);
     let shared = SharedPermissionMode::new(mode);
-    PermissionMiddleware::with_shared_mode(
-        broker,
-        default_requires_approval,
-        shared,
-        classifier,
-    )
+    PermissionMiddleware::with_shared_mode(broker, default_requires_approval, shared, classifier)
 }
 
 #[tokio::test]

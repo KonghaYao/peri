@@ -364,6 +364,62 @@ fn register_session_with_history(
     sid
 }
 
+#[tokio::test]
+async fn test_rewind_methods_require_explicit_capability() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager
+        .caps_registry()
+        .insert(sid.clone(), PeriCaps::default());
+    let target = sessions.get(&sid).unwrap().history[0]
+        .id()
+        .as_uuid()
+        .to_string();
+    let original: Vec<_> = sessions
+        .get(&sid)
+        .unwrap()
+        .history
+        .iter()
+        .map(|message| (message.id().as_uuid().to_string(), message.content()))
+        .collect();
+
+    for (method, params) in [
+        ("session/rewind-candidates", json!({"sessionId": sid})),
+        (
+            "session/rewind-preview",
+            json!({"sessionId": sid, "target_message_id": target}),
+        ),
+        (
+            "session/rewind",
+            json!({"sessionId": sid, "target_message_id": target}),
+        ),
+    ] {
+        let error = handle_request(method, &params, &cfg, &mut sessions, &transport)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32601);
+        assert_eq!(error.message, "peri.rewind capability not negotiated");
+    }
+    let current: Vec<_> = sessions
+        .get(&sid)
+        .unwrap()
+        .history
+        .iter()
+        .map(|message| (message.id().as_uuid().to_string(), message.content()))
+        .collect();
+    assert_eq!(current, original);
+}
+
 /// session/rewind-candidates 路由到 dispatch：返回 user-only 候选。
 #[tokio::test]
 async fn test_rewind_candidates_routes_to_dispatch() {
@@ -379,6 +435,13 @@ async fn test_rewind_candidates_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
 
     let result = handle_request(
         "session/rewind-candidates",
@@ -411,6 +474,13 @@ async fn test_rewind_preview_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
     let target_id = sessions.get(&sid).unwrap().history[2]
         .id()
         .as_uuid()
@@ -447,6 +517,13 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
 
     let result = handle_request(
         "session/rewind-preview",
@@ -481,14 +558,35 @@ async fn test_rewind_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
     let target_id = sessions.get(&sid).unwrap().history[0]
         .id()
         .as_uuid()
         .to_string();
+    let preview = handle_request(
+        "session/rewind-preview",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap();
 
     let result = handle_request(
         "session/rewind",
-        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &json!({
+            "sessionId": sid,
+            "target_message_id": target_id,
+            "preview_fingerprint": preview_fingerprint,
+        }),
         &cfg,
         &mut sessions,
         &transport,
@@ -501,6 +599,66 @@ async fn test_rewind_routes_to_dispatch() {
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
     assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+}
+
+#[tokio::test]
+async fn test_rewind_rejects_stale_preview_without_mutating_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
+    let target_id = sessions.get(&sid).unwrap().history[0]
+        .id()
+        .as_uuid()
+        .to_string();
+    let preview = handle_request(
+        "session/rewind-preview",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
+
+    sessions
+        .get_mut(&sid)
+        .unwrap()
+        .history
+        .push(peri_acp_types::messages::BaseMessage::ai("late answer"));
+    let before = sessions.get(&sid).unwrap().history.len();
+    let error = handle_request(
+        "session/rewind",
+        &json!({
+            "sessionId": sid,
+            "target_message_id": target_id,
+            "preview_fingerprint": preview_fingerprint,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.message.contains("preview is stale"));
+    assert_eq!(sessions.get(&sid).unwrap().history.len(), before);
 }
 
 // ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────

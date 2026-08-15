@@ -51,6 +51,7 @@ dashmap = "6"
 tokio-util.workspace = true
 dirs-next.workspace = true
 url.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

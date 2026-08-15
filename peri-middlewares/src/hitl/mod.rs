@@ -122,7 +122,10 @@ mod tests {
     fn name_and_tool_names() {
         let mw = HumanInTheLoopMiddleware::new(mock_broker());
         assert_eq!(mw.name(), "HumanInTheLoopMiddleware");
-        assert_eq!(HumanInTheLoopMiddleware::tool_names(), vec!["AskUserQuestion"]);
+        assert_eq!(
+            HumanInTheLoopMiddleware::tool_names(),
+            vec!["AskUserQuestion"]
+        );
     }
 
     #[test]
@@ -131,7 +134,10 @@ mod tests {
         let tools = mw.collect_tools("/tmp");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "AskUserQuestion");
-        assert!(tools[0].is_direct(), "AskUserQuestion 必须 is_direct（Core 层）");
+        assert!(
+            tools[0].is_direct(),
+            "AskUserQuestion 必须 is_direct（Core 层）"
+        );
     }
 
     #[test]

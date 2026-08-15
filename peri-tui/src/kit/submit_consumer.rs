@@ -111,8 +111,9 @@ async fn handle_submit(
         SubmitRequest::SessionControl(SessionControlRequest::Rewind(args)) => {
             info!("kit submit_consumer: /rewind intercepted, forwarding to rewind_consumer");
             if let Some(tx) = REWIND_ACTION_TX.get() {
-                let _ = tx.send(crate::kit::rewind_action::RewindAction::Confirm {
+                let _ = tx.send(crate::kit::rewind_action::RewindAction::Preview {
                     target_message_id: args.target_message_id,
+                    target_text: String::new(),
                 });
             }
             Ok(())
@@ -158,6 +159,9 @@ async fn handle_clear_submit(
     crate::kit::popup_overlay::close_popup();
     *crate::kit::atoms::REWIND_PREVIEW.state().write() = None;
     *crate::kit::atoms::REWIND_TARGET_TEXT.state().write() = None;
+    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+        .state()
+        .write() = None;
     *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
         crate::kit::atoms::RewindBudgetState::Idle;
     *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;

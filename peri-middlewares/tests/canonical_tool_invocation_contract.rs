@@ -17,7 +17,9 @@ use peri_agent::{
 #[cfg(unix)]
 use peri_middlewares::hooks::{HookEvent, HookMiddleware, HookType, RegisteredHook};
 use peri_middlewares::{
-    permission::{default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode},
+    permission::{
+        default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode,
+    },
     ExecuteExtraToolResolver, EXECUTE_EXTRA_TOOL_NAME,
 };
 use serde_json::{json, Value};

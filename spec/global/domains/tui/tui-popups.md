@@ -83,7 +83,7 @@ Rewind 为 v2 两段式流程（双击 Esc 触发，非 `/rewind` 命令——sl
 ```
 
 - **Candidates 态**：双击 Esc → `rewind_candidates.rs::spawn_candidates_query` 实时查询 `session/rewind-candidates` RPC，写入 `REWIND_PREVIEW` atom；候选只含 user 消息，↑/↓ 选择。
-- **Budget 态**：候选 Enter → `RewindAction::Preview`（`rewind_action.rs` 消费者）暂存目标文本到 `REWIND_TARGET_TEXT` → 查询 `session/rewind-preview` 预算 → 预算空则立即执行回退；预算非空则写 `REWIND_BUDGET_STATE = Files(预算)`，弹窗切预算视图（文件影响范围），Enter 发送 `RewindAction::Confirm` 执行（恒 `revert_files=true`）。
+- **Budget 态**：候选 Enter → `RewindAction::Preview`（`rewind_action.rs` 消费者）暂存目标文本到 `REWIND_TARGET_TEXT` → 查询 `session/rewind-preview`，保存 Agent 返回的 `preview_fingerprint`，并始终写 `REWIND_BUDGET_STATE = Files(预算)`。即使没有文件变化，对话截断仍必须经过显式确认；Enter 发送 `RewindAction::Confirm`，携带同一 fingerprint 执行（恒 `revert_files=true`）。
 - **Executing 态**：等待 `RewindCompleted` 事件——回退完成后 `REWIND_BUDGET_STATE` 复位、目标文本写回 `INPUT_RESTORE_TEXT` 恢复编辑态、弹窗关闭（仅当弹窗仍在显示时，防误关其他弹窗）；`RewindError` 事件渲染系统提示（不复用 CompactError 文案）。
 - 查询失败写 `REWIND_QUERY_ERROR`；Esc 从 Budget 返回候选视图。
 

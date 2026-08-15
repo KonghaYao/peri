@@ -34,7 +34,9 @@ use crate::{
     hooks::HookMiddleware,
     mcp::{build_tool_bridges, McpClientPool, McpMiddleware, McpResourceTool},
     middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
-    permission::{default_requires_approval, AutoClassifier, LlmAutoClassifier, PermissionMiddleware},
+    permission::{
+        default_requires_approval, AutoClassifier, LlmAutoClassifier, PermissionMiddleware,
+    },
     plugin::PluginMiddleware,
     skills::SkillsMiddleware,
     subagent::{SkillPreloadMiddleware, SubAgentMiddleware},
@@ -855,9 +857,7 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
         // 非有意设计，见 spec/issues/2026-08-15-permission-hitl-split.md）。
         if !disabled.contains("HumanInTheLoopMiddleware") {
             if let Some(broker) = &ctx.broker {
-                middlewares.push(Box::new(HumanInTheLoopMiddleware::new(Arc::clone(
-                    broker,
-                ))));
+                middlewares.push(Box::new(HumanInTheLoopMiddleware::new(Arc::clone(broker))));
             }
         }
 

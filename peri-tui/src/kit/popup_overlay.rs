@@ -127,6 +127,7 @@ pub fn close_popup() -> Option<PopupKind> {
             PopupKind::Rewind => {
                 *atoms::REWIND_BUDGET_STATE.state().write() = atoms::RewindBudgetState::Idle;
                 *atoms::REWIND_TARGET_TEXT.state().write() = None;
+                *atoms::REWIND_PREVIEW_FINGERPRINT.state().write() = None;
                 *atoms::REWIND_QUERY_ERROR.state().write() = None;
             }
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,

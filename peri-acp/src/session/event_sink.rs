@@ -22,7 +22,8 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::{
-    event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
+    event::activity::map_agent_activity, event::map_event, event::AcpEvent,
+    event::CompactFileInfoDto, transport::AcpTransport,
 };
 
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
@@ -150,6 +151,28 @@ impl EventSink for TransportEventSink {
                     .transport
                     .send_notification("session/update", payload)
                     .await;
+            }
+        }
+
+        // Privacy-safe GUI activity channel. This is intentionally independent
+        // from legacy `peri/agent_event`: the mapper has already removed raw
+        // messages, summaries, paths, outputs, errors and URLs before transport.
+        if caps.agent_activity {
+            if let Some(activity) = map_agent_activity(event) {
+                if let Err(error) = self
+                    .transport
+                    .send_notification(
+                        "peri/agent_activity",
+                        json!({ "sessionId": session_id, "activity": activity }),
+                    )
+                    .await
+                {
+                    tracing::trace!(
+                        session_id = %session_id,
+                        error = %error,
+                        "EventSink: agent activity send failed (non-critical)"
+                    );
+                }
             }
         }
 
@@ -508,7 +531,13 @@ mod tests {
     async fn push_event_forwards_rewind_completed() {
         let transport = Arc::new(MockTransport::default());
         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
-        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
         let sink = TransportEventSink::new(transport.clone(), caps);
 
         sink.push_event(
@@ -566,6 +595,67 @@ mod tests {
             transport.notifications.lock().unwrap().is_empty(),
             "未声明 agent_event cap 时不应发出通知"
         );
+    }
+
+    #[tokio::test]
+    async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_activity: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "reviewer".into(),
+                result: "SECRET_RESULT_SENTINEL".into(),
+                is_error: false,
+                instance_id: "raw-instance-id".into(),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, "peri/agent_activity");
+        assert_eq!(notifications[0].1["activity"]["schemaVersion"], 1);
+        assert_eq!(notifications[0].1["activity"]["kind"], "subagent");
+        let serialized = notifications[0].1.to_string();
+        assert!(!serialized.contains("SECRET_RESULT_SENTINEL"));
+        assert!(!serialized.contains("raw-instance-id"));
+    }
+
+    #[tokio::test]
+    async fn push_event_does_not_emit_activity_without_exact_cap() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                agent_activity: false,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::ContextWarning {
+                used_tokens: 90,
+                total_tokens: 100,
+                percentage: 0.9,
+            },
+            0,
+        )
+        .await;
+        assert!(transport.notifications.lock().unwrap().is_empty());
     }
 
     /// push_unstable_event 通道 method 命名统一为 snake_case（2026-08-14 整顿）。

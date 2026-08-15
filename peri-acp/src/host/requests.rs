@@ -1112,6 +1112,7 @@ pub(crate) async fn handle_request(
                 .or_else(|| params.get("session_id"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
+            require_rewind_cap(&cfg.session_manager.get_caps(session_id))?;
             let history = sessions
                 .get(session_id)
                 .map(|s| s.history.clone())
@@ -1126,16 +1127,17 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
                 .to_string();
-            let history = sessions
+            require_rewind_cap(&cfg.session_manager.get_caps(&session_id))?;
+            let (cwd, history) = sessions
                 .get(&session_id)
-                .map(|s| s.history.clone())
+                .map(|s| (s.cwd.clone(), s.history.clone()))
                 .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
             let event_sink: Arc<dyn crate::session::event_sink::EventSink> =
                 Arc::new(crate::session::event_sink::TransportEventSink::new(
                     transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
                     cfg.session_manager.caps_registry(),
                 ));
-            dispatch::rewind_preview(params, &history, &event_sink, &session_id).await
+            dispatch::rewind_preview(params, &history, &cwd, &event_sink, &session_id).await
         }
 
         "session/rewind" => {
@@ -1145,6 +1147,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
                 .to_string();
+            require_rewind_cap(&cfg.session_manager.get_caps(&session_id))?;
             let (cwd, history) = {
                 let s = sessions
                     .get_mut(&session_id)
@@ -1209,7 +1212,55 @@ pub(crate) async fn handle_request(
             }
         }
 
-        // ── MCP OAuth 授权交互（手动兜底路径：TUI popup 收集授权码后回传）──
+        // ── MCP OAuth 授权交互（专用 peri.oauth + legacy TUI 兼容）──
+        "mcp/list" => {
+            let caps = cfg.session_manager.effective_host_caps();
+            if !caps.oauth {
+                return Err(AcpError::new(
+                    -32601,
+                    "peri.oauth capability not negotiated",
+                ));
+            }
+            let pool = cfg
+                .mcp_pool
+                .clone()
+                .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?
+                .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
+            let mut servers = pool.all_server_infos();
+            servers.sort_by(|left, right| left.name.cmp(&right.name));
+            let servers = servers
+                .into_iter()
+                .filter(|server| crate::event::oauth::validate_server_name(&server.name).is_ok())
+                .take(256)
+                .map(|server| {
+                    let connection_status = match server.status {
+                        peri_middlewares::mcp::ClientStatus::Connected => "connected",
+                        peri_middlewares::mcp::ClientStatus::Failed(_) => "failed",
+                        peri_middlewares::mcp::ClientStatus::Disconnected => "disconnected",
+                        peri_middlewares::mcp::ClientStatus::Disabled => "disabled",
+                        peri_middlewares::mcp::ClientStatus::Uninitialized => "uninitialized",
+                    };
+                    let oauth_status = match server.oauth_status {
+                        peri_middlewares::mcp::OAuthStatus::None => "none",
+                        peri_middlewares::mcp::OAuthStatus::Authorized => "authorized",
+                        peri_middlewares::mcp::OAuthStatus::NeedsAuthorization => {
+                            "needs_authorization"
+                        }
+                    };
+                    serde_json::json!({
+                        "name": server.name,
+                        "transport": server.transport_type,
+                        "connectionStatus": connection_status,
+                        "oauthStatus": oauth_status,
+                        "activeFlowId": pool.active_oauth_flow(&server.name),
+                        "toolsCount": server.tool_count,
+                        "resourcesCount": server.resource_count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!({ "servers": servers }))
+        }
         "mcp/oauth_start" => {
             // 用户经 MCP 面板显式发起授权：host pool 异步执行 OAuth 流程
             // （spawn_oauth_flow 内部标记 NeedsAuthorization → run_oauth_flow
@@ -1219,19 +1270,60 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?
                 .to_string();
+            crate::event::oauth::validate_server_name(&server_name)
+                .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+            let caps = cfg.session_manager.effective_host_caps();
+            if !caps.oauth && !caps.agent_event {
+                return Err(AcpError::new(-32601, "OAuth capability not negotiated"));
+            }
+            let flow_id = match params.get("flow_id").and_then(Value::as_str) {
+                Some(flow_id) => {
+                    crate::event::oauth::validate_identifier(flow_id)
+                        .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+                    flow_id.to_string()
+                }
+                None if caps.agent_event && !caps.oauth => uuid::Uuid::now_v7().to_string(),
+                None => return Err(AcpError::new(-32602, "missing 'flow_id'")),
+            };
             let pool = cfg
                 .mcp_pool
                 .clone()
                 .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
             match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
                 Ok(p) => {
-                    p.spawn_oauth_flow(&server_name);
-                    Ok(serde_json::json!({ "success": true }))
+                    let disposition = p.spawn_oauth_flow_with_id(&server_name, &flow_id);
+                    let (status, active_flow_id) = match disposition {
+                        peri_middlewares::mcp::OAuthStartDisposition::Started => {
+                            ("started", flow_id.clone())
+                        }
+                        peri_middlewares::mcp::OAuthStartDisposition::AlreadyActive => {
+                            ("already_active", flow_id.clone())
+                        }
+                        peri_middlewares::mcp::OAuthStartDisposition::Conflict {
+                            active_flow_id,
+                        } => ("conflict", active_flow_id),
+                    };
+                    Ok(serde_json::json!({
+                        "success": status != "conflict",
+                        "status": status,
+                        "flowId": flow_id,
+                        "activeFlowId": active_flow_id,
+                    }))
                 }
                 Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
             }
         }
         "mcp/oauth_callback" => {
+            let caps = cfg.session_manager.effective_host_caps();
+            if caps.oauth {
+                return Err(AcpError::new(
+                    -32601,
+                    "peri.oauth uses the loopback callback; callback codes are not accepted over ACP",
+                ));
+            }
+            if !caps.agent_event {
+                return Err(AcpError::new(-32601, "OAuth capability not negotiated"));
+            }
             let server_name = params
                 .get("server_name")
                 .and_then(|v| v.as_str())
@@ -1247,36 +1339,64 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            if code.len() > 4096 || state.len() > 4096 {
+                return Err(AcpError::new(-32602, "OAuth callback value too long"));
+            }
             let pool = cfg
                 .mcp_pool
                 .clone()
                 .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
-            pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-                .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?
-                .deliver_oauth_callback(&server_name, code, state)
+            let pool = pool
+                .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
+            let result = pool.deliver_oauth_callback(&server_name, code, state);
+            result
                 .map(|_| serde_json::json!({ "success": true }))
                 .map_err(|e| AcpError::new(-32603, e))
         }
         "mcp/oauth_cancel" => {
-            let server_name = params
-                .get("server_name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AcpError::new(-32602, "missing 'server_name'"))?
-                .to_string();
+            let caps = cfg.session_manager.effective_host_caps();
+            if !caps.oauth && !caps.agent_event {
+                return Err(AcpError::new(-32601, "OAuth capability not negotiated"));
+            }
             let pool = cfg
                 .mcp_pool
                 .clone()
                 .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
             match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
                 Ok(p) => {
-                    p.cancel_oauth_callback(&server_name);
-                    Ok(serde_json::json!({ "success": true }))
+                    let cancelled =
+                        if let Some(flow_id) = params.get("flow_id").and_then(Value::as_str) {
+                            crate::event::oauth::validate_identifier(flow_id)
+                                .map_err(|error| AcpError::new(-32602, error.to_string()))?;
+                            p.cancel_oauth_flow(flow_id)
+                        } else if caps.agent_event && !caps.oauth {
+                            let server_name = params
+                                .get("server_name")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| AcpError::new(-32602, "missing 'flow_id'"))?;
+                            p.cancel_oauth_callback(server_name)
+                        } else {
+                            return Err(AcpError::new(-32602, "missing 'flow_id'"));
+                        };
+                    Ok(serde_json::json!({ "success": true, "cancelled": cancelled }))
                 }
                 Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
             }
         }
 
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
+    }
+}
+
+fn require_rewind_cap(caps: &PeriCaps) -> Result<(), AcpError> {
+    if caps.rewind {
+        Ok(())
+    } else {
+        Err(AcpError::new(
+            -32601,
+            "peri.rewind capability not negotiated",
+        ))
     }
 }
 

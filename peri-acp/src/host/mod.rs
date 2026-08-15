@@ -117,8 +117,10 @@ pub struct AcpServerConfig {
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
     /// 消费者 task，以 `peri/agent_event` notification（sessionId 为空串，
     /// host 级事件不做 session 过滤）送达 TUI。
-    pub oauth_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AcpEvent>>,
-    pub(crate) oauth_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::AcpEvent>>,
+    pub oauth_event_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::event::oauth::HostOAuthEvent>>,
+    pub(crate) oauth_event_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::oauth::HostOAuthEvent>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
@@ -165,6 +167,67 @@ type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
 /// continuation scheduler 通过同一把锁串行化内部续跑）。
 pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OAuthDeliveryPolicy {
+    safe: bool,
+    legacy: bool,
+}
+
+fn oauth_delivery_policy(caps: &peri_acp_types::PeriCaps) -> OAuthDeliveryPolicy {
+    OAuthDeliveryPolicy {
+        safe: caps.oauth,
+        legacy: caps.agent_event,
+    }
+}
+
+async fn send_safe_oauth_event(
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    notification: Result<
+        crate::event::oauth::OAuthWireNotification,
+        crate::event::oauth::OAuthWireError,
+    >,
+) {
+    match notification {
+        Ok(notification) => {
+            if let Err(error) = transport
+                .send_notification("peri/oauth", notification.into_params())
+                .await
+            {
+                tracing::debug!(error = %error, "safe OAuth notification send failed");
+            }
+        }
+        Err(error) => tracing::warn!(
+            error = %error,
+            "OAuth notification rejected by safe wire boundary"
+        ),
+    }
+}
+
+async fn send_legacy_oauth_event(
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    event: crate::event::AcpEvent,
+) {
+    let event_json = match serde_json::to_string(&event) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::error!(error = %error, "legacy OAuth event serialize failed");
+            return;
+        }
+    };
+    if let Err(error) = transport
+        .send_notification(
+            "peri/agent_event",
+            serde_json::json!({
+                "sessionId": "",
+                "event_json": event_json,
+            }),
+        )
+        .await
+    {
+        tracing::debug!(error = %error, "legacy OAuth notification send failed");
+    }
+}
+
 /// Main ACP server loop. Accepts any `AcpTransport` (mpsc for TUI, stdio for IDE).
 ///
 /// `session/prompt` is spawned into a background task so the loop stays
@@ -179,32 +242,151 @@ pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
     mut cfg: AcpServerConfig,
 ) {
-    // OAuth 授权事件消费者：host 级事件（无 session 归属），以空 sessionId
-    // 的 peri/agent_event notification 送达 TUI（pump 侧对空 sessionId 放行）。
+    // OAuth 授权事件消费者：host 级事件（无 session 归属）。专用安全通道与
+    // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
     let oauth_event_rx = cfg.oauth_event_rx.take();
     let cfg = Arc::new(cfg);
     if let Some(mut rx) = oauth_event_rx {
         let oauth_transport = Arc::clone(&transport);
+        let oauth_sessions = cfg.session_manager.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                let event_json = match serde_json::to_string(&event) {
-                    Ok(json) => json,
-                    Err(e) => {
-                        tracing::error!(error = %e, "OAuth event serialize failed");
-                        continue;
+                let caps = oauth_sessions.effective_host_caps();
+                let policy = oauth_delivery_policy(&caps);
+                match event {
+                    crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
+                        flow_id,
+                        server_name,
+                        authorization_url,
+                    } => {
+                        if policy.safe {
+                            match crate::event::oauth::OAuthWireNotification::authorization_needed(
+                                flow_id.clone(),
+                                server_name.clone(),
+                                authorization_url.clone(),
+                            ) {
+                                Ok(notification) => {
+                                    let _ = oauth_transport
+                                        .send_notification("peri/oauth", notification.into_params())
+                                        .await;
+                                }
+                                Err(error) => tracing::warn!(
+                                    error = %error,
+                                    "OAuth notification rejected by safe wire boundary"
+                                ),
+                            }
+                        }
+                        if policy.legacy {
+                            send_legacy_oauth_event(
+                                &oauth_transport,
+                                crate::event::AcpEvent::OauthNeeded {
+                                    server_name,
+                                    auth_url: authorization_url,
+                                },
+                            )
+                            .await;
+                        }
                     }
-                };
-                if let Err(e) = oauth_transport
-                    .send_notification(
-                        "peri/agent_event",
-                        serde_json::json!({
-                            "sessionId": "",
-                            "event_json": event_json,
-                        }),
-                    )
-                    .await
-                {
-                    tracing::debug!(error = %e, "OAuth event notification send failed");
+                    crate::event::oauth::HostOAuthEvent::Completed {
+                        flow_id,
+                        server_name,
+                    } => {
+                        if policy.safe {
+                            send_safe_oauth_event(
+                                &oauth_transport,
+                                crate::event::oauth::OAuthWireNotification::terminal(
+                                    flow_id,
+                                    server_name.clone(),
+                                    crate::event::oauth::OAuthWireStatus::Completed,
+                                ),
+                            )
+                            .await;
+                        }
+                        if policy.legacy {
+                            send_legacy_oauth_event(
+                                &oauth_transport,
+                                crate::event::AcpEvent::OauthCompleted { server_name },
+                            )
+                            .await;
+                        }
+                    }
+                    crate::event::oauth::HostOAuthEvent::Failed {
+                        flow_id,
+                        server_name,
+                        failure_class,
+                        legacy_error,
+                    } => {
+                        if policy.safe {
+                            send_safe_oauth_event(
+                                &oauth_transport,
+                                crate::event::oauth::OAuthWireNotification::failed(
+                                    flow_id,
+                                    server_name.clone(),
+                                    failure_class,
+                                ),
+                            )
+                            .await;
+                        }
+                        if policy.legacy {
+                            send_legacy_oauth_event(
+                                &oauth_transport,
+                                crate::event::AcpEvent::OauthFailed {
+                                    server_name,
+                                    error: legacy_error,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    crate::event::oauth::HostOAuthEvent::Cancelled {
+                        flow_id,
+                        server_name,
+                    } => {
+                        if policy.safe {
+                            send_safe_oauth_event(
+                                &oauth_transport,
+                                crate::event::oauth::OAuthWireNotification::terminal(
+                                    flow_id,
+                                    server_name.clone(),
+                                    crate::event::oauth::OAuthWireStatus::Cancelled,
+                                ),
+                            )
+                            .await;
+                        }
+                        if policy.legacy {
+                            send_legacy_oauth_event(
+                                &oauth_transport,
+                                crate::event::AcpEvent::OauthFailed {
+                                    server_name,
+                                    error: "OAuth authorization cancelled".to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    crate::event::oauth::HostOAuthEvent::Restored {
+                        flow_id,
+                        server_name,
+                    } => {
+                        if policy.safe {
+                            send_safe_oauth_event(
+                                &oauth_transport,
+                                crate::event::oauth::OAuthWireNotification::terminal(
+                                    flow_id,
+                                    server_name.clone(),
+                                    crate::event::oauth::OAuthWireStatus::Restored,
+                                ),
+                            )
+                            .await;
+                        }
+                        if policy.legacy {
+                            send_legacy_oauth_event(
+                                &oauth_transport,
+                                crate::event::AcpEvent::OauthRestored { server_name },
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
         });
@@ -631,4 +813,35 @@ pub(crate) async fn dispatch_prompt_turn(
     }
 
     result
+}
+
+#[cfg(test)]
+mod oauth_cap_tests {
+    use super::{oauth_delivery_policy, OAuthDeliveryPolicy};
+
+    #[test]
+    fn test_oauth_delivery_policy_keeps_safe_and_legacy_caps_independent() {
+        let safe_only = peri_acp_types::PeriCaps {
+            oauth: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            oauth_delivery_policy(&safe_only),
+            OAuthDeliveryPolicy {
+                safe: true,
+                legacy: false
+            }
+        );
+        let legacy_only = peri_acp_types::PeriCaps {
+            agent_event: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            oauth_delivery_policy(&legacy_only),
+            OAuthDeliveryPolicy {
+                safe: false,
+                legacy: true
+            }
+        );
+    }
 }

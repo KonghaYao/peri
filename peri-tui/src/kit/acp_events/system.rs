@@ -370,6 +370,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     // 回退完成：预算状态复位、查询错误清空；弹窗关闭（执行完成）
     *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
         crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+        .state()
+        .write() = None;
     *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
     // P1：仅当 rewind 弹窗仍在显示时关闭——执行期间用户可能已 Esc 关闭弹窗
     // 或打开了其他弹窗（HITL/OAuth 事件），无条件 close 会误关。

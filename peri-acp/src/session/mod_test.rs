@@ -402,6 +402,26 @@ async fn test_pending_caps_double_fallback_semantics() {
     );
 }
 
+#[tokio::test]
+async fn test_effective_host_caps_requires_external_negotiation_but_preserves_internal_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    assert!(
+        mgr.effective_host_caps().oauth,
+        "未 initialize 的进程内 TUI 路径保持 all_enabled"
+    );
+    mgr.set_pending_caps(peri_acp_types::PeriCaps::default());
+    assert!(
+        !mgr.effective_host_caps().oauth,
+        "外部 initialize 未声明 peri.oauth 时必须关闭"
+    );
+    mgr.set_pending_caps(peri_acp_types::PeriCaps {
+        oauth: true,
+        ..Default::default()
+    });
+    assert!(mgr.effective_host_caps().oauth);
+}
+
 // ── mcp_subscription_for（2026-07-28 subscriptions/listen 订阅 inbox 注册）───
 
 /// mcp_subscription_for：首次调用惰性注册，重复调用幂等（只注册一次、不 panic）。
