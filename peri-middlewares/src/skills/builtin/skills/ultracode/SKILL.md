@@ -121,9 +121,11 @@ return subResult  // 子 workflow 的 return 值
 `@peri-code/workflow` provides a CLI preflight check for an existing workflow file:
 
 ```bash
-npx -y @peri-code/workflow validate scripts/parallel-review.mjs
+# 必须带显式版本号：npx 在全局已有同名 bin 时会静默复用旧版（0.1.x 无 CLI 子命令，
+# 所有命令无输出且 exit 0，无任何报错），`@<version>` 才能强制使用 registry 目标版本。
+npx -y @peri-code/workflow@0.2.0 validate scripts/parallel-review.mjs
 # Machine-readable output for tooling:
-npx -y @peri-code/workflow validate scripts/parallel-review.mjs --json
+npx -y @peri-code/workflow@0.2.0 validate scripts/parallel-review.mjs --json
 ```
 
 Use it when a workflow script is already saved and non-trivial. It checks engine syntax and exports, rejects old `workflow.agent(...)`-style calls, requires `export const meta = { name, description }`, and warns when the script has no top-level `return`.
@@ -135,10 +137,10 @@ Do not create a file solely to validate an inline script passed directly to the 
 After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. The Read tool remains suitable for a known result file; use the built-in CLI when you need a complete report or need to discover runs:
 
 ```bash
-npx -y @peri-code/workflow list
-npx -y @peri-code/workflow list --json
-npx -y @peri-code/workflow read <run_id>
-npx -y @peri-code/workflow read <run_id> --short --json
+npx -y @peri-code/workflow@0.2.0 list
+npx -y @peri-code/workflow@0.2.0 list --json
+npx -y @peri-code/workflow@0.2.0 read <run_id>
+npx -y @peri-code/workflow@0.2.0 read <run_id> --short --json
 ```
 
 `read` and `list` search upward from the current directory for `.claude/workflow-runs/`. `read` restores extracted long outputs in its report.
@@ -155,7 +157,7 @@ Use `/workflows` to open the workflow panel and see real-time progress (phases, 
 
 ## Prerequisites
 
-The Peri host prefers its locally installed `@peri-code/workflow` Node bundle and automatically falls back to `npx -y @peri-code/workflow` when that bundle is unavailable. No global `@peri-code/workflow` installation is required. The Workflow tool requires **Node.js** (provides `npx`); if npx is unavailable, it returns an error:
+The Peri host prefers its locally installed `@peri-code/workflow` Node bundle and automatically falls back to `npx -y @peri-code/workflow@<version>` (explicit version pin) when that bundle is unavailable. No global `@peri-code/workflow` installation is required. The Workflow tool requires **Node.js** (provides `npx`); if npx is unavailable, it returns an error:
 
 > npx is not available. Install Node.js (https://nodejs.org/) to enable workflow support.
 

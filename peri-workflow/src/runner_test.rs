@@ -311,21 +311,23 @@ throw new Error('intentional crash after agent')
             .await
     });
 
-    // 等待 run_started 写入 progress_store（run 进入 Running 状态）——
-    // 证明 workflow/start 已成功且 msg_loop 已 spawn（修复前此处之后永久 Running）
+    // 等待 run_started 写入 progress_store（run 出现）——证明 workflow/start 已成功
+    // 且 msg_loop 已 spawn（修复前此处之后永久 Running）。
+    //
+    // 注意：不能等待 Running 状态——mock executor 秒回 + 脚本顶层立即 throw，
+    // Running 窗口仅毫秒级，50ms 轮询必然错过；run 可能直接以 Failed 终态出现
+    // （崩溃收敛），因此只等待"run 存在"，终态由下方断言验证。
     let progress_wait = Arc::clone(&progress);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let Some(run) = progress_wait.get_run(&run_id) {
-                if matches!(run.status, RunStatus::Running) {
-                    break;
-                }
+            if progress_wait.get_run(&run_id).is_some() {
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("run 未在超时内进入 Running 状态");
+    .expect("run 未在超时内出现");
 
     // 不触发 kill：Node 自然崩溃 → run() 应正常返回
     run_handle.await.unwrap().unwrap();

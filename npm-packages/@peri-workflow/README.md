@@ -35,7 +35,9 @@
 npm install -g @peri-code/workflow
 ```
 
-或通过 npx / bunx 自动下载（无需全局安装）：`npx -y @peri-code/workflow` / `bunx @peri-code/workflow`
+或通过 npx / bunx 自动下载（无需全局安装）：`npx -y @peri-code/workflow@0.2.0` / `bunx @peri-code/workflow@0.2.0`
+
+> **⚠️ npx 必须带显式版本号**：机器上若全局装过旧版（如 0.1.1），`npx -y @peri-code/workflow` 会**静默复用全局旧版**而不下载最新版——旧版没有 CLI 子命令，`list` / `read` / `validate` / `--help` 全部无输出且 exit 0（看似成功实则什么都没跑）。显式 `@0.2.0` 才能强制使用 registry 上的目标版本。清理全局旧版：`npm uninstall -g @peri-code/workflow`。
 
 **消费端无需构建**：发布的包自带 `dist/peri-workflow.js`（自包含单文件，内嵌 engine、零运行时依赖），Node.js ≥ 18 直接运行。
 
@@ -142,7 +144,7 @@ if method == "agent/run" {
 
 想对接 `@peri-code/workflow`，你的宿主需要实现：
 
-- [ ] spawn 子进程（`npx -y @peri-code/workflow` 或 `bunx @peri-code/workflow`）
+- [ ] spawn 子进程（`npx -y @peri-code/workflow@<version>` 或 `bunx @peri-code/workflow@<version>`，**必须带显式版本**，避免 npx 静默复用全局旧版）
 - [ ] 在 `stdin` 上写 newline-delimited JSON，在 `stdout` 上读 newline-delimited JSON
 - [ ] 发送 `workflow/start` 请求（含脚本源码）
 - [ ] 处理 `agent/run` 请求：执行 LLM agent 并返回 `AgentRunResult`
@@ -173,9 +175,9 @@ peri-workflow --help               # 用法帮助
 无参数运行时保持 JSON-RPC 模式（宿主集成）；带子命令即 CLI 模式，互不干扰。通过 `npx` / `bunx` 也可直接用：
 
 ```bash
-npx -y @peri-code/workflow list
-npx -y @peri-code/workflow read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
-npx -y @peri-code/workflow validate my-workflow.mjs
+npx -y @peri-code/workflow@0.2.0 list
+npx -y @peri-code/workflow@0.2.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
+npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
 ```
 
 ### validate：agent 写脚本前的语法校验
@@ -280,7 +282,7 @@ npm publish
 | 使用方 | 接入方式 | 需要构建？ |
 |--------|----------|-----------|
 | Peri 宿主（Rust） | `ensure_workflow_install` 自动 `npm install --prefix ~/.peri/workflow/<ver> @peri-code/workflow@<ver>`，`node` 直跑 `dist/peri-workflow.js` | 不需要（仅 Peri 自身重编时同步版本常量） |
-| 临时手动 / 调试 | `npx -y @peri-code/workflow` 或 `bunx @peri-code/workflow`（每次联网解析 registry） | 不需要 |
+| 临时手动 / 调试 | `npx -y @peri-code/workflow@<version>` 或 `bunx @peri-code/workflow@<version>`（显式版本；不带版本会在全局已有同名 bin 时静默复用旧版） | 不需要 |
 | 其他宿主集成 | 按上方「宿主实现检查清单」spawn 子进程 + JSON-RPC 协议 | 不需要 |
 | 参与开发 / 发布 | 仓库内 `bun build src/index.ts`（npm run build） | 需要（bun） |
 
