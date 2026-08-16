@@ -458,6 +458,12 @@ pub(crate) async fn handle_request(
                 cfg.session_manager.command_registry_for(req_session_id),
             )
             .await;
+            // 与 session/new 同构（决策 B 扩展）：恢复会话同样预热 MCP skill
+            // 发现——stdio 宿主 session/load 后无需等首 turn before_agent
+            // 装配即有 mcp 命令（广播首发无 mcp 条目属预期，发现完成经注册表
+            // on_change 重发）。幂等（Started 去重）；pool/registry 缺失或
+            // 连接中 → 空跑，由首 turn 装配与连接完成事件兜底。
+            prewarm_session_mcp_discovery(cfg, req_session_id);
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }

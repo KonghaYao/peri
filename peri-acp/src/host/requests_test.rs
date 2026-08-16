@@ -1498,6 +1498,49 @@ async fn test_available_commands_update_mcp_callback_resend() {
     }
 }
 
+/// session/load 与 session/new 同构（决策 B 扩展）：同样预热 MCP skill
+/// 发现。pool 存在但无已连接 server（pending）时 prewarm 空跑不 panic、
+/// 广播正常发出；已连接 server 的发现行为由 middleware 层单测覆盖
+/// （`prewarm_discovery_triggers_idempotent_discovery`）。
+#[tokio::test]
+async fn test_session_load_prewarms_mcp_discovery_smoke() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps::default());
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/load",
+        &json!({ "sessionId": "s1", "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.get("modes").is_some(),
+        "session/load 应返回 modes/configOptions"
+    );
+    // prewarm 空跑路径（pending pool 无已连接 server）不 panic，广播正常发出
+    assert!(
+        transport.notifications().iter().any(|(m, p)| {
+            m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
+        }),
+        "session/load 应广播 available_commands_update"
+    );
+}
+
 /// 核对点 8 覆盖缺口（P2-3）：`set_pending_caps` 带 `ui_commands` 明细 →
 /// session/new → 断言 ui 面板条目随 caps 明细出现（name = Level1 裸名、
 /// `periKind=panel`、`periCategory=ui`、alias 注入），未协商的默认明细不出现。

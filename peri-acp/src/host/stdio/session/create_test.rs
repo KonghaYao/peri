@@ -13,7 +13,8 @@ use std::sync::Arc;
 use agent_client_protocol::{
     schema::v1::{
         DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
-        LoadSessionRequest, LoadSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+        LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+        ResumeSessionRequest, ResumeSessionResponse,
     },
     Agent, Channel, Client, ConnectionTo,
 };
@@ -21,7 +22,7 @@ use parking_lot::RwLock;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::ports::{SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
 use peri_acp_types::store::ThreadStore;
 use peri_agent::thread::FilesystemThreadStore;
 
@@ -75,6 +76,7 @@ fn make_lsp_config() -> LspServerConfig {
 fn make_stdio_context(
     tmp: &tempfile::TempDir,
     lsp_servers: Vec<LspServerConfig>,
+    mcp_pool: Option<Arc<dyn McpPoolPort>>,
 ) -> Arc<StdioContext> {
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
@@ -123,7 +125,7 @@ fn make_stdio_context(
         peri_config: RwLock::new(peri_config),
         permission_mode,
         cron_scheduler,
-        mcp_pool: None,
+        mcp_pool,
         channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_agent_dirs: Vec::new(),
@@ -144,12 +146,56 @@ fn make_stdio_context(
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
 
+/// session/new 预热 MCP skill 发现（决策 B 扩展，stdio 装配面）：pool 存在
+/// 但无已连接 server（pending）时 prewarm 空跑不 panic、响应正常；已连接
+/// server 的发现行为由 middleware 层单测覆盖
+/// （`prewarm_discovery_triggers_idempotent_discovery`）。
+#[tokio::test]
+async fn test_new_prewarms_mcp_discovery_smoke() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool: Arc<dyn McpPoolPort> = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    let ctx = make_stdio_context(&tmp, vec![], Some(pool));
+    let (channel_a, channel_b) = Channel::duplex();
+
+    let ctx_for_handler = Arc::clone(&ctx);
+    let server = Agent
+        .builder()
+        .on_receive_request(
+            {
+                let ctx = ctx_for_handler;
+                async move |req: NewSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    handle_new(&ctx, req, responder, cx).await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_to(channel_b);
+    let _server_task = tokio::spawn(server);
+
+    let result = Client
+        .builder()
+        .connect_with(
+            channel_a,
+            async move |cx: ConnectionTo<Agent>| -> Result<(), agent_client_protocol::Error> {
+                let _resp: NewSessionResponse = cx
+                    .send_request(NewSessionRequest::new(tmp.path().to_str().unwrap()))
+                    .block_task()
+                    .await?;
+                Ok(())
+            },
+        )
+        .await;
+
+    assert!(result.is_ok(), "handle_new 应成功: {result:?}");
+    // prewarm 空跑路径（pending pool 无已连接 server）不 panic
+}
+
 /// load 分支与 session/new 一致创建会话级 LSP 池（H1：跨 turn 复用；
 /// 此前置 None 走临时实例路径，LSP 服务器子进程跨 turn 泄漏）。
 #[tokio::test]
 async fn test_load_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()]);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -196,7 +242,7 @@ async fn test_load_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_resume_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()]);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -243,7 +289,7 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()]);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
     // 前置：注册带非空历史的 source session（fork 要求 source history 非空）
     {
         let mut sessions = ctx.sessions.write();
@@ -312,7 +358,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_load_without_lsp_config_has_no_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![]);
+    let ctx = make_stdio_context(&tmp, vec![], None);
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -359,7 +405,7 @@ async fn test_load_without_lsp_config_has_no_pool() {
 #[tokio::test]
 async fn test_delete_removes_thread_and_responds_empty() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, Vec::new());
+    let ctx = make_stdio_context(&tmp, Vec::new(), None);
     let (channel_a, channel_b) = Channel::duplex();
 
     // 先创建线程（session/new 等价物），取得真实 thread id
