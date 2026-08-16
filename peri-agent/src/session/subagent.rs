@@ -147,7 +147,10 @@ pub struct SubagentHost {
     pub frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen system prompt（fork 路径复用以避免重建；父 session 冻结的 subagent 版本）
     pub frozen_system_prompt: Option<Arc<String>>,
-    /// 父线程 ID 回退值（生产路径由 spawn_subagent 从 parent session 读取）
+    /// 父线程 ID 回退值：被 [`parent_thread_id_of`] 在 spawn 写盘与 resume parent
+    /// 链校验两侧直接读取（主 session `store().thread_id` 恒 None 时是本链的
+    /// 权威值，由 executor 以 `ctx.thread_id` 注入；生产路径为 spawn_subagent
+    /// 从 parent session 读取的同一回退源）
     pub parent_thread_id: Option<String>,
     /// Frozen CLAUDE.md 回退值（生产路径由 spawn_subagent 从 parent session copy）
     pub frozen_claude_md: Option<Arc<String>>,
@@ -377,6 +380,25 @@ impl SessionFactory {
     }
 }
 
+/// 父线程 ID 解析——spawn 写盘与 resume 校验的**唯一取值点**（两侧必须同源，
+/// 防止漂移；resume 校验曾只比 `store().thread_id`，主 agent 路径 100% mismatch）：
+/// - 优先 parent session 的 `store().thread_id`：subagent 层 session 构造时以
+///   child_thread_id 注入，恒为 `Some`（孙 agent 链校验命中此值）；
+/// - 回退 `SubagentHost.parent_thread_id`：TUI 主 agent 的 `store().thread_id`
+///   恒为 `None`（stage_builder 构造主 session 不传 thread_id，`SessionStore`
+///   无 setter），executor 以 `ctx.thread_id` 注入 host
+///   （`ThreadPersistence.parent_thread_id` → stage_builder → host）——即 spawn
+///   落盘时的同一回退值。
+///
+/// parent 为 `None` 时返回 `None`：spawn 侧继续走 `parent_thread_id_cfg` 回退
+/// （`parent == Some` 时 cfg 与 helper/host 同源，写盘值不变），resume 侧跳过
+/// parent 链校验。
+fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<String> {
+    parent
+        .and_then(|p| p.store().thread_id.clone())
+        .or_else(|| parent.and_then(|p| p.subagent_host().and_then(|h| h.parent_thread_id.clone())))
+}
+
 /// 启动子 agent（统一创建入口实现，L3）。
 ///
 /// 流程（与迁移前四条路径语义一致）：
@@ -451,9 +473,7 @@ async fn spawn_subagent_impl(
         .map(|p| p.store().cwd.to_string())
         .or(cwd_cfg)
         .ok_or("spawn_subagent: cwd 未提供（parent 缺失且 config.cwd 为 None）")?;
-    let parent_thread_id = parent
-        .and_then(|p| p.store().thread_id.clone())
-        .or(parent_thread_id_cfg);
+    let parent_thread_id = parent_thread_id_of(parent).or(parent_thread_id_cfg);
     let frozen_claude_md = parent
         .map(|p| p.store().frozen.claude_md.to_string())
         .or(frozen_claude_md_cfg);
@@ -753,8 +773,9 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
 /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
 /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
-/// 3. parent 链：`meta.parent_thread_id` 与 parent 的 `store().thread_id` 比对
-///    （parent 为 None 时仅校验存在性，不校验 parent 链——与 spawn 的 parent
+/// 3. parent 链：`meta.parent_thread_id` 与 [`parent_thread_id_of`] 比对
+///    （`store().thread_id` 优先，回退 `SubagentHost.parent_thread_id`，
+///    与 spawn 写盘同源；parent 为 None 时仅校验存在性——与 spawn 的 parent
 ///    回退语义一致）
 ///
 /// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
@@ -843,9 +864,14 @@ async fn resume_subagent_impl(
     // 原值快照：重建失败时回滚（R-M1）
     let previous_status = meta.agent_status;
 
-    // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）
+    // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）。
+    //    parent id 解析与 spawn 写盘同源（parent_thread_id_of）：优先
+    //    store().thread_id（subagent 层恒 Some），回退 SubagentHost
+    //    .parent_thread_id（TUI 主 agent 的 store().thread_id 恒 None，host 由
+    //    executor 以 ctx.thread_id 注入——spawn 落盘的同一值源）。对称修复后
+    //    主 agent 凭通知 resume 后台子任务不再误报 mismatch。
     if let Some(p) = parent {
-        if meta.parent_thread_id != p.store().thread_id {
+        if meta.parent_thread_id != parent_thread_id_of(Some(p)) {
             return Err(format!(
                 "resume_subagent: parent thread mismatch for {} \
                 (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
