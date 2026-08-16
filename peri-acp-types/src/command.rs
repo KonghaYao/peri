@@ -102,6 +102,11 @@ pub struct CommandContext {
     /// 辅助 LLM（v2 stages/compact.rs 摘要 + Goal 工具验证共用）。
     pub auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     pub event_sink: Arc<dyn EventSink>,
+    /// 用户消息原文（拦截层整段透传，含 `/` 前缀与 args；RPC 路径仅命令名
+    /// 文本、无 `/` 前缀保证，且 Inject 在 RPC 路径显式报错、值不被消费）。
+    /// `AgentPassthrough` 等需要把原文交还 agent 管线的 handler 消费——
+    /// 命令名与 args 均已切分，原文不可重建，故随上下文携带。
+    pub raw_text: String,
     /// 命令参数（命令名之后的文本）。
     pub args: String,
     /// 命令参数统一解析结果（P1-1：拦截层 / execute-command RPC 路径在
@@ -194,6 +199,7 @@ impl CommandContext {
             deps,
             compact_config: CompactConfig::default(),
             auxiliary_model: None,
+            raw_text: String::new(),
             args: String::new(),
             parsed_args: None,
             thread_store: None,

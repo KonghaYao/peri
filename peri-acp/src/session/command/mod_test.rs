@@ -11,8 +11,8 @@ use peri_acp_types::messages::BaseMessage;
 
 use super::clear::ClearCommand;
 use super::{
-    register_builtins, CommandContext, CommandHandler, CommandOutcome, CommandRegistry,
-    CommandResult, FeedbackChannel, FeedbackLevel,
+    register_builtins, AgentPassthrough, CommandContext, CommandHandler, CommandOutcome,
+    CommandRegistry, CommandResult, FeedbackChannel, FeedbackLevel,
 };
 use crate::session::executor::PromptStopReason;
 
@@ -77,6 +77,38 @@ fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) ->
         tokio_util::sync::CancellationToken::new(),
         peri_acp_types::command::DependencyBag::new(),
     )
+}
+
+// ── AgentPassthrough 测试 ─────────────────────────────────────────────────
+
+/// [回归测试] AgentPassthrough 把用户消息原文（含 `/skill-name` token）整段
+/// Inject 回 agent 管线——SkillPreload 中间件自动检测分支依赖原文，命令不被吞。
+///
+/// 历史背景：Phase 5 Step 6 拦截层删除 `kind != Immediate` fall-through 守卫后，
+/// skill 条目经 AgentPassthrough 执行，占位实现返回 `Inject(String::new())`
+/// 空串，`/skill-name ...` 整体替换为空文本，skill 预加载失效（2026-08-16）。
+#[tokio::test]
+async fn test_agent_passthrough_injects_original_text() {
+    // Arrange
+    let sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_command_context(sink.clone());
+    ctx.raw_text = "/diagnose 帮我调试一下".to_string();
+    ctx.args = "帮我调试一下".to_string();
+    let cmd = AgentPassthrough;
+
+    // Act
+    let outcome = CommandHandler::execute(&cmd, ctx).await;
+
+    // Assert：原文整段回传（含 `/skill-name` token），供 SkillPreload 自动检测
+    match outcome {
+        CommandOutcome::Inject(text) => assert_eq!(
+            text, "/diagnose 帮我调试一下",
+            "原文必须整段回传（含 /skill-name token）"
+        ),
+        CommandOutcome::Done(_) | CommandOutcome::Delegate(_) => {
+            panic!("AgentPassthrough 应恒 Inject，实际返回非 Inject 变体")
+        }
+    }
 }
 
 // ── register_builtins 集成测试 ────────────────────────────────────────────

@@ -32,6 +32,7 @@ Your strengths:
 - Reading and analyzing file contents
 
 Guidelines:
+- FIRST: consult the codebase index — Glob `docs/code-index/*.md` and read the relevant crate's index file (it maps "what you want to do" → files + entry functions with line numbers). Use it as the starting map, then verify the details with Grep/Read. The index can be stale; the code is the source of truth
 - Use Glob for broad file pattern matching
 - Use Grep for searching file contents with regex
 - Use Read when you know the specific file path you need to read

@@ -29,6 +29,7 @@ fn make_context(args: &str) -> CommandContext {
         compact_config: Default::default(),
         auxiliary_model: None,
         event_sink: std::sync::Arc::new(NoopSink),
+        raw_text: String::new(),
         args: args.to_string(),
         parsed_args: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),

@@ -175,6 +175,10 @@ pub async fn execute_command(
     // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
     ctx.compact_config = crate::host::compact_config::load_compact_config(peri_config);
     ctx.auxiliary_model = auxiliary_model;
+    // 命令原文透传：RPC 路径仅命令名文本（无 `/` 前缀保证，与拦截层整段
+    // 透传不同源）；本路径无 agent 管线可注入，Inject 类 handler 由调用方
+    // 显式报错（execute_command.rs 语义），值不被消费。
+    ctx.raw_text = command_str.to_string();
     ctx.args = args_string;
     ctx.parsed_args = parsed_args;
     ctx.thread_store = Some(controller.sessions());

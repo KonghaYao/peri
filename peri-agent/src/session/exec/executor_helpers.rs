@@ -457,6 +457,10 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     ctx.compact_config = (req.compact_config_loader)();
     ctx.auxiliary_model = req.auxiliary_model.clone();
     ctx.args = resolved.args;
+    // 用户消息原文随上下文透传（AgentPassthrough 等 handler 交还 agent 管线
+    // 用；skill 命中时原文含 `/skill-name` token，SkillPreloadMiddleware
+    // 自动检测分支依赖原文，命令不被吞）。
+    ctx.raw_text = req.content.text_content();
     ctx.parsed_args = parsed_args;
     ctx.thread_store = req.thread_store;
     ctx.thread_id = req.thread_id;

@@ -764,6 +764,80 @@ async fn test_intercept_inject_outcome_returns_inject() {
     );
 }
 
+/// [回归测试] AgentPassthrough 行为镜像（core 域 skill 条目占位 handler）：
+/// 命中 skill 命令时 `Inject(ctx.raw_text)`——用户消息原文整段（含
+/// `/skill-name` token）回传 agent 管线，SkillPreload 中间件自动检测分支
+/// 依赖原文，命令不被吞。
+///
+/// 历史背景：Phase 5 Step 6 拦截层删除 `kind != Immediate` fall-through
+/// 守卫后，skill 条目经 AgentPassthrough 执行，占位实现返回空串 Inject，
+/// 用户消息被整体替换为空文本，skill 预加载失效（2026-08-16）。
+#[tokio::test]
+async fn test_intercept_skill_passthrough_injects_original_text() {
+    struct PassthroughHandler;
+    #[async_trait]
+    impl CommandHandler for PassthroughHandler {
+        async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+            CommandOutcome::Inject(ctx.raw_text)
+        }
+    }
+    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+        // 镜像注册表 resolve 语义：整段文本进入，名字 + args 词法切分完成。
+        if text == "diagnose 帮我调试一下" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:diagnose".to_string(),
+                    aliases: vec![],
+                    description: "test skill".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Skill,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(PassthroughHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                args: "帮我调试一下".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let content = MessageContent::text("/diagnose 帮我调试一下");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        lookup,
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：skill 命中 → Inject 回传原文（含 `/skill-name` token），不 push_done
+    assert!(
+        matches!(result, InterceptOutcome::Inject(ref text) if text == "/diagnose 帮我调试一下"),
+        "skill 命中应将原文整段回传 agent 管线（原文被吞 = skill 预加载失效）"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        0,
+        "Inject 路径不应调用 push_done（由 agent pump 负责）"
+    );
+}
+
 /// 新增：cancel 分支（外层 cancel 已触发）→ Handled(Cancelled) + push_done，
 /// messages = history 原样（cancel 语义保持）。
 #[tokio::test]

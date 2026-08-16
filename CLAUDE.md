@@ -32,6 +32,10 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 | 文档站 | `peri-cool/CLAUDE.md` + documentation | `peri-cool/`（submodule） |
 | Rust 通用、测试、CLAUDE 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
 
+## 代码定位
+
+定位或修改代码行为时，先查 `docs/code-index/` 速查表（每 crate 一个文件：「我想做什么」→ 主文件 + 入口/关键函数 + 一句话关键逻辑，跨 crate 链路在「跨模块契约」节指向 ARC 编号）：从「我想做什么」列匹配意图 → 打开主文件 → Grep 验证入口函数。索引缺失、过期或行为变更后，按 `codebase-index` skill 的构建/更新流程重建对应条目。
+
 Crate 拓扑：`peri-tui → peri-acp → peri-agent`；`peri-middlewares` 由 ACP 装配；其他 workspace crates 以 `Cargo.toml` 为事实源。
 
 ## Workspace 命令

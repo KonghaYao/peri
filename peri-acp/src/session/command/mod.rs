@@ -100,18 +100,20 @@ impl CommandHandler for LoopPlaceholder {
 /// Inject 三态：透传指令进正常 agent 管线）。
 ///
 /// skill 注入语义 = 把 skill 调用指令文本注入 agent 管线；当前为最小占位
-/// ——返回 [`CommandOutcome::Inject`] 空串（拦截路径对 Inject 的既有处理为
-/// warn + fall-through，原文进 agent 管线，Skills 中间件旧路径继续处理，
-/// 命令不被吞；与 `peri-middlewares` MCP `McpSkillPlaceholder` 同构。
-/// Phase 6 A4 后 `dispatch/commands.rs` 桥接占位已随发送侧扫描删除）。
+/// ——返回 [`CommandOutcome::Inject`] **用户消息原文**（整段透传，含
+/// `/skill-name` token）：原文进 agent 管线，Skills 中间件旧路径
+/// （SkillPreloadMiddleware 自动检测）继续处理，命令不被吞。
 /// 完整语义（按 skill 名加载 SKILL.md 注入系统提示）留待后续版本。
 #[derive(Clone, Copy)]
 pub struct AgentPassthrough;
 
 #[async_trait]
 impl CommandHandler for AgentPassthrough {
-    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
-        CommandOutcome::Inject(String::new())
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        // 原文整段交还 agent 管线（含 `/skill-name` token）：SkillPreload
+        // 中间件自动检测分支依赖原文，命令不被吞。RPC 路径（execute-command）
+        // 无 agent 管线，Inject 由调用方显式报错（execute_command.rs 语义）。
+        CommandOutcome::Inject(ctx.raw_text)
     }
 }
 

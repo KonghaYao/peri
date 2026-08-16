@@ -287,6 +287,9 @@ pub async fn rewind_execute(
     // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
     ctx.compact_config = crate::host::compact_config::load_compact_config(peri_config);
     ctx.auxiliary_model = auxiliary_model;
+    // rewind 恒 Done，无 Inject 语义——原文无需透传，显式置空防未来
+    // 新增 Inject 类 handler 时静默吞消息（与 intercept 路径整段透传对应）。
+    ctx.raw_text = String::new();
     // Phase 5 Step 5：不再构造 CommandContext.args JSON（slash 形态解析已迁
     // ArgsSchema）——RPC 前置校验已拿到结构化参数，直接调共享执行体。
     ctx.thread_store = Some(controller.sessions());
