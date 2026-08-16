@@ -14,7 +14,10 @@ fn temp_dir_str() -> String {
 
 /// 绝对临时目录下的相对拼接，用于构造工具参数中的绝对路径。
 fn temp_dir_join(rel: &str) -> String {
-    std::env::temp_dir().join(rel).to_string_lossy().into_owned()
+    std::env::temp_dir()
+        .join(rel)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
@@ -63,7 +66,10 @@ async fn test_preview_lists_file_changes_after_target() {
 
     let changes = result["file_changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1, "目标之后只有 Write");
-    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("new_file.txt"));
+    assert_eq!(
+        Path::new(changes[0]["path"].as_str().unwrap()),
+        Path::new("new_file.txt")
+    );
     assert_eq!(changes[0]["kind"], "write");
     let fingerprint = result["preview_fingerprint"].as_str().unwrap();
     assert_eq!(fingerprint.len(), 64);
@@ -86,8 +92,15 @@ async fn test_preview_reverse_order_newest_first() {
 
     let changes = result["file_changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2);
-    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("new_file.txt"), "逆序：最新变更在前");
-    assert_eq!(Path::new(changes[1]["path"].as_str().unwrap()), Path::new("src/main.rs"));
+    assert_eq!(
+        Path::new(changes[0]["path"].as_str().unwrap()),
+        Path::new("new_file.txt"),
+        "逆序：最新变更在前"
+    );
+    assert_eq!(
+        Path::new(changes[1]["path"].as_str().unwrap()),
+        Path::new("src/main.rs")
+    );
     assert_eq!(changes[1]["kind"], "edit");
 }
 
@@ -160,7 +173,10 @@ async fn test_preview_extracts_anthropic_tool_use() {
     // P1 修复：ai_from_blocks 双路径（tool_calls + content_blocks）按 id 去重，
     // 同一变更只计一次。
     assert_eq!(changes.len(), 1);
-    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("docs/readme.md"));
+    assert_eq!(
+        Path::new(changes[0]["path"].as_str().unwrap()),
+        Path::new("docs/readme.md")
+    );
 }
 
 #[tokio::test]
@@ -191,7 +207,10 @@ async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
     .await
     .unwrap();
 
-    assert_eq!(Path::new(result["file_changes"][0]["path"].as_str().unwrap()), Path::new("src/lib.rs"));
+    assert_eq!(
+        Path::new(result["file_changes"][0]["path"].as_str().unwrap()),
+        Path::new("src/lib.rs")
+    );
 }
 
 #[tokio::test]

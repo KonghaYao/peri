@@ -1770,7 +1770,10 @@ impl HomeDirGuard {
         {
             let prev = std::env::var_os("USERPROFILE");
             std::env::set_var("USERPROFILE", path);
-            Self { home, userprofile: prev }
+            Self {
+                home,
+                userprofile: prev,
+            }
         }
         #[cfg(not(windows))]
         Self { home }
