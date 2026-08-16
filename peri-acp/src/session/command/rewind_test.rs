@@ -17,7 +17,9 @@ use peri_acp_types::{
     messages::{BaseMessage, ContentBlock, ToolCallRequest},
 };
 
-use super::super::{AgentCommand, CommandContext, CommandKind};
+use super::super::{
+    CommandContext, CommandHandler, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
+};
 use super::{extract_file_changes, revert_files, validate_tool_pairing, RewindCommand};
 use crate::session::executor::PromptStopReason;
 
@@ -118,41 +120,42 @@ fn make_ctx(
     cwd: String,
     args: String,
 ) -> CommandContext {
-    CommandContext {
-        session_id: "test-session".to_string(),
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 非默认旧字段显式赋值（args）。
+    let mut ctx = CommandContext::new(
+        "test-session".to_string(),
         history,
         cwd,
-        compact_config: Default::default(),
-        auxiliary_model: None,
-        event_sink: sink,
-        args,
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-        thread_store: None,
-        thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
-    }
+        sink,
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    );
+    ctx.args = args.clone();
+    // P1-1：参数统一解析——测试直调 handler 路径无拦截层，按声明 schema
+    // 解析填充 parsed_args（解析失败 → None，等价拦截层拒绝进入 handler；
+    // 空参数回落 handler 内 missing target_message_id 防御分支）。
+    ctx.parsed_args = RewindCommand::args_schema().parse(&args).ok();
+    ctx
 }
 
 // ── RewindCommand 属性测试 ────────────────────────────────────────────────
 
 #[test]
 fn test_rewind_command_name_and_aliases() {
-    let cmd = RewindCommand;
-    assert_eq!(cmd.name(), "rewind");
-    let aliases = cmd.aliases();
-    assert!(
-        aliases.contains(&"undo"),
-        "应包含 undo 别名，实际: {:?}",
-        aliases
-    );
-    assert_eq!(cmd.kind(), CommandKind::Immediate);
-    assert!(!cmd.description().is_empty());
+    // Phase 5 Step 6：旧 AgentCommand trait 已删，元数据取命令关联常量
+    //（注册条目挂载的单一事实源）。
+    assert_eq!(RewindCommand::NAME, "rewind");
+    assert!(RewindCommand::ALIASES.contains(&"undo"), "应包含 undo 别名");
+    assert!(!RewindCommand::DESCRIPTION.is_empty());
+}
+
+/// 执行并解包：rewind 恒 Done，其他变体 panic（与旧 AgentCommand 转发
+/// unreachable! 同语义；Phase 5 Step 6 旧契约删除后直接经新契约执行）。
+async fn execute_rewind_cmd(cmd: &RewindCommand, ctx: CommandContext) -> CommandResult {
+    match CommandHandler::execute(cmd, ctx).await {
+        CommandOutcome::Done(r) => r,
+        _ => panic!("rewind 应恒 Done"),
+    }
 }
 
 // ── extract_file_changes 测试 ─────────────────────────────────────────────
@@ -614,37 +617,36 @@ fn test_validate_tool_pairing_mixed_message_types_no_panic() {
 // ── execute 测试 ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_execute_invalid_args_emits_rewind_error() {
-    // Arrange: 无效 JSON 参数
+async fn test_execute_missing_target_returns_error_feedback() {
+    // Phase 5 Step 5：参数形态由 serde_json 迁入 ArgsSchema（positional +
+    // flag）；解析失败收敛为 feedback(Error, UiOnly)，RewindError 事件通道
+    // 已删除——命令自身零事件发射（编排层 emit_command_feedback 统一发射）。
+    // Arrange: 缺 target_message_id（空参数）
     let sink = Arc::new(MockEventSink::new());
     let history = vec![BaseMessage::human("你好")];
-    let ctx = make_ctx(
-        sink.clone(),
-        history,
-        "/tmp".to_string(),
-        "{invalid json".to_string(),
-    );
+    let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), "".to_string());
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 返回原始 history（未修改），EndTurn
     assert_eq!(result.messages.len(), 1, "参数错误应返回原始 history");
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 RewindError 事件（rewind 失败与压缩无关，不复用 CompactError）
-    let events = sink.events();
-    assert_eq!(events.len(), 1, "应推送 1 个事件");
+    // 解析失败经 feedback 返回（UiOnly），不再推送 RewindError 事件
+    let fb = result.feedback.as_ref().expect("解析失败应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert!(fb.message.contains("rewind 参数解析失败"));
     assert!(
-        events[0].1.contains("rewind_error"),
-        "应推送 rewind_error 事件，实际: {}",
-        events[0].1
+        sink.events().is_empty(),
+        "命令自身不应发射任何事件（RewindError 变体已删除）"
     );
 }
 
 #[tokio::test]
-async fn test_execute_target_not_found_emits_rewind_error() {
+async fn test_execute_target_not_found_returns_error_feedback() {
     // Arrange: 目标 message_id 不在 history 中
     let sink = Arc::new(MockEventSink::new());
     let history = vec![
@@ -653,32 +655,29 @@ async fn test_execute_target_not_found_emits_rewind_error() {
         BaseMessage::human("第二条"),
     ];
     let target_id = "nonexistent-uuid-0000-0000-000000000000";
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history.clone(), "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 返回完整 history，EndTurn
     assert_eq!(result.messages.len(), 3, "未找到目标时应返回完整 history");
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
+    // 未找到目标经 feedback 返回（UiOnly），不再推送 RewindError 事件
+    let fb = result.feedback.as_ref().expect("未找到目标应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
     assert!(
-        events[0].1.contains("rewind_error"),
-        "应推送 rewind_error，实际: {}",
-        events[0].1
+        fb.message.contains("未找到目标消息"),
+        "错误消息应包含 '未找到目标消息'，实际: {}",
+        fb.message
     );
     assert!(
-        events[0].1.contains("未找到目标消息"),
-        "错误消息应包含 '未找到目标消息'，实际: {}",
-        events[0].1
+        sink.events().is_empty(),
+        "命令自身不应发射任何事件（RewindError 变体已删除）"
     );
 }
 
@@ -695,16 +694,12 @@ async fn test_execute_tail_truncation_keeps_messages_before_target() {
     let m4 = BaseMessage::ai("第二答");
     let target_id = m3.id().as_uuid().to_string();
     let history = vec![m1.clone(), m2.clone(), m3, m4];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 保留 m1, m2（目标之前）
     assert_eq!(result.messages.len(), 2, "末尾截断应保留目标前的 2 条");
@@ -712,7 +707,13 @@ async fn test_execute_tail_truncation_keeps_messages_before_target() {
     assert_eq!(result.messages[1].id(), m2.id());
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 rewind_completed 事件
+    // 成功 summary → feedback(Info, UiOnly)（Phase 5 Step 5 收敛）
+    let fb = result.feedback.as_ref().expect("成功应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Info);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert_eq!(fb.message, "已回滚 2 条消息");
+
+    // 应推送 rewind_completed 事件（重建信号保留）
     let events = sink.events();
     assert_eq!(events.len(), 1);
     assert!(
@@ -742,16 +743,12 @@ async fn test_execute_middle_truncation_keeps_prefix_only() {
     let m6 = BaseMessage::ai("A3");
     let target_id = m3.id().as_uuid().to_string();
     let history = vec![m1.clone(), m2.clone(), m3, m4, m5, m6];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 保留 m1, m2
     assert_eq!(result.messages.len(), 2, "中间截断应保留前 2 条");
@@ -777,16 +774,12 @@ async fn test_execute_head_truncation_returns_empty() {
     let m2 = BaseMessage::ai("A1");
     let target_id = m1.id().as_uuid().to_string();
     let history = vec![m1, m2];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 保留为空
     assert!(result.messages.is_empty(), "回滚到第一条应保留空历史");
@@ -815,16 +808,14 @@ async fn test_execute_revert_files_true_invokes_file_removal() {
     let m2 = make_ai_write_call(file_rel, "created"); // 这条及之后将被移除
     let target_id = m2.id().as_uuid().to_string();
     let history = vec![m1.clone(), m2];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": true,
-    })
-    .to_string();
+    // revert_files 缺省 = true（现状 serde default_true 语义，ArgsSchema 形态
+    // 下不传 --no-revert-files 即回退文件）
+    let args = target_id.clone();
     let ctx = make_ctx(sink.clone(), history, cwd, args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 文件被删除，保留 m1
     assert!(!full.exists(), "revert_files=true 应删除 Write 创建的文件");
@@ -849,16 +840,12 @@ async fn test_execute_revert_files_false_preserves_files() {
     let m2 = make_ai_write_call(file_rel, "created");
     let target_id = m2.id().as_uuid().to_string();
     let history = vec![m1, m2];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, cwd, args);
     let cmd = RewindCommand;
 
     // Act
-    let _ = cmd.execute(ctx).await;
+    let _ = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 文件仍存在
     assert!(full.exists(), "revert_files=false 应保留文件");
@@ -876,16 +863,12 @@ async fn test_execute_rewind_completed_event_carries_retained_messages() {
     let m3 = BaseMessage::human("Q2"); // 目标
     let target_id = m3.id().as_uuid().to_string();
     let history = vec![m1.clone(), m2.clone(), m3];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 事件存在且为 rewind_completed
     let events = sink.events();
@@ -914,16 +897,12 @@ async fn test_execute_does_not_call_push_done_itself() {
     let m1 = BaseMessage::human("Q1");
     let target_id = m1.id().as_uuid().to_string();
     let history = vec![m1];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act
-    cmd.execute(ctx).await;
+    execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 自身不调用 push_done
     assert_eq!(
@@ -954,16 +933,12 @@ async fn test_execute_with_orphan_tool_pairing_in_retained_does_not_panic() {
     let m3 = BaseMessage::human("Q2");
     let target_id = m3.id().as_uuid().to_string();
     let history = vec![m1.clone(), m2.clone(), m3];
-    let args = serde_json::json!({
-        "target_message_id": target_id,
-        "revert_files": false,
-    })
-    .to_string();
+    let args = format!("{target_id} --no-revert-files");
     let ctx = make_ctx(sink.clone(), history, "/tmp".to_string(), args);
     let cmd = RewindCommand;
 
     // Act: 不应 panic
-    let result = cmd.execute(ctx).await;
+    let result = execute_rewind_cmd(&cmd, ctx).await;
 
     // Assert: 保留 m1, m2（含未配对 ToolUse）
     assert_eq!(result.messages.len(), 2);
@@ -986,20 +961,31 @@ async fn test_execute_missing_revert_files_defaults_true() {
         sink.clone(),
         history.clone(),
         std::env::temp_dir().to_string_lossy().to_string(),
-        // 只传 target_message_id，缺 revert_files
-        serde_json::json!({ "target_message_id": target_id }).to_string(),
+        // 只传 target_message_id（ArgsSchema positional），缺 --no-revert-files
+        // → revert_files 默认 true
+        target_id,
     );
 
-    let result = RewindCommand.execute(ctx).await;
+    let result = execute_rewind_cmd(&RewindCommand, ctx).await;
 
     let events = sink.events();
     assert!(
         !events.iter().any(|(_, json)| json.contains("参数解析失败")),
-        "缺 revert_files 不应进入解析失败路径"
+        "缺 --no-revert-files 不应进入解析失败路径"
     );
+    // 成功路径：feedback(Info, UiOnly) + RewindCompleted 事件仍发射
+    let fb = result.feedback.as_ref().expect("成功应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Info);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
     assert_eq!(
         result.messages.len(),
         0,
         "回退到第一条 → 保留 0 条（截断已执行）"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(_, json)| json.contains("rewind_completed")),
+        "成功路径必须仍发射 RewindCompleted 事件（TUI 重建信号）"
     );
 }

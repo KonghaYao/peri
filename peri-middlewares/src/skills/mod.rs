@@ -166,7 +166,7 @@ impl SkillsMiddleware {
         vec![PromptSection::dynamic(
             "13_skills",
             PromptSectionZone::Uncached,
-            5, // C1 D2 编号事实：gated 13=5（11_subagent=4 之后）
+            6, // C1 D2 编号事实（2026-08-15 顺延）：gated 13=6（12_ask_user=5 之后）
             content,
         )]
     }

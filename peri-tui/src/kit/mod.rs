@@ -43,6 +43,7 @@ pub mod rewind_candidates;
 pub mod service_snapshot;
 pub mod setup_wizard;
 pub mod slash_completion;
+pub mod slash_projection;
 pub mod status_bar;
 pub mod stream_data;
 pub mod submit_consumer;
@@ -54,6 +55,7 @@ pub mod thread_load_consumer;
 pub mod tool_display;
 pub mod tool_semantics;
 pub mod tui_render_unit;
+pub mod ui_command;
 pub mod welcome;
 pub mod workflow_snapshot;
 

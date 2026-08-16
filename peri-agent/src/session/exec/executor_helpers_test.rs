@@ -6,20 +6,27 @@
 //!
 //! 随迁适配（R4，断言语义不重写）：`peri_config` 已移出拦截契约——命令
 //! 注册表查找经注入的 `command_lookup` 闭包 mock（ACP 协议面注册表语义
-//! 由装配面承载）；compact 配置经注入闭包返回默认值。
+//! 由装配面承载，返回 `ResolvedCommand`，假 handler 执行）；
+//! compact 配置经注入闭包返回默认值。
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_acp_types::{
-    command::{AgentCommand, CommandContext, CommandKind, CommandResult, PromptStopReason},
+    command::{
+        command_handler::CommandHandler, command_route::RouteEntry, CommandContext,
+        CommandFeedback, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
+        PromptStopReason, ResolvedCommand,
+    },
     compact::CompactConfig,
     event::{EventSink, ExecutorEvent},
     messages::{BaseMessage, MessageContent},
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{intercept_immediate_command, InterceptRequest};
+use super::{
+    emit_command_feedback, intercept_immediate_command, InterceptOutcome, InterceptRequest,
+};
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -66,31 +73,40 @@ impl EventSink for MockEventSink {
     }
 }
 
-// ── Fake Immediate 命令（mock command_lookup 注入）──────────────────────────
+// ── Fake CommandHandler（mock command_lookup 注入）─────────────────────────
 
-/// Fake Immediate 命令：execute 返回拦截时的历史（与真实 Immediate 命令的
+/// Fake CommandHandler：execute 返回拦截时的历史（与真实 Immediate 命令的
 /// messages 透传语义一致）。
-struct FakeImmediateCommand;
+struct FakeImmediateHandler;
 
 #[async_trait]
-impl AgentCommand for FakeImmediateCommand {
-    fn name(&self) -> &str {
-        "compact"
-    }
-
-    fn description(&self) -> &str {
-        "fake immediate command for tests"
-    }
-
-    fn kind(&self) -> CommandKind {
-        CommandKind::Immediate
-    }
-
-    async fn execute(&self, ctx: CommandContext) -> CommandResult {
-        CommandResult {
+impl CommandHandler for FakeImmediateHandler {
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        CommandOutcome::Done(CommandResult {
             messages: ctx.history,
             stop_reason: PromptStopReason::EndTurn,
-        }
+            feedback: None,
+        })
+    }
+}
+
+/// 测试用 RouteEntry（core 域 Command 条目，假 handler）。
+fn test_route_entry() -> RouteEntry {
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource,
+    };
+    RouteEntry {
+        fullname: "core:compact".to_string(),
+        aliases: vec![],
+        description: "fake immediate command for tests".to_string(),
+        kind: CommandEntryKind::Command,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(FakeImmediateHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Core,
+            lifecycle: CommandLifecycle::Connected,
+        },
     }
 }
 
@@ -99,7 +115,7 @@ impl AgentCommand for FakeImmediateCommand {
 /// 构造最小 InterceptRequest（auxiliary_model / thread_store / frozen 等均为 None）。
 ///
 /// `command_lookup` 为注入的注册表查找 mock（None = 未注册，走 agent 管线；
-/// Some = 命令命中，按 kind 决定拦截与否）。
+/// Some = 命中，执行由 CommandOutcome 承载）。
 #[allow(clippy::too_many_arguments)]
 fn make_intercept_request<'a>(
     content: &'a MessageContent,
@@ -151,14 +167,50 @@ fn no_match_lookup() -> super::CommandLookupFn {
     Arc::new(|_text: &str| None)
 }
 
-/// 命中 Fake Immediate 命令的 command_lookup mock（/compact 路径）。
+/// 命中 Fake CommandHandler 的 command_lookup mock（/compact 路径；
+/// P1-6：返回 `ResolvedCommand`，args 词法切分由注册表 resolve 完成）。
 fn immediate_lookup() -> super::CommandLookupFn {
     Arc::new(|text: &str| {
         if text == "compact" {
-            Some((
-                Arc::new(FakeImmediateCommand) as Arc<dyn AgentCommand>,
-                String::new(),
-            ))
+            Some(ResolvedCommand {
+                entry: Arc::new(test_route_entry()),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+/// 命中返回 Inject 的 handler 的 command_lookup mock（Phase 5 Step 6 语义：
+/// 回传 `Inject(text)`，executor.rs 调用点转 AgentInput::blocks 进 agent 管线）。
+fn inject_lookup() -> super::CommandLookupFn {
+    struct InjectHandler;
+    #[async_trait]
+    impl CommandHandler for InjectHandler {
+        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+            CommandOutcome::Inject("/skill tdd".to_string())
+        }
+    }
+    Arc::new(|text: &str| {
+        if text == "inject-me" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:inject-me".to_string(),
+                    aliases: vec![],
+                    description: "inject handler for tests".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(InjectHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
         } else {
             None
         }
@@ -167,7 +219,7 @@ fn immediate_lookup() -> super::CommandLookupFn {
 
 // ── intercept_immediate_command: 路径分支测试 ─────────────────────────────
 
-/// 普通 slash 命令（非 Immediate 注册）：不在注入注册表中 → 返回 None
+/// 普通 slash 命令（非 Immediate 注册）：不在注入注册表中 → PassThrough
 #[tokio::test]
 async fn test_intercept_unknown_command_returns_none() {
     // Arrange
@@ -190,11 +242,14 @@ async fn test_intercept_unknown_command_returns_none() {
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：未知命令不拦截，继续走 agent 管线
-    assert!(result.is_none(), "未知命令应返回 None 继续走 agent 管线");
+    // Assert：未知命令不拦截，PassThrough 继续走 agent 管线
+    assert!(
+        matches!(result, InterceptOutcome::PassThrough),
+        "未知命令应 PassThrough 继续走 agent 管线"
+    );
 }
 
-/// 普通文本（无 `/` 前缀）：返回 None
+/// 普通文本（无 `/` 前缀）：PassThrough
 #[tokio::test]
 async fn test_intercept_plain_text_returns_none() {
     // Arrange
@@ -218,10 +273,13 @@ async fn test_intercept_plain_text_returns_none() {
     let result = intercept_immediate_command(req).await;
 
     // Assert：普通文本不拦截
-    assert!(result.is_none(), "普通文本应返回 None");
+    assert!(
+        matches!(result, InterceptOutcome::PassThrough),
+        "普通文本应 PassThrough"
+    );
 }
 
-/// 单个 `/` 字符：strip 后为空 → 返回 None
+/// 单个 `/` 字符：strip 后为空 → PassThrough
 #[tokio::test]
 async fn test_intercept_slash_only_returns_none() {
     // Arrange
@@ -244,20 +302,176 @@ async fn test_intercept_slash_only_returns_none() {
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：单个 `/` 应返回 None（不空命中命令）
-    assert!(result.is_none(), "单个 `/` 应返回 None");
+    // Assert：单个 `/` 应 PassThrough（不空命中命令）
+    assert!(
+        matches!(result, InterceptOutcome::PassThrough),
+        "单个 `/` 应 PassThrough"
+    );
 }
 
-// ── intercept_immediate_command: Immediate 命令拦截（/clear） ─────────────
-
-/// `/clear` 已迁移到视图层——prompt 路径不再拦截，返回 None（走 agent 管线）
+/// `/etc/hosts` 绝对路径输入：strip 后注册表未命中 → PassThrough（fall through
+/// 进 agent 管线，不产生错误事件、不硬报错——设计 §78 未解析一律 fall through）。
 #[tokio::test]
-async fn test_intercept_clear_command_not_intercepted_in_prompt_path() {
+async fn test_intercept_etc_hosts_falls_through() {
+    // Arrange
+    let content = MessageContent::text("/etc/hosts");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        no_match_lookup(),
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：绝对路径未命中注册表 → PassThrough，且不产生任何事件
+    assert!(
+        matches!(result, InterceptOutcome::PassThrough),
+        "/etc/hosts 应 PassThrough 走 agent 管线"
+    );
+    assert!(
+        mock_sink.pushed_events.lock().unwrap().is_empty(),
+        "fall through 路径不得产生错误事件"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        0,
+        "fall through 路径不得 push_done"
+    );
+}
+
+/// `mcp__demo__hello`（废弃 mcp__ 双下划线形态，无 `/` 前缀）：未命中 →
+/// PassThrough（fall through 进 agent 管线，不硬报错——词法层拒绝是注册表
+/// resolve 的职责，拦截层不产生错误事件）。
+#[tokio::test]
+async fn test_intercept_mcp_legacy_form_falls_through() {
+    // Arrange
+    let content = MessageContent::text("mcp__demo__hello");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        no_match_lookup(),
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：mcp__ 遗留形态不拦截、不报错 → PassThrough
+    assert!(
+        matches!(result, InterceptOutcome::PassThrough),
+        "mcp__ 遗留形态应 PassThrough 走 agent 管线"
+    );
+    assert!(
+        mock_sink.pushed_events.lock().unwrap().is_empty(),
+        "fall through 路径不得产生错误事件"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        0,
+        "fall through 路径不得 push_done"
+    );
+}
+
+// ── intercept_immediate_command: Immediate 命令拦截（/clear 注册表命中） ─────
+
+/// 命中 Fake ClearHandler 的 command_lookup mock（core:clear 注册形态：
+/// 别名 cls/reset，args_schema = ArgsSchema::default() 零校验；语义与真实
+/// ClearCommand 对齐——messages 清空 + feedback(Info, "对话已清空", UiOnly)）。
+fn clear_lookup() -> super::CommandLookupFn {
+    struct FakeClearHandler;
+    #[async_trait]
+    impl CommandHandler for FakeClearHandler {
+        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+            CommandOutcome::Done(CommandResult {
+                messages: Vec::new(), // 语义保持：清空后会话为空
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: Some(CommandFeedback {
+                    level: FeedbackLevel::Info,
+                    message: "对话已清空".to_string(),
+                    channel: FeedbackChannel::UiOnly,
+                }),
+            })
+        }
+    }
+    Arc::new(|text: &str| {
+        matches!(text, "clear" | "cls" | "reset").then(|| ResolvedCommand {
+            entry: Arc::new(RouteEntry {
+                fullname: "core:clear".to_string(),
+                aliases: vec!["cls".to_string(), "reset".to_string()],
+                description: "清空当前会话的对话历史".to_string(),
+                kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                category: None,
+                args_schema: Some(peri_acp_types::command::ArgsSchema::default()),
+                handler: Arc::new(FakeClearHandler),
+                provenance: peri_acp_types::command::command_route::CommandProvenance {
+                    source: peri_acp_types::command::command_route::CommandSource::Core,
+                    lifecycle: peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                },
+            }),
+            args: String::new(),
+        })
+    })
+}
+
+/// 断言 clear 拦截结果：Handled + messages 清空 + CommandFeedback
+/// (Info, "对话已清空", UiOnly) + push_done 恰好一次。
+fn assert_clear_handled(result: InterceptOutcome, mock_sink: &MockEventSink) {
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("clear 注册表命中应返回 Handled");
+    };
+    assert!(prompt_result.ok);
+    assert_eq!(prompt_result.stop_reason, PromptStopReason::EndTurn);
+    assert!(
+        prompt_result.messages.is_empty(),
+        "clear 应清空消息历史（真实 ClearCommand messages: Vec::new() 语义）"
+    );
+    let events = mock_sink.pushed_events.lock().unwrap();
+    let fb_event = events.iter().find(|json| json.contains("command_feedback"));
+    assert!(fb_event.is_some(), "clear 应发射 CommandFeedback 事件");
+    let fb_json = fb_event.unwrap();
+    assert!(
+        fb_json.contains("对话已清空") && fb_json.contains("uiOnly"),
+        "反馈应为 feedback(Info, 对话已清空, UiOnly)，实际: {fb_json}"
+    );
+    drop(events);
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "clear 拦截必须调用 push_done（TRAP: TUI 永久 loading）"
+    );
+}
+
+/// `/clear` 已注册进 ACP 注册表（core:clear，Phase 5 Step 3）——prompt 路径
+/// 经 command_lookup resolve 命中 → 拦截层确定性执行清空（不再 PassThrough
+/// fall-through）。
+#[tokio::test]
+async fn test_intercept_clear_hits_registry_and_handles() {
     // Arrange
     let content = MessageContent::text("/clear");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
     let cancel = AgentCancellationToken::new();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
     let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
@@ -267,27 +481,25 @@ async fn test_intercept_clear_command_not_intercepted_in_prompt_path() {
         &sink,
         &bg_tx,
         &bg_reg,
-        no_match_lookup(),
+        clear_lookup(),
     );
 
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：视图层命令不再被拦截
-    assert!(
-        result.is_none(),
-        "/clear 在 prompt 路径应返回 None（由视图层处理）"
-    );
+    // Assert：注册表命中 → 确定性清空
+    assert_clear_handled(result, &mock_sink);
 }
 
-/// `/clear` 别名 `/cls` 已迁移到视图层——不再被 prompt 路径拦截
+/// `/clear` 别名 `/cls`：注册表 alias 索引命中 → 同样确定性清空。
 #[tokio::test]
-async fn test_intercept_clear_alias_cls_not_intercepted() {
+async fn test_intercept_clear_alias_cls_hits_registry_and_handles() {
     // Arrange
     let content = MessageContent::text("/cls");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("历史消息")];
     let cancel = AgentCancellationToken::new();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
     let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
@@ -297,27 +509,25 @@ async fn test_intercept_clear_alias_cls_not_intercepted() {
         &sink,
         &bg_tx,
         &bg_reg,
-        no_match_lookup(),
+        clear_lookup(),
     );
 
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：视图层命令不再被拦截
-    assert!(
-        result.is_none(),
-        "/cls 在 prompt 路径应返回 None（由视图层处理）"
-    );
+    // Assert：别名命中 → 确定性清空
+    assert_clear_handled(result, &mock_sink);
 }
 
-/// `/clear` 别名 `/reset` 已迁移到视图层——不再被 prompt 路径拦截
+/// `/clear` 别名 `/reset`：注册表 alias 索引命中 → 同样确定性清空。
 #[tokio::test]
-async fn test_intercept_clear_alias_reset_not_intercepted() {
+async fn test_intercept_clear_alias_reset_hits_registry_and_handles() {
     // Arrange
     let content = MessageContent::text("/reset");
     let history: Vec<BaseMessage> = vec![];
     let cancel = AgentCancellationToken::new();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
     let (bg_tx, bg_reg) = make_bg_infra();
     let req = make_intercept_request(
         &content,
@@ -327,17 +537,14 @@ async fn test_intercept_clear_alias_reset_not_intercepted() {
         &sink,
         &bg_tx,
         &bg_reg,
-        no_match_lookup(),
+        clear_lookup(),
     );
 
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：视图层命令不再被拦截
-    assert!(
-        result.is_none(),
-        "/reset 在 prompt 路径应返回 None（由视图层处理）"
-    );
+    // Assert：别名命中 → 确定性清空
+    assert_clear_handled(result, &mock_sink);
 }
 
 // ── intercept_immediate_command: push_done TRAP 验证 ──────────────────────
@@ -439,8 +646,11 @@ async fn test_intercept_with_cancelled_token_still_returns_some() {
     // Act
     let result = intercept_immediate_command(req).await;
 
-    // Assert：无论 select 走哪个分支，结果都应非 None（命令已拦截或被取消）
-    assert!(result.is_some(), "已 cancel 的拦截路径仍应返回 Some");
+    // Assert：无论 select 走哪个分支，结果都应 Handled（命令已拦截或被取消）
+    assert!(
+        matches!(result, InterceptOutcome::Handled(_)),
+        "已 cancel 的拦截路径仍应返回 Handled"
+    );
     // 不变量：push_done 必被调用（TRAP 守护）
     assert!(
         mock_sink.push_done_count() >= 1,
@@ -474,7 +684,9 @@ async fn test_intercept_immediate_returns_empty_recall_items() {
     let result = intercept_immediate_command(req).await;
 
     // Assert：recall_items 必须为空
-    let prompt_result = result.unwrap();
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("Immediate 命令拦截应返回 Handled");
+    };
     assert!(
         prompt_result.recall_items.is_empty(),
         "Immediate 命令不应产生 recall items"
@@ -507,6 +719,460 @@ async fn test_intercept_immediate_ok_always_true() {
     let result = intercept_immediate_command(req).await;
 
     // Assert
-    let prompt_result = result.unwrap();
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("Immediate 命令拦截应返回 Handled");
+    };
     assert!(prompt_result.ok, "Immediate 命令拦截结果 ok 必须为 true");
+}
+
+// ── intercept_immediate_command: Inject / args 解析 / cancel 分发验证 ───────
+
+/// handler 返回 Inject：回传 Inject(text)（不 push_done——agent pump 负责，
+/// executor.rs 调用点转 AgentInput::blocks(text) 进 agent 管线）。
+#[tokio::test]
+async fn test_intercept_inject_outcome_returns_inject() {
+    // Arrange
+    let content = MessageContent::text("/inject-me");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        inject_lookup(),
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：Inject 原样回传（注入文本进 agent 管线），不 push_done
+    assert!(
+        matches!(result, InterceptOutcome::Inject(ref text) if text == "/skill tdd"),
+        "Inject 应原样回传注入文本"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        0,
+        "Inject 路径不应调用 push_done（由 agent pump 负责）"
+    );
+}
+
+/// [回归测试] AgentPassthrough 行为镜像（core 域 skill 条目占位 handler）：
+/// 命中 skill 命令时 `Inject(ctx.raw_text)`——用户消息原文整段（含
+/// `/skill-name` token）回传 agent 管线，SkillPreload 中间件自动检测分支
+/// 依赖原文，命令不被吞。
+///
+/// 历史背景：Phase 5 Step 6 拦截层删除 `kind != Immediate` fall-through
+/// 守卫后，skill 条目经 AgentPassthrough 执行，占位实现返回空串 Inject，
+/// 用户消息被整体替换为空文本，skill 预加载失效（2026-08-16）。
+#[tokio::test]
+async fn test_intercept_skill_passthrough_injects_original_text() {
+    struct PassthroughHandler;
+    #[async_trait]
+    impl CommandHandler for PassthroughHandler {
+        async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+            CommandOutcome::Inject(ctx.raw_text)
+        }
+    }
+    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+        // 镜像注册表 resolve 语义：整段文本进入，名字 + args 词法切分完成。
+        if text == "diagnose 帮我调试一下" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:diagnose".to_string(),
+                    aliases: vec![],
+                    description: "test skill".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Skill,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(PassthroughHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                args: "帮我调试一下".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let content = MessageContent::text("/diagnose 帮我调试一下");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        lookup,
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：skill 命中 → Inject 回传原文（含 `/skill-name` token），不 push_done
+    assert!(
+        matches!(result, InterceptOutcome::Inject(ref text) if text == "/diagnose 帮我调试一下"),
+        "skill 命中应将原文整段回传 agent 管线（原文被吞 = skill 预加载失效）"
+    );
+    assert_eq!(
+        mock_sink.push_done_count(),
+        0,
+        "Inject 路径不应调用 push_done（由 agent pump 负责）"
+    );
+}
+
+/// 新增：cancel 分支（外层 cancel 已触发）→ Handled(Cancelled) + push_done，
+/// messages = history 原样（cancel 语义保持）。
+#[tokio::test]
+async fn test_intercept_cancel_outcome_returns_handled_cancelled() {
+    // Arrange：预先 cancel；handler 挂一个永不返回的假 handler 保证 select
+    // 必然走 cancel 分支（与 PendingEventSink 同理——瞬时命令可能先完成）。
+    struct PendingHandler;
+    #[async_trait]
+    impl CommandHandler for PendingHandler {
+        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+            std::future::pending::<()>().await;
+            unreachable!("pending 永不返回");
+        }
+    }
+    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+        if text == "pending" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:pending".to_string(),
+                    aliases: vec![],
+                    description: "pending handler".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(PendingHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let content = MessageContent::text("/pending");
+    let history: Vec<BaseMessage> = vec![BaseMessage::human("hello")];
+    let cancel = AgentCancellationToken::new();
+    cancel.cancel();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        lookup,
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：cancel 分支 → Handled(Cancelled) + history 原样 + push_done
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("cancel 分支应返回 Handled");
+    };
+    assert_eq!(prompt_result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(prompt_result.messages.len(), 1, "cancel 应返回原样 history");
+    assert!(prompt_result.ok);
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "cancel 分支必须调用 push_done（TRAP 守护）"
+    );
+}
+
+/// args 解析失败：schema 声明 required positional，args 缺失 → 不进入 handler，
+/// 立即返回 Handled + feedback(Error, 解析失败) + history 原样 + push_done。
+#[tokio::test]
+async fn test_intercept_args_parse_failure_returns_error_feedback() {
+    // Arrange：rewind 形态 schema（required positional + flag）；handler 为
+    // 哨兵——若被调用即 panic（解析失败必须不进入 handler）。
+    struct SentryHandler;
+    #[async_trait]
+    impl CommandHandler for SentryHandler {
+        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+            panic!("解析失败路径不得进入 handler");
+        }
+    }
+    let schema = peri_acp_types::command::ArgsSchema {
+        positionals: vec![peri_acp_types::command::ArgSpec {
+            name: "target_message_id".into(),
+            kind: peri_acp_types::command::ArgKind::String,
+            required: true,
+            description: None,
+        }],
+        named: vec![],
+        flags: vec![peri_acp_types::command::FlagSpec {
+            name: "no-revert-files".into(),
+            short: None,
+            description: None,
+        }],
+    };
+    let lookup: super::CommandLookupFn = Arc::new(move |text: &str| {
+        if text == "rewind" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:rewind".to_string(),
+                    aliases: vec![],
+                    description: "rewind for args-parse test".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                    category: None,
+                    args_schema: Some(schema.clone()),
+                    handler: Arc::new(SentryHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let content = MessageContent::text("/rewind");
+    let history: Vec<BaseMessage> = vec![BaseMessage::human("hello")];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        lookup,
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：Handled + feedback(Error, 参数解析失败) + history 原样 + push_done
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("解析失败应返回 Handled");
+    };
+    assert!(prompt_result.ok);
+    assert_eq!(prompt_result.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(
+        prompt_result.messages.len(),
+        1,
+        "解析失败应返回原样 history"
+    );
+    // feedback 经 emit_command_feedback 发射为 CommandFeedback 事件
+    let events = mock_sink.pushed_events.lock().unwrap();
+    let fb_event = events.iter().find(|json| json.contains("command_feedback"));
+    assert!(fb_event.is_some(), "解析失败应发射 CommandFeedback 事件");
+    assert!(
+        fb_event.unwrap().contains("rewind 参数解析失败"),
+        "错误消息应含 'rewind 参数解析失败'，实际: {events:?}"
+    );
+    drop(events);
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "解析失败路径必须调用 push_done（TRAP 守护）"
+    );
+}
+
+/// args 解析通过：schema 声明 required positional，args 提供 → 正常进入
+/// handler（SentryHandler 替换为正常 handler）。
+#[tokio::test]
+async fn test_intercept_args_parse_ok_passes_into_handler() {
+    // Arrange：rewind 形态 schema + 正常 handler（Done + history 原样）
+    struct OkHandler;
+    #[async_trait]
+    impl CommandHandler for OkHandler {
+        async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+            assert_eq!(
+                ctx.args, "abc123 --no-revert-files",
+                "ctx.args 应为 resolve 切分原文"
+            );
+            // P1-1：统一解析结果经 ctx.parsed_args 传入——handler 不再自研解析
+            let parsed = ctx
+                .parsed_args
+                .as_ref()
+                .expect("解析通过路径应携带 parsed_args");
+            assert_eq!(
+                parsed.positionals,
+                vec!["abc123".to_string()],
+                "positionals[0] 应为 target_message_id"
+            );
+            assert_eq!(
+                parsed.flags,
+                vec!["no-revert-files".to_string()],
+                "flags 应命中 no-revert-files"
+            );
+            CommandOutcome::Done(CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: None,
+            })
+        }
+    }
+    let schema = peri_acp_types::command::ArgsSchema {
+        positionals: vec![peri_acp_types::command::ArgSpec {
+            name: "target_message_id".into(),
+            kind: peri_acp_types::command::ArgKind::String,
+            required: true,
+            description: None,
+        }],
+        named: vec![],
+        flags: vec![peri_acp_types::command::FlagSpec {
+            name: "no-revert-files".into(),
+            short: None,
+            description: None,
+        }],
+    };
+    let lookup: super::CommandLookupFn = Arc::new(move |text: &str| {
+        if text.starts_with("rewind") {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:rewind".to_string(),
+                    aliases: vec![],
+                    description: "rewind for args-parse test".to_string(),
+                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                    category: None,
+                    args_schema: Some(schema.clone()),
+                    handler: Arc::new(OkHandler),
+                    provenance: peri_acp_types::command::command_route::CommandProvenance {
+                        source: peri_acp_types::command::command_route::CommandSource::Core,
+                        lifecycle:
+                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                    },
+                }),
+                // resolve 词法切分（不变式 3）：命令名后的参数原样
+                args: "abc123 --no-revert-files".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let content = MessageContent::text("/rewind abc123 --no-revert-files");
+    let history: Vec<BaseMessage> = vec![];
+    let cancel = AgentCancellationToken::new();
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let (bg_tx, bg_reg) = make_bg_infra();
+    let req = make_intercept_request(
+        &content,
+        &history,
+        "test-session",
+        &cancel,
+        &sink,
+        &bg_tx,
+        &bg_reg,
+        lookup,
+    );
+
+    // Act
+    let result = intercept_immediate_command(req).await;
+
+    // Assert：Handled + handler 已执行（OkHandler 内断言 ctx.args）
+    let InterceptOutcome::Handled(prompt_result) = result else {
+        panic!("解析通过应返回 Handled");
+    };
+    assert!(prompt_result.ok);
+    assert_eq!(mock_sink.push_done_count(), 1, "解析通过路径必须 push_done");
+}
+
+// ── emit_command_feedback: 反馈双通道验证 ───────────────────────────────────
+
+/// 构造带 feedback 的 CommandResult（messages 预置一条 human 消息）。
+fn result_with_feedback(channel: FeedbackChannel) -> CommandResult {
+    CommandResult {
+        messages: vec![BaseMessage::human("你好")],
+        stop_reason: PromptStopReason::EndTurn,
+        feedback: Some(CommandFeedback {
+            level: FeedbackLevel::Info,
+            message: "命令已完成".to_string(),
+            channel,
+        }),
+    }
+}
+
+/// channel=Session：message 以系统消息追加进 messages 尾部，事件发射一次
+/// （Step 1：编排层统一反馈出口；Session 仅命令显式 opt-in，设计 §79）。
+#[tokio::test]
+async fn test_emit_command_feedback_session_appends_system_message() {
+    // Arrange
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let mut result = result_with_feedback(FeedbackChannel::Session);
+
+    // Act
+    emit_command_feedback(&sink, "test-session", &mut result).await;
+
+    // Assert：尾部为系统消息（内容同 feedback.message）
+    let messages = &result.messages;
+    assert_eq!(messages.len(), 2, "Session 通道应追加一条系统消息");
+    let last = messages.last().unwrap();
+    assert!(
+        matches!(last, BaseMessage::System { .. }),
+        "尾元素应为系统消息"
+    );
+    assert_eq!(last.content(), "命令已完成");
+    // feedback 已被 take（发射唯一归属本 helper），事件发射一次
+    assert!(result.feedback.is_none(), "feedback 应被 take 出");
+    assert_eq!(
+        mock_sink.pushed_events.lock().unwrap().len(),
+        1,
+        "Session 通道也应发射 CommandFeedback 事件"
+    );
+}
+
+/// channel=UiOnly：messages 不变（不追加系统消息），事件仍发射
+#[tokio::test]
+async fn test_emit_command_feedback_ui_only_keeps_messages() {
+    // Arrange
+    let mock_sink = Arc::new(MockEventSink::new());
+    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
+    let mut result = result_with_feedback(FeedbackChannel::UiOnly);
+
+    // Act
+    emit_command_feedback(&sink, "test-session", &mut result).await;
+
+    // Assert：messages 不变（UiOnly 不进会话，设计 §79）
+    assert_eq!(result.messages.len(), 1, "UiOnly 不应追加消息");
+    assert!(result.feedback.is_none(), "feedback 应被 take 出");
+    assert_eq!(
+        mock_sink.pushed_events.lock().unwrap().len(),
+        1,
+        "UiOnly 仍应发射 CommandFeedback 事件"
+    );
 }

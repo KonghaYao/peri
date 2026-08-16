@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use peri_acp_types::{
     agents::AgentOverrides,
+    command_registry::CommandRegistry,
     event::AgentEventHandler,
     frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
     goal::GoalController,
@@ -134,6 +135,11 @@ pub(crate) fn build_stage_context(
     let mcp_skill_registry: Option<Arc<McpSkillRegistry>> = session_access
         .as_ref()
         .and_then(|sa| sa.mcp_skill_registry(&ctx.session_id));
+    // 会话级命令注册表（命令面，Phase 6 A3；SessionManager 路径；None =
+    // print 模式，跳过 mcp 域命令发现投影——与 mcp_skill_registry 同模式）
+    let command_registry: Option<Arc<CommandRegistry>> = session_access
+        .as_ref()
+        .and_then(|sa| sa.command_registry(&ctx.session_id));
 
     // ── 注入面：主 prompt 覆盖渲染（agent overrides 非空时调用）──
     let render_system_prompt: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync> = {
@@ -251,6 +257,7 @@ pub(crate) fn build_stage_context(
         launch_cron_bridge,
         launch_mcp_subscription,
         mcp_skill_registry,
+        command_registry,
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,
         compact_post_hook,

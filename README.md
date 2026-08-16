@@ -46,7 +46,6 @@ Every surface you need, everywhere you work.
 - 📡 **Channel Support** — WeChat, Slack, Feishu. Reply in-thread, terminal stays synced
 - 🌐 **Web Terminal** (`peri web`) — Browser shell, one command. xterm.js + split panes
 - 🔧 **LSP + Langfuse** — Code intelligence and per-turn tracing out of the box
-- 📦 **agm** — `agm install` any skill. One lockfile, reproducible
 
 ---
 
@@ -78,7 +77,7 @@ graph TD
     TUI --> E2E["e2e<br/>tmux black-box tests"]
 ```
 
-**Crate topology**: `peri-tui` → `peri-acp` → `peri-agent` / `peri-middlewares` · `peri-widgets` · `langfuse-client` · `peri-lsp` · `peri-web-pty` · `agm` · `peri-acp-types` · `peri-workflow` · `peri-theme`
+**Crate topology**: `peri-tui` → `peri-acp` → `peri-agent` / `peri-middlewares` · `peri-widgets` · `langfuse-client` · `peri-lsp` · `peri-web-pty` · `peri-acp-types` · `peri-workflow` · `peri-theme`
 
 **One core, three frontends.** Terminal users get `peri-tui`. IDE users connect via ACP (Zed today, more to come). Headless / CI / cloud scenarios use the Stdio transport. Change the agent logic once — every frontend benefits.
 

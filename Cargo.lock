@@ -129,26 +129,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agm"
-version = "0.2.0"
-dependencies = [
- "clap",
- "dirs-next",
- "flate2",
- "glob",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3853,6 +3833,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3873,6 +3854,7 @@ dependencies = [
  "peri-model",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -3981,6 +3963,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "shellexpand",
  "tar",
  "tempfile",

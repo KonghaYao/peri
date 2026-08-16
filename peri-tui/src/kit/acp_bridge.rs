@@ -160,35 +160,27 @@ pub fn spawn_acp_bridge(
                                     );
                                     continue;
                                 }
-                                // manual /compact 完成提示跨 replay 存活：SystemNote
-                                // 随 committed 被清空，从 pending atom 重建（issue
+                                // Phase 5 Step 7 补遗（Step 8 回归修复）：
+                                // CommandFeedback(UiOnly) 的 compact 完成提示跨
+                                // replay 存活——reset 清空 committed/current_turn
+                                // 后从 PENDING_COMPACT_NOTE 重建 SystemNote
+                                // （机制沿袭 aecc2834，死锁教训：显式块提取值、
+                                // guard 立即 drop 后再 set 清空，见 issue
                                 // 2026-08-08-e2e-compact-command-screenshot-too-early）。
-                                // 仅 compact replay 写入该 atom；消费后立即清空，
-                                // 不串到后续 thread 切换。
-                                // 注意：必须先 clone 出值再进 if-let——scrutinee 的临时
-                                // 读锁 guard 会存活到整个 if-let 块结束，若在分支体内
-                                // set（写锁）会造成同一线程读写锁死锁（std RwLock
-                                // 非重入），bridge 事件循环停摆、load_session 挂起
-                                // （issue 2026-08-08-e2e-compact-command-screenshot-too-early）。
-                                let pending_note =
-                                    atoms::PENDING_COMPACT_NOTE.state().read().clone();
-                                tracing::info!(sid = %state.active_session_id, "[COMPACT_NOTE] reset branch: checking pending compact note");
-                                if let Some(note_text) = pending_note {
-                                    tracing::info!(sid = %state.active_session_id, "[COMPACT_NOTE] pending note found, injecting");
-                                    atoms::PENDING_COMPACT_NOTE.set(None);
-                                    let content_hash =
-                                        crate::kit::tui_render_unit::tui_hash_str(&note_text);
-                                    state.current_turn.push_system_note(
-                                        note_text,
-                                        crate::kit::tui_render_unit::TuiNoteLevel::Warning,
-                                        content_hash,
-                                    );
-                                    tracing::info!(
-                                        sid = %state.active_session_id,
-                                        "bridge: re-injected compact completion note after replay reset"
-                                    );
-                                } else {
-                                    tracing::info!(sid = %state.active_session_id, "[COMPACT_NOTE] no pending note");
+                                {
+                                    let pending = atoms::PENDING_COMPACT_NOTE
+                                        .state()
+                                        .read()
+                                        .clone();
+                                    if let Some(text) = pending {
+                                        use crate::kit::tui_render_unit::{
+                                            TuiNoteLevel, tui_hash_str,
+                                        };
+                                        state
+                                            .current_turn
+                                            .push_system_note(text.clone(), TuiNoteLevel::Info, tui_hash_str(&text));
+                                        atoms::PENDING_COMPACT_NOTE.set(None);
+                                    }
                                 }
                             }
 
@@ -275,6 +267,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         Progress(_) => "Progress",
         BudgetWarning(_) => "BudgetWarning",
         SystemNotification(_) => "SystemNotification",
+        CommandFeedback(_) => "CommandFeedback",
         Prediction(_) => "Prediction",
         FileSuggestions(_) => "FileSuggestions",
         HitlPending(_) => "HitlPending",
@@ -295,12 +288,10 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         TurnCommitted { .. } => "TurnCommitted",
         CompactStarted => "CompactStarted",
         CompactCompleted { .. } => "CompactCompleted",
-        CompactError { .. } => "CompactError",
         BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
         AgentExecutionFailed { .. } => "AgentExecutionFailed",
         WorkflowProgress { .. } => "WorkflowProgress",
         RewindCompleted { .. } => "RewindCompleted",
-        RewindError { .. } => "RewindError",
         PluginSnapshot(_) => "PluginSnapshot",
         PluginActionResult(_) => "PluginActionResult",
         PluginSearchResult(_) => "PluginSearchResult",

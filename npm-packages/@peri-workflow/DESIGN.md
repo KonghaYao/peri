@@ -313,8 +313,10 @@ npm install -g @peri-code/workflow
 或通过 npx / bunx 自动下载（无需全局安装）：
 
 ```bash
-npx -y @peri-code/workflow     # Node.js 环境
-bunx @peri-code/workflow       # Bun 环境
+# 必须带显式版本：npx 在全局已有同名 bin 时会静默复用旧版（旧版无 CLI 子命令，
+# 命令无输出且 exit 0），`@<version>` 才能强制使用 registry 上的目标版本。
+npx -y @peri-code/workflow@0.2.0   # Node.js 环境
+bunx @peri-code/workflow@0.2.0     # Bun 环境
 ```
 
 ### 宿主发现

@@ -205,7 +205,7 @@ fn test_project_enabled_sections_from_chain_names() {
     );
     assert!(
         !enabled.contains("10_hitl"),
-        "HumanInTheLoopMiddleware 不在链上 → 10_hitl 关闭"
+        "PermissionMiddleware 不在链上 → 10_hitl 关闭（2026-08-15 拆分：10_hitl 持有者）"
     );
     assert!(
         !enabled.contains("16_workflow"),

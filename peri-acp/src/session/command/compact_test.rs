@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use peri_acp_types::{
+    command::{FeedbackChannel, FeedbackLevel},
     event::ExecutorEvent,
     messages::{BaseMessage, ContentBlock},
     store::ThreadStore,
@@ -27,6 +28,7 @@ use peri_acp_types::{
 use peri_agent::thread::{FilesystemThreadStore, SqliteThreadStore};
 
 use super::*;
+use crate::session::command::CommandResult;
 use crate::session::executor::PromptStopReason;
 
 // ── Mock EventSink ────────────────────────────────────────────────────
@@ -74,25 +76,16 @@ fn make_ctx(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
     history: Vec<BaseMessage>,
 ) -> super::super::CommandContext {
-    super::super::CommandContext {
-        session_id: "test-session".to_string(),
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 旧字段默认值与原字面量一致（compact_config: Default / 其余 None）。
+    super::super::CommandContext::new(
+        "test-session".to_string(),
         history,
-        cwd: "/tmp".to_string(),
-        compact_config: Default::default(),
-        auxiliary_model: None,
-        event_sink: sink,
-        args: String::new(),
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-        thread_store: None,
-        thread_id: None,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
-    }
+        "/tmp".to_string(),
+        sink,
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    )
 }
 
 /// 构造带 auxiliary_model 的 CommandContext（contract test 使用真实模型路径）
@@ -122,25 +115,20 @@ fn make_ctx_with_model_and_thread(
     thread_store: Option<Arc<dyn ThreadStore>>,
     thread_id: Option<String>,
 ) -> super::super::CommandContext {
-    super::super::CommandContext {
-        session_id: "test-session".to_string(),
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 非默认旧字段显式赋值（auxiliary_model / thread_store / thread_id）。
+    let mut ctx = super::super::CommandContext::new(
+        "test-session".to_string(),
         history,
         cwd,
-        compact_config: Default::default(),
-        auxiliary_model: Some(model),
-        event_sink: sink,
-        args: String::new(),
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-        thread_store,
-        thread_id,
-        bg_event_sender: None,
-        task_manager: None,
-        frozen_claude_md: None,
-        frozen_claude_local_md: None,
-        frozen_skill_summary: None,
-        frozen_system_prompt: None,
-        bg_spawner: None,
-    }
+        sink,
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    );
+    ctx.auxiliary_model = Some(model);
+    ctx.thread_store = thread_store;
+    ctx.thread_id = thread_id;
+    ctx
 }
 
 // ── extract_file_info 测试 ───────────────────────────────────────────
@@ -301,37 +289,44 @@ fn test_extract_skill_names_extracts_only_first_line() {
 
 // ── CompactCommand execute 测试 ──────────────────────────────────────
 
+/// 执行并解包：compact 恒 Done，其他变体 panic（与旧 AgentCommand 转发
+/// unreachable! 同语义；Phase 5 Step 6 旧契约删除后直接经新契约执行）。
+async fn execute_compact(cmd: &CompactCommand, ctx: CommandContext) -> CommandResult {
+    match CommandHandler::execute(cmd, ctx).await {
+        CommandOutcome::Done(r) => r,
+        _ => panic!("compact 应恒 Done"),
+    }
+}
+
 #[tokio::test]
-async fn test_compact_empty_history_returns_original_with_error_event() {
+async fn test_compact_empty_history_returns_original_with_error_feedback() {
+    // Phase 5 Step 4：CompactError 事件通道已删除——错误收敛为
+    // feedback(Error, UiOnly)，命令自身零事件发射。
     // Arrange: 空历史 + mock sink
     let sink = Arc::new(MockEventSink::new());
     let ctx = make_ctx(sink.clone(), vec![]);
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 返回空消息 + EndTurn
     assert_eq!(result.messages.len(), 0);
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 CompactError 事件
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
+    // 错误经 feedback 返回（UiOnly），不再推送 CompactError 事件
+    let fb = result.feedback.as_ref().expect("空历史应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert_eq!(fb.message, "no history to compact");
     assert!(
-        events[0].1.contains("compact_error"),
-        "空历史应推送 compact_error，实际: {}",
-        events[0].1
-    );
-    assert!(
-        events[0].1.contains("no history to compact"),
-        "错误消息应包含 'no history to compact'，实际: {}",
-        events[0].1
+        sink.events().is_empty(),
+        "命令自身不应发射任何事件（编排层 emit_command_feedback 统一发射）"
     );
 }
 
 #[tokio::test]
-async fn test_compact_no_model_returns_original_with_error_event() {
+async fn test_compact_no_model_returns_original_with_error_feedback() {
     // Arrange: 有历史但无 auxiliary_model（默认 None）
     let sink = Arc::new(MockEventSink::new());
     let history = vec![BaseMessage::human("你好"), BaseMessage::ai("世界")];
@@ -339,24 +334,20 @@ async fn test_compact_no_model_returns_original_with_error_event() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 返回原消息 + EndTurn
     assert_eq!(result.messages.len(), 2);
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 
-    // 应推送 CompactError 事件
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
+    // 错误经 feedback 返回（UiOnly），不再推送 CompactError 事件
+    let fb = result.feedback.as_ref().expect("无模型应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert_eq!(fb.message, "no model available for compact");
     assert!(
-        events[0].1.contains("compact_error"),
-        "无模型应推送 compact_error，实际: {}",
-        events[0].1
-    );
-    assert!(
-        events[0].1.contains("no model available"),
-        "错误消息应包含 'no model available'，实际: {}",
-        events[0].1
+        sink.events().is_empty(),
+        "命令自身不应发射任何事件（编排层 emit_command_feedback 统一发射）"
     );
 }
 
@@ -364,13 +355,14 @@ async fn test_compact_no_model_returns_original_with_error_event() {
 
 #[test]
 fn test_compact_command_name_and_aliases() {
-    let cmd = CompactCommand;
-
-    assert_eq!(cmd.name(), "compact");
-    let aliases = cmd.aliases();
-    assert!(aliases.contains(&"compress"), "应包含 compress 别名");
-    assert_eq!(cmd.kind(), CommandKind::Immediate);
-    assert!(!cmd.description().is_empty());
+    // Phase 5 Step 6：旧 AgentCommand trait 已删，元数据取命令关联常量
+    //（注册条目挂载的单一事实源）。
+    assert_eq!(CompactCommand::NAME, "compact");
+    assert!(
+        CompactCommand::ALIASES.contains(&"compress"),
+        "应包含 compress 别名"
+    );
+    assert!(!CompactCommand::DESCRIPTION.is_empty());
 }
 
 /// 验证 CompactCommand（Immediate）执行后 push_done 未被命令自身调用
@@ -381,7 +373,7 @@ async fn test_compact_command_does_not_call_push_done_itself() {
     let ctx = make_ctx(sink.clone(), vec![]);
     let cmd = CompactCommand;
 
-    let _result = cmd.execute(ctx).await;
+    let _result = execute_compact(&cmd, ctx).await;
 
     // 空历史返回后，不调用 push_done（由 executor 负责）
     let count = sink.push_done_count();
@@ -503,7 +495,7 @@ async fn test_compact_pipeline_uses_bound_sqlite_lifecycle() {
         Some(thread_id.clone()),
     );
 
-    let result = CompactCommand.execute(ctx).await;
+    let result = execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert!(
@@ -564,7 +556,7 @@ async fn test_compact_pipeline_does_not_append_preexisting_history_to_bound_thre
         Some(thread_id.clone()),
     );
 
-    let result = CompactCommand.execute(ctx).await;
+    let result = execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     let stored_history = store
@@ -618,8 +610,9 @@ async fn test_compact_pipeline_reuses_visible_result_history_for_second_bound_sq
         .expect("持久化初始 history 失败");
 
     let first_sink = Arc::new(MockEventSink::new());
-    let first = CompactCommand
-        .execute(make_ctx_with_model_and_thread(
+    let first = execute_compact(
+        &CompactCommand,
+        make_ctx_with_model_and_thread(
             first_sink.clone(),
             history,
             dir.path().to_string_lossy().to_string(),
@@ -628,8 +621,9 @@ async fn test_compact_pipeline_reuses_visible_result_history_for_second_bound_sq
             )),
             Some(store.clone()),
             Some(thread_id.clone()),
-        ))
-        .await;
+        ),
+    )
+    .await;
     assert_eq!(first.stop_reason, PromptStopReason::EndTurn);
     assert!(
         first.messages.iter().any(|message| message
@@ -639,8 +633,9 @@ async fn test_compact_pipeline_reuses_visible_result_history_for_second_bound_sq
     );
 
     let second_sink = Arc::new(MockEventSink::new());
-    let second = CompactCommand
-        .execute(make_ctx_with_model_and_thread(
+    let second = execute_compact(
+        &CompactCommand,
+        make_ctx_with_model_and_thread(
             second_sink.clone(),
             first.messages,
             dir.path().to_string_lossy().to_string(),
@@ -649,8 +644,9 @@ async fn test_compact_pipeline_reuses_visible_result_history_for_second_bound_sq
             )),
             Some(store.clone()),
             Some(thread_id.clone()),
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     assert_eq!(
         second.stop_reason,
@@ -709,8 +705,9 @@ async fn test_compact_pipeline_filesystem_lifecycle_failure_preserves_durable_me
         .map(BaseMessage::id)
         .collect::<Vec<_>>();
 
-    let result = CompactCommand
-        .execute(make_ctx_with_model_and_thread(
+    let result = execute_compact(
+        &CompactCommand,
+        make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             history.clone(),
             dir.path().to_string_lossy().to_string(),
@@ -719,8 +716,9 @@ async fn test_compact_pipeline_filesystem_lifecycle_failure_preserves_durable_me
             )),
             Some(store.clone()),
             Some(thread_id.clone()),
-        ))
-        .await;
+        ),
+    )
+    .await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(
@@ -793,7 +791,7 @@ async fn test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_
         Some(thread_id.clone()),
     );
 
-    let result = CompactCommand.execute(ctx).await;
+    let result = execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(
@@ -808,12 +806,13 @@ async fn test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_
             .collect::<Vec<_>>(),
         "持久化 context 与传入 history ID 不一致时必须原样返回 incoming history"
     );
-    let events = sink.events();
-    assert_eq!(events.len(), 1, "不匹配时只能推送 CompactError");
+    let fb = result.feedback.as_ref().expect("不匹配时应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert_eq!(fb.message, "compact persistence context mismatch");
     assert!(
-        events[0].1.contains("compact_error"),
-        "不匹配时必须推送 CompactError，实际: {}",
-        events[0].1
+        sink.events().is_empty(),
+        "命令自身不应发射 CompactError 事件（Phase 5 Step 4 收敛为 feedback）"
     );
 
     let persisted_history = store
@@ -866,7 +865,7 @@ async fn test_compact_pipeline_without_thread_binding_returns_error_without_muta
         None,
     );
 
-    let result = CompactCommand.execute(ctx).await;
+    let result = execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(
@@ -878,11 +877,16 @@ async fn test_compact_pipeline_without_thread_binding_returns_error_without_muta
         history.iter().map(BaseMessage::id).collect::<Vec<_>>(),
         "缺少 store/thread binding 时必须保留原 history"
     );
+    let fb = result
+        .feedback
+        .as_ref()
+        .expect("缺少 binding 应携带 feedback");
+    assert_eq!(fb.level, FeedbackLevel::Error);
+    assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+    assert_eq!(fb.message, "compact persistence is unavailable");
     assert!(
-        sink.events()
-            .iter()
-            .any(|(_, json)| json.contains("compact_error")),
-        "缺少 store/thread binding 时必须走 CompactError"
+        sink.events().is_empty(),
+        "命令自身不应发射 CompactError 事件（Phase 5 Step 4 收敛为 feedback）"
     );
 }
 
@@ -915,7 +919,7 @@ async fn test_contract_compact_output_starts_with_human_summary() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 首条必须是 Human
     assert!(!result.messages.is_empty(), "compact 输出不应为空");
@@ -978,7 +982,7 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 结构契约 — 首条 Human（摘要），其后只能是 Human（re-inject 文件/Skills）
     //
@@ -1041,7 +1045,7 @@ async fn test_contract_summary_not_in_system_message() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 摘要只出现在首条 Human，不得出现在任何 System 消息中
     assert!(
@@ -1085,7 +1089,7 @@ async fn test_contract_compact_completed_event_matches_result_messages() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: CompactCompleted 事件存在
     let events = sink.events();
@@ -1132,7 +1136,7 @@ async fn test_contract_all_system_history_still_human_first() {
     let cmd = CompactCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_compact(&cmd, ctx).await;
 
     // Assert: 仍以 Human 开头（fallback 摘要也要走 Human 路径）
     assert!(

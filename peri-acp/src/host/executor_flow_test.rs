@@ -21,6 +21,7 @@ use peri_acp_types::{
 };
 use peri_agent::session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn};
 use peri_agent::thread::FilesystemThreadStore;
+use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::session::executor::{
@@ -307,6 +308,8 @@ async fn make_session_context_with_manager(
         None, // MCP 订阅端口（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     );
     sm.new_session_with_id(session_id, "/tmp")
         .await
@@ -577,6 +580,8 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         Arc::new(SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -587,7 +592,12 @@ fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
 /// 上下文差异产生不同前缀，会破坏 Anthropic 前缀缓存，并使主 agent 与
 /// subagent 看到不一致的策略。本测试固定全部输入，验证
 /// `build_frozen_data` 是确定性的。
+///
+/// `#[serial]`：`build_frozen_data` 扫描用户级 `~/.claude/skills`（HOME），
+/// 与 requests_test 的 `#[serial]` 组（B3 用例重定向 HOME）互斥，防止两次
+/// build 间读到不同 HOME 快照。
 #[tokio::test]
+#[serial]
 async fn test_frozen_session_data_build_is_deterministic() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
@@ -613,7 +623,11 @@ async fn test_frozen_session_data_build_is_deterministic() {
 /// 历史背景（ARC-FROZEN-001 / 审计 prompt-sections-audit.md P2-11）：skill
 /// 摘要与 system prompt 在 session/new 冻结；会话内磁盘 skill 增删不得改变
 /// 已冻结产物（冻结是前缀缓存稳定性的有意权衡，不能按需重扫）。
+///
+/// `#[serial]`：与 requests_test 的 `#[serial]` 组（B3 用例重定向 HOME）
+/// 互斥，防止冻结前后两次扫描读到不同用户级 skills 快照。
 #[tokio::test]
+#[serial]
 async fn test_frozen_system_prompt_immune_to_disk_changes() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
@@ -700,21 +714,23 @@ async fn test_frozen_subagent_prompt_identical_to_main() {
     );
 }
 
-/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配
-/// HumanInTheLoopMiddleware（broker: None），10_hitl 描述的是主会话审批
-/// 机制，对 workflow 模型是误导性指令——workflow 渲染路径（fallback +
-/// agentType builder）必须排除 10_hitl，兑现 presence-is-the-gate 契约
-/// （C3 D5 决策修订，design §3.1.1 契约 3 / §3.5 语义边界）。
+/// [回归测试] advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
+/// middleware（broker: None → PermissionMiddleware::disabled()），10_hitl
+/// 描述的是主会话审批机制，对 workflow 模型是误导性指令——workflow 渲染
+/// 路径（fallback + agentType builder）必须排除 10_hitl，兑现
+/// presence-is-the-gate 契约（C3 D5 决策修订，design §3.1.1 契约 3 /
+/// §3.5 语义边界；2026-08-15 拆分：10_hitl 持有者改为 PermissionMiddleware，
+/// 过滤目标段落不变）。
 #[tokio::test]
 async fn test_workflow_prompt_excludes_hitl_section() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_manager(&tmp);
     let frozen = mgr.build_frozen_data("/tmp", &[], &[]);
 
-    // 主链冻结 prompt 保留 10_hitl（HumanInTheLoopMiddleware 默认装配）
+    // 主链冻结 prompt 保留 10_hitl（PermissionMiddleware 默认装配）
     assert!(
         frozen.system_prompt().contains("Human-in-the-Loop (HITL)"),
-        "主链冻结 prompt 应保留 10_hitl（HITL middleware 默认装配）"
+        "主链冻结 prompt 应保留 10_hitl（PermissionMiddleware 默认装配）"
     );
 
     let skills: Arc<dyn peri_acp_types::ports::SkillsPort> = Arc::new(SkillsProvider);
@@ -725,7 +741,7 @@ async fn test_workflow_prompt_excludes_hitl_section() {
     let prompt = fallback("/tmp", Some("2026-01-01"), frozen.language());
     assert!(
         !prompt.contains("Human-in-the-Loop (HITL)"),
-        "workflow 链无 HumanInTheLoopMiddleware：提示词不得包含 10_hitl"
+        "workflow 链无审批 middleware：提示词不得包含 10_hitl"
     );
 
     // agentType builder（workflow 子 agent）同样排除
@@ -829,6 +845,7 @@ fn make_parity_context(
         hook_groups: Vec::new(),
         session_start_source: None,
         mcp_skill_registry: None,
+        command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
         channel_state: None,
@@ -885,6 +902,7 @@ fn chain_collection_parity_with_build_collected_sections() {
             None,
             None,
             &[
+                "PermissionMiddleware",
                 "HumanInTheLoopMiddleware",
                 "SubAgentMiddleware",
                 "SkillsMiddleware",
@@ -903,6 +921,7 @@ fn chain_collection_parity_with_build_collected_sections() {
             &[
                 "DefaultSystemPromptMiddleware",
                 "LangMiddleware",
+                "PermissionMiddleware",
                 "HumanInTheLoopMiddleware",
                 "SubAgentMiddleware",
                 "SkillsMiddleware",

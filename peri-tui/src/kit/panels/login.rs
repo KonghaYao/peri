@@ -983,7 +983,7 @@ fn save_login_edit(es: &LoginEditState) -> bool {
     };
 
     // 先持久化：失败则不发布任何变更（handle / PROVIDER_LIST / ACP 均不动）
-    if let Err(e) = crate::config::save(&snap) {
+    if let Err(e) = crate::config::save_effective(&snap) {
         *NOTIFICATION.state().write() = Some(Notification {
             message: i18n::tr_args(
                 "config-save-failed",
@@ -1066,7 +1066,7 @@ fn refresh_provider_list() {
 
 /// 持久化 PeriConfig 快照并显示通知
 fn persist_and_notify(snap: &crate::config::PeriConfig) {
-    match crate::config::save(snap) {
+    match crate::config::save_effective(snap) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),

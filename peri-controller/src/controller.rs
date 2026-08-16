@@ -43,7 +43,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// agent 定义引用（§6 lite params）。
 ///
-/// 引用 agent 定义（agm 命名空间 / 内置定义名），解析归 Agent 层；
+/// 引用 agent 定义（命名空间 / 内置定义名），解析归 Agent 层；
 /// Controller 只作为 lite params 的组成部分透传。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRef(String);

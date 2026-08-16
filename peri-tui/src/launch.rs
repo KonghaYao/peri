@@ -149,6 +149,7 @@ pub async fn build_app_and_acp(
                 peri_acp::host::assemble::HostAssemblyInput {
                     provider: provider.clone(),
                     peri_config: app.services.peri_config.clone(),
+                    config_source: app.config_source.clone(),
                     permission_mode: app.services.permission_mode.clone(),
                     // M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
                     // ToolSearchIndex / SkillsProvider / PluginManager /

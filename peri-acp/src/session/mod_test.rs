@@ -6,6 +6,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+};
+use peri_acp_types::command::{CommandHandler, CommandOutcome};
+
 use crate::provider::{
     LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
 };
@@ -57,6 +63,23 @@ fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
     cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
 ) -> SessionManager {
+    make_manager_inner(tmp, cron_scheduler, Vec::new())
+}
+
+/// Phase 6 B2：构造带插件命令静态条目的 SessionManager（cron 无）。
+fn make_manager_with_plugin_entries(
+    tmp: &tempfile::TempDir,
+    plugin_entries: Vec<RouteEntry>,
+) -> SessionManager {
+    make_manager_inner(tmp, None, plugin_entries)
+}
+
+/// 通用构造：cron scheduler + 插件命令静态条目可组合注入。
+fn make_manager_inner(
+    tmp: &tempfile::TempDir,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    plugin_entries: Vec<RouteEntry>,
+) -> SessionManager {
     let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
@@ -82,6 +105,8 @@ fn make_manager_with_cron_option(
         None, // MCP 订阅端口（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        plugin_entries,
+        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -156,6 +181,8 @@ fn make_manager_with_mcp_subscription(
         mcp_subscription,
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -400,6 +427,26 @@ async fn test_pending_caps_double_fallback_semantics() {
         peri_acp_types::PeriCaps::all_enabled(),
         "ensure 未协商 → all_enabled"
     );
+}
+
+#[tokio::test]
+async fn test_effective_host_caps_requires_external_negotiation_but_preserves_internal_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    assert!(
+        mgr.effective_host_caps().oauth,
+        "未 initialize 的进程内 TUI 路径保持 all_enabled"
+    );
+    mgr.set_pending_caps(peri_acp_types::PeriCaps::default());
+    assert!(
+        !mgr.effective_host_caps().oauth,
+        "外部 initialize 未声明 peri.oauth 时必须关闭"
+    );
+    mgr.set_pending_caps(peri_acp_types::PeriCaps {
+        oauth: true,
+        ..Default::default()
+    });
+    assert!(mgr.effective_host_caps().oauth);
 }
 
 // ── mcp_subscription_for（2026-07-28 subscriptions/listen 订阅 inbox 注册）───
@@ -669,6 +716,8 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         None,
         None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     );
 
     let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
@@ -736,6 +785,8 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         None,
         None,
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     );
 
     let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
@@ -755,5 +806,178 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
     assert!(
         frozen2.meta_harness().section_overrides.is_empty(),
         "文档删除后新冻结状态无覆盖"
+    );
+}
+
+/// 占位 handler：测试只断言路由层（注册 / 解析 / 投影），不触发执行。
+struct TestHandler;
+
+#[async_trait]
+impl CommandHandler for TestHandler {
+    async fn execute(&self, _ctx: peri_acp_types::command::CommandContext) -> CommandOutcome {
+        CommandOutcome::Inject(String::new())
+    }
+}
+
+// ─── Phase 6 B2/C1：会话创建注册本地 skills（core 域）+ 插件静态命令 ────
+
+/// 写入本地 skill fixture：`{cwd}/.claude/skills/{dir}/SKILL.md`
+/// （frontmatter name 可含任意字符串——含冒号形态由词法校验兜底）。
+fn write_local_skill(cwd: &std::path::Path, dir: &str, skill_name: &str) {
+    let dir_path = cwd.join(".claude").join("skills").join(dir);
+    std::fs::create_dir_all(&dir_path).unwrap();
+    std::fs::write(
+        dir_path.join("SKILL.md"),
+        format!("---\nname: \"{skill_name}\"\ndescription: \"test skill {skill_name}\"\n---\nBody"),
+    )
+    .unwrap();
+}
+
+/// C1：本地 skill 注册为 `core:{name}`（第一等级显式形态，kind = Skill），
+/// 裸名快捷匹配可用（第一等级裸名 alias_index 登记）。
+#[tokio::test]
+async fn test_session_creation_registers_local_skills_core_domain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_local_skill(tmp.path(), "hello", "hello");
+    let mgr = make_session_manager(&tmp);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    let resolved = reg.resolve("/hello").expect("裸名命中本地 skill");
+    assert_eq!(resolved.entry.fullname, "core:hello");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
+    assert_eq!(resolved.entry.description, "test skill hello");
+
+    let resolved = reg.resolve("/core:hello").expect("全名命中");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
+}
+
+/// C1 冲突裁决：内置 compact 先注册 → 同名 skill 被拒 + 告警，注册表保持
+/// 内置条目（不覆盖、不静默；冲突纯拒绝 + 装配顺序即优先级）。
+#[tokio::test]
+async fn test_session_creation_core_conflict_keeps_builtin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_local_skill(tmp.path(), "compact", "compact");
+    let mgr = make_session_manager(&tmp);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    let snap = reg.snapshot();
+    let compact = snap
+        .iter()
+        .find(|e| e.fullname == "core:compact")
+        .expect("内置 core:compact 存在");
+    assert_eq!(
+        compact.kind,
+        CommandEntryKind::Command,
+        "同名 skill 被拒，注册表保持内置条目"
+    );
+    assert!(
+        !snap
+            .iter()
+            .any(|e| e.fullname == "core:compact" && e.kind == CommandEntryKind::Skill),
+        "Skill 形态的 core:compact 不得存在（不覆盖）"
+    );
+    let resolved = reg.resolve("/compact").expect("裸名命中内置");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
+}
+
+/// C1 词法兜底：skill 名含冒号（frontmatter 任意字符串）→ MalformedName
+/// 拒绝 + 告警跳过，注册表无该条目。
+#[tokio::test]
+async fn test_session_creation_skill_name_with_colon_skipped() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_local_skill(tmp.path(), "bad", "foo:bar");
+    let mgr = make_session_manager(&tmp);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    assert!(
+        reg.resolve("/core:foo:bar").is_none(),
+        "含冒号 skill 名被 MalformedName 拒绝"
+    );
+    assert!(
+        reg.snapshot()
+            .iter()
+            .all(|e| !e.fullname.contains("foo:bar")),
+        "词法非法条目不得入注册表"
+    );
+}
+
+/// B2 集成：会话创建注册插件静态命令 `plugin:{plugin}:{cmd}`（kind =
+/// Command，provenance = Plugin{name} + Connected），第二等级完整形态可解析。
+#[tokio::test]
+async fn test_session_creation_registers_plugin_commands() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let plugin_entry = RouteEntry {
+        fullname: "plugin:ecc:deploy".into(),
+        aliases: vec![],
+        description: "deploy command".into(),
+        kind: CommandEntryKind::Command,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(TestHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Plugin { name: "ecc".into() },
+            lifecycle: CommandLifecycle::Connected,
+        },
+    };
+    let mgr = make_manager_with_plugin_entries(&tmp, vec![plugin_entry]);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    let resolved = reg.resolve("/plugin:ecc:deploy").expect("插件命令命中");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
+    assert_eq!(resolved.entry.description, "deploy command");
+    assert_eq!(
+        resolved.entry.provenance.source,
+        CommandSource::Plugin { name: "ecc".into() },
+        "provenance = 剥离 plugin: 前缀的插件名"
+    );
+    assert_eq!(
+        resolved.entry.provenance.lifecycle,
+        CommandLifecycle::Connected
+    );
+    // 第二等级不登记裸名（deploy 不可解析）。
+    assert!(reg.resolve("/deploy").is_none());
+}
+
+/// B2 注册顺序：内置 → 本地 skills → 插件（先注册者占键）。插件与内置/
+/// skill 键空间不相交（plugin: 域 vs core: 域），冲突裁决仅按键唯一性。
+#[tokio::test]
+async fn test_session_creation_register_order_builtin_skill_plugin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_local_skill(tmp.path(), "hello", "hello");
+    let mgr = make_manager_with_plugin_entries(
+        &tmp,
+        vec![RouteEntry {
+            fullname: "plugin:ecc:deploy".into(),
+            aliases: vec![],
+            description: "deploy".into(),
+            kind: CommandEntryKind::Command,
+            category: None,
+            args_schema: None,
+            handler: Arc::new(TestHandler),
+            provenance: CommandProvenance {
+                source: CommandSource::Plugin { name: "ecc".into() },
+                lifecycle: CommandLifecycle::Connected,
+            },
+        }],
+    );
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    // 内置（core:compact）与 skill（core:hello）、插件（plugin:ecc:deploy）共存。
+    assert_eq!(
+        reg.resolve("/compact").unwrap().entry.kind,
+        CommandEntryKind::Command
+    );
+    assert_eq!(
+        reg.resolve("/hello").unwrap().entry.kind,
+        CommandEntryKind::Skill
+    );
+    assert_eq!(
+        reg.resolve("/plugin:ecc:deploy").unwrap().entry.kind,
+        CommandEntryKind::Command
     );
 }

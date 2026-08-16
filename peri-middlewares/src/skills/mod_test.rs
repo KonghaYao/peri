@@ -498,8 +498,8 @@ fn discovery_protocol_root_order_matches_resolve_skill_roots() {
     );
 }
 
-/// 13_skills 段落声明：位置属性（Uncached order=5）+ 机制说明保留 +
-/// 动态 discovery 后缀。
+/// 13_skills 段落声明：位置属性（Uncached order=6，2026-08-15 拆分后
+/// 12_ask_user=5 插入，13 顺延）+ 机制说明保留 + 动态 discovery 后缀。
 #[test]
 fn skills_section_declaration_shape() {
     let sections = SkillsMiddleware::sections();
@@ -507,7 +507,7 @@ fn skills_section_declaration_shape() {
     let section = &sections[0];
     assert_eq!(section.id, "13_skills");
     assert_eq!(section.zone, PromptSectionZone::Uncached);
-    assert_eq!(section.order, 5);
+    assert_eq!(section.order, 6);
     let content = section.content.as_str();
     assert!(
         content.contains("# Skills"),

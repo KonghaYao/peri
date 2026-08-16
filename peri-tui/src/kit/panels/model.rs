@@ -448,7 +448,7 @@ pub(crate) fn switch_active_alias(idx: usize) {
     }
     let snap = cfg.clone();
     drop(cfg);
-    notify_save_result(crate::config::save(&snap));
+    notify_save_result(crate::config::save_effective(&snap));
     let resolved_name = resolve_model_name_for_alias(&snap.config, key);
     let s_handle = SERVICE_SNAPSHOT.state();
     let mut svc_snap = s_handle.read().clone();
@@ -621,7 +621,7 @@ fn edit_field(alias: String, field: usize, forward: bool) {
     }
     let snap = cfg.clone();
     drop(cfg);
-    notify_save_result(crate::config::save(&snap));
+    notify_save_result(crate::config::save_effective(&snap));
     // 推送 ACP 服务端 + 刷新 SERVICE_SNAPSHOT（模型名可能变化）
     let resolved = resolve_model_name_for_alias(&snap.config, &alias);
     let s_handle = SERVICE_SNAPSHOT.state();

@@ -29,6 +29,7 @@ use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
+use crate::kit::ui_command::ui_command_specs;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
     crossterm::{
@@ -70,6 +71,10 @@ pub async fn run_kit_fullscreen(
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
+    // 2b1. 配置源句柄：读写路径决策的唯一事实源（全局 + 工作区布局在
+    //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
+    //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
+    let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -156,7 +161,7 @@ pub async fn run_kit_fullscreen(
                     drop(peri);
                     // re-read for save
                     let peri = peri_handle.read();
-                    crate::config::save(&peri)
+                    crate::config::save_effective(&peri)
                         .unwrap_or_else(|e| tracing::warn!("Failed to save daily color date: {e}"));
                 }
             }
@@ -348,6 +353,24 @@ pub async fn run_kit_fullscreen(
         {
             let client = client.clone();
             tokio::spawn(async move {
+                // 5a. 上送 ui 域命令明细（设计 §88，Phase 3 caps 通道）：必须在
+                //     new_session 之前完成 caps 协商（initialize 为进程级一次性），
+                //     host 将明细注册为 ui:* 条目 → 投影回推刷新补全缓存。
+                //     上送失败仅 warn——host 回退 all_enabled 兜底明细（11 条
+                //     旧表），不阻断会话创建（R2 双写窗口防御）。
+                let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> =
+                    ui_command_specs()
+                        .iter()
+                        .map(|s| peri_acp_types::command::command_route::UiCommandSpec {
+                            name: s.name.into(),
+                            aliases: s.aliases.iter().map(|a| (*a).into()).collect(),
+                            description: s.description.into(),
+                            args: None, // 面板命令无参数 schema（第一版）
+                        })
+                        .collect();
+                if let Err(e) = client.register_ui_commands(&specs).await {
+                    tracing::warn!(error = %e, "kit: ui 命令上送注册失败（host 回退兜底明细）");
+                }
                 match client.new_session(&cwd_for_init, None).await {
                     Ok(session_id) => {
                         tracing::info!(%session_id, "kit: initial session created");

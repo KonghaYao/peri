@@ -140,3 +140,32 @@ fn test_parse_submit_request_matches_view_actions() {
         Some(SubmitRequest::ViewAction(ViewActionRequest::Exit))
     );
 }
+
+#[test]
+fn test_parse_submit_request_intercepts_ui_domain() {
+    // `ui:` 前缀显式形态 → ui 域本地拦截
+    assert_eq!(
+        parse_submit_request("/ui:history"),
+        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
+    );
+}
+
+#[test]
+fn test_parse_submit_request_ui_bare_name() {
+    // 裸名（level 1 快捷形态）→ ui 域本地拦截
+    assert_eq!(
+        parse_submit_request("/history"),
+        Some(SubmitRequest::OpenPanel(PanelKind::ThreadBrowser))
+    );
+}
+
+#[test]
+fn test_parse_submit_request_ui_setup_explicit() {
+    // `ui:` 前缀显式形态 → ToggleSetup
+    assert_eq!(
+        parse_submit_request("/ui:setup"),
+        Some(SubmitRequest::SessionControl(
+            SessionControlRequest::ToggleSetup
+        ))
+    );
+}

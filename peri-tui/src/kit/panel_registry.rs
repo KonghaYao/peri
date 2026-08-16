@@ -376,25 +376,6 @@ pub const PANELS: &[PanelMeta] = &[
     },
 ];
 
-pub fn slash_command_for_panel(kind: PanelKind) -> &'static str {
-    meta(kind)
-        .expect("all PanelKind variants must be registered")
-        .slash_command
-}
-
-pub fn panel_for_slash_command(command: &str) -> Option<PanelKind> {
-    let normalized = command.trim_start_matches('/').to_ascii_lowercase();
-    // /history、/resume、/his 都是 /threads（Thread Browser 面板）的别名。
-    // ACP server 将 "history"/"resume" 作为远程 command 下发，但 TUI 应映射为面板打开。
-    if normalized == "history" || normalized == "resume" || normalized == "his" {
-        return Some(PanelKind::ThreadBrowser);
-    }
-    PANELS
-        .iter()
-        .find(|m| m.slash_command == normalized)
-        .map(|m| m.kind)
-}
-
 pub fn panel_title(kind: PanelKind) -> String {
     let key = match kind {
         PanelKind::Model => "panel-title-model",

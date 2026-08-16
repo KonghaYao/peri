@@ -1,9 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use async_trait::async_trait;
 use gray_matter::{engine::YAML, Matter};
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource as RouteCommandSource,
+    RouteEntry,
+};
+use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
 use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
@@ -215,7 +222,9 @@ fn process_command_file(
             .unwrap_or("unknown")
     });
 
-    let full_name = format!("{plugin_name}:{cmd_name}");
+    // 与 CommandSource::Plugin 语义对齐（namespace = 插件名）：`plugin:{plugin}:{cmd}`
+    // 三层形态——原 `{plugin}:{cmd}` 二层形态对第二等级（外部来源）非法，必须显式 plugin 域前缀。
+    let full_name = format!("plugin:{plugin_name}:{cmd_name}");
     let description = fm
         .description
         .or(explicit_description.map(String::from))
@@ -228,6 +237,73 @@ fn process_command_file(
             path: cmd_file_path.to_path_buf(),
         },
     });
+}
+
+/// 插件命令占位 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变
+/// 执行通路，仅要求路由表支持运行时注册 / 注销）。
+///
+/// 占位实现（执行语义未定）：返回 [`CommandOutcome::Inject`] 空串——拦截
+/// 路径对 Inject 的既有处理为 warn + fall-through（原文进 agent 管线，
+/// 命令不被吞，与 `mcp/skill_discovery.rs` 的 `McpSkillPlaceholder` /
+/// `peri-acp` 的 `PassthroughPlaceholder` 同构）。UI-only 反馈「插件命令
+/// 执行待后续版本」与正式执行体留待 Phase 5+ 补齐（注册 / 注销 / 投影
+/// 链路本 Phase 全量生效）。
+#[derive(Clone)]
+pub struct PluginCommandHandler {
+    /// 命令来源（插件命令文件路径；占位期仅承载来源信息）。
+    pub source: CommandSource,
+}
+
+#[async_trait]
+impl CommandHandler for PluginCommandHandler {
+    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+        // 占位：Inject 空串 → 拦截路径 fall-through，原文进 agent 管线。
+        CommandOutcome::Inject(String::new())
+    }
+}
+
+/// `CommandEntry` → `RouteEntry`（plugin 域；name 形如 `plugin:{plugin}:{cmd}`，
+/// B1 词法迁移后的三层形态，设计 §44-59 第二等级）。
+///
+/// fullname 原样使用（`plugin:{plugin}:{cmd}`）；kind = [`CommandEntryKind::Command`]
+/// （plugin 域暂归 Command，设计 §85 注）；provenance = `CommandSource::Plugin`
+/// （**剥离 `plugin:` 前缀**的插件名——register 域校验将核对词法 namespace
+/// 段 == 插件名，设计 §58，未剥离 → ProvenanceMismatch 全量拒绝）+
+/// [`CommandLifecycle::Connected`]（静态装配，与 MCP 动态注入的 Discovered
+/// 相对）；handler = [`PluginCommandHandler`] 占位。含 `plugin:` 前缀但缺
+/// 末段 cmd（词法异常，如 `plugin:x`）→ 跳过并告警；非 plugin 域 name
+/// （如 `foo:bar`）不属本函数职责，静默跳过（register 词法校验兜底）。
+pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            // 先剥 "plugin:" 域前缀（非 plugin 域 → 静默跳过），再取末段
+            // cmd：`plugin:ecc:deploy` → ("ecc", "deploy")；`plugin:x`（单层
+            // 非法）→ None → 告警跳过（register 词法校验兜底）。
+            let rest = e.name.strip_prefix("plugin:")?;
+            let Some((plugin, _cmd)) = rest.rsplit_once(':') else {
+                warn!(name = %e.name, "插件命令名词法异常，跳过 plugin 域注册");
+                return None;
+            };
+            Some(RouteEntry {
+                fullname: e.name.clone(), // "plugin:{plugin}:{cmd}"
+                aliases: vec![],
+                description: e.description.clone(),
+                kind: CommandEntryKind::Command, // plugin 域暂归 Command（设计 §85 注）
+                category: None,
+                args_schema: None,
+                handler: Arc::new(PluginCommandHandler {
+                    source: e.source.clone(),
+                }),
+                provenance: CommandProvenance {
+                    source: RouteCommandSource::Plugin {
+                        name: plugin.to_string(),
+                    },
+                    lifecycle: CommandLifecycle::Connected,
+                },
+            })
+        })
+        .collect()
 }
 
 /// Extract skill roots from plugin manifest.
@@ -537,7 +613,9 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
     let mut result = HashMap::new();
     for plugin in plugins {
         for (name, config) in &plugin.mcp_servers {
-            // 与 Claude Code 一致：使用 plugin:{插件名}:{服务器名} 前缀
+            // config 层唯一键（与 Claude Code 一致）：`plugin:{插件名}:{服务器名}`
+            // 不进命令命名空间——命令词法层（plugin 域 `plugin:{plugin}:{cmd}`）与
+            // MCP server 键各自独立，互不交叉。
             let namespaced = format!("plugin:{}:{}", plugin.name, name);
             result.insert(namespaced, config.clone());
         }

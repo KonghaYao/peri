@@ -117,11 +117,15 @@ struct NoopSubscriber;
 #[async_trait]
 impl EventSubscriber for NoopSubscriber {
     async fn recv(&mut self) -> Result<EventMessage, SubscriptionError> {
-        unreachable!("short-circuit path never subscribes")
+        // 测试泵：永不产生事件。pump 的 biased select 会先 poll 本分支，
+        // 必须返回 pending（而非 unreachable）——agent 管线路径（Inject/
+        // PassThrough）会 spawn pump，select 另一分支（channel 关闭）就绪
+        // 时自然退出。
+        std::future::pending().await
     }
 
     fn try_recv(&mut self) -> Result<Option<EventMessage>, SubscriptionError> {
-        unreachable!("short-circuit path never subscribes")
+        Ok(None)
     }
 }
 
@@ -349,5 +353,277 @@ async fn test_run_session_loop_keepgoing_short_circuit_forwards_request_id() {
         mock_sink.last_push_done_request_id().as_deref(),
         Some("req-1"),
         "push_done 必须透传 SessionContext.request_id"
+    );
+}
+
+// ── run_session_loop: 命令拦截三态分发（Phase 5 Step 6）─────────────────────
+//
+// 三态：Handled → 短路返回（agent 不构建，stage_build 哨兵不被调用）；
+// Inject / PassThrough → 走 agent 管线（管线分发核心断言在
+// executor_helpers_test 的 intercept_immediate_command 层，本层测可端到端
+// 验证的短路分支；noop_stage_build 被调用即 panic——见 noop_stage_build 注释）。
+
+/// 构造「命中 Done handler」的 command_lookup（/compact 形态，恒 Done）。
+fn done_command_lookup() -> super::CommandLookupFn {
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+    };
+    use peri_acp_types::command::{CommandHandler, CommandOutcome, CommandResult, ResolvedCommand};
+    struct DoneHandler;
+    #[async_trait]
+    impl CommandHandler for DoneHandler {
+        async fn execute(&self, ctx: peri_acp_types::command::CommandContext) -> CommandOutcome {
+            CommandOutcome::Done(CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: None,
+            })
+        }
+    }
+    Arc::new(move |text: &str| {
+        if text == "compact" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:compact".to_string(),
+                    aliases: vec![],
+                    description: "compact for executor dispatch test".to_string(),
+                    kind: CommandEntryKind::Command,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(DoneHandler),
+                    provenance: CommandProvenance {
+                        source: CommandSource::Core,
+                        lifecycle: CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+/// Handled 分发：拦截命中 → run_session_loop 短路返回（ok / EndTurn），
+/// push_done 恰好一次，且不构建 agent（stage_build 哨兵不被调用——noop
+/// stage_build 被调用即 panic）。
+#[tokio::test]
+async fn test_run_session_loop_intercept_handled_short_circuits() {
+    // Arrange
+    let mock_sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_session_context("test-session");
+    ctx.command_lookup = done_command_lookup();
+    let turn = make_turn_input(
+        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        MessageContent::text("/compact"),
+        false,
+        vec![BaseMessage::human("hello")],
+    );
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert：短路返回，agent 不构建
+    assert!(result.ok, "Handled 分发应 ok=true");
+    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "Handled 分发必须 push_done 一次（TRAP 守护）"
+    );
+    assert!(
+        result.recall_items.is_empty(),
+        "Handled 分发不应产生 recall items"
+    );
+}
+
+/// cancel 分发：外层 cancel 已触发 + handler pending → 拦截层
+/// Handled(Cancelled)，run_session_loop 短路返回 Cancelled + push_done。
+#[tokio::test]
+async fn test_run_session_loop_intercept_cancel_returns_cancelled() {
+    // Arrange
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+    };
+    use peri_acp_types::command::{CommandHandler, CommandOutcome, ResolvedCommand};
+    struct PendingHandler;
+    #[async_trait]
+    impl CommandHandler for PendingHandler {
+        async fn execute(&self, _ctx: peri_acp_types::command::CommandContext) -> CommandOutcome {
+            std::future::pending::<()>().await;
+            unreachable!("pending 永不返回");
+        }
+    }
+    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+        if text == "compact" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:compact".to_string(),
+                    aliases: vec![],
+                    description: "compact for executor cancel test".to_string(),
+                    kind: CommandEntryKind::Command,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(PendingHandler),
+                    provenance: CommandProvenance {
+                        source: CommandSource::Core,
+                        lifecycle: CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    });
+
+    let mock_sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_session_context("test-session");
+    ctx.command_lookup = lookup;
+    ctx.cancel.cancel();
+    let turn = make_turn_input(
+        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        MessageContent::text("/compact"),
+        false,
+        vec![BaseMessage::human("hello")],
+    );
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert：cancel 分支 → Cancelled + history 原样 + push_done
+    assert!(result.ok);
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(result.messages.len(), 1, "cancel 应返回原样 history");
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "cancel 分发必须 push_done 一次（TRAP 守护）"
+    );
+}
+
+/// Inject 分发（Phase 5 Step 6）：拦截命中返回 `Inject` 的 handler →
+/// run_session_loop **不短路**——注入文本经 `AgentInput::blocks` 进入 agent
+/// 管线（stage_build 被调用、v2 queue 收到注入文本），pump 正常收尾
+/// （push_done 恰好一次）。与 Handled 分发（短路、不构建 agent）成对。
+///
+/// 管线端到端：stage_build 哨兵返回「turn 已取消」的最小 V2AgentOutput——
+/// run_react_loop 首轮检查 `turn.is_cancelled()` 立即 `Interrupted`，管线
+/// 以 Cancelled 收尾，无需真实 LLM。
+#[tokio::test]
+async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+    };
+    use peri_acp_types::command::{CommandHandler, CommandOutcome, ResolvedCommand};
+    use peri_acp_types::event_v2::EventBus;
+    use peri_acp_types::session::{MessageKind, MessageSource as V2MessageSource};
+
+    use crate::agent::stages::StageContext;
+    use crate::session::exec::stage_builder::V2AgentOutput;
+    use crate::session::{FrozenContext, Session};
+
+    // Arrange：命中返回 Inject 的 handler（/inject 形态，恒 Inject）。
+    struct InjectHandler;
+    #[async_trait]
+    impl CommandHandler for InjectHandler {
+        async fn execute(&self, _ctx: peri_acp_types::command::CommandContext) -> CommandOutcome {
+            CommandOutcome::Inject("/skill tdd".to_string())
+        }
+    }
+    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
+        if text == "inject" {
+            Some(ResolvedCommand {
+                entry: Arc::new(RouteEntry {
+                    fullname: "core:inject".to_string(),
+                    aliases: vec![],
+                    description: "inject for executor dispatch test".to_string(),
+                    kind: CommandEntryKind::Command,
+                    category: None,
+                    args_schema: None,
+                    handler: Arc::new(InjectHandler),
+                    provenance: CommandProvenance {
+                        source: CommandSource::Core,
+                        lifecycle: CommandLifecycle::Connected,
+                    },
+                }),
+                args: String::new(),
+            })
+        } else {
+            None
+        }
+    });
+
+    // stage_build 哨兵：记录调用次数 + 返回「turn 已取消」的最小
+    // V2AgentOutput（run_react_loop 立即 Interrupted，无需真实 LLM）。
+    let stage_build_calls = Arc::new(Mutex::new(0usize));
+    let build_calls = Arc::clone(&stage_build_calls);
+    let session_for_build = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+    let session_arc = Arc::clone(&session_for_build);
+    let stage_build: StageBuildFn = Arc::new(move |_sbr| {
+        *build_calls.lock().unwrap() += 1;
+        let turn = session_for_build.start_turn();
+        turn.cancel_token.cancel(); // 首轮 is_cancelled() → 立即 Interrupted
+        let (bus, handles) = EventBus::new(Default::default());
+        let ctx = StageContext::builder(
+            turn,
+            session_for_build.transcript(),
+            session_for_build.queue().clone(),
+        )
+        .with_event_bus(Arc::new(bus))
+        .build();
+        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            V2AgentOutput {
+                context: ctx,
+                session: Arc::clone(&session_for_build),
+                event_handles: handles,
+                todo_rx,
+                bg_event_rx,
+            },
+            None,
+        )
+    });
+
+    let mock_sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_session_context("test-session");
+    ctx.command_lookup = lookup;
+    let mut turn = make_turn_input(
+        Arc::clone(&mock_sink) as Arc<dyn EventSink>,
+        MessageContent::text("/inject"),
+        false,
+        vec![BaseMessage::human("hello")],
+    );
+    turn.stage_build = stage_build;
+
+    // Act
+    let result = run_session_loop(ctx, turn).await;
+
+    // Assert：Inject 不短路——agent 管线被构建，注入文本进 v2 queue。
+    assert_eq!(
+        *stage_build_calls.lock().unwrap(),
+        1,
+        "Inject 分发必须构建 agent 管线（stage_build 被调用一次）"
+    );
+    let queued = session_arc.queue().drain_all();
+    let injected = queued.iter().find(|q| q.kind == MessageKind::Prompt);
+    assert!(
+        matches!(injected, Some(q) if q.message.content().contains("/skill tdd")),
+        "注入文本必须经 AgentInput::blocks 进入 agent 管线，实际: {:?}",
+        injected.map(|q| q.message.content())
+    );
+    assert!(
+        matches!(injected, Some(q) if q.source == V2MessageSource::UserInput),
+        "注入消息来源应为 UserInput"
+    );
+    // 管线以 Interrupted(Cancelled) 收尾（哨兵 turn 已取消）；pump 正常收尾
+    // 恰好一次 push_done（agent pump 负责，拦截层不 push）。
+    assert!(!result.ok, "Interrupted 应 ok=false");
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert_eq!(
+        mock_sink.push_done_count(),
+        1,
+        "Inject 分发不 push_done 于拦截层，pump 收尾恰好一次（TRAP 守护）"
     );
 }

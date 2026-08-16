@@ -9,5 +9,9 @@ fle = "fle"
 gti = "gti"
 bulder = "bulder"
 
+[default]
+# commit hash / 十六进制标识符不是拼写错误（如 59ba70b8 中的 ba）
+extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
+
 [files]
 extend-exclude = ["Cargo.lock", "side-projects/", "worktrees/", "target/", ".git/"]

@@ -15,7 +15,8 @@
 //! ## 认知增强与安全（原 rust-standard-middlewares）
 //! - [`AgentsMdMiddleware`]：注入 AGENTS.md / CLAUDE.md 项目指引
 //! - [`SkillsMiddleware`]：渐进式 Skills 摘要注入
-//! - [`HumanInTheLoopMiddleware`]：敏感工具调用前需用户确认
+//! - [`PermissionMiddleware`]：敏感工具调用前需用户确认
+//! - [`HumanInTheLoopMiddleware`]：向用户提问的通道（AskUserQuestion 工具）
 
 pub mod agent_define;
 pub mod agents_md;
@@ -40,6 +41,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod meta_harness;
 pub mod middleware;
+pub mod permission;
 pub mod plugin;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
@@ -65,13 +67,13 @@ pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 pub use goal_middleware::GoalMiddleware;
-pub use hitl::{
-    default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
-    HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
-    SharedPermissionMode,
-};
+pub use hitl::HumanInTheLoopMiddleware;
 pub use lsp::{LspMiddleware, LspTool};
 pub use middleware::image::ImageMiddleware;
+pub use permission::{
+    default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
+    HitlDecision, LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
+};
 pub use skills::{
     list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
 };
@@ -100,12 +102,13 @@ pub mod prelude {
         },
         attribution::GitAttributionMiddleware,
         cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
-        hitl::{
-            default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
-            HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode, SharedPermissionMode,
-        },
+        hitl::HumanInTheLoopMiddleware,
         hooks::{HookMiddleware, RegisteredHook},
         middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+        permission::{
+            default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
+            LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
+        },
         plugin::{
             AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource,
             InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin,

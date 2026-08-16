@@ -59,9 +59,10 @@ fn test_build_preview_params_carries_target() {
 
 #[test]
 fn test_build_execute_params_carries_target() {
-    let params = build_execute_params("test-sid", "m1");
+    let params = build_execute_params("test-sid", "m1", &"a".repeat(64));
     assert_eq!(params["sessionId"], "test-sid");
     assert_eq!(params["target_message_id"], "m1");
+    assert_eq!(params["preview_fingerprint"], "a".repeat(64));
 }
 
 #[test]
@@ -70,21 +71,34 @@ fn test_parse_budget_response_extracts_changes() {
         "file_changes": [
             { "path": "src/main.rs", "kind": "edit" },
             { "path": "new_file.txt", "kind": "write" },
-        ]
+        ],
+        "preview_fingerprint": "a".repeat(64),
     });
-    let changes = parse_budget_response(&resp).unwrap();
-    assert_eq!(changes.len(), 2);
-    assert_eq!(changes[0].path, "src/main.rs");
-    assert_eq!(changes[0].kind, "edit");
-    assert_eq!(changes[1].path, "new_file.txt");
-    assert_eq!(changes[1].kind, "write");
+    let preview = parse_budget_response(&resp).unwrap();
+    assert_eq!(preview.changes.len(), 2);
+    assert_eq!(preview.changes[0].path, "src/main.rs");
+    assert_eq!(preview.changes[0].kind, "edit");
+    assert_eq!(preview.changes[1].path, "new_file.txt");
+    assert_eq!(preview.changes[1].kind, "write");
+    assert_eq!(preview.fingerprint, "a".repeat(64));
 }
 
 #[test]
 fn test_parse_budget_response_empty_ok() {
-    let resp = json!({ "file_changes": [] });
-    let changes = parse_budget_response(&resp).unwrap();
-    assert!(changes.is_empty());
+    let resp = json!({
+        "file_changes": [],
+        "preview_fingerprint": "b".repeat(64),
+    });
+    let preview = parse_budget_response(&resp).unwrap();
+    assert!(preview.changes.is_empty());
+}
+
+#[test]
+fn test_empty_file_preview_still_requires_confirmation() {
+    assert_eq!(
+        confirmation_state(Vec::new()),
+        RewindBudgetState::Files(Vec::new())
+    );
 }
 
 #[test]
@@ -132,7 +146,7 @@ fn test_rewind_action_variants() {
 /// （虽有服务端默认值兜底，TUI 侧仍应显式声明回退文件语义）。
 #[test]
 fn test_build_execute_params_includes_revert_files() {
-    let params = build_execute_params("sid-1", "msg-1");
+    let params = build_execute_params("sid-1", "msg-1", &"c".repeat(64));
     assert_eq!(params["sessionId"], "sid-1");
     assert_eq!(params["target_message_id"], "msg-1");
     assert_eq!(
@@ -148,6 +162,7 @@ fn test_build_execute_params_includes_revert_files() {
 fn test_on_action_failed_writes_query_error() {
     crate::kit::atoms::init_atoms();
     *REWIND_TARGET_TEXT.state().write() = Some("target".to_string());
+    *REWIND_PREVIEW_FINGERPRINT.state().write() = Some("d".repeat(64));
     *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
     *REWIND_QUERY_ERROR.state().write() = None;
 
@@ -156,6 +171,10 @@ fn test_on_action_failed_writes_query_error() {
     assert!(
         REWIND_TARGET_TEXT.state().read().is_none(),
         "目标文本应清空"
+    );
+    assert!(
+        REWIND_PREVIEW_FINGERPRINT.state().read().is_none(),
+        "预览指纹应清空"
     );
     assert_eq!(
         *REWIND_BUDGET_STATE.state().read(),

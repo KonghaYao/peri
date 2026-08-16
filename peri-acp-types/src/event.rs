@@ -485,57 +485,21 @@ pub enum ExecutorEvent {
         /// 压缩触发方式
         trigger: CompactTrigger,
     },
-    /// 上下文压缩完成
+    /// 上下文压缩完成（Phase 5 Step 4 收敛：状态重建信号，非纯反馈——通知
+    /// 文案职责已移交 `CommandFeedback`；R1/R3 桥接核心，字段不得再删）
     CompactCompleted {
-        /// 摘要文本（full compact 时非空，micro compact 时为空）
+        /// 摘要文本（full compact 时非空，micro compact 时为空）。
+        /// 文案职责移交 feedback 后仅为兼容保留（TUI 事件日志展示）。
         summary: String,
-        /// 保留的文件摘要列表
-        files: Vec<CompactFileInfo>,
-        /// 保留的 Skill 名称列表
-        skills: Vec<String>,
-        /// micro-compact 清除的工具结果数量（>0 表示 micro-compact）
-        micro_cleared: usize,
-        /// 压缩后的新消息列表（full compact 时非空）
+        /// 压缩后的新消息列表（full compact 时非空）——TUI 重建数据源
+        /// （重放兜底 + 事件日志）
         messages: Vec<crate::messages::BaseMessage>,
-        /// 压缩前 token 数
-        token_before: u64,
-        /// 压缩后 token 数
-        token_after: u64,
-        /// 本次使用的压缩策略
-        strategy: CompactStrategy,
-        /// 受影响的消息数量（v2 compact 操作计数）
-        #[serde(default)]
-        affected_count: usize,
-        /// 估算节省的 token 数量（v2 compact projection 估算）
-        #[serde(default)]
-        estimated_tokens_saved: u64,
-        /// 压缩前估算 token 数（ContextPressure.estimated_tokens）
-        #[serde(default)]
-        estimated_tokens_before: u64,
-        /// 压缩后估算 token 数（estimated_tokens_before - estimated_tokens_saved）
-        #[serde(default)]
-        estimated_tokens_after: u64,
-        /// 被修改的消息数量（v2 projection 变更计数）
-        #[serde(default)]
-        changed_messages: usize,
-        /// 被修改的字段数量（v2 projection 字段级变更计数）
-        #[serde(default)]
-        changed_fields: usize,
-        /// 无操作候选数量（projection 判定无需变更的消息数）
-        #[serde(default)]
-        no_op_candidates: usize,
-        /// 升级到 Full Compact 的原因（Micro/Smart 时为 None）
-        #[serde(default)]
-        full_escalation_reason: Option<crate::compact::FullEscalationReason>,
-        /// 压缩前缓存命中率（0.0-1.0）
-        #[serde(default)]
-        cache_hit_rate_before: f64,
         /// 压缩触发方式（Manual=用户 /compact 命令；Auto=agent 内部自动压缩）。
+        /// R3 标志链依赖（TUI compact_just_completed 置位条件
+        /// `trigger=="manual"`），不得删。
         /// 旧事件（无此字段）按 Auto 处理（serde(default)）。
         #[serde(default)]
         trigger: CompactTrigger,
-        /// Compact 执行的语义结果
-        outcome: crate::compact::CompactOutcome,
     },
     /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
     RewindCompleted {
@@ -543,17 +507,6 @@ pub enum ExecutorEvent {
         summary: String,
         /// 回退后的新消息列表（目标消息之前，不含目标本身）
         messages: Vec<crate::messages::BaseMessage>,
-    },
-    /// 对话回退失败（rewind 目标消息不存在 / 参数解析失败）
-    ///
-    /// 与 [`Self::CompactError`] 分开：rewind 失败与上下文压缩无关，
-    /// 复用 CompactError 会让 TUI 渲染压缩语境、langfuse 误报压缩失败。
-    RewindError {
-        message: String,
-    },
-    /// 上下文压缩失败
-    CompactError {
-        message: String,
     },
     /// Agent 执行失败（LLM API 错误等致命错误，TUI 显示红色 SystemNote）
     AgentExecutionFailed {
@@ -629,6 +582,9 @@ pub enum ExecutorEvent {
     /// ACP 订阅端解包映射回 `bg-task-*` unstable 事件协议化（TUI bg 面板
     /// 协议面不变）；`map_event` 无 SessionUpdate 输出。
     BgRegistryEvent(crate::tasks::BgRegistryEvent),
+    /// 命令执行反馈（Phase 1 `CommandFeedback` 载荷，无 v2 等价物，
+    /// 功能载体事件，经 peri/agent_event 通道送达 TUI 通知条）。
+    CommandFeedback(crate::command::CommandFeedback),
 }
 
 /// 协议化前事件载体：canonical envelope（身份，Runtime 补打后）+ v1 payload。

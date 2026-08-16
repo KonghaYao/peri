@@ -16,7 +16,10 @@ use crate::protocol::*;
 use crate::rpc::{IncomingMessage, RpcChannel};
 
 /// 本地固定安装的 workflow engine 版本（与 npm 发布版本保持一致）。
-const WORKFLOW_NPM_VERSION: &str = "0.1.1";
+/// npx 兜底必须带显式版本：`npx -y @peri-code/workflow` 在全局已有同名 bin
+/// 时会静默复用旧版（CLI 子命令缺失、无任何输出），显式 `@<version>` 才能
+/// 绕过该行为强制使用 registry 上的目标版本。
+const WORKFLOW_NPM_VERSION: &str = "0.2.0";
 
 /// 串行化本地安装（避免并发 workflow 同时触发安装）。
 static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
@@ -26,7 +29,7 @@ static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 ///
 /// 优先使用本地固定安装 `~/.peri/workflow/<version>/`——完全离线、秒启，
 /// 不依赖 npm registry；未安装时回退 `npx -y`（联网兜底，行为同旧版）。
-/// 通过 @peri-code/workflow v0.1.1+ 的 waitDrain() 确保 stdout backpressure 安全。
+/// 通过 @peri-code/workflow v0.2.0 的 waitDrain() 确保 stdout backpressure 安全。
 fn workflow_cmd() -> Result<(String, Vec<String>), WorkflowError> {
     if let Some(dist) = workflow_local_dist() {
         return Ok(("node".to_string(), vec![dist]));
@@ -41,7 +44,10 @@ fn workflow_cmd() -> Result<(String, Vec<String>), WorkflowError> {
     {
         return Ok((
             "npx".to_string(),
-            vec!["-y".to_string(), "@peri-code/workflow".to_string()],
+            vec![
+                "-y".to_string(),
+                format!("@peri-code/workflow@{WORKFLOW_NPM_VERSION}"),
+            ],
         ));
     }
     Err(WorkflowError::SpawnFailed(

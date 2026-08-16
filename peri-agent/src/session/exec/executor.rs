@@ -83,8 +83,8 @@ use crate::tools::ToolInvocationResolver;
 pub use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
     spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, DefaultBgForkSpawner,
-    ExecOutcome, ForwarderLauncherFn, InterceptRequest, ParentToolsFactory, PumpHandle,
-    SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
+    ExecOutcome, ForwarderLauncherFn, InterceptOutcome, InterceptRequest, ParentToolsFactory,
+    PumpHandle, SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
 };
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
@@ -339,7 +339,7 @@ pub struct SessionContext {
     pub subscribe: Arc<dyn Fn() -> Box<dyn peri_acp_types::event::EventSubscriber> + Send + Sync>,
 
     // ── 命令拦截注入面（ACP 协议面）────────────────────────────────────────
-    /// 命令注册表查找（ACP 协议面注册表 `default_prompt_command_registry`）。
+    /// 命令注册表查找（ACP 协议面会话级注册表；返回 `ResolvedCommand`）。
     pub command_lookup: CommandLookupFn,
     /// compact 配置装载（`load_compact_config` 语义，含 env overrides，留 ACP）。
     pub compact_config_loader:
@@ -833,8 +833,8 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     }
 
     // ── L5 命令拦截注入面（注册表 / compact 配置 / bg fork spawner）──
-    // 命令注册表查找：ACP 协议面注册表（default_prompt_command_registry 注册
-    // compact/bg 命令，实现已在 Agent 层）；每次拦截按原语义构造新注册表。
+    // 命令注册表查找：ACP 协议面会话级注册表（内置命令在会话创建时注册，
+    // 经注入闭包 resolve 查找，实现已在 Agent 层）。
     let command_lookup = Arc::clone(&ctx.command_lookup);
     // compact 配置装载：load_compact_config 语义（含 env overrides）留在 ACP。
     let compact_config_loader = Arc::clone(&ctx.compact_config_loader);
@@ -854,7 +854,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         ));
 
     // Command interception — check if content is a slash command before building agent.
-    if let Some(immediate) = intercept_immediate_command(InterceptRequest {
+    // 三态分发（Phase 5 Step 6）：
+    //   Handled(r)   → 命令已完成（push_done 已由拦截层调用），直接返回；
+    //   Inject(text) → AgentInput::blocks(text) 进 agent 管线（不 push_done，
+    //                  pump 负责）；
+    //   PassThrough  → 现状 AgentInput::blocks(content)。
+    let injected_content = match intercept_immediate_command(InterceptRequest {
         content: &content,
         history: &history,
         cwd: &ctx.cwd,
@@ -885,22 +890,24 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     })
     .await
     {
-        return immediate;
-    }
+        InterceptOutcome::Handled(result) => return result,
+        InterceptOutcome::Inject(text) => MessageContent::text(text),
+        InterceptOutcome::PassThrough => content,
+    };
 
-    let trace_input = content.text_content();
+    let trace_input = injected_content.text_content();
     // 演进 1（meta-harness 波 4）：permission_mode 运行时通知注入已整体删除。
-    // 模型对权限模式的感知仅经 10_hitl 段落（HumanInTheLoopMiddleware 持有）
+    // 模型对权限模式的感知仅经 10_hitl 段落（PermissionMiddleware 持有）
     // 的机制说明——mode 会话内切换不再注入 `<system-reminder>` 通知。
     // 此处仅保留 incoming_recalls 的受控容器注入语义。
     let agent_input = if incoming_recalls.is_empty() {
-        AgentInput::blocks(content)
+        AgentInput::blocks(injected_content)
     } else {
         let reminder_text = format!(
             "<system-reminder>\n{}\n</system-reminder>",
             incoming_recalls.join("\n")
         );
-        let mut blocks = content.content_blocks();
+        let mut blocks = injected_content.content_blocks();
         blocks.push(ContentBlock::text(reminder_text));
         AgentInput::blocks(MessageContent::blocks(blocks))
     };

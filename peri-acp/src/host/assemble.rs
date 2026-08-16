@@ -10,15 +10,17 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 
-use crate::provider::{config_path, LlmProvider, PeriConfig};
+use crate::provider::{LlmProvider, PeriConfig};
 use crate::session::SessionManager;
 
 use super::AcpServerConfig;
@@ -35,6 +37,9 @@ use super::AcpServerConfig;
 pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
+    /// 配置源（读写路径决策的唯一事实源：TUI/print/stdio 共享，启动早期
+    /// 经 [`crate::provider::ConfigSource::load`] 构建一次）。
+    pub config_source: Arc<crate::provider::ConfigSource>,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
     /// 工作目录（用于加载 project/local settings hooks）
@@ -84,6 +89,7 @@ pub fn assemble_hook_groups(
 ///
 /// 装配细节与迁移前 `launch.rs` / `cli_print.rs` / stdio init 三处一致：
 /// peri_config 冻结快照 + cron scheduler（可选）注入。
+#[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
 pub fn build_session_manager(
     thread_store: Arc<dyn ThreadStore>,
     provider: LlmProvider,
@@ -92,6 +98,8 @@ pub fn build_session_manager(
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
     skills: Arc<dyn SkillsPort>,
+    plugin_command_entries: Vec<RouteEntry>,
+    plugin_skill_roots: Vec<SkillRoot>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
     SessionManager::new(
@@ -110,6 +118,8 @@ pub fn build_session_manager(
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         skills,
+        plugin_command_entries,
+        plugin_skill_roots,
     )
 }
 
@@ -127,6 +137,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     let HostAssemblyInput {
         provider,
         peri_config,
+        config_source,
         permission_mode,
         thread_store,
         cwd,
@@ -173,7 +184,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
     // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
     let (oauth_event_tx, oauth_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::event::AcpEvent>();
+        tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
     let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare {
         None
     } else {
@@ -195,24 +206,66 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
             let cb_pool = pool.clone();
             Some(Box::new(move |event: OAuthFlowEvent| match event {
                 OAuthFlowEvent::AuthorizationNeeded {
+                    flow_id,
                     server_name,
                     authorization_url,
                     callback_tx,
                 } => {
-                    cb_pool.register_oauth_callback(&server_name, callback_tx);
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthNeeded {
+                    if !cb_pool.register_oauth_callback(&server_name, &flow_id, callback_tx) {
+                        return;
+                    }
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
+                        flow_id,
                         server_name,
-                        auth_url: authorization_url,
+                        authorization_url,
                     });
                 }
-                OAuthFlowEvent::AuthorizationCompleted { server_name } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthCompleted { server_name });
+                OAuthFlowEvent::AuthorizationCompleted {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Completed {
+                        flow_id,
+                        server_name,
+                    });
                 }
-                OAuthFlowEvent::AuthorizationFailed { server_name, error } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthFailed { server_name, error });
+                OAuthFlowEvent::AuthorizationFailed {
+                    flow_id,
+                    server_name,
+                    failure_kind,
+                    error,
+                } => {
+                    let failure_class = match failure_kind {
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackUnavailable => crate::event::oauth::OAuthFailureClass::CallbackUnavailable,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackTimeout => crate::event::oauth::OAuthFailureClass::CallbackTimeout,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ProviderRejected => crate::event::oauth::OAuthFailureClass::ProviderRejected,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ConnectionFailed => crate::event::oauth::OAuthFailureClass::ConnectionFailed,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::Internal => crate::event::oauth::OAuthFailureClass::Internal,
+                    };
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Failed {
+                        flow_id,
+                        server_name,
+                        failure_class,
+                        legacy_error: error,
+                    });
                 }
-                OAuthFlowEvent::AuthorizationRestored { server_name } => {
-                    let _ = cb_tx.send(crate::event::AcpEvent::OauthRestored { server_name });
+                OAuthFlowEvent::AuthorizationCancelled {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Cancelled {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationRestored {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Restored {
+                        flow_id,
+                        server_name,
+                    });
                 }
             }))
         };
@@ -265,6 +318,12 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         .as_ref()
         .map(|pd| pd.all_skill_roots.clone())
         .unwrap_or_default();
+    // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
+    // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
+    let plugin_command_entries = plugin_data
+        .as_ref()
+        .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
+        .unwrap_or_default();
     let plugin_agent_dirs = plugin_data
         .as_ref()
         .map(|pd| pd.all_agent_dirs.clone())
@@ -306,6 +365,10 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         cron_scheduler.clone(),
         mcp_subscription,
         skills.clone(),
+        // Phase 6 B2/C1：插件静态条目 + 插件 skill roots 注入 session
+        // 管理器（会话创建时按 内置 → skills → 插件 顺序注册）。
+        plugin_command_entries.clone(),
+        plugin_skill_roots.clone(),
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
@@ -329,6 +392,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         oauth_event_rx: Some(oauth_event_rx),
         channel_state: None, // ServiceRegistry.channel_state 已删除
         plugin_skill_roots,
+        plugin_command_entries,
         plugin_agent_dirs,
         plugin_hooks: flat_hooks,
         // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
@@ -346,7 +410,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,
-        config_path: config_path(),
+        config_source,
         session_manager,
     }
 }

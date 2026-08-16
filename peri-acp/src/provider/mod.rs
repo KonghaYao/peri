@@ -11,7 +11,8 @@ use std::sync::Arc;
 pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
 use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
 pub use store::{
-    config_path, load, load_from, save, save_to, set_global_config_path, workspace_config_path,
+    config_path, load, load_from, save_to, set_global_config_path, workspace_config_path,
+    ConfigSource,
 };
 use url::Url;
 

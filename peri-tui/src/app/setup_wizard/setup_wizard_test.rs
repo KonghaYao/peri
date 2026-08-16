@@ -74,3 +74,76 @@ fn test_parse_url_parts_with_path() {
     assert_eq!(port, 8080);
     assert_eq!(path, "/v1/chat");
 }
+
+#[test]
+fn test_peri_free_provider_fields() {
+    let mp = peri_free_provider();
+    assert_eq!(mp.provider_id, "peri");
+    assert_eq!(mp.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(mp.api_key, "public");
+    assert_eq!(mp.provider_type, ProviderType::OpenAiCompatible);
+    assert_eq!(mp.aliases, PERI_FREE_MODEL_IDS.map(String::from));
+    assert!(mp.selected, "免费服务应默认选中");
+    assert!(mp.is_complete(), "免费服务配置应视为完整");
+}
+
+#[test]
+fn test_build_wizard_config_peri_free_profiles() {
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::PeriFreeService,
+        providers: vec![peri_free_provider()],
+        language: "zh-CN".to_string(),
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
+    assert_eq!(
+        cfg.config.active_alias, "sonnet",
+        "免费服务默认档位为 sonnet"
+    );
+    assert_eq!(cfg.config.providers.len(), 1);
+    let p = &cfg.config.providers[0];
+    assert_eq!(p.id, "peri");
+    assert_eq!(p.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(p.api_key, "public");
+    assert_eq!(
+        [
+            p.models.fable.as_str(),
+            p.models.opus.as_str(),
+            p.models.sonnet.as_str(),
+            p.models.haiku.as_str()
+        ],
+        PERI_FREE_MODEL_IDS
+    );
+    assert_eq!(cfg.config.profiles.fable.effort, "max");
+    assert_eq!(cfg.config.profiles.opus.effort, "medium");
+    assert_eq!(cfg.config.profiles.sonnet.effort, "max");
+    assert_eq!(cfg.config.profiles.haiku.effort, "low");
+    for alias in ["fable", "opus", "sonnet", "haiku"] {
+        assert_eq!(
+            cfg.config.profiles.get(alias).unwrap().provider,
+            "peri",
+            "{alias} 档位应绑定 peri provider"
+        );
+    }
+    assert_eq!(cfg.config.language.as_deref(), Some("zh-CN"));
+}
+
+#[test]
+fn test_build_wizard_config_custom_api_keeps_opus_only() {
+    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
+    mp.api_key = "sk-test".to_string();
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
+    assert_eq!(cfg.config.active_alias, "opus", "手动配置默认档位仍为 opus");
+    assert_eq!(cfg.config.profiles.opus.provider, "anthropic");
+    // 非 Peri 免费服务来源：其余档位保持默认
+    assert!(cfg.config.profiles.fable.is_default());
+    assert!(cfg.config.profiles.sonnet.is_default());
+    assert!(cfg.config.profiles.haiku.is_default());
+}

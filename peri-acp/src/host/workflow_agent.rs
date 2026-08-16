@@ -118,10 +118,13 @@ pub(crate) fn build_workflow_system_prompt_fallback(
             let features = crate::prompt::PromptFeatures::detect();
             // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + 冻结语言
             // 驱动；fallback 无 overrides）。
-            // advisor 裁决 B（2026-08-14）：workflow agent 链不装配
-            // HumanInTheLoopMiddleware（broker: None），10_hitl 描述的是主
-            // 会话审批机制——对 workflow 模型是误导性指令；presence-is-the-gate
-            // 契约要求在无 HITL 的渲染路径排除该段（C3 D5 决策修订）。
+            // advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
+            // middleware（broker: None → PermissionMiddleware::disabled()），
+            // 10_hitl 描述的是主会话审批机制——对 workflow 模型是误导性
+            // 指令；presence-is-the-gate 契约要求在无审批的渲染路径排除
+            // 该段（C3 D5 决策修订；2026-08-15 职责拆分：10_hitl 持有者由
+            // HumanInTheLoopMiddleware 改为 PermissionMiddleware，过滤目标
+            // 段落不变）。
             let collected =
                 crate::session::build_collected_sections(&meta_harness, None, frozen_language)
                     .into_iter()
@@ -155,8 +158,8 @@ pub(crate) fn build_workflow_agent_prompt_builder(
             let features = crate::prompt::PromptFeatures::detect();
             // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + overrides +
             // 冻结语言驱动；persona 段内容依赖 overrides，调用期计算）。
-            // advisor 裁决 B：workflow 链无 HumanInTheLoopMiddleware，
-            // 排除 10_hitl（同 build_workflow_system_prompt_fallback）。
+            // advisor 裁决 B：workflow 链无审批 middleware（PermissionMiddleware
+            // disabled 实例），排除 10_hitl（同 build_workflow_system_prompt_fallback）。
             let collected =
                 crate::session::build_collected_sections(&meta_harness, overrides, frozen_language)
                     .into_iter()

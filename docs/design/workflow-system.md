@@ -171,7 +171,7 @@ pub struct WorkflowRunner {
 
 1. 生成 `run_id` (UUID v7)
 2. `journal_store.init_run(run_id)` — 创建 `.claude/workflow-runs/{run_id}/script.js`
-3. 检测 bun 环境 → 优先 `bunx @peri-code/workflow`，否则 `npx -y @peri-code/workflow`
+3. 检测 bun 环境 → 优先 `bunx @peri-code/workflow@<version>`，否则 `npx -y @peri-code/workflow@<version>`（npx 兜底带显式版本，避免全局旧版被静默复用）
 4. 启动子进程，继承 cwd 和 PATH
 5. 创建 `RpcChannel`（绑定 child stdin/stdout，启动 `spawn_stdout_reader()` 线程）
 6. `send_request("workflow/start")`，**15 秒超时** — Node runner.js 开始执行

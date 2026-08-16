@@ -31,6 +31,7 @@ use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::image_safety::{ImageMeta, PathGrade};
 use crate::kit::rewind_action::RewindAction;
+use crate::kit::slash_projection::SlashCommandEntry;
 use crate::kit::submit_request::SubmitRequest;
 use image::DynamicImage;
 
@@ -324,21 +325,15 @@ pub static SLASH_PREFIX: AtomStatic<String> = AtomStatic::new(String::new);
 pub static MENTION_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 pub static SLASH_SELECTED_INDEX: AtomStatic<usize> = AtomStatic::new(|| 0);
 
-/// manual /compact 完成提示（SystemNote 文本）暂存——CompactCompleted 写入，
-/// bridge 的 BRIDGE_RESET_COUNTER 重置（session/load replay）后重建注入。
-///
-/// 背景：manual /compact 后 TurnDone 触发 session/load replay，reset 清空
-/// committed 会把刚注入的"压缩完成"SystemNote 一并丢弃，replay 后屏幕无
-/// 任何完成提示（issue 2026-08-08-e2e-compact-command-screenshot-too-early）。
-/// 消费后立即清空；auto compact 不写入（无 replay，且避免残留串到后续
-/// thread 切换的 reset）。
-pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
-
 pub static REWIND_PREVIEW: AtomStatic<Option<RewindPreview>> = AtomStatic::new(|| None);
 
 /// 回退目标 user 消息文本暂存——候选 Enter 时写入，RewindCompleted 到达后
 /// 消费回填输入框；任何失败/取消路径清空。
 pub static REWIND_TARGET_TEXT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+
+/// `session/rewind-preview` 返回的内容指纹。执行 RPC 必须原样带回；任何新的
+/// preview 都先清空旧值，避免用户确认已经过期的文件影响范围。
+pub static REWIND_PREVIEW_FINGERPRINT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
 /// 文件回退预算状态——候选 Enter 后由 rewind_consumer 写入：
 /// `Idle` = 未进入预算阶段（候选视图）；`Executing` = 预算为空自动执行或
@@ -394,6 +389,11 @@ pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
 > = OnceLock::new();
+/// 配置源句柄（读写路径决策的唯一事实源）：启动早期 `ConfigSource::load_lenient`
+/// 构建一次，TUI 与 ACP 共享同一 `Arc`；所有保存经
+/// [`crate::config::save_effective`] 走此句柄。
+pub static CONFIG_SOURCE_HANDLE: OnceLock<std::sync::Arc<crate::config::ConfigSource>> =
+    OnceLock::new();
 /// TUI 渲染配置共享句柄（仅 UI 字段，与 PERI_CONFIG_HANDLE 独立）
 pub static TUI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,
@@ -418,15 +418,12 @@ pub static MCP_PANEL_POOL: OnceLock<std::sync::Arc<peri_middlewares::mcp::McpCli
 pub static LANG_VERSION: AtomStatic<u64> = AtomStatic::new(|| 0);
 pub static WORKFLOW_SNAPSHOT: AtomStatic<Option<WorkflowSnapshot>> = AtomStatic::new(|| None);
 
-pub static ACP_COMMANDS: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
-pub static SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
-/// MCP 远端 skill 名称列表（`mcp__<server>__<skill>` 形态）。
-/// 由 kit notifier 在收到 `meta.mcpSkillNames` 后写入，slash 归类 McpSkill。
-pub static MCP_SKILL_NAMES: AtomStatic<Vec<String>> = AtomStatic::new(Vec::new);
-/// ACP 服务器下发的可用 slash 命令列表（含 skills）。
-/// 键 = 命令名（不含 / 前缀），值 = 描述。
-/// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入。
-pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<(String, String)>> = AtomStatic::new(Vec::new);
+/// ACP 服务器下发的可用 slash 命令投影列表（含 skills）。
+/// 由 kit notifier 在收到 `SessionUpdate::AvailableCommandsUpdate` 后写入：
+/// 结构化为投影 DTO，kind/level/args 等元数据随 `_meta` 通道携带，解析在
+/// acp_notifier `available_commands_update` 分支完成（`_meta` 五键 +
+/// 缺省回退 kind=Command/level=1），写入后立即 `refresh_slash_items()`。
+pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<SlashCommandEntry>> = AtomStatic::new(Vec::new);
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
 /// Setup Wizard 全量状态（步骤、Provider 列表、光标位置等）
 pub static SETUP_WIZARD: AtomStatic<SetupWizardState> = AtomStatic::new(SetupWizardState::default);
@@ -507,6 +504,15 @@ pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::n
 /// bridge 只需在 counter 变更时重置内部状态——新 session 的空 ViewCommit
 /// 会通过正常事件流到达，确保 committed 清空。
 pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// 跨 session/load replay 存活的 compact 完成提示（manual /compact 的
+/// CommandFeedback UiOnly 消息；replay 的 BRIDGE_RESET_COUNTER 重置会清空
+/// committed（含已注入的 SystemNote），bridge reset 分支据此重建到
+/// current_turn 后消费清空——机制沿袭 aecc2834（issue
+/// 2026-08-08-e2e-compact-command-screenshot-too-early），Phase 5 Step 7
+/// 文案移交 CommandFeedback 后由 handle_command_feedback 写入）。None =
+/// 无待重建提示。
+pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
 /// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble
 /// 到 acp_bridge，统一走 dispatch_and_notify 路径写入 VIEW_MODELS atom。

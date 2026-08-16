@@ -221,8 +221,9 @@ fn test_features_none_excludes_only_unheld_channel_section() {
 
 #[test]
 fn test_hitl_section_rendered_by_holder() {
-    // 10_hitl 由 HumanInTheLoopMiddleware 持有（Dynamic：机制说明 + 按代码
-    // 事实生成的 sensitive 列表）；收集段恒渲染，不依赖 hitl_enabled 字段。
+    // 10_hitl 由 PermissionMiddleware 持有（2026-08-15 拆分：Dynamic：机制
+    // 说明 + 按代码事实生成的 sensitive 列表）；收集段恒渲染，不依赖
+    // hitl_enabled 字段。
     let result = build_system_prompt(
         &MetaHarnessState::default(),
         None,
@@ -1553,7 +1554,7 @@ fn meta_harness_override_placeholders_still_substituted() {
 
 #[test]
 fn meta_harness_gated_enabled_shows_override() {
-    // 10_hitl 由 HumanInTheLoopMiddleware 持有（收集即装配）：覆盖 10_hitl
+    // 10_hitl 由 PermissionMiddleware 持有（收集即装配）：覆盖 10_hitl
     // 应生效（覆盖 = 替换持有者对应段落贡献，设计 §2.4 / §3.5.1 步骤 5）。
     let state = override_state("10_hitl", "HITL-OVERRIDE");
     let features = PromptFeatures::detect();
@@ -1597,9 +1598,11 @@ fn meta_harness_override_11_subagent_replaces_holder_section() {
     );
 }
 
-/// C3（gate 原子迁移）：10_hitl gate = HumanInTheLoopMiddleware 是否在链上，
+/// C3（gate 原子迁移）：10_hitl gate = PermissionMiddleware 是否在链上，
 /// 不再依赖 permission_mode——`detect()` 无 gate 差异，覆盖恒渲染；关闭
-/// 持有者（disabled_middlewares）才隐藏段落（决策记录 C3 D5）。
+/// 持有者（disabled_middlewares）才隐藏段落（决策记录 C3 D5；2026-08-15
+/// 职责拆分：10_hitl 持有者由新 HumanInTheLoopMiddleware 改为
+/// PermissionMiddleware）。
 #[test]
 fn meta_harness_gated_override_hidden_only_when_holder_disabled() {
     let mut state = override_state("10_hitl", "HITL-OVERRIDE");
@@ -1613,11 +1616,11 @@ fn meta_harness_gated_override_hidden_only_when_holder_disabled() {
     // 关闭持有者 → 段落整体消失（覆盖随段落一并隐藏）
     state
         .disabled_middlewares
-        .insert("HumanInTheLoopMiddleware".to_string());
+        .insert("PermissionMiddleware".to_string());
     let result = render_with_state(&state, features);
     assert!(
         !result.contains("HITL-OVERRIDE"),
-        "关闭 HumanInTheLoopMiddleware 后 10_hitl（含覆盖）不渲染"
+        "关闭 PermissionMiddleware 后 10_hitl（含覆盖）不渲染"
     );
 }
 
@@ -1710,6 +1713,11 @@ fn section_ids_match_arrays_and_holders() {
                 .map(|s| s.id),
         )
         .chain(LangMiddleware::sections(Some("zh")).iter().map(|s| s.id))
+        .chain(
+            peri_middlewares::permission::PermissionMiddleware::sections()
+                .iter()
+                .map(|s| s.id),
+        )
         .chain(
             peri_middlewares::hitl::HumanInTheLoopMiddleware::sections()
                 .iter()

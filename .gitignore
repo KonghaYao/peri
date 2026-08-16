@@ -206,6 +206,8 @@ settings.json
 !.claude/skills/project-maturity/
 !.claude/skills/advisor-consultation/**
 !.claude/skills/advisor-consultation/
+!.claude/skills/codebase-index/**
+!.claude/skills/codebase-index/
 !.claude/skills/langfuse/
 !.claude/skills/langfuse/scripts/
 !.claude/skills/langfuse/scripts/**
@@ -219,3 +221,5 @@ skills-lock.json
 e2e/results
 __pycache__
 .codex
+dsh-tui
+acp-hub/web/test-results/

@@ -75,6 +75,7 @@ impl McpClientPool {
                         oauth_status: OAuthStatus::default(),
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
+                        skills_capable: false,
                         channel_capable: false,
                     }),
                 );
@@ -186,6 +187,7 @@ impl McpClientPool {
                         })
                         .is_some();
                     let oauth_status = OAuthStatus::default();
+                    let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
                         name: name.clone(),
                         peer: Some(peer),
@@ -196,6 +198,7 @@ impl McpClientPool {
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
                         channel_capable,
+                        skills_capable,
                     });
                     pool.clients.write().insert(name.clone(), handle);
                     pool.services.lock().await.insert(name.clone(), rs);
@@ -304,6 +307,7 @@ impl McpClientPool {
                         oauth_status: OAuthStatus::default(),
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
+                        skills_capable: false,
                         channel_capable: false,
                     }),
                 );
@@ -405,6 +409,7 @@ impl McpClientPool {
                         })
                         .is_some();
                     let oauth_status = OAuthStatus::default();
+                    let skills_capable = super::client::peer_declares_skills(&peer);
                     pool.clients.write().insert(
                         name.clone(),
                         Arc::new(McpClientHandle {
@@ -417,6 +422,7 @@ impl McpClientPool {
                             source: server_config.source.clone(),
                             url: server_config.url.clone(),
                             channel_capable,
+                            skills_capable,
                         }),
                     );
                     pool.services.lock().await.insert(name.clone(), rs);

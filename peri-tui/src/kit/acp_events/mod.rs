@@ -223,8 +223,8 @@ impl BridgeState {
     /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
     /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
     ///
-    /// 注意：SystemNote（BudgetWarning/SystemNotification/CompactCompleted/
-    /// CompactError/AgentExecutionFailed）不再通过 flush-then-push 模式，
+    /// 注意：SystemNote（BudgetWarning/SystemNotification/CommandFeedback/
+    /// AgentExecutionFailed）不再通过 flush-then-push 模式，
     /// 改为 inject_system_note() 统一注入 current_turn 内部 segment。
     fn flush_current_turn(&mut self) {
         if !self.current_turn.committed && !self.current_turn.is_empty() {
@@ -251,8 +251,9 @@ impl BridgeState {
     /// SystemNote 统一注入入口。封装 push_system_note → push_view_models → push_acp_state
     /// 三步操作，确保 SystemNote 按时序出现在 current_turn 内部。
     ///
-    /// 所有 handler（CompactCompleted/CompactError/AgentExecutionFailed/BudgetWarning/
-    /// SystemNotification）必须通过此方法注入 SystemNote，禁止直接 push committed。
+    /// 所有 handler（CompactCompleted/CommandFeedback/AgentExecutionFailed/
+    /// BudgetWarning/SystemNotification）必须通过此方法注入 SystemNote，
+    /// 禁止直接 push committed。
     pub fn inject_system_note(&mut self, text: String, level: TuiNoteLevel) {
         let content_hash = tui_hash_str(&text);
         self.current_turn
@@ -342,6 +343,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         Progress(_) => tool::handle_progress(state),
         BudgetWarning(bw) => system::handle_budget_warning(state, bw),
         SystemNotification(sn) => system::handle_system_notification(state, sn),
+        CommandFeedback(fb) => system::handle_command_feedback(state, fb),
 
         // ── §4.4 Input assist ──
         Prediction(p) => system::handle_prediction(p),
@@ -359,7 +361,6 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
         // 变体保留以向后兼容旧服务端。
         RewindPreview(_) => {}
         RewindCompleted { messages_json } => system::handle_rewind_completed(state, messages_json),
-        RewindError { message } => system::handle_rewind_error(state, message),
         OauthNeeded(on) => system::handle_oauth_needed(state, on),
         OauthCompleted { server_name } => system::handle_oauth_completed(state, server_name),
         OauthFailed { server_name, error } => {
@@ -385,18 +386,7 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             steps,
         } => turn::handle_turn_committed(state, *steps),
         CompactStarted => compact::handle_compact_started(state),
-        CompactCompleted {
-            summary,
-            files,
-            skills,
-            strategy,
-            trigger,
-            outcome,
-            ..
-        } => compact::handle_compact_completed(
-            state, summary, files, skills, strategy, trigger, outcome,
-        ),
-        CompactError { message } => compact::handle_compact_error(state, message),
+        CompactCompleted { trigger, .. } => compact::handle_compact_completed(state, trigger),
         BackgroundTaskCompleted {
             task_id,
             agent_name,

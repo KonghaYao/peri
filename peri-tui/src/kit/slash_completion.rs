@@ -25,6 +25,7 @@ use crate::kit::inline_nav::{
     InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
 };
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
+use crate::kit::slash_projection::ArgsSchema;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -53,12 +54,33 @@ pub(crate) fn slash_kind_color(
 
 #[derive(Debug, Clone)]
 pub struct SlashCompletionItem {
+    /// 显示形态（映射时已按 level 变换：1 裸名 / 2 全名）。
     pub label: String,
+    /// 提交形态（display 即 lexical：== label，解析器严格命中）。
     pub insert_text: String,
     pub description: String,
     pub kind: SlashActionKind,
     /// label 的小写版本，预计算避免每帧 to_lowercase() 分配。
     pub label_lowercase: String,
+    /// 元数据：唯一键（ui 域解析 / fuzzy 双索引 / args 关联）。
+    pub fullname: String,
+    /// 参数 schema（schema 驱动补全 / 校验，步骤 9 消费）。
+    pub args: Option<ArgsSchema>,
+    /// 双索引匹配串（Phase 4 步骤 4 预计算）：label_lowercase + fullname_lowercase
+    /// 合并——level 1 裸名条目也可被全名前缀（如 `/mcp:demo`）模糊搜到（R4）。
+    pub search_lowercase: String,
+}
+
+impl SlashCompletionItem {
+    /// 预计算双索引匹配串：label_lowercase + fullname_lowercase 合并。
+    /// fullname 为空（过渡期合成条目）时退化为 label 小写。
+    pub fn make_search_lowercase(label_lowercase: &str, fullname: &str) -> String {
+        if fullname.is_empty() {
+            label_lowercase.to_string()
+        } else {
+            format!("{label_lowercase} {}", fullname.to_lowercase())
+        }
+    }
 }
 
 #[derive(Default, Props)]
@@ -69,6 +91,29 @@ pub struct SlashCompletionProps {
     pub on_cancel: Arc<Mutex<Handler<'static, ()>>>,
 }
 
+/// 按 prefix 过滤 + 模糊打分排序（Phase 4 步骤 4 抽出为独立函数便于单测）。
+///
+/// 双索引：匹配串为预计算 `search_lowercase`（label_lowercase +
+/// fullname_lowercase 合并）——level 1 裸名条目也能被全名前缀（如
+/// `/mcp:demo`）搜到（R4）；level 2 全名条目经 label 路径命中。
+fn filter_slash_items(items: &[SlashCompletionItem], prefix: &str) -> Vec<SlashCompletionItem> {
+    if prefix.is_empty() {
+        return items.to_vec();
+    }
+    let matcher = SkimMatcherV2::default();
+    let query = prefix.to_lowercase();
+    let mut scored: Vec<(i64, SlashCompletionItem)> = items
+        .iter()
+        .filter_map(|item| {
+            let score = matcher.fuzzy_match(&item.search_lowercase, &query)?;
+            Some((score, item.clone()))
+        })
+        .collect();
+    // 按模糊匹配分数降序排列
+    scored.sort_by_key(|b| std::cmp::Reverse(b.0));
+    scored.into_iter().map(|(_, item)| item).collect()
+}
+
 #[component]
 pub fn SlashCompletion(
     props: &SlashCompletionProps,
@@ -76,23 +121,7 @@ pub fn SlashCompletion(
 ) -> impl Into<AnyElement<'static>> {
     let selection = hooks.use_atom(&SLASH_SELECTED_INDEX);
 
-    let filtered: Vec<SlashCompletionItem> = if props.prefix.is_empty() {
-        props.items.clone()
-    } else {
-        let matcher = SkimMatcherV2::default();
-        let query = props.prefix.to_lowercase();
-        let mut scored: Vec<(i64, SlashCompletionItem)> = props
-            .items
-            .iter()
-            .filter_map(|item| {
-                let score = matcher.fuzzy_match(&item.label_lowercase, &query)?;
-                Some((score, item.clone()))
-            })
-            .collect();
-        // 按模糊匹配分数降序排列
-        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-        scored.into_iter().map(|(_, item)| item).collect()
-    };
+    let filtered = filter_slash_items(&props.items, &props.prefix);
 
     let item_count = filtered.len();
     let filtered_for_handler = filtered.clone();
@@ -308,6 +337,70 @@ mod tests {
             s.model_info,
             "McpSkill 应映射 semantic.model_info"
         );
+    }
+
+    /// 构造测试条目：label 为显示形态，fullname 为唯一键。
+    fn item(label: &str, fullname: &str) -> SlashCompletionItem {
+        SlashCompletionItem {
+            label: label.to_string(),
+            insert_text: label.to_string(),
+            description: String::new(),
+            kind: SlashActionKind::Command,
+            label_lowercase: label.to_lowercase(),
+            fullname: fullname.to_string(),
+            search_lowercase: SlashCompletionItem::make_search_lowercase(
+                &label.to_lowercase(),
+                fullname,
+            ),
+            args: None,
+        }
+    }
+
+    /// Phase 4 步骤 4：fuzzy 双索引——level 1 裸名条目（label=hello）也能被
+    /// 全名前缀 `/mcp:demo` 搜到（fullname 索引路径，R4）。
+    #[test]
+    fn test_filter_slash_items_fullname_index_matches_level1_bare_label() {
+        let items = vec![
+            item("hello", "mcp:demo:hello"),
+            item("compact", "core:compact"),
+            item("model", ""),
+        ];
+        let hits = filter_slash_items(&items, "mcp:demo");
+        assert!(
+            hits.iter().any(|i| i.fullname == "mcp:demo:hello"),
+            "/mcp:demo 应经 fullname 索引命中 level 1 裸名条目 mcp:demo:hello"
+        );
+        assert!(hits.iter().all(|i| i.fullname != "core:compact"));
+        assert!(hits.iter().all(|i| !i.fullname.is_empty()));
+    }
+
+    /// Phase 4 步骤 4：level 2 全名条目（label == fullname）被 `/mcp:demo`
+    /// 前缀搜到（label 路径）。
+    #[test]
+    fn test_filter_slash_items_fullname_prefix_matches_level2_label() {
+        let items = vec![
+            item("mcp:demo:hello", "mcp:demo:hello"),
+            item("mcp:other:bye", "mcp:other:bye"),
+        ];
+        let hits = filter_slash_items(&items, "mcp:demo");
+        assert!(
+            hits.iter().any(|i| i.fullname == "mcp:demo:hello"),
+            "/mcp:demo 应命中 level 2 全名条目 mcp:demo:hello"
+        );
+        assert!(hits.iter().all(|i| i.fullname != "mcp:other:bye"));
+    }
+
+    /// label（裸名）路径仍可命中；空 prefix 返回全部（原行为）。
+    #[test]
+    fn test_filter_slash_items_label_index_and_empty_prefix() {
+        let items = vec![
+            item("hello", "mcp:demo:hello"),
+            item("world", "mcp:demo:world"),
+        ];
+        assert_eq!(filter_slash_items(&items, "").len(), items.len());
+        let hits = filter_slash_items(&items, "hello");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].fullname, "mcp:demo:hello");
     }
 
     /// 回归：既有 Panel/Command/Skill 映射不变（渲染行为除新增色外不变）。

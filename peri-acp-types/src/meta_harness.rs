@@ -40,6 +40,10 @@ pub struct MetaHarnessState {
 /// `.peri/meta/persona.md` / `.peri/meta/language.md` 覆盖）。与持有者
 /// 段落声明 + `GATED_SECTIONS` 数组 ID 并集完全一致且无重复（由
 /// `prompt_test.rs` 锁定）。
+///
+/// 2026-08-15 职责拆分后：`10_hitl`（审批机制）归 `PermissionMiddleware`，
+/// `12_ask_user`（提问纪律）归新 `HumanInTheLoopMiddleware`（持有
+/// `AskUserQuestion` 工具）。
 pub const SECTION_IDS: &[&str] = &[
     "01_intro",
     "02_system",
@@ -50,6 +54,7 @@ pub const SECTION_IDS: &[&str] = &[
     "07_runtime",
     "10_hitl",
     "11_subagent",
+    "12_ask_user",
     "13_skills",
     "15_channel",
     "persona",
@@ -61,6 +66,12 @@ pub const SECTION_IDS: &[&str] = &[
 /// 覆盖全部装配入口：顶层链（`assembly.rs` 21 注册点）、Workflow agent 链、
 /// SubAgent 子链。`false` 条目键必须在此集合内，否则解析期校验
 /// warn 后忽略。
+///
+/// 2026-08-15 职责拆分：`PermissionMiddleware`（原审批职责，持有
+/// `10_hitl`）；`HumanInTheLoopMiddleware` 旧名由新"提问"middleware 接管
+/// （持有 `AskUserQuestion` 工具 + `12_ask_user` 段落）。配置键
+/// `"HumanInTheLoopMiddleware": false` 语义随之从"关审批"漂移为"关提问"
+/// （纯破坏性改名，见 `spec/issues/2026-08-15-permission-hitl-split.md`）。
 pub const MIDDLEWARE_NAMES: &[&str] = &[
     "DefaultSystemPromptMiddleware",
     "LangMiddleware",
@@ -78,6 +89,7 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "TodoMiddleware",
     "CronMiddleware",
     "HookMiddleware",
+    "PermissionMiddleware",
     "HumanInTheLoopMiddleware",
     "SubAgentMiddleware",
     "McpMiddleware",
@@ -100,8 +112,9 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
 /// persona / language）gate = 持有者是否装配，由收集机制天然承担
 /// （收集即装配，见 `peri_agent::middleware::prompt_sections`），不入表。
 pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
-    ("10_hitl", "HumanInTheLoopMiddleware"),
+    ("10_hitl", "PermissionMiddleware"),
     ("11_subagent", "SubAgentMiddleware"),
+    ("12_ask_user", "HumanInTheLoopMiddleware"),
     ("13_skills", "SkillsMiddleware"),
 ];
 
@@ -112,12 +125,15 @@ pub const SECTION_HOLDER_MIDDLEWARE: &[(&str, &str)] = &[
 /// `spec/issues/2026-08-14-meta-harness-tool-view-exclusion.md`）。与各
 /// middleware 实现的工具名由 `assembly_test.rs` 锁定一致。
 ///
-/// **事实核查（2026-08-14）**：共享 registry（`shared_tools`）的唯一写入
-/// 点是 `AskUserQuestion`（assembly.rs 装配期 insert）——middleware 工具
-/// （含本清单全部条目与 MCP 动态工具）从不进入共享 registry，只经
-/// `chain.collect_tools()` 进入每 turn 重建的本地视图。因此本清单是
-/// 防御性剔除面：当前永不命中，但若将来注册面变化（middleware 工具写入
-/// shared_tools），清单必须同步扩展——新增 middleware 工具名须加入此处。
+/// **事实核查（2026-08-15 更新）**：2026-08-15 职责拆分（`spec/issues/
+/// 2026-08-15-permission-hitl-split.md`）后，宿主级共享 registry
+/// （`shared_tools`）生产路径写入点归零——`AskUserQuestion` 移入新
+/// `HumanInTheLoopMiddleware` 的 `collect_tools`（随关闭而消失），其余
+/// middleware 工具（含本清单全部条目与 MCP 动态工具）从不进入共享
+/// registry，只经 `chain.collect_tools()` 进入每 turn 重建的本地视图。
+/// 因此本清单是纯防御性剔除面：当前永不命中，但若将来注册面变化
+/// （middleware 工具写入 shared_tools），清单必须同步扩展——新增
+/// middleware 工具名须加入此处。
 ///
 /// MCP 动态 bridge 工具（`mcp__{server}__{tool}`）与 `McpResourceTool`/
 /// `DiscoverMCP` 同样不进入共享 registry，无需也无法静态枚举；禁用
@@ -139,6 +155,8 @@ pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     // SkillsMiddleware
     "SkillTool",
     "DiscoverSkillsTool",
+    // HumanInTheLoopMiddleware（新：提问通道）
+    "AskUserQuestion",
     // SubAgentMiddleware
     "Agent",
     "AgentResult",

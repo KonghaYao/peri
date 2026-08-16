@@ -11,6 +11,7 @@ fn test_oauth_flow_error_display() {
 #[test]
 fn test_oauth_flow_event_types() {
     let event1 = OAuthFlowEvent::AuthorizationNeeded {
+        flow_id: "flow-1".to_string(),
         server_name: "srv".to_string(),
         authorization_url: "http://example.com".to_string(),
         callback_tx: oneshot::channel().0,
@@ -20,6 +21,7 @@ fn test_oauth_flow_event_types() {
     }
 
     let event2 = OAuthFlowEvent::AuthorizationCompleted {
+        flow_id: "flow-1".to_string(),
         server_name: "srv".to_string(),
     };
     if let OAuthFlowEvent::AuthorizationCompleted { server_name, .. } = event2 {
@@ -27,7 +29,9 @@ fn test_oauth_flow_event_types() {
     }
 
     let event3 = OAuthFlowEvent::AuthorizationFailed {
+        flow_id: "flow-1".to_string(),
         server_name: "srv".to_string(),
+        failure_kind: OAuthFailureKind::ProviderRejected,
         error: "fail".to_string(),
     };
     if let OAuthFlowEvent::AuthorizationFailed { error, .. } = event3 {
@@ -80,6 +84,7 @@ async fn test_oauth_flow_manager_emit_event() {
     });
 
     manager.emit_event(OAuthFlowEvent::AuthorizationCompleted {
+        flow_id: "flow-1".to_string(),
         server_name: "test".to_string(),
     });
     assert_eq!(counter.load(Ordering::SeqCst), 1);

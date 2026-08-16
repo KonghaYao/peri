@@ -128,7 +128,7 @@ fn persist_theme(name: &str) {
     tui_snapshot.sync_to_extra(&mut peri.config.extra);
     let snap = peri.clone();
     drop(peri);
-    match crate::config::save(&snap) {
+    match crate::config::save_effective(&snap) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
@@ -179,7 +179,7 @@ fn toggle_daily_color() {
     tui_snapshot.sync_to_extra(&mut peri.config.extra);
     let snap = peri.clone();
     drop(peri);
-    match crate::config::save(&snap) {
+    match crate::config::save_effective(&snap) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),

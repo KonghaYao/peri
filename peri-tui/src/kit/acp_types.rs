@@ -1268,6 +1268,11 @@ pub enum AcpEventData {
     /// `"system-notification"` -- system-level notification text with severity.
     SystemNotification(SystemNotification),
 
+    /// `"command-feedback"` — 命令执行反馈（Phase 1 `CommandFeedback` 载荷，
+    /// 经 peri/agent_event 通道送达，无标准 SessionUpdate；level/channel 为
+    /// wire string 化 camelCase：`"info"|"warning"|"error"`、`"uiOnly"|"session"`）。
+    CommandFeedback(TuiCommandFeedback),
+
     // -- §4.4 Input assist -------------------------------------------------
     /// `"prediction"` -- input prediction suggestion (grey placeholder).
     Prediction(Prediction),
@@ -1297,10 +1302,6 @@ pub enum AcpEventData {
     /// 由 AcpEvent::RewindCompleted（peri/agent_event）转换而来，
     /// dispatch_and_notify 反序列化后替换 state.committed。
     RewindCompleted { messages_json: String },
-
-    /// `"rewind-error"` — 回退失败（目标消息不存在 / 参数解析失败）。
-    /// 由 AcpEvent::RewindError（peri/agent_event）转换而来。
-    RewindError { message: String },
 
     /// `"oauth-needed"` -- MCP server authorization required.
     OauthNeeded(OauthNeeded),
@@ -1368,24 +1369,15 @@ pub enum AcpEventData {
     /// `"compact-started"` — 上下文压缩开始。
     CompactStarted,
 
-    /// `"compact-completed"` — 上下文压缩完成。
+    /// `"compact-completed"` — 上下文压缩完成（Phase 5 Step 4 收敛：
+    /// 状态重建信号三字段；通知文案由 CommandFeedback 渲染）。
     CompactCompleted {
         summary: String,
-        files: Vec<serde_json::Value>,
-        skills: Vec<String>,
-        micro_cleared: usize,
         messages_json: String,
-        /// 压缩策略: "micro" | "full" | "smart"
-        strategy: String,
         /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"，由
         /// acp_notifier 透传时补默认值）
         trigger: String,
-        /// Compact 执行的语义结果
-        outcome: String,
     },
-
-    /// `"compact-error"` — 上下文压缩失败。
-    CompactError { message: String },
 
     /// `"background-task-completed"` — 后台 agent 任务完成。
     BackgroundTaskCompleted {
@@ -1548,6 +1540,34 @@ impl AcpEventData {
             data,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TuiCommandFeedback -- decoded CommandFeedback event payload
+// ---------------------------------------------------------------------------
+
+/// 命令执行反馈（Phase 1 `CommandFeedback` 的 TUI 侧结构化镜像）。
+/// 经 `convert_agent_event`（peri/agent_event 通道）解析 wire 字符串后构造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiCommandFeedback {
+    pub level: FeedbackLevel,
+    pub message: String,
+    pub channel: FeedbackChannel,
+}
+
+/// 反馈级别（wire: `"info"|"warning"|"error"`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+/// 反馈通道（wire: `"uiOnly"|"session"`；缺省 UiOnly）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackChannel {
+    UiOnly,
+    Session,
 }
 
 // ---------------------------------------------------------------------------

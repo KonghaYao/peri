@@ -71,9 +71,9 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `workflow/kill_agent` | `{ sessionId, runId, agentId }` | `{ killed }` | 终止运行中的工作流 agent |
 | `workflow/kill_run` | `{ sessionId, runId }` | `{ killed }` | 终止整个工作流运行 |
 | `workflow/resume` | `{ sessionId, runId }` | `{ newRunId, resumedFrom }` | 恢复已暂停的工作流运行 |
-| `session/rewind-candidates` | `{ sessionId }` | 候选列表 | 回退候选查询 |
-| `session/rewind-preview` | `{ sessionId, ... }` | 预览 | 回退预览（FileChange + RewindMessage） |
-| `session/rewind` | `{ sessionId, ... }` | `{}` | 执行回退 |
+| `session/rewind-candidates` | `{ sessionId }` | 最多 64 个 `{ message_id, preview }` | 仅在双向协商 `peri.rewind` 后查询清洗后的 user message 候选 |
+| `session/rewind-preview` | `{ sessionId, target_message_id, revert_files }` | `{ preview_fingerprint, file_changes }` | 返回有界、project-relative 的 write/edit 文件影响与一次性预览指纹 |
+| `session/rewind` | `{ sessionId, target_message_id, preview_fingerprint, revert_files }` | `{ status: "executed" }` | 执行前重算当前历史；指纹缺失或过期时在任何截断/文件恢复前拒绝 |
 
 ---
 

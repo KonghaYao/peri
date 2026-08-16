@@ -171,14 +171,18 @@ initialize 成功（列表已缓存）→ 异步任务：
 - **deferred 悖论**：DiscoverMCP 自身 deferred，需经 SearchExtraTools 发现——agent 需先知道"有个搜 MCP 的工具"。缓解：SearchExtraTools description 已列 Core 工具与发现用途，DiscoverMCP 的 name/description 进 deferred 索引后自然可见；后续可观察触发率决定是否升 direct。
 - **search 结果体积**：工具类带完整 schema 可能让返回很大。缓解：`max_results` 上限（默认 5、上限 20）+ 结果截断策略复用既有输出截断。
 - **commands 列表膨胀**：每个 MCP skill 一条，恶意/低质 server 可注入大量条目。缓解：命名带 server 前缀可识别；后续可按 server 折叠。
-- **内容新鲜度**：注册时读入缓存的 SKILL.md 不随 server 侧变化刷新（本次无 list_changed 订阅）——重连时重扫兜底；阶段二接订阅。
+- **内容新鲜度**：注册时读入缓存的 SKILL.md 不随 server 侧变化**主动**刷新；热更新闭环**已落地**（2026-08-15 第二轮 review）——读取面 digest 校验失败/未列出时经 `skills/get` 刷新单条目并回写注册表（digest 失败触发，frontmatter 比对失败不触发；handle 一致性检查防重连竞态）；重连重扫仍为兜底。
 - **旧 issue 演进**：本 issue 取代 `2026-08-13-mcp-skills-from-resources.md`（superseded），保留其 SEP-2640 阶段二路线与 resource 前缀方案事实基础。
 
 ## 非目标
 
 - 不在 DiscoverMCP 提供 MCP 工具执行（执行仅 `ExecuteExtraTool`）。
 - 不改 tool search 体系现有行为（SearchExtraTools/ExecuteExtraTool 保留原语义）。
-- 不做 SEP-2640 `skills/list` 原语、digest 校验、list_changed 订阅热更新（阶段二）。
+- 不做 SEP-2640 `skills/list`/`skills/get` 原语与 digest 校验（阶段二）。
+  - **2026-08-15 更新**：`skills/list` + `skills/get` 语义与 digest 校验**已落地**（声明 `io.modelcontextprotocol/skills` 扩展的 server 走 `skills/list` 分页 → `resources/read` → sha256 digest 校验 → frontmatter 逐字段全量比对；digest 校验失败经 `skills/get` 刷新单条目恢复；未声明扩展的旧 server 保留 `skill://` resources 扫描为 legacy 兜底）。仍不做：`resources/directory/read` 导航。
+- **2026-08-15 修正**：SEP-2640 v1 无 `list_changed` 机制——热更新模型为读取时校验失败 + `skills/get` 刷新单条目（Rationale 否决了专用 list_changed 通知）；无需实现。
+- **2026-08-15 新增**：不做未列举技能 URI 入口（SkillTool 按名加载已发现条目；未在 skills/list 中的技能 URI 不提供加载入口）。
+- **2026-08-15 新增**：不做 content-bound 持久化审批（技能内容绑定校验通过即用，不引入内容审批面）。
 - 不做 MCP scope 语义与企业策略。
 - 颜色标记不进配置系统。
 - 不做 MCP skill 的发现完成通知（toast/system-reminder）。
@@ -200,3 +204,7 @@ initialize 成功（列表已缓存）→ 异步任务：
 | 2026-08-13 | — | Open | agent | 需求访谈定案后创建；supersede 旧 issue |
 | 2026-08-13 | Open | Open | agent | 新增 C 节 session 边界三硬约束（MCP 池不下沉定案）+ 验收 14 |
 | 2026-08-13 | Open | Open | agent | 8 Slice 全部落地；组 A-F + 最终集成评审 APPROVED；修复 HIGH-1（TUI `_meta` wire key）与 LOW-1（commands 合并去重）；验收 1-14 全闭合，待提交 |
+| 2026-08-15 | Open | Open | agent | MCP skills 发现升级 SEP-2640 v1 规范路径：扩展声明门闩（`peer_declares_skills`）+ `skills/list` 分页 + digest 校验 + frontmatter 逐字段比对 + URI 最终段=name 身份 + 同名消歧（路径段）+ 嵌套技能过滤；legacy resources 扫描降级为兜底；`McpClientHandle.skills_capable`；非目标同步更新 |
+| 2026-08-15 | Open | Open | agent | 规范补齐三项：① frontmatter 逐字段**全量**比对（附加字段差异拒绝 + YAML 值类型宽松归一，`frontmatter_maps_equal` 纯函数带单测）；② `skills/get` 客户端能力 + digest 校验失败单条目恢复（仅 stale 路径触发、cancel 约束、新条目重新定位 digest 重读重校验）；③ `McpResourceTool` 按 entry.resources 完整性读取校验（未列出 URI 拒绝 / digest 不匹配拒绝，session 级 registry 注入；`SkillMetadata.resources` 契约层新增）；非目标修正（list_changed 无机制无需实现、skills/get 主动调用已落地、新增未列举技能 URI 入口与 content-bound 持久化审批非目标） |
+| 2026-08-15 | Open | Open | agent | 第二轮 review 全修：① 读取面热更新闭环（digest 失败/未列出 → `skills/get` 刷新单条目 → 全量校验 → `refresh_entries` 回写注册表，`Arc::ptr_eq` handle 一致性防重连竞态；`peri-acp-types::mcp_skills::refresh_entries` 新增）；② Blob 内容 base64 解码后 digest 校验（`verify_digest_bytes`，与 Text 路径字节一致）+ 多 contents 逐项校验（任一不匹配拒绝）；③ frontmatter 值比较严格化（数字↔字符串跨类型不相等 42≠"42"；Number 保留混合 f64 比较 1==1.0；String 仅尾随空白归一 trim_end）+ 删除 `number_eq_str`；④ `skills/get` 响应 uri 与请求核对，不一致拒绝恢复；⑤ scheme 大小写不敏感（`is_skill_scheme`，RFC 3986）；⑥ resources 省略/空数组区分（DTO `Option<Vec>`，present 时必须含 SKILL.md 自身条目）；⑦ `locate_skill_binding` 最长根优先 + 纯函数化；⑧ 假警报 warn 治理（verify_and_build 内 digest 失败降 debug，恢复出口为真——恢复失败才 warn）；风险区"内容新鲜度"同步为热更新闭环已落地 |
+| 2026-08-15 | Open | Open | agent | 第三轮收尾修复（12 项，全部 LOW/注释/测试级）：① 超时预算注释修正（`McpResourceTool::timeout()=None` 无整体超时；Listed 分支上界约 210s、Unlisted ≤90s）；② `number_eq` 大数精度（Float-vs-Int 在 \|f\|≤2^53 精确比较，域外保守判不等）；③ 恢复回写不复活已删条目（定位不到 → 不回写）；④ 恢复回写保留原条目 name（防消歧名漂移/撞名）；⑤ `read_server` notify_one 移入 skills/get 分支（同步点修正，handle_mismatch 测试稳定）；⑥ `refresh_entries` 直接单测（Started/handle 不一致拒写、同 handle 回写+on_change、两空不触发）；⑦ hex 大小写宽容声明+测试（大写 hex 通过、非 hex 拒绝）；⑧ 恢复内容格式化 mime 取自原值 + 复用截断/持久化；⑨ Blob 恢复边界文案（NotText 区分"未返回文本内容"）；⑩ cancel 边界文档（恢复 ≤90s 不可中断；悬挂窗口上界 (N/8)×30s + 恢复条目×60s）；⑪ scheme 大小写统一（`uri_eq_ignore_scheme_case` 提升 pub(crate) 共用，恢复路径两处）；⑫ 多 contents 语义注释。**剩余已知限制**：f64 大数域外保守拒绝（2^53+2 起判不等）；同 handle 并发恢复 lost update（无版本戳）；invoke→recover 窗口内重连的新 handle 会接受回写；读取面无 cancel（恢复最长 90s 不可中断） |

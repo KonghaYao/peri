@@ -4,10 +4,12 @@
 //! `peri/agent_event` channel. It contains only the fields that TUI consumers need,
 //! avoiding a direct `ExecutorEvent` dependency in the TUI.
 
+pub mod activity;
 mod forwarder;
 #[cfg(test)]
 mod forwarder_test;
 pub mod mapper;
+pub mod oauth;
 
 pub(crate) use self::forwarder::spawn_eventbus_forwarder;
 pub use mapper::{map_event, MappedEvent};
@@ -98,32 +100,22 @@ pub enum AcpEvent {
     },
     /// Context compaction started
     CompactStarted,
-    /// Context compaction completed
+    /// Context compaction completed（Phase 5 Step 4 收敛：状态重建信号三字段；
+    /// 通知文案职责已移交 CommandFeedback）
     CompactCompleted {
         summary: String,
-        files: Vec<CompactFileInfoDto>,
-        skills: Vec<String>,
-        micro_cleared: usize,
         /// JSON-serialized `Vec<BaseMessage>` (the new message list after compact)
         messages_json: String,
-        /// 压缩策略: "micro" | "full" | "smart"
-        strategy: String,
         /// 压缩触发方式: "auto" | "manual"（旧事件缺省视为 "auto"）
         #[serde(default = "default_compact_trigger")]
         trigger: String,
-        /// Compact 执行的语义结果
-        outcome: String,
     },
-    /// Context compaction failed
-    CompactError { message: String },
     /// Rewind completed
     RewindCompleted {
         summary: String,
         /// JSON-serialized `Vec<BaseMessage>` (messages after rewind)
         messages_json: String,
     },
-    /// Rewind failed (target message not found / argument parse error)
-    RewindError { message: String },
     /// Background agent task completed
     BackgroundTaskCompleted {
         task_id: String,
@@ -192,6 +184,17 @@ pub enum AcpEvent {
         tool_count: Option<u64>,
         run_status: Option<String>,
         message: Option<String>,
+    },
+    /// 命令执行反馈（命令执行结果回传，ACP → TUI 通知条渲染）。
+    ///
+    /// wire string 化：`level` = `"info"|"warning"|"error"`、`channel` =
+    /// `"uiOnly"|"session"`（Phase 1 serde camelCase 输出，经 to_serde_str
+    /// 透传）；channel=session 由 TUI 侧 opt-in 另写系统消息
+    /// （Phase 4 落 TUI 本地拦截）。
+    CommandFeedback {
+        level: String,
+        message: String,
+        channel: String,
     },
 }
 

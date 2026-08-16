@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::i18n;
-use crate::kit::acp_types::BgTaskEntry;
+use crate::kit::acp_types::{BgTaskEntry, FeedbackChannel, FeedbackLevel, TuiCommandFeedback};
 use crate::kit::atoms::PluginSummary;
 use crate::kit::atoms::{
     ASK_USER_PENDING, ASK_USER_REQUEST_ID, BG_DISPLAY, BG_TASKS, HITL_REQUEST_ID, NOTIFICATION,
@@ -57,6 +57,36 @@ pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNot
         _ => TuiNoteLevel::Info,
     };
     state.inject_system_note(sn.text.clone(), level);
+}
+
+pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFeedback) {
+    // 命令执行反馈（Phase 3 CommandFeedback 事件）。v1 不建独立通知条组件，
+    // UiOnly/Session 两通道均先走 inject_system_note——SystemNote 是 TUI 渲染
+    // 层概念，不进 ACP 消息，agent 永不见（设计 §79）；通知条/状态区的视觉
+    // 差异留待后续组件化。
+    // channel=Session 的会话写入（命令显式 opt-in 才另写系统消息进会话，
+    // 设计 §79/§89）待通知条组件化（Phase 5+）时收口——此处保留显式分支，
+    // 防止 Phase 3 侧 opt-in Session 的命令上线后反馈语义静默丢失而无编译期提醒。
+    let level = match fb.level {
+        FeedbackLevel::Info => TuiNoteLevel::Info,
+        FeedbackLevel::Warning => TuiNoteLevel::Warning,
+        FeedbackLevel::Error => TuiNoteLevel::Error,
+    };
+    match fb.channel {
+        FeedbackChannel::UiOnly | FeedbackChannel::Session => {
+            state.inject_system_note(fb.message.clone(), level);
+        }
+    }
+    // Phase 5 Step 7 补遗（Step 8 回归修复）：compact 手动完成的 CommandFeedback
+    // SystemNote 会被紧随的 session/load replay（BRIDGE_RESET_COUNTER reset）
+    // 清空——8/8 aecc2834 的 PENDING_COMPACT_NOTE 跨 replay 桥接随 Step 7
+    // 删除后，文案移交 CommandFeedback 渲染时未保留该机制（e2e compact-command
+    // waitFor 完成提示 120s 超时）。仅 UiOnly 且 compact 完成场景写入：auto
+    // compact 无 replay 触发不写、非 compact 命令无 replay 不写，防残留串到
+    // 后续 thread 切换的 reset。
+    if fb.channel == FeedbackChannel::UiOnly && state.compact_just_completed {
+        crate::kit::atoms::PENDING_COMPACT_NOTE.set(Some(fb.message.clone()));
+    }
 }
 
 pub(super) fn handle_prediction(p: &Prediction) {
@@ -370,6 +400,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     // 回退完成：预算状态复位、查询错误清空；弹窗关闭（执行完成）
     *crate::kit::atoms::REWIND_BUDGET_STATE.state().write() =
         crate::kit::atoms::RewindBudgetState::Idle;
+    *crate::kit::atoms::REWIND_PREVIEW_FINGERPRINT
+        .state()
+        .write() = None;
     *crate::kit::atoms::REWIND_QUERY_ERROR.state().write() = None;
     // P1：仅当 rewind 弹窗仍在显示时关闭——执行期间用户可能已 Esc 关闭弹窗
     // 或打开了其他弹窗（HITL/OAuth 事件），无条件 close 会误关。
@@ -377,19 +410,6 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
         crate::kit::popup_overlay::close_popup();
     }
 
-    super::render::push_acp_state(state);
-}
-
-pub(super) fn handle_rewind_error(state: &mut BridgeState, message: &str) {
-    // rewind 失败（目标消息不存在 / 参数解析失败）——与上下文压缩无关，
-    // 单独渲染 rewind 语境提示，避免复用 CompactError 时的"压缩失败"误导。
-    tracing::warn!(message, "bridge: RewindError");
-    let text = i18n::tr_args(
-        "app-note-rewind-error",
-        &[("message".into(), FluentValue::from(message))],
-    );
-    state.inject_system_note(text, TuiNoteLevel::Warning);
-    state.phase = SessionPhase::Idle;
     super::render::push_acp_state(state);
 }
 

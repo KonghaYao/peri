@@ -27,9 +27,12 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::command::{CommandContext, CommandResult, PromptStopReason};
+use peri_acp_types::command::{
+    CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel,
+    PromptStopReason,
+};
 use peri_acp_types::compact::CompactConfig;
-use peri_acp_types::event::EventSink;
+use peri_acp_types::event::CompactTrigger;
 use peri_acp_types::messages::BaseMessage;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
@@ -37,27 +40,36 @@ use tracing::{info, warn};
 use crate::agent::compact_v2;
 use crate::session::transcript::MessageTranscript;
 
-use super::events::{
-    emit_compact_completed, emit_compact_error, emit_compact_started, FULL_COMPACT_MICRO_CLEARED,
-};
+use super::events::{emit_compact_completed, emit_compact_started};
 
 /// Pipeline 终态。编排层据此决定返回值与是否中途 short-circuit。
 pub enum PipelineOutcome {
     /// 正常完成：组装后的消息（首条 Human + re-inject 消息...）。
-    Completed { messages: Vec<BaseMessage> },
+    Completed {
+        messages: Vec<BaseMessage>,
+        /// v2 compact 操作计数（feedback 文案「已压缩 N 条消息」的 N）。
+        affected_count: usize,
+    },
     /// 取消（用户 Ctrl+C）：保留原 history，stop_reason = Cancelled。
     Cancelled { history: Vec<BaseMessage> },
-    /// 边界情况（空历史 / 无模型 / compact 失败）：保留原 history，stop_reason = EndTurn。
+    /// 边界情况（空历史 / 无模型 / compact 失败）：保留原 history，
+    /// stop_reason = EndTurn，失败文案经 message 结构化返回（Phase 5 Step 4：
+    /// 不再直接发射 CompactError 事件，由 execute_compact 最外层统一映射
+    /// feedback(Error, UiOnly)）。
     EarlyReturn {
         history: Vec<BaseMessage>,
         stop_reason: PromptStopReason,
+        message: String,
     },
 }
 
 /// 运行 v2 compact 的完整 Pipeline。
 ///
 /// 调用方（`compact.rs::execute`）负责在调用前完成空 history 短路。
-/// 此函数内部发出 CompactStarted / CompactError / CompactCompleted 事件。
+/// 此函数内部发出 CompactStarted / CompactCompleted 事件（Phase 5 Step 4：
+/// CompactError 变体与发射已删除——错误不再经事件通道，改由
+/// [`PipelineOutcome::EarlyReturn`] 结构化返回，由 execute_compact 最外层
+/// 统一映射 feedback(Error, UiOnly)）。
 pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let CommandContext {
         session_id,
@@ -77,10 +89,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 1: 验证 history 非空（边界短路）
     if history.is_empty() {
         warn!("compact: 无历史消息可压缩");
-        emit_compact_error(&event_sink, &session_id, "no history to compact").await;
         return PipelineOutcome::EarlyReturn {
             history,
             stop_reason: PromptStopReason::EndTurn,
+            message: "no history to compact".to_string(),
         };
     }
 
@@ -89,10 +101,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         Some(m) => m,
         None => {
             warn!("compact: 无可用模型");
-            emit_compact_error(&event_sink, &session_id, "no model available for compact").await;
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message: "no model available for compact".to_string(),
             };
         }
     };
@@ -102,30 +114,20 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         (Some(store), Some(thread_id)) => (store, thread_id),
         _ => {
             warn!("compact: persistence is unavailable");
-            emit_compact_error(
-                &event_sink,
-                &session_id,
-                "compact persistence is unavailable",
-            )
-            .await;
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message: "compact persistence is unavailable".to_string(),
             };
         }
     };
 
     if !thread_store.supports_compaction_lifecycle() {
         warn!("compact: persistence backend does not support lifecycle commits");
-        emit_compact_error(
-            &event_sink,
-            &session_id,
-            "compact lifecycle persistence is unavailable",
-        )
-        .await;
         return PipelineOutcome::EarlyReturn {
             history,
             stop_reason: PromptStopReason::EndTurn,
+            message: "compact lifecycle persistence is unavailable".to_string(),
         };
     }
 
@@ -135,10 +137,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         Ok(messages) => messages,
         Err(_) => {
             warn!("compact: failed to load persisted history");
-            emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message: "compact persistence failed".to_string(),
             };
         }
     };
@@ -150,10 +152,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
         if transcript.flush_persistence().await.is_err() {
             warn!("compact: failed to persist initial history");
-            emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message: "compact persistence failed".to_string(),
             };
         }
     } else {
@@ -161,10 +163,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             Ok(flags) => flags,
             Err(_) => {
                 warn!("compact: failed to load persisted flags");
-                emit_compact_error(&event_sink, &session_id, "compact persistence failed").await;
                 return PipelineOutcome::EarlyReturn {
                     history,
                     stop_reason: PromptStopReason::EndTurn,
+                    message: "compact persistence failed".to_string(),
                 };
             }
         };
@@ -188,15 +190,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                 .all(|(persisted, incoming)| persisted.id() == incoming.id());
         if !visible_matches {
             warn!("compact: persisted visible history does not match command history");
-            emit_compact_error(
-                &event_sink,
-                &session_id,
-                "compact persistence context mismatch",
-            )
-            .await;
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message: "compact persistence context mismatch".to_string(),
             };
         }
         transcript = transcript.with_persistence(thread_store, thread_id);
@@ -212,7 +209,6 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         &compact_config,
         &cwd,
         &cancel_token,
-        &event_sink,
         &session_id,
         &mut consecutive_failures,
     )
@@ -222,10 +218,11 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         Err(CancelOrError::Cancelled) => {
             return PipelineOutcome::Cancelled { history };
         }
-        Err(CancelOrError::Error) => {
+        Err(CancelOrError::Error(message)) => {
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
+                message,
             };
         }
     };
@@ -239,19 +236,14 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     // 阶段 6: 组装最终消息（从 transcript visible_messages 取）
     let assembled = assemble_compact_messages(&transcript, &compact_result.summary.clone());
 
-    // 阶段 7: 发出 CompactCompleted 事件
+    // 阶段 7: 发出 CompactCompleted 事件（重建信号，Phase 5 Step 4 收敛为
+    // summary/messages/trigger 三字段；通知文案移交编排层 CommandFeedback）
     emit_compact_completed(
         &event_sink,
         &session_id,
         compact_result.summary.clone().unwrap_or_default(),
-        assembled.files.clone(),
-        assembled.skills.clone(),
-        FULL_COMPACT_MICRO_CLEARED,
         assembled.messages.clone(),
-        compact_result.strategy,
-        compact_result.outcome,
-        compact_result.estimated_tokens_saved,
-        compact_result.affected_count,
+        CompactTrigger::Manual,
     )
     .await;
 
@@ -259,13 +251,17 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
 
     PipelineOutcome::Completed {
         messages: assembled.messages,
+        affected_count: compact_result.affected_count,
     }
 }
 
 /// v2 run_compact + 取消语义的执行结果。
+///
+/// Phase 5 Step 4：失败路径不再发射 CompactError 事件（由 execute_compact
+/// 最外层统一映射 feedback(Error, UiOnly)），仅以结构化错误返回。
 enum CancelOrError {
     Cancelled,
-    Error,
+    Error(String),
 }
 
 /// 执行 v2 run_compact 并封装取消/错误路径。
@@ -276,7 +272,6 @@ async fn run_v2_compact_with_cancel(
     config: &CompactConfig,
     cwd: &str,
     cancel_token: &AgentCancellationToken,
-    event_sink: &Arc<dyn EventSink>,
     session_id: &str,
     consecutive_failures: &mut u32,
 ) -> Result<compact_v2::CompactResult, CancelOrError> {
@@ -299,7 +294,6 @@ async fn run_v2_compact_with_cancel(
         ) => r,
         _ = cancel_token.cancelled() => {
             tracing::info!(session_id = %session_id, "compact cancelled by user");
-            emit_compact_error(event_sink, session_id, "compact cancelled").await;
             return Err(CancelOrError::Cancelled);
         }
     };
@@ -307,8 +301,9 @@ async fn run_v2_compact_with_cancel(
     // 检测失败：affected_count == 0 + summary 为 None 表示 compact 未成功
     if result.affected_count == 0 && result.summary.is_none() {
         warn!(strategy = ?result.strategy, "compact: v2 run_compact 无效果");
-        emit_compact_error(event_sink, session_id, "compact produced no effect").await;
-        return Err(CancelOrError::Error);
+        return Err(CancelOrError::Error(
+            "compact produced no effect".to_string(),
+        ));
     }
 
     Ok(result)
@@ -357,24 +352,49 @@ pub struct AssembledMessages {
 }
 
 /// `/compact` 命令入口：执行完整 Pipeline 并映射终态到 `CommandResult`。
+///
+/// Phase 5 Step 4：错误/成功反馈统一经 `feedback` 字段返回（编排层
+/// emit_command_feedback 发射），本函数内零事件代码（CompactStarted /
+/// CompactCompleted 阶段信号除外）。
 pub async fn execute_compact(ctx: CommandContext) -> CommandResult {
     match run_pipeline(ctx).await {
-        PipelineOutcome::Completed { messages } => CommandResult {
+        PipelineOutcome::Completed {
+            messages,
+            affected_count,
+        } => CommandResult {
             messages,
             stop_reason: PromptStopReason::EndTurn,
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Info,
+                message: format!("已压缩 {affected_count} 条消息"),
+                channel: FeedbackChannel::UiOnly,
+            }),
         },
         PipelineOutcome::Cancelled { history } => CommandResult {
             // [TRAP] cancel_token.cancelled() 分支返回 Cancelled；executor.rs 上游
             // 对 Cancelled 有专门处理（保留 agent 已写入 state 的消息，避免 amnesia）。
+            // P2-4：cancel 是用户主动操作，非执行失败——Warning 级提示
+            // （stop_reason: Cancelled 已由编排层消费）。
             messages: history,
             stop_reason: PromptStopReason::Cancelled,
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Warning,
+                message: "compact cancelled".to_string(),
+                channel: FeedbackChannel::UiOnly,
+            }),
         },
         PipelineOutcome::EarlyReturn {
             history,
             stop_reason,
+            message,
         } => CommandResult {
             messages: history,
             stop_reason,
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Error,
+                message,
+                channel: FeedbackChannel::UiOnly,
+            }),
         },
     }
 }

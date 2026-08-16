@@ -38,9 +38,14 @@ use std::{
 use chrono::Utc;
 use dashmap::DashMap;
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+};
+use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::{
     store::ThreadStore,
     thread::{ThreadId, ThreadMeta},
@@ -110,6 +115,9 @@ pub struct AcpSession {
     /// Session 级 MCP skill 远端注册表（发现任务写入，Skills 侧读取合并；
     /// 随本结构 drop 释放，杜绝全局挂点——验收 14）。
     pub mcp_skill_registry: Arc<McpSkillRegistry>,
+    /// Session 级命令注册表（随 session 创建初始化并注册内置命令；跨轮常驻，
+    /// 动态注入条目不因轮次丢失；随本结构 drop 释放，杜绝全局挂点）。
+    pub command_registry: Arc<CommandRegistry>,
 }
 
 struct SessionManagerInner {
@@ -134,6 +142,11 @@ struct SessionManagerInner {
     pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
+    /// 内置 → 本地 skills（C1）→ 插件 顺序 register_all）。
+    pub plugin_command_entries: Vec<RouteEntry>,
+    /// 插件 skill roots（C1 本地 skills 扫描参数；与 host cfg 同源）。
+    pub plugin_skill_roots: Vec<SkillRoot>,
     /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
     /// per-session 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合）。
     /// None = 未注入时 fallback `NoopTaskManager`（print 等无 bg 场景）。
@@ -157,6 +170,8 @@ impl SessionManager {
         mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
         skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+        plugin_command_entries: Vec<RouteEntry>,
+        plugin_skill_roots: Vec<SkillRoot>,
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
@@ -171,6 +186,8 @@ impl SessionManager {
                 cron_scheduler,
                 mcp_subscription,
                 skills,
+                plugin_command_entries,
+                plugin_skill_roots,
                 task_manager_factory,
             }),
         }
@@ -184,6 +201,60 @@ impl SessionManager {
             .as_ref()
             .map(|f| f())
             .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager))
+    }
+
+    /// 构建 per-session 命令注册表（Phase 6 B2/C1 注册顺序契约）：
+    ///
+    /// 1. 内置命令（[`register_builtins`]，先注册者占键——内置永远优先，
+    ///    设计 §64 冲突纯拒绝 + 装配顺序裁决）；
+    /// 2. 本地 skills（C1：`core:{name}` 第一等级显式形态，kind = Skill，
+    ///    provenance = Core + Connected；同名冲突 / 名含冒号 → 注册表
+    ///    `register_all` 内部逐条 warn + 跳过，注册表保持既有条目）；
+    /// 3. 插件静态命令（B2：`plugin:{plugin}:{cmd}` 三层形态，kind =
+    ///    Command，provenance = Plugin{name} + Connected）。
+    ///
+    /// 动态注入（MCP / 插件运行时注册注销）由发现管线异步驱动（A3 已接，
+    /// 不在此处）。skill 注入语义（`AgentPassthrough`）与插件命令执行语义
+    /// 均为占位（Phase 5+ 补齐执行体）。
+    fn build_command_registry(&self, cwd: &str) -> Arc<CommandRegistry> {
+        let reg = Arc::new(CommandRegistry::new());
+        // 1) 内置（先注册者占键，后续同键一律 Conflict 拒绝）。
+        crate::session::command::register_builtins(&reg);
+        // 2) 本地 skills 归 core 域（C1；扫描调用点收敛为本处——发送侧
+        // 旧扫描路径由 Phase 6 C2 收尾清理）。
+        let skills = self
+            .inner
+            .skills
+            .available_skills(cwd, &self.inner.plugin_skill_roots);
+        let skill_entries: Vec<RouteEntry> = skills
+            .iter()
+            .map(|s| RouteEntry {
+                // 第一等级显式形态；裸名 = 解析层快捷匹配（alias_index 登记）。
+                fullname: format!("core:{}", s.name.to_lowercase()),
+                aliases: vec![],
+                description: s.description.clone(),
+                kind: CommandEntryKind::Skill, // core 域本地 skill（设计 §85）
+                category: None,
+                args_schema: None,
+                handler: Arc::new(crate::session::command::AgentPassthrough), // Phase 1 handler
+                provenance: CommandProvenance {
+                    source: CommandSource::Core,
+                    lifecycle: CommandLifecycle::Connected,
+                },
+            })
+            .collect();
+        let (added, errors) = reg.register_all(skill_entries);
+        if added < skills.len() {
+            tracing::warn!(
+                total = skills.len(),
+                added,
+                errors = ?errors,
+                "本地 skills 注册部分失败（同名冲突 / 词法非法，已告警跳过）"
+            );
+        }
+        // 3) 插件静态命令（B2；bare 时为空 Vec，注册零条目无副作用）。
+        reg.register_all(self.inner.plugin_command_entries.clone());
+        reg
     }
 
     /// 使用指定 session_id 创建会话（用于 session/load 和 session/resume）
@@ -246,6 +317,7 @@ impl SessionManager {
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
+            command_registry: self.build_command_registry(cwd),
         };
 
         self.inner.sessions.insert(session_id.clone(), session);
@@ -283,6 +355,7 @@ impl SessionManager {
             task_manager,
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
+            command_registry: self.build_command_registry(cwd),
         }
     }
 
@@ -368,6 +441,23 @@ impl SessionManager {
     /// 用于 MpscTransport 路径判断：若未调用 initialize，默认全部 cap=true。
     pub fn pending_caps_was_set(&self) -> bool {
         self.inner.pending_caps.lock().is_some()
+    }
+
+    /// 返回当前 ACP 连接在 initialize 阶段协商的进程级能力。
+    /// host 级事件没有 session identity，必须读取此快照而不能回退到任意
+    /// session registry 条目。
+    pub fn negotiated_caps(&self) -> PeriCaps {
+        self.inner.pending_caps.lock().clone().unwrap_or_default()
+    }
+
+    /// Host 请求面的有效能力：stdio/外部连接必须显式协商；未调用
+    /// initialize 的进程内 MPSC/TUI 路径保持历史的全能力语义。
+    pub fn effective_host_caps(&self) -> PeriCaps {
+        self.inner
+            .pending_caps
+            .lock()
+            .clone()
+            .unwrap_or_else(PeriCaps::all_enabled)
     }
 
     /// session/new 时调用：将暂存的 caps 关联到 session_id，返回 caps 副本。
@@ -545,6 +635,17 @@ impl SessionManager {
             .map(|s| s.mcp_skill_registry.clone())
     }
 
+    /// 取指定 session 的命令注册表句柄（命令拦截注入面 / 投影数据源用）。
+    ///
+    /// 内部 Arc 共享，clone 廉价；session 不存在时返回 None。
+    /// 调用方应先调用 [`ensure_session`] 保证记录存在。
+    pub fn command_registry_for(&self, session_id: &str) -> Option<Arc<CommandRegistry>> {
+        self.inner
+            .sessions
+            .get(session_id)
+            .map(|s| s.command_registry.clone())
+    }
+
     /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
     /// 内部 Arc 共享，clone 廉价。session 不存在时返回 None。
     pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
@@ -711,6 +812,9 @@ pub(crate) fn build_collected_sections(
         collected
             .extend(peri_middlewares::default_system_prompt::LangMiddleware::sections(language));
     }
+    if !state.disabled_middlewares.contains("PermissionMiddleware") {
+        collected.extend(peri_middlewares::permission::PermissionMiddleware::sections());
+    }
     if !state
         .disabled_middlewares
         .contains("HumanInTheLoopMiddleware")
@@ -876,5 +980,9 @@ impl SessionAccessPort for SessionManager {
 
     fn mcp_skill_registry(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
         self.mcp_skill_registry_for(session_id)
+    }
+
+    fn command_registry(&self, session_id: &str) -> Option<Arc<CommandRegistry>> {
+        self.command_registry_for(session_id)
     }
 }

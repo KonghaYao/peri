@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::acp_client::AcpTuiClient;
+use crate::kit::slash_completion::SlashActionKind;
+use crate::kit::slash_projection::ArgKind;
 use peri_acp::event::AcpEvent;
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp_types::event_data::PredictionAction;
@@ -399,6 +401,101 @@ async fn test_agent_event_forwards_system_notification() {
     shutdown.cancel();
 }
 
+/// CommandFeedback（Phase 3 事件链路）必须解析 tag + level/message/channel 字段。
+/// 实际交付形态：`AcpEvent::CommandFeedback`（peri/agent_event 通道，无标准
+/// SessionUpdate tag）；level/channel 为 wire string 化 camelCase
+/// （"warning" / "uiOnly"），解析为结构化枚举后推入 dual-bridge。
+#[tokio::test]
+async fn test_agent_event_parses_command_feedback() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::CommandFeedback {
+                level: "warning".into(),
+                message: "命令执行失败：目标不存在".into(),
+                channel: "uiOnly".into(),
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 CommandFeedback");
+    match bridge_event.event {
+        AcpEventData::CommandFeedback(fb) => {
+            assert_eq!(fb.level, FeedbackLevel::Warning);
+            assert_eq!(fb.message, "命令执行失败：目标不存在");
+            assert_eq!(fb.channel, FeedbackChannel::UiOnly);
+        }
+        other => panic!("expected CommandFeedback, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
+/// CommandFeedback 的 channel=session 显式形态与未知 level/channel 回落
+/// （Info / UiOnly）解析。
+#[tokio::test]
+async fn test_agent_event_command_feedback_session_channel_and_fallback() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::CommandFeedback {
+                level: "verbose".into(),
+                message: "已写入系统消息".into(),
+                channel: "session".into(),
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 CommandFeedback");
+    match bridge_event.event {
+        AcpEventData::CommandFeedback(fb) => {
+            assert_eq!(fb.level, FeedbackLevel::Info, "未知 level 应回落 Info");
+            assert_eq!(fb.channel, FeedbackChannel::Session);
+        }
+        other => panic!("expected CommandFeedback, got {other:?}"),
+    }
+
+    // 未知 channel（如 "broadcast"）应回落 UiOnly——与 level 侧未知值回落对称。
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::CommandFeedback {
+                level: "info".into(),
+                message: "广播通道反馈".into(),
+                channel: "broadcast".into(),
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 CommandFeedback");
+    match bridge_event.event {
+        AcpEventData::CommandFeedback(fb) => {
+            assert_eq!(fb.level, FeedbackLevel::Info);
+            assert_eq!(
+                fb.channel,
+                FeedbackChannel::UiOnly,
+                "未知 channel 应回落 UiOnly"
+            );
+        }
+        other => panic!("expected CommandFeedback, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 #[tokio::test]
 async fn test_agent_done_forwards_turn_done_to_bridges() {
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
@@ -579,171 +676,119 @@ fn test_handle_session_update_parses_available_commands() {
     let _ = handle_session_update(payload, &dummy_tx, "test");
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0], ("help".to_string(), "Show help".to_string()));
-    assert_eq!(
-        entries[2],
-        (
-            "archify".to_string(),
-            "Create architecture diagrams".to_string()
-        )
-    );
+    // Phase 4 步骤 1：投影 DTO 结构化后按字段断言；缺 _meta 的条目
+    // 回退 kind=Command / level=1（步骤 2 升级解析后再断言元数据字段）。
+    assert_eq!(entries[0].fullname, "help");
+    assert_eq!(entries[0].description, "Show help");
+    assert_eq!(entries[0].kind, SlashActionKind::Command);
+    assert_eq!(entries[0].level, 1);
+    assert_eq!(entries[2].fullname, "archify");
+    assert_eq!(entries[2].description, "Create architecture diagrams");
 }
 
-/// Slice 7：meta.mcpSkillNames（JSON 数组 of string）→ MCP_SKILL_NAMES atom。
+/// Phase 4 步骤 2：投影 _meta 全字段解析——periKind / periLevel /
+/// periAliases / periCategory / periArgs（含 flags 为 **object 数组的
+/// `FlagSpec` 往返**——wire 与本地镜像对齐，P1-5）。
 #[test]
 #[serial]
-fn test_handle_session_update_parses_mcp_skill_names() {
+fn test_handle_session_update_parses_projection_fields() {
     crate::kit::atoms::init_atoms();
-    *MCP_SKILL_NAMES.state().write() = Vec::new();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
     let payload = json!({
         "sessionId": "s1",
         "update": {
             "sessionUpdate": "available_commands_update",
             "availableCommands": [
-                {"name": "help", "description": "Show help"},
-                {"name": "mcp__demo__hello", "description": "MCP skill hello"}
-            ],
-            "meta": {
-                "skillNames": ["help"],
-                "mcpSkillNames": ["mcp__demo__hello"]
-            }
-        }
-    });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = handle_session_update(payload, &dummy_tx, "test");
-    let names = MCP_SKILL_NAMES.state().read().clone();
-    assert_eq!(
-        names,
-        vec!["mcp__demo__hello".to_string()],
-        "mcpSkillNames 应写入 MCP_SKILL_NAMES atom"
-    );
-}
-
-/// Slice 7：meta.mcpSkillNames 缺失 key → atom 清空（"缺 key" = 无 mcp skill，
-/// 跨 session/断连后不残留旧值）。
-#[test]
-#[serial]
-fn test_handle_session_update_mcp_skill_names_missing_key() {
-    crate::kit::atoms::init_atoms();
-    // 预置陈旧值：缺 key 的 update 必须把它清掉，而非保留
-    *MCP_SKILL_NAMES.state().write() = vec!["mcp__old__stale".to_string()];
-    let payload = json!({
-        "sessionId": "s1",
-        "update": {
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [
-                {"name": "help", "description": "Show help"}
+                {
+                    "name": "mcp:demo:hello",
+                    "description": "MCP skill hello",
+                    "_meta": {
+                        "periKind": "mcp_skill",
+                        "periLevel": 2,
+                        "periAliases": ["h", "hello"],
+                        "periCategory": "mcp",
+                        "periArgs": {
+                            "positionals": [
+                                {"name": "file", "kind": "Path", "required": true}
+                            ],
+                            "named": [
+                                {"name": "out", "kind": "String", "required": false}
+                            ],
+                            "flags": [
+                                {"name": "force", "short": "-f", "description": "force it"}
+                            ]
+                        }
+                    }
+                }
             ]
         }
     });
     let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
     let _ = handle_session_update(payload, &dummy_tx, "test");
-    assert!(
-        MCP_SKILL_NAMES.state().read().is_empty(),
-        "缺失 mcpSkillNames → atom 清空（不保留陈旧值）"
-    );
+    let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e.fullname, "mcp:demo:hello");
+    assert_eq!(e.description, "MCP skill hello");
+    assert_eq!(e.kind, SlashActionKind::McpSkill);
+    assert_eq!(e.level, 2);
+    assert_eq!(e.aliases, vec!["h".to_string(), "hello".to_string()]);
+    assert_eq!(e.category.as_deref(), Some("mcp"));
+    // ArgsSchema 全字段往返（flags 为 object 数组的 FlagSpec）
+    let args = e.args.as_ref().expect("periArgs 应解析为 ArgsSchema");
+    assert_eq!(args.positionals.len(), 1);
+    assert_eq!(args.positionals[0].name, "file");
+    assert_eq!(args.positionals[0].kind, ArgKind::Path);
+    assert!(args.positionals[0].required);
+    assert_eq!(args.named.len(), 1);
+    assert_eq!(args.named[0].name, "out");
+    assert_eq!(args.named[0].kind, ArgKind::String);
+    assert!(!args.named[0].required);
+    assert_eq!(args.flags.len(), 1);
+    assert_eq!(args.flags[0].name, "force");
+    assert_eq!(args.flags[0].short.as_deref(), Some("-f"));
+    assert_eq!(args.flags[0].description.as_deref(), Some("force it"));
 }
 
-/// Slice 7：meta.mcpSkillNames 非数组 → atom 清空（安全落空，不 panic）。
+/// Phase 4 步骤 2：缺 _meta 元数据的投影条目回退 kind=Command / level=1 /
+/// args=None / aliases=[]（R1：条目缺 kind 时分类整体退化 Command）。
 #[test]
 #[serial]
-fn test_handle_session_update_mcp_skill_names_non_array() {
+fn test_handle_session_update_projection_missing_meta_defaults() {
     crate::kit::atoms::init_atoms();
-    *MCP_SKILL_NAMES.state().write() = vec!["mcp__old__stale".to_string()];
+    *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
     let payload = json!({
         "sessionId": "s1",
         "update": {
             "sessionUpdate": "available_commands_update",
             "availableCommands": [
-                {"name": "help", "description": "Show help"}
-            ],
-            "meta": {
-                "mcpSkillNames": "not-an-array"
-            }
+                {"name": "plaincmd", "description": "普通命令"},
+                {
+                    "name": "weird:entry",
+                    "description": "未知 kind / 非法 level",
+                    "_meta": {
+                        "periKind": "unknown_kind",
+                        "periLevel": 9
+                    }
+                }
+            ]
         }
     });
     let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
     let _ = handle_session_update(payload, &dummy_tx, "test");
-    assert!(
-        MCP_SKILL_NAMES.state().read().is_empty(),
-        "非数组 mcpSkillNames → atom 空"
-    );
-}
-
-/// 评审 HIGH-1 回归：ACP 真实 wire key 是 "_meta"（serde rename）——
-/// AvailableCommandsUpdate.meta 标注 #[serde(rename = "_meta")]，生产 payload
-/// 走 `_meta`，此前的 `meta` 键解析在生产环境恒 None → MCP_SKILL_NAMES 恒空、
-/// McpSkill 归类永不激活。本测试用 `_meta` 键锁死真实 wire 格式。
-#[test]
-#[serial]
-fn test_handle_session_update_mcp_skill_names_underscore_meta_wire_format() {
-    crate::kit::atoms::init_atoms();
-    *MCP_SKILL_NAMES.state().write() = Vec::new();
-    let payload = json!({
-        "sessionId": "s1",
-        "update": {
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [
-                {"name": "help", "description": "Show help"},
-                {"name": "mcp__demo__hello", "description": "MCP skill hello"}
-            ],
-            "_meta": {
-                "skillNames": ["help"],
-                "mcpSkillNames": ["mcp__demo__hello"]
-            }
-        }
-    });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = handle_session_update(payload, &dummy_tx, "test");
-    assert_eq!(
-        MCP_SKILL_NAMES.state().read().clone(),
-        vec!["mcp__demo__hello".to_string()],
-        "_meta（生产 wire key）的 mcpSkillNames 应写入 MCP_SKILL_NAMES"
-    );
-    assert_eq!(
-        SKILL_NAMES.state().read().clone(),
-        vec!["help".to_string()],
-        "_meta 的 skillNames 应写入 SKILL_NAMES（同款键名修复）"
-    );
-}
-
-/// 评审 HIGH-1 回归补充：`_meta` 与 `meta` 同时出现时 `_meta` 优先
-/// （生产格式优先于兼容格式）。
-#[test]
-#[serial]
-fn test_handle_session_update_underscore_meta_takes_priority() {
-    crate::kit::atoms::init_atoms();
-    *MCP_SKILL_NAMES.state().write() = Vec::new();
-    *SKILL_NAMES.state().write() = Vec::new();
-    let payload = json!({
-        "sessionId": "s1",
-        "update": {
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [
-                {"name": "help", "description": "Show help"}
-            ],
-            "_meta": {
-                "skillNames": ["help"],
-                "mcpSkillNames": ["mcp__real__skill"]
-            },
-            "meta": {
-                "skillNames": ["stale"],
-                "mcpSkillNames": ["mcp__stale__skill"]
-            }
-        }
-    });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = handle_session_update(payload, &dummy_tx, "test");
-    assert_eq!(
-        MCP_SKILL_NAMES.state().read().clone(),
-        vec!["mcp__real__skill".to_string()],
-        "_meta 应优先于 meta"
-    );
-    assert_eq!(
-        SKILL_NAMES.state().read().clone(),
-        vec!["help".to_string()],
-        "_meta 的 skillNames 应优先"
-    );
+    let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
+    assert_eq!(entries.len(), 2);
+    for e in &entries {
+        assert_eq!(
+            e.kind,
+            SlashActionKind::Command,
+            "未知/缺失 kind 回退 Command"
+        );
+        assert_eq!(e.level, 1, "缺失/非法 level 回退 1");
+        assert!(e.args.is_none(), "缺失 periArgs → args=None");
+        assert!(e.aliases.is_empty(), "缺失 periAliases → aliases=[]");
+        assert!(e.category.is_none(), "缺失 periCategory → category=None");
+    }
 }
 
 /// 验证非 available_commands_update 的 session/update 不会错误写入 atom。

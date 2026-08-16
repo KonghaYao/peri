@@ -194,6 +194,10 @@ impl MiddlewareState for AgentContext<'_> {
     fn v2_queue(&self) -> &MessageQueue {
         &self.ctx.session.queue
     }
+
+    fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
+        Some(&self.ctx.runtime.tools)
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

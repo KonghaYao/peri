@@ -1,6 +1,6 @@
+use peri_acp_types::command::{CommandFeedback, FeedbackChannel, FeedbackLevel};
 use peri_acp_types::event::{
-    BackgroundTaskResult, CompactFileInfo, CompactStrategy, CompactTrigger, ExecutorEvent,
-    TodoEntry, TodoStatus,
+    BackgroundTaskResult, CompactStrategy, CompactTrigger, ExecutorEvent, TodoEntry, TodoStatus,
 };
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::tools::ToolDefinition;
@@ -385,6 +385,7 @@ fn test_todo_update_maps_to_session_update() {
             assert_eq!(plan.entries.len(), 3, "Plan 应包含 3 个条目");
             assert_eq!(plan.entries[0].content, "实现功能 A");
             assert_eq!(plan.entries[0].status, PlanEntryStatus::InProgress);
+            assert!(plan.entries[0].meta.is_none(), "未协商不得附加 Peri 元数据");
             assert_eq!(plan.entries[1].status, PlanEntryStatus::Pending);
             assert_eq!(plan.entries[2].status, PlanEntryStatus::Completed);
             // 所有条目优先级为 Medium（mapper 中硬编码）
@@ -394,6 +395,31 @@ fn test_todo_update_maps_to_session_update() {
         }
         other => panic!("预期 Plan，实际: {:?}", other),
     }
+}
+
+#[test]
+fn test_todo_active_form_requires_negotiated_capability() {
+    let event = ExecutorEvent::TodoUpdate(vec![TodoEntry {
+        content: "运行测试".into(),
+        active_form: Some("正在运行测试".into()),
+        status: TodoStatus::InProgress,
+    }]);
+    let caps = PeriCaps {
+        plan_entry_active_form: true,
+        ..PeriCaps::default()
+    };
+    let mapped = map_event(&event, 200_000, &caps);
+    let SessionUpdate::Plan(plan) = &mapped[0].updates[0] else {
+        panic!("预期 Plan")
+    };
+    assert_eq!(
+        plan.entries[0]
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("activeForm"))
+            .and_then(serde_json::Value::as_str),
+        Some("正在运行测试")
+    );
 }
 
 #[test]
@@ -471,52 +497,14 @@ fn test_compact_started_no_session_update() {
 
 #[test]
 fn test_compact_completed_no_session_update() {
+    // Phase 5 Step 4 收敛：CompactCompleted 为重建信号三字段。
     assert_no_session_update(
         &ExecutorEvent::CompactCompleted {
             summary: "compressed".to_string(),
-            files: vec![CompactFileInfo {
-                path: "src/main.rs".to_string(),
-                lines: 100,
-            }],
-            skills: vec!["skill-a".to_string()],
-            micro_cleared: 0,
             messages: vec![],
-            token_before: 0,
-            token_after: 0,
-            strategy: CompactStrategy::Smart,
-            affected_count: 0,
-            estimated_tokens_saved: 0,
-            estimated_tokens_before: 0,
-            estimated_tokens_after: 0,
-            changed_messages: 0,
-            changed_fields: 0,
-            no_op_candidates: 0,
-            full_escalation_reason: None,
-            cache_hit_rate_before: 0.0,
             trigger: CompactTrigger::Auto,
-            outcome: peri_acp_types::compact::CompactOutcome::FullApplied,
         },
         "CompactCompleted",
-    );
-}
-
-#[test]
-fn test_compact_error_no_session_update() {
-    assert_no_session_update(
-        &ExecutorEvent::CompactError {
-            message: "compact failed".to_string(),
-        },
-        "CompactError",
-    );
-}
-
-#[test]
-fn test_rewind_error_no_session_update() {
-    assert_no_session_update(
-        &ExecutorEvent::RewindError {
-            message: "rewind: 未找到目标消息 abc".to_string(),
-        },
-        "RewindError",
     );
 }
 
@@ -547,6 +535,18 @@ fn test_lsp_diagnostics_no_session_update() {
             files_with_errors: 3,
         },
         "LspDiagnostics",
+    );
+}
+
+#[test]
+fn test_command_feedback_no_session_update() {
+    assert_no_session_update(
+        &ExecutorEvent::CommandFeedback(CommandFeedback {
+            level: FeedbackLevel::Info,
+            message: "ok".into(),
+            channel: FeedbackChannel::UiOnly,
+        }),
+        "CommandFeedback",
     );
 }
 

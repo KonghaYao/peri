@@ -44,6 +44,7 @@ flate2 = "1"
 tar = "0.4"
 
 shellexpand = "3"
+sha2.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"

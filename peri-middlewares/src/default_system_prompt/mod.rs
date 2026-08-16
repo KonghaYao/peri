@@ -174,7 +174,7 @@ impl LangMiddleware {
         vec![PromptSection::dynamic(
             "language",
             PromptSectionZone::Uncached,
-            7, // gated 段（10/11/13/15 = 3-6）之后最后段
+            8, // gated 段（10/11/12/13/15 = 3-7，2026-08-15 拆分后）之后最后段
             build_language_content(language),
         )]
     }

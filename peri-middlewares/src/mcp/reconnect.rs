@@ -5,7 +5,8 @@ use super::{
     client::{
         build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
         spawn_stdio_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
-        OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        OAuthStartDisposition, OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
+        STDIO_CONNECT_TIMEOUT,
     },
     oauth_flow::{OAuthFlowEvent, OAuthFlowManager},
     transport::TransportConfig,
@@ -100,6 +101,17 @@ impl McpClientPool {
                     }
                 });
                 if let Some(cfg) = oauth_cfg {
+                    let flow_id = uuid::Uuid::now_v7().to_string();
+                    match self.reserve_oauth_flow(server_name, &flow_id) {
+                        OAuthStartDisposition::Started => {}
+                        OAuthStartDisposition::AlreadyActive
+                        | OAuthStartDisposition::Conflict { .. } => {
+                            return Err(McpPoolError::ConnectionFailed {
+                                server: server_name.to_string(),
+                                reason: "OAuth authorization already active".to_string(),
+                            });
+                        }
+                    }
                     // callback 可空：优先调用方传入，其次 pool 级回调（host
                     // 装配注入，事件转发 TUI popup），都没有则 no-op 静默授权。
                     let cb: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync> = oauth_event_callback
@@ -108,7 +120,11 @@ impl McpClientPool {
                         .unwrap_or_else(|| Arc::new(|_| {}));
                     let ts = Arc::new(FileCredentialStore::new());
                     let mut mgr = OAuthFlowManager::new_with_arc(ts, cb);
-                    match mgr.run_oauth_flow(server_name, url, &cfg).await {
+                    let oauth_result = mgr
+                        .run_oauth_flow_with_id(&flow_id, server_name, url, &cfg)
+                        .await;
+                    self.release_oauth_flow(server_name, &flow_id);
+                    match oauth_result {
                         Ok(()) => {
                             used_oauth = true;
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
@@ -168,6 +184,7 @@ impl McpClientPool {
                         })?;
                 let resources = rs.list_all_resources().await.unwrap_or_default();
                 let peer = rs.peer().clone();
+                let skills_capable = super::client::peer_declares_skills(&peer);
                 let oauth_status = if used_oauth {
                     OAuthStatus::Authorized
                 } else {
@@ -185,6 +202,7 @@ impl McpClientPool {
                         source: server_config.source.clone(),
                         url: server_config.url.clone(),
                         channel_capable: false,
+                        skills_capable,
                     }),
                 );
                 self.services

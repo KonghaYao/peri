@@ -206,7 +206,7 @@ where
 ///
 /// 反序列化时自动 clamp 阈值到 [0.0, 1.0] 并 warn，防止配置错误导致
 /// budget 检查被静默绕过。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactConfig {
     #[serde(default = "default_true")]
     pub auto_compact_enabled: bool,

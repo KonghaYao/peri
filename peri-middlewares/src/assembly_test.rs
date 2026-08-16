@@ -35,9 +35,9 @@ use crate::{
         create_session_lsp_pool, default_workflow_middleware_factory, load_merged_lsp_servers,
         AssemblyContext, OnBgCompleteFn, ProductionChainAssembler, SystemPromptBuilder,
     },
-    hitl::{PermissionMode, SharedPermissionMode},
     hooks::{HookEvent, HookType, RegisteredHook},
     mcp::McpClientPool,
+    permission::{PermissionMode, SharedPermissionMode},
     tool_search::ToolSearchIndex,
     tools::TodoItem,
 };
@@ -157,6 +157,7 @@ fn base_context() -> AssemblyContext {
         hook_groups: Vec::new(),
         session_start_source: None,
         mcp_skill_registry: None,
+        command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
         channel_state: None,
@@ -265,8 +266,9 @@ fn blueprint_sequence_is_canonical() {
             "Cron",
             // 第四组：Hook 哨兵
             "Hook",
-            // 第五组：HITL + SubAgent
-            "Hitl",
+            // 第五组：Permission + AskUser + SubAgent（2026-08-15 职责拆分）
+            "Permission",
+            "AskUser",
             "SubAgent",
             // 第六组：MCP / Workflow / ToolSearch
             "Mcp",
@@ -297,7 +299,8 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Todo => "Todo",
         ChainSlot::Cron => "Cron",
         ChainSlot::Hook => "Hook",
-        ChainSlot::Hitl => "Hitl",
+        ChainSlot::Permission => "Permission",
+        ChainSlot::AskUser => "AskUser",
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
         ChainSlot::Workflow => "Workflow",
@@ -329,6 +332,7 @@ fn default_config_produces_canonical_chain() {
             "WebMiddleware",
             "TodoMiddleware",
             "CronMiddleware",
+            "PermissionMiddleware",
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "ToolSearch",
@@ -336,7 +340,7 @@ fn default_config_produces_canonical_chain() {
     );
 }
 
-/// 权限模式不影响链组成与 HITL 位置（四种模式一致）。
+/// 权限模式不影响链组成与 Permission/AskUser 位置（四种模式一致）。
 #[test]
 fn permission_mode_keeps_chain_shape() {
     for mode in [
@@ -350,8 +354,13 @@ fn permission_mode_keeps_chain_shape() {
         let names = assemble_names(&ctx);
         assert_eq!(
             names.iter().position(|n| n == "HumanInTheLoopMiddleware"),
+            Some(16),
+            "mode {mode:?}: AskUser 位置漂移"
+        );
+        assert_eq!(
+            names.iter().position(|n| n == "PermissionMiddleware"),
             Some(15),
-            "mode {mode:?}: HITL 位置漂移"
+            "mode {mode:?}: Permission 位置漂移"
         );
         // 条件中间件（Hook/MCP/Workflow/LSP/Goal）不应出现
         for cond in [
@@ -567,6 +576,7 @@ fn full_config_chain_order() {
             "CronMiddleware",
             "HookMiddleware",
             "HookMiddleware",
+            "PermissionMiddleware",
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "McpMiddleware",
@@ -775,21 +785,46 @@ fn meta_harness_disabled_tools_removed_from_chain() {
     }
 }
 
-/// AskUserQuestion 不在关闭面：全部 middleware 禁用后仍注册到 shared_tools。
+/// 提问通道连坐语义：关闭新 HumanInTheLoopMiddleware 后 AskUserQuestion
+/// 从链收集结果消失（2026-08-15 拆分后纳入关闭面，原"始终注册"测试反转）。
 #[test]
-fn meta_harness_ask_user_tool_always_registered() {
+fn meta_harness_ask_user_tool_follows_hitl_disabled() {
+    // 全开：AskUserQuestion 在工具集中
     let mut ctx = base_context();
-    for name in MIDDLEWARE_NAMES {
-        ctx.meta_harness_disabled.insert(name.to_string());
-    }
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx);
+    let tool_names = assemble_tool_names(&ctx);
     assert!(
-        out.subagent_mw.is_none(),
-        "全部禁用时 subagent_mw 应为 None"
+        tool_names.iter().any(|n| n == "AskUserQuestion"),
+        "全开时 AskUserQuestion 应可见"
+    );
+
+    // 关闭 HumanInTheLoopMiddleware：AskUserQuestion 消失；其余不变
+    ctx.meta_harness_disabled
+        .insert("HumanInTheLoopMiddleware".to_string());
+    let tool_names = assemble_tool_names(&ctx);
+    assert!(
+        !tool_names.iter().any(|n| n == "AskUserQuestion"),
+        "关闭 HumanInTheLoopMiddleware 后 AskUserQuestion 应消失: {tool_names:?}"
     );
     assert!(
-        ctx.shared_tools.read().contains_key("AskUserQuestion"),
-        "AskUserQuestion 不在关闭面（核心交互工具），必须始终注册"
+        tool_names.iter().any(|n| n == "Bash"),
+        "关闭提问通道不影响其他工具: {tool_names:?}"
+    );
+
+    // 关闭 PermissionMiddleware 不影响 AskUserQuestion（审批/提问独立开关）
+    let mut ctx2 = base_context();
+    ctx2.meta_harness_disabled
+        .insert("PermissionMiddleware".to_string());
+    let tool_names = assemble_tool_names(&ctx2);
+    assert!(
+        tool_names.iter().any(|n| n == "AskUserQuestion"),
+        "关闭 PermissionMiddleware 后 AskUserQuestion 应保留"
+    );
+
+    // 宿主级 shared_tools 不再注册任何工具（生产路径写入点归零）
+    build_middleware_chain(&ProductionChainAssembler, &ctx2);
+    assert!(
+        !ctx2.shared_tools.read().contains_key("AskUserQuestion"),
+        "shared_tools 不应再注册 AskUserQuestion（移入链 collect_tools）"
     );
 }
 
@@ -870,7 +905,8 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Todo => "TodoMiddleware",
         ChainSlot::Cron => "CronMiddleware",
         ChainSlot::Hook => "HookMiddleware",
-        ChainSlot::Hitl => "HumanInTheLoopMiddleware",
+        ChainSlot::Permission => "PermissionMiddleware",
+        ChainSlot::AskUser => "HumanInTheLoopMiddleware",
         ChainSlot::SubAgent => "SubAgentMiddleware",
         ChainSlot::Mcp => "McpMiddleware",
         ChainSlot::Workflow => "WorkflowMiddleware",
@@ -889,6 +925,7 @@ fn middleware_tool_names_match_static_tool_sets() {
     let static_tools: std::collections::HashSet<&str> = FilesystemMiddleware::tool_names()
         .into_iter()
         .chain(TerminalMiddleware::tool_names())
+        .chain(HumanInTheLoopMiddleware::tool_names())
         .chain([
             // WebMiddleware
             "WebFetch",
@@ -1029,7 +1066,7 @@ fn workflow_build_middlewares_filters_disabled() {
             "TerminalMiddleware",
             "WebMiddleware",
             "TodoMiddleware",
-            "HumanInTheLoopMiddleware",
+            "PermissionMiddleware",
         ]
     );
 
@@ -1043,7 +1080,7 @@ fn workflow_build_middlewares_filters_disabled() {
         "TerminalMiddleware",
         "WebMiddleware",
         "TodoMiddleware",
-        "HumanInTheLoopMiddleware",
+        "PermissionMiddleware",
     ] {
         let middlewares = factory.build_middlewares(
             &workflow_context_with_disabled(&[mw]),
@@ -1065,6 +1102,7 @@ fn workflow_build_middlewares_filters_disabled() {
 
 use crate::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
 use crate::hitl::HumanInTheLoopMiddleware;
+use crate::permission::PermissionMiddleware;
 use crate::skills::SkillsMiddleware;
 use crate::subagent::SubAgentMiddleware;
 
@@ -1089,6 +1127,7 @@ fn c2_chain_collection_matches_static_declaration() {
     let expected = DefaultSystemPromptMiddleware::sections(Some(&overrides))
         .into_iter()
         .chain(LangMiddleware::sections(Some("zh-CN")))
+        .chain(PermissionMiddleware::sections())
         .chain(HumanInTheLoopMiddleware::sections())
         .chain(SubAgentMiddleware::sections())
         .chain(SkillsMiddleware::sections())
@@ -1153,15 +1192,17 @@ fn c2_disable_holders_removes_sections_from_chain() {
 }
 
 /// 盲区闭合（任务 4，契约 3）：关闭 gated 段持有者 → 段落与工具同时消失。
-/// - 关闭 HumanInTheLoopMiddleware → 10_hitl 段落消失（HITL 无 collect_tools 工具，
+/// - 关闭 PermissionMiddleware → 10_hitl 段落消失（审批无 collect_tools 工具，
 ///   仅验证段落）；
+/// - 关闭 HumanInTheLoopMiddleware → 12_ask_user 段落 + AskUserQuestion 工具
+///   同时消失（2026-08-15 拆分后提问通道纳入关闭面）；
 /// - 关闭 SubAgentMiddleware → 11_subagent 段落 + Agent/AgentResult 工具同时消失；
 /// - 关闭 SkillsMiddleware → 13_skills 段落 + SkillTool/DiscoverSkillsTool 同时消失。
 ///
 /// 段落关闭盲区（3.4 记载：关闭后段落仍渲染内置内容）随本批闭合。
 #[test]
 fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
-    // 基线：默认装配下三段全部收集
+    // 基线：默认装配下四段全部收集
     let baseline_ctx = base_context();
     let baseline_ids: Vec<&str> = build_middleware_chain(&ProductionChainAssembler, &baseline_ctx)
         .chain
@@ -1169,7 +1210,7 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
         .iter()
         .map(|s| s.id)
         .collect();
-    for id in ["10_hitl", "11_subagent", "13_skills"] {
+    for id in ["10_hitl", "11_subagent", "12_ask_user", "13_skills"] {
         assert!(
             baseline_ids.contains(&id),
             "基线装配应收集 {id}: {baseline_ids:?}"
@@ -1178,9 +1219,14 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
 
     let cases: &[(&str, &str, &[&str])] = &[
         (
-            "HumanInTheLoopMiddleware",
+            "PermissionMiddleware",
             "10_hitl",
-            &[], // HITL 无 collect_tools 工具
+            &[], // 审批无 collect_tools 工具
+        ),
+        (
+            "HumanInTheLoopMiddleware",
+            "12_ask_user",
+            &["AskUserQuestion"],
         ),
         (
             "SubAgentMiddleware",

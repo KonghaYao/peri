@@ -1,9 +1,8 @@
 use std::io::Write;
-use std::path::PathBuf;
 
 use serial_test::serial;
 
-use super::{load_from, save, save_to};
+use super::{load_from, save_to, ConfigSource};
 use crate::provider::config::PeriConfig;
 
 /// 在临时目录创建 .peri/settings.json
@@ -24,31 +23,51 @@ impl Drop for ConfigPathGuard {
     }
 }
 
-/// RAII guard：测试结束时恢复进程 cwd。
-///
-/// `load()` 的工作区合并依赖 `std::env::current_dir()`（`workspace_config_path`），
-/// 完整接线测试必须临时切换 cwd；guard 保证任何退出路径都恢复原目录。
-struct CwdGuard(PathBuf);
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.0);
-    }
-}
-
 #[test]
 fn test_load_global_only_no_workspace() {
-    // load() 的合并行为依赖 std::env::current_dir()，
-    // 在单元测试中 mock cwd 不实际。
-    // 这里验证 load_from 行为不变。
+    // load_from 不存在的路径 → 默认空配置
     let cfg = load_from(&std::path::PathBuf::from("/nonexistent/path/settings.json")).unwrap();
     assert!(cfg.config.providers.is_empty());
 }
 
 #[test]
+fn test_config_source_load_standalone_ignores_workspace() {
+    // --settings 语义：指定文件整体生效，不探测工作区、不合并全局；
+    // 写回仍写该文件（读写对称）。
+    let tmp = tempfile::tempdir().unwrap();
+    // 工作区文件存在但不应被加载
+    write_settings(
+        &tmp.path().join("ws"),
+        r#"{"config": {"active_alias": "sonnet"}}"#,
+    );
+
+    let settings_file = tmp.path().join("standalone.json");
+    std::fs::write(
+        &settings_file,
+        r#"{"config": {"active_alias": "haiku", "providers": [{"id": "p1", "type": "openai", "apiKey": "sk-1"}]}}"#,
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_standalone(settings_file.clone()).unwrap();
+    assert!(!source.is_workspace());
+    assert!(source.workspace_path().is_none());
+    let merged = source.loaded_merged();
+    assert_eq!(merged.config.active_alias, "haiku");
+    assert_eq!(merged.config.providers.len(), 1);
+    assert_eq!(merged.config.providers[0].api_key, "sk-1");
+
+    // 写回仍写该文件（无工作区 → 全量快照落该文件）
+    let mut updated = merged.clone();
+    updated.config.active_alias = "opus".to_string();
+    source.save(&updated).unwrap();
+    let reloaded = load_from(&settings_file).unwrap();
+    assert_eq!(reloaded.config.active_alias, "opus");
+    assert_eq!(reloaded.config.providers.len(), 1);
+}
+
+#[test]
 fn test_workspace_config_path_does_not_panic() {
-    // workspace_config_path 依赖 current_dir，集成测试中不做断言
-    // 只验证函数不 panic
+    // workspace_config_path 依赖进程 cwd，仅验证不 panic（只读探测场景）
     let _ = super::workspace_config_path();
 }
 
@@ -97,6 +116,202 @@ fn test_merge_global_and_workspace_via_load_from() {
     assert_eq!(global.config.profiles.sonnet.effort, "xhigh");
 }
 
+// ─── ConfigSource（值对象，无进程级全局态，可并行）─────────────────────────
+
+/// 构造配置源：global 目录 + 可选 workspace 目录（均含 .peri/settings.json）
+fn make_source(tmp: &tempfile::TempDir, ws_dir: Option<&str>) -> ConfigSource {
+    let global_dir = tmp.path().join("global");
+    let global_path = global_dir.join(".peri").join("settings.json");
+    let cwd = ws_dir
+        .map(|d| tmp.path().join(d))
+        .unwrap_or_else(|| tmp.path().join("empty-cwd"));
+    if ws_dir.is_none() {
+        std::fs::create_dir_all(&cwd).unwrap();
+    }
+    ConfigSource::load_at(&cwd, global_path).unwrap()
+}
+
+/// [P0 契约] 加载与保存共享同一路径决策：`ConfigSource` 在加载时一次性确定
+/// 布局，保存复用——工作区配置存在时写回工作区，全局文件保持原样。
+///
+/// providers 例外说明：merge/extract 均为**整体替换**语义（既定设计，用户
+/// 确认保持）——工作区一旦声明 provider，即接管完整列表（含全局条目）。
+#[test]
+fn test_config_source_save_routes_to_workspace_layered() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 全局：sonnet + openai-1（含 apiKey）
+    write_settings(
+        &tmp.path().join("global"),
+        r#"{
+        "config": {
+            "active_alias": "sonnet",
+            "providers": [{"id": "openai-1", "type": "openai", "apiKey": "sk-global"}]
+        }
+    }"#,
+    );
+    // 工作区：仅覆盖 active_alias
+    write_settings(
+        &tmp.path().join("ws"),
+        r#"{"config": {"active_alias": "haiku"}}"#,
+    );
+    let source = make_source(&tmp, Some("ws"));
+    assert!(source.is_workspace());
+    let ws_path = tmp.path().join("ws").join(".peri").join("settings.json");
+    let global_path = tmp
+        .path()
+        .join("global")
+        .join(".peri")
+        .join("settings.json");
+
+    // 用户在 TUI 中把 active_alias 切回全局值 + 新增一个工作区 provider
+    let mut merged = source.loaded_merged();
+    merged.config.active_alias = "sonnet".to_string(); // 与全局相同 → 应剔除
+    merged.config.providers.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "ws-provider",
+            "type": "openai",
+            "apiKey": "sk-workspace"
+        }))
+        .unwrap(),
+    );
+    source.save(&merged).unwrap();
+
+    // 工作区文件：active_alias 恒收录（分层豁免，值为保存时生效值）；
+    // providers 整体接管（含全局条目）
+    let ws_content = std::fs::read_to_string(&ws_path).unwrap();
+    let ws_parsed: serde_json::Value = serde_json::from_str(&ws_content).unwrap();
+    assert_eq!(
+        ws_parsed["config"]["active_alias"], "sonnet",
+        "active_alias 恒收录（豁免分层：缺省 opus 与未声明不可区分）"
+    );
+    let ws_providers = ws_parsed["config"]["providers"].as_array().unwrap();
+    assert_eq!(
+        ws_providers.len(),
+        2,
+        "providers 整体接管：含全局 + 新增条目"
+    );
+    assert_eq!(ws_providers[0]["id"], "openai-1");
+    assert_eq!(ws_providers[1]["id"], "ws-provider");
+
+    // 全局文件保持原样（未被动）
+    let global_content = std::fs::read_to_string(&global_path).unwrap();
+    assert!(
+        global_content.contains("sk-global") && !global_content.contains("ws-provider"),
+        "全局文件必须保持原样"
+    );
+
+    // 分层 roundtrip：重新加载合并结果应等于保存前的 merged
+    let reloaded = ConfigSource::load_at(
+        &tmp.path().join("ws"),
+        tmp.path()
+            .join("global")
+            .join(".peri")
+            .join("settings.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        reloaded.loaded_merged(),
+        merged,
+        "extract 与 merge 应严格互逆"
+    );
+}
+
+/// 无工作区配置时：save 写回全局文件（唯一事实源）
+#[test]
+fn test_config_source_save_writes_global_when_no_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_settings(
+        &tmp.path().join("global"),
+        r#"{"config": {"active_alias": "sonnet"}}"#,
+    );
+    let source = make_source(&tmp, None);
+    assert!(!source.is_workspace());
+    let global_path = tmp
+        .path()
+        .join("global")
+        .join(".peri")
+        .join("settings.json");
+
+    let mut merged = source.loaded_merged();
+    merged.config.active_alias = "haiku".to_string();
+    source.save(&merged).unwrap();
+
+    let content = std::fs::read_to_string(&global_path).unwrap();
+    assert!(
+        content.contains("\"haiku\""),
+        "无工作区时保存应写回全局文件"
+    );
+}
+
+/// [Q5 契约] 生产接线等价性：`ConfigSource::load_at` 与 `load()` 的合并语义
+/// 一致——meta_harness 逐 key 合并（全局其余 key 保留、同 key 工作区覆盖）。
+#[test]
+fn test_config_source_load_merges_meta_harness_per_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_settings(
+        &tmp.path().join("global"),
+        r#"{
+        "config": {
+            "meta_harness": {
+                "01_intro": true,
+                "WebMiddleware": false
+            }
+        }
+    }"#,
+    );
+    write_settings(
+        &tmp.path().join("ws"),
+        r#"{
+        "config": {
+            "meta_harness": {
+                "01_intro": false,
+                "TerminalMiddleware": false
+            }
+        }
+    }"#,
+    );
+    let source = make_source(&tmp, Some("ws"));
+
+    let map = source
+        .loaded_merged()
+        .config
+        .meta_harness
+        .expect("merged 后存在");
+    assert_eq!(map.get("01_intro"), Some(&false), "同 key：工作区覆盖全局");
+    assert_eq!(
+        map.get("TerminalMiddleware"),
+        Some(&false),
+        "新 key：追加保留"
+    );
+    assert_eq!(map.get("WebMiddleware"), Some(&false), "全局其余 key 保留");
+    assert_eq!(
+        source
+            .global_config()
+            .config
+            .meta_harness
+            .as_ref()
+            .unwrap()
+            .get("01_intro"),
+        Some(&true),
+        "原始全局基准不含工作区覆盖"
+    );
+}
+
+/// 写回失败传播：目标路径不可写时 save 返回 Err
+#[test]
+fn test_config_source_save_unwritable_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 以普通文件为全局路径父目录，create_dir_all 必然失败
+    let f = tmp.path().join("f");
+    std::fs::write(&f, "not a dir").unwrap();
+    let target = f.join("settings.json");
+    let source = ConfigSource::load_at(&tmp.path().join("empty-cwd"), target.clone()).unwrap();
+
+    let result = source.save(&PeriConfig::default());
+    assert!(result.is_err());
+    assert!(!target.exists());
+}
+
 // ─── set_global_config_path 重定向（进程级全局态，全部 #[serial]）──────────
 
 #[test]
@@ -111,6 +326,7 @@ fn test_set_global_config_path_none_keeps_default() {
     assert_eq!(super::config_path(), expected);
 }
 
+/// 重定向 + ConfigSource 全链路：save 写回重定向后的全局路径
 #[test]
 #[serial]
 fn test_redirect_config_path_and_save_roundtrip() {
@@ -121,10 +337,10 @@ fn test_redirect_config_path_and_save_roundtrip() {
     super::set_global_config_path(Some(target.clone()));
     assert_eq!(super::config_path(), target);
 
-    save(&PeriConfig::default()).unwrap();
+    let source = ConfigSource::load().unwrap();
+    source.save(&PeriConfig::default()).unwrap();
     assert!(target.exists());
-    // 写入内容必须是合法 JSON（save 内部 serde_json::to_string_pretty 已保证，
-    // 此处防御性验证文件可解析）
+    // 写入内容必须是合法 JSON（save_to 内部 serde_json::to_string_pretty 已保证）
     let content = std::fs::read_to_string(&target).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert!(parsed.is_object());
@@ -151,86 +367,6 @@ fn test_redirect_load_reads_override_file() {
     assert_eq!(cfg.config.active_alias, "sonnet");
     assert_eq!(cfg.config.providers.len(), 1);
     assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
-}
-
-/// [Q5 契约] `load()` 生产接线：全局 + 工作区双文件 → meta_harness 逐 key 合并生效。
-///
-/// 设计 §2.1/3.3：meta_harness 合并是专属特例（逐 key 而非整体覆盖），且必须经
-/// 生产入口 `load()` 生效（`merge_overrides` 特例分支 + `store.rs:74` 接线）。
-/// advisor 复审后补此契约测试：锁定"全局其余 key 保留、同 key 工作区覆盖"的
-/// 完整链路，防止未来重构破坏生产接线（单元级 merge 用例见 config_test）。
-#[test]
-#[serial]
-fn test_load_merges_meta_harness_per_key() {
-    let _guard = ConfigPathGuard;
-    let _cwd_guard = CwdGuard(std::env::current_dir().unwrap());
-    let tmp = tempfile::tempdir().unwrap();
-
-    // 全局配置：01_intro=true、WebMiddleware=false
-    let global_dir = tmp.path().join("global");
-    write_settings(
-        &global_dir,
-        r#"{
-        "config": {
-            "meta_harness": {
-                "01_intro": true,
-                "WebMiddleware": false
-            }
-        }
-    }"#,
-    );
-    let global_target = global_dir.join(".peri").join("settings.json");
-    super::set_global_config_path(Some(global_target));
-
-    // 工作区配置（cwd 临时切到 ws 目录）：同 key 覆盖 + 新 key 追加
-    let ws_dir = tmp.path().join("workspace");
-    std::fs::create_dir_all(&ws_dir).unwrap();
-    write_settings(
-        &ws_dir,
-        r#"{
-        "config": {
-            "meta_harness": {
-                "01_intro": false,
-                "TerminalMiddleware": false
-            }
-        }
-    }"#,
-    );
-    std::env::set_current_dir(&ws_dir).unwrap();
-
-    let cfg = super::load().unwrap();
-    let map = cfg.config.meta_harness.expect("merge 后 meta_harness 存在");
-    assert_eq!(
-        map.get("01_intro"),
-        Some(&false),
-        "同 key：工作区覆盖全局（逐 key 合并）"
-    );
-    assert_eq!(
-        map.get("TerminalMiddleware"),
-        Some(&false),
-        "新 key：追加保留"
-    );
-    assert_eq!(
-        map.get("WebMiddleware"),
-        Some(&false),
-        "全局其余 key 保留（非整体覆盖）"
-    );
-}
-
-#[test]
-#[serial]
-fn test_redirect_save_unwritable_errors() {
-    let _guard = ConfigPathGuard;
-    let tmp = tempfile::tempdir().unwrap();
-    // 以普通文件为父目录，create_dir_all 必然失败
-    let f = tmp.path().join("f");
-    std::fs::write(&f, "not a dir").unwrap();
-    let target = f.join("settings.json");
-    super::set_global_config_path(Some(target.clone()));
-
-    let result = save(&PeriConfig::default());
-    assert!(result.is_err());
-    assert!(!target.exists());
 }
 
 #[test]

@@ -296,6 +296,65 @@ fn on_change_stale_writeback_does_not_fire() {
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
+// ─── refresh_entries（读取面热更新回写）────────────────────────────────────
+
+#[test]
+fn refresh_entries_started_state_rejects() {
+    let (reg, count) = counter_reg();
+    reg.mark_discovery_started("srv", token(1));
+    // Started（发现任务进行中，不写——整体覆盖以发现完成为准）→ 拒绝
+    assert!(!reg.refresh_entries("srv", &token(1), vec![skill("mcp__srv__a")]));
+    assert_eq!(count.load(Ordering::SeqCst), 0, "拒绝回写不触发 on_change");
+    assert!(reg.all_skills().is_empty(), "Started 状态不得写入条目");
+}
+
+#[test]
+fn refresh_entries_handle_mismatch_rejects() {
+    let (reg, count) = counter_reg();
+    complete(&reg, "srv", token(1), vec![skill("mcp__srv__a")]);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    // 恢复期间重连/新发现 → 旧 handle（ptr 不同）回写丢弃
+    assert!(!reg.refresh_entries("srv", &token(2), vec![skill("mcp__srv__b")]));
+    assert_eq!(count.load(Ordering::SeqCst), 1, "拒绝回写不触发 on_change");
+    assert_eq!(
+        reg.skills_of("srv")[0].name,
+        "mcp__srv__a",
+        "条目保持原样，不被旧 handle 覆盖"
+    );
+}
+
+#[test]
+fn refresh_entries_matching_handle_writes_and_fires_once() {
+    let (reg, count) = counter_reg();
+    let h = token(1);
+    complete(&reg, "srv", h.clone(), vec![skill("mcp__srv__a")]);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    // Discovered + 同 handle → 回写成功 + on_change 触发一次
+    assert!(reg.refresh_entries("srv", &h, vec![skill("mcp__srv__a"), skill("mcp__srv__b")]));
+    assert_eq!(count.load(Ordering::SeqCst), 2, "替换触发恰一次");
+    let names: Vec<String> = reg
+        .skills_of("srv")
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["mcp__srv__a".to_string(), "mcp__srv__b".to_string()]
+    );
+}
+
+#[test]
+fn refresh_entries_empty_to_empty_no_fire() {
+    let (reg, count) = counter_reg();
+    let h = token(1);
+    complete(&reg, "srv", h.clone(), vec![]);
+    assert_eq!(count.load(Ordering::SeqCst), 0, "空条目完成不触发");
+    // 理论态：old/new entries 均为空 → 回写成功但不触发 on_change
+    assert!(reg.refresh_entries("srv", &h, vec![]));
+    assert_eq!(count.load(Ordering::SeqCst), 0, "两空替换不触发");
+    assert!(reg.all_skills().is_empty());
+}
+
 // ─── clear_discovery_started ───────────────────────────────────────────────
 
 #[test]

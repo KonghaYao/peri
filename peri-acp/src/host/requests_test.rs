@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
@@ -7,16 +8,19 @@ use std::{
 use crate::provider::{PeriConfig, ProviderConfig, ProviderModels};
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
+use peri_acp_types::event_data::PluginSnapshotEntry;
+use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, PluginOrigin};
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
 use peri_agent::thread::FilesystemThreadStore;
-use peri_middlewares::hitl::shared_mode::{PermissionMode, SharedPermissionMode};
+use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
 use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
 use peri_workflow::runner::AgentExecutor;
 use serde_json::{json, Value};
+use serial_test::serial;
 
 use super::*;
 use crate::provider::LlmProvider;
@@ -111,6 +115,8 @@ fn make_server_config(
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     );
     AcpServerConfig {
         provider: Arc::new(parking_lot::RwLock::new(provider)),
@@ -122,6 +128,7 @@ fn make_server_config(
         oauth_event_rx: None,
         channel_state: None,
         plugin_skill_roots: Vec::new(),
+        plugin_command_entries: Vec::new(),
         plugin_agent_dirs: Vec::new(),
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
@@ -139,7 +146,14 @@ fn make_server_config(
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
-        config_path: tmp.path().join("test_config.json"),
+        config_source: Arc::new(
+            // 空 cwd（无工作区配置）+ 显式全局路径：persist_config 写回该路径
+            crate::provider::ConfigSource::load_at(
+                &tmp.path().join("empty-cwd"),
+                tmp.path().join("test_config.json"),
+            )
+            .unwrap(),
+        ),
         session_manager,
     }
 }
@@ -364,6 +378,62 @@ fn register_session_with_history(
     sid
 }
 
+#[tokio::test]
+async fn test_rewind_methods_require_explicit_capability() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager
+        .caps_registry()
+        .insert(sid.clone(), PeriCaps::default());
+    let target = sessions.get(&sid).unwrap().history[0]
+        .id()
+        .as_uuid()
+        .to_string();
+    let original: Vec<_> = sessions
+        .get(&sid)
+        .unwrap()
+        .history
+        .iter()
+        .map(|message| (message.id().as_uuid().to_string(), message.content()))
+        .collect();
+
+    for (method, params) in [
+        ("session/rewind-candidates", json!({"sessionId": sid})),
+        (
+            "session/rewind-preview",
+            json!({"sessionId": sid, "target_message_id": target}),
+        ),
+        (
+            "session/rewind",
+            json!({"sessionId": sid, "target_message_id": target}),
+        ),
+    ] {
+        let error = handle_request(method, &params, &cfg, &mut sessions, &transport)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, -32601);
+        assert_eq!(error.message, "peri.rewind capability not negotiated");
+    }
+    let current: Vec<_> = sessions
+        .get(&sid)
+        .unwrap()
+        .history
+        .iter()
+        .map(|message| (message.id().as_uuid().to_string(), message.content()))
+        .collect();
+    assert_eq!(current, original);
+}
+
 /// session/rewind-candidates 路由到 dispatch：返回 user-only 候选。
 #[tokio::test]
 async fn test_rewind_candidates_routes_to_dispatch() {
@@ -379,6 +449,13 @@ async fn test_rewind_candidates_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
 
     let result = handle_request(
         "session/rewind-candidates",
@@ -411,6 +488,13 @@ async fn test_rewind_preview_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
     let target_id = sessions.get(&sid).unwrap().history[2]
         .id()
         .as_uuid()
@@ -447,6 +531,13 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
 
     let result = handle_request(
         "session/rewind-preview",
@@ -481,14 +572,35 @@ async fn test_rewind_routes_to_dispatch() {
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
     let target_id = sessions.get(&sid).unwrap().history[0]
         .id()
         .as_uuid()
         .to_string();
+    let preview = handle_request(
+        "session/rewind-preview",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap();
 
     let result = handle_request(
         "session/rewind",
-        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &json!({
+            "sessionId": sid,
+            "target_message_id": target_id,
+            "preview_fingerprint": preview_fingerprint,
+        }),
         &cfg,
         &mut sessions,
         &transport,
@@ -501,6 +613,66 @@ async fn test_rewind_routes_to_dispatch() {
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
     assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+}
+
+#[tokio::test]
+async fn test_rewind_rejects_stale_preview_without_mutating_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap());
+    cfg.session_manager.caps_registry().insert(
+        sid.clone(),
+        PeriCaps {
+            rewind: true,
+            ..PeriCaps::default()
+        },
+    );
+    let target_id = sessions.get(&sid).unwrap().history[0]
+        .id()
+        .as_uuid()
+        .to_string();
+    let preview = handle_request(
+        "session/rewind-preview",
+        &json!({ "sessionId": sid, "target_message_id": target_id }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
+
+    sessions
+        .get_mut(&sid)
+        .unwrap()
+        .history
+        .push(peri_acp_types::messages::BaseMessage::ai("late answer"));
+    let before = sessions.get(&sid).unwrap().history.len();
+    let error = handle_request(
+        "session/rewind",
+        &json!({
+            "sessionId": sid,
+            "target_message_id": target_id,
+            "preview_fingerprint": preview_fingerprint,
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.message.contains("preview is stale"));
+    assert_eq!(sessions.get(&sid).unwrap().history.len(), before);
 }
 
 // ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────
@@ -1178,26 +1350,14 @@ async fn test_delete_active_session_shuts_down_lsp_pool() {
     );
 }
 
-// ── AvailableCommandsUpdate + MCP 回调重发（Slice 6 / DD-5）──────────────────
+// ── AvailableCommandsUpdate + 注册表回调重发（Slice 6 / DD-5 / Phase 6 A4）──
 
-/// 构造 mcp SkillMetadata（content Some，模拟发现任务回写 registry）。
-fn fake_mcp_skill_meta(server: &str, skill: &str) -> peri_acp_types::skills::SkillMetadata {
-    peri_acp_types::skills::SkillMetadata {
-        name: format!("mcp__{server}__{skill}"),
-        description: format!("MCP skill {skill}"),
-        path: std::path::PathBuf::new(),
-        source: peri_acp_types::skills::SkillSource::Mcp,
-        plugin_name: None,
-        origin: Some(peri_acp_types::skills::SkillOrigin::Mcp {
-            server: server.to_string(),
-            uri: format!("skill://{server}/{skill}/SKILL.md"),
-        }),
-        content: Some(format!("# Body of {skill}")),
-    }
-}
-
-/// session/new 首发无 mcp 条目；registry 发现完成后经 on_change 回调重发，
-/// 第二次通知含 mcp 条目与 meta.mcpSkillNames（验收 11/13 的 ACP 半边）。
+/// session/new 首发无 mcp 条目；MCP 发现完成后经「发现管线直接写入命令
+/// 注册表（A3 `mark_source_completed`）→ **注册表 on_change（投影重建唯一
+/// 触发源）**」重发，第二次通知含 mcp 条目（条目级 `_meta.periKind`；
+/// update 级 `mcpSkillNames` 镜像键已退役，Phase 6 D1）；注册表
+/// 内容变化（unregister）亦触发重发且投影收缩（Phase 6 A4：McpSkillRegistry
+/// 挂点已删，命令面变更统一经注册表）。
 #[tokio::test]
 async fn test_available_commands_update_mcp_callback_resend() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1232,18 +1392,45 @@ async fn test_available_commands_update_mcp_callback_resend() {
     assert_eq!(update0["sessionUpdate"], "available_commands_update");
     let commands0 = update0["availableCommands"].as_array().unwrap();
     assert!(
-        commands0.iter().all(|c| c["name"] != "mcp__demo__hello"),
+        commands0
+            .iter()
+            .all(|c| c["name"] != "mcp__demo__hello" && c["name"] != "mcp:demo:hello"),
         "首发不得含 mcp 条目"
     );
 
-    // 变更 registry：Started → Discovered(1 条) → on_change 触发回调重发
-    let registry = cfg
+    // 变更命令注册表（A4 后 MCP 条目由发现管线直接写入，不再经
+    // McpSkillRegistry on_change 对账——挂点已删）→ 注册表 on_change
+    // 触发投影重发（A3 `mark_source_completed` 同语义）。
+    let command_registry = cfg
         .session_manager
-        .mcp_skill_registry_for(&sid)
-        .expect("session 应持有 registry");
+        .command_registry_for(&sid)
+        .expect("session 应持有命令注册表");
     let token: peri_acp_types::mcp_skills::HandleToken = Arc::new(42u32);
-    registry.mark_discovery_started("demo", token.clone());
-    registry.mark_discovery_completed("demo", token, vec![fake_mcp_skill_meta("demo", "hello")]);
+    command_registry.mark_source_started("mcp:demo", token.clone());
+    command_registry.mark_source_completed(
+        "mcp:demo",
+        token,
+        vec![peri_acp_types::command::command_route::RouteEntry {
+            fullname: "mcp:demo:hello".into(),
+            aliases: Vec::new(),
+            description: "MCP skill hello".into(),
+            kind: peri_acp_types::command::command_route::CommandEntryKind::McpSkill,
+            category: None,
+            args_schema: None,
+            handler: Arc::new(crate::session::command::AgentPassthrough),
+            provenance: peri_acp_types::command::command_route::CommandProvenance {
+                source: peri_acp_types::command::command_route::CommandSource::Mcp {
+                    server: "demo".into(),
+                },
+                // 对齐生产语义（skill_discovery.rs `mcp_route_entries` 产出
+                // Discovered；handler 为跨 crate 占位等价——peri-acp 无法
+                // 引用 peri-middlewares 的 McpSkillPlaceholder，用
+                // AgentPassthrough 占位，本用例只断言触发源 = 注册表
+                // on_change，与 handler/lifecycle 无关）。
+                lifecycle: peri_acp_types::command::command_route::CommandLifecycle::Discovered,
+            },
+        }],
+    );
 
     // 回调经 tokio::spawn 异步发送 → 轮询短等待
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1251,6 +1438,14 @@ async fn test_available_commands_update_mcp_callback_resend() {
         assert!(std::time::Instant::now() < deadline, "等待重发通知超时");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    // 稳定窗口：异步重发落袋后再等一拍，断言重发**恰一次**（注册表
+    // on_change 只触发一次，不得重复重发——A5「重发恰一次断言不变」）
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        transport.notifications().len(),
+        2,
+        "mark_source_completed 应触发重发恰一次（首发 + 重发）"
+    );
 
     // 静默断言（验收 13 ACP 半边）：除 available_commands_update 外无其它
     // 通知类型
@@ -1268,21 +1463,46 @@ async fn test_available_commands_update_mcp_callback_resend() {
 
     let update1 = &notifications[1].1["update"];
     let commands1 = update1["availableCommands"].as_array().unwrap();
-    assert!(
-        commands1.iter().any(|c| c["name"] == "mcp__demo__hello"),
-        "第二次通知应含 mcp 条目"
-    );
+    let hello = commands1
+        .iter()
+        .find(|c| c["name"] == "mcp:demo:hello")
+        .expect("第二次通知应含 mcp 条目（mcp:demo:hello 全名）");
     assert_eq!(
-        update1["_meta"]["mcpSkillNames"],
-        json!(["mcp__demo__hello"]),
-        "meta.mcpSkillNames 应正确"
+        hello["_meta"]["periKind"], "mcp_skill",
+        "mcp 条目 kind 入条目级 _meta（mcpSkillNames 镜像键已退役）"
     );
+
+    // 触发源 = 注册表：unregister 内置条目 → 重发且投影收缩（不再依赖
+    // McpSkillRegistry 直接重发）
+    let before = transport.notifications().len();
+    assert!(
+        command_registry.unregister("core:loop"),
+        "unregister 应命中"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let shrunk = transport.notifications().iter().any(|(_, p)| {
+            p["update"]["availableCommands"]
+                .as_array()
+                .map(|a| a.iter().all(|c| c["name"] != "core:loop"))
+                .unwrap_or(false)
+        });
+        if shrunk {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待注册表 on_change 重发超时（before={before}）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
-/// 防引用环断言：注册回调后清零外部强引用（持 Weak 观察）→ upgrade 必须
-/// 变 None（回调不得捕获 registry Arc 强引用）。
+/// 核对点 8 覆盖缺口（P2-3）：`set_pending_caps` 带 `ui_commands` 明细 →
+/// session/new → 断言 `ui:*` 条目随 caps 明细出现（fullname=`ui:<name>`、
+/// `periKind=panel`、`periCategory=ui`、alias 注入），未协商的默认明细不出现。
 #[tokio::test]
-async fn test_available_commands_update_callback_does_not_hold_strong_ref() {
+async fn test_available_commands_update_ui_entries_from_caps_details() {
     let tmp = tempfile::TempDir::new().unwrap();
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
@@ -1292,27 +1512,742 @@ async fn test_available_commands_update_callback_does_not_hold_strong_ref() {
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let cfg = make_server_config(peri_config, provider, &tmp);
+    // 协商 caps：仅上送两条自定义 ui 明细（大写 name 验证小写归一 + alias 透传）
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        ui_commands: vec![
+            peri_acp_types::command::command_route::UiCommandSpec {
+                name: "gallery".into(),
+                description: "Open the gallery panel".into(),
+                aliases: vec!["gal".into()],
+                args: None,
+            },
+            peri_acp_types::command::command_route::UiCommandSpec {
+                name: "Zoom".into(),
+                description: "Zoom panel".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let reg = Arc::new(peri_acp_types::mcp_skills::McpSkillRegistry::new());
-    let weak = Arc::downgrade(&reg);
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let _sid = result["sessionId"].as_str().unwrap();
+
+    let notifications = transport.notifications();
+    assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
+    let update = &notifications[0].1["update"];
+    assert_eq!(update["sessionUpdate"], "available_commands_update");
+    let commands = update["availableCommands"].as_array().unwrap();
+    let by_name = |n: &str| {
+        commands
+            .iter()
+            .find(|c| c["name"] == n)
+            .unwrap_or_else(|| panic!("条目 {n} 应存在: {:?}", commands))
+    };
+    // ui 条目随 caps 明细出现：periKind=panel / periLevel=1 / periCategory=ui
+    let gallery = by_name("ui:gallery");
+    assert_eq!(
+        gallery["_meta"]["periKind"], "panel",
+        "ui 条目 kind = panel"
+    );
+    assert_eq!(gallery["_meta"]["periLevel"], 1, "core/ui 域 level = 1");
+    assert_eq!(gallery["_meta"]["periCategory"], "ui");
+    assert_eq!(
+        gallery["_meta"]["periAliases"],
+        json!(["gal"]),
+        "caps 明细 alias 应透传注入"
+    );
+    assert_eq!(
+        by_name("ui:zoom")["_meta"]["periKind"],
+        "panel",
+        "name 应小写归一（Zoom → ui:zoom）"
+    );
+    // 未协商的默认明细不得出现（门控反转：只广播客户端声明的明细）
+    assert!(
+        !commands
+            .iter()
+            .any(|c| c["name"] == "ui:help" || c["name"] == "ui:clear"),
+        "未协商的 ui 明细不得出现"
+    );
+    // 基座内置仍在（注册表投影）
+    assert!(
+        commands.iter().any(|c| c["name"] == "core:compact"),
+        "基座内置条目应保留"
+    );
+}
+
+/// 防引用环断言：注册回调后清零外部强引用（持 Weak 观察）→ upgrade 必须
+/// 变 None——注册表 on_change 回调不得捕获注册表 Arc 强引用（重发闭包只
+/// 持 Weak；Phase 6 A4 后 McpSkillRegistry 不再经本函数挂回调）。
+#[tokio::test]
+async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let _cfg = make_server_config(peri_config, provider, &tmp);
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let command_registry = Arc::new(peri_acp_types::command_registry::CommandRegistry::new());
+    let weak_cmd = Arc::downgrade(&command_registry);
 
     crate::host::notify::send_available_commands_update(
         &transport_dyn,
         "anti-cycle-session",
-        &cfg.skills,
-        tmp.path().to_str().unwrap(),
-        &cfg.plugin_skill_roots,
         &PeriCaps::all_enabled(),
-        Some(reg), // 唯一强引用移入函数，返回后即释放
+        Some(command_registry), // 唯一强引用移入函数，返回后即释放
     )
     .await;
 
-    // 外部强引用清零后：回调闭包只持 Weak，registry 必须能被回收
+    // 外部强引用清零后：注册表 on_change 回调只持 Weak(注册表)（重发闭包），
+    // 注册表必须能被回收（无引用环）。
     assert!(
-        weak.upgrade().is_none(),
-        "回调不得捕获 registry 强引用（引用环）；upgrade 应为 None"
+        weak_cmd.upgrade().is_none(),
+        "注册表应可回收（on_change 回调不得捕获强引用）；upgrade 应为 None"
     );
-    assert_eq!(weak.strong_count(), 0, "strong_count 应归零");
+    assert_eq!(weak_cmd.strong_count(), 0, "注册表 strong_count 应归零");
+}
+
+#[tokio::test]
+async fn test_mcp_list_requires_negotiated_oauth_capability() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps::default());
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32601);
+    assert_eq!(error.message, "peri.oauth capability not negotiated");
+}
+
+#[tokio::test]
+async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response, json!({ "servers": [] }));
+    assert!(response.to_string().find("url").is_none());
+    assert!(response.to_string().find("error").is_none());
+}
+
+#[tokio::test]
+async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/oauth_start",
+        &json!({ "server_name": "docs" }),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(error.message, "missing 'flow_id'");
+}
+
+#[tokio::test]
+async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let error = handle_request(
+        "mcp/oauth_callback",
+        &json!({
+            "server_name": "docs",
+            "flow_id": "flow-1",
+            "code": "secret-code",
+            "state": "secret-state"
+        }),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32601);
+    assert!(!error.message.contains("secret-code"));
+    assert!(!error.message.contains("secret-state"));
+}
+
+// ── Phase 6 B3：plugin install/uninstall RPC 级投影断言（P2-2）──────────────
+
+/// 测试期重定向 `$HOME`（`handle_request` 内 `claude_dir` 由
+/// `dirs_next::home_dir()` 计算，`refresh_plugin_command_entries` 经真实
+/// `load_enabled_plugins` 重载）；Drop 时还原。进程级 env 态 →
+/// 本组用例全部 `#[serial]`（与 store_test 同组互斥）。
+/// Windows 下 `dirs_next::home_dir()` 读 `USERPROFILE`（`HOME` 仅 Unix 生效），
+/// 两个变量同步设置以保证隔离。
+struct HomeDirGuard {
+    home: Option<std::ffi::OsString>,
+    #[cfg(windows)]
+    userprofile: Option<std::ffi::OsString>,
+}
+
+impl HomeDirGuard {
+    fn set(path: &Path) -> Self {
+        let home = std::env::var_os("HOME");
+        std::env::set_var("HOME", path);
+        #[cfg(windows)]
+        {
+            let prev = std::env::var_os("USERPROFILE");
+            std::env::set_var("USERPROFILE", path);
+            Self {
+                home,
+                userprofile: prev,
+            }
+        }
+        #[cfg(not(windows))]
+        Self { home }
+    }
+}
+
+fn restore_env_var(slot: &mut Option<std::ffi::OsString>, name: &str) {
+    match slot.take() {
+        Some(v) => std::env::set_var(name, v),
+        None => std::env::remove_var(name),
+    }
+}
+
+impl Drop for HomeDirGuard {
+    fn drop(&mut self) {
+        restore_env_var(&mut self.home, "HOME");
+        #[cfg(windows)]
+        restore_env_var(&mut self.userprofile, "USERPROFILE");
+    }
+}
+
+/// 可编程 `PluginManagerPort` mock：install / uninstall 结果注入，其余方法
+/// 空实现（install/uninstall 分支仅消费 install/uninstall + snapshot +
+/// cache_dir；`unstable_event` caps 默认关闭，push_plugin_* 不发通知）。
+struct MockPluginManager {
+    install_result: std::sync::Mutex<Result<InstalledPlugin, String>>,
+    uninstall_result: std::sync::Mutex<Result<(), String>>,
+}
+
+impl MockPluginManager {
+    fn install_ok(id: &str) -> Self {
+        Self {
+            install_result: std::sync::Mutex::new(Ok(InstalledPlugin {
+                id: id.to_string(),
+                name: id.to_string(),
+                version: "1.0.0".into(),
+                marketplace: "test-mkt".into(),
+                install_path: PathBuf::from("/tmp/mock-install"),
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            })),
+            uninstall_result: std::sync::Mutex::new(Ok(())),
+        }
+    }
+}
+
+#[async_trait]
+impl PluginManagerPort for MockPluginManager {
+    async fn install(
+        &self,
+        _name: &str,
+        _marketplace: &str,
+        _scope: InstallScope,
+        _cache_dir: &Path,
+        _claude_dir: &Path,
+    ) -> Result<InstalledPlugin, String> {
+        self.install_result.lock().unwrap().clone()
+    }
+
+    async fn uninstall(&self, _plugin_id: &str, _claude_dir: &Path) -> Result<(), String> {
+        self.uninstall_result.lock().unwrap().clone()
+    }
+
+    fn set_enabled(
+        &self,
+        _plugin_id: &str,
+        _scope: InstallScope,
+        _claude_dir: &Path,
+        _enable: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        PathBuf::from("/tmp/mock-cache")
+    }
+
+    async fn update(
+        &self,
+        _plugin_id: &str,
+        _cache_dir: &Path,
+        _claude_dir: &Path,
+    ) -> Result<InstalledPlugin, String> {
+        Err("mock: unused".into())
+    }
+
+    async fn refresh_marketplace(&self, _name: &str) -> Result<usize, String> {
+        Err("mock: unused".into())
+    }
+
+    async fn cleanup(&self, _claude_dir: &Path) -> Result<usize, String> {
+        Err("mock: unused".into())
+    }
+
+    async fn marketplace_add(&self, _source: &str) -> Result<String, String> {
+        Err("mock: unused".into())
+    }
+
+    async fn marketplace_remove(&self, _name: &str) -> Result<(), String> {
+        Err("mock: unused".into())
+    }
+
+    async fn marketplace_update(&self, _name: &str) -> Result<String, String> {
+        Err("mock: unused".into())
+    }
+
+    fn marketplace_snapshot(&self) -> Value {
+        json!({})
+    }
+
+    fn snapshot(&self, _claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
+        vec![]
+    }
+}
+
+/// 在 `{home}/.claude` 布置一个启用中的插件 `ecc`（含命令
+/// `commands/deploy.md`），供 `refresh_plugin_command_entries` 重载出
+/// `plugin:ecc:deploy`（与 peri-middlewares loader_test 的磁盘形态同构）。
+fn seed_plugin_ecc(home: &Path) {
+    let claude_dir = home.join(".claude");
+    let plugin_dir = claude_dir.join("plugins").join("ecc");
+    // 命令文件相对插件根目录（extract_commands: base_dir.join(path)）
+    std::fs::create_dir_all(plugin_dir.join("commands")).unwrap();
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"ecc","version":"1.0.0","commands":[{"path":"commands/deploy.md"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join("commands").join("deploy.md"),
+        "---\ndescription: Deploy to prod\n---\nBody",
+    )
+    .unwrap();
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json =
+        serde_json::to_string(&peri_middlewares::plugin::types::InstalledPlugins {
+            version: 2,
+            plugins: vec![InstalledPlugin {
+                id: "ecc@test-mkt".into(),
+                name: "ecc".into(),
+                version: "1.0.0".into(),
+                marketplace: "test-mkt".into(),
+                install_path: plugin_dir,
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            }],
+        })
+        .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["ecc@test-mkt"]}"#,
+    )
+    .unwrap();
+}
+
+/// 等待 `session/update` 通知达到目标条数（on_change 经 tokio::spawn
+/// 异步发送 → 轮询短等待，对齐 A5 重发测试先例）。仅计数 session/update：
+/// 未协商 caps 回退 all_enabled（`unstable_event: true`），install/uninstall
+/// 还会发 `peri/unstable_event`（plugin-action-result / plugin-snapshot）。
+fn session_update_count(transport: &MockTransport) -> usize {
+    transport
+        .notifications()
+        .iter()
+        .filter(|(m, _)| m == "session/update")
+        .count()
+}
+
+async fn wait_for_session_updates(transport: &MockTransport, target: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while session_update_count(transport) < target {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待通知超时（target={target}）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // 稳定窗口：异步重发落袋后再等一拍（防迟到的重复重发漏判）
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+fn plugin_entries(registry: &peri_acp_types::command::CommandRegistry) -> Vec<String> {
+    registry
+        .snapshot()
+        .iter()
+        .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
+        .map(|e| e.fullname.clone())
+        .collect()
+}
+
+/// B3 成功分支（install 调用路径 :907）：mock install 成功 + 磁盘重载出
+/// `plugin:ecc:deploy` → 注册表投影含新插件命令（provenance 剥离前缀，
+/// P0-1 回归）+ 注册表 on_change 触发投影推送**恰一次**。
+#[tokio::test]
+#[serial]
+async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home_guard = HomeDirGuard::set(&home);
+    seed_plugin_ecc(&home);
+
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let sid = result["sessionId"].as_str().unwrap().to_string();
+    assert_eq!(
+        transport.notifications().len(),
+        1,
+        "session/new 首发仅 available_commands_update 一条"
+    );
+    let registry = cfg
+        .session_manager
+        .command_registry_for(&sid)
+        .expect("session 应持有命令注册表");
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "初始 plugin 域应为空（无插件命令）"
+    );
+
+    // Act：plugin/install（mock 成功）
+    let resp = handle_request(
+        "plugin/install",
+        &json!({
+            "sessionId": sid,
+            "name": "ecc",
+            "marketplace": "test-mkt",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["success"], true, "install RPC 应成功");
+    assert_eq!(resp["plugin"], "ecc");
+
+    // Assert ①：注册表投影含新插件命令，provenance 剥离 plugin: 前缀
+    let entries = plugin_entries(&registry);
+    assert_eq!(entries, vec!["plugin:ecc:deploy"]);
+    let entry = registry
+        .snapshot()
+        .into_iter()
+        .find(|e| e.fullname == "plugin:ecc:deploy")
+        .expect("插件命令应已注册");
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandSource as RouteCommandSource,
+    };
+    assert_eq!(entry.kind, CommandEntryKind::Command);
+    assert_eq!(entry.provenance.lifecycle, CommandLifecycle::Connected);
+    match &entry.provenance.source {
+        RouteCommandSource::Plugin { name } => {
+            assert_eq!(name, "ecc", "plugin: 前缀必须剥离，实际: {name}");
+        }
+        other => panic!("source 应为 Plugin，实际: {other:?}"),
+    }
+
+    // Assert ②：注册表 on_change → 投影推送恰一次（首发 + 重发）
+    wait_for_session_updates(&transport, 2).await;
+    let notifications = transport.notifications();
+    let updates: Vec<_> = notifications
+        .iter()
+        .filter(|(m, _)| m == "session/update")
+        .collect();
+    assert_eq!(
+        updates.len(),
+        2,
+        "install 后注册表 on_change 应触发投影重发恰一次"
+    );
+    let commands = updates[1].1["update"]["availableCommands"]
+        .as_array()
+        .expect("重发载荷应含 availableCommands");
+    assert!(
+        commands.iter().any(|c| c["name"] == "plugin:ecc:deploy"),
+        "投影推送应含插件命令条目"
+    );
+}
+
+/// B3 失败分支（install 调用路径 :907）：磁盘重载失败（installed_plugins.json
+/// 非法 JSON → `load_enabled_plugins` Err）→ 保留空 plugin 域 + 告警，
+/// **不阻塞 RPC 回包**（`{success: true}` 仍回），plugin 域无变化不触发推送。
+#[tokio::test]
+#[serial]
+async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_block_rpc() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let _home_guard = HomeDirGuard::set(&home);
+    // 重载失败形态：installed_plugins.json 内容非法
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        "{invalid json",
+    )
+    .unwrap();
+
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let sid = result["sessionId"].as_str().unwrap().to_string();
+    let registry = cfg
+        .session_manager
+        .command_registry_for(&sid)
+        .expect("session 应持有命令注册表");
+
+    // Act：plugin/install —— 重载失败不得阻塞回包
+    let resp = handle_request(
+        "plugin/install",
+        &json!({
+            "sessionId": sid,
+            "name": "ecc",
+            "marketplace": "test-mkt",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["success"], true, "重载失败不得阻塞 RPC 回包");
+
+    // Assert：plugin 域保持空 + 无内容变化 → 无投影推送（unstable_event
+    // 通知 `peri/unstable_event` 与投影推送 `session/update` 相互独立）
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "重载失败 → 保留空 plugin 域（过时条目不得残留）"
+    );
+    // 稳定窗口：若存在异步重发也已落袋（重载失败路径 reconcile 无内容
+    // 变化，不应触发任何 on_change）
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        session_update_count(&transport),
+        1,
+        "plugin 域无内容变化，不得触发投影推送（仅首发一条）"
+    );
+}
+
+/// B3 注销分支（uninstall 调用路径 :969）：install 预置 plugin 域条目 →
+/// 磁盘 enabledPlugins 清空 → uninstall 成功 → stale 条目按名注销，
+/// plugin 域为空，RPC 仍 success。
+#[tokio::test]
+#[serial]
+async fn test_plugin_uninstall_removes_stale_plugin_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home_guard = HomeDirGuard::set(&home);
+    seed_plugin_ecc(&home);
+
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp);
+    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
+    let mut sessions = HashMap::new();
+    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
+    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
+
+    let result = handle_request(
+        "session/new",
+        &json!({ "cwd": tmp.path().to_str().unwrap() }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    let sid = result["sessionId"].as_str().unwrap().to_string();
+    let registry = cfg
+        .session_manager
+        .command_registry_for(&sid)
+        .expect("session 应持有命令注册表");
+
+    // 预置：install 成功 → plugin 域含 plugin:ecc:deploy
+    handle_request(
+        "plugin/install",
+        &json!({
+            "sessionId": sid,
+            "name": "ecc",
+            "marketplace": "test-mkt",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        plugin_entries(&registry),
+        vec!["plugin:ecc:deploy"],
+        "install 预置失败"
+    );
+
+    // 卸载后磁盘重载面清空（enabledPlugins 空 → 无插件）
+    std::fs::write(
+        home.join(".claude").join("settings.json"),
+        r#"{"enabledPlugins":[]}"#,
+    )
+    .unwrap();
+
+    // Act：plugin/uninstall（mock 成功）
+    let resp = handle_request(
+        "plugin/uninstall",
+        &json!({
+            "sessionId": sid,
+            "pluginId": "ecc@test-mkt",
+        }),
+        &cfg,
+        &mut sessions,
+        &transport_dyn,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp["success"], true, "uninstall RPC 应成功");
+
+    // Assert：stale 条目按名注销 → plugin 域空
+    assert!(
+        plugin_entries(&registry).is_empty(),
+        "uninstall 后 stale 插件命令应全部注销"
+    );
+    // 通知：首发 + install on_change + uninstall 注销 on_change，各恰一次
+    wait_for_session_updates(&transport, 3).await;
+    assert_eq!(
+        session_update_count(&transport),
+        3,
+        "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
+    );
 }

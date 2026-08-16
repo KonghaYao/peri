@@ -43,8 +43,6 @@ fn test_all_executor_event_variants_mapped() {
         "CompactStarted",
         "CompactCompleted",
         "RewindCompleted",
-        "RewindError",
-        "CompactError",
         "AgentExecutionFailed",
         "LspDiagnostics",
         "BgToolStep",
@@ -58,6 +56,7 @@ fn test_all_executor_event_variants_mapped() {
         "WorkflowStarted",
         "WorkflowEnded",
         "BgRegistryEvent",
+        "CommandFeedback",
     ];
     for v in exhausted_variants {
         assert!(

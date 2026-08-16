@@ -173,6 +173,53 @@ impl McpSkillRegistry {
         }
     }
 
+    /// 读取面热更新回写（resource_tool 恢复成功后调用）：仅当该 server
+    /// 当前状态为 Discovered 且 handle 指针一致（`Arc::ptr_eq`，防与重连/
+    /// 新发现竞态——恢复 RPC 期间 server 可能已重连重扫）时替换 entries；
+    /// 替换后锁外触发 on_change（旧 entries 非空或新 entries 非空——对齐
+    /// `mark_discovery_started` 的覆盖语义：内容变化即通知 commands 侧）。
+    /// 状态为 Started（发现任务进行中，不写——整体覆盖以发现完成为准）或
+    /// handle 不一致 → 返回 false 不写入。
+    pub fn refresh_entries(
+        &self,
+        server: &str,
+        handle: &HandleToken,
+        entries: Vec<SkillMetadata>,
+    ) -> bool {
+        let cb = {
+            let mut guard = self.inner.write();
+            let Some(ServerDiscoveryState::Discovered {
+                handle: current,
+                entries: old_entries,
+            }) = guard.servers.get(server)
+            else {
+                // Started / 无状态：不写。
+                return false;
+            };
+            if !std::sync::Arc::ptr_eq(current, handle) {
+                // 恢复期间重连/新发现 → 旧 handle 回写丢弃。
+                return false;
+            }
+            let fire = !old_entries.is_empty() || !entries.is_empty();
+            guard.servers.insert(
+                server.to_string(),
+                ServerDiscoveryState::Discovered {
+                    handle: handle.clone(),
+                    entries,
+                },
+            );
+            if fire {
+                guard.on_change.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(cb) = cb {
+            cb();
+        }
+        true
+    }
+
     /// 发现任务取消时回退 Started 状态：条目为 Started 且 ptr_eq 才移除
     /// （不触发 on_change）——session/cancel 后下轮可重试。
     pub fn clear_discovery_started(&self, server: &str, handle: HandleToken) {
@@ -205,6 +252,9 @@ impl McpSkillRegistry {
 
     /// 按全名查找（小写精确匹配 `mcp__<server>__<skill>`）；未命中再试
     /// `<server>:<skill>` 别名（rsplit_once(':')，后缀非空才拼全名）。
+    ///
+    /// 仅供 tool 面（SkillTool/发现管线）消费：`mcp__` 形态不进入命令面
+    /// （注册表/投影/补全），tool 面迁移为后续 SEP（Phase 6 范围外）。
     pub fn find(&self, name: &str) -> Option<SkillMetadata> {
         let guard = self.inner.read();
         let needle = name.to_lowercase();
@@ -279,6 +329,9 @@ fn find_exact(
 
 /// `<server>:<skill>` → `mcp__<server>__<skill>`（registry.find 与 SkillTool
 /// 别名分支共用）。
+///
+/// 仅供 tool 面消费：`mcp__` 形态不进入命令面（注册表/投影/补全），
+/// tool 面迁移为后续 SEP（Phase 6 范围外）。
 pub fn mcp_skill_name(server: &str, skill: &str) -> String {
     format!("mcp__{}__{}", server, skill)
 }

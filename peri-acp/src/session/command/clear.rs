@@ -1,70 +1,37 @@
 //! `/clear` 命令 — 清空对话历史。
 
-use peri_acp_types::event::{CompactStrategy, CompactTrigger, ExecutorEvent};
+use async_trait::async_trait;
+use peri_acp_types::command::{CommandHandler, CommandOutcome};
 
-use super::{AgentCommand, CommandContext, CommandKind, CommandResult};
+use super::{CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel};
 use crate::session::executor::PromptStopReason;
 
 /// 清空历史命令。
+#[derive(Default)]
 pub struct ClearCommand;
 
 impl ClearCommand {
     pub const NAME: &'static str = "clear";
+    /// 别名（注册条目挂载，命令声明单一事实源；旧 AgentCommand impl 已删）。
+    pub const ALIASES: &'static [&'static str] = &["cls", "reset"];
+    /// 描述（注册条目挂载）。
+    pub const DESCRIPTION: &'static str = "清空当前会话的对话历史";
 }
 
-#[async_trait::async_trait]
-impl AgentCommand for ClearCommand {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    fn aliases(&self) -> Vec<&str> {
-        vec!["cls", "reset"]
-    }
-
-    fn description(&self) -> &str {
-        "清空当前会话的对话历史"
-    }
-
-    fn kind(&self) -> CommandKind {
-        CommandKind::Immediate
-    }
-
-    async fn execute(&self, ctx: CommandContext) -> CommandResult {
-        // 发送 CompactCompleted（空 messages）复用 TUI 的 compact 清理路径：
-        // pipeline.clear() → restore_completed(vec![]) → RebuildAll { prefix_len: 0 }
-        // 这确保 TUI 的 view_messages 和 origin_messages 被正确清空。
-        ctx.event_sink
-            .push_event(
-                &ctx.session_id,
-                &ExecutorEvent::CompactCompleted {
-                    summary: "对话已清空".to_string(),
-                    files: vec![],
-                    skills: vec![],
-                    micro_cleared: 0,
-                    messages: vec![],
-                    token_before: 0,
-                    token_after: 0,
-                    strategy: CompactStrategy::Smart,
-                    affected_count: 0,
-                    estimated_tokens_saved: 0,
-                    estimated_tokens_before: 0,
-                    estimated_tokens_after: 0,
-                    changed_messages: 0,
-                    changed_fields: 0,
-                    no_op_candidates: 0,
-                    full_escalation_reason: None,
-                    cache_hit_rate_before: 0.0,
-                    trigger: CompactTrigger::Manual,
-                    outcome: peri_acp_types::compact::CompactOutcome::Skipped,
-                },
-                0,
-            )
-            .await;
-
-        CommandResult {
-            messages: Vec::new(),
+// 新契约主实现（Phase 5 Step 3）：无参（ArgsSchema::default()，注册条目挂载）；
+// 反馈经 CommandFeedback 双通道（UiOnly，不进会话）——事件发射统一收敛到编排层
+// emit_command_feedback，命令内零事件代码。
+#[async_trait]
+impl CommandHandler for ClearCommand {
+    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+        CommandOutcome::Done(CommandResult {
+            messages: Vec::new(), // 语义保持：清空后会话为空
             stop_reason: PromptStopReason::EndTurn,
-        }
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Info,
+                message: "对话已清空".to_string(),
+                channel: FeedbackChannel::UiOnly,
+            }),
+        })
     }
 }

@@ -22,15 +22,16 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::{
-    event::map_event, event::AcpEvent, event::CompactFileInfoDto, transport::AcpTransport,
+    event::activity::map_agent_activity, event::map_event, event::AcpEvent, transport::AcpTransport,
 };
 
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
 pub use peri_acp_types::event::EventSink;
 
-/// Serializes a serde `Serialize` value into its serde snake_case string
-/// representation. Used for CompactStrategy/CompactOutcome enum variants
-/// so TUI string matching works correctly.
+/// Serializes a serde `Serialize` value into its string wire representation.
+/// The output follows the input type's serde rename form: CompactStrategy/
+/// CompactOutcome produce snake_case, CommandFeedback level/channel produce
+/// camelCase (`"info"`/`"uiOnly"`); TUI string matching relies on these forms.
 fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value)
         .unwrap_or_default()
@@ -153,6 +154,28 @@ impl EventSink for TransportEventSink {
             }
         }
 
+        // Privacy-safe GUI activity channel. This is intentionally independent
+        // from legacy `peri/agent_event`: the mapper has already removed raw
+        // messages, summaries, paths, outputs, errors and URLs before transport.
+        if caps.agent_activity {
+            if let Some(activity) = map_agent_activity(event) {
+                if let Err(error) = self
+                    .transport
+                    .send_notification(
+                        "peri/agent_activity",
+                        json!({ "sessionId": session_id, "activity": activity }),
+                    )
+                    .await
+                {
+                    tracing::trace!(
+                        session_id = %session_id,
+                        error = %error,
+                        "EventSink: agent activity send failed (non-critical)"
+                    );
+                }
+            }
+        }
+
         // 2. peri/agent_event — TUI 专用通知（Category ③）
         // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
         // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
@@ -180,14 +203,8 @@ impl EventSink for TransportEventSink {
                 }),
                 ExecutorEvent::CompactCompleted {
                     summary,
-                    files,
-                    skills,
-                    micro_cleared,
                     messages,
-                    strategy,
                     trigger,
-                    outcome,
-                    ..
                 } => {
                     let messages_json = match serde_json::to_string(messages) {
                         Ok(json) => json,
@@ -196,24 +213,11 @@ impl EventSink for TransportEventSink {
                             return;
                         }
                     };
-                    let strategy_str = to_serde_str(strategy);
                     let trigger_str = to_serde_str(trigger);
-                    let outcome_str = to_serde_str(outcome);
                     Some(AcpEvent::CompactCompleted {
                         summary: summary.clone(),
-                        files: files
-                            .iter()
-                            .map(|f| CompactFileInfoDto {
-                                path: f.path.clone(),
-                                lines: f.lines,
-                            })
-                            .collect(),
-                        skills: skills.clone(),
-                        micro_cleared: *micro_cleared,
                         messages_json,
-                        strategy: strategy_str,
                         trigger: trigger_str,
-                        outcome: outcome_str,
                     })
                 }
                 ExecutorEvent::AgentExecutionFailed { message } => {
@@ -237,9 +241,6 @@ impl EventSink for TransportEventSink {
                         messages_json,
                     })
                 }
-                ExecutorEvent::RewindError { message } => Some(AcpEvent::RewindError {
-                    message: message.clone(),
-                }),
                 // SystemNotification：MCP 上下线等连接状态变化经 peri/agent_event
                 // 通道送达 TUI（AcpEventData::SystemNotification → system-notification
                 // 通知显示）。
@@ -303,6 +304,14 @@ impl EventSink for TransportEventSink {
                 // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
                 // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
                 ExecutorEvent::TurnCommitted { .. } => None,
+                // CommandFeedback：命令执行反馈经 peri/agent_event 通道送达 TUI
+                // 通知条（level/channel 复用 to_serde_str 先例）；channel=session
+                // 由 TUI 侧 opt-in 另写系统消息（Phase 4 落 TUI 本地拦截）。
+                ExecutorEvent::CommandFeedback(fb) => Some(AcpEvent::CommandFeedback {
+                    level: to_serde_str(&fb.level),
+                    message: fb.message.clone(),
+                    channel: to_serde_str(&fb.channel),
+                }),
                 _ => None,
             };
             if let Some(acp_event) = acp_event {
@@ -508,7 +517,13 @@ mod tests {
     async fn push_event_forwards_rewind_completed() {
         let transport = Arc::new(MockTransport::default());
         let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
-        caps.insert("s1".to_string(), PeriCaps::all_enabled());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
         let sink = TransportEventSink::new(transport.clone(), caps);
 
         sink.push_event(
@@ -566,6 +581,122 @@ mod tests {
             transport.notifications.lock().unwrap().is_empty(),
             "未声明 agent_event cap 时不应发出通知"
         );
+    }
+
+    /// CommandFeedback 分支 wire 断言：level/channel 经 to_serde_str 透传 Phase 1
+    /// camelCase 输出（"info" / "uiOnly"），message 原文透传（核对点 7）。
+    #[tokio::test]
+    async fn push_event_forwards_command_feedback_wire() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::CommandFeedback(peri_acp_types::command::CommandFeedback {
+                level: peri_acp_types::command::FeedbackLevel::Info,
+                message: "命令完成".to_string(),
+                channel: peri_acp_types::command::FeedbackChannel::UiOnly,
+            }),
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "应发出恰好 1 条通知: {:?}",
+            notifications
+        );
+        let (method, params) = &notifications[0];
+        assert_eq!(method, "peri/agent_event");
+
+        let event_json = params
+            .get("event_json")
+            .and_then(|v| v.as_str())
+            .expect("event_json 缺失");
+        let parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "type": "command_feedback",
+                "value": {
+                    "level": "info",
+                    "message": "命令完成",
+                    "channel": "uiOnly",
+                }
+            }),
+            "CommandFeedback wire 形态必须与 Phase 1 serde camelCase 输出一致"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_activity: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "reviewer".into(),
+                result: "SECRET_RESULT_SENTINEL".into(),
+                is_error: false,
+                instance_id: "raw-instance-id".into(),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, "peri/agent_activity");
+        assert_eq!(notifications[0].1["activity"]["schemaVersion"], 1);
+        assert_eq!(notifications[0].1["activity"]["kind"], "subagent");
+        let serialized = notifications[0].1.to_string();
+        assert!(!serialized.contains("SECRET_RESULT_SENTINEL"));
+        assert!(!serialized.contains("raw-instance-id"));
+    }
+
+    #[tokio::test]
+    async fn push_event_does_not_emit_activity_without_exact_cap() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                agent_activity: false,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::ContextWarning {
+                used_tokens: 90,
+                total_tokens: 100,
+                percentage: 0.9,
+            },
+            0,
+        )
+        .await;
+        assert!(transport.notifications.lock().unwrap().is_empty());
     }
 
     /// push_unstable_event 通道 method 命名统一为 snake_case（2026-08-14 整顿）。

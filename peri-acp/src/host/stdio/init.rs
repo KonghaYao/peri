@@ -77,6 +77,10 @@ pub(super) async fn init_stdio_context(
         Some(std::path::Path::new(&cwd)),
     );
     let plugin_skill_roots = plugin_data.all_skill_roots;
+    // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
+    // scripts/import-exemptions.conf；stdio 装配面同源）。
+    let plugin_command_entries =
+        peri_middlewares::plugin::plugin_route_entries(&plugin_data.all_commands);
     let plugin_agent_dirs = plugin_data.all_agent_dirs;
     let plugin_hooks = plugin_data.all_hooks;
     let plugin_loaded = plugin_data.plugins;
@@ -168,6 +172,8 @@ pub(super) async fn init_stdio_context(
             cron_scheduler.clone(),
             Some(mcp_pool_concrete.clone() as Arc<dyn McpSubscriptionPort>),
             skills.clone(),
+            plugin_command_entries.clone(),
+            plugin_skill_roots.clone(),
         )
     };
 

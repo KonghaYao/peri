@@ -41,7 +41,6 @@ pub(crate) async fn handle_new(
     cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     let cwd_str = req.cwd.to_string_lossy().to_string();
-    let cwd_for_skills = cwd_str.clone();
     let meta = peri_acp_types::thread::ThreadMeta::new(&cwd_str);
     let thread_id = match ctx.thread_store.create_thread(meta).await {
         Ok(id) => id,
@@ -110,15 +109,13 @@ pub(crate) async fn handle_new(
             .modes(modes)
             .config_options(config_options),
     );
-    // Push AvailableCommandsUpdate notification
+    // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 = 注册表
+    // snapshot，本地 skills / ui / 插件条目已在会话创建时注册）
     commands::send_available_commands(
-        &ctx.skills,
-        &cwd_for_skills,
-        &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
         &peri_caps,
-        ctx.session_manager.mcp_skill_registry_for(&sid),
+        ctx.session_manager.command_registry_for(&sid),
     );
     Ok(())
 }
@@ -132,7 +129,6 @@ pub(crate) async fn handle_load(
 ) -> Result<(), agent_client_protocol::Error> {
     let sid = req.session_id.0.to_string();
     let cwd = req.cwd.to_string_lossy().to_string();
-    let cwd_for_skills = cwd.clone();
 
     // 登记到 SessionManager 以支撑 cascade cancel / goal_state
     ctx.session_manager.ensure_session(&sid, &cwd);
@@ -193,15 +189,13 @@ pub(crate) async fn handle_load(
             .config_options(config_options),
     );
 
-    // Scan skills for AvailableCommands notification
+    // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 = 注册表
+    // snapshot，本地 skills / ui / 插件条目已在会话创建时注册）
     commands::send_available_commands(
-        &ctx.skills,
-        &cwd_for_skills,
-        &ctx.plugin_skill_roots,
         &SessionId::new(&*sid),
         &cx,
         &caps,
-        ctx.session_manager.mcp_skill_registry_for(&sid),
+        ctx.session_manager.command_registry_for(&sid),
     );
     Ok(())
 }
@@ -211,14 +205,14 @@ pub(crate) async fn handle_resume(
     ctx: &StdioContext,
     req: ResumeSessionRequest,
     responder: Responder<ResumeSessionResponse>,
-    _cx: ConnectionTo<Client>,
+    cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     let sid = req.session_id.0.to_string();
     let cwd = req.cwd.to_string_lossy().to_string();
     // 登记到 SessionManager 以支撑 cascade cancel / goal_state
     ctx.session_manager.ensure_session(&sid, &cwd);
     // 确保 caps 已在 registry 中注册
-    ctx.session_manager.ensure_session_caps(&sid);
+    let caps = ctx.session_manager.ensure_session_caps(&sid);
     // Build frozen data for session
     let frozen_data = freeze::build(ctx, &cwd);
 
@@ -258,6 +252,16 @@ pub(crate) async fn handle_resume(
     }
 
     let _ = responder.respond(ResumeSessionResponse::new());
+    // Push AvailableCommandsUpdate notification（Phase 6 A4，P2-3）：resume
+    // 可能在新连接上恢复会话（连接已重建），需重广播投影 + 重挂注册表
+    // on_change（与 handle_load 同构），否则后续 MCP 发现/断连的投影更新
+    // 发往旧连接快照。
+    commands::send_available_commands(
+        &SessionId::new(&*sid),
+        &cx,
+        &caps,
+        ctx.session_manager.command_registry_for(&sid),
+    );
     Ok(())
 }
 
@@ -266,7 +270,7 @@ pub(crate) async fn handle_fork(
     ctx: &StdioContext,
     req: ForkSessionRequest,
     responder: Responder<ForkSessionResponse>,
-    _cx: ConnectionTo<Client>,
+    cx: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
     let source_id = req.session_id.0.to_string();
     let cwd_str = req.cwd.to_string_lossy().to_string();
@@ -316,7 +320,7 @@ pub(crate) async fn handle_fork(
     ctx.session_manager
         .ensure_session(&new_session_id, &cwd_str);
     // 确保 caps 已在 registry 中注册
-    ctx.session_manager.ensure_session_caps(&new_session_id);
+    let caps = ctx.session_manager.ensure_session_caps(&new_session_id);
     // Build frozen data for forked session
     let frozen_data = freeze::build(ctx, &cwd_str);
     // 与 session/new 一致创建会话级 LSP 池（H1：跨 turn 复用，避免
@@ -340,8 +344,17 @@ pub(crate) async fn handle_fork(
         );
     }
 
-    let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
+    let resp = ForkSessionResponse::new(SessionId::new(new_session_id.clone()));
     let _ = responder.respond(resp);
+    // Push AvailableCommandsUpdate notification（Phase 6 A4，P2-3）：fork
+    // 产生新 session（新 ThreadStore 线程），需广播投影 + 挂注册表
+    // on_change（与 handle_new 同构），否则新会话收不到动态条目更新。
+    commands::send_available_commands(
+        &SessionId::new(&*new_session_id),
+        &cx,
+        &caps,
+        ctx.session_manager.command_registry_for(&new_session_id),
+    );
     Ok(())
 }
 

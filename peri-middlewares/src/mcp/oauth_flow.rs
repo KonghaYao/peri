@@ -36,21 +36,48 @@ pub enum OAuthFlowError {
 pub enum OAuthFlowEvent {
     /// 需要用户浏览器授权
     AuthorizationNeeded {
+        flow_id: String,
         server_name: String,
         authorization_url: String,
         /// 回调通道：TUI 收集用户输入后通过此通道传回授权码
         callback_tx: oneshot::Sender<OAuthCallbackResult>,
     },
     /// OAuth 授权完成
-    AuthorizationCompleted { server_name: String },
+    AuthorizationCompleted {
+        flow_id: String,
+        server_name: String,
+    },
     /// OAuth 授权失败
-    AuthorizationFailed { server_name: String, error: String },
+    AuthorizationFailed {
+        flow_id: String,
+        server_name: String,
+        failure_kind: OAuthFailureKind,
+        error: String,
+    },
+    /// 用户显式取消授权。
+    AuthorizationCancelled {
+        flow_id: String,
+        server_name: String,
+    },
     /// 从凭证存储恢复成功（快速路径：磁盘已有有效凭证，跳过浏览器授权）。
     ///
     /// 恢复 ≠ 用户本次完成授权——连接阶段仍会验证 token 有效性，失效时由
     /// 调用方清除凭证并重新走完整授权。TUI 收到此事件用于反馈「已使用已
     /// 保存凭证连接」并同步面板池状态。
-    AuthorizationRestored { server_name: String },
+    AuthorizationRestored {
+        flow_id: String,
+        server_name: String,
+    },
+}
+
+/// 对外可安全降维的 OAuth 失败分类。原始错误仅用于本进程诊断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthFailureKind {
+    CallbackUnavailable,
+    CallbackTimeout,
+    ProviderRejected,
+    ConnectionFailed,
+    Internal,
 }
 
 /// OAuth 流程编排器
@@ -101,6 +128,48 @@ impl OAuthFlowManager {
         server_url: &str,
         oauth_config: &OAuthConfig,
     ) -> Result<(), OAuthFlowError> {
+        let flow_id = uuid::Uuid::now_v7().to_string();
+        self.run_oauth_flow_with_id(&flow_id, server_name, server_url, oauth_config)
+            .await
+    }
+
+    /// 以调用方提供的稳定 identity 执行授权流程。
+    pub async fn run_oauth_flow_with_id(
+        &mut self,
+        flow_id: &str,
+        server_name: &str,
+        server_url: &str,
+        oauth_config: &OAuthConfig,
+    ) -> Result<(), OAuthFlowError> {
+        let result = self
+            .run_oauth_flow_inner(flow_id, server_name, server_url, oauth_config)
+            .await;
+        if let Err(error) = &result {
+            match error {
+                OAuthFlowError::Cancelled => {
+                    self.emit_event(OAuthFlowEvent::AuthorizationCancelled {
+                        flow_id: flow_id.to_string(),
+                        server_name: server_name.to_string(),
+                    });
+                }
+                _ => self.emit_event(OAuthFlowEvent::AuthorizationFailed {
+                    flow_id: flow_id.to_string(),
+                    server_name: server_name.to_string(),
+                    failure_kind: failure_kind(error),
+                    error: error.to_string(),
+                }),
+            }
+        }
+        result
+    }
+
+    async fn run_oauth_flow_inner(
+        &mut self,
+        flow_id: &str,
+        server_name: &str,
+        server_url: &str,
+        oauth_config: &OAuthConfig,
+    ) -> Result<(), OAuthFlowError> {
         info!(server = %server_name, "开始 OAuth 授权流程");
 
         // 1. 创建或复用 OAuthState
@@ -130,6 +199,7 @@ impl OAuthFlowManager {
                 // emit AuthorizationRestored：通知 TUI 走的是快速路径（凭据
                 // 已存在），供其反馈「已使用已保存凭证连接」并同步面板池。
                 (self.event_callback)(OAuthFlowEvent::AuthorizationRestored {
+                    flow_id: flow_id.to_string(),
                     server_name: server_name.to_string(),
                 });
                 return Ok(());
@@ -163,6 +233,7 @@ impl OAuthFlowManager {
         let (callback_tx, callback_rx) = oneshot::channel::<OAuthCallbackResult>();
 
         self.emit_event(OAuthFlowEvent::AuthorizationNeeded {
+            flow_id: flow_id.to_string(),
             server_name: server_name.to_string(),
             authorization_url: authorization_url.clone(),
             callback_tx,
@@ -193,16 +264,7 @@ impl OAuthFlowManager {
             }
         };
 
-        let callback_data = match callback_result {
-            Ok(data) => data,
-            Err(e) => {
-                self.emit_event(OAuthFlowEvent::AuthorizationFailed {
-                    server_name: server_name.to_string(),
-                    error: e.to_string(),
-                });
-                return Err(e);
-            }
-        };
+        let callback_data = callback_result?;
 
         // 8. 处理回调，完成授权
         state
@@ -214,6 +276,7 @@ impl OAuthFlowManager {
 
         // 10. 通知 TUI 授权完成
         self.emit_event(OAuthFlowEvent::AuthorizationCompleted {
+            flow_id: flow_id.to_string(),
             server_name: server_name.to_string(),
         });
 
@@ -258,6 +321,15 @@ impl OAuthFlowManager {
     /// 发送事件给调用方
     fn emit_event(&self, event: OAuthFlowEvent) {
         (self.event_callback)(event);
+    }
+}
+
+fn failure_kind(error: &OAuthFlowError) -> OAuthFailureKind {
+    match error {
+        OAuthFlowError::CallbackError(_) => OAuthFailureKind::CallbackUnavailable,
+        OAuthFlowError::AuthError(_) => OAuthFailureKind::ProviderRejected,
+        OAuthFlowError::Cancelled => OAuthFailureKind::Internal,
+        OAuthFlowError::CallbackTimeout => OAuthFailureKind::CallbackTimeout,
     }
 }
 

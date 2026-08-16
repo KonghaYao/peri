@@ -53,17 +53,23 @@ describe("scenarios: /compact 命令", () => {
       await tester.sendKey("Enter");
       await tester.sleep(500);
 
-      // 等待 compact 处理完成：SystemNote（"*压缩完成"）注入后再等待屏幕稳定。
+      // 等待 compact 处理完成：完成提示经 CommandFeedback（UiOnly）注入
+      // SystemNote（Phase 5 Step 7 文案移交——服务端文案「已压缩 N 条消息」，
+      // 非 TUI 本地 fluent 模板），再等待屏幕稳定。
       // 历史教训（2026-08-06 第二轮失败）：原实现固定 sleep 3.5s 后截图，
       // 此时 compact 仍在处理中（spinner "学以致用" 转动、消息区未折叠、
       // 无完成提示行），Judge 将处理中的稀疏布局（大量留白）误判为渲染
       // 异常（失败录制 compact-after.txt 与 before 布局同构，证实为等待
       // 时机问题而非渲染缺陷）。
-      // 完成提示文案随 locale 变化：zh "压缩完成" / en "compaction completed"
-      // （e2e 环境 LANG=C.UTF-8，fluent 回退英文），两者都接受。
+      // 完成提示文案：zh "压缩完成" / en "compaction completed"（旧 fluent
+      // 注入，已退役）；Phase 5 Step 7 起为服务端 CommandFeedback 文案
+      // 「已压缩 N 条消息」（UiOnly → SystemNote），三者都接受。
       await tester.waitFor(
-        (screen) => screen.includes("压缩完成") || screen.includes("compaction completed"),
-        { timeout: 120_000, interval: 1000, message: "/compact 完成提示（压缩完成/compaction completed）未出现" },
+        (screen) =>
+          screen.includes("已压缩") ||
+          screen.includes("压缩完成") ||
+          screen.includes("compaction completed"),
+        { timeout: 120_000, interval: 1000, message: "/compact 完成提示（已压缩/压缩完成/compaction completed）未出现" },
       );
       await waitForStableScreen(tester, 60_000);
 

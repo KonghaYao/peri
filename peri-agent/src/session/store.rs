@@ -58,7 +58,7 @@ pub struct FrozenContext {
     pub system_prompt: Arc<str>,
     /// CLAUDE.md 内容（项目级 + 用户级合并后）
     pub claude_md: Arc<str>,
-    /// Skills 摘要（builtin + agm 加载的汇总）
+    /// Skills 摘要（builtin + 外部加载的汇总）
     pub skill_summary: Arc<str>,
     /// 会话创建日期（用于 System Prompt 中的日期占位符）
     pub date: Arc<str>,

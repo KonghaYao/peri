@@ -21,8 +21,8 @@ pub use auth_store::{AuthStoreError, FileCredentialStore, PerServerCredentialSto
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use channel_handler::ChannelHandler;
 pub use client::{
-    ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError, OAuthStatus,
-    ServerInfo,
+    ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
+    OAuthStartDisposition, OAuthStatus, ServerInfo,
 };
 pub(crate) use config::load_merged_config_full;
 pub use config::{
@@ -30,7 +30,9 @@ pub use config::{
     McpConfigError, McpConfigFile, McpServerConfig, OAuthConfig,
 };
 pub use middleware::McpMiddleware;
-pub use oauth_flow::{OAuthCallbackResult, OAuthFlowError, OAuthFlowEvent, OAuthFlowManager};
+pub use oauth_flow::{
+    OAuthCallbackResult, OAuthFailureKind, OAuthFlowError, OAuthFlowEvent, OAuthFlowManager,
+};
 pub use resource_tool::McpResourceTool;
 pub use rmcp::model::{Resource, Tool};
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};

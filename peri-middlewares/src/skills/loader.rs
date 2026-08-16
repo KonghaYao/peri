@@ -68,6 +68,8 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
         plugin_name: None,
         origin: None,
         content: None,
+        // 本地技能无 resources 绑定（仅 MCP 来源条目填写）
+        resources: Vec::new(),
     })
 }
 
@@ -122,6 +124,8 @@ fn scan_skill_roots_impl(
                     plugin_name: None,
                     origin: None,
                     content: None,
+                    // 内置技能无 resources 绑定（仅 MCP 来源条目填写）
+                    resources: Vec::new(),
                 };
                 insert_skill(meta, root, &mut seen, &mut ordered);
             }

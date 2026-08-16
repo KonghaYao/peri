@@ -5,7 +5,7 @@
 //! 1. `Preview { target_message_id, target_text }`（候选列表 Enter）：
 //!    暂存目标文本到 REWIND_TARGET_TEXT → 查询 `session/rewind-preview` 预算
 //!    → 预算空：立即执行 `session/rewind`（写 REWIND_BUDGET_STATE=Executing）
-//!    → 预算非空：写 REWIND_BUDGET_STATE=Files(预算)，弹窗切预算视图
+//!    → 写 REWIND_BUDGET_STATE=Files(预算)，即使没有文件变化也先进入确认视图
 //! 2. `Confirm { target_message_id }`（预算确认 Enter）：
 //!    执行 `session/rewind`（REWIND_BUDGET_STATE=Executing）
 //!    执行完成由 RewindCompleted 事件驱动（handle_rewind_completed），
@@ -20,8 +20,8 @@ use tracing::{error, info, warn};
 use crate::acp_client::AcpTuiClient;
 use crate::i18n;
 use crate::kit::atoms::{
-    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_QUERY_ERROR, REWIND_TARGET_TEXT,
-    RewindBudgetState, RewindFileChange,
+    ACTIVE_SESSION_ID, REWIND_BUDGET_STATE, REWIND_PREVIEW_FINGERPRINT, REWIND_QUERY_ERROR,
+    REWIND_TARGET_TEXT, RewindBudgetState, RewindFileChange,
 };
 
 /// Rewind 用户操作——由 RewindPopup 通过 REWIND_ACTION_TX 发送。
@@ -48,21 +48,32 @@ pub fn build_preview_params(sid: &str, target_message_id: &str) -> Value {
 ///
 /// P0 修复：显式携带 `revert_files: true`。服务端虽已有 `#[serde(default)]`
 /// 兜底，但客户端显式声明意图，双保险避免旧路径静默失败。
-pub fn build_execute_params(sid: &str, target_message_id: &str) -> Value {
+pub fn build_execute_params(
+    sid: &str,
+    target_message_id: &str,
+    preview_fingerprint: &str,
+) -> Value {
     json!({
         "sessionId": sid,
         "target_message_id": target_message_id,
         "revert_files": true,
+        "preview_fingerprint": preview_fingerprint,
     })
 }
 
-/// 解析预算响应为文件改动列表。
-pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindBudgetPreview {
+    pub changes: Vec<RewindFileChange>,
+    pub fingerprint: String,
+}
+
+/// 解析预算响应；fingerprint 与可见文件列表是一个不可拆分的确认事实。
+pub fn parse_budget_response(resp: &Value) -> Result<RewindBudgetPreview, String> {
     let changes = resp
         .get("file_changes")
         .and_then(|v| v.as_array())
         .ok_or_else(|| i18n::tr("rewind-error-budget-missing"))?;
-    changes
+    let changes = changes
         .iter()
         .map(|c| {
             Ok(RewindFileChange {
@@ -78,13 +89,30 @@ pub fn parse_budget_response(resp: &Value) -> Result<Vec<RewindFileChange>, Stri
                     .to_string(),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let fingerprint = resp
+        .get("preview_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|fingerprint| {
+            fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| i18n::tr("rewind-error-budget-missing"))?
+        .to_string();
+    Ok(RewindBudgetPreview {
+        changes,
+        fingerprint,
+    })
+}
+
+fn confirmation_state(changes: Vec<RewindFileChange>) -> RewindBudgetState {
+    RewindBudgetState::Files(changes)
 }
 
 /// 执行失败恢复（纯函数，测试友好）：清目标文本与预算状态，回候选视图
 /// 并写 REWIND_QUERY_ERROR——弹窗 Candidates 视图据此展示错误，不再静默。
 pub fn on_action_failed(error: &str) {
     *REWIND_TARGET_TEXT.state().write() = None;
+    *REWIND_PREVIEW_FINGERPRINT.state().write() = None;
     *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Idle;
     *REWIND_QUERY_ERROR.state().write() = Some(error.to_string());
     crate::kit::atoms::RENDER_HEARTBEAT
@@ -141,6 +169,7 @@ async fn handle_action(
             target_text,
         } => {
             *REWIND_TARGET_TEXT.state().write() = Some(target_text);
+            *REWIND_PREVIEW_FINGERPRINT.state().write() = None;
             info!(
                 target_message_id = %target_message_id,
                 "kit rewind_consumer: querying rewind budget"
@@ -151,24 +180,24 @@ async fn handle_action(
                     build_preview_params(&sid, &target_message_id),
                 )
                 .await?;
-            let changes = parse_budget_response(&resp)?;
-            if changes.is_empty() {
-                // 无文件改动 → 直接执行
-                *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
-                crate::kit::atoms::RENDER_HEARTBEAT
-                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-                execute_rewind(acp_client, &sid, &target_message_id).await?;
-            } else {
-                *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Files(changes);
-                crate::kit::atoms::RENDER_HEARTBEAT
-                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-            }
+            let preview = parse_budget_response(&resp)?;
+            *REWIND_PREVIEW_FINGERPRINT.state().write() = Some(preview.fingerprint.clone());
+            // Conversation truncation is destructive even when no files need
+            // restoration. Always require the explicit confirmation state.
+            *REWIND_BUDGET_STATE.state().write() = confirmation_state(preview.changes);
+            crate::kit::atoms::RENDER_HEARTBEAT
+                .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
         }
         RewindAction::Confirm { target_message_id } => {
+            let preview_fingerprint = REWIND_PREVIEW_FINGERPRINT
+                .state()
+                .read()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!(i18n::tr("rewind-error-budget-missing")))?;
             *REWIND_BUDGET_STATE.state().write() = RewindBudgetState::Executing;
             crate::kit::atoms::RENDER_HEARTBEAT
                 .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-            execute_rewind(acp_client, &sid, &target_message_id).await?;
+            execute_rewind(acp_client, &sid, &target_message_id, &preview_fingerprint).await?;
         }
     }
     Ok(())
@@ -178,12 +207,13 @@ async fn execute_rewind(
     acp_client: &AcpTuiClient,
     sid: &str,
     target_message_id: &str,
+    preview_fingerprint: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(target_message_id = %target_message_id, "kit rewind_consumer: executing /rewind");
     acp_client
         .send_raw_request(
             "session/rewind",
-            build_execute_params(sid, target_message_id),
+            build_execute_params(sid, target_message_id, preview_fingerprint),
         )
         .await
         .map_err(|e| {
