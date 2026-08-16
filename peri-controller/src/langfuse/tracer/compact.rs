@@ -11,6 +11,23 @@ pub(crate) struct CompactSpanStart {
     pub start_time: String,
 }
 
+/// Compact 结束结果：执行前状态与执行结果指标（on_compact_end 一次性传入）。
+pub struct CompactEndInfo {
+    pub summary: String,
+    pub files_count: usize,
+    pub skills_count: usize,
+    pub micro_cleared: usize,
+    pub is_error: bool,
+    pub error_message: String,
+    pub estimated_tokens_saved: u64,
+    pub estimated_tokens_before: u64,
+    pub estimated_tokens_after: u64,
+    pub cache_hit_rate_before: f64,
+    pub full_escalation_reason: Option<String>,
+    /// Compact 执行的语义结果（CompactOutcome 的 Display 表示）
+    pub outcome: Option<String>,
+}
+
 pub(crate) struct CompactSpanContext {
     pub span_id: String,
     pub start_time: String,

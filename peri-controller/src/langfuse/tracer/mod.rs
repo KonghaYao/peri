@@ -19,7 +19,7 @@
 //! 所有事件通过 session trait 的 try_add() 同步入队，保证事件顺序与调用顺序一致，
 //! 确保 Langfuse 层级关系正确（父 span 先于子 span 入队）。
 
-mod compact;
+pub(crate) mod compact;
 mod event_builder;
 mod generation;
 pub(crate) mod middleware;
@@ -78,6 +78,8 @@ pub struct LangfuseTracer {
     pub(crate) compact_work_done: bool,
     /// agent-run observation 的开始时间（推迟到 on_turn_end 创建时设置）
     pub(crate) agent_start_time: Option<String>,
+    /// agent-run observation 的 input（on_turn_start 时暂存，on_turn_end 创建时写入）
+    pub(crate) agent_input: Option<String>,
     /// 最近一次 TurnError 的稳定分类；原始错误正文绝不写入 Langfuse。
     pub(crate) last_error_class: Option<TurnErrorReason>,
 }
@@ -109,6 +111,7 @@ impl LangfuseTracer {
             replayed_stage_handles: std::collections::HashMap::new(),
             compact_work_done: false,
             agent_start_time: None,
+            agent_input: None,
             last_error_class: None,
         }
     }
@@ -135,7 +138,7 @@ impl LangfuseTracer {
 
     /// 对话轮次开始：创建 Trace 根 span + Session + 推迟 agent-run Observation。
     /// 如有 user_id 配置，在 TraceCreate/SessionCreate 中设置 user 维度。
-    pub fn on_turn_start(&mut self, _input: &str) {
+    pub fn on_turn_start(&mut self, input: &str) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -192,6 +195,7 @@ impl LangfuseTracer {
         // 推迟 agent-run ObservationCreate 到 on_turn_end，
         // 避免 OTEL span 不可变导致 end_time 无法更新 → 0s latency
         self.agent_start_time = Some(start_time);
+        self.agent_input = Some(input.to_string());
     }
 
     /// 对话轮次结束：更新 agent-run Observation 输出和结束时间，并强制 flush。
@@ -321,8 +325,9 @@ impl LangfuseTracer {
 
         self.sampling.cleanup_turn(&self.trace_id);
 
-        // 取出推迟到现在的 start_time。
+        // 取出推迟到现在的 start_time 和 input。
         let agent_start_time = self.agent_start_time.take();
+        let agent_input = self.agent_input.take();
 
         // agent-run ObservationCreate 同步入队（不放进 spawn 任务）：
         // 保证 on_turn_end 返回时全部事件已入队，调用方随后显式 flush() 即可
@@ -337,7 +342,7 @@ impl LangfuseTracer {
             name: Some("agent-run".to_string()),
             start_time: agent_start_time,
             end_time: Some(end_time.clone()),
-            input: None,
+            input: agent_input.map(|s| serde_json::json!(s)),
             output,
             parent_observation_id: Some(trace_id.clone()),
             version: Some(VERSION.to_string()),
@@ -552,7 +557,7 @@ impl LangfuseTracer {
             name: Some(format!("step-{}", step)),
             start_time: Some(gen_end.start_time),
             end_time: Some(end_time.clone()),
-            input: None,
+            input: Some(gen_end.input_json),
             output: generation_output,
             metadata: Some(meta),
             level,
@@ -805,15 +810,12 @@ impl LangfuseTracer {
     }
 
     /// Compact 完成/错误：若 duration > 0 则发送 SpanCreate（合并 start+end），否则跳过。
-    pub fn on_compact_end(
-        &mut self,
-        summary: &str,
-        files_count: usize,
-        skills_count: usize,
-        micro_cleared: usize,
-        is_error: bool,
-        _error_message: &str,
-    ) {
+    ///
+    /// 结构约定：
+    /// - name：Micro 策略记录为 `micro-compact`，其余（Full/Smart/Skip）记录为 `compact`，以区分类型
+    /// - input：执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before）
+    /// - output：执行结果（summary/文件/技能/清理数/token 节省与剩余/escalation/outcome）
+    pub fn on_compact_end(&mut self, info: crate::langfuse::tracer::compact::CompactEndInfo) {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
@@ -826,22 +828,35 @@ impl LangfuseTracer {
         let duration_ms = calculate_duration_ms(&ctx.start_time, &end_time);
 
         // 0ms compact span 不上报
-        if duration_ms == 0 && !is_error {
+        if duration_ms == 0 && !info.is_error {
             return;
         }
 
-        let output = if is_error {
-            serde_json::json!({"error_class": "compact_failure"})
+        // Micro compact 以独立类型记录（name 区分），Full/Smart/Skip 统一 compact
+        let span_name = match ctx.strategy {
+            CompactStrategy::Micro => "micro-compact",
+            _ => "compact",
+        };
+
+        let output = if info.is_error {
+            serde_json::json!({
+                "error_class": "compact_failure",
+                "message": info.error_message,
+            })
         } else {
             serde_json::json!({
-                "summary": summary,
-                "files_count": files_count,
-                "skills_count": skills_count,
-                "micro_cleared": micro_cleared,
+                "summary": info.summary,
+                "files_count": info.files_count,
+                "skills_count": info.skills_count,
+                "micro_cleared": info.micro_cleared,
                 "duration_ms": duration_ms,
+                "estimated_tokens_saved": info.estimated_tokens_saved,
+                "estimated_tokens_after": info.estimated_tokens_after,
+                "full_escalation_reason": info.full_escalation_reason,
+                "outcome": info.outcome,
             })
         };
-        let level = if is_error {
+        let level = if info.is_error {
             Some(ObservationLevel::Error)
         } else {
             None
@@ -850,10 +865,15 @@ impl LangfuseTracer {
         let span_body = SpanBody {
             id: Some(ctx.span_id),
             trace_id: Some(self.trace_id.clone()),
-            name: Some("compact".to_string()),
+            name: Some(span_name.to_string()),
             start_time: Some(ctx.start_time),
             end_time: Some(end_time.clone()),
-            input: None,
+            input: Some(serde_json::json!({
+                "strategy": format!("{:?}", ctx.strategy),
+                "trigger": format!("{:?}", ctx.trigger),
+                "estimated_tokens_before": info.estimated_tokens_before,
+                "cache_hit_rate_before": info.cache_hit_rate_before,
+            })),
             output: Some(output),
             metadata: Some(serde_json::json!({
                 "strategy": format!("{:?}", ctx.strategy),
@@ -1015,7 +1035,7 @@ impl LangfuseTracer {
             name: Some(format!("workflow-{}", workflow_id)),
             start_time: Some(now_rfc3339()),
             end_time: None,
-            input: None,
+            input: Some(serde_json::json!({"plan": plan})),
             output: None,
             metadata: None,
             level: None,

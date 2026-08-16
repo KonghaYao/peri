@@ -67,6 +67,21 @@ async fn test_smoke_complete_turn_sequence() {
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
     assert!(!events.is_empty(), "应有至少一个事件");
+
+    // 回归防护：agent-run（AGENT observation）必须携带 on_turn_start 的 input
+    // （历史上曾因重构删除 agent_input 存储逻辑，导致 AGENT 类型 input 全部丢失）
+    let agent_run_input = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::ObservationCreate { body, .. } = e {
+            if body.r#type == langfuse_client::ObservationType::Agent {
+                body.input.as_ref()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    assert_eq!(agent_run_input, Some(&serde_json::json!("turn_1")));
 }
 
 // ── 采样率测试 ──────────────────────────────────────────────────────────────
@@ -150,6 +165,17 @@ async fn test_llm_generation_emits_events() {
         .filter(|e| matches!(e, langfuse_client::IngestionEvent::GenerationCreate { .. }))
         .count();
     assert!(gen_count > 0, "应有至少一个 GenerationCreate 事件");
+
+    // 回归防护：generation 必须携带 input（历史上曾因重构误写成硬编码 None，
+    // 导致所有 generation 的 input 丢失，见 commit 0c0a3313）
+    let gen_input = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+            body.input.as_ref()
+        } else {
+            None
+        }
+    });
+    assert!(gen_input.is_some(), "GenerationCreate 应携带 input");
 }
 
 #[tokio::test]
@@ -289,6 +315,8 @@ async fn test_middleware_start_and_end() {
 
 // ── Compact 事件测试 ────────────────────────────────────────────────────────
 
+/// Micro compact 应记录为独立类型 `micro-compact`（name 区分），
+/// 且 input/output 结构完整（执行前状态 / 执行结果含 token 指标）。
 #[tokio::test]
 async fn test_compact_lifecycle() {
     let (mut t, session) = make_tracer(1.0);
@@ -299,29 +327,142 @@ async fn test_compact_lifecycle() {
     );
     // 微小延迟确保 duration > 0（Compact 条件上报）
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    t.on_compact_end("summary text", 3, 2, 5, false, "");
+    t.on_compact_end(crate::langfuse::tracer::compact::CompactEndInfo {
+        summary: "summary text".to_string(),
+        files_count: 3,
+        skills_count: 2,
+        micro_cleared: 5,
+        is_error: false,
+        error_message: String::new(),
+        estimated_tokens_saved: 12000,
+        estimated_tokens_before: 45000,
+        estimated_tokens_after: 33000,
+        cache_hit_rate_before: 0.8,
+        full_escalation_reason: None,
+        outcome: Some("done".to_string()),
+    });
     let _handle = t.on_turn_end(None);
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
 
-    let has_compact_span = events.iter().any(|e| {
+    let compact = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            if body.name.as_deref() == Some("micro-compact") {
+                Some(body)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    let body = compact.expect("Micro 策略应有 micro-compact SpanCreate 事件");
+
+    // input = 执行前状态
+    let input = body.input.as_ref().expect("compact 应有 input");
+    assert_eq!(input["strategy"], "Micro");
+    assert_eq!(input["estimated_tokens_before"], 45000);
+    assert_eq!(input["cache_hit_rate_before"], 0.8);
+
+    // output = 执行结果（含 token 指标）
+    let output = body.output.as_ref().expect("compact 应有 output");
+    assert_eq!(output["summary"], "summary text");
+    assert_eq!(output["files_count"], 3);
+    assert_eq!(output["skills_count"], 2);
+    assert_eq!(output["micro_cleared"], 5);
+    assert_eq!(output["estimated_tokens_saved"], 12000);
+    assert_eq!(output["estimated_tokens_after"], 33000);
+    assert_eq!(output["outcome"], "done");
+
+    // v2 条件上报：compact 改为延迟创建，不再发 SpanUpdate
+    let has_compact_update = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanUpdate { body, .. } = e {
+            body.name.as_deref() == Some("micro-compact") || body.name.as_deref() == Some("compact")
+        } else {
+            false
+        }
+    });
+    assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
+}
+
+/// Full 策略应记录为 `compact`（非 micro-compact）。
+#[tokio::test]
+async fn test_full_compact_span_name() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_compact_start(
+        peri_agent::agent::events::CompactStrategy::Full,
+        peri_agent::agent::events::CompactTrigger::Auto,
+    );
+    // 微小延迟确保 duration > 0（Compact 条件上报）
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    t.on_compact_end(crate::langfuse::tracer::compact::CompactEndInfo {
+        summary: "summary text".to_string(),
+        files_count: 0,
+        skills_count: 0,
+        micro_cleared: 0,
+        is_error: false,
+        error_message: String::new(),
+        estimated_tokens_saved: 0,
+        estimated_tokens_before: 0,
+        estimated_tokens_after: 0,
+        cache_hit_rate_before: 0.0,
+        full_escalation_reason: None,
+        outcome: None,
+    });
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let has_full = events.iter().any(|e| {
         if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
             body.name.as_deref() == Some("compact")
         } else {
             false
         }
     });
-    assert!(has_compact_span, "应有 compact SpanCreate 事件");
+    assert!(has_full, "Full 策略应有 compact SpanCreate 事件");
 
-    // v2 条件上报：compact 改为延迟创建，不再发 SpanUpdate
-    let has_compact_update = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanUpdate { body, .. } = e {
-            body.name.as_deref() == Some("compact")
+    let has_micro = events.iter().any(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            body.name.as_deref() == Some("micro-compact")
         } else {
             false
         }
     });
-    assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
+    assert!(!has_micro, "Full 策略不应有 micro-compact 事件");
+}
+
+// ── Workflow 事件测试 ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_workflow_span_carries_plan_input() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_stage_start(Stage::Act, "turn_1");
+    t.on_workflow_start("wf-1", "my test plan");
+    let _handle = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    // 回归防护：workflow span 必须携带 plan input
+    // （历史上曾因重构把 {"plan": plan} 误改为硬编码 None）
+    let wf_input = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            if body.name.as_deref() == Some("workflow-wf-1") {
+                body.input.as_ref()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        wf_input,
+        Some(&serde_json::json!({"plan": "my test plan"})),
+        "workflow span 应携带 plan input"
+    );
 }
 
 /// 回归测试：当 `stages.active_handle()` 返回 None 但 subagent 已注册时，

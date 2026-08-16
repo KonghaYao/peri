@@ -793,14 +793,20 @@ impl LangfuseBridge {
                     skills_count,
                     "CompactCompleted"
                 );
-                t.on_compact_end(
-                    summary,
-                    *files_count,
-                    *skills_count,
-                    *micro_cleared,
-                    *is_error,
-                    error_message,
-                );
+                t.on_compact_end(crate::langfuse::tracer::compact::CompactEndInfo {
+                    summary: summary.clone(),
+                    files_count: *files_count,
+                    skills_count: *skills_count,
+                    micro_cleared: *micro_cleared,
+                    is_error: *is_error,
+                    error_message: error_message.clone(),
+                    estimated_tokens_saved: *estimated_tokens_saved,
+                    estimated_tokens_before: *estimated_tokens_before,
+                    estimated_tokens_after: *estimated_tokens_after,
+                    cache_hit_rate_before: *cache_hit_rate_before,
+                    full_escalation_reason: full_escalation_reason.clone(),
+                    outcome: outcome.clone(),
+                });
             }
             UnifiedLangfuseEvent::BudgetWarning {
                 percentage,
