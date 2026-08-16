@@ -463,7 +463,7 @@ async fn fetch_and_verify_one(
         return None;
     };
     match verify_and_build(server, &entry, &text) {
-        VerifyOutcome::Built(meta) => Some(meta),
+        VerifyOutcome::Built(meta) => Some(*meta),
         VerifyOutcome::Rejected => None,
         VerifyOutcome::DigestMismatch => {
             // digest 不匹配 = 内容陈旧/被替换（规范建议：经 skills/get 恢复）；
@@ -530,7 +530,7 @@ async fn recover_via_skills_get(
         }
     };
     match verify_and_build(server, &refreshed, &new_text) {
-        VerifyOutcome::Built(meta) => Some(meta),
+        VerifyOutcome::Built(meta) => Some(*meta),
         VerifyOutcome::DigestMismatch | VerifyOutcome::Rejected => {
             tracing::warn!(
                 server,
@@ -716,7 +716,7 @@ async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillLi
 #[derive(Debug)]
 enum VerifyOutcome {
     /// 校验通过，metadata 构建成功
-    Built(SkillMetadata),
+    Built(Box<SkillMetadata>),
     /// digest 不匹配（内容与条目承诺不一致）
     DigestMismatch,
     /// frontmatter 比对 / URI 身份 / frontmatter 解析 / 完整性违规
@@ -808,7 +808,7 @@ fn verify_and_build(server: &str, entry: &SkillListEntry, content: &str) -> Veri
         content,
         entry.resources.clone().unwrap_or_default(),
     ) {
-        Some(meta) => VerifyOutcome::Built(meta),
+        Some(meta) => VerifyOutcome::Built(Box::new(meta)),
         None => VerifyOutcome::Rejected,
     }
 }
