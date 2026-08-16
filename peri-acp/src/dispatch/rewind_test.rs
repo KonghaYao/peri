@@ -1,8 +1,21 @@
 //! dispatch/rewind 单元测试（预算 + 执行）。
 
+use std::path::Path;
+
 use peri_acp_types::messages::{BaseMessage, ContentBlock, ToolCallRequest};
 
 use super::rewind_preview;
+
+/// 跨平台绝对临时目录字符串（Windows 下 `/tmp` 不是绝对路径，
+/// rewind_preview 要求 session cwd 必须绝对）。
+fn temp_dir_str() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
+/// 绝对临时目录下的相对拼接，用于构造工具参数中的绝对路径。
+fn temp_dir_join(rel: &str) -> String {
+    std::env::temp_dir().join(rel).to_string_lossy().into_owned()
+}
 
 /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
 fn make_history_with_tools() -> Vec<BaseMessage> {
@@ -42,7 +55,7 @@ async fn test_preview_lists_file_changes_after_target() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp",
+        &temp_dir_str(),
         "test-session",
     )
     .await
@@ -50,7 +63,7 @@ async fn test_preview_lists_file_changes_after_target() {
 
     let changes = result["file_changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1, "目标之后只有 Write");
-    assert_eq!(changes[0]["path"], "new_file.txt");
+    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("new_file.txt"));
     assert_eq!(changes[0]["kind"], "write");
     let fingerprint = result["preview_fingerprint"].as_str().unwrap();
     assert_eq!(fingerprint.len(), 64);
@@ -65,7 +78,7 @@ async fn test_preview_reverse_order_newest_first() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp",
+        &temp_dir_str(),
         "test-session",
     )
     .await
@@ -73,8 +86,8 @@ async fn test_preview_reverse_order_newest_first() {
 
     let changes = result["file_changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2);
-    assert_eq!(changes[0]["path"], "new_file.txt", "逆序：最新变更在前");
-    assert_eq!(changes[1]["path"], "src/main.rs");
+    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("new_file.txt"), "逆序：最新变更在前");
+    assert_eq!(Path::new(changes[1]["path"].as_str().unwrap()), Path::new("src/main.rs"));
     assert_eq!(changes[1]["kind"], "edit");
 }
 
@@ -85,7 +98,7 @@ async fn test_preview_target_not_found_returns_error() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": "nonexistent" }),
         &history,
-        "/tmp",
+        &temp_dir_str(),
         "test-session",
     )
     .await;
@@ -104,7 +117,7 @@ async fn test_preview_no_file_changes_returns_empty_list() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp",
+        &temp_dir_str(),
         "test-session",
     )
     .await
@@ -137,7 +150,7 @@ async fn test_preview_extracts_anthropic_tool_use() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp",
+        &temp_dir_str(),
         "test-session",
     )
     .await
@@ -147,11 +160,12 @@ async fn test_preview_extracts_anthropic_tool_use() {
     // P1 修复：ai_from_blocks 双路径（tool_calls + content_blocks）按 id 去重，
     // 同一变更只计一次。
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0]["path"], "docs/readme.md");
+    assert_eq!(Path::new(changes[0]["path"].as_str().unwrap()), Path::new("docs/readme.md"));
 }
 
 #[tokio::test]
 async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
+    let inside_path = temp_dir_join("project/src/../src/lib.rs");
     let history = vec![
         BaseMessage::human("改一下"),
         BaseMessage::ai_with_tool_calls(
@@ -160,7 +174,7 @@ async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
                 id: "inside".into(),
                 name: "Edit".into(),
                 arguments: serde_json::json!({
-                    "file_path": "/tmp/project/src/../src/lib.rs",
+                    "file_path": inside_path,
                     "old_string": "a",
                     "new_string": "b",
                 }),
@@ -171,17 +185,18 @@ async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp/project",
+        &temp_dir_join("project"),
         "test-session",
     )
     .await
     .unwrap();
 
-    assert_eq!(result["file_changes"][0]["path"], "src/lib.rs");
+    assert_eq!(Path::new(result["file_changes"][0]["path"].as_str().unwrap()), Path::new("src/lib.rs"));
 }
 
 #[tokio::test]
 async fn test_preview_rejects_path_outside_session_cwd() {
+    let outside_path = temp_dir_join("other/secret.txt");
     let history = vec![
         BaseMessage::human("改一下"),
         BaseMessage::ai_with_tool_calls(
@@ -189,7 +204,7 @@ async fn test_preview_rejects_path_outside_session_cwd() {
             vec![ToolCallRequest {
                 id: "outside".into(),
                 name: "Write".into(),
-                arguments: serde_json::json!({ "file_path": "/tmp/other/secret.txt" }),
+                arguments: serde_json::json!({ "file_path": outside_path }),
             }],
         ),
     ];
@@ -197,7 +212,7 @@ async fn test_preview_rejects_path_outside_session_cwd() {
     let error = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
-        "/tmp/project",
+        &temp_dir_join("project"),
         "test-session",
     )
     .await

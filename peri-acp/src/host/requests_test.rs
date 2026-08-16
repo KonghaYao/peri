@@ -1754,22 +1754,41 @@ async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
 /// `dirs_next::home_dir()` 计算，`refresh_plugin_command_entries` 经真实
 /// `load_enabled_plugins` 重载）；Drop 时还原。进程级 env 态 →
 /// 本组用例全部 `#[serial]`（与 store_test 同组互斥）。
-struct HomeDirGuard(Option<std::ffi::OsString>);
+/// Windows 下 `dirs_next::home_dir()` 读 `USERPROFILE`（`HOME` 仅 Unix 生效），
+/// 两个变量同步设置以保证隔离。
+struct HomeDirGuard {
+    home: Option<std::ffi::OsString>,
+    #[cfg(windows)]
+    userprofile: Option<std::ffi::OsString>,
+}
 
 impl HomeDirGuard {
     fn set(path: &Path) -> Self {
-        let prev = std::env::var_os("HOME");
+        let home = std::env::var_os("HOME");
         std::env::set_var("HOME", path);
-        Self(prev)
+        #[cfg(windows)]
+        {
+            let prev = std::env::var_os("USERPROFILE");
+            std::env::set_var("USERPROFILE", path);
+            Self { home, userprofile: prev }
+        }
+        #[cfg(not(windows))]
+        Self { home }
+    }
+}
+
+fn restore_env_var(slot: &mut Option<std::ffi::OsString>, name: &str) {
+    match slot.take() {
+        Some(v) => std::env::set_var(name, v),
+        None => std::env::remove_var(name),
     }
 }
 
 impl Drop for HomeDirGuard {
     fn drop(&mut self) {
-        match &self.0 {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+        restore_env_var(&mut self.home, "HOME");
+        #[cfg(windows)]
+        restore_env_var(&mut self.userprofile, "USERPROFILE");
     }
 }
 
