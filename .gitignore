@@ -219,3 +219,5 @@ skills-lock.json
 e2e/results
 __pycache__
 .codex
+dsh-tui
+acp-hub/web/test-results/
