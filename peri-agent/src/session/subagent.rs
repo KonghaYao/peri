@@ -147,10 +147,10 @@ pub struct SubagentHost {
     pub frozen_claude_local_md: Option<Arc<String>>,
     /// Frozen system prompt（fork 路径复用以避免重建；父 session 冻结的 subagent 版本）
     pub frozen_system_prompt: Option<Arc<String>>,
-    /// 父线程 ID 回退值：被 [`parent_thread_id_of`] 在 spawn 写盘与 resume parent
-    /// 链校验两侧直接读取（主 session `store().thread_id` 恒 None 时是本链的
-    /// 权威值，由 executor 以 `ctx.thread_id` 注入；生产路径为 spawn_subagent
-    /// 从 parent session 读取的同一回退源）
+    /// 父线程 ID 回退值：被 [`parent_thread_id_of`] 在 spawn 写盘读取
+    /// （主 session `store().thread_id` 恒 None 时是本链的权威值，由 executor
+    /// 以 `ctx.thread_id` 注入；生产路径为 spawn_subagent 从 parent session
+    /// 读取的同一回退源）
     pub parent_thread_id: Option<String>,
     /// Frozen CLAUDE.md 回退值（生产路径由 spawn_subagent 从 parent session copy）
     pub frozen_claude_md: Option<Arc<String>>,
@@ -370,8 +370,8 @@ impl SessionFactory {
     /// 恢复子 agent（唯一恢复入口，见 [`resume_subagent_impl`] 的校验流程说明）。
     ///
     /// 主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id` 重新唤起被中断的
-    /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active / parent 链）
-    /// 后重建现场继续执行。thread_id 不变，可无限次恢复。
+    /// subagent：从磁盘 thread_store 加载 meta 校验（存在 / 非 active）后重建现场
+    /// 继续执行。thread_id 不变，可无限次恢复。
     pub async fn resume_subagent(
         parent: Option<&Arc<Session>>,
         config: SubagentResumeConfig,
@@ -380,19 +380,17 @@ impl SessionFactory {
     }
 }
 
-/// 父线程 ID 解析——spawn 写盘与 resume 校验的**唯一取值点**（两侧必须同源，
-/// 防止漂移；resume 校验曾只比 `store().thread_id`，主 agent 路径 100% mismatch）：
+/// 父线程 ID 解析——spawn 写盘的**唯一取值点**（挂父子链）：
 /// - 优先 parent session 的 `store().thread_id`：subagent 层 session 构造时以
-///   child_thread_id 注入，恒为 `Some`（孙 agent 链校验命中此值）；
+///   child_thread_id 注入，恒为 `Some`（孙 agent 链命中此值）；
 /// - 回退 `SubagentHost.parent_thread_id`：TUI 主 agent 的 `store().thread_id`
 ///   恒为 `None`（stage_builder 构造主 session 不传 thread_id，`SessionStore`
 ///   无 setter），executor 以 `ctx.thread_id` 注入 host
-///   （`ThreadPersistence.parent_thread_id` → stage_builder → host）——即 spawn
-///   落盘时的同一回退值。
+///   （`ThreadPersistence.parent_thread_id` → stage_builder → host）。
 ///
-/// parent 为 `None` 时返回 `None`：spawn 侧继续走 `parent_thread_id_cfg` 回退
-/// （`parent == Some` 时 cfg 与 helper/host 同源，写盘值不变），resume 侧跳过
-/// parent 链校验。
+/// parent 为 `None` 时返回 `None`：spawn 侧继续走 `parent_thread_id_cfg` 回退。
+/// （resume 路径不再做 parent 链校验——该解析链路在生产路径与写盘值常有
+/// 偏差，误判拒绝；resume 仅以 thread_id 存在性 / status 为准）
 fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<String> {
     parent
         .and_then(|p| p.store().thread_id.clone())
@@ -770,13 +768,13 @@ static RESUME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 恢复子 agent（统一入口实现，slice 4：重建 + 执行）。
 ///
-/// 三层校验（不通过返回明确 Err，与 issue 验收一致）：
+/// 两层校验（不通过返回明确 Err，与 issue 验收一致）：
 /// 1. 存在性：`load_meta` 失败/不存在 → `thread not found`
 /// 2. status：`agent_status == Active`（可能未正常收尾）→ 拒绝恢复
-/// 3. parent 链：`meta.parent_thread_id` 与 [`parent_thread_id_of`] 比对
-///    （`store().thread_id` 优先，回退 `SubagentHost.parent_thread_id`，
-///    与 spawn 写盘同源；parent 为 None 时仅校验存在性——与 spawn 的 parent
-///    回退语义一致）
+///
+/// parent 链校验已移除：parent_thread_id 解析链路（store().thread_id 优先、
+/// 回退 host 注入值）在生产路径经常与写盘值不一致，误判导致兄弟 subagent
+/// 无法恢复；thread_id 本身就是不透明凭证，持有 child_thread_id 即可恢复。
 ///
 /// 校验 → 置 active 段整体持锁（R-M1：防并发双 resume 双执行同一 thread）；
 /// 锁内仅 load_meta + update_thread_status（无嵌套锁，不 await run_react_loop）。
@@ -863,24 +861,6 @@ async fn resume_subagent_impl(
     }
     // 原值快照：重建失败时回滚（R-M1）
     let previous_status = meta.agent_status;
-
-    // 3. parent 链校验（所有权校验；parent 为 None 时仅校验存在性）。
-    //    parent id 解析与 spawn 写盘同源（parent_thread_id_of）：优先
-    //    store().thread_id（subagent 层恒 Some），回退 SubagentHost
-    //    .parent_thread_id（TUI 主 agent 的 store().thread_id 恒 None，host 由
-    //    executor 以 ctx.thread_id 注入——spawn 落盘的同一值源）。对称修复后
-    //    主 agent 凭通知 resume 后台子任务不再误报 mismatch。
-    if let Some(p) = parent {
-        if meta.parent_thread_id != parent_thread_id_of(Some(p)) {
-            return Err(format!(
-                "resume_subagent: parent thread mismatch for {} \
-                (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
-                并行派发的兄弟 subagent 需由原父 agent 恢复, 或改传 subagent_type 新建)",
-                thread_id
-            )
-            .into());
-        }
-    }
 
     // 校验通过 → 锁内立即置 active（R-M1：置 active 与校验原子化，第二个并发
     // resume 在锁内看到 active 被拒）；重建失败时下方回滚

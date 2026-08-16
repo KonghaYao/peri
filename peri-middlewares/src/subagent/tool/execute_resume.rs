@@ -222,8 +222,9 @@ impl super::SubAgentTool {
         }
     }
 
-    /// 调用统一恢复入口（parent 存在时 frozen copy / parent 链校验自 parent
-    /// session 读取；与 [`spawn`] :402-408 同款包装）。
+    /// 调用统一恢复入口（parent 存在时 frozen copy 自 parent session 读取；
+    /// 与 [`spawn`] :402-408 同款包装。parent 链校验已移除，见
+    /// `peri_agent::session::subagent::resume_subagent_impl`）。
     pub(crate) async fn resume(
         &self,
         config: SubagentResumeConfig,

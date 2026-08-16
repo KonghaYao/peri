@@ -3463,13 +3463,22 @@ async fn test_resume_thread_id_active_rejected() {
     );
 }
 
-/// 校验：parent 链不匹配（meta.parent_thread_id ≠ 父 session thread_id）→ Err
+/// parent 链不匹配不再拒绝（parent 链校验已移除）——meta.parent_thread_id 与
+/// 父 session thread_id 不一致时恢复仍成功（thread_id 即恢复凭证）
 #[tokio::test]
-async fn test_resume_thread_id_parent_mismatch() {
+async fn test_resume_thread_id_parent_mismatch_not_rejected() {
     let dir = tempdir().unwrap();
+    write_test_agent(&dir);
     let store = make_fs_store(&dir);
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &id, "fork", Some("some-other-parent"), Vec::new()).await;
+    preset_resumable_thread(
+        &store,
+        &id,
+        "test-agent",
+        Some("some-other-parent"),
+        vec![BaseMessage::human("旧消息")],
+    )
+    .await;
 
     // 父 session：store().thread_id = "parent-uuid" ≠ meta.parent_thread_id
     let work = dir.path().to_str().unwrap();
@@ -3484,16 +3493,17 @@ async fn test_resume_thread_id_parent_mismatch() {
     let result = t
         .invoke(
             serde_json::json!({
-                "resume_thread_id": id,
+                "resume_thread_id": id.clone(),
+                "cwd": work,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await;
-    let err = result.unwrap_err().to_string();
+        .await
+        .expect("parent 链不匹配不再拒绝恢复");
     assert!(
-        err.contains("parent thread mismatch"),
-        "parent 链不匹配应被拒绝: {}",
-        err
+        result.contains(&format!("child_thread_id: {}", id)),
+        "完成文本应带 child_thread_id: {}",
+        result
     );
 }
 
@@ -3891,7 +3901,7 @@ async fn wait_for_messages(
 /// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
 /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
 /// 调用 resume_thread_id → 完成文本含结果。
-/// R-L3：进程重启复用相同父 thread_id → parent 校验通过。
+/// R-L3：进程重启后凭 child_thread_id 恢复（thread_id 即凭证，父链仅作落盘记录）。
 #[tokio::test]
 async fn test_resume_interrupted_then_resumed_across_instances() {
     let dir = tempdir().unwrap();
@@ -3904,7 +3914,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     .unwrap();
 
     let store = make_fs_store(&dir);
-    // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变 → 父链校验跨进程成立，R-L3）
+    // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变，R-L3）
     let work = dir.path().to_str().unwrap();
     let parent = peri_agent::session::Session::new(
         Arc::from(work),
@@ -3949,7 +3959,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
             peri_agent::tools::ToolContext::new(&[], work),
         )
         .await
-        .expect("resume 应成功完成（parent 校验通过）");
+        .expect("resume 应成功完成（thread_id 即恢复凭证）");
     assert!(
         result.contains(&format!("child_thread_id: {}", id)),
         "完成文本应带 child_thread_id: {}",
@@ -3961,7 +3971,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         result
     );
 
-    // R-L3：子线程父链 = 父 session thread_id（实例 B 复用同一父 id → parent 校验通过）
+    // R-L3：子线程父链 = 父 session thread_id（跨实例复用，仅作父子链落盘记录）
     let meta = store.load_meta(&id).await.unwrap();
     assert_eq!(
         meta.parent_thread_id.as_deref(),
