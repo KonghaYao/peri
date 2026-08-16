@@ -452,8 +452,8 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
 }
 
 /// spawn_subagent：主 agent 场景（`store().thread_id` 恒 None）——parent id
-/// 经 `SubagentHost.parent_thread_id` 注入时必须正确落库（与 resume 校验同源，
-/// 对称锁定：resume 侧两测试仅锁后半程，此处锁前半程）
+/// 经 `SubagentHost.parent_thread_id` 注入时必须正确落库（与 spawn 落盘父子链
+/// 同源；resume 已不做 parent 链校验，父子链仅作落盘记录）
 #[tokio::test]
 async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
     let store = Arc::new(MockThreadStore::new());

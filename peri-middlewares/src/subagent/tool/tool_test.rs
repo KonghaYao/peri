@@ -3488,7 +3488,7 @@ async fn test_resume_thread_id_parent_mismatch_not_rejected() {
         Some("parent-uuid".into()),
     );
     let t = make_subagent_tool(vec![])
-        .with_thread_store(store)
+        .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
         .with_parent_session(parent);
     let result = t
         .invoke(
@@ -3504,6 +3504,13 @@ async fn test_resume_thread_id_parent_mismatch_not_rejected() {
         result.contains(&format!("child_thread_id: {}", id)),
         "完成文本应带 child_thread_id: {}",
         result
+    );
+    // 与 agent 层测试对齐：锁定完成收尾（区别于 bg 启动 / interrupted 文本也带前缀）
+    let meta = store.load_meta(&id).await.unwrap();
+    assert_eq!(
+        meta.agent_status,
+        peri_agent::thread::AgentStatus::Done,
+        "恢复完成后收尾 done"
     );
 }
 
