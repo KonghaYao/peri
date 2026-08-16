@@ -1484,7 +1484,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
         let shrunk = transport.notifications().iter().any(|(_, p)| {
             p["update"]["availableCommands"]
                 .as_array()
-                .map(|a| a.iter().all(|c| c["name"] != "core:loop"))
+                .map(|a| a.iter().all(|c| c["name"] != "loop"))
                 .unwrap_or(false)
         });
         if shrunk {
@@ -1499,7 +1499,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
 }
 
 /// 核对点 8 覆盖缺口（P2-3）：`set_pending_caps` 带 `ui_commands` 明细 →
-/// session/new → 断言 `ui:*` 条目随 caps 明细出现（fullname=`ui:<name>`、
+/// session/new → 断言 ui 面板条目随 caps 明细出现（name = Level1 裸名、
 /// `periKind=panel`、`periCategory=ui`、alias 注入），未协商的默认明细不出现。
 #[tokio::test]
 async fn test_available_commands_update_ui_entries_from_caps_details() {
@@ -1555,8 +1555,9 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
             .find(|c| c["name"] == n)
             .unwrap_or_else(|| panic!("条目 {n} 应存在: {:?}", commands))
     };
-    // ui 条目随 caps 明细出现：periKind=panel / periLevel=1 / periCategory=ui
-    let gallery = by_name("ui:gallery");
+    // ui 条目随 caps 明细出现：name = 裸名 / periKind=panel / periLevel=1 /
+    // periCategory=ui（Level1 域归属只经条目级 kind 下发，name 不带域前缀）
+    let gallery = by_name("gallery");
     assert_eq!(
         gallery["_meta"]["periKind"], "panel",
         "ui 条目 kind = panel"
@@ -1569,20 +1570,26 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
         "caps 明细 alias 应透传注入"
     );
     assert_eq!(
-        by_name("ui:zoom")["_meta"]["periKind"],
+        by_name("zoom")["_meta"]["periKind"],
         "panel",
-        "name 应小写归一（Zoom → ui:zoom）"
+        "name 应小写归一（Zoom → zoom）"
     );
-    // 未协商的默认明细不得出现（门控反转：只广播客户端声明的明细）
-    assert!(
-        !commands
-            .iter()
-            .any(|c| c["name"] == "ui:help" || c["name"] == "ui:clear"),
-        "未协商的 ui 明细不得出现"
+    // 未协商的默认明细不得出现（门控反转：只广播客户端声明的明细）——
+    // panel 条目恰为协商的 gallery/zoom 两条（help 未协商不注册；core:clear
+    // 的内置裸名条目 kind=command，不构成 panel）
+    let panels: Vec<&str> = commands
+        .iter()
+        .filter(|c| c["_meta"]["periKind"] == "panel")
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        panels,
+        ["gallery", "zoom"],
+        "仅协商的 ui 明细注册为 panel 条目: {panels:?}"
     );
-    // 基座内置仍在（注册表投影）
+    // 基座内置仍在（注册表投影，Level1 裸名）
     assert!(
-        commands.iter().any(|c| c["name"] == "core:compact"),
+        commands.iter().any(|c| c["name"] == "compact"),
         "基座内置条目应保留"
     );
 }

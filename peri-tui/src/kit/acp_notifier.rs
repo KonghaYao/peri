@@ -373,10 +373,11 @@ fn handle_session_update(
             Some(c) => c,
             None => return None,
         };
-        // Phase 4 步骤 2：每条解析 name（=全名）+ description + _meta
-        // （_meta 优先、meta 兜底先例，与下方 is_session_replay 一致）的
-        // periKind / periLevel / periAliases / periCategory / periArgs；
-        // 缺省回退 kind=Command / level=1 / args=None / aliases=[]（R1）。
+        // Phase 4 步骤 2：每条解析 name（= 投影名：Level1 裸名 / Level2 全名）
+        // + description + _meta（_meta 优先、meta 兜底先例，与下方
+        // is_session_replay 一致）的 periKind / periLevel / periAliases /
+        // periCategory / periArgs；缺省回退 kind=Command / level=1 / args=None
+        // / aliases=[]（R1）。
         // **单 atom 原子写**：只写 AVAILABLE_SLASH_COMMANDS，消除现状
         // 「AVAILABLE + SKILL_NAMES + MCP_SKILL_NAMES 三 atom 组合时序」
         // 问题（inv03 §4-R1）；kind 直接来自投影，无集合反推。

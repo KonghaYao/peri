@@ -256,8 +256,9 @@ impl CommandName {
 
 impl fmt::Display for CommandName {
     /// 全名小写规范化输出（唯一键形态；Bare 输出裸名小写）。注意：Level1
-    /// 输出 `core:compact` 而非 UI 展示形态 `compact`（设计 §87）——Phase 3
-    /// 投影渲染勿直接复用本 Display。
+    /// 输出 `core:compact` 而非投影渲染形态 `compact`（设计 §87）——投影
+    /// name 由 `build_available_commands_update` 按 level 统一输出（Level1
+    /// 裸名 / Level2 全名），本 Display 仅供注册表内部使用，勿复用。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.full_name())
     }

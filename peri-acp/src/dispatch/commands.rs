@@ -92,18 +92,26 @@ pub(crate) fn register_ui_entries(caps: &PeriCaps, command_registry: &CommandReg
 ///
 /// | 设计字段 | `_meta` 键名 | 省略规则 |
 /// |---|---|---|
-/// | fullname（唯一键） | —（`name` 字段直接承载） | 恒有 |
+/// | fullname（唯一键） | —（`name` 字段承载投影名，见下） | 恒有 |
 /// | kind | `periKind`（`CommandEntryKind` serde snake_case） | 恒有 |
 /// | level | `periLevel`（1 \| 2） | 恒有（显式，不留缺省歧义） |
 /// | aliases | `periAliases` | 空数组省略 |
 /// | category | `periCategory` | `None` 省略 |
 /// | args | `periArgs`（`ArgsSchema` serde 形态） | `None` 省略 |
 ///
-/// update 级 meta：`skillNames`（仅 core 域 Skill 条目 fullname，`caps.skill_names`
+/// update 级 meta：`skillNames`（仅 core 域 Skill 条目**裸名**，`caps.skill_names`
 /// 门控保留）；`mcpSkillNames` 已退役（Phase 6 D1，03-protocol §4 建议——
 /// kind 已入投影条目 `_meta.periKind`，Hub 按条目级 kind 消费），不再写入。
 /// `caps.ui_commands` 不再在此附加任何条目（门控反转，ui 条目由调用点
 /// 注册进注册表）。
+///
+/// name 投影规则（TUI/stdio 共用一条实现，不按 transport 分叉）：Level1
+/// （core/ui 域）输出末段裸名（`core:compact` → `compact`），Level2
+/// （mcp/plugin/user 域）输出全名原样（`demo:hello`）——与 TUI 展示层
+/// `display_name` 规则一致，消费端不再自行剥前缀（display 即 lexical）。
+/// 注册表 fullname 唯一键不变（core/ui 同裸名互斥仍由 register 保证）；
+/// 投影 name 允许重复（core:hello 与 ui:hello 均投影为 `hello`），消费端
+/// 按条目级 `_meta.periKind` 区分，不做按名去重。
 ///
 /// 不做按名去重（Phase 6 D1）：词法统一后本地 = `core:{name}`、MCP =
 /// `{server}:{skill}`（决策 1，server 名即词法首段域）、插件 =
@@ -143,7 +151,7 @@ pub(crate) fn build_available_commands_update(
             );
         }
         commands.push(
-            AvailableCommand::new(entry.fullname.clone(), entry.description.clone()).meta(Some(m)),
+            AvailableCommand::new(projection_name(entry), entry.description.clone()).meta(Some(m)),
         );
     }
 
@@ -152,7 +160,7 @@ pub(crate) fn build_available_commands_update(
         let skill_names: Vec<serde_json::Value> = entries
             .iter()
             .filter(|e| e.kind == CommandEntryKind::Skill && e.provenance.source.domain() == "core")
-            .map(|e| serde_json::Value::String(e.fullname.clone()))
+            .map(|e| serde_json::Value::String(projection_name(e)))
             .collect();
         meta.insert("skillNames".into(), serde_json::Value::Array(skill_names));
     }
@@ -162,5 +170,20 @@ pub(crate) fn build_available_commands_update(
         update
     } else {
         update.meta(meta)
+    }
+}
+
+/// 投影 name 单一派生点（条目级 `name` 与 update 级 `skillNames` 共用）：
+/// Level1（core/ui 域）取末段裸名（无冒号时原样返回——防御，Level1 注册
+/// 词法恒为两段）；Level2（mcp/plugin/user 域）全名原样。
+fn projection_name(entry: &RouteEntry) -> String {
+    if entry.level() == CommandLevel::Level1 {
+        entry
+            .fullname
+            .rsplit_once(':')
+            .map(|(_, bare)| bare.to_string())
+            .unwrap_or_else(|| entry.fullname.clone())
+    } else {
+        entry.fullname.clone()
     }
 }

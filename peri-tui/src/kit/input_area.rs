@@ -1364,25 +1364,22 @@ fn build_slash_items() -> Vec<SlashCompletionItem> {
         .collect();
     // 字母序排序——只排一次，组件端不再重排
     items.sort_by(|a, b| a.label_lowercase.cmp(&b.label_lowercase));
-    // 双写窗口去重（R2 防御，步骤 6 明示保留）：R2 收口后触发条件已不
-    // 存在——服务端 UI_COMMANDS 常量已删除（裸名广播无 _meta 的路径消失）、
-    // 上送注册全量落地（ui: 前缀全名 + periKind=panel），当前 core 内置与
-    // ui 面板裸名无碰撞，本块实际不触发，仅作防御。
-    // 方向性风险：本去重「ui: 前缀 + kind != Command」优先保留 ui 域条目，
-    // 与注册表冲突裁决（内置优先、先注册占键）方向相反——若未来 core 域
-    // 新增与 ui 面板同裸名的命令（如 core:model），UI 会吞掉带 _meta 的
-    // core 条目而保留 ui:model，显示与执行不一致（display 即 lexical 破坏）。
-    // 仅当一方为缺省回退条目（kind==Command 且无 _meta 佐证）时才应触发；
-    // 保留现状不收紧，待真实碰撞出现时再收窄条件。
+    // 双写窗口去重（R2 防御，步骤 6 明示保留）：wire name 已裸名化
+    // （Level1 输出裸名、无域前缀），投影 name 不再携带域信息——仅按
+    // kind 防御性去重：非 Command 条目（panel/skill/mcp_skill）优先于
+    // Command 保留。同分 tie（core skill 与 ui 面板同裸名）保留字母序
+    // 先者；TUI 拦截语义不变（resolve_ui_command 裸名优先命中 ui 域，
+    // 与注册表冲突裁决方向相反——若 core 域新增与 ui 面板同裸名的命令，
+    // UI 拦截优先，显示与执行不一致的取舍保留现状，待真实碰撞出现时
+    // 再收窄）。仅当一方为缺省回退条目（kind==Command 且无 _meta 佐证）
+    // 时才应触发；保留现状不收紧。
     let mut deduped: Vec<SlashCompletionItem> = Vec::with_capacity(items.len());
     for item in items {
         if let Some(last) = deduped.last_mut()
             && last.label == item.label
         {
-            let last_score = (last.fullname.starts_with("ui:") as u8)
-                + (last.kind != SlashActionKind::Command) as u8;
-            let item_score = (item.fullname.starts_with("ui:") as u8)
-                + (item.kind != SlashActionKind::Command) as u8;
+            let last_score = (last.kind != SlashActionKind::Command) as u8;
+            let item_score = (item.kind != SlashActionKind::Command) as u8;
             if item_score > last_score {
                 *last = item;
             }

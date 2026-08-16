@@ -640,7 +640,7 @@ fn test_build_slash_items_uses_projection_kind_level() {
             ..Default::default()
         },
         SlashCommandEntry {
-            fullname: "core:compact".to_string(),
+            fullname: "compact".to_string(),
             description: "Compact".to_string(),
             kind: SlashActionKind::Command,
             level: 1,
@@ -663,15 +663,15 @@ fn test_build_slash_items_uses_projection_kind_level() {
     let skill = find("MySkill");
     assert_eq!(skill.kind, SlashActionKind::Skill);
     assert_eq!(skill.insert_text, "MySkill");
-    // level 1 → 最右冒号后段裸名；fullname 保留全名元数据
+    // level 1 → wire 即裸名（display_name 幂等原样），fullname 无域前缀
     let compact = find("compact");
     assert_eq!(compact.kind, SlashActionKind::Command);
     assert_eq!(compact.insert_text, "compact");
-    assert_eq!(compact.fullname, "core:compact");
+    assert_eq!(compact.fullname, "compact");
     // 双索引（步骤 4）：search_lowercase = label + fullname 小写合并——
     // 全名条目也能被词法首段前缀（如 /demo:）模糊搜到
     assert_eq!(mcp.search_lowercase, "demo:hello demo:hello");
-    assert_eq!(compact.search_lowercase, "compact core:compact");
+    assert_eq!(compact.search_lowercase, "compact compact");
     // 全名形态不得再出现（display 即 lexical，解析器严格命中）
     assert!(items.iter().all(|i| i.label != "core:compact"));
     // 步骤 6 收口：条目全部来自投影——无 PANELS/setup 本地合成
@@ -703,7 +703,7 @@ fn test_build_slash_items_display_is_lexical() {
 
     *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
         SlashCommandEntry {
-            fullname: "core:compact".to_string(),
+            fullname: "compact".to_string(),
             description: "Compact".to_string(),
             level: 1,
             ..Default::default()
@@ -736,7 +736,7 @@ fn test_build_slash_items_projection_aliases() {
     crate::kit::atoms::init_atoms();
     *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
         SlashCommandEntry {
-            fullname: "ui:threads".to_string(),
+            fullname: "threads".to_string(),
             description: "Thread browser".to_string(),
             kind: SlashActionKind::Panel,
             aliases: vec!["history".into(), "his".into(), "resume".into()],
@@ -744,7 +744,7 @@ fn test_build_slash_items_projection_aliases() {
             ..Default::default()
         },
         SlashCommandEntry {
-            fullname: "core:clear".to_string(),
+            fullname: "clear".to_string(),
             description: "Clear".to_string(),
             kind: SlashActionKind::Command,
             aliases: vec!["cls".into(), "reset".into()],
@@ -762,13 +762,13 @@ fn test_build_slash_items_projection_aliases() {
     };
     // 主条目正常生成
     let threads = find("threads");
-    assert_eq!(threads.fullname, "ui:threads");
+    assert_eq!(threads.fullname, "threads");
     assert_eq!(threads.kind, SlashActionKind::Panel);
     // ui 域别名条目：继承主条目元数据，display 即 lexical
     for alias in ["history", "his", "resume"] {
         let item = find(alias);
         assert_eq!(item.insert_text, alias);
-        assert_eq!(item.fullname, "ui:threads", "alias 条目归属主条目");
+        assert_eq!(item.fullname, "threads", "alias 条目归属主条目");
         assert_eq!(item.kind, SlashActionKind::Panel);
         assert_eq!(item.description, "Thread browser");
     }
@@ -776,7 +776,7 @@ fn test_build_slash_items_projection_aliases() {
     find("clear");
     for alias in ["cls", "reset"] {
         let item = find(alias);
-        assert_eq!(item.fullname, "core:clear");
+        assert_eq!(item.fullname, "clear");
         assert_eq!(item.kind, SlashActionKind::Command);
     }
     // alias 可被补全过滤命中（search_lowercase 预计算含 alias）
@@ -789,23 +789,23 @@ fn test_build_slash_items_projection_aliases() {
 }
 
 /// Phase 4 步骤 6：双写窗口去重（R2 防御）——同 display 名多条时优先保留
-/// 「携带 kind 元数据（非缺省回退）的 ui 域条目」：服务端旧 UI_COMMANDS
-/// 裸名广播（`history`，无 _meta → kind 缺省回退 Command）与 TUI 上送注册
-/// （`ui:history` 全名 + periKind=panel）并存时，后者胜出。
+/// 「携带 kind 元数据（非缺省回退）的条目」：wire 裸名化后投影 name 不携带
+/// 域信息（Level1 裸名），缺省回退条目（kind=Command）与上送注册的 ui 面板
+/// 条目（`history` + periKind=panel）并存时，按 kind 判断后者胜出。
 #[test]
 #[serial]
 fn test_build_slash_items_dedup_prefers_ui_kind_meta() {
     crate::kit::atoms::init_atoms();
     *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
-        // 服务端裸名广播（缺 _meta → 缺省回退形态 kind=Command / level=1）
+        // 缺省回退形态（无 _meta → kind=Command / level=1）
         SlashCommandEntry {
             fullname: "history".to_string(),
             description: "legacy broadcast".to_string(),
             ..Default::default()
         },
-        // TUI 上送注册（ui 域全名 + 显式 kind 元数据）
+        // TUI 上送注册（Level1 裸名 + 显式 kind 元数据）
         SlashCommandEntry {
-            fullname: "ui:history".to_string(),
+            fullname: "history".to_string(),
             description: "Thread browser".to_string(),
             kind: SlashActionKind::Panel,
             level: 1,
@@ -824,9 +824,9 @@ fn test_build_slash_items_dedup_prefers_ui_kind_meta() {
     assert_eq!(
         history[0].kind,
         SlashActionKind::Panel,
-        "优先保留携带 kind 元数据（非缺省回退）的 ui 域条目"
+        "优先保留携带 kind 元数据（非缺省回退）的条目"
     );
-    assert_eq!(history[0].fullname, "ui:history");
+    assert_eq!(history[0].fullname, "history");
     assert_eq!(history[0].insert_text, "history");
 }
 

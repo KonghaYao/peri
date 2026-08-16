@@ -91,7 +91,7 @@ fn plugin_entry(fullname: &str, plugin: &str) -> Arc<RouteEntry> {
 // ─── 投影纯函数（Phase 3 步骤 3/7）──────────────────────────────────────────
 
 /// 无 cap（外部客户端）：availableCommands = 仅注册表投影条目（基座 5 条
-/// 内置），无 ui / skill / mcp 条目；每条 name = 全名、_meta.periKind /
+/// 内置），无 ui / skill / mcp 条目；每条 name = Level1 裸名、_meta.periKind /
 /// periLevel 恒有（任务书 Step 7 断言面）。
 #[test]
 fn test_update_no_caps_projects_registry_entries_only() {
@@ -106,20 +106,14 @@ fn test_update_no_caps_projects_registry_entries_only() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    for base in [
-        "core:compact",
-        "core:bg",
-        "core:clear",
-        "core:rewind",
-        "core:loop",
-    ] {
+    for base in ["compact", "bg", "clear", "rewind", "loop"] {
         assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
     }
     for c in commands {
         let name = c["name"].as_str().unwrap();
         assert!(
-            name.starts_with("core:"),
-            "name 应为全名（域前缀），实际: {}",
+            !name.contains(':'),
+            "name 应为 Level1 裸名（无域前缀），实际: {}",
             c["name"]
         );
         assert_eq!(c["_meta"]["periKind"], "command", "内置命令 kind = command");
@@ -133,11 +127,8 @@ fn test_update_no_caps_projects_registry_entries_only() {
         );
         assert_eq!(
             c["_meta"].get("periArgs").is_some(),
-            name == "core:clear"
-                || name == "core:compact"
-                || name == "core:rewind"
-                || name == "core:bg",
-            "core:clear/compact/rewind/bg 已声明 args schema（Phase 5 Step 3-5 + P2-5），实际: {name}"
+            name == "clear" || name == "compact" || name == "rewind" || name == "bg",
+            "clear/compact/rewind/bg 已声明 args schema（Phase 5 Step 3-5 + P2-5），实际: {name}"
         );
     }
     let by_name = |n: &str| {
@@ -147,37 +138,40 @@ fn test_update_no_caps_projects_registry_entries_only() {
             .unwrap_or_else(|| panic!("条目 {n} 应存在"))
     };
     assert_eq!(
-        by_name("core:compact")["_meta"]["periAliases"],
+        by_name("compact")["_meta"]["periAliases"],
         serde_json::json!(["compress"]),
         "内置命令 aliases 应注入 periAliases"
     );
     assert_eq!(
-        by_name("core:clear")["_meta"]["periAliases"],
+        by_name("clear")["_meta"]["periAliases"],
         serde_json::json!(["cls", "reset"])
     );
     // Phase 5 Step 3：clear 无参命令，投影附加空 schema（三维度全空）
     assert_eq!(
-        by_name("core:clear")["_meta"]["periArgs"],
+        by_name("clear")["_meta"]["periArgs"],
         serde_json::json!({"positionals": [], "named": [], "flags": []}),
         "clear 已声明 ArgsSchema::default()，投影应附加空 schema"
     );
     // P2-5：bg 与 compact/clear 对齐（Some(ArgsSchema::default())），投影同样
     // 附加空 schema（free-form 参数零校验语义不变）。
     assert_eq!(
-        by_name("core:bg")["_meta"]["periArgs"],
+        by_name("bg")["_meta"]["periArgs"],
         serde_json::json!({"positionals": [], "named": [], "flags": []}),
         "bg 已声明 ArgsSchema::default()，投影应附加空 schema"
     );
     assert_eq!(
-        by_name("core:rewind")["_meta"]["periAliases"],
+        by_name("rewind")["_meta"]["periAliases"],
         serde_json::json!(["undo"])
     );
     assert!(
-        by_name("core:loop")["_meta"].get("periAliases").is_none(),
+        by_name("loop")["_meta"].get("periAliases").is_none(),
         "无 aliases 的条目不得附加 periAliases"
     );
-    // 无 ui / skill / mcp 条目
-    assert!(names.iter().all(|n| !n.starts_with("ui:")));
+    // 无 ui 条目（未协商 ui_commands → 无 panel 条目）
+    assert!(
+        commands.iter().all(|c| c["_meta"]["periKind"] != "panel"),
+        "无 ui 明细协商时不得出现 panel 条目"
+    );
     // caps.skill_names=false → 无 skillNames key；mcpSkillNames 键退役（Phase 6
     // D1：kind 已入条目级 _meta.periKind，update 级镜像键不再写入）
     assert!(value["_meta"].get("skillNames").is_none());
@@ -205,43 +199,36 @@ fn test_update_all_enabled_includes_default_ui_details() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
 
-    for base in [
-        "core:compact",
-        "core:bg",
-        "core:clear",
-        "core:rewind",
-        "core:loop",
-    ] {
+    for base in ["compact", "bg", "clear", "rewind", "loop"] {
         assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
     }
     for ui in [
-        "ui:help",
-        "ui:context",
-        "ui:cost",
-        "ui:mode",
-        "ui:effort",
-        "ui:history",
-        "ui:agents",
-        "ui:rename",
-        "ui:lang",
-        "ui:exit",
+        "help", "context", "cost", "mode", "effort", "history", "agents", "rename", "lang", "exit",
     ] {
         assert!(names.contains(&ui), "ui 明细 {ui} 应注册并投影: {names:?}");
     }
+    // ui:clear 与 core:clear 第一等级裸名互斥，注册被纯拒绝（warn）——投影
+    // 中仅存在 core:clear 的裸名条目（kind=command），无 panel 形态的 clear。
     assert!(
-        !names.contains(&"ui:clear"),
+        !commands
+            .iter()
+            .any(|c| c["name"] == "clear" && c["_meta"]["periKind"] == "panel"),
         "ui:clear 与 core:clear 第一等级裸名冲突，注册应被纯拒绝（warn）"
     );
     assert_eq!(commands.len(), 15, "基座 5 + ui 注册成功 10 = 15 条");
 
-    // 断言每条 ui 条目 _meta.periKind / periLevel 存在、name = 全名
+    // 断言每条条目 _meta.periKind / periLevel 存在、name = 投影名（Level1
+    // 裸名——core/ui 域均无域前缀，域归属只经 periKind 区分）
     for c in commands {
         let name = c["name"].as_str().unwrap();
         let meta = &c["_meta"];
         assert!(meta.get("periKind").is_some(), "{name} 缺 periKind");
         assert!(meta.get("periLevel").is_some(), "{name} 缺 periLevel");
-        if name.starts_with("ui:") {
-            assert_eq!(meta["periKind"], "panel", "ui 域条目 kind = panel");
+        assert!(
+            !name.contains(':'),
+            "Level1（core/ui 域）name 应为裸名，实际: {name}"
+        );
+        if meta["periKind"] == "panel" {
             assert_eq!(meta["periLevel"], 1, "ui 域 level = 1");
         } else {
             assert_eq!(meta["periKind"], "command");
@@ -298,7 +285,7 @@ fn test_update_meta_injects_aliases_category_args() {
     let update = build_available_commands_update(&[entry], &caps);
     let value = serde_json::to_value(&update).unwrap();
     let cmd = &value["availableCommands"][0];
-    assert_eq!(cmd["name"], "core:demo");
+    assert_eq!(cmd["name"], "demo");
     assert_eq!(cmd["_meta"]["periAliases"], serde_json::json!(["d", "dem"]));
     assert_eq!(cmd["_meta"]["periCategory"], "utility");
     assert!(cmd["_meta"]["periArgs"].is_object(), "periArgs 应为 object");
@@ -306,8 +293,9 @@ fn test_update_meta_injects_aliases_category_args() {
 
 /// Phase 6 D1 断言重写：投影 = snapshot 全量（内置 + 本地 + MCP + 插件条目），
 /// 不做按名去重——`core:hello` 与 `demo:hello` **共存**（键空间不相交 =
-/// 键唯一性而非按名去重）；条目级 periKind / periLevel 正确；skillNames 仅
-/// core 域 Skill 条目；mcpSkillNames 键退役（任何情况不出现）。
+/// 键唯一性而非按名去重；Level1 裸名 `hello` 与 Level2 全名 `demo:hello`
+/// 投影名互不冲突）；条目级 periKind / periLevel 正确；skillNames 仅
+/// core 域 Skill 条目裸名；mcpSkillNames 键退役（任何情况不出现）。
 #[test]
 fn test_update_projects_snapshot_entries_with_kinds() {
     let entries: Vec<Arc<RouteEntry>> = vec![
@@ -329,19 +317,19 @@ fn test_update_projects_snapshot_entries_with_kinds() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     for expected in [
-        "core:hello",
-        "core:my-skill",
+        "hello",
+        "my-skill",
         "demo:hello",
         "demo:world",
         "plugin:ecc:deploy",
     ] {
         assert!(names.contains(&expected), "{expected} 应投影: {names:?}");
     }
-    // 'core:hello' 与 'demo:hello' 共存：同尾名不同键空间，互不互斥
-    // （键唯一性而非按名去重）
+    // Level1 裸名 'hello' 与 Level2 全名 'demo:hello' 共存：域信息经
+    // periKind / periLevel 下发，投影名不冲突（键唯一性而非按名去重）
     assert!(
-        names.contains(&"core:hello") && names.contains(&"demo:hello"),
-        "core:hello 与 demo:hello 应共存: {names:?}"
+        names.contains(&"hello") && names.contains(&"demo:hello"),
+        "hello 与 demo:hello 应共存: {names:?}"
     );
 
     let by_name = |n: &str| {
@@ -350,9 +338,9 @@ fn test_update_projects_snapshot_entries_with_kinds() {
             .find(|c| c["name"] == n)
             .unwrap_or_else(|| panic!("条目 {n} 应存在"))
     };
-    assert_eq!(by_name("core:hello")["_meta"]["periKind"], "command");
-    assert_eq!(by_name("core:hello")["_meta"]["periLevel"], 1);
-    assert_eq!(by_name("core:my-skill")["_meta"]["periKind"], "skill");
+    assert_eq!(by_name("hello")["_meta"]["periKind"], "command");
+    assert_eq!(by_name("hello")["_meta"]["periLevel"], 1);
+    assert_eq!(by_name("my-skill")["_meta"]["periKind"], "skill");
     assert_eq!(by_name("demo:hello")["_meta"]["periKind"], "mcp_skill");
     assert_eq!(
         by_name("demo:hello")["_meta"]["periLevel"],
@@ -370,12 +358,13 @@ fn test_update_projects_snapshot_entries_with_kinds() {
         "plugin 域 level = 2"
     );
 
-    // update 级 meta：skillNames 仅 core 域 Skill 条目 fullname；mcpSkillNames
-    // 键退役——kind 已入条目级 periKind，Hub 按条目级 kind 消费。
+    // update 级 meta：skillNames 仅 core 域 Skill 条目**裸名**（与条目级
+    // name 形态一致，不重复携带域前缀）；mcpSkillNames 键退役——kind 已入
+    // 条目级 periKind，Hub 按条目级 kind 消费。
     assert_eq!(
         value["_meta"]["skillNames"],
-        serde_json::json!(["core:my-skill"]),
-        "skillNames 仅 core 域 Skill 条目 fullname"
+        serde_json::json!(["my-skill"]),
+        "skillNames 仅 core 域 Skill 条目裸名"
     );
     assert!(
         value["_meta"].get("mcpSkillNames").is_none(),
@@ -436,11 +425,8 @@ fn test_update_local_skill_same_name_as_builtin_only_builtin_exists() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"core:compact"));
-    let compact = commands
-        .iter()
-        .find(|c| c["name"] == "core:compact")
-        .unwrap();
+    assert!(names.contains(&"compact"));
+    let compact = commands.iter().find(|c| c["name"] == "compact").unwrap();
     assert_eq!(
         compact["_meta"]["periKind"], "command",
         "同名冲突后仅内置条目存在（kind = command，无 Skill 条目）"

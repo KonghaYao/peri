@@ -118,19 +118,19 @@ async fn test_stdio_send_available_commands_ui_entries_and_sync_resend() {
     let commands1 = &update1.available_commands;
     let names1: Vec<&str> = commands1.iter().map(|c| c.name.as_str()).collect();
     assert!(
-        names1.contains(&"ui:gallery"),
+        names1.contains(&"gallery"),
         "ui 明细应随 caps 出现: {names1:?}"
     );
     let gallery = commands1
         .iter()
-        .find(|c| c.name == "ui:gallery")
-        .expect("ui:gallery 应存在");
+        .find(|c| c.name == "gallery")
+        .expect("gallery 应存在");
     let meta1 = gallery.meta.clone().expect("ui 条目应带 _meta");
     assert_eq!(meta1["periKind"], "panel", "ui 条目 kind = panel");
     assert_eq!(meta1["periLevel"], 1, "core/ui 域 level = 1");
     assert_eq!(meta1["periCategory"], "ui");
     assert!(
-        names1.contains(&"core:loop") && names1.contains(&"core:compact"),
+        names1.contains(&"loop") && names1.contains(&"compact"),
         "基座内置应存在: {names1:?}"
     );
 
@@ -145,11 +145,11 @@ async fn test_stdio_send_available_commands_ui_entries_and_sync_resend() {
         .map(|c| c.name.as_str())
         .collect();
     assert!(
-        !names2.contains(&"core:loop"),
+        !names2.contains(&"loop"),
         "unregister 后重发投影应收缩: {names2:?}"
     );
     assert!(
-        names2.contains(&"ui:gallery"),
+        names2.contains(&"gallery"),
         "重发投影应保留 ui 条目（注册表 snapshot 投影）: {names2:?}"
     );
 }
