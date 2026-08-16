@@ -70,6 +70,10 @@ pub async fn run_kit_fullscreen(
     // 2b. H2: 把 peri_config 共享句柄塞到全局 OnceLock，让 ModelPanel 等组件
     //     在 #[component] 闭包里能直接 write active_alias。ACP server 持同一 Arc。
     let _ = atoms::PERI_CONFIG_HANDLE.set(app.services.peri_config.clone());
+    // 2b1. 配置源句柄：读写路径决策的唯一事实源（全局 + 工作区布局在
+    //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
+    //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
+    let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -156,7 +160,7 @@ pub async fn run_kit_fullscreen(
                     drop(peri);
                     // re-read for save
                     let peri = peri_handle.read();
-                    crate::config::save(&peri)
+                    crate::config::save_effective(&peri)
                         .unwrap_or_else(|e| tracing::warn!("Failed to save daily color date: {e}"));
                 }
             }

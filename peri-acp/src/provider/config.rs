@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// 顶层包装（与 ~/.peri/settings.json 的 { "config": {...} } 对应）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PeriConfig {
     #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -18,7 +18,7 @@ pub struct PeriConfig {
 }
 
 /// Provider 内的模型档位映射
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProviderModels {
     #[serde(default)]
     pub opus: String,
@@ -64,20 +64,40 @@ fn default_profile_max_tokens() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileConfig {
     /// 引用 providers[].id；空字符串表示未绑定 provider（请求时回退第一个可用 provider）
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
     /// 手动选择/输入的模型名；None 时回退到 provider.models 同档位映射
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// "low" | "medium" | "high" | "xhigh" | "max"
-    #[serde(default = "default_profile_effort")]
+    #[serde(
+        default = "default_profile_effort",
+        skip_serializing_if = "is_default_effort"
+    )]
     pub effort: String,
     /// 最大输出 token 数
-    #[serde(default = "default_profile_max_tokens")]
+    #[serde(
+        default = "default_profile_max_tokens",
+        skip_serializing_if = "is_default_max_tokens"
+    )]
     pub max_tokens: u32,
     /// 是否启用 1M 上下文
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub context_1m: bool,
+}
+
+/// 序列化辅助：effort 为默认值（"xhigh"）时不落盘——"默认值即未填写"
+/// 与 merge 语义（非默认档位才覆盖）对称，保证工作区文件只含有效覆盖。
+fn is_default_effort(v: &String) -> bool {
+    *v == default_profile_effort()
+}
+
+fn is_default_max_tokens(v: &u32) -> bool {
+    *v == default_profile_max_tokens()
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl Default for ProfileConfig {
@@ -92,16 +112,24 @@ impl Default for ProfileConfig {
     }
 }
 
+impl ProfileConfig {
+    /// 序列化辅助：与 `Profiles::default()` 对应档位相同即为"未填写"。
+    /// merge 语义（非默认档位才覆盖全局）与序列化语义（默认档位不落盘）对称。
+    pub fn is_default(&self) -> bool {
+        self == &ProfileConfig::default()
+    }
+}
+
 /// 固定四档 Profile（不可增删改名）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Profiles {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
     pub fable: ProfileConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
     pub opus: ProfileConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
     pub sonnet: ProfileConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ProfileConfig::is_default")]
     pub haiku: ProfileConfig,
 }
 
@@ -134,16 +162,23 @@ impl Profiles {
 }
 
 /// Beta 功能开关配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BetasConfig {}
 
+impl BetasConfig {
+    /// 当前无任何开关（空结构）；恒为"未填写"，不落盘。
+    pub fn is_default(&self) -> bool {
+        true
+    }
+}
+
 /// 应用配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     /// 当前激活的模型档位（"fable" | "opus" | "sonnet" | "haiku"）
-    #[serde(default = "default_alias")]
+    #[serde(default = "default_alias", skip_serializing_if = "String::is_empty")]
     pub active_alias: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderConfig>,
     /// 四档 Profile（请求参数唯一事实源）
     #[serde(default)]
@@ -184,7 +219,7 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_cache_warning: Option<bool>,
     /// Beta 功能开关
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BetasConfig::is_default")]
     pub betas: BetasConfig,
     /// 保留未知字段（旧 thinking/active_provider_id/context_1m 会被吸收到此，不回写）
     #[serde(flatten)]
@@ -255,6 +290,102 @@ impl AppConfig {
         self.extra.extend(workspace.extra);
     }
 
+    /// 计算 `merged` 相对 `global` 的覆盖字段——[`merge_overrides`] 的严格逆操作。
+    ///
+    /// 分层写回契约：`ConfigSource::save` 写回工作区时只收录「与全局不同」的
+    /// 字段，保证工作区文件保持"项目覆盖"性质（不拷贝全局字段/凭据，全局
+    /// apiKey 不会进入项目文件），且与 `load` 对称：
+    ///
+    /// ```text
+    /// merge_overrides(global, extract_overrides(merged, global)) == merged
+    /// ```
+    ///
+    /// 规则与 [`merge_overrides`] 逐字段互逆：
+    /// - 整体替换字段（providers / active_alias / profiles 档位 / Option 字段）：
+    ///   `merged != global` 则收录 merged 值；
+    /// - 逐 key 合并字段（meta_harness / extra）：收录 merged 中与 global 不同的
+    ///   key 子集（含 global 未声明的 key）；
+    /// - merge 未处理的字段（betas）：永不收录。
+    pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
+        let mut ws = AppConfig::default();
+
+        // providers — 整体替换字段
+        if self.providers != global.providers {
+            ws.providers = self.providers.clone();
+        }
+        // active_alias — 分层豁免：恒收录（与全局相同也写回）。
+        //
+        // 原因：解析期缺省为 "opus"（default_alias），无法区分「文件未声明」
+        // 与「显式声明 opus」；若剔除该字段，工作区文件缺失时解析出 "opus"
+        // 会经 merge 的"非空覆盖"错误覆盖全局的非 opus 值（roundtrip 破坏）。
+        // 恒收录代价仅是工作区文件固定记录该字段，功能语义完全正确。
+        ws.active_alias = self.active_alias.clone();
+        // profiles — 逐档位整体替换（与 merge 的档位级语义对称）
+        for alias in Profiles::ALL {
+            let m = self.profiles.get(alias);
+            let g = global.profiles.get(alias);
+            if m != g {
+                if let Some(m) = m {
+                    *ws.profiles.get_mut(alias).unwrap() = m.clone();
+                }
+            }
+        }
+        // Option 字段 — 与全局不同则收录（含全局未声明）
+        if self.skills_dir != global.skills_dir {
+            ws.skills_dir = self.skills_dir.clone();
+        }
+        if self.env != global.env {
+            ws.env = self.env.clone();
+        }
+        if self.compact != global.compact {
+            ws.compact = self.compact.clone();
+        }
+        if self.language != global.language {
+            ws.language = self.language.clone();
+        }
+        if self.persona != global.persona {
+            ws.persona = self.persona.clone();
+        }
+        if self.tone != global.tone {
+            ws.tone = self.tone.clone();
+        }
+        if self.claude_md_excludes != global.claude_md_excludes {
+            ws.claude_md_excludes = self.claude_md_excludes.clone();
+        }
+        if self.proactiveness != global.proactiveness {
+            ws.proactiveness = self.proactiveness.clone();
+        }
+        if self.show_cache_warning != global.show_cache_warning {
+            ws.show_cache_warning = self.show_cache_warning;
+        }
+        // meta_harness — 专属逐 key 差异（与 merge 的逐 key 合并对称）
+        match (&self.meta_harness, &global.meta_harness) {
+            (Some(m), Some(g)) => {
+                let diff: HashMap<String, bool> = m
+                    .iter()
+                    .filter(|(k, v)| g.get(*k) != Some(*v))
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                if !diff.is_empty() {
+                    ws.meta_harness = Some(diff);
+                }
+            }
+            (Some(m), None) => ws.meta_harness = Some(m.clone()),
+            (None, _) => {}
+        }
+        // extra — 逐 key 差异（与 merge 的 extend 对称）
+        let extra_diff: Map<String, Value> = self
+            .extra
+            .iter()
+            .filter(|(k, v)| global.extra.get(*k) != Some(*v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !extra_diff.is_empty() {
+            ws.extra = extra_diff;
+        }
+        ws
+    }
+
     /// MetaHarness 解析期校验（warn 不 fail）：未知 key warn + 移除，已知 key
     /// 的四种 bool 组合全部保留。
     ///
@@ -279,6 +410,22 @@ impl AppConfig {
                 false
             }
         });
+        // 高危组合检测（warn 不 fail，不改变值）：全部 middleware 均为 false
+        // = 所有工具/钩子/段落持有者装配期被卸载。正常使用几乎不可能逐一手写
+        // 全部 23 个 key，出现即高度疑似配置污染（曾发生过：项目级配置被写入
+        // 全 false 后经 load() 合并透传写回全局配置，功能全关）。显著告警便于
+        // 用户第一时间定位，而不是等会话静默降级。
+        let all_middleware_disabled = MIDDLEWARE_NAMES
+            .iter()
+            .all(|name| map.get(*name).copied() == Some(false));
+        if all_middleware_disabled {
+            tracing::warn!(
+                middleware_count = MIDDLEWARE_NAMES.len(),
+                "meta_harness: ALL middleware disabled — every tool/hook/section holder \
+                 will be unavailable; if this was not intentional, remove the meta_harness \
+                 keys from settings.json"
+            );
+        }
     }
 }
 
@@ -305,7 +452,7 @@ impl Default for AppConfig {
 }
 
 /// 单个 Provider 配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProviderConfig {
     #[serde(default)]
     pub id: String,

@@ -18,7 +18,7 @@ use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
 use peri_acp_types::store::ThreadStore;
 
-use crate::provider::{config_path, LlmProvider, PeriConfig};
+use crate::provider::{LlmProvider, PeriConfig};
 use crate::session::SessionManager;
 
 use super::AcpServerConfig;
@@ -35,6 +35,9 @@ use super::AcpServerConfig;
 pub struct HostAssemblyInput {
     pub provider: LlmProvider,
     pub peri_config: Arc<RwLock<PeriConfig>>,
+    /// 配置源（读写路径决策的唯一事实源：TUI/print/stdio 共享，启动早期
+    /// 经 [`crate::provider::ConfigSource::load`] 构建一次）。
+    pub config_source: Arc<crate::provider::ConfigSource>,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub thread_store: Arc<dyn ThreadStore>,
     /// 工作目录（用于加载 project/local settings hooks）
@@ -127,6 +130,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
     let HostAssemblyInput {
         provider,
         peri_config,
+        config_source,
         permission_mode,
         thread_store,
         cwd,
@@ -388,7 +392,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,
-        config_path: config_path(),
+        config_source,
         session_manager,
     }
 }

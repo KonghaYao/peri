@@ -26,11 +26,13 @@ use super::{
     notify::{extract_session_id, send_available_commands_update, send_config_option_update},
     parse_permission_mode, AcpServerConfig, SessionState,
 };
-use crate::provider::{save_to, LlmProvider};
+use crate::provider::LlmProvider;
 
 fn persist_config(cfg: &AcpServerConfig) {
     let c = cfg.peri_config.read();
-    if let Err(e) = save_to(&c, &cfg.config_path) {
+    // 写回当前生效层：路径决策在 ConfigSource 加载时一次性确定（工作区存在则
+    // 分层写回工作区，否则写全局），与读取完全对称，不存在第二套实现。
+    if let Err(e) = cfg.config_source.save(&c) {
         tracing::warn!(error = %e, "Failed to persist config");
     }
 }

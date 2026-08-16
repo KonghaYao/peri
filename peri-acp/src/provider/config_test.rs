@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use peri_acp_types::meta_harness::MIDDLEWARE_NAMES;
+
 use super::*;
 
 fn make_global() -> AppConfig {
@@ -186,13 +188,19 @@ fn profiles_serde_roundtrip_four_tiers() {
     assert_eq!(profiles.opus.effort, "xhigh"); // 缺省字段用默认
     assert_eq!(profiles.opus.max_tokens, 32000);
     assert_eq!(profiles.haiku.model.as_deref(), Some("gpt-5.6-luna"));
+    // 序列化：非默认档位完整输出；全默认档位（sonnet）省略——"默认值即未填写"
     let back = serde_json::to_value(&profiles).unwrap();
     assert!(
-        back.get("fable").is_some()
-            && back.get("opus").is_some()
-            && back.get("sonnet").is_some()
-            && back.get("haiku").is_some()
+        back.get("fable").is_some() && back.get("opus").is_some() && back.get("haiku").is_some(),
+        "非默认档位必须输出"
     );
+    assert!(
+        back.get("sonnet").is_none(),
+        "全默认档位不落盘（默认值即未填写）"
+    );
+    // roundtrip：省略的默认档位解析时补全，值不变
+    let back_profiles: Profiles = serde_json::from_value(back).unwrap();
+    assert_eq!(back_profiles, profiles);
 }
 
 #[test]
@@ -446,4 +454,189 @@ fn meta_harness_empty_map_kept_as_some() {
     let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
     cfg.validate_meta_harness();
     assert_eq!(cfg.meta_harness, Some(HashMap::new()));
+}
+
+#[test]
+fn all_middleware_false_is_kept_but_warns() {
+    // [回归保险丝] 全部 middleware=false = 功能全关（疑似配置污染，曾真实发生：
+    // 项目级配置被写入全 false 后经 load() 合并透传写回全局配置）。
+    // 校验语义与设计 §2.1 一致：warn 不 fail、不改变值——但必须显著告警。
+    let entries: Vec<(&str, bool)> = MIDDLEWARE_NAMES.iter().map(|name| (*name, false)).collect();
+    let mut cfg = AppConfig {
+        meta_harness: Some(mh(&entries)),
+        ..Default::default()
+    };
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.expect("全 false 保留（warn 不 fail）");
+    assert_eq!(
+        map.len(),
+        MIDDLEWARE_NAMES.len(),
+        "23 个 middleware 全部保留"
+    );
+    assert!(MIDDLEWARE_NAMES.iter().all(|n| map.get(*n) == Some(&false)));
+}
+
+#[test]
+fn partial_middleware_false_does_not_trigger_fuse() {
+    // 只关一个 middleware（文档示例场景）不触发保险丝
+    let mut cfg = AppConfig {
+        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        ..Default::default()
+    };
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("WebMiddleware"), Some(&false));
+    assert_eq!(map.len(), 1);
+}
+
+#[test]
+fn all_middleware_false_plus_section_keys_still_triggers_fuse() {
+    // 全 false + 段落 key 混合：middleware 面仍是全关，保险丝照常触发
+    let mut entries: Vec<(&str, bool)> =
+        MIDDLEWARE_NAMES.iter().map(|name| (*name, false)).collect();
+    entries.push(("01_intro", true));
+    let mut cfg = AppConfig {
+        meta_harness: Some(mh(&entries)),
+        ..Default::default()
+    };
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("01_intro"), Some(&true));
+}
+
+// ─── extract_overrides（与 merge_overrides 严格互逆，分层写回契约）─────────
+
+/// roundtrip 恒等式：merge(global, extract(merge(global, ws), global)) == merge(global, ws)
+fn assert_roundtrip(global: &AppConfig, ws: &AppConfig) {
+    let mut merged = global.clone();
+    merged.merge_overrides(ws.clone());
+    let extracted = merged.extract_overrides(global);
+    let mut back = global.clone();
+    back.merge_overrides(extracted);
+    assert_eq!(
+        back, merged,
+        "extract 必须与 merge 严格互逆（分层写回 roundtrip 破坏）"
+    );
+}
+
+#[test]
+fn extract_overrides_roundtrip_providers_and_alias() {
+    let global = AppConfig {
+        active_alias: "sonnet".into(),
+        providers: vec![serde_json::from_value(serde_json::json!({
+            "id": "g1", "type": "openai", "apiKey": "sk-global"
+        }))
+        .unwrap()],
+        ..Default::default()
+    };
+    // 工作区只覆盖 provider（active_alias 保持全局值）
+    let ws = AppConfig {
+        providers: vec![serde_json::from_value(serde_json::json!({
+            "id": "w1", "type": "anthropic", "apiKey": "sk-workspace"
+        }))
+        .unwrap()],
+        ..Default::default()
+    };
+    assert_roundtrip(&global, &ws);
+
+    // 工作区把 active_alias 改回与全局相同 → 仍收录（分层豁免：解析期缺省
+    // "opus" 与未声明不可区分，恒收录保证 roundtrip）
+    let ws2 = AppConfig {
+        active_alias: "sonnet".into(),
+        ..Default::default()
+    };
+    let mut merged = global.clone();
+    merged.merge_overrides(ws2.clone());
+    let extracted = merged.extract_overrides(&global);
+    assert_eq!(
+        extracted.active_alias, "sonnet",
+        "active_alias 恒收录（豁免分层）"
+    );
+    assert_roundtrip(&global, &ws2);
+}
+
+#[test]
+fn extract_overrides_roundtrip_profiles() {
+    let global = AppConfig {
+        profiles: Profiles {
+            opus: ProfileConfig {
+                effort: "high".into(),
+                max_tokens: 32000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut ws = AppConfig::default();
+    ws.profiles.get_mut("opus").unwrap().effort = "max".into();
+    assert_roundtrip(&global, &ws);
+
+    // 工作区档位与全局相同 → extract 剔除该档位
+    let mut ws_same = AppConfig::default();
+    ws_same.profiles.get_mut("opus").unwrap().effort = "high".into();
+    let mut merged = global.clone();
+    merged.merge_overrides(ws_same);
+    let extracted = merged.extract_overrides(&global);
+    assert_eq!(
+        extracted.profiles.opus,
+        ProfileConfig::default(),
+        "与全局相同的档位应剔除"
+    );
+}
+
+#[test]
+fn extract_overrides_roundtrip_meta_harness_and_extra() {
+    let global = AppConfig {
+        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        extra: {
+            let mut m = serde_json::Map::new();
+            m.insert("legacy_a".into(), serde_json::json!(1));
+            m
+        },
+        ..Default::default()
+    };
+    let ws = AppConfig {
+        // 01_intro 与全局同值（true）、TerminalMiddleware 为工作区新增
+        meta_harness: Some(mh(&[("01_intro", true), ("TerminalMiddleware", false)])),
+        ..Default::default()
+    };
+    assert_roundtrip(&global, &ws);
+
+    // 逐 key 差异：与全局同值 key 剔除，新增 key 保留
+    let mut merged = global.clone();
+    merged.merge_overrides(ws);
+    let extracted = merged.extract_overrides(&global);
+    let mh = extracted.meta_harness.as_ref().unwrap();
+    assert!(!mh.contains_key("01_intro"), "与全局同值 key 应剔除");
+    assert!(mh.contains_key("TerminalMiddleware"));
+    assert!(!mh.contains_key("WebMiddleware"), "全局 key 不收录");
+    assert_eq!(mh.len(), 1);
+    assert_roundtrip(
+        &global,
+        &AppConfig {
+            meta_harness: extracted.meta_harness.clone(),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn extract_overrides_global_only_roundtrip() {
+    // 工作区为空（未声明任何字段）：extract 后 merged 不变
+    let global = AppConfig {
+        active_alias: "opus".into(),
+        language: Some("zh".into()),
+        ..Default::default()
+    };
+    assert_roundtrip(&global, &AppConfig::default());
+
+    // 空工作区 extract 结果：仅 active_alias（分层豁免字段，恒收录）
+    let merged = global.clone();
+    let extracted = merged.extract_overrides(&global);
+    let expected = AppConfig {
+        active_alias: "opus".into(),
+        ..Default::default()
+    };
+    assert_eq!(extracted, expected);
 }

@@ -56,22 +56,29 @@ pub async fn run_print(
 
     let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
 
-    // 加载配置
-    let peri_config = match &settings_path {
+    // 加载配置（经 ConfigSource 承载读写路径决策，与 TUI 同源；print 模式
+    // 无保存，但装配面需要一致的来源语义）：
+    // - --settings：指定文件整体生效（单文件来源，不合并全局/工作区）
+    // - 默认：全局 + 工作区分层合并（load_lenient 保持迁移前
+    //   `load().unwrap_or_default()` 的容错语义）
+    let config_source = match &settings_path {
         Some(path) => {
             let p = std::path::Path::new(path);
             if p.exists() {
-                peri_tui::config::load_from(p)?
+                Arc::new(peri_tui::config::ConfigSource::load_standalone(
+                    p.to_path_buf(),
+                )?)
             } else {
                 let v: serde_json::Value = serde_json::from_str(path)
                     .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
                 let tmp = std::env::temp_dir().join("peri-settings-override.json");
                 std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
-                peri_tui::config::load_from(&tmp)?
+                Arc::new(peri_tui::config::ConfigSource::load_standalone(tmp)?)
             }
         }
-        None => peri_tui::config::load().unwrap_or_default(),
+        None => Arc::new(peri_tui::config::ConfigSource::load_lenient()),
     };
+    let peri_config = config_source.loaded_merged();
 
     // 构建 provider
     let provider = peri_tui::app::agent::LlmProvider::from_config(&peri_config)
@@ -135,6 +142,7 @@ pub async fn run_print(
     let host_config = assemble_server_config(HostAssemblyInput {
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
+        config_source: config_source.clone(),
         permission_mode: shared_permission,
         thread_store: thread_store.clone(),
         cwd: cwd.clone(),

@@ -5,6 +5,8 @@
  * - 动态解析项目根目录，适配不同开发者环境
  */
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { TmuxTester, createTester } from "tui-tester";
 import type { ScreenCapture, TerminalSize } from "tui-tester";
@@ -182,17 +184,42 @@ async function waitForPeriReady(
  * 启动 peri TUI（通过 dev.sh）
  *
  * dev.sh 会 source .env 并运行 cargo run -p peri-tui
+ *
+ * HOME 隔离：默认注入临时 HOME（含空 .peri/settings.json），防止 e2e 会话
+ * 读取/污染用户真实 ~/.peri/settings.json（TUI 启动即可能触发配置保存，如
+ * daily color 落盘；此前仅 model-switch 测试隔离 HOME，其余 e2e 直接读
+ * 真实配置——真实配置曾因此被透传写入高危 meta_harness 全关字段导致功能
+ * 全部消失）。显式传入 env.HOME 的调用方（如 model-switch 预置测试配置）
+ * 保持原语义，不被覆盖。
  */
 export async function launchPeri(
   options: PeriLaunchOptions = {},
 ): Promise<TmuxTester> {
   const size = options.size ?? DEFAULT_SIZE;
 
+  const env: Record<string, string> = { ...(options.env ?? {}) };
+  let isoHome: string | undefined;
+  if (!env.HOME) {
+    isoHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-home-"));
+    const periDir = path.join(isoHome, ".peri");
+    fs.mkdirSync(periDir, { recursive: true });
+    fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
+    env.HOME = isoHome;
+    // 测试进程退出时清理临时 HOME（best-effort，不阻塞退出）
+    process.on("exit", () => {
+      try {
+        fs.rmSync(isoHome!, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors
+      }
+    });
+  }
+
   const tester = new TmuxTester({
     command: [DEV_SH],
     size,
     cwd: PROJECT_ROOT,
-    env: options.env ?? {},
+    env,
     debug: options.debug ?? false,
     snapshotDir: path.join(PROJECT_ROOT, "e2e", "recordings"),
   });

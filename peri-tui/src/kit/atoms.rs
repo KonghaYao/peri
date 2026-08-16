@@ -398,6 +398,11 @@ pub static THREAD_LOAD_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
 > = OnceLock::new();
+/// 配置源句柄（读写路径决策的唯一事实源）：启动早期 `ConfigSource::load_lenient`
+/// 构建一次，TUI 与 ACP 共享同一 `Arc`；所有保存经
+/// [`crate::config::save_effective`] 走此句柄。
+pub static CONFIG_SOURCE_HANDLE: OnceLock<std::sync::Arc<crate::config::ConfigSource>> =
+    OnceLock::new();
 /// TUI 渲染配置共享句柄（仅 UI 字段，与 PERI_CONFIG_HANDLE 独立）
 pub static TUI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::TuiConfig>>,

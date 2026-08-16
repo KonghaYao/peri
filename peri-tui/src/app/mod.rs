@@ -33,6 +33,9 @@ pub struct App {
     pub global_ui: GlobalUiState,
     /// 应用焦点状态（true=聚焦，false=失焦）
     pub focused: bool,
+    /// 配置源（读写路径决策的唯一事实源；TUI 面板保存与 ACP persist_config
+    /// 共享同一 `Arc`，见 [`crate::config::ConfigSource`]）
+    pub config_source: std::sync::Arc<crate::config::ConfigSource>,
     /// ACP client — communicates with the ACP server via in-memory transport.
     /// Initialized after App construction in run_app(); None until `set_acp_client` is called.
     pub acp_client: Option<AcpTuiClient>,
@@ -49,8 +52,11 @@ impl App {
         // 工具卡片头行路径精简用（进程生命周期内不变）
         crate::truncate::set_display_cwd(cwd.clone());
 
-        // 优先从 ~/.peri/settings.json 加载配置，失败时 fallback 到环境变量
-        let peri_config = crate::config::load().ok();
+        // 配置源：启动时一次性探测「全局 + 工作区」布局（P0 分层语义——
+        // 加载与保存共享同一路径决策）；解析失败按空配置继续（容错，与
+        // 迁移前 `load().ok()` 行为一致），回退环境变量。
+        let config_source = std::sync::Arc::new(crate::config::ConfigSource::load_lenient());
+        let peri_config = Some(config_source.loaded_merged());
 
         let lc = crate::i18n::LcRegistry::new(
             peri_config
@@ -112,6 +118,7 @@ impl App {
             services,
             global_ui: GlobalUiState::new(),
             focused: true,
+            config_source,
             acp_client: None,
         })
     }
@@ -148,14 +155,15 @@ impl App {
         });
     }
 
-    /// 保存配置：优先写入 override 路径（测试用），否则写入全局路径
+    /// 保存配置：优先写入 override 路径（测试用），否则写回当前生效层
+    /// （路径决策在 ConfigSource 加载时确定，见 [`crate::config::save_effective`]）
     pub fn save_config(
         cfg: &PeriConfig,
         override_path: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
         match override_path {
             Some(path) => crate::config::save_to(cfg, path),
-            None => crate::config::save(cfg),
+            None => crate::config::save_effective(cfg),
         }
     }
 

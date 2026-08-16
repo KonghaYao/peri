@@ -151,7 +151,9 @@ pub struct AcpServerConfig {
     /// 3.0 批 2：事件发射（`publish_event`）/ 执行发起（`run_session`）亦经此宿主。
     pub controller: Arc<peri_controller::Controller>,
     pub langfuse_session: Option<Arc<peri_controller::langfuse::LangfuseSession>>,
-    pub config_path: std::path::PathBuf,
+    /// 配置源（读写路径决策的唯一事实源；`persist_config` 经此写回生效层，
+    /// 与加载共享同一路径决策，见 `provider::store::ConfigSource`）。
+    pub config_source: Arc<crate::provider::ConfigSource>,
     /// 共享 SessionManager：用于支撑 cascade cancel 子 agent 与 goal_state。
     ///
     /// TUI 本地仍维护 SessionState（history/frozen/agent_pool 等），但 SubAgent

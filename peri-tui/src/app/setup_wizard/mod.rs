@@ -436,7 +436,7 @@ pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::Per
         merged.config.language = Some(lang);
     }
 
-    crate::config::save(&merged)?;
+    crate::config::save_effective(&merged)?;
     Ok(merged)
 }
 

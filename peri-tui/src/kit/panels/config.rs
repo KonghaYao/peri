@@ -1,7 +1,8 @@
 //! ratatui-kit ConfigPanel component.
 //!
 //! H1a（Iteration 14）：从 PERI_CONFIG_HANDLE 读取真实 PeriConfig，操作时
-//! write + 调用 config::save 持久化到 ~/.peri/settings.json。permission_mode
+//! write + 调用 config::save_effective 持久化到当前生效层（全局或工作区，
+//! 路径决策由 ConfigSource 加载时确定）。permission_mode
 //! 通过 PERMISSION_MODE_HANDLE 写运行时 SharedPermissionMode（非持久化——
 
 use crate::app::panel_types::PanelKind;
@@ -396,7 +397,7 @@ fn activate_row(row: usize, forward: bool) {
                     tui_snapshot.sync_to_extra(&mut peri.config.extra);
                     let cfg_snapshot = peri.clone();
                     drop(peri);
-                    match crate::config::save(&cfg_snapshot) {
+                    match crate::config::save_effective(&cfg_snapshot) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
@@ -433,7 +434,7 @@ fn activate_row(row: usize, forward: bool) {
             // drop guard before save（save 借 &cfg）
             let cfg_snapshot = cfg.clone();
             drop(cfg);
-            match crate::config::save(&cfg_snapshot) {
+            match crate::config::save_effective(&cfg_snapshot) {
                 Ok(()) => {
                     *NOTIFICATION.state().write() = Some(Notification {
                         message: i18n::tr("config-saved").to_string(),
@@ -477,7 +478,7 @@ fn activate_row(row: usize, forward: bool) {
                     tui_snapshot.sync_to_extra(&mut peri.config.extra);
                     let snap = peri.clone();
                     drop(peri);
-                    match crate::config::save(&snap) {
+                    match crate::config::save_effective(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
@@ -503,7 +504,7 @@ fn activate_row(row: usize, forward: bool) {
                     cfg.config.language = Some(new_val.to_string());
                     let snap = cfg.clone();
                     drop(cfg);
-                    match crate::config::save(&snap) {
+                    match crate::config::save_effective(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
@@ -531,7 +532,7 @@ fn activate_row(row: usize, forward: bool) {
                     cfg.config.active_alias = new_val.to_string();
                     let snap = cfg.clone();
                     drop(cfg);
-                    match crate::config::save(&snap) {
+                    match crate::config::save_effective(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),
@@ -574,7 +575,7 @@ fn activate_row(row: usize, forward: bool) {
                     tui_snapshot.sync_to_extra(&mut peri.config.extra);
                     let snap = peri.clone();
                     drop(peri);
-                    match crate::config::save(&snap) {
+                    match crate::config::save_effective(&snap) {
                         Ok(()) => {
                             *NOTIFICATION.state().write() = Some(Notification {
                                 message: i18n::tr("config-saved").to_string(),

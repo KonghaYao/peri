@@ -139,7 +139,14 @@ fn make_server_config(
         thread_store: arc_thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(arc_thread_store)),
         langfuse_session: None,
-        config_path: tmp.path().join("test_config.json"),
+        config_source: Arc::new(
+            // 空 cwd（无工作区配置）+ 显式全局路径：persist_config 写回该路径
+            crate::provider::ConfigSource::load_at(
+                &tmp.path().join("empty-cwd"),
+                tmp.path().join("test_config.json"),
+            )
+            .unwrap(),
+        ),
         session_manager,
     }
 }
