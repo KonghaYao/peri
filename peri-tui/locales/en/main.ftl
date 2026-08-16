@@ -873,7 +873,7 @@ panel-mcp-pool-label =   MCP Pool:
 panel-mcp-connected =    { $connected }/{ $total } connected
 panel-mcp-empty =   No MCP servers configured
 panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
-panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }  skills: { $skills }
 panel-mcp-needs-auth =  [needs auth]
 panel-mcp-oauth-hint =   Enter: open auth detail  |  Esc: close
 # MCP panel detail view (OAuth authorize entry)

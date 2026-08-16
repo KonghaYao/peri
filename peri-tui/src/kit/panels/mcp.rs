@@ -8,10 +8,13 @@
 //! 详情视图，详情里选 [ 授权 ] 按钮（Enter/鼠标点击）才触发 mcp/oauth_start
 //! RPC → host 异步授权 → 弹出 OAuthPopup；[ 返回 ] 或 Esc 回列表。
 
+use std::collections::HashMap;
+
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, LANG_VERSION, MCP_SERVERS, McpServerSummary, SERVICE_SNAPSHOT,
+    ACP_CLIENT_HANDLE, AVAILABLE_SLASH_COMMANDS, LANG_VERSION, MCP_SERVERS, McpServerSummary,
+    SERVICE_SNAPSHOT,
 };
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, left_down};
@@ -51,6 +54,28 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let connected_total = snap_store.read().mcp.connected;
     let config_total = snap_store.read().mcp.total;
     let _ = snap_store;
+    // 每 server 已注入的 MCP skill 命令数（决策 1：命令面 fullname =
+    // `{server}:{skill}`，来自 available_commands_update 投影；discovery
+    // 完成 → 注册表 on_change → 广播 → 本 atom 自动刷新，无需轮询）。
+    // 命令面首段 = server 名末段小写（mcp_source_key 派生，与 host 侧
+    // 同源），查询时按同规则归一。
+    let cmd_store = hooks.use_atom(&AVAILABLE_SLASH_COMMANDS);
+    let skills_by_server: HashMap<String, usize> = {
+        let mut m: HashMap<String, usize> = HashMap::new();
+        for entry in cmd_store.read().iter() {
+            if let Some((server, _)) = entry.fullname.split_once(':') {
+                *m.entry(server.to_string()).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+    let _ = cmd_store;
+    let mcp_domain_key = |name: &str| -> String {
+        name.rsplit_once(':')
+            .map(|(_, n)| n)
+            .unwrap_or(name)
+            .to_lowercase()
+    };
     let _ = hooks.use_atom(&LANG_VERSION);
 
     // 视图状态：List ⇄ Detail（OAuth 授权入口）
@@ -284,6 +309,15 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 FluentValue::from(s.transport.as_str()),
                             ),
                             ("count".to_string(), FluentValue::from(s.tools_count as i64)),
+                            (
+                                "skills".to_string(),
+                                FluentValue::from(
+                                    skills_by_server
+                                        .get(&mcp_domain_key(&s.name))
+                                        .copied()
+                                        .unwrap_or(0) as i64,
+                                ),
+                            ),
                         ],
                     ),
                     Style::new().fg(theme_def.read().semantic.text.dim),

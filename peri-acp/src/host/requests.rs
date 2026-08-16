@@ -248,6 +248,12 @@ pub(crate) async fn handle_request(
             )
             .await;
 
+            // 新会话预热 MCP skill 发现（决策 B 扩展）：chain 首 turn 装配前
+            // 即 spawn 发现——/clear 后面板无需等首轮消息即有 mcp 命令。
+            // 幂等（Started 去重）；pool/registry 缺失或连接中 → 空跑，
+            // 由首 turn 装配与连接完成事件兜底。
+            prewarm_session_mcp_discovery(cfg, &session_id);
+
             // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
@@ -1462,6 +1468,47 @@ pub(crate) async fn handle_request(
 
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
+}
+
+/// 新会话 MCP skill 发现预热（决策 B 扩展）：session/new 完成时挂接连接
+/// 事件 notifier + 触发幂等发现，chain 首 turn 装配前即可开始。任何组件
+/// 缺失（pool 未装配 / registry 缺失）→ 空跑返回，由首 turn 装配兜底；
+/// cancel 持 session token，会话关闭即早退。notifier 无 ExecutorEvent 通道
+/// （通知展示由首 turn 装配覆盖为完整版），连接完成事件在此即触发发现。
+fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, session_id: &str) {
+    let Some(pool) = cfg.mcp_pool.clone() else {
+        return;
+    };
+    let Ok(pool) = pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() else {
+        return;
+    };
+    let Some(registry) = cfg.session_manager.mcp_skill_registry_for(session_id) else {
+        return;
+    };
+    let Some(command_registry) = cfg.session_manager.command_registry_for(session_id) else {
+        return;
+    };
+    let Some(cancel) = cfg
+        .session_manager
+        .inner_sessions()
+        .get(session_id)
+        .map(|s| s.cancel_token.clone())
+    else {
+        return;
+    };
+    peri_middlewares::mcp::middleware::attach_connection_notifier(
+        &pool,
+        Some(&registry),
+        Some(&command_registry),
+        &cancel,
+        None,
+    );
+    peri_middlewares::mcp::middleware::prewarm_discovery(
+        &pool,
+        &registry,
+        &command_registry,
+        &cancel,
+    );
 }
 
 fn require_rewind_cap(caps: &PeriCaps) -> Result<(), AcpError> {

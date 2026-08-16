@@ -875,6 +875,39 @@ impl McpClientPool {
         *self.notifier.write() = Some(notifier);
     }
 
+    /// 初始化收口后补发初始连接通知（仅 notifier 回调，不进
+    /// `pending_changes`——初始连接概览由首 turn 的 `first_turn_reminder`
+    /// 覆盖，不重复注入模型上下文）。
+    ///
+    /// 背景：`run_initialize` 直接插入 Connected handle（不经过
+    /// [`Self::record_status_change`]），且 `mark_initialized` 在全部连接
+    /// 之后才置位——初始化期间的连接事件永远不产生 notifier 调用。
+    /// 装配面 / session 预热挂载的连接事件 notifier
+    /// （`attach_connection_notifier`）因此收不到初始连接，只有重连 /
+    /// OAuth 完成（`mark_initialized` 之后的 `record_status_change`）才能
+    /// 触发。本方法在初始化收口时补发一次，使「刚进入、未说话」场景下
+    /// 连接完成的 server 也能立即驱动 skill 发现。
+    ///
+    /// 锁序：先持 clients 读锁收集文本（短临界区），再持 notifier 读锁
+    /// 逐条回调。回调可能重入 pool 读锁（`run_ensure_discovery`）——
+    /// parking_lot 读锁可重入，与 `record_status_change` 锁内调用先例一致。
+    pub fn notify_initial_connections(&self) {
+        let texts: Vec<String> = {
+            let clients = self.clients.read();
+            clients
+                .values()
+                .filter(|h| matches!(h.status, ClientStatus::Connected))
+                .map(|h| status_change_text(&h.name, &h.status, h.tools.len()))
+                .collect()
+        };
+        let notifier_guard = self.notifier.read();
+        if let Some(notifier) = notifier_guard.as_ref() {
+            for text in texts {
+                notifier(&text);
+            }
+        }
+    }
+
     /// 取出待注入的状态变化文本（McpMiddleware::before_model 调用；恰好一次）。
     pub(crate) fn drain_pending_changes(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_changes.lock())

@@ -672,6 +672,151 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
     assert_eq!(state.messages().len(), 0, "断连清理静默");
 }
 
+/// 会话预热（决策 B 扩展，审查会话生命周期）：`prewarm_discovery` 不装配
+/// chain 即触发幂等发现——新会话（/clear）在首 turn 前命令面即可获得
+/// 条目；重复预热（Started/Discovered 去重）零动作、不触发 on_change。
+#[tokio::test]
+async fn prewarm_discovery_triggers_idempotent_discovery() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cb_counter = Arc::clone(&counter);
+    cmd_reg.set_on_change(Some(Arc::new(move || {
+        cb_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })));
+
+    // 模拟 session/new 路径（无 middleware 实例）：预热 → 发现任务
+    // （peer=None）空回写落定。
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：srv:hello 入投影
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "完成回写应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "预热后命令面应含 srv:hello（无需 before_agent）"
+    );
+    let after_first = counter.load(std::sync::atomic::Ordering::SeqCst);
+
+    // 重复预热幂等：已 Discovered → 不重扫、不触发 on_change。
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        after_first,
+        "重复预热零动作"
+    );
+}
+
+/// 连接完成事件（决策 B，session/new 窗口期）：notifier 挂接后，Connected
+/// 状态变化即触发幂等发现——「装配时连接未完成」场景在首 turn 前即被
+/// 补偿（无 chain、无 before_agent）。notify_tx=None 仅发现触发。
+#[tokio::test]
+async fn attach_connection_notifier_triggers_discovery_on_connected() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    attach_connection_notifier(
+        &pool,
+        Some(&reg),
+        Some(&cmd_reg),
+        &AgentCancellationToken::new(),
+        None,
+    );
+
+    // 模拟 session/new 后连接完成：pool 初始化完成 + 状态变更广播
+    // （record_status_change → notifier → run_ensure_discovery）。
+    // 注意 record_status_change 要求 initialized + old 为 Some 且状态
+    // 确实变化（client.rs:854-869），故插入 Connected 前先置旧态。
+    pool.mark_initialized();
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    pool.record_status_change("srv", Some(&ClientStatus::Disconnected));
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：连接事件补偿路径下命令面直接可得。
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "连接事件补偿应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "连接完成后面板即可路由 srv:hello（无需首 turn）"
+    );
+}
+
+/// 初始连接补发（决策 B 扩展）：`run_initialize` 收口时
+/// `notify_initial_connections` 为每个 Connected server 补发一次连接
+/// 通知——初始化期间的连接事件不经过 `record_status_change`
+/// （`run_initialize` 直接插入 Connected handle），连接事件 notifier
+/// 需靠收口补发驱动「刚进入、未说话」时的 skill 发现。
+#[tokio::test]
+async fn notify_initial_connections_triggers_discovery_on_startup() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    attach_connection_notifier(
+        &pool,
+        Some(&reg),
+        Some(&cmd_reg),
+        &AgentCancellationToken::new(),
+        None,
+    );
+
+    // 模拟 run_initialize：直接插入 Connected handle（不调用
+    // record_status_change——初始连接事件不产生通知）。
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    pool.notify_initial_connections();
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：补发路径下命令面直接可得。
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "初始化补发应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "补发后面板即可路由 srv:hello（无需首 turn）"
+    );
+}
+
 /// 重连顺序性（Phase 6 A5 验收核心）：连接 → 发现 → 注册（投影含
 /// `demo:hello`）→ 断连（投影收缩）→ 重连（新 handle）→ 重扫完成前
 /// 投影**不含**新条目（`Started → Discovered` 不占位）→ 完成回写（投影

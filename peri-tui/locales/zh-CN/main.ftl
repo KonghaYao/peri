@@ -871,7 +871,7 @@ panel-mcp-pool-label =   MCP Pool:
 panel-mcp-connected =    { $connected }/{ $total } 已连接
 panel-mcp-empty =   暂未配置 MCP 服务器
 panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
-panel-mcp-server-detail =      transport: { $transport }  tools: { $count }
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }  skills: { $skills }
 panel-mcp-needs-auth =  [需要授权]
 panel-mcp-oauth-hint =   Enter: 进入授权详情  |  Esc: 关闭
 # MCP 面板详情视图（OAuth 授权入口）

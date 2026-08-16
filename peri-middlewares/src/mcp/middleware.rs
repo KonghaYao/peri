@@ -171,6 +171,61 @@ pub(crate) fn run_ensure_discovery(
     }
 }
 
+/// session/new 预热入口（决策 B 扩展，审查会话生命周期）：不装配 chain
+/// 即可触发幂等发现——新会话（/clear）在首 turn 装配前即 spawn 发现，
+/// 面板无需等首轮消息即有 mcp 命令。幂等语义与装配面一致（Started 去重 /
+/// Completed 跳过 / 重连 ptr_eq）；已连接 server 立即发现，连接中的
+/// server 空跑，由首 turn 装配与连接完成事件兜底。cancel 持调用方 session
+/// token，session 关闭即早退。
+pub fn prewarm_discovery(
+    pool: &Arc<McpClientPool>,
+    registry: &Arc<McpSkillRegistry>,
+    command_registry: &Arc<CommandRegistry>,
+    cancel: &AgentCancellationToken,
+) {
+    run_ensure_discovery(pool, Some(registry), Some(command_registry), cancel);
+}
+
+/// 挂接 pool 连接完成事件（决策 B）：Connected 状态变化 → 触发幂等发现，
+/// 补偿「装配时连接尚未完成 / 重连 / OAuth 授权后连接」的场景。装配面
+/// 与 session/new 预热面共用（覆盖语义：后挂者生效，持其 cancel 生命周期）。
+///
+/// `notify_tx`：装配面传入 session 事件通道以展示连接通知（SystemNotification）；
+/// session/new 预热面无 ExecutorEvent 通道传 None（仅发现触发；首 turn 装配
+/// 时覆盖为完整版，窗口期行为与 notifier 未挂一致，无退化）。
+pub fn attach_connection_notifier(
+    pool: &Arc<McpClientPool>,
+    registry: Option<&Arc<McpSkillRegistry>>,
+    command_registry: Option<&Arc<CommandRegistry>>,
+    cancel: &AgentCancellationToken,
+    notify_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
+) {
+    let discovery_pool = Arc::clone(pool);
+    let discovery_registry = registry.cloned();
+    let discovery_cmd = command_registry.cloned();
+    let discovery_cancel = cancel.clone();
+    pool.set_notifier(Box::new(move |text: &str| {
+        if let Some(tx) = notify_tx.as_ref() {
+            let _ = tx.send(
+                peri_agent::agent::events::ExecutorEvent::SystemNotification {
+                    text: text.to_string(),
+                    level: "info".to_string(),
+                },
+            );
+        }
+        // 文本匹配 Connected 固定形态（status_change_text 唯一来源，
+        // `connected (` 后缀稳定；Failed reason 含 " connected " 不误触发）。
+        if text.contains(" connected (") {
+            run_ensure_discovery(
+                &discovery_pool,
+                discovery_registry.as_ref(),
+                discovery_cmd.as_ref(),
+                &discovery_cancel,
+            );
+        }
+    }));
+}
+
 impl McpMiddleware {
     /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
     ///

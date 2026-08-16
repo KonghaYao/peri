@@ -270,6 +270,14 @@ impl McpClientPool {
         // 初始化收口：此后状态变化才产生上下线通知（初始连接结果由
         // 会话首 turn 的 first_turn_reminder 概览覆盖，不逐条推送）。
         pool.mark_initialized();
+        // 初始连接补发（决策 B 扩展）：mark_initialized 之后为每个已连接
+        // server 补发一次连接通知——`run_initialize` 直接插入 Connected
+        // handle，初始化期间的连接事件不产生 record_status_change，挂载
+        // 的连接事件 notifier（装配面 / session 预热）收不到初始连接。
+        // 补发使「刚进入、未说话」场景下连接完成的 server 立即驱动
+        // skill 发现（notifier 未挂载时零操作，由 session/new 预热发现
+        // 兜底——get_all_clients 已非空）。
+        pool.notify_initial_connections();
     }
 
     pub async fn initialize(
