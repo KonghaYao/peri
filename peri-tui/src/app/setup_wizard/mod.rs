@@ -53,7 +53,7 @@ impl SetupSource {
 
 /// Peri Code 免费服务快速配置（与 tavily-search/.peri/settings.json 中的
 /// provider 配置等同：公共网关、固定档位模型）。
-pub const PERI_FREE_BASE_URL: &str = "https://tavily.claude-code-best.win/peri-model";
+pub const PERI_FREE_BASE_URL: &str = "https://tavily.claude-code-best.win/peri-model/v1";
 pub const PERI_FREE_API_KEY: &str = "public";
 pub const PERI_FREE_PROVIDER_ID: &str = "peri";
 /// 顺序：fable → opus → sonnet → haiku
@@ -61,7 +61,7 @@ pub const PERI_FREE_MODEL_IDS: [&str; 4] = ["peri-fable", "peri-opus", "peri-son
 
 /// 构造 Peri Code 免费服务的 Provider 快速配置
 pub fn peri_free_provider() -> MigratedProvider {
-    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
+    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
     mp.provider_id = PERI_FREE_PROVIDER_ID.to_string();
     mp.base_url = PERI_FREE_BASE_URL.to_string();
     mp.api_key = PERI_FREE_API_KEY.to_string();

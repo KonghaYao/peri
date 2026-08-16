@@ -81,7 +81,7 @@ fn test_peri_free_provider_fields() {
     assert_eq!(mp.provider_id, "peri");
     assert_eq!(mp.base_url, PERI_FREE_BASE_URL);
     assert_eq!(mp.api_key, "public");
-    assert_eq!(mp.provider_type, ProviderType::Anthropic);
+    assert_eq!(mp.provider_type, ProviderType::OpenAiCompatible);
     assert_eq!(mp.aliases, PERI_FREE_MODEL_IDS.map(String::from));
     assert!(mp.selected, "免费服务应默认选中");
     assert!(mp.is_complete(), "免费服务配置应视为完整");
