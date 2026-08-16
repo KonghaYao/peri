@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,6 +12,27 @@ use peri_acp_types::{
     store::{CompactionLifecycle, ThreadStore},
     thread::{AgentStatus, ThreadId, ThreadMeta},
 };
+
+/// 进程内计数器：保证并发写同一目标时临时文件名唯一。
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 原子写入 JSON 文件：先写同目录唯一临时文件再 rename。
+///
+/// tokio `fs::write` 是「截断 + 写数据」两步（经 spawn_blocking 独立线程），
+/// 并发读方可能读到截断后的空文件/半写文件（EOF/JSON 解析失败）。
+/// rename 在同一文件系统内原子，读方永远看到旧完整文件或新完整文件。
+///
+/// 临时名必须唯一（pid + 计数器）：transcript 异步 writer 批量落库与
+/// `update_thread_status` 等会并发更新同一 meta.json——固定 tmp 名时，
+/// 先完成的 rename 会把 tmp 移走，后到的 rename 报 ENOENT
+/// （No such file or directory）。
+async fn atomic_write_json(path: &std::path::Path, content: &str) -> Result<()> {
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), n));
+    fs::write(&tmp, content).await?;
+    fs::rename(&tmp, path).await?;
+    Ok(())
+}
 
 /// 基于文件系统的 ThreadStore 实现
 ///
@@ -73,7 +95,7 @@ impl FilesystemThreadStore {
     async fn write_index(&self, metas: &[ThreadMeta]) -> Result<()> {
         fs::create_dir_all(&self.base_dir).await?;
         let json = serde_json::to_string_pretty(metas)?;
-        fs::write(self.index_path(), json).await?;
+        atomic_write_json(&self.index_path(), &json).await?;
         Ok(())
     }
 
@@ -97,7 +119,7 @@ impl ThreadStore for FilesystemThreadStore {
         let id = meta.id.clone();
         fs::create_dir_all(self.thread_dir(&id)).await?;
         let json = serde_json::to_string_pretty(&meta)?;
-        fs::write(self.meta_path(&id), json).await?;
+        atomic_write_json(&self.meta_path(&id), &json).await?;
         // 创建空的 messages.jsonl
         fs::write(self.messages_path(&id), b"").await?;
         self.upsert_index(&meta).await?;
@@ -166,7 +188,7 @@ impl ThreadStore for FilesystemThreadStore {
 
     async fn update_meta(&self, id: &ThreadId, meta: ThreadMeta) -> Result<()> {
         let json = serde_json::to_string_pretty(&meta)?;
-        fs::write(self.meta_path(id), json).await?;
+        atomic_write_json(&self.meta_path(id), &json).await?;
         self.upsert_index(&meta).await
     }
 
