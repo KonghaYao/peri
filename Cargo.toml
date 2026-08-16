@@ -12,7 +12,6 @@ members = [
     "langfuse-client",
     "peri-lsp",
     "peri-web-pty",
-    "agm",
     "peri-workflow",
 ]
 resolver = "2"

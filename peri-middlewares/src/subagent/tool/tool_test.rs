@@ -3472,8 +3472,9 @@ async fn test_resume_thread_id_parent_mismatch() {
     preset_resumable_thread(&store, &id, "fork", Some("some-other-parent"), Vec::new()).await;
 
     // 父 session：store().thread_id = "parent-uuid" ≠ meta.parent_thread_id
+    let work = dir.path().to_str().unwrap();
     let parent = peri_agent::session::Session::new(
-        Arc::from("/tmp/work"),
+        Arc::from(work),
         peri_agent::session::FrozenContext::builder().build(),
         Some("parent-uuid".into()),
     );
@@ -3904,8 +3905,9 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
 
     let store = make_fs_store(&dir);
     // 主 agent 会话 thread_id 固定（进程重启后 session_id 不变 → 父链校验跨进程成立，R-L3）
+    let work = dir.path().to_str().unwrap();
     let parent = peri_agent::session::Session::new(
-        Arc::from("/tmp/work"),
+        Arc::from(work),
         peri_agent::session::FrozenContext::builder().build(),
         Some("parent-uuid".into()),
     );
@@ -3922,7 +3924,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
                 "cwd": dir.path().to_str().unwrap(),
                 "prompt": "first task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            peri_agent::tools::ToolContext::new(&[], work),
         )
         .await
         .expect_err("首次执行应返回（Interrupted 错误）");
@@ -3942,9 +3944,9 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
         .invoke(
             serde_json::json!({
                 "resume_thread_id": id.clone(),
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": work,
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            peri_agent::tools::ToolContext::new(&[], work),
         )
         .await
         .expect("resume 应成功完成（parent 校验通过）");
