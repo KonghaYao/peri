@@ -29,7 +29,8 @@ function hasExpandedReasoning(text: string): boolean {
     (l, i) =>
       (l.includes("思考了") || l.includes("Thought")) &&
       i + 1 < lines.length &&
-      lines[i + 1].trimStart().startsWith("│"),
+      lines[i + 1].trimStart().startsWith("│") &&
+      lines[i + 1].trimStart().length > 1,
   );
 }
 

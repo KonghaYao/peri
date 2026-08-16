@@ -127,7 +127,13 @@ describe("scenarios: rewind v2 回退链路", () => {
 
       // ── Enter → 预算查询 ──
       await tester.sendKey("Enter");
-      await tester.sleep(1500);
+      // 预算查询通过异步 ACP 请求完成；固定 sleep 可能在结果到达前截图。
+      // 等待预算标题或执行态明确出现，再读取屏幕。
+      await tester.waitForPattern(/回退将撤销|Rewind will revert|正在回退|Rewinding/, {
+        timeout: 30_000,
+        interval: 500,
+        message: "等待 rewind 预算查询完成",
+      });
 
       const screenAfterEnter = await tester.getScreenText();
       if (/回退将撤销|Rewind will revert/.test(screenAfterEnter)) {

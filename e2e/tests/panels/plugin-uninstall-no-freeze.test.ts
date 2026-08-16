@@ -9,11 +9,25 @@
  * 屏幕仍变化"断言 UI 未被冻结。不依赖具体插件内容，无副作用。
  */
 import { describe, it, expect, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("panels: plugin uninstall no-freeze", () => {
   let tester: TmuxTester;
+  let testHome: string;
+
+  afterEach(async () => {
+    if (tester?.isRunning()) {
+      await tester.stop().catch(() => {});
+    }
+    if (testHome) {
+      fs.rmSync(testHome, { recursive: true, force: true });
+      testHome = "";
+    }
+  });
 
   afterEach(async () => {
     if (tester?.isRunning()) {
@@ -25,7 +39,35 @@ describe("panels: plugin uninstall no-freeze", () => {
     "详情页 Enter 卸载进入确认模式，UI 保持响应",
     { timeout: 90_000 },
     async () => {
-      tester = await launchPeri();
+      testHome = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-plugin-home-"));
+      fs.mkdirSync(path.join(testHome, ".peri"), { recursive: true });
+      fs.writeFileSync(
+        path.join(testHome, ".peri", "settings.json"),
+        JSON.stringify({ config: { language: "zh-CN" } }),
+      );
+      const pluginsDir = path.join(testHome, ".claude", "plugins");
+      const cacheDir = path.join(pluginsDir, "cache", "fixture-marketplace", "fixture-plugin", "1.0.0");
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pluginsDir, "installed_plugins.json"),
+        JSON.stringify({
+          version: 2,
+          plugins: [{
+            id: "fixture-plugin@fixture-marketplace",
+            name: "fixture-plugin",
+            marketplace: "fixture-marketplace",
+            version: "1.0.0",
+            scope: "user",
+            install_path: cacheDir,
+            origin: "peri",
+          }],
+        }),
+      );
+      fs.writeFileSync(
+        path.join(testHome, ".claude", "settings.json"),
+        JSON.stringify({ enabledPlugins: ["fixture-plugin@fixture-marketplace"] }),
+      );
+      tester = await launchPeri({ env: { HOME: testHome } });
 
       // ── 打开 plugin 面板 ──
       await sendPrompt(tester, "/plugin");

@@ -28,6 +28,8 @@ describe("scenarios: thread switch", () => {
       const base = await tester.getScreenText();
       await sendPrompt(tester, "hello");
       await waitForStableScreen(tester, 60_000, base);
+      // service_snapshot 每 2s 刷新线程列表；确保当前 turn 已写入 store。
+      await tester.sleep(2500);
 
       // 阶段 2：通过 /threads 命令打开历史面板
       await sendPrompt(tester, "/threads");

@@ -7,12 +7,57 @@
  * 注意：本测试依赖配置中的 locale 设置（当前为 zh-CN），Tab 文本使用中文。
  */
 import { describe, it, expect, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
 describe("panels: plugin", () => {
   let tester: TmuxTester;
+  let testHome: string;
+
+  function createChineseHome(): string {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "peri-e2e-plugin-home-"));
+    fs.mkdirSync(path.join(home, ".peri"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".peri", "settings.json"),
+      JSON.stringify({ config: { language: "zh-CN" } }),
+    );
+    const pluginsDir = path.join(home, ".claude", "plugins");
+    const marketplaceDir = path.join(pluginsDir, "marketplaces", "claude-plugins-official");
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginsDir, "known_marketplaces.json"),
+      JSON.stringify({
+        "claude-plugins-official": {
+          source: { source: "github", repo: "anthropics/claude-plugins-official" },
+          installLocation: marketplaceDir,
+          autoUpdate: true,
+          lastUpdated: "2026-08-16T00:00:00Z",
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(marketplaceDir, "marketplace.json"),
+      JSON.stringify({
+        name: "claude-plugins-official",
+        plugins: [{ name: "example-plugin", version: "1.0.0", description: "Fixture plugin" }],
+      }),
+    );
+    return home;
+  }
+
+  afterEach(async () => {
+    if (tester?.isRunning()) {
+      await tester.stop().catch(() => {});
+    }
+    if (testHome) {
+      fs.rmSync(testHome, { recursive: true, force: true });
+      testHome = "";
+    }
+  });
 
   afterEach(async () => {
     if (tester?.isRunning()) {
@@ -24,7 +69,8 @@ describe("panels: plugin", () => {
     "/plugin 打开面板，Tab 切换和 Marketplaces 列表正常显示",
     { timeout: 180_000 },
     async () => {
-      tester = await launchPeri();
+      testHome = createChineseHome();
+      tester = await launchPeri({ env: { HOME: testHome } });
 
       // ── 阶段 1：/plugin 打开插件面板 ──
       await sendPrompt(tester, "/plugin");
