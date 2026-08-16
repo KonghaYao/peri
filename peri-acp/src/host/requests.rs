@@ -879,9 +879,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let claude_dir = dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude");
+            let claude_dir = peri_middlewares::plugin::claude_home();
             let cache_dir = cfg.plugin_manager.cache_dir();
 
             let caps = cfg.session_manager.get_caps(session_id);
@@ -949,9 +947,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let claude_dir = dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude");
+            let claude_dir = peri_middlewares::plugin::claude_home();
 
             let caps = cfg.session_manager.get_caps(session_id);
 
@@ -1027,9 +1023,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let claude_dir = dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude");
+            let claude_dir = peri_middlewares::plugin::claude_home();
 
             let result = cfg
                 .plugin_manager
@@ -1113,9 +1107,7 @@ pub(crate) async fn handle_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let claude_dir = dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude");
+            let claude_dir = peri_middlewares::plugin::claude_home();
             let cache_dir = cfg.plugin_manager.cache_dir();
 
             let caps = cfg.session_manager.get_caps(session_id);

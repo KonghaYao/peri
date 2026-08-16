@@ -102,9 +102,17 @@ pub enum PluginConfigError {
     },
 }
 
-/// 返回 `~/.claude/` 根目录，不存在时返回 fallback（当前目录）
+/// 返回 `~/.claude/` 根目录，不存在时返回 fallback（当前目录）。
+///
+/// home 解析优先 `$HOME`（且要求绝对路径）：跨平台工具惯例，Windows 下
+/// git-bash 与 CI/测试注入（USERPROFILE 之外）都依赖 HOME 生效；
+/// `dirs_next::home_dir()` 在 Windows 2.0.0 读 Profile known-folder
+/// （SHGetKnownFolderPath），完全忽略 HOME/USERPROFILE 环境变量。
 pub fn claude_home() -> PathBuf {
-    dirs_next::home_dir()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(dirs_next::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
 }
