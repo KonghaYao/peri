@@ -39,6 +39,18 @@ pub struct SkillRoot {
     pub plugin_name: Option<String>,
 }
 
+/// Skill 资源绑定（仅 Mcp source 填写；本地 skill 为空）。
+///
+/// 对应 SEP-2640 `skills/list` / `skills/get` 条目 `resources[]` 的完整清单
+/// （非精选子集）：host 持有条目期间，读该 skill 的文件须 resolve 到所列
+/// URI；`digest` 为对应文件内容的 sha256（格式 `sha256:{64 位小写 hex}`），
+/// 读取面按它做内容绑定校验。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillResource {
+    pub uri: String,
+    pub digest: String,
+}
+
 /// Skill 元数据（来自 SKILL.md frontmatter）
 #[derive(Debug, Clone)]
 pub struct SkillMetadata {
@@ -53,6 +65,8 @@ pub struct SkillMetadata {
     pub origin: Option<SkillOrigin>,
     /// 已读入的 SKILL.md 全文（仅 Mcp source 填，本地为 None）
     pub content: Option<String>,
+    /// 技能资源绑定（仅 Mcp source 填——entry.resources 完整清单；本地为空）
+    pub resources: Vec<SkillResource>,
 }
 
 impl Default for SkillMetadata {
@@ -65,6 +79,7 @@ impl Default for SkillMetadata {
             plugin_name: None,
             origin: None,
             content: None,
+            resources: Vec::new(),
         }
     }
 }

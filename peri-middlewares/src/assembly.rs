@@ -14,6 +14,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use parking_lot::RwLock;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_agent::{
     agent::{events::AgentEventHandler, react::ReactLLM},
     interaction::{ChannelBroker, MultiplexBroker, UserInteractionBroker},
@@ -87,7 +88,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             plugin_loaded,
             hook_groups,
             session_start_source,
-            mcp_skill_registry: _,
+            mcp_skill_registry,
             cron_scheduler,
             mcp_pool,
             channel_state,
@@ -210,7 +211,14 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     parent_tools.push(tool);
                 }
                 if pool.has_resources() {
-                    parent_tools.push(Box::new(McpResourceTool::new(Arc::clone(pool))));
+                    parent_tools.push(Box::new(McpResourceTool::new(
+                        Arc::clone(pool),
+                        // 未装配 session 注册表（print 模式）→ 空注册表
+                        //（无条目 = 不校验）
+                        mcp_skill_registry
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(McpSkillRegistry::new())),
+                    )));
                 }
             }
         }

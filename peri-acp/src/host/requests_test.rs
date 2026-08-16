@@ -1193,6 +1193,8 @@ fn fake_mcp_skill_meta(server: &str, skill: &str) -> peri_acp_types::skills::Ski
             uri: format!("skill://{server}/{skill}/SKILL.md"),
         }),
         content: Some(format!("# Body of {skill}")),
+        // 测试 fixture：无 resources 绑定
+        resources: Vec::new(),
     }
 }
 

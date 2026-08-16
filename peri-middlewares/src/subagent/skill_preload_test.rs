@@ -37,6 +37,8 @@ fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> 
             uri: format!("skill://{server}/{skill}/SKILL.md"),
         }),
         content: Some(format!("# Hello\n\nBody of {skill}.\n")),
+        // 测试 fixture：无 resources 绑定
+        resources: Vec::new(),
     };
     reg.mark_discovery_started(server, handle.clone());
     reg.mark_discovery_completed(server, handle, vec![meta]);

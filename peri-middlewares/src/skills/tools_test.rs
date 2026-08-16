@@ -397,6 +397,8 @@ fn fake_mcp_skill(server: &str, skill: &str) -> SkillMetadata {
             uri: format!("skill://{server}/{skill}/SKILL.md"),
         }),
         content: Some(format!("# Hello\n\nBody of {skill}.\n")),
+        // 测试 fixture：无 resources 绑定
+        resources: Vec::new(),
     }
 }
 

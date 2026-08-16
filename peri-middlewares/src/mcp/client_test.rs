@@ -1,6 +1,7 @@
 //! Tests for client
 
 use super::*;
+use crate::mcp::oauth_flow::OAuthFailureKind;
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 use rmcp::model::SubscriptionFilter;
 
@@ -75,6 +76,7 @@ async fn test_remove_server() {
             oauth_status: OAuthStatus::default(),
             source: None,
             url: None,
+            skills_capable: false,
             channel_capable: false,
         }),
     );
@@ -95,6 +97,7 @@ async fn test_get_tools_resources() {
             oauth_status: OAuthStatus::default(),
             source: None,
             url: None,
+            skills_capable: false,
             channel_capable: false,
         }),
     );
@@ -224,5 +227,92 @@ async fn test_set_disabled_clears_subscription_tasks() {
         pool.clients.read().get("a").map(|c| c.status.clone()),
         Some(ClientStatus::Disabled),
         "handle 应标记为 Disabled"
+    );
+}
+
+#[test]
+fn test_oauth_flow_reservation_is_idempotent_and_rejects_competing_identity() {
+    let pool = McpClientPool::new_pending();
+    assert_eq!(
+        pool.reserve_oauth_flow("docs", "flow-1"),
+        OAuthStartDisposition::Started
+    );
+    assert_eq!(
+        pool.reserve_oauth_flow("docs", "flow-1"),
+        OAuthStartDisposition::AlreadyActive
+    );
+    assert_eq!(
+        pool.reserve_oauth_flow("docs", "flow-2"),
+        OAuthStartDisposition::Conflict {
+            active_flow_id: "flow-1".to_string()
+        }
+    );
+    assert_eq!(pool.active_oauth_flow("docs").as_deref(), Some("flow-1"));
+}
+
+#[test]
+fn test_oauth_late_release_cannot_clear_newer_flow() {
+    let pool = McpClientPool::new_pending();
+    assert_eq!(
+        pool.reserve_oauth_flow("docs", "flow-new"),
+        OAuthStartDisposition::Started
+    );
+    pool.release_oauth_flow("docs", "flow-old");
+    assert_eq!(
+        pool.active_oauth_flow("docs").as_deref(),
+        Some("flow-new"),
+        "晚到旧终态不得释放当前 flow"
+    );
+}
+
+#[test]
+fn test_oauth_cancel_requires_exact_flow_identity() {
+    let pool = McpClientPool::new_pending();
+    assert_eq!(
+        pool.reserve_oauth_flow("docs", "flow-1"),
+        OAuthStartDisposition::Started
+    );
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    assert!(pool.register_oauth_callback("docs", "flow-1", tx));
+    assert!(!pool.cancel_oauth_flow("flow-other"));
+    assert_eq!(pool.active_oauth_flow("docs").as_deref(), Some("flow-1"));
+    assert!(pool.cancel_oauth_flow("flow-1"));
+    assert_eq!(
+        pool.active_oauth_flow("docs").as_deref(),
+        Some("flow-1"),
+        "取消请求只关闭 callback，须等精确终态再释放 reservation"
+    );
+    pool.release_oauth_flow("docs", "flow-1");
+    assert!(pool.active_oauth_flow("docs").is_none());
+}
+
+#[tokio::test]
+async fn test_oauth_preflight_failure_emits_one_exact_terminal_event() {
+    let pool = Arc::new(McpClientPool::new_pending());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_clone = observed.clone();
+    pool.set_oauth_event_callback(move |event| {
+        if let OAuthFlowEvent::AuthorizationFailed {
+            flow_id,
+            server_name,
+            failure_kind,
+            ..
+        } = event
+        {
+            observed_clone
+                .lock()
+                .unwrap()
+                .push((flow_id, server_name, failure_kind));
+        }
+    });
+    let result = pool.start_oauth_flow("flow-1", "missing", false).await;
+    assert!(matches!(result, Err(McpPoolError::NotConnected { .. })));
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![(
+            "flow-1".to_string(),
+            "missing".to_string(),
+            OAuthFailureKind::Internal
+        )]
     );
 }

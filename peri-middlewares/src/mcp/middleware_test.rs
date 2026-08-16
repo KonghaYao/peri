@@ -45,6 +45,7 @@ fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
         oauth_status: OAuthStatus::default(),
         source: None,
         url: None,
+        skills_capable: false,
         channel_capable: false,
     })
 }
@@ -67,6 +68,7 @@ fn test_overview_mixed_statuses() {
             oauth_status: OAuthStatus::default(),
             source: None,
             url: None,
+            skills_capable: false,
             channel_capable: false,
         }),
     );
@@ -81,6 +83,7 @@ fn test_overview_mixed_statuses() {
             oauth_status: OAuthStatus::default(),
             source: None,
             url: None,
+            skills_capable: false,
             channel_capable: false,
         }),
     );
@@ -348,6 +351,7 @@ fn insert_skill_handle(
         oauth_status: OAuthStatus::default(),
         source: None,
         url: None,
+        skills_capable: false,
         channel_capable: false,
     });
     pool.clients
