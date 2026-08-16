@@ -14,7 +14,7 @@ use crate::kit::slash_completion::SlashActionKind;
 /// 投影条目（`available_commands_update.availableCommands[]` 元素）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandEntry {
-    /// 唯一键：core:compact / ui:history / mcp:demo:hello。
+    /// 唯一键：core:compact / ui:history / demo:hello（决策 1：MCP server 命令）。
     pub fullname: String,
     /// 投影 kind（复用渲染枚举——数据/渲染同源，消除两套枚举映射）。
     pub kind: SlashActionKind,
@@ -124,7 +124,7 @@ pub fn parse_projection_kind(s: &str) -> Option<SlashActionKind> {
 /// 分级展示名（「权威词法」：display 即 lexical——用户提交的文本与显示一致）。
 ///
 /// level 1 → 最右冒号后段裸名（`core:compact` → `compact`）；level 2 → 全名
-/// 原样（`mcp:demo:hello`）。无冒号 / 非 1 级一律返回全名原样，保证提交文本
+/// 原样（`demo:hello`）。无冒号 / 非 1 级一律返回全名原样，保证提交文本
 /// 与显示一致。
 pub fn display_name(fullname: &str, level: u8) -> String {
     if level == 1 {

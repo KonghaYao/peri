@@ -461,6 +461,9 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     // 用；skill 命中时原文含 `/skill-name` token，SkillPreloadMiddleware
     // 自动检测分支依赖原文，命令不被吞）。
     ctx.raw_text = req.content.text_content();
+    // 拦截层存在 agent 管线：`CommandOutcome::Inject` 原文会替换用户消息进
+    // 管线（McpSkillReleaser 依此放行，决策 A2；RPC 路径恒 false）。
+    ctx.supports_inject = true;
     ctx.parsed_args = parsed_args;
     ctx.thread_store = req.thread_store;
     ctx.thread_id = req.thread_id;

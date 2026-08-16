@@ -485,10 +485,31 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                                 ctx.cancel.clone(),
                             )
                             .with_command_registry(command_registry.clone());
+                        // 决策 B：装配后立即触发幂等发现（覆盖「装配时连接已
+                        // 完成」的场景——已连接 server 即刻 spawn 发现，命令
+                        // 面/元数据面无需等首轮 before_agent；Started 去重 /
+                        // Completed 跳过 / Arc::ptr_eq 重连检测保证幂等）。
+                        mw.ensure_discovery();
                         // 注入状态变化通知：经 session 事件通道发布
                         // system-notification（TUI 通知面显示）。pool 全局共享，
                         // 多 session 时以最后装配的 session 通道为准。
                         let tx = ctx.bg_event_tx.clone();
+                        // 连接完成事件（决策 B）：Connected 状态变化经
+                        // record_status_change → notifier 补偿触发发现——
+                        // 覆盖重连/OAuth 授权后连接的场景。注意两个边界：
+                        // (1) 补偿以最后装配 session 的 cancel 生命周期为限
+                        // （cancel 后入口早退，发现延迟到其他 session 的
+                        // before_agent）；(2) 初始慢连接（如 HTTP 30s 超时）
+                        // 在装配时未就绪，且 mark_initialized 前的状态变化
+                        // 不通知——该场景由 before_agent 幂等增量兜底，三
+                        // 挂点（装配后立即/连接事件/before_agent）覆盖全
+                        // 时序。文本匹配 Connected 固定形态（status_change_text
+                        // 唯一来源，`connected (` 后缀稳定；Failed reason 含
+                        // " connected " 也不会误触发）。
+                        let discovery_pool = Arc::clone(pool);
+                        let discovery_registry = ctx.mcp_skill_registry.clone();
+                        let discovery_cmd = command_registry.clone();
+                        let discovery_cancel = ctx.cancel.clone();
                         pool.set_notifier(Box::new(move |text: &str| {
                             let _ = tx.send(
                                 peri_agent::agent::events::ExecutorEvent::SystemNotification {
@@ -496,6 +517,14 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                                     level: "info".to_string(),
                                 },
                             );
+                            if text.contains(" connected (") {
+                                crate::mcp::middleware::run_ensure_discovery(
+                                    &discovery_pool,
+                                    discovery_registry.as_ref(),
+                                    discovery_cmd.as_ref(),
+                                    &discovery_cancel,
+                                );
+                            }
                         }));
                         chain.add(Box::new(mw));
                     }

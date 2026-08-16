@@ -11,6 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use peri_acp_types::mcp_skills::mcp_skill_name;
+use peri_acp_types::skills::SkillOrigin;
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
@@ -217,10 +218,31 @@ fn find_and_load_skill(
     // MCP 别名分支（DD-3）：`<server>:<skill>` → `mcp__<server>__<skill>`。
     // 在既有 rsplit_once 剥前缀**之前**同构查找缓存（大小写无关）；命中即
     // 加载返回。未命中继续走下方磁盘路径——本地 plugin 命名空间语义不变。
+    // 兜底（决策 1 + A3）：plugin 多冒号 server key（`plugin:{plugin}:{server}`）
+    // 下别名按原名拼名必 miss——按「server 名末段小写 / 完整名」匹配
+    // SkillOrigin::Mcp 的 server（与命令面 fullname 首段派生、SkillPreload
+    // 的 registry find_by_command 同构）。
     if let Some((prefix, suffix)) = skill_name.rsplit_once(':') {
         if !suffix.is_empty() {
-            let mcp_full = mcp_skill_name(prefix, suffix).to_lowercase();
+            let prefix = prefix.to_lowercase();
+            let mcp_full = mcp_skill_name(&prefix, suffix).to_lowercase();
             if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == mcp_full) {
+                return load_skill_content(skill);
+            }
+            let want_skill = suffix.to_lowercase();
+            if let Some(skill) = skills.iter().find(|s| match &s.origin {
+                Some(SkillOrigin::Mcp { server, .. }) => {
+                    let trail = server
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(server.as_str())
+                        .to_lowercase();
+                    (trail == prefix || server.to_lowercase() == prefix)
+                        && s.name.to_lowercase()
+                            == mcp_skill_name(server, &want_skill).to_lowercase()
+                }
+                _ => false,
+            }) {
                 return load_skill_content(skill);
             }
         }

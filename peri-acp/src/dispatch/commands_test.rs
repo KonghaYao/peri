@@ -305,7 +305,7 @@ fn test_update_meta_injects_aliases_category_args() {
 }
 
 /// Phase 6 D1 断言重写：投影 = snapshot 全量（内置 + 本地 + MCP + 插件条目），
-/// 不做按名去重——`core:hello` 与 `mcp:demo:hello` **共存**（键空间不相交 =
+/// 不做按名去重——`core:hello` 与 `demo:hello` **共存**（键空间不相交 =
 /// 键唯一性而非按名去重）；条目级 periKind / periLevel 正确；skillNames 仅
 /// core 域 Skill 条目；mcpSkillNames 键退役（任何情况不出现）。
 #[test]
@@ -313,8 +313,8 @@ fn test_update_projects_snapshot_entries_with_kinds() {
     let entries: Vec<Arc<RouteEntry>> = vec![
         core_entry("core:hello", CommandEntryKind::Command),
         core_entry("core:my-skill", CommandEntryKind::Skill),
-        mcp_entry("mcp:demo:hello", "demo"),
-        mcp_entry("mcp:demo:world", "demo"),
+        mcp_entry("demo:hello", "demo"),
+        mcp_entry("demo:world", "demo"),
         plugin_entry("plugin:ecc:deploy", "ecc"),
     ];
     let caps = PeriCaps::all_enabled();
@@ -331,17 +331,17 @@ fn test_update_projects_snapshot_entries_with_kinds() {
     for expected in [
         "core:hello",
         "core:my-skill",
-        "mcp:demo:hello",
-        "mcp:demo:world",
+        "demo:hello",
+        "demo:world",
         "plugin:ecc:deploy",
     ] {
         assert!(names.contains(&expected), "{expected} 应投影: {names:?}");
     }
-    // 'core:hello' 与 'mcp:demo:hello' 共存：同尾名不同键空间，互不互斥
+    // 'core:hello' 与 'demo:hello' 共存：同尾名不同键空间，互不互斥
     // （键唯一性而非按名去重）
     assert!(
-        names.contains(&"core:hello") && names.contains(&"mcp:demo:hello"),
-        "core:hello 与 mcp:demo:hello 应共存: {names:?}"
+        names.contains(&"core:hello") && names.contains(&"demo:hello"),
+        "core:hello 与 demo:hello 应共存: {names:?}"
     );
 
     let by_name = |n: &str| {
@@ -353,9 +353,9 @@ fn test_update_projects_snapshot_entries_with_kinds() {
     assert_eq!(by_name("core:hello")["_meta"]["periKind"], "command");
     assert_eq!(by_name("core:hello")["_meta"]["periLevel"], 1);
     assert_eq!(by_name("core:my-skill")["_meta"]["periKind"], "skill");
-    assert_eq!(by_name("mcp:demo:hello")["_meta"]["periKind"], "mcp_skill");
+    assert_eq!(by_name("demo:hello")["_meta"]["periKind"], "mcp_skill");
     assert_eq!(
-        by_name("mcp:demo:hello")["_meta"]["periLevel"],
+        by_name("demo:hello")["_meta"]["periLevel"],
         2,
         "mcp 域 level = 2"
     );
@@ -390,7 +390,7 @@ fn test_update_projects_snapshot_entries_with_kinds() {
 fn test_update_skill_names_gated_by_caps() {
     let entries: Vec<Arc<RouteEntry>> = vec![
         core_entry("core:my-skill", CommandEntryKind::Skill),
-        mcp_entry("mcp:demo:hello", "demo"),
+        mcp_entry("demo:hello", "demo"),
     ];
     let caps = PeriCaps {
         skill_names: false,

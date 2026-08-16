@@ -21,19 +21,30 @@ use crate::session::command::{
 };
 use crate::session::executor::PromptStopReason;
 use crate::transport::types::AcpError;
+use peri_acp_types::command::command_route::CommandSource;
 
 /// Immediate 语义 = core/ui 域第一等级（替代旧 `kind() != Immediate` 判断，
 /// Phase 5 Step 6）：execute-command RPC 无 agent 管线，只执行第一等级
 /// （core/ui）条目的本地确定性语义；第二等级（mcp/plugin/user）条目为
-/// 外部来源动态注入，无本地 Immediate 执行语义 → 显式报错。
+/// 外部来源动态注入，无本地 Immediate 执行语义。
+///
+/// 决策 D 例外：`CommandSource::Mcp` 放行——`McpSkillReleaser`
+/// 在 RPC 上下文（`supports_inject == false`）不依赖 agent 管线，直接返回
+/// skill 全文 + 来源/工具通路标注（与 SkillPreload 预载注入内容同源）；
+/// 交互式输入走 preload 注入（语义差异见返回消息）。plugin/user 第二等级
+/// 条目维持拒绝（其 handler 无 RPC 直返语义，Inject/Delegate 分支显式报错）。
 fn check_immediate_level(entry: &RouteEntry) -> Result<(), AcpError> {
-    if entry.level() == CommandLevel::Level1 {
+    // 按 provenance 判断而非 kind（审查 Minor）：kind 属元数据形态，伪造
+    // 的 McpSkill kind 非生产路径无 handler 语义；provenance 是注册面事实。
+    if entry.level() == CommandLevel::Level1
+        || matches!(entry.provenance.source, CommandSource::Mcp { .. })
+    {
         Ok(())
     } else {
         Err(AcpError::new(
             -32602,
             format!(
-                "command '{}' 非 Immediate 命令（等级 {:?}）；execute-command RPC 仅支持 core/ui 域第一等级命令",
+                "command '{}' 非 Immediate 命令（等级 {:?}）；execute-command RPC 仅支持 core/ui 域第一等级与 MCP skill 命令",
                 entry.fullname,
                 entry.level()
             ),
@@ -58,7 +69,8 @@ fn check_immediate_level(entry: &RouteEntry) -> Result<(), AcpError> {
 /// - `command` is missing
 /// - The command string does not match any registered command
 /// - The matched command returns `Inject` / `Delegate`（execute-command RPC
-///   无 agent 管线可注入，显式错误；需经 `session/prompt`）
+///   无 agent 管线可注入，显式错误；需经 `session/prompt`。决策 D：
+///   `McpSkill` 条目除外——handler 在 RPC 上下文返回 skill 全文 + 标注）
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     params: &Value,
@@ -101,8 +113,9 @@ pub async fn execute_command(
         .resolve(command_str)
         .ok_or_else(|| AcpError::new(-32602, format!("unknown command: {command_str}")))?;
 
-    // Immediate 语义 = core/ui 域第一等级（旧 kind() 检查由 RouteEntry
-    // 域/等级检查取代；Level2 动态注入条目无本地执行语义 → 显式报错）。
+    // Immediate 语义 = core/ui 域第一等级 + MCP skill 命令（决策 D 放行，
+    // 旧 kind() 检查由 RouteEntry 域/等级检查取代；plugin/user Level2 动态
+    // 注入条目无本地 Immediate 执行语义 → 显式报错）。
     check_immediate_level(&resolved.entry)?;
 
     // args：消费 resolved.args（注册表词法切分，不变式 3）——RPC 未显式传
@@ -176,8 +189,9 @@ pub async fn execute_command(
     ctx.compact_config = crate::host::compact_config::load_compact_config(peri_config);
     ctx.auxiliary_model = auxiliary_model;
     // 命令原文透传：RPC 路径仅命令名文本（无 `/` 前缀保证，与拦截层整段
-    // 透传不同源）；本路径无 agent 管线可注入，Inject 类 handler 由调用方
-    // 显式报错（execute_command.rs 语义），值不被消费。
+    // 透传不同源）；`supports_inject` 保持默认 false——McpSkillReleaser
+    // 依此降级为直返 skill 全文（决策 D），其余 Inject 类 handler 由调用方
+    // 显式报错（execute_command.rs 语义）。
     ctx.raw_text = command_str.to_string();
     ctx.args = args_string;
     ctx.parsed_args = parsed_args;
@@ -217,7 +231,8 @@ pub async fn execute_command(
         }
     };
     // Outcome 匹配：Done 走现状 JSON 序列化；Inject/Delegate → AcpError
-    // （RPC 无 agent 管线可注入，显式错误）。
+    // （RPC 无 agent 管线可注入，显式错误；McpSkill 在 RPC 上下文恒返回
+    // Done——决策 D 放行语义，见 check_immediate_level）。
     let (messages, stop_reason) = match outcome {
         CommandOutcome::Done(mut result) => {
             // 反馈统一出口：与 executor_helpers 拦截处同源（复用同一 helper），

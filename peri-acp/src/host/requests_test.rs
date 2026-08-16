@@ -1394,7 +1394,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
     assert!(
         commands0
             .iter()
-            .all(|c| c["name"] != "mcp__demo__hello" && c["name"] != "mcp:demo:hello"),
+            .all(|c| c["name"] != "mcp__demo__hello" && c["name"] != "demo:hello"),
         "首发不得含 mcp 条目"
     );
 
@@ -1406,12 +1406,12 @@ async fn test_available_commands_update_mcp_callback_resend() {
         .command_registry_for(&sid)
         .expect("session 应持有命令注册表");
     let token: peri_acp_types::mcp_skills::HandleToken = Arc::new(42u32);
-    command_registry.mark_source_started("mcp:demo", token.clone());
+    command_registry.mark_source_started("demo", token.clone());
     command_registry.mark_source_completed(
-        "mcp:demo",
+        "demo",
         token,
         vec![peri_acp_types::command::command_route::RouteEntry {
-            fullname: "mcp:demo:hello".into(),
+            fullname: "demo:hello".into(),
             aliases: Vec::new(),
             description: "MCP skill hello".into(),
             kind: peri_acp_types::command::command_route::CommandEntryKind::McpSkill,
@@ -1424,7 +1424,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
                 },
                 // 对齐生产语义（skill_discovery.rs `mcp_route_entries` 产出
                 // Discovered；handler 为跨 crate 占位等价——peri-acp 无法
-                // 引用 peri-middlewares 的 McpSkillPlaceholder，用
+                // 引用 peri-middlewares 的 McpSkillReleaser，用
                 // AgentPassthrough 占位，本用例只断言触发源 = 注册表
                 // on_change，与 handler/lifecycle 无关）。
                 lifecycle: peri_acp_types::command::command_route::CommandLifecycle::Discovered,
@@ -1465,8 +1465,8 @@ async fn test_available_commands_update_mcp_callback_resend() {
     let commands1 = update1["availableCommands"].as_array().unwrap();
     let hello = commands1
         .iter()
-        .find(|c| c["name"] == "mcp:demo:hello")
-        .expect("第二次通知应含 mcp 条目（mcp:demo:hello 全名）");
+        .find(|c| c["name"] == "demo:hello")
+        .expect("第二次通知应含 mcp 条目（demo:hello 全名）");
     assert_eq!(
         hello["_meta"]["periKind"], "mcp_skill",
         "mcp 条目 kind 入条目级 _meta（mcpSkillNames 镜像键已退役）"

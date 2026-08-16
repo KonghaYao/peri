@@ -1424,12 +1424,14 @@ async fn run_discovery_spec_mode_get_wrong_uri_rejects_recovery() {
     );
 }
 
-// ─── mcp_route_entries（Phase 6 A3 命令面转换）─────────────────────────────
+// ─── mcp_route_entries（决策 1 命令面转换）─────────────────────────────────
 
-/// 纯函数转换：SkillMetadata → mcp 域 RouteEntry（fullname 小写、namespace
-/// 取 server 名末段、kind=McpSkill、provenance=Mcp+Discovered、占位 handler）。
+/// 纯函数转换：SkillMetadata → mcp 域 RouteEntry（fullname `{server}:{skill}`
+/// 小写、首段取 server 名末段、kind=McpSkill、provenance=Mcp+Discovered、
+/// handler=McpSkillReleaser 放行跳板）。
 #[test]
 fn mcp_route_entries_converts_skills() {
+    let registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![
         SkillMetadata {
             name: "mcp__demo__AlphaSkill".to_string(),
@@ -1456,10 +1458,10 @@ fn mcp_route_entries_converts_skills() {
             resources: vec![],
         },
     ];
-    let entries = mcp_route_entries("demo", &skills);
+    let entries = mcp_route_entries(&registry, "demo", &skills);
     assert_eq!(entries.len(), 2, "全部转换");
     let e = &entries[0];
-    assert_eq!(e.fullname, "mcp:demo:alphaskill", "fullname 小写归一");
+    assert_eq!(e.fullname, "demo:alphaskill", "fullname 小写归一");
     assert!(e.aliases.is_empty());
     assert_eq!(e.description, "Alpha skill");
     assert_eq!(e.kind, CommandEntryKind::McpSkill);
@@ -1473,15 +1475,16 @@ fn mcp_route_entries_converts_skills() {
     );
     assert_eq!(e.provenance.lifecycle, CommandLifecycle::Discovered);
     assert_eq!(
-        entries[1].fullname, "mcp:demo:alpha/sub",
+        entries[1].fullname, "demo:alpha/sub",
         "路径段形态保留（词法允许 /）"
     );
 }
 
 /// plugin 提供的 server key 形如 `plugin:{plugin}:{server}`（loader.rs:541），
-/// 含冒号会突破词法 2 层上限 → namespace 取末段；纯 server 名不变。
+/// 含冒号会突破词法 2 段上限 → 词法首段取末段；纯 server 名不变。
 #[test]
 fn mcp_route_entries_plugin_server_takes_last_segment() {
+    let registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![SkillMetadata {
         name: "mcp__plugin:p1:demosrv__beta".to_string(),
         description: "Beta skill".to_string(),
@@ -1492,9 +1495,9 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
         content: None,
         resources: vec![],
     }];
-    let entries = mcp_route_entries("plugin:p1:demosrv", &skills);
+    let entries = mcp_route_entries(&registry, "plugin:p1:demosrv", &skills);
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].fullname, "mcp:demosrv:beta");
+    assert_eq!(entries[0].fullname, "demosrv:beta");
     assert_eq!(
         entries[0].provenance.source,
         CommandSource::Mcp {
@@ -1503,17 +1506,19 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
     );
 }
 
-/// P1-1：`mcp_source_key` 与 `mcp_route_entries` 的 fullname namespace 派生
-/// 同构（单一派生点 `mcp_namespace`）——断连注销前缀 `mcp:{末段}:` 才能
-/// 命中条目 fullname。
+/// P1-1：`mcp_source_key` 与 `mcp_route_entries` 的 fullname 首段派生
+/// 同构（单一派生点 `mcp_namespace`）——断连注销前缀 `{末段}:` 才能
+/// 命中条目 fullname（决策 1：键 = server 名末段，无 `mcp:` 域前缀）。
 #[test]
 fn mcp_source_key_matches_route_entry_namespace() {
-    // 纯 server 名：键 = mcp:demo（不变）
-    assert_eq!(mcp_source_key("demo"), "mcp:demo");
-    // plugin server key：键 = mcp:demosrv（末段，非原名）
-    assert_eq!(mcp_source_key("plugin:p1:demosrv"), "mcp:demosrv");
+    // 纯 server 名：键 = demo（不变）
+    assert_eq!(mcp_source_key("demo"), "demo");
+    // plugin server key：键 = demosrv（末段，非原名）
+    assert_eq!(mcp_source_key("plugin:p1:demosrv"), "demosrv");
     // 键与条目 fullname 前缀一致（注销前缀 `{键}:` 命中 fullname）
+    let registry = Arc::new(McpSkillRegistry::new());
     let entries = mcp_route_entries(
+        &registry,
         "plugin:p1:demosrv",
         &[SkillMetadata {
             name: "mcp__plugin:p1:demosrv__beta".to_string(),
@@ -1530,12 +1535,70 @@ fn mcp_source_key_matches_route_entry_namespace() {
         );
     }
     // 大小写归一同源：大写 server 名同样派生小写键（与词法键一致）
-    assert_eq!(mcp_source_key("Plugin:P1:DemoSrv"), "mcp:demosrv");
+    assert_eq!(mcp_source_key("Plugin:P1:DemoSrv"), "demosrv");
+}
+
+/// 审查 B1 防线 1：保留词法域 server 不进命令面——来源键派生标记 +
+/// `finish_command_source` 跳过注册（元数据面不受影响，工具面仍可用）。
+#[test]
+fn mcp_source_key_reserved_domain_skipped() {
+    for reserved in ["core", "ui", "plugin", "user", "mcp"] {
+        assert!(
+            mcp_namespace_reserved(reserved),
+            "{reserved} 应判定为保留域"
+        );
+        // 纯 server 名末段命中保留域也判定（plugin:pa:core → core）。
+        assert!(mcp_namespace_reserved(&format!("plugin:pa:{reserved}")));
+    }
+    assert!(!mcp_namespace_reserved("demo"));
+    assert!(!mcp_namespace_reserved("plugin:pa:demosrv"));
+
+    // finish_command_source：保留域 server 不产生任何命令面条目。
+    let command_registry = Arc::new(CommandRegistry::new());
+    let meta_registry = Arc::new(McpSkillRegistry::new());
+    let skills = vec![SkillMetadata {
+        name: "mcp__core__hello".to_string(),
+        description: "Core-named skill".to_string(),
+        ..SkillMetadata::default()
+    }];
+    let token_core: HandleToken = Arc::new(101u32);
+    command_registry.mark_source_started("core", token_core.clone());
+    finish_command_source(
+        &Some(command_registry.clone()),
+        &meta_registry,
+        "core",
+        token_core,
+        &skills,
+    );
+    assert!(
+        command_registry.resolve("core:hello").is_none(),
+        "保留域 server 的 skill 不得注册为命令"
+    );
+    // 对照：非保留域正常注册。
+    let skills2 = vec![SkillMetadata {
+        name: "mcp__demo__hello".to_string(),
+        description: "Demo skill".to_string(),
+        ..SkillMetadata::default()
+    }];
+    let token_demo: HandleToken = Arc::new(102u32);
+    command_registry.mark_source_started("demo", token_demo.clone());
+    finish_command_source(
+        &Some(command_registry.clone()),
+        &meta_registry,
+        "demo",
+        token_demo,
+        &skills2,
+    );
+    assert!(
+        command_registry.resolve("demo:hello").is_some(),
+        "非保留域 server 正常注册"
+    );
 }
 
 /// 缺 `mcp__{server}__` 前缀的 skill 名 → 跳过（warn），不产出条目。
 #[test]
 fn mcp_route_entries_skips_unprefixed_name() {
+    let registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![SkillMetadata {
         name: "other__name".to_string(),
         description: "No prefix".to_string(),
@@ -1546,12 +1609,12 @@ fn mcp_route_entries_skips_unprefixed_name() {
         content: None,
         resources: vec![],
     }];
-    let entries = mcp_route_entries("demo", &skills);
+    let entries = mcp_route_entries(&registry, "demo", &skills);
     assert!(entries.is_empty(), "缺前缀条目跳过");
 }
 
-/// run_discovery 命令面双写（Phase 6 A3）：规范模式发现完成后，命令面
-/// 注册表收到 `mcp:srv:alpha` 条目（kind=McpSkill、provenance=Mcp+Discovered）。
+/// run_discovery 命令面双写（决策 1）：规范模式发现完成后，命令面
+/// 注册表收到 `srv:alpha` 条目（kind=McpSkill、provenance=Mcp+Discovered）。
 #[tokio::test]
 async fn run_discovery_writes_command_registry() {
     let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
@@ -1581,7 +1644,7 @@ async fn run_discovery_writes_command_registry() {
     let cmd_reg = Arc::new(CommandRegistry::new());
     let token: HandleToken = Arc::new(9u32);
     reg.mark_discovery_started("srv", token.clone());
-    cmd_reg.mark_source_started("mcp:srv", token.clone());
+    cmd_reg.mark_source_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
     run_discovery(
         reg.clone(),
@@ -1595,7 +1658,7 @@ async fn run_discovery_writes_command_registry() {
     let entries = cmd_reg.snapshot();
     assert_eq!(entries.len(), 1, "命令面注册 1 条");
     let e = &entries[0];
-    assert_eq!(e.fullname, "mcp:srv:alpha");
+    assert_eq!(e.fullname, "srv:alpha");
     assert_eq!(e.kind, CommandEntryKind::McpSkill);
     assert_eq!(
         e.provenance.source,
@@ -1638,7 +1701,7 @@ async fn run_discovery_cancel_clears_command_source_started() {
         ],
     );
     reg.mark_discovery_started("srv", token.clone());
-    cmd_reg.mark_source_started("mcp:srv", token.clone());
+    cmd_reg.mark_source_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
     let discovery = tokio::spawn(run_discovery(
         reg.clone(),
@@ -1659,4 +1722,168 @@ async fn run_discovery_cancel_clears_command_source_started() {
     // 命令面 Started 回退后，来源无状态 → 下轮 before_agent 重新 to_discover；
     // 注册表无公开 sources 查询，用无条目 + 无 on_change 侧证（cancel 不触发）。
     assert!(cmd_reg.snapshot().is_empty(), "cancel 路径不注册条目");
+}
+
+// ─── McpSkillReleaser（决策 A2/D 放行跳板）─────────────────────────────────
+
+/// 最小事件 sink（releaser execute 需要 CommandContext，对齐
+/// plugin/loader_test.rs 先例）。
+struct NoopEventSink;
+
+#[async_trait::async_trait]
+impl peri_acp_types::event::EventSink for NoopEventSink {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &peri_acp_types::event::ExecutorEvent,
+        _context_window: u32,
+    ) {
+    }
+
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
+}
+
+/// 构造最小 CommandContext（supports_inject / raw_text 按场景置位）。
+fn make_releaser_ctx(raw_text: &str, supports_inject: bool) -> CommandContext {
+    let mut ctx = CommandContext::new(
+        "s1".to_string(),
+        vec![],
+        "/tmp".to_string(),
+        Arc::new(NoopEventSink),
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    );
+    ctx.raw_text = raw_text.to_string();
+    ctx.supports_inject = supports_inject;
+    ctx
+}
+
+/// 造 Discovered 条目（content 带全文；对齐 mcp_skills_test 的 complete）。
+fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, content: &str) {
+    let token: HandleToken = Arc::new(1u32);
+    let meta = SkillMetadata {
+        name: format!("mcp__{server}__{skill}"),
+        description: format!("MCP skill {skill}"),
+        path: PathBuf::new(),
+        source: SkillSource::Mcp,
+        plugin_name: None,
+        origin: Some(SkillOrigin::Mcp {
+            server: server.to_string(),
+            uri: format!("skill://{server}/{skill}/SKILL.md"),
+        }),
+        content: Some(content.to_string()),
+        resources: vec![],
+    };
+    reg.mark_discovery_started(server, token.clone());
+    reg.mark_discovery_completed(server, token, vec![meta]);
+}
+
+/// 交互式（supports_inject）：Inject(原文)——命令含 `/` 前缀与 args 整段
+/// 放行进 agent 管线，由 SkillPreload 完成注入（决策 A2 核心语义）。
+#[tokio::test]
+async fn releaser_interactive_injects_raw_text() {
+    let reg = Arc::new(McpSkillRegistry::new());
+    let releaser = McpSkillReleaser {
+        registry: Arc::clone(&reg),
+    };
+    let outcome = releaser
+        .execute(make_releaser_ctx("/demo:hello some args", true))
+        .await;
+    match outcome {
+        CommandOutcome::Inject(text) => {
+            assert_eq!(
+                text, "/demo:hello some args",
+                "原文整段放行（含 / 前缀与 args）"
+            )
+        }
+        _other => panic!("交互式应 Inject 原文"),
+    }
+}
+
+/// 交互式但原文缺失（理论不可达：拦截层恒透传）→ 回退 Done + Info，不吞
+/// 命令不静默。
+#[tokio::test]
+async fn releaser_interactive_empty_raw_text_falls_back_done() {
+    let reg = Arc::new(McpSkillRegistry::new());
+    let releaser = McpSkillReleaser {
+        registry: Arc::clone(&reg),
+    };
+    let outcome = releaser.execute(make_releaser_ctx("", true)).await;
+    match outcome {
+        CommandOutcome::Done(result) => {
+            assert!(result.messages.is_empty());
+            let fb = result.feedback.expect("回退应有 Info 反馈");
+            assert_eq!(fb.level, FeedbackLevel::Info);
+            assert!(
+                fb.message.contains("原文缺失"),
+                "反馈应说明原文缺失，实际: {}",
+                fb.message
+            );
+        }
+        _other => panic!("原文缺失应回退 Done"),
+    }
+}
+
+/// RPC（supports_inject=false，决策 D）：直返 skill 全文 + 标注（与预载注入
+/// 同源 annotate_mcp_content），feedback 说明语义差异。
+#[tokio::test]
+async fn releaser_rpc_returns_skill_content_with_annotation() {
+    let reg = Arc::new(McpSkillRegistry::new());
+    seed_discovered(&reg, "demo", "hello", "Body of hello.");
+    let releaser = McpSkillReleaser {
+        registry: Arc::clone(&reg),
+    };
+    let outcome = releaser
+        .execute(make_releaser_ctx("/demo:hello", false))
+        .await;
+    match outcome {
+        CommandOutcome::Done(result) => {
+            let last = result.messages.last().expect("RPC 命中应追加内容消息");
+            let content = last.content();
+            assert!(content.contains("Body of hello."), "应含 skill 全文");
+            assert!(
+                content.contains("This skill is served by MCP server \"demo\""),
+                "应含来源标注，实际: {content}"
+            );
+            assert!(
+                content.contains("SearchExtraTools"),
+                "应含工具通路提醒，实际: {content}"
+            );
+            let fb = result.feedback.expect("RPC 命中应有反馈");
+            assert_eq!(fb.level, FeedbackLevel::Info);
+            assert!(
+                fb.message.contains("内容已返回"),
+                "反馈应说明直返语义，实际: {}",
+                fb.message
+            );
+        }
+        _other => panic!("RPC 命中应直返 Done"),
+    }
+}
+
+/// RPC 且 registry miss（server 未连接/无该 skill）→ Done + Info 提示，不
+/// 吞命令不静默；messages 原样（不追加内容）。
+#[tokio::test]
+async fn releaser_rpc_miss_falls_back_done_info() {
+    let reg = Arc::new(McpSkillRegistry::new());
+    seed_discovered(&reg, "demo", "hello", "Body of hello.");
+    let releaser = McpSkillReleaser {
+        registry: Arc::clone(&reg),
+    };
+    let outcome = releaser
+        .execute(make_releaser_ctx("other:bye", false))
+        .await;
+    match outcome {
+        CommandOutcome::Done(result) => {
+            assert!(result.messages.is_empty(), "miss 不追加内容");
+            let fb = result.feedback.expect("miss 应有反馈");
+            assert_eq!(fb.level, FeedbackLevel::Info);
+            assert!(
+                fb.message.contains("未发现"),
+                "反馈应说明未发现，实际: {}",
+                fb.message
+            );
+        }
+        _other => panic!("RPC miss 应回退 Done"),
+    }
 }

@@ -67,7 +67,7 @@ pub struct SlashCompletionItem {
     /// 参数 schema（schema 驱动补全 / 校验，步骤 9 消费）。
     pub args: Option<ArgsSchema>,
     /// 双索引匹配串（Phase 4 步骤 4 预计算）：label_lowercase + fullname_lowercase
-    /// 合并——level 1 裸名条目也可被全名前缀（如 `/mcp:demo`）模糊搜到（R4）。
+    /// 合并——level 1 裸名条目也可被全名前缀（如 `/demo:`）模糊搜到（R4）。
     pub search_lowercase: String,
 }
 
@@ -95,7 +95,7 @@ pub struct SlashCompletionProps {
 ///
 /// 双索引：匹配串为预计算 `search_lowercase`（label_lowercase +
 /// fullname_lowercase 合并）——level 1 裸名条目也能被全名前缀（如
-/// `/mcp:demo`）搜到（R4）；level 2 全名条目经 label 路径命中。
+/// `/demo:`）搜到（R4）；level 2 全名条目经 label 路径命中。
 fn filter_slash_items(items: &[SlashCompletionItem], prefix: &str) -> Vec<SlashCompletionItem> {
     if prefix.is_empty() {
         return items.to_vec();
@@ -357,50 +357,47 @@ mod tests {
     }
 
     /// Phase 4 步骤 4：fuzzy 双索引——level 1 裸名条目（label=hello）也能被
-    /// 全名前缀 `/mcp:demo` 搜到（fullname 索引路径，R4）。
+    /// 全名前缀 `/demo:` 搜到（fullname 索引路径，R4）。
     #[test]
     fn test_filter_slash_items_fullname_index_matches_level1_bare_label() {
         let items = vec![
-            item("hello", "mcp:demo:hello"),
+            item("hello", "demo:hello"),
             item("compact", "core:compact"),
             item("model", ""),
         ];
-        let hits = filter_slash_items(&items, "mcp:demo");
+        let hits = filter_slash_items(&items, "demo:");
         assert!(
-            hits.iter().any(|i| i.fullname == "mcp:demo:hello"),
-            "/mcp:demo 应经 fullname 索引命中 level 1 裸名条目 mcp:demo:hello"
+            hits.iter().any(|i| i.fullname == "demo:hello"),
+            "/demo: 应经 fullname 索引命中 level 1 裸名条目 demo:hello"
         );
         assert!(hits.iter().all(|i| i.fullname != "core:compact"));
         assert!(hits.iter().all(|i| !i.fullname.is_empty()));
     }
 
-    /// Phase 4 步骤 4：level 2 全名条目（label == fullname）被 `/mcp:demo`
+    /// Phase 4 步骤 4：level 2 全名条目（label == fullname）被 `/demo:`
     /// 前缀搜到（label 路径）。
     #[test]
     fn test_filter_slash_items_fullname_prefix_matches_level2_label() {
         let items = vec![
-            item("mcp:demo:hello", "mcp:demo:hello"),
-            item("mcp:other:bye", "mcp:other:bye"),
+            item("demo:hello", "demo:hello"),
+            item("other:bye", "other:bye"),
         ];
-        let hits = filter_slash_items(&items, "mcp:demo");
+        let hits = filter_slash_items(&items, "demo:");
         assert!(
-            hits.iter().any(|i| i.fullname == "mcp:demo:hello"),
-            "/mcp:demo 应命中 level 2 全名条目 mcp:demo:hello"
+            hits.iter().any(|i| i.fullname == "demo:hello"),
+            "/demo: 应命中 level 2 全名条目 demo:hello"
         );
-        assert!(hits.iter().all(|i| i.fullname != "mcp:other:bye"));
+        assert!(hits.iter().all(|i| i.fullname != "other:bye"));
     }
 
     /// label（裸名）路径仍可命中；空 prefix 返回全部（原行为）。
     #[test]
     fn test_filter_slash_items_label_index_and_empty_prefix() {
-        let items = vec![
-            item("hello", "mcp:demo:hello"),
-            item("world", "mcp:demo:world"),
-        ];
+        let items = vec![item("hello", "demo:hello"), item("world", "demo:world")];
         assert_eq!(filter_slash_items(&items, "").len(), items.len());
         let hits = filter_slash_items(&items, "hello");
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].fullname, "mcp:demo:hello");
+        assert_eq!(hits[0].fullname, "demo:hello");
     }
 
     /// 回归：既有 Panel/Command/Skill 映射不变（渲染行为除新增色外不变）。

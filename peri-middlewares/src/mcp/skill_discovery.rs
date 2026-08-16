@@ -33,6 +33,7 @@ use peri_acp_types::{
     },
     command_registry::CommandRegistry,
     mcp_skills::{mcp_skill_name, HandleToken, McpSkillRegistry},
+    messages::BaseMessage,
     skills::{SkillMetadata, SkillOrigin, SkillResource, SkillSource},
 };
 use rmcp::{
@@ -65,10 +66,10 @@ const MAX_LIST_PAGES: usize = 100;
 /// - peer 缺失 → warn + 完成（失败=空条目，不重试；重连才重扫）；
 /// - cancel 触发 → 回退 Started 状态（不触发 on_change），下轮可重试。
 ///
-/// 双注册表回写（Phase 6 A3）：`registry`（元数据面）完成后，若
+/// 双注册表回写（决策 1 + A2）：`registry`（元数据面）完成后，若
 /// `command_registry`（命令面）已装配，把发现结果经 [`mcp_route_entries`]
 /// 转换后 `mark_source_completed`（来源键 = [`mcp_source_key`]，plugin
-/// server 取末段，与 fullname namespace 同构）；cancel 分支对齐
+/// server 取末段，与 fullname 词法首段同构）；cancel 分支对齐
 /// `clear_source_started`。None = 未装配命令面（print 模式/既有测试）→
 /// 仅回写元数据面。
 pub(crate) async fn run_discovery(
@@ -88,13 +89,25 @@ pub(crate) async fn run_discovery(
             return;
         }
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
-        finish_command_source(&command_registry, &handle.name, handle_token, &[]);
+        finish_command_source(
+            &command_registry,
+            &registry,
+            &handle.name,
+            handle_token,
+            &[],
+        );
         return;
     }
     let Some(peer) = handle.peer.clone() else {
         tracing::warn!(server = %handle.name, "MCP skill 发现：peer 缺失，跳过");
         registry.mark_discovery_completed(&handle.name, handle_token.clone(), vec![]);
-        finish_command_source(&command_registry, &handle.name, handle_token, &[]);
+        finish_command_source(
+            &command_registry,
+            &registry,
+            &handle.name,
+            handle_token,
+            &[],
+        );
         return;
     };
     let entries = if handle.skills_capable {
@@ -117,6 +130,7 @@ pub(crate) async fn run_discovery(
     let skills = entries.1;
     finish_command_source(
         &command_registry,
+        &registry,
         &handle.name,
         handle_token.clone(),
         &skills,
@@ -124,20 +138,29 @@ pub(crate) async fn run_discovery(
     registry.mark_discovery_completed(&handle.name, handle_token, skills);
 }
 
-/// 命令面完成回写（Phase 6 A3）：来源键 = [`mcp_source_key`] 置 Discovered
+/// 命令面完成回写（决策 1 + A2）：来源键 = [`mcp_source_key`] 置 Discovered
 /// 并注册转换后的 mcp 域 RouteEntry（冲突/越权条目由注册表纯拒绝 + warn，
 /// 不整体回滚）。`command_registry = None` → no-op。
 fn finish_command_source(
     command_registry: &Option<Arc<CommandRegistry>>,
+    registry: &Arc<McpSkillRegistry>,
     server: &str,
     handle_token: HandleToken,
     skills: &[SkillMetadata],
 ) {
     if let Some(reg) = command_registry.as_ref() {
+        // 审查 B1：保留词法域 server 不进命令面（防裸名污染/误删内置域）。
+        if mcp_namespace_reserved(server) {
+            tracing::warn!(
+                server = %server,
+                "MCP server 名与保留词法域冲突，跳过命令面注册（Skill 工具面不受影响）"
+            );
+            return;
+        }
         reg.mark_source_completed(
             &mcp_source_key(server),
             handle_token,
-            mcp_route_entries(server, skills),
+            mcp_route_entries(registry, server, skills),
         );
     }
 }
@@ -150,29 +173,48 @@ fn clear_command_source(
     handle_token: HandleToken,
 ) {
     if let Some(reg) = command_registry.as_ref() {
+        // 审查 B1：保留词法域 server 从未在命令面 Started（finish 同源防护），
+        // 回退为 no-op。
+        if mcp_namespace_reserved(server) {
+            return;
+        }
         reg.clear_source_started(&mcp_source_key(server), handle_token);
     }
 }
 
-/// 命令面「来源键 = 注销前缀键 = fullname namespace 段」的单一派生函数
-/// （Phase 6 A3，P1-1 修复）：返回 `mcp:{末段}`，与 [`mcp_route_entries`]
-/// 的 fullname namespace 派生（[`mcp_namespace`]）同构——断连批量注销
-/// `mcp:{末段}:` 前缀才能命中 fullname `mcp:{末段}:{skill}`。
+/// 命令面「来源键 = 注销前缀键 = fullname 词法首段域」的单一派生函数
+/// （决策 1，替代 Phase 6 A3 的 `mcp:{末段}` 形态）：返回 server 名末段
+/// 小写（纯 server 名即原名），与 [`mcp_route_entries`] 的 fullname 首段
+/// 派生（[`mcp_namespace`]）同构——断连批量注销 `{末段}:` 前缀才能命中
+/// fullname `{末段}:{skill}`。
 ///
 /// plugin 提供的 server key 形如 `plugin:{plugin}:{server}` 时：来源键 =
-/// `mcp:demosrv`、条目 fullname = `mcp:demosrv:beta`、注销前缀
-/// `mcp:demosrv:` 三者一致；纯 server 名（demo）不变。
+/// `demosrv`、条目 fullname = `demosrv:beta`、注销前缀 `demosrv:` 三者
+/// 一致；纯 server 名（demo）不变。
 ///
 /// 衍生语义（设计风险行「同键 Conflict 拒绝」之外）：跨插件同名 server
 /// （`plugin:pa:srvA` / `plugin:pb:srvA` 末段同为 `srvA`）共享来源键
-/// `mcp:srvA`，后连者 Started 覆盖先连者、发现结果互相丢弃——与「取末段」
-/// 既有决策（fullname 键 `mcp:srvA:*` 本就唯一，:409 已接受同键拒绝）
-/// 同一取舍，插件归属不可从命令名追溯。
+/// `srvA`，后连者 Started 覆盖先连者、发现结果互相丢弃——与「取末段」
+/// 既有决策（fullname 键 `srvA:*` 本就唯一，命令面注册同键冲突纯拒绝已
+/// 接受此取舍）同一取舍，插件归属不可从命令名追溯。
 pub(crate) fn mcp_source_key(server: &str) -> String {
-    format!("mcp:{}", mcp_namespace(server))
+    mcp_namespace(server)
 }
 
-/// server 名 → 命令面 namespace 段（末段小写；纯 server 名不变）。
+/// 保留词法域防护（审查 B1）：server 名派生为保留域（core/ui/plugin/user/
+/// mcp）时，命令面注册会产生 Level1 裸名路由污染（`core:hello` 登记裸名
+/// `hello`）或断连批量注销误删内置域条目（前缀 `core:` 命中全部 core 域
+/// 命令）。命令面在 [`finish_command_source`]/[`clear_command_source`] 与
+/// [`run_ensure_discovery`] 命令面投影处整体跳过该 server；元数据面照常
+/// 发现（SkillTool/SkillPreload 工具面仍可用）。
+pub(crate) fn mcp_namespace_reserved(server: &str) -> bool {
+    matches!(
+        mcp_namespace(server).as_str(),
+        "core" | "ui" | "plugin" | "user" | "mcp"
+    )
+}
+
+/// server 名 → 命令面词法首段域（末段小写；纯 server 名不变）。
 /// [`mcp_source_key`] 与 [`mcp_route_entries`] 共用（单一派生点）。
 fn mcp_namespace(server: &str) -> String {
     server
@@ -182,43 +224,108 @@ fn mcp_namespace(server: &str) -> String {
         .to_lowercase()
 }
 
-/// Phase 6 A3 占位 handler（mcp 域 RouteEntry 执行体；正式 MCP skill 执行
-/// 通路落地后替换）：Done + UI-only 反馈「MCP skill 执行尚未实现」——不
-/// 静默（对齐 :408「插件占位返回 UI-only 反馈」与 `core:loop`
-/// `LoopPlaceholder` 同构；桥接期不吞命令、用户有明确反馈）。
+/// mcp 域 RouteEntry 执行体（决策 A2/D：放行跳板，替代 Phase 6 A3 占位）。
 ///
-/// 注：旧注释「Inject 空串 → 拦截路径 fall-through，原文进 agent 管线」
-/// 与实际拦截层行为不符——`executor.rs` 三态分发
-/// `Inject(text) → MessageContent::text(text)` 会**替换**用户输入，空串即
-/// 空文本进 agent 管线（原文被吞、零反馈），故弃用 Inject 形态。
-#[derive(Clone, Copy)]
-pub(crate) struct McpSkillPlaceholder;
+/// - 交互式（拦截层，`ctx.supports_inject == true`）：`Inject(原文)` 放行
+///   用户消息原文（含 `/server:skill` token）进 agent 管线，由
+///   SkillPreloadMiddleware 完成 skill 注入——命令不被吞、技能全文在首轮
+///   即见（与 `core:{skill}` 的 `AgentPassthrough` 同构）。
+/// - RPC（`supports_inject == false`，execute-command 无 agent 管线）：
+///   经 [`McpSkillRegistry::find_by_command`] 取 skill 全文并以
+///   [`crate::skills::annotate_mcp_content`] 标注后直接返回（决策 D，
+///   与预载注入内容同源）；内容缺失时回退 `Done + Info` 反馈。
+///
+/// 待 E2E 场景（e2e/ 现无 MCP skill fixture，不新建基础设施）：skill://
+/// server → 会话建立（无消息）→ 面板 `/demo:hello` → 触发 → 管线内出现
+/// `SkillTool(demo:hello)` ToolResult → Agent 回引用工具通路文案。
+#[derive(Clone)]
+pub(crate) struct McpSkillReleaser {
+    registry: Arc<McpSkillRegistry>,
+}
 
 #[async_trait]
-impl CommandHandler for McpSkillPlaceholder {
+impl CommandHandler for McpSkillReleaser {
     async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        if ctx.supports_inject {
+            // 交互式：原文整段放行（含 `/` 前缀与 args）。原文缺失（理论
+            // 不可达：拦截层恒透传）→ 回退 Done + Info，不吞命令不静默。
+            if ctx.raw_text.is_empty() {
+                return CommandOutcome::Done(CommandResult {
+                    messages: ctx.history,
+                    stop_reason: PromptStopReason::EndTurn,
+                    feedback: Some(CommandFeedback {
+                        level: FeedbackLevel::Info,
+                        message:
+                            "MCP skill 命令原文缺失，无法放行注入（请直接输入 /server:skill 触发）"
+                                .to_string(),
+                        channel: FeedbackChannel::UiOnly,
+                    }),
+                });
+            }
+            return CommandOutcome::Inject(ctx.raw_text);
+        }
+        // RPC：无管线可放行——直返 skill 全文 + 来源/工具通路标注（与
+        // SkillPreload 注入内容同源：annotate_mcp_content）。命令名 =
+        // raw_text 首 token（RPC 传命令名文本，剥 `/` 前缀容忍两种形态）。
+        let name = ctx
+            .raw_text
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        let hit = self
+            .registry
+            .find_by_command(name)
+            .and_then(|meta| meta.content.clone().map(|content| (meta, content)));
+        let (messages, feedback) = match hit {
+            Some((meta, content)) => {
+                let annotated = crate::skills::annotate_mcp_content(&meta, &content);
+                let mut messages = ctx.history;
+                // 全文追加为 human 消息，随 RPC 响应 messages 回传（Content-only）。
+                messages.push(BaseMessage::human(annotated.clone()));
+                let feedback = CommandFeedback {
+                    level: FeedbackLevel::Info,
+                    message: format!(
+                        "MCP skill `{name}` 内容已返回（语义差异：交互式输入 `/{}` 走 preload 注入，RPC 直返全文）",
+                        name
+                    ),
+                    channel: FeedbackChannel::UiOnly,
+                };
+                (messages, feedback)
+            }
+            None => {
+                let feedback = CommandFeedback {
+                    level: FeedbackLevel::Info,
+                    message: format!(
+                        "MCP skill `{name}` 内容未发现（server 未连接或未发现该 skill）；交互式输入 `/{}` 走 preload 注入",
+                        name
+                    ),
+                    channel: FeedbackChannel::UiOnly,
+                };
+                (ctx.history, feedback)
+            }
+        };
         CommandOutcome::Done(CommandResult {
-            messages: ctx.history,
+            messages,
             stop_reason: PromptStopReason::EndTurn,
-            feedback: Some(CommandFeedback {
-                level: FeedbackLevel::Info,
-                message: "MCP skill 执行尚未实现（Phase 6 占位；正式执行通路后续版本替换）"
-                    .to_string(),
-                channel: FeedbackChannel::UiOnly,
-            }),
+            feedback: Some(feedback),
         })
     }
 }
 
-/// SkillMetadata → mcp 域 RouteEntry（Phase 6 A3 唯一转换点；词法：
-/// `mcp:{namespace}:{skill}`，skill 名剥 `mcp__{server}__` 前缀）。
+/// SkillMetadata → mcp 域 RouteEntry（决策 1 唯一转换点；词法：
+/// `{server}:{skill}`，skill 名剥 `mcp__{server}__` 前缀）。
 ///
-/// namespace = server 名末段（[`mcp_namespace`]，与 [`mcp_source_key`]
-/// 同源派生）：plugin 提供的 server key 形如 `plugin:{plugin}:{server}`
-/// （loader.rs:541），含冒号会突破 2 层上限 → 取末段；纯 server 名
-/// （demo）不变。provenance = Mcp{server} + Discovered；handler = 占位
-/// （[`McpSkillPlaceholder`]，Phase 6 占位，后续替换）。
-pub(crate) fn mcp_route_entries(server: &str, skills: &[SkillMetadata]) -> Vec<RouteEntry> {
+/// 首段 = server 名末段（[`mcp_namespace`]，与 [`mcp_source_key`] 同源
+/// 派生）：plugin 提供的 server key 形如 `plugin:{plugin}:{server}`
+/// （loader.rs:541），含冒号会突破词法 2 段上限 → 取末段；纯 server 名
+/// （demo）不变。provenance = Mcp{server} + Discovered；handler =
+/// [`McpSkillReleaser`]（决策 A2/D 放行跳板，持注册表供 RPC 直返全文）。
+pub(crate) fn mcp_route_entries(
+    registry: &Arc<McpSkillRegistry>,
+    server: &str,
+    skills: &[SkillMetadata],
+) -> Vec<RouteEntry> {
     let namespace = mcp_namespace(server);
     let prefix = format!("mcp__{server}__");
     skills
@@ -230,19 +337,21 @@ pub(crate) fn mcp_route_entries(server: &str, skills: &[SkillMetadata]) -> Vec<R
                     tracing::warn!(
                         name = %s.name,
                         server = %server,
-                        "mcp skill 名缺 mcp__{server}__ 前缀，跳过 mcp 域注册"
+                        "mcp skill 名缺 mcp__{server}__ 前缀，跳过命令面注册"
                     );
                     return None;
                 }
             };
             Some(RouteEntry {
-                fullname: format!("mcp:{namespace}:{}", skill.to_lowercase()),
+                fullname: format!("{}:{}", namespace, skill.to_lowercase()),
                 aliases: Vec::new(),
                 description: s.description.clone(),
                 kind: CommandEntryKind::McpSkill,
                 category: None,
                 args_schema: None,
-                handler: Arc::new(McpSkillPlaceholder),
+                handler: Arc::new(McpSkillReleaser {
+                    registry: Arc::clone(registry),
+                }),
                 provenance: CommandProvenance {
                     source: CommandSource::Mcp {
                         server: namespace.clone(),

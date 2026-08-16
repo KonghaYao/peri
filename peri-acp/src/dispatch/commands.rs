@@ -106,8 +106,9 @@ pub(crate) fn register_ui_entries(caps: &PeriCaps, command_registry: &CommandReg
 /// 注册进注册表）。
 ///
 /// 不做按名去重（Phase 6 D1）：词法统一后本地 = `core:{name}`、MCP =
-/// `mcp:{server}:{skill}`、插件 = `plugin:{plugin}:{cmd}`，键空间两两不相交，
-/// 键唯一性由注册表 register 时保证（A2 冲突纯拒绝），投影 = snapshot 全量。
+/// `{server}:{skill}`（决策 1，server 名即词法首段域）、插件 =
+/// `plugin:{plugin}:{cmd}`，键空间两两不相交，键唯一性由注册表 register
+/// 时保证（A2 冲突纯拒绝），投影 = snapshot 全量。
 pub(crate) fn build_available_commands_update(
     entries: &[Arc<RouteEntry>],
     caps: &PeriCaps,

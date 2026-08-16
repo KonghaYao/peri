@@ -408,7 +408,7 @@ fn register_valid_domains_ok() {
     reg.register(fake_entry("ui:history", CommandSource::Ui, &[]))
         .unwrap();
     reg.register(fake_entry(
-        "mcp:demo:hello",
+        "demo:hello",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -472,7 +472,7 @@ fn unregister_namespace_batch_keeps_others() {
     let reg = CommandRegistry::new();
     // 带 alias 的第一条（P2-3 审查跟进：批量注销路径须同步清 alias 索引）。
     reg.register(fake_entry(
-        "mcp:demo:a",
+        "demo:a",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -480,7 +480,7 @@ fn unregister_namespace_batch_keeps_others() {
     ))
     .unwrap();
     reg.register(fake_entry(
-        "mcp:demo:b",
+        "demo:b",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -488,7 +488,7 @@ fn unregister_namespace_batch_keeps_others() {
     ))
     .unwrap();
     reg.register(fake_entry(
-        "mcp:other:c",
+        "other:c",
         CommandSource::Mcp {
             server: "other".into(),
         },
@@ -496,7 +496,7 @@ fn unregister_namespace_batch_keeps_others() {
     ))
     .unwrap();
     reg.register(fake_entry(
-        "mcp:demo2:d",
+        "demo2:d",
         CommandSource::Mcp {
             server: "demo2".into(),
         },
@@ -505,18 +505,20 @@ fn unregister_namespace_batch_keeps_others() {
     .unwrap();
     reg.register(core_entry("compact", &[])).unwrap();
 
-    let n = reg.unregister_namespace("mcp", "demo");
-    assert_eq!(n, 2, "仅 mcp:demo: 前缀两条");
+    // 决策 1：Mcp 无独立 namespace——前缀 = server 名（domain 段即 server，
+    // namespace 参数传空，`{domain}:` 结算前缀命中 `demo:*`）。
+    let n = reg.unregister_namespace("demo", "");
+    assert_eq!(n, 2, "仅 demo: 前缀两条");
 
     // 前缀边界：demo2 前缀相似但不同，保留。
-    assert!(reg.resolve("/mcp:demo:a").is_none());
-    assert!(reg.resolve("/mcp:demo:b").is_none());
+    assert!(reg.resolve("/demo:a").is_none());
+    assert!(reg.resolve("/demo:b").is_none());
     assert!(
         reg.resolve("/da").is_none(),
         "alias 随 namespace 批量注销同步清理"
     );
-    assert!(reg.resolve("/mcp:other:c").is_some());
-    assert!(reg.resolve("/mcp:demo2:d").is_some());
+    assert!(reg.resolve("/other:c").is_some());
+    assert!(reg.resolve("/demo2:d").is_some());
     assert!(reg.resolve("/compact").is_some());
     assert_eq!(reg.snapshot().len(), 3);
 }
@@ -525,7 +527,7 @@ fn unregister_namespace_batch_keeps_others() {
 fn unregister_namespace_miss_zero() {
     let reg = CommandRegistry::new();
     reg.register(fake_entry(
-        "mcp:demo:a",
+        "demo:a",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -533,7 +535,16 @@ fn unregister_namespace_miss_zero() {
     ))
     .unwrap();
 
-    assert_eq!(reg.unregister_namespace("mcp", "nope"), 0);
+    assert_eq!(reg.unregister_namespace("demo", ""), 1);
+    reg.register(fake_entry(
+        "demo:a",
+        CommandSource::Mcp {
+            server: "demo".into(),
+        },
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(reg.unregister_namespace("nope", ""), 0);
     assert_eq!(reg.unregister_namespace("plugin", "ecc"), 0);
     assert_eq!(reg.snapshot().len(), 1);
 }
@@ -547,7 +558,7 @@ fn on_change_fires_on_register_ok() {
 
     reg.register(core_entry("compact", &[])).unwrap();
     reg.register(fake_entry(
-        "mcp:demo:a",
+        "demo:a",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -586,7 +597,7 @@ fn on_change_unregister_trigger_matrix() {
     let count = install_counter(&reg);
     reg.register(core_entry("compact", &[])).unwrap();
     reg.register(fake_entry(
-        "mcp:demo:a",
+        "demo:a",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -600,10 +611,10 @@ fn on_change_unregister_trigger_matrix() {
     assert!(!reg.unregister("core:compact"), "二次删除未命中");
     assert_eq!(count.load(Ordering::SeqCst), 3, "unregister 未命中不触发");
 
-    assert_eq!(reg.unregister_namespace("mcp", "demo"), 1);
+    assert_eq!(reg.unregister_namespace("demo", ""), 1);
     assert_eq!(count.load(Ordering::SeqCst), 4, "namespace 移除 n>0 触发");
 
-    assert_eq!(reg.unregister_namespace("mcp", "demo"), 0);
+    assert_eq!(reg.unregister_namespace("demo", ""), 0);
     assert_eq!(count.load(Ordering::SeqCst), 4, "namespace 未命中不触发");
 }
 
@@ -657,7 +668,7 @@ fn reconcile_fires_single_on_change() {
     let reg = Arc::new(CommandRegistry::new());
     let mcp_a = || {
         fake_entry(
-            "mcp:demo:a",
+            "demo:a",
             CommandSource::Mcp {
                 server: "demo".into(),
             },
@@ -666,7 +677,7 @@ fn reconcile_fires_single_on_change() {
     };
     let mcp_b = || {
         fake_entry(
-            "mcp:demo:b",
+            "demo:b",
             CommandSource::Mcp {
                 server: "demo".into(),
             },
@@ -686,7 +697,7 @@ fn reconcile_fires_single_on_change() {
         let n = reg_ref.snapshot().len();
         seen_ref.lock().unwrap().push(n);
     })));
-    let (removed, added) = reg.reconcile(&["mcp:demo:a".to_string()], vec![mcp_b()]);
+    let (removed, added) = reg.reconcile(&["demo:a".to_string()], vec![mcp_b()]);
     assert_eq!(
         (removed, added),
         (1, 0),
@@ -699,7 +710,7 @@ fn reconcile_fires_single_on_change() {
     );
 
     // 内容无变化（注销 0 且注册 0）→ 不触发
-    let (removed, added) = reg.reconcile(&["mcp:nope".to_string()], vec![mcp_b()]);
+    let (removed, added) = reg.reconcile(&["nope".to_string()], vec![mcp_b()]);
     assert_eq!((removed, added), (0, 0));
     assert_eq!(
         *seen.lock().unwrap(),
@@ -715,7 +726,7 @@ fn resolve_failure_paths_none() {
     let reg = CommandRegistry::new();
     reg.register(core_entry("compact", &["c"])).unwrap();
     reg.register(fake_entry(
-        "mcp:demo:hello",
+        "demo:hello",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -737,9 +748,12 @@ fn resolve_failure_paths_none() {
     assert!(reg.resolve("/nonexistent").is_none());
     assert!(reg.resolve("/mcp:compact").is_none());
     assert!(reg.resolve("/core:demo:hello").is_none());
-    // 第二等级不支持裸名 / 省略 namespace 形态。
+    // 决策 1 Mcp：不登记裸名（/hello none）；命令全名 /demo:hello 精确命中；
+    // 同 server 未注册 skill（/demo:bye）与未注册 server（/other:hello）miss。
     assert!(reg.resolve("/hello").is_none());
-    assert!(reg.resolve("/demo:hello").is_none());
+    assert!(reg.resolve("/demo:hello").is_some());
+    assert!(reg.resolve("/demo:bye").is_none());
+    assert!(reg.resolve("/other:hello").is_none());
 }
 
 // ─── 第二等级不登记裸名 / 第一等级 ui 域裸名可用 ────────────────────
@@ -748,7 +762,7 @@ fn resolve_failure_paths_none() {
 fn level2_bare_name_not_indexed() {
     let reg = CommandRegistry::new();
     reg.register(fake_entry(
-        "mcp:demo:hello",
+        "demo:hello",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -756,7 +770,7 @@ fn level2_bare_name_not_indexed() {
     ))
     .unwrap();
     reg.register(fake_entry(
-        "mcp:demo:world",
+        "demo:world",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -764,12 +778,12 @@ fn level2_bare_name_not_indexed() {
     ))
     .unwrap();
 
-    // 第二等级条目不登记裸名（设计 §54：mcp:hello 形态非法），裸名不解析。
+    // 决策 1：词法地位等同 Level2，不登记裸名（hello/world 不解析）。
     assert!(reg.resolve("/hello").is_none());
     assert!(reg.resolve("/world").is_none());
-    assert!(reg.resolve("/demo:hello").is_none());
-    // 完整全名正常。
-    assert!(reg.resolve("/mcp:demo:hello").is_some());
+    // 完整全名正常；旧 3 段 mcp:demo:hello 形态下无此键。
+    assert!(reg.resolve("/demo:hello").is_some());
+    assert!(reg.resolve("/mcp:demo:hello").is_none());
 }
 
 #[test]
@@ -792,7 +806,7 @@ fn level1_ui_bare_name_works() {
 fn snapshot_sorted_contents_and_arc_identity() {
     let reg = CommandRegistry::new();
     reg.register(fake_entry(
-        "mcp:demo:hello",
+        "demo:hello",
         CommandSource::Mcp {
             server: "demo".into(),
         },
@@ -808,13 +822,13 @@ fn snapshot_sorted_contents_and_arc_identity() {
     // 按 fullname 排序（确定性输出）。
     assert_eq!(
         snap.iter().map(|e| e.fullname.as_str()).collect::<Vec<_>>(),
-        ["core:compact", "mcp:demo:hello", "ui:history"]
+        ["core:compact", "demo:hello", "ui:history"]
     );
     // resolve 与 snapshot 返回同一 Arc（单一事实源，无漂移）。
     let resolved = reg.resolve("/compact").unwrap();
     assert!(Arc::ptr_eq(&resolved.entry, &snap[0]));
     assert!(Arc::ptr_eq(
-        &reg.resolve("/mcp:demo:hello").unwrap().entry,
+        &reg.resolve("/demo:hello").unwrap().entry,
         &snap[1]
     ));
 }
@@ -916,7 +930,7 @@ fn concurrent_register_resolve_unregister_smoke() {
                 server: format!("srv{i}"),
             };
             for j in 0..PER_THREAD {
-                let fullname = format!("mcp:srv{i}:cmd{j}");
+                let fullname = format!("srv{i}:cmd{j}");
                 let alias = format!("s{i}c{j}");
                 let entry = fake_entry(&fullname, source.clone(), &[alias.as_str()]);
                 reg.register(entry)
@@ -938,7 +952,7 @@ fn concurrent_register_resolve_unregister_smoke() {
         let failed = resolve_failed.clone();
         handles.push(thread::spawn(move || {
             for j in 0..PER_THREAD {
-                let fullname = format!("mcp:srv{i}:cmd{j}");
+                let fullname = format!("srv{i}:cmd{j}");
                 let alias = format!("s{i}c{j}");
                 if reg.resolve(&fullname).is_none() || reg.resolve(&alias).is_none() {
                     failed.store(true, Ordering::SeqCst);
@@ -967,7 +981,7 @@ fn concurrent_register_resolve_unregister_smoke() {
     for i in 0..THREADS {
         let reg = reg.clone();
         handles.push(thread::spawn(move || {
-            let n = reg.unregister_namespace("mcp", &format!("srv{i}"));
+            let n = reg.unregister_namespace(&format!("srv{i}"), "");
             assert_eq!(n, PER_THREAD, "线程 {i} 注销数");
         }));
     }
@@ -975,7 +989,7 @@ fn concurrent_register_resolve_unregister_smoke() {
         h.join().expect("注销线程无 panic");
     }
     assert!(reg.snapshot().is_empty(), "全部注销后注册表为空");
-    assert!(reg.resolve("/mcp:srv0:cmd0").is_none());
+    assert!(reg.resolve("/srv0:cmd0").is_none());
     assert!(reg.resolve("/s0c0").is_none());
 }
 
@@ -983,15 +997,41 @@ fn concurrent_register_resolve_unregister_smoke() {
 // （register_all / project_sources / mark_source_* / clear_source_started；
 // 语义逐条对齐 mcp_skills_test.rs 的 McpSkillRegistry 先例）
 
-/// mcp 域条目快捷构造（第二等级，`mcp:{server}:{name}`）。
+/// mcp 域条目快捷构造（决策 1：`{server}:{name}`，server 名即词法首段域）。
 fn mcp_entry(server: &str, name: &str) -> RouteEntry {
     fake_entry(
-        &format!("mcp:{server}:{name}"),
+        &format!("{server}:{name}"),
         CommandSource::Mcp {
             server: server.to_string(),
         },
         &[],
     )
+}
+
+/// 审查 B1 防线 2：Mcp provenance 强制 Level2Short——server 名恰为保留域
+/// 时 fullname 被解析为 Level1/Level2，注册必须拒绝（防裸名路由污染与
+/// 断连误删内置域条目；源头跳过见 skill_discovery::mcp_namespace_reserved）。
+#[test]
+fn mcp_entry_reserved_domain_rejected() {
+    let reg = CommandRegistry::new();
+    for reserved in ["core", "ui", "plugin", "user", "mcp"] {
+        let result = reg.register(mcp_entry(reserved, "hello"));
+        // core/ui：parse 为 Level1 → 防线 2 ProvenanceMismatch；plugin/user/
+        // mcp：第二等级域缺 namespace 段 → 词法层 MalformedName。均为拒绝。
+        assert!(
+            matches!(
+                result,
+                Err(RegisterError::ProvenanceMismatch) | Err(RegisterError::MalformedName)
+            ),
+            "server 名 {reserved} 应拒绝（Level1/Level2 形态）: {result:?}"
+        );
+        // 拒绝即不残留：裸名/全名均不可路由。
+        assert!(reg.resolve(reserved).is_none());
+        assert!(reg.resolve(&format!("{reserved}:hello")).is_none());
+    }
+    // 非保留域正常注册（对照）。
+    assert!(reg.register(mcp_entry("demo", "hello")).is_ok());
+    assert!(reg.resolve("demo:hello").is_some());
 }
 
 /// 连接身份 token（type-erased Arc；不同 u32 → 不同指针，ptr_eq 可区分）。
@@ -1026,7 +1066,7 @@ fn register_all_partial_success_matrix() {
         errors,
         vec![
             RegisterError::Conflict {
-                key: "mcp:demo:hello".into()
+                key: "demo:hello".into()
             },
             RegisterError::ProvenanceMismatch,
             RegisterError::MalformedName,
@@ -1035,7 +1075,7 @@ fn register_all_partial_success_matrix() {
     );
     // 成功条目已注册（fullname 排序）；失败条目不占位。
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
-    assert_eq!(names, vec!["mcp:demo:hello", "mcp:demo:world"]);
+    assert_eq!(names, vec!["demo:hello", "demo:world"]);
     // 批量注册合并为单次变更事件。
     assert_eq!(count.load(Ordering::SeqCst), 1, "on_change 恰一次");
 }
@@ -1076,23 +1116,23 @@ fn project_sources_removed_triggers_unregister() {
     let h1 = token(1);
 
     // 两个已发现来源（demo：2 条；other：1 条）。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     reg.mark_source_completed(
-        "mcp:demo",
+        "demo",
         h1.clone(),
         vec![mcp_entry("demo", "hello"), mcp_entry("demo", "world")],
     );
-    reg.mark_source_started("mcp:other", h1.clone());
-    reg.mark_source_completed("mcp:other", h1, vec![mcp_entry("other", "skill")]);
+    reg.mark_source_started("other", h1.clone());
+    reg.mark_source_completed("other", h1, vec![mcp_entry("other", "skill")]);
     assert_eq!(count.load(Ordering::SeqCst), 2, "两次完成回写各触发一次");
 
     // 断连：other 不在 connected；demo handle 变化（重连）→ 重扫。
     let h2 = token(2);
-    let proj = reg.project_sources(&[("mcp:demo".to_string(), h2.clone())]);
+    let proj = reg.project_sources(&[("demo".to_string(), h2.clone())]);
 
     assert!(proj.removed_any, "other 被移除");
     assert_eq!(proj.to_discover.len(), 1, "demo handle 变化 → 重扫");
-    assert_eq!(proj.to_discover[0].0, "mcp:demo");
+    assert_eq!(proj.to_discover[0].0, "demo");
     assert!(
         Arc::ptr_eq(&proj.to_discover[0].1, &h2),
         "重扫携带新 handle"
@@ -1101,8 +1141,8 @@ fn project_sources_removed_triggers_unregister() {
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
     assert_eq!(
         names,
-        vec!["mcp:demo:hello", "mcp:demo:world"],
-        "断连按 mcp:other: 前缀批量注销"
+        vec!["demo:hello", "demo:world"],
+        "断连按 other: 前缀批量注销"
     );
     assert_eq!(count.load(Ordering::SeqCst), 3, "断连清理触发恰一次");
 }
@@ -1113,11 +1153,11 @@ fn project_sources_same_handle_no_rescan_no_fire() {
     let count = install_counter(&reg);
     let h1 = token(1);
 
-    reg.mark_source_started("mcp:demo", h1.clone());
-    reg.mark_source_completed("mcp:demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
+    reg.mark_source_started("demo", h1.clone());
+    reg.mark_source_completed("demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
 
     // 同 handle Discovered：不重扫、无移除、不触发。
-    let proj = reg.project_sources(&[("mcp:demo".to_string(), h1.clone())]);
+    let proj = reg.project_sources(&[("demo".to_string(), h1.clone())]);
     assert!(!proj.removed_any);
     assert!(
         proj.to_discover.is_empty(),
@@ -1141,26 +1181,26 @@ fn mark_source_started_overwrite_matrix() {
     let h1 = token(1);
 
     // ① 首次 Started（无状态）→ 不触发。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     assert_eq!(count.load(Ordering::SeqCst), 0);
 
     // ② Started → Started（重复 spawn，同 handle）→ 不触发。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     assert_eq!(count.load(Ordering::SeqCst), 0);
 
     // ③ Started → Discovered（完成，注册 1 条）→ 触发一次。
-    reg.mark_source_completed("mcp:demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
+    reg.mark_source_completed("demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
     assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // ④ Discovered（有条目）→ Started（重连撤旧）→ 先批量注销 + 触发一次。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     assert_eq!(count.load(Ordering::SeqCst), 2, "撤旧触发恰一次");
     assert!(reg.snapshot().is_empty(), "重连撤旧：前缀条目已注销");
 
     // ⑤ Discovered（无条目）→ Started → 不触发。
-    reg.mark_source_completed("mcp:demo", h1.clone(), vec![]);
+    reg.mark_source_completed("demo", h1.clone(), vec![]);
     assert_eq!(count.load(Ordering::SeqCst), 2, "空完成回写不触发");
-    reg.mark_source_started("mcp:demo", h1);
+    reg.mark_source_started("demo", h1);
     assert_eq!(
         count.load(Ordering::SeqCst),
         2,
@@ -1176,7 +1216,7 @@ fn mark_source_completed_without_started_ignored() {
     let count = install_counter(&reg);
 
     // 无 Started 状态（发现任务从未 spawn）→ 回写丢弃，不注册、不触发。
-    let n = reg.mark_source_completed("mcp:demo", token(1), vec![mcp_entry("demo", "hello")]);
+    let n = reg.mark_source_completed("demo", token(1), vec![mcp_entry("demo", "hello")]);
     assert_eq!(n, 0, "无来源状态不回写");
     assert!(reg.snapshot().is_empty());
     assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -1189,26 +1229,26 @@ fn mark_source_completed_old_handle_writeback_discarded() {
     let h1 = token(1);
     let h2 = token(2);
 
-    reg.mark_source_started("mcp:demo", h1.clone());
-    reg.mark_source_completed("mcp:demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
+    reg.mark_source_started("demo", h1.clone());
+    reg.mark_source_completed("demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
     assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // 重连：覆盖为 handle 2 的 Started（撤旧触发一次）。
-    reg.mark_source_started("mcp:demo", h2.clone());
+    reg.mark_source_started("demo", h2.clone());
     assert_eq!(count.load(Ordering::SeqCst), 2);
     assert!(reg.snapshot().is_empty());
 
     // 旧任务（handle 1）回写 → ptr_eq 拒绝，丢弃（无 ABA）。
-    let n = reg.mark_source_completed("mcp:demo", h1, vec![mcp_entry("demo", "old")]);
+    let n = reg.mark_source_completed("demo", h1, vec![mcp_entry("demo", "old")]);
     assert_eq!(n, 0, "旧 handle 回写返回 0");
     assert_eq!(count.load(Ordering::SeqCst), 2, "拒绝回写不触发 on_change");
     assert!(reg.snapshot().is_empty(), "旧任务条目不入主表");
 
     // 新任务（handle 2）回写 → 应用 + 触发恰一次。
-    let n = reg.mark_source_completed("mcp:demo", h2.clone(), vec![mcp_entry("demo", "new")]);
+    let n = reg.mark_source_completed("demo", h2.clone(), vec![mcp_entry("demo", "new")]);
     assert_eq!(n, 1);
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
-    assert_eq!(names, vec!["mcp:demo:new"], "仅新任务条目");
+    assert_eq!(names, vec!["demo:new"], "仅新任务条目");
     assert_eq!(count.load(Ordering::SeqCst), 3, "新任务回写触发恰一次");
 }
 
@@ -1219,10 +1259,10 @@ fn mark_source_completed_success_fires_once() {
     let h1 = token(1);
 
     // 首次发现：注册 2 条 → 触发一次（批量回写合并）。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     assert_eq!(count.load(Ordering::SeqCst), 0, "Started 置位不触发");
     let n = reg.mark_source_completed(
-        "mcp:demo",
+        "demo",
         h1.clone(),
         vec![mcp_entry("demo", "hello"), mcp_entry("demo", "world")],
     );
@@ -1230,7 +1270,7 @@ fn mark_source_completed_success_fires_once() {
     assert_eq!(count.load(Ordering::SeqCst), 1, "批量回写 on_change 恰一次");
 
     // 重复完成（同 handle，重扫结果收缩）：清旧 2 + 注册 1 → 触发一次。
-    let n = reg.mark_source_completed("mcp:demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
+    let n = reg.mark_source_completed("demo", h1.clone(), vec![mcp_entry("demo", "hello")]);
     assert_eq!(n, 1);
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -1238,11 +1278,11 @@ fn mark_source_completed_success_fires_once() {
         "清旧+注册合并为单次变更事件"
     );
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
-    assert_eq!(names, vec!["mcp:demo:hello"], "重扫结果收缩：world 已撤");
+    assert_eq!(names, vec!["demo:hello"], "重扫结果收缩：world 已撤");
 
     // 部分失败：越权条目跳过 + 告警，不整体回滚。
     let n = reg.mark_source_completed(
-        "mcp:demo",
+        "demo",
         h1.clone(),
         vec![
             mcp_entry("demo", "hi"),
@@ -1251,7 +1291,7 @@ fn mark_source_completed_success_fires_once() {
     );
     assert_eq!(n, 1, "越权条目跳过，其余注册");
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
-    assert_eq!(names, vec!["mcp:demo:hi"], "冲突/越权条目不占位");
+    assert_eq!(names, vec!["demo:hi"], "冲突/越权条目不占位");
     assert_eq!(count.load(Ordering::SeqCst), 3, "部分失败仍触发恰一次");
 }
 
@@ -1264,11 +1304,11 @@ fn clear_source_started_retryable() {
     let h1 = token(1);
 
     // 发现任务 spawn → Started（不触发）。
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
     assert_eq!(count.load(Ordering::SeqCst), 0, "Started 置位不触发");
 
     // cancel：同 handle 回退 Started（不触发）。
-    reg.clear_source_started("mcp:demo", h1.clone());
+    reg.clear_source_started("demo", h1.clone());
     assert_eq!(
         count.load(Ordering::SeqCst),
         0,
@@ -1276,8 +1316,8 @@ fn clear_source_started_retryable() {
     );
 
     // 下轮可重试：重新 Started → 完成 → 注册成功。
-    reg.mark_source_started("mcp:demo", h1.clone());
-    let n = reg.mark_source_completed("mcp:demo", h1, vec![mcp_entry("demo", "hello")]);
+    reg.mark_source_started("demo", h1.clone());
+    let n = reg.mark_source_completed("demo", h1, vec![mcp_entry("demo", "hello")]);
     assert_eq!(n, 1, "回退后重试注册成功");
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
@@ -1286,19 +1326,19 @@ fn clear_source_started_retryable() {
 fn clear_source_started_handle_mismatch_keeps_state() {
     let reg = CommandRegistry::new();
     let h1 = token(1);
-    reg.mark_source_started("mcp:demo", h1.clone());
+    reg.mark_source_started("demo", h1.clone());
 
     // 旧 handle 的 cancel → 不移除；状态仍在 → 同 handle 投影不重扫。
-    reg.clear_source_started("mcp:demo", token(99));
-    let proj = reg.project_sources(&[("mcp:demo".to_string(), h1.clone())]);
+    reg.clear_source_started("demo", token(99));
+    let proj = reg.project_sources(&[("demo".to_string(), h1.clone())]);
     assert!(
         proj.to_discover.is_empty(),
         "handle 不匹配不移除，同 handle 不重扫"
     );
 
     // 正确 handle 的 cancel → 移除；下轮投影重新进入 to_discover（可重试）。
-    reg.clear_source_started("mcp:demo", h1);
-    let proj = reg.project_sources(&[("mcp:demo".to_string(), token(2))]);
+    reg.clear_source_started("demo", h1);
+    let proj = reg.project_sources(&[("demo".to_string(), token(2))]);
     assert_eq!(
         proj.to_discover.len(),
         1,

@@ -107,6 +107,13 @@ pub struct CommandContext {
     /// `AgentPassthrough` 等需要把原文交还 agent 管线的 handler 消费——
     /// 命令名与 args 均已切分，原文不可重建，故随上下文携带。
     pub raw_text: String,
+    /// 当前上下文是否存在可接收 Inject 的 agent 管线（跨层契约，决策 A2/D）。
+    ///
+    /// 拦截层（`executor_helpers.rs`）置 `true`——`CommandOutcome::Inject`
+    /// 原文会替换用户消息进 agent 管线，由 SkillPreload 等后续处理；RPC 路径
+    /// （`execute_command.rs`）恒为默认 `false`——无管线可注入，
+    /// `McpSkillReleaser` 依此降级为直接返回 skill 全文（决策 D）。
+    pub supports_inject: bool,
     /// 命令参数（命令名之后的文本）。
     pub args: String,
     /// 命令参数统一解析结果（P1-1：拦截层 / execute-command RPC 路径在
@@ -200,6 +207,7 @@ impl CommandContext {
             compact_config: CompactConfig::default(),
             auxiliary_model: None,
             raw_text: String::new(),
+            supports_inject: false,
             args: String::new(),
             parsed_args: None,
             thread_store: None,

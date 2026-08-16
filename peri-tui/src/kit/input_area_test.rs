@@ -626,7 +626,7 @@ fn test_build_slash_items_uses_projection_kind_level() {
     crate::kit::atoms::init_atoms();
     *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
         SlashCommandEntry {
-            fullname: "mcp:demo:hello".to_string(),
+            fullname: "demo:hello".to_string(),
             description: "MCP skill".to_string(),
             kind: SlashActionKind::McpSkill,
             level: 2,
@@ -656,9 +656,9 @@ fn test_build_slash_items_uses_projection_kind_level() {
             .unwrap_or_else(|| panic!("未找到 slash 条目 {label}"))
     };
     // level 2 → 全名原样
-    let mcp = find("mcp:demo:hello");
+    let mcp = find("demo:hello");
     assert_eq!(mcp.kind, SlashActionKind::McpSkill);
-    assert_eq!(mcp.insert_text, "mcp:demo:hello");
+    assert_eq!(mcp.insert_text, "demo:hello");
     // 无冒号全名 → 原样（裸名即全名）
     let skill = find("MySkill");
     assert_eq!(skill.kind, SlashActionKind::Skill);
@@ -669,8 +669,8 @@ fn test_build_slash_items_uses_projection_kind_level() {
     assert_eq!(compact.insert_text, "compact");
     assert_eq!(compact.fullname, "core:compact");
     // 双索引（步骤 4）：search_lowercase = label + fullname 小写合并——
-    // level 1 裸名条目也能被全名前缀（如 /mcp:demo）模糊搜到
-    assert_eq!(mcp.search_lowercase, "mcp:demo:hello mcp:demo:hello");
+    // 全名条目也能被词法首段前缀（如 /demo:）模糊搜到
+    assert_eq!(mcp.search_lowercase, "demo:hello demo:hello");
     assert_eq!(compact.search_lowercase, "compact core:compact");
     // 全名形态不得再出现（display 即 lexical，解析器严格命中）
     assert!(items.iter().all(|i| i.label != "core:compact"));
@@ -709,7 +709,7 @@ fn test_build_slash_items_display_is_lexical() {
             ..Default::default()
         },
         SlashCommandEntry {
-            fullname: "mcp:demo:hello".to_string(),
+            fullname: "demo:hello".to_string(),
             description: "MCP skill".to_string(),
             level: 2,
             ..Default::default()

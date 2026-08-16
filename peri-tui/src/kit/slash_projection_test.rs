@@ -8,13 +8,13 @@ fn display_name_level1_uses_bare_name_after_last_colon() {
     assert_eq!(display_name("core:compact", 1), "compact");
     assert_eq!(display_name("ui:history", 1), "history");
     // 多段全名取最右段
-    assert_eq!(display_name("mcp:demo:hello", 1), "hello");
+    assert_eq!(display_name("demo:hello", 1), "hello");
 }
 
 #[test]
 fn display_name_level2_keeps_fullname() {
     assert_eq!(display_name("core:compact", 2), "core:compact");
-    assert_eq!(display_name("mcp:demo:hello", 2), "mcp:demo:hello");
+    assert_eq!(display_name("demo:hello", 2), "demo:hello");
     assert_eq!(display_name("plaincmd", 2), "plaincmd");
 }
 
