@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16（v2，修正注册面与 Full 升级判定）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17（v3，executor / executor_helpers / subagent / async_tasks 拆分为子模块目录）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -16,9 +16,9 @@
 | 改 compact 触发阈值 | `peri-acp-types/src/compact.rs`（`CompactConfig` 事实源，`apply_env_overrides` 实现在 :325；`peri-agent/src/agent/compact_v2/config.rs` 仅 re-export；`peri-acp/src/host/compact_config.rs` 是配置加载调用方） | `CompactConfig` 字段：`auto_compact_threshold`（默认 0.95）、`micro_compact_threshold`（默认 0.75）、`smart_compact_enabled`（废弃恒 false） | budget < 0.75 跳过；≥ 0.75 走 Micro；Micro 收益不足且 budget ≥ auto_compact_threshold 时升级 Full；force=true 直接 Full。注意：调低 Full 阈值时 micro_compact_threshold 必须更低，否则先走 Skip |
 | 改 compact 策略选择 | `src/agent/compact_v2/mod.rs` + `src/agent/stages/compact.rs` | `determine_compact_action(budget, config)`（mod.rs:102，Skip/Micro/Smart 选择）；`run_compact`（mod.rs:125 编排，Full 升级判定在 :233）；阶段入口 `stages/compact.rs::run_compact` | Full 升级判定以代码为准：`budget >= config.auto_compact_threshold` + `llm.is_none()` 守卫 + cache-aware 跳过；`planner.rs::CompactPolicy::force_full_threshold` 无消费点（遗留） |
 | 改 Micro/Full 执行细节 | `src/agent/compact_v2/micro.rs` / `full.rs` | `micro_compact`；`re_inject_v2`、`extract_file_info`、`extract_skill_names` | Micro 按 round 截断（`micro_excluded_tools` 黑名单）；Full 走 `peri_model::Model` 摘要 + re-inject |
-| 改循环退出 / keepgoing 判定 | `src/session/exec/executor.rs` + `src/agent/stages/mod.rs`（Receive 分支） | `executor.rs:125 is_keepgoing(&MessageContent)`；`run_react_loop` 退出判断（stages/mod.rs:647 `consumed_count == 0 && !has_tool_calls`）；判空底层 `peri-acp-types/src/messages/content.rs::is_empty`（:399） | 空白 prompt 须用 `MessageContent::is_empty()` 判空（禁止 trim 替代）；空历史 + 空白 prompt 时短路 `push_done`；keepgoing 不注入 recall；契约 ARC-KEEPGOING-001 |
+| 改循环退出 / keepgoing 判定 | `src/session/exec/executor.rs` + `src/agent/stages/mod.rs`（Receive 分支） | `executor.rs:130 is_keepgoing(&MessageContent)`；`run_session_loop`（executor.rs:221）；`run_react_loop` 退出判断（stages/mod.rs:647 `consumed_count == 0 && !has_tool_calls`）；判空底层 `peri-acp-types/src/messages/content.rs::is_empty`（:399） | 空白 prompt 须用 `MessageContent::is_empty()` 判空（禁止 trim 替代）；空历史 + 空白 prompt 时短路 `push_done`；keepgoing 不注入 recall；契约 ARC-KEEPGOING-001 |
 | 加工具（direct/deferred） | trait 事实源 `peri-acp-types/src/tools.rs`；注册面 = middleware 的 `collect_tools()`（13 处实现，例 `peri-middlewares/src/middleware/filesystem.rs:39`）；组装 `src/session/exec/stage_builder.rs::build_session_tool_view` | `BaseTool::is_direct()`（默认 **false** = deferred，无需覆写）；LLM 侧唯一过滤点 `src/agent/stages/reason.rs:138`（`.filter(is_direct)`） | `is_direct()=true` 直接进 LLM tools；false 经 `SearchExtraTools` 发现 + `ExecuteExtraTool` 代理执行（`peri-middlewares/src/tool_search/`）；包装层须透传；契约 ARC-TOOLS-001 |
-| 改 cancel 链路 | `src/session/exec/executor_helpers.rs` + `peri-acp-types/src/session.rs` | `build_and_execute_agent_v2`（executor_helpers.rs:842）；`cancel_cascade_agents` / `cancel_all_agents`（session.rs:573/582）；`CancelRequest` 在 `peri-acp-types/src/identity.rs:262` | 按 (session_id, turn_id, attempt_id) 三元组定位；幂等判定与终态归 Agent 层；clear_queue 默认 false；契约 ARC-CANCEL-001 |
+| 改 cancel 链路 | `src/session/exec/executor_helpers/v2_execute.rs` + `peri-acp-types/src/session.rs` | `build_and_execute_agent_v2`（executor_helpers/v2_execute.rs:122，根 executor_helpers.rs:54 re-export）；`cancel_cascade_agents` / `cancel_all_agents`（session.rs:573/582）；`CancelRequest` 在 `peri-acp-types/src/identity.rs:262` | 按 (session_id, turn_id, attempt_id) 三元组定位；幂等判定与终态归 Agent 层；clear_queue 默认 false；契约 ARC-CANCEL-001 |
 | /compact 命令路径 | `src/session/exec/compact_pipeline.rs` | `run_compact(force=true)` → Full + re-inject | 编排：validate_inputs → resolve_auxiliary_model → run_v2_compact_with_cancel → assemble_compact_messages；取消返回 Cancelled |
 | 改 LLM 调用链路 | `src/agent/stages/reason.rs` + `src/agent/model_bridge.rs` | `run_reason`；model_bridge 流式事件 v2 直发 | Reason：snapshot → LlmCallStart → before_model → generate（与 cancel 竞争）→ after_model → LlmCallEnd；事件契约 ARC-EVENT-001 |
 | 改工具执行分发 | `src/agent/stages/act.rs` + `src/agent/stages/tool_dispatch.rs` | `run_act`；`dispatch_tools`（并发执行 + 写 transcript） | 有 tool_calls → 并发执行；无 → 最终回答 emit TextChunk + StateSnapshot |
@@ -53,10 +53,12 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 执行编排、keepgoing、短路 | session/exec/executor.rs | `is_keepgoing`（:125）；`run_session_loop`；空历史短路 push_done |
-| v2 装配与循环驱动 | session/exec/executor_helpers.rs | `build_and_execute_agent_v2`（:842） |
+| 执行编排、keepgoing、短路 | session/exec/executor.rs | `is_keepgoing`（:130）；`run_session_loop`（:221）；空历史短路 push_done；辅助构建拆至 executor/（context / agent_build / prediction 子模块） |
+| v2 装配与循环驱动 | session/exec/executor_helpers/v2_execute.rs | `build_and_execute_agent_v2`（:122）；根 executor_helpers.rs（:41-57）声明子模块并 re-export intercept / event_pump / collect / bg_fork 子流程 |
 | /compact 命令执行体 | session/exec/compact_pipeline.rs | `run_compact(force=true)` |
 | 工具视图组装 | session/exec/stage_builder.rs | `build_session_tool_view`（:223）、`build_stage_context`（:576） |
+| 子 Agent 创建（spawner/fork/bg/build_agent 收敛） | session/subagent/ | `SessionFactory::spawn_subagent`（factory.rs:36）；`SubagentSpawnConfig`/`SubagentChainAssembler`（types.rs:137/:87）；根 subagent.rs 仅 re-export（directives / factory / run_sync / background / v2_bridge / lifecycle / util） |
+| 后台任务管理（bg shell，易失不持久化） | agent/async_tasks/ | `TaskManager`（manager.rs:28，per-session 聚合）；`BackgroundTaskRegistry`（registry.rs:105）；shell 执行 `shell_command` / `kill_process_group` / `parse_timeout`（shell.rs:109/:25/:201）；根 async_tasks.rs 仅 re-export |
 | 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs） |
 | 消息队列 | session/queue.rs | MessageQueue 入队/排空 |
 | Transcript 标记 API | session/transcript.rs | `visible_messages()`；excluded 标记过滤 |
