@@ -287,7 +287,6 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         }
         ExecutorEvent::WorkflowStarted {
             workflow_id,
-            plan_summary: _,
             ..
         } => AgentActivityWire::new(K::Workflow, S::Running).correlated("workflow", workflow_id),
         ExecutorEvent::WorkflowEnded {
