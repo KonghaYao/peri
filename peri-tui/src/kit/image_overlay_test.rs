@@ -52,9 +52,13 @@ fn reset_atoms() {
     *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 }
 
-/// 轮询 IMAGE_PREVIEW_STATE 直至谓词成立；超时返回 false（正常 <500ms）。
+/// 轮询 IMAGE_PREVIEW_STATE 直至谓词成立；超时返回 false。
+///
+/// 正常 <500ms；窗口放宽至 15s（1500×10ms）：解码跑独立 std::thread，
+/// workspace 并发测试/CI 高负载下线程调度可能延迟数秒（本机压测观测到
+/// 5s 窗口偶发超时）。
 fn wait_state<F: Fn(&ImagePreviewState) -> bool>(pred: F) -> bool {
-    for _ in 0..500 {
+    for _ in 0..1500 {
         let state = IMAGE_PREVIEW_STATE.state().read().clone();
         if pred(&state) {
             return true;
