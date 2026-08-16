@@ -90,7 +90,7 @@ fn test_extract_commands_single() {
 
     let entries = extract_commands(&manifest, dir.path(), "my-plugin");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "my-plugin:test");
+    assert_eq!(entries[0].name, "plugin:my-plugin:test");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_extract_commands_explicit_name() {
     }]);
 
     let entries = extract_commands(&manifest, dir.path(), "p");
-    assert_eq!(entries[0].name, "p:my-cmd");
+    assert_eq!(entries[0].name, "plugin:p:my-cmd");
 }
 
 #[test]
@@ -169,6 +169,123 @@ fn test_extract_commands_frontmatter_description() {
 
     let entries = extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries[0].description, "FM desc");
+}
+
+// ── plugin_route_entries（Phase 6 B2 转换函数；P2-1 直测）──────────────────
+
+/// 最小事件 sink（占位 handler execute 需要 CommandContext）。
+struct NoopEventSink;
+
+#[async_trait::async_trait]
+impl peri_acp_types::event::EventSink for NoopEventSink {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &peri_acp_types::event::ExecutorEvent,
+        _context_window: u32,
+    ) {
+    }
+
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
+}
+
+/// 转换主路径：fullname / 剥离 plugin: 前缀的 provenance / kind / lifecycle
+/// 全量锁定（P0-1 回归：未剥离前缀 → namespace 段校验失败 →
+/// ProvenanceMismatch 全量拒绝，本用例直接暴露）。
+#[test]
+fn test_plugin_route_entries_full() {
+    let entries = vec![CommandEntry {
+        name: "plugin:ecc:deploy".into(),
+        description: "Deploy to prod".into(),
+        source: CommandSource::Plugin {
+            path: PathBuf::from("/tmp/ecc/deploy.md"),
+        },
+    }];
+    let routes = plugin_route_entries(&entries);
+    assert_eq!(routes.len(), 1);
+    let r = &routes[0];
+    // fullname 原样使用（三层形态 `plugin:{plugin}:{cmd}`）
+    assert_eq!(r.fullname, "plugin:ecc:deploy");
+    assert!(r.aliases.is_empty(), "插件条目不得带 alias");
+    assert_eq!(r.description, "Deploy to prod");
+    // kind / lifecycle
+    assert_eq!(r.kind, CommandEntryKind::Command, "plugin 域暂归 Command");
+    assert_eq!(r.provenance.lifecycle, CommandLifecycle::Connected);
+    assert!(r.category.is_none());
+    assert!(r.args_schema.is_none());
+    // provenance.source：plugin: 前缀必须剥离（P0-1）
+    match &r.provenance.source {
+        RouteCommandSource::Plugin { name } => {
+            assert_eq!(name, "ecc", "plugin: 前缀必须剥离，实际: {name}");
+        }
+        other => panic!("source 应为 Plugin，实际: {other:?}"),
+    }
+    // 与词法 namespace 段一致（register 域校验通过面，设计 §58）
+    assert_eq!(r.provenance.source.namespace(), Some("ecc"));
+}
+
+/// 占位 handler 语义：execute → `Inject` 空串（fall-through 进 agent 管线，
+/// 命令不被吞——与 McpSkillPlaceholder / PassthroughPlaceholder 同构）。
+#[tokio::test]
+async fn test_plugin_route_entries_handler_is_placeholder_inject() {
+    let entries = vec![CommandEntry {
+        name: "plugin:ecc:deploy".into(),
+        description: String::new(),
+        source: CommandSource::Builtin,
+    }];
+    let routes = plugin_route_entries(&entries);
+    let outcome = routes[0]
+        .handler
+        .execute(CommandContext::new(
+            "test-session".into(),
+            vec![],
+            "/tmp".into(),
+            Arc::new(NoopEventSink),
+            tokio_util::sync::CancellationToken::new(),
+            Default::default(),
+        ))
+        .await;
+    assert!(
+        matches!(&outcome, CommandOutcome::Inject(s) if s.is_empty()),
+        "占位 handler 应 Inject 空串，实际 outcome 非 Inject"
+    );
+}
+
+/// 词法异常 name 全量跳过：单层 `plugin:x`（缺末段 cmd）、非 plugin 域
+/// `foo:bar`、无冒号裸名（register 阶段词法校验兜底）。
+#[test]
+fn test_plugin_route_entries_skips_lexically_abnormal() {
+    let entries = vec![
+        CommandEntry {
+            name: "plugin:x".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        CommandEntry {
+            name: "foo:bar".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        CommandEntry {
+            name: "nocolon".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        // 合法条目共存时仅合法者产出（过滤不得误伤）
+        CommandEntry {
+            name: "plugin:p:standalone".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+    ];
+    let routes = plugin_route_entries(&entries);
+    assert_eq!(routes.len(), 1, "词法异常 name 应跳过，仅合法条目产出");
+    assert_eq!(routes[0].fullname, "plugin:p:standalone");
+    assert_eq!(
+        routes[0].provenance.source.namespace(),
+        Some("p"),
+        "合法条目 provenance 剥离 plugin: 前缀"
+    );
 }
 
 #[test]
@@ -734,12 +851,12 @@ fn test_plugin_command_provider_multiple() {
             manifest: make_manifest_with_commands(vec![]),
             commands: vec![
                 CommandEntry {
-                    name: "p1:cmd1".into(),
+                    name: "plugin:p1:cmd1".into(),
                     description: "d1".into(),
                     source: CommandSource::Builtin,
                 },
                 CommandEntry {
-                    name: "p1:cmd2".into(),
+                    name: "plugin:p1:cmd2".into(),
                     description: "d2".into(),
                     source: CommandSource::Builtin,
                 },
@@ -758,12 +875,12 @@ fn test_plugin_command_provider_multiple() {
             manifest: make_manifest_with_commands(vec![]),
             commands: vec![
                 CommandEntry {
-                    name: "p2:cmd3".into(),
+                    name: "plugin:p2:cmd3".into(),
                     description: "d3".into(),
                     source: CommandSource::Builtin,
                 },
                 CommandEntry {
-                    name: "p2:cmd4".into(),
+                    name: "plugin:p2:cmd4".into(),
                     description: "d4".into(),
                     source: CommandSource::Builtin,
                 },
@@ -901,8 +1018,11 @@ fn test_extract_commands_string_directory() {
     assert_eq!(entries.len(), 2);
     let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
     names.sort();
-    assert_eq!(names, vec!["ecc:deploy", "ecc:rollback"]);
-    let deploy = entries.iter().find(|e| e.name == "ecc:deploy").unwrap();
+    assert_eq!(names, vec!["plugin:ecc:deploy", "plugin:ecc:rollback"]);
+    let deploy = entries
+        .iter()
+        .find(|e| e.name == "plugin:ecc:deploy")
+        .unwrap();
     assert_eq!(deploy.description, "Deploy to production");
 }
 
@@ -929,7 +1049,7 @@ fn test_extract_commands_string_single_file() {
 
     let entries = extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "p:standalone");
+    assert_eq!(entries[0].name, "plugin:p:standalone");
 }
 
 // ===== 项目级插件发现测试 =====

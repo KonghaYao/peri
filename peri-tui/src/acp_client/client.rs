@@ -12,6 +12,8 @@ use peri_acp::transport::{
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
 };
+use peri_acp_types::PeriCaps;
+use peri_acp_types::command::command_route::UiCommandSpec;
 use peri_acp_types::event_data::PredictionAction;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -395,6 +397,30 @@ impl AcpTuiClient {
     }
 
     // ── High-level RPC wrappers ──
+
+    /// 上送 ui 域命令明细（设计 §88 / Phase 3 caps 通道：`clientCapabilities._meta.
+    /// peri.uiCommands` 明细数组）。
+    ///
+    /// TUI 内部 Mpsc 路径无协议 initialize 握手，host 默认以
+    /// [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。本方法显式协商
+    /// caps：以 all_enabled 为基座、替换 `ui_commands` 为 TUI 实时明细，经
+    /// initialize 请求送达 host（`handle_request` "initialize" 分支 → `set_pending_caps`
+    /// → 首个 session/new 的 `ensure_session_caps` 取协商值 → `send_available_commands_update`
+    /// 把明细注册进注册表，投影回推刷新补全缓存）。
+    ///
+    /// **时序契约**：必须在首个 `session/new` 之前调用（initialize 是进程级
+    /// 一次性协商）；失败仅 warn 不阻断——host 回退 all_enabled 兜底明细，
+    /// 首 session 仍可用（R2 双写窗口防御）。
+    pub async fn register_ui_commands(&self, specs: &[UiCommandSpec]) -> Result<(), AcpError> {
+        let mut caps = PeriCaps::all_enabled();
+        caps.ui_commands = specs.to_vec();
+        let params = json!({
+            "protocolVersion": 1,
+            "clientCapabilities": { "_meta": caps.to_agent_meta() },
+        });
+        self.transport.send_request("initialize", params).await?;
+        Ok(())
+    }
 
     /// Create a new agent session.
     ///

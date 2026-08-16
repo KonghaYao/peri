@@ -222,25 +222,35 @@ fn test_slash_commands_unique() {
             m.slash_command,
             m.kind
         );
-        assert_eq!(panel_for_slash_command(m.slash_command), Some(m.kind));
-        assert_eq!(slash_command_for_panel(m.kind), m.slash_command);
+        // 纯表查找：同一 slash_command 在表中唯一对应一个面板（即自身）
+        assert_eq!(
+            PANELS
+                .iter()
+                .find(|x| x.slash_command == m.slash_command)
+                .map(|x| x.kind),
+            Some(m.kind)
+        );
     }
 }
 
 #[test]
-fn test_history_aliases_map_to_thread_browser() {
-    assert_eq!(
-        panel_for_slash_command("history"),
-        Some(PanelKind::ThreadBrowser)
+fn test_panels_slash_command_table_pure() {
+    // 别名表（history/resume/his）已迁入 ui_command.rs——反查函数
+    // （panel_for_slash_command / slash_command_for_panel）已删除，命中路径
+    // 统一走 ui_command::resolve_ui_command；此处直接断言 PANELS 表内容：
+    // 表内不含别名、不含未注册命令。
+    let threads = PANELS
+        .iter()
+        .find(|m| m.slash_command == "threads")
+        .expect("PANELS 必须含 threads（ThreadBrowser 面板）条目");
+    assert_eq!(threads.kind, PanelKind::ThreadBrowser);
+    assert!(
+        PANELS
+            .iter()
+            .all(|m| m.slash_command != "history" && m.slash_command != "his"),
+        "别名不得以 slash_command 形式存在于 PANELS"
     );
-    assert_eq!(
-        panel_for_slash_command("/history"),
-        Some(PanelKind::ThreadBrowser)
-    );
-    assert_eq!(
-        panel_for_slash_command("/his"),
-        Some(PanelKind::ThreadBrowser)
-    );
+    assert!(PANELS.iter().all(|m| m.slash_command != "unknown"));
 }
 
 #[test]

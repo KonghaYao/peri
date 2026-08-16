@@ -20,6 +20,7 @@ use std::{
 use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
+    command_registry::CommandRegistry,
     compact::CompactConfig,
     cron::CronSchedulerPort,
     event::{AgentEventHandler, ExecutorEvent},
@@ -157,6 +158,9 @@ pub struct StageBuildInput {
     /// 会话级 MCP skill 远端注册表（SessionAccessPort 投影；None = print
     /// 模式，跳过发现与合并）。
     pub mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
+    /// 会话级命令注册表（命令面，Phase 6 A3；SessionAccessPort 投影；
+    /// None = print 模式，跳过 mcp 域命令发现投影）。
+    pub command_registry: Option<Arc<CommandRegistry>>,
     /// tool invocation resolver（wrapper-aware canonical resolver）
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     /// compact 前置 hook（hook_groups 非空时 ACP 装配点构造）
@@ -425,6 +429,7 @@ pub(crate) fn build_agent(
             hook_groups,
             session_start_source,
             mcp_skill_registry: input.mcp_skill_registry.clone(),
+            command_registry: input.command_registry.clone(),
             cron_scheduler,
             mcp_pool,
             channel_state,

@@ -2,6 +2,7 @@
 //! Extracted from original acp_server.rs (2026-05-20 split).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::dispatch::config_update::make_config_options;
@@ -35,6 +36,71 @@ fn persist_config(cfg: &AcpServerConfig) {
     if let Err(e) = cfg.config_source.save(&c) {
         tracing::warn!(error = %e, "Failed to persist config");
     }
+}
+
+/// Phase 6 B3：插件 install / uninstall 成功后刷新 plugin 域命令条目——
+/// 注销全部旧条目 → 重载已启用插件 → 重新注册（`reconcile` 单次写锁原子
+/// 完成，任一内容变化只触发**一次** `on_change` → 投影推送，不经 TUI
+/// 协议）。
+///
+/// 重载失败 → 注销全部旧条目（plugin 域保持空：磁盘状态已变，过时条目
+/// 不得残留展示）+ 日志告警，不阻塞 RPC 回包。
+///
+/// Phase 6 遗留登记（P2-4，跨主题确认事项）：插件 mcpServers 变更
+/// （install/uninstall 改插件 manifest 的 mcpServers）**无 client 池刷新
+/// 触发点**——`McpPoolPort` 仅暴露 shutdown/snapshot，池配置为装配时
+/// 快照（`run_initialize` 一次性读取聚合配置含插件 mcpServers，
+/// assemble.rs / stdio/init.rs），`reconnect(name)` 仅按既有配置键重连，
+/// 无法接入新装插件的服务器；新装插件 `mcp:*` 命令条目依赖既有池重连
+/// 机制 + A3 发现链路自愈，需下次装配/会话重启生效，未在本 Phase 触发。
+fn refresh_plugin_command_entries(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    claude_dir: &Path,
+    session_cwd: Option<&str>,
+) {
+    let Some(command_registry) = cfg.session_manager.command_registry_for(session_id) else {
+        tracing::warn!(
+            session_id,
+            "plugin 命令刷新：无 session 级命令注册表，跳过（RPC 回包不受影响）"
+        );
+        return;
+    };
+    // stale = 当前 plugin 域全部条目（reconcile 精确键注销，未命中静默跳过）。
+    let stale: Vec<String> = command_registry
+        .snapshot()
+        .iter()
+        .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
+        .map(|e| e.fullname.clone())
+        .collect();
+    // 重载：与装配面同源（`load_enabled_plugins` → all_commands 聚合）；
+    // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
+    let fresh_commands = match peri_middlewares::plugin::load_enabled_plugins(
+        claude_dir,
+        session_cwd.map(Path::new),
+    ) {
+        Ok(plugins) => plugins
+            .iter()
+            .flat_map(|p| p.commands.clone())
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "插件重载失败：plugin 域清空（保留空 plugin 域），不阻塞 RPC 回包"
+            );
+            Vec::new()
+        }
+    };
+    let (removed, added) = command_registry.reconcile(
+        &stale,
+        peri_middlewares::plugin::plugin_route_entries(&fresh_commands),
+    );
+    tracing::info!(
+        session_id,
+        removed,
+        added,
+        "插件命令条目动态刷新完成（install/uninstall 后；注册表 on_change 已触发投影推送）"
+    );
 }
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
@@ -169,20 +235,16 @@ pub(crate) async fn handle_request(
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
                 .config_options(config_options);
-            // Scan skills for AvailableCommands（本地 + MCP 合并，DD-5）
-            // 将暂存的 peri caps 关联到新 session。
-            // MpscTransport 路径：若未显式调用 initialize（TUI 内部连接），
-            // 默认全部 cap=true（TUI 需要接收所有自定义事件）。
+            // 将暂存的 peri caps 关联到新 session（MpscTransport 路径：若未
+            // 显式调用 initialize（TUI 内部连接），默认全部 cap=true）。
             let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
-
+            // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 =
+            // 注册表 snapshot；本地 skills / ui / 插件条目已在会话创建时注册）
             send_available_commands_update(
                 transport,
                 &session_id,
-                &cfg.skills,
-                &cwd,
-                &cfg.plugin_skill_roots,
                 &peri_caps,
-                cfg.session_manager.mcp_skill_registry_for(&session_id),
+                cfg.session_manager.command_registry_for(&session_id),
             )
             .await;
 
@@ -381,15 +443,13 @@ pub(crate) async fn handle_request(
             let resp = LoadSessionResponse::new()
                 .modes(modes)
                 .config_options(config_options);
-            // Scan skills for AvailableCommands (same as session/new；本地 + MCP 合并)
+            // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 =
+            // 注册表 snapshot；本地 skills / ui / 插件条目已在会话创建时注册）
             send_available_commands_update(
                 transport,
                 req_session_id,
-                &cfg.skills,
-                cwd,
-                &cfg.plugin_skill_roots,
                 &caps,
-                cfg.session_manager.mcp_skill_registry_for(req_session_id),
+                cfg.session_manager.command_registry_for(req_session_id),
             )
             .await;
             serde_json::to_value(resp)
@@ -849,6 +909,18 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
+                    // Phase 6 B3：install 成功 → plugin 域命令条目动态刷新
+                    //（注册表 on_change 自动触发投影推送；重载失败 → 保留
+                    // 空 plugin 域 + 告警，不阻塞回包）
+                    // 遗留登记（P2-4）：插件 mcpServers 变更自愈依赖既有池
+                    // 重连机制（池为装配时快照），未在本 Phase 触发，详见
+                    // `refresh_plugin_command_entries` doc 注释。
+                    refresh_plugin_command_entries(
+                        cfg,
+                        session_id,
+                        &claude_dir,
+                        sessions.get(session_id).map(|s| s.cwd.as_str()),
+                    );
                     Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
                 }
                 Err(e) => {
@@ -902,6 +974,18 @@ pub(crate) async fn handle_request(
                         &caps,
                     )
                     .await;
+                    // Phase 6 B3：uninstall 成功 → plugin 域命令条目动态刷新
+                    //（注册表 on_change 自动触发投影推送；重载失败 → 保留
+                    // 空 plugin 域 + 告警，不阻塞回包）
+                    // 遗留登记（P2-4）：插件 mcpServers 变更自愈依赖既有池
+                    // 重连机制（池为装配时快照），未在本 Phase 触发，详见
+                    // `refresh_plugin_command_entries` doc 注释。
+                    refresh_plugin_command_entries(
+                        cfg,
+                        session_id,
+                        &claude_dir,
+                        sessions.get(session_id).map(|s| s.cwd.as_str()),
+                    );
                     Ok(serde_json::json!({ "success": true }))
                 }
                 Err(e) => {
@@ -1134,12 +1218,9 @@ pub(crate) async fn handle_request(
                 .get(&session_id)
                 .map(|s| (s.cwd.clone(), s.history.clone()))
                 .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-            let event_sink: Arc<dyn crate::session::event_sink::EventSink> =
-                Arc::new(crate::session::event_sink::TransportEventSink::new(
-                    transport.clone(), // transport: &Arc<dyn AcpTransport>（签名改动见下方实现注记）
-                    cfg.session_manager.caps_registry(),
-                ));
-            dispatch::rewind_preview(params, &history, &cwd, &event_sink, &session_id).await
+            // Phase 5 Step 5：RewindError 变体删除，preview 为只读路径
+            // 零事件——不再需要 event_sink。
+            dispatch::rewind_preview(params, &history, &cwd, &session_id).await
         }
 
         "session/rewind" => {

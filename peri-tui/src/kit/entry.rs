@@ -29,6 +29,7 @@ use crate::kit::service_snapshot::{SnapshotSource, spawn_service_snapshot};
 use crate::kit::submit_consumer::{spawn_cancel_consumer, spawn_submit_consumer};
 use crate::kit::submit_request::SubmitRequest;
 use crate::kit::thread_load_consumer::spawn_thread_load_consumer;
+use crate::kit::ui_command::ui_command_specs;
 use crate::launch::{TuiLaunchOptions, build_app_and_acp, teardown_app};
 use ratatui_kit::{
     crossterm::{
@@ -352,6 +353,24 @@ pub async fn run_kit_fullscreen(
         {
             let client = client.clone();
             tokio::spawn(async move {
+                // 5a. 上送 ui 域命令明细（设计 §88，Phase 3 caps 通道）：必须在
+                //     new_session 之前完成 caps 协商（initialize 为进程级一次性），
+                //     host 将明细注册为 ui:* 条目 → 投影回推刷新补全缓存。
+                //     上送失败仅 warn——host 回退 all_enabled 兜底明细（11 条
+                //     旧表），不阻断会话创建（R2 双写窗口防御）。
+                let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> =
+                    ui_command_specs()
+                        .iter()
+                        .map(|s| peri_acp_types::command::command_route::UiCommandSpec {
+                            name: s.name.into(),
+                            aliases: s.aliases.iter().map(|a| (*a).into()).collect(),
+                            description: s.description.into(),
+                            args: None, // 面板命令无参数 schema（第一版）
+                        })
+                        .collect();
+                if let Err(e) = client.register_ui_commands(&specs).await {
+                    tracing::warn!(error = %e, "kit: ui 命令上送注册失败（host 回退兜底明细）");
+                }
                 match client.new_session(&cwd_for_init, None).await {
                     Ok(session_id) => {
                         tracing::info!(%session_id, "kit: initial session created");

@@ -1,42 +1,8 @@
 //! dispatch/rewind 单元测试（预算 + 执行）。
 
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
-use peri_acp_types::{
-    event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock, ToolCallRequest},
-};
+use peri_acp_types::messages::{BaseMessage, ContentBlock, ToolCallRequest};
 
 use super::rewind_preview;
-use crate::session::event_sink::EventSink;
-
-// ── Mock EventSink（与 command/rewind_test.rs 同构）──
-
-struct MockEventSink {
-    events: Mutex<Vec<(String, String)>>,
-}
-
-impl MockEventSink {
-    fn new() -> Self {
-        Self {
-            events: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl EventSink for MockEventSink {
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, _context_window: u32) {
-        let json = serde_json::to_string(event).unwrap_or_default();
-        self.events
-            .lock()
-            .unwrap()
-            .push((session_id.to_string(), json));
-    }
-
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
-}
 
 /// 构造带工具调用的历史：U1 → A1(Edit) → U2 → A2(Write)
 fn make_history_with_tools() -> Vec<BaseMessage> {
@@ -71,14 +37,12 @@ fn make_history_with_tools() -> Vec<BaseMessage> {
 #[tokio::test]
 async fn test_preview_lists_file_changes_after_target() {
     let history = make_history_with_tools();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[2].id().as_uuid().to_string(); // U2
 
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp",
-        &sink,
         "test-session",
     )
     .await
@@ -96,14 +60,12 @@ async fn test_preview_lists_file_changes_after_target() {
 #[tokio::test]
 async fn test_preview_reverse_order_newest_first() {
     let history = make_history_with_tools();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[0].id().as_uuid().to_string(); // U1
 
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp",
-        &sink,
         "test-session",
     )
     .await
@@ -119,13 +81,11 @@ async fn test_preview_reverse_order_newest_first() {
 #[tokio::test]
 async fn test_preview_target_not_found_returns_error() {
     let history = make_history_with_tools();
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
 
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": "nonexistent" }),
         &history,
         "/tmp",
-        &sink,
         "test-session",
     )
     .await;
@@ -139,14 +99,12 @@ async fn test_preview_no_file_changes_returns_empty_list() {
         BaseMessage::human("你好"),
         BaseMessage::ai("你好！有什么可以帮你？"),
     ];
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[0].id().as_uuid().to_string();
 
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp",
-        &sink,
         "test-session",
     )
     .await
@@ -174,14 +132,12 @@ async fn test_preview_extracts_anthropic_tool_use() {
             }),
         )]),
     ];
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[0].id().as_uuid().to_string();
 
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp",
-        &sink,
         "test-session",
     )
     .await
@@ -211,13 +167,11 @@ async fn test_preview_normalizes_inside_absolute_path_to_project_relative() {
             }],
         ),
     ];
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[0].id().as_uuid().to_string();
     let result = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp/project",
-        &sink,
         "test-session",
     )
     .await
@@ -239,13 +193,11 @@ async fn test_preview_rejects_path_outside_session_cwd() {
             }],
         ),
     ];
-    let sink: Arc<dyn EventSink> = Arc::new(MockEventSink::new());
     let target_id = history[0].id().as_uuid().to_string();
     let error = rewind_preview(
         &serde_json::json!({ "target_message_id": target_id }),
         &history,
         "/tmp/project",
-        &sink,
         "test-session",
     )
     .await

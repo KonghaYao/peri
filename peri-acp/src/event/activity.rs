@@ -152,43 +152,17 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             item.attributes.insert("trigger".into(), wire_name(trigger));
             item
         }
+        // Phase 5 Step 4：CompactCompleted 收敛为重建信号三字段
+        // （summary/messages/trigger）——activity 观测仅保留 trigger 与消息数。
         ExecutorEvent::CompactCompleted {
-            files,
-            skills,
-            micro_cleared,
-            token_before,
-            token_after,
-            strategy,
-            trigger,
-            outcome,
-            affected_count,
-            estimated_tokens_saved,
-            ..
+            messages, trigger, ..
         } => {
-            let outcome_name = wire_name(outcome);
-            let failed = outcome_name.contains("failed") || outcome_name == "interrupted";
             let mut item =
-                AgentActivityWire::new(K::Compact, if failed { S::Failed } else { S::Completed })
-                    .correlated("compact", "current");
-            item.metrics.insert("file_count".into(), files.len() as u64);
+                AgentActivityWire::new(K::Compact, S::Completed).correlated("compact", "current");
             item.metrics
-                .insert("skill_count".into(), skills.len() as u64);
-            item.metrics
-                .insert("micro_cleared".into(), *micro_cleared as u64);
-            item.metrics.insert("token_before".into(), *token_before);
-            item.metrics.insert("token_after".into(), *token_after);
-            item.metrics
-                .insert("affected_count".into(), *affected_count as u64);
-            item.metrics
-                .insert("estimated_tokens_saved".into(), *estimated_tokens_saved);
-            item.attributes
-                .insert("strategy".into(), wire_name(strategy));
+                .insert("message_count".into(), messages.len() as u64);
             item.attributes.insert("trigger".into(), wire_name(trigger));
-            item.attributes.insert("outcome".into(), outcome_name);
             item
-        }
-        ExecutorEvent::CompactError { message: _ } => {
-            AgentActivityWire::new(K::Compact, S::Failed).correlated("compact", "current")
         }
         ExecutorEvent::ContextWarning {
             used_tokens,
@@ -251,7 +225,6 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             item
         }
         ExecutorEvent::RewindCompleted { .. } => AgentActivityWire::new(K::Rewind, S::Completed),
-        ExecutorEvent::RewindError { message: _ } => AgentActivityWire::new(K::Rewind, S::Failed),
         ExecutorEvent::LspDiagnostics {
             errors,
             warnings,
@@ -348,7 +321,10 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         | ExecutorEvent::TurnStarted { .. }
         | ExecutorEvent::TurnEnded { .. }
         | ExecutorEvent::MiddlewareStarted { .. }
-        | ExecutorEvent::MiddlewareEnded { .. } => return None,
+        | ExecutorEvent::MiddlewareEnded { .. }
+        // 命令反馈经 peri/agent_event 通道送达 TUI 通知条，不写 agent_activity
+        // （该通道禁止消息/错误文本，CommandFeedback.message 是用户可见文本）
+        | ExecutorEvent::CommandFeedback(_) => return None,
     };
     Some(activity)
 }
@@ -461,29 +437,12 @@ mod tests {
 
     #[test]
     fn compact_projection_contains_counts_not_sensitive_bodies() {
+        // Phase 5 Step 4：CompactCompleted 收敛为三字段重建信号——activity
+        // 投影仅含 trigger 与消息数，敏感摘要/路径均不泄漏。
         let event = ExecutorEvent::CompactCompleted {
             summary: "SECRET_SUMMARY".into(),
-            files: vec![peri_acp_types::event::CompactFileInfo {
-                path: "/secret/path".into(),
-                lines: 42,
-            }],
-            skills: vec!["private-skill".into()],
-            micro_cleared: 3,
             messages: vec![],
-            token_before: 1000,
-            token_after: 600,
-            strategy: CompactStrategy::Smart,
-            affected_count: 4,
-            estimated_tokens_saved: 400,
-            estimated_tokens_before: 1000,
-            estimated_tokens_after: 600,
-            changed_messages: 2,
-            changed_fields: 2,
-            no_op_candidates: 0,
-            full_escalation_reason: None,
-            cache_hit_rate_before: 0.5,
             trigger: CompactTrigger::Auto,
-            outcome: peri_acp_types::compact::CompactOutcome::SmartApplied,
         };
         let completed = map_agent_activity(&event).unwrap();
         let started = map_agent_activity(&ExecutorEvent::CompactStarted {
@@ -496,14 +455,7 @@ mod tests {
         .unwrap();
         assert_eq!(started.correlation_id, completed.correlation_id);
         let wire = serde_json::to_string(&completed).unwrap();
-        assert!(wire.contains("\"file_count\":1"));
-        assert!(wire.contains("\"skill_count\":1"));
-        for prohibited in [
-            "SECRET_SUMMARY",
-            "/secret/path",
-            "private-skill",
-            "messages",
-        ] {
+        for prohibited in ["SECRET_SUMMARY", "messages"] {
             assert!(
                 !wire.contains(prohibited),
                 "prohibited field leaked: {prohibited}"

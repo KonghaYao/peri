@@ -35,18 +35,20 @@ use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
     ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
     CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
-    LANG_VERSION, LOCAL_EVENT_TX, MCP_SKILL_NAMES, MENTION_PREFIX, MENTION_SELECTED_INDEX,
-    PENDING_ATTACHMENTS, POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SKILL_NAMES, SLASH_HINT_ACTIVE,
-    SLASH_PREFIX, SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
+    LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS,
+    POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SLASH_HINT_ACTIVE, SLASH_PREFIX,
+    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
-use crate::kit::panel_registry::{PANELS, open_panel, panel_description, panel_for_slash_command};
+use crate::kit::panel_registry::open_panel;
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
+use crate::kit::slash_projection::display_name;
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
+use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -896,32 +898,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                     prefix: slash_prefix.clone(),
                     items: slash_items.clone(),
                     on_select: Arc::new(Mutex::new(Handler::from(move |item: SlashCompletionItem| {
-                        match item.kind {
-                            SlashActionKind::Panel => {
-                                if let Some(kind) = panel_for_slash_command(&item.insert_text) {
-                                    // 清空输入框再打开面板
-                                    let mut editor = slash_select_state.write();
-                                    editor.text.clear();
-                                    editor.cursor = 0;
-                                    open_panel(kind);
-                                }
-                            }
-                            SlashActionKind::Command
-                            | SlashActionKind::Skill
-                            | SlashActionKind::McpSkill => {
-                                // S16：command/skill 先检查是否映射到面板（如 /history → ThreadBrowser）
-                                if let Some(kind) = panel_for_slash_command(&item.insert_text) {
-                                    // 清空输入框再打开面板
-                                    let mut editor = slash_select_state.write();
-                                    editor.text.clear();
-                                    editor.cursor = 0;
-                                    open_panel(kind);
-                                } else {
-                                    let mut editor = slash_select_state.write();
-                                    apply_slash_selection(&mut editor, &item.insert_text);
-                                }
-                            }
-                        }
+                        // Phase 4 步骤 4：选中行为收敛——统一先 resolve_ui_command
+                        // （ui 域本地拦截：裸名 / ui: 前缀 / aliases 归一化）。
+                        // 命中 → 清空输入框并打开面板 / 激活 setup；未命中 →
+                        // apply_slash_selection 落输入框（display 即 lexical）。
+                        let mut editor = slash_select_state.write();
+                        handle_slash_selection(&mut editor, &item);
                         reset_slash_popup();
                     }))),
                     on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
@@ -1304,64 +1286,111 @@ fn apply_slash_selection(state: &mut TextAreaState, cmd: &str) {
     }
 }
 
+/// Phase 4 步骤 4：补全选中行为收敛——统一先 `resolve_ui_command`（ui 域
+/// 本地拦截：裸名 / `ui:` 前缀 / aliases 归一化）。命中（如裸名 `history`
+/// → ThreadBrowser、`setup` → Wizard）→ 清空输入框并本地执行（不发 ACP）；
+/// 未命中 → `apply_slash_selection` 落输入框（display 即 lexical，解析器
+/// 严格命中）。
+fn handle_slash_selection(editor: &mut TextAreaState, item: &SlashCompletionItem) {
+    match resolve_ui_command(&item.insert_text) {
+        Some(UiCommandAction::OpenPanel(kind)) => {
+            editor.text.clear();
+            editor.cursor = 0;
+            open_panel(kind);
+        }
+        Some(UiCommandAction::ToggleSetup) => {
+            editor.text.clear();
+            editor.cursor = 0;
+            *WIZARD_ACTIVE.state().write() = true;
+        }
+        None => apply_slash_selection(editor, &item.insert_text),
+    }
+}
+
 fn build_slash_items() -> Vec<SlashCompletionItem> {
     let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
-    let skill_names: std::collections::HashSet<String> = SKILL_NAMES
-        .state()
-        .read()
+    // 纯投影映射（设计不变式 1/2，步骤 6 收口）：补全条目**全部**由投影
+    // 生成——PANELS 本地合成与 /setup 硬编码已删除（history/setup 不再
+    // 凭空出现）；kind 直接来自投影（无 SKILL_NAMES / MCP_SKILL_NAMES
+    // 集合反推）；label 经 display_name 按 level 变换（1 裸名 / 2 全名），
+    // display 即 lexical（insert_text == label）。
+    let mut items: Vec<SlashCompletionItem> = remote
         .iter()
-        .map(|s| s.to_lowercase())
+        .flat_map(|entry| {
+            let label = display_name(&entry.fullname, entry.level);
+            let label_lowercase = label.to_lowercase();
+            // 与主 display 名相同的 alias 跳过（主条目已生成，防重复）
+            let aliases: Vec<&String> = entry
+                .aliases
+                .iter()
+                .filter(|a| !a.eq_ignore_ascii_case(&label))
+                .collect();
+            let mut out = vec![SlashCompletionItem {
+                search_lowercase: SlashCompletionItem::make_search_lowercase(
+                    &label_lowercase,
+                    &entry.fullname,
+                ),
+                label_lowercase,
+                label: label.clone(),
+                insert_text: label,
+                description: entry.description.clone(),
+                kind: entry.kind.clone(),
+                fullname: entry.fullname.clone(),
+                args: entry.args.clone(),
+            }];
+            // alias 条目（display 即 lexical：alias 就是要输入的文本，不做 level
+            // 变换），继承主条目 kind/description/fullname/args。选中时
+            // handle_slash_selection 先走 resolve_ui_command——ui 域别名
+            // （history/his/resume → threads）直接本地打开面板；core 域别名
+            // （cls/reset/compress/undo）落输入框交 ACP 注册表 alias 索引解析。
+            for alias in aliases {
+                let a = alias.to_lowercase();
+                out.push(SlashCompletionItem {
+                    search_lowercase: SlashCompletionItem::make_search_lowercase(
+                        &a,
+                        &entry.fullname,
+                    ),
+                    label_lowercase: a,
+                    label: alias.clone(),
+                    insert_text: alias.clone(),
+                    description: entry.description.clone(),
+                    kind: entry.kind.clone(),
+                    fullname: entry.fullname.clone(),
+                    args: entry.args.clone(),
+                });
+            }
+            out
+        })
         .collect();
-    let mcp_skill_names: std::collections::HashSet<String> = MCP_SKILL_NAMES
-        .state()
-        .read()
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-    let mut items = Vec::with_capacity(PANELS.len() + remote.len() + 1);
-    for panel in PANELS {
-        if panel.slash_command.is_empty() {
-            continue;
-        }
-        let slash_name = panel.slash_command.to_string();
-        items.push(SlashCompletionItem {
-            label_lowercase: slash_name.to_lowercase(),
-            label: slash_name.clone(),
-            insert_text: slash_name,
-            description: panel_description(panel.kind),
-            kind: SlashActionKind::Panel,
-        });
-    }
-    // /setup 命令：打开 Setup Wizard 引导界面
-    items.push(SlashCompletionItem {
-        label: "setup".to_string(),
-        insert_text: "setup".to_string(),
-        description: i18n::tr("command-setup-description"),
-        kind: SlashActionKind::Command,
-        label_lowercase: "setup".to_string(),
-    });
-    for (name, description) in &remote {
-        // S16：根据 SKILL_NAMES / MCP_SKILL_NAMES 区分 McpSkill / Skill / Command，
-        // 优先级 McpSkill > Skill > Command（先判 MCP_SKILL_NAMES）。
-        let name_lower = name.to_lowercase();
-        let kind = if mcp_skill_names.contains(&name_lower) {
-            SlashActionKind::McpSkill
-        } else if skill_names.contains(&name_lower) {
-            SlashActionKind::Skill
-        } else {
-            SlashActionKind::Command
-        };
-        items.push(SlashCompletionItem {
-            label: name.clone(),
-            insert_text: name.clone(),
-            description: description.clone(),
-            kind,
-            label_lowercase: name_lower,
-        });
-    }
     // 字母序排序——只排一次，组件端不再重排
     items.sort_by(|a, b| a.label_lowercase.cmp(&b.label_lowercase));
-    items
+    // 双写窗口去重（R2 防御，步骤 6 明示保留）：R2 收口后触发条件已不
+    // 存在——服务端 UI_COMMANDS 常量已删除（裸名广播无 _meta 的路径消失）、
+    // 上送注册全量落地（ui: 前缀全名 + periKind=panel），当前 core 内置与
+    // ui 面板裸名无碰撞，本块实际不触发，仅作防御。
+    // 方向性风险：本去重「ui: 前缀 + kind != Command」优先保留 ui 域条目，
+    // 与注册表冲突裁决（内置优先、先注册占键）方向相反——若未来 core 域
+    // 新增与 ui 面板同裸名的命令（如 core:model），UI 会吞掉带 _meta 的
+    // core 条目而保留 ui:model，显示与执行不一致（display 即 lexical 破坏）。
+    // 仅当一方为缺省回退条目（kind==Command 且无 _meta 佐证）时才应触发；
+    // 保留现状不收紧，待真实碰撞出现时再收窄条件。
+    let mut deduped: Vec<SlashCompletionItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(last) = deduped.last_mut()
+            && last.label == item.label
+        {
+            let last_score = (last.fullname.starts_with("ui:") as u8)
+                + (last.kind != SlashActionKind::Command) as u8;
+            let item_score = (item.fullname.starts_with("ui:") as u8)
+                + (item.kind != SlashActionKind::Command) as u8;
+            if item_score > last_score {
+                *last = item;
+            }
+            continue;
+        }
+        deduped.push(item);
+    }
+    deduped
 }
 
 /// 缓存 `build_slash_items()` 的结果，仅在 ACP 推送新命令时刷新。

@@ -252,6 +252,9 @@ impl McpSkillRegistry {
 
     /// 按全名查找（小写精确匹配 `mcp__<server>__<skill>`）；未命中再试
     /// `<server>:<skill>` 别名（rsplit_once(':')，后缀非空才拼全名）。
+    ///
+    /// 仅供 tool 面（SkillTool/发现管线）消费：`mcp__` 形态不进入命令面
+    /// （注册表/投影/补全），tool 面迁移为后续 SEP（Phase 6 范围外）。
     pub fn find(&self, name: &str) -> Option<SkillMetadata> {
         let guard = self.inner.read();
         let needle = name.to_lowercase();
@@ -326,6 +329,9 @@ fn find_exact(
 
 /// `<server>:<skill>` → `mcp__<server>__<skill>`（registry.find 与 SkillTool
 /// 别名分支共用）。
+///
+/// 仅供 tool 面消费：`mcp__` 形态不进入命令面（注册表/投影/补全），
+/// tool 面迁移为后续 SEP（Phase 6 范围外）。
 pub fn mcp_skill_name(server: &str, skill: &str) -> String {
     format!("mcp__{}__{}", server, skill)
 }

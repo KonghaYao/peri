@@ -10,8 +10,8 @@
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
-//!   未映射变体（TurnCommitted/StateSnapshotMeta/CompactCompleted/...）保持
-//!   静默丢弃，S5+ 迭代扩展。
+//!   未映射变体（StateSnapshot/BgToolStep/LspDiagnostics/ContextWarning/
+//!   LlmRetrying/...）保持静默丢弃，S5+ 迭代扩展。
 //!
 //! 该任务是**纯转换 + channel push**——不做状态突变。
 
@@ -21,13 +21,16 @@ use tracing::{debug, info, warn};
 
 use crate::acp_client::AcpNotification;
 use crate::i18n;
-use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
+use crate::kit::acp_types::{
+    AcpEventData, AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, TuiCommandFeedback,
+};
 use crate::kit::atoms::{
     ACP_STATE, ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, INPUT_BUFFER,
-    MCP_SKILL_NAMES, NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SKILL_NAMES,
-    SPINNER_TOKEN_COUNT,
+    NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
+use crate::kit::slash_completion::SlashActionKind;
+use crate::kit::slash_projection::{ArgsSchema, SlashCommandEntry, parse_projection_kind};
 use crate::truncate::summarize_input;
 use fluent_bundle::FluentValue;
 use peri_acp::event::AcpEvent;
@@ -118,30 +121,13 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         AcpEvent::CompactStarted => Some(AcpEventData::CompactStarted),
         AcpEvent::CompactCompleted {
             summary,
-            files,
-            skills,
-            micro_cleared,
             messages_json,
-            strategy,
             trigger,
-            outcome,
-        } => {
-            let files_json: Vec<serde_json::Value> = files
-                .into_iter()
-                .filter_map(|f| serde_json::to_value(f).ok())
-                .collect();
-            Some(AcpEventData::CompactCompleted {
-                summary,
-                files: files_json,
-                skills,
-                micro_cleared,
-                messages_json,
-                strategy,
-                trigger,
-                outcome,
-            })
-        }
-        AcpEvent::CompactError { message } => Some(AcpEventData::CompactError { message }),
+        } => Some(AcpEventData::CompactCompleted {
+            summary,
+            messages_json,
+            trigger,
+        }),
         AcpEvent::BackgroundTaskCompleted {
             task_id,
             agent_name,
@@ -191,7 +177,6 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             messages_json,
             summary: _,
         } => Some(AcpEventData::RewindCompleted { messages_json }),
-        AcpEvent::RewindError { message } => Some(AcpEventData::RewindError { message }),
         // SystemNotification：MCP 上下线等连接状态变化（peri/agent_event 通道
         // 送达），转换为 AcpEventData::SystemNotification 显示系统通知。
         AcpEvent::SystemNotification { text, level } => {
@@ -200,6 +185,26 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
                 level,
             }))
         }
+        // CommandFeedback：命令执行反馈（Phase 3 事件链路，经 peri/agent_event
+        // 通道送达，无标准 SessionUpdate）。level/channel 为 wire string 化
+        // camelCase（"info" / "uiOnly"），解析为结构化枚举后推入 dual-bridge。
+        // 未知 level 回落 Info、未知 channel 回落 UiOnly（Phase 1 缺省语义）。
+        AcpEvent::CommandFeedback {
+            level,
+            message,
+            channel,
+        } => Some(AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: match level.as_str() {
+                "warning" => FeedbackLevel::Warning,
+                "error" => FeedbackLevel::Error,
+                _ => FeedbackLevel::Info,
+            },
+            message,
+            channel: match channel.as_str() {
+                "session" => FeedbackChannel::Session,
+                _ => FeedbackChannel::UiOnly,
+            },
+        })),
         // TurnSuspended：bg agent/cron/workflow 挂起信号——归档 current_turn、
         // 停止 loading spinner。双轨下线后（2026-08-05-3.0-m-event-chain-canonical）
         // 此信号仅经 ACP peri/agent_event 通道送达。
@@ -368,48 +373,64 @@ fn handle_session_update(
             Some(c) => c,
             None => return None,
         };
-        let entries: Vec<(String, String)> = cmds
+        // Phase 4 步骤 2：每条解析 name（=全名）+ description + _meta
+        // （_meta 优先、meta 兜底先例，与下方 is_session_replay 一致）的
+        // periKind / periLevel / periAliases / periCategory / periArgs；
+        // 缺省回退 kind=Command / level=1 / args=None / aliases=[]（R1）。
+        // **单 atom 原子写**：只写 AVAILABLE_SLASH_COMMANDS，消除现状
+        // 「AVAILABLE + SKILL_NAMES + MCP_SKILL_NAMES 三 atom 组合时序」
+        // 问题（inv03 §4-R1）；kind 直接来自投影，无集合反推。
+        let entries: Vec<SlashCommandEntry> = cmds
             .iter()
             .filter_map(|cmd| {
-                let name = cmd.get("name")?.as_str()?;
-                let desc = cmd
+                let fullname = cmd.get("name")?.as_str()?.to_string();
+                let description = cmd
                     .get("description")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                Some((name.to_string(), desc.to_string()))
+                    .unwrap_or("")
+                    .to_string();
+                let meta = cmd.get("_meta").or_else(|| cmd.get("meta"));
+                let kind = meta
+                    .and_then(|m| m.get("periKind"))
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_projection_kind)
+                    .unwrap_or(SlashActionKind::Command);
+                let level = meta
+                    .and_then(|m| m.get("periLevel"))
+                    .and_then(|v| v.as_u64())
+                    .map(|l| l as u8)
+                    .filter(|l| *l == 1 || *l == 2)
+                    .unwrap_or(1);
+                let args = meta
+                    .and_then(|m| m.get("periArgs"))
+                    .and_then(|v| serde_json::from_value::<ArgsSchema>(v.clone()).ok());
+                let aliases = meta
+                    .and_then(|m| m.get("periAliases"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|a| a.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let category = meta
+                    .and_then(|m| m.get("periCategory"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Some(SlashCommandEntry {
+                    fullname,
+                    description,
+                    kind,
+                    level,
+                    args,
+                    aliases,
+                    category,
+                })
             })
             .collect();
         let len = entries.len();
         *AVAILABLE_SLASH_COMMANDS.state().write() = entries;
-        // 从 meta 中提取 skill 名称，写入 SKILL_NAMES atom。
-        // 真实 wire key 是 "_meta"（serde rename），"_meta" 优先、"meta" 兜底
-        // （与下方 is_session_replay 的解析先例一致）。
-        let meta = update.get("_meta").or_else(|| update.get("meta"));
-        if let Some(skill_names) = meta
-            .and_then(|m| m.get("skillNames"))
-            .and_then(|s| s.as_array())
-        {
-            let names: Vec<String> = skill_names
-                .iter()
-                .filter_map(|n| n.as_str().map(String::from))
-                .collect();
-            *SKILL_NAMES.state().write() = names;
-        }
-        // 从 meta 中提取 MCP skill 名称，写入 MCP_SKILL_NAMES atom
-        // ACP 契约：mcp 列表为空时省略该 key → "缺 key" 语义 = 无 mcp skill，
-        // 显式清空，避免跨 session/断连后残留旧值。
-        let mcp_names = meta
-            .and_then(|m| m.get("mcpSkillNames"))
-            .and_then(|s| s.as_array())
-            .map(|mcp_skill_names| {
-                mcp_skill_names
-                    .iter()
-                    .filter_map(|n| n.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        *MCP_SKILL_NAMES.state().write() = mcp_names;
-        // 归类依赖两个 atom 的最新值，刷新须在写入之后（避免缓存用旧分类）。
+        // 单 atom 原子写后刷新补全缓存（无旧分类残留）。
         refresh_slash_items();
         debug!(
             "kit ACP notifier: updated AVAILABLE_SLASH_COMMANDS ({})",

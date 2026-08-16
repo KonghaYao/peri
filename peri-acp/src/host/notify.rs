@@ -4,13 +4,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::dispatch::commands::{build_available_commands_update, register_ui_entries};
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
 use agent_client_protocol::schema::v1::SessionUpdate;
-use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_acp_types::ports::SkillsPort;
+use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::session::MessageSource;
-use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
@@ -193,74 +192,72 @@ pub(crate) async fn send_config_option_update(
 
 /// Push an `AvailableCommandsUpdate` notification for the given session.
 ///
-/// 本地 + MCP 合并构建（DD-5 共享纯函数）；registry Some 时注册 on_change
-/// 回调——发现完成/条目变化后经 `tokio::spawn` 异步重发（回调捕获 Weak
-/// 防引用环；发送失败仅 error 日志，现有语义）。
+/// Phase 6 A4 起投影数据源 = 注册表 `snapshot()`（本地 skills（C1）/ ui
+/// 明细 / 插件静态条目（B2）已由各自注册路径写入；MCP 条目由发现管线
+/// （A3）异步注入）；**注册表 on_change 为投影重建重发的唯一触发源**。
+/// 发送失败仅 error 日志，现有语义。
 pub(crate) async fn send_available_commands_update(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
-    skills_port: &Arc<dyn SkillsPort>,
-    cwd: &str,
-    plugin_skill_roots: &[SkillRoot],
     caps: &PeriCaps,
-    registry: Option<Arc<McpSkillRegistry>>,
+    command_registry: Option<Arc<CommandRegistry>>,
 ) {
     if session_id.is_empty() {
         return;
     }
-    let local = skills_port.available_skills(cwd, plugin_skill_roots);
-    let mcp = registry
-        .as_ref()
-        .map(|reg| reg.all_skills())
-        .unwrap_or_default();
-    let update = crate::dispatch::commands::build_available_commands_update(&local, &mcp, caps);
+    let Some(command_registry) = command_registry else {
+        tracing::warn!(
+            session_id,
+            "send_available_commands_update: 无 session 级命令注册表，跳过广播"
+        );
+        return;
+    };
+    // 时序契约（P2-6）：广播入口先摘除旧 on_change，再执行 ui 注册（一次性、
+    // 幂等），最后挂新回调。首次广播时旧回调不存在（防双发约束不变）；
+    // session/load 对同一 session 重广播时，ui 注册动作不再触发旧回调
+    // （发往旧连接捕获的 transport/cx 快照）。
+    command_registry.set_on_change(None);
+    // 时序（防双发）：ui 注册（一次性、幂等）必须在 set_on_change 挂载之前
+    // 完成；on_change 回调内直接重建 snapshot 投影，不重放 ui 注册（P1-1）。
+    register_ui_entries(caps, &command_registry);
+    let update = build_available_commands_update(&command_registry.snapshot(), caps);
 
-    // 发现完成/条目变化 → 重发（防引用环：捕获 Weak；session 销毁后
-    // upgrade 失败即静默返回）。
-    if let Some(reg) = &registry {
-        let weak = Arc::downgrade(reg);
-        let transport = Arc::clone(transport);
-        let skills_port = Arc::clone(skills_port);
-        let cwd = cwd.to_string();
-        let plugin_skill_roots = plugin_skill_roots.to_vec();
-        let caps = caps.clone();
-        let session_id = session_id.to_string();
-        reg.set_on_change(Some(Arc::new(move || {
-            let Some(reg) = weak.upgrade() else {
-                return;
-            };
-            let transport = Arc::clone(&transport);
-            let skills_port = Arc::clone(&skills_port);
-            let cwd = cwd.clone();
-            let plugin_skill_roots = plugin_skill_roots.clone();
-            let caps = caps.clone();
-            let session_id = session_id.clone();
-            tokio::spawn(async move {
-                let local = skills_port.available_skills(&cwd, &plugin_skill_roots);
-                let mcp = reg.all_skills();
-                let update =
-                    crate::dispatch::commands::build_available_commands_update(&local, &mcp, &caps);
-                let update_value =
-                    match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "Failed to serialize AvailableCommandsUpdate"
-                            );
-                            return;
-                        }
-                    };
-                // Use {"update": ..., "sessionId": ...} format — same as TransportEventSink —
-                // so that handle_session_update_peri on the TUI side can parse via params.get("update").
-                let payload = serde_json::json!({
-                    "sessionId": session_id,
-                    "update": update_value,
-                });
-                let _ = transport.send_notification("session/update", payload).await;
+    // 注册表 on_change → 投影重建重发（唯一触发源）。防引用环：回调只捕获
+    // Weak(command_registry) + 不可变快照数据；session 销毁（注册表无强引用）
+    // 后 upgrade 失败即静默返回。
+    let weak = Arc::downgrade(&command_registry);
+    let tx = Arc::clone(transport);
+    let caps_owned = caps.clone();
+    let sid = session_id.to_string();
+    command_registry.set_on_change(Some(Arc::new(move || {
+        let Some(reg) = weak.upgrade() else {
+            return;
+        };
+        let tx = Arc::clone(&tx);
+        let caps = caps_owned.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let update = build_available_commands_update(&reg.snapshot(), &caps);
+            let update_value =
+                match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to serialize AvailableCommandsUpdate"
+                        );
+                        return;
+                    }
+                };
+            // Use {"update": ..., "sessionId": ...} format — same as TransportEventSink —
+            // so that handle_session_update_peri on the TUI side can parse via params.get("update").
+            let payload = serde_json::json!({
+                "sessionId": sid,
+                "update": update_value,
             });
-        })));
-    }
+            let _ = tx.send_notification("session/update", payload).await;
+        });
+    })));
 
     let update_value = match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
         Ok(p) => p,

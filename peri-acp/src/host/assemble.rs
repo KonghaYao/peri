@@ -10,12 +10,14 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
 use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::store::ThreadStore;
 
 use crate::provider::{LlmProvider, PeriConfig};
@@ -87,6 +89,7 @@ pub fn assemble_hook_groups(
 ///
 /// 装配细节与迁移前 `launch.rs` / `cli_print.rs` / stdio init 三处一致：
 /// peri_config 冻结快照 + cron scheduler（可选）注入。
+#[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
 pub fn build_session_manager(
     thread_store: Arc<dyn ThreadStore>,
     provider: LlmProvider,
@@ -95,6 +98,8 @@ pub fn build_session_manager(
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
     skills: Arc<dyn SkillsPort>,
+    plugin_command_entries: Vec<RouteEntry>,
+    plugin_skill_roots: Vec<SkillRoot>,
 ) -> SessionManager {
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
     SessionManager::new(
@@ -113,6 +118,8 @@ pub fn build_session_manager(
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         skills,
+        plugin_command_entries,
+        plugin_skill_roots,
     )
 }
 
@@ -311,6 +318,12 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         .as_ref()
         .map(|pd| pd.all_skill_roots.clone())
         .unwrap_or_default();
+    // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
+    // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
+    let plugin_command_entries = plugin_data
+        .as_ref()
+        .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
+        .unwrap_or_default();
     let plugin_agent_dirs = plugin_data
         .as_ref()
         .map(|pd| pd.all_agent_dirs.clone())
@@ -352,6 +365,10 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         cron_scheduler.clone(),
         mcp_subscription,
         skills.clone(),
+        // Phase 6 B2/C1：插件静态条目 + 插件 skill roots 注入 session
+        // 管理器（会话创建时按 内置 → skills → 插件 顺序注册）。
+        plugin_command_entries.clone(),
+        plugin_skill_roots.clone(),
     );
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
@@ -375,6 +392,7 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         oauth_event_rx: Some(oauth_event_rx),
         channel_state: None, // ServiceRegistry.channel_state 已删除
         plugin_skill_roots,
+        plugin_command_entries,
         plugin_agent_dirs,
         plugin_hooks: flat_hooks,
         // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再

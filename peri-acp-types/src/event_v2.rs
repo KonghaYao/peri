@@ -834,44 +834,13 @@ pub fn observe_event_to_executor(event: ObserveEvent) -> Option<ExecutorEvent> {
         // 事件变体；仅 Langfuse bridge 直消费 v2 闭合 span。
         ObserveEvent::CompactEnded { .. } => None,
         ObserveEvent::MessagesCompacted {
-            before_count,
-            after_count,
-            summary,
-            messages,
-            files,
-            skills,
-            strategy,
-            affected_count,
-            estimated_tokens_saved,
-            estimated_tokens_before,
-            estimated_tokens_after,
-            changed_messages,
-            changed_fields,
-            no_op_candidates,
-            full_escalation_reason,
-            cache_hit_rate_before,
-            outcome,
-            ..
+            summary, messages, ..
         } => Some(ExecutorEvent::CompactCompleted {
+            // Phase 5 Step 4：CompactCompleted 收敛为重建信号三字段——
+            // v2 观测字段（files/skills/strategy/outcome/计数）不再透传。
             summary,
-            files,
-            skills,
-            micro_cleared: before_count.saturating_sub(after_count),
             messages,
-            token_before: estimated_tokens_before,
-            token_after: estimated_tokens_after,
-            strategy,
-            affected_count,
-            estimated_tokens_saved,
-            estimated_tokens_before,
-            estimated_tokens_after,
-            changed_messages,
-            changed_fields,
-            no_op_candidates,
-            full_escalation_reason,
-            cache_hit_rate_before,
             trigger: CompactTrigger::Auto,
-            outcome,
         }),
         // TurnError：TUI 错误展示经 executor_helpers 的 AgentExecutionFailed
         // （LoopResult::Error 分支）；Langfuse 经 bridge 直消费 v2。v1 无对应变体。

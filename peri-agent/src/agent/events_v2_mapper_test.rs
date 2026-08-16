@@ -6,6 +6,7 @@ use super::*;
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{RenderEvent, StateEvent};
 use crate::session::turn::TurnId;
+use peri_acp_types::event::CompactTrigger;
 use peri_acp_types::identity::AgentId;
 
 fn ids() -> (TurnId, AgentId) {
@@ -391,14 +392,13 @@ fn test_observe_messages_compacted_maps() {
         cache_hit_rate_before: 0.0,
         outcome: crate::agent::compact_v2::CompactOutcome::MicroApplied,
     };
+    // Phase 5 Step 4：映射收敛为重建信号三字段（summary/messages/trigger）。
     match observe_event_to_executor(o).unwrap() {
         ExecutorEvent::CompactCompleted {
-            summary,
-            micro_cleared,
-            ..
+            summary, trigger, ..
         } => {
             assert_eq!(summary, "compressed");
-            assert_eq!(micro_cleared, 70);
+            assert_eq!(trigger, CompactTrigger::Auto);
         }
         _ => panic!("应为 CompactCompleted"),
     }

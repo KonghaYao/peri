@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
 use peri_agent::{
     agent::AgentCancellationToken,
@@ -25,6 +26,11 @@ pub struct McpMiddleware {
     /// 会话级 MCP skill 远端注册表（None = 未装配 session 透传；DiscoverMCP
     /// 的 skill 域查询读它）。
     registry: Option<Arc<McpSkillRegistry>>,
+    /// 会话级命令注册表（命令面，Phase 6 A3；None = 未装配 session 透传，
+    /// 跳过 mcp 域命令发现投影）。与 `registry` 是两条独立写路径：
+    /// 元数据面发现结果经 [`crate::mcp::skill_discovery::mcp_route_entries`]
+    /// 转换后写本注册表。
+    command_registry: Option<Arc<CommandRegistry>>,
     /// session 取消令牌（发现任务持有；触发后 before_agent 不再投影/spawn）
     cancel: AgentCancellationToken,
     /// 是否已向模型提示过 tool search 用法（每个会话实例恰好一次）
@@ -36,6 +42,7 @@ impl McpMiddleware {
         Self {
             pool,
             registry: None,
+            command_registry: None,
             cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
         }
@@ -51,6 +58,16 @@ impl McpMiddleware {
         self.registry = registry;
         self.cancel = cancel;
         self
+    }
+
+    /// 注入命令面注册表（session 级 CommandRegistry；assembly 槽位调用，
+    /// Phase 6 A3）。None = 未装配命令面（print 模式/既有测试），发现任务
+    /// 仅回写元数据面。
+    pub fn with_command_registry(self, command_registry: Option<Arc<CommandRegistry>>) -> Self {
+        Self {
+            command_registry,
+            ..self
+        }
     }
 
     /// 首 turn 概览：MCP 基础情况（服务器名 + 状态 + 工具数），失败报名字 + 错误。
@@ -171,6 +188,11 @@ impl Middleware for McpMiddleware {
     /// - `project_connected` 内部完成断连清理（有移除才触发 on_change）；
     /// - 需发现的 (name, handle) 同步置 Started 后 spawn 发现任务（持
     ///   session cancel token）。发现本身静默：不向 state 写任何消息。
+    /// - 命令面（`command_registry` 装配时）：同 connected 列表以
+    ///   [`crate::mcp::skill_discovery::mcp_source_key`] 投影来源
+    ///   （Started/断连清理），发现任务完成回写经
+    ///   [`crate::mcp::skill_discovery::run_discovery`] 双写（元数据面 +
+    ///   命令面，Phase 6 A3）。
     async fn before_agent(
         &self,
         _state: &mut dyn MiddlewareState,
@@ -190,6 +212,28 @@ impl Middleware for McpMiddleware {
                 (h.name.clone(), t)
             })
             .collect();
+        // 命令面投影（Phase 6 A3，P1-1 修复）：同 connected 列表，来源键 =
+        // `mcp_source_key(server)`（plugin server key 取末段，与
+        // mcp_route_entries 的 fullname namespace 段同构——断连批量注销
+        // `mcp:{末段}:` 才能命中条目）。
+        if let Some(reg) = self.command_registry.as_ref() {
+            let cmd_connected: Vec<(String, HandleToken)> = connected
+                .iter()
+                .map(|(name, token)| {
+                    (
+                        crate::mcp::skill_discovery::mcp_source_key(name),
+                        token.clone(),
+                    )
+                })
+                .collect();
+            let cmd_projection = reg.project_sources(&cmd_connected);
+            // removed_any 已由注册表内部消费（on_change 触发决策，含断连
+            // 批量注销），本层只需处理 to_discover（与元数据面 Projection
+            // 同构，非漏处理）。
+            for (prefix, handle_token) in cmd_projection.to_discover {
+                reg.mark_source_started(&prefix, handle_token);
+            }
+        }
         let projection = registry.project_connected(&connected);
         for (name, handle_token) in projection.to_discover {
             registry.mark_discovery_started(&name, handle_token.clone());
@@ -207,9 +251,17 @@ impl Middleware for McpMiddleware {
                 continue;
             };
             let reg = Arc::clone(registry);
+            let cmd_reg = self.command_registry.clone();
             let cancel = self.cancel.clone();
             tokio::spawn(async move {
-                crate::mcp::skill_discovery::run_discovery(reg, handle, handle_token, cancel).await;
+                crate::mcp::skill_discovery::run_discovery(
+                    reg,
+                    cmd_reg,
+                    handle,
+                    handle_token,
+                    cancel,
+                )
+                .await;
             });
         }
         Ok(())

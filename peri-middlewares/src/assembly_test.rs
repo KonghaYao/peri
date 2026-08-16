@@ -157,6 +157,7 @@ fn base_context() -> AssemblyContext {
         hook_groups: Vec::new(),
         session_start_source: None,
         mcp_skill_registry: None,
+        command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
         channel_state: None,

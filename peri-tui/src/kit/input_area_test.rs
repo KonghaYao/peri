@@ -3,6 +3,7 @@
 use super::*;
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::slash_projection::SlashCommandEntry;
 use serial_test::serial;
 use unicode_width::UnicodeWidthStr;
 
@@ -616,48 +617,306 @@ fn test_exit_entry_focus_on_edit_noop_when_no_focus() {
     assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none());
 }
 
-/// Slice 7：build_slash_items 归类——预置 SKILL_NAMES / MCP_SKILL_NAMES 后
-/// 断言 McpSkill / Skill / Command 三分（小写化匹配）。
+/// Phase 4 步骤 3：build_slash_items 纯投影映射——kind/level 直接来自结构化
+/// 投影（无 SKILL_NAMES / MCP_SKILL_NAMES 反推）；label 经 display_name 按
+/// level 变换（1 裸名 / 2 全名），insert_text == label（display 即 lexical）。
 #[test]
 #[serial]
-fn test_build_slash_items_classifies_mcp_skill_skill_command() {
+fn test_build_slash_items_uses_projection_kind_level() {
     crate::kit::atoms::init_atoms();
     *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
-        ("mcp__demo__hello".to_string(), "MCP skill".to_string()),
-        ("MySkill".to_string(), "本地 skill".to_string()),
-        ("plaincmd".to_string(), "普通命令".to_string()),
+        SlashCommandEntry {
+            fullname: "mcp:demo:hello".to_string(),
+            description: "MCP skill".to_string(),
+            kind: SlashActionKind::McpSkill,
+            level: 2,
+            ..Default::default()
+        },
+        SlashCommandEntry {
+            fullname: "MySkill".to_string(),
+            description: "本地 skill".to_string(),
+            kind: SlashActionKind::Skill,
+            level: 1,
+            ..Default::default()
+        },
+        SlashCommandEntry {
+            fullname: "core:compact".to_string(),
+            description: "Compact".to_string(),
+            kind: SlashActionKind::Command,
+            level: 1,
+            ..Default::default()
+        },
     ];
-    *SKILL_NAMES.state().write() = vec!["MySkill".to_string()];
-    *MCP_SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
 
     let items = build_slash_items();
-    let kind_of = |label: &str| {
+    let find = |label: &str| {
         items
             .iter()
             .find(|i| i.label == label)
-            .map(|i| i.kind.clone())
             .unwrap_or_else(|| panic!("未找到 slash 条目 {label}"))
     };
-    assert_eq!(kind_of("mcp__demo__hello"), SlashActionKind::McpSkill);
-    assert_eq!(kind_of("MySkill"), SlashActionKind::Skill);
-    assert_eq!(kind_of("plaincmd"), SlashActionKind::Command);
+    // level 2 → 全名原样
+    let mcp = find("mcp:demo:hello");
+    assert_eq!(mcp.kind, SlashActionKind::McpSkill);
+    assert_eq!(mcp.insert_text, "mcp:demo:hello");
+    // 无冒号全名 → 原样（裸名即全名）
+    let skill = find("MySkill");
+    assert_eq!(skill.kind, SlashActionKind::Skill);
+    assert_eq!(skill.insert_text, "MySkill");
+    // level 1 → 最右冒号后段裸名；fullname 保留全名元数据
+    let compact = find("compact");
+    assert_eq!(compact.kind, SlashActionKind::Command);
+    assert_eq!(compact.insert_text, "compact");
+    assert_eq!(compact.fullname, "core:compact");
+    // 双索引（步骤 4）：search_lowercase = label + fullname 小写合并——
+    // level 1 裸名条目也能被全名前缀（如 /mcp:demo）模糊搜到
+    assert_eq!(mcp.search_lowercase, "mcp:demo:hello mcp:demo:hello");
+    assert_eq!(compact.search_lowercase, "compact core:compact");
+    // 全名形态不得再出现（display 即 lexical，解析器严格命中）
+    assert!(items.iter().all(|i| i.label != "core:compact"));
+    // 步骤 6 收口：条目全部来自投影——无 PANELS/setup 本地合成
+    assert_eq!(items.len(), 3, "不得存在投影之外的本地合成条目");
 }
 
-/// Slice 7：归类优先级 McpSkill > Skill（同名同时出现在两个 atom 时）。
+/// Phase 4 步骤 6：纯投影收口——不预置投影则无任何条目（PANELS 合成与
+/// /setup 硬编码已删除，history/setup 不再凭空出现）；预置投影时
+/// label == insert_text（display 即 lexical）。
 #[test]
 #[serial]
-fn test_build_slash_items_mcp_skill_priority_over_skill() {
+fn test_build_slash_items_display_is_lexical() {
     crate::kit::atoms::init_atoms();
-    *AVAILABLE_SLASH_COMMANDS.state().write() =
-        vec![("mcp__demo__hello".to_string(), "MCP skill".to_string())];
-    *SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
-    *MCP_SKILL_NAMES.state().write() = vec!["mcp__demo__hello".to_string()];
+    // 显式清空投影——init_atoms 为空操作，不重置 atom；并行测试（如
+    // acp_notifier 投影解析测试）可能已写入 AVAILABLE_SLASH_COMMANDS
+    *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
+    // 步骤 6：不预置投影 → 空列表（无本地合成兜底）
+    let items = build_slash_items();
+    assert!(
+        items.is_empty(),
+        "纯投影收口后不预置投影不得有任何条目（PANELS 合成与 /setup 硬编码已删除）"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|i| i.label != "history" && i.label != "setup"),
+        "history/setup 条目只能来自投影，不得本地合成"
+    );
+
+    *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
+        SlashCommandEntry {
+            fullname: "core:compact".to_string(),
+            description: "Compact".to_string(),
+            level: 1,
+            ..Default::default()
+        },
+        SlashCommandEntry {
+            fullname: "mcp:demo:hello".to_string(),
+            description: "MCP skill".to_string(),
+            level: 2,
+            ..Default::default()
+        },
+    ];
 
     let items = build_slash_items();
-    let kind = items
-        .iter()
-        .find(|i| i.label == "mcp__demo__hello")
-        .map(|i| i.kind.clone())
-        .expect("应有 mcp__demo__hello 条目");
-    assert_eq!(kind, SlashActionKind::McpSkill, "McpSkill 优先于 Skill");
+    assert!(!items.is_empty(), "预置投影后应有条目");
+    for item in &items {
+        assert_eq!(
+            item.label, item.insert_text,
+            "label 必须等于 insert_text（display 即 lexical）"
+        );
+    }
+}
+
+/// 投影条目 aliases 必须生成独立补全条目：门控反转后旧 UI_COMMANDS 裸名
+/// 广播（`history`）消失，别名只经 `_meta.periAliases` 挂载（ui:threads →
+/// history/his/resume；core:clear → cls/reset）。若 build_slash_items 不消费
+/// aliases，这些别名补全条目会随之丢失。
+#[test]
+#[serial]
+fn test_build_slash_items_projection_aliases() {
+    crate::kit::atoms::init_atoms();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
+        SlashCommandEntry {
+            fullname: "ui:threads".to_string(),
+            description: "Thread browser".to_string(),
+            kind: SlashActionKind::Panel,
+            aliases: vec!["history".into(), "his".into(), "resume".into()],
+            level: 1,
+            ..Default::default()
+        },
+        SlashCommandEntry {
+            fullname: "core:clear".to_string(),
+            description: "Clear".to_string(),
+            kind: SlashActionKind::Command,
+            aliases: vec!["cls".into(), "reset".into()],
+            level: 1,
+            ..Default::default()
+        },
+    ];
+
+    let items = build_slash_items();
+    let find = |label: &str| {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("未找到 slash 条目 {label}"))
+    };
+    // 主条目正常生成
+    let threads = find("threads");
+    assert_eq!(threads.fullname, "ui:threads");
+    assert_eq!(threads.kind, SlashActionKind::Panel);
+    // ui 域别名条目：继承主条目元数据，display 即 lexical
+    for alias in ["history", "his", "resume"] {
+        let item = find(alias);
+        assert_eq!(item.insert_text, alias);
+        assert_eq!(item.fullname, "ui:threads", "alias 条目归属主条目");
+        assert_eq!(item.kind, SlashActionKind::Panel);
+        assert_eq!(item.description, "Thread browser");
+    }
+    // core 域别名条目同样生成（提交时经 ACP 注册表 alias 索引解析）
+    find("clear");
+    for alias in ["cls", "reset"] {
+        let item = find(alias);
+        assert_eq!(item.fullname, "core:clear");
+        assert_eq!(item.kind, SlashActionKind::Command);
+    }
+    // alias 可被补全过滤命中（search_lowercase 预计算含 alias）
+    assert!(
+        items
+            .iter()
+            .any(|i| i.search_lowercase.starts_with("history ")),
+        "alias 必须进入 search_lowercase 双索引"
+    );
+}
+
+/// Phase 4 步骤 6：双写窗口去重（R2 防御）——同 display 名多条时优先保留
+/// 「携带 kind 元数据（非缺省回退）的 ui 域条目」：服务端旧 UI_COMMANDS
+/// 裸名广播（`history`，无 _meta → kind 缺省回退 Command）与 TUI 上送注册
+/// （`ui:history` 全名 + periKind=panel）并存时，后者胜出。
+#[test]
+#[serial]
+fn test_build_slash_items_dedup_prefers_ui_kind_meta() {
+    crate::kit::atoms::init_atoms();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = vec![
+        // 服务端裸名广播（缺 _meta → 缺省回退形态 kind=Command / level=1）
+        SlashCommandEntry {
+            fullname: "history".to_string(),
+            description: "legacy broadcast".to_string(),
+            ..Default::default()
+        },
+        // TUI 上送注册（ui 域全名 + 显式 kind 元数据）
+        SlashCommandEntry {
+            fullname: "ui:history".to_string(),
+            description: "Thread browser".to_string(),
+            kind: SlashActionKind::Panel,
+            level: 1,
+            ..Default::default()
+        },
+    ];
+
+    let items = build_slash_items();
+    let history: Vec<&SlashCompletionItem> =
+        items.iter().filter(|i| i.label == "history").collect();
+    assert_eq!(
+        history.len(),
+        1,
+        "同 display 名必须去重为一条（双写窗口防御）"
+    );
+    assert_eq!(
+        history[0].kind,
+        SlashActionKind::Panel,
+        "优先保留携带 kind 元数据（非缺省回退）的 ui 域条目"
+    );
+    assert_eq!(history[0].fullname, "ui:history");
+    assert_eq!(history[0].insert_text, "history");
+}
+
+// ── Phase 4 步骤 4：on_select 选中行为收敛（resolve_ui_command 统一拦截） ──
+
+/// 构造测试条目：label 为显示形态，fullname 为唯一键。
+fn slash_item(label: &str, fullname: &str) -> SlashCompletionItem {
+    SlashCompletionItem {
+        label: label.to_string(),
+        insert_text: label.to_string(),
+        description: String::new(),
+        kind: SlashActionKind::Command,
+        label_lowercase: label.to_lowercase(),
+        fullname: fullname.to_string(),
+        search_lowercase: SlashCompletionItem::make_search_lowercase(
+            &label.to_lowercase(),
+            fullname,
+        ),
+        args: None,
+    }
+}
+
+/// 选中裸名 history（ui 域别名）→ resolve_ui_command 命中 → 清空输入框 +
+/// open_panel（ThreadBrowser），不再回退 apply_slash_selection。
+#[test]
+#[serial]
+fn test_slash_on_select_history_alias_opens_thread_browser() {
+    crate::kit::atoms::init_atoms();
+    reset_submit_side_effect_state();
+    let mut s = TextAreaState::default();
+    s.insert_str("/hist");
+    s.cursor = 5;
+    let item = slash_item("history", "ui:history");
+    handle_slash_selection(&mut s, &item);
+    assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
+    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::ThreadBrowser));
+}
+
+/// 选中 `ui:` 前缀显式形态（ui:model）→ resolve_ui_command 归一化命中 →
+/// Model 面板。
+#[test]
+#[serial]
+fn test_slash_on_select_ui_prefix_opens_model_panel() {
+    crate::kit::atoms::init_atoms();
+    reset_submit_side_effect_state();
+    let mut s = TextAreaState::default();
+    s.insert_str("/ui:mo");
+    s.cursor = 6;
+    let item = slash_item("model", "ui:model");
+    handle_slash_selection(&mut s, &item);
+    assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
+    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Model));
+}
+
+/// 选中 setup（ui 域）→ 本地激活 Setup Wizard（不发 ACP）。
+#[test]
+#[serial]
+fn test_slash_on_select_setup_activates_wizard() {
+    crate::kit::atoms::init_atoms();
+    reset_submit_side_effect_state();
+    *WIZARD_ACTIVE.state().write() = false;
+    let mut s = TextAreaState::default();
+    s.insert_str("/set");
+    s.cursor = 4;
+    let item = slash_item("setup", "ui:setup");
+    handle_slash_selection(&mut s, &item);
+    assert!(s.text.is_empty(), "命中 ui 域命令后输入框必须清空");
+    assert!(
+        *WIZARD_ACTIVE.state().read(),
+        "setup 选中后必须激活 Wizard（本地拦截，不发 ACP）"
+    );
+}
+
+/// 未命中 ui 域（core:compact 全名形态，TUI 只拦截 ui 域）→
+/// apply_slash_selection 落输入框（display 即 lexical）。
+#[test]
+#[serial]
+fn test_slash_on_select_non_ui_command_applies_selection() {
+    crate::kit::atoms::init_atoms();
+    reset_submit_side_effect_state();
+    *WIZARD_ACTIVE.state().write() = false;
+    let mut s = TextAreaState::default();
+    s.insert_str("/com");
+    s.cursor = 4;
+    let item = slash_item("compact", "core:compact");
+    handle_slash_selection(&mut s, &item);
+    assert_eq!(
+        s.text, "/compact ",
+        "未命中 ui 域应落输入框（display 即 lexical）"
+    );
+    assert_eq!(*ACTIVE_PANEL.state().read(), None);
+    assert!(!*WIZARD_ACTIVE.state().read());
 }

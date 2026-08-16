@@ -1,29 +1,52 @@
 //! `session/execute-command` dispatch handler.
 //!
 //! Accepts a slash command string and delegates to the registered
-//! [`AgentCommand`] implementations in [`crate::session::command`].
+//! [`CommandRegistry`] entries in [`crate::session::command`].
 //! This mirrors the in-process interception done by
 //! [`crate::session::executor::intercept_immediate_command`] but exposes
 //! it as a standalone ACP JSON-RPC method so that external clients (IDE,
-//! stdio transport) can execute Immediate commands without going through
+//! stdio transport) can execute slash commands without going through
 //! the full `session/prompt` pipeline.
 
 use serde_json::Value;
 
+use peri_acp_types::command::{
+    CommandFeedback, CommandLevel, CommandOutcome, FeedbackChannel, FeedbackLevel,
+};
+use peri_agent::session::exec::executor_helpers::emit_command_feedback;
 use peri_controller::Controller;
 
 use crate::session::command::{
-    default_command_registry, CommandContext, CommandKind, CommandResult,
+    register_builtins, CommandContext, CommandRegistry, CommandResult, RouteEntry,
 };
 use crate::session::executor::PromptStopReason;
 use crate::transport::types::AcpError;
 
+/// Immediate 语义 = core/ui 域第一等级（替代旧 `kind() != Immediate` 判断，
+/// Phase 5 Step 6）：execute-command RPC 无 agent 管线，只执行第一等级
+/// （core/ui）条目的本地确定性语义；第二等级（mcp/plugin/user）条目为
+/// 外部来源动态注入，无本地 Immediate 执行语义 → 显式报错。
+fn check_immediate_level(entry: &RouteEntry) -> Result<(), AcpError> {
+    if entry.level() == CommandLevel::Level1 {
+        Ok(())
+    } else {
+        Err(AcpError::new(
+            -32602,
+            format!(
+                "command '{}' 非 Immediate 命令（等级 {:?}）；execute-command RPC 仅支持 core/ui 域第一等级命令",
+                entry.fullname,
+                entry.level()
+            ),
+        ))
+    }
+}
+
 /// Execute a slash command against the given session.
 ///
 /// Accepts `{ session_id, command, args }` in `params`, looks up the command
-/// in the default [`CommandRegistry`], and if it is an `Immediate` command,
-/// runs it synchronously (blocking the caller) and returns the updated
-/// message list.
+/// in a freshly built [`CommandRegistry`] (内置命令注册，Phase 5 归属裁决时
+/// 随 `ui:` 域迁移统一处理，不引入 session_manager 依赖), and runs it
+/// synchronously (blocking the caller) and returns the updated message list.
 ///
 /// 存储访问经 `controller.sessions()`（ARC-BOUNDARY-001 方向），不再由调用方
 /// 直传 `thread_store`。
@@ -34,8 +57,8 @@ use crate::transport::types::AcpError;
 /// - `session_id` is missing
 /// - `command` is missing
 /// - The command string does not match any registered command
-/// - The matched command is not `Immediate` (Passthrough/Transform commands
-///   must go through `session/prompt`)
+/// - The matched command returns `Inject` / `Delegate`（execute-command RPC
+///   无 agent 管线可注入，显式错误；需经 `session/prompt`）
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     params: &Value,
@@ -68,60 +91,145 @@ pub async fn execute_command(
 
     let args_value = params.get("args").cloned().unwrap_or(Value::Null);
 
-    // Convert args Value to a plain string representation.
-    // For JSON object args (e.g. rewind), pass the JSON string.
-    // For simple string args, pass as-is.
+    // 自建注册表（函数无生产调用者，Phase 5 归属裁决时随 `ui:` 域迁移统一
+    // 处理，不引入 session_manager 依赖）；resolve 严格精确（无前缀匹配，
+    // 设计 §55）；RPC 路径无 agent 管线可注入，未命中显式报错（与 prompt
+    // 路径的 fall-through 语义不同）。
+    let registry = CommandRegistry::new();
+    register_builtins(&registry);
+    let resolved = registry
+        .resolve(command_str)
+        .ok_or_else(|| AcpError::new(-32602, format!("unknown command: {command_str}")))?;
+
+    // Immediate 语义 = core/ui 域第一等级（旧 kind() 检查由 RouteEntry
+    // 域/等级检查取代；Level2 动态注入条目无本地执行语义 → 显式报错）。
+    check_immediate_level(&resolved.entry)?;
+
+    // args：消费 resolved.args（注册表词法切分，不变式 3）——RPC 未显式传
+    // args 时回退 command 字符串内嵌参数；显式 args 仅接受 slash 形态字符串
+    // （如 `/rewind <id> [--no-revert-files]`）。[P2-1] 旧 JSON 形态（rewind
+    // RPC wire）已随 Phase 5 Step 5 废弃：rewind 参数解析已迁 ArgsSchema，
+    // JSON 字符串会被 `split_whitespace` 当作 positional 整体，产生误导性
+    // 错误「未找到目标消息 {json}」——调用方不得再传 JSON 对象。参数权威
+    // 校验见下方 args_schema.parse 前置检查（P1-1，与拦截层同构）。
     let args_string = match args_value {
-        Value::Null => String::new(),
+        Value::Null => resolved.args.clone(),
         Value::String(s) => s,
         other => other.to_string(),
     };
 
-    let registry = default_command_registry();
-    let (cmd, _cmd_args) = registry
-        .find(command_str)
-        .ok_or_else(|| AcpError::new(-32602, format!("unknown command: {command_str}")))?;
-
-    if cmd.kind() != CommandKind::Immediate {
-        return Err(AcpError::new(
-            -32602,
-            format!(
-                "command '{}' is not Immediate; use session/prompt instead",
-                cmd.name()
-            ),
-        ));
-    }
-
     let cancel_history = session_history.clone();
-    let ctx = CommandContext {
-        session_id: session_id.clone(),
-        history: session_history,
-        cwd: cwd.to_string(),
-        // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
-        compact_config: crate::host::compact_config::load_compact_config(peri_config),
-        auxiliary_model,
-        event_sink: std::sync::Arc::clone(event_sink),
-        args: args_string,
-        cancel_token: cancel_token.clone(),
-        thread_store: Some(controller.sessions()),
-        thread_id,
-        bg_event_sender: bg_event_tx,
-        task_manager,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-        frozen_system_prompt,
-        bg_spawner: None, // RPC 直调路径无 executor 装配面，/bg 在此路径优雅报错
-    };
 
-    let result = tokio::select! {
-        r = cmd.execute(ctx) => r,
-        _ = cancel_token.cancelled() => {
-            tracing::info!(session_id = %session_id, "execute_command: cancelled");
-            CommandResult {
-                messages: cancel_history,
-                stop_reason: PromptStopReason::Cancelled,
+    // P1-1：复用拦截层同款前置校验（executor_helpers 拦截处同构）——
+    // `args_schema.parse` 失败 → 不进入 handler，立即返回 Done +
+    // feedback(Error)（错误不进会话、走 UI 通道，设计 §81），使 RPC 路径
+    // 与 slash 路径词法严格性一致（未知 option / missing required 均拦截）；
+    // 成功 → `ParsedArgs` 经 `ctx.parsed_args` 传入 handler（P1-1 联动：
+    // handler 消费统一解析结果，不再自研解析）。
+    let parsed_args = match &resolved.entry.args_schema {
+        Some(schema) => match schema.parse(&args_string) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                let name = resolved
+                    .entry
+                    .fullname
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(&resolved.entry.fullname);
+                let mut result = CommandResult {
+                    messages: cancel_history.clone(),
+                    stop_reason: PromptStopReason::EndTurn,
+                    feedback: Some(CommandFeedback {
+                        level: FeedbackLevel::Error,
+                        message: format!("{name} 参数解析失败: {err}"),
+                        channel: FeedbackChannel::UiOnly,
+                    }),
+                };
+                emit_command_feedback(event_sink, &session_id, &mut result).await;
+                event_sink.push_done(&session_id, "end_turn", None).await;
+                let messages_json: Vec<Value> = result
+                    .messages
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                    .collect();
+                return Ok(serde_json::json!({
+                    "messages": messages_json,
+                    "stop_reason": format!("{:?}", result.stop_reason),
+                }));
             }
+        },
+        None => None,
+    };
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 旧字段显式赋值保持原字面量语义（行为等价零漂移，字段一个未删）。
+    let mut ctx = CommandContext::new(
+        session_id.clone(),
+        session_history,
+        cwd.to_string(),
+        std::sync::Arc::clone(event_sink),
+        cancel_token.clone(),
+        // 扩展依赖接口注册表（本步空表；旧字段迁移归消费方适配任务，
+        // 迁移前以 deps/dep::<T>() 形态按接口注入）。
+        peri_acp_types::command::DependencyBag::new(),
+    );
+    // L5：compact 配置由装配点预填（env overrides 每轮重新应用）
+    ctx.compact_config = crate::host::compact_config::load_compact_config(peri_config);
+    ctx.auxiliary_model = auxiliary_model;
+    ctx.args = args_string;
+    ctx.parsed_args = parsed_args;
+    ctx.thread_store = Some(controller.sessions());
+    ctx.thread_id = thread_id;
+    ctx.bg_event_sender = bg_event_tx;
+    ctx.task_manager = task_manager;
+    ctx.frozen_claude_md = frozen_claude_md;
+    ctx.frozen_claude_local_md = frozen_claude_local_md;
+    ctx.frozen_skill_summary = frozen_skill_summary;
+    ctx.frozen_system_prompt = frozen_system_prompt;
+
+    // 预取消短路：token 已取消时不进入 handler。`tokio::select!` 非 biased
+    // 模式分支随机——若 handler 同步完成（如 compact 无模型时无 await 即
+    // EarlyReturn），execute 分支会抢先胜出，导致外层已取消的调用仍执行
+    // 命令并发射反馈（outer_cancel 测试用 PendingEventSink，push_event 恒
+    // pending → 挂死）。此处提前裁决，语义与测试锁定一致：预取消 →
+    // 直接返回 Cancelled（history 原样，不进入 handler）。
+    let outcome = if cancel_token.is_cancelled() {
+        tracing::info!(session_id = %session_id, "execute_command: cancelled (pre-cancelled)");
+        CommandOutcome::Done(CommandResult {
+            messages: cancel_history,
+            stop_reason: PromptStopReason::Cancelled,
+            feedback: None,
+        })
+    } else {
+        tokio::select! {
+            r = resolved.entry.handler.execute(ctx) => r,
+            _ = cancel_token.cancelled() => {
+                tracing::info!(session_id = %session_id, "execute_command: cancelled");
+                CommandOutcome::Done(CommandResult {
+                    messages: cancel_history,
+                    stop_reason: PromptStopReason::Cancelled,
+                    feedback: None,
+                })
+            }
+        }
+    };
+    // Outcome 匹配：Done 走现状 JSON 序列化；Inject/Delegate → AcpError
+    // （RPC 无 agent 管线可注入，显式错误）。
+    let (messages, stop_reason) = match outcome {
+        CommandOutcome::Done(mut result) => {
+            // 反馈统一出口：与 executor_helpers 拦截处同源（复用同一 helper），
+            // handler.execute 之后、push_done 之前发射 CommandFeedback 事件
+            // （channel=Session 额外追加系统消息）。[P2-1] 占位日志退役。
+            emit_command_feedback(event_sink, &session_id, &mut result).await;
+            (result.messages, result.stop_reason)
+        }
+        CommandOutcome::Inject(_) | CommandOutcome::Delegate(_) => {
+            return Err(AcpError::new(
+                -32602,
+                format!(
+                    "command '{}' 返回 Inject/Delegate；execute-command RPC 无 agent 管线可注入，请改用 session/prompt",
+                    resolved.entry.fullname
+                ),
+            ));
         }
     };
 
@@ -132,15 +240,14 @@ pub async fn execute_command(
     event_sink.push_done(&session_id, "end_turn", None).await;
 
     // Serialize the result messages into a compact JSON array of { role, content }.
-    let messages_json: Vec<Value> = result
-        .messages
+    let messages_json: Vec<Value> = messages
         .iter()
         .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
         .collect();
 
     Ok(serde_json::json!({
         "messages": messages_json,
-        "stop_reason": format!("{:?}", result.stop_reason),
+        "stop_reason": format!("{:?}", stop_reason),
     }))
 }
 

@@ -226,8 +226,8 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         // 显式穷尽（`2026-07-25-event-identity-diverges-across-dual-delivery-paths.md`）：
         // 每个 ExecutorEvent 变体必须显式列出，新增变体无法静默落入 wildcard 丢弃分支。
         // 这些变体或经 peri/agent_event DTO 通道送达 TUI（SubagentStarted/Stopped、
-        // CompactCompleted、AgentExecutionFailed、RewindCompleted/Error、
-        // TurnSuspended 等，见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
+        // CompactCompleted、AgentExecutionFailed、RewindCompleted、TurnSuspended 等，
+        // 见 event_sink.rs），或为 Langfuse/tracer-only（Stage*、
         // TurnStarted/Ended、LlmCallStart/RequestPayload、BudgetThresholdHit 等）。
         ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
@@ -243,8 +243,6 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::CompactStarted { .. }
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::RewindCompleted { .. }
-        | ExecutorEvent::RewindError { .. }
-        | ExecutorEvent::CompactError { .. }
         | ExecutorEvent::AgentExecutionFailed { .. }
         | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::BgToolStep { .. }
@@ -261,7 +259,9 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::OauthNeeded { .. }
         | ExecutorEvent::OauthCompleted { .. }
         | ExecutorEvent::OauthFailed { .. }
-        | ExecutorEvent::BgRegistryEvent(_) => {
+        | ExecutorEvent::BgRegistryEvent(_)
+        // 无标准 SessionUpdate，经 peri/agent_event 通道送达 TUI 通知条
+        | ExecutorEvent::CommandFeedback(_) => {
             vec![MappedEvent::standard(vec![])]
         }
     }

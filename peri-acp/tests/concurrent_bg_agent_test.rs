@@ -100,7 +100,14 @@ async fn test_bg_event_pump_receives_all_completions() {
     // 注册 session 的 PeriCaps，否则 push_event 使用 default()（全 false）
     // 会跳过 peri/agent_event 通知，导致 transport 上零消息到达
     use peri_acp_types::PeriCaps;
-    caps_registry.insert(session_id.clone(), PeriCaps::all_enabled());
+    let mut caps = PeriCaps::all_enabled();
+    // 8c7d1825（capability-gated 事件通道）引入 peri/agent_activity 后，
+    // all_enabled() 会为每条 BackgroundTaskCompleted 发一条 activity 通知
+    // （activity.rs map_agent_activity 有该分支），与下方「0 transport 通知」
+    // 断言冲突。本测试意图是验证并发 sender 全量送达 + pump 退出，仅需
+    // Category ③ 通道声明，关闭 agent_activity 保持断言语义。
+    caps.agent_activity = false;
+    caps_registry.insert(session_id.clone(), caps);
 
     let sink = Arc::new(TransportEventSink::new(
         Arc::new(server_transport),

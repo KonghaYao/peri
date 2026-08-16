@@ -1,4 +1,5 @@
 use crate::app::panel_types::PanelKind;
+use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitRequest {
@@ -41,7 +42,7 @@ pub enum ExportMode {
 
 /// 统一 slash submit parser。
 ///
-/// 优先级固定为：session control / view action / panel / agent text。
+/// 优先级固定为：session control / view action / ui 域 / agent text。
 /// 这样可以避免未来本地 panel alias 意外抢占控制命令，同时保持本地 UI slash
 /// 在 Enter 提交时优先于远端 ACP command/skill。未命中的 slash 一律按 AgentText
 /// 处理，不报本地 command 错误。
@@ -73,10 +74,17 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
         return Some(SubmitRequest::ViewAction(action));
     }
 
+    // ui 域本地拦截：裸名（level 1 快捷形态）与 `ui:` 前缀显式形态均由
+    // resolve_ui_command 归一化；命中即本地执行，不发 ACP。
     if command.starts_with('/')
-        && let Some(kind) = crate::kit::panel_registry::panel_for_slash_command(command)
+        && let Some(action) = resolve_ui_command(&command[1..])
     {
-        return Some(SubmitRequest::OpenPanel(kind));
+        return Some(match action {
+            UiCommandAction::OpenPanel(kind) => SubmitRequest::OpenPanel(kind),
+            UiCommandAction::ToggleSetup => {
+                SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup)
+            }
+        });
     }
 
     Some(SubmitRequest::AgentText(trimmed.to_string()))

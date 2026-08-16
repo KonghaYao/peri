@@ -17,7 +17,6 @@ pub mod session_fork;
 pub mod session_load;
 pub mod session_replay;
 
-pub use commands::build_available_commands;
 pub use init::build_initialize_response;
 pub use list_sessions::list_sessions_as_info;
 pub use prompt::{extract_prompt_params, handle_prompt};

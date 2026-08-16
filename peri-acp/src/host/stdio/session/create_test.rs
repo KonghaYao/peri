@@ -114,6 +114,8 @@ fn make_stdio_context(
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
         skills.clone(),
+        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
+        Vec::new(), // plugin skill roots（C1；测试无）
     );
 
     Arc::new(StdioContext {

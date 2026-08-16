@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::command::PromptStopReason;
+use crate::command_registry::CommandRegistry;
 use crate::mcp_skills::McpSkillRegistry;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
@@ -659,6 +660,14 @@ pub trait SessionAccessPort: Send + Sync {
     ///
     /// 默认实现返回 None（print mode / 未装配端口时安全 no-op）。
     fn mcp_skill_registry(&self, _session_id: &str) -> Option<Arc<McpSkillRegistry>> {
+        None
+    }
+
+    /// 会话级命令注册表（AcpSession 持有；命令面动态注入——MCP/插件发现
+    /// 结果经注册表写入，投影经 snapshot 下发）。
+    ///
+    /// 默认实现返回 None（print mode / 未装配端口时安全 no-op）。
+    fn command_registry(&self, _session_id: &str) -> Option<Arc<CommandRegistry>> {
         None
     }
 }

@@ -21,7 +21,7 @@
 //! - `error` — 层边界错误契约（AgentError）
 //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
-//! - `command` — slash 命令契约（PromptStopReason/AgentCommand/CommandContext/BgForkRequest）
+//! - `command` — slash 命令契约（PromptStopReason/CommandHandler/CommandContext/BgForkRequest）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
 //! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
@@ -33,6 +33,9 @@
 
 pub mod agents;
 pub mod command;
+// 注册表顶层 re-export（Phase 2 消费方路径 `peri_acp_types::command_registry::*`，
+// 挂载本体在 command.rs 契约子模块区，避免双份模块实例）。
+pub use command::command_registry;
 pub mod compact;
 pub mod cron;
 pub mod error;

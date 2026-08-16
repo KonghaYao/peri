@@ -24,6 +24,7 @@ pub use crate::session::state_builders::{
     parse_permission_mode,
 };
 use crate::transport::types::{AcpError, IncomingMessage};
+use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::interaction::ChannelState;
@@ -123,6 +124,10 @@ pub struct AcpServerConfig {
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::oauth::HostOAuthEvent>>,
     pub channel_state: Option<Arc<ChannelState>>,
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
+    /// 插件命令静态条目（Phase 6 B2：`plugin_data.all_commands` 经
+    /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =
+    /// 内置 → 本地 skills（C1）→ 插件（本字段）→ 动态注入（发现管线异步））。
+    pub plugin_command_entries: Vec<RouteEntry>,
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——

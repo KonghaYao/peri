@@ -1,40 +1,61 @@
 //! `/rewind` 命令 — 回滚对话到指定消息。
 //!
-//! 接收 JSON 参数（`target_message_id` + `revert_files`），定位目标消息后：
+//! 参数形态（Phase 5 Step 5 由 serde_json 迁入 ArgsSchema）：
+//! `/rewind <target_message_id> [--no-revert-files]`；`--no-revert-files`
+//! 缺省时 revert_files=true（现状 serde default_true 语义保持）。
+//! 定位目标消息后：
 //! 1. 截断 history 到目标消息之前
 //! 2. 从被移除的消息中提取 Write/Edit 工具调用，逆向恢复文件
 //! 3. 验证保留消息的 ToolUse/ToolResult 配对完整性
 //! 4. 从 SQLite 持久化中删除被移除的消息
-//! 5. 发送 CompactCompleted 事件通知 TUI 刷新
+//! 5. 发送 RewindCompleted 事件通知 TUI 刷新（重建信号，保留原样）
+//!
+//! RPC 路径（`dispatch/rewind.rs`）复用本模块的 [`execute_rewind`] 共享执行体，
+//! RPC wire（serde RewindArgs + preview_fingerprint）保持不变。
 
 mod events;
 
 use std::path::Path;
 
+use peri_acp_types::command::{ArgKind, ArgSpec, ArgsSchema, FlagSpec};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
 use tracing::{debug, warn};
 
-use super::{AgentCommand, CommandContext, CommandKind, CommandResult};
+use super::{CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel};
 use crate::session::executor::PromptStopReason;
 
 /// 回滚命令。
+#[derive(Default)]
 pub struct RewindCommand;
 
 impl RewindCommand {
     pub const NAME: &'static str = "rewind";
-}
+    /// 别名（注册条目挂载，命令声明单一事实源；旧 AgentCommand impl 已删）。
+    pub const ALIASES: &'static [&'static str] = &["undo"];
+    /// 描述（注册条目挂载）。
+    pub const DESCRIPTION: &'static str = "回滚对话到指定消息";
 
-#[derive(serde::Deserialize)]
-struct RewindArgs {
-    target_message_id: String,
-    /// P0 修复：默认回退文件。TUI 早期版本/第三方客户端可能只传
-    /// target_message_id——缺失时不得进入解析失败静默路径。
-    #[serde(default = "default_true")]
-    revert_files: bool,
-}
-
-fn default_true() -> bool {
-    true
+    /// 参数 schema（Phase 5 Step 5：slash 形态 `/rewind <target_message_id>
+    /// [--no-revert-files]`）。与 Phase 1 FlagSpec 形态一致（P1-1 延伸）；
+    /// 现状 serde default_true 语义 = 无该 flag 时 revert_files=true
+    /// （原 `ArgFlag { name: "revert-files", default: true }` 形态与语义自相矛盾，
+    /// 以 `--no-revert-files` 为准）。
+    pub fn args_schema() -> ArgsSchema {
+        ArgsSchema {
+            positionals: vec![ArgSpec {
+                name: "target_message_id".to_string(),
+                kind: ArgKind::String,
+                required: true,
+                description: None,
+            }],
+            flags: vec![FlagSpec {
+                name: "no-revert-files".to_string(),
+                short: None,
+                description: None,
+            }],
+            named: vec![],
+        }
+    }
 }
 
 /// 提取到的文件变更操作。
@@ -52,125 +73,159 @@ pub(crate) enum FileChange {
     },
 }
 
+// 新契约主实现（Phase 5 Step 5/6）：参数由 ArgsSchema 声明（注册条目挂载，
+// 拦截层 Step 6 统一解析）；执行体为共享函数 [`execute_rewind`]（slash 与
+// RPC 双入口复用）；反馈经 CommandFeedback 双通道（UiOnly，不进会话）——
+// 事件发射统一收敛到编排层 emit_command_feedback。
 #[async_trait::async_trait]
-impl AgentCommand for RewindCommand {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
+impl peri_acp_types::command::CommandHandler for RewindCommand {
+    async fn execute(&self, ctx: CommandContext) -> peri_acp_types::command::CommandOutcome {
+        // 参数由 ArgsSchema 统一解析（P1-1）：slash 拦截层与 execute-command
+        // RPC 路径均在构造 CommandContext 前完成权威校验（失败 → 不进入
+        // handler），结果经 `ctx.parsed_args` 传入——本处不再重复解析
+        // （验收标准第 2 条：解析由 ArgsSchema 统一执行，handler 仅消费）。
+        let parsed = ctx.parsed_args.as_ref();
+        let target_message_id = parsed
+            .and_then(|p| p.positionals.first())
+            .cloned()
+            .unwrap_or_default();
+        // flags 命中 `no-revert-files` → revert_files=false（缺省
+        // revert_files=true 的 serde default_true 语义保持）。
+        let revert_files = !parsed
+            .map(|p| p.flags.iter().any(|f| f == "no-revert-files"))
+            .unwrap_or(false);
 
-    fn aliases(&self) -> Vec<&str> {
-        vec!["undo"]
-    }
-
-    fn description(&self) -> &str {
-        "回滚对话到指定消息"
-    }
-
-    fn kind(&self) -> CommandKind {
-        CommandKind::Immediate
-    }
-
-    async fn execute(&self, ctx: CommandContext) -> CommandResult {
-        let history = &ctx.history;
-
-        // Step 1: 解析参数
-        let args = match serde_json::from_str::<RewindArgs>(ctx.args.trim()) {
-            Ok(a) => a,
-            Err(e) => {
-                let msg = format!("rewind 参数解析失败: {e}");
-                warn!(msg);
-                events::emit_rewind_parse_error(&ctx.event_sink, &ctx.session_id, &e).await;
-                return CommandResult {
-                    messages: ctx.history,
-                    stop_reason: PromptStopReason::EndTurn,
-                };
-            }
-        };
-
-        // Step 2: 定位目标消息
-        let target_idx = history
-            .iter()
-            .position(|m| m.id().as_uuid().to_string() == args.target_message_id);
-
-        let target_idx = match target_idx {
-            Some(i) => i,
-            None => {
-                let msg = format!("rewind: 未找到目标消息 {}", args.target_message_id);
-                warn!(msg);
-                events::emit_rewind_not_found(
-                    &ctx.event_sink,
-                    &ctx.session_id,
-                    &args.target_message_id,
-                )
-                .await;
-                return CommandResult {
-                    messages: ctx.history,
-                    stop_reason: PromptStopReason::EndTurn,
-                };
-            }
-        };
-
-        // 截断：保留目标消息之前的所有消息（不含目标本身）
-        // 目标用户消息及其之后的所有消息（AI 回复、工具调用、后续交互）全部移除
-        let removed_messages = &history[target_idx..];
-        let retained_messages = history[..target_idx].to_vec();
-
-        let removed_count = removed_messages.len();
-
-        // Step 3: 提取文件变更并逆向恢复
-        let mut revert_warnings = Vec::new();
-        if args.revert_files {
-            let changes = extract_file_changes(removed_messages);
-            // P1 修复：revert_files 内含同步 git checkout 子进程，直接调用会
-            // 阻塞 tokio worker（tokio worker_threads=4）——移出 async 上下文。
-            let cwd_owned = ctx.cwd.clone();
-            revert_warnings = tokio::task::spawn_blocking(move || {
-                let mut warnings = Vec::new();
-                revert_files(&changes, &cwd_owned, &mut warnings);
-                warnings
-            })
-            .await
-            .unwrap_or_else(|e| {
-                warn!("rewind: spawn_blocking join 失败: {e}");
-                Vec::new()
+        if target_message_id.is_empty() {
+            // 防御兜底（正常路径不进入：两条入口均在构造 ctx 前完成 required
+            // 校验；直调 handler 的测试路径 parsed_args=None 时回落）。
+            let msg = "rewind 参数解析失败: missing target_message_id".to_string();
+            warn!(msg);
+            return peri_acp_types::command::CommandOutcome::Done(CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: Some(CommandFeedback {
+                    level: FeedbackLevel::Error,
+                    message: msg,
+                    channel: FeedbackChannel::UiOnly,
+                }),
             });
         }
 
-        // Step 4: 验证 ToolUse/ToolResult 配对完整性
-        validate_tool_pairing(&retained_messages);
+        peri_acp_types::command::CommandOutcome::Done(
+            execute_rewind(ctx, target_message_id, revert_files).await,
+        )
+    }
+}
 
-        // Step 5: 从持久化中删除被移除的消息
-        let removed_ids: Vec<MessageId> = removed_messages.iter().map(|m| m.id()).collect();
-        if let (Some(store), Some(tid)) = (&ctx.thread_store, &ctx.thread_id) {
-            if !removed_ids.is_empty() {
-                match store.delete_messages(tid, &removed_ids).await {
-                    Ok(()) => debug!(count = removed_ids.len(), "rewind: 持久化消息已删除"),
-                    Err(e) => {
-                        let msg = format!("rewind: 持久化删除失败: {e}");
-                        warn!(msg);
-                        revert_warnings.push(msg);
-                    }
+/// 共享执行体（slash 与 RPC 双入口复用；Phase 5 Step 5 新增 pub(crate) 函数）。
+///
+/// 原 `RewindCommand.execute` 的 Step 2-6 逻辑原样迁入；错误分支（解析失败 /
+/// 未找到目标 / 持久化删除失败）改 `feedback(Error, UiOnly)`（原 RewindError
+/// 事件通道已删除）；成功 summary → `feedback(Info, UiOnly)`；
+/// `RewindCompleted` 事件保留（TUI 重建信号）。
+pub(crate) async fn execute_rewind(
+    ctx: CommandContext,
+    target_message_id: String,
+    revert_files: bool,
+) -> CommandResult {
+    let history = &ctx.history;
+
+    // Step 2: 定位目标消息
+    let target_idx = history
+        .iter()
+        .position(|m| m.id().as_uuid().to_string() == target_message_id);
+
+    let target_idx = match target_idx {
+        Some(i) => i,
+        None => {
+            let msg = format!("rewind: 未找到目标消息 {target_message_id}");
+            warn!(msg);
+            return CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: Some(CommandFeedback {
+                    level: FeedbackLevel::Error,
+                    message: msg,
+                    channel: FeedbackChannel::UiOnly,
+                }),
+            };
+        }
+    };
+
+    // 截断：保留目标消息之前的所有消息（不含目标本身）
+    // 目标用户消息及其之后的所有消息（AI 回复、工具调用、后续交互）全部移除
+    let removed_messages = &history[target_idx..];
+    let retained_messages = history[..target_idx].to_vec();
+
+    let removed_count = removed_messages.len();
+
+    // Step 3: 提取文件变更并逆向恢复
+    let mut revert_warnings = Vec::new();
+    if revert_files {
+        let changes = extract_file_changes(removed_messages);
+        // P1 修复：revert_files 内含同步 git checkout 子进程，直接调用会
+        // 阻塞 tokio worker（tokio worker_threads=4）——移出 async 上下文。
+        // [shadow] 参数名 revert_files 遮蔽同名函数，经 self:: 显式路径调用。
+        let cwd_owned = ctx.cwd.clone();
+        revert_warnings = tokio::task::spawn_blocking(move || {
+            let mut warnings = Vec::new();
+            self::revert_files(&changes, &cwd_owned, &mut warnings);
+            warnings
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("rewind: spawn_blocking join 失败: {e}");
+            Vec::new()
+        });
+    }
+
+    // Step 4: 验证 ToolUse/ToolResult 配对完整性
+    validate_tool_pairing(&retained_messages);
+
+    // Step 5: 从持久化中删除被移除的消息
+    let removed_ids: Vec<MessageId> = removed_messages.iter().map(|m| m.id()).collect();
+    if let (Some(store), Some(tid)) = (&ctx.thread_store, &ctx.thread_id) {
+        if !removed_ids.is_empty() {
+            match store.delete_messages(tid, &removed_ids).await {
+                Ok(()) => debug!(count = removed_ids.len(), "rewind: 持久化消息已删除"),
+                Err(e) => {
+                    let msg = format!("rewind: 持久化删除失败: {e}");
+                    warn!(msg);
+                    return CommandResult {
+                        messages: ctx.history,
+                        stop_reason: PromptStopReason::EndTurn,
+                        feedback: Some(CommandFeedback {
+                            level: FeedbackLevel::Error,
+                            message: msg,
+                            channel: FeedbackChannel::UiOnly,
+                        }),
+                    };
                 }
             }
         }
+    }
 
-        // Step 6: 发送 RewindCompleted 事件
-        let mut summary = format!("已回滚 {removed_count} 条消息");
-        if !revert_warnings.is_empty() {
-            summary.push_str(&format!("（警告: {}）", revert_warnings.join("; ")));
-        }
-        events::emit_rewind_completed(
-            &ctx.event_sink,
-            &ctx.session_id,
-            summary,
-            retained_messages.clone(),
-        )
-        .await;
+    // Step 6: 发送 RewindCompleted 事件（重建信号，保留原样）
+    let mut summary = format!("已回滚 {removed_count} 条消息");
+    if !revert_warnings.is_empty() {
+        summary.push_str(&format!("（警告: {}）", revert_warnings.join("; ")));
+    }
+    events::emit_rewind_completed(
+        &ctx.event_sink,
+        &ctx.session_id,
+        summary.clone(),
+        retained_messages.clone(),
+    )
+    .await;
 
-        CommandResult {
-            messages: retained_messages,
-            stop_reason: PromptStopReason::EndTurn,
-        }
+    CommandResult {
+        messages: retained_messages,
+        stop_reason: PromptStopReason::EndTurn,
+        feedback: Some(CommandFeedback {
+            level: FeedbackLevel::Info,
+            message: summary,
+            channel: FeedbackChannel::UiOnly,
+        }),
     }
 }
 

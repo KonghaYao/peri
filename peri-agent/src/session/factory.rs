@@ -163,6 +163,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::event::AgentEventHandler;
 use peri_acp_types::goal::GoalController;
@@ -270,6 +271,9 @@ pub struct AssemblyContext {
     /// 会话级 MCP skill 远端注册表（SessionAccessPort 投影；None = print
     /// 模式，跳过发现与合并）。
     pub mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
+    /// 会话级命令注册表（命令面，Phase 6 A3；SessionAccessPort 投影；
+    /// None = print 模式，跳过 mcp 域命令发现投影）。
+    pub command_registry: Option<Arc<CommandRegistry>>,
     // ── 外部服务 ──
     /// Cron 调度器端口（None = 构造临时实例；装配方 downcast 还原）
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,

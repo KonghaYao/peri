@@ -385,9 +385,11 @@ pub(crate) async fn run_prompt(
     };
 
     // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
-    let command_lookup: CommandLookupFn = Arc::new(|text: &str| {
-        crate::session::command::default_prompt_command_registry().find_arc(text)
-    });
+    // Phase 2 常驻化：捕获会话级注册表（随 session 创建注册内置命令，跨轮
+    // 常驻，动态注入条目不因轮次丢失），不再每轮 new 默认注册表。
+    let command_registry = session_manager.command_registry_for(&session_id);
+    let command_lookup: CommandLookupFn =
+        Arc::new(move |text: &str| command_registry.as_ref().and_then(|r| r.resolve(text)));
     let compact_config_loader: Arc<
         dyn Fn() -> peri_acp_types::compact::CompactConfig + Send + Sync,
     > = {

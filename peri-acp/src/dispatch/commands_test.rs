@@ -1,253 +1,483 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
+use async_trait::async_trait;
+use peri_acp_types::command::command_handler::{CommandHandler, CommandOutcome};
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+};
+use peri_acp_types::command::{CommandContext, CommandResult, PromptStopReason};
+use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::PeriCaps;
-use peri_middlewares::skills::{SkillMetadata, SkillSource};
 
-use super::commands::{build_available_commands, build_available_commands_update};
+use super::commands::{build_available_commands_update, register_ui_entries, ui_route_entries};
+use crate::session::command::register_builtins;
 
-#[test]
-fn test_build_available_commands_includes_builtins() {
-    let cmds = build_available_commands(&[]);
-    // 基座：仅功能性内置命令（compact/loop）
-    assert_eq!(
-        cmds.len(),
-        2,
-        "应为 2 条功能性内置命令，实际: {}",
-        cmds.len()
-    );
-    // 验证功能性命令存在
-    let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
-    assert!(names.contains(&"compact"), "compact 命令应存在");
-    assert!(names.contains(&"loop"), "loop 命令应存在");
+// ─── 辅助 ───────────────────────────────────────────────────────────────────
+
+/// 假 handler：仅占位（投影测试只断言 RouteEntry 元数据，不触发执行）。
+struct FakeHandler;
+
+#[async_trait]
+impl CommandHandler for FakeHandler {
+    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+        CommandOutcome::Done(CommandResult {
+            messages: Vec::new(),
+            stop_reason: PromptStopReason::EndTurn,
+            feedback: None,
+        })
+    }
 }
 
-/// 界面性命令按 `caps.ui_commands` 门控：TUI（全 cap）广播，外部客户端不广播。
+/// 内置注册表（register_builtins：core:compact / core:bg / core:clear /
+/// core:rewind / core:loop，全部 kind=Command、core 域）。
+fn builtin_registry() -> CommandRegistry {
+    let reg = CommandRegistry::new();
+    register_builtins(&reg);
+    reg
+}
+
+fn core_entry(fullname: &str, kind: CommandEntryKind) -> Arc<RouteEntry> {
+    Arc::new(RouteEntry {
+        fullname: fullname.into(),
+        aliases: Vec::new(),
+        description: format!("desc of {fullname}"),
+        kind,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(FakeHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Core,
+            lifecycle: CommandLifecycle::Discovered,
+        },
+    })
+}
+
+fn mcp_entry(fullname: &str, server: &str) -> Arc<RouteEntry> {
+    Arc::new(RouteEntry {
+        fullname: fullname.into(),
+        aliases: Vec::new(),
+        description: format!("desc of {fullname}"),
+        kind: CommandEntryKind::McpSkill,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(FakeHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Mcp {
+                server: server.into(),
+            },
+            lifecycle: CommandLifecycle::Discovered,
+        },
+    })
+}
+
+fn plugin_entry(fullname: &str, plugin: &str) -> Arc<RouteEntry> {
+    Arc::new(RouteEntry {
+        fullname: fullname.into(),
+        aliases: Vec::new(),
+        description: format!("desc of {fullname}"),
+        kind: CommandEntryKind::Command,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(FakeHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Plugin {
+                name: plugin.into(),
+            },
+            lifecycle: CommandLifecycle::Discovered,
+        },
+    })
+}
+
+// ─── 投影纯函数（Phase 3 步骤 3/7）──────────────────────────────────────────
+
+/// 无 cap（外部客户端）：availableCommands = 仅注册表投影条目（基座 5 条
+/// 内置），无 ui / skill / mcp 条目；每条 name = 全名、_meta.periKind /
+/// periLevel 恒有（任务书 Step 7 断言面）。
 #[test]
-fn test_ui_commands_gated_by_caps() {
-    // 外部客户端（无 cap）：只有功能性命令
-    let caps_off = PeriCaps::default();
-    let update = build_available_commands_update(&[], &[], &caps_off);
+fn test_update_no_caps_projects_registry_entries_only() {
+    let reg = builtin_registry();
+    let caps = PeriCaps::default();
+    let update = build_available_commands_update(&reg.snapshot(), &caps);
     let value = serde_json::to_value(&update).unwrap();
-    let names: Vec<&str> = value["availableCommands"]
-        .as_array()
-        .unwrap()
+    let commands = value["availableCommands"].as_array().unwrap();
+
+    assert_eq!(commands.len(), 5, "无 cap 时仅注册表投影（基座 5 条内置）");
+    let names: Vec<&str> = commands
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 2, "无 ui_commands cap 时仅功能性命令");
-    for ui_cmd in [
-        "help", "clear", "context", "cost", "mode", "effort", "history", "agents", "rename",
-        "lang", "exit", "cron",
+    for base in [
+        "core:compact",
+        "core:bg",
+        "core:clear",
+        "core:rewind",
+        "core:loop",
     ] {
-        assert!(!names.contains(&ui_cmd), "非功能性命令 {ui_cmd} 不应广播");
+        assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
     }
-
-    // TUI（全 cap）：附加全部界面性命令
-    let caps_on = PeriCaps::all_enabled();
-    let update = build_available_commands_update(&[], &[], &caps_on);
-    let value = serde_json::to_value(&update).unwrap();
-    let names: Vec<&str> = value["availableCommands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names.len(), 13, "全 cap 时 = 2 功能性 + 11 界面性");
-    assert!(names.contains(&"compact"));
-    assert!(names.contains(&"clear"), "clear 应广播（TUI 场景）");
-    assert!(names.contains(&"exit"), "exit 应广播（TUI 场景）");
-}
-
-#[test]
-fn test_build_available_commands_includes_skills() {
-    let skills = vec![
-        SkillMetadata {
-            name: "my-skill".into(),
-            description: "My custom skill".into(),
-            path: PathBuf::from("/fake/my-skill/SKILL.md"),
-            ..Default::default()
-        },
-        SkillMetadata {
-            name: "other".into(),
-            description: "Other skill".into(),
-            path: PathBuf::from("/fake/other/SKILL.md"),
-            ..Default::default()
-        },
-    ];
-    let cmds = build_available_commands(&skills);
-    let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
-    assert!(names.contains(&"my-skill"), "my-skill 应存在");
-    assert!(names.contains(&"other"), "other 应存在");
-}
-
-#[test]
-fn test_build_available_commands_no_skills_no_leak() {
-    let cmds = build_available_commands(&[]);
-    assert!(
-        !cmds.iter().any(|c| c.name.as_str().starts_with("skill:")),
-        "不应包含 skill: 前缀命令"
+    for c in commands {
+        let name = c["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("core:"),
+            "name 应为全名（域前缀），实际: {}",
+            c["name"]
+        );
+        assert_eq!(c["_meta"]["periKind"], "command", "内置命令 kind = command");
+        assert_eq!(c["_meta"]["periLevel"], 1, "core 域 level = 1");
+        // 基座 category 全 None → 不附加；args 未声明者不附加（core:bg
+        // 亦已声明无参 schema，P2-5 与 compact/clear 对齐，下方单独断言）；
+        // aliases 按命令实现声明注入
+        assert!(
+            c["_meta"].get("periCategory").is_none(),
+            "基座条目不得附加 periCategory（全 None）"
+        );
+        assert_eq!(
+            c["_meta"].get("periArgs").is_some(),
+            name == "core:clear"
+                || name == "core:compact"
+                || name == "core:rewind"
+                || name == "core:bg",
+            "core:clear/compact/rewind/bg 已声明 args schema（Phase 5 Step 3-5 + P2-5），实际: {name}"
+        );
+    }
+    let by_name = |n: &str| {
+        commands
+            .iter()
+            .find(|c| c["name"] == n)
+            .unwrap_or_else(|| panic!("条目 {n} 应存在"))
+    };
+    assert_eq!(
+        by_name("core:compact")["_meta"]["periAliases"],
+        serde_json::json!(["compress"]),
+        "内置命令 aliases 应注入 periAliases"
     );
+    assert_eq!(
+        by_name("core:clear")["_meta"]["periAliases"],
+        serde_json::json!(["cls", "reset"])
+    );
+    // Phase 5 Step 3：clear 无参命令，投影附加空 schema（三维度全空）
+    assert_eq!(
+        by_name("core:clear")["_meta"]["periArgs"],
+        serde_json::json!({"positionals": [], "named": [], "flags": []}),
+        "clear 已声明 ArgsSchema::default()，投影应附加空 schema"
+    );
+    // P2-5：bg 与 compact/clear 对齐（Some(ArgsSchema::default())），投影同样
+    // 附加空 schema（free-form 参数零校验语义不变）。
+    assert_eq!(
+        by_name("core:bg")["_meta"]["periArgs"],
+        serde_json::json!({"positionals": [], "named": [], "flags": []}),
+        "bg 已声明 ArgsSchema::default()，投影应附加空 schema"
+    );
+    assert_eq!(
+        by_name("core:rewind")["_meta"]["periAliases"],
+        serde_json::json!(["undo"])
+    );
+    assert!(
+        by_name("core:loop")["_meta"].get("periAliases").is_none(),
+        "无 aliases 的条目不得附加 periAliases"
+    );
+    // 无 ui / skill / mcp 条目
+    assert!(names.iter().all(|n| !n.starts_with("ui:")));
+    // caps.skill_names=false → 无 skillNames key；mcpSkillNames 键退役（Phase 6
+    // D1：kind 已入条目级 _meta.periKind，update 级镜像键不再写入）
+    assert!(value["_meta"].get("skillNames").is_none());
+    assert!(value["_meta"].get("mcpSkillNames").is_none());
 }
 
-// ─── build_available_commands_update 纯函数（Slice 6 / DD-5）───────────────
-
-fn local_skill(name: &str) -> SkillMetadata {
-    SkillMetadata {
-        name: name.into(),
-        description: format!("Local {name}"),
-        path: PathBuf::from(format!("/fake/{name}/SKILL.md")),
-        ..Default::default()
-    }
-}
-
-fn mcp_skill(name: &str) -> SkillMetadata {
-    SkillMetadata {
-        name: name.into(),
-        description: format!("MCP {name}"),
-        path: PathBuf::new(),
-        source: SkillSource::Mcp,
-        ..Default::default()
-    }
-}
-
+/// 全 cap（TUI 内部路径）：模拟调用点准备动作（ui 注册 + 注册表投影）——
+/// 基座 + caps 明细注册的 ui 条目（`ui:<name>` 全名 + periKind=panel）。
+/// ui:clear 与内置 core:clear 第一等级裸名互斥（设计 §63/§64），注册被纯拒绝，
+/// 不覆盖不静默（warn）——其余 10 条 ui 明细全部注册成功。
 #[test]
-fn test_build_update_mcp_entries_in_available_commands() {
-    let local = vec![local_skill("local-a")];
-    let mcp = vec![mcp_skill("mcp__demo__hello")];
+fn test_update_all_enabled_includes_default_ui_details() {
+    let reg = builtin_registry();
     let caps = PeriCaps::all_enabled();
+    assert_eq!(caps.ui_commands.len(), 11, "默认 ui 明细应为 11 条");
 
-    let update = build_available_commands_update(&local, &mcp, &caps);
+    // 模拟调用点（P1-1 拆分后形态）：ui 注册为独立步骤（on_change 挂载前
+    // 一次性），投影直接取注册表 snapshot（Phase 6 A4）。
+    register_ui_entries(&caps, &reg);
+    let update = build_available_commands_update(&reg.snapshot(), &caps);
     let value = serde_json::to_value(&update).unwrap();
-
     let commands = value["availableCommands"].as_array().unwrap();
     let names: Vec<&str> = commands
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"compact"), "内置命令应存在");
+
+    for base in [
+        "core:compact",
+        "core:bg",
+        "core:clear",
+        "core:rewind",
+        "core:loop",
+    ] {
+        assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
+    }
+    for ui in [
+        "ui:help",
+        "ui:context",
+        "ui:cost",
+        "ui:mode",
+        "ui:effort",
+        "ui:history",
+        "ui:agents",
+        "ui:rename",
+        "ui:lang",
+        "ui:exit",
+    ] {
+        assert!(names.contains(&ui), "ui 明细 {ui} 应注册并投影: {names:?}");
+    }
     assert!(
-        names.contains(&"local-a"),
-        "本地 skill 应进 availableCommands"
+        !names.contains(&"ui:clear"),
+        "ui:clear 与 core:clear 第一等级裸名冲突，注册应被纯拒绝（warn）"
     );
-    assert!(
-        names.contains(&"mcp__demo__hello"),
-        "MCP 条目应进 availableCommands（name/description 同构）"
-    );
-    // 合并后条目数 = 2 功能性 + 11 界面性（全 cap）+ 1 本地 + 1 MCP
-    assert_eq!(commands.len(), 15, "合并后条目数应为 2 + 11 + local + mcp");
-    let mcp_entry = commands
-        .iter()
-        .find(|c| c["name"] == "mcp__demo__hello")
-        .unwrap();
-    assert_eq!(mcp_entry["description"], "MCP mcp__demo__hello");
+    assert_eq!(commands.len(), 15, "基座 5 + ui 注册成功 10 = 15 条");
+
+    // 断言每条 ui 条目 _meta.periKind / periLevel 存在、name = 全名
+    for c in commands {
+        let name = c["name"].as_str().unwrap();
+        let meta = &c["_meta"];
+        assert!(meta.get("periKind").is_some(), "{name} 缺 periKind");
+        assert!(meta.get("periLevel").is_some(), "{name} 缺 periLevel");
+        if name.starts_with("ui:") {
+            assert_eq!(meta["periKind"], "panel", "ui 域条目 kind = panel");
+            assert_eq!(meta["periLevel"], 1, "ui 域 level = 1");
+        } else {
+            assert_eq!(meta["periKind"], "command");
+        }
+    }
+    // 全 cap：skillNames 镜像 key 出现（无 Skill 条目 → 空数组）
+    assert_eq!(value["_meta"]["skillNames"], serde_json::json!([]));
 }
 
+/// P1-1 回归：register_ui_entries 幂等——同 fullname 已存在即跳过（不 warn、
+/// 不触发 on_change、不重复登记）。session/load 复用进程内 registry 重放
+/// 注册时不再刷「命令注册冲突」warn。
 #[test]
-fn test_build_update_meta_skill_names_and_mcp_skill_names() {
-    let local = vec![local_skill("local-a"), local_skill("local-b")];
-    let mcp = vec![mcp_skill("mcp__demo__hello")];
+fn test_register_ui_entries_idempotent() {
+    let reg = builtin_registry();
     let caps = PeriCaps::all_enabled();
 
-    let update = build_available_commands_update(&local, &mcp, &caps);
+    register_ui_entries(&caps, &reg);
+    let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
+    assert!(
+        names.iter().any(|n| n == "ui:help"),
+        "首次注册应写入 ui 条目"
+    );
+    assert!(
+        !names.iter().any(|n| n == "ui:clear"),
+        "ui:clear 与 core:clear 裸名互斥，首次即被纯拒绝"
+    );
+    let n1 = names.len();
+
+    // 重放（session/load 路径）：已注册条目全部跳过，注册表不变
+    register_ui_entries(&caps, &reg);
+    let n2 = reg.snapshot().len();
+    assert_eq!(n1, n2, "重放注册不得改变注册表内容");
+}
+
+/// _meta 可选字段注入：非空 aliases / Some(category) / Some(args_schema) →
+/// periAliases / periCategory / periArgs 附加。
+#[test]
+fn test_update_meta_injects_aliases_category_args() {
+    let entry = Arc::new(RouteEntry {
+        fullname: "core:demo".into(),
+        aliases: vec!["d".into(), "dem".into()],
+        description: "Demo".into(),
+        kind: CommandEntryKind::Command,
+        category: Some("utility".into()),
+        args_schema: Some(Default::default()),
+        handler: Arc::new(FakeHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Core,
+            lifecycle: CommandLifecycle::Connected,
+        },
+    });
+    let caps = PeriCaps::default();
+    let update = build_available_commands_update(&[entry], &caps);
     let value = serde_json::to_value(&update).unwrap();
-
-    // skillNames 仅本地名，MCP 名不进
-    let skill_names = value["_meta"]["skillNames"].as_array().unwrap();
-    assert_eq!(
-        skill_names,
-        &vec![serde_json::json!("local-a"), serde_json::json!("local-b")],
-        "skillNames 应仅含本地名"
-    );
-    assert!(
-        !skill_names
-            .iter()
-            .any(|n| n.as_str() == Some("mcp__demo__hello")),
-        "MCP 名不得进 skillNames"
-    );
-
-    // mcpSkillNames 并列、值正确
-    let mcp_names = value["_meta"]["mcpSkillNames"].as_array().unwrap();
-    assert_eq!(
-        mcp_names,
-        &vec![serde_json::json!("mcp__demo__hello")],
-        "mcpSkillNames 应含 MCP 名"
-    );
+    let cmd = &value["availableCommands"][0];
+    assert_eq!(cmd["name"], "core:demo");
+    assert_eq!(cmd["_meta"]["periAliases"], serde_json::json!(["d", "dem"]));
+    assert_eq!(cmd["_meta"]["periCategory"], "utility");
+    assert!(cmd["_meta"]["periArgs"].is_object(), "periArgs 应为 object");
 }
 
+/// Phase 6 D1 断言重写：投影 = snapshot 全量（内置 + 本地 + MCP + 插件条目），
+/// 不做按名去重——`core:hello` 与 `mcp:demo:hello` **共存**（键空间不相交 =
+/// 键唯一性而非按名去重）；条目级 periKind / periLevel 正确；skillNames 仅
+/// core 域 Skill 条目；mcpSkillNames 键退役（任何情况不出现）。
 #[test]
-fn test_build_update_mcp_skill_names_absent_when_mcp_empty() {
-    let local = vec![local_skill("local-a")];
+fn test_update_projects_snapshot_entries_with_kinds() {
+    let entries: Vec<Arc<RouteEntry>> = vec![
+        core_entry("core:hello", CommandEntryKind::Command),
+        core_entry("core:my-skill", CommandEntryKind::Skill),
+        mcp_entry("mcp:demo:hello", "demo"),
+        mcp_entry("mcp:demo:world", "demo"),
+        plugin_entry("plugin:ecc:deploy", "ecc"),
+    ];
     let caps = PeriCaps::all_enabled();
-
-    let update = build_available_commands_update(&local, &[], &caps);
-    let value = serde_json::to_value(&update).unwrap();
-
-    assert!(
-        value["_meta"].get("mcpSkillNames").is_none(),
-        "mcp 为空时不得附加 mcpSkillNames"
-    );
-    assert!(
-        value["_meta"]["skillNames"].is_array(),
-        "skillNames 仍应存在（caps.skill_names=true）"
-    );
-}
-
-/// 评审 LOW-1 回归：本地 skill 恰名 `mcp__x__y` 时，合并去重（本地优先），
-/// availableCommands 不得出现两条同名条目（TUI 双显示 + 归类歧义）。
-#[test]
-fn test_build_update_merged_dedupes_name_collision_local_wins() {
-    let local = vec![local_skill("mcp__demo__hello")];
-    let mcp = vec![mcp_skill("mcp__demo__hello")];
-    let caps = PeriCaps::all_enabled();
-
-    let update = build_available_commands_update(&local, &mcp, &caps);
+    let update = build_available_commands_update(&entries, &caps);
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
-    let name_matches = commands
-        .iter()
-        .filter(|c| c["name"] == "mcp__demo__hello")
-        .count();
-    assert_eq!(name_matches, 1, "同名条目应去重为一条: {value}");
 
-    // 去重后保留的是本地条目（description 为本地样式）
-    let entry = commands
+    // 投影 = snapshot 全量（5 条全进，无去重、无合并）
+    assert_eq!(commands.len(), 5, "投影 = snapshot 全量（无去重）");
+    let names: Vec<&str> = commands
         .iter()
-        .find(|c| c["name"] == "mcp__demo__hello")
-        .unwrap();
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "core:hello",
+        "core:my-skill",
+        "mcp:demo:hello",
+        "mcp:demo:world",
+        "plugin:ecc:deploy",
+    ] {
+        assert!(names.contains(&expected), "{expected} 应投影: {names:?}");
+    }
+    // 'core:hello' 与 'mcp:demo:hello' 共存：同尾名不同键空间，互不互斥
+    // （键唯一性而非按名去重）
+    assert!(
+        names.contains(&"core:hello") && names.contains(&"mcp:demo:hello"),
+        "core:hello 与 mcp:demo:hello 应共存: {names:?}"
+    );
+
+    let by_name = |n: &str| {
+        commands
+            .iter()
+            .find(|c| c["name"] == n)
+            .unwrap_or_else(|| panic!("条目 {n} 应存在"))
+    };
+    assert_eq!(by_name("core:hello")["_meta"]["periKind"], "command");
+    assert_eq!(by_name("core:hello")["_meta"]["periLevel"], 1);
+    assert_eq!(by_name("core:my-skill")["_meta"]["periKind"], "skill");
+    assert_eq!(by_name("mcp:demo:hello")["_meta"]["periKind"], "mcp_skill");
     assert_eq!(
-        entry["description"],
-        serde_json::json!("Local mcp__demo__hello"),
-        "本地条目应优先保留"
+        by_name("mcp:demo:hello")["_meta"]["periLevel"],
+        2,
+        "mcp 域 level = 2"
+    );
+    assert_eq!(
+        by_name("plugin:ecc:deploy")["_meta"]["periKind"],
+        "command",
+        "插件条目 kind = command（plugin/user 域暂归 Command）"
+    );
+    assert_eq!(
+        by_name("plugin:ecc:deploy")["_meta"]["periLevel"],
+        2,
+        "plugin 域 level = 2"
+    );
+
+    // update 级 meta：skillNames 仅 core 域 Skill 条目 fullname；mcpSkillNames
+    // 键退役——kind 已入条目级 periKind，Hub 按条目级 kind 消费。
+    assert_eq!(
+        value["_meta"]["skillNames"],
+        serde_json::json!(["core:my-skill"]),
+        "skillNames 仅 core 域 Skill 条目 fullname"
+    );
+    assert!(
+        value["_meta"].get("mcpSkillNames").is_none(),
+        "mcpSkillNames 键退役，不再写入"
     );
 }
 
+/// skillNames 门控保留（caps.skill_names=false → 无 key，Phase 6 D1 语义
+/// 不变）；mcpSkillNames 退役后无任何 update 级 mcp 镜像键——mcp 条目
+/// 分类只经条目级 periKind 下发。
 #[test]
-fn test_build_update_caps_behavior_unchanged() {
-    let local = vec![local_skill("local-a")];
-    let mcp = vec![mcp_skill("mcp__demo__hello")];
-
-    // caps.skill_names = false：无 skillNames key（既有门控语义不变）
-    let caps_off = PeriCaps {
+fn test_update_skill_names_gated_by_caps() {
+    let entries: Vec<Arc<RouteEntry>> = vec![
+        core_entry("core:my-skill", CommandEntryKind::Skill),
+        mcp_entry("mcp:demo:hello", "demo"),
+    ];
+    let caps = PeriCaps {
         skill_names: false,
         ..PeriCaps::all_enabled()
     };
-    let update_off = build_available_commands_update(&local, &mcp, &caps_off);
-    let value_off = serde_json::to_value(&update_off).unwrap();
+    let update = build_available_commands_update(&entries, &caps);
+    let value = serde_json::to_value(&update).unwrap();
     assert!(
-        value_off["_meta"].get("skillNames").is_none(),
+        value["_meta"].get("skillNames").is_none(),
         "caps.skill_names=false 时不得有 skillNames"
     );
+    assert_eq!(
+        value["availableCommands"].as_array().unwrap().len(),
+        2,
+        "mcp 条目不受 skill_names 门控影响，照常投影"
+    );
     assert!(
-        value_off["_meta"]["mcpSkillNames"].is_array(),
-        "mcpSkillNames 不加 cap 门控，仍应附加"
+        value["_meta"].get("mcpSkillNames").is_none(),
+        "mcpSkillNames 键退役，不再写入"
+    );
+}
+
+/// Phase 6 D1：本地 skill 与内置同名 → 仅内置条目存在——注册表键唯一性
+/// （A2 register 冲突纯拒绝）保证同名不共存；投影 = snapshot 全量，不合并、
+/// 不去重（「本地优先按名去重」合并逻辑已删除）。
+#[test]
+fn test_update_local_skill_same_name_as_builtin_only_builtin_exists() {
+    let reg = builtin_registry();
+    // 本地 skill core:compact（与内置 core:compact 同名）注册 → 冲突纯拒绝
+    let err = reg.register((*core_entry("core:compact", CommandEntryKind::Skill)).clone());
+    assert!(err.is_err(), "同名注册应被注册表冲突拒绝（键唯一性）");
+
+    let caps = PeriCaps::all_enabled();
+    let update = build_available_commands_update(&reg.snapshot(), &caps);
+    let value = serde_json::to_value(&update).unwrap();
+    let commands = value["availableCommands"].as_array().unwrap();
+    assert_eq!(
+        commands.len(),
+        5,
+        "投影 = snapshot 全量：同名 skill 未入表，仅内置 5 条"
+    );
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"core:compact"));
+    let compact = commands
+        .iter()
+        .find(|c| c["name"] == "core:compact")
+        .unwrap();
+    assert_eq!(
+        compact["_meta"]["periKind"], "command",
+        "同名冲突后仅内置条目存在（kind = command，无 Skill 条目）"
+    );
+}
+
+// ─── 条目构造（ui / 本地 skill 桥接 / mcp 桥接）─────────────────────────────
+
+/// caps.ui_commands 明细 → ui 域 RouteEntry：fullname = `ui:<name>`（小写）、
+/// kind = Panel、category = "ui"、args_schema 透传、provenance = Ui + Connected、
+/// handler = UiDelegatePlaceholder（Delegate 回 TUI）。
+#[test]
+fn test_ui_route_entries_from_caps_details() {
+    let caps = PeriCaps::all_enabled();
+    let entries = ui_route_entries(&caps);
+    assert_eq!(
+        entries.len(),
+        11,
+        "默认明细 11 条全部构造（注册冲突由注册表裁决）"
     );
 
-    // caps.skill_names = true：skillNames 存在
-    let caps_on = PeriCaps::all_enabled();
-    let update_on = build_available_commands_update(&local, &mcp, &caps_on);
-    let value_on = serde_json::to_value(&update_on).unwrap();
+    let help = entries
+        .iter()
+        .find(|e| e.fullname == "ui:help")
+        .expect("ui:help 应构造");
+    assert_eq!(help.kind, CommandEntryKind::Panel);
+    assert_eq!(help.category.as_deref(), Some("ui"));
+    assert!(help.args_schema.is_none(), "默认明细无 args schema");
     assert_eq!(
-        value_on["_meta"]["skillNames"],
-        serde_json::json!(["local-a"])
+        help.provenance.source,
+        CommandSource::Ui,
+        "provenance.source = Ui"
     );
+    assert_eq!(
+        help.provenance.lifecycle,
+        CommandLifecycle::Connected,
+        "静态 ui 条目恒 Connected"
+    );
+    assert_eq!(help.fullname, "ui:help");
 }

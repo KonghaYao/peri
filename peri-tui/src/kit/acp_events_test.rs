@@ -1,7 +1,9 @@
 //! Tests for acp_events
 
 use super::*;
-use crate::kit::acp_types::AcpEventWithEpoch;
+use crate::kit::acp_types::{
+    AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, TuiCommandFeedback,
+};
 use crate::kit::message_area::TodoStatus;
 use crate::kit::tui_render_unit::{
     InteractionKind, TuiAskUserBlock, TuiTodoChangeKind, TuiToolPresentation,
@@ -1945,6 +1947,27 @@ fn test_compact_turndone_reload() {
         current_request_id: None,
     };
 
+    // Phase 5 Step 7 补遗（Step 8 回归修复）：manual compact 场景的 UiOnly
+    // CommandFeedback 写入 PENDING_COMPACT_NOTE（跨 replay 存活桥接，
+    // 沿袭 aecc2834；replay reset 清空 committed 后由 acp_bridge reset 分支
+    // 重建 SystemNote 到 current_turn）。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: FeedbackLevel::Info,
+            message: "已压缩 2 条消息".into(),
+            channel: FeedbackChannel::UiOnly,
+        }),
+    );
+    assert_eq!(
+        crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .clone(),
+        Some("已压缩 2 条消息".to_string()),
+        "场景 A: manual compact 的 UiOnly CommandFeedback 应写入 PENDING_COMPACT_NOTE"
+    );
+
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     let received = rx_a.try_recv().ok();
@@ -1953,9 +1976,7 @@ fn test_compact_turndone_reload() {
         Some("test-session"),
         "场景 A: THREAD_LOAD_TX 应收到 session_id"
     );
-    assert!(!state.compact_just_completed, "场景 A: flag 应清除");
-
-    // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
+    assert!(!state.compact_just_completed, "场景 A: flag 应清除"); // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
     // S4.1 红测试改造：按真实时序（CompactCompleted → 流事件 → TurnDone）
     // 构造，并补 rx 空断言。修复前流事件不清除 compact_just_completed 标志
     // → TurnDone 误发送（rx 非空，测试红）；修复后标志被流事件清除 → rx 空。
@@ -1989,25 +2010,13 @@ fn test_compact_turndone_reload() {
         &mut state,
         &AcpEventData::CompactCompleted {
             summary: "compact summary".into(),
-            files: vec![],
-            skills: vec![],
-            micro_cleared: 0,
             messages_json: String::new(),
-            strategy: "micro".into(),
             trigger: "auto".into(),
-            outcome: "micro_applied".into(),
         },
     );
     assert!(
         !state.compact_just_completed,
         "场景 B: auto compact 后标志不应置位（方案 A）"
-    );
-    assert!(
-        crate::kit::atoms::PENDING_COMPACT_NOTE
-            .state()
-            .read()
-            .is_none(),
-        "场景 B: auto compact 不应写入 PENDING_COMPACT_NOTE（无 replay）"
     );
 
     // ② agent 继续产出——流事件到达（标志从未置位，防御逻辑无操作）
@@ -2033,6 +2042,26 @@ fn test_compact_turndone_reload() {
         "场景 B: THREAD_LOAD_TX 不应收到消息（auto-compact 不触发重放）"
     );
 
+    // ── 场景 B 补遗（Step 8）：auto compact 场景（标志未置位）的 UiOnly
+    // CommandFeedback 不得写 PENDING_COMPACT_NOTE——无 replay 触发，避免
+    // 残留串到后续 thread 切换的 reset。
+    crate::kit::atoms::PENDING_COMPACT_NOTE.set(None);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: FeedbackLevel::Info,
+            message: "已压缩 2 条消息".into(),
+            channel: FeedbackChannel::UiOnly,
+        }),
+    );
+    assert!(
+        crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_none(),
+        "场景 B: auto compact 的 CommandFeedback 不应写 PENDING_COMPACT_NOTE"
+    );
+
     // ── 场景 B2：manual compact + 流事件（方案 B 防御路径保留）────────
     // manual compact 置位后，若 agent 继续产出流事件（理论上 manual 是
     // Immediate 命令无流事件，但防御逻辑保留），标志被清除，TurnDone
@@ -2041,13 +2070,8 @@ fn test_compact_turndone_reload() {
         &mut state,
         &AcpEventData::CompactCompleted {
             summary: "manual compact summary".into(),
-            files: vec![],
-            skills: vec![],
-            micro_cleared: 0,
             messages_json: String::new(),
-            strategy: "full".into(),
             trigger: "manual".into(),
-            outcome: "full_applied".into(),
         },
     );
     assert!(
@@ -2055,20 +2079,9 @@ fn test_compact_turndone_reload() {
         "场景 B2: manual compact 后标志应置位"
     );
     // B2 补充（issue 2026-08-08-e2e-compact-command-screenshot-too-early）：
-    // manual compact 写入 PENDING_COMPACT_NOTE——TurnDone 触发 session/load
-    // replay 时 bridge reset 会清空 committed（含 SystemNote），replay 后由
-    // reset 分支从该 atom 重建完成提示。
-    let pending_note = crate::kit::atoms::PENDING_COMPACT_NOTE
-        .state()
-        .read()
-        .clone();
-    let note_ok = pending_note
-        .as_deref()
-        .is_some_and(|t| t.contains("compaction completed") || t.contains("压缩完成"));
-    assert!(
-        note_ok,
-        "场景 B2: manual compact 应写入 compact 完成提示，实际: {pending_note:?}"
-    );
+    // Phase 5 Step 7 文案移交 CommandFeedback 渲染后，SystemNote 注入职责
+    // 由 handle_command_feedback 承担（manual 场景写入 PENDING_COMPACT_NOTE
+    // 跨 replay 存活——见场景 A/B 补遗断言）；此处仅保留标志链断言。
 
     dispatch_and_notify(
         &mut state,
@@ -4841,4 +4854,80 @@ fn test_edit_same_line_replacement_with_count_not_grouped() {
             other => panic!("expected TuiToolCard, got {other:?}"),
         }
     }
+}
+
+/// Phase 4 步骤 8：CommandFeedback 消费——inject_system_note 后 current_turn
+/// 含 SystemNote，level 映射 Info→Info / Warning→Warning / Error→Error
+/// （tui_render_unit.rs:553）；UiOnly/Session 两通道均走同一通路。
+#[test]
+#[serial]
+fn test_command_feedback_injects_system_note() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = BridgeState {
+        variant: 0,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::Idle,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+    };
+
+    // Info（UiOnly 通道）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: FeedbackLevel::Info,
+            message: "命令完成".into(),
+            channel: FeedbackChannel::UiOnly,
+        }),
+    );
+    // Warning（UiOnly 通道）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: FeedbackLevel::Warning,
+            message: "配置未生效".into(),
+            channel: FeedbackChannel::UiOnly,
+        }),
+    );
+    // Error（Session 通道——v1 同样走 inject_system_note，不进 ACP 消息）
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::CommandFeedback(TuiCommandFeedback {
+            level: FeedbackLevel::Error,
+            message: "命令执行失败".into(),
+            channel: FeedbackChannel::Session,
+        }),
+    );
+
+    let vms = state.current_turn.view_models();
+    let notes: Vec<(String, TuiNoteLevel)> = vms
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiSystemNote(n) => Some((n.text.clone(), n.level.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        vec![
+            ("命令完成".to_string(), TuiNoteLevel::Info),
+            ("配置未生效".to_string(), TuiNoteLevel::Warning),
+            ("命令执行失败".to_string(), TuiNoteLevel::Error),
+        ],
+        "三条 CommandFeedback 应按时序注入 current_turn 内部 SystemNote"
+    );
 }

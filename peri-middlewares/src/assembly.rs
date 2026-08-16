@@ -91,6 +91,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             hook_groups,
             session_start_source,
             mcp_skill_registry,
+            command_registry,
             cron_scheduler,
             mcp_pool,
             channel_state,
@@ -478,10 +479,12 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::Mcp if disabled.contains("McpMiddleware") => {}
                 ChainSlot::Mcp => {
                     if let Some(pool) = mcp_pool_concrete.as_ref() {
-                        let mw = McpMiddleware::new(Arc::clone(pool)).with_skill_discovery(
-                            ctx.mcp_skill_registry.clone(),
-                            ctx.cancel.clone(),
-                        );
+                        let mw = McpMiddleware::new(Arc::clone(pool))
+                            .with_skill_discovery(
+                                ctx.mcp_skill_registry.clone(),
+                                ctx.cancel.clone(),
+                            )
+                            .with_command_registry(command_registry.clone());
                         // 注入状态变化通知：经 session 事件通道发布
                         // system-notification（TUI 通知面显示）。pool 全局共享，
                         // 多 session 时以最后装配的 session 通道为准。
