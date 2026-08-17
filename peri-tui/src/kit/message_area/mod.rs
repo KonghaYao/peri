@@ -51,8 +51,12 @@ use self::entry_nav::{
 pub(crate) use self::hits::ImageHoverState;
 use self::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit, compute_keepgoing_rect};
 #[cfg(test)]
+use self::image_action::hover_target_for;
+// macOS-only 符号：对应 mod_test 中 `#[cfg(target_os = "macos")]` 测试，
+// 非 macOS 平台下剔除避免 unused-import（CI ubuntu/windows 全量 clippy）。
+#[cfg(all(test, target_os = "macos"))]
 use self::image_action::{
-    OpenImageError, build_open_command, build_open_command_with, hover_target_for, try_open_image,
+    OpenImageError, build_open_command, build_open_command_with, try_open_image,
 };
 use self::no_color::strip_line_colors;
 use self::vm_cache::{
