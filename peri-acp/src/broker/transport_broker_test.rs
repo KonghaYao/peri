@@ -1,8 +1,8 @@
 //! Tests for `broker/transport_broker.rs` 提取的 elicitation 纯函数
 //! （`build_elicitation_params` / `parse_elicitation_response`）。
 //!
-//! `AcpTransportBroker`（mpsc/TUI 路径）与 `StdioQuestionBroker`（stdio 路径）
-//! 共用这两处逻辑（行为零变化复用面），纯函数单测直接锁住 schema 构造
+//! TUI/notify（mpsc）与 stdio 两路共用同一 `AcpTransportBroker` 及这两处
+//! 逻辑（行为零变化复用面），纯函数单测直接锁住 schema 构造
 //! （单选 oneOf / 多选 array+items.anyOf / 自由文本 + option description 注入）
 //! 与响应解析语义（accept/decline/cancel/未知 action/解析失败兜底）。
 

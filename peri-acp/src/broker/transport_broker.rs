@@ -19,8 +19,8 @@ use peri_acp_types::interaction::{
 use crate::transport::RequestTransport;
 
 /// 审批转发模式：`Forward` 经 `session/request_permission` 转发给客户端；
-/// `AutoApprove` 无条件批准（stdio 无审批 UI 的宿主使用，行为同旧
-/// `StdioBroker`）。
+/// `AutoApprove` 无条件批准（stdio 无审批 UI 的宿主使用，行为同旧自动
+/// 批准语义）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalMode {
     Forward,
