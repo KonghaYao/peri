@@ -11,7 +11,7 @@ pub(crate) async fn handle_list(
 ) -> ListSessionsResponse {
     let cwd_filter = req.cwd.as_ref().map(|p| p.to_string_lossy().to_string());
     let entries =
-        crate::dispatch::list_sessions_as_info(ctx.controller.as_ref(), cwd_filter.as_deref())
+        crate::dispatch::list_sessions_as_info(ctx.cfg.controller.as_ref(), cwd_filter.as_deref())
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "session/list: failed to list threads");
@@ -52,7 +52,7 @@ pub(crate) async fn handle_close(ctx: &StdioContext, session_id: &str) {
         pool.shutdown().await;
     }
     // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
-    let _ = ctx.session_manager.close_session(session_id).await;
+    let _ = ctx.cfg.session_manager.close_session(session_id).await;
 }
 
 /// session/delete 核心逻辑（标准 ACP：从 session history 中移除会话）。
@@ -82,9 +82,10 @@ pub(crate) async fn handle_delete(ctx: &StdioContext, session_id: &str) {
         pool.shutdown().await;
     }
     // 同步从 SessionManager 移除 AcpSession 记录（取消所有 cascade 子 agent）
-    let _ = ctx.session_manager.close_session(session_id).await;
+    let _ = ctx.cfg.session_manager.close_session(session_id).await;
     // 持久化删除线程（消息级联删除）；线程不存在时（幂等）不视为错误
     if let Err(e) = ctx
+        .cfg
         .thread_store
         .delete_thread(&session_id.to_string())
         .await

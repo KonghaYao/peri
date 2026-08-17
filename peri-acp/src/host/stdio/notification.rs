@@ -18,9 +18,10 @@ pub(super) fn send_config_update(
     session_id: &SessionId,
     cx: &ConnectionTo<Client>,
 ) -> Vec<SessionConfigOption> {
-    let c = ctx.peri_config.read();
-    let p = ctx.provider.read();
-    let options = dispatch::config_update::make_config_options(&c, &p, ctx.permission_mode.load());
+    let c = ctx.cfg.peri_config.read();
+    let p = ctx.cfg.provider.read();
+    let options =
+        dispatch::config_update::make_config_options(&c, &p, ctx.cfg.permission_mode.load());
     let notif = SessionNotification::new(
         session_id.clone(),
         SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options.clone())),

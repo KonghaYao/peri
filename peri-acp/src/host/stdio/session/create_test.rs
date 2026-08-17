@@ -7,7 +7,6 @@
 //! `Client.builder().connect_with(channel_a, main_fn)` 经 `block_task()` 等待
 //! 响应（单端 connect_with 时对端 channel 无人消费消息，请求/响应无法回环）。
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agent_client_protocol::{
@@ -18,18 +17,15 @@ use agent_client_protocol::{
     },
     Agent, Channel, Client, ConnectionTo,
 };
-use parking_lot::RwLock;
-use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::lsp::LspServerConfig;
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::store::ThreadStore;
 use peri_agent::thread::FilesystemThreadStore;
 
 use super::*;
 use crate::host::stdio::session::control;
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
-use crate::session::SessionManager;
 
 // ── 辅助：构造测试用 StdioContext（仿 init.rs 装配 + requests_test.rs 配置） ──
 
@@ -73,7 +69,15 @@ fn make_lsp_config() -> LspServerConfig {
     }
 }
 
-fn make_stdio_context(
+/// 构造测试用 StdioContext：走统一装配 `assemble_server_config(bare: true)`
+/// （与 init.rs 同源；bare 跳过插件/全局 settings hooks/MCP 后台初始化/
+/// 孤儿插件清理，仅装配最小中间件集 + SessionManager）。
+///
+/// prewarm（MCP 发现）与 LSP 池测试需要注入自定义 `mcp_pool` /
+/// `lsp_servers`，装配完成后显式替换 `cfg.mcp_pool` / `cfg.plugin_lsp_servers`
+/// 两个字段（bare 装配下 mcp_pool 恒为 None；plugin_lsp_servers 仅含全局
+/// settings.json 合并结果，测试以参数为准）。
+async fn make_stdio_context(
     tmp: &tempfile::TempDir,
     lsp_servers: Vec<LspServerConfig>,
     mcp_pool: Option<Arc<dyn McpPoolPort>>,
@@ -88,59 +92,34 @@ fn make_stdio_context(
     let permission_mode = peri_middlewares::permission::shared_mode::SharedPermissionMode::new(
         peri_middlewares::permission::shared_mode::PermissionMode::Bypass,
     );
-    let cron_scheduler: Arc<dyn CronSchedulerPort> = Arc::new(
-        peri_middlewares::cron::CronSchedulerPortHandle(Arc::new(parking_lot::Mutex::new(
-            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
-        ))),
-    );
-    let tool_search_index: Arc<dyn ToolSearchPort> =
-        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-    let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
-    let workflow_middleware_factory =
-        peri_middlewares::assembly::default_workflow_middleware_factory();
     let thread_store: Arc<dyn ThreadStore> =
         Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn peri_agent::tools::BaseTool>>>> =
-        Arc::new(RwLock::new(BTreeMap::new()));
+    // 显式 tmp 路径 + 空配置：测试不读进程/开发者配置（config_source 本批
+    // 无 handler 消费，仅装配面注入）。
+    let config_source = Arc::new(crate::provider::ConfigSource::load_at_lenient(
+        tmp.path(),
+        tmp.path().join("test_config.json"),
+    ));
 
-    let session_manager = SessionManager::new(
-        thread_store.clone(),
-        provider.clone(),
-        Arc::new(peri_config.clone()),
-        permission_mode.clone(),
-        None,
-        Some(cron_scheduler.clone()),
-        None,
-        Some(Arc::new(|| {
-            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
-                as Arc<dyn peri_acp_types::tasks::TaskManager>
-        })),
-        skills.clone(),
-        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
-    );
+    let mut cfg =
+        crate::host::assemble::assemble_server_config(crate::host::assemble::HostAssemblyInput {
+            provider,
+            peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
+            config_source,
+            permission_mode,
+            thread_store,
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            bare: true,
+            drive_cron_tick: false,
+        })
+        .await;
+    // 测试注入（见函数注释）
+    cfg.mcp_pool = mcp_pool;
+    cfg.plugin_lsp_servers = lsp_servers;
 
     Arc::new(StdioContext {
-        provider: Arc::new(RwLock::new(provider)),
-        peri_config: RwLock::new(peri_config),
-        permission_mode,
-        cron_scheduler,
-        mcp_pool,
-        channel_state: None,
-        plugin_skill_roots: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
-        plugin_loaded: Vec::new(),
-        hook_groups: Vec::new(),
-        plugin_lsp_servers: lsp_servers,
-        tool_search_index,
-        skills,
-        shared_tools,
-        workflow_middleware_factory,
-        sessions: RwLock::new(std::collections::HashMap::new()),
-        thread_store: thread_store.clone(),
-        controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
-        langfuse_session: None,
-        session_manager,
+        cfg,
+        sessions: parking_lot::RwLock::new(std::collections::HashMap::new()),
     })
 }
 
@@ -154,7 +133,7 @@ fn make_stdio_context(
 async fn test_new_prewarms_mcp_discovery_smoke() {
     let tmp = tempfile::TempDir::new().unwrap();
     let pool: Arc<dyn McpPoolPort> = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-    let ctx = make_stdio_context(&tmp, vec![], Some(pool));
+    let ctx = make_stdio_context(&tmp, vec![], Some(pool)).await;
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -195,7 +174,7 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
 #[tokio::test]
 async fn test_load_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None).await;
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -242,7 +221,7 @@ async fn test_load_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_resume_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None).await;
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -289,22 +268,30 @@ async fn test_resume_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_fork_creates_session_scoped_lsp_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None);
+    let ctx = make_stdio_context(&tmp, vec![make_lsp_config()], None).await;
     // 前置：注册带非空历史的 source session（fork 要求 source history 非空）
     {
         let mut sessions = ctx.sessions.write();
         sessions.insert(
             "fork-source-session".to_string(),
-            SessionInfo {
+            crate::host::SessionState {
                 session_id: "fork-source-session".to_string(),
                 thread_id: "fork-source-session".to_string(),
                 cwd: tmp.path().to_string_lossy().into_owned(),
                 history: vec![BaseMessage::human("hello")],
                 cancel_token: None,
                 frozen: None,
+                recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
                 workflow_middleware: None,
                 lsp_pool: None,
+                title: None,
+                tags: Vec::new(),
+                continuation_armed: false,
+                continuation_epoch: 0,
+                continuation_in_flight: false,
+                // 会话创建方即 writer（§6；测试源 session 同样建立 lease）
+                lease: crate::host::lease::WriterLease::acquired("default"),
             },
         );
     }
@@ -358,7 +345,7 @@ async fn test_fork_creates_session_scoped_lsp_pool() {
 #[tokio::test]
 async fn test_load_without_lsp_config_has_no_pool() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, vec![], None);
+    let ctx = make_stdio_context(&tmp, vec![], None).await;
     let (channel_a, channel_b) = Channel::duplex();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -405,12 +392,12 @@ async fn test_load_without_lsp_config_has_no_pool() {
 #[tokio::test]
 async fn test_delete_removes_thread_and_responds_empty() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let ctx = make_stdio_context(&tmp, Vec::new(), None);
+    let ctx = make_stdio_context(&tmp, Vec::new(), None).await;
     let (channel_a, channel_b) = Channel::duplex();
 
     // 先创建线程（session/new 等价物），取得真实 thread id
     let meta = peri_acp_types::thread::ThreadMeta::new(tmp.path().to_str().unwrap());
-    let thread_id = ctx.thread_store.create_thread(meta).await.unwrap();
+    let thread_id = ctx.cfg.thread_store.create_thread(meta).await.unwrap();
     let sid = thread_id.clone();
 
     let ctx_for_handler = Arc::clone(&ctx);
@@ -449,7 +436,7 @@ async fn test_delete_removes_thread_and_responds_empty() {
     assert!(result.is_ok(), "handle_delete 应成功: {result:?}");
     // 线程已持久化删除（元数据消失）
     assert!(
-        ctx.thread_store.load_meta(&sid).await.is_err(),
+        ctx.cfg.thread_store.load_meta(&sid).await.is_err(),
         "删除后线程元数据不应存在"
     );
 }

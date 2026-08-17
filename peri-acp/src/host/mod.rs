@@ -67,12 +67,14 @@ pub(crate) use requests::handle_request;
 // ── Session state ────────────────────────────────────────────────────────────
 
 pub(crate) struct SessionState {
+    // 以下字段 stdio 路径的 typed handler（host::stdio）需要读写，批 1 起
+    // 提升为 pub(crate)；其余沿用 host 内部模块可见性。
     #[allow(dead_code)] // session 标识字段，保留供调试
-    session_id: String,
-    thread_id: String,
-    cwd: String,
+    pub(crate) session_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) cwd: String,
     pub(crate) history: Vec<BaseMessage>,
-    cancel_token: Option<CancellationToken>,
+    pub(crate) cancel_token: Option<CancellationToken>,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).

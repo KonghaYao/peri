@@ -10,6 +10,9 @@ use super::context::StdioContext;
 /// 委托给 `SessionManager::build_frozen_data`，保证 stdio 与 TUI 路径
 /// 使用同一份 frozen 构造逻辑。
 pub(super) fn build(ctx: &StdioContext, cwd: &str) -> crate::session::executor::FrozenSessionData {
-    ctx.session_manager
-        .build_frozen_data(cwd, &ctx.plugin_skill_roots, &ctx.plugin_agent_dirs)
+    ctx.cfg.session_manager.build_frozen_data(
+        cwd,
+        &ctx.cfg.plugin_skill_roots,
+        &ctx.cfg.plugin_agent_dirs,
+    )
 }

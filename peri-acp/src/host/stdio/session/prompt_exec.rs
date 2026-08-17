@@ -71,8 +71,8 @@ pub(crate) async fn run(params: PromptExecParams) {
     let event_sink_for_notif = Arc::clone(&event_sink);
 
     // Snapshot provider / config (release guards before await).
-    let provider_snapshot = ctx.provider.read().clone();
-    let peri_config_snapshot = Arc::new(ctx.peri_config.read().clone());
+    let provider_snapshot = ctx.cfg.provider.read().clone();
+    let peri_config_snapshot = Arc::new(ctx.cfg.peri_config.read().clone());
 
     // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
     // 当前配置重建；frozen None（防御路径）回落默认空状态）。设计 §2.5-2.6。
@@ -121,22 +121,22 @@ pub(crate) async fn run(params: PromptExecParams) {
             progress_tx: None,
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&ctx.skills),
+                Arc::clone(&ctx.cfg.skills),
                 meta_harness.clone(),
             ),
             model_factory: crate::host::workflow_agent::build_model_factory(
-                &ctx.provider,
-                &ctx.peri_config,
+                &ctx.cfg.provider,
+                &ctx.cfg.peri_config,
             ),
-            middleware_factory: Arc::clone(&ctx.workflow_middleware_factory),
+            middleware_factory: Arc::clone(&ctx.cfg.workflow_middleware_factory),
             system_prompt_fallback:
                 crate::host::workflow_agent::build_workflow_system_prompt_fallback(
-                    Arc::clone(&ctx.skills),
+                    Arc::clone(&ctx.cfg.skills),
                     meta_harness.clone(),
                 ),
             forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
             publish_hook: Some(crate::host::workflow_agent::build_publish_hook(
-                &ctx.controller,
+                &ctx.cfg.controller,
             )),
             // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
             langfuse_hooks: None,
@@ -147,7 +147,8 @@ pub(crate) async fn run(params: PromptExecParams) {
         },
     );
 
-    // Read session-scoped workflow_middleware from SessionInfo
+    // Read session-scoped workflow_middleware from SessionState（stdio 会话状态已
+    // 统一为 host::SessionState，字段与 TUI 路径同构）
     let (workflow_middleware, lsp_pool) = {
         let sessions = ctx.sessions.read();
         (
@@ -305,10 +306,10 @@ pub(crate) async fn run(params: PromptExecParams) {
 
     // 事件端口（Controller 适配）
     let event_publisher: Arc<dyn peri_acp_types::event::EventPublisher> = Arc::new(
-        crate::host::controller_ports::ControllerEventPublisher(Arc::clone(&ctx.controller)),
+        crate::host::controller_ports::ControllerEventPublisher(Arc::clone(&ctx.cfg.controller)),
     );
     let subscribe: Arc<dyn Fn() -> Box<dyn peri_acp_types::event::EventSubscriber> + Send + Sync> = {
-        let controller = Arc::clone(&ctx.controller);
+        let controller = Arc::clone(&ctx.cfg.controller);
         Arc::new(move || {
             Box::new(
                 crate::host::controller_ports::ControllerSubscriptionAdapter(
@@ -321,7 +322,7 @@ pub(crate) async fn run(params: PromptExecParams) {
     // 命令拦截注入面（ACP 协议面注册表 / compact 配置 / /bg fork 装配）
     // Phase 2 常驻化：捕获会话级注册表（随 session 创建注册内置命令，跨轮
     // 常驻，动态注入条目不因轮次丢失），不再每轮 new 默认注册表。
-    let command_registry = ctx.session_manager.command_registry_for(&sid);
+    let command_registry = ctx.cfg.session_manager.command_registry_for(&sid);
     let command_lookup: CommandLookupFn =
         Arc::new(move |text: &str| command_registry.as_ref().and_then(|r| r.resolve(text)));
     let compact_config_loader: Arc<
@@ -355,9 +356,9 @@ pub(crate) async fn run(params: PromptExecParams) {
 
     // 防御性 frozen 构建器（turn.frozen=None 回落；生产不可达）
     let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = {
-        let sm = ctx.session_manager.clone();
-        let roots = ctx.plugin_skill_roots.clone();
-        let dirs = ctx.plugin_agent_dirs.clone();
+        let sm = ctx.cfg.session_manager.clone();
+        let roots = ctx.cfg.plugin_skill_roots.clone();
+        let dirs = ctx.cfg.plugin_agent_dirs.clone();
         Some(Arc::new(move |cwd, _language| {
             sm.build_frozen_data(cwd, &roots, &dirs)
         }))
@@ -383,22 +384,22 @@ pub(crate) async fn run(params: PromptExecParams) {
         session_id: sid.clone(),
         cancel,
         broker,
-        permission_mode: ctx.permission_mode.clone(),
-        session_access: Some(Arc::new(ctx.session_manager.clone())
+        permission_mode: ctx.cfg.permission_mode.clone(),
+        session_access: Some(Arc::new(ctx.cfg.session_manager.clone())
             as Arc<dyn peri_acp_types::session::SessionAccessPort>),
-        thread_store: Some(Arc::clone(&ctx.thread_store)),
+        thread_store: Some(Arc::clone(&ctx.cfg.thread_store)),
         thread_id: Some(thread_id.clone()),
-        plugin_skill_roots: ctx.plugin_skill_roots.clone(),
-        plugin_agent_dirs: ctx.plugin_agent_dirs.clone(),
-        plugin_loaded: ctx.plugin_loaded.clone(),
-        hook_groups: ctx.hook_groups.clone(),
-        cron_scheduler: Some(ctx.cron_scheduler.clone()),
-        mcp_pool: ctx.mcp_pool.clone(),
-        channel_state: ctx.channel_state.clone(),
-        tool_search_index: ctx.tool_search_index.clone(),
-        skills: ctx.skills.clone(),
-        shared_tools: ctx.shared_tools.clone(),
-        lsp_servers: ctx.plugin_lsp_servers.clone(),
+        plugin_skill_roots: ctx.cfg.plugin_skill_roots.clone(),
+        plugin_agent_dirs: ctx.cfg.plugin_agent_dirs.clone(),
+        plugin_loaded: ctx.cfg.plugin_loaded.clone(),
+        hook_groups: ctx.cfg.hook_groups.clone(),
+        cron_scheduler: ctx.cfg.cron_scheduler.clone(),
+        mcp_pool: ctx.cfg.mcp_pool.clone(),
+        channel_state: ctx.cfg.channel_state.clone(),
+        tool_search_index: ctx.cfg.tool_search_index.clone(),
+        skills: ctx.cfg.skills.clone(),
+        shared_tools: ctx.cfg.shared_tools.clone(),
+        lsp_servers: ctx.cfg.plugin_lsp_servers.clone(),
         lsp_pool,
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
@@ -418,52 +419,55 @@ pub(crate) async fn run(params: PromptExecParams) {
     };
 
     // ── L5：TurnInput 注入面（Langfuse hooks / stage 装配桥 / forwarder）──
-    let langfuse_hooks: Option<executor::LangfuseHooks> = ctx.langfuse_session.as_ref().map(|s| {
-        let session_clone = Arc::clone(s);
-        let config = session_clone.config.clone();
-        let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
-            session_clone;
-        let tracer = Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
-            session,
-            sid.clone(),
-            config,
-        )));
-        executor::LangfuseHooks {
-            on_turn_start: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(move |input: &str| {
-                    tracer.lock().on_turn_start(input);
-                }) as Arc<dyn Fn(&str) + Send + Sync>
-            },
-            on_turn_end: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(move |err: Option<String>| {
-                    tracer.lock().on_turn_end(err.as_deref()).into()
-                })
-                    as Arc<
-                        dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>> + Send + Sync,
-                    >
-            },
-            bridge_factory: {
-                let tracer = Arc::clone(&tracer);
-                Arc::new(move |name: String, agent_id: Option<String>| {
-                    Some(
-                        Arc::new(LangfuseBridge::new(Arc::clone(&tracer), name, agent_id))
-                            as Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
-                    )
-                })
-                    as Arc<
-                        dyn Fn(
-                                String,
-                                Option<String>,
-                            )
-                                -> Option<Arc<dyn peri_agent::agent::LangfuseBridgeLike>>
-                            + Send
-                            + Sync,
-                    >
-            },
-        }
-    });
+    let langfuse_hooks: Option<executor::LangfuseHooks> =
+        ctx.cfg.langfuse_session.as_ref().map(|s| {
+            let session_clone = Arc::clone(s);
+            let config = session_clone.config.clone();
+            let session: std::sync::Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
+                session_clone;
+            let tracer = Arc::new(parking_lot::Mutex::new(LangfuseTracer::new(
+                session,
+                sid.clone(),
+                config,
+            )));
+            executor::LangfuseHooks {
+                on_turn_start: {
+                    let tracer = Arc::clone(&tracer);
+                    Arc::new(move |input: &str| {
+                        tracer.lock().on_turn_start(input);
+                    }) as Arc<dyn Fn(&str) + Send + Sync>
+                },
+                on_turn_end: {
+                    let tracer = Arc::clone(&tracer);
+                    Arc::new(move |err: Option<String>| {
+                        tracer.lock().on_turn_end(err.as_deref()).into()
+                    })
+                        as Arc<
+                            dyn Fn(Option<String>) -> Option<tokio::task::JoinHandle<()>>
+                                + Send
+                                + Sync,
+                        >
+                },
+                bridge_factory: {
+                    let tracer = Arc::clone(&tracer);
+                    Arc::new(move |name: String, agent_id: Option<String>| {
+                        Some(
+                            Arc::new(LangfuseBridge::new(Arc::clone(&tracer), name, agent_id))
+                                as Arc<dyn peri_agent::agent::LangfuseBridgeLike>,
+                        )
+                    })
+                        as Arc<
+                            dyn Fn(
+                                    String,
+                                    Option<String>,
+                                )
+                                    -> Option<Arc<dyn peri_agent::agent::LangfuseBridgeLike>>
+                                + Send
+                                + Sync,
+                        >
+                },
+            }
+        });
 
     // stage 装配桥：从 SessionContext 投影 StageBuildInput 并补齐注入面
     //（Langfuse bridge factory 经 turn 级 hooks 构造），再调用 ACP 装配桥。
@@ -545,8 +549,10 @@ pub(crate) async fn run(params: PromptExecParams) {
     // 返回时结果已就绪 → take_result。
     // L5：执行体固定为 `run_session_loop`（句柄内部直接调用，无需 runner 注入）。
     let handle = Arc::new(crate::host::prompt_handle::PromptHandle::new(cx, turn));
-    ctx.controller.register_session(&sid, Arc::clone(&handle));
-    if let Err(e) = ctx.controller.run_session(&sid).await {
+    ctx.cfg
+        .controller
+        .register_session(&sid, Arc::clone(&handle));
+    if let Err(e) = ctx.cfg.controller.run_session(&sid).await {
         tracing::error!(session_id = %sid, error = %e, "run_session failed");
         let _ = responder.respond(PromptResponse::new(StopReason::Cancelled));
         return;
@@ -564,7 +570,12 @@ pub(crate) async fn run(params: PromptExecParams) {
     // Persist new messages to ThreadStore.
     if result.ok && history_len < result.messages.len() {
         let new_msgs = &result.messages[history_len..];
-        if let Err(e) = ctx.thread_store.append_messages(&thread_id, new_msgs).await {
+        if let Err(e) = ctx
+            .cfg
+            .thread_store
+            .append_messages(&thread_id, new_msgs)
+            .await
+        {
             tracing::warn!(error = %e, "Failed to persist messages to ThreadStore");
         }
     }

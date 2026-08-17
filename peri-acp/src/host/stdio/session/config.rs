@@ -21,7 +21,7 @@ pub(crate) async fn handle_set_mode(
 ) -> Result<(), Error> {
     let mode_id = req.mode_id.0.as_ref();
     let mode = parse_permission_mode(mode_id);
-    ctx.permission_mode.store(mode);
+    ctx.cfg.permission_mode.store(mode);
     tracing::info!(mode_id = %mode_id, "Permission mode changed");
     let _config_options = notification::send_config_update(ctx, &req.session_id, &cx);
     responder.respond(SetSessionModeResponse::new())
@@ -42,21 +42,21 @@ pub(crate) async fn handle_set_config_option(
             match config_id {
                 "mode" => {
                     let mode = parse_permission_mode(v);
-                    ctx.permission_mode.store(mode);
+                    ctx.cfg.permission_mode.store(mode);
                     tracing::info!(mode = %v, "Permission mode changed via configOption");
                 }
                 "model" => {
                     let _ = model::switch_model(ctx, req.session_id.0.as_ref(), v);
                 }
                 "thinking_effort" => {
-                    apply_profile_effort(&ctx.peri_config, v);
+                    apply_profile_effort(&ctx.cfg.peri_config, v);
                     // 同步更新 LlmProvider（thinking 变更需要重建 provider）
                     let new_provider = {
-                        let c = ctx.peri_config.read();
+                        let c = ctx.cfg.peri_config.read();
                         LlmProvider::from_config(&c)
                     };
                     if let Some(new_provider) = new_provider {
-                        *ctx.provider.write() = new_provider;
+                        *ctx.cfg.provider.write() = new_provider;
                     }
                     // Thinking 变更 → invalidate cached LLM 实例
                     if !session_id.is_empty() {
@@ -70,7 +70,7 @@ pub(crate) async fn handle_set_config_option(
                 "context_1m" => {
                     let enabled = v == "true" || v == "1";
                     {
-                        let mut c = ctx.peri_config.write();
+                        let mut c = ctx.cfg.peri_config.write();
                         let alias = c.config.active_alias.clone();
                         if let Some(profile) = c.config.profiles.get_mut(&alias) {
                             profile.context_1m = enabled;
@@ -149,14 +149,14 @@ pub(crate) async fn handle_update_config(
         )));
     }
 
-    *ctx.peri_config.write() = new_cfg.clone();
+    *ctx.cfg.peri_config.write() = new_cfg.clone();
 
     if let Some(p) = crate::provider::LlmProvider::from_config(&new_cfg) {
         tracing::info!(
             model = %p.model_name(),
             "Provider updated via session/update_config"
         );
-        *ctx.provider.write() = p;
+        *ctx.cfg.provider.write() = p;
     }
 
     // Model switch → invalidate cached LLM instances

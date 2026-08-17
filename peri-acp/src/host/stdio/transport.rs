@@ -28,7 +28,7 @@ pub(super) async fn handle_initialize(
         .unwrap_or_default();
 
     // 暂存到 SessionManager，session/new 时 consume
-    ctx.session_manager.set_pending_caps(peri_caps.clone());
+    ctx.cfg.session_manager.set_pending_caps(peri_caps.clone());
 
     let resp = dispatch::build_initialize_response(&peri_caps);
     responder.respond(resp)
