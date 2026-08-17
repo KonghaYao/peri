@@ -117,14 +117,16 @@ mod tests {
             .iter()
             .any(|e| matches!(e, langfuse_client::IngestionEvent::TraceCreate { .. }));
         let has_error_span = events.iter().any(|e| {
-            if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            // ErrorTurn 是"时点标记"而非工作区间，用 Event 类型（无 end_time 语义），
+            // 避免误导性 0ms span（见 tracer/mod.rs on_turn_end）。
+            if let langfuse_client::IngestionEvent::EventCreate { body, .. } = e {
                 body.name.as_deref() == Some("ErrorTurn")
             } else {
                 false
             }
         });
         assert!(has_trace, "e2e: 错误 turn 应补发 TraceCreate");
-        assert!(has_error_span, "e2e: 错误 turn 应发 ErrorSpan");
+        assert!(has_error_span, "e2e: 错误 turn 应发 ErrorTurn event");
     }
 
     // ── SubAgent e2e 测试 ──────────────────────────────────────────────────

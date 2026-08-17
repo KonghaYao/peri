@@ -4,7 +4,7 @@ use super::stages::StageHandle;
 use super::LangfuseTracer;
 use langfuse_client::types::ObservationLevel;
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
-use peri_agent::agent::events::Stage;
+use peri_agent::agent::events::{Stage, StageStatus};
 
 impl LangfuseTracer {
     // ── SubAgent 身份注册表(registry)入口 ────────────────────────────────────
@@ -73,9 +73,20 @@ impl LangfuseTracer {
                 return None;
             }
         };
-        let handle = self
-            .stages
-            .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
+        let (handle, replaced) =
+            self.stages
+                .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
+        // 旧 stage 被覆盖:立即补发其合并 SpanCreate(subagent 的 reason/act
+        // 快速切换时旧 stage 的 StageEnded 可能因乱序/重放丢失,不补发则
+        // 工具 batch 的 parent 悬空,整批工具调用沦为孤儿)。
+        if let Some(old) = replaced {
+            self.emit_stage_span_close(&old, StageStatus::Done, None);
+        }
+        // 子内容事件时刻刷新(AGENT obs close 的 end_time 取 max)
+        if self.subagent.ownership(agent_id) == Ownership::Subagent {
+            self.subagent
+                .touch_content_time(agent_id, &handle.start_time);
+        }
         // 工具批次归属 Act 阶段:ToolStart 先于 StageStarted(Act) 到达时,
         // batch parent 冻结在旧 stage(stage-reason),Act 开始后重挂到 stage-act
         if stage == Stage::Act {
@@ -95,6 +106,16 @@ impl LangfuseTracer {
     /// StageEnded 分支领取乱序重放的 stage handle(active_stage 未命中时)
     pub(crate) fn take_replayed_stage_handle(&mut self, agent_id: &str) -> Option<StageHandle> {
         self.replayed_stage_handles.remove(agent_id)
+    }
+
+    /// 取出全部未领取的重放 stage handle(turn 结束兜底用)。
+    /// 对应 StageEnded 可能因事件流截断/乱序丢失，由调用方立即补发，
+    /// 否则工具 batch 的 parent 引用一个从未创建的 span（孤儿 batch）。
+    pub(crate) fn take_all_replayed(&mut self) -> Vec<StageHandle> {
+        self.replayed_stage_handles
+            .drain()
+            .map(|(_, h)| h)
+            .collect()
     }
 
     /// SubagentStart:驱动 AGENT obs 创建(join 成功后 emit ObservationCreate open),
@@ -236,7 +257,17 @@ impl LangfuseTracer {
 
     /// AGENT obs 关闭:flush child tool_batch + ObservationUpdate(带 end_time/output)。
     /// end 时刻 = Stop 时刻;output = Stop result(空则父工具 deferred_output)。
-    pub(super) fn emit_subagent_close(&self, closed: registry::ClosedSubagent) {
+    pub(super) fn emit_subagent_close(&mut self, closed: registry::ClosedSubagent) {
+        // 兜底:关闭该 subagent 仍活跃的 stage(StageEnded 可能因事件流截断/
+        // 乱序丢失,span 不发送则工具 batch 的 parent 悬空成孤儿;subagent
+        // 关闭后不可能再有新 stage,立即补发是安全的)。重复发送无害
+        // (Langfuse 按同 id upsert,以较晚 end_time 为准)。
+        if let Some(handle) = self.stages.take_active(&closed.agent_id) {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
+        if let Some(handle) = self.replayed_stage_handles.remove(&closed.agent_id) {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
         // 先 flush child 的工具批次(工具 span 挂在 child 的 batch/stage 下)
         self.emit_tools_flush(closed.flush);
         let level = if closed.is_error {
@@ -245,9 +276,13 @@ impl LangfuseTracer {
             None
         };
         // 成功/失败统一写 text(成功不再丢 output);错误时附加 error_class
+        // 与 error_message(实际错误正文,截断防超大)
         let mut output = serde_json::json!({"text": closed.output});
         if closed.is_error {
             output["error_class"] = serde_json::json!("subagent_failure");
+            output["error_message"] =
+                serde_json::json!(closed.output.chars().take(2_000).collect::<String>());
+            output["error_schema_version"] = serde_json::json!(2);
         }
         // 与 ErrorTurn span 的 metadata 格式对齐(trace_id == turn_id)
         let mut metadata = serde_json::json!({

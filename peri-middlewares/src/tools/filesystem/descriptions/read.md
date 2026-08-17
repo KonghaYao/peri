@@ -8,7 +8,7 @@ Usage:
 - Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset
 - To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length
 - Any lines longer than 65536 characters will be truncated; the result reports the original and retained character counts before the line content
-- Results exceeding 5000 bytes are truncated with the original byte count, and the complete numbered output is persisted to a temporary file
+- Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset (Read never persists output to a file)
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool reads files from the local filesystem; it cannot handle URLs
 - You can call multiple tools in a single response. It is always better to speculatively read multiple files before making edits

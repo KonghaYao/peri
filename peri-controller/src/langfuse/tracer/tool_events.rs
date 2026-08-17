@@ -60,6 +60,8 @@ impl LangfuseTracer {
             Ownership::Subagent => {
                 let tb = self.subagent.tool_batch_mut(agent_id);
                 tb.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
+                self.subagent
+                    .touch_content_time(agent_id, &chrono::Utc::now().to_rfc3339());
             }
             Ownership::Unknown => return false,
         }
@@ -208,7 +210,13 @@ impl LangfuseTracer {
                     end_time: Some(tool.end_time.clone()),
                     input: Some(tool.input.clone()),
                     output: Some(if tool.is_error {
-                        serde_json::json!({"error_class": "tool_failure"})
+                        // error_message 携带工具实际错误正文(截断防超大),
+                        // 替代 v1 只写 error_class 的信息丢失
+                        serde_json::json!({
+                            "error_class": "tool_failure",
+                            "error_message": tool.output.chars().take(2_000).collect::<String>(),
+                            "error_schema_version": 2,
+                        })
                     } else {
                         serde_json::json!(tool.output)
                     }),

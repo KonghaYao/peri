@@ -43,7 +43,8 @@ use crate::langfuse::tracer::stages::StageHandle;
 use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
-use langfuse_client::{IngestionEvent, ObservationBody, ObservationType, SpanBody};
+use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
+use peri_agent::agent::events::StageStatus;
 use peri_agent::agent::events_v2::TurnErrorReason;
 
 pub struct LangfuseTracer {
@@ -205,8 +206,9 @@ impl LangfuseTracer {
     /// 均通过 session.try_add() 同步入队，保证顺序。tokio::spawn 使 flush 异步化，
     /// 不阻塞调用方。
     ///
-    /// ErrorSpan 机制：当轮次以 error 结束时，始终发送 ErrorTurn span
-    /// （即使该轮次未被采样），确保错误可观测。
+    /// ErrorEvent 机制：当轮次以 error 结束时，始终发送 ErrorTurn event
+    /// （即使该轮次未被采样），确保错误可观测。错误是"时点标记"而非一段
+    /// 工作区间，故用 Event 类型（无 end_time 语义），不产生误导性的 0ms span。
     pub fn on_turn_end(&mut self, error_output: Option<&str>) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
@@ -220,7 +222,21 @@ impl LangfuseTracer {
         for closed in closed_list {
             self.emit_subagent_close(closed);
         }
-        self.replayed_stage_handles.clear();
+        // 兜底:关闭所有仍活跃/未领取的 stage span(StageEnded 因事件流截断/
+        // 乱序丢失时,不发送则其下工具 batch 的 parent 悬空成孤儿)。
+        // turn 结束是终态,此后不可能再有 stage 事件,立即补发是安全的;
+        // 乱序 StageEnded 若随后到达,Langfuse 按同 id upsert 无害。
+        for handle in self.stages.take_all_active() {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
+        let stale_replayed: Vec<StageHandle> = self
+            .replayed_stage_handles
+            .drain()
+            .map(|(_, h)| h)
+            .collect();
+        for handle in stale_replayed {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
 
         let is_error = error_output.is_some();
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
@@ -234,7 +250,7 @@ impl LangfuseTracer {
         if is_error && self.config.error_span_always {
             let turn_id = self.trace_id.clone();
             let error_out =
-                serde_json::json!({"error_class": &error_class, "error_schema_version": 1});
+                serde_json::json!({"error_class": &error_class, "error_schema_version": 2});
 
             if !sampled {
                 // 未采样时创建合成 Trace（复用 trace_id），让 error span 有父 trace
@@ -251,7 +267,7 @@ impl LangfuseTracer {
                     metadata: Some(serde_json::json!({
                         "synthetic_error": true,
                         "error_class": &error_class,
-                        "error_schema_version": 1,
+                        "error_schema_version": 2,
                     })),
                     tags: None,
                     environment: None,
@@ -271,14 +287,13 @@ impl LangfuseTracer {
                 );
             }
 
-            // Emit ErrorTurn Span
+            // Emit ErrorTurn Event(时点标记,非 span)
             let error_span_id = new_uuid();
-            let span_body = SpanBody {
+            let event_body = EventBody {
                 id: Some(error_span_id.clone()),
                 trace_id: Some(turn_id.clone()),
                 name: Some("ErrorTurn".to_string()),
                 start_time: Some(now_rfc3339()),
-                end_time: Some(now_rfc3339()),
                 input: None,
                 output: Some(error_out),
                 metadata: Some(serde_json::json!({
@@ -286,26 +301,25 @@ impl LangfuseTracer {
                     "was_sampled": sampled,
                     "turn_id": &turn_id,
                     "error_class": &error_class,
-                    "error_schema_version": 1,
+                    "error_schema_version": 2,
                 })),
                 level: Some(ObservationLevel::Error),
                 status_message: None,
                 version: Some(VERSION.to_string()),
                 environment: None,
                 parent_observation_id: Some(self.agent_observation_id.clone()),
-                session_id: Some(self.session_id.clone()),
             };
-            let span_event = IngestionEvent::SpanCreate {
+            let event_event = IngestionEvent::EventCreate {
                 id: new_uuid(),
                 timestamp: now_rfc3339(),
-                body: span_body,
+                body: event_body,
                 metadata: None,
             };
             try_add_or_warn_via_session(
                 &*self.session,
-                span_event,
+                event_event,
                 &self.trace_id,
-                "ErrorTurn SpanCreate",
+                "ErrorTurn EventCreate",
             );
         }
 

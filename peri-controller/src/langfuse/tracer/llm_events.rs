@@ -35,9 +35,16 @@ impl LangfuseTracer {
         tools: &[ToolDefinition],
     ) -> bool {
         match self.subagent.ownership(agent_id) {
-            Ownership::Main | Ownership::Subagent => {
+            Ownership::Main => {
                 self.generation
                     .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+                true
+            }
+            Ownership::Subagent => {
+                self.generation
+                    .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+                self.subagent
+                    .touch_content_time(agent_id, &chrono::Utc::now().to_rfc3339());
                 true
             }
             Ownership::Unknown => {

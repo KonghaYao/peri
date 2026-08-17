@@ -15,7 +15,7 @@ langfuse api <resource> <action>
 ## Discovery
 
 ```bash
-bunx langfuse-cli api __schema
+bunx langfuse-cli api --help
 bunx langfuse-cli api <resource> --help
 bunx langfuse-cli api <resource> <action> --help
 bunx langfuse-cli api <resource> <action> --curl

@@ -4,7 +4,7 @@ description: Interact with Langfuse and access its documentation. Use when needi
 allowed-tools:
   - WebFetch(domain:langfuse.com)
   - Bash(curl *langfuse.com/*)
-  - Bash(bunx langfuse-cli api __schema *)
+  - Bash(bunx langfuse-cli api --help *)
   - Bash(bunx langfuse-cli api * --help *)
   - Bash(bunx langfuse-cli api * list *)
   - Bash(bunx langfuse-cli api * get *)
@@ -25,7 +25,7 @@ allowed-tools:
 Use `langfuse-cli` to interact with the full Langfuse REST API. Run via bunx (auto-loads `.env`):
 
 ```bash
-bunx langfuse-cli api __schema                              # Discover all resources
+bunx langfuse-cli api --help                              # 列出所有 resources
 bunx langfuse-cli api <resource> --help                     # List actions for a resource
 bunx langfuse-cli api <resource> <action> --help            # Show args for an action
 bunx langfuse-cli api <resource> <action> [options]         # Execute
@@ -70,13 +70,13 @@ All scripts accept common filtering options for time range and metadata:
 bun .claude/skills/langfuse/scripts/trace-search.ts [选项]
 
 # 示例
-bun trace-search.ts --days 7 --tag production                # 最近 7 天带 production tag 的 trace
-bun trace-search.ts --session sess_abc --csv > session.csv   # 导出 session 为 CSV
-bun trace-search.ts --model claude-sonnet --status error     # 查询特定模型的错误 trace
-bun trace-search.ts --from 2026-07-01T00:00:00Z --summary   # 只看汇总统计
-bun trace-search.ts --days 30 --json > report.json           # 导出 JSON
-bun trace-search.ts --user user_123 --limit 100              # 按用户过滤
-bun trace-search.ts --order latency.desc --limit 10          # 按延迟排序，找最慢的
+bun .claude/skills/langfuse/scripts/trace-search.ts --days 7 --tag production                # 最近 7 天带 production tag 的 trace
+bun .claude/skills/langfuse/scripts/trace-search.ts --session sess_abc --csv > session.csv   # 导出 session 为 CSV
+bun .claude/skills/langfuse/scripts/trace-search.ts --model claude-sonnet --status error     # 查询特定模型的错误 trace
+bun .claude/skills/langfuse/scripts/trace-search.ts --from 2026-07-01T00:00:00Z --summary   # 只看汇总统计
+bun .claude/skills/langfuse/scripts/trace-search.ts --days 30 --json > report.json           # 导出 JSON
+bun .claude/skills/langfuse/scripts/trace-search.ts --user user_123 --limit 100              # 按用户过滤
+bun .claude/skills/langfuse/scripts/trace-search.ts --order latency.desc --limit 10          # 按延迟排序，找最慢的
 ```
 
 Output modes: table (default), `--csv`, `--json`, `--summary` (aggregate only), `--full` (detailed fields).
@@ -91,7 +91,7 @@ bun .claude/skills/langfuse/scripts/analyze.ts --report [N]     # Full report (a
 bun .claude/skills/langfuse/scripts/analyze.ts --trace-id <id>  # Single trace detail
 
 # 支持时间/元数据过滤
-bun analyze.ts 20 --days 7 --user user_123 --report         # 某用户最近 7 天的完整报告
+bun .claude/skills/langfuse/scripts/analyze.ts 20 --days 7 --user user_123 --report         # 某用户最近 7 天的完整报告
 ```
 
 ### 2c. session-analyze — Session 完整分析
@@ -117,11 +117,11 @@ bun .claude/skills/langfuse/scripts/session-analyze.ts --session <id> [选项]
 ```bash
 bun .claude/skills/langfuse/scripts/daily-report.ts [选项]
 
-bun daily-report.ts                           # 今天的日报
-bun daily-report.ts --days 7                  # 最近 7 天周报
-bun daily-report.ts --days 30 --tag prod      # 按 tag 过滤的月报
-bun daily-report.ts --model claude-sonnet     # 按模型过滤
-bun daily-report.ts --detail                  # 显示所有 trace 详情
+bun .claude/skills/langfuse/scripts/daily-report.ts                           # 今天的日报
+bun .claude/skills/langfuse/scripts/daily-report.ts --days 7                  # 最近 7 天周报
+bun .claude/skills/langfuse/scripts/daily-report.ts --days 30 --tag prod      # 按 tag 过滤的月报
+bun .claude/skills/langfuse/scripts/daily-report.ts --model claude-sonnet     # 按模型过滤
+bun .claude/skills/langfuse/scripts/daily-report.ts --detail                  # 显示所有 trace 详情
 
 # 输出内容
 # - Key Metrics（traces, sessions, errors, tokens, cost）
@@ -136,15 +136,15 @@ bun daily-report.ts --detail                  # 显示所有 trace 详情
 ```bash
 # Token 流 + 缓存异常
 bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>
-bun trace-tokens.ts --index 1 --days 7        # 用 --index 从过滤结果中选 trace
+bun .claude/skills/langfuse/scripts/trace-tokens.ts --index 1 --days 7        # 用 --index 从过滤结果中选 trace
 
 # 消息组成 + diff
 bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId> [--detail]
-bun trace-messages.ts --index 3 --user user_123
+bun .claude/skills/langfuse/scripts/trace-messages.ts --index 3 --user user_123
 
 # System prompt 段落拆解
 bun .claude/skills/langfuse/scripts/prompt-breakdown.ts <traceId>
-bun prompt-breakdown.ts --index 1 --days 7
+bun .claude/skills/langfuse/scripts/prompt-breakdown.ts --index 1 --days 7
 
 # Trace 汇总列表
 bun .claude/skills/langfuse/scripts/traces-list.ts [N] [过滤选项]
@@ -156,53 +156,53 @@ bun .claude/skills/langfuse/scripts/traces-list.ts [N] [过滤选项]
 
 | 需求 | 命令 |
 |------|------|
-| 今天所有 trace | `bun daily-report.ts` 或 `bun trace-search.ts --days 1` |
-| 本周 trace | `bun daily-report.ts --days 7` |
-| 本月 trace | `bun daily-report.ts --days 30` |
-| 特定时间段 | `bun trace-search.ts --from ISO --to ISO` |
-| 上周 vs 本周对比 | 分别跑两次 `daily-report.ts --days 7`（注意时间不对齐），或用 `--from/--to` 精确控制 |
+| 今天所有 trace | `bun .claude/skills/langfuse/scripts/daily-report.ts` 或 `bun .claude/skills/langfuse/scripts/trace-search.ts --days 1` |
+| 本周 trace | `bun .claude/skills/langfuse/scripts/daily-report.ts --days 7` |
+| 本月 trace | `bun .claude/skills/langfuse/scripts/daily-report.ts --days 30` |
+| 特定时间段 | `bun .claude/skills/langfuse/scripts/trace-search.ts --from ISO --to ISO` |
+| 上周 vs 本周对比 | 分别跑两次 `.claude/skills/langfuse/scripts/daily-report.ts --days 7`（注意时间不对齐），或用 `--from/--to` 精确控制 |
 
 ### 按用户/会话查询
 
 | 需求 | 命令 |
 |------|------|
-| 某用户的所有 trace | `bun trace-search.ts --user <id> --days 30` |
-| 某 session 完整分析 | `bun session-analyze.ts --session <id> --detail` |
-| 某 session 导出 CSV | `bun session-analyze.ts --session <id> --csv` |
-| 用户日报 | `bun daily-report.ts --user <id> --days 1` |
+| 某用户的所有 trace | `bun .claude/skills/langfuse/scripts/trace-search.ts --user <id> --days 30` |
+| 某 session 完整分析 | `bun .claude/skills/langfuse/scripts/session-analyze.ts --session <id> --detail` |
+| 某 session 导出 CSV | `bun .claude/skills/langfuse/scripts/session-analyze.ts --session <id> --csv` |
+| 用户日报 | `bun .claude/skills/langfuse/scripts/daily-report.ts --user <id> --days 1` |
 
 ### 成本排查
 
 | 需求 | 命令 |
 |------|------|
-| 找最贵的 trace | `bun trace-search.ts --order totalTokens --days 7 --limit 10` |
-| 全量成本报告 | `bun analyze.ts 50 --days 7 --report` |
-| 单模型成本 | `bun daily-report.ts --days 7 --model claude-sonnet` |
-| 缓存效率低的 trace | `bun analyze.ts --days 7 --report`（看 Summary & Flags 的缓存异常） |
+| 找最贵的 trace | `bun .claude/skills/langfuse/scripts/trace-search.ts --order totalTokens --days 7 --limit 10` |
+| 全量成本报告 | `bun .claude/skills/langfuse/scripts/analyze.ts 50 --days 7 --report` |
+| 单模型成本 | `bun .claude/skills/langfuse/scripts/daily-report.ts --days 7 --model claude-sonnet` |
+| 缓存效率低的 trace | `bun .claude/skills/langfuse/scripts/analyze.ts --days 7 --report`（看 Summary & Flags 的缓存异常） |
 
 ### 质量排查
 
 | 需求 | 命令 |
 |------|------|
-| 找所有错误 trace | `bun trace-search.ts --status error --days 7` |
-| 某错误 trace 深挖 | `bun trace-tokens.ts <traceId>` + `bun trace-messages.ts <traceId>` |
-| agent loop 检测 | `bun analyze.ts --days 7 --tools`（看 LLM 调用次数） |
-| context 膨胀分析 | `bun analyze.ts --growth --days 7` |
+| 找所有错误 trace | `bun .claude/skills/langfuse/scripts/trace-search.ts --status error --days 7` |
+| 某错误 trace 深挖 | `bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>` + `bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>` |
+| agent loop 检测 | `bun .claude/skills/langfuse/scripts/analyze.ts --days 7 --tools`（看 LLM 调用次数） |
+| context 膨胀分析 | `bun .claude/skills/langfuse/scripts/analyze.ts --growth --days 7` |
 
 ### 模型对比
 
 | 需求 | 命令 |
 |------|------|
-| 模型用量分布 | `bun daily-report.ts --days 7`（看 By Model 表） |
-| 某模型所有 trace | `bun trace-search.ts --model <model> --days 7 --csv` |
+| 模型用量分布 | `bun .claude/skills/langfuse/scripts/daily-report.ts --days 7`（看 By Model 表） |
+| 某模型所有 trace | `bun .claude/skills/langfuse/scripts/trace-search.ts --model <model> --days 7 --csv` |
 
 ### 调试 Prompt
 
 | 需求 | 命令 |
 |------|------|
-| 看 system prompt 结构 | `bun prompt-breakdown.ts --index 1 --days 1` |
-| system prompt 是否稳定 | `bun trace-messages.ts <traceId>`（看 System Prompt Stability 段落） |
-| 上下文增长来源 | `bun trace-messages.ts <traceId> --detail`（看消息 diff） |
+| 看 system prompt 结构 | `bun .claude/skills/langfuse/scripts/prompt-breakdown.ts --index 1 --days 1` |
+| system prompt 是否稳定 | `bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>`（看 System Prompt Stability 段落） |
+| 上下文增长来源 | `bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId> --detail`（看消息 diff） |
 
 ## 4. Data Retrieval Patterns（按目的选择工具）
 
