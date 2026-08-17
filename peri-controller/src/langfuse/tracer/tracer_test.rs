@@ -128,14 +128,14 @@ async fn test_error_span_emitted_for_error_turn() {
         .iter()
         .any(|e| matches!(e, langfuse_client::IngestionEvent::TraceCreate { .. }));
     let has_error_span = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+        if let langfuse_client::IngestionEvent::EventCreate { body, .. } = e {
             body.name.as_deref() == Some("ErrorTurn")
         } else {
             false
         }
     });
     assert!(has_trace, "错误 turn 应补发 TraceCreate");
-    assert!(has_error_span, "错误 turn 应发 ErrorSpan");
+    assert!(has_error_span, "错误 turn 应发 ErrorTurn event");
 }
 
 // ── TextChunk 累积测试 ─────────────────────────────────────────────────────
@@ -229,13 +229,13 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
     let error_span = events
         .iter()
         .find_map(|e| {
-            if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
+            if let langfuse_client::IngestionEvent::EventCreate { body, .. } = e {
                 (body.name.as_deref() == Some("ErrorTurn")).then_some(body)
             } else {
                 None
             }
         })
-        .expect("应有 ErrorTurn span");
+        .expect("应有 ErrorTurn event");
     assert_eq!(
         error_span
             .output
@@ -248,7 +248,7 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.get("error_schema_version")),
-        Some(&serde_json::json!(1))
+        Some(&serde_json::json!(2))
     );
     assert!(!format!("{error_span:?}").contains("sentinel-secret"));
 }
@@ -689,7 +689,11 @@ async fn test_tool_observation_error_marks_error_class() {
     );
     assert_eq!(
         tool_obs[0].output,
-        Some(serde_json::json!({"error_class": "tool_failure"})),
-        "错误工具 output 应保留 error_class 标记"
+        Some(serde_json::json!({
+            "error_class": "tool_failure",
+            "error_message": "command failed",
+            "error_schema_version": 2,
+        })),
+        "错误工具 output 应保留 error_class 与 error_message 标记"
     );
 }

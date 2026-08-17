@@ -250,9 +250,13 @@ impl LangfuseTracer {
             None
         };
         // 成功/失败统一写 text(成功不再丢 output);错误时附加 error_class
+        // 与 error_message(实际错误正文,截断防超大)
         let mut output = serde_json::json!({"text": closed.output});
         if closed.is_error {
             output["error_class"] = serde_json::json!("subagent_failure");
+            output["error_message"] =
+                serde_json::json!(closed.output.chars().take(2_000).collect::<String>());
+            output["error_schema_version"] = serde_json::json!(2);
         }
         // 与 ErrorTurn span 的 metadata 格式对齐(trace_id == turn_id)
         let mut metadata = serde_json::json!({
