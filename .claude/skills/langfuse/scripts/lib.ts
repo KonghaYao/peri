@@ -211,8 +211,36 @@ export function summarizeTraceMetrics(observations: any[]): TraceMetrics {
   return { llmCalls: tokens.calls, toolCalls: observations.filter((observation) => observation?.type === "TOOL").length, inputTokens: tokens.input, outputTokens: tokens.output, cacheReadTokens: tokens.cacheRead, cacheCreateTokens: tokens.cacheCreate, effectiveNewTokens: tokens.effective, latency: summarizeLatency(observations) };
 }
 
+/** 每百万 token 美元定价。键顺序即匹配优先级：estimateCost 用 includes 子串匹配，更具体的版本号键必须排在通用键之前（如 claude-sonnet-4-5 先于 claude-sonnet-4，gpt-5-mini 先于 gpt-5）。 */
 const MODEL_PRICES: Record<string, { input: number; output: number; cacheRead: number }> = {
-  "claude-sonnet-4-20250514": { input: 3, output: 15, cacheRead: 0.30 }, "claude-3-5-sonnet": { input: 3, output: 15, cacheRead: 0.30 }, "claude-3-5-haiku": { input: 0.8, output: 4, cacheRead: 0.08 }, "claude-3-opus": { input: 15, output: 75, cacheRead: 1.50 }, "claude-3-haiku": { input: 0.25, output: 1.25, cacheRead: 0.025 }, "gpt-4o": { input: 2.5, output: 10, cacheRead: 1.25 }, "gpt-4o-mini": { input: 0.15, output: 0.6, cacheRead: 0.075 }, "gpt-4-turbo": { input: 10, output: 30, cacheRead: 5 }, "deepseek-v3": { input: 0.27, output: 1.10, cacheRead: 0.07 }, "deepseek-r1": { input: 0.55, output: 2.19, cacheRead: 0.14 }, "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.3125 }, "gemini-2.5-flash": { input: 0.15, output: 0.6, cacheRead: 0.0375 },
+  // Anthropic
+  "claude-3-7-sonnet": { input: 3, output: 15, cacheRead: 0.30 },
+  "claude-sonnet-4-20250514": { input: 3, output: 15, cacheRead: 0.30 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.30 },
+  "claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.30 },
+  "claude-opus-4-1": { input: 15, output: 75, cacheRead: 1.50 },
+  "claude-opus-4": { input: 15, output: 75, cacheRead: 1.50 },
+  "claude-3-5-sonnet": { input: 3, output: 15, cacheRead: 0.30 },
+  "claude-3-5-haiku": { input: 0.8, output: 4, cacheRead: 0.08 },
+  "claude-3-opus": { input: 15, output: 75, cacheRead: 1.50 },
+  "claude-3-haiku": { input: 0.25, output: 1.25, cacheRead: 0.025 },
+  // OpenAI
+  "gpt-5-nano": { input: 0.05, output: 0.40, cacheRead: 0.005 },
+  "gpt-5-mini": { input: 0.25, output: 2, cacheRead: 0.025 },
+  "gpt-5": { input: 1.25, output: 10, cacheRead: 0.125 },
+  "gpt-4.1-nano": { input: 0.10, output: 0.40, cacheRead: 0.025 },
+  "gpt-4.1-mini": { input: 0.40, output: 1.60, cacheRead: 0.10 },
+  "gpt-4.1": { input: 2, output: 8, cacheRead: 0.50 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6, cacheRead: 0.075 },
+  "gpt-4o": { input: 2.5, output: 10, cacheRead: 1.25 },
+  "gpt-4-turbo": { input: 10, output: 30, cacheRead: 5 },
+  // DeepSeek
+  "deepseek-v3.2": { input: 0.28, output: 0.42, cacheRead: 0.028 },
+  "deepseek-v3": { input: 0.27, output: 1.10, cacheRead: 0.07 },
+  "deepseek-r1": { input: 0.55, output: 2.19, cacheRead: 0.14 },
+  // Google
+  "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.125 },
+  "gemini-2.5-flash": { input: 0.30, output: 2.50, cacheRead: 0.03 },
 };
 export function estimateCost(model: string, tokens: Pick<TokenSummary, "input" | "output" | "cacheRead">): number {
   const key = Object.keys(MODEL_PRICES).find((candidate) => model.toLowerCase().includes(candidate));
