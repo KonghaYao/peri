@@ -19,7 +19,7 @@
 | 改事件发射/forwarder | `src/event/forwarder.rs` | `spawn_eventbus_forwarder(handles, on_event, bridge)`（:78） | 消费 v2 EventBus 三通道（render/state/observe），**biased select：render 先于 state**（防 partial 污染）；Langfuse `LangfuseBridge` 在协议化前分支消费（:101）；observe Lagged 容错；映射后经 `on_event(UnstampedEvent, ExecutorEvent)` 送 event_sink |
 | 改 Hub/Web 事件投影 | `src/event/activity.rs` | `map_agent_activity(&ExecutorEvent) -> Option<AgentActivityWire>`（:93）；`AgentActivityKind`（:19）/`AgentActivityStatus`（:36） | `peri.agentActivity` 安全摘要面：allowlist 字段 + `safe_label`/`truncate_utf8`/`hash_correlation` 清洗；禁止携带消息/路径/输出/错误正文；cap 未双向协商不投影 |
 | 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :92 / `save` :199） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers 非空 + profile→provider 引用；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
-| 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait（mod.rs:24，send_request/send_notification/recv/send_response）；`mpsc_transport_pair()`（mpsc.rs:237）；`RequestRouter`（router.rs:25，`dispatch` :64） | router 只匹配 `RequestId::Number` 的 pending 请求，String id 走 unmatched 转发路径；transport 只做帧编解码不分发业务语义；TUI 走 mpsc、IDE 走 stdio（agent_client_protocol ConnectionTo） |
+| 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait（mod.rs:24，send_request/send_notification/recv/send_response）；`mpsc_transport_pair()`（mpsc.rs:237）；`RequestRouter`（router.rs:25，`dispatch` :64）；`StdioTransport::from_reader_writer`（stdio.rs:70，可注入 reader/writer 供测试） | router 只匹配 `RequestId::Number` 的 pending 请求，String id 走 unmatched 转发路径；transport 只做帧编解码不分发业务语义；TUI 走 mpsc、IDE 走 stdio（agent_client_protocol ConnectionTo）。**想改 stdio 帧行为/pump 语义** → `transport/stdio_test.rs`（集成测试：解析三态/id 配对/并发乱序/EOF/失败语义/id 越界压 0 基线）；**想对照双路径 wire 形态** → `host/unify_wire_baseline_test.rs`（批 0 基线，见 docs/design/acp-host-unify.md） |
 | 改 prompt 组装（system prompt） | `src/prompt/mod.rs` + `prompts/sections/*.md` | `PromptTemplate::render`（:342）；`PromptFeatures::detect`（:42）；`PromptEnv::with_frozen_date`（:104） | render 按 `PromptFeatures` 门控 section（git repo 检测等）；frozen date 在会话创建时注入，禁止中途重读（ARC-FROZEN-001）；`format_available_agents`（:409） |
 | 改 HITL/AskUser 交互 | `src/broker/transport_broker.rs`（mpsc 路径）+ `src/host/stdio/context.rs`（stdio 路径） | `AcpTransportBroker`（:26）`impl UserInteractionBroker`（:41，`request` :42）；`StdioBroker`（context.rs:96） | 审批逐 item 发 `session/request_permission` RPC（仅 allow_once/reject_once 两选项）；问题聚合为单个 `elicitation/create` form；传输失败默认 Reject（防误放行） |
 | 改命令路由/内置命令 | `src/session/command/mod.rs` + `src/dispatch/commands.rs` | `register_builtins`（command/mod.rs:124，compact/bg/clear/rewind/LoopPlaceholder）；`register_ui_entries`（commands.rs:73）/`ui_route_entries`（:38）；`CompactCommand`（compact.rs:26，ALIASES=["compress"]） | 注册顺序 = 内置 → 本地 skills → 插件（`AcpServerConfig::plugin_command_entries`）→ 动态注入；`session/command/compact/pipeline.rs:11` **仅 re-export** `peri_agent::session::exec::compact_pipeline::execute_compact` |
@@ -75,7 +75,7 @@
 | --- | --- | --- |
 | 传输 trait | transport/mod.rs | `AcpTransport`（:24） |
 | mpsc 实现 | transport/mpsc.rs | `MpscClientTransport`（:63）/`MpscServerTransport`（:147）/`mpsc_transport_pair`（:237） |
-| stdio 实现 | transport/stdio.rs | stdio 帧编解码 |
+| stdio 实现 | transport/stdio.rs | 帧编解码；`StdioTransport::from_reader_writer`（:70，可注入 reader/writer）；集成测试 `transport/stdio_test.rs`（批 0：解析三态/id 配对/并发乱序/EOF/失败语义） |
 | 请求-响应匹配 | transport/router.rs | `RequestRouter`（:25，仅匹配 Number 型 RequestId） |
 
 ### src/dispatch/（共享业务纯函数）
@@ -99,7 +99,7 @@
 | --- | --- | --- |
 | 服务循环 | host/mod.rs | `run_acp_server`（:248）；`dispatch_prompt_turn`（:496）；`SessionState`（:66，frozen/agent_pool/workflow_middleware/continuation_armed/lease） |
 | 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
-| notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153） |
+| notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；通知 wire 基线对照测试 `host/unify_wire_baseline_test.rs`（批 0：notify 封装 vs stdio `SessionNotification` 逐字段一致，见 docs/design/acp-host-unify.md） |
 | prompt 执行体 | host/prompt.rs | `run_prompt`（:35）；`take_recall_for_turn`（:763）；`build_compact_hooks`（:776） |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |

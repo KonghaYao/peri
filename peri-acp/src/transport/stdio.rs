@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
     sync::{mpsc, Mutex},
 };
 
@@ -44,7 +44,7 @@ struct JsonRpcEnvelope {
 pub struct StdioTransport {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
     router: RequestRouter,
-    writer: Arc<Mutex<BufWriter<tokio::io::Stdout>>>,
+    writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
 }
 
 impl Default for StdioTransport {
@@ -56,14 +56,28 @@ impl Default for StdioTransport {
 impl StdioTransport {
     /// Create a new stdio transport. Must be called within a tokio runtime.
     pub fn new() -> Self {
+        Self::from_reader_writer(tokio::io::stdin(), tokio::io::stdout())
+    }
+
+    /// Create a transport reading from `reader` and writing to `writer`.
+    ///
+    /// `new()`/`Default` 行为不变（进程 stdin/stdout）；本构造器仅注入
+    /// reader/writer 以便集成测试驱动（可测性重构，批 0）。pump 语义与
+    /// `new()` 完全一致：逐行解析 stdin、响应按 id 分派到 router、其余消息
+    /// 转发到 `recv()` 通道；reader EOF 后 pump 退出（通道关闭 → `recv()`
+    /// 返回 `None`）。
+    pub fn from_reader_writer<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let router = RequestRouter::new();
         let pump_router = router.clone();
 
         // Background pump: read stdin → dispatch responses / forward messages
         tokio::spawn(async move {
-            let stdin = BufReader::new(tokio::io::stdin());
-            let mut lines = stdin.lines();
+            let mut lines = BufReader::new(reader).lines();
 
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.is_empty() {
@@ -126,7 +140,9 @@ impl StdioTransport {
         Self {
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
             router,
-            writer: Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout()))),
+            writer: Arc::new(Mutex::new(BufWriter::new(
+                Box::new(writer) as Box<dyn AsyncWrite + Send + Unpin>
+            ))),
         }
     }
 }
@@ -203,7 +219,7 @@ impl AcpTransport for StdioTransport {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 async fn write_envelope(
-    writer: &Arc<Mutex<BufWriter<tokio::io::Stdout>>>,
+    writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
     envelope: &JsonRpcEnvelope,
 ) -> Result<(), AcpError> {
     let mut line = serde_json::to_string(envelope)

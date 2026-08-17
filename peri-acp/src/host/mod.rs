@@ -54,6 +54,9 @@ pub mod prompt_handle;
 mod requests;
 pub mod stage_builder;
 pub mod stdio;
+#[cfg(test)]
+#[path = "unify_wire_baseline_test.rs"]
+mod unify_wire_baseline_tests;
 pub mod workflow_agent;
 
 pub(crate) use continuation::run_continuation_scheduler;
