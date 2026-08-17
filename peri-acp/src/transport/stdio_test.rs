@@ -430,3 +430,131 @@ async fn test_pump_preserves_string_ids_and_coerces_out_of_domain() {
     }
     assert!(recv(&transport).await.is_none());
 }
+
+// ── legacy type:cancel（批 3 §7 #10 移植）──────────────────────────────────
+
+/// pump 对 `{"type":"cancel"}` 行（非 JSON-RPC）拦截：注入的 hook 收到原始行，
+/// 该行不产生任何 IncomingMessage；随后的合法报文仍正常解析（pump 不中断）。
+#[tokio::test]
+async fn test_type_cancel_line_invokes_hook_and_produces_no_message() {
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let hook_calls = Arc::clone(&calls);
+    let hook = Arc::new(move |line: &str| {
+        hook_calls.lock().unwrap().push(line.to_string());
+    });
+    let (transport, mut input, _output) = duplex_transport_with_hook(Some(hook));
+
+    write_line(&mut input, r#"{"type":"cancel"}"#).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":1,"method":"m/req","params":{}}"#,
+    )
+    .await;
+    drop(input);
+
+    // type:cancel 行不产生 IncomingMessage：首条应为后续合法请求
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, method, .. }) => {
+            assert_eq!(id, RequestId::Number(1));
+            assert_eq!(method, "m/req");
+        }
+        other => panic!("type:cancel 不应占用消息流，期望后续请求，实际 {other:?}"),
+    }
+    // hook 收到原始行（pump 传原始行、精确 trim 匹配，与迁移前
+    // cancel_debug_hook 一致）
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded, vec![r#"{"type":"cancel"}"#.to_string()]);
+}
+
+/// 同 `duplex_transport` 但允许注入 type:cancel hook。
+fn duplex_transport_with_hook(
+    hook: Option<CancelHook>,
+) -> (StdioTransport, DuplexStream, DuplexStream) {
+    let (input_write, transport_read) = tokio::io::duplex(64 * 1024);
+    let (transport_write, output_read) = tokio::io::duplex(64 * 1024);
+    let transport =
+        StdioTransport::from_reader_writer_with_cancel_hook(transport_read, transport_write, hook);
+    (transport, input_write, output_read)
+}
+
+/// 未注入 hook 时 `{"type":"cancel"}` 行静默跳过（不误报 invalid JSON）、
+/// 不产生 IncomingMessage，后续合法报文解析不中断（与批 0
+/// `test_invalid_json_line_skipped_keeps_parsing` 语义保持一致）。
+#[tokio::test]
+async fn test_type_cancel_without_hook_skipped_quietly() {
+    let (transport, mut input, _output) = duplex_transport();
+    write_line(&mut input, r#"{"type":"cancel"}"#).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":2,"method":"m/req","params":{}}"#,
+    )
+    .await;
+    drop(input);
+
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, method, .. }) => {
+            assert_eq!(id, RequestId::Number(2));
+            assert_eq!(method, "m/req");
+        }
+        other => panic!("type:cancel（无 hook）应被静默跳过，期望后续请求，实际 {other:?}"),
+    }
+    assert!(recv(&transport).await.is_none());
+}
+
+/// `with_cancel_hook` 事后注入同样生效（构造后设置，共享槽位被 pump 读取）。
+#[tokio::test]
+async fn test_with_cancel_hook_after_construction_is_effective() {
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let hook_calls = Arc::clone(&calls);
+    let (mut input_write, transport_read) = tokio::io::duplex(64 * 1024);
+    let (transport_write, _output_read) = tokio::io::duplex(64 * 1024);
+    let transport = StdioTransport::from_reader_writer(transport_read, transport_write);
+    let transport = transport.with_cancel_hook(Some(Arc::new(move |line: &str| {
+        hook_calls.lock().unwrap().push(line.to_string());
+    })));
+
+    write_line(&mut input_write, r#"{"type":"cancel"}"#).await;
+    write_line(
+        &mut input_write,
+        r#"{"jsonrpc":"2.0","id":3,"method":"m/req","params":{}}"#,
+    )
+    .await;
+    drop(input_write);
+
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, .. }) => assert_eq!(id, RequestId::Number(3)),
+        other => panic!("期望后续请求，实际 {other:?}"),
+    }
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded, vec![r#"{"type":"cancel"}"#.to_string()]);
+}
+
+/// 空白环绕的 type:cancel 行（trim 匹配）同样触发 hook。
+#[tokio::test]
+async fn test_type_cancel_line_trim_matching() {
+    let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let hook_calls = Arc::clone(&calls);
+    let hook = Arc::new(move |line: &str| {
+        hook_calls.lock().unwrap().push(line.to_string());
+    });
+    let (transport, mut input, _output) = duplex_transport_with_hook(Some(hook));
+
+    write_line(&mut input, "  {\"type\":\"cancel\"}  ").await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":4,"method":"m/req","params":{}}"#,
+    )
+    .await;
+    drop(input);
+
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, .. }) => assert_eq!(id, RequestId::Number(4)),
+        other => panic!("期望后续请求，实际 {other:?}"),
+    }
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["  {\"type\":\"cancel\"}  ".to_string()],
+        "hook 收到原始行（trim 仅用于匹配）"
+    );
+}

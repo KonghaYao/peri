@@ -35,6 +35,10 @@ struct JsonRpcEnvelope {
     error: Option<AcpError>,
 }
 
+/// legacy `{"type":"cancel"}` 行拦截回调（批 3 §7 #10 移植；pump 逐行精确
+/// trim 匹配后调用，host 侧实现遍历全部 session 的 cancel_token）。
+pub type CancelHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Stdio-based ACP transport.
 ///
 /// Communicates with an external client (IDE) over stdin/stdout using
@@ -45,6 +49,11 @@ pub struct StdioTransport {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
     router: RequestRouter,
     writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    /// legacy `{"type":"cancel"}` 逐行拦截回调（全 session 兜底中断，移植自
+    /// `host/stdio/transport.rs::cancel_debug_hook`，批 3 §7 #10）。pump 读到
+    /// 原始行为该 JSON（精确 trim 匹配）时调用之；消费后不产生 IncomingMessage。
+    /// `None` = 不拦截（type:cancel 行按非 JSON 行静默跳过，pump 解析不中断）。
+    cancel_hook: Arc<std::sync::Mutex<Option<CancelHook>>>,
 }
 
 impl Default for StdioTransport {
@@ -59,6 +68,18 @@ impl StdioTransport {
         Self::from_reader_writer(tokio::io::stdin(), tokio::io::stdout())
     }
 
+    /// 注入 legacy `{"type":"cancel"}` 拦截回调（构造后可调用；pump 在遇到
+    /// type:cancel 行时经由共享槽位读取，构造完成后写入的 hook 同样生效）。
+    ///
+    /// 语义（批 3 §7 #10，与标准 `session/cancel` 并存）：type:cancel 是无
+    /// sessionId 的全 session 兜底中断——host 侧回调负责遍历全部 SessionState
+    /// 对所有 `cancel_token.cancel()`。标准 `session/cancel`（按 sessionId +
+    /// writer lease + continuation 武装）行为不受影响。
+    pub fn with_cancel_hook(self, hook: Option<CancelHook>) -> Self {
+        *self.cancel_hook.lock().unwrap() = hook;
+        self
+    }
+
     /// Create a transport reading from `reader` and writing to `writer`.
     ///
     /// `new()`/`Default` 行为不变（进程 stdin/stdout）；本构造器仅注入
@@ -71,9 +92,25 @@ impl StdioTransport {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::from_reader_writer_with_cancel_hook(reader, writer, None)
+    }
+
+    /// 同 [`from_reader_writer`]，另注入 legacy `{"type":"cancel"}` 拦截回调
+    /// （等价构造期注入；`with_cancel_hook` 亦可事后设置）。
+    pub fn from_reader_writer_with_cancel_hook<R, W>(
+        reader: R,
+        writer: W,
+        cancel_hook: Option<CancelHook>,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let router = RequestRouter::new();
         let pump_router = router.clone();
+        let cancel_hook = Arc::new(std::sync::Mutex::new(cancel_hook));
+        let pump_cancel_hook = Arc::clone(&cancel_hook);
 
         // Background pump: read stdin → dispatch responses / forward messages
         tokio::spawn(async move {
@@ -81,6 +118,22 @@ impl StdioTransport {
 
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.is_empty() {
+                    continue;
+                }
+
+                // legacy `{"type":"cancel"}` 兜底中断（非 JSON-RPC 行）：
+                // 在 JSON parse 失败分支之前拦截——精确 trim 匹配（与迁移前
+                // `host/stdio/transport.rs::cancel_debug_hook` 一致）。hook
+                // 消费该行后不产生 IncomingMessage；未注入 hook 时该行静默
+                // 跳过（不误报 invalid JSON），其余非法行仍走 error 日志跳过。
+                if line.trim() == r#"{"type":"cancel"}"# {
+                    let hook = { pump_cancel_hook.lock().unwrap().clone() };
+                    if let Some(hook) = hook {
+                        let raw = line.clone();
+                        hook(&raw);
+                    } else {
+                        tracing::debug!("type:cancel line ignored (no cancel hook installed)");
+                    }
                     continue;
                 }
 
@@ -143,6 +196,7 @@ impl StdioTransport {
             writer: Arc::new(Mutex::new(BufWriter::new(
                 Box::new(writer) as Box<dyn AsyncWrite + Send + Unpin>
             ))),
+            cancel_hook,
         }
     }
 }

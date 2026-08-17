@@ -14,7 +14,7 @@ mod cli_print;
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
 // 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
 // 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
-use peri_acp::host::stdio::StdioAssemblyInput;
+use peri_acp::host::stdio::StdioInput;
 use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
@@ -480,9 +480,9 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 // stdio host 位于 ACP 层（部署装配点），cli 仅作为启动入口调用；
                 // thread 存储与 middlewares 具体实现（CronScheduler / McpClientPool /
-                // 插件数据等）由 init_stdio_context 内部构造（§0 依赖方向，
-                // docs/top-level.md §7/§8）；cli 只提供协议面输入。
-                peri_acp::host::stdio::run_acp_stdio(StdioAssemblyInput {
+                // 插件数据等）由 host 装配面（assemble_server_config）内部构造
+                // （§0 依赖方向，docs/top-level.md §7/§8）；cli 只提供协议面输入。
+                peri_acp::host::stdio::run_acp_stdio(StdioInput {
                     cwd,
                     permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
                         peri_acp_types::permission::PermissionMode::Bypass,

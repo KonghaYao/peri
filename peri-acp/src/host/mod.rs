@@ -252,7 +252,28 @@ async fn send_legacy_oauth_event(
 /// 相同的执行路径（pool / prompt lock / run_prompt 后处理）发起一次内部续跑。
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
+    cfg: AcpServerConfig,
+) {
+    let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    run_acp_server_inner(transport, cfg, sessions).await;
+}
+
+/// stdio 宿主入口：注入**调用方持有的**共享 session 集合（批 3 §7 #10：
+/// legacy `type:cancel` 全 session 兜底中断回调需与宿主遍历同一 session map——
+/// stdio 装配点构造 transport 时已注入取消回调，因此 session map 必须由装配点
+/// 创建并注入，不能由本函数私建）。
+pub(crate) async fn run_acp_server_with_sessions(
+    transport: Arc<dyn crate::transport::AcpTransport>,
+    cfg: AcpServerConfig,
+    sessions: SharedSessions,
+) {
+    run_acp_server_inner(transport, cfg, sessions).await;
+}
+
+async fn run_acp_server_inner(
+    transport: Arc<dyn crate::transport::AcpTransport>,
     mut cfg: AcpServerConfig,
+    sessions: SharedSessions,
 ) {
     // OAuth 授权事件消费者：host 级事件（无 session 归属）。专用安全通道与
     // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
@@ -403,7 +424,7 @@ pub async fn run_acp_server(
             }
         });
     }
-    let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let sessions: SharedSessions = sessions;
     // Per-session prompt serialization lock: ensures that when a prompt completes
     // (state.history updated) the next prompt for the same session sees the updated history.
     let prompt_locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));

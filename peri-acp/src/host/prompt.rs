@@ -74,13 +74,21 @@ pub(crate) async fn run_prompt(
         .to_string();
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
-    let message = params
-        .get("message")
-        .ok_or_else(|| AcpError::new(-32602, "missing message"))?;
-    let content: peri_acp_types::messages::MessageContent = message
-        .get("content")
-        .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
-        .unwrap_or_default();
+    // TUI/notify 路径：`message.content`（MessageContent 形态）；stdio ACP
+    // 客户端（agent-client-protocol-schema `PromptRequest`）：`prompt`
+    // （`Vec<ContentBlock>` wire 形态，camelCase）——批 3 §7 #1 合并方向以
+    // run_prompt 为基座、兼容 stdio 输入。
+    let content: peri_acp_types::messages::MessageContent = match params.get("message") {
+        Some(message) => message
+            .get("content")
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
+            .unwrap_or_default(),
+        None => params
+            .get("prompt")
+            .and_then(|v| v.as_array())
+            .map(|blocks| crate::dispatch::prompt::prompt_blocks_to_content(blocks))
+            .ok_or_else(|| AcpError::new(-32602, "missing message"))?,
+    };
 
     // Parse optional background task results for synthetic tool_use + tool_result injection
     let bg_results: Vec<peri_acp_types::event::BackgroundTaskResult> = params
