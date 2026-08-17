@@ -3,7 +3,8 @@
 //! 扁平 HashMap + alias 索引的运行时注册表（设计 §63）：
 //! `HashMap<fullname_lowercase, RouteEntry>` 与
 //! `HashMap<alias_lowercase, fullname>`——严格输入下查找永远精确（全名 /
-//! 第一等级域内裸名 / alias），域枚举用前缀过滤（`mcp:demo:`）。
+//! 第一等级域内裸名 / alias），域枚举用前缀过滤（决策 1：`demo:`，Mcp server
+//! 名即词法首段域）。
 //! 支持运行时 register / unregister / unregister_namespace、冲突裁决
 //! （内置优先，纯拒绝：不覆盖、不静默，设计 §64）与 `on_change` → 投影重建
 //! 回调（`McpSkillRegistry` 先例泛化，设计 §65）。
@@ -17,8 +18,8 @@
 //! [`clear_source_started`](CommandRegistry::clear_source_started) 驱动；
 //! `handle` 用 [`HandleToken`]（type-erased Arc + `Arc::ptr_eq`，registry 持强
 //! 引用使旧 handle 分配保持存活，新 handle 不可能复用同一地址——防 ABA）。
-//! 条目级注册、前缀级注销（`mcp:demo:` 形态），语义逐条对齐 `mcp_skills.rs`
-//! 的 `McpSkillRegistry` 先例。
+//! 条目级注册、前缀级注销（决策 1：`demo:` 形态——Mcp server 名即词法首段
+//! 域），语义逐条对齐 `mcp_skills.rs` 的 `McpSkillRegistry` 先例。
 //!
 //! 模块依赖约束（设计 §72）：只 import peri-acp-types 契约 + std + parking_lot，
 //! **不 import 任何 handler 实现**——注册表只持 `Arc<dyn CommandHandler>` +
@@ -35,7 +36,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::command::command_name::CommandName;
-use crate::command::command_route::RouteEntry;
+use crate::command::command_route::{CommandSource, RouteEntry};
 // pub re-export（plan A2 关键代码形态 :70）：`command_registry::HandleToken`
 // 路径直达，消费方（A3 接线）无需经 `mcp_skills::HandleToken` 引入。
 pub use crate::mcp_skills::HandleToken;
@@ -99,7 +100,7 @@ impl SourceDiscoveryState {
 /// 本轮是否发生了断连清理（`removed_any == true` 时已锁外触发 on_change 恰一次）。
 #[derive(Debug, Default)]
 pub struct SourceProjection {
-    /// 需发现的来源（域前缀如 `mcp:demo`）+ 连接 handle。
+    /// 需发现的来源（域前缀如决策 1 的 `demo`——Mcp server 名）+ 连接 handle。
     pub to_discover: Vec<(String, HandleToken)>,
     /// 本轮是否有来源被移除（断连按前缀批量注销）。
     pub removed_any: bool,
@@ -110,7 +111,8 @@ pub struct SourceProjection {
 /// - `entries`：fullname 小写键 → 条目（唯一键 = 全名小写，设计 §57/§86）。
 /// - `alias_index`：alias 小写 / **第一等级**（core/ui）条目裸名小写 → fullname
 ///   小写键（第二等级条目不登记裸名——`mcp:hello` 形态非法，设计 §54）。
-/// - `sources`：第二等级来源发现状态（Phase 6 A2；`mcp:demo` 形态键）。
+/// - `sources`：第二等级来源发现状态（Phase 6 A2；决策 1 后 Mcp server 名
+///   即词法首段域，形态键如 `demo`）。
 /// - `on_change`：内容变化（register Ok / unregister 命中 / unregister_namespace
 ///   n>0 / 生命周期撤旧）锁内取回调克隆、锁外调用（防死锁；`McpSkillRegistry`
 ///   先例）。锁序固定：sources → entries → alias_index → on_change（生命周期
@@ -246,8 +248,18 @@ impl CommandRegistry {
 
     /// `domain:namespace:` 前缀批量注销（断连清理，设计 §65）；返回移除数。
     /// 移除 n > 0 触发 `on_change`；未命中返回 0，不触发。
+    ///
+    /// 决策 1 扩展：`namespace` 传空串表示「无 namespace 段的来源」（Mcp
+    /// server 名即词法首段域），传参前缀 = `{domain}`（无冒号，由
+    /// `unregister_prefix_locked` 内部补 `:`，与 [`mcp_source_key`] 形态
+    /// 同构）；非空 namespace 传 `{domain}:{namespace}`（plugin/user，
+    /// 内部同样补冒号）。
     pub fn unregister_namespace(&self, domain: &str, namespace: &str) -> usize {
-        let prefix = format!("{}:{}", domain.to_lowercase(), namespace.to_lowercase());
+        let prefix = if namespace.is_empty() {
+            domain.to_lowercase()
+        } else {
+            format!("{}:{}", domain.to_lowercase(), namespace.to_lowercase())
+        };
         let (n, cb) = {
             let mut entries = self.entries.write();
             let mut alias_index = self.alias_index.write();
@@ -374,12 +386,12 @@ impl CommandRegistry {
     /// 来源对账投影（对齐 `McpSkillRegistry::project_connected`，
     /// `mcp_skills.rs:70-107`）：比对 connected 列表（prefix, handle）。
     ///
-    /// **prefix 形态契约**：小写 `domain:namespace`（如 `mcp:demo`）、无尾
-    /// 冒号；`sources` 键大小写敏感、不归一，与 mcp_skills 先例 server 键
-    /// 同契约——调用方须保证 connected 与生命周期 API 传入的 prefix 大小写
-    /// 一致，否则同一来源会分叉为两个键，且本方法会把大小写不一致的来源
-    /// 误判为断连并批量注销（`unregister_prefix_locked` 对 entries 键小写
-    /// 归一，但 sources 键不归一）。
+    /// **prefix 形态契约**：小写 `domain:namespace`（plugin/user 如 `plugin:ecc`；
+    /// 决策 1 后 Mcp 即 server 名 `demo`，无 namespace）、无尾冒号；`sources`
+    /// 键大小写敏感、不归一，与 mcp_skills 先例 server 键同契约——调用方须
+    /// 保证 connected 与生命周期 API 传入的 prefix 大小写一致，否则同一来源
+    /// 会分叉为两个键，且本方法会把大小写不一致的来源误判为断连并批量注销
+    /// （`unregister_prefix_locked` 对 entries 键小写归一，但 sources 键不归一）。
     ///
     /// - sources 中不在 connected 的来源被移除，逐个按 `{prefix}:` 前缀批量
     ///   注销（断连清理）；有移除（`removed_any`）才锁外触发 `on_change`
@@ -444,8 +456,9 @@ impl CommandRegistry {
     /// 发现任务 spawn 前同步置位（插入/覆盖为 Started；对齐
     /// `McpSkillRegistry::mark_discovery_started`，`mcp_skills.rs:115-134`）。
     ///
-    /// **prefix 形态契约**：小写 `domain:namespace`（如 `mcp:demo`）、无尾
-    /// 冒号；`sources` 键大小写敏感、不归一（见 [`project_sources`](Self::project_sources)
+    /// **prefix 形态契约**：小写 `domain:namespace`（plugin/user 如 `plugin:ecc`；
+    /// 决策 1 后 Mcp 即 server 名 `demo`，无 namespace）、无尾冒号；`sources`
+    /// 键大小写敏感、不归一（见 [`project_sources`](Self::project_sources)
     /// 的契约说明），与 mcp_skills 先例 server 键同契约，风险由调用方一致性
     /// 保证。
     ///
@@ -621,18 +634,31 @@ fn prepare_entry(entry: &RouteEntry) -> Result<PreparedEntry, RegisterError> {
     let parsed = CommandName::parse(&entry.fullname).map_err(|_| RegisterError::MalformedName)?;
     // 域校验：词法首段域必须与 provenance 声明域一致（Bare 无域，注册键
     // 禁止裸名——设计 §86 裸名不是独立键，注册路径要求完整全名）。
-    let domain_ok = match &parsed {
-        CommandName::Bare { .. } => false,
-        CommandName::Level1 { domain, .. } | CommandName::Level2 { domain, .. } => {
-            domain.as_str() == entry.provenance.source.domain()
-        }
+    // 防线 2（审查 B1）：Mcp 源强制 Level2Short 形态——server 名即词法
+    // 首段域；server 名恰为保留域（core/ui/plugin/user/mcp）时 fullname
+    // 会被解析为 Level1/Level2，此处置 ProvenanceMismatch 拒绝（命令面
+    // 源头跳过见 `mcp_namespace_reserved`，双防线）。
+    let domain_ok = match (&parsed, &entry.provenance.source) {
+        (_, CommandSource::Mcp { .. }) => matches!(
+            &parsed,
+            CommandName::Level2Short { domain, .. }
+                if domain.as_str() == entry.provenance.source.domain()
+        ),
+        (CommandName::Bare { .. }, _) => false,
+        (
+            CommandName::Level1 { domain, .. }
+            | CommandName::Level2 { domain, .. }
+            | CommandName::Level2Short { domain, .. },
+            _,
+        ) => domain.as_str() == entry.provenance.source.domain(),
     };
     if !domain_ok {
         return Err(RegisterError::ProvenanceMismatch);
     }
     // namespace 段与 provenance 来源域内标识一致（设计 §58 不可伪造：
-    // `Mcp { server: "demo" }` 只能注册 `mcp:demo:*`；否则与 §65 断连
-    // 按 namespace 前缀批量注销联动时生命周期清理失真）。
+    // `Plugin { name: "ecc" }` 只能注册 `plugin:ecc:*`；决定 1 后 Mcp 走
+    // Level2Short（无 namespace 段），server 名即词法首段域，已由上方域校验
+    // 把关）。Level2Short 不命中本分支（无 namespace 段）。
     if let CommandName::Level2 { namespace, .. } = &parsed {
         if entry.provenance.source.namespace() != Some(namespace.as_str()) {
             return Err(RegisterError::ProvenanceMismatch);
@@ -730,8 +756,9 @@ fn remove_index_entries(index: &mut HashMap<String, String>, entry: &RouteEntry,
     }
 }
 
-/// 锁内按 `{prefix}:` 前缀批量注销（`prefix` 为 `mcp:demo` 形态，键匹配前
-/// 小写归一——entries 键一律小写）；返回移除数。生命周期方法（`project_sources` /
+/// 锁内按 `{prefix}:` 前缀批量注销（`prefix` 为小写 `domain:namespace`（plugin/
+/// user）或决策 1 的 Mcp server 名 `demo`，键匹配前小写归一——entries 键一律
+/// 小写）；返回移除数。生命周期方法（`project_sources` /
 /// `mark_source_started` / `mark_source_completed`）与 [`CommandRegistry::unregister_namespace`]
 /// 共用；调用方持有 entries / alias_index 写锁并自行决定 on_change 触发时机。
 fn unregister_prefix_locked(

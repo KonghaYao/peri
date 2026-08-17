@@ -64,7 +64,7 @@ pub fn ui_command_specs() -> Vec<UiCommandSpec> {
 /// - 裸名（`history` / `model`）：ui 域快捷形态，查 PANELS + 别名表 + setup；
 /// - `ui:` 显式形态（`ui:history`）：剥除 `ui:` 前缀后仅允许 1 段（设计 §52
 ///   层数上限：2 段冒号），多层形态（`ui:foo:bar`）显式拒绝；
-/// - **非 ui 域显式形态（`core:compact` / `mcp:demo:hello` / 未知域）一律
+/// - **非 ui 域显式形态（`core:compact` / `demo:hello` / 未知域）一律
 ///   fall through（返回 None）**——TUI 只拦截 ui 域，其他域显式提交由 ACP
 ///   侧解析（设计 §78：词法非法同样 fall through，不报错）。
 pub fn resolve_ui_command(name: &str) -> Option<UiCommandAction> {

@@ -317,9 +317,10 @@ fn test_check_immediate_level_accepts_core_level1() {
     assert!(check_immediate_level(&entry).is_ok());
 }
 
-/// Level2（mcp 域）条目拒绝（非 Immediate 语义，RPC 显式报错）。
+/// Level2（mcp 域）条目放行（决策 D）：McpSkill 条目在 RPC 上下文由
+/// McpSkillReleaser 直返 skill 全文（不依赖 agent 管线），check 通过。
 #[test]
-fn test_check_immediate_level_rejects_mcp_level2() {
+fn test_check_immediate_level_allows_mcp_skill_level2() {
     use peri_acp_types::command::command_route::{
         CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
     };
@@ -332,7 +333,7 @@ fn test_check_immediate_level_rejects_mcp_level2() {
         }
     }
     let entry = RouteEntry {
-        fullname: "mcp:demo:hello".to_string(),
+        fullname: "demo:hello".to_string(),
         aliases: vec![],
         description: "".to_string(),
         kind: CommandEntryKind::McpSkill,
@@ -342,6 +343,42 @@ fn test_check_immediate_level_rejects_mcp_level2() {
         provenance: CommandProvenance {
             source: CommandSource::Mcp {
                 server: "demo".to_string(),
+            },
+            lifecycle: CommandLifecycle::Connected,
+        },
+    };
+    assert!(
+        check_immediate_level(&entry).is_ok(),
+        "McpSkill 条目应放行（决策 D：RPC 直返全文）"
+    );
+}
+
+/// Level2 非 McpSkill 条目（plugin/user）仍拒绝：handler 无 RPC 直返语义，
+/// Inject/Delegate 分支会显式报错（非 Immediate，RPC 显式报错）。
+#[test]
+fn test_check_immediate_level_rejects_plugin_level2() {
+    use peri_acp_types::command::command_route::{
+        CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource, RouteEntry,
+    };
+    use peri_acp_types::command::{CommandHandler, CommandOutcome};
+    struct DoneHandler;
+    #[async_trait]
+    impl CommandHandler for DoneHandler {
+        async fn execute(&self, _ctx: peri_acp_types::command::CommandContext) -> CommandOutcome {
+            unreachable!("仅构造条目，不执行");
+        }
+    }
+    let entry = RouteEntry {
+        fullname: "plugin:ecc:plan".to_string(),
+        aliases: vec![],
+        description: "".to_string(),
+        kind: CommandEntryKind::Command,
+        category: None,
+        args_schema: None,
+        handler: Arc::new(DoneHandler),
+        provenance: CommandProvenance {
+            source: CommandSource::Plugin {
+                name: "ecc".to_string(),
             },
             lifecycle: CommandLifecycle::Connected,
         },

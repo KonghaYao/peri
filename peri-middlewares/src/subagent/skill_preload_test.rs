@@ -472,6 +472,10 @@ async fn test_preload_mcp_skill_injects_annotated_content() {
         tool_content.contains("skill://demo/hello/SKILL.md"),
         "应含来源标注 uri，实际: {tool_content}"
     );
+    assert!(
+        tool_content.contains("SearchExtraTools") && tool_content.contains("ExecuteExtraTool"),
+        "应含工具通路提醒（文档 3.1），实际: {tool_content}"
+    );
 }
 
 #[tokio::test]
@@ -492,6 +496,34 @@ async fn test_preload_mcp_skill_by_alias() {
     let tool_content = state.messages()[2].content();
     assert!(tool_content.contains("Body of hello."));
     assert!(tool_content.contains("This skill is served by MCP server \"demo\""));
+}
+
+/// 决策 A3 兜底：plugin 多冒号 server key（`plugin:p1:demosrv`）下
+/// `{server}:{skill}` 命令形态 token（`/demosrv:beta`，命令面 fullname 取
+/// 末段）——`registry.find` 别名按原名拼 `mcp__plugin:p1:demosrv__beta`
+/// 必 miss → `find_by_command` 按「server 名末段小写」匹配补上。
+#[tokio::test]
+async fn test_preload_mcp_skill_plugin_server_via_find_by_command() {
+    let dir = tempdir().unwrap();
+    let reg = seed_registry_with_skill("plugin:p1:demosrv", "beta");
+    let mw = SkillPreloadMiddleware::new(vec![], dir.path().to_str().unwrap())
+        .with_mcp_registry(Some(reg));
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+    state.add_message(BaseMessage::human("/demosrv:beta 帮我"));
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(
+        state.messages().len(),
+        3,
+        "find_by_command 兜底应命中并注入 Ai + Tool"
+    );
+    let tool_content = state.messages()[2].content();
+    assert!(tool_content.contains("Body of beta."), "应含缓存正文");
+    assert!(
+        tool_content.contains("MCP server \"plugin:p1:demosrv\""),
+        "标注应含完整 server key，实际: {tool_content}"
+    );
 }
 
 #[tokio::test]

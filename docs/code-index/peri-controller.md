@@ -1,6 +1,6 @@
 # peri-controller 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17（langfuse tracer / bridge 拆分事件域子模块）
 > 依据：docs/standards/architecture-contracts.md（ARC-CANCEL-001 / ARC-EVENT-001）、源码（无 crate 级 CLAUDE.md，架构速览取自 lib.rs / controller.rs 模块注释）
 
 ## 架构速览
@@ -22,7 +22,7 @@
 | 会话生命周期面 | `src/controller.rs` | `join_session`（:362）、`destroy_session`（:383）、`submit_input`（:404） | join 带 deadline（true=期内结束/false=超时）；destroy 经 Runtime 七步编排，drain 出的补打事件经 `publish` 双投递并作为返回值；submit_input 透传 `SessionHandle::submit_input`，错误包 `InjectFailed` |
 | 装配注入（pick 目标源） | `src/controller.rs` | `with_runtime`（:216）/ `with_resources`（:223）/ `with_mcp_pool`（:230）/ `with_cron_scheduler`（:240）/ `with_tool_search`（:250）/ `with_lsp_servers`（:259）与对应 `pick_*`（:265-:280） | 缺省：Runtime 空实例、Resources None、端口 None、lsp 空 vec；宿主装配点构造具体实现后 upcast 注入 |
 | lite params 会话启动参数 | `src/controller.rs` | `LiteParams::new`（:87）、`with_initial_messages`（:104）、`with_tools`（:110）；`AgentRef`（:49） | 仅承载最小启动参数集（session 标识/agent 引用/cwd/初始输入/初始消息/工具集）；初始消息与工具集为透传声明，消费方在 Agent 层 session 工厂（L5） |
-| Langfuse 观测（旁路消费者） | `src/langfuse/bridge.rs` + `src/langfuse/tracer/mod.rs` | `LangfuseBridge::process_event`（bridge.rs:668）；`LangfuseTracer`（tracer/mod.rs:48，`new` :89） | 事件在协议化前分支给 bridge，不承担 Controller 职责；`UnifiedLangfuseEvent`（bridge.rs:33）为 v1/v2 事件并集，无映射事件返回 None |
+| Langfuse 观测（旁路消费者） | `src/langfuse/bridge.rs` + `src/langfuse/tracer/mod.rs` | `LangfuseBridge::process_event`（bridge.rs:105）；`LangfuseTracer`（tracer/mod.rs:49，`new` :90） | 事件在协议化前分支给 bridge，不承担 Controller 职责；`UnifiedLangfuseEvent`（bridge/unified_event.rs:19，bridge.rs:21 re-export）为 v1/v2 事件并集，无映射事件返回 None |
 | 改边界错误类型 | `src/error.rs` | `ControllerError`（:9）、`SubscriptionError`（:33） | 仅对边界可判定条件类型化（RunFailed/CancelFailed/JoinFailed/DestroyFailed/InjectFailed 均包 Runtime context 为 `#[source]`）；层内细节错误归 anyhow，不逐层类型化 |
 
 ## 子系统
@@ -41,8 +41,8 @@
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 事件路由 / 统一枚举 | bridge.rs | `UnifiedLangfuseEvent`（:33）；`from_executor_event`（:181）/ `from_render_event`（:364）/ `from_observe_event`（:409）；`LangfuseBridge`（:594）、`process_event`（:668） |
-| 单轮追踪器 Facade | tracer/mod.rs | `LangfuseTracer`（:48）；`on_turn_start`（:141）/ `on_turn_end`（:209）/ `on_llm_start`（:376）/ `on_llm_retrying`（:600）/ `on_tool_start`（:678）/ `on_tool_end`（:743）/ `on_compact_start`（:803）/ `on_compact_end`（:818）/ `on_stage_start`（:906）等全部 `on_*` 方法 |
+| 事件路由 / 统一枚举 | bridge.rs + bridge/unified_event.rs | `UnifiedLangfuseEvent`（unified_event.rs:19）；`from_executor_event`（unified_event.rs:167）/ `from_render_event`（:350）/ `from_observe_event`（:395）；`LangfuseBridge`（bridge.rs:31）、`process_event`（bridge.rs:105） |
+| 单轮追踪器 Facade | tracer/mod.rs + tracer/{llm_events,tool_events,span_events,subagent_events}.rs | `LangfuseTracer`（mod.rs:49）；turn：`on_turn_start`（mod.rs:142）/ `on_turn_end`（mod.rs:210）；LLM：`on_llm_start`（llm_events.rs:15）/ `on_llm_retrying`（llm_events.rs:239）；工具：`on_tool_start`（tool_events.rs:17）/ `on_tool_end`（tool_events.rs:82）；Span：`on_compact_start`（span_events.rs:14）/ `on_compact_end`（span_events.rs:29）/ `on_stage_start`（span_events.rs:117）/ `on_stage_end`（span_events.rs:138）；subagent：`on_subagent_start`（subagent_events.rs:102）/ `on_subagent_stop`（subagent_events.rs:122） |
 | ReAct 阶段 Span 管理 | tracer/stages.rs | `StageHandle`（:23）、`StageSpans`（:47）、`MAIN_AGENT_KEY`（:20） |
 | 工具批次管理 | tracer/tool_batch.rs | `ToolBatch`（:52） |
 | SubAgent 归属注册表 | tracer/registry.rs | `SubagentRegistry`（:210，agent_id 查表归属，替代旧 LIFO 栈） |

@@ -119,11 +119,11 @@ fn test_resolve_ui_command_non_ui_domain_falls_through() {
         None,
         "core:model 不得命中 Model 面板"
     );
-    assert_eq!(resolve_ui_command("mcp:demo:hello"), None);
+    assert_eq!(resolve_ui_command("demo:hello"), None);
     assert_eq!(
-        resolve_ui_command("mcp:demo:model"),
+        resolve_ui_command("demo:model"),
         None,
-        "mcp 完整形态不得命中面板名"
+        "MCP server 命令形态不得命中面板名"
     );
     assert_eq!(resolve_ui_command("plugin:ecc:deploy"), None);
     assert_eq!(resolve_ui_command("unknown:foo"), None);

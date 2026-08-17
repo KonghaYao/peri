@@ -1,4 +1,8 @@
 > 归档于 2026-08-11，原路径 spec/issues/2026-08-09-subagent-resume-mechanism.md
+>
+> **行为变更（2026-08-16，commit 04b8bd0e）**：parent 链所有权校验已移除。
+> 恢复凭证只剩 thread_id（存在性 + 非 active 两层校验），下文第 71、116 行
+> 关于「parent 链校验 / parent mismatch 拒绝」的描述已不适用，仅作历史记录。
 
 # SubAgent 恢复机制：主 agent 凭 thread_id 重新唤起被中断的 subagent
 

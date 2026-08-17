@@ -211,6 +211,38 @@ fn on_change_not_fired_on_started() {
 }
 
 #[test]
+fn started_returns_setter_bool_only_first_wins() {
+    // 审查 M1：并发挂点（装配/连接事件/before_agent）重复投影时，仅置位者
+    // 返回 true（负责 spawn），覆盖已有 Started 返回 false（跳过 spawn）。
+    let (reg, count) = counter_reg();
+    assert!(
+        reg.mark_discovery_started("srv", token(1)),
+        "首次置位 = 置位者"
+    );
+    assert!(
+        !reg.mark_discovery_started("srv", token(2)),
+        "覆盖已有 Started 非置位者"
+    );
+    // 覆盖非空 Discovered = 重新发现（新任务应 spawn）：返回 true，且
+    // 旧条目从 all_skills 消失触发一次 on_change。
+    complete(&reg, "srv", token(3), vec![skill("mcp__srv__a")]);
+    assert_eq!(count.load(Ordering::SeqCst), 1, "完成回写触发一次");
+    assert!(
+        reg.mark_discovery_started("srv", token(4)),
+        "覆盖 Discovered = 重新发现，置位者应 spawn"
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "覆盖非空 Discovered 仍触发恰一次"
+    );
+    assert!(
+        !reg.mark_discovery_started("srv", token(5)),
+        "再覆盖 Started 非置位者（重复投影不 spawn）"
+    );
+}
+
+#[test]
 fn on_change_fires_once_on_started_over_discovered_non_empty() {
     let (reg, count) = counter_reg();
     let h = token(1);
@@ -475,6 +507,70 @@ fn find_prefers_exact_over_alias() {
     // 精确未中 "srv:x"（没有叫这个全名的 skill）→ 走别名拼 mcp__srv__x
     let hit = reg.find("srv:x").expect("别名应命中 mcp__srv__x");
     assert_eq!(hit.name, "mcp__srv__x");
+}
+
+// ─── find_by_command：命令形态 `{server}:{skill}` 兜底（决策 1 + A3） ──────
+
+#[test]
+fn find_by_command_pure_server() {
+    let reg = McpSkillRegistry::new();
+    complete(&reg, "demo", token(1), vec![skill("mcp__demo__hello")]);
+    let hit = reg
+        .find_by_command("demo:hello")
+        .expect("纯 server 命令形态应命中");
+    assert_eq!(hit.name, "mcp__demo__hello");
+    // 大小写无关
+    assert!(reg.find_by_command("DEMO:Hello").is_some());
+}
+
+/// plugin 多冒号 server：`find` 别名走 `mcp__srvA__beta` 会 miss；
+/// `find_by_command` 按「server 名末段小写」匹配补上（命令面 fullname =
+/// `srvA:beta`，与 skill_discovery 的 namespace 派生同构）。
+#[test]
+fn find_by_command_plugin_server_last_segment() {
+    let reg = McpSkillRegistry::new();
+    let server = "plugin:p1:demosrv";
+    complete(
+        &reg,
+        server,
+        token(1),
+        vec![skill("mcp__plugin:p1:demosrv__beta")],
+    );
+    // 现有 `find` 别名缺 namespace 末段归一 → miss
+    assert!(
+        reg.find("demosrv:beta").is_none(),
+        "find 别名用原名拼名，plugin 多冒号 server 场景必 miss"
+    );
+    let hit = reg
+        .find_by_command("demosrv:beta")
+        .expect("命令形态按末段匹配应命中");
+    assert_eq!(hit.name, "mcp__plugin:p1:demosrv__beta");
+    // 完整 server key 前缀也命中（用户直接输入全名）
+    assert!(reg.find_by_command("plugin:p1:demosrv:beta").is_some());
+}
+
+#[test]
+fn find_by_command_miss_returns_none() {
+    let reg = McpSkillRegistry::new();
+    complete(&reg, "demo", token(1), vec![skill("mcp__demo__hello")]);
+    assert!(
+        reg.find_by_command("demo:").is_none(),
+        "空 skill 不构成命令"
+    );
+    assert!(
+        reg.find_by_command("other:hello").is_none(),
+        "未知 server 前缀"
+    );
+    assert!(reg.find_by_command("demo:bye").is_none(), "skill miss");
+    assert!(reg.find_by_command("nocolon").is_none());
+}
+
+/// Started（未发现）server 不参与命令匹配（无条目可命中）。
+#[test]
+fn find_by_command_skips_started_servers() {
+    let reg = McpSkillRegistry::new();
+    reg.mark_discovery_started("demo", token(1));
+    assert!(reg.find_by_command("demo:hello").is_none());
 }
 
 // ─── mcp_skill_name ────────────────────────────────────────────────────────

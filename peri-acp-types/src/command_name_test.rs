@@ -131,26 +131,54 @@ fn reject_double_underscore() {
 }
 
 #[test]
-fn reject_unknown_domain() {
-    // 未知域：1 层与 2 层形态都拒绝。
-    assert_eq!(
-        CommandName::parse("foo:bar"),
-        Err(CommandNameError::UnknownDomain("foo".into()))
-    );
+fn reject_unknown_domain_three_segments() {
+    // 保留域之外的 2 段形态不再拒绝（决策 1 → Level2Short，见
+    // parse_level2short_forms）；UnknownDomain 仅剩 3 段（第二等级）形态。
     assert_eq!(
         CommandName::parse("foo:bar:baz"),
         Err(CommandNameError::UnknownDomain("foo".into()))
-    );
-    // 设计 §55 无域省略简写（demo:hello 废弃）。
-    assert_eq!(
-        CommandName::parse("demo:hello"),
-        Err(CommandNameError::UnknownDomain("demo".into()))
     );
     // 第一等级域在 2 层形态不合法（core 不在第二等级域集合内）。
     assert_eq!(
         CommandName::parse("core:compact:extra"),
         Err(CommandNameError::UnknownDomain("core".into()))
     );
+    // 保留第二等级域在 3 段形态也不合法（core/ui 非第二等级域）。
+    assert_eq!(
+        CommandName::parse("core:compact"),
+        Ok(CommandName::Level1 {
+            domain: "core".into(),
+            name: "compact".into(),
+        }),
+        "core 2 段形态仍为 Level1"
+    );
+}
+
+/// 决策 1：保留域之外的 2 段冒号形态解析为 [`CommandName::Level2Short`]
+/// （MCP server 命令形态 `{server}:{skill}`；demo:hello / foo:bar 均合法）。
+#[test]
+fn parse_level2short_forms() {
+    let n = CommandName::parse("demo:hello").unwrap();
+    assert_eq!(
+        n,
+        CommandName::Level2Short {
+            domain: "demo".into(),
+            name: "hello".into(),
+        }
+    );
+    assert_eq!(n.name(), "hello");
+    assert_eq!(
+        n.level(),
+        CommandLevel::Level2,
+        "Level2Short 词法地位等同 Level2"
+    );
+    assert_eq!(n.full_name(), "demo:hello");
+
+    // 大小写归一（唯一键 = 全名小写）。
+    let n = CommandName::parse("Demo:Hello").unwrap();
+    assert_eq!(n.full_name(), "demo:hello");
+    // 最右冒号切分：多冒号 server 名末段为 skill（plugin:pa:srvA:beta → 3 段）
+    // 仍属 Level2（见 parse_level2_rightmost_colon）；无 namespace 段才走此形态。
 }
 
 #[test]

@@ -115,12 +115,13 @@ fn provenance_carries_source_and_lifecycle() {
 fn command_source_domain_all_five() {
     assert_eq!(CommandSource::Core.domain(), "core");
     assert_eq!(CommandSource::Ui.domain(), "ui");
+    // 决策 1：Mcp.domain() = server 名本身（词法首段域）。
     assert_eq!(
         CommandSource::Mcp {
             server: "demo".into()
         }
         .domain(),
-        "mcp"
+        "demo"
     );
     assert_eq!(
         CommandSource::Plugin { name: "ecc".into() }.domain(),
@@ -131,14 +132,15 @@ fn command_source_domain_all_five() {
 
 #[test]
 fn command_source_namespace() {
-    // 第二等级：namespace = 来源域内标识（server / 插件名，设计 §58）。
+    // 决策 1：Mcp 无独立 namespace 段（server 名 = 词法首段域）。
     assert_eq!(
         CommandSource::Mcp {
             server: "demo".into()
         }
         .namespace(),
-        Some("demo")
+        None
     );
+    // 插件 / 用户：namespace = 来源域内标识（插件名，设计 §58）。
     assert_eq!(
         CommandSource::Plugin { name: "ecc".into() }.namespace(),
         Some("ecc")

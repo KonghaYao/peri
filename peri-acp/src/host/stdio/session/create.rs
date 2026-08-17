@@ -33,6 +33,51 @@ fn session_lsp_pool(
     peri_middlewares::assembly::create_session_lsp_pool(cwd, &ctx.plugin_lsp_servers)
 }
 
+/// 会话 MCP skill 发现预热（决策 B 扩展，stdio 装配面）：new / load / resume
+/// / fork 完成时挂接连接事件 notifier + 触发幂等发现——stdio 宿主「刚进入、
+/// 未说话」即有 mcp 命令（广播首发无 mcp 条目属预期，发现完成经注册表
+/// on_change 重发）。与 host/requests.rs `prewarm_session_mcp_discovery`
+/// 同构，双轨装配各自挂载（stdio 走 agent-client-protocol handler，不经
+/// run_acp_server 的 handle_request）。任何组件缺失（pool 未装配 / registry
+/// 缺失）→ 空跑返回，由首 turn 装配兜底；cancel 持 session token，会话
+/// 关闭即早退。notifier 无 ExecutorEvent 通道（通知展示由首 turn 装配覆盖
+/// 为完整版），连接完成事件在此即触发发现。
+fn prewarm_mcp_discovery(ctx: &StdioContext, sid: &str) {
+    let Some(pool) = ctx.mcp_pool.clone() else {
+        return;
+    };
+    let Ok(pool) = pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() else {
+        return;
+    };
+    let Some(registry) = ctx.session_manager.mcp_skill_registry_for(sid) else {
+        return;
+    };
+    let Some(command_registry) = ctx.session_manager.command_registry_for(sid) else {
+        return;
+    };
+    let Some(cancel) = ctx
+        .session_manager
+        .inner_sessions()
+        .get(sid)
+        .map(|s| s.cancel_token.clone())
+    else {
+        return;
+    };
+    peri_middlewares::mcp::middleware::attach_connection_notifier(
+        &pool,
+        Some(&registry),
+        Some(&command_registry),
+        &cancel,
+        None,
+    );
+    peri_middlewares::mcp::middleware::prewarm_discovery(
+        &pool,
+        &registry,
+        &command_registry,
+        &cancel,
+    );
+}
+
 /// session/new 处理器：创建 ThreadStore 线程、冻结系统提示词、返回模式/模型/配置选项。
 pub(crate) async fn handle_new(
     ctx: &StdioContext,
@@ -117,6 +162,9 @@ pub(crate) async fn handle_new(
         &peri_caps,
         ctx.session_manager.command_registry_for(&sid),
     );
+    // 会话预热 MCP skill 发现（决策 B 扩展）：stdio「刚进入、未说话」即有
+    // mcp 命令，无需等首 turn before_agent 装配。幂等（Started 去重）。
+    prewarm_mcp_discovery(ctx, &sid);
     Ok(())
 }
 
@@ -197,6 +245,9 @@ pub(crate) async fn handle_load(
         &caps,
         ctx.session_manager.command_registry_for(&sid),
     );
+    // 会话预热 MCP skill 发现（决策 B 扩展）：与 handle_new 同构，恢复会话
+    // 后无需等首 turn 装配即有 mcp 命令。
+    prewarm_mcp_discovery(ctx, &sid);
     Ok(())
 }
 
@@ -262,6 +313,9 @@ pub(crate) async fn handle_resume(
         &caps,
         ctx.session_manager.command_registry_for(&sid),
     );
+    // 会话预热 MCP skill 发现（决策 B 扩展）：与 handle_new 同构，新连接
+    // 恢复会话后无需等首 turn 装配即有 mcp 命令。
+    prewarm_mcp_discovery(ctx, &sid);
     Ok(())
 }
 
@@ -355,6 +409,9 @@ pub(crate) async fn handle_fork(
         &caps,
         ctx.session_manager.command_registry_for(&new_session_id),
     );
+    // 会话预热 MCP skill 发现（决策 B 扩展）：fork 产生新 session，与
+    // handle_new 同构，无需等首 turn 装配即有 mcp 命令。
+    prewarm_mcp_discovery(ctx, &new_session_id);
     Ok(())
 }
 

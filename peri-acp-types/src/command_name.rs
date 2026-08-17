@@ -1,9 +1,16 @@
 //! 命令全名词法契约（设计文档「权威词法」§42-59）。
 //!
 //! 统一字符串结构：`裸名` / `domain:name`（第一等级）/ `domain:namespace:name`
-//! （第二等级）。层数上限 2 段冒号（3 段词），最右冒号切分（与
-//! `mcp_skills.rs` / `skill_preload.rs` 先例一致）；段统一小写归一，
+//! （第二等级）/ `domain:name`（[`CommandName::Level2Short`]，外部动态域短
+//! 形态——MCP server 命令，决策 1）。层数上限 2 段冒号（3 段词），最右冒号
+//! 切分（与 `mcp_skills.rs` / `skill_preload.rs` 先例一致）；段统一小写归一，
 //! 小写全名 = 唯一键；`mcp__` 双下划线遗留形态解析即失败。
+//!
+//! [`CommandName::Level2Short`] 是决策 1（命令形态 `{server}:{skill}`）的在场
+//! 形态：server 名充当词法首段域（外部动态域，非保留集），skill 为 name 段；
+//! 词法地位等同 Level2（完整全名展示、不登记裸名），仅少了 namespace 段。
+//! 保留域之外任意 2 段冒号形态解析为 Level2Short（真实可用性由注册表
+//! provenance 域校验把关，设计 §58 namespace 首段不可伪造）。
 //!
 //! 词法结构直接携带路由信息：domain = 来源域（provenance 首段），
 //! namespace = 来源域内标识（server / 插件名），name = 命令名。
@@ -25,8 +32,11 @@ use serde::{Deserialize, Serialize};
 const LEVEL1_DOMAINS: [&str; 2] = ["core", "ui"];
 
 /// 第二等级域（外部来源，必须完整 2 层形态）：`mcp` / `plugin` / `user`。
-/// namespace 显式标记不可省略——`mcp:demo:hello`、`plugin:ecc:deploy`；
-/// `mcp:hello` 形态对外部来源非法。
+/// namespace 显式标记不可省略——`plugin:ecc:deploy`、`user:me:greet`；
+/// `mcp:hello` 形态对外部来源非法。注：Mcp 生产形态已迁决策 1 的
+/// `{server}:{skill}` 短形态（[`CommandName::Level2Short`]），3 段
+/// `mcp:demo:hello` 仅残留词法可解析（真实可用性由注册表 provenance
+/// 域校验把关）。
 ///
 /// 同步约束同 [`LEVEL1_DOMAINS`]：与 `command_route.rs::CommandSource`
 /// 变体一一对应，新增域需两处同步（见上）。
@@ -44,12 +54,18 @@ pub enum CommandName {
     Bare { name: String },
     /// 第一等级显式：`domain:name`（core:compact / ui:history）。
     Level1 { domain: String, name: String },
-    /// 第二等级完整：`domain:namespace:name`（mcp:demo:hello）。
+    /// 第二等级完整：`domain:namespace:name`（plugin:ecc:deploy；Mcp 生产
+    /// 形态为 [`Level2Short`]，决策 1）。
     Level2 {
         domain: String,
         namespace: String,
         name: String,
     },
+    /// 外部动态域短形态（决策 1）：`domain:name`（如 MCP server 命令
+    /// `demo:hello`），无 namespace 段。词法地位等同 [`Level2`]（完整全名
+    /// 展示、不登记裸名），仅语法为 2 段；真实可用性由注册表 provenance
+    /// 域校验把关（`CommandSource::Mcp` 的 `domain()` = server 名）。
+    Level2Short { domain: String, name: String },
 }
 
 /// 词法等级（第一等级可裸名 / 1 层显式；第二等级必须完整 2 层形态）。
@@ -89,7 +105,8 @@ pub enum CommandNameError {
     #[error("命令域 `{0}` 在该词法形态下不合法（第一等级: core/ui；第二等级: mcp/plugin/user）")]
     UnknownDomain(String),
     /// 第二等级域缺 namespace 的 1 层形态（`mcp:hello` 对外部来源非法，
-    /// 设计 §54：namespace 显式标记不可省略——`mcp:demo:hello`）。
+    /// 设计 §54：namespace 显式标记不可省略——`mcp:demo:hello` 3 段形态
+    /// 词法仍可解析，但 Mcp 生产形态为 Level2Short，见决策 1）。
     #[error("第二等级域 `{domain}` 必须带 namespace（如 `{domain}:server:name`）")]
     MissingNamespace { domain: String },
 }
@@ -107,8 +124,10 @@ impl CommandName {
     /// ③ 冒号段计数 0/1/2 → 对应变体，>2 → `TooManySegments`；
     /// ④ 空段（`:a` / `a:` / `a::b`）→ `EmptySegment`；
     /// ⑤ 段含空白字符 → `IllegalCharacter`（防与 args 分离混淆）；
-    /// ⑥ 显式形态域不在该等级声明集合 → `UnknownDomain`；第二等级域缺
-    /// namespace 的 1 层形态（`mcp:hello`）→ `MissingNamespace`；
+    /// ⑥ 显式形态域不在该等级声明集合：2 段形态保留域之外 → 外部动态域
+    /// （[`CommandName::Level2Short`]，决策 1 MCP server 形态）；
+    /// 3 段形态域不在第二等级声明集合（core/ui/未知）→ `UnknownDomain`；
+    /// 第二等级域缺 namespace 的 1 层形态（`mcp:hello`）→ `MissingNamespace`；
     /// ⑦ 段统一 `to_lowercase()` 归一。
     pub fn parse(input: &str) -> Result<CommandName, CommandNameError> {
         if input.is_empty() {
@@ -148,10 +167,13 @@ impl CommandName {
                     // 外部来源非法（设计 §54）。
                     return Err(CommandNameError::MissingNamespace { domain });
                 }
-                if !LEVEL1_DOMAINS.contains(&domain.as_str()) {
-                    return Err(CommandNameError::UnknownDomain(domain));
+                if LEVEL1_DOMAINS.contains(&domain.as_str()) {
+                    return Ok(CommandName::Level1 { domain, name });
                 }
-                Ok(CommandName::Level1 { domain, name })
+                // 保留域之外的 2 段形态 → Level2Short（决策 1 MCP server 命令
+                // 形态 `{server}:{skill}`；真实可用性由注册表 provenance 校验
+                // 把关——无 provenance 声明该域则无法注册）。
+                Ok(CommandName::Level2Short { domain, name })
             }
             3 => {
                 let mut it = lower.into_iter();
@@ -177,10 +199,11 @@ impl CommandName {
             CommandName::Bare { name } => name,
             CommandName::Level1 { name, .. } => name,
             CommandName::Level2 { name, .. } => name,
+            CommandName::Level2Short { name, .. } => name,
         }
     }
 
-    /// 小写规范全名 = 唯一键（Level1: `domain:name`；Level2:
+    /// 小写规范全名 = 唯一键（Level1/Level2Short: `domain:name`；Level2:
     /// `domain:namespace:name`；Bare: 返回裸名小写，非键，路由层按 core/ui
     /// 展开）。输出前各段再归一一次，直接构造大写字段也保证键不变。
     pub fn full_name(&self) -> String {
@@ -199,6 +222,9 @@ impl CommandName {
                 namespace.to_lowercase(),
                 name.to_lowercase()
             ),
+            CommandName::Level2Short { domain, name } => {
+                format!("{}:{}", domain.to_lowercase(), name.to_lowercase())
+            }
         }
     }
 
@@ -219,19 +245,20 @@ impl CommandName {
         }
     }
 
-    /// 词法等级：Bare / Level1 → Level1；Level2 → Level2。
+    /// 词法等级：Bare / Level1 → Level1；Level2 / Level2Short → Level2。
     pub fn level(&self) -> CommandLevel {
         match self {
             CommandName::Bare { .. } | CommandName::Level1 { .. } => CommandLevel::Level1,
-            CommandName::Level2 { .. } => CommandLevel::Level2,
+            CommandName::Level2 { .. } | CommandName::Level2Short { .. } => CommandLevel::Level2,
         }
     }
 }
 
 impl fmt::Display for CommandName {
     /// 全名小写规范化输出（唯一键形态；Bare 输出裸名小写）。注意：Level1
-    /// 输出 `core:compact` 而非 UI 展示形态 `compact`（设计 §87）——Phase 3
-    /// 投影渲染勿直接复用本 Display。
+    /// 输出 `core:compact` 而非投影渲染形态 `compact`（设计 §87）——投影
+    /// name 由 `build_available_commands_update` 按 level 统一输出（Level1
+    /// 裸名 / Level2 全名），本 Display 仅供注册表内部使用，勿复用。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.full_name())
     }

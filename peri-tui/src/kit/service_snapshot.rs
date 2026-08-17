@@ -183,7 +183,7 @@ async fn tick_once(
                 Vec::new()
             }
         };
-        slow.next_thread_scan = now + Duration::from_secs(30);
+        slow.next_thread_scan = now + Duration::from_secs(2);
     }
     let threads = slow.threads.clone();
 

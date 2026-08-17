@@ -536,9 +536,9 @@ async fn before_agent_without_registry_noop() {
     assert_eq!(state.messages().len(), 0);
 }
 
-// ─── 命令面投影（Phase 6 A3：双注册表）─────────────────────────────────────
+// ─── 命令面投影（决策 1：双注册表）───────────────────────────────────────
 
-/// with_command_registry 装配 → before_agent 以 `mcp:{server}` 前缀置 Started；
+/// with_command_registry 装配 → before_agent 以 `{server}` 来源键置 Started；
 /// 断连 → 命令面按前缀批量注销（removed_any → on_change）。
 #[tokio::test]
 async fn before_agent_command_registry_projection_and_disconnect() {
@@ -556,7 +556,7 @@ async fn before_agent_command_registry_projection_and_disconnect() {
         .with_command_registry(Some(Arc::clone(&cmd_reg)));
     let mut state = AgentState::new("/tmp");
 
-    // 第一轮：命令面 Started（mcp:srv 来源登记；注册表无公开 sources 查询，
+    // 第一轮：命令面 Started（srv 来源登记；注册表无公开 sources 查询，
     // 以断连清理行为 + on_change 侧证接线生效）。
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert_eq!(
@@ -565,7 +565,7 @@ async fn before_agent_command_registry_projection_and_disconnect() {
         "Started 不触发"
     );
 
-    // 断连：pool 条目移除 → 下轮投影按 mcp:srv 前缀清理 → on_change 恰一次
+    // 断连：pool 条目移除 → 下轮投影按 srv 前缀清理 → on_change 恰一次
     pool.clients.write().remove("srv");
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert_eq!(
@@ -607,7 +607,8 @@ async fn before_agent_without_command_registry_noop() {
 }
 
 /// 命令面等价断言（对齐 :431 断连清理用例，Phase 6 A5）：断连 →
-/// `mcp:{server}:` 前缀条目从 snapshot 消失 + on_change 恰一次。
+/// `{server}:` 前缀条目从 snapshot 消失 + on_change 恰一次（决策 1：
+/// server 名即词法首段域，无 `mcp:` 域前缀）。
 ///
 /// 发现回写模拟说明：测试 handle 无 rmcp peer（`run_discovery` 立即以空
 /// 条目完成），非空条目经 `mcp_route_entries` 转换后手动
@@ -633,12 +634,13 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     wait_discovered(&reg, "srv").await;
 
-    // 发现完成回写（A3 转换点同构）：mcp:srv:hello 入投影
+    // 发现完成回写（A3 转换点同构）：srv:hello 入投影
     let token: HandleToken = h1.clone();
     let added = cmd_reg.mark_source_completed(
-        "mcp:srv",
+        "srv",
         token,
         crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
             "srv",
             &[SkillMetadata {
                 name: "mcp__srv__hello".into(),
@@ -649,24 +651,18 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
     );
     assert_eq!(added, 1, "完成回写应注册 1 条");
     assert!(
-        cmd_reg
-            .snapshot()
-            .iter()
-            .any(|e| e.fullname == "mcp:srv:hello"),
-        "完成回写后 snapshot 应含 mcp:srv:hello"
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "完成回写后 snapshot 应含 srv:hello"
     );
     let before_disconnect = counter.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(before_disconnect, 1, "完成回写应触发 on_change 一次");
 
-    // 断连：pool 条目移除 → 下轮投影按 mcp:srv 前缀批量注销 → on_change 恰一次
+    // 断连：pool 条目移除 → 下轮投影按 srv 前缀批量注销 → on_change 恰一次
     pool.clients.write().remove("srv");
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert!(
-        !cmd_reg
-            .snapshot()
-            .iter()
-            .any(|e| e.fullname == "mcp:srv:hello"),
-        "断连后 mcp:srv:hello 应从 snapshot 消失"
+        !cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "断连后 srv:hello 应从 snapshot 消失"
     );
     assert_eq!(
         counter.load(std::sync::atomic::Ordering::SeqCst),
@@ -676,8 +672,153 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
     assert_eq!(state.messages().len(), 0, "断连清理静默");
 }
 
+/// 会话预热（决策 B 扩展，审查会话生命周期）：`prewarm_discovery` 不装配
+/// chain 即触发幂等发现——新会话（/clear）在首 turn 前命令面即可获得
+/// 条目；重复预热（Started/Discovered 去重）零动作、不触发 on_change。
+#[tokio::test]
+async fn prewarm_discovery_triggers_idempotent_discovery() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cb_counter = Arc::clone(&counter);
+    cmd_reg.set_on_change(Some(Arc::new(move || {
+        cb_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })));
+
+    // 模拟 session/new 路径（无 middleware 实例）：预热 → 发现任务
+    // （peer=None）空回写落定。
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：srv:hello 入投影
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "完成回写应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "预热后命令面应含 srv:hello（无需 before_agent）"
+    );
+    let after_first = counter.load(std::sync::atomic::Ordering::SeqCst);
+
+    // 重复预热幂等：已 Discovered → 不重扫、不触发 on_change。
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    prewarm_discovery(&pool, &reg, &cmd_reg, &AgentCancellationToken::new());
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        after_first,
+        "重复预热零动作"
+    );
+}
+
+/// 连接完成事件（决策 B，session/new 窗口期）：notifier 挂接后，Connected
+/// 状态变化即触发幂等发现——「装配时连接未完成」场景在首 turn 前即被
+/// 补偿（无 chain、无 before_agent）。notify_tx=None 仅发现触发。
+#[tokio::test]
+async fn attach_connection_notifier_triggers_discovery_on_connected() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    attach_connection_notifier(
+        &pool,
+        Some(&reg),
+        Some(&cmd_reg),
+        &AgentCancellationToken::new(),
+        None,
+    );
+
+    // 模拟 session/new 后连接完成：pool 初始化完成 + 状态变更广播
+    // （record_status_change → notifier → run_ensure_discovery）。
+    // 注意 record_status_change 要求 initialized + old 为 Some 且状态
+    // 确实变化（client.rs:854-869），故插入 Connected 前先置旧态。
+    pool.mark_initialized();
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    pool.record_status_change("srv", Some(&ClientStatus::Disconnected));
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：连接事件补偿路径下命令面直接可得。
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "连接事件补偿应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "连接完成后面板即可路由 srv:hello（无需首 turn）"
+    );
+}
+
+/// 初始连接补发（决策 B 扩展）：`run_initialize` 收口时
+/// `notify_initial_connections` 为每个 Connected server 补发一次连接
+/// 通知——初始化期间的连接事件不经过 `record_status_change`
+/// （`run_initialize` 直接插入 Connected handle），连接事件 notifier
+/// 需靠收口补发驱动「刚进入、未说话」时的 skill 发现。
+#[tokio::test]
+async fn notify_initial_connections_triggers_discovery_on_startup() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let reg = Arc::new(McpSkillRegistry::new());
+    let cmd_reg = Arc::new(CommandRegistry::new());
+    attach_connection_notifier(
+        &pool,
+        Some(&reg),
+        Some(&cmd_reg),
+        &AgentCancellationToken::new(),
+        None,
+    );
+
+    // 模拟 run_initialize：直接插入 Connected handle（不调用
+    // record_status_change——初始连接事件不产生通知）。
+    let h1 = insert_skill_handle(&pool, "srv", vec![]);
+    pool.notify_initial_connections();
+    wait_discovered(&reg, "srv").await;
+
+    // 完成回写（A3 转换点同构）：补发路径下命令面直接可得。
+    let token: HandleToken = h1.clone();
+    let added = cmd_reg.mark_source_completed(
+        "srv",
+        token,
+        crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
+            "srv",
+            &[SkillMetadata {
+                name: "mcp__srv__hello".into(),
+                description: "hello skill".into(),
+                ..SkillMetadata::default()
+            }],
+        ),
+    );
+    assert_eq!(added, 1, "初始化补发应注册 1 条");
+    assert!(
+        cmd_reg.snapshot().iter().any(|e| e.fullname == "srv:hello"),
+        "补发后面板即可路由 srv:hello（无需首 turn）"
+    );
+}
+
 /// 重连顺序性（Phase 6 A5 验收核心）：连接 → 发现 → 注册（投影含
-/// `mcp:demo:hello`）→ 断连（投影收缩）→ 重连（新 handle）→ 重扫完成前
+/// `demo:hello`）→ 断连（投影收缩）→ 重连（新 handle）→ 重扫完成前
 /// 投影**不含**新条目（`Started → Discovered` 不占位）→ 完成回写（投影
 /// 复现 + `resolve` 路由一致）；旧任务回写（旧 handle）被 ptr_eq 拒绝
 /// （无 ABA）。
@@ -701,9 +842,10 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
         .with_command_registry(Some(Arc::clone(&cmd_reg)));
     let mut state = AgentState::new("/tmp");
 
-    // A3 转换点同构的回写载荷（skill 名剥 `mcp__demo__` 前缀 → mcp:demo:hello）
+    // A3 转换点同构的回写载荷（skill 名剥 `mcp__demo__` 前缀 → demo:hello）
     let route_entries = || {
         crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
             "demo",
             &[SkillMetadata {
                 name: "mcp__demo__hello".into(),
@@ -712,11 +854,8 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
             }],
         )
     };
-    let snapshot_has_hello = |reg: &CommandRegistry| {
-        reg.snapshot()
-            .iter()
-            .any(|e| e.fullname == "mcp:demo:hello")
-    };
+    let snapshot_has_hello =
+        |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demo:hello");
 
     // 1) 连接 → 命令面 Started；发现任务（peer=None）空回写落定
     let h1 = insert_skill_handle(&pool, "demo", vec![]);
@@ -724,18 +863,18 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     wait_discovered(&reg, "demo").await;
 
-    // 2) 发现完成回写 → 投影含 mcp:demo:hello；resolve 路由一致
+    // 2) 发现完成回写 → 投影含 demo:hello；resolve 路由一致
     assert_eq!(
-        cmd_reg.mark_source_completed("mcp:demo", token1.clone(), route_entries()),
+        cmd_reg.mark_source_completed("demo", token1.clone(), route_entries()),
         1,
         "首次完成回写应注册 1 条"
     );
     assert!(
         snapshot_has_hello(&cmd_reg),
-        "完成回写后投影应含 mcp:demo:hello"
+        "完成回写后投影应含 demo:hello"
     );
-    let r1 = cmd_reg.resolve("mcp:demo:hello").expect("resolve 应命中");
-    assert_eq!(r1.entry.fullname, "mcp:demo:hello");
+    let r1 = cmd_reg.resolve("demo:hello").expect("resolve 应命中");
+    assert_eq!(r1.entry.fullname, "demo:hello");
     assert_eq!(r1.entry.kind, CommandEntryKind::McpSkill);
     assert_eq!(r1.entry.description, "hello skill");
     assert_eq!(
@@ -750,7 +889,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
     );
     assert_eq!(r1.args, "");
 
-    // 3) 断连 → 投影收缩（mcp:demo:hello 从 snapshot 消失）
+    // 3) 断连 → 投影收缩（demo:hello 从 snapshot 消失）
     pool.clients.write().remove("demo");
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert!(!snapshot_has_hello(&cmd_reg), "断连后投影应收缩");
@@ -772,24 +911,24 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
     // 5) 重扫（peer=None 空回写）落定后，新 handle 回写 → 投影复现 + 路由一致
     wait_discovered(&reg, "demo").await;
     assert_eq!(
-        cmd_reg.mark_source_completed("mcp:demo", token2.clone(), route_entries()),
+        cmd_reg.mark_source_completed("demo", token2.clone(), route_entries()),
         1,
         "重连完成回写应注册 1 条"
     );
     assert!(
         snapshot_has_hello(&cmd_reg),
-        "重连完成回写后投影应复现 mcp:demo:hello"
+        "重连完成回写后投影应复现 demo:hello"
     );
     let r2 = cmd_reg
-        .resolve("mcp:demo:hello")
+        .resolve("demo:hello")
         .expect("重连后 resolve 应命中");
-    assert_eq!(r2.entry.fullname, "mcp:demo:hello");
+    assert_eq!(r2.entry.fullname, "demo:hello");
     assert_eq!(r2.entry.kind, CommandEntryKind::McpSkill);
 
     // 6) 旧任务回写（旧 handle token1）被 ptr_eq 拒绝：不注册、不覆盖、不触发
     let before_stale = counter.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        cmd_reg.mark_source_completed("mcp:demo", token1, route_entries()),
+        cmd_reg.mark_source_completed("demo", token1, route_entries()),
         0,
         "旧 handle 回写应被 ptr_eq 拒绝（无 ABA）"
     );
@@ -803,8 +942,8 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
 }
 
 /// P1-1 回归：plugin 提供的 MCP server key（`plugin:p1:demosrv`，含冒号）
-/// 命令面来源键统一为末段 `mcp:demosrv`（与 fullname namespace 同构）——
-/// 断连按 `mcp:demosrv:` 前缀批量注销（幽灵条目不残留），重连复现无
+/// 命令面来源键统一为末段 `demosrv`（决策 1：与 fullname 首段同构）——
+/// 断连按 `demosrv:` 前缀批量注销（幽灵条目不残留），重连复现无
 /// Conflict（验收 :414/:415 在 plugin server 形态下成立）。
 #[tokio::test]
 async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
@@ -822,16 +961,17 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
     let mut state = AgentState::new("/tmp");
     let server = "plugin:p1:demosrv";
 
-    // 来源键派生断言：三处键（来源登记 / 注销前缀 / fullname namespace）
-    // 必须同构（旧实现用原名 `mcp:plugin:p1:demosrv`，注销前缀匹配不到
-    // fullname `mcp:demosrv:beta` → 幽灵条目）。
+    // 来源键派生断言：三处键（来源登记 / 注销前缀 / fullname 首段）必须
+    // 同构（旧实现用 `mcp:plugin:p1:demosrv`，注销前缀匹配不到 fullname
+    // `demosrv:beta` → 幽灵条目）。
     assert_eq!(
         crate::mcp::skill_discovery::mcp_source_key(server),
-        "mcp:demosrv",
+        "demosrv",
         "plugin server 来源键必须取末段（P1-1）"
     );
     let route_entries = || {
         crate::mcp::skill_discovery::mcp_route_entries(
+            &reg,
             server,
             &[SkillMetadata {
                 name: "mcp__plugin:p1:demosrv__beta".into(),
@@ -840,12 +980,9 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
             }],
         )
     };
-    assert_eq!(route_entries()[0].fullname, "mcp:demosrv:beta");
-    let snapshot_has_beta = |reg: &CommandRegistry| {
-        reg.snapshot()
-            .iter()
-            .any(|e| e.fullname == "mcp:demosrv:beta")
-    };
+    assert_eq!(route_entries()[0].fullname, "demosrv:beta");
+    let snapshot_has_beta =
+        |reg: &CommandRegistry| reg.snapshot().iter().any(|e| e.fullname == "demosrv:beta");
 
     // 1) 连接 → 命令面以末段来源键置 Started；发现任务（peer=None）空回写落定
     let h1 = insert_skill_handle(&pool, server, vec![]);
@@ -853,7 +990,7 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     wait_discovered(&reg, server).await;
 
-    // 2) 完成回写（A3 转换点同构，来源键 = mcp:demosrv）→ 投影含条目
+    // 2) 完成回写（A3 转换点同构，来源键 = demosrv）→ 投影含条目
     assert_eq!(
         cmd_reg.mark_source_completed(
             &crate::mcp::skill_discovery::mcp_source_key(server),
@@ -865,15 +1002,15 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
     );
     assert!(
         snapshot_has_beta(&cmd_reg),
-        "完成回写后投影应含 mcp:demosrv:beta"
+        "完成回写后投影应含 demosrv:beta"
     );
 
-    // 3) 断连 → 按 mcp:demosrv: 前缀批量注销，幽灵条目不残留
+    // 3) 断连 → 按 demosrv: 前缀批量注销，幽灵条目不残留
     pool.clients.write().remove(server);
     Middleware::before_agent(&mw, &mut state).await.unwrap();
     assert!(
         !snapshot_has_beta(&cmd_reg),
-        "断连后 mcp:demosrv:beta 必须收缩（P1-1 幽灵条目回归）"
+        "断连后 demosrv:beta 必须收缩（P1-1 幽灵条目回归）"
     );
 
     // 4) 重连（新 Arc handle → token 变化）→ 重扫落定 → 新 token 回写复现
@@ -891,12 +1028,9 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
         1,
         "重连完成回写应注册 1 条（幽灵条目残留时此处 Conflict → 0）"
     );
-    assert!(
-        snapshot_has_beta(&cmd_reg),
-        "重连后投影复现 mcp:demosrv:beta"
-    );
+    assert!(snapshot_has_beta(&cmd_reg), "重连后投影复现 demosrv:beta");
     let r = cmd_reg
-        .resolve("mcp:demosrv:beta")
+        .resolve("demosrv:beta")
         .expect("重连后 resolve 应命中");
     assert_eq!(r.entry.kind, CommandEntryKind::McpSkill);
     assert_eq!(state.messages().len(), 0, "断连/重连清理静默");

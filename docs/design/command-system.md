@@ -82,9 +82,9 @@ CommandName := 裸名                              // 第一等级域（core / u
 
 ## 协议层（投影 / 上送 / 回传）
 
-- **投影条目升级**：`AvailableCommand = { fullname（唯一键）, kind（Command | Skill | McpSkill | Panel，注册时由 handler 域推导一次）, description, aliases, category?, args?（serde ArgsSchema）, level（1 | 2） }`。
+- **投影条目升级**：`AvailableCommand = { fullname（唯一键，注册表层）, kind（Command | Skill | McpSkill | Panel，注册时由 handler 域推导一次）, description, aliases, category?, args?（serde ArgsSchema）, level（1 | 2） }`；wire `name` 字段承载投影渲染形态（见「渲染形态」，Level1 裸名 / Level2 全名），域归属经条目级 `periKind` / `periLevel` 下发。
 - **键模型**：唯一键 = 全名（`core:compact` / `ui:history` / `mcp:demo:hello`）；**裸名不是独立键**，是解析层对第一等级域（core / ui）的快捷匹配——`/compact` 在 core/ui 域内精确匹配 name。本地 skill 与内置命令同键（`core:compact`），冲突裁决在注册路径生效，模型自洽。
-- **渲染形态**：投影按 level 渲染——level 1 显示裸名（`compact`），level 2 显示全名（`mcp:demo:hello`）；**display 即 lexical**，用户提交的文本与显示一致，解析器严格命中。
+- **渲染形态（协议层投影即渲染形态，TUI/stdio 一条实现）**：投影 name 按 level 渲染——level 1 输出裸名（`compact`），level 2 输出全名（`mcp:demo:hello`）；**display 即 lexical**，用户提交的文本与显示一致，解析器严格命中。注册表唯一键仍为全名；投影 name 允许 core/ui 同裸名重复（`core:hello` 与 `ui:hello` 均投影为 `hello`），消费端按条目级 kind 区分，投影不做按名去重。
 - **caps 升级**：`ui_commands: bool → Vec<UiCommandSpec{ name, aliases, description, args? }>`。TUI 连接时上送明细 → ACP 注册为 `ui:*` 条目（provenance=ui，handler=TuiLocal）；ACP 的 `UI_COMMANDS` 常量整体删除，门控语义反转——从"TUI 声明 bool → ACP 附加硬编码"变为"TUI 声明明细 → ACP 注册"。
 - **执行结果回传**：`CommandResult` 增 `feedback: Option<CommandFeedback{ level, message, channel }>`；新增 `CommandFeedback` 事件（ACP → TUI 通知条渲染）；channel=Session 仅 opt-in 才另写系统消息进会话；执行失败 = `level: Error` 走同一事件通道。
 - **动态注册 / 注销**：MCP / 插件发现走 ACP 内部（middleware → 注册表），不经 TUI 协议；变更统一经 `available_commands_update` 投影推送（触发时机 = 注册表 on_change）。

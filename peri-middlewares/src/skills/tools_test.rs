@@ -463,6 +463,31 @@ async fn test_skill_tool_loads_mcp_skill_by_alias() {
     assert!(content.contains("This skill is served by MCP server \"demo\""));
 }
 
+/// 决策 1 + A3：plugin 多冒号 server key（`plugin:p1:demosrv`）下命令形态
+/// `demosrv:beta` 别名按原名拼名（`mcp__demosrv__beta`）必 miss → 按
+/// SkillOrigin::Mcp server 名末段兜底命中（与命令面 fullname 首段派生、
+/// SkillPreload find_by_command 同构）。
+#[tokio::test]
+async fn test_skill_tool_loads_mcp_skill_plugin_server_by_last_segment() {
+    let tool = make_skill_tool_with_entries(vec![fake_mcp_skill("plugin:p1:demosrv", "beta")]);
+    let input = json!({"skill_name": "demosrv:beta"});
+
+    let result = tool.invoke(input, ToolContext::new(&[], "/tmp")).await;
+
+    assert!(result.is_ok(), "demosrv:beta 应按末段兜底命中 MCP 条目");
+    let content = result.unwrap();
+    assert!(content.contains("Body of beta."));
+    assert!(
+        content.contains("MCP server \"plugin:p1:demosrv\""),
+        "标注应含完整 server key，实际: {content}"
+    );
+
+    // 完整 server key 前缀同样命中（用户直接输入全名形态）
+    let input_full = json!({"skill_name": "plugin:p1:demosrv:beta"});
+    let result_full = tool.invoke(input_full, ToolContext::new(&[], "/tmp")).await;
+    assert!(result_full.is_ok(), "完整 server key 形态应命中");
+}
+
 #[tokio::test]
 async fn test_skill_tool_mixed_cache_mcp_alias_and_local_namespace() {
     // Arrange: 混合缓存——MCP 条目 + 本地 skill（磁盘）

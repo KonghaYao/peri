@@ -30,7 +30,7 @@ describe("tool-card: output truncation", () => {
       // Cargo.lock 通常很大，输出会被截断
       await sendPrompt(
         tester,
-        "请用 Read 工具读取 Cargo.lock 文件的内容",
+        "请严格只调用一次 Read 工具，读取当前工作目录下的 Cargo.lock 文件（file_path 必须是 Cargo.lock，不要读取 Cargo.toml 或其他文件），然后根据读取结果继续回答。",
       );
 
       // 等待 Read 工具被调用

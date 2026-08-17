@@ -108,29 +108,38 @@ impl McpSkillRegistry {
 
     /// 发现任务 spawn 前同步置位（插入/覆盖为 Started）。
     ///
+    /// 返回「本调用是否置位者」（审查 M1）：插入前状态非 Started → true，
+    /// 调用方负责 spawn；覆盖已有 Started → false，调用方跳过 spawn——
+    /// 装配后立即 / 连接完成事件 / before_agent 并发调用时防重复发现任务。
+    ///
     /// on_change 语义（评审 LOW-2）：一般插入/覆盖为 Started 不触发；**例外**——
     /// 覆盖前为 `Discovered` 且 entries 非空时触发一次（旧条目从 `all_skills`
     /// 消失，commands 列表及时撤下陈旧条目；随后完成回调按需再触发）。
     /// 回调在锁内取克隆、锁外调用。
-    pub fn mark_discovery_started(&self, server: &str, handle: HandleToken) {
-        let cb = {
+    pub fn mark_discovery_started(&self, server: &str, handle: HandleToken) -> bool {
+        let (was_started, cb) = {
             let mut guard = self.inner.write();
-            let fire = matches!(
+            let was_started = matches!(
                 guard.servers.get(server),
-                Some(ServerDiscoveryState::Discovered { entries, .. }) if !entries.is_empty()
+                Some(ServerDiscoveryState::Started { .. })
             );
+            let fire = !was_started
+                && matches!(
+                    guard.servers.get(server),
+                    Some(ServerDiscoveryState::Discovered { entries, .. }) if !entries.is_empty()
+                );
             guard
                 .servers
                 .insert(server.to_string(), ServerDiscoveryState::Started { handle });
-            if fire {
-                guard.on_change.clone()
-            } else {
-                None
-            }
+            (
+                was_started,
+                if fire { guard.on_change.clone() } else { None },
+            )
         };
         if let Some(cb) = cb {
             cb();
         }
+        !was_started
     }
 
     /// 发现任务完成回写：条目存在且 `Arc::ptr_eq(handle)` 才应用（旧任务回写
@@ -267,6 +276,49 @@ impl McpSkillRegistry {
             if !suffix.is_empty() {
                 let full = mcp_skill_name(prefix, suffix).to_lowercase();
                 return find_exact(&guard.servers, &full);
+            }
+        }
+        None
+    }
+
+    /// 命令形态查找兜底（决策 1 + A3）：`{server}:{skill}` 短形态，覆盖
+    /// `find` 别名路径 miss 的 plugin 多冒号 server 场景。
+    ///
+    /// token 前缀（最右冒号前段）按「server 名末段小写」或「完整 server 名
+    /// 小写」匹配逐个 Discovered server（与命令面 fullname 的 namespace 派生
+    /// 同构——skill_discovery.rs `mcp_namespace` 语义，此处内联避免跨 crate
+    /// 依赖）；命中后按 `mcp__{server}__{skill}` 精确名取条目。多 server 同名
+    /// 末段且都持有该 skill 时返回 server_names 序遍历先到者（与
+    /// [`find`](Self::find) 的 find_exact 首中一致；冲突由命令面注册表纯拒绝
+    /// 兜底，决策 1 不考虑冲突）。
+    pub fn find_by_command(&self, name: &str) -> Option<SkillMetadata> {
+        let (prefix, skill) = name.rsplit_once(':')?;
+        if skill.is_empty() {
+            return None;
+        }
+        // 小写归一（审查 Minor：skill 段未过发现管线 sanitize，手输大小写
+        // 变体亦可命中；注册表条目名恒小写存储）。
+        let skill = skill.to_lowercase();
+        let prefix = prefix.to_lowercase();
+        let guard = self.inner.read();
+        for (server, state) in &guard.servers {
+            if !matches!(state, ServerDiscoveryState::Discovered { .. }) {
+                continue;
+            }
+            let trail = server
+                .rsplit(':')
+                .next()
+                .unwrap_or(server.as_str())
+                .to_lowercase();
+            if trail != prefix && server.to_lowercase() != prefix {
+                continue;
+            }
+            let want = mcp_skill_name(server, &skill).to_lowercase();
+            if let Some(entry) = entries_of(state)
+                .into_iter()
+                .find(|e| e.name.to_lowercase() == want)
+            {
+                return Some(entry);
             }
         }
         None

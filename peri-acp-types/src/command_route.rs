@@ -8,8 +8,10 @@
 //! 注册表持 `Arc<dyn CommandHandler>`，不 import 任何 handler 实现（设计 §72）。
 //!
 //! 来源域（[`CommandSource`]）对应词法保留域（设计 §44-59）：`core` / `ui` 为
-//! 第一等级（可裸名 / 1 层显式），`mcp` / `plugin` / `user` 为第二等级（外部来源，
-//! 必须完整 2 层形态，namespace 首段由 provenance 声明，不可伪造，设计 §58）。
+//! 第一等级（可裸名 / 1 层显式），`mcp` / `plugin` / `user` 外部来源中——
+//! plugin/user 为第二等级完整 2 层形态（namespace 首段由 provenance 声明，
+//! 不可伪造，设计 §58）；**Mcp（决策 1）为外部动态域短形态 `{server}:{skill}`，
+//! server 名即词法首段域**。
 
 use std::sync::Arc;
 
@@ -34,23 +36,26 @@ pub enum CommandEntryKind {
     Panel,
 }
 
-/// 声明来源域（设计 §44-59 词法保留域；对应词法首段，level 推导依据）。
+/// 声明来源域（设计 §44-59；`CommandSource::Mcp` 于决策 1 后词法首段 =
+/// server 名，见下）。
 ///
 /// 第一等级（可裸名 / 1 层显式）：[`CommandSource::Core`]（内置命令 +
-/// 本地 skill）、[`CommandSource::Ui`]（TUI 面板）；第二等级（外部来源，
-/// 必须完整 2 层形态）：[`CommandSource::Mcp`] / [`CommandSource::Plugin`] /
-/// [`CommandSource::User`]。
+/// 本地 skill）、[`CommandSource::Ui`]（TUI 面板）。
 ///
-/// 第二等级变体携带来源域内标识（server 名 / 插件名 / 用户定义名）——
-/// namespace 首段由 provenance 声明，类型级保证不可伪造（设计 §58：
-/// 插件只能注册 `plugin:*`，MCP server 只能注册 `mcp:*`）。
+/// 外部来源：插件 / 用户命令为第二等级完整形态（`plugin:name:xxx` /
+/// `user:xxx:yyy`，必须完整 2 层形态）；**MCP server（决策 1）为外部动态域
+/// 短形态 `{server}:{skill}`**——server 名即词法首段域，无 namespace 段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSource {
     /// 内置命令 + 本地 skill（第一等级，可裸名）。
     Core,
     /// TUI 面板（第一等级，上送注册，设计 §67）。
     Ui,
-    /// 外部 MCP server（第二等级，`mcp:server:name`）。
+    /// 外部 MCP server（决策 1：词法首段域 = server 名，命令形态
+    /// `{server}:{skill}`）。语义收缩：plugin 提供的 server key 形如
+    /// `plugin:p1:demosrv` 时，命令面存末段派生名 `demosrv`（词法 2 段
+    /// 上限）——从命令面反查元数据面 registry 会 miss，插件归属不可从
+    /// 命令名追溯，属既有取舍（skill_discovery.rs `mcp_namespace`）。
     Mcp { server: String },
     /// 插件（第二等级，`plugin:插件名:name`）。
     Plugin { name: String },
@@ -60,28 +65,34 @@ pub enum CommandSource {
 
 impl CommandSource {
     /// 词法域（core/ui/mcp/plugin/user）——路由与投影的域前缀。
-    pub fn domain(&self) -> &'static str {
+    ///
+    /// 决策 1 例外：`Mcp` 返回 server 名本身（非 `"mcp"`）——MCP server
+    /// 名视作与 plugin 命名空间等同的领域，命令全名 = `{server}:{skill}`，
+    /// server 名即词法首段域（注册表 provenance 域校验据此把关，设计 §58
+    /// namespace 首段不可伪造）。
+    pub fn domain(&self) -> &str {
         match self {
             CommandSource::Core => "core",
             CommandSource::Ui => "ui",
-            CommandSource::Mcp { .. } => "mcp",
+            CommandSource::Mcp { server } => server,
             CommandSource::Plugin { .. } => "plugin",
             CommandSource::User { .. } => "user",
         }
     }
 
-    /// 第二等级的 namespace（Mcp/Plugin/User 的来源域内标识，对应词法
-    /// namespace 段）；第一等级为 None。
+    /// 第二等级的 namespace（Plugin/User 的来源域内标识，对应词法
+    /// namespace 段）；Mcp（决策 1）与第一等级为 `None`——server 名已充当
+    /// 词法首段域，无独立 namespace 段。
     pub fn namespace(&self) -> Option<&str> {
         match self {
-            CommandSource::Mcp { server } => Some(server),
+            CommandSource::Mcp { .. } | CommandSource::Core | CommandSource::Ui => None,
             CommandSource::Plugin { name } => Some(name),
             CommandSource::User { name } => Some(name),
-            CommandSource::Core | CommandSource::Ui => None,
         }
     }
 
-    /// 等级推导：core/ui → Level1；mcp/plugin/user → Level2（设计 §85）。
+    /// 等级推导：core/ui → Level1；mcp/plugin/user → Level2（决策 1：Mcp
+    /// 保持 Level2——完整全名展示、不登记裸名）。
     pub fn level(&self) -> CommandLevel {
         match self {
             CommandSource::Core | CommandSource::Ui => CommandLevel::Level1,

@@ -308,7 +308,8 @@ main() {
     # 管道（curl | bash）或子进程（bash install.sh）执行时，脚本内 export
     # 无法穿透到父 shell——给出当前窗口立即生效的一行命令（source 方式执行
     # 则已生效，无需提示）。
-    if [[ "${BASH_SOURCE[0]}" != "$0" && "${SHELL_PROFILE_SET:-}" == "1" ]]; then
+    # 注意：curl | bash（stdin）执行时 BASH_SOURCE 未定义，set -u 下必须给默认值
+    if [[ "${BASH_SOURCE[0]:-}" != "$0" && "${SHELL_PROFILE_SET:-}" == "1" ]]; then
         echo ""
         info "To use 'peri' in the current window immediately, run:"
         if [[ "${SHELL}" == */fish ]]; then

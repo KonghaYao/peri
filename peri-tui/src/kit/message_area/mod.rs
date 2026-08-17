@@ -8,618 +8,75 @@
 
 #![allow(clippy::needless_update)]
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+#[cfg(test)]
+use crate::kit::atoms::FocusedEntry;
 use crate::kit::atoms::{
-    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, IMAGE_HOVER,
-    KEEPGOING_BLOCKED_UNTIL, LANG_VERSION, LOADING_EPOCH, RENDER_HEARTBEAT, SELECTED_SUBAGENT_ID,
-    SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
+    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, IMAGE_HOVER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS,
 };
-use crate::kit::focus_router;
-use crate::kit::mouse_router;
-use crate::kit::submit_request::SubmitRequest;
 use crate::kit::text_selection::TextSelection;
-use crate::kit::tui_render_unit::{
-    FoldKey, FoldState, InteractionKind, TuiAskUserBlock, TuiAssistantBubble, TuiRenderUnit,
-};
+use crate::kit::tui_render_unit::TuiRenderUnit;
+#[cfg(test)]
+use crate::kit::tui_render_unit::{FoldKey, FoldState};
 use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Modifier, Style},
-        text::{Line, Span, Text as RatText},
-        widgets::{Block, Padding, Paragraph, Wrap},
-    },
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::{
+    layout::{Constraint, Direction},
+    style::{Modifier, Style},
+    text::{Line, Span, Text as RatText},
+    widgets::{Block, Padding, Paragraph, Wrap},
 };
 
+mod entry_nav;
 mod footer;
 pub(crate) mod grid;
+mod handlers;
+mod hits;
+mod image_action;
+mod no_color;
 mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
 mod selection;
+mod vm_cache;
+
+#[cfg(test)]
+use self::entry_nav::{
+    apply_fold_override, apply_fold_toggle, cycle_interaction_option, entry_click_decision,
+    fold_key_of, move_entry_focus, pending_interaction_of, set_entry_focus,
+};
+pub(crate) use self::hits::ImageHoverState;
+use self::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit, compute_keepgoing_rect};
+#[cfg(test)]
+use self::image_action::hover_target_for;
+// macOS-only 符号：对应 mod_test 中 `#[cfg(target_os = "macos")]` 测试，
+// 非 macOS 平台下剔除避免 unused-import（CI ubuntu/windows 全量 clippy）。
+#[cfg(all(test, target_os = "macos"))]
+use self::image_action::{
+    OpenImageError, build_open_command, build_open_command_with, try_open_image,
+};
+use self::no_color::strip_line_colors;
+use self::vm_cache::{
+    VmCacheSlot, palette_markdown_key, render_timing_enabled, total_visual_rows, trace_phase,
+};
+#[cfg(test)]
+use footer::KeepGoingLayout;
+use footer::build_footer_lines;
 pub(crate) use footer::hash_todo_items;
-use footer::{KeepGoingLayout, build_footer_lines};
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::{ImageLineInfo, vm_to_lines_cached};
-use scroll::{DragThrottle, GesturePending, ScrollThrottle, ScrollbarDragState};
+use render::vm_to_lines_cached;
+#[cfg(test)]
+use scroll::GesturePending;
+use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
 use selection::{
-    WrappedLineInfo, build_wrap_map, concat_wrap_maps, copy_to_clipboard,
-    highlight_line_in_selection, mark_copy_message, viewport_logical_range, visual_to_logical,
+    WrappedLineInfo, build_wrap_map, concat_wrap_maps, highlight_line_in_selection,
+    viewport_logical_range, visual_to_logical,
 };
-
-/// keepgoing 按钮点击防抖时长（连续点击冷却）。
-const KEEPGOING_DEBOUNCE: Duration = Duration::from_millis(1500);
-
-/// 计算 palette 中影响 markdown 渲染的关键字段哈希。
-/// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
-fn palette_markdown_key(p: &ratatui_kit::prelude::Palette) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    p.fg.hash(&mut h);
-    p.bg.hash(&mut h);
-    p.fg_dim.hash(&mut h);
-    p.accent.hash(&mut h);
-    p.surface.hash(&mut h);
-    p.border.hash(&mut h);
-    p.success.hash(&mut h);
-    p.warning.hash(&mut h);
-    p.error.hash(&mut h);
-    p.info.hash(&mut h);
-    h.finish()
-}
-
-/// NO_COLOR 剥离 pass（§12）：剥离可见行的前景/背景/下划线色，**保留 modifier**
-/// （bold/italic/dim 等）与符号、文本——任何状态都不能只依赖颜色。
-///
-/// [G3] 只作用于视口裁剪后的可见行（视口行数 ≈ 终端高度），不触碰渲染缓存，
-/// 不写业务状态；颜色剥离后的行仅本帧使用。
-fn strip_line_colors(
-    line: &ratatui_kit::ratatui::text::Line<'static>,
-) -> ratatui_kit::ratatui::text::Line<'static> {
-    // Line 级 style 与 span 级 style 同等处理：剥离颜色、保留 modifier。
-    let line_style = strip_style_color(line.style);
-    let spans = line
-        .spans
-        .iter()
-        .map(|span| {
-            ratatui_kit::ratatui::text::Span::styled(
-                span.content.clone(),
-                strip_style_color(span.style),
-            )
-        })
-        .collect();
-    ratatui_kit::ratatui::text::Line {
-        spans,
-        alignment: line.alignment,
-        style: line_style,
-    }
-}
-
-/// 剥离单个 Style 的颜色字段（fg/bg/underline_color），保留 modifier。
-fn strip_style_color(s: ratatui_kit::ratatui::style::Style) -> ratatui_kit::ratatui::style::Style {
-    ratatui_kit::ratatui::style::Style {
-        fg: None,
-        bg: None,
-        underline_color: None,
-        add_modifier: s.add_modifier,
-        sub_modifier: s.sub_modifier,
-    }
-}
-
-// ── entry 焦点导航纯函数（Slice 2 键盘语义层，视觉归 Slice 3）──────────────
-
-/// 移动 entry 焦点：`Alt+Up`（delta=-1）/ `Alt+Down`（delta=+1）。
-/// 无焦点时向上 → 最新 entry（末项），向下 → 首 entry；到达边界后钳制（不循环）。
-fn move_entry_focus(items_len: usize, current: Option<usize>, delta: i32) -> Option<usize> {
-    if items_len == 0 {
-        return None;
-    }
-    let base: i64 = match current {
-        Some(i) => i as i64,
-        None if delta < 0 => items_len as i64, // 从无焦点向上 → 最新 entry
-        None => -1,                            // 从无焦点向下 → 首 entry 之前
-    };
-    let next = base + i64::from(delta);
-    Some(next.clamp(0, items_len as i64 - 1) as usize)
-}
-
-/// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
-/// 与折叠 pass（`acp_events/render.rs::apply_fold_pass`）的键控口径一致：
-/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
-/// Interaction(request_id)。
-fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
-    match vm {
-        TuiRenderUnit::TuiAssistantBubble(b) => {
-            let r = b.reasoning.as_ref()?;
-            Some((FoldKey::Reasoning(b.message_id.clone()?), r.fold))
-        }
-        TuiRenderUnit::TuiToolCard(t) => Some((FoldKey::Tool(t.tool_id.clone()), t.fold)),
-        TuiRenderUnit::TuiSubAgentGroup(g) => Some((FoldKey::SubAgent(g.agent_id.clone()), g.fold)),
-        TuiRenderUnit::TuiAskUserBlock(a) => {
-            Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
-        }
-        _ => None,
-    }
-}
-
-/// [S2 焦点单一事实源] 设 entry 焦点：一次写入 FOCUSED_ENTRY 完整表达导航
-/// 事实（slot + key）。
-/// [Why 锁内派生] 必须在持 VIEW_MODELS 写锁内调用——key 从锁内快照
-/// items[slot] 派生：foldable entry 有值；无折叠能力 entry / request_id 缺失
-/// 的 interaction 合法 `key: None`（slot 仍表达「焦点在消息区」）。桥线程
-/// 可并发写 VIEW_MODELS，锁外读快照会读到漂移索引（key 与索引一致性由
-/// 同一快照保证）。
-fn set_entry_focus(snapshot: &ViewModelsSnapshot, slot: usize) {
-    let key = snapshot
-        .items
-        .get(slot)
-        .and_then(fold_key_of)
-        .map(|(k, _)| k);
-    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot, key });
-}
-
-/// entry 单击结算判定（纯函数，S3 测试直调锁定）——单击 Up handler 中
-/// 被消费前的唯一判定路径。
-///
-/// 单击 = Down 冻结 + 手势从未升级（`gesture` 保持 Pending 到 Up）：
-/// `gesture` 为 Some 且冻结的 `entry_hit` 命中首行 `(slot, 0)` →
-/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非首行）。
-///
-/// [防御 Up 坐标] `mouse_row` 必须在 `area` 内且非滚动条列——防御检查
-/// 基于 Up 时点坐标，比 D2 设计表述（pending.screen）更严格（S1 review
-/// L4），提取时保持该语义。
-///
-/// [D3 权衡] 不做 Down/Up 坐标比较：升级判定的唯一时机是 Drag 事件
-/// （终端按住移动必发 Drag，Up 结算只看手势是否仍为 Pending）；无 Drag
-/// 事件的超容差 Up（坐标差 10 行）仍判单击——有意识决策，S3 锁定用例。
-fn entry_click_decision(
-    gesture: Option<&GesturePending>,
-    mouse_row: u16,
-    area: ratatui_kit::ratatui::layout::Rect,
-    is_scrollbar_col: bool,
-) -> Option<usize> {
-    // 防御检查基于 Up 坐标：行越界 / 滚动条列不参与 entry 点击
-    //（滚动条 Up 分支负责 thumb 释放）
-    if mouse_row < area.y || mouse_row >= area.y.saturating_add(area.height) {
-        return None;
-    }
-    if is_scrollbar_col {
-        return None;
-    }
-    let pending = gesture?;
-    match pending.entry_hit {
-        Some((slot, 0)) => Some(slot),
-        _ => None,
-    }
-}
-
-// ── [T4 §4] @image 行交互：hover 目标解析 + 点击 open ────────────────────
-
-/// Moved 事件 hover 目标解析（§4.4）：命中 [`ImageLineHit`] → [`ImageHoverState`]；
-/// 未命中或遮挡（`mouse_router::is_occluded`）→ None（恢复默认渲染）。
-/// 纯函数（mod_test 直调锁定）——handler 只做「命中集合变化才写」的胶水。
-fn hover_target_for(
-    hits: &[ImageLineHit],
-    x: u16,
-    y: u16,
-    occluded: bool,
-) -> Option<ImageHoverState> {
-    if occluded {
-        return None;
-    }
-    hits.iter()
-        .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
-        .map(|h| ImageHoverState {
-            row: h.row,
-            slot_index: h.slot_index,
-            logical_idx: h.logical_idx,
-            vm_hash: h.vm_hash,
-            path: h.path.clone(),
-            size_text: h.size_text.clone(),
-        })
-}
-
-/// open 命令构建失败原因（错误文本不含路径细节，RUST-ERROR-001）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpenImageError {
-    /// 非 macOS 平台尚未验证（§4.6：安全降级，仅记录日志不 spawn）。
-    UnsupportedPlatform,
-    /// T5 校验失败（非常规文件 / 扩展名 / 大小上限等）。
-    ValidationFailed,
-}
-
-/// 构建打开图片的 open 命令（参数化，**禁止 shell 拼接**，§6.2-6）。
-///
-/// 平台选型（§4.2）：macOS `open`；Windows `cmd /C start`、Linux `xdg-open`
-/// 未验证前返回 [`OpenImageError::UnsupportedPlatform`]（§4.6 安全降级——
-/// 不 spawn）。打开前过 T5 校验（常规文件 + 扩展名 + 大小上限；§4.4）。
-/// stdout/stderr 重定向 null——detach 不阻塞 TUI、不继承终端。
-///
-/// [F8 残余窗口] 调用方传 canonical 路径（T4 `ImageLineHit.path`，render.rs
-/// 注释），但 `open` 命令本身按路径打开：T5 校验与 spawn 之间文件仍可能被
-/// 替换（OS 语义固有，无法经 fd 传递到外部命令）——登记为低危残余窗口。
-pub(crate) fn build_open_command(path: &str) -> Result<std::process::Command, OpenImageError> {
-    build_open_command_with(path, "open")
-}
-
-/// [`build_open_command`] 的二进制名注入版（P2-7：成功 spawn 路径测试
-/// 注入 `/bin/echo` 等，不依赖真实 Finder；生产路径恒为 `"open"`）。
-fn build_open_command_with(
-    path: &str,
-    open_bin: &str,
-) -> Result<std::process::Command, OpenImageError> {
-    if !cfg!(target_os = "macos") {
-        return Err(OpenImageError::UnsupportedPlatform);
-    }
-    crate::kit::image_safety::validate_image_file(std::path::Path::new(path))
-        .map_err(|_| OpenImageError::ValidationFailed)?;
-    let mut cmd = std::process::Command::new(open_bin);
-    cmd.arg(path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    Ok(cmd)
-}
-
-/// 点击 open 完整链路（§4.4）：T5 校验 → 参数化 Command → detach spawn。
-/// 校验失败 → NOTIFICATION 提示（paste-truncated 通知模式）；未支持平台
-/// （非 macOS）→ 仅记录日志不 spawn（§4.6 安全降级）。返回是否成功 spawn。
-pub(crate) fn try_open_image(path: &str) -> bool {
-    match build_open_command(path) {
-        Ok(mut cmd) => match cmd.spawn() {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::warn!(error = %e, "image open: spawn failed");
-                false
-            }
-        },
-        Err(OpenImageError::UnsupportedPlatform) => {
-            tracing::warn!("image open: platform not supported (macOS verified only)");
-            false
-        }
-        Err(OpenImageError::ValidationFailed) => {
-            show_open_failed_notification();
-            false
-        }
-    }
-}
-
-/// 打开失败状态栏提示（参照 submit_blocked 的 paste-truncated 通知模式）。
-fn show_open_failed_notification() {
-    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
-        message: crate::i18n::tr("user-image-open-failed"),
-        until: std::time::Instant::now() + std::time::Duration::from_secs(3),
-    });
-    crate::kit::atoms::RENDER_HEARTBEAT
-        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-}
-
-/// 对 VM 应用手动折叠覆盖：写 fold + user_modified + 重算 hash（G1）。
-/// 调用方必须先写 FOLD_OVERRIDES 覆盖表——快照重建（push_view_models）后
-/// 由折叠 pass 依据覆盖表恢复 fold/user_modified，手动选择跨流式保持。
-fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
-    match vm {
-        TuiRenderUnit::TuiAssistantBubble(b) => {
-            if let Some(r) = b.reasoning.as_mut() {
-                r.fold = fold;
-                b.recompute_hash();
-            }
-        }
-        TuiRenderUnit::TuiToolCard(t) => {
-            t.fold = fold;
-            t.user_modified = true;
-            t.recompute_hash();
-        }
-        TuiRenderUnit::TuiSubAgentGroup(g) => {
-            g.fold = fold;
-            g.user_modified = true;
-            g.recompute_hash();
-        }
-        TuiRenderUnit::TuiAskUserBlock(a) => {
-            a.fold = fold;
-            a.user_modified = true;
-            a.recompute_hash();
-        }
-        _ => {}
-    }
-}
-
-/// [Slice 4 §6.8] 取出 pending 的 interaction block（§6.8）——选项导航/提交
-/// 的目标。completed（结果行）不在此列（走折叠切换）。
-fn pending_interaction_of(vm: &TuiRenderUnit) -> Option<&TuiAskUserBlock> {
-    match vm {
-        TuiRenderUnit::TuiAskUserBlock(a) if a.pending => Some(a),
-        _ => None,
-    }
-}
-
-/// [Slice 4 §6.8] interaction option 循环切换（Tab/← 后退、→ 前进；首末回绕）。
-/// `count` 调用方已归一化 ≥1。后退在首项回绕到末项（循环语义——浏览器 Tab
-/// 直觉；不能用 `saturating_sub`——首项会卡死无法回绕）。
-fn cycle_interaction_option(current: usize, count: usize, back: bool) -> usize {
-    debug_assert!(count >= 1);
-    if back {
-        (current + count - 1) % count
-    } else {
-        (current + 1) % count
-    }
-}
-
-/// [Slice 4 §6.8] 提交 interaction block 的指定选项（双轨 D5：与弹窗/面板
-/// 同一响应通道——HITL_RESPONSE_TX / ASK_USER_RESPONSE_TX；InteractionResolved
-/// 结果回写由 ask_user_action / hitl_response 消费者发出）。同时关闭模态层
-/// （HITL 弹窗 / AskUser 面板），保持双轨一致。request_id 缺失时 no-op。
-fn submit_interaction_option(block: &TuiAskUserBlock, option_index: usize) {
-    let Some(id_str) = block.request_id.clone() else {
-        return;
-    };
-    match block.kind {
-        InteractionKind::Permission => {
-            // D6：HITL 只渲染 [Allow once] [Deny] 两选项（[Always allow] 为
-            // 协议依赖项，记入 active spec）。
-            let action = if option_index == 0 {
-                crate::kit::hitl_response::HitlResponseAction::Approve {
-                    request_id_str: id_str,
-                }
-            } else {
-                crate::kit::hitl_response::HitlResponseAction::Reject {
-                    request_id_str: id_str,
-                }
-            };
-            if let Some(tx) = crate::kit::atoms::HITL_RESPONSE_TX.get() {
-                let _ = tx.send(action);
-            }
-            crate::kit::popup_overlay::close_popup();
-        }
-        InteractionKind::AskUser => {
-            let label = block.options.get(option_index).cloned().unwrap_or_default();
-            let answers = build_inline_answers(&label);
-            if let Some(tx) = crate::kit::atoms::ASK_USER_RESPONSE_TX.get() {
-                let _ = tx.send(crate::kit::ask_user_action::AskUserResponseAction::Submit {
-                    request_id_str: id_str,
-                    answers,
-                });
-            }
-            // 关闭面板 + 清 payload（与面板提交路径一致）
-            crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::AskUser);
-            *crate::kit::atoms::ASK_USER_PENDING.state().write() = None;
-            *crate::kit::atoms::ASK_USER_REQUEST_ID.state().write() = None;
-        }
-    }
-}
-
-/// [Slice 4 §6.8] AskUser inline 快速回答的 answers map：首问 = 选中 label，
-/// 其余问题空字符串（协议结构完整——单选 string 类型，面板的空答案先例
-/// `json!("")`）。从 ASK_USER_PENDING 读首问 id（面板仍打开；防御分支返回
-/// 空 map，提交失败不 panic）。
-fn build_inline_answers(label: &str) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    if let Some(au) = crate::kit::atoms::ASK_USER_PENDING.state().read().as_ref() {
-        for (i, q) in au.questions.iter().enumerate() {
-            let val = if i == 0 && !label.is_empty() {
-                serde_json::json!(label)
-            } else {
-                serde_json::json!("")
-            };
-            map.insert(q.id.clone(), val);
-        }
-    }
-    serde_json::Value::Object(map)
-}
-
-/// [Slice 2/4] 对焦点 entry 应用折叠切换（Enter Collapsed↔Expanded /
-/// Space → Preview）：写 FOLD_OVERRIDES + 当帧快照 COW set + 重算 hash。
-/// 无折叠能力的 entry 消费但不动作（避免误触发送）。
-/// 调用方保证 `idx < snapshot.items.len()`（焦点失效已在调用点处理）。
-fn apply_fold_toggle(
-    snapshot: &mut ViewModelsSnapshot,
-    idx: usize,
-    next_is_preview: bool,
-) -> EventResult {
-    let Some((fold_key, current_fold)) = fold_key_of(&snapshot.items[idx]) else {
-        // 无折叠能力的 entry（纯文本 assistant / user）：消费但不切换，
-        // 避免误触发送。
-        return EventResult::Consumed;
-    };
-    // [Slice 2] §6.7：subagent Enter → 打开详情 pane（不切折叠——subagent
-    // 折叠恒 Collapsed 是 §7 表裁决，fold_key_of 不动）；Tool/Reasoning 的
-    // Enter 语义不变。写 SELECTED_SUBAGENT_ID 供详情面板按 id 从 VIEW_MODELS
-    // 扫描嵌套消息。
-    if !next_is_preview && let FoldKey::SubAgent(agent_id) = &fold_key {
-        *SELECTED_SUBAGENT_ID.state().write() = Some(agent_id.clone());
-        crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::SubAgentDetail);
-        return EventResult::Consumed;
-    }
-    let next = if next_is_preview {
-        if current_fold == FoldState::Preview {
-            FoldState::Collapsed
-        } else {
-            FoldState::Preview
-        }
-    } else if current_fold == FoldState::Collapsed {
-        FoldState::Expanded
-    } else {
-        FoldState::Collapsed
-    };
-    // 持久覆盖表：快照重建（push_view_models）后由折叠 pass 恢复，
-    // 手动选择跨流式/跨 turn 保持（spec §7）。
-    FOLD_OVERRIDES.state().write().insert(fold_key, next);
-    // 应用到当帧快照（COW set + 重算 hash）
-    let mut updated = snapshot.items[idx].clone();
-    apply_fold_override(&mut updated, next);
-    snapshot.items.set(idx, updated);
-    snapshot.generation = snapshot.generation.wrapping_add(1);
-    EventResult::Consumed
-}
-
-/// 计算可滚动内容的视觉高度。
-///
-/// 视觉行索引和滚动偏移均为 `usize`；仅终端几何坐标保留 `u16`，避免长消息在
-/// 65,535 行处截断而无法滚到底部。
-fn total_visual_rows(core_rows: usize, footer_rows: usize, is_loading: bool) -> usize {
-    if core_rows == 0 && footer_rows == 0 {
-        usize::from(is_loading)
-    } else {
-        core_rows
-            .saturating_add(footer_rows)
-            .saturating_add(scroll::SCROLL_PADDING)
-    }
-}
-
-// ── 渲染性能诊断（PERI_RENDER_TIMING=1 启用）──────────────────────────────
-
-fn render_timing_enabled() -> bool {
-    thread_local! {
-        static ENABLED: bool = std::env::var("PERI_RENDER_TIMING")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-    }
-    ENABLED.with(|&e| e)
-}
-
-/// 如果启用诊断，打印阶段耗时。
-#[track_caller]
-fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
-    if render_timing_enabled() {
-        let elapsed_us = start.elapsed().as_micros();
-        let extra = detail.map(|d| format!(" | {d}")).unwrap_or_default();
-        tracing::info!(target: "perf.render", "[{phase}] {elapsed_us}μs{extra}");
-    }
-}
-
-// ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
-//
-// [Why] 旧版 lines_cache / wrap_map_cache / total_rows_cache 以 (vm_generation, width)
-// 为 key，但 push_view_models 每个 token 都 generation += 1，流式期间缓存永远不命中，
-// 每个 token 都触发 O(N×W) 的全量 markdown 解析 + wrap_map 重建 + line_count → CPU 拉满。
-//
-// 现在按 VM 的 content_hash 分片：只有正在流式（hash 变化）的那个 VM 重新解析 markdown
-// + 重建 wrap_map，其余 VM 直接 Arc::clone 复用。流式单次成本从 O(N×W) 降至 O(W)。
-//
-// content_hash 由 build_view_models / TuiAssistantBubble::recompute_hash 维护，
-// 已覆盖 text / reasoning.text / reasoning.collapsed / tool duration(secs) 等可变字段。
-#[derive(Clone, Default)]
-struct VmCacheSlot {
-    /// 上次渲染时 VM 的 content_hash。变化时（流式追加 text、折叠/展开 reasoning、
-    /// tool duration 跨秒）触发 markdown 重新解析 + wrap_map 重建。
-    content_hash: u64,
-    /// 上次渲染时的视宽。width 变化（窗口 resize）时 wrap 规则改变，必须重建。
-    width: u16,
-    /// 上次渲染时的 palette 关键字段哈希。主题切换时 hash 变化 → 强制重建所有 VM 的 markdown 渲染。
-    palette_key: u64,
-    /// 上次渲染时的 LANG_VERSION。语言切换时递增 → 强制重建（md 复制按钮文本依赖 i18n）。
-    lang_key: u64,
-    /// 该 VM 解析后的所有 Line（markdown + reasoning + tool card 渲染结果）。
-    lines: Arc<Vec<Line<'static>>>,
-    /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
-    wrap_map: Arc<Vec<WrappedLineInfo>>,
-    /// 该 VM 占据的视觉行数（= wrap_map 末项 visual_end）。
-    visual_rows: usize,
-    /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
-    /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
-    markdown_cache: crate::kit::markdown::MarkdownRenderCache,
-    /// md 复制按钮布局（slot 内逻辑索引 + 列范围）。None = 该 VM 无按钮
-    /// （非 AssistantBubble / 空文本 / 宽度不足）。rebuild 时随 lines 重建。
-    copy_button: Option<render::CopyButtonInfo>,
-    /// [Slice 4 §6.8] pending interaction block 的选项行布局（slot 内逻辑行
-    /// 与列区间）。None = 非 pending interaction。rebuild 时随 lines 重建，
-    /// 供视口 post-pass 应用「当前项」高亮与点击热区。
-    interaction: Option<render::InteractionLayout>,
-    /// [T4 §4] @image 行渲染期信息（slot 内逻辑索引 + 展示路径 + 受管理标志）。
-    /// rebuild 时随 lines 重建，供点击/hover 屏幕命中映射。
-    image_lines: Vec<ImageLineInfo>,
-    /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
-    /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
-    anim_frame: u64,
-}
-
-/// md 复制按钮的屏幕点击区域（每帧由渲染 body 构建，点击 handler 实时读取）。
-/// [Why] 与 keepgoing 按钮同模式：事件在上帧渲染完成后分发，读取最近一帧的位置；
-/// 存屏幕绝对坐标（含 scroll_y / area 偏移换算），handler 无需再查 wrap_map。
-struct CopyButtonHit {
-    /// 按钮所在屏幕行（绝对坐标）。
-    row: u16,
-    /// 按钮文本列范围（屏幕绝对坐标，[x_start, x_end)）。
-    x_start: u16,
-    x_end: u16,
-    /// 所属 VM 在 VIEW_MODELS.items 中的索引——点击时读取其 text 复制。
-    slot_index: usize,
-    /// 渲染时该 VM 的 content_hash——点击时校验索引仍指向同一 VM
-    /// （Rewind / Reset 可能增删 items 导致索引错位）。
-    vm_hash: u64,
-}
-
-/// [Slice 4 §6.8] interaction option 的屏幕点击区域（每帧由渲染 body 构建，
-/// 点击 handler 实时读取——与 CopyButtonHit 同模式；事件在上帧渲染完成后
-/// 分发，读取最近一帧的位置）。单击 = 提交该选项（按钮语义）。
-struct InteractionOptionHit {
-    /// 选项所在屏幕行（绝对坐标）。
-    row: u16,
-    /// 选项文本列范围（屏幕绝对坐标，[x_start, x_end)；垂直排列/超宽时
-    /// 整行命中）。
-    x_start: u16,
-    x_end: u16,
-    /// 所属 VM 在 VIEW_MODELS.items 中的索引——点击时校验仍指向同一 VM。
-    slot_index: usize,
-    /// 渲染时该 VM 的 content_hash——点击时校验（Rewind / Reset 索引错位防御）。
-    vm_hash: u64,
-    /// 选项索引——提交时选择哪个 option。
-    option_index: usize,
-}
-
-/// @image 行的屏幕点击区域（每帧由渲染 body 构建，点击/hover handler 实时读取
-/// ——与 CopyButtonHit 同模式；事件在上帧渲染完成后分发，读取最近一帧的位置）。
-/// 存屏幕绝对坐标（含 scroll_y / area 偏移换算），handler 无需再查 wrap_map。
-struct ImageLineHit {
-    /// meta 行所在屏幕行（绝对坐标）。
-    row: u16,
-    /// 命中列范围（屏幕绝对坐标，[x_start, x_end)；content 区域内整行命中，
-    /// 不含滚动条列——滚动条点击不被误吞）。
-    x_start: u16,
-    x_end: u16,
-    /// 所属 VM 在 VIEW_MODELS.items 中的索引——点击时校验仍指向同一 VM
-    /// （Rewind / Reset 可能增删 items 导致索引错位）。
-    slot_index: usize,
-    /// 渲染时该 VM 的 content_hash——点击时校验（同 CopyButtonHit 防御）。
-    vm_hash: u64,
-    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标。
-    path: String,
-    /// 受管理目录内（~/.peri/images）→ 自动预览候选。本任务（T4）仅传递
-    /// 给 T7 预览资格判定，暂无读取点。
-    #[allow(dead_code)]
-    managed: bool,
-    /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
-    /// hover 时不再 stat（§4.4 stat 时机取舍）。
-    size_text: String,
-    /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）——hover 渲染定位。
-    logical_idx: usize,
-}
-
-/// @image 行 hover 状态（§4.4）：Moved 事件命中变化时由 handler 写入
-/// [`IMAGE_HOVER`]，渲染 body 读取决定该 meta 行是否显示绝对路径 + accent
-/// 高亮（移出/遮挡 → None 恢复默认渲染）。字段与 [`ImageLineHit`] 对齐
-/// （渲染定位 + 陈旧校验）。
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ImageHoverState {
-    /// 命中时鼠标所在屏幕行（绝对坐标）。
-    pub(crate) row: u16,
-    /// 所属 VM 在 VIEW_MODELS.items 中的索引。
-    pub(crate) slot_index: usize,
-    /// slot 内逻辑行索引——渲染定位（滚动后 hover 高亮跟随行）。
-    pub(crate) logical_idx: usize,
-    /// 渲染时该 VM 的 content_hash（陈旧校验）。
-    pub(crate) vm_hash: u64,
-    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——hover 行显示。
-    pub(crate) path: String,
-    /// 重建期算好的大小文案（B/KB/MB 或 missing）。
-    pub(crate) size_text: String,
-}
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
@@ -953,122 +410,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let total_visual_rows =
         total_visual_rows(core_total_visual_rows, footer_visual_rows, is_loading);
 
-    // ── keepgoing 按钮点击（footer summary 行右侧）──
-    // [Why] 必须注册在 scroll handler 之前：两者同 Global+High，同优先级按注册序分发，
-    // scroll::handle_event 对消息区内 Down(Left) 一律 Consumed（文本选中起点）——
-    // 若在其后注册，按钮点击会被 scroll handler 截断、永远收不到。
-    // 命中 → Consumed（scroll handler 不处理该点击，不会误设选区起点）；
-    // 未命中 → Ignored（滚动/选区逻辑照常）。
-    // [TRAP] 闭包捕获 State 句柄（keepgoing_rect）而非帧快照——每帧 write_no_update
-    // 更新 rect，滚动/布局变化后坐标仍准确；事件在上帧渲染完成后分发，读取的
-    // 是最近一帧的按钮位置。
-    {
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 status_bar / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            // 命中检测：点击坐标落在按钮屏幕区域内 (y, x_start, width)
-            // [Why 先于防抖] 防抖期内点击禁用按钮也应 Consumed——否则事件落到
-            // scroll handler 的文本选区逻辑（消息区内 Down(Left) 设置选区锚点）。
-            let Some((by, bx, bw)) = *keepgoing_rect.read() else {
-                return EventResult::Ignored;
-            };
-            let (x, y) = (mouse.column, mouse.row);
-            if y != by || x < bx || x >= bx.saturating_add(bw) {
-                return EventResult::Ignored;
-            }
-            // 防抖：防抖期内按钮渲染为禁用样式，点击被吞掉但不触发提交
-            let now = Instant::now();
-            let blocked = KEEPGOING_BLOCKED_UNTIL
-                .state()
-                .read()
-                .is_some_and(|until| now < until);
-            if blocked {
-                return EventResult::Consumed;
-            }
-            // 触发 keepgoing 提交：发送空白 user prompt（服务端不插入 user 消息，仅继续 loop）
-            if let Some(tx) = SUBMIT_TX.get() {
-                let _ = tx.send(SubmitRequest::KeepGoing);
-            }
-            // 防抖：冷却期内按钮禁用（渲染为 muted 样式，见 build_footer_lines）
-            *KEEPGOING_BLOCKED_UNTIL.state().write() = Some(now + KEEPGOING_DEBOUNCE);
-            // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
-            tokio::spawn(async move {
-                tokio::time::sleep(KEEPGOING_DEBOUNCE).await;
-                *KEEPGOING_BLOCKED_UNTIL.state().write() = None;
-                RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
-            });
-            EventResult::Consumed
-        });
-    }
+    handlers::register_keepgoing_click(&mut hooks, keepgoing_rect);
 
-    // ── md 复制按钮点击（复制整条 AI 回复的原始 markdown）──
-    // [Why] 注册顺序与 keepgoing 相同：必须在 scroll handler 之前——scroll::handle_event
-    // 对消息区内 Down(Left) 一律 Consumed（文本选中起点），在其后注册收不到点击。
-    // 命中 → Consumed（滚动/选区逻辑不处理该点击，不会误设选区起点）；
-    // 未命中 → Ignored（滚动/选区逻辑照常）。
-    // [Why 每次渲染重建] ratatui-kit 的 use_event_handler 闭包每帧重新注册（当帧值），
-    // copy_buttons State 由渲染 body 后部 write_no_update 更新——事件分发时读到的
-    // 是最近一帧的按钮位置（与 keepgoing 一致）。
-    {
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 status_bar / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            let (x, y) = (mouse.column, mouse.row);
-            let hits = copy_buttons.read();
-            let Some(hit) = hits
-                .iter()
-                .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
-            else {
-                return EventResult::Ignored;
-            };
-            // 读取最新 VM 文本：校验 hash 防 Rewind/Reset 后索引错位。
-            // [LOW-5] assistant 用稳定身份 hash 比对（排除时变 duration——
-            // 运行中 bubble 的 content_hash 每秒漂移，跨秒点击偶发拒绝）；
-            // 其余类型沿用 content_hash。
-            let snapshot = view_models.read();
-            let matched = snapshot
-                .items
-                .get(hit.slot_index)
-                .is_some_and(|vm| match vm {
-                    TuiRenderUnit::TuiAssistantBubble(b) => {
-                        TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
-                            == hit.vm_hash
-                    }
-                    _ => vm.content_hash() == hit.vm_hash,
-                });
-            let text = if matched {
-                match &snapshot.items[hit.slot_index] {
-                    TuiRenderUnit::TuiAssistantBubble(d) => Some(d.text.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            drop(snapshot);
-            if let Some(text) = text {
-                copy_to_clipboard(text.clone());
-                mark_copy_message(text.chars().count());
-            }
-            // 命中按钮（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
-            EventResult::Consumed
-        });
-    }
+    handlers::register_md_copy_click(&mut hooks, copy_buttons, view_models);
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
@@ -1077,420 +421,47 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let last_scrolled_at = hooks.use_state(|| 0usize);
     // 粘性吸底开关：默认跟随；用户向上滚动即退出（浏览模式），滚回底部才恢复。
     let follow_bottom = hooks.use_state(|| true);
+    handlers::register_new_output_indicator_click(
+        &mut hooks,
+        new_output_rect,
+        follow_bottom,
+        scroll_state,
+    );
 
-    // ── `↓ New output` 指示器点击（§8.1：滚回底部并恢复跟随）──
-    // [Why 注册顺序] 必须注册在 scroll handler（下方）之前：scroll::handle_event
-    // 对消息区内 Down(Left) 一律 Consumed（文本选中起点）——在其后注册收不到点击。
-    // 命中 → Consumed（滚动/选区逻辑不处理该点击）；未命中 → Ignored。
-    // [TRAP] 闭包捕获 State 句柄（new_output_rect）而非帧快照——每帧
-    // write_no_update 更新 rect，滚动/布局变化后坐标仍准确。
-    {
-        let new_output_rect_state = new_output_rect;
-        let follow_state = follow_bottom;
-        let scroll_state_for_indicator = scroll_state;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 keepgoing / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            let Some((ry, rx_start, rx_end)) = *new_output_rect_state.read() else {
-                return EventResult::Ignored;
-            };
-            let (x, y) = (mouse.column, mouse.row);
-            if y != ry || x < rx_start || x >= rx_end {
-                return EventResult::Ignored;
-            }
-            // 恢复跟随 + 滚到底（渲染每帧 clamp scroll_to_bottom 的 usize::MAX
-            // 哨兵到当帧 max_scroll——与 End 键同一路径）。
-            *follow_state.write() = true;
-            scroll_state_for_indicator
-                .write_no_update()
-                .scroll_to_bottom();
-            EventResult::Consumed
-        });
-    }
+    handlers::register_interaction_option_click(&mut hooks, interaction_rects, view_models);
 
-    // ── [Slice 4 §6.8] interaction option 点击（提交该选项，按钮语义）──
-    // [Why 注册顺序] 与 keepgoing/md 复制/new output 一致：必须在 scroll
-    // handler 之前——scroll::handle_event 对消息区内 Down(Left) 一律 Consumed
-    // （文本选中起点），在其后注册收不到点击。命中 → Consumed；未命中 → Ignored。
-    {
-        let interaction_rects_state = interaction_rects;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 keepgoing / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            let (x, y) = (mouse.column, mouse.row);
-            let hits = interaction_rects_state.read();
-            let Some(hit) = hits
-                .iter()
-                .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
-            else {
-                return EventResult::Ignored;
-            };
-            // 校验 VM 身份（Rewind/Reset 索引错位防御）——与 md 复制按钮同模式。
-            let vm_guard = view_models.read();
-            let block = vm_guard
-                .items
-                .get(hit.slot_index)
-                .filter(|vm| vm.content_hash() == hit.vm_hash)
-                .and_then(pending_interaction_of)
-                .cloned();
-            drop(vm_guard);
-            if let Some(block) = block {
-                submit_interaction_option(&block, hit.option_index);
-            }
-            // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
-            EventResult::Consumed
-        });
-    }
+    handlers::register_image_click(&mut hooks, image_rects, view_models);
 
-    // ── [T4 §4] @image 行点击（open 图片文件）──
-    // [Why 注册顺序] 与 keepgoing/md 复制/interaction 一致：必须在 scroll
-    // handler 之前——scroll::handle_event 对消息区内 Down(Left) 一律 Consumed
-    // （文本选中起点），在其后注册收不到点击。命中 → Consumed；未命中 → Ignored。
-    // 打开前过 T5 校验（常规文件 + 扩展名 + 大小上限）；校验失败 → NOTIFICATION
-    // 提示（paste-truncated 通知模式）。open 用参数化 Command（§6.2-6 禁止 shell
-    // 拼接），macOS 验证；其他平台未验证前仅记录日志不 spawn（§4.6 安全降级）。
-    {
-        let image_rects_for_click = image_rects;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 keepgoing / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            let (x, y) = (mouse.column, mouse.row);
-            let hits = image_rects_for_click.read();
-            let Some(hit) = hits
-                .iter()
-                .find(|h| y == h.row && x >= h.x_start && x < h.x_end)
-            else {
-                return EventResult::Ignored;
-            };
-            // 校验 VM 身份（Rewind/Reset 索引错位防御）——同 md 复制按钮模式。
-            let vm_guard = view_models.read();
-            let matched = vm_guard.items.get(hit.slot_index).is_some_and(|vm| {
-                matches!(vm, TuiRenderUnit::TuiUserBubble(_)) && vm.content_hash() == hit.vm_hash
-            });
-            drop(vm_guard);
-            if matched {
-                try_open_image(&hit.path);
-            }
-            // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
-            EventResult::Consumed
-        });
-    }
+    handlers::register_image_hover(&mut hooks, image_rects);
 
-    // ── [T4 §4] @image 行 hover（绝对路径 + accent 高亮）──
-    // [Why 注册顺序] 注册在 scroll handler 之前（scroll.rs 对 Moved 直接
-    // Ignored，顺序在其前即可收到）；Moved 恒 Ignored，不消费事件。
-    // [防风暴 §4.6] 仅当「命中集合变化」时 write（触发重渲染）；命中不变
-    // 的移动 no-op——防高频 Moved 每帧全量重渲染消息区。
-    {
-        let image_rects_for_hover = image_rects;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Moved {
-                return EventResult::Ignored;
-            }
-            let new_state = hover_target_for(
-                &image_rects_for_hover.read(),
-                mouse.column,
-                mouse.row,
-                mouse_router::is_occluded(),
-            );
-            // [TRAP] 先 copy 出当前值 drop guard 再 write——parking_lot 同线程
-            // read+write 冲突会 panic。
-            let current = IMAGE_HOVER.state().read().clone();
-            if current != new_state {
-                *IMAGE_HOVER.state().write() = new_state;
-            }
-            EventResult::Ignored
-        });
-    }
-
-    // ── entry 单击展开（仅首行 header；与键盘 Enter 同语义）──
-    // [Why 注册顺序] 必须在 scroll handler 之前：scroll::handle_event 对消息区内
-    // Up(Left) 也会消费（选区复制/清锚点），在其后注册收不到单击。放在
-    // interaction option（Down）之后即可——两者事件类型不重叠。
-    // [语义] 单击 = Down 冻结 + 手势从未升级（gesture 保持 Pending 到 Up）：
-    // Up 只消费 Down 时冻结的结果（entry_hit），不再做坐标换算与反查。命中
-    // entry 首行 → 设置 entry 焦点 + 折叠切换：tool/reasoning/subagent/completed
-    // interaction toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent
-    // 打开详情面板；pending interaction 首行仅聚焦不提交（键盘 Enter 的提交
-    // 是明确按键语义）。未命中（手势已升级/滚动条列/非首行/坐标外）→
-    // Ignored，选区逻辑照常。
     // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
     // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
     let focused_entry_atom = hooks.use_atom(&FOCUSED_ENTRY);
-    {
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Mouse(mouse) = event else {
-                return EventResult::Ignored;
-            };
-            if mouse.kind != MouseEventKind::Up(MouseButton::Left) {
-                return EventResult::Ignored;
-            }
-            // 弹窗/面板遮挡时不响应（与 keepgoing / scroll handler 一致）
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            let Some(area) = area_rect else {
-                return EventResult::Ignored;
-            };
-            // [单击判定] 判定收敛为纯函数 entry_click_decision（mod_test 直调
-            // 锁定）：单击 = Down 冻结 + 手势从未升级（gesture 保持 Pending
-            // 到 Up）——升级瞬间 scroll.rs Drag 分支已复位 gesture 并置
-            // text_sel.dragging（终端按下后任何微移都会报 Drag 事件，判定
-            // 前移到 Drag 分支后，手抖保持在容差内即 Pending 原样保留）。
-            // Up 只消费 Down 时冻结的 entry_hit，不再比较 Down/Up 坐标、不
-            // 读 text_sel.dragging、不做 entry_click_target 反查——滚动
-            // （scroll_y > 0）/ 网格前缀（area.x > 0）的坐标正确性由 Down
-            // 冻结保证。防御检查（area 行界 / 滚动条列）基于 Up 坐标，见
-            // 函数文档 [防御 Up 坐标]。
-            // [TRAP] gesture.read() 返回临时 guard，as_ref() 的借用只在语句
-            // 内有效——命中路径的写入（FOCUSED_ENTRY / gesture）发生在判定
-            // 返回之后（guard 已 drop），parking_lot 同线程 read+write 冲突
-            // 安全。
-            let Some(slot) = entry_click_decision(
-                gesture.read().as_ref(),
-                mouse.row,
-                area,
-                scroll::is_scrollbar_column(mouse.column, area),
-            ) else {
-                return EventResult::Ignored;
-            };
-            // ── 命中 entry 首行：设焦点 + 折叠动作 ──
-            // 与键盘 Alt+Up/Down 一致：焦点可落在任意 entry，FOCUSED_ENTRY
-            // 的 key 仅 foldable 有值（无折叠能力 entry 合法 key: None）；
-            // 重置 interaction option 到首项。
-            tracing::trace!(target: "frozen_diag", slot, "click: hit entry, setting focus");
-            *interaction_option.write() = 0;
-            // 持 VIEW_MODELS 写锁期间不再读其他可能被同一帧写入的 atom
-            //（FOLD_OVERRIDES / SELECTED_SUBAGENT_ID 是独立锁）——键盘同模式。
-            tracing::trace!(target: "frozen_diag", slot, "click: acquiring VIEW_MODELS write lock");
-            let vm_state_ref = VIEW_MODELS.state();
-            let mut snapshot = vm_state_ref.write();
-            tracing::trace!(target: "frozen_diag", slot, "click: got VIEW_MODELS write lock");
-            if slot >= snapshot.items.len() {
-                // 快照缩短（reset/rewind）——焦点失效，退出导航（键盘同模式）
-                *FOCUSED_ENTRY.state().write() = None;
-                // 手势已消费：所有命中 return 路径统一先复位 gesture
-                //（dispatch 顺序执行，Consumed 后 scroll.rs Up 分支不运行）
-                *gesture.write_no_update() = None;
-                return EventResult::Consumed;
-            }
-            // 持写锁内派生 key（桥线程可并发写 VIEW_MODELS——锁外派生会读到
-            // 漂移索引；key 与索引一致性由同一快照保证）。
-            set_entry_focus(&snapshot, slot);
-            // pending interaction：Enter 语义是提交 option（鼠标不承担）；
-            // 首行点击仅聚焦，不提交不折叠。
-            if pending_interaction_of(&snapshot.items[slot]).is_some() {
-                *gesture.write_no_update() = None;
-                return EventResult::Consumed;
-            }
-            // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
-            text_sel.write().clear();
-            *gesture.write_no_update() = None;
-            let result = apply_fold_toggle(&mut snapshot, slot, false);
-            tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
-            result
-        });
-    }
+    handlers::register_entry_click(&mut hooks, area_rect, gesture, interaction_option, text_sel);
 
     // 闭包持 clone，原值继续在 render body 内用。
     // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染
     // 以相同相对顺序调用——use_event_handler 只是占顺序槽，位置调整无状态错位。
-    {
-        let wrap_map_for_closure = Arc::clone(&concat_wrap_map_arc);
-        let slot_arcs_for_closure = Arc::clone(&slot_arcs_arc);
-        let slot_offsets_for_closure = Arc::clone(&slot_offsets_arc);
-        let view_models_for_closure = view_models;
-        let grid_for_closure = grid;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            // [D3 §9] 语义复制：事件时点读快照 VM 列表（im::Vector clone O(1)，
-            // 只读不改——与 parking_lot 读锁安全共存；选区提取需要 VM 类型
-            // 分派语义文本，不能只靠已渲染行）。
-            let vms_snapshot = view_models_for_closure.read().items.clone();
-            scroll::handle_event(
-                &event,
-                area_rect,
-                vis_width,
-                &scroll_state,
-                &scroll_throttle,
-                &text_sel,
-                &gesture,
-                &drag_throttle,
-                &wrap_map_for_closure,
-                &slot_arcs_for_closure,
-                &slot_offsets_for_closure,
-                &scrollbar_fields,
-                &scrollbar_drag,
-                &follow_bottom,
-                Some(&vms_snapshot),
-                Some(grid_for_closure),
-            )
-        });
-    }
+    handlers::register_scroll_events(
+        &mut hooks,
+        area_rect,
+        vis_width,
+        scroll_state,
+        scroll_throttle,
+        text_sel,
+        gesture,
+        drag_throttle,
+        scrollbar_fields,
+        scrollbar_drag,
+        follow_bottom,
+        view_models,
+        grid,
+        Arc::clone(&concat_wrap_map_arc),
+        Arc::clone(&slot_arcs_arc),
+        Arc::clone(&slot_offsets_arc),
+    );
 
-    // ── entry 焦点导航（Slice 2 键盘语义层；selection border 视觉归 Slice 3）──
-    // Alt+Up/Down 移动 entry 焦点；焦点激活时 Enter 切 Collapsed/Expanded、
-    // Space 切 Preview（写 FOLD_OVERRIDES + user_modified）；Esc 退出导航。
-
-    // 键盘：Alt+Up/Down 移焦点；Enter/Space 切折叠（写覆盖表 + 当帧快照）；
-    // Tab/←/→ 切换 pending interaction 选项、Enter 提交（§6.8）；
-    // Esc 单层取消（退出导航）。仲裁见 focus_router::message_nav_accepts。
-    {
-        let option_state = interaction_option;
-        hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            if mouse_router::is_occluded() {
-                return EventResult::Ignored;
-            }
-            // Esc：仅焦点激活时消费（单层取消，退出导航）；未激活时放行给
-            // root handler（双击 Esc → Rewind 等既有语义不受影响）。
-            // [TRAP] 判定用临时 read guard（语句末 drop）——同线程随后 write
-            // 同一 atom，parking_lot read+write 冲突会 panic。
-            if key.code == KeyCode::Esc
-                && FOCUSED_ENTRY.state().read().is_some()
-                && matches!(
-                    focus_router::active_layer(),
-                    focus_router::FocusLayer::Input
-                )
-            {
-                // [S2 单一事实源] 清除焦点事实源本身（slot+key 一次清除）；
-                // §7 免疫是读者派生行为——读者读 FOCUSED_ENTRY 的 key 消失
-                // 即恢复自动合并，无需在此同步清除。
-                *FOCUSED_ENTRY.state().write() = None;
-                return EventResult::Consumed;
-            }
-            let focused = FOCUSED_ENTRY.state().read().is_some();
-            if !focus_router::message_nav_accepts(&key, focused) {
-                return EventResult::Ignored;
-            }
-            let alt = key.modifiers.contains(KeyModifiers::ALT);
-            match key.code {
-                KeyCode::Up | KeyCode::Down if alt => {
-                    // [TRAP] 先 copy 出值 drop guard 再 write——parking_lot
-                    // 同线程 read+write 冲突会 panic。
-                    let current = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
-                    let items_len = VIEW_MODELS.state().read().items.len();
-                    let next = move_entry_focus(
-                        items_len,
-                        current,
-                        if key.code == KeyCode::Up { -1 } else { 1 },
-                    );
-                    // 持 VIEW_MODELS 写锁内派生 key（桥线程可并发写 VIEW_MODELS
-                    // ——锁外派生会读到漂移索引；key 与索引一致性由同一快照
-                    // 保证）。[§7 免疫] 焦点落在无折叠能力 entry（user/
-                    // assistant/group）时 key 为 None（分组只涉及工具）。
-                    let vm_state_ref = VIEW_MODELS.state();
-                    let snapshot = vm_state_ref.write();
-                    match next {
-                        Some(next_slot) => set_entry_focus(&snapshot, next_slot),
-                        None => *FOCUSED_ENTRY.state().write() = None,
-                    }
-                    // 焦点移动到其他 entry——重置 interaction option 到首项
-                    *option_state.write() = 0;
-                    EventResult::Consumed
-                }
-                // [Slice 4 §6.8] Tab/←/→：焦点在 pending interaction block 时
-                // 切换 option（局部状态，不新增 FocusLayer）；非 interaction 时
-                // Ignored 放行（Tab 继续传给输入区——消息区不独占）。
-                KeyCode::Tab | KeyCode::Left | KeyCode::Right
-                    if key.modifiers == KeyModifiers::NONE =>
-                {
-                    // 读当前快照判断焦点 entry 类型（只读；无写锁）
-                    // [TRAP] 先 copy 出值 drop guard 再读 VIEW_MODELS（独立锁，
-                    // 顺序无冲突；保持先读后用的 guard 最小化）。
-                    let idx = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
-                    let vm_guard = VIEW_MODELS.state();
-                    let items = &vm_guard.read().items;
-                    let block = idx
-                        .and_then(|i| items.get(i))
-                        .and_then(pending_interaction_of);
-                    let Some(block) = block else {
-                        return EventResult::Ignored;
-                    };
-                    let opt_count = block.options.len().max(1);
-                    let opt = *option_state.read();
-                    // Tab/← 后退、→ 前进；首末回绕（循环语义，浏览器 Tab 直觉）
-                    let next_opt = cycle_interaction_option(
-                        opt,
-                        opt_count,
-                        matches!(key.code, KeyCode::Left | KeyCode::Tab),
-                    );
-                    *option_state.write() = next_opt;
-                    EventResult::Consumed
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    let next_is_preview = key.code == KeyCode::Char(' ');
-                    // 读当前快照：对焦点 entry 应用切换。持 VIEW_MODELS 写锁期间
-                    // 不再读其他可能被同一帧写入的 atom（FOLD_OVERRIDES 是独立锁）。
-                    // [TRAP] state() 必须绑定变量——临时值在语句末释放会导致
-                    // ReactiveMutRef::Drop 在借用期间运行（E0716）。
-                    tracing::trace!(target: "frozen_diag", "enter: acquiring VIEW_MODELS write lock");
-                    let vm_state_ref = VIEW_MODELS.state();
-                    let mut snapshot = vm_state_ref.write();
-                    tracing::trace!(target: "frozen_diag", "enter: got VIEW_MODELS write lock");
-                    // [TRAP] 先 copy 出值 drop guard 再 write——同线程随后写
-                    // FOCUSED_ENTRY，parking_lot read+write 冲突会 panic。
-                    let cur_focus = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
-                    let Some(idx) = cur_focus else {
-                        return EventResult::Consumed;
-                    };
-                    if idx >= snapshot.items.len() {
-                        // 快照缩短（reset/rewind）——焦点失效，退出导航
-                        *FOCUSED_ENTRY.state().write() = None;
-                        return EventResult::Consumed;
-                    }
-                    // [Slice 4 §6.8] 焦点在 pending interaction block 上：
-                    // Enter 提交当前 option（双轨：响应 channel + 关闭模态层；
-                    // InteractionResolved 由消费者发出）；Space 消费但不动作
-                    // （防止泄漏给输入区插入空格）。提交后退出 entry 焦点。
-                    if let Some(block) = pending_interaction_of(&snapshot.items[idx]) {
-                        if !next_is_preview {
-                            let opt = *option_state.read();
-                            submit_interaction_option(block, opt);
-                        }
-                        *FOCUSED_ENTRY.state().write() = None;
-                        tracing::trace!(target: "frozen_diag", "enter: interaction submit exit");
-                        return EventResult::Consumed;
-                    }
-                    let result = apply_fold_toggle(&mut snapshot, idx, next_is_preview);
-                    tracing::trace!(target: "frozen_diag", "enter: handler exit");
-                    result
-                }
-                _ => EventResult::Ignored,
-            }
-        });
-    }
+    handlers::register_keyboard_nav(&mut hooks, interaction_option);
 
     // [S2 单一事实源] 焦点同步已删除：外部清除（输入区点击 / session 复位）
     // 在事件边界直接写 FOCUSED_ENTRY = None，仲裁与渲染同源读取——不再需要
@@ -1648,156 +619,36 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         );
     }
 
-    // ── md 复制按钮屏幕位置（每帧更新）──
-    // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
-    // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。
-    // 视口外的按钮不进入映射（点不到），避免列表随会话增长。
-    {
-        let mut hits: Vec<CopyButtonHit> = Vec::new();
-        if let Some(area) = area_rect {
-            let vp_end = area.y.saturating_add(vis_height);
-            let caches_read = vm_caches.read();
-            // [LOW-5] 点击校验的身份 hash：运行中 bubble 的 content_hash 每秒
-            // 随 duration 漂移（G1 按秒刷新时长文本），跨秒点击会偶发拒绝——
-            // 命中映射保存稳定身份 hash（assistant 排除时变 duration），
-            // 事件时点按同口径比对。快照索引可能落后于 vm_caches（TOCTOU
-            // 防御同 rebuild 阶段：越界回退 slot.content_hash）。
-            let vms_guard = view_models.read();
-            for (slot_index, slot) in caches_read.iter().enumerate() {
-                let Some(btn) = &slot.copy_button else {
-                    continue;
-                };
-                let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
-                    continue;
-                };
-                let vis_row = slot_visual_starts
-                    .get(slot_index)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(entry.visual_start);
-                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-                if row < area.y as i64 || row >= vp_end as i64 {
-                    continue;
-                }
-                let hit_hash = match vms_guard.items.get(slot_index) {
-                    Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
-                        TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
-                    }
-                    _ => slot.content_hash,
-                };
-                hits.push(CopyButtonHit {
-                    row: row as u16,
-                    x_start: area.x.saturating_add(btn.x_start),
-                    x_end: area.x.saturating_add(btn.x_end),
-                    slot_index,
-                    vm_hash: hit_hash,
-                });
-            }
-        }
-        *copy_buttons.write_no_update() = Arc::new(hits);
-    }
+    hits::update_copy_button_hits(
+        copy_buttons,
+        &vm_caches,
+        &view_models,
+        area_rect,
+        vis_height,
+        scroll_y,
+        &slot_visual_starts,
+    );
 
-    // ── [T4 §4] @image 行屏幕位置（每帧更新）──
-    // 与 md 复制按钮同模式：meta 行在 slot 内是完整渲染的逻辑行（部分截断的
-    // meta 行不进入映射——渲染位置与点击区域错位）。屏幕行 = area.y + slot
-    // 视觉偏移 + 行内视觉偏移 - scroll_y；视口外的行不进入映射（点不到）。
-    // 命中列 = content 区域内整行（前缀列到滚动条列前），wrap 续行同列区间
-    // 天然覆盖；滚动条列（最右 1 列）不进入——滚动条点击不被误吞。
-    {
-        let mut hits: Vec<ImageLineHit> = Vec::new();
-        if let Some(area) = area_rect {
-            let vp_end = area.y.saturating_add(vis_height);
-            let caches_read = vm_caches.read();
-            let content_x = area.x.saturating_add(grid.cont_prefix_width() as u16);
-            for (slot_index, slot) in caches_read.iter().enumerate() {
-                for info in &slot.image_lines {
-                    let Some(entry) = slot.wrap_map.get(info.logical_idx) else {
-                        continue;
-                    };
-                    let vis_row = slot_visual_starts
-                        .get(slot_index)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(entry.visual_start);
-                    let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-                    if row < area.y as i64 || row >= vp_end as i64 {
-                        continue;
-                    }
-                    hits.push(ImageLineHit {
-                        row: row as u16,
-                        x_start: content_x,
-                        x_end: content_x.saturating_add(grid.content),
-                        slot_index,
-                        vm_hash: slot.content_hash,
-                        path: info.path.clone(),
-                        managed: info.managed,
-                        size_text: info.size_text.clone(),
-                        logical_idx: info.logical_idx,
-                    });
-                }
-            }
-        }
-        *image_rects.write_no_update() = Arc::new(hits);
-    }
+    hits::update_image_line_hits(
+        image_rects,
+        &vm_caches,
+        area_rect,
+        vis_height,
+        scroll_y,
+        &slot_visual_starts,
+        grid,
+    );
 
-    // ── [Slice 4 §6.8] interaction option 屏幕位置 + 当前项高亮信息（每帧更新）──
-    // 与 md 复制按钮同模式：视口外的选项不进映射（点不到）；高亮只作用于
-    // 视口行（G3 视口级，不动渲染缓存）。返回值供视口循环对「焦点 slot 的
-    // 当前 option 行」应用 selection bg + bold（§9）。
-    let interaction_highlight: Option<(usize, usize)> = {
-        let mut hits: Vec<InteractionOptionHit> = Vec::new();
-        let mut focused_interaction_row: Option<(usize, usize)> = None;
-        // [S2 单一事实源] 渲染读点——与仲裁同读 FOCUSED_ENTRY（临时 guard
-        // 语句末 drop；interaction_option 仍是局部派生，不参与跨组件仲裁）。
-        let focus_slot = focused_entry_atom.read().as_ref().map(|f| f.slot);
-        let cur_option = *interaction_option.read();
-        if let Some(area) = area_rect {
-            let vp_end = area.y.saturating_add(vis_height);
-            let caches_read = vm_caches.read();
-            for (slot_index, slot) in caches_read.iter().enumerate() {
-                let Some(il) = &slot.interaction else {
-                    continue;
-                };
-                for (opt_i, row_local) in il.option_rows.iter().enumerate() {
-                    let Some(entry) = slot.wrap_map.get(*row_local) else {
-                        continue;
-                    };
-                    let vis_row = slot_visual_starts
-                        .get(slot_index)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(entry.visual_start);
-                    let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-                    if row < area.y as i64 || row >= vp_end as i64 {
-                        continue;
-                    }
-                    // 列区间：横向布局按 option 文本区间；垂直/超宽整行命中
-                    let (x_start, x_end) = match il.option_cols.get(opt_i).copied().flatten() {
-                        Some((s, e)) => (area.x.saturating_add(s), area.x.saturating_add(e)),
-                        None => (
-                            area.x,
-                            area.x
-                                .saturating_add(area.width)
-                                .max(area.x.saturating_add(1)),
-                        ),
-                    };
-                    hits.push(InteractionOptionHit {
-                        row: row as u16,
-                        x_start,
-                        x_end,
-                        slot_index,
-                        vm_hash: slot.content_hash,
-                        option_index: opt_i,
-                    });
-                    if focus_slot == Some(slot_index) && opt_i == cur_option {
-                        focused_interaction_row = Some((slot_index, *row_local));
-                    }
-                }
-            }
-        }
-        *interaction_rects.write_no_update() = Arc::new(hits);
-        focused_interaction_row
-    };
+    let interaction_highlight: Option<(usize, usize)> = hits::update_interaction_hits(
+        interaction_rects,
+        &vm_caches,
+        area_rect,
+        vis_height,
+        scroll_y,
+        &slot_visual_starts,
+        &focused_entry_atom,
+        &interaction_option,
+    );
 
     // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
 
@@ -2026,41 +877,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     )
     .into_any()
-}
-
-/// 计算 keepgoing 按钮的屏幕点击区域 `(y, x_start, width)`。
-///
-/// 渲染布局：core 行（`core_total_visual_rows` 行）→ footer_lines（`line_index` 行）
-/// → padding 行。footer_lines[line_index] 的屏幕 y = area.y + core_total_visual_rows
-/// + line_index - scroll_y（i64 数学避免 u16 下溢）。
-///
-/// 返回 None 的情形：
-/// - empty：Welcome 布局（footer 渲染在 Welcome 之下，行位置模型不同）——按钮可见但不可点击
-/// - 按钮被滚出视口（y 不在 [area.y, area.y + vis_height) 内）
-fn compute_keepgoing_rect(
-    empty: bool,
-    area_rect: Option<ratatui_kit::ratatui::layout::Rect>,
-    layout: Option<KeepGoingLayout>,
-    core_total_visual_rows: usize,
-    scroll_y: usize,
-    vis_height: u16,
-) -> Option<(u16, u16, u16)> {
-    let area = area_rect?;
-    let layout = layout?;
-    if empty {
-        return None;
-    }
-    let row =
-        area.y as i64 + core_total_visual_rows as i64 + layout.line_index as i64 - scroll_y as i64;
-    let vp_end = area.y as i64 + vis_height as i64;
-    if row < area.y as i64 || row >= vp_end {
-        return None;
-    }
-    Some((
-        row as u16,
-        area.x.saturating_add(layout.start_col),
-        layout.width,
-    ))
 }
 
 #[cfg(test)]

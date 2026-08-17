@@ -76,11 +76,17 @@ pub fn load_disable_bundled_skills_from_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界）
+/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界；文档 3.1：
+/// 附加「来源 server + 工具通路」提醒——MCP 工具经 SearchExtraTools
+/// 发现（工具名前缀 `mcp__{server}__`，sanitize 见 tool_bridge.rs）、
+/// ExecuteExtraTool 执行）。
 pub fn annotate_mcp_content(meta: &SkillMetadata, content: &str) -> String {
     match &meta.origin {
         Some(SkillOrigin::Mcp { server, uri }) => {
-            format!("This skill is served by MCP server \"{server}\", uri: {uri}.\n\n{content}")
+            format!(
+                "This skill is served by MCP server \"{server}\", uri: {uri}.\n\n\
+                 该 Skill 来自 {server} MCP server；如需工具，用 SearchExtraTools 搜索 mcp__{server} 取工具定义（工具名前缀 mcp__{server}__），ExecuteExtraTool 执行。\n\n{content}"
+            )
         }
         _ => content.to_string(),
     }

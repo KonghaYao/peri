@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn test_peri_model() {
+    assert_eq!(
+        get_attribution_email("peri-sonnet"),
+        "noreply@peri-code.dev"
+    );
+}
+
+#[test]
 fn test_claude() {
     assert_eq!(
         get_attribution_email("claude-sonnet-4-20250514"),

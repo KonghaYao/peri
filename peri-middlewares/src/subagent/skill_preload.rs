@@ -136,6 +136,10 @@ impl Middleware for SkillPreloadMiddleware {
         // DD-3：每名称先查 registry（同步 RwLock 读，无需 spawn_blocking）。
         // `registry.find` 已实现精确名（mcp__<server>__<skill>）+ `<server>:<skill>`
         // 别名；命中即用缓存 content，未命中才走既有本地磁盘路径。
+        // 兜底（决策 1 + A3）：`{server}:{skill}` 命令形态 token 再经
+        // `registry.find_by_command` 按「server 名末段小写」匹配——覆盖
+        // plugin 多冒号 server key（`plugin:{plugin}:{server}`）下 `find`
+        // 别名拼原名必 miss 的场景（命令面 fullname 同源取末段）。
         // OQ1：`mcp__` 前缀 token 是 MCP 身份——registry miss 即静默跳过，
         // 不回退磁盘（防误注入本地同名内容）；`<x>:<y>` 别名 miss 保持既有
         // 磁盘回退（对齐 plugin 命名空间语义）。
@@ -146,7 +150,7 @@ impl Middleware for SkillPreloadMiddleware {
         let mut disk_names: Vec<String> = Vec::new();
         if let Some(reg) = &self.mcp_registry {
             for name in &names_lower {
-                match reg.find(name) {
+                match reg.find(name).or_else(|| reg.find_by_command(name)) {
                     Some(meta) => {
                         registry_hits.insert(name.clone(), meta);
                     }

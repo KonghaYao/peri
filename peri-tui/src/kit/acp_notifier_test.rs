@@ -700,7 +700,7 @@ fn test_handle_session_update_parses_projection_fields() {
             "sessionUpdate": "available_commands_update",
             "availableCommands": [
                 {
-                    "name": "mcp:demo:hello",
+                    "name": "demo:hello",
                     "description": "MCP skill hello",
                     "_meta": {
                         "periKind": "mcp_skill",
@@ -728,7 +728,7 @@ fn test_handle_session_update_parses_projection_fields() {
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 1);
     let e = &entries[0];
-    assert_eq!(e.fullname, "mcp:demo:hello");
+    assert_eq!(e.fullname, "demo:hello");
     assert_eq!(e.description, "MCP skill hello");
     assert_eq!(e.kind, SlashActionKind::McpSkill);
     assert_eq!(e.level, 2);

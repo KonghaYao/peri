@@ -11,49 +11,73 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
+mod hooks;
+mod image;
+mod popup;
+mod render;
+mod submit;
+
+pub(crate) use image::png_encode;
+pub(crate) use popup::refresh_slash_items;
+pub(crate) use submit::send_local_user_bubble;
+
+use hooks::{AreaTracker, CjkGhostFix};
+use popup::{
+    filter_files_for_mention, get_cached_slash_items, handle_slash_selection, replace_last_mention,
+    reset_mention_popup, reset_slash_popup, update_popup_prefix,
+};
+use render::{
+    QUEUE_VISIBLE_MAX, build_composer_block, build_composer_lines, build_queue_lines,
+    footer_separator, popup_height, prompt_and_border_width,
+    render_multiline_with_cursor_for_themed,
+};
+use submit::{exit_history_mode_if_active, submit_text};
+
+#[cfg(test)]
+use popup::{apply_slash_selection, build_slash_items, detect_slash_token};
+#[cfg(test)]
+use render::{build_session_title_line, readable_fg, stable_hash, truncate_title_to_width};
+#[cfg(test)]
+use submit::dispatch_submit_request;
+
 use crate::components::textarea::{TextAreaState, wrap_text};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction, Rect},
-        style::{Color, Modifier, Style},
+        layout::{Constraint, Direction},
+        style::Style,
         text::{Line, Span},
-        widgets::{Block, Borders, Paragraph},
+        widgets::Paragraph,
     },
 };
 use std::sync::{Arc, Mutex};
 
-use parking_lot::RwLock;
-use std::sync::OnceLock;
-
 use crate::i18n;
-use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACP_STATE, ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
-    CURRENT_SESSION_TITLE, FILE_LIST, FOCUSED_ENTRY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER,
-    LANG_VERSION, LOCAL_EVENT_TX, MENTION_PREFIX, MENTION_SELECTED_INDEX, PENDING_ATTACHMENTS,
+    ACTIVE_PANEL, AT_MENTION_ACTIVE, CONTEXT_USAGE, CURRENT_SESSION_TITLE, FOCUSED_ENTRY,
+    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, MENTION_PREFIX, PENDING_ATTACHMENTS,
     POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SLASH_HINT_ACTIVE, SLASH_PREFIX,
-    SLASH_SELECTED_INDEX, SUBMIT_TX, WIZARD_ACTIVE,
 };
 use crate::kit::focus_router::input_accepts_key;
-use crate::kit::input_history::{history_down, history_up, push_history, reset_history_cursor};
+use crate::kit::input_history::{history_down, history_up};
 use crate::kit::mention_popup::MentionPopup;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
-use crate::kit::panel_registry::open_panel;
-use crate::kit::slash_completion::{SlashActionKind, SlashCompletion, SlashCompletionItem};
-use crate::kit::slash_projection::display_name;
-use crate::kit::submit_request::{SessionControlRequest, SubmitRequest, parse_submit_request};
-use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
+use crate::kit::slash_completion::{SlashCompletion, SlashCompletionItem};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
-/// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
-const QUEUE_VISIBLE_MAX: usize = 5;
+#[cfg(test)]
+use crate::kit::atoms::{ACP_STATE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, WIZARD_ACTIVE};
+#[cfg(test)]
+use crate::kit::slash_completion::SlashActionKind;
+#[cfg(test)]
+use crate::kit::submit_request::{SubmitRequest, parse_submit_request};
+#[cfg(test)]
+use ratatui_kit::ratatui::widgets::Block;
 
 /// [S2 单一事实源] 输入内容变化 → 焦点回到输入态：同步清除消息区 entry
 /// 导航焦点（消息区仲裁与渲染同读 FOCUSED_ENTRY，无需 effect 收敛）。
@@ -65,63 +89,6 @@ const QUEUE_VISIBLE_MAX: usize = 5;
 fn exit_entry_focus_on_edit() {
     if FOCUSED_ENTRY.state().read().is_some() {
         *FOCUSED_ENTRY.state().write() = None;
-    }
-}
-
-/// 在 post_component_draw 时修复 CJK 续接 cell 的 diff 不可见性。
-///
-/// ratatui `set_stringn` 对双宽字符的续接 cell 始终 reset 到 `Cell::EMPTY`
-/// (bg=Color::Reset, 无 modifier)。两帧续接 cell 相同 → diff 跳过 → 终端保留
-/// 主 cell bg 的视觉扩展（光标白色残影）。
-///
-/// 此 hook 在每帧渲染后将续接 cell 标记 `AlwaysUpdate`，强制 diff 发送 SGR，
-/// 但 **不修改 bg/fg 值**——视觉上完全透明，无底色。
-struct CjkGhostFix;
-
-impl Hook for CjkGhostFix {
-    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        use ratatui::buffer::CellDiffOption;
-        let area = drawer.area;
-        let buf = drawer.buffer_mut();
-        let right = area.right();
-        let bottom = area.bottom();
-        for y in area.y..bottom {
-            let mut x = area.x;
-            while x < right {
-                let w = {
-                    let symbol = buf[(x, y)].symbol();
-                    if symbol.is_empty() {
-                        0
-                    } else {
-                        symbol.chars().next().and_then(|c| c.width()).unwrap_or(0) as u16
-                    }
-                };
-                if w > 1 {
-                    for dx in 1..w {
-                        let cx = x + dx;
-                        if cx < right {
-                            buf[(cx, y)].diff_option = CellDiffOption::AlwaysUpdate;
-                        }
-                    }
-                    x += w;
-                } else {
-                    x += 1;
-                }
-            }
-        }
-    }
-}
-
-/// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
-/// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
-/// handler 注册前取出副本传给闭包。
-struct AreaTracker {
-    rect: Option<Rect>,
-}
-
-impl Hook for AreaTracker {
-    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        self.rect = Some(drawer.area);
     }
 }
 
@@ -959,589 +926,6 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } }
         }
     )
-}
-
-fn input_tokens() -> peri_theme::component::InputTokens {
-    THEME_ATOM.state().read().component.input
-}
-
-/// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧
-/// `@ N files` + 右侧资源线（`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
-/// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；
-/// `show_bottom=false`（h<8）隐藏 title_bottom。
-/// `max_width` = composer 区域宽度（`use_previous_size`，resize 后次帧收敛）。
-#[allow(clippy::too_many_arguments)] // 标题位/可见性/宽度参数同属一个边框语义，拆分反增复杂度
-fn build_composer_block(
-    loading: bool,
-    session_title: &str,
-    files_label: Option<&str>,
-    footer_right: Option<Line<'static>>,
-    show_top: bool,
-    show_bottom: bool,
-    max_width: u16,
-) -> Block<'static> {
-    let tokens = input_tokens();
-    let sem = THEME_ATOM.state().read().semantic;
-    let border_color = if loading {
-        tokens.border_loading
-    } else {
-        tokens.border
-    };
-
-    let mut block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(border_color));
-    if show_top && !session_title.is_empty() {
-        let title_width = session_title.width().min(32) + 2;
-        if title_width <= usize::from(max_width) {
-            block = block.title_top(build_session_title_line(session_title).right_aligned());
-        }
-    }
-    if show_bottom {
-        // 左侧附件计数 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
-        if let Some(f) = files_label {
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {f} "),
-                Style::default().fg(sem.text.muted),
-            )));
-        }
-        if let Some(line) = footer_right {
-            block = block.title_bottom(line.right_aligned());
-        }
-    }
-    block
-}
-
-/// 资源线分隔符：` · `（muted，与 composer footer 其余文本同色系）。
-fn footer_separator(color: Color) -> Span<'static> {
-    Span::styled(" · ", Style::default().fg(color))
-}
-
-/// §10 queued 队列行：`· {text}`（queued 符号 + muted），每行按 composer
-/// 文本宽度截断；超过 [`QUEUE_VISIBLE_MAX`] 条时末行 `· · ·`。
-fn build_queue_lines(items: &[String], has_more: bool, max_width: usize) -> Vec<Line<'static>> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-    let sem = THEME_ATOM.state().read().semantic;
-    let muted = Style::default().fg(sem.text.muted);
-    let sym = crate::kit::terminal_caps::symbols(&crate::kit::atoms::TERMINAL_CAPS.state().read());
-    let mut lines = Vec::with_capacity(items.len() + usize::from(has_more));
-    for text in items {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", sym.queued), muted),
-            Span::styled(crate::truncate::truncate_by_width(text, max_width), muted),
-        ]));
-    }
-    if has_more {
-        lines.push(Line::from(vec![Span::styled(
-            format!("{} {} {}", sym.queued, sym.queued, sym.queued),
-            muted,
-        )]));
-    }
-    lines
-}
-
-/// §10 对齐：composer 正文起点 = prompt 前缀宽度（outer1 + accent1 + gap，
-/// 与 transcript `first_prefix_width` 一致）+ 右预留 2 列。gap=1 → 5；
-/// gap=2 → 6。
-fn prompt_and_border_width(grid: GridSpec) -> u16 {
-    (2 + grid.gap) + 2
-}
-
-/// 会话标题标签：hash 稳定底色 + 按亮度反色前景 + BOLD。
-///
-/// 同一标题经确定性 hash 后始终命中同一底色，不同标题大概率不同色；
-/// 底色来自主题 `input.session_title_palette`，遵循"主题不硬编码颜色"约束。
-fn build_session_title_line(title: &str) -> Line<'static> {
-    let palette = input_tokens().session_title_palette;
-    let bg = palette[stable_hash(title) as usize % palette.len()];
-    Line::from(Span::styled(
-        format!(" {} ", truncate_title_to_width(title, 32)),
-        Style::default()
-            .bg(bg)
-            .fg(readable_fg(bg))
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-/// FNV-1a 64 位确定性 hash——不依赖 `std` DefaultHasher 的随机 seed，
-/// 保证同一标题在跨进程 / 跨会话场景下颜色稳定。
-fn stable_hash(s: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），超长补省略号。
-///
-/// 委托共享 helper `crate::truncate::truncate_by_width`（历史实现已迁移，语义不变）。
-fn truncate_title_to_width(s: &str, max_width: usize) -> String {
-    crate::truncate::truncate_by_width(s, max_width)
-}
-
-/// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。
-fn readable_fg(bg: Color) -> Color {
-    match bg {
-        Color::Rgb(r, g, b) => {
-            let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
-            if luminance > 140.0 {
-                Color::Black
-            } else {
-                Color::White
-            }
-        }
-        _ => Color::White,
-    }
-}
-
-/// §10/§3.1 对齐：prompt 前缀宽度 = outer(1) + accent(1) + gap ——与 transcript
-/// content 起点（`first_prefix_width`）一致。composer 无左右 border
-/// （`Borders::TOP|BOTTOM`），正文起点即前缀宽度：gap=1 → `" ❯ "`（3 列），
-/// gap=2 → `" ❯  "`（4 列）。续行前缀同宽（accent 位置留空）。
-fn build_composer_lines(
-    editor_lines: Vec<Line<'static>>,
-    loading: bool,
-    grid: GridSpec,
-) -> Vec<Line<'static>> {
-    let tokens = input_tokens();
-    let mut lines = Vec::with_capacity(editor_lines.len().max(1));
-    let prompt_style = Style::default()
-        .fg(if loading {
-            tokens.prompt_loading
-        } else {
-            tokens.prompt
-        })
-        .add_modifier(Modifier::BOLD);
-
-    let prompt_prefix = format!(" \u{276f}{}", " ".repeat(grid.gap as usize));
-    let cont_prefix = " ".repeat(grid.first_prefix_width());
-
-    if editor_lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(prompt_prefix, prompt_style),
-            Span::raw(""),
-        ]));
-        return lines;
-    }
-
-    for (index, line) in editor_lines.into_iter().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
-        if index == 0 {
-            spans.push(Span::styled(prompt_prefix.clone(), prompt_style));
-        } else {
-            spans.push(Span::styled(
-                cont_prefix.clone(),
-                Style::default().fg(tokens.continuation),
-            ));
-        }
-        spans.extend(line.spans);
-        lines.push(Line::from(spans));
-    }
-
-    lines
-}
-
-fn popup_height(item_count: usize) -> u16 {
-    (item_count.max(1) as u16 + 2).min(THEME_ATOM.state().read().component.popup.inline_height)
-}
-
-fn submit_text(submitted: String) {
-    let Some(request) = parse_submit_request(&submitted) else {
-        return;
-    };
-
-    let is_loading = ACP_STATE.state().read().is_loading;
-    dispatch_submit_request(request, is_loading, |request| {
-        if let Some(tx) = SUBMIT_TX.get() {
-            let _ = tx.send(request);
-        }
-    });
-}
-
-fn dispatch_submit_request<F>(request: SubmitRequest, is_loading: bool, mut send_request: F)
-where
-    F: FnMut(SubmitRequest),
-{
-    match request {
-        SubmitRequest::OpenPanel(kind) => open_panel(kind),
-        SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
-            *WIZARD_ACTIVE.state().write() = true;
-        }
-        SubmitRequest::AgentText(text) => {
-            push_history(&text);
-            reset_history_cursor();
-            if is_loading {
-                // §10 queued（Slice 3 D4 反转）：loading 期间**只入队**，不提前进
-                // transcript——排队项显示在 composer 上方队列；TurnDone/取消
-                // 复位时 drain（send_local_user_bubble + AgentText），气泡恰出现
-                // 一次。保留 32 条上限（防无限堆积）。
-                let input_buffer = INPUT_BUFFER.state();
-                let mut guard = input_buffer.write();
-                guard.push_back(text);
-                while guard.len() > 32 {
-                    guard.pop_front();
-                }
-            } else {
-                // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
-                // 统一走 dispatch_and_notify → push_view_models 写入路径。
-                send_local_user_bubble(&text);
-                send_request(SubmitRequest::AgentText(text));
-            }
-        }
-        request @ (SubmitRequest::SessionControl(_)
-        | SubmitRequest::ViewAction(_)
-        | SubmitRequest::KeepGoing) => {
-            if is_loading {
-                show_submit_blocked_notification(&request);
-            } else {
-                send_request(request);
-            }
-        }
-    }
-}
-
-fn show_submit_blocked_notification(request: &SubmitRequest) {
-    let message = match request {
-        SubmitRequest::SessionControl(_) => i18n::tr("submit-blocked"),
-        SubmitRequest::ViewAction(_) => i18n::tr("submit-blocked"),
-        _ => return,
-    };
-    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
-        message,
-        until: std::time::Instant::now() + std::time::Duration::from_secs(3),
-    });
-    crate::kit::atoms::RENDER_HEARTBEAT
-        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-}
-
-/// 发送本地 user bubble 事件（`LocalUserBubble`）到 acp_bridge。
-///
-/// pub(crate)：非 loading 提交路径与 `acp_events::render::drain_input_buffer`
-/// （Slice 3 D4）共用——drain 排队项时镜像非 loading 路径，先本地气泡再提交。
-pub(crate) fn send_local_user_bubble(text: &str) {
-    use crate::kit::acp_types::AcpEventData;
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
-        let _ = tx.send(AcpEventWithEpoch {
-            event: AcpEventData::LocalUserBubble {
-                text: text.to_string(),
-            },
-            active_session_id: String::new(),
-        });
-    }
-}
-
-/// 退出 history 浏览模式（如果当前正在浏览）。
-///
-/// 任何改变编辑文本的 handler 都应在写入前调用：保留当前编辑内容作为新草稿，
-/// 但清掉 `INPUT_HISTORY_INDEX` 指针，避免下一次 history_up 复用陈旧的浏览位置。
-/// 非历史模式下调用为 no-op。
-fn exit_history_mode_if_active() {
-    use crate::kit::atoms::INPUT_HISTORY_INDEX;
-    if INPUT_HISTORY_INDEX.state().read().is_some() {
-        reset_history_cursor();
-    }
-}
-
-fn reset_mention_popup() {
-    *AT_MENTION_ACTIVE.state().write() = false;
-    MENTION_PREFIX.state().write().clear();
-    *MENTION_SELECTED_INDEX.state().write() = 0;
-}
-
-fn reset_slash_popup() {
-    *SLASH_HINT_ACTIVE.state().write() = false;
-    SLASH_PREFIX.state().write().clear();
-    *SLASH_SELECTED_INDEX.state().write() = 0;
-}
-
-fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
-    if let Some(at_byte) = state.text.rfind('@') {
-        let before = crate::components::textarea::History::snapshot(state);
-        let after_at_byte = at_byte + 1;
-        let keep_until_byte = state.text[after_at_byte..]
-            .char_indices()
-            .take_while(|(_, c)| !c.is_whitespace())
-            .last()
-            .map(|(i, c)| after_at_byte + i + c.len_utf8())
-            .unwrap_or(after_at_byte);
-        state.text.drain(after_at_byte..keep_until_byte);
-        state.text.insert_str(after_at_byte, replacement);
-        state.cursor = state.text.chars().count();
-        state.record_edit(before);
-    }
-}
-
-fn apply_slash_selection(state: &mut TextAreaState, cmd: &str) {
-    let replacement = format!("/{cmd} ");
-    if let Some((_, token_start_byte)) = detect_slash_token(&state.text, state.cursor_byte()) {
-        let token_start = state.text[..token_start_byte].chars().count();
-        let token_end = state.cursor;
-        state.replace_char_range(token_start, token_end, &replacement);
-    } else {
-        state.replace_all(replacement);
-    }
-}
-
-/// Phase 4 步骤 4：补全选中行为收敛——统一先 `resolve_ui_command`（ui 域
-/// 本地拦截：裸名 / `ui:` 前缀 / aliases 归一化）。命中（如裸名 `history`
-/// → ThreadBrowser、`setup` → Wizard）→ 清空输入框并本地执行（不发 ACP）；
-/// 未命中 → `apply_slash_selection` 落输入框（display 即 lexical，解析器
-/// 严格命中）。
-fn handle_slash_selection(editor: &mut TextAreaState, item: &SlashCompletionItem) {
-    match resolve_ui_command(&item.insert_text) {
-        Some(UiCommandAction::OpenPanel(kind)) => {
-            editor.text.clear();
-            editor.cursor = 0;
-            open_panel(kind);
-        }
-        Some(UiCommandAction::ToggleSetup) => {
-            editor.text.clear();
-            editor.cursor = 0;
-            *WIZARD_ACTIVE.state().write() = true;
-        }
-        None => apply_slash_selection(editor, &item.insert_text),
-    }
-}
-
-fn build_slash_items() -> Vec<SlashCompletionItem> {
-    let remote = AVAILABLE_SLASH_COMMANDS.state().read().clone();
-    // 纯投影映射（设计不变式 1/2，步骤 6 收口）：补全条目**全部**由投影
-    // 生成——PANELS 本地合成与 /setup 硬编码已删除（history/setup 不再
-    // 凭空出现）；kind 直接来自投影（无 SKILL_NAMES / MCP_SKILL_NAMES
-    // 集合反推）；label 经 display_name 按 level 变换（1 裸名 / 2 全名），
-    // display 即 lexical（insert_text == label）。
-    let mut items: Vec<SlashCompletionItem> = remote
-        .iter()
-        .flat_map(|entry| {
-            let label = display_name(&entry.fullname, entry.level);
-            let label_lowercase = label.to_lowercase();
-            // 与主 display 名相同的 alias 跳过（主条目已生成，防重复）
-            let aliases: Vec<&String> = entry
-                .aliases
-                .iter()
-                .filter(|a| !a.eq_ignore_ascii_case(&label))
-                .collect();
-            let mut out = vec![SlashCompletionItem {
-                search_lowercase: SlashCompletionItem::make_search_lowercase(
-                    &label_lowercase,
-                    &entry.fullname,
-                ),
-                label_lowercase,
-                label: label.clone(),
-                insert_text: label,
-                description: entry.description.clone(),
-                kind: entry.kind.clone(),
-                fullname: entry.fullname.clone(),
-                args: entry.args.clone(),
-            }];
-            // alias 条目（display 即 lexical：alias 就是要输入的文本，不做 level
-            // 变换），继承主条目 kind/description/fullname/args。选中时
-            // handle_slash_selection 先走 resolve_ui_command——ui 域别名
-            // （history/his/resume → threads）直接本地打开面板；core 域别名
-            // （cls/reset/compress/undo）落输入框交 ACP 注册表 alias 索引解析。
-            for alias in aliases {
-                let a = alias.to_lowercase();
-                out.push(SlashCompletionItem {
-                    search_lowercase: SlashCompletionItem::make_search_lowercase(
-                        &a,
-                        &entry.fullname,
-                    ),
-                    label_lowercase: a,
-                    label: alias.clone(),
-                    insert_text: alias.clone(),
-                    description: entry.description.clone(),
-                    kind: entry.kind.clone(),
-                    fullname: entry.fullname.clone(),
-                    args: entry.args.clone(),
-                });
-            }
-            out
-        })
-        .collect();
-    // 字母序排序——只排一次，组件端不再重排
-    items.sort_by(|a, b| a.label_lowercase.cmp(&b.label_lowercase));
-    // 双写窗口去重（R2 防御，步骤 6 明示保留）：R2 收口后触发条件已不
-    // 存在——服务端 UI_COMMANDS 常量已删除（裸名广播无 _meta 的路径消失）、
-    // 上送注册全量落地（ui: 前缀全名 + periKind=panel），当前 core 内置与
-    // ui 面板裸名无碰撞，本块实际不触发，仅作防御。
-    // 方向性风险：本去重「ui: 前缀 + kind != Command」优先保留 ui 域条目，
-    // 与注册表冲突裁决（内置优先、先注册占键）方向相反——若未来 core 域
-    // 新增与 ui 面板同裸名的命令（如 core:model），UI 会吞掉带 _meta 的
-    // core 条目而保留 ui:model，显示与执行不一致（display 即 lexical 破坏）。
-    // 仅当一方为缺省回退条目（kind==Command 且无 _meta 佐证）时才应触发；
-    // 保留现状不收紧，待真实碰撞出现时再收窄条件。
-    let mut deduped: Vec<SlashCompletionItem> = Vec::with_capacity(items.len());
-    for item in items {
-        if let Some(last) = deduped.last_mut()
-            && last.label == item.label
-        {
-            let last_score = (last.fullname.starts_with("ui:") as u8)
-                + (last.kind != SlashActionKind::Command) as u8;
-            let item_score = (item.fullname.starts_with("ui:") as u8)
-                + (item.kind != SlashActionKind::Command) as u8;
-            if item_score > last_score {
-                *last = item;
-            }
-            continue;
-        }
-        deduped.push(item);
-    }
-    deduped
-}
-
-/// 缓存 `build_slash_items()` 的结果，仅在 ACP 推送新命令时刷新。
-static SLASH_ITEMS_CACHE: OnceLock<RwLock<Vec<SlashCompletionItem>>> = OnceLock::new();
-
-fn slash_items_cache() -> &'static RwLock<Vec<SlashCompletionItem>> {
-    SLASH_ITEMS_CACHE.get_or_init(|| RwLock::new(build_slash_items()))
-}
-
-/// 刷新斜杠命令缓存——由 acp_notifier 在收到新命令后调用。
-pub(crate) fn refresh_slash_items() {
-    *slash_items_cache().write() = build_slash_items();
-}
-
-fn get_cached_slash_items() -> Vec<SlashCompletionItem> {
-    slash_items_cache().read().clone()
-}
-
-/// 从 `FILE_LIST` atom 读出 cwd 文件列表，按 `prefix` 过滤，最多 20 条。
-///
-/// 大小写不敏感的子串匹配——这样 `@auth` 能匹配 `auth.rs` / `oauth.rs` /
-/// `authenticated.md` 等。结果按"prefix 开头优先"排序，提升命中率。
-fn filter_files_for_mention(prefix: &str) -> Vec<String> {
-    let files = FILE_LIST.state().read().clone();
-    if prefix.is_empty() {
-        return files.into_iter().take(20).collect();
-    }
-    let prefix_lower = prefix.to_lowercase();
-    let mut matches: Vec<String> = files
-        .iter()
-        .filter(|f| f.to_lowercase().contains(&prefix_lower))
-        .cloned()
-        .collect();
-    // prefix 开头的优先
-    matches.sort_by_key(|f| !f.to_lowercase().starts_with(&prefix_lower));
-    matches.truncate(20);
-    matches
-}
-
-/// 根据 editor 当前文本和光标更新 @mention / slash 提示状态。
-///
-/// - `/` token：参考 peri-main，向光标前回溯最近的 `/`，要求 `/` 前为空白或行首。
-/// - `@` 在最近词中：开启 @mention，prefix = @ 之后的字符。
-fn update_popup_prefix(state: &TextAreaState) {
-    let cursor_byte = state.cursor_byte();
-    if let Some((prefix, _)) = detect_slash_token(&state.text, cursor_byte) {
-        *SLASH_HINT_ACTIVE.state().write() = true;
-        *SLASH_PREFIX.state().write() = prefix;
-    } else {
-        *SLASH_HINT_ACTIVE.state().write() = false;
-        SLASH_PREFIX.state().write().clear();
-    }
-
-    let before_cursor = &state.text[..cursor_byte];
-    let mention_active_now = if let Some(at_idx) = before_cursor.rfind('@') {
-        let after = &before_cursor[at_idx + 1..];
-        !after.is_empty() && !after.contains(char::is_whitespace) && after != "@"
-    } else {
-        false
-    };
-    *AT_MENTION_ACTIVE.state().write() = mention_active_now;
-    if mention_active_now {
-        if let Some(at_idx) = before_cursor.rfind('@') {
-            *MENTION_PREFIX.state().write() = before_cursor[at_idx + 1..].to_string();
-        }
-    } else {
-        MENTION_PREFIX.state().write().clear();
-    }
-}
-
-/// 在 `text[..cursor_byte]` 中检测光标前最近的 `/` token。
-fn detect_slash_token(text: &str, cursor_byte: usize) -> Option<(String, usize)> {
-    if cursor_byte == 0 || cursor_byte > text.len() || !text.is_char_boundary(cursor_byte) {
-        return None;
-    }
-    let before_cursor = &text[..cursor_byte];
-    let slash_pos = before_cursor.rfind('/')?;
-    let after_slash = &before_cursor[slash_pos + '/'.len_utf8()..];
-
-    if slash_pos > 0 {
-        let char_before = before_cursor[..slash_pos].chars().next_back()?;
-        if !char_before.is_whitespace() {
-            return None;
-        }
-    }
-
-    if !after_slash.is_empty()
-        && !after_slash
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.')
-    {
-        return None;
-    }
-
-    Some((after_slash.to_string(), slash_pos))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_multiline_with_cursor_for_themed(
-    text: &str,
-    cursor: usize,
-    selection_range: Option<(usize, usize)>,
-    placeholder: Option<&str>,
-    max_width: usize,
-    viewport_height: usize,
-    loading: bool,
-    show_cursor: bool,
-) -> Vec<ratatui::text::Line<'static>> {
-    let tokens = input_tokens();
-    let cursor_style = Style::default()
-        .fg(tokens.cursor_fg)
-        .bg(tokens.cursor_bg)
-        .add_modifier(Modifier::BOLD);
-    let selection_style = Style::default()
-        .fg(tokens.cursor_fg)
-        .bg(tokens.cursor_bg)
-        .add_modifier(Modifier::DIM);
-    let placeholder_style = Style::default().fg(tokens.placeholder);
-    let default_style = Style::default().bg(Color::Reset);
-    crate::components::textarea::render_multiline_with_cursor(
-        text,
-        cursor,
-        cursor_style,
-        selection_range,
-        selection_style,
-        placeholder,
-        placeholder_style,
-        default_style,
-        max_width,
-        viewport_height,
-        loading,
-        show_cursor,
-    )
-}
-
-/// 将 RGBA 字节数组编码为 PNG 文件
-pub(crate) fn png_encode(
-    rgba_bytes: &[u8],
-    width: usize,
-    height: usize,
-    output_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let file = std::fs::File::create(output_path)?;
-    let mut w = std::io::BufWriter::new(file);
-    let mut encoder = png::Encoder::new(&mut w, width as u32, height as u32);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(rgba_bytes)?;
-    writer.finish()?;
-    Ok(())
 }
 
 #[cfg(test)]

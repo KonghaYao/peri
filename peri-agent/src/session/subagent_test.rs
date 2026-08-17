@@ -451,6 +451,75 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     );
 }
 
+/// spawn_subagent：主 agent 场景（`store().thread_id` 恒 None）——parent id
+/// 经 `SubagentHost.parent_thread_id` 注入时必须正确落库（与 spawn 落盘父子链
+/// 同源；resume 已不做 parent 链校验，父子链仅作落盘记录）
+#[tokio::test]
+async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
+    let store = Arc::new(MockThreadStore::new());
+    // 主 agent 样子：store().thread_id = None + host.parent_thread_id = ctx.thread_id
+    let parent = Session::new(
+        Arc::from("/tmp/work"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    parent.set_subagent_host(SubagentHost {
+        parent_thread_id: Some("main-context-thread".to_string()),
+        ..Default::default()
+    });
+
+    let config = SubagentSpawnConfig {
+        agent_name: "host-agent".to_string(),
+        prompt: "do something".to_string(),
+        parent_messages: Vec::new(),
+        cancel_policy: SubagentCancelPolicy::Independent,
+        max_iterations: 200,
+        fork_directive_kind: None,
+        run_mode: SubagentRunMode::Sync,
+        skill_names: Vec::new(),
+        llm: Box::new(EchoLLM),
+        chain_assembler: Arc::new(EmptyChainAssembler),
+        tools: Vec::new(),
+        system_prompt: None,
+        error_suggest_registry: None,
+        tool_registry_snapshot: None,
+        tool_invocation_resolver: None,
+        compact_config: None,
+        context_budget: None,
+        compact_llm: None,
+        thread_store: Some(Arc::clone(&store) as Arc<dyn ThreadStore>),
+        event_handler: None,
+        bg_event_sender: None,
+        task_manager: None,
+        on_bg_complete: None,
+        langfuse_bridge: None,
+        on_subagent_start: None,
+        on_subagent_stop: None,
+        register_runtime: None,
+        deregister_runtime: None,
+        parent_agent_id: None,
+        cancel_token: None,
+        cwd: None,
+        parent_thread_id: None, // 生产路径 host 注入；cfg 为 None 时不得影响
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
+        frozen_date: None,
+    };
+
+    let _ = SessionFactory::spawn_subagent(Some(&parent), config)
+        .await
+        .expect("spawn ok");
+
+    let threads = store.threads.read();
+    assert_eq!(threads.len(), 1, "必须创建 1 个 child thread");
+    assert_eq!(
+        threads[0].parent_thread_id.as_deref(),
+        Some("main-context-thread"),
+        "parent id 经 host 注入正确落库（store().thread_id 为 None 时）"
+    );
+}
+
 /// spawn_subagent：frozen data 从父 session copy（不重新读取磁盘）
 #[tokio::test]
 async fn test_spawn_subagent_copies_frozen_from_parent() {
@@ -851,12 +920,12 @@ async fn test_resume_subagent_active_thread_rejected() {
     );
 }
 
-/// resume_subagent：校验分支 3——parent 链不匹配 → Err
+/// resume_subagent：parent 链不匹配不再拒绝（parent 链校验已移除）——
+/// meta.parent_thread_id 与父 session thread_id 不一致时仍可恢复成功。
+/// thread_id 即恢复凭证，不做所有权校验（曾误判拒绝兄弟 subagent 恢复）。
 #[tokio::test]
-async fn test_resume_subagent_parent_mismatch_rejected() {
+async fn test_resume_subagent_parent_mismatch_not_rejected() {
     let store = Arc::new(MockThreadStore::new());
-    // low-1 后校验顺序为「格式 → 存在性 → status → parent 链」，
-    // thread_id 必须为合法 UUID 才能走到 parent 链校验
     let id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new("/tmp");
     meta.id = id.clone();
@@ -869,20 +938,53 @@ async fn test_resume_subagent_parent_mismatch_rejected() {
         FrozenContext::builder().build(),
         Some("parent-thread-2".into()),
     );
-    let config = resume_config(store, id.clone());
-    let err = resume_err(Some(&parent), config).await;
+    let config = resume_config(store.clone(), id.clone());
+    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .expect("parent 链不匹配不再拒绝恢复");
+    assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
+    let statuses = store.statuses.read();
     assert_eq!(
-        err,
-        format!(
-            "resume_subagent: parent thread mismatch for {} \
-            (该 thread 属于其他父 agent 的上下文, 当前会话无权恢复; \
-            并行派发的兄弟 subagent 需由原父 agent 恢复, 或改传 subagent_type 新建)",
-            id
-        )
+        statuses.last().map(|(_, s)| s.as_str()),
+        Some("done"),
+        "恢复完成后收尾 done"
     );
 }
 
-/// resume_subagent：校验三分支全部通过 → 重建 + 完整执行（thread_id 不变）
+/// resume_subagent：主 agent 场景——TUI 主 session 的 `store().thread_id` 恒为
+/// None（parent id 仅经 `SubagentHost.parent_thread_id` 注入），resume 成功。
+/// （parent 链校验已移除，本测试保留为主 agent 路径的恢复成功回归）
+#[tokio::test]
+async fn test_resume_subagent_main_agent_via_host_parent_id() {
+    let store = Arc::new(MockThreadStore::new());
+    let id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &id, Some("main-context-thread")).await;
+
+    // 主 agent 样子：store().thread_id = None + host.parent_thread_id = ctx.thread_id
+    let parent = Session::new(
+        Arc::from("/tmp/work"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    parent.set_subagent_host(SubagentHost {
+        parent_thread_id: Some("main-context-thread".to_string()),
+        ..Default::default()
+    });
+
+    let config = resume_config(Arc::clone(&store), id.clone());
+    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .expect("主 agent 场景恢复应成功");
+    assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
+    let statuses = store.statuses.read();
+    assert_eq!(
+        statuses.last().map(|(_, s)| s.as_str()),
+        Some("done"),
+        "恢复完成后收尾 done"
+    );
+}
+
+/// resume_subagent：校验全部通过 → 重建 + 完整执行（thread_id 不变）
 #[tokio::test]
 async fn test_resume_subagent_validation_passes_and_runs() {
     let store = Arc::new(MockThreadStore::new());
@@ -1320,8 +1422,8 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
     assert_eq!(spawned.child_thread_id, thread_id);
 }
 
-/// parent None 组合（low-1 缺口）：meta.parent_thread_id = Some(x) 且 parent 为
-/// None → 跳过 parent 链校验（仅校验存在性），恢复成功
+/// parent None 组合：meta.parent_thread_id = Some(x) 且调用方无 parent session
+/// （/bg 命令等路径）→ 恢复成功（无 parent 链校验，仅存在性 + status 校验）
 #[tokio::test]
 async fn test_resume_subagent_parent_none_skips_chain_check() {
     let store = Arc::new(MockThreadStore::new());
@@ -1336,7 +1438,7 @@ async fn test_resume_subagent_parent_none_skips_chain_check() {
     let config = resume_config(store.clone(), thread_id.clone());
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
-        .expect("parent None 时跳过 parent 链校验");
+        .expect("parent None 时无 parent 链校验，恢复成功");
     assert_eq!(spawned.child_thread_id, thread_id);
     assert!(!spawned.interrupted);
     let statuses = store.statuses.read();
