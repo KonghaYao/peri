@@ -1,24 +1,24 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17（host/requests 拆分为 requests/ 子模块）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
 
 - 数据流：`ACP request → transport(mpsc/stdio) → host 部署单元 → dispatch 纯函数 → SessionManager(frozen/caps) → run_prompt → peri-agent run_session_loop → ExecutorEvent → event/forwarder+mapper → SessionUpdate / AcpEvent → client`
-- 服务入口：`src/host/mod.rs:248` 的 `run_acp_server(AcpTransport, AcpServerConfig)`（mpsc/TUI 部署单元，`session/prompt` spawn 后台 task 保证 cancel 可响应）；stdio 部署单元 `src/host/stdio/mod.rs:24` 的 `run_acp_stdio(StdioAssemblyInput)`。方法分发：mpsc 路径 `src/host/requests.rs:151` 的 `handle_request` match；stdio 路径直接按 agent_client_protocol 请求类型分派（`host/stdio/`）
+- 服务入口：`src/host/mod.rs:248` 的 `run_acp_server(AcpTransport, AcpServerConfig)`（mpsc/TUI 部署单元，`session/prompt` spawn 后台 task 保证 cancel 可响应）；stdio 部署单元 `src/host/stdio/mod.rs:24` 的 `run_acp_stdio(StdioAssemblyInput)`。方法分发：mpsc 路径 `src/host/requests.rs:22` 的 `handle_request` match（按方法分派到 `host/requests/` 子模块：session_lifecycle / plugin / config_options / mcp_oauth / workflow / rewind）；stdio 路径直接按 agent_client_protocol 请求类型分派（`host/stdio/`）
 - 稳定不变量：`SessionManager` 在每条 session/new、load、resume、fork 路径注册 caps，发送扩展事件前按 session caps 门控；frozen 数据会话内不可漂移（ARC-FROZEN-001）；事件改动须覆盖发射/mapper/forwarder/caps 门控/客户端五层（ARC-EVENT-001）；Hub/Web 投影必须从 canonical event 映射为版本化 allowlist DTO（`event/activity.rs`），禁止复用 TUI 私有 `event_json`；中间件链序事实源在 Agent 层 `production_blueprint`（ARC-MIDDLEWARE-001），ACP 仅构造装配上下文；Langfuse 仅经 `event/forwarder.rs` 协议化前分支调 bridge（None=禁用），不参与业务链路
 
 ## 速查表
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 新增/改会话协议方法 | `src/host/requests.rs`（mpsc 注册面，`handle_request` :151，24 个方法分支）；`src/host/mod.rs`（`session/prompt` 单独处理 :421，spawn 后台 task）；stdio 侧 `src/host/stdio/mod.rs`（:24 `run_acp_stdio`）+ `src/host/stdio/session/{create,control,config,prompt}.rs` | match 分支：`session/new` :175、`session/update_config` :793、`workflow/*` :470-546、`plugin/*` :859-1106、`session/rewind*` :1195-1226；`session/cancel` 走 notification（mod.rs:454 分支） | `session/prompt` 是唯一 spawn 后台执行的方法（保证 cancel 可响应）；stdio 只注册标准方法 + `session/update_config`（设计文档 §2.5）；`session/execute-command` 无生产调用者；共享业务逻辑抽到 `src/dispatch/` 纯函数，两侧复用 |
+| 新增/改会话协议方法 | `src/host/requests.rs`（mpsc 注册面，`handle_request` :22，按方法分派到 `host/requests/{session_lifecycle,plugin,config_options,mcp_oauth,workflow,rewind}.rs`）；`src/host/mod.rs`（`session/prompt` 单独处理 :421，spawn 后台 task）；stdio 侧 `src/host/stdio/mod.rs`（:24 `run_acp_stdio`）+ `src/host/stdio/session/{create,control,config,prompt}.rs` | handle_* 入口：`session/new`（requests/session_lifecycle.rs:84）、`session/update_config`（requests/config_options.rs:130）、`workflow/*`（requests/workflow.rs:12-93）、`plugin/*`（requests/plugin.rs:83-400）、`session/rewind*`（requests/rewind.rs:13-52）；`session/cancel` 走 notification（mod.rs:454 分支） | `session/prompt` 是唯一 spawn 后台执行的方法（保证 cancel 可响应）；stdio 只注册标准方法 + `session/update_config`（设计文档 §2.5）；`session/execute-command` 无生产调用者；共享业务逻辑抽到 `src/dispatch/` 纯函数，两侧复用 |
 | 改 prompt 执行流程（keepgoing/挂起注入） | `src/host/prompt.rs` + `src/host/mod.rs` + `src/session/executor.rs` | `run_prompt`（prompt.rs:35，15+ 装配参数）；`dispatch_prompt_turn`（mod.rs:496）；`session/executor.rs:17-22` **仅 re-export** `peri_agent::session::exec::executor` 的 `run_session_loop` / `is_keepgoing` / `FrozenSessionData` 等（执行本体在 Agent 层，ARC-BOUNDARY-001） | 挂起（await_wake）时 prompt 注入 inbox 不阻塞（`is_idle_suspended` 判断，mod.rs:548）；writer lease 校验（`lease::WriterLease::is_writer`，默认 "default"）；keepgoing 短路 + `push_done` 在 Agent 层 executor；continuation 不 push 空 prompt、不触发 keepgoing |
 | 改事件映射（ExecutorEvent → 协议） | `src/event/mapper.rs` + `src/event/mod.rs` | `map_event(event, context_window, caps)`（mapper.rs:51，穷尽 match，`variant_coverage_test` 断言）；`AcpEvent` DTO（mod.rs:42，`peri/agent_event` 载体） | 流式事件（TextChunk/AiReasoning/ToolStart/ToolEnd 等）→ 标准 `SessionUpdate`；其余 → AcpEvent/其他通知；v2 序列化面映射在 `peri-acp-types::event_v2`（`*_event_to_executor`，mod.rs:30 re-export）；终止事件必须使客户端离开 loading |
 | 改事件发射/forwarder | `src/event/forwarder.rs` | `spawn_eventbus_forwarder(handles, on_event, bridge)`（:78） | 消费 v2 EventBus 三通道（render/state/observe），**biased select：render 先于 state**（防 partial 污染）；Langfuse `LangfuseBridge` 在协议化前分支消费（:101）；observe Lagged 容错；映射后经 `on_event(UnstampedEvent, ExecutorEvent)` 送 event_sink |
 | 改 Hub/Web 事件投影 | `src/event/activity.rs` | `map_agent_activity(&ExecutorEvent) -> Option<AgentActivityWire>`（:93）；`AgentActivityKind`（:19）/`AgentActivityStatus`（:36） | `peri.agentActivity` 安全摘要面：allowlist 字段 + `safe_label`/`truncate_utf8`/`hash_correlation` 清洗；禁止携带消息/路径/输出/错误正文；cap 未双向协商不投影 |
-| 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :92 / `save` :199） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests.rs:271）；`session/update_config` 校验 providers 非空 + profile→provider 引用；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
+| 改 provider/模型/配置 | `src/provider/mod.rs` + `config.rs` + `store.rs` | `LlmProvider` enum（mod.rs:23，OpenAi/Anthropic）；`from_config`（:118）/`from_config_for_alias`（:125）/`into_model`（:246）；`PeriConfig`（config.rs:13）；`ConfigSource`（store.rs:78，读写路径唯一事实源，`load_at` :92 / `save` :199） | 模型切换走 `session/set_config_option` 的 `configId="model"` 分支（requests/config_options.rs:62，`handle_set_config_option` :44）；`session/update_config` 校验 providers 非空 + profile→provider 引用；`AgentPool::has_valid_cache`（session/agent_pool.rs:64）按 provider 指纹复用 LLM 实例 |
 | 改 transport（新增传输） | `src/transport/mod.rs` + `mpsc.rs` + `stdio.rs` + `router.rs` | `AcpTransport` trait（mod.rs:24，send_request/send_notification/recv/send_response）；`mpsc_transport_pair()`（mpsc.rs:237）；`RequestRouter`（router.rs:25，`dispatch` :64） | router 只匹配 `RequestId::Number` 的 pending 请求，String id 走 unmatched 转发路径；transport 只做帧编解码不分发业务语义；TUI 走 mpsc、IDE 走 stdio（agent_client_protocol ConnectionTo） |
 | 改 prompt 组装（system prompt） | `src/prompt/mod.rs` + `prompts/sections/*.md` | `PromptTemplate::render`（:342）；`PromptFeatures::detect`（:42）；`PromptEnv::with_frozen_date`（:104） | render 按 `PromptFeatures` 门控 section（git repo 检测等）；frozen date 在会话创建时注入，禁止中途重读（ARC-FROZEN-001）；`format_available_agents`（:409） |
 | 改 HITL/AskUser 交互 | `src/broker/transport_broker.rs`（mpsc 路径）+ `src/host/stdio/context.rs`（stdio 路径） | `AcpTransportBroker`（:26）`impl UserInteractionBroker`（:41，`request` :42）；`StdioBroker`（context.rs:96） | 审批逐 item 发 `session/request_permission` RPC（仅 allow_once/reject_once 两选项）；问题聚合为单个 `elicitation/create` form；传输失败默认 Reject（防误放行） |
@@ -83,7 +83,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 方法分发聚合 | dispatch/mod.rs | re-export：`build_initialize_response`、`handle_prompt`、`rewind_execute`、`fork_session`、`replay_session_history` 等 |
-| 命令执行 | dispatch/execute_command.rs | `execute_command`（:63） |
+| 命令执行 | dispatch/execute_command.rs | `execute_command`（:75） |
 | rewind | dispatch/rewind.rs | `rewind_preview`（:52）/`rewind_execute`（:215） |
 | UI 命令条目 | dispatch/commands.rs | `register_ui_entries`（:73） |
 
@@ -98,7 +98,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 服务循环 | host/mod.rs | `run_acp_server`（:248）；`dispatch_prompt_turn`（:496）；`SessionState`（:66，frozen/agent_pool/workflow_middleware/continuation_armed/lease） |
-| 方法注册面（mpsc） | host/requests.rs | `handle_request` match（:151 起 25+ 方法） |
+| 方法注册面（mpsc） | host/requests.rs + host/requests/*.rs | `handle_request`（requests.rs:22，30 个方法分派到子模块；各 handle_* 均为 `pub(super)` 定义在对应子文件） |
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153） |
 | prompt 执行体 | host/prompt.rs | `run_prompt`（:35）；`take_recall_for_turn`（:763）；`build_compact_hooks`（:776） |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |

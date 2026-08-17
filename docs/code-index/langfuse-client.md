@@ -1,6 +1,6 @@
 # langfuse-client 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-16
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17
 > 依据：langfuse-client/src 源码、Doc.md（x-langfuse-ingestion-version: 4）
 
 ## 架构速览
@@ -37,6 +37,6 @@
 ## 跨模块契约
 
 - 消费方（唯一生产消费方）：`peri-controller/src/langfuse/session.rs`（:20-46 实例化 `LangfuseClient` + `Batcher`，组合进 TelemetrySession）；`peri-controller/src/langfuse/tracer/event_builder.rs:34`（持 `&Batcher` 上报事件）；`peri-controller/src/langfuse/drop_telemetry.rs:58`（`LangfuseError::ChannelClosed` → BatcherClosed 丢弃原因映射）
-- **新增 trace 阶段/span 的改动点在消费侧而非本 crate**：`peri-controller/src/langfuse/tracer/mod.rs`（`on_stage_start` :906 / `on_stage_end` :927，SpanCreate 延迟到 end 且仅 duration>0 才发送）、`tracer/stages.rs`（`StageSpans` 生命周期）、`peri-acp-types/src/event.rs:207` 的 `Stage` 枚举（阶段事实源）；本 crate 只在类型/OTLP 映射变化时才动（`types/mod.rs`、`types/conversion.rs`）
+- **新增 trace 阶段/span 的改动点在消费侧而非本 crate**：`peri-controller/src/langfuse/tracer/`（`span_events.rs` 的 `on_stage_start` :117 / `on_stage_end` :138，SpanCreate 延迟到 end 且仅 duration>0 才发送）、`tracer/stages.rs`（`StageSpans` 生命周期）、`peri-acp-types/src/event.rs:207` 的 `Stage` 枚举（阶段事实源）；本 crate 只在类型/OTLP 映射变化时才动（`types/mod.rs`、`types/conversion.rs`）
 - `peri-agent/src/session/transcript.rs:254/:763` 仅注释引用 batcher 的 Shutdown 模式（flush 后退出），无代码依赖
 - lib.rs re-export（:8-12）：`Batcher`、`LangfuseClient`、`BackpressurePolicy`/`BatcherConfig`/`ClientConfig`、`LangfuseError`、`GenerationBody`/`IngestionEvent`/`ObservationBody`/`ObservationType`/`SpanBody`
