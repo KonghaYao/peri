@@ -407,9 +407,7 @@ async fn test_delete_removes_thread_and_responds_empty() {
             {
                 let ctx = ctx_for_handler;
                 async move |req: DeleteSessionRequest, responder, _cx: ConnectionTo<Client>| {
-                    control::handle_delete(&ctx, &req.session_id.0).await;
-                    let _ = responder.respond(DeleteSessionResponse::new());
-                    Ok(())
+                    control::handle_delete(&ctx, &req.session_id.0, responder).await
                 }
             },
             agent_client_protocol::on_receive_request!(),

@@ -467,10 +467,11 @@ pub(crate) async fn handle_resume(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_fork(
+pub(crate) async fn handle_fork(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let source_id = params
         .get("sessionId")
@@ -492,7 +493,7 @@ pub(super) async fn handle_fork(
 
     // ── 先构建 frozen + workflow_middleware ──
     cfg.session_manager.ensure_session(&new_session_id, cwd);
-    cfg.session_manager.ensure_session_caps(&new_session_id);
+    let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
     let frozen_data =
         cfg.session_manager
             .build_frozen_data(cwd, &cfg.plugin_skill_roots, &cfg.plugin_agent_dirs);
@@ -523,6 +524,17 @@ pub(super) async fn handle_fork(
     );
 
     info!(source = %source_id, new = %new_session_id, "Session forked");
+    // Push AvailableCommandsUpdate notification + 预热 MCP skill 发现
+    // （决策 B 扩展，与 session/new 同构；stdio 装配面同款行为——fork 产生
+    // 新 session 后无需等首 turn before_agent 装配即有 mcp 命令）。
+    send_available_commands_update(
+        transport,
+        &new_session_id,
+        &caps,
+        cfg.session_manager.command_registry_for(&new_session_id),
+    )
+    .await;
+    prewarm_session_mcp_discovery(cfg, &new_session_id);
     let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }

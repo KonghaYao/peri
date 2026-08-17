@@ -4,13 +4,9 @@
 //! 系统通道（thread 存储）由部署单元（cli）打开后经 `thread_store` 注入，
 //! ACP 层不直接依赖 Resources（§0 依赖方向）。
 
-mod commands;
 mod context;
-mod freeze;
 mod init;
 pub use init::StdioAssemblyInput;
-mod model;
-mod notification;
 mod session;
 mod transport;
 
@@ -26,10 +22,10 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
 
     use agent_client_protocol::{
         schema::v1::{
-            CancelNotification, CloseSessionRequest, CloseSessionResponse, DeleteSessionRequest,
-            DeleteSessionResponse, ForkSessionRequest, InitializeRequest, ListSessionsRequest,
-            LoadSessionRequest, NewSessionRequest, PromptRequest, ResumeSessionRequest,
-            SetSessionConfigOptionRequest, SetSessionModeRequest,
+            CancelNotification, CloseSessionRequest, DeleteSessionRequest, ForkSessionRequest,
+            InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+            PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
+            SetSessionModeRequest,
         },
         Agent, Client, ConnectionTo, Stdio,
     };
@@ -119,9 +115,7 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
             {
                 let ctx = ctx_clone.clone();
                 async move |req: CloseSessionRequest, responder, _cx: ConnectionTo<Client>| {
-                    session::control::handle_close(&ctx, &req.session_id.0).await;
-                    let _ = responder.respond(CloseSessionResponse::new());
-                    Ok(())
+                    session::control::handle_close(&ctx, &req.session_id.0, responder).await
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -161,9 +155,7 @@ pub async fn run_acp_stdio(input: init::StdioAssemblyInput) -> anyhow::Result<()
             {
                 let ctx = ctx_clone.clone();
                 async move |req: DeleteSessionRequest, responder, _cx: ConnectionTo<Client>| {
-                    session::control::handle_delete(&ctx, &req.session_id.0).await;
-                    let _ = responder.respond(DeleteSessionResponse::new());
-                    Ok(())
+                    session::control::handle_delete(&ctx, &req.session_id.0, responder).await
                 }
             },
             agent_client_protocol::on_receive_request!(),

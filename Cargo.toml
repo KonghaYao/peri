@@ -69,7 +69,7 @@ tracing-appender = "0.2"
 
 # --- Utilities ---
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["send_guard"] }
 dirs-next = "2"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }

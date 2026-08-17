@@ -328,3 +328,78 @@ fn test_initialize_response_wire_baseline() {
     assert_eq!(meta["peri.rewind"], false);
     assert_eq!(meta["peri.uiCommands"], json!([]));
 }
+
+// ── 批 2 stdio notify adapter：Value payload → SessionNotification 往返保真 ──
+
+/// 批 2 `StdioNotifyTransport` 的转换无损性基线：requests 侧通知 helper
+/// （`send_available_commands_update` / `send_config_option_update` /
+/// `TuiReplaySender`）经 `AcpTransport::send_notification("session/update",
+/// payload)` 发出的 payload 是 `{sessionId, update}`（`update` = `SessionUpdate`
+/// 序列化值）。stdio 侧 adapter 把它 `serde_json::from_value::<SessionNotification>`
+/// 还原后发送——本测试锁定该转换往返后 **wire JSON 逐字段不变**（migration 不因
+/// Value↔typed 转换引入新的外层封装差异）。
+#[tokio::test]
+async fn test_stdio_notify_adapter_payload_roundtrip_preserves_wire() {
+    // requests 侧 `send_available_commands_update` 首发广播的 payload 形态
+    let caps = PeriCaps {
+        skill_names: true,
+        ui_commands: vec![UiCommandSpec {
+            name: "gallery".into(),
+            description: "Open the gallery panel".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let reg = Arc::new(CommandRegistry::new());
+    register_builtins(&reg);
+    let update_value = serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(
+        build_available_commands_update(&reg.snapshot(), &caps),
+    ))
+    .expect("AvailableCommandsUpdate 序列化不应失败");
+    let payload = json!({
+        "sessionId": "s-adapter",
+        "update": update_value,
+    });
+
+    // adapter 内部等价转换：payload → SessionNotification → 重新序列化
+    let notif: SessionNotification =
+        serde_json::from_value(payload.clone()).expect("payload 应可还原为 SessionNotification");
+    let rebuilt = serde_json::to_value(&notif).expect("SessionNotification 序列化不应失败");
+
+    assert_eq!(
+        rebuilt, payload,
+        "StdioNotifyTransport 转换往返必须保持 wire JSON 逐字段不变"
+    );
+    assert_eq!(rebuilt["sessionId"], "s-adapter");
+    assert_eq!(
+        rebuilt["update"]["sessionUpdate"], "available_commands_update",
+        "update 判别字符串保持不变"
+    );
+}
+
+/// 批 2 adapter 同样承载 `session/update` 的其余 `SessionUpdate` 变体
+/// （`send_config_option_update` / `TuiReplaySender` 同款外层封装）——
+/// 以 `SessionInfoUpdate` 为例锁定往返保真。
+#[tokio::test]
+async fn test_stdio_notify_adapter_info_payload_roundtrip_preserves_wire() {
+    let info_update = serde_json::to_value(SessionUpdate::SessionInfoUpdate(
+        agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+            .updated_at("FIXED-TS")
+            .title("新标题".to_string()),
+    ))
+    .expect("SessionInfoUpdate 序列化不应失败");
+    let payload = json!({
+        "sessionId": "s-adapter",
+        "update": info_update,
+    });
+
+    let notif: SessionNotification =
+        serde_json::from_value(payload.clone()).expect("payload 应可还原为 SessionNotification");
+    let rebuilt = serde_json::to_value(&notif).expect("SessionNotification 序列化不应失败");
+
+    assert_eq!(
+        rebuilt, payload,
+        "StdioNotifyTransport 对 SessionInfoUpdate payload 往返保真"
+    );
+    assert_eq!(rebuilt["update"]["sessionUpdate"], "session_info_update");
+}
