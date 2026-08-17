@@ -168,6 +168,8 @@ pub(crate) struct AgentObsStart {
 
 /// AGENT obs 关闭所需全部信息,tracer 据此发 ObservationUpdate + flush child tool_batch
 pub(crate) struct ClosedSubagent {
+    /// 事件侧 child_agent_id(关闭时兜底清理该 agent 的活跃 stage 用)
+    pub agent_id: String,
     pub observation_id: String,
     pub parent_observation_id: String,
     pub start_time: String,
@@ -609,6 +611,7 @@ impl SubagentRegistry {
         // 同毫秒早到,直接复用它会把 AGENT obs 时长虚标为 0
         let end_time = later_rfc3339(&stop.stop_time, &sa.last_content_time);
         let closed = ClosedSubagent {
+            agent_id: child.clone(),
             observation_id: sa.observation_id.clone(),
             parent_observation_id: sa.parent_observation_id.clone(),
             start_time: sa.start_time.clone(),
@@ -738,6 +741,7 @@ impl SubagentRegistry {
         // 同毫秒早到,直接复用它会把 AGENT obs 时长虚标为 0
         let end_time = later_rfc3339(&stop.stop_time, &sa.last_content_time);
         let closed = ClosedSubagent {
+            agent_id: child_agent_id.to_string(),
             observation_id: sa.observation_id.clone(),
             parent_observation_id: sa.parent_observation_id.clone(),
             start_time: sa.start_time.clone(),
@@ -815,6 +819,7 @@ impl SubagentRegistry {
                 stop.result.clone()
             };
             closed.push(ClosedSubagent {
+                agent_id: agent.clone(),
                 observation_id: sa.observation_id.clone(),
                 parent_observation_id: sa.parent_observation_id.clone(),
                 start_time: sa.start_time.clone(),

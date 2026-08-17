@@ -56,6 +56,13 @@ impl StageSpans {
         }
     }
 
+    /// 开始新阶段 span，返回 (新 handle, 被覆盖的旧 handle)。
+    ///
+    /// 自动结束同一 agent 的前一个 stage（清理状态，事件构造在外层）——
+    /// 只清理该 agent 自己的 slot，并行 subagent 的 stage 互不影响。
+    /// 被覆盖的旧 handle 返回给调用方，由 tracer 立即补发其合并 SpanCreate：
+    /// 旧 stage 的 StageEnded 可能因乱序/重放丢失，若不发则工具 batch 的
+    /// parent 会引用一个从未创建的 span（孤儿 batch）。
     pub(crate) fn on_stage_start(
         &mut self,
         agent_id: &str,
@@ -63,10 +70,8 @@ impl StageSpans {
         trace_id: &str,
         _turn_id: &str,
         parent_observation_id: &str,
-    ) -> StageHandle {
-        // 自动结束同一 agent 的前一个 stage（清理状态，事件构造在外层）。
-        // 只清理该 agent 自己的 slot——并行 subagent 的 stage 互不影响。
-        self.active.remove(agent_id);
+    ) -> (StageHandle, Option<StageHandle>) {
+        let replaced = self.active.remove(agent_id).map(|a| a.handle);
         let span_id = format!("span_{}", uuid::Uuid::now_v7());
         let start_time = chrono::Utc::now().to_rfc3339();
         let handle = StageHandle {
@@ -89,13 +94,16 @@ impl StageSpans {
                 mq_counts,
             },
         );
-        StageHandle {
-            span_id,
-            stage,
-            start_time,
-            trace_id: trace_id.to_string(),
-            parent_observation_id: parent_observation_id.to_string(),
-        }
+        (
+            StageHandle {
+                span_id,
+                stage,
+                start_time,
+                trace_id: trace_id.to_string(),
+                parent_observation_id: parent_observation_id.to_string(),
+            },
+            replaced,
+        )
     }
 
     pub(crate) fn on_stage_end(
@@ -121,6 +129,21 @@ impl StageSpans {
             return;
         }
         self.active.remove(agent_id);
+    }
+
+    /// 取出全部活跃 stage handle 并清空（turn 结束 / subagent 关闭兜底用）。
+    /// 对应 stage 的 StageEnded 可能因事件流截断/乱序丢失，由调用方立即补发
+    /// 合并 SpanCreate，否则工具 batch 的 parent 引用一个从未创建的 span。
+    pub(crate) fn take_all_active(&mut self) -> Vec<StageHandle> {
+        self.active
+            .drain()
+            .map(|(_, a)| a.handle)
+            .collect::<Vec<_>>()
+    }
+
+    /// 取出指定 agent 的活跃 stage handle（subagent 关闭兜底用）。
+    pub(crate) fn take_active(&mut self, agent_id: &str) -> Option<StageHandle> {
+        self.active.remove(agent_id).map(|a| a.handle)
     }
 
     pub(crate) fn active_stage(&self, agent_id: &str) -> Option<Stage> {

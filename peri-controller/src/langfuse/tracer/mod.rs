@@ -44,6 +44,7 @@ use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION}
 use langfuse_client::types::session::SessionBody;
 use langfuse_client::types::{EventBody, ObservationLevel, TraceBody};
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
+use peri_agent::agent::events::StageStatus;
 use peri_agent::agent::events_v2::TurnErrorReason;
 
 pub struct LangfuseTracer {
@@ -221,7 +222,21 @@ impl LangfuseTracer {
         for closed in closed_list {
             self.emit_subagent_close(closed);
         }
-        self.replayed_stage_handles.clear();
+        // 兜底:关闭所有仍活跃/未领取的 stage span(StageEnded 因事件流截断/
+        // 乱序丢失时,不发送则其下工具 batch 的 parent 悬空成孤儿)。
+        // turn 结束是终态,此后不可能再有 stage 事件,立即补发是安全的;
+        // 乱序 StageEnded 若随后到达,Langfuse 按同 id upsert 无害。
+        for handle in self.stages.take_all_active() {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
+        let stale_replayed: Vec<StageHandle> = self
+            .replayed_stage_handles
+            .drain()
+            .map(|(_, h)| h)
+            .collect();
+        for handle in stale_replayed {
+            self.emit_stage_span_close(&handle, StageStatus::Done, None);
+        }
 
         let is_error = error_output.is_some();
         let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);

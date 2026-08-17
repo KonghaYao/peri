@@ -40,7 +40,7 @@ async fn test_smoke_complete_turn_sequence() {
 
     // Stage: Receive
     t.on_stage_start(Stage::Receive, "turn_1");
-    let recv_handle = t.stages.on_stage_start(
+    let (recv_handle, _replaced) = t.stages.on_stage_start(
         "main",
         Stage::Receive,
         &t.trace_id,
@@ -53,7 +53,7 @@ async fn test_smoke_complete_turn_sequence() {
     t.on_stage_start(Stage::Reason, "turn_1");
     t.on_llm_start("main", 0, &[], &[]);
     t.on_llm_end("main", 0, "claude-4.7", "anthropic", "hello", None, None);
-    let reason_handle = t.stages.on_stage_start(
+    let (reason_handle, _replaced) = t.stages.on_stage_start(
         "main",
         Stage::Reason,
         &t.trace_id,

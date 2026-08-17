@@ -118,7 +118,7 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let handle = self.stages.on_stage_start(
+        let (handle, replaced) = self.stages.on_stage_start(
             MAIN_AGENT_KEY,
             stage,
             &self.trace_id,
@@ -129,6 +129,11 @@ impl LangfuseTracer {
         // batch parent 冻结在旧 stage(stage-reason),Act 开始后重挂到 stage-act
         if stage == Stage::Act {
             self.tool_batch.on_act_stage_start(&handle.span_id);
+        }
+        // 旧 stage 被覆盖:立即补发其合并 SpanCreate。若等待 StageEnded,
+        // 乱序/重放丢失会导致 span 永不发送,工具 batch 的 parent 悬空(孤儿 batch)。
+        if let Some(old) = replaced {
+            self.emit_stage_span_close(&old, StageStatus::Done, None);
         }
         // SpanCreate 延迟到 on_stage_end：仅在 duration > 0 时发送
     }
@@ -165,22 +170,44 @@ impl LangfuseTracer {
 
         self.stages.on_stage_end(agent_id, handle, status);
 
-        // Act stage 结束时自动 flush 主 agent 工具批次（确保工具挂在正确的 act 下，
-        // 而非全部堆在第一个 act 中）。仅当该 stage 属于主 agent 域时 flush——
-        // subagent 的 Act 结束不应影响主 batch(主 batch 中的 Agent 工具可能尚未结束,
-        // flush() 的 pending_tools.clear() 会导致丢失)。
-        // subagent 的工具批次由 AGENT obs 关闭(Stop/ToolEnded 双信号)时独立 flush。
-        if handle.stage == Stage::Act && self.subagent.is_main_agent(agent_id) {
-            let flush = self.tool_batch.flush();
-            self.emit_tools_flush(flush);
-        }
+        self.emit_stage_span_close(handle, status, receive_input);
 
+        // Act stage 结束时按 owner flush 对应工具批次，保证每轮工具稳定挂在
+        // `stage-act → tool-batch` 下。subagent 也必须逐 Act flush：若一直延迟到
+        // AGENT obs 关闭，同一个 batch 会跨多个 Act，并被后续 on_act_stage_start
+        // 反复重挂；最终若落到被 0ms 条件过滤的 Act，整批工具都会成为孤儿。
+        if handle.stage == Stage::Act {
+            let flush = match self.subagent.ownership(agent_id) {
+                crate::langfuse::tracer::registry::Ownership::Main => Some(self.tool_batch.flush()),
+                crate::langfuse::tracer::registry::Ownership::Subagent => {
+                    Some(self.subagent.tool_batch_mut(agent_id).flush())
+                }
+                crate::langfuse::tracer::registry::Ownership::Unknown => None,
+            };
+            if let Some(flush) = flush {
+                self.emit_tools_flush(flush);
+            }
+        }
+        self.compact_work_done = false;
+    }
+
+    /// 发送 stage 的合并 SpanCreate（含 end_time）。
+    ///
+    /// 条件上报（v2 语义）：0ms stage 不上报；Compact 阶段无实际工作时不上报。
+    /// 供 `on_stage_end` 与「旧 stage 被覆盖时立即补发」两条路径共用——
+    /// 覆盖补发的 span 若与后续乱序到达的 StageEnded 重复发送，Langfuse 对
+    /// 相同 observation id 的写入是 upsert，最终以较晚的 end_time/status 为准。
+    pub(crate) fn emit_stage_span_close(
+        &self,
+        handle: &crate::langfuse::tracer::stages::StageHandle,
+        status: StageStatus,
+        receive_input: Option<serde_json::Value>,
+    ) {
         // Compact stage：仅在实际执行了 micro/full compact 时才上报 span，
         // 否则跳过空 compact 阶段（无意义的 ~20ms span）
         if handle.stage == Stage::Compact && !self.compact_work_done {
             return;
         }
-        self.compact_work_done = false;
 
         let end_time = now_rfc3339();
         let duration_ms = calculate_duration_ms(&handle.start_time, &end_time);
