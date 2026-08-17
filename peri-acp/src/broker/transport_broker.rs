@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
@@ -16,24 +16,52 @@ use peri_acp_types::interaction::{
     QuestionItem, UserInteractionBroker,
 };
 
-use crate::transport::AcpTransport;
+use crate::transport::RequestTransport;
 
-/// A broker that uses [`AcpTransport`] to relay HITL and AskUser interactions
-/// to the ACP client via `RequestPermission` and `elicitation/create` RPCs.
+/// 审批转发模式：`Forward` 经 `session/request_permission` 转发给客户端；
+/// `AutoApprove` 无条件批准（stdio 无审批 UI 的宿主使用，行为同旧
+/// `StdioBroker`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalMode {
+    Forward,
+    AutoApprove,
+}
+
+/// A broker that uses [`RequestTransport`] to relay HITL and AskUser
+/// interactions to the ACP client via `RequestPermission` and
+/// `elicitation/create` RPCs. mpsc（TUI/notify）与 stdio 两路共用同一 broker，
+/// 差异仅由构造参数（`ApprovalMode` / `timeout`）表达。
 ///
 /// Each approval item is sent as a separate `RequestPermission` request.
 /// Questions are aggregated into a single `elicitation/create` form.
 pub struct AcpTransportBroker {
-    transport: Arc<dyn AcpTransport>,
+    transport: Arc<dyn RequestTransport>,
     session_id: SessionId,
+    approval_mode: ApprovalMode,
+    timeout: Option<Duration>,
 }
 
 impl AcpTransportBroker {
-    pub fn new(transport: Arc<dyn AcpTransport>, session_id: SessionId) -> Self {
+    /// mpsc/TUI 默认装配：审批转发、无超时（与既有行为一致）。
+    pub fn new(transport: Arc<dyn RequestTransport>, session_id: SessionId) -> Self {
         Self {
             transport,
             session_id,
+            approval_mode: ApprovalMode::Forward,
+            timeout: None,
         }
+    }
+
+    /// 审批分支改为无条件批准（stdio 宿主用）。
+    pub fn with_auto_approve(mut self) -> Self {
+        self.approval_mode = ApprovalMode::AutoApprove;
+        self
+    }
+
+    /// 提问分支超时（`Some` 时超时返回 `Rejected`；`None` 不超时）。
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -49,6 +77,18 @@ impl UserInteractionBroker for AcpTransportBroker {
 
 impl AcpTransportBroker {
     async fn handle_approval(&self, items: Vec<ApprovalItem>) -> InteractionResponse {
+        match self.approval_mode {
+            ApprovalMode::AutoApprove => InteractionResponse::Decisions(
+                items
+                    .into_iter()
+                    .map(|_| ApprovalDecision::Approve { source: None })
+                    .collect(),
+            ),
+            ApprovalMode::Forward => self.forward_approval(items).await,
+        }
+    }
+
+    async fn forward_approval(&self, items: Vec<ApprovalItem>) -> InteractionResponse {
         let mut decisions = Vec::with_capacity(items.len());
 
         for item in &items {
@@ -104,17 +144,19 @@ impl AcpTransportBroker {
 
     async fn handle_questions(&self, requests: Vec<QuestionItem>) -> InteractionResponse {
         let params = build_elicitation_params(&requests, self.session_id.clone());
-
-        match self
-            .transport
-            .send_request("elicitation/create", params)
-            .await
-        {
-            Ok(response) => parse_elicitation_response(response, requests),
-            Err(e) => {
+        let request = self.transport.send_request("elicitation/create", params);
+        let result = match self.timeout {
+            Some(timeout) => tokio::time::timeout(timeout, request).await,
+            None => Ok(request.await),
+        };
+        match result {
+            Ok(Ok(response)) => parse_elicitation_response(response, requests),
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "Elicitation request failed, returning empty answers");
                 InteractionResponse::Answers(empty_answers(requests))
             }
+            // 客户端存活但不响应：超时 → Rejected（LLM 侧 ToolRejected）。
+            Err(_elapsed) => InteractionResponse::Rejected,
         }
     }
 }

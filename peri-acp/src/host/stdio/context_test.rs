@@ -1,4 +1,5 @@
-//! Tests for `host/stdio/context.rs` 的 `StdioQuestionBroker`（stdio 提问转发）。
+//! Tests for `host/stdio/context.rs` 的 stdio 装配（统一
+//! [`AcpTransportBroker`](crate::broker) + `ConnectionTo` 适配的提问转发）。
 //!
 //! 双端 builder 驱动（对齐 `session/create_test.rs` / `commands_test.rs`）：
 //! agent 端 handler 处理触发请求后 `tokio::spawn` broker 任务——broker 的
@@ -25,7 +26,9 @@ use peri_acp_types::interaction::{
 };
 use serde_json::{json, Value};
 
-use super::{ask_user_timeout, parse_ask_user_timeout, StdioQuestionBroker};
+use crate::broker::AcpTransportBroker;
+
+use super::{ask_user_timeout, parse_ask_user_timeout};
 
 const TEST_SESSION_ID: &str = "test-session";
 
@@ -131,7 +134,10 @@ async fn drive_broker(
                     let context_task = context.clone();
                     let result_task = Arc::clone(&result_agent);
                     tokio::spawn(async move {
-                        let broker = StdioQuestionBroker::new(cx_task, session_id_task, timeout);
+                        // stdio 生产装配：ConnectionTo 适配 + 自动审批 + 超时。
+                        let broker = AcpTransportBroker::new(Arc::new(cx_task), session_id_task)
+                            .with_auto_approve()
+                            .with_timeout(timeout);
                         let response = broker.request(context_task).await;
                         *result_task.lock().unwrap() = Some(response);
                     });

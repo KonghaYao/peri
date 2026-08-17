@@ -220,3 +220,149 @@ fn test_parse_invalid_response_empty_answers() {
     assert_eq!(answers.len(), 3);
     assert_eq!(answers[0].text.as_deref(), Some(""));
 }
+
+// ─── AcpTransportBroker 行为：ApprovalMode / timeout（mock transport） ───
+
+use std::sync::Mutex;
+
+use crate::transport::types::AcpError;
+use crate::transport::RequestTransport;
+
+/// Mock `RequestTransport`：记录调用；`Behavior::Respond` 回固定响应，
+/// `Behavior::Pending` 永不完成（模拟客户端不响应）。
+struct MockTransport {
+    calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    behavior: Behavior,
+}
+
+enum Behavior {
+    Respond(serde_json::Value),
+    Pending,
+}
+
+#[async_trait::async_trait]
+impl RequestTransport for MockTransport {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        match &self.behavior {
+            Behavior::Respond(v) => Ok(v.clone()),
+            Behavior::Pending => std::future::pending().await,
+        }
+    }
+}
+
+fn approval_context() -> InteractionContext {
+    InteractionContext::Approval {
+        items: vec![ApprovalItem {
+            tool_call_id: "call_1".into(),
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "ls"}),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn test_approval_mode_auto_approve_never_calls_transport() {
+    // stdio 装配（with_auto_approve）：全部 Approve 且零 transport 调用。
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        behavior: Behavior::Pending,
+    };
+    let broker =
+        AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1")).with_auto_approve();
+    let resp = broker.request(approval_context()).await;
+    let InteractionResponse::Decisions(decisions) = resp else {
+        panic!("auto-approve 应返回 Decisions: {resp:?}");
+    };
+    assert_eq!(decisions.len(), 1);
+    assert!(
+        matches!(decisions[0], ApprovalDecision::Approve { source: None }),
+        "auto-approve 应为 Approve: {:?}",
+        decisions[0]
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "auto-approve 不应发起任何 transport 请求"
+    );
+}
+
+#[tokio::test]
+async fn test_approval_mode_forward_sends_request_permission() {
+    // mpsc/TUI 默认装配（Forward）：经 request_permission 转发，accept → Approve。
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        // ACP schema 真实 wire 格式（见 peri-tui hitl_response.rs 协议注释）。
+        behavior: Behavior::Respond(json!({
+            "outcome": { "outcome": "selected", "optionId": "allow_once" }
+        })),
+    };
+    let broker = AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1"));
+    let resp = broker.request(approval_context()).await;
+    let InteractionResponse::Decisions(decisions) = resp else {
+        panic!("forward 应返回 Decisions: {resp:?}");
+    };
+    assert!(matches!(decisions[0], ApprovalDecision::Approve { .. }));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "session/request_permission");
+}
+
+#[tokio::test]
+async fn test_questions_timeout_returns_rejected() {
+    // 客户端存活但不响应：超时 → Rejected（LLM 侧 ToolRejected）。
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        behavior: Behavior::Pending,
+    };
+    let broker = AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1"))
+        .with_timeout(Some(Duration::from_millis(50)));
+    let resp = broker
+        .request(InteractionContext::Questions {
+            requests: sample_questions(),
+        })
+        .await;
+    assert!(
+        matches!(resp, InteractionResponse::Rejected),
+        "超时应返回 Rejected: {resp:?}"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "elicitation/create");
+}
+
+#[tokio::test]
+async fn test_questions_transport_error_returns_empty_answers() {
+    // transport 断连（send_request 报错）：空 Answers 而非挂死。
+    struct ErrorTransport;
+    #[async_trait::async_trait]
+    impl RequestTransport for ErrorTransport {
+        async fn send_request(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, AcpError> {
+            Err(AcpError::new(-32000, "transport closed"))
+        }
+    }
+    let broker = AcpTransportBroker::new(Arc::new(ErrorTransport), SessionId::new("s1"));
+    let resp = broker
+        .request(InteractionContext::Questions {
+            requests: sample_questions(),
+        })
+        .await;
+    let InteractionResponse::Answers(answers) = resp else {
+        panic!("transport 错误应返回空 Answers: {resp:?}");
+    };
+    assert_eq!(answers.len(), 3);
+    assert_eq!(answers[0].text.as_deref(), Some(""));
+}

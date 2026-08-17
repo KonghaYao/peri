@@ -6,6 +6,12 @@
 //!
 //! - [`MpscTransport`](mpsc) — in-memory channel pair for TUI ↔ ACP Server
 //! - [`StdioTransport`](stdio) — stdio-based transport for external IDE clients
+//!
+//! The [`RequestTransport`] trait is the minimal send-only slice used by the
+//! interaction broker ([`AcpTransportBroker`](crate::broker)); it is
+//! implemented blanket for all [`AcpTransport`]s and directly for the ACP SDK
+//! [`ConnectionTo`] handle (stdio production path), so broker assembly is
+//! transport-agnostic.
 
 pub mod mpsc;
 pub mod router;
@@ -14,6 +20,7 @@ pub mod types;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
 use types::{AcpError, IncomingMessage, RequestId};
 
 /// Bidirectional ACP JSON-RPC 2.0 transport.
@@ -37,4 +44,55 @@ pub trait AcpTransport: Send + Sync {
         id: RequestId,
         result: Result<Value, AcpError>,
     ) -> Result<(), AcpError>;
+}
+
+/// Minimal send-only transport contract (server→client request round-trip).
+///
+/// This is the narrowest slice the interaction broker needs. It exists because
+/// the ACP SDK `ConnectionTo<Client>` handle (stdio production path) is a
+/// callback/push model and cannot implement the full pull-model
+/// [`AcpTransport`] (`recv`/`send_response`); the broker therefore depends on
+/// this trait so both mpsc and stdio paths share one broker.
+#[async_trait]
+pub trait RequestTransport: Send + Sync {
+    /// Send a request and wait for a response.
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError>;
+}
+
+#[async_trait]
+impl<T: AcpTransport + ?Sized> RequestTransport for T {
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        AcpTransport::send_request(self, method, params).await
+    }
+}
+
+/// `Arc<dyn AcpTransport>` → `Arc<dyn RequestTransport>` 的显式桥。
+///
+/// `dyn AcpTransport: RequestTransport` 经 blanket impl 成立，但 unsize
+/// coercion 依赖 supertrait 关系而非 trait 满足，故 mpsc 装配点
+/// （`host/prompt.rs`）需经本结构体显式转换。
+pub struct AcpRequestBridge(pub Arc<dyn AcpTransport>);
+
+#[async_trait]
+impl RequestTransport for AcpRequestBridge {
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        AcpTransport::send_request(self.0.as_ref(), method, params).await
+    }
+}
+
+/// ACP SDK stdio 模式的 `ConnectionTo<Client>` 适配：直接复用 SDK 的
+/// server→client request 通道（`send_request` + `block_task`，dispatch loop
+/// 之外使用），与 mpsc 路径的 [`AcpTransport`] 实现共享同一 broker。
+#[async_trait]
+impl RequestTransport for agent_client_protocol::ConnectionTo<agent_client_protocol::Client> {
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        let message = agent_client_protocol::UntypedMessage::new(method, params)
+            .map_err(|e| AcpError::new(-32600, format!("Invalid request: {e}")))?;
+        let response = self
+            .send_request(message)
+            .block_task()
+            .await
+            .map_err(|e| AcpError::new(-32603, format!("Request failed: {e}")))?;
+        Ok(response)
+    }
 }

@@ -139,3 +139,15 @@ let broker: Arc<dyn UserInteractionBroker> = Arc::new(
 - **行为文档已补**：`docs/design/peri-acp-protocol.md` 新增 §6.3「stdio 提问转发行为」，注明 `session/cancel` 不解除挂起提问、超时兜底（`PERI_ASK_USER_TIMEOUT_SECS`，超时 → `ToolRejected`）、断连兜底（transport 关闭 → 空答案）三组行为。
 - **TUI 路径关系确认**：TUI 不是另一套协议——TUI 是 ACP client 端（`AcpTuiClient::send_response` 回 accept/cancel/reject 弹窗），服务端 broker 与 stdio 分属两路：TUI/notify 走 `AcpTransportBroker`（mpsc transport，`host/prompt.rs:146`），stdio 走 `StdioQuestionBroker`（`ConnectionTo` 直发），两路共用 `build_elicitation_params` / `parse_elicitation_response` 纯函数，协议帧一致。
 - **提交**：本次变更（3 实现文件 + 2 测试文件 + 本 spec + 行为文档）已提交。
+
+### 归一记录（2026-08-17，提交 2）
+
+**统一 TUI 与 stdio 的交互 broker**：删除 `StdioQuestionBroker`，stdio 与 mpsc 共用同一 `AcpTransportBroker`。
+
+- `transport/mod.rs`：新增最小面 `RequestTransport`（仅 `send_request`）；blanket impl for `AcpTransport` + `AcpRequestBridge`（`Arc<dyn AcpTransport>` 显式桥，dyn upcast 不适用于平行 trait）+ `ConnectionTo<Client>` 直连适配（`UntypedMessage` + `block_task`）。
+- `broker/transport_broker.rs`：`AcpTransportBroker` 依赖收窄为 `Arc<dyn RequestTransport>`；新增 `ApprovalMode`（`Forward` 默认 / `AutoApprove`）与 `with_timeout` 构造参数；超时 → `Rejected`、transport 错误 → 空 Answers 语义自 `StdioQuestionBroker` 平移。
+- `host/stdio/context.rs`：删除 `StdioQuestionBroker`/`empty_answers`，保留 env 超时解析（`ask_user_timeout`）。
+- `host/stdio/session/prompt_exec.rs`：装配改为 `AcpTransportBroker::new(Arc::new(cx), session_id).with_auto_approve().with_timeout(...)`；`host/prompt.rs`（mpsc）经 `AcpRequestBridge` 零行为变化。
+- 测试：`context_test` 改测统一 broker（10 项全过）；`transport_broker_test` 新增 `ApprovalMode`/超时/transport 错误 4 项。
+- §6.3 文档更新为统一 broker 描述。
+- **验证限制**：提交时工作区存在他人未提交的并行重构（`requests.rs`/`control.rs` 等，session_lifecycle 可见性 + Responder 签名），阻塞 `peri-acp` lib test 编译，故 `transport_broker_test` 新增 4 项未能在本提交前全量重跑（核心 `cargo check` 与 `context_test` 10 项在并行改动前已验证通过）；待并行改动完成后补跑全量验证。

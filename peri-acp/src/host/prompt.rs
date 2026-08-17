@@ -142,9 +142,11 @@ pub(crate) async fn run_prompt(
     let history_ids: Vec<peri_acp_types::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
 
-    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
-        AcpTransportBroker::new(Arc::clone(transport), session_id.clone().into()),
-    );
+    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
+        Arc::new(AcpTransportBroker::new(
+            Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
+            session_id.clone().into(),
+        ));
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
         session_manager.caps_registry(),

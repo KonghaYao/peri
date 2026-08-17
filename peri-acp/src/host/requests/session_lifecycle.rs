@@ -59,7 +59,7 @@ fn create_session_lsp_pool(
     peri_middlewares::assembly::create_session_lsp_pool(cwd, &cfg.plugin_lsp_servers)
 }
 
-pub(super) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let version = params
         .get("protocolVersion")
         .and_then(|v| v.as_u64())
@@ -81,7 +81,7 @@ pub(super) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_new(
+pub(crate) async fn handle_new(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -172,7 +172,7 @@ pub(super) async fn handle_new(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_load(
+pub(crate) async fn handle_load(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -281,7 +281,7 @@ pub(super) async fn handle_load(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
     let cwd_filter = params.get("cwd").and_then(|v| v.as_str());
     let entries = dispatch::list_sessions_as_info(cfg.controller.as_ref(), cwd_filter)
         .await
@@ -317,7 +317,7 @@ pub(super) fn handle_cancel_bg_task(
     Ok(serde_json::json!({ "success": true }))
 }
 
-pub(super) async fn handle_close(
+pub(crate) async fn handle_close(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -343,7 +343,7 @@ pub(super) async fn handle_close(
 // 从 session history 中移除会话——先做与 session/close 相同的内存态清理，
 // 再从 ThreadStore 持久化删除线程（消息级联删除）。存储层幂等：线程
 // 不存在时不视为错误；真实 IO 失败仅记录日志（与 stdio 路径一致）。
-pub(super) async fn handle_delete(
+pub(crate) async fn handle_delete(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -383,10 +383,11 @@ pub(super) async fn handle_delete(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_resume(
+pub(crate) async fn handle_resume(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let req_session_id = params
         .get("sessionId")
@@ -399,7 +400,7 @@ pub(super) async fn handle_resume(
 
     // ── 先构建 frozen + workflow_middleware ──
     cfg.session_manager.ensure_session(req_session_id, cwd);
-    cfg.session_manager.ensure_session_caps(req_session_id);
+    let caps = cfg.session_manager.ensure_session_caps(req_session_id);
     let frozen_data =
         cfg.session_manager
             .build_frozen_data(cwd, &cfg.plugin_skill_roots, &cfg.plugin_agent_dirs);
@@ -448,6 +449,19 @@ pub(super) async fn handle_resume(
         }
         info!(session_id = %req_session_id, "Session resumed (existing)");
     }
+
+    // Push AvailableCommandsUpdate notification + 预热 MCP skill 发现
+    // （决策 B 扩展，与 session/load 同构；stdio 装配面同款行为——恢复会话
+    // 后无需等首 turn before_agent 装配即有 mcp 命令）。幂等（Started 去重）；
+    // pool/registry 缺失或连接中 → 空跑，由首 turn 装配兜底。
+    send_available_commands_update(
+        transport,
+        req_session_id,
+        &caps,
+        cfg.session_manager.command_registry_for(req_session_id),
+    )
+    .await;
+    prewarm_session_mcp_discovery(cfg, req_session_id);
 
     let resp = ResumeSessionResponse::new();
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))

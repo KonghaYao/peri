@@ -60,12 +60,14 @@ pub(crate) async fn run(params: PromptExecParams) {
         peri_caps,
     } = params;
 
-    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
-        Arc::new(super::super::context::StdioQuestionBroker::new(
-            cx.clone(),
-            session_id.clone(),
-            super::super::context::ask_user_timeout(),
-        ));
+    // 统一 broker（与 TUI/notify 路径同一 `AcpTransportBroker`）：
+    // `ConnectionTo<Client>` 经 `RequestTransport` 适配直发，审批分支自动
+    // approve（stdio 无审批 UI），提问分支带超时兜底。
+    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
+        crate::broker::AcpTransportBroker::new(Arc::new(cx.clone()), session_id.clone())
+            .with_auto_approve()
+            .with_timeout(super::super::context::ask_user_timeout()),
+    );
 
     let event_sink = Arc::new(StdioEventSink::new(
         cx.clone(),
