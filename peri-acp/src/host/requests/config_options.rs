@@ -23,7 +23,7 @@ fn persist_config(cfg: &AcpServerConfig) {
     }
 }
 
-pub(super) async fn handle_set_mode(
+pub(crate) async fn handle_set_mode(
     params: &Value,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -41,7 +41,7 @@ pub(super) async fn handle_set_mode(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_set_config_option(
+pub(crate) async fn handle_set_config_option(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -127,7 +127,7 @@ pub(super) async fn handle_set_config_option(
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_update_config(
+pub(crate) async fn handle_update_config(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,

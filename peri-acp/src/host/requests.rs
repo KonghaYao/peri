@@ -12,11 +12,11 @@ use peri_acp_types::PeriCaps;
 
 use super::{AcpServerConfig, SessionState};
 
-mod config_options;
+pub(crate) mod config_options;
 mod mcp_oauth;
 mod plugin;
 mod rewind;
-mod session_lifecycle;
+pub(crate) mod session_lifecycle;
 mod workflow;
 
 pub(crate) async fn handle_request(
@@ -42,8 +42,10 @@ pub(crate) async fn handle_request(
         "session/cancel-bg-task" => session_lifecycle::handle_cancel_bg_task(params, cfg),
         "session/close" => session_lifecycle::handle_close(params, cfg, sessions).await,
         "session/delete" => session_lifecycle::handle_delete(params, cfg, sessions).await,
-        "session/resume" => session_lifecycle::handle_resume(params, cfg, sessions).await,
-        "session/fork" => session_lifecycle::handle_fork(params, cfg, sessions).await,
+        "session/resume" => {
+            session_lifecycle::handle_resume(params, cfg, sessions, transport).await
+        }
+        "session/fork" => session_lifecycle::handle_fork(params, cfg, sessions, transport).await,
         "session/update_config" => {
             config_options::handle_update_config(params, cfg, sessions, transport).await
         }

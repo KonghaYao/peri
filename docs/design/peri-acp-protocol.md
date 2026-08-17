@@ -177,6 +177,14 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。事件协议化与通道选择由 `peri-acp/src/event/` 的 EventSink 和映射层决定。
 
+### 6.3 stdio 提问转发行为
+
+stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/transport_broker.rs`）：broker 只依赖最小面 `RequestTransport` 契约（仅 `send_request`），mpsc 经 `AcpTransport` blanket 桥接（`AcpRequestBridge`），stdio 经 `ConnectionTo<Client>` 直连适配（`transport/mod.rs`），协议帧一致（`elicitation/create` + accept/cancel/decline，共享 `build_elicitation_params` / `parse_elicitation_response`）。stdio 装配差异仅由构造参数表达：`with_auto_approve()`（无审批 UI，审批分支无条件批准）+ `with_timeout()`（提问超时兜底）。行为限制：
+
+- **`session/cancel` 不解除挂起提问**：挂起的 elicitation request 由 ACP transport 层管理，`session/cancel` 只中断 agent turn；客户端不响应时提问会一直挂起，直到超时或 transport 关闭。
+- **超时兜底**：`PERI_ASK_USER_TIMEOUT_SECS`（秒，缺省 300，`0` 表示不超时）——超时返回 `Rejected`（LLM 侧表现为 `ToolRejected`），不挂死 turn。
+- **断连兜底**：transport 关闭（incoming EOF）时挂起请求自动失败，返回空答案，会话可继续。
+
 ---
 
 ## 7. 兼容性

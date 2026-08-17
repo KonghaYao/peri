@@ -74,13 +74,21 @@ pub(crate) async fn run_prompt(
         .to_string();
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
-    let message = params
-        .get("message")
-        .ok_or_else(|| AcpError::new(-32602, "missing message"))?;
-    let content: peri_acp_types::messages::MessageContent = message
-        .get("content")
-        .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
-        .unwrap_or_default();
+    // TUI/notify 路径：`message.content`（MessageContent 形态）；stdio ACP
+    // 客户端（agent-client-protocol-schema `PromptRequest`）：`prompt`
+    // （`Vec<ContentBlock>` wire 形态，camelCase）——批 3 §7 #1 合并方向以
+    // run_prompt 为基座、兼容 stdio 输入。
+    let content: peri_acp_types::messages::MessageContent = match params.get("message") {
+        Some(message) => message
+            .get("content")
+            .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())
+            .unwrap_or_default(),
+        None => params
+            .get("prompt")
+            .and_then(|v| v.as_array())
+            .map(|blocks| crate::dispatch::prompt::prompt_blocks_to_content(blocks))
+            .ok_or_else(|| AcpError::new(-32602, "missing message"))?,
+    };
 
     // Parse optional background task results for synthetic tool_use + tool_result injection
     let bg_results: Vec<peri_acp_types::event::BackgroundTaskResult> = params
@@ -143,7 +151,16 @@ pub(crate) async fn run_prompt(
         history.iter().map(|m| m.id()).collect();
 
     let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
-        AcpTransportBroker::new(Arc::clone(transport), session_id.clone().into()),
+        AcpTransportBroker::new(
+            Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
+            session_id.clone().into(),
+        )
+        // 提问超时兜底（批 4 恢复旧 stdio 语义，见 broker::parse_ask_user_timeout）：
+        // 统一构造点读 env `PERI_ASK_USER_TIMEOUT_SECS`（缺失/非法 → 默认 300s；
+        // `0` → 不超时）。本构造点是 TUI/stdio 唯一统一点——TUI 不设 env 时也
+        // 获得 300s 默认兜底（TUI 本地客户端恒响应，实际交互无感知）；TUI 用户
+        // 显式设 env 会获得对应超时——显式配置的合理语义。
+        .with_timeout(crate::broker::ask_user_timeout()),
     );
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
