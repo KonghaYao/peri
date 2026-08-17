@@ -76,6 +76,11 @@ impl LangfuseTracer {
         let handle = self
             .stages
             .on_stage_start(agent_id, stage, &self.trace_id, turn_id, &parent);
+        // 子内容事件时刻刷新(AGENT obs close 的 end_time 取 max)
+        if self.subagent.ownership(agent_id) == Ownership::Subagent {
+            self.subagent
+                .touch_content_time(agent_id, &handle.start_time);
+        }
         // 工具批次归属 Act 阶段:ToolStart 先于 StageStarted(Act) 到达时,
         // batch parent 冻结在旧 stage(stage-reason),Act 开始后重挂到 stage-act
         if stage == Stage::Act {

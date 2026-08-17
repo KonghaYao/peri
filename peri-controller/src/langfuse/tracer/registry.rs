@@ -66,6 +66,10 @@ pub(crate) struct ActiveSubagent {
     pub parent_observation_id: String,
     /// Start join 时刻(rfc3339)
     pub start_time: String,
+    /// 该 AGENT obs 下最后一个子内容事件的处理时刻(rfc3339);
+    /// 关闭时 end_time 取 max(stop_time, last_content_time),
+    /// 防 Stop 事件乱序/同毫秒早到把 AGENT obs 时长虚标为 0
+    pub last_content_time: String,
     pub agent_name: String,
     pub is_background: bool,
     /// 该 subagent 自己的 ToolBatch(内容工具归属)
@@ -418,12 +422,14 @@ impl SubagentRegistry {
             return SubagentStartOutcome::Duplicate;
         }
         // 占位登记:防 Stop/重复 Start 竞态;join 成功后补 obs 字段
+        let now = chrono::Utc::now().to_rfc3339();
         self.by_agent_id.insert(
             child_agent_id.to_string(),
             ActiveSubagent {
                 observation_id: String::new(),
                 parent_observation_id: String::new(),
-                start_time: chrono::Utc::now().to_rfc3339(),
+                start_time: now.clone(),
+                last_content_time: now,
                 agent_name: agent_name.to_string(),
                 is_background,
                 tool_batch: ToolBatch::new(),
@@ -518,6 +524,7 @@ impl SubagentRegistry {
         sa.observation_id = obs.observation_id.clone();
         sa.parent_observation_id = obs.parent_observation_id.clone();
         sa.start_time = obs.start_time.clone();
+        sa.last_content_time = obs.start_time.clone();
         sa.agent_name = obs.agent_name.clone();
         sa.invocation_key = Some(key.clone());
         sa.input = input;
@@ -598,6 +605,9 @@ impl SubagentRegistry {
         } else {
             stop.result.clone()
         };
+        // end_time 取 Stop 事件时刻与最后子内容时刻的较晚者:Stop 可能乱序/
+        // 同毫秒早到,直接复用它会把 AGENT obs 时长虚标为 0
+        let end_time = later_rfc3339(&stop.stop_time, &sa.last_content_time);
         let closed = ClosedSubagent {
             observation_id: sa.observation_id.clone(),
             parent_observation_id: sa.parent_observation_id.clone(),
@@ -605,13 +615,22 @@ impl SubagentRegistry {
             agent_name: sa.agent_name.clone(),
             input: sa.input.clone(),
             output,
-            stop_time: stop.stop_time,
+            stop_time: end_time,
             is_error: stop.is_error,
             flush,
             incomplete_reason: None,
         };
         sa.status = SubagentStatus::Closed;
         Some(closed)
+    }
+
+    /// 内容事件归属 AGENT obs 时刷新最后子内容时刻(处理时刻)。
+    /// 仅更新,不强制;close 时 end_time = max(stop_time, last_content_time)。
+    pub(crate) fn touch_content_time(&mut self, agent_id: &str, ts: &str) {
+        let Some(sa) = self.by_agent_id.get_mut(agent_id) else {
+            return;
+        };
+        sa.last_content_time = later_rfc3339(&sa.last_content_time, ts);
     }
 
     /// SubagentStop:按状态迁移(暂存/StopReceived/回收),返回关闭信息(如有)
@@ -715,6 +734,9 @@ impl SubagentRegistry {
         } else {
             stop.result.clone()
         };
+        // end_time 取 Stop 事件时刻与最后子内容时刻的较晚者:Stop 可能乱序/
+        // 同毫秒早到,直接复用它会把 AGENT obs 时长虚标为 0
+        let end_time = later_rfc3339(&stop.stop_time, &sa.last_content_time);
         let closed = ClosedSubagent {
             observation_id: sa.observation_id.clone(),
             parent_observation_id: sa.parent_observation_id.clone(),
@@ -722,7 +744,7 @@ impl SubagentRegistry {
             agent_name: sa.agent_name.clone(),
             input: sa.input.clone(),
             output,
-            stop_time: stop.stop_time,
+            stop_time: end_time,
             is_error: stop.is_error,
             flush,
             incomplete_reason: None,
@@ -799,7 +821,7 @@ impl SubagentRegistry {
                 agent_name: sa.agent_name.clone(),
                 input: sa.input.clone(),
                 output,
-                stop_time: stop.stop_time,
+                stop_time: later_rfc3339(&stop.stop_time, &sa.last_content_time),
                 is_error: stop.is_error,
                 flush,
                 incomplete_reason: Some(IncompleteReason::MissingStop),
@@ -853,12 +875,14 @@ impl SubagentRegistry {
         } else {
             // 未知 agent(Start 从未到达):插入占位记录(orphan 标记,不产生 obs,
             // 后续内容事件归属 Unknown 继续走闸门/丢弃)
+            let now = chrono::Utc::now().to_rfc3339();
             self.by_agent_id.insert(
                 child_agent_id.to_string(),
                 ActiveSubagent {
                     observation_id: String::new(),
                     parent_observation_id: String::new(),
-                    start_time: chrono::Utc::now().to_rfc3339(),
+                    start_time: now.clone(),
+                    last_content_time: now,
                     agent_name: "unknown".to_string(),
                     is_background: false,
                     tool_batch: ToolBatch::new(),
@@ -876,6 +900,27 @@ impl SubagentRegistry {
             reason = ?reason,
             "subagent 标记 incomplete"
         );
+    }
+}
+
+/// 两个 rfc3339 字符串取较晚者(解析失败回退前者)。
+/// 时间均为 `Utc::now().to_rfc3339()` 生成,解析后比较避免字符串字典序
+/// 在"整秒无小数 vs 带小数"时误判。
+fn later_rfc3339(a: &str, b: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(x), Ok(y)) => {
+            if y > x {
+                b.to_string()
+            } else {
+                a.to_string()
+            }
+        }
+        (Ok(_), Err(_)) => a.to_string(),
+        (Err(_), Ok(_)) => b.to_string(),
+        (Err(_), Err(_)) => a.to_string(),
     }
 }
 

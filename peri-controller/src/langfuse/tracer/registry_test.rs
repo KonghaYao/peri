@@ -455,6 +455,53 @@ async fn test_stop_before_tool_ended() {
 
 // ── 注册闸门:内容先于 Start ────────────────────────────────────────────────
 
+/// 乱序场景:Stop 先于内容事件到达(StopReceived 暂存),内容随后挂入。
+/// close 时 end_time 应为 max(stop_time, 最后子内容时刻)而非 Stop 时刻,
+/// 否则 AGENT obs 时长被虚标为 0(真实 trace obs_01a00d6a552175c2b5a573c10f1da5e5)。
+#[tokio::test]
+async fn test_stop_before_content_end_time_takes_max() {
+    let (mut t, session) = make_tracer(1.0);
+    t.set_main_agent_id("main".to_string());
+    t.on_turn_start("turn_sb");
+
+    let main_act = t
+        .on_stage_start_gated("main", Stage::Act, "turn_sb")
+        .unwrap();
+    t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
+    t.on_subagent_start("main", "child_1", "coder", false);
+    // Stop 先到:暂存 → StopReceived(父 ToolEnded 未到,不关闭)
+    t.on_subagent_stop("main", "child_1", "done", false);
+    assert_eq!(
+        t.subagent.status_of("child_1"),
+        Some(&SubagentStatus::StopReceived)
+    );
+
+    // 内容事件随后到达(晚于 Stop):stage + tool
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let child_reason = t
+        .on_stage_start_gated("child_1", Stage::Reason, "turn_sb")
+        .unwrap();
+    t.on_tool_start("child_1", "call_bash", "Bash", &serde_json::json!({}));
+    t.on_tool_end("child_1", "call_bash", "out", false);
+    t.on_stage_end("child_1", &child_reason, StageStatus::Done);
+
+    // 父 ToolEnded → 两信号齐备 → 关闭
+    t.on_tool_end("main", "call_agent", "subagent done", false);
+    let updates = agent_obs_updates(&session.events_snapshot());
+    assert_eq!(updates.len(), 1, "应关闭 AGENT obs");
+
+    // end_time ≥ 最后子内容时刻(stage start),而非早到的 Stop 时刻
+    let agent_end = parse_time(updates[0].1.as_ref().unwrap());
+    assert!(
+        agent_end >= parse_time(&child_reason.start_time),
+        "end_time 应取最后子内容时刻(≥ stage start),实际 {agent_end} < {}",
+        child_reason.start_time
+    );
+    let _ = main_act;
+    let _h = t.on_turn_end(None);
+    tokio::task::yield_now().await;
+}
+
 /// ①child StageStarted → ②child LlmCallStart → ③SubagentStart → ④父ToolStart
 /// ①②入 gate_cache 不落主 agent;③ join 后按原顺序重放;
 /// 最终 ①②parent 为 child AGENT;无任何 obs 挂 agent-run。

@@ -60,6 +60,8 @@ impl LangfuseTracer {
             Ownership::Subagent => {
                 let tb = self.subagent.tool_batch_mut(agent_id);
                 tb.on_tool_start(tool_call_id, name, input.clone(), &parent_id);
+                self.subagent
+                    .touch_content_time(agent_id, &chrono::Utc::now().to_rfc3339());
             }
             Ownership::Unknown => return false,
         }
