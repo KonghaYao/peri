@@ -90,7 +90,7 @@ async fn test_read_long_line_reports_line_truncation_before_content() {
 }
 
 #[tokio::test]
-async fn test_read_large_output_reports_truncation_and_persisted_copy() {
+async fn test_read_large_output_reports_truncation_and_segment_hint() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large-output.txt");
     std::fs::write(&path, "line content\n".repeat(1000)).unwrap();
@@ -108,8 +108,12 @@ async fn test_read_large_output_reports_truncation_and_persisted_copy() {
         "总输出截断应报告原始字节数: {result}"
     );
     assert!(
-        result.contains("[Full output saved to"),
-        "总输出截断应保留完整输出路径提示: {result}"
+        result.contains("of 1001") && result.contains("offset=251"),
+        "截断应按行边界提示分段读取(总行数 + 续读 offset): {result}"
+    );
+    assert!(
+        !result.contains("[Full output saved to") && !result.contains("peri-tool-output"),
+        "Read 不得落盘,否则二次 Read 产生两重行号: {result}"
     );
 }
 

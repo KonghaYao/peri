@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use super::folder::list_folder;
 use super::resolve_path;
-use crate::tools::output_persist::persist_truncated_output;
 use crate::tools::output_truncate::truncate_bytes;
 
 /// Read tool - 与 TypeScript read_tool 对齐
@@ -22,7 +21,8 @@ const MAX_LINES: usize = 2000;
 const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
 /// 单行最大字符数（超过则截断）
 const MAX_CHARS_PER_LINE: usize = 65536;
-/// 输出最大字节数（超过后截断并落盘）
+/// 输出最大字节数（超过后按行截断并提示分段读取；Read 不落盘——落盘文件会被
+/// 模型二次 Read 再编号，产生两重行号，且丢失 offset 语义）
 const MAX_OUTPUT_BYTES: usize = 5_000;
 
 const READ_FILE_DESCRIPTION: &str = include_str!("descriptions/read.md");
@@ -260,14 +260,39 @@ impl BaseTool for ReadFileTool {
 
         let mut output = numbered.join("\n");
 
-        // 总输出超过上限时截断并落盘；提示保留原始大小和完整输出路径。
+        // 总输出超过上限时按行截断并提示分段读取，不落盘：
+        // 落盘文件会被模型二次 Read 再编号（两重行号），且失去 offset 语义。
         if output.len() > MAX_OUTPUT_BYTES {
             let original_output_bytes = output.len();
-            let persist_hint = persist_truncated_output(&output);
-            output = truncate_bytes(&output, MAX_OUTPUT_BYTES);
-            output.push_str(&format!(
-                "\n[Output truncated: {original_output_bytes} bytes total; showing first {MAX_OUTPUT_BYTES} bytes]{persist_hint}"
-            ));
+            let total_lines = lines.len();
+
+            // 在字节预算内保留尽可能多的完整行（`{:>6}\t` 前缀 + 内容）。
+            let mut budget = MAX_OUTPUT_BYTES;
+            let mut kept_lines = 0usize;
+            for l in &numbered {
+                if l.len() + 1 > budget {
+                    break;
+                }
+                budget -= l.len() + 1;
+                kept_lines += 1;
+            }
+
+            if kept_lines == 0 {
+                // 单行就超过上限：退回字节截断，引导跳过该行继续读。
+                let truncated_line = truncate_bytes(&numbered[0], MAX_OUTPUT_BYTES);
+                let next_offset = start + 2;
+                output = format!(
+                    "{truncated_line}\n[Output truncated: {original_output_bytes} bytes total; line {next_offset} exceeds the output limit; use offset={next_offset} to read the rest of the file]"
+                );
+            } else {
+                let shown_start = start + 1;
+                let shown_end = start + kept_lines;
+                let next_offset = shown_end + 1;
+                output = format!(
+                    "{}\n[Output truncated: {original_output_bytes} bytes total; showing lines {shown_start}..={shown_end} of {total_lines}; continue reading with offset={next_offset}]",
+                    numbered[..kept_lines].join("\n")
+                );
+            }
         }
 
         Ok(output)
