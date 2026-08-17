@@ -103,82 +103,14 @@ impl AcpTransportBroker {
     }
 
     async fn handle_questions(&self, requests: Vec<QuestionItem>) -> InteractionResponse {
-        // Build an elicitation form schema from the questions
-        let mut schema = ElicitationSchema::new();
-
-        for q in &requests {
-            if q.multi_select && !q.options.is_empty() {
-                let options: Vec<EnumOption> = q
-                    .options
-                    .iter()
-                    .map(|o| EnumOption::new(&o.label, &o.label))
-                    .collect();
-                let prop = MultiSelectPropertySchema::titled(options)
-                    .title(q.header.clone())
-                    .description(q.question.clone());
-                schema = schema.property(&q.id, prop, false);
-            } else if !q.options.is_empty() {
-                let options: Vec<EnumOption> = q
-                    .options
-                    .iter()
-                    .map(|o| EnumOption::new(&o.label, &o.label))
-                    .collect();
-                let prop = StringPropertySchema::new()
-                    .one_of(options)
-                    .title(q.header.clone())
-                    .description(q.question.clone());
-                schema = schema.property(&q.id, prop, false);
-            } else {
-                let prop = StringPropertySchema::new()
-                    .title(q.header.clone())
-                    .description(q.question.clone());
-                schema = schema.property(&q.id, prop, false);
-            }
-        }
-
-        let scope = ElicitationSessionScope::new(self.session_id.clone());
-        let form_mode = ElicitationFormMode::new(scope, schema);
-        let request =
-            CreateElicitationRequest::new(form_mode, "Please provide the requested information");
-        let mut params = serde_json::to_value(&request).unwrap_or_default();
-
-        // EnumOption only has const+title, no description field.
-        // Inject description into each option's JSON so the TUI can read it.
-        inject_option_descriptions(&mut params, &requests);
+        let params = build_elicitation_params(&requests, self.session_id.clone());
 
         match self
             .transport
             .send_request("elicitation/create", params)
             .await
         {
-            Ok(response) => match serde_json::from_value::<CreateElicitationResponse>(response) {
-                Ok(resp) => match resp.action {
-                    ElicitationAction::Accept(accept) => {
-                        let content = accept.content.unwrap_or_default();
-                        let answers: Vec<QuestionAnswer> = requests
-                            .into_iter()
-                            .map(|q| map_elicitation_answer(q, &content))
-                            .collect();
-                        InteractionResponse::Answers(answers)
-                    }
-                    ElicitationAction::Decline => {
-                        tracing::info!("Elicitation declined by user");
-                        InteractionResponse::Rejected
-                    }
-                    ElicitationAction::Cancel => {
-                        tracing::info!("Elicitation cancelled by user");
-                        InteractionResponse::Answers(empty_answers(requests))
-                    }
-                    _ => {
-                        tracing::warn!("Unknown elicitation action, returning empty answers");
-                        InteractionResponse::Answers(empty_answers(requests))
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse elicitation response");
-                    InteractionResponse::Answers(empty_answers(requests))
-                }
-            },
+            Ok(response) => parse_elicitation_response(response, requests),
             Err(e) => {
                 tracing::warn!(error = %e, "Elicitation request failed, returning empty answers");
                 InteractionResponse::Answers(empty_answers(requests))
@@ -188,6 +120,86 @@ impl AcpTransportBroker {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn build_elicitation_params(
+    requests: &[QuestionItem],
+    session_id: SessionId,
+) -> serde_json::Value {
+    let mut schema = ElicitationSchema::new();
+
+    for q in requests {
+        if q.multi_select && !q.options.is_empty() {
+            let options: Vec<EnumOption> = q
+                .options
+                .iter()
+                .map(|o| EnumOption::new(&o.label, &o.label))
+                .collect();
+            let prop = MultiSelectPropertySchema::titled(options)
+                .title(q.header.clone())
+                .description(q.question.clone());
+            schema = schema.property(&q.id, prop, false);
+        } else if !q.options.is_empty() {
+            let options: Vec<EnumOption> = q
+                .options
+                .iter()
+                .map(|o| EnumOption::new(&o.label, &o.label))
+                .collect();
+            let prop = StringPropertySchema::new()
+                .one_of(options)
+                .title(q.header.clone())
+                .description(q.question.clone());
+            schema = schema.property(&q.id, prop, false);
+        } else {
+            let prop = StringPropertySchema::new()
+                .title(q.header.clone())
+                .description(q.question.clone());
+            schema = schema.property(&q.id, prop, false);
+        }
+    }
+
+    let scope = ElicitationSessionScope::new(session_id);
+    let form_mode = ElicitationFormMode::new(scope, schema);
+    let request =
+        CreateElicitationRequest::new(form_mode, "Please provide the requested information");
+    let mut params = serde_json::to_value(&request).unwrap_or_default();
+    inject_option_descriptions(&mut params, requests);
+    params
+}
+
+pub(crate) fn parse_elicitation_response(
+    response: serde_json::Value,
+    requests: Vec<QuestionItem>,
+) -> InteractionResponse {
+    match serde_json::from_value::<CreateElicitationResponse>(response) {
+        Ok(resp) => match resp.action {
+            ElicitationAction::Accept(accept) => {
+                let content = accept.content.unwrap_or_default();
+                InteractionResponse::Answers(
+                    requests
+                        .into_iter()
+                        .map(|q| map_elicitation_answer(q, &content))
+                        .collect(),
+                )
+            }
+            ElicitationAction::Decline => {
+                tracing::info!("Elicitation declined by user");
+                InteractionResponse::Rejected
+            }
+            ElicitationAction::Cancel => {
+                tracing::info!("Elicitation cancelled by user");
+                InteractionResponse::Answers(empty_answers(requests))
+            }
+            _ => {
+                tracing::warn!("Unknown elicitation action, returning empty answers");
+                InteractionResponse::Answers(empty_answers(requests))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse elicitation response");
+            InteractionResponse::Answers(empty_answers(requests))
+        }
+    }
+}
 
 fn map_permission_response(resp: RequestPermissionResponse) -> ApprovalDecision {
     match resp.outcome {
@@ -307,3 +319,7 @@ fn inject_option_descriptions(params: &mut serde_json::Value, requests: &[Questi
         }
     }
 }
+
+#[cfg(test)]
+#[path = "transport_broker_test.rs"]
+mod tests;

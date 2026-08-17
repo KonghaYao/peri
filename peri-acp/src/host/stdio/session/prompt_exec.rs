@@ -61,7 +61,11 @@ pub(crate) async fn run(params: PromptExecParams) {
     } = params;
 
     let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
-        Arc::new(super::super::context::StdioBroker::new());
+        Arc::new(super::super::context::StdioQuestionBroker::new(
+            cx.clone(),
+            session_id.clone(),
+            super::super::context::ask_user_timeout(),
+        ));
 
     let event_sink = Arc::new(StdioEventSink::new(
         cx.clone(),

@@ -6,10 +6,14 @@
 //! 改用宿主 [`crate::host::SessionState`]（会话创建方即 writer，见
 //! `SessionState::lease`）。handler 的字段引用统一经 `ctx.cfg.xxx`。
 
+use std::time::Duration;
+
+use agent_client_protocol::{schema::v1::SessionId, Client, ConnectionTo, UntypedMessage};
 use peri_acp_types::interaction::{
-    ApprovalDecision, InteractionContext, InteractionResponse, QuestionAnswer,
-    UserInteractionBroker,
+    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
 };
+
+use crate::broker::{build_elicitation_params, parse_elicitation_response};
 
 /// Stdio 传输环境的共享上下文
 pub(super) struct StdioContext {
@@ -18,17 +22,28 @@ pub(super) struct StdioContext {
         parking_lot::RwLock<std::collections::HashMap<String, crate::host::SessionState>>,
 }
 
-/// Stdio 模式下的简化 Broker：直接 approve 所有权限请求，questions 返回空答案。
-pub(super) struct StdioBroker;
+pub(super) struct StdioQuestionBroker {
+    cx: ConnectionTo<Client>,
+    session_id: SessionId,
+    timeout: Option<Duration>,
+}
 
-impl StdioBroker {
-    pub(super) fn new() -> Self {
-        Self
+impl StdioQuestionBroker {
+    pub(super) fn new(
+        cx: ConnectionTo<Client>,
+        session_id: SessionId,
+        timeout: Option<Duration>,
+    ) -> Self {
+        Self {
+            cx,
+            session_id,
+            timeout,
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl UserInteractionBroker for StdioBroker {
+impl UserInteractionBroker for StdioQuestionBroker {
     async fn request(&self, context: InteractionContext) -> InteractionResponse {
         match context {
             InteractionContext::Approval { items } => InteractionResponse::Decisions(
@@ -37,16 +52,59 @@ impl UserInteractionBroker for StdioBroker {
                     .map(|_| ApprovalDecision::Approve { source: None })
                     .collect(),
             ),
-            InteractionContext::Questions { requests } => InteractionResponse::Answers(
-                requests
-                    .into_iter()
-                    .map(|q| QuestionAnswer {
-                        id: q.id,
-                        selected: vec![],
-                        text: Some(String::new()),
-                    })
-                    .collect(),
-            ),
+            InteractionContext::Questions { requests } => {
+                let params = build_elicitation_params(&requests, self.session_id.clone());
+                let message = match UntypedMessage::new("elicitation/create", params) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to build elicitation request");
+                        return InteractionResponse::Answers(empty_answers(requests));
+                    }
+                };
+                let response = self.cx.send_request(message).block_task();
+                let result = match self.timeout {
+                    Some(timeout) => tokio::time::timeout(timeout, response).await,
+                    None => Ok(response.await),
+                };
+                match result {
+                    Ok(Ok(response)) => parse_elicitation_response(response, requests),
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Elicitation transport error");
+                        InteractionResponse::Answers(empty_answers(requests))
+                    }
+                    Err(_) => InteractionResponse::Rejected,
+                }
+            }
         }
     }
 }
+
+fn empty_answers(
+    requests: Vec<peri_acp_types::interaction::QuestionItem>,
+) -> Vec<peri_acp_types::interaction::QuestionAnswer> {
+    requests
+        .into_iter()
+        .map(|q| peri_acp_types::interaction::QuestionAnswer {
+            id: q.id,
+            selected: vec![],
+            text: Some(String::new()),
+        })
+        .collect()
+}
+
+/// 解析 `PERI_ASK_USER_TIMEOUT_SECS` 环境变量值（纯逻辑，便于单测）：
+/// 缺失/非法回落默认 300 秒；`0` 表示不超时（返回 None）。
+fn parse_ask_user_timeout(value: Option<&str>) -> Option<Duration> {
+    match value.and_then(|v| v.parse::<u64>().ok()).unwrap_or(300) {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
+    }
+}
+
+pub(super) fn ask_user_timeout() -> Option<Duration> {
+    parse_ask_user_timeout(std::env::var("PERI_ASK_USER_TIMEOUT_SECS").ok().as_deref())
+}
+
+#[cfg(test)]
+#[path = "context_test.rs"]
+mod tests;
