@@ -1,14 +1,16 @@
-//! 批 0 wire capture 基线测试：锁定双路径在**通知/响应构造层**的最终 wire
-//! JSON 形态，供统一后对照。
+//! 批 0 wire capture 基线测试：锁定统一宿主在**通知/响应构造层**的最终 wire
+//! JSON 形态（批 3 后 stdio 并入 `run_acp_server` 单一路径，本文件作为 wire
+//! 回归基线保留）。
 //!
 //! 背景（docs/design/acp-host-unify.md §8.3）：`dispatch::build_available_commands_update`
-//! 与 `dispatch::build_initialize_response` 是 TUI/notify 路径与 typed stdio 路径
-//! **共享**的单一实现。两侧差异只在**外层封装**：
-//! - notify 路径（`host/notify.rs`）：手工 `json!({"sessionId", "update"})` 封装，
-//!   经 `AcpTransport::send_notification("session/update", payload)` 发送；
-//! - stdio 路径（host/stdio/commands.rs 等）：`SessionNotification::new(session_id,
-//!   update)`（agent-client-protocol-schema 类型，camelCase + skip_serializing_none），
-//!   经 `ConnectionTo<Client>::send_notification` 发送 → 序列化为同一 JSON 结构。
+//! 与 `dispatch::build_initialize_response` 是 TUI/notify 与 stdio **共享**的
+//! 单一实现（统一后 stdio 经 `StdioTransport` 走同一发射面）。通知外层封装的
+//! 唯一参照是 schema typed `SessionNotification` 序列化（agent-client-protocol-
+//! schema，camelCase + skip_serializing_none）：
+//! - 统一宿主发射面（`host/notify.rs`）：`AcpTransport::send_notification("session/update",
+//!   {sessionId, update} payload)`——Value 直发，无 typed 中间层；
+//! - 参照线：同一业务数据经 `serde_json::to_value(SessionNotification::new(...))`
+//!   序列化，断言逐字段一致。
 //!
 //! schema 侧 `SESSION_UPDATE_NOTIFICATION = "session/update"`（v1/client.rs:2282）。
 //!
@@ -105,8 +107,8 @@ fn mcp_entry(fullname: &str, server: &str) -> RouteEntry {
     }
 }
 
-/// 掩码 `update.updatedAt`（内部 `chrono::Utc::now()` 时间戳不可在两条路径
-/// 同时固定），归一后逐字段比较其余结构。
+/// 掩码 `update.updatedAt`（内部 `chrono::Utc::now()` 时间戳不可在发射面与
+/// 参照线同时固定），归一后逐字段比较其余结构。
 fn mask_updated_at(mut v: Value) -> Value {
     if let Some(obj) = v.get_mut("update").and_then(|u| u.as_object_mut()) {
         if let Some(ts) = obj.get_mut("updatedAt") {
@@ -118,12 +120,12 @@ fn mask_updated_at(mut v: Value) -> Value {
 
 // ── AvailableCommandsUpdate：外层封装一致性 ─────────────────────────────────
 
-/// 同一业务数据（注册表 snapshot 投影）经 notify 路径（`send_available_commands_update`）
-/// 与 stdio 路径（`SessionNotification` 序列化）产出的**最终 wire JSON 逐字段相同**。
-///
-/// 共享实现：`build_available_commands_update`（dispatch/commands.rs:120）——本测试
-/// 锁外层封装：`{sessionId, update}` 结构、`sessionUpdate` 判别字符串、`_meta` 省略
-/// 规则、camelCase 字段命名。
+/// 同一业务数据（注册表 snapshot 投影）经统一宿主通知发射面
+/// （`send_available_commands_update`）发出的 payload 与 schema typed
+/// `SessionNotification` 序列化产出的**最终 wire JSON 逐字段相同**（批 3 后
+/// stdio 与 TUI 共用同一发射面，无第二路径；本测试锁外层封装作回归基线：
+/// `{sessionId, update}` 结构、`sessionUpdate` 判别字符串、`_meta` 省略
+/// 规则、camelCase 字段命名）。
 #[tokio::test]
 async fn test_available_commands_update_wire_identical_between_paths() {
     // 同一业务数据：协商 skill_names + ui 明细；注册表 = 基座内置 + mcp 条目
@@ -142,7 +144,7 @@ async fn test_available_commands_update_wire_identical_between_paths() {
     reg.register(mcp_entry("demo:hello", "demo"))
         .expect("mcp 条目注册应成功");
 
-    // —— notify 路径：驱动真实发送，捕获最终 payload ——
+    // —— 统一宿主发射面：驱动真实发送，捕获最终 payload ——
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
     send_available_commands_update(&dyn_transport, "s-wire", &caps, Some(Arc::clone(&reg))).await;
@@ -151,20 +153,20 @@ async fn test_available_commands_update_wire_identical_between_paths() {
     let (method, notify_payload) = &notifs[0];
     assert_eq!(
         method, "session/update",
-        "notify 路径 method 与 schema 侧 SESSION_UPDATE_NOTIFICATION 一致"
+        "发射面 method 与 schema 侧 SESSION_UPDATE_NOTIFICATION 一致"
     );
 
-    // —— stdio 路径：同一 snapshot 投影重建 → SessionNotification 序列化 ——
+    // —— 参照线：同一 snapshot 投影重建 → schema typed SessionNotification 序列化 ——
     let update = build_available_commands_update(&reg.snapshot(), &caps);
-    let stdio_wire = serde_json::to_value(SessionNotification::new(
+    let typed_wire = serde_json::to_value(SessionNotification::new(
         SessionId::new("s-wire"),
         SessionUpdate::AvailableCommandsUpdate(update),
     ))
     .expect("SessionNotification 序列化不应失败");
 
     assert_eq!(
-        notify_payload, &stdio_wire,
-        "两条路径最终 wire JSON 必须逐字段一致"
+        notify_payload, &typed_wire,
+        "发射面 payload 与 schema typed 序列化必须逐字段一致"
     );
 
     // 显式锁判别字符串与字段命名/省略规则（失败信息可读）
@@ -180,8 +182,8 @@ async fn test_available_commands_update_wire_identical_between_paths() {
 }
 
 /// `_meta`（update 级）省略规则：未协商 `skill_names` 时整个 update 级 `_meta`
-/// 不出现；条目级 `_meta.periKind/periLevel` 恒有。两条路径一致（共享同一
-/// `build_available_commands_update`，此处只锁 notify 路径 wire）。
+/// 不出现；条目级 `_meta.periKind/periLevel` 恒有（统一宿主发射面 + schema
+/// typed 序列化共享同一 `build_available_commands_update`，此处锁发射面 wire）。
 #[tokio::test]
 async fn test_available_commands_update_meta_omission_rules() {
     let caps = PeriCaps::default(); // skill_names = false
@@ -208,12 +210,14 @@ async fn test_available_commands_update_meta_omission_rules() {
 
 // ── SessionInfoUpdate：通知携带会话元信息（外层封装一致）──────────────────
 
-/// stdio 侧（`prompt_exec.rs:587-589`）与 notify 侧（`send_session_info_update_*`）
-/// 同用 `SessionUpdate::SessionInfoUpdate`；锁定外层 `{sessionId, update}` 结构、
-/// `session_info_update` 判别字符串、camelCase 字段命名（`updatedAt`/`title`）。
+/// 统一宿主通知发射面（`send_session_info_update_*`）与 schema typed
+/// `SessionUpdate::SessionInfoUpdate` 序列化同构（`host/notify.rs` 以
+/// `SessionInfoUpdate::new().updated_at(now)` 构造后 Value 直发）；锁定外层
+/// `{sessionId, update}` 结构、`session_info_update` 判别字符串、camelCase
+/// 字段命名（`updatedAt`/`title`）。
 #[tokio::test]
 async fn test_session_info_update_wire_identical_between_paths() {
-    // —— notify 路径：带 title ——
+    // —— 发射面：带 title ——
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
     send_session_info_update_with_title(dyn_transport.as_ref(), "s-info", Some("新标题")).await;
@@ -221,11 +225,11 @@ async fn test_session_info_update_wire_identical_between_paths() {
     assert_eq!(method, "session/update");
     assert_eq!(notify_payload["sessionId"], "s-info");
 
-    // —— stdio 路径：prompt_exec.rs 同款构造（updated_at(now)，可选 title）——
+    // —— 参照线：schema typed 同款构造（updated_at(now)，可选 title）——
     let info = agent_client_protocol::schema::v1::SessionInfoUpdate::new()
         .updated_at("FIXED-TS")
         .title("新标题".to_string());
-    let stdio_wire = serde_json::to_value(SessionNotification::new(
+    let typed_wire = serde_json::to_value(SessionNotification::new(
         SessionId::new("s-info"),
         SessionUpdate::SessionInfoUpdate(info),
     ))
@@ -233,8 +237,8 @@ async fn test_session_info_update_wire_identical_between_paths() {
 
     assert_eq!(
         mask_updated_at(notify_payload.clone()),
-        mask_updated_at(stdio_wire),
-        "updatedAt 掩码后两条路径 wire 逐字段一致"
+        mask_updated_at(typed_wire),
+        "updatedAt 掩码后发射面与参照线 wire 逐字段一致"
     );
     assert_eq!(
         notify_payload["update"]["sessionUpdate"], "session_info_update",
@@ -248,7 +252,7 @@ async fn test_session_info_update_wire_identical_between_paths() {
 }
 
 /// title 缺省时 `title` 字段整体省略（MaybeUndefined skip 语义），
-/// 谓两条路径一致地遵守省略规则。
+/// 发射面与 schema typed 参照线一致地遵守省略规则。
 #[tokio::test]
 async fn test_session_info_update_title_omitted_when_unset() {
     let transport = Arc::new(MockTransport::default());
@@ -270,8 +274,9 @@ async fn test_session_info_update_title_omitted_when_unset() {
 
 // ── initialize：`build_initialize_response` wire 基线 ──────────────────────
 
-/// initialize 响应基线（TUI 侧 `serde_json::to_value(resp)`、stdio 侧
-/// `responder.respond(resp)` 序列化同一 `InitializeResponse`）：
+/// initialize 响应基线（统一宿主 `build_initialize_response` 产物经
+/// `serde_json::to_value(resp)` 序列化；stdio 侧经 `StdioTransport::send_response`
+/// 以同一 Value 直发）：
 /// - 顶层仅 `{protocolVersion, agentCapabilities}`（authMethods/agentInfo/_meta
 ///   空时省略，`skip_serializing_none`）；
 /// - `protocolVersion` = 数字 1；
@@ -329,18 +334,17 @@ fn test_initialize_response_wire_baseline() {
     assert_eq!(meta["peri.uiCommands"], json!([]));
 }
 
-// ── 批 2 stdio notify adapter：Value payload → SessionNotification 往返保真 ──
+// ── 通知 payload ↔ schema typed 往返保真（批 3 后 Value 直发无 typed 中间层）──
 
-/// 批 2 `StdioNotifyTransport` 的转换无损性基线：requests 侧通知 helper
-/// （`send_available_commands_update` / `send_config_option_update` /
+/// 统一宿主通知发射面（`send_available_commands_update` / `send_config_option_update` /
 /// `TuiReplaySender`）经 `AcpTransport::send_notification("session/update",
 /// payload)` 发出的 payload 是 `{sessionId, update}`（`update` = `SessionUpdate`
-/// 序列化值）。stdio 侧 adapter 把它 `serde_json::from_value::<SessionNotification>`
-/// 还原后发送——本测试锁定该转换往返后 **wire JSON 逐字段不变**（migration 不因
-/// Value↔typed 转换引入新的外层封装差异）。
+/// 序列化值）；stdio 侧（`StdioTransport`）以同一 Value 直发，**无 typed 中间层**。
+/// 本测试锁定该 payload 与 `SessionNotification`（schema typed 参照）往返后
+/// **wire JSON 逐字段不变**——Value↔typed 转换不引入外层封装差异。
 #[tokio::test]
 async fn test_stdio_notify_adapter_payload_roundtrip_preserves_wire() {
-    // requests 侧 `send_available_commands_update` 首发广播的 payload 形态
+    // 统一宿主发射面 `send_available_commands_update` 首发广播的 payload 形态
     let caps = PeriCaps {
         skill_names: true,
         ui_commands: vec![UiCommandSpec {
@@ -361,14 +365,14 @@ async fn test_stdio_notify_adapter_payload_roundtrip_preserves_wire() {
         "update": update_value,
     });
 
-    // adapter 内部等价转换：payload → SessionNotification → 重新序列化
+    // Value payload → SessionNotification（schema typed 参照）→ 重新序列化
     let notif: SessionNotification =
         serde_json::from_value(payload.clone()).expect("payload 应可还原为 SessionNotification");
     let rebuilt = serde_json::to_value(&notif).expect("SessionNotification 序列化不应失败");
 
     assert_eq!(
         rebuilt, payload,
-        "StdioNotifyTransport 转换往返必须保持 wire JSON 逐字段不变"
+        "Value↔typed 往返必须保持 wire JSON 逐字段不变"
     );
     assert_eq!(rebuilt["sessionId"], "s-adapter");
     assert_eq!(
@@ -377,9 +381,8 @@ async fn test_stdio_notify_adapter_payload_roundtrip_preserves_wire() {
     );
 }
 
-/// 批 2 adapter 同样承载 `session/update` 的其余 `SessionUpdate` 变体
-/// （`send_config_option_update` / `TuiReplaySender` 同款外层封装）——
-/// 以 `SessionInfoUpdate` 为例锁定往返保真。
+/// `session/update` 的其余 `SessionUpdate` 变体（`send_config_option_update` /
+/// `TuiReplaySender` 同款外层封装）——以 `SessionInfoUpdate` 为例锁定往返保真。
 #[tokio::test]
 async fn test_stdio_notify_adapter_info_payload_roundtrip_preserves_wire() {
     let info_update = serde_json::to_value(SessionUpdate::SessionInfoUpdate(
@@ -399,7 +402,7 @@ async fn test_stdio_notify_adapter_info_payload_roundtrip_preserves_wire() {
 
     assert_eq!(
         rebuilt, payload,
-        "StdioNotifyTransport 对 SessionInfoUpdate payload 往返保真"
+        "Value↔typed 对 SessionInfoUpdate payload 往返保真"
     );
     assert_eq!(rebuilt["update"]["sessionUpdate"], "session_info_update");
 }

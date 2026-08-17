@@ -69,7 +69,11 @@ tracing-appender = "0.2"
 
 # --- Utilities ---
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
-parking_lot = { version = "0.12", features = ["send_guard"] }
+# send_guard feature 已移除（批 4 依赖清理）：批 2 为 stdio typed handler 层
+# 的 `await_holding_lock` 规避引入，批 3 删除 adapter 后无任何代码使用
+# `MappedSendGuard`/`send_guard`（grep 全 workspace 无引用）；无跨 await 持锁
+# 告警（clippy -D warnings 验证）。
+parking_lot = "0.12"
 dirs-next = "2"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }

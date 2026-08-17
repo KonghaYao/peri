@@ -366,3 +366,51 @@ async fn test_questions_transport_error_returns_empty_answers() {
     assert_eq!(answers.len(), 3);
     assert_eq!(answers[0].text.as_deref(), Some(""));
 }
+
+// ─── PERI_ASK_USER_TIMEOUT_SECS 解析（批 4：统一 broker 恢复提问超时兜底）───
+
+/// 纯逻辑形态：缺省 300 / 非法回落 300 / `0` → None / 合法值。
+/// 语义与批 3 删除的 `host/stdio/context.rs::parse_ask_user_timeout` 完全一致。
+#[test]
+fn test_parse_ask_user_timeout_env_values() {
+    assert_eq!(
+        parse_ask_user_timeout(None),
+        Some(Duration::from_secs(300)),
+        "缺失 → 默认 300"
+    );
+    assert_eq!(
+        parse_ask_user_timeout(Some("300")),
+        Some(Duration::from_secs(300))
+    );
+    assert_eq!(
+        parse_ask_user_timeout(Some("1")),
+        Some(Duration::from_secs(1))
+    );
+    assert_eq!(parse_ask_user_timeout(Some("0")), None, "0 → 不超时");
+    assert_eq!(
+        parse_ask_user_timeout(Some("abc")),
+        Some(Duration::from_secs(300)),
+        "非法值回落 300"
+    );
+    assert_eq!(
+        parse_ask_user_timeout(Some("-5")),
+        Some(Duration::from_secs(300)),
+        "负数解析失败回落 300"
+    );
+    assert_eq!(
+        parse_ask_user_timeout(Some("")),
+        Some(Duration::from_secs(300))
+    );
+}
+
+/// env 读取接线（serial 串行：`std::env::set_var` 为进程级全局，避免并行竞态）。
+#[serial_test::serial]
+#[test]
+fn test_ask_user_timeout_reads_env() {
+    std::env::set_var("PERI_ASK_USER_TIMEOUT_SECS", "0");
+    assert_eq!(ask_user_timeout(), None);
+    std::env::set_var("PERI_ASK_USER_TIMEOUT_SECS", "42");
+    assert_eq!(ask_user_timeout(), Some(Duration::from_secs(42)));
+    std::env::remove_var("PERI_ASK_USER_TIMEOUT_SECS");
+    assert_eq!(ask_user_timeout(), Some(Duration::from_secs(300)));
+}

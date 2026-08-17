@@ -3,7 +3,7 @@
 //! 集成测试经 `StdioTransport::from_reader_writer`（可测性重构，`new()`/
 //! `Default` 行为不变）注入 `tokio::io::duplex` 读写端驱动：
 //! stdin pump 逐行解析、stdout 写入形态、send_request id 配对（含乱序）、
-//! 并发交错、EOF 关闭语义、非法 JSON 跳过、id 越界压 0 行为、失败语义。
+//! 并发交错、EOF 关闭语义、非法 JSON 跳过、域外 id 拒绝行为、失败语义。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -346,47 +346,57 @@ async fn test_send_request_write_failure_on_broken_stdout() {
     );
 }
 
-// ── id 保真：`value_to_request_id` 域约束 ──────────────────────────────────
+// ── id 域约束：`is_domain_id` 校验 + pump 拒绝域外 id（决策点 7 收口）──
 //
-// [批 0 结论/决策点] agent-client-protocol-schema 的 `RequestId` =
-// `Null | Number(i64) | Str(String)`（`rpc.rs:42`，JSON-RPC 2.0 §5：id 仅
-// String/Number/Null，Number 不应含小数）。`transport::types::RequestId` =
-// `String | Number(i64)`（无 Null）——域已覆盖 schema 可表示子集。
-// 但 `stdio.rs:224-229` 对**域外**值（小数、u64 溢出 i64、null、bool 等）
-// 静默压 `0`（`as_i64().unwrap_or(0)`），非保真、且与合法 id 0 存在碰撞
-// 风险。本测试锁现有行为；统一后建议改为「拒绝域外 id」或显式对齐 ACP
-// 约束（§10 决策点，批 0 不擅自改行为）。
+// agent-client-protocol-schema 的 `RequestId` = `Null | Number(i64) |
+// Str(String)`（`rpc.rs:42`，JSON-RPC 2.0 §5：id 仅 String/Number/Null，
+// Number 不应含小数）。`transport::types::RequestId` = `String |
+// Number(i64)`（无 Null）——域已覆盖 schema 可表示子集。批 0-3 对**域外**
+// 值（小数、u64 溢出 i64、null、bool 等）静默压 `0`（`as_i64().unwrap_or(0)`），
+// 非保真、且与合法 id 0 存在碰撞风险（router 配对/宿主 `send_response(0, ...)`
+// 将响错对象）。批 4 收口（docs/design/acp-host-unify.md §10 决策点 7）：
+// pump 对入站域外 id **拒绝该行**（warn + 丢弃，不中断 pump，与非法 JSON 行
+// 处理语义一致）；id 为 null 的 Request 按 JSON-RPC 2.0 §2.2 视为通知。
+// `send_request` 侧 id 由内部 `RequestId` 生成恒合法，行为不改。
 
 #[test]
-fn test_request_id_conversion_fidelity_and_out_of_domain_coercion() {
-    // 保真域：i64 整数与字符串
-    assert_eq!(value_to_request_id(&json!(42i64)), RequestId::Number(42));
+fn test_request_id_domain_validation() {
+    // 域内：整数 Number(i64) 与 String 保真
+    assert!(is_domain_id(&json!(0i64)));
+    assert!(is_domain_id(&json!(42i64)));
+    assert!(is_domain_id(&json!(-1i64)));
+    assert!(is_domain_id(&json!("req-1")));
+    // 域外：小数 / u64 溢出 i64 / null / bool（协议违规）
+    assert!(!is_domain_id(&json!(1.5)), "小数 id 域外");
+    assert!(
+        !is_domain_id(&json!(18446744073709551615u64)),
+        "u64 溢出 i64 域外"
+    );
+    assert!(
+        !is_domain_id(&Value::Null),
+        "null id 域外（pump 按通知单独处理）"
+    );
+    assert!(!is_domain_id(&Value::Bool(true)), "bool id 域外");
+}
+
+#[test]
+fn test_request_id_string_conversion_fidelity() {
+    // String id 保真往返（Number 往返由既有 test_request_id_conversion 覆盖）
     assert_eq!(
         value_to_request_id(&json!("req-1")),
         RequestId::String("req-1".into())
     );
-    // 域外 → 压 0（当前实现，非保真）
     assert_eq!(
-        value_to_request_id(&json!(1.5)),
-        RequestId::Number(0),
-        "小数 id 压 0"
-    );
-    assert_eq!(
-        value_to_request_id(&json!(18446744073709551615u64)),
-        RequestId::Number(0),
-        "u64 溢出 i64 压 0"
-    );
-    assert_eq!(value_to_request_id(&Value::Null), RequestId::Number(0));
-    assert_eq!(
-        value_to_request_id(&Value::Bool(true)),
-        RequestId::Number(0)
+        request_id_to_value(&RequestId::String("req-1".into())),
+        json!("req-1")
     );
 }
 
-/// 经 pump 的实际观察：String id 行保真；域外 id（小数 / bool 响应 id）
-/// 压 0 进入内部消息（未匹配响应走转发通道）。
+/// 经 pump 的实际观察（决策点 7 收口）：String id 行保真；域外 id（小数 /
+/// bool）行被拒绝（不产生 IncomingMessage、pump 不中断）；id 为 null 的
+/// Request 按 JSON-RPC 2.0 §2.2 视为通知。
 #[tokio::test]
-async fn test_pump_preserves_string_ids_and_coerces_out_of_domain() {
+async fn test_pump_rejects_out_of_domain_ids_and_null_id_becomes_notification() {
     let (transport, mut input, _output) = duplex_transport();
     write_line(
         &mut input,
@@ -403,6 +413,16 @@ async fn test_pump_preserves_string_ids_and_coerces_out_of_domain() {
         r#"{"jsonrpc":"2.0","id":true,"result":"orphan"}"#,
     )
     .await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":null,"method":"m/notif","params":{"c":3}}"#,
+    )
+    .await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":7,"method":"m/req2","params":{}}"#,
+    )
+    .await;
     drop(input);
 
     match recv(&transport).await {
@@ -414,21 +434,20 @@ async fn test_pump_preserves_string_ids_and_coerces_out_of_domain() {
         other => panic!("期望 String id Request，实际 {other:?}"),
     }
     match recv(&transport).await {
-        Some(IncomingMessage::Request { id, .. }) => assert_eq!(
-            id,
-            RequestId::Number(0),
-            "小数 id 应压 0（非保真，见 test_request_id_conversion_*）"
-        ),
-        other => panic!("期望压 0 的 Request，实际 {other:?}"),
+        Some(IncomingMessage::Notification { method, params }) => {
+            assert_eq!(method, "m/notif");
+            assert_eq!(params, json!({"c": 3}));
+        }
+        other => panic!("null id Request 应视为通知（非压 0 请求），实际 {other:?}"),
     }
     match recv(&transport).await {
-        Some(IncomingMessage::Response { id, result }) => {
-            assert_eq!(id, RequestId::Number(0), "bool id 压 0 后进入转发通道");
-            assert_eq!(result.unwrap(), json!("orphan"));
+        Some(IncomingMessage::Request { id, method, .. }) => {
+            assert_eq!(id, RequestId::Number(7), "后续合法请求正常解析");
+            assert_eq!(method, "m/req2");
         }
-        other => panic!("期望压 0 的 Response 转发，实际 {other:?}"),
+        other => panic!("域外 id 行应被拒绝、pump 不中断，实际 {other:?}"),
     }
-    assert!(recv(&transport).await.is_none());
+    assert!(recv(&transport).await.is_none(), "EOF 后 pump 退出");
 }
 
 // ── legacy type:cancel（批 3 §7 #10 移植）──────────────────────────────────

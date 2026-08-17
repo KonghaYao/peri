@@ -65,6 +65,29 @@ impl AcpTransportBroker {
     }
 }
 
+/// 解析 `PERI_ASK_USER_TIMEOUT_SECS` 环境变量值（纯逻辑，便于单测）：
+/// 缺失/非法回落默认 300 秒；`0` 表示不超时（返回 `None`）。
+///
+/// 语义与批 3 删除的 `host/stdio/context.rs::parse_ask_user_timeout` 完全一致
+/// （批 4 收口：统一 broker 构造点恢复提问超时兜底，stdio IDE 客户端不响应
+/// `elicitation/create` 时 turn 不再无限挂起）。
+pub fn parse_ask_user_timeout(value: Option<&str>) -> Option<Duration> {
+    match value.and_then(|v| v.parse::<u64>().ok()).unwrap_or(300) {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
+    }
+}
+
+/// 读取 `PERI_ASK_USER_TIMEOUT_SECS` 并解析（缺失/非法 → 默认 300s）。
+///
+/// 统一构造点（`host/prompt.rs::run_prompt` 的 `AcpTransportBroker::new(...)`）
+/// 显式调用本函数：mpsc/TUI 与 stdio 共用同一 broker，env 语义对所有路径
+/// 生效——TUI 用户显式设 env 也会获得超时兜底，这是显式配置的合理语义；
+/// 不设 env 时回落默认 300s（与旧 stdio 一致）。
+pub fn ask_user_timeout() -> Option<Duration> {
+    parse_ask_user_timeout(std::env::var("PERI_ASK_USER_TIMEOUT_SECS").ok().as_deref())
+}
+
 #[async_trait]
 impl UserInteractionBroker for AcpTransportBroker {
     async fn request(&self, context: InteractionContext) -> InteractionResponse {

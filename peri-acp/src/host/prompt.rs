@@ -150,11 +150,18 @@ pub(crate) async fn run_prompt(
     let history_ids: Vec<peri_acp_types::messages::MessageId> =
         history.iter().map(|m| m.id()).collect();
 
-    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
-        Arc::new(AcpTransportBroker::new(
+    let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> = Arc::new(
+        AcpTransportBroker::new(
             Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
             session_id.clone().into(),
-        ));
+        )
+        // 提问超时兜底（批 4 恢复旧 stdio 语义，见 broker::parse_ask_user_timeout）：
+        // 统一构造点读 env `PERI_ASK_USER_TIMEOUT_SECS`（缺失/非法 → 默认 300s；
+        // `0` → 不超时）。本构造点是 TUI/stdio 唯一统一点——TUI 不设 env 时也
+        // 获得 300s 默认兜底（TUI 本地客户端恒响应，实际交互无感知）；TUI 用户
+        // 显式设 env 会获得对应超时——显式配置的合理语义。
+        .with_timeout(crate::broker::ask_user_timeout()),
+    );
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
         session_manager.caps_registry(),

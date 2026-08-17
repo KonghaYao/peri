@@ -149,9 +149,29 @@ impl StdioTransport {
                 let result_val = envelope.result.take();
                 let error_val = envelope.error.take();
 
-                match (envelope.id, has_method) {
+                // JSON-RPC 2.0 §2.2：Request 的 id 成员存在但为 null 时视为
+                // 通知（客户端无兴趣于对应响应，等同「无 id」）——进入
+                // `(None, true)` 通知分支，而非压 0 成请求（决策点 7 收口）。
+                let id = match envelope.id {
+                    Some(Value::Null) if has_method => None,
+                    id => id,
+                };
+
+                match (id, has_method) {
                     // Response to a server-initiated request (has id, no method)
                     (Some(id), false) => {
+                        if !is_domain_id(&id) {
+                            // 域外 id（小数/u64 溢出 i64/null/bool 等）→ 协议
+                            // 违规：拒绝该行（warn + 丢弃，pump 不中断；与非法
+                            // JSON 行处理语义一致）。不压 0 转发——压 0 会把合法
+                            // id 0 与域外 id 混淆，router 配对/宿主
+                            // `send_response(0, ...)` 将响错对象（决策点 7）。
+                            tracing::warn!(
+                                id = %id,
+                                "Ignoring JSON-RPC response with out-of-domain id"
+                            );
+                            continue;
+                        }
                         let req_id = value_to_request_id(&id);
                         let result = if let Some(error) = error_val {
                             Err(error)
@@ -165,6 +185,13 @@ impl StdioTransport {
                     }
                     // Request (has id + method)
                     (Some(id), true) => {
+                        if !is_domain_id(&id) {
+                            tracing::warn!(
+                                id = %id,
+                                "Ignoring JSON-RPC request with out-of-domain id"
+                            );
+                            continue;
+                        }
                         let method = envelope.method.unwrap();
                         let req_id = value_to_request_id(&id);
                         let _ = incoming_tx.send(IncomingMessage::Request {
@@ -291,7 +318,21 @@ async fn write_envelope(
     Ok(())
 }
 
+/// JSON-RPC 2.0 id 域校验（决策点 7 收口）：合法 id 仅 String 或整数
+/// Number（§2.2：Number 不应含小数，脚注 2）。`null` 由 pump 按通知语义
+/// 单独处理（§2.2：id 为 null 的 Request 视为通知）；布尔/小数/u64 溢出
+/// i64/数组等一律视为域外（协议违规 → pump 拒绝该消息，不压 0 转发）。
+fn is_domain_id(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Number(n) => n.as_i64().is_some(),
+        _ => false,
+    }
+}
+
 fn value_to_request_id(v: &Value) -> RequestId {
+    // 调用方（pump）已做 `is_domain_id` 校验，此处仅处理域内值；压 0 分支
+    // 为防御性兜底（正常不可达）。
     match v {
         Value::String(s) => RequestId::String(s.clone()),
         Value::Number(n) => RequestId::Number(n.as_i64().unwrap_or(0)),

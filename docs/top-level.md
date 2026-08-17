@@ -105,6 +105,7 @@ flowchart BT
 - 纯协议实现：ACP 协议适配，不承载业务
 - 事件协议化映射、caps 门控
 - 全部客户端（TUI/CLI/stdio/IDE/print）一律经 ACP
+- 部署单元（统一宿主，批 3 acp-host-unify 后单一路径）：TUI/print = `peri-tui` 客户端装配；stdio/IDE = `run_acp_stdio(StdioInput)`（`peri-acp/src/host/stdio/mod.rs`）→ `assemble_stdio_config` → `run_acp_server`——与 TUI 共用同一 `run_acp_server`（`handle_request` + `dispatch_prompt_turn`），仅 transport 多态（mpsc vs `transport/stdio.rs` `StdioTransport`，JSON-RPC 2.0 newline-delimited）
 
 8. Peri TUI 层（View 层）
 
