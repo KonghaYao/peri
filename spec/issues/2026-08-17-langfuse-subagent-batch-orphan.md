@@ -98,4 +98,5 @@ stage span 的 SpanCreate **延迟到 `on_stage_end` 合并发送**（v2 条件�
 
 | 日期 | commit | 说明 |
 |------|--------|------|
-| 2026-08-17 | 待提交 | 修复 + 回归测试（两轮） |
+| 2026-08-17 | `99df3357` | 修复 + 回归测试（两轮：覆盖即补发 / turn end 兜底） |
+| 2026-08-17 | `99df3357` | 第三轮：subagent 按 Act 独立 flush batch（含回归测试 `test_subagent_flushes_tool_batch_per_act_stage`） |
