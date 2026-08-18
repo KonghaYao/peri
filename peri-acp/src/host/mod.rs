@@ -170,6 +170,14 @@ pub struct AcpServerConfig {
     /// 注册/注销与 goal_state 通过 SessionManager 中的 AcpSession 记录管理，
     /// 保证 `run_session_loop` 接收 `Some(session_manager)` 时 cascade cancel 生效。
     pub session_manager: crate::session::SessionManager,
+    /// stdio 部署命令过滤开关。
+    ///
+    /// 仅影响 stdio 部署单元（IDE client，`assemble_stdio_config` 置 `true`）；
+    /// TUI / print 恒为 `false`（保留全部命令）。为 `true` 时，`rewind` /
+    /// `clear`（含别名 `cls`/`reset`）不作为命令拦截，fall-through 进 agent
+    /// 管线（当作普通文本消息发给模型）——IDE 客户端自管理这两个命令，服务端
+    /// 不应执行清会话/回退操作。其余命令不受影响。
+    pub stdio_command_filter: bool,
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────
@@ -672,6 +680,7 @@ pub(crate) async fn dispatch_prompt_turn(
         &cfg.workflow_middleware_factory,
         Some(cont_tx.clone()),
         is_continuation,
+        cfg.stdio_command_filter,
     )
     .await;
 

@@ -14,7 +14,7 @@
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 打开全部资源（会话存储） | `src/context.rs` | `Resources::open`（:26）；`open_with`（:36）；`thread_store`（:54，返回 `Arc<dyn ThreadStore>`） | 默认路径 `~/.peri/threads/threads.db`（`SqliteThreadStore::default_path`）打开失败 fallback 临时目录；显式 `Some(path)` 失败直接报错不 fallback |
-| 改会话存储 SQL 实现 | `src/sessions/sqlite_store.rs` | `SqliteThreadStore::new`（:39）；`default_path`（:63）；`init_schema`（:73）；`ThreadStore` impl（:292） | trait 方法须与 `peri-acp-types/src/store.rs::ThreadStore` 签名一致；含 compaction 生命周期（`supports_compaction_lifecycle` :719 / `commit_compaction_lifecycle` :723）与 context cache（`invalidate_context_cache` :636 / `get_context_cache_epoch` :644） |
+| 改会话存储 SQL 实现 | `src/sessions/sqlite_store.rs` | `SqliteThreadStore::new`（:39）；`default_path`（:63）；`init_schema`（:73）；`ThreadStore` impl（:292）；轻量列表 `list_thread_entries` | trait 方法须与 `peri-acp-types/src/store.rs::ThreadStore` 签名一致；TUI 列表查询只投影 thread 摘要并在 SQL 层按 cwd/hidden/message_count 过滤；含 compaction 生命周期（`supports_compaction_lifecycle` :719 / `commit_compaction_lifecycle` :723）与 context cache（`invalidate_context_cache` :636 / `get_context_cache_epoch` :644） |
 | 改消息读写/祖先链 | `src/sessions/sqlite_store.rs` | `create_thread`（:293）；`append_messages`（:318）；`load_messages`（:360）；`load_context`（:494）；`resolve_ancestor_chain`（:135） | load_context 按祖先链拼装 + context cache（`save_context_cache` :191）；`delete_messages_since`（:818）供回滚类操作 |
 | 改测试用文件存储 | `src/sessions/filesystem.rs` | `FilesystemThreadStore`（:25）；`new`（:30）；`default_path`（:37） | 纯测试用途（sessions/mod.rs:3），生产实现是 sqlite |
 | 改全局配置路径 | `src/config/mod.rs` | `peri_dir`（:9，`~/.peri`）；`settings_path`（:14，`~/.peri/settings.json`） | 仅路径入口，配置读取语义之外的逻辑不迁入本 crate |

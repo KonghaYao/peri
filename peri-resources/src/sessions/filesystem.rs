@@ -10,7 +10,7 @@ use tokio::{fs, io::AsyncWriteExt};
 use peri_acp_types::{
     messages::BaseMessage,
     store::{CompactionLifecycle, ThreadStore},
-    thread::{AgentStatus, ThreadId, ThreadMeta},
+    thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
 };
 
 /// 进程内计数器：保证并发写同一目标时临时文件名唯一。
@@ -207,6 +207,18 @@ impl ThreadStore for FilesystemThreadStore {
             }
         }
         Ok(metas)
+    }
+
+    async fn list_thread_entries(&self, cwd: &str) -> Result<Vec<ThreadListEntry>> {
+        let mut entries: Vec<_> = self
+            .read_index()
+            .await?
+            .into_iter()
+            .filter(|meta| !meta.hidden && meta.message_count > 0 && meta.cwd == cwd)
+            .map(ThreadListEntry::from)
+            .collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
+        Ok(entries)
     }
 
     async fn delete_thread(&self, id: &ThreadId) -> Result<()> {

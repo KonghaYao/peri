@@ -82,7 +82,7 @@ pub async fn execute_command(
     cancel_token: &tokio_util::sync::CancellationToken,
     controller: &Controller,
     thread_id: Option<String>,
-    bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
+    _bg_event_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::event::ExecutorEvent>>,
     task_manager: Option<std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
     frozen_claude_md: Option<std::sync::Arc<String>>,
     frozen_claude_local_md: Option<std::sync::Arc<String>>,
@@ -197,7 +197,6 @@ pub async fn execute_command(
     ctx.parsed_args = parsed_args;
     ctx.thread_store = Some(controller.sessions());
     ctx.thread_id = thread_id;
-    ctx.bg_event_sender = bg_event_tx;
     ctx.task_manager = task_manager;
     ctx.frozen_claude_md = frozen_claude_md;
     ctx.frozen_claude_local_md = frozen_claude_local_md;

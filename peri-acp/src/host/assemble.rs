@@ -410,6 +410,9 @@ pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig
         thread_store: thread_store.clone(),
         controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
         langfuse_session,
+        // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
+        // 显式置 true，过滤 rewind/clear。
+        stdio_command_filter: false,
         config_source,
         session_manager,
     }

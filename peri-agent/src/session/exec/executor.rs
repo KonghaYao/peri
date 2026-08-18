@@ -69,13 +69,13 @@ use crate::session::async_router::AsyncRouter;
 // intercept_immediate_command / InterceptRequest / spawn_event_pump /
 // SpawnPumpRequest / PumpHandle / collect_result / CollectRequest /
 // close_channel / wait_for_pump / build_and_execute_agent_v2 /
-// V2ExecuteRequest / StageBuildFn / ExecOutcome / DefaultBgForkSpawner ——
+// V2ExecuteRequest / StageBuildFn / ExecOutcome ——
 // executor_test.rs 通过 `super::` 访问的符号路径保持不变。
 pub use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
-    spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, DefaultBgForkSpawner,
-    ExecOutcome, ForwarderLauncherFn, InterceptOutcome, InterceptRequest, ParentToolsFactory,
-    PumpHandle, SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
+    spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, ExecOutcome,
+    ForwarderLauncherFn, InterceptOutcome, InterceptRequest, PumpHandle, SpawnPumpRequest,
+    StageBuildFn, V2ExecuteRequest,
 };
 
 mod agent_build;
@@ -148,14 +148,6 @@ struct TurnConfig<'a> {
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
     effective_context_window: u32,
 }
-
-/// /bg 命令事件的 envelope 身份标记（agent_id 槽位）。
-///
-/// bg 命令事件泵（Immediate 命令路径）发射时打此标记，消费端按标记过滤，
-/// 避免与主 turn 事件流交叉（本泵每轮 spawn 并订阅全局广播，不过滤会重复
-/// 消费主 pump 的事件，破坏 turn 终态唯一）。envelope 仅 ACP 内部使用，
-/// TUI 协议化映射不消费身份字段。
-const BG_CMD_EVENT_AGENT: &str = "__bg_cmd__";
 
 /// BgRegistryEvent → unstable 事件（bg-task-started/completed/cancelled）映射。
 ///
@@ -276,6 +268,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
             recall_items: Vec::new(),
+            failure: None,
         };
     }
 
@@ -362,104 +355,12 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // Context window（宿主构造点已按 context_1m 计算 effective 值）
     let effective_context_window = ctx.effective_context_window;
 
-    // 前置创建 bg 事件通道（BgCommand 等 Immediate 命令依赖）
-    let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
-        tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     // session 级 TaskManager（跨 prompt 存活，由 executor 从 session 获取）
     let task_manager_for_cmd = ctx
         .session_access
         .as_ref()
         .and_then(|sa| sa.task_manager(&ctx.session_id))
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
-
-    // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）。
-    // 事件三层化：发射端把 /bg 子 agent 事件经 `EventPublisher` 发射
-    // （Controller 补打 session_id/session_seq），消费端从 `subscribe()` 工厂
-    // 订阅并按 [`BG_CMD_EVENT_AGENT`] 身份标记过滤（只消费本泵发射的事件）。
-    // 过滤必要性：本泵每轮 spawn 且订阅全局广播——若不过滤会重复消费主 turn
-    // 事件（主 pump 也订阅并推送，双推破坏 turn 终态唯一断言）。
-    {
-        let mut subscription = (ctx.subscribe)();
-        let bg_cmd_sink = Arc::clone(&event_sink);
-        let bg_cmd_sid = ctx.session_id.clone();
-        let bg_cmd_cw = effective_context_window;
-        let publisher = Arc::clone(&ctx.event_publisher);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    msg = subscription.recv() => {
-                        match msg {
-                            Ok(m) if m.envelope.session_id == bg_cmd_sid
-                                && m.envelope.agent_id == BG_CMD_EVENT_AGENT => {
-                                if let Some(bg_event) = m.event {
-                                    bg_cmd_sink
-                                        .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
-                                        .await;
-                                    // bg agent 完成后必须 push_done，否则 TUI 因
-                                    // SubagentStopped 设置 is_loading=true 后永久卡住
-                                    // （与 Immediate 命令路径同模式，需手动发
-                                    // peri/agent_event_done 触发 acp_notifier 的
-                                    // AgentDone→TurnDone）。
-                                    if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                                        // bg 完成事件与当前 turn 无关，不携带 request_id（None）。
-                                        bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
-                                    }
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                tracing::warn!(n, "bg command event subscription lagged, events dropped");
-                            }
-                            Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                        }
-                    }
-                    ev = bg_event_rx_for_cmd.recv() => {
-                        match ev {
-                            Some(bg_event) => {
-                                // 发射端：v1 事件无 turn/agent 身份，agent_id 打
-                                // [`BG_CMD_EVENT_AGENT`] 标记供消费端过滤（envelope
-                                // 仅 ACP 内部使用，TUI 协议化映射不消费身份字段）。
-                                let source = peri_acp_types::runtime::UnstampedEvent::new(
-                                    String::new(),
-                                    BG_CMD_EVENT_AGENT.to_string(),
-                                    None,
-                                    peri_acp_types::identity::EventDeliveryClass::Critical,
-                                );
-                                publisher.publish_event(&bg_cmd_sid, &source, bg_event);
-                            }
-                            None => {
-                                // 发射点集合结束（bg_event_tx 全 drop）：drain 广播
-                                // 在途事件后退出（与主 pump 同语义）。
-                                loop {
-                                    match subscription.try_recv() {
-                                        Ok(Some(m)) if m.envelope.session_id == bg_cmd_sid
-                                            && m.envelope.agent_id == BG_CMD_EVENT_AGENT => {
-                                            if let Some(bg_event) = m.event {
-                                                bg_cmd_sink
-                                                    .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
-                                                    .await;
-                                                if matches!(bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
-                                                    bg_cmd_sink.push_done(&bg_cmd_sid, "end_turn", None).await;
-                                                }
-                                            }
-                                        }
-                                        Ok(Some(_)) => {}
-                                        Ok(None) => break,
-                                        Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                            tracing::warn!(n, "bg command event subscription lagged, events dropped");
-                                            break;
-                                        }
-                                        Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
 
     // Registry → 事件链泵（事件三层化收尾）：发射经 EventPublisher
     // （BgRegistryEvent 包装为 ExecutorEvent::BgRegistryEvent 载体；身份降级为
@@ -541,26 +442,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         });
     }
 
-    // ── L5 命令拦截注入面（注册表 / compact 配置 / bg fork spawner）──
-    // 命令注册表查找：ACP 协议面会话级注册表（内置命令在会话创建时注册，
-    // 经注入闭包 resolve 查找，实现已在 Agent 层）。
+    // ── L5 命令拦截注入面（注册表 / compact 配置）──
     let command_lookup = Arc::clone(&ctx.command_lookup);
-    // compact 配置装载：load_compact_config 语义（含 env overrides）留在 ACP。
     let compact_config_loader = Arc::clone(&ctx.compact_config_loader);
-    // /bg fork spawner（默认实现迁入本 crate；LLM 构造 / 父工具集 /
-    // 链装配器 / resolver 经注入面接入——LLM 与工具集惰性构造，仅 /bg 触发）。
-    let bg_llm_factory = Arc::clone(&ctx.bg_llm_factory);
-    let parent_tools_factory = Arc::clone(&ctx.parent_tools_factory);
-    let chain_assembler = Arc::clone(&ctx.chain_assembler);
-    let tool_invocation_resolver = Arc::clone(&ctx.tool_invocation_resolver);
-    let bg_spawner_arc: Arc<dyn peri_acp_types::command::BgForkSpawner> =
-        Arc::new(DefaultBgForkSpawner::new(
-            Arc::clone(&task_manager_for_cmd),
-            bg_llm_factory,
-            parent_tools_factory,
-            chain_assembler,
-            tool_invocation_resolver,
-        ));
 
     // Command interception — check if content is a slash command before building agent.
     // 三态分发（Phase 5 Step 6）：
@@ -591,11 +475,9 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         frozen_system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
-        bg_event_tx: &bg_event_tx_for_cmd,
         task_manager: &task_manager_for_cmd,
         command_lookup,
         compact_config_loader,
-        bg_spawner: Some(bg_spawner_arc),
     })
     .await
     {

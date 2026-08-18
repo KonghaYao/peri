@@ -133,6 +133,7 @@ fn make_server_config_with(
             .unwrap(),
         ),
         session_manager,
+        stdio_command_filter: true,
     }
 }
 

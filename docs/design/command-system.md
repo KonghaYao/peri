@@ -76,7 +76,7 @@ CommandName := 裸名                              // 第一等级域（core / u
 ## Feedback 层（反馈通道）
 
 - **未解析一律 fall through，不报错**：`/xxx` 解析未命中 → 作为 agent 信息进入管线（Linux 下 `/` 与绝对路径冲突，`/etc/hosts` 常见；确定性路由的边界 = 已解析的命令必须确定性执行，未解析的 slash 文本不判定为错误）。**词法非法同样 fall through**（`/a:b` 未知域、`/mcp:hello` 缺 namespace 一律进管线，不报错——裁决 2026-08-15，P2-3 定案）；`register` 路径仍严格校验（词法/域校验拒绝注册），仅 `resolve` 路径宽松。例外：execute-command RPC 是显式命令请求（无 agent 管线可注入），resolve 失败 → 显式错误。
-- **反馈双通道，默认 UI-only，不污染会话**：`CommandFeedback { level, message, channel: UiOnly（默认）| Session（opt-in）}`。UiOnly → 通知条/状态区渲染，不进会话，agent 永不见（clear/compact/rewind/bg 反馈全部如此）；Session 仅命令显式 opt-in。会话是 agent 的上下文，运维反馈不是 agent 该看的。
+- **反馈双通道，默认 UI-only，不污染会话**：`CommandFeedback { level, message, channel: UiOnly（默认）| Session（opt-in）}`。UiOnly → 通知条/状态区渲染，不进会话，agent 永不见（clear/compact/rewind 反馈全部如此）；Session 仅命令显式 opt-in。会话是 agent 的上下文，运维反馈不是 agent 该看的。
 - **Inject 反馈**："已应用 skill X"提示为 UI-only；agent 见到的只有注入的指令文本本身（指令是语义，不是反馈）。
 - **错误不进会话**：词法非法 / 路由未命中 / 执行失败，全部走 UI 通道（确定性错误事件 + 通知条），零会话污染；历史回看依赖 TUI 事件日志。
 
@@ -119,7 +119,7 @@ graph LR
 
 ```mermaid
 graph TB
-    SRC1["内置命令<br/>core:compact / core:bg ..."]
+    SRC1["内置命令<br/>core:compact / core:clear ..."]
     SRC2["本地面板<br/>ui:history / ui:help ..."]
     SRC3["本地 Skills<br/>core:xxx（第一等级 · 裸名可用）"]
     SRC4["外部 MCP server<br/>mcp:demo:hello（动态注入）"]

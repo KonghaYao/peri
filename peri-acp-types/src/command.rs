@@ -1,29 +1,16 @@
 //! Slash 命令契约（L5：命令执行体迁入 Agent 层的边界端口）。
 //!
-//! 自 `peri-acp/src/session/command/mod.rs` 与 `peri-acp/src/host/exec/`
-//! 命令执行体（`bg` / `compact_pipeline`）迁入：命令执行模型
-//! （[`CommandHandler`]）、
-//! 执行上下文（[`CommandContext`]）、/bg fork 请求（[`BgForkRequest`] +
-//! [`BgForkSpawner`]）与命令/执行终态（[`CommandResult`] / [`PromptStopReason`]）
-//! 归本层，Agent 层命令实现经本契约执行，ACP 保留协议化薄壳与装配面
-//! （命令注册表 / spawner 实现 / EventSink 实现）。
-//!
-//! 依赖反转说明：
-//! - `peri_config`（ACP provider 配置）不进入本契约——`CommandContext` 以
-//!   `compact_config`（compact 管线输入）投影，/bg fork 的 LLM 构造由
-//!   [`BgForkSpawner`] 实现方（ACP 装配面）自持配置；
-//! - 事件发射经 [`crate::event::EventSink`] 端口（ACP 实现，协议序列化面）。
+//! 命令执行模型、执行上下文与命令执行终态归本层，Agent 层命令实现经本契约执行。
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::compact::CompactConfig;
-use crate::event::{EventSink, ExecutorEvent};
+use crate::event::EventSink;
 use crate::messages::BaseMessage;
 use crate::store::ThreadStore;
 use crate::tasks::TaskManager;
@@ -77,18 +64,13 @@ pub enum PromptStopReason {
 
 /// 命令执行上下文（L5 契约化：原 ACP `session::command::CommandContext`）。
 ///
-/// `peri_config`（ACP provider 配置）不进入本结构：
-/// - compact 管线使用 [`CommandContext::compact_config`]（ACP 装配点按
-///   `load_compact_config` 语义预填，env overrides 每轮重新应用）；
-/// - /bg fork 的 LLM 构造由 [`BgForkSpawner`] 实现方自持配置。
-///
 /// 拆层（设计 §74 / 不变式 5）：core 5 字段常驻（session_id / history /
 /// cwd / event_sink / cancel_token），扩展依赖收进私有字段
 /// [`CommandContext::deps`]（[`DependencyBag`]），经
 /// [`CommandContext::dep`] 按接口获取——新增依赖不动本结构体。
 ///
 /// 本结构为「两步走」过渡态：core 之外的旧字段（compact_config /
-/// auxiliary_model / args / thread_store / frozen_* / bg_* / task_manager
+/// auxiliary_model / args / thread_store / frozen_* / task_manager
 /// 等）**Phase 2 适配完成后将随消费方迁移逐步退役**，迁移前由消费方
 /// 构造点经 [`CommandContext::new`] + 旧字段显式赋值全量预填
 /// （`executor_helpers.rs:340` 先例），行为等价零漂移。
@@ -127,11 +109,9 @@ pub struct CommandContext {
     pub thread_store: Option<Arc<dyn ThreadStore>>,
     /// 当前会话的 thread ID，配合 thread_store 使用。
     pub thread_id: Option<String>,
-    /// 后台任务事件的发送通道（BgCommand 等 Immediate 命令依赖）。
-    pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    /// 后台任务管理器（BgCommand 等 Immediate 命令依赖）。
+    /// 后台任务管理器（Immediate 命令依赖，如 rewind 的异步执行）。
     pub task_manager: Option<Arc<dyn TaskManager>>,
-    /// Frozen CLAUDE.md main content（会话级捕获，BgCommand 透传到 fork agent）。
+    /// Frozen CLAUDE.md main content（会话级捕获）。
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen CLAUDE.local.md content
     pub frozen_claude_local_md: Option<Arc<String>>,
@@ -139,10 +119,6 @@ pub struct CommandContext {
     pub frozen_skill_summary: Option<Arc<String>>,
     /// Frozen system prompt（fork 路径复用以避免重建）。
     pub frozen_system_prompt: Option<Arc<String>>,
-    /// `/bg` fork agent 启动器（legacy：Phase 2 拆层后注入面已迁
-    /// `ctx.dep::<Arc<dyn BgForkSpawner>>()`，本字段无生产消费方，列入退役
-    /// 清单；当前「字段一个未删」策略下保留，`new()` 恒 None）。
-    pub bg_spawner: Option<Arc<dyn BgForkSpawner>>,
     /// 扩展依赖接口注册表（设计 §74 / 不变式 5）：core 之外的一切按接口
     /// 注入，新增依赖不动本结构体（注入/取用形态见 [`DependencyBag`] 与
     /// [`CommandContext::dep`]）。
@@ -212,13 +188,11 @@ impl CommandContext {
             parsed_args: None,
             thread_store: None,
             thread_id: None,
-            bg_event_sender: None,
             task_manager: None,
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
             frozen_system_prompt: None,
-            bg_spawner: None,
         }
     }
 }
@@ -268,47 +242,6 @@ pub struct CommandResult {
     pub stop_reason: PromptStopReason,
     /// 命令反馈；None = 无反馈。执行失败 = level: Error 走同一通道（设计 §81）。
     pub feedback: Option<CommandFeedback>,
-}
-
-/// `/bg` fork agent 启动请求（纯数据，跨层透传）。
-///
-/// 命令定义（Agent 层 `session::exec::bg::BgCommand`）只构造本请求并交给
-/// 注入的 [`BgForkSpawner`]；深绑 ACP/Agent 层类型（LLM 构造 / 工具集 /
-/// SubAgent 发起）的实现在装配面（`peri-agent::session::exec::executor_helpers`
-/// 的 `DefaultBgForkSpawner`，经 `BgForkSpawner` 端口注入），命令层不引用
-/// 业务面实现。
-pub struct BgForkRequest {
-    /// 后台任务描述。
-    pub prompt: String,
-    /// 父会话消息历史（fork 上下文）。
-    pub parent_messages: Vec<BaseMessage>,
-    /// 父会话 thread id。
-    pub parent_thread_id: Option<String>,
-    /// 工作目录。
-    pub cwd: String,
-    /// 冻结 CLAUDE.md main content。
-    pub frozen_claude_md: Option<String>,
-    /// 冻结 CLAUDE.local.md content。
-    pub frozen_claude_local_md: Option<String>,
-    /// 冻结 skills summary。
-    pub frozen_skill_summary: Option<String>,
-    /// 冻结 system prompt（fork 路径复用，避免重建）。
-    pub frozen_system_prompt: Option<String>,
-    /// 后台任务事件通道（子 agent 事件经此到达事件泵）。
-    pub bg_event_sender: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-    /// 持久化存储。
-    pub thread_store: Arc<dyn ThreadStore>,
-}
-
-/// `/bg` fork agent 启动接口（装配注入）。
-///
-/// 实现方为 ACP executor 装配面（深绑 Agent 层 `SessionFactory`）；命令定义
-/// 只经本接口发起，不直接引用 Agent 层类型。`peri_config`（LLM 构造输入）
-/// 由实现方自持，不进入请求契约。
-#[async_trait]
-pub trait BgForkSpawner: Send + Sync {
-    /// 启动后台 fork agent。返回 `Err(用户可见错误信息)`。
-    async fn spawn_fork(&self, req: BgForkRequest) -> Result<(), String>;
 }
 
 #[cfg(test)]
@@ -366,12 +299,12 @@ mod context_deps_tests {
 
     /// 测试用事件出口（EventSink 必需方法的最小实现）。
     struct NoopSink;
-    #[async_trait]
+    #[async_trait::async_trait]
     impl EventSink for NoopSink {
         async fn push_event(
             &self,
             _session_id: &str,
-            _event: &ExecutorEvent,
+            _event: &crate::event::ExecutorEvent,
             _context_window: u32,
         ) {
         }
@@ -492,12 +425,10 @@ mod context_deps_tests {
         assert!(ctx.auxiliary_model.is_none());
         assert!(ctx.thread_store.is_none());
         assert!(ctx.thread_id.is_none());
-        assert!(ctx.bg_event_sender.is_none());
         assert!(ctx.task_manager.is_none());
         assert!(ctx.frozen_claude_md.is_none());
         assert!(ctx.frozen_claude_local_md.is_none());
         assert!(ctx.frozen_skill_summary.is_none());
         assert!(ctx.frozen_system_prompt.is_none());
-        assert!(ctx.bg_spawner.is_none());
     }
 }

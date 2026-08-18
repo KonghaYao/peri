@@ -27,12 +27,12 @@ impl EventSink for PendingEventSink {
 fn test_extract_params_basic() {
     let params = serde_json::json!({
         "sessionId": "s1",
-        "command": "/bg",
+        "command": "/clear",
         "args": "do something"
     });
     let (sid, cmd, args) = extract_execute_command_params(&params).unwrap();
     assert_eq!(sid, "s1");
-    assert_eq!(cmd, "/bg");
+    assert_eq!(cmd, "/clear");
     assert_eq!(args.as_str().unwrap(), "do something");
 }
 
@@ -51,7 +51,7 @@ fn test_extract_params_session_id_underscore() {
 #[test]
 fn test_extract_params_missing_session_id() {
     let params = serde_json::json!({
-        "command": "/bg"
+        "command": "/clear"
     });
     let err = extract_execute_command_params(&params).unwrap_err();
     assert_eq!(err.code, -32602);
@@ -389,60 +389,6 @@ fn test_check_immediate_level_rejects_plugin_level2() {
         err.message.contains("非 Immediate 命令"),
         "错误应说明非 Immediate 语义，实际: {}",
         err.message
-    );
-}
-
-/// RPC 路径 args 消费（Phase 5 Step 6）：command 字符串内嵌参数在未显式传
-/// args 时回退 `resolved.args`（注册表词法切分，不变式 3）→ ctx.args 非空 →
-/// /bg 走 spawner 分支（缺装配 → feedback Error「bg_spawner 未配置」，可区分
-/// 于空参用法提示分支）。
-#[tokio::test]
-async fn test_execute_command_consumes_resolved_args_fallback() {
-    let params = serde_json::json!({
-        "sessionId": "bg-args",
-        "command": "/bg 你好世界",
-    });
-    let history = vec![BaseMessage::human("first message")];
-    let cancel = AgentCancellationToken::new();
-    let peri_config = Arc::new(PeriConfig::default());
-    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let event_sink: Arc<dyn EventSink> = Arc::new(RecordingEventSink {
-        events: events.clone(),
-    });
-    let tmp = tempfile::tempdir().unwrap();
-    let store: Arc<dyn peri_acp_types::store::ThreadStore> =
-        Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
-    let controller = Controller::new(store);
-
-    let result = execute_command(
-        &params,
-        history.clone(),
-        "/tmp",
-        &peri_config,
-        &event_sink,
-        None,
-        &cancel,
-        &controller,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result["stop_reason"], "EndTurn");
-    assert_eq!(result["messages"], serde_json::to_value(&history).unwrap());
-    // ctx.args 非空（内嵌参数已消费）→ spawner 分支 feedback Error
-    let recorded = events.lock().unwrap();
-    assert!(
-        recorded
-            .iter()
-            .any(|(_, json)| json.contains("bg_spawner 未配置")),
-        "args 应消费自 resolved.args（内嵌参数），实际: {recorded:?}"
     );
 }
 

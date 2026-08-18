@@ -15,6 +15,7 @@ use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
+use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
 use peri_controller::langfuse::bridge::LangfuseBridge;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 use peri_controller::langfuse::LangfuseSession;
@@ -22,7 +23,7 @@ use serde_json::Value;
 use tracing::info;
 
 use peri_agent::session::exec::executor_helpers::{
-    CommandLookupFn, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
+    CommandLookupFn, ForwarderLauncherFn, StageBuildFn,
 };
 use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 
@@ -30,6 +31,75 @@ use super::SharedSessions;
 use crate::provider::{LlmProvider, PeriConfig};
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
+
+// ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
+
+/// fatal turn failure 的稳定 JSON-RPC server error code。
+///
+/// 取自 JSON-RPC 2.0 保留段 server error（`-32000..=-32099`）的首值，语义为
+/// "agent turn execution failed"。具名常量替代调用点 magic number；首版
+/// `data` 恒为 `None`，不把内部类型 / provider payload / 不稳定字段固化为
+/// 公开协议（D2/D5）。
+pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
+
+/// [`ExecutionFailureKind`] → JSON-RPC server error code 的穷尽映射。
+///
+/// 只映射稳定内部类别；新增类别时编译器强制在此显式补充映射，禁止
+/// fallthrough 默认码。
+const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
+    match kind {
+        ExecutionFailureKind::Internal => ACP_TURN_EXECUTION_FAILED_CODE,
+    }
+}
+
+/// Agent→ACP 结果边界的窄映射：`ExecutionFailure` → 传输层 `AcpError`。
+///
+/// - `code`：按 [`execution_failure_kind_code`] 穷尽映射；
+/// - `message`：直接使用 failure 的脱敏 public message（非空由
+///   [`ExecutionFailure::internal`] 保证，空输入回落稳定 fallback）；
+/// - `data`：首版恒 `None`。
+pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpError {
+    AcpError {
+        code: execution_failure_kind_code(failure.kind),
+        message: failure.public_message.clone(),
+        data: None,
+    }
+}
+
+/// `PromptResult` 终止语义 → ACP 响应（`run_prompt` 尾部投影的窄 seam）。
+///
+/// - `failure=Some` → `Err(AcpError)`：fatal turn failure 由统一 host 与
+///   transport 生成标准 JSON-RPC error response（mpsc 与 stdio 共用同一路径）；
+/// - `failure=None` → 现有成功 `PromptResponse`（cancel / max-iterations /
+///   end-turn 各有对应 `StopReason`，不得升级为请求失败）。
+///
+/// 调用方（`run_prompt`）必须完成全部后处理（历史保存 / session state /
+/// cancel token 清理 / recall 回写）后再调用本函数——wire 形态决定不得先于
+/// 失败路径清理（D2 顺序不变量）。
+fn prompt_wire_response(
+    failure: Option<&ExecutionFailure>,
+    stop_reason: executor::PromptStopReason,
+) -> Result<Value, AcpError> {
+    if let Some(failure) = failure {
+        return Err(execution_failure_to_acp_error(failure));
+    }
+    let acp_stop_reason = match stop_reason {
+        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
+        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
+    };
+    let resp = PromptResponse::new(acp_stop_reason);
+    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
+
+/// stdio 部署是否过滤指定命令（按解析后的 `fullname` 判定，含别名）。
+///
+/// 仅 stdio 部署单元（`stdio_command_filter=true`）过滤 `rewind` / `clear`；
+/// 命中即 fall-through 进 agent 管线（当作普通文本发给模型，IDE 客户端
+/// 自管理这两个命令）。TUI / print（`false`）恒不过滤。
+fn stdio_filters_command(fullname: &str, stdio_command_filter: bool) -> bool {
+    stdio_command_filter && matches!(fullname, "core:rewind" | "core:clear")
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_prompt(
@@ -65,6 +135,8 @@ pub(crate) async fn run_prompt(
     // 内部 AsyncContinuation（bg 完成唤醒被取消的 turn）：不 push 空 user
     // prompt、不触发 keepgoing 语义。仅由 continuation scheduler 调用。
     continuation: bool,
+    // stdio 部署过滤 rewind/clear（仅 stdio 置 true；TUI/print 恒 false）。
+    stdio_command_filter: bool,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -264,24 +336,6 @@ pub(crate) async fn run_prompt(
     compact_config.apply_env_overrides();
     let retry_events = pool.lock().retry_events.clone();
 
-    // /bg fork LLM 构造（LlmProvider::from_config 语义，惰性构造仅 /bg 触发）
-    let bg_llm_factory: Arc<
-        dyn Fn() -> Result<Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>, String>
-            + Send
-            + Sync,
-    > = {
-        let peri_config = Arc::clone(&peri_config_snapshot);
-        Arc::new(move || match LlmProvider::from_config(&peri_config) {
-            Some(provider) => Ok(Box::new(
-                peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
-                    provider.into_model(),
-                )),
-            )),
-            None => {
-                Err("无法构造 LLM 实例（请检查 peri-config.toml 的 Provider 配置）".to_string())
-            }
-        })
-    };
     // 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）
     let get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>> = {
         let pool = Arc::clone(&pool);
@@ -405,50 +459,23 @@ pub(crate) async fn run_prompt(
     // Phase 2 常驻化：捕获会话级注册表（随 session 创建注册内置命令，跨轮
     // 常驻，动态注入条目不因轮次丢失），不再每轮 new 默认注册表。
     let command_registry = session_manager.command_registry_for(&session_id);
-    let command_lookup: CommandLookupFn =
-        Arc::new(move |text: &str| command_registry.as_ref().and_then(|r| r.resolve(text)));
+    let command_lookup: CommandLookupFn = Arc::new(move |text: &str| {
+        let reg = command_registry.as_ref()?;
+        let resolved = reg.resolve(text)?;
+        // stdio 部署过滤：rewind / clear（含别名 cls/reset）不作为命令拦截，
+        // fall-through 进 agent 管线（当普通文本发给模型，IDE 客户端自管理）。
+        // 仅 stdio_command_filter 为 true 时生效，其余命令与 TUI 完全一致。
+        if stdio_filters_command(resolved.entry.fullname.as_str(), stdio_command_filter) {
+            return None;
+        }
+        Some(resolved)
+    });
     let compact_config_loader: Arc<
         dyn Fn() -> peri_acp_types::compact::CompactConfig + Send + Sync,
     > = {
         let peri_config = Arc::clone(&peri_config_snapshot);
         Arc::new(move || crate::host::compact_config::load_compact_config(&peri_config))
     };
-    let parent_tools_factory: ParentToolsFactory = {
-        let bg_cwd = cwd.clone();
-        // MetaHarness（设计 §2.5）：/bg 后台 agent 属关闭面（第 5 装配入口）
-        // ——关闭的 middleware 连坐，其工具不注入后台 agent，否则关闭
-        // Filesystem/Web/Terminal 后仍可经后台 agent 使用（系统性链下泄漏）。
-        let bg_disabled = meta_harness.disabled_middlewares.clone();
-        Arc::new(move || {
-            // 文件系统 + 终端 + Web = Read/Write/Edit/Bash/Grep/Glob/WebFetch/WebSearch
-            //（MCP tools 有意排除：后台任务不依赖可能不可用的外部 MCP server；
-            //  可能要求交互式审批的工具不适用于后台 agent）。
-            let mut tools: Vec<Box<dyn peri_agent::tools::BaseTool>> = Vec::new();
-            if !bg_disabled.contains("FilesystemMiddleware") {
-                tools.extend(
-                    peri_middlewares::middleware::FilesystemMiddleware::build_tools(&bg_cwd),
-                );
-            }
-            if !bg_disabled.contains("TerminalMiddleware") {
-                tools
-                    .extend(peri_middlewares::middleware::TerminalMiddleware::build_tools(&bg_cwd));
-            }
-            if !bg_disabled.contains("WebMiddleware") {
-                tools.extend(peri_middlewares::middleware::WebMiddleware::build_tools());
-            }
-            Arc::new(
-                tools
-                    .into_iter()
-                    .map(|t| {
-                        Arc::new(peri_middlewares::tools::BoxToolWrapper(t))
-                            as Arc<dyn peri_agent::tools::BaseTool>
-                    })
-                    .collect(),
-            )
-        })
-    };
-    let chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler> =
-        Arc::new(peri_middlewares::subagent::SubagentChainAssemblerImpl);
     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
 
@@ -471,7 +498,6 @@ pub(crate) async fn run_prompt(
         claude_md_excludes,
         language,
         compact_config,
-        bg_llm_factory,
         get_cached_llm,
         fresh_auxiliary_model,
         store_llm,
@@ -506,8 +532,6 @@ pub(crate) async fn run_prompt(
         subscribe,
         command_lookup,
         compact_config_loader,
-        parent_tools_factory,
-        chain_assembler,
         tool_invocation_resolver,
         session_start_source: if !continuation && is_empty {
             Some("startup".to_string())
@@ -761,13 +785,13 @@ pub(crate) async fn run_prompt(
         }
     }
 
-    let acp_stop_reason = match result.stop_reason {
-        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
-        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
-        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
-    };
-    let resp = PromptResponse::new(acp_stop_reason);
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    // ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）──
+    // 所有失败路径的历史保存 / session state / cancel token 清理 / recall 回写
+    // 已在上方完成（result.messages / recall_items 已被消费）；此处只决定 wire
+    // 形态：fatal failure → Err(AcpError)（统一 host 与 mpsc/stdio transport 共用
+    // 同一标准 JSON-RPC error 路径），其余终止（cancel / max-iterations / end-turn）
+    // → 现有成功 PromptResponse。
+    prompt_wire_response(result.failure.as_ref(), result.stop_reason)
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：

@@ -2,6 +2,21 @@ use super::*;
 
 use peri_acp_types::messages::BaseMessage;
 
+/// stdio 部署过滤 rewind/clear：stdio（true）命中 rewind/clear 返回 true。
+#[test]
+fn test_stdio_filters_rewind_and_clear_only_when_stdio() {
+    // stdio 开启：rewind / clear（含别名解析后的 fullname）被过滤。
+    assert!(super::stdio_filters_command("core:rewind", true));
+    assert!(super::stdio_filters_command("core:clear", true));
+    // 其它命令不过滤。
+    assert!(!super::stdio_filters_command("core:compact", true));
+    assert!(!super::stdio_filters_command("core:loop", true));
+    assert!(!super::stdio_filters_command("core:cron", true));
+    // 非 stdio（TUI/print）：一律不过滤，rewind/clear 照常作为命令。
+    assert!(!super::stdio_filters_command("core:rewind", false));
+    assert!(!super::stdio_filters_command("core:clear", false));
+}
+
 /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
 #[test]
 fn test_strip_leaked_prepends_有历史时剥离头部system消息() {
@@ -156,4 +171,110 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
         user_state_recall = vec!["本轮新 recall".to_string()];
     }
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
+}
+
+// ── ACP 结果投影 seam（spec/issues/2026-08-18-acp-error-handler.md D2）────────
+//
+// 测外部协议行为（`run_prompt` 尾部的 wire 形态决定），不断言内部局部变量：
+// fatal → `Err(AcpError)`（code/message/data 契约）；cancel / max-iterations /
+// end-turn → 成功 `PromptResponse`。`ExecutionFailureKind` 穷尽映射 + 脱敏
+// 消息基线一并固定。
+mod wire_projection {
+    use peri_acp_types::session::{
+        ExecutionFailure, ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE,
+    };
+
+    use super::{
+        execution_failure_kind_code, execution_failure_to_acp_error, prompt_wire_response,
+        ACP_TURN_EXECUTION_FAILED_CODE,
+    };
+
+    /// fatal failure → 唯一 `Internal` 类别穷尽映射到命名 code `-32000`。
+    #[test]
+    fn execution_failure_kind_exhaustive_mapping_pins_named_code() {
+        assert_eq!(
+            execution_failure_kind_code(ExecutionFailureKind::Internal),
+            -32000
+        );
+        assert_eq!(
+            execution_failure_kind_code(ExecutionFailureKind::Internal),
+            ACP_TURN_EXECUTION_FAILED_CODE,
+            "Internal 必须使用具名常量（替代调用点 magic number）"
+        );
+    }
+
+    /// fatal → Err：code = -32000（具名常量）、message = failure 的脱敏
+    /// public message、data = None。
+    #[test]
+    fn fatal_failure_maps_to_server_error_with_code_message_data_none() {
+        let failure = ExecutionFailure::internal("LLM API error");
+        let err = execution_failure_to_acp_error(&failure);
+        assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(err.message, "LLM API error");
+        assert!(err.data.is_none(), "首版 data 必须为 None");
+    }
+
+    /// fatal 空 message → 非空稳定 fallback（脱敏、无内部细节）。
+    #[test]
+    fn fatal_failure_empty_message_falls_back_to_nonempty_safe_text() {
+        let failure = ExecutionFailure::internal("");
+        let err = execution_failure_to_acp_error(&failure);
+        assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(err.message, EXECUTION_FAILURE_FALLBACK_MESSAGE);
+        assert!(!err.message.is_empty(), "fallback message 必须非空");
+    }
+
+    /// `prompt_wire_response`：fatal（即便 stop_reason=EndTurn）→ Err，且
+    /// serialized 形态无 `data` 字段（`AcpError.data` 为 None 时跳过序列化）。
+    #[test]
+    fn prompt_wire_response_fatal_returns_error_no_data_on_wire() {
+        let failure = ExecutionFailure::internal("middleware fatal");
+        let err = prompt_wire_response(
+            Some(&failure),
+            crate::session::executor::PromptStopReason::EndTurn,
+        )
+        .expect_err("fatal failure 必须映射为 Err，不得返回成功 PromptResponse");
+        assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(err.message, "middleware fatal");
+        assert!(err.data.is_none());
+
+        let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
+        assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
+        assert_eq!(wire["message"], "middleware fatal");
+        assert!(
+            wire.get("data").is_none(),
+            "data=None 时 wire 不得出现 data 字段: {wire}"
+        );
+    }
+
+    /// 用户 cancel → 成功 `PromptResponse(Cancelled)`，不升级为请求错误。
+    #[test]
+    fn prompt_wire_response_cancel_is_success_prompt_response() {
+        let value =
+            prompt_wire_response(None, crate::session::executor::PromptStopReason::Cancelled)
+                .expect("cancel 必须返回成功 PromptResponse");
+        assert_eq!(value["stopReason"], "cancelled", "{value}");
+        assert!(value.get("error").is_none(), "成功响应不应携带 error 字段");
+    }
+
+    /// 最大轮数 → 成功 `PromptResponse(MaxTurnRequests)`。
+    #[test]
+    fn prompt_wire_response_max_turn_requests_is_success_prompt_response() {
+        let value = prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::MaxTurnRequests,
+        )
+        .expect("max-iterations 必须返回成功 PromptResponse");
+        assert_eq!(value["stopReason"], "max_turn_requests", "{value}");
+        assert!(value.get("error").is_none());
+    }
+
+    /// 正常完成 → 成功 `PromptResponse(EndTurn)`。
+    #[test]
+    fn prompt_wire_response_end_turn_is_success_prompt_response() {
+        let value = prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn)
+            .expect("正常完成必须返回成功 PromptResponse");
+        assert_eq!(value["stopReason"], "end_turn", "{value}");
+        assert!(value.get("error").is_none());
+    }
 }

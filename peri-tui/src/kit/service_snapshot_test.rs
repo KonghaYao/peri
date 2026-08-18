@@ -82,6 +82,54 @@ async fn test_tick_once_empty_thread_list() {
 
 #[tokio::test]
 #[serial]
+async fn test_tick_once_lists_only_nonempty_threads_for_current_cwd() {
+    crate::kit::atoms::init_atoms();
+
+    let store = make_sqlite_store().await;
+    let mut src = make_minimal_source(store.clone());
+    src.cwd = "/workspace".into();
+
+    let visible_id = store
+        .create_thread(peri_acp_types::thread::ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+    store
+        .append_messages(
+            &visible_id,
+            &[peri_acp_types::messages::BaseMessage::human("visible")],
+        )
+        .await
+        .unwrap();
+
+    let _empty_id = store
+        .create_thread(peri_acp_types::thread::ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+
+    let other_id = store
+        .create_thread(peri_acp_types::thread::ThreadMeta::new("/other"))
+        .await
+        .unwrap();
+    store
+        .append_messages(
+            &other_id,
+            &[peri_acp_types::messages::BaseMessage::human("other")],
+        )
+        .await
+        .unwrap();
+
+    let mut slow = SlowSnapshotRefresh::default();
+    tick_once(&src, &mut slow).await.unwrap();
+
+    let threads = THREAD_LIST.state().read().clone();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].id, visible_id);
+    assert_eq!(threads[0].cwd, "/workspace");
+    assert_eq!(threads[0].message_count, 1);
+}
+
+#[tokio::test]
+#[serial]
 async fn test_cron_tasks_collected() {
     crate::kit::atoms::init_atoms();
 

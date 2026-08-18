@@ -159,6 +159,13 @@ pub async fn replay_session_history(
                     } else {
                         ToolCallStatus::Completed
                     }))
+                    // 标准 `content` 与 live mapper（`event::mapper::tool_result_content`）
+                    // 共用同一投影规则：失败空文本使用稳定非空 fallback，replay 后
+                    // 错误内容与 live 更新保持同形态。
+                    .content(crate::event::mapper::tool_result_content(
+                        &result_text,
+                        *is_error,
+                    ))
                     .raw_output(Some(serde_json::Value::String(result_text)));
                 let update = SessionUpdate::ToolCallUpdate(replay_tool_update(
                     ToolCallUpdate::new(ToolCallId::new(tool_call_id.clone()), fields),
@@ -241,3 +248,7 @@ pub enum ReplayError {
     #[error("transport send failed: {0}")]
     SendFailed(String),
 }
+
+#[cfg(test)]
+#[path = "session_replay_test.rs"]
+mod tests;

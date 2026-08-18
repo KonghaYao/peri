@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use peri_acp_types::{
     command::{
-        BgForkSpawner, CommandContext, CommandFeedback, CommandOutcome, CommandResult,
-        FeedbackChannel, FeedbackLevel, PromptStopReason, ResolvedCommand,
+        CommandContext, CommandFeedback, CommandOutcome, CommandResult, FeedbackChannel,
+        FeedbackLevel, PromptStopReason, ResolvedCommand,
     },
     compact::CompactConfig,
     event::{EventSink, ExecutorEvent},
@@ -29,9 +29,7 @@ pub type CommandLookupFn = Arc<dyn Fn(&str) -> Option<ResolvedCommand> + Send + 
 /// 配置经 [`InterceptRequest::compact_config_loader`] 注入闭包按
 /// `load_compact_config` 语义预填（env overrides 每轮重新应用）；
 /// 命令注册表查找经 [`InterceptRequest::command_lookup`] 注入（ACP 协议面
-/// 会话级注册表语义，`resolve` 严格精确）；
-/// `/bg` fork 启动器经 [`InterceptRequest::bg_spawner`] 注入（ACP 装配面
-/// 构造 [`DefaultBgForkSpawner`]，LLM 构造配置由实现自持）。
+/// 会话级注册表语义，`resolve` 严格精确）。
 pub struct InterceptRequest<'a> {
     // ── 消息上下文 ──
     pub content: &'a MessageContent,
@@ -51,15 +49,12 @@ pub struct InterceptRequest<'a> {
     pub event_sink: &'a Arc<dyn EventSink>,
     pub auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
-    pub bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     pub task_manager: &'a Arc<dyn TaskManager>,
     // ── 注入面（L5 依赖反转）──
     /// 命令注册表查找（ACP 协议面注册表；`None` = 未注册，fall-through）。
     pub command_lookup: CommandLookupFn,
     /// compact 配置装载（ACP 侧 `load_compact_config` 语义，含 env overrides）。
     pub compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync>,
-    /// `/bg` fork agent 启动器（ACP 装配面注入；None = 未装配，BgCommand 优雅报错）。
-    pub bg_spawner: Option<Arc<dyn BgForkSpawner>>,
 }
 
 /// 编排层统一反馈出口（Phase 5 Step 1）：UiOnly/Session 均发射
@@ -181,24 +176,14 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     stop_reason: result.stop_reason,
                     history_replaced_by_compaction: false,
                     recall_items: Vec::new(),
+                    failure: None,
                 });
             }
         },
         None => None,
     };
 
-    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
-    // 旧字段显式赋值保持原字面量语义（行为等价零漂移，字段一个未删）。
-    // Phase 5 Step 2：bg_spawner 消费方（BgCommand）已迁移到 dep 取用
-    // （`ctx.dep::<Arc<dyn BgForkSpawner>>()`），注入面随迁——经 deps 按
-    // trait object 具体类型形态注入（注入契约见 CommandContext::dep doc）。
-    let mut deps = peri_acp_types::command::DependencyBag::new();
-    if let Some(spawner) = &req.bg_spawner {
-        deps.insert(
-            std::any::TypeId::of::<Arc<dyn BgForkSpawner>>(),
-            Arc::new(Arc::clone(spawner)) as Arc<dyn std::any::Any + Send + Sync>,
-        );
-    }
+    let deps = peri_acp_types::command::DependencyBag::new();
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
         req.history.to_vec(),
@@ -222,7 +207,6 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     ctx.parsed_args = parsed_args;
     ctx.thread_store = req.thread_store;
     ctx.thread_id = req.thread_id;
-    ctx.bg_event_sender = Some(req.bg_event_tx.clone());
     ctx.task_manager = Some(req.task_manager.clone());
     ctx.frozen_claude_md = req.frozen_claude_md.clone().map(Arc::new);
     ctx.frozen_claude_local_md = req.frozen_claude_local_md.clone().map(Arc::new);
@@ -265,6 +249,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 stop_reason: result.stop_reason,
                 history_replaced_by_compaction: false,
                 recall_items: Vec::new(),
+                failure: None,
             })
         }
         CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),

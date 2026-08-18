@@ -123,7 +123,7 @@ fn make_intercept_request<'a>(
     session_id: &'a str,
     cancel: &'a AgentCancellationToken,
     event_sink: &'a Arc<dyn EventSink>,
-    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    _bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
     command_lookup: super::CommandLookupFn,
 ) -> InterceptRequest<'a> {
@@ -143,11 +143,9 @@ fn make_intercept_request<'a>(
         frozen_system_prompt: None,
         event_sink,
         auxiliary_model: &None,
-        bg_event_tx,
         task_manager,
         command_lookup,
         compact_config_loader,
-        bg_spawner: None,
     }
 }
 
@@ -1175,4 +1173,121 @@ async fn test_emit_command_feedback_ui_only_keeps_messages() {
         1,
         "UiOnly 仍应发射 CommandFeedback 事件"
     );
+}
+
+// ── LoopResult → ExecOutcome 分类映射（v2 Phase 9）─────────────────────────
+//
+// spec/issues/2026-08-18-acp-error-handler.md Commit 1：fatal / cancel /
+// max-iterations 三类不会混淆，且 fatal 的 public message 非空并脱敏。
+mod loop_result_mapping {
+    use peri_acp_types::{
+        command::PromptStopReason,
+        error::AgentError,
+        session::{ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
+    };
+
+    use crate::agent::stages::LoopResult;
+
+    use super::super::v2_execute::map_loop_result_to_outcome;
+
+    /// 真正 fatal（LLM 错误）：ok=false + failure=Some(Internal, 非空脱敏)。
+    /// 消息来自 `user_facing_message()`，不得泄露 provider body / secret。
+    #[test]
+    fn fatal_llm_error_maps_to_internal_failure() {
+        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+            &LoopResult::Error(AgentError::LlmError(
+                "provider 500: Authorization: Bearer top-secret-key".to_string(),
+            )),
+            false,
+        );
+        assert!(!ok);
+        assert_eq!(stop_reason, PromptStopReason::EndTurn);
+        let failure = failure.expect("fatal error 必须携带 failure");
+        assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+        assert!(
+            !failure.public_message.is_empty(),
+            "public message 必须非空"
+        );
+        // 脱敏：内部错误/LLM 错误只暴露通用文案
+        assert!(!failure.public_message.contains("top-secret-key"));
+        assert!(!failure.public_message.contains("Bearer"));
+        assert!(failure.public_message.contains("LLM API error"));
+    }
+
+    /// 用户主动中断：failure=None，stop_reason=Cancelled。
+    #[test]
+    fn interrupted_maps_to_no_failure() {
+        let (ok, stop_reason, failure) =
+            map_loop_result_to_outcome(&LoopResult::Interrupted, false);
+        assert!(!ok);
+        assert_eq!(stop_reason, PromptStopReason::Cancelled);
+        assert!(failure.is_none(), "Interrupted 不得升级为 fatal failure");
+    }
+
+    /// cancel token 已取消（即便 Error 非 Interrupted）：failure=None，
+    /// 视为用户取消而非请求失败。
+    #[test]
+    fn cancelled_error_maps_to_no_failure() {
+        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+            &LoopResult::Error(AgentError::LlmError("cancelled while failing".to_string())),
+            true,
+        );
+        assert!(!ok);
+        assert_eq!(stop_reason, PromptStopReason::Cancelled);
+        assert!(failure.is_none(), "用户 cancel 不得升级为 fatal failure");
+    }
+
+    /// 最大轮数：failure=None，stop_reason=MaxTurnRequests。
+    #[test]
+    fn max_iterations_maps_to_no_failure() {
+        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+            &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
+            false,
+        );
+        assert!(!ok);
+        assert_eq!(stop_reason, PromptStopReason::MaxTurnRequests);
+        assert!(
+            failure.is_none(),
+            "MaxIterationsExceeded 不得升级为 fatal failure"
+        );
+    }
+
+    /// 正常完成：ok=true + failure=None。
+    #[test]
+    fn completed_maps_to_success_no_failure() {
+        let (ok, stop_reason, failure) = map_loop_result_to_outcome(&LoopResult::Completed, false);
+        assert!(ok);
+        assert_eq!(stop_reason, PromptStopReason::EndTurn);
+        assert!(failure.is_none());
+    }
+
+    /// 其它 fatal（如 LLM HTTP 错误）：failure=Some，public message 为
+    /// `user_facing_message()` 的脱敏通用文案（不泄露 provider body）。
+    #[test]
+    fn llm_http_error_maps_to_sanitized_message() {
+        let (ok, _stop_reason, failure) = map_loop_result_to_outcome(
+            &LoopResult::Error(AgentError::LlmHttpError {
+                status: 500,
+                message: "secret-provider-body".to_string(),
+            }),
+            false,
+        );
+        assert!(!ok);
+        let failure = failure.expect("fatal error 必须携带 failure");
+        assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+        assert!(!failure.public_message.is_empty());
+        assert!(
+            !failure.public_message.contains("secret-provider-body"),
+            "不得泄露 provider body"
+        );
+        assert!(failure.public_message.contains("LLM API error"));
+    }
+
+    /// 脱敏契约：任何 fatal failure 的 public message 都不得为空，
+    /// fallback 文案本身不含内部细节。
+    #[test]
+    fn fallback_message_is_non_empty_and_safe() {
+        assert!(!EXECUTION_FAILURE_FALLBACK_MESSAGE.is_empty());
+        assert!(!EXECUTION_FAILURE_FALLBACK_MESSAGE.contains("secret"));
+    }
 }

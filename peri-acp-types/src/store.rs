@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::{BaseMessage, MessageId};
 use crate::projection::MessageProjectionDirective;
-use crate::thread::{ThreadId, ThreadMeta};
+use crate::thread::{ThreadId, ThreadListEntry, ThreadMeta};
 
 #[derive(Clone, Debug)]
 pub struct CompactionLifecycle {
@@ -61,6 +61,20 @@ pub trait ThreadStore: Send + Sync {
 
     /// 列举所有 thread 元数据，按 updated_at 降序（不含 hidden 的子 agent）
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>>;
+
+    /// 列举指定工作目录下可展示的非空 thread，不计算消息内容总大小。
+    ///
+    /// 存储实现应覆盖此方法并在数据源层完成过滤；默认实现用于测试替身和
+    /// 非性能关键实现的兼容。
+    async fn list_thread_entries(&self, cwd: &str) -> Result<Vec<ThreadListEntry>> {
+        Ok(self
+            .list_threads()
+            .await?
+            .into_iter()
+            .filter(|meta| !meta.hidden && meta.message_count > 0 && meta.cwd == cwd)
+            .map(ThreadListEntry::from)
+            .collect())
+    }
 
     /// 删除指定 thread（包含消息和元数据）
     async fn delete_thread(&self, id: &ThreadId) -> Result<()>;

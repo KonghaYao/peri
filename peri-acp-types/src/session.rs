@@ -19,6 +19,62 @@ use crate::mcp_skills::McpSkillRegistry;
 use crate::messages::BaseMessage;
 use crate::thread::{CancelPolicy, ThreadId};
 
+// ─── ExecutionFailure（Agent→ACP 结果契约的 fatal failure DTO）────────────
+
+/// 执行终止的稳定内部类别（ACP 边界据此选择协议错误码）。
+///
+/// 仅为本次协议决策区分（spec/issues/2026-08-18-acp-error-handler.md D1），
+/// 不建立过度复杂的 taxonomy；所有类别都必须显式映射并保证非空、脱敏的
+/// public message。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionFailureKind {
+    /// 真正的执行/LLM/middleware/serialization fatal failure。
+    Internal,
+}
+
+/// 结果缺失 / 空 message 时的稳定非空 fallback 文案（脱敏、无内部细节）。
+pub const EXECUTION_FAILURE_FALLBACK_MESSAGE: &str =
+    "An internal error occurred. Check logs for details.";
+
+/// Agent→ACP 结果边界的窄 fatal failure DTO。
+///
+/// 设计约束（spec D1/D5）：
+/// - **非 serde**：不参与 wire 序列化，阻止完整 `AgentError` / provider
+///   response / cause chain 意外跨层暴露；
+/// - 只承载稳定类别 + 由 `AgentError::user_facing_message()` 生成的脱敏消息；
+/// - `public_message` 保证非空（空输入 → 稳定 fallback 文案）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFailure {
+    /// 稳定内部类别。
+    pub kind: ExecutionFailureKind,
+    /// 非空、已脱敏的用户可见消息。
+    pub public_message: String,
+}
+
+impl ExecutionFailure {
+    /// 构造 [`ExecutionFailureKind::Internal`] 类别，并保证 `public_message`
+    /// 非空（空输入 → [`EXECUTION_FAILURE_FALLBACK_MESSAGE`]）。
+    pub fn internal(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let public_message = if message.trim().is_empty() {
+            EXECUTION_FAILURE_FALLBACK_MESSAGE.to_string()
+        } else {
+            message
+        };
+        Self {
+            kind: ExecutionFailureKind::Internal,
+            public_message,
+        }
+    }
+
+    /// 结果缺失时的防御性 failure（`PromptResult::default()` 等场景）：
+    /// 缺失结果不能作为成功 `EndTurn` 继续交给 ACP（Commit 2 将据此映射
+    /// 为 JSON-RPC error）。
+    pub fn missing_result() -> Self {
+        Self::internal(EXECUTION_FAILURE_FALLBACK_MESSAGE)
+    }
+}
+
 // ─── PromptResult（L5：自 peri-acp host/exec/executor.rs 契约化）────────────
 
 /// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
@@ -30,6 +86,9 @@ pub struct PromptResult {
     pub ok: bool,
     /// 执行停止原因。
     pub stop_reason: PromptStopReason,
+    /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = turn 应
+    /// 以协议 error 结束，见 spec/issues/2026-08-18-acp-error-handler.md）。
+    pub failure: Option<ExecutionFailure>,
     /// 本轮是否发生 Full Compact 提交并替换了先前的可见历史。
     pub history_replaced_by_compaction: bool,
     /// 执行期间收集的 recall 项（供下一轮注入）。
@@ -38,6 +97,9 @@ pub struct PromptResult {
 
 impl Default for PromptResult {
     /// 防御性回退（结果缺失 / 未执行时使用）：空失败结果。
+    ///
+    /// 结果缺失必须表达为安全的 fatal failure，不能作为成功 `EndTurn`
+    /// 继续交给 ACP。
     fn default() -> Self {
         Self {
             messages: Vec::new(),
@@ -45,6 +107,7 @@ impl Default for PromptResult {
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
             recall_items: Vec::new(),
+            failure: Some(ExecutionFailure::missing_result()),
         }
     }
 }
@@ -671,3 +734,7 @@ pub trait SessionAccessPort: Send + Sync {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod tests;

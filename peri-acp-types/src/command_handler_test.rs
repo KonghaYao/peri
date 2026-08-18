@@ -36,13 +36,11 @@ fn make_context(args: &str) -> CommandContext {
         cancel_token: tokio_util::sync::CancellationToken::new(),
         thread_store: None,
         thread_id: None,
-        bg_event_sender: None,
         task_manager: None,
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         frozen_system_prompt: None,
-        bg_spawner: None,
         // Phase 2 拆层：扩展依赖接口注册表（crate 内测试直接补空表；
         // 消费方构造点迁移形态见 peri-agent/peri-acp 各构造点）。
         deps: crate::command::DependencyBag::new(),

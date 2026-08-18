@@ -88,6 +88,82 @@ async fn test_list_threads_order() {
 }
 
 #[tokio::test]
+async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_threads() {
+    let (store, _dir) = make_store().await;
+
+    let visible_id = store
+        .create_thread(ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+    store
+        .append_messages(&visible_id, &[BaseMessage::human("visible")])
+        .await
+        .unwrap();
+
+    let empty_id = store
+        .create_thread(ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+
+    let mut hidden = ThreadMeta::new("/workspace");
+    hidden.hidden = true;
+    let hidden_id = store.create_thread(hidden).await.unwrap();
+    store
+        .append_messages(&hidden_id, &[BaseMessage::human("hidden")])
+        .await
+        .unwrap();
+
+    let other_id = store
+        .create_thread(ThreadMeta::new("/other"))
+        .await
+        .unwrap();
+    store
+        .append_messages(&other_id, &[BaseMessage::human("other")])
+        .await
+        .unwrap();
+
+    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, visible_id);
+    assert_eq!(summaries[0].cwd, "/workspace");
+    assert_eq!(summaries[0].message_count, 1);
+    assert_ne!(summaries[0].id, empty_id);
+    assert_ne!(summaries[0].id, hidden_id);
+    assert_ne!(summaries[0].id, other_id);
+}
+
+#[tokio::test]
+async fn test_list_thread_entries_orders_by_updated_at_descending() {
+    let (store, _dir) = make_store().await;
+
+    let first_id = store
+        .create_thread(ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+    store
+        .append_messages(&first_id, &[BaseMessage::human("first")])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let second_id = store
+        .create_thread(ThreadMeta::new("/workspace"))
+        .await
+        .unwrap();
+    store
+        .append_messages(&second_id, &[BaseMessage::human("second")])
+        .await
+        .unwrap();
+
+    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].id, second_id);
+    assert_eq!(summaries[1].id, first_id);
+}
+
+#[tokio::test]
 async fn test_delete_thread_cascade() {
     let (store, _dir) = make_store().await;
     let meta = ThreadMeta::new("/tmp");

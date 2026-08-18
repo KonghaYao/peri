@@ -8,6 +8,7 @@ use crate::dispatch::commands::{build_available_commands_update, register_ui_ent
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
 use agent_client_protocol::schema::v1::SessionUpdate;
+use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::tasks::BgTaskKind;
@@ -201,6 +202,7 @@ pub(crate) async fn send_available_commands_update(
     session_id: &str,
     caps: &PeriCaps,
     command_registry: Option<Arc<CommandRegistry>>,
+    stdio_command_filter: bool,
 ) {
     if session_id.is_empty() {
         return;
@@ -212,6 +214,19 @@ pub(crate) async fn send_available_commands_update(
         );
         return;
     };
+    // stdio 部署过滤 rewind/clear（IDE 客户端自管理）：命令列表/补全不显示。
+    // 仅 stdio_command_filter 为 true 时生效，其余命令与 TUI 完全一致。
+    let filtered_snapshot = |reg: &CommandRegistry| {
+        let entries: Vec<Arc<RouteEntry>> = reg
+            .snapshot()
+            .into_iter()
+            .filter(|e| {
+                !(stdio_command_filter
+                    && matches!(e.fullname.as_str(), "core:rewind" | "core:clear"))
+            })
+            .collect();
+        entries
+    };
     // 时序契约（P2-6）：广播入口先摘除旧 on_change，再执行 ui 注册（一次性、
     // 幂等），最后挂新回调。首次广播时旧回调不存在（防双发约束不变）；
     // session/load 对同一 session 重广播时，ui 注册动作不再触发旧回调
@@ -220,7 +235,8 @@ pub(crate) async fn send_available_commands_update(
     // 时序（防双发）：ui 注册（一次性、幂等）必须在 set_on_change 挂载之前
     // 完成；on_change 回调内直接重建 snapshot 投影，不重放 ui 注册（P1-1）。
     register_ui_entries(caps, &command_registry);
-    let update = build_available_commands_update(&command_registry.snapshot(), caps);
+    let entries = filtered_snapshot(&command_registry);
+    let update = build_available_commands_update(&entries, caps);
 
     // 注册表 on_change → 投影重建重发（唯一触发源）。防引用环：回调只捕获
     // Weak(command_registry) + 不可变快照数据；session 销毁（注册表无强引用）
@@ -229,6 +245,7 @@ pub(crate) async fn send_available_commands_update(
     let tx = Arc::clone(transport);
     let caps_owned = caps.clone();
     let sid = session_id.to_string();
+    let stdio_filter = stdio_command_filter;
     command_registry.set_on_change(Some(Arc::new(move || {
         let Some(reg) = weak.upgrade() else {
             return;
@@ -237,7 +254,14 @@ pub(crate) async fn send_available_commands_update(
         let caps = caps_owned.clone();
         let sid = sid.clone();
         tokio::spawn(async move {
-            let update = build_available_commands_update(&reg.snapshot(), &caps);
+            let entries: Vec<Arc<RouteEntry>> = reg
+                .snapshot()
+                .into_iter()
+                .filter(|e| {
+                    !(stdio_filter && matches!(e.fullname.as_str(), "core:rewind" | "core:clear"))
+                })
+                .collect();
+            let update = build_available_commands_update(&entries, &caps);
             let update_value =
                 match serde_json::to_value(SessionUpdate::AvailableCommandsUpdate(update)) {
                     Ok(p) => p,

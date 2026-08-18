@@ -6,9 +6,9 @@
 //! - **Other variants**: no SessionUpdate output
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    SessionUpdate, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    ToolKind, UsageUpdate,
+    Content, ContentBlock, ContentChunk, MessageId, Plan, PlanEntry, PlanEntryPriority,
+    PlanEntryStatus, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
@@ -124,6 +124,9 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                         } else {
                             ToolCallStatus::Completed
                         })
+                        // 标准 `content`：与 session replay 共用同一投影规则，
+                        // 失败空文本由 helper 提供稳定非空 fallback。
+                        .content(tool_result_content(output, *is_error))
                         .raw_output(raw_output),
                 ))],
                 source_agent_id.clone(),
@@ -265,6 +268,25 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             vec![MappedEvent::standard(vec![])]
         }
     }
+}
+
+/// 工具失败且无可展示文本时的稳定 fallback（非空、通用、不含内部细节）。
+const TOOL_FAILED_FALLBACK: &str = "Tool execution failed";
+
+/// 工具结果的标准展示 `content` 投影（单个 Text block）。
+///
+/// 失败且底层文本为空白时使用 [`TOOL_FAILED_FALLBACK`]，保证客户端
+/// 不会因空串静默丢弃失败；成功路径保持底层文本原样（可能为空）。
+/// live mapper 与 session replay 共用此规则，避免两种路径的协议形态漂移。
+pub fn tool_result_content(output: &str, is_error: bool) -> Vec<ToolCallContent> {
+    let text = if is_error && output.trim().is_empty() {
+        TOOL_FAILED_FALLBACK
+    } else {
+        output
+    };
+    vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+        TextContent::new(text),
+    )))]
 }
 
 fn infer_tool_kind(name: &str) -> ToolKind {

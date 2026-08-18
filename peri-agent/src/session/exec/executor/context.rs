@@ -9,12 +9,10 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
 use crate::agent::react::ReactLLM;
-use crate::session::{exec::stage_builder::CachedLlmInstances, subagent::SubagentChainAssembler};
+use crate::session::exec::stage_builder::CachedLlmInstances;
 use crate::tools::ToolInvocationResolver;
 
-use super::{
-    CommandLookupFn, ContinuationRequest, ForwarderLauncherFn, ParentToolsFactory, StageBuildFn,
-};
+use super::{CommandLookupFn, ContinuationRequest, ForwarderLauncherFn, StageBuildFn};
 
 /// Session-scoped frozen data that locks system prompt stability.
 ///
@@ -170,9 +168,6 @@ pub struct SessionContext {
     /// Compact 配置（`load_compact_config` 语义：unwrap_or_default + env
     /// overrides 每轮在宿主构造点应用——[TRAP] env 每轮重读，非 frozen）。
     pub compact_config: peri_acp_types::compact::CompactConfig,
-    /// LLM 构造闭包（/bg fork 惰性构造；ACP 宿主从 `LlmProvider::from_config`）。
-    pub bg_llm_factory:
-        Arc<dyn Fn() -> Result<Box<dyn ReactLLM + Send + Sync>, String> + Send + Sync>,
     /// 主 LLM 缓存读取（AgentPool has_valid_cache + get_cached_llm 语义）。
     pub get_cached_llm: Option<Arc<dyn Fn() -> Option<CachedLlmInstances> + Send + Sync>>,
     /// fresh auxiliary model 构造（缓存缺失时；retry observer 烘焙在 ACP）。
@@ -234,11 +229,7 @@ pub struct SessionContext {
     /// compact 配置装载（`load_compact_config` 语义，含 env overrides，留 ACP）。
     pub compact_config_loader:
         Arc<dyn Fn() -> peri_acp_types::compact::CompactConfig + Send + Sync>,
-    /// /bg fork 父工具集构造（middlewares 实现注入）。
-    pub parent_tools_factory: ParentToolsFactory,
-    /// /bg fork 链装配器（middlewares 实现注入）。
-    pub chain_assembler: Arc<dyn SubagentChainAssembler>,
-    /// tool resolver（middlewares 实现注入）。
+    /// deferred 工具解析器（主 Agent 与后台 Agent 工具共享）。
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
 
     // ── turn: per-turn metadata ────────────────────────────────────────────
