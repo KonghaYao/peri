@@ -1,14 +1,11 @@
 //! ACP Slash Commands — 命令基础设施。
 //!
-//! 命令契约（[`CommandContext`] / [`CommandResult`] / [`BgForkRequest`] /
-//! [`BgForkSpawner`] / [`PromptStopReason`]）已随 L5 迁入契约层
-//! （peri-acp-types::command），命令实现（bg / compact 执行体）迁入 Agent 层
-//! （peri-agent::session::exec）；本模块保留组合根：注册表本体在契约层
+//! 命令契约已迁入 `peri-acp-types::command`，compact 执行体迁入 Agent 层；本模块保留组合根：注册表本体在契约层
 //! （[`CommandRegistry`]，扁平 HashMap + alias 索引，设计 §63），本模块只做
 //! 内置命令装配（[`register_builtins`]）——旧契约（[`AgentCommand`]）已随
 //! Phase 5 Step 6 整体删除，命令全部以 [`CommandHandler`] 直接注册。
 //!
-//! 执行方式由 [`CommandOutcome`] 承载：四命令全走 `Done`；`Inject` /
+//! 执行方式由 [`CommandOutcome`] 承载：内置命令走 `Done`；`Inject` /
 //! `Delegate` 为 Phase 5/6 保留。命令在 executor 入口拦截
 //! （`peri-agent::session::exec::executor_helpers::intercept_immediate_command`），
 //! 命中即执行，未命中 fall-through 进 agent 管线。
@@ -21,7 +18,6 @@ use peri_acp_types::command::command_route::{
 };
 use peri_acp_types::command::{ArgsSchema, CommandHandler, CommandOutcome};
 
-pub mod bg;
 pub mod clear;
 pub mod compact;
 pub mod rewind;
@@ -38,8 +34,8 @@ pub use peri_acp_types::command::CommandLevel;
 /// 命令契约（L5：事实源 peri-acp-types::command；`AgentCommand` /
 /// `CommandKind` 已随 Phase 5 Step 6 删除）。
 pub use peri_acp_types::command::{
-    BgForkRequest, BgForkSpawner, CommandContext, CommandFeedback, CommandResult, FeedbackChannel,
-    FeedbackLevel, PromptStopReason,
+    CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel,
+    PromptStopReason,
 };
 
 /// 注册表契约（Phase 2 Step 4 换型：本模块不再持有 Vec 实现，注册表本体在
@@ -131,16 +127,6 @@ pub fn register_builtins(reg: &CommandRegistry) {
         Some(ArgsSchema::default()),
     ))
     .expect("core:compact 注册失败：词法合法且无冲突，失败即编程错误");
-    // bg：free-form prompt，不声明结构化参数（P2-5：与 compact/clear 一致挂
-    // ArgsSchema::default()——parse 零校验（free-form 全 token 归 positionals），
-    // 投影侧 args 字段可渲染，避免与 compact/clear 的渲染元数据不一致）。
-    reg.register(handler_entry::<bg::BgCommand>(
-        "core:bg",
-        bg::BgCommand::ALIASES,
-        bg::BgCommand::DESCRIPTION,
-        Some(ArgsSchema::default()),
-    ))
-    .expect("core:bg 注册失败：词法合法且无冲突，失败即编程错误");
     // Phase 5 Step 3：clear 已迁移新契约（CommandHandler 主实现），无参命令，
     // args_schema 挂 ArgsSchema::default()（投影可渲染）。
     reg.register(handler_entry::<clear::ClearCommand>(

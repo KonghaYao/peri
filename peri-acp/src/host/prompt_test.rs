@@ -2,6 +2,21 @@ use super::*;
 
 use peri_acp_types::messages::BaseMessage;
 
+/// stdio 部署过滤 rewind/clear：stdio（true）命中 rewind/clear 返回 true。
+#[test]
+fn test_stdio_filters_rewind_and_clear_only_when_stdio() {
+    // stdio 开启：rewind / clear（含别名解析后的 fullname）被过滤。
+    assert!(super::stdio_filters_command("core:rewind", true));
+    assert!(super::stdio_filters_command("core:clear", true));
+    // 其它命令不过滤。
+    assert!(!super::stdio_filters_command("core:compact", true));
+    assert!(!super::stdio_filters_command("core:loop", true));
+    assert!(!super::stdio_filters_command("core:cron", true));
+    // 非 stdio（TUI/print）：一律不过滤，rewind/clear 照常作为命令。
+    assert!(!super::stdio_filters_command("core:rewind", false));
+    assert!(!super::stdio_filters_command("core:clear", false));
+}
+
 /// 测试 strip_leaked_prepends：有原始历史时，通过 ID 匹配定位并剥离 leaked system prepends
 #[test]
 fn test_strip_leaked_prepends_有历史时剥离头部system消息() {

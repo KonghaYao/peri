@@ -153,9 +153,8 @@ fn test_register_builtins_resolves_builtin_commands() {
         reg.resolve("/rewind").unwrap().entry.fullname,
         "core:rewind"
     );
-    assert_eq!(reg.resolve("/bg").unwrap().entry.fullname, "core:bg");
     assert_eq!(reg.resolve("/loop").unwrap().entry.fullname, "core:loop");
-    assert_eq!(reg.snapshot().len(), 5, "内置命令共 5 条（含 loop 占位）");
+    assert_eq!(reg.snapshot().len(), 4, "内置命令共 4 条（含 loop 占位）");
 }
 
 // ── ClearCommand 测试 ─────────────────────────────────────────────────────

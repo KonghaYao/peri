@@ -155,6 +155,7 @@ fn make_server_config(
             .unwrap(),
         ),
         session_manager,
+        stdio_command_filter: false,
     }
 }
 
@@ -1662,6 +1663,7 @@ async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
         "anti-cycle-session",
         &PeriCaps::all_enabled(),
         Some(command_registry), // 唯一强引用移入函数，返回后即释放
+        false,
     )
     .await;
 

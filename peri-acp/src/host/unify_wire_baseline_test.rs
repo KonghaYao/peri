@@ -147,7 +147,14 @@ async fn test_available_commands_update_wire_identical_between_paths() {
     // —— 统一宿主发射面：驱动真实发送，捕获最终 payload ——
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(&dyn_transport, "s-wire", &caps, Some(Arc::clone(&reg))).await;
+    send_available_commands_update(
+        &dyn_transport,
+        "s-wire",
+        &caps,
+        Some(Arc::clone(&reg)),
+        false,
+    )
+    .await;
     let notifs = transport.notifications();
     assert_eq!(notifs.len(), 1, "首发广播恰一条");
     let (method, notify_payload) = &notifs[0];
@@ -181,6 +188,69 @@ async fn test_available_commands_update_wire_identical_between_paths() {
     assert!(!commands.is_empty(), "availableCommands 应为投影条目数组");
 }
 
+/// stdio 部署过滤：命令列表/补全不显示 rewind/clear（`stdio_command_filter=true`）；
+/// 非 stdio（TUI/print）保留这两个命令。
+#[tokio::test]
+async fn test_stdio_command_filter_hides_rewind_and_clear_from_list() {
+    let caps = PeriCaps::default();
+    let reg = Arc::new(CommandRegistry::new());
+    register_builtins(&reg);
+
+    // stdio（stdio_command_filter=true）：rewind/clear 从命令列表过滤。
+    let transport = Arc::new(MockTransport::default());
+    let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
+    send_available_commands_update(
+        &dyn_transport,
+        "s-stdio",
+        &caps,
+        Some(Arc::clone(&reg)),
+        true,
+    )
+    .await;
+    let (_, payload) = &transport.notifications()[0];
+    let names: Vec<String> = payload["update"]["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str().map(String::from))
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "clear" || n == "rewind"),
+        "stdio 下命令列表不应含 clear/rewind: {names:?}"
+    );
+    assert!(
+        names.contains(&"compact".to_string()),
+        "stdio 下其余命令保留: {names:?}"
+    );
+
+    // 非 stdio（false）：rewind/clear 保留。
+    let transport = Arc::new(MockTransport::default());
+    let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
+    send_available_commands_update(
+        &dyn_transport,
+        "s-tui",
+        &caps,
+        Some(Arc::clone(&reg)),
+        false,
+    )
+    .await;
+    let (_, payload) = &transport.notifications()[0];
+    let names: Vec<String> = payload["update"]["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str().map(String::from))
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "clear"),
+        "TUI 下 clear 应保留: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "rewind"),
+        "TUI 下 rewind 应保留: {names:?}"
+    );
+}
+
 /// `_meta`（update 级）省略规则：未协商 `skill_names` 时整个 update 级 `_meta`
 /// 不出现；条目级 `_meta.periKind/periLevel` 恒有（统一宿主发射面 + schema
 /// typed 序列化共享同一 `build_available_commands_update`，此处锁发射面 wire）。
@@ -192,7 +262,14 @@ async fn test_available_commands_update_meta_omission_rules() {
 
     let transport = Arc::new(MockTransport::default());
     let dyn_transport: Arc<dyn AcpTransport> = transport.clone();
-    send_available_commands_update(&dyn_transport, "s-meta", &caps, Some(Arc::clone(&reg))).await;
+    send_available_commands_update(
+        &dyn_transport,
+        "s-meta",
+        &caps,
+        Some(Arc::clone(&reg)),
+        false,
+    )
+    .await;
     let (_, payload) = &transport.notifications()[0];
 
     assert!(

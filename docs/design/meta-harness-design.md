@@ -211,7 +211,7 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
 **关闭面 = 全部装配入口**（禁止只过滤顶层链——否则产生系统性链下泄漏：
 parent_tools / Workflow agent 链 / 子链独立装配、无条件注入工具，关闭
 Filesystem/Web/Terminal/Mcp 后子 agent 仍携带这些工具。现状 5 处装配入口
-清单见 3.4，含 /bg 后台 agent 的 `parent_tools_factory`——实现裁定 Q9）：
+清单见 3.4——实现裁定 Q9）：
 
 ```rust
 // 每个装配入口内：
@@ -531,7 +531,6 @@ Q3/Q7）：
 | parent_tools | `assembly.rs:186-197` | **无条件** Filesystem+Bash+Web+MCP 工具 → SubAgentMiddleware（`subagent/mod.rs:158-168` → `:244-246`） |
 | Workflow agent 链 | `assembly.rs:670-715` | 独立装配 FileSystem/Web/Terminal/Todo/GitAttribution |
 | 子链 | `subagent/tool/mod.rs:56-64`（装配入口 `SubagentChainAssemblerImpl`，`:125-139`） | AgentsMd → Skills → SkillPreload（条件）→ **Todo（无条件）** |
-| /bg 后台 agent | `host/prompt.rs:385-405`（`parent_tools_factory`） | **无条件** Filesystem+Terminal+Web 工具（MCP 有意排除）——已按 `disabled_middlewares` 过滤 |
 
 **AskUserQuestion 架构**（理想 2.5"不在关闭面"的依据）：
 

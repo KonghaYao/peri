@@ -28,8 +28,7 @@ impl CommandHandler for FakeHandler {
     }
 }
 
-/// 内置注册表（register_builtins：core:compact / core:bg / core:clear /
-/// core:rewind / core:loop，全部 kind=Command、core 域）。
+/// 内置注册表（register_builtins：core:compact / core:clear / core:rewind / core:loop，全部 kind=Command、core 域）。
 fn builtin_registry() -> CommandRegistry {
     let reg = CommandRegistry::new();
     register_builtins(&reg);
@@ -90,7 +89,7 @@ fn plugin_entry(fullname: &str, plugin: &str) -> Arc<RouteEntry> {
 
 // ─── 投影纯函数（Phase 3 步骤 3/7）──────────────────────────────────────────
 
-/// 无 cap（外部客户端）：availableCommands = 仅注册表投影条目（基座 5 条
+/// 无 cap（外部客户端）：availableCommands = 仅注册表投影条目（基座 4 条
 /// 内置），无 ui / skill / mcp 条目；每条 name = Level1 裸名、_meta.periKind /
 /// periLevel 恒有（任务书 Step 7 断言面）。
 #[test]
@@ -101,12 +100,12 @@ fn test_update_no_caps_projects_registry_entries_only() {
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
 
-    assert_eq!(commands.len(), 5, "无 cap 时仅注册表投影（基座 5 条内置）");
+    assert_eq!(commands.len(), 4, "无 cap 时仅注册表投影（基座 4 条内置）");
     let names: Vec<&str> = commands
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    for base in ["compact", "bg", "clear", "rewind", "loop"] {
+    for base in ["compact", "clear", "rewind", "loop"] {
         assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
     }
     for c in commands {
@@ -118,8 +117,7 @@ fn test_update_no_caps_projects_registry_entries_only() {
         );
         assert_eq!(c["_meta"]["periKind"], "command", "内置命令 kind = command");
         assert_eq!(c["_meta"]["periLevel"], 1, "core 域 level = 1");
-        // 基座 category 全 None → 不附加；args 未声明者不附加（core:bg
-        // 亦已声明无参 schema，P2-5 与 compact/clear 对齐，下方单独断言）；
+        // 基座 category 全 None → 不附加；aliases 按命令实现声明注入。
         // aliases 按命令实现声明注入
         assert!(
             c["_meta"].get("periCategory").is_none(),
@@ -127,8 +125,8 @@ fn test_update_no_caps_projects_registry_entries_only() {
         );
         assert_eq!(
             c["_meta"].get("periArgs").is_some(),
-            name == "clear" || name == "compact" || name == "rewind" || name == "bg",
-            "clear/compact/rewind/bg 已声明 args schema（Phase 5 Step 3-5 + P2-5），实际: {name}"
+            name == "clear" || name == "compact" || name == "rewind",
+            "clear/compact/rewind 已声明 args schema，实际: {name}"
         );
     }
     let by_name = |n: &str| {
@@ -151,13 +149,6 @@ fn test_update_no_caps_projects_registry_entries_only() {
         by_name("clear")["_meta"]["periArgs"],
         serde_json::json!({"positionals": [], "named": [], "flags": []}),
         "clear 已声明 ArgsSchema::default()，投影应附加空 schema"
-    );
-    // P2-5：bg 与 compact/clear 对齐（Some(ArgsSchema::default())），投影同样
-    // 附加空 schema（free-form 参数零校验语义不变）。
-    assert_eq!(
-        by_name("bg")["_meta"]["periArgs"],
-        serde_json::json!({"positionals": [], "named": [], "flags": []}),
-        "bg 已声明 ArgsSchema::default()，投影应附加空 schema"
     );
     assert_eq!(
         by_name("rewind")["_meta"]["periAliases"],
@@ -199,7 +190,7 @@ fn test_update_all_enabled_includes_default_ui_details() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
 
-    for base in ["compact", "bg", "clear", "rewind", "loop"] {
+    for base in ["compact", "clear", "rewind", "loop"] {
         assert!(names.contains(&base), "基座条目 {base} 应存在: {names:?}");
     }
     for ui in [
@@ -215,7 +206,7 @@ fn test_update_all_enabled_includes_default_ui_details() {
             .any(|c| c["name"] == "clear" && c["_meta"]["periKind"] == "panel"),
         "ui:clear 与 core:clear 第一等级裸名冲突，注册应被纯拒绝（warn）"
     );
-    assert_eq!(commands.len(), 15, "基座 5 + ui 注册成功 10 = 15 条");
+    assert_eq!(commands.len(), 14, "基座 4 + ui 注册成功 10 = 14 条");
 
     // 断言每条条目 _meta.periKind / periLevel 存在、name = 投影名（Level1
     // 裸名——core/ui 域均无域前缀，域归属只经 periKind 区分）
@@ -418,8 +409,8 @@ fn test_update_local_skill_same_name_as_builtin_only_builtin_exists() {
     let commands = value["availableCommands"].as_array().unwrap();
     assert_eq!(
         commands.len(),
-        5,
-        "投影 = snapshot 全量：同名 skill 未入表，仅内置 5 条"
+        4,
+        "投影 = snapshot 全量：同名 skill 未入表，仅内置 4 条"
     );
     let names: Vec<&str> = commands
         .iter()

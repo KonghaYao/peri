@@ -159,6 +159,7 @@ pub(crate) async fn handle_new(
         &session_id,
         &peri_caps,
         cfg.session_manager.command_registry_for(&session_id),
+        cfg.stdio_command_filter,
     )
     .await;
 
@@ -270,6 +271,7 @@ pub(crate) async fn handle_load(
         req_session_id,
         &caps,
         cfg.session_manager.command_registry_for(req_session_id),
+        cfg.stdio_command_filter,
     )
     .await;
     // 与 session/new 同构（决策 B 扩展）：恢复会话同样预热 MCP skill
@@ -459,6 +461,7 @@ pub(crate) async fn handle_resume(
         req_session_id,
         &caps,
         cfg.session_manager.command_registry_for(req_session_id),
+        cfg.stdio_command_filter,
     )
     .await;
     prewarm_session_mcp_discovery(cfg, req_session_id);
@@ -532,6 +535,7 @@ pub(crate) async fn handle_fork(
         &new_session_id,
         &caps,
         cfg.session_manager.command_registry_for(&new_session_id),
+        cfg.stdio_command_filter,
     )
     .await;
     prewarm_session_mcp_discovery(cfg, &new_session_id);

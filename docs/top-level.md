@@ -188,7 +188,7 @@ HITL/secret：broker 经 Resources 注入 Middleware（OnPermissionRequest 在 M
 
 Task vs Thread：
 
-- Task：内存运行态（registry），bg shell/bg fork，不持久化，生命周期跟随 session
+- Task：内存运行态（registry），bg shell/后台 SubAgent，不持久化，生命周期跟随 session
 - Thread：持久化实体（sqlite），ThreadMeta + 消息，subagent 必有
 - 父子链 parent_thread_id = 父子标记的持久化载体（thread_id = agent_id）
 

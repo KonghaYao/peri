@@ -28,11 +28,7 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::{is_keepgoing, run_session_loop, PromptStopReason, SessionContext, TurnInput};
 use crate::{
-    middleware::MiddlewareChain,
-    session::{
-        exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
-        subagent::{SubagentChainAssembler, SubagentChainContext},
-    },
+    session::exec::executor_helpers::{ForwarderLauncherFn, StageBuildFn},
     tools::DirectToolInvocationResolver,
 };
 
@@ -153,15 +149,6 @@ impl ToolSearchPort for NoopToolSearch {
     }
 }
 
-/// 空链装配器（短路路径不调用；assemble 返回空链即可满足类型）。
-struct EmptyChainAssembler;
-
-impl SubagentChainAssembler for EmptyChainAssembler {
-    fn assemble(&self, _ctx: &SubagentChainContext) -> MiddlewareChain {
-        MiddlewareChain::new()
-    }
-}
-
 /// 占位 stage 装配桥（短路路径不调用；满足 TurnInput 类型——被调用即测试失败）。
 fn noop_stage_build() -> StageBuildFn {
     Arc::new(|_sbr| unreachable!("short-circuit path never builds stage"))
@@ -185,7 +172,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         claude_md_excludes: None,
         language: None,
         compact_config: Default::default(),
-        bg_llm_factory: Arc::new(|| Err("test context: bg llm factory not reachable".to_string())),
         get_cached_llm: None,
         fresh_auxiliary_model: None,
         store_llm: None,
@@ -218,8 +204,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         subscribe: Arc::new(|| Box::new(NoopSubscriber)),
         command_lookup: Arc::new(|_| None),
         compact_config_loader: Arc::new(Default::default),
-        parent_tools_factory: Arc::new(|| Arc::new(Vec::new())),
-        chain_assembler: Arc::new(EmptyChainAssembler),
         tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
         session_start_source: None,
         request_id: None,

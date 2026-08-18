@@ -103,7 +103,7 @@ dispatch 函数是纯函数——接收输入参数，返回结果。不持有 s
 
 | CommandKind | 执行时机 | 示例 |
 |-------------|---------|------|
-| **Immediate** | 绕过 Agent 循环，直接执行后返回 Done | `/compact`、`/rewind`、`/bg`、`/clear` |
+| **Immediate** | 绕过 Agent 循环，直接执行后返回 Done | `/compact`、`/rewind`、`/clear` |
 | **Passthrough** | 原样传入 Agent 循环作为用户消息 | 未使用（预留） |
 | **Transform** | 修改消息后传入 Agent 循环 | 未使用（预留） |
 
@@ -111,7 +111,6 @@ dispatch 函数是纯函数——接收输入参数，返回结果。不持有 s
 
 | 命令 | 别名 |
 |------|------|
-| `/bg` | `/background` |
 | `/compact` | `/compress` |
 | `/clear` | `/cls`、`/reset` |
 | `/rewind` | `/undo` |
@@ -223,7 +222,7 @@ Provider 快照：`session/new` 时捕获当前 Provider 配置——会话内�
 v2 通过 `AsyncRouter`（`peri-agent/src/session/async_router.rs:34`，L5 自 ACP 层物理迁入 peri-agent）统一路由后台异步结果到 Session inbox，替代 executor 直接操作 raw `v2_message_queue` 的方式。
 
 两条路由目标：
-- **Background SubAgent 结果**（`route_bg_result`）：`/bg` fork agent 完成通知，push 为 `Defer` + `MessageSource::SubAgentComplete`
+- **Background SubAgent 结果**（`route_bg_result`）：后台 SubAgent 完成通知，push 为 `Defer` + `MessageSource::SubAgentComplete`
 - **Workflow 事件**（`route_workflow_event`）：workflow middleware 订阅者的完成通知，push 为 `Defer` + `MessageSource::WorkflowComplete`
 
 `SessionInbox`（类型定义已下沉 `peri-acp-types/src/session.rs:282`）是 `AcpSession` 的 `session_inbox` 字段，lazy-init（首次通过 `SessionManager::session_inbox_for` 创建）。内部持有 `InboxHandle`（包装 `MessageQueue` + wake `Notify`），`AsyncRouter` 每次 route 调用后触发 wake，使 idle 的 `run_session_loop` 通过 `await_wake` 恢复执行。

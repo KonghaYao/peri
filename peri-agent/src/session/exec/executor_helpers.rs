@@ -17,8 +17,6 @@
 //!   事件消费经 [`EventSubscriber`] 端口（包装 Controller 订阅）
 //! - 命令拦截经注入的 `command_lookup` 闭包（ACP 协议面注册表）+ 注入的
 //!   `compact_config_loader` 闭包（`load_compact_config` 语义留在 ACP）
-//! - `/bg` fork 启动器 [`DefaultBgForkSpawner`] 的 LLM 构造 / 父工具集 /
-//!   链装配器 / tool resolver 全部经 `new()` 注入（ACP 装配面构造）
 //! - stage 装配经注入的 `StageBuildFn`（ACP 侧从 `SessionContext` 投影
 //!   `StageBuildInput` 并补齐注入面）；Langfuse tracer 由 ACP 闭包捕获，
 //!   本模块不触碰观测实现
@@ -38,13 +36,11 @@ use peri_acp_types::command::PromptStopReason;
 
 use crate::agent::state::AgentState;
 
-mod bg_fork;
 mod collect;
 mod event_pump;
 mod intercept;
 mod v2_execute;
 
-pub use bg_fork::{DefaultBgForkSpawner, ForkLlmFactory, ParentToolsFactory};
 pub use collect::{close_channel, collect_result, wait_for_pump, CollectRequest};
 pub use event_pump::{spawn_event_pump, LangfuseEndFn, PumpHandle, SpawnPumpRequest};
 pub use intercept::{

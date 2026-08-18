@@ -11,7 +11,6 @@
 //! - [`executor_helpers`]：命令拦截 / 事件泵 / 结果收集 / v2 执行驱动
 //!   （原 ACP `host/exec/executor_helpers.rs`，依赖反转后经端口与注入面接入）
 //! - [`compact_pipeline`]：/compact 命令的 v2 执行体
-//! - [`bg`]：/bg 命令（经 [`BgForkSpawner`] 装配注入发起）
 //! - [`prompt_handle`]：执行句柄（`SessionHandle` 实现，runner 注入）
 //! - [`events`]：命令事件发射辅助（EventSink 端口）
 //!
@@ -19,7 +18,6 @@
 //! 与 crate 内部；ACP 特有构造（LLM provider / 装配器 / 渲染 / 观测）经
 //! 注入参数或端口接入，ACP 侧保留协议化薄壳与装配面。
 
-pub mod bg;
 pub mod compact_pipeline;
 pub mod events;
 pub mod executor;

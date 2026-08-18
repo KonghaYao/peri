@@ -123,7 +123,7 @@ fn make_intercept_request<'a>(
     session_id: &'a str,
     cancel: &'a AgentCancellationToken,
     event_sink: &'a Arc<dyn EventSink>,
-    bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    _bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
     command_lookup: super::CommandLookupFn,
 ) -> InterceptRequest<'a> {
@@ -143,11 +143,9 @@ fn make_intercept_request<'a>(
         frozen_system_prompt: None,
         event_sink,
         auxiliary_model: &None,
-        bg_event_tx,
         task_manager,
         command_lookup,
         compact_config_loader,
-        bg_spawner: None,
     }
 }
 
