@@ -175,6 +175,137 @@ fn test_tool_end_carries_title() {
 }
 
 #[test]
+fn test_tool_end_success_writes_standard_output_content() {
+    // ToolEnd 成功 → status=completed + 标准 content（Text block）+ rawOutput
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-ok".to_string(),
+        name: "Bash".to_string(),
+        output: "done".to_string(),
+        is_error: false,
+        source_agent_id: None,
+    };
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(mapped[0].updates.len(), 1);
+    match &mapped[0].updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(
+                update.fields.status,
+                Some(ToolCallStatus::Completed),
+                "成功状态应为 completed"
+            );
+            assert_eq!(tool_call_output_text(&update.fields), "done");
+            assert!(
+                update.fields.raw_output.is_some(),
+                "raw_output 必须保留以维持机器消费兼容"
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[test]
+fn test_tool_end_failure_writes_standard_output_content() {
+    // ToolEnd 失败 → status=failed + 错误文本写入标准 content + rawOutput 仍存在
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-err".to_string(),
+        name: "Bash".to_string(),
+        output: "command not found".to_string(),
+        is_error: true,
+        source_agent_id: None,
+    };
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    match &mapped[0].updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(update.fields.status, Some(ToolCallStatus::Failed));
+            assert_eq!(tool_call_output_text(&update.fields), "command not found");
+            assert!(
+                update.fields.raw_output.is_some(),
+                "raw_output 必须保留以维持机器消费兼容"
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[test]
+fn test_tool_end_failure_empty_output_uses_stable_fallback() {
+    // 失败且底层文本为空 → 标准 content 使用稳定非空 fallback，
+    // 不允许前端因空串静默丢弃；raw_output 保持原样。
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-empty".to_string(),
+        name: "Bash".to_string(),
+        output: String::new(),
+        is_error: true,
+        source_agent_id: None,
+    };
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    match &mapped[0].updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(update.fields.status, Some(ToolCallStatus::Failed));
+            let text = tool_call_output_text(&update.fields);
+            assert_eq!(text, "Tool execution failed", "fallback 文案必须稳定非空");
+            assert!(
+                !text.contains("SECRET") && !text.contains("panic"),
+                "fallback 不得携带内部细节"
+            );
+            assert!(
+                update.fields.raw_output.is_some(),
+                "raw_output 必须保留以维持机器消费兼容"
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[test]
+fn test_tool_end_failure_wire_shape() {
+    // wire 形态锁定（P0 序列化）：ToolCallUpdate 展开后必须同时含
+    // status=failed、content（标准 output 文本块）与 rawOutput，
+    // 标准客户端可仅凭标准字段感知失败。
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-wire".to_string(),
+        name: "Bash".to_string(),
+        output: "boom".to_string(),
+        is_error: true,
+        source_agent_id: None,
+    };
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    let SessionUpdate::ToolCallUpdate(update) = &mapped[0].updates[0] else {
+        panic!("预期 ToolCallUpdate")
+    };
+    let value = serde_json::to_value(update).unwrap();
+    let obj = value.as_object().unwrap();
+    assert_eq!(obj.get("status").unwrap().as_str(), Some("failed"));
+    let content = obj.get("content").unwrap().as_array().unwrap();
+    assert_eq!(content.len(), 1, "标准 output 应为单个文本块");
+    let text_block = &content[0]["content"];
+    assert_eq!(text_block["type"], "text");
+    assert_eq!(text_block["text"], "boom");
+    assert!(obj.contains_key("rawOutput"), "rawOutput 必须保留");
+}
+
+/// 提取 `ToolCallUpdateFields.content` 中唯一 Text block 的文本。
+fn tool_call_output_text(fields: &ToolCallUpdateFields) -> String {
+    let content = fields
+        .content
+        .as_deref()
+        .expect("标准 output content 必须存在");
+    assert_eq!(content.len(), 1, "标准 output 应为单个文本块");
+    match &content[0] {
+        ToolCallContent::Content(c) => match &c.content {
+            ContentBlock::Text(t) => t.text.clone(),
+            other => panic!("预期 Text ContentBlock，实际: {other:?}"),
+        },
+        other => panic!("预期 ToolCallContent::Content，实际: {other:?}"),
+    }
+}
+
+#[test]
 fn test_stop_reason_wire_format() {
     // legacy wire format：与历史 StopReason Display 一致。
     // peri_model::StopReason 无 Display，经 mapper 本地 helper 显式映射。

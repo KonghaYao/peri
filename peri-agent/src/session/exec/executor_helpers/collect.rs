@@ -36,6 +36,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         messages: exec_outcome.agent_state.into_messages(),
         ok: exec_outcome.ok,
         stop_reason: exec_outcome.stop_reason,
+        failure: exec_outcome.failure,
         history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
     }

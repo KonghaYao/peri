@@ -13,6 +13,7 @@ use peri_acp_types::{
     identity::EventDeliveryClass,
     messages::BaseMessage,
     runtime::UnstampedEvent,
+    session::ExecutionFailure,
     store::ThreadStore,
     tasks::{BgTaskKind, TaskManager},
 };
@@ -383,42 +384,31 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 
     // Phase 9: 映射 LoopResult → ExecOutcome
-    let (ok, stop_reason) = match loop_result {
-        LoopResult::Completed => (true, PromptStopReason::EndTurn),
-        LoopResult::Interrupted => (false, PromptStopReason::Cancelled),
-        LoopResult::Error(ref e) => {
-            error!(session_id = %req.session_id, error = %e, "[v2] loop failed");
-            // 对非 Interrupted/MaxIterations 的致命错误，通知 TUI 显示红色错误提示
-            // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
-            if !matches!(e, AgentError::Interrupted)
-                && !matches!(e, AgentError::MaxIterationsExceeded(_))
-                && !req.cancel.is_cancelled()
-            {
-                // 发射点统一经 EventPublisher
-                let source = UnstampedEvent::new(
-                    String::new(),
-                    String::new(),
-                    None,
-                    EventDeliveryClass::Critical,
-                );
-                req.publisher.publish_event(
-                    &req.session_id,
-                    &source,
-                    ExecutorEvent::AgentExecutionFailed {
-                        message: e.user_facing_message(),
-                    },
-                );
-            }
-            let reason = if req.cancel.is_cancelled() || matches!(e, AgentError::Interrupted) {
-                PromptStopReason::Cancelled
-            } else if matches!(e, AgentError::MaxIterationsExceeded(_)) {
-                PromptStopReason::MaxTurnRequests
-            } else {
-                PromptStopReason::EndTurn
-            };
-            (false, reason)
-        }
-    };
+    // 内部诊断日志对所有 Error 保持（含 Interrupted/MaxIterations）。
+    if let LoopResult::Error(ref e) = loop_result {
+        error!(session_id = %req.session_id, error = %e, "[v2] loop failed");
+    }
+    let (ok, stop_reason, failure) =
+        map_loop_result_to_outcome(&loop_result, req.cancel.is_cancelled());
+    // 对非 Interrupted/MaxIterations/cancel 的致命错误，通知 TUI 显示红色错误提示
+    // issue: spec/issues/2026-07-22-llm-api-error-silently-swallowed-in-tui.md
+    // （与 failure 共享同一 fatal 判定：fatal ↔ 发射；message 同一来源）
+    if let Some(f) = &failure {
+        // 发射点统一经 EventPublisher
+        let source = UnstampedEvent::new(
+            String::new(),
+            String::new(),
+            None,
+            EventDeliveryClass::Critical,
+        );
+        req.publisher.publish_event(
+            &req.session_id,
+            &source,
+            ExecutorEvent::AgentExecutionFailed {
+                message: f.public_message.clone(),
+            },
+        );
+    }
 
     // langfuse v2: emit TurnEnded
     {
@@ -463,7 +453,42 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     ExecOutcome {
         ok,
         stop_reason,
+        failure,
         history_replaced_by_compaction,
         agent_state,
+    }
+}
+
+/// Phase 9 分类映射：`LoopResult` → `(ok, stop_reason, fatal failure)`。
+///
+/// 分类契约（spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
+/// - `Completed` / 用户 cancel / `Interrupted` / `MaxIterationsExceeded` →
+///   failure 为 `None`（它们已有标准 `StopReason` 表达，不应升级为请求失败）；
+/// - 其他 `LoopResult::Error` → failure 为
+///   `Some(ExecutionFailureKind::Internal + user_facing_message())`。
+///
+/// fatal 判定与 `AgentExecutionFailed` 发射条件共享（fatal ↔ 发射私有事件），
+/// public message 来自 [`AgentError::user_facing_message()`]（脱敏基线）。
+pub(crate) fn map_loop_result_to_outcome(
+    loop_result: &LoopResult,
+    cancelled: bool,
+) -> (bool, PromptStopReason, Option<ExecutionFailure>) {
+    match loop_result {
+        LoopResult::Completed => (true, PromptStopReason::EndTurn, None),
+        LoopResult::Interrupted => (false, PromptStopReason::Cancelled, None),
+        LoopResult::Error(e) => {
+            let is_interrupted = matches!(e, AgentError::Interrupted);
+            let is_max_iterations = matches!(e, AgentError::MaxIterationsExceeded(_));
+            let fatal = !is_interrupted && !is_max_iterations && !cancelled;
+            let reason = if cancelled || is_interrupted {
+                PromptStopReason::Cancelled
+            } else if is_max_iterations {
+                PromptStopReason::MaxTurnRequests
+            } else {
+                PromptStopReason::EndTurn
+            };
+            let failure = fatal.then(|| ExecutionFailure::internal(e.user_facing_message()));
+            (false, reason, failure)
+        }
     }
 }

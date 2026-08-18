@@ -15,6 +15,7 @@ use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
+use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
 use peri_controller::langfuse::bridge::LangfuseBridge;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 use peri_controller::langfuse::LangfuseSession;
@@ -30,6 +31,66 @@ use super::SharedSessions;
 use crate::provider::{LlmProvider, PeriConfig};
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
+
+// ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
+
+/// fatal turn failure 的稳定 JSON-RPC server error code。
+///
+/// 取自 JSON-RPC 2.0 保留段 server error（`-32000..=-32099`）的首值，语义为
+/// "agent turn execution failed"。具名常量替代调用点 magic number；首版
+/// `data` 恒为 `None`，不把内部类型 / provider payload / 不稳定字段固化为
+/// 公开协议（D2/D5）。
+pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
+
+/// [`ExecutionFailureKind`] → JSON-RPC server error code 的穷尽映射。
+///
+/// 只映射稳定内部类别；新增类别时编译器强制在此显式补充映射，禁止
+/// fallthrough 默认码。
+const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
+    match kind {
+        ExecutionFailureKind::Internal => ACP_TURN_EXECUTION_FAILED_CODE,
+    }
+}
+
+/// Agent→ACP 结果边界的窄映射：`ExecutionFailure` → 传输层 `AcpError`。
+///
+/// - `code`：按 [`execution_failure_kind_code`] 穷尽映射；
+/// - `message`：直接使用 failure 的脱敏 public message（非空由
+///   [`ExecutionFailure::internal`] 保证，空输入回落稳定 fallback）；
+/// - `data`：首版恒 `None`。
+pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpError {
+    AcpError {
+        code: execution_failure_kind_code(failure.kind),
+        message: failure.public_message.clone(),
+        data: None,
+    }
+}
+
+/// `PromptResult` 终止语义 → ACP 响应（`run_prompt` 尾部投影的窄 seam）。
+///
+/// - `failure=Some` → `Err(AcpError)`：fatal turn failure 由统一 host 与
+///   transport 生成标准 JSON-RPC error response（mpsc 与 stdio 共用同一路径）；
+/// - `failure=None` → 现有成功 `PromptResponse`（cancel / max-iterations /
+///   end-turn 各有对应 `StopReason`，不得升级为请求失败）。
+///
+/// 调用方（`run_prompt`）必须完成全部后处理（历史保存 / session state /
+/// cancel token 清理 / recall 回写）后再调用本函数——wire 形态决定不得先于
+/// 失败路径清理（D2 顺序不变量）。
+fn prompt_wire_response(
+    failure: Option<&ExecutionFailure>,
+    stop_reason: executor::PromptStopReason,
+) -> Result<Value, AcpError> {
+    if let Some(failure) = failure {
+        return Err(execution_failure_to_acp_error(failure));
+    }
+    let acp_stop_reason = match stop_reason {
+        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
+        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
+    };
+    let resp = PromptResponse::new(acp_stop_reason);
+    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
 
 /// stdio 部署是否过滤指定命令（按解析后的 `fullname` 判定，含别名）。
 ///
@@ -724,13 +785,13 @@ pub(crate) async fn run_prompt(
         }
     }
 
-    let acp_stop_reason = match result.stop_reason {
-        executor::PromptStopReason::Cancelled => StopReason::Cancelled,
-        executor::PromptStopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
-        executor::PromptStopReason::EndTurn => StopReason::EndTurn,
-    };
-    let resp = PromptResponse::new(acp_stop_reason);
-    serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+    // ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）──
+    // 所有失败路径的历史保存 / session state / cancel token 清理 / recall 回写
+    // 已在上方完成（result.messages / recall_items 已被消费）；此处只决定 wire
+    // 形态：fatal failure → Err(AcpError)（统一 host 与 mpsc/stdio transport 共用
+    // 同一标准 JSON-RPC error 路径），其余终止（cancel / max-iterations / end-turn）
+    // → 现有成功 PromptResponse。
+    prompt_wire_response(result.failure.as_ref(), result.stop_reason)
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：

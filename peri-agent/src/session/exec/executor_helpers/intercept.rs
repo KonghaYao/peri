@@ -176,6 +176,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     stop_reason: result.stop_reason,
                     history_replaced_by_compaction: false,
                     recall_items: Vec::new(),
+                    failure: None,
                 });
             }
         },
@@ -248,6 +249,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 stop_reason: result.stop_reason,
                 history_replaced_by_compaction: false,
                 recall_items: Vec::new(),
+                failure: None,
             })
         }
         CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),

@@ -33,6 +33,7 @@
 //!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
 
 use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::ExecutionFailure;
 
 use crate::agent::state::AgentState;
 
@@ -58,6 +59,10 @@ pub use v2_execute::{
 pub struct ExecOutcome {
     pub ok: bool,
     pub stop_reason: PromptStopReason,
+    /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = 真正
+    /// fatal 的 `LoopResult::Error`，见
+    /// spec/issues/2026-08-18-acp-error-handler.md Commit 1）。
+    pub failure: Option<ExecutionFailure>,
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
     pub agent_state: AgentState,

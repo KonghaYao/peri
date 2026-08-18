@@ -268,6 +268,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
             recall_items: Vec::new(),
+            failure: None,
         };
     }
 

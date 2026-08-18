@@ -228,6 +228,24 @@ async fn test_send_response_and_notification_wire_shapes() {
     assert_eq!(v["error"]["code"], -32000);
     assert_eq!(v["error"]["message"], "boom");
     assert!(v.get("result").is_none(), "错误响应不应含 result: {v}");
+    assert!(
+        v["error"].get("data").is_none(),
+        "data=None 时 error 不得出现 data 字段: {v}"
+    );
+
+    // data=Some 时 wire 携带 data（统一 JSON-RPC error 序列化语义锁定）。
+    transport
+        .send_response(
+            RequestId::Number(7),
+            Err(AcpError::new(-32000, "boom").with_data(json!({ "reason": "classified" }))),
+        )
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    assert_eq!(v["error"]["code"], -32000);
+    assert_eq!(v["error"]["message"], "boom");
+    assert_eq!(v["error"]["data"], json!({ "reason": "classified" }));
+    assert!(v.get("result").is_none(), "错误响应不应含 result: {v}");
 
     transport
         .send_notification("m/n", json!({"x": 1}))
