@@ -121,6 +121,28 @@ impl ThreadMetaParseError {
     }
 }
 
+/// Thread 列表的轻量投影，不包含消息内容聚合或完整配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadListEntry {
+    pub id: ThreadId,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub message_count: usize,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ThreadMeta> for ThreadListEntry {
+    fn from(meta: ThreadMeta) -> Self {
+        Self {
+            id: meta.id,
+            title: meta.title,
+            cwd: meta.cwd,
+            message_count: meta.message_count,
+            updated_at: meta.updated_at,
+        }
+    }
+}
+
 /// Thread 元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadMeta {

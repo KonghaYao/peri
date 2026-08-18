@@ -13,7 +13,7 @@ use sqlx::{
 use peri_acp_types::{
     messages::BaseMessage,
     store::{CompactionLifecycle, MessageFlags, ThreadStore},
-    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta},
+    thread::{AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta},
 };
 
 /// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
@@ -450,6 +450,30 @@ impl ThreadStore for SqliteThreadStore {
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
                     row.11, row.12, row.13,
                 )
+            })
+            .collect()
+    }
+
+    async fn list_thread_entries(&self, cwd: &str) -> Result<Vec<ThreadListEntry>> {
+        let rows: Vec<(String, Option<String>, String, i64, String)> = sqlx::query_as(
+            "SELECT id, title, cwd, message_count, updated_at
+             FROM threads
+             WHERE hidden = 0 AND message_count > 0 AND cwd = ?
+             ORDER BY updated_at DESC",
+        )
+        .bind(cwd)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, title, cwd, message_count, updated_at)| {
+                Ok(ThreadListEntry {
+                    id,
+                    title,
+                    cwd,
+                    message_count: message_count as usize,
+                    updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+                })
             })
             .collect()
     }

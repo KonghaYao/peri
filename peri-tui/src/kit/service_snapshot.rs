@@ -164,18 +164,15 @@ async fn tick_once(
     // ── 6. Thread 列表：慢频刷新，避免空闲时持续打 SQLite / I/O ───────────────
     let now = Instant::now();
     if now >= slow.next_thread_scan {
-        slow.threads = match src.thread_store.list_threads().await {
-            Ok(metas) => metas
+        slow.threads = match src.thread_store.list_thread_entries(&src.cwd).await {
+            Ok(entries) => entries
                 .into_iter()
-                .filter(|m| !m.hidden) // 主列表不显示子 agent
-                .filter(|m| m.message_count > 0) // 不显示无消息的空 thread
-                .filter(|m| m.cwd == src.cwd) // 只显示当前工作目录的 thread
-                .map(|m| ThreadSummary {
-                    id: m.id.clone(),
-                    title: m.title.clone(),
-                    cwd: m.cwd.clone(),
-                    message_count: m.message_count,
-                    updated_at: Some(m.updated_at),
+                .map(|entry| ThreadSummary {
+                    id: entry.id,
+                    title: entry.title,
+                    cwd: entry.cwd,
+                    message_count: entry.message_count,
+                    updated_at: Some(entry.updated_at),
                 })
                 .collect(),
             Err(e) => {
