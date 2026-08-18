@@ -98,11 +98,13 @@ fn decode_event(state: &Mutex<StreamState>, event: SseEvent) -> ModelResult<Vec<
             let id = tool_call
                 .get("id")
                 .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
                 .map(str::to_owned);
             let name = tool_call
                 .get("function")
                 .and_then(|function| function.get("name"))
                 .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
                 .map(str::to_owned);
             let arguments_delta = tool_call
                 .get("function")
