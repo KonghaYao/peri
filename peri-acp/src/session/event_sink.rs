@@ -304,6 +304,17 @@ impl EventSink for TransportEventSink {
                 // 序列化该载荷是纯浪费；`{ .. }` 通配字段绑定，兼容 peri-agent 侧
                 // messages 改 Arc<Vec<BaseMessage>> 传递，本分支无需再改。
                 ExecutorEvent::TurnCommitted { .. } => None,
+                ExecutorEvent::LlmRetrying {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error,
+                } => Some(AcpEvent::LlmRetrying {
+                    attempt: *attempt,
+                    max_attempts: *max_attempts,
+                    delay_ms: *delay_ms,
+                    error: error.clone(),
+                }),
                 // CommandFeedback：命令执行反馈经 peri/agent_event 通道送达 TUI
                 // 通知条（level/channel 复用 to_serde_str 先例）；channel=session
                 // 由 TUI 侧 opt-in 另写系统消息（Phase 4 落 TUI 本地拦截）。
@@ -557,6 +568,56 @@ mod tests {
         let messages_json = value.get("messages_json").and_then(|v| v.as_str()).unwrap();
         let msgs: Vec<BaseMessage> = serde_json::from_str(messages_json).unwrap();
         assert_eq!(msgs.len(), 1, "messages_json 应可反序列化回 BaseMessage");
+    }
+
+    /// LLM retry 必须经 peri/agent_event 通道送达 TUI，否则客户端无法展示
+    /// attempt/max_attempts/delay，用户会误以为首次失败即终止。
+    #[tokio::test]
+    async fn push_event_forwards_llm_retrying() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                agent_event: true,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::LlmRetrying {
+                attempt: 1,
+                max_attempts: 6,
+                delay_ms: 500,
+                error: "transport".into(),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        let (method, params) = &notifications[0];
+        assert_eq!(method, "peri/agent_event");
+        let event_json = params
+            .get("event_json")
+            .and_then(|value| value.as_str())
+            .expect("event_json 缺失");
+        let parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "type": "llm_retrying",
+                "value": {
+                    "attempt": 1,
+                    "max_attempts": 6,
+                    "delay_ms": 500,
+                    "error": "transport",
+                }
+            })
+        );
     }
 
     /// 能力未声明（agent_event=false）时事件不发出。

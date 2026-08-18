@@ -48,6 +48,26 @@ pub(super) fn handle_budget_warning(state: &mut BridgeState, bw: &BudgetWarning)
     state.inject_system_note(text, TuiNoteLevel::Warning);
 }
 
+pub(super) fn handle_llm_retrying(
+    state: &mut BridgeState,
+    attempt: usize,
+    max_attempts: usize,
+    delay_ms: u64,
+    error: &str,
+) {
+    let delay_seconds = format!("{:.1}", delay_ms as f64 / 1000.0);
+    let text = i18n::tr_args(
+        "statusbar-retrying",
+        &[
+            ("attempt".into(), FluentValue::from(attempt as u64)),
+            ("max".into(), FluentValue::from(max_attempts as u64)),
+            ("delay".into(), FluentValue::from(delay_seconds)),
+            ("error".into(), FluentValue::from(error)),
+        ],
+    );
+    state.inject_system_note(text, TuiNoteLevel::Warning);
+}
+
 pub(super) fn handle_system_notification(state: &mut BridgeState, sn: &SystemNotification) {
     // 系统通知（如 cache 命中率警告）——通过 inject_system_note 注入
     // current_turn 内部，天然位于其时序位置（已产出内容之后、后续内容之前）。
