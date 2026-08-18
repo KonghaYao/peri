@@ -191,8 +191,6 @@ pub enum MessageSource {
     ToolFailureWarning,
     /// 工作流完成
     WorkflowComplete,
-    /// 推测深挖哨兵（SpeculationGuard 注入的提问纪律提醒）
-    SpeculationGuard,
 }
 
 // ─── QueuedMessage ───────────────────────────────────────────────────────────
@@ -297,15 +295,6 @@ impl MessageQueue {
     /// 是否有能唤醒循环的消息（Prompt 或 Defer）
     pub fn has_wake_up(&self) -> bool {
         self.inner.lock().iter().any(|m| m.kind.wakes_up())
-    }
-
-    /// 队列中是否存在用户 Prompt（SpeculationGuard 区分"用户新输入"与
-    /// Info/Defer 系统注入——只有用户 Prompt 才重置推测深挖计数）
-    pub fn has_pending_prompt(&self) -> bool {
-        self.inner
-            .lock()
-            .iter()
-            .any(|m| m.kind == MessageKind::Prompt)
     }
 
     /// 队列中是否存在指定来源的 pending Defer（wake-able 延迟结果）。

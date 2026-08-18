@@ -11,10 +11,9 @@ pub mod compact;
 pub mod middleware_runner;
 pub mod reason;
 pub mod receive;
-pub mod speculation_guard;
 pub mod tool_dispatch;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -128,10 +127,6 @@ pub struct StageContext {
     /// 调用结束后由 middleware_runner 把 AgentContext 内部
     /// recall_buffer drain 到本缓冲区，循环结束后由 executor 统一取出。
     pub recall_buffer: Arc<RwLock<Vec<String>>>,
-    /// 推测深挖哨兵开关（SpeculationGuard）。默认 true（主 agent 生效）；
-    /// SubAgent 由 session_context 的 session_id 信号排除——
-    /// 见 `speculation_guard.rs` 模块注释（构建点均不在本 issue 修改范围）。
-    pub ask_discipline: bool,
 }
 
 impl StageContext {
@@ -189,7 +184,6 @@ impl StageContext {
                 idle_suspended_flag: None,
             },
             recall_buffer: rbuf,
-            ask_discipline: true,
         }
     }
 
@@ -234,7 +228,6 @@ impl StageContext {
                 idle_should_wait: None,
                 idle_suspended_flag: None,
             },
-            ask_discipline: true,
         }
     }
 
@@ -297,8 +290,6 @@ pub struct StageContextBuilder {
     runtime: RuntimeServices,
     compact: CompactContext,
     async_ctx: AsyncContext,
-    /// 推测深挖哨兵开关（默认 true；SubAgent 由 session_id 信号排除）
-    ask_discipline: bool,
 }
 
 impl StageContextBuilder {
@@ -365,16 +356,6 @@ impl StageContextBuilder {
         self
     }
 
-    /// 设置推测深挖哨兵（SpeculationGuard）开关。
-    ///
-    /// 默认 true；仅对主 agent 生效（SubAgent 由 session_context 的
-    /// session_id 信号排除，见 speculation_guard.rs 模块注释）。
-    /// 需要显式关闭的场景（如批量/CI 模式）传入 false。
-    pub fn with_ask_discipline(mut self, enabled: bool) -> Self {
-        self.ask_discipline = enabled;
-        self
-    }
-
     pub fn with_session_context(mut self, ctx: Arc<RwLock<HashMap<String, String>>>) -> Self {
         self.session.session_context = ctx;
         self
@@ -417,7 +398,6 @@ impl StageContextBuilder {
             compact: self.compact,
             async_ctx: self.async_ctx,
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
-            ask_discipline: self.ask_discipline,
         }
     }
 }
@@ -527,28 +507,12 @@ pub fn append_messages_to_transcript(
 // ─── 控制流编排 ──────────────────────────────────────────────────────────────
 
 /// 循环运行时状态（P1-2: 显式封装 has_tool_calls，替代游离的局部变量）。
-///
-/// 后续扩展方向（P1-1）：与 StageContext 的 LoopState 职责统一，
-/// 将更多迭代级别状态（consecutive_failures 等）迁入此结构。
-///
-/// SpeculationGuard 字段生命周期 = turn（与"无用户输入连续深挖"语义匹配）：
-/// 用户 Prompt 到达时由 `speculation_guard::reset` 清零。
 #[derive(Debug, Default)]
 struct LoopState {
     /// 上一轮 Act 是否产出了 tool_calls
     has_tool_calls: bool,
     /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
     before_agent_has_run: bool,
-    /// SpeculationGuard：自首个用户 Prompt 以来的连续无输入工具轮数
-    speculation_rounds: u32,
-    /// SpeculationGuard：最近 K=2 轮 thought 是否命中推测词（环形窗口）
-    recent_speculation: VecDeque<bool>,
-    /// SpeculationGuard：最近 M=2 轮工具结果是否含错误（环形窗口）
-    recent_errors: VecDeque<bool>,
-    /// SpeculationGuard：已注入的最高提醒等级（0=无 / 1=L1 / 2=L2）
-    warned_level: u8,
-    /// SpeculationGuard：本 turn 是否已调用 AskUserQuestion
-    asked_user: bool,
 }
 
 /// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
@@ -622,11 +586,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
         // 推进 step
         context.session.turn.advance_step();
-
-        // SpeculationGuard：本轮队列中是否存在用户 Prompt。
-        // Receive 之后据此决定是否重置推测深挖计数（Info/Defer 系统注入不重置——
-        // 否则哨兵自己的提醒消息会把计数清零，L2 永远无法升级）。
-        let has_pending_prompt = context.session.queue.has_pending_prompt();
 
         // ── Receive（循环入口，也是退出判断点）──
         let receive_out = match run_stage(&context, Stage::Receive, || async {
@@ -723,12 +682,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             }
         }
 
-        // SpeculationGuard：用户新输入到达 → 重置推测深挖计数
-        // （has_pending_prompt=true ⟹ consumed_count>0，不会走到上方退出判断）
-        if has_pending_prompt {
-            speculation_guard::reset(&mut loop_state);
-        }
-
         // ── Compact ──
         // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
         // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
@@ -758,21 +711,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             Err(e) => return e,
         };
 
-        // SpeculationGuard：reasoning 随后 move 进 Act，需在此处提前读取：
-        // - thought 副本（推测词检测用）
-        // - 本轮是否调用了 AskUserQuestion（D 条件）
-        // - consecutive_failures 基线（Act 内部执行工具，对比判断本轮是否有错误）
-        let speculation_thought = reason_out.reasoning.thought.clone();
-        let asked_user_this_round = reason_out
-            .reasoning
-            .tool_calls
-            .iter()
-            .any(|tc| tc.name == "AskUserQuestion");
-        let failures_before_act = context
-            .compact
-            .consecutive_failures
-            .load(std::sync::atomic::Ordering::Relaxed);
-
         // ── Act ──
         let act_out = match run_stage(&context, Stage::Act, || async {
             act::run_act(ActInput {
@@ -788,27 +726,6 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         };
 
         loop_state.has_tool_calls = act_out.has_tool_calls;
-        if asked_user_this_round {
-            loop_state.asked_user = true;
-        }
-
-        // ── SpeculationGuard 哨兵（P1）──
-        // B 条件：当前轮无用户输入（consumed_count==0）且产出了工具调用。
-        // 其余条件（A 连续轮数 / C 推测词或错误窗口 / D 未问过用户）在
-        // observe_tool_round 内部判定；满足时注入分级提醒（queue push Info，
-        // 下轮 Receive 消费）。
-        if receive_out.consumed_count == 0 && act_out.has_tool_calls {
-            let failures_after_act = context
-                .compact
-                .consecutive_failures
-                .load(std::sync::atomic::Ordering::Relaxed);
-            speculation_guard::observe_tool_round(
-                &context,
-                &mut loop_state,
-                &speculation_thought,
-                failures_after_act > failures_before_act,
-            );
-        }
         // RCRA：无论 has_tool_calls 是 true 或 false，统一回 Receive 开始新一轮迭代
         continue;
     }

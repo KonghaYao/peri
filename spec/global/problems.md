@@ -58,7 +58,6 @@
 ### AskUserQuestion
 
 - [AskUserQuestion 面板多选交互缺失 + 文本超长不换行](domains/tui/tui-popups.md#issue_2026-07-14-ask-user-multiselect-tui-support) — tui
-- [issue_2026-08-02-agent-asks-user-too-late-in-ambiguous-env agent 在环境失败/症状不明时静态深挖不收敛，提问过晚](domains/agent.md#issue_2026-08-02-agent-asks-user-too-late-in-ambiguous-env) — agent
 
 ### BTreeMap
 

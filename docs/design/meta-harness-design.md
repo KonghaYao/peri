@@ -551,9 +551,7 @@ Q3/Q7）：
   `QuestionItem` → `broker.request` 挂起。
 - **与 HITL 的关系**：审批（`ApprovalItem`/`HumanInTheLoopMiddleware`）与
   提问（`QuestionItem`/`AskUserTool`）共用 `InteractionContext`/`InteractionResponse`
-  契约；`SpeculationGuard`（`peri-agent/src/agent/stages/mod.rs:550` 注释、
-  字段 `asked_user` 在 `:551`）按"本轮是否已调用 AskUserQuestion" 做决策
-  保护。
+  契约。
 - **为何不可关闭**：非 middleware 提供（无 collect_tools 路径），meta_harness
   的 `false` 面无法触及；且对话必须保留向用户提问的通道（HITL 审批拒绝、
   歧义澄清都依赖它）。若要纳入关闭面，需将其移入某个 middleware 的
