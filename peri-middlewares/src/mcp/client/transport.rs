@@ -104,99 +104,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    async fn observe_first_request(protocol_version: Option<&McpProtocolVersion>) -> String {
-        let (client_io, server_io) = tokio::io::duplex(8192);
-        let server = tokio::spawn(async move {
-            let (read, mut write) = tokio::io::split(server_io);
-            let mut lines = BufReader::new(read).lines();
-            let line = lines.next_line().await.unwrap().unwrap();
-            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-            let method = request["method"].as_str().unwrap().to_string();
-            let id = request["id"].clone();
-            let result = if method == "server/discover" {
-                serde_json::json!({
-                    "resultType": "complete",
-                    "supportedVersions": ["2026-07-28"],
-                    "capabilities": {},
-                    "serverInfo": { "name": "test-server", "version": "1.0.0" },
-                    "ttlMs": 0,
-                    "cacheScope": "private"
-                })
-            } else {
-                serde_json::json!({
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "serverInfo": { "name": "test-server", "version": "1.0.0" }
-                })
-            };
-            let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .unwrap();
-            if method == "initialize" {
-                let initialized = lines.next_line().await.unwrap().unwrap();
-                let notification: serde_json::Value = serde_json::from_str(&initialized).unwrap();
-                assert_eq!(notification["method"], "notifications/initialized");
-            }
-            method
-        });
-
-        let _service = serve_client_auto(
-            client_io,
-            None,
-            protocol_version,
-            std::time::Duration::from_secs(2),
-        )
-        .await
-        .expect("握手不应超时")
-        .expect("握手应成功");
-        let method = server.await.unwrap();
-        method
-    }
-
-    #[tokio::test]
-    async fn default_transport_starts_with_initialize() {
-        assert_eq!(observe_first_request(None).await, "initialize");
-    }
-
-    #[tokio::test]
-    async fn explicit_2026_07_28_transport_starts_with_discover() {
-        assert_eq!(
-            observe_first_request(Some(&McpProtocolVersion::V2026_07_28)).await,
-            "server/discover"
-        );
-    }
-
-    #[test]
-    fn lifecycle_requires_explicit_2026_07_28() {
-        assert_eq!(lifecycle_for(None), McpLifecycle::Legacy);
-        assert_eq!(
-            lifecycle_for(Some(&McpProtocolVersion::V2026_07_28)),
-            McpLifecycle::Discover2026_07_28
-        );
-    }
-
-    #[test]
-    fn connection_mode_preserves_channel_handler_for_both_lifecycles() {
-        assert_eq!(connection_mode(None, false), ConnectionMode::LegacyDefault);
-        assert_eq!(connection_mode(None, true), ConnectionMode::LegacyChannel);
-        assert_eq!(
-            connection_mode(Some(&McpProtocolVersion::V2026_07_28), false),
-            ConnectionMode::DiscoverDefault
-        );
-        assert_eq!(
-            connection_mode(Some(&McpProtocolVersion::V2026_07_28), true),
-            ConnectionMode::DiscoverChannel
-        );
-    }
-}
-
 pub(crate) fn spawn_stdio_transport(
     command: &str,
     args: &[String],
@@ -294,4 +201,97 @@ pub(crate) fn build_authed_transport(
     }
     let auth_client = rmcp::transport::auth::AuthClient::new(reqwest::Client::new(), auth_manager);
     rmcp::transport::StreamableHttpClientTransport::with_client(auth_client, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn observe_first_request(protocol_version: Option<&McpProtocolVersion>) -> String {
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server_io);
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap().to_string();
+            let id = request["id"].clone();
+            let result = if method == "server/discover" {
+                serde_json::json!({
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {},
+                    "serverInfo": { "name": "test-server", "version": "1.0.0" },
+                    "ttlMs": 0,
+                    "cacheScope": "private"
+                })
+            } else {
+                serde_json::json!({
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "serverInfo": { "name": "test-server", "version": "1.0.0" }
+                })
+            };
+            let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+            if method == "initialize" {
+                let initialized = lines.next_line().await.unwrap().unwrap();
+                let notification: serde_json::Value = serde_json::from_str(&initialized).unwrap();
+                assert_eq!(notification["method"], "notifications/initialized");
+            }
+            method
+        });
+
+        let _service = serve_client_auto(
+            client_io,
+            None,
+            protocol_version,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect("握手不应超时")
+        .expect("握手应成功");
+        let method = server.await.unwrap();
+        method
+    }
+
+    #[tokio::test]
+    async fn default_transport_starts_with_initialize() {
+        assert_eq!(observe_first_request(None).await, "initialize");
+    }
+
+    #[tokio::test]
+    async fn explicit_2026_07_28_transport_starts_with_discover() {
+        assert_eq!(
+            observe_first_request(Some(&McpProtocolVersion::V2026_07_28)).await,
+            "server/discover"
+        );
+    }
+
+    #[test]
+    fn lifecycle_requires_explicit_2026_07_28() {
+        assert_eq!(lifecycle_for(None), McpLifecycle::Legacy);
+        assert_eq!(
+            lifecycle_for(Some(&McpProtocolVersion::V2026_07_28)),
+            McpLifecycle::Discover2026_07_28
+        );
+    }
+
+    #[test]
+    fn connection_mode_preserves_channel_handler_for_both_lifecycles() {
+        assert_eq!(connection_mode(None, false), ConnectionMode::LegacyDefault);
+        assert_eq!(connection_mode(None, true), ConnectionMode::LegacyChannel);
+        assert_eq!(
+            connection_mode(Some(&McpProtocolVersion::V2026_07_28), false),
+            ConnectionMode::DiscoverDefault
+        );
+        assert_eq!(
+            connection_mode(Some(&McpProtocolVersion::V2026_07_28), true),
+            ConnectionMode::DiscoverChannel
+        );
+    }
 }
