@@ -10,51 +10,67 @@ use rmcp::{
 use super::super::channel_handler::ChannelHandler;
 use super::McpServiceWrapper;
 
-/// 按订阅配置选择握手方式并带超时连接（initialize / reconnect 共用）。
+fn client_lifecycle() -> ClientLifecycleMode {
+    ClientLifecycleMode::Auto {
+        preferred_versions: vec![ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_11_25],
+        legacy_version: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_prefers_2026_07_28_and_falls_back_to_legacy() {
+        let ClientLifecycleMode::Auto {
+            preferred_versions,
+            legacy_version,
+        } = client_lifecycle()
+        else {
+            panic!("expected auto lifecycle");
+        };
+
+        assert_eq!(
+            preferred_versions,
+            vec![ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_11_25,]
+        );
+        assert_eq!(legacy_version, None);
+    }
+}
+
+/// 使用 2026-07-28 lifecycle 建立连接，并在服务端明确为 legacy 时回退。
 ///
-/// - 配置了 subscriptions：协商 2026-07-28 协议（`Auto`：先 server/discover，
-///   服务器不支持时回退 legacy 握手）；
-/// - 否则维持 legacy 握手（优先 channel handler，其次空 handler）。
+/// initialize / reconnect 共用；subscriptions 只控制连接后的订阅建立，不再控制
+/// 协议版本协商。传入 channel handler 时必须保留其通知处理能力。
 // ClientInitializeError 来自 rmcp crate，无法修改其定义
 #[allow(clippy::result_large_err)]
 pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
     channel_handler: Option<&Arc<ChannelHandler>>,
-    subscriptions: Option<&McpSubscriptionsConfig>,
+    _subscriptions: Option<&McpSubscriptionsConfig>,
     timeout: std::time::Duration,
 ) -> Result<Result<McpServiceWrapper, ClientInitializeError>, tokio::time::error::Elapsed>
 where
     T: IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    if subscriptions.is_some() {
+    let lifecycle = client_lifecycle();
+
+    if let Some(handler) = channel_handler {
         tokio::time::timeout(
             timeout,
-            rmcp::service::serve_client_with_lifecycle(
-                (),
-                transport,
-                ClientLifecycleMode::Auto {
-                    preferred_versions: vec![
-                        ProtocolVersion::V_2026_07_28,
-                        ProtocolVersion::V_2025_11_25,
-                    ],
-                    legacy_version: None,
-                },
-            ),
-        )
-        .await
-        .map(|inner| inner.map(McpServiceWrapper::Default))
-    } else if let Some(handler) = channel_handler {
-        tokio::time::timeout(
-            timeout,
-            rmcp::service::serve_client(handler.clone(), transport),
+            rmcp::service::serve_client_with_lifecycle(handler.clone(), transport, lifecycle),
         )
         .await
         .map(|inner| inner.map(McpServiceWrapper::Channel))
     } else {
-        tokio::time::timeout(timeout, rmcp::service::serve_client((), transport))
-            .await
-            .map(|inner| inner.map(McpServiceWrapper::Default))
+        tokio::time::timeout(
+            timeout,
+            rmcp::service::serve_client_with_lifecycle((), transport, lifecycle),
+        )
+        .await
+        .map(|inner| inner.map(McpServiceWrapper::Default))
     }
 }
 
