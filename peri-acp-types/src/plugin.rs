@@ -30,6 +30,14 @@ pub enum ConfigSource {
     Plugin,
 }
 
+/// 显式 MCP 协议版本。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum McpProtocolVersion {
+    /// 使用 `server/discover` lifecycle 的 MCP 2026-07-28。
+    #[serde(rename = "2026-07-28")]
+    V2026_07_28,
+}
+
 /// 单个 MCP 服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -52,8 +60,15 @@ pub struct McpServerConfig {
     /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
-    /// subscriptions/listen 订阅配置（2026-07-28 协议；配置后连接协商
-    /// 2026-07-28 并建立订阅，收到通知时唤醒 agent）
+    /// 显式 MCP 协议版本。仅 `2026-07-28` 使用 `server/discover` lifecycle；
+    /// 未配置保持 legacy `initialize` 握手，未知版本会使配置解析失败。
+    #[serde(
+        default,
+        rename = "protocolVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub protocol_version: Option<McpProtocolVersion>,
+    /// subscriptions/listen 订阅配置（2026-07-28 协议；仅负责连接后建立订阅）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<McpSubscriptionsConfig>,
     /// 配置来源（运行时标记，不序列化）
@@ -63,8 +78,8 @@ pub struct McpServerConfig {
 
 /// `subscriptions/listen` 订阅配置（2026-07-28 协议）
 ///
-/// 任一字段非空即启用订阅：连接协商 2026-07-28 协议版本，
-/// 建立对应过滤器的 `subscriptions/listen` 长流；收到通知时
+/// 任一字段非空即启用订阅：连接后建立对应过滤器的
+/// `subscriptions/listen` 长流；收到通知时
 /// 唤醒 agent 会话（注入 `<system-reminder>` Defer 消息）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

@@ -60,8 +60,8 @@ impl McpClientPool {
         } else {
             STDIO_CONNECT_TIMEOUT
         };
-        // subscriptions 配置存在时协商 2026-07-28 协议（Auto：先
-        // server/discover，服务器不支持时回退 legacy 握手），否则维持原路径。
+        // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
+        let protocol_version = server_config.protocol_version.as_ref();
         let subscriptions = server_config
             .subscriptions
             .as_ref()
@@ -71,7 +71,7 @@ impl McpClientPool {
         let result = match &tc {
             TransportConfig::Stdio { command, args, env } => {
                 match spawn_stdio_transport(command, args, env) {
-                    Ok(t) => serve_client_auto(t, None, subscriptions, timeout).await,
+                    Ok(t) => serve_client_auto(t, None, protocol_version, timeout).await,
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
                         return Err(McpPoolError::ConnectionFailed {
@@ -131,7 +131,7 @@ impl McpClientPool {
                                 serve_client_auto(
                                     build_authed_transport(url, headers, am),
                                     None,
-                                    subscriptions,
+                                    protocol_version,
                                     timeout,
                                 )
                                 .await
@@ -139,7 +139,7 @@ impl McpClientPool {
                                 serve_client_auto(
                                     build_http_transport(url, headers),
                                     None,
-                                    subscriptions,
+                                    protocol_version,
                                     timeout,
                                 )
                                 .await
@@ -150,7 +150,7 @@ impl McpClientPool {
                             serve_client_auto(
                                 build_http_transport(url, headers),
                                 None,
-                                subscriptions,
+                                protocol_version,
                                 timeout,
                             )
                             .await
@@ -160,7 +160,7 @@ impl McpClientPool {
                     serve_client_auto(
                         build_http_transport(url, headers),
                         None,
-                        subscriptions,
+                        protocol_version,
                         timeout,
                     )
                     .await

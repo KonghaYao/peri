@@ -108,6 +108,9 @@ pub(crate) fn server_config_hash(cfg: &McpServerConfig) -> u64 {
             v.hash(&mut hasher);
         }
     }
+    if let Some(protocol_version) = &cfg.protocol_version {
+        protocol_version.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -203,6 +206,7 @@ pub(crate) fn expand_server_config_with_context(
             scopes: o.scopes.clone(),
         }),
         disabled: config.disabled,
+        protocol_version: config.protocol_version,
         source: config.source.clone(),
         subscriptions: config.subscriptions.clone(),
     }
@@ -585,6 +589,7 @@ fn test_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        protocol_version: None,
         subscriptions: None,
         source: None,
     }

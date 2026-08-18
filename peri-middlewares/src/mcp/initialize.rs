@@ -95,8 +95,8 @@ impl McpClientPool {
             } else {
                 STDIO_CONNECT_TIMEOUT
             };
-            // subscriptions 配置存在时协商 2026-07-28 协议（Auto：先 server/discover，
-            // 服务器不支持时回退 legacy 握手），否则维持原协商路径。
+            // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
+            let protocol_version = server_config.protocol_version.as_ref();
             let subscriptions = server_config
                 .subscriptions
                 .as_ref()
@@ -112,7 +112,7 @@ impl McpClientPool {
                         serve_client_auto(
                             transport,
                             channel_handler.as_ref(),
-                            subscriptions,
+                            protocol_version,
                             timeout,
                         )
                         .await
@@ -157,7 +157,7 @@ impl McpClientPool {
                         serve_client_auto(
                             build_http_transport(url, headers),
                             channel_handler.as_ref(),
-                            subscriptions,
+                            protocol_version,
                             timeout,
                         )
                         .await
@@ -334,7 +334,8 @@ impl McpClientPool {
             } else {
                 STDIO_CONNECT_TIMEOUT
             };
-            // subscriptions 配置存在时协商 2026-07-28 协议（Auto 协商），否则维持原路径。
+            // lifecycle 仅由显式 protocolVersion 选择；subscriptions 只负责连接后订阅。
+            let protocol_version = server_config.protocol_version.as_ref();
             let subscriptions = server_config
                 .subscriptions
                 .as_ref()
@@ -347,7 +348,8 @@ impl McpClientPool {
                     ref env,
                 } => match spawn_stdio_transport(command, args, env) {
                     Ok(t) => {
-                        serve_client_auto(t, channel_handler.as_ref(), subscriptions, timeout).await
+                        serve_client_auto(t, channel_handler.as_ref(), protocol_version, timeout)
+                            .await
                     }
                     Err(e) => {
                         Self::insert_failed(&pool, name, format!("stdio 失败: {e}"));
@@ -389,7 +391,7 @@ impl McpClientPool {
                         serve_client_auto(
                             build_http_transport(url, headers),
                             channel_handler.as_ref(),
-                            subscriptions,
+                            protocol_version,
                             timeout,
                         )
                         .await
