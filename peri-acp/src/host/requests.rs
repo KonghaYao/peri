@@ -28,7 +28,7 @@ pub(crate) async fn handle_request(
 ) -> Result<Value, AcpError> {
     match method {
         "initialize" => session_lifecycle::handle_initialize(params, cfg),
-        "session/new" => session_lifecycle::handle_new(params, cfg, sessions, transport).await,
+        "session/new" => session_lifecycle::handle_new(params, cfg, sessions).await,
         "session/set_mode" => config_options::handle_set_mode(params, cfg, transport).await,
         "session/set_config_option" => {
             config_options::handle_set_config_option(params, cfg, sessions, transport).await

@@ -1384,6 +1384,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
 
     // 首发：registry 尚未发现 → availableCommands 无 mcp 条目
     let notifications = transport.notifications();
@@ -2058,10 +2059,11 @@ async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     assert_eq!(
         transport.notifications().len(),
         1,
-        "session/new 首发仅 available_commands_update 一条"
+        "session/new response 后首发仅 available_commands_update 一条"
     );
     let registry = cfg
         .session_manager

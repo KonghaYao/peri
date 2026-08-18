@@ -482,7 +482,27 @@ async fn run_acp_server_inner(
                     let mut sessions = sessions.lock().await;
                     let result =
                         handle_request(&method, &params, &cfg, &mut sessions, &transport).await;
-                    let _ = transport.send_response(id, result).await;
+                    let new_session_id = (method == "session/new")
+                        .then(|| {
+                            result
+                                .as_ref()
+                                .ok()?
+                                .get("sessionId")?
+                                .as_str()
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                    let response_sent = transport.send_response(id, result).await.is_ok();
+                    if response_sent {
+                        if let Some(session_id) = new_session_id {
+                            requests::session_lifecycle::after_new_response(
+                                &cfg,
+                                &transport,
+                                &session_id,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
             IncomingMessage::Notification { method, params } => {
