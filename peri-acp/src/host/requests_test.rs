@@ -1587,7 +1587,8 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
     )
     .await
     .unwrap();
-    let _sid = result["sessionId"].as_str().unwrap();
+    let sid = result["sessionId"].as_str().unwrap();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, sid).await;
 
     let notifications = transport.notifications();
     assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
@@ -2173,6 +2174,7 @@ async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_bloc
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     let registry = cfg
         .session_manager
         .command_registry_for(&sid)
@@ -2245,6 +2247,7 @@ async fn test_plugin_uninstall_removes_stale_plugin_entries() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
+    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
     let registry = cfg
         .session_manager
         .command_registry_for(&sid)
