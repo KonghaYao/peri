@@ -88,3 +88,34 @@ fn reasoning_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiReasoningBlock
         other => panic!("expected TuiAssistantBubble at [{idx}], got {other:?}"),
     }
 }
+
+#[test]
+#[serial]
+fn test_llm_retrying_injects_warning_system_note() {
+    let mut state = make_fold_test_state();
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LlmRetrying {
+            attempt: 1,
+            max_attempts: 6,
+            delay_ms: 500,
+            error: "transport".into(),
+        },
+    );
+
+    let notes: Vec<_> = state
+        .current_turn
+        .view_models()
+        .into_iter()
+        .filter_map(|unit| match unit {
+            TuiRenderUnit::TuiSystemNote(note) => Some((note.text.clone(), note.level.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].1, TuiNoteLevel::Warning);
+    assert!(notes[0].0.contains("1/6"));
+    assert!(notes[0].0.contains("0.5"));
+    assert!(notes[0].0.contains("transport"));
+}

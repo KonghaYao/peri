@@ -394,6 +394,12 @@ pub fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
             duration_ms,
             ..
         } => agent::handle_background_task_completed(agent_name, task_id, *success, *duration_ms),
+        LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error,
+        } => system::handle_llm_retrying(state, *attempt, *max_attempts, *delay_ms, error),
         AgentExecutionFailed { message } => agent::handle_agent_execution_failed(state, message),
         WorkflowProgress {
             run_id,

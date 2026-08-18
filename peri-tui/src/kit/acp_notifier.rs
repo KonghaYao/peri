@@ -10,8 +10,8 @@
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
-//!   未映射变体（StateSnapshot/BgToolStep/LspDiagnostics/ContextWarning/
-//!   LlmRetrying/...）保持静默丢弃，S5+ 迭代扩展。
+//!   未映射变体（StateSnapshot/BgToolStep/LspDiagnostics/ContextWarning/...）
+//!   保持静默丢弃，S5+ 迭代扩展。
 //!
 //! 该任务是**纯转换 + channel push**——不做状态突变。
 
@@ -87,7 +87,7 @@ pub fn spawn_kit_notifier(
 /// 将 `peri/agent_event` 通道的 `AcpEvent` DTO 转换为 kit 层的 `AcpEventData`。
 ///
 /// 当前映射列表（需与后续 S5+ 迭代同步扩展）：
-/// - `SubagentStarted` / `SubagentStopped` → 对应的 `AcpEventData` 变体
+/// - `SubagentStarted` / `SubagentStopped` / `LlmRetrying` → 对应的 `AcpEventData` 变体
 /// - 其他变体返回 `None`（不存在对应的 `AcpEventData` 或以其他通道覆盖）
 fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
     match event {
@@ -144,6 +144,17 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             tool_calls_count,
             duration_ms,
             child_thread_id,
+        }),
+        AcpEvent::LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error,
+        } => Some(AcpEventData::LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error,
         }),
         AcpEvent::AgentExecutionFailed { message } => {
             Some(AcpEventData::AgentExecutionFailed { message })

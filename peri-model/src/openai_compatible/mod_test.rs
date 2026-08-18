@@ -409,6 +409,49 @@ async fn stream_emits_completed_after_trailing_qwen_usage() {
 }
 
 #[tokio::test]
+async fn stream_preserves_tool_identity_when_followup_chunk_has_empty_fields() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-valid\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"pwd\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes()
+        .to_vec())],
+    }));
+    let model = OpenAiModel::with_transport(config("qwen3"), transport);
+    let events = model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<ModelResult<Vec<_>>>()
+        .expect("valid events");
+
+    let completed = events
+        .into_iter()
+        .find_map(|event| match event {
+            ModelStreamEvent::Completed(response) => Some(response),
+            _ => None,
+        })
+        .expect("completed event");
+    let ModelMessage::Assistant { tool_calls, .. } = completed.message() else {
+        panic!("assistant response required");
+    };
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].id(), "call-valid");
+    assert_eq!(tool_calls[0].name(), "Bash");
+    assert_eq!(tool_calls[0].arguments().as_map()["command"], "pwd");
+}
+
+#[tokio::test]
 async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
     let transport = Arc::new(FakeTransport::with_response(FakeResponse {
         status: 200,
@@ -418,7 +461,7 @@ async fn stream_emits_standard_events_and_aggregates_interleaved_tools() {
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"B\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"A\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":1}}}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}},{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"tool_calls\":[{\"index\":1,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"2}\"}},{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         ).as_bytes().to_vec())],
     }));

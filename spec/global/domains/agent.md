@@ -424,17 +424,6 @@ Peri Agent 的 ReAct 循环、工具系统、Context 管理、SubAgent 构建。
 **涉及文件:** peri-agent/src/agent/compact_v2/{planner.rs,projection.rs}
 **CLAUDE.md 链接:** false
 
-### issue_2026-08-02-agent-asks-user-too-late-in-ambiguous-env
-**摘要:** agent 在环境失败/症状不明时静态深挖不收敛，提问过晚
-**状态:** Fixed
-**归档日期:** 2026-08-11
-**关键词:** AskUserQuestion, 静态深挖, speculation guard, prompt 硬规则
-**问题本质:** agent 把"环境失败/症状不明"当代码缺陷，静态分析不收敛不升级提问；修复 = prompt 硬规则（Ask Before Diving）+ 代码层 speculation_guard 哨兵。
-**通用模式:** 运行时问题只能问用户；推测性语言连续出现且无新证据时止损；去数字阈值、去词表防 Goodhart。
-**架构影响:** LoopState 扩展、MessageSource 新变体、SubAgent 用 session_id 键区分。
-**涉及文件:** peri-acp/prompts/sections/{03_doing_tasks,05_using_tools}.md, prompt_test.rs, peri-agent/src/agent/stages/speculation_guard.rs, stages/mod.rs, session/queue.rs
-**CLAUDE.md 链接:** false
-
 ### issue_2026-08-02-background-task-15s-timeout-kills-and-misreports
 **摘要:** 后台任务受 15s 默认超时约束——只杀 wrapper 致孤儿进程存活 + 通知误报
 **状态:** Fixed

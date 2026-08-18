@@ -247,6 +247,14 @@ pub enum AcpEventData {
         child_thread_id: Option<String>,
     },
 
+    /// `"llm-retrying"` — LLM 请求正在按策略退避重试。
+    LlmRetrying {
+        attempt: usize,
+        max_attempts: usize,
+        delay_ms: u64,
+        error: String,
+    },
+
     /// `"agent-execution-failed"` — agent 执行失败。
     AgentExecutionFailed { message: String },
 

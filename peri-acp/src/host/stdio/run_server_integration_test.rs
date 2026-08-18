@@ -356,16 +356,29 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
     )
     .await;
 
-    // handle_new 内部先发 AvailableCommandsUpdate 通知（stdout 侧出现
-    // {"method":"session/update"...} 行含 available_commands_update），响应在后
+    // session/new 必须先返回 response，让客户端建立 sessionId 路由；随后再推送
+    // AvailableCommandsUpdate，避免首次 commands 通知因 session 尚未绑定而丢失。
+    let line = read_line(&mut output_read).await;
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["id"], 2, "session/new RequestId 往返: {resp}");
+    assert!(resp.get("error").is_none(), "session/new 不应报错: {resp}");
+    let session_id = resp["result"]["sessionId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .expect("session/new 返回非空 sessionId")
+        .to_string();
+    assert!(resp["result"]["modes"].is_object(), "modes 存在: {resp}");
+    assert!(
+        resp["result"]["configOptions"].is_array(),
+        "configOptions 存在: {resp}"
+    );
+
     let line = read_line(&mut output_read).await;
     let notif: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(notif["method"], "session/update", "通知 method: {notif}");
-    assert!(
-        notif["params"]["sessionId"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
-        "通知携带 sessionId: {notif}"
+    assert_eq!(
+        notif["params"]["sessionId"], session_id,
+        "commands 通知应属于刚创建的 session: {notif}"
     );
     assert_eq!(
         notif["params"]["update"]["sessionUpdate"], "available_commands_update",
@@ -374,22 +387,6 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
     assert!(
         notif["params"]["update"]["availableCommands"].is_array(),
         "availableCommands 数组存在: {notif}"
-    );
-
-    let line = read_line(&mut output_read).await;
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["id"], 2, "session/new RequestId 往返: {resp}");
-    assert!(resp.get("error").is_none(), "session/new 不应报错: {resp}");
-    assert!(
-        resp["result"]["sessionId"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
-        "session/new 返回 sessionId: {resp}"
-    );
-    assert!(resp["result"]["modes"].is_object(), "modes 存在: {resp}");
-    assert!(
-        resp["result"]["configOptions"].is_array(),
-        "configOptions 存在: {resp}"
     );
 
     // ── EOF → 宿主优雅退出（LSP pool shutdown 钩子后返回）──

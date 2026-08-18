@@ -289,6 +289,7 @@ fn event_kind_short(event: &AcpEventData) -> &'static str {
         CompactStarted => "CompactStarted",
         CompactCompleted { .. } => "CompactCompleted",
         BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
+        LlmRetrying { .. } => "LlmRetrying",
         AgentExecutionFailed { .. } => "AgentExecutionFailed",
         WorkflowProgress { .. } => "WorkflowProgress",
         RewindCompleted { .. } => "RewindCompleted",

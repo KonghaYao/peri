@@ -37,7 +37,6 @@ TUI 正常使用中（agent 长对话深挖、界面上正显示 `<system-remind
 - `peri-tui/src/main.rs` —— `install_panic_hook` / `init_panic_notify`（panic hook 安装）
 - `peri-tui/src/kit/entry.rs` —— `element!(AppShell).fullscreen()` → `ratatui::init()` 包装 panic hook
 - `peri-tui/src/launch.rs` —— `panic_notify_rx` 已退役，panic 无 TUI 提示
-- `peri-agent/src/agent/stages/speculation_guard.rs` —— 注入 `<system-reminder>`（与崩溃时间重合但非根因，已排除字符切割嫌疑）
 
 ## 诊断线索（2026-08-04 调查结论）
 

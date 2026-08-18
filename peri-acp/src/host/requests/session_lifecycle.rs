@@ -85,7 +85,6 @@ pub(crate) async fn handle_new(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
-    transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let cwd = params
         .get("cwd")
@@ -150,27 +149,34 @@ pub(crate) async fn handle_new(
         .modes(modes)
         .config_options(config_options);
     // 将暂存的 peri caps 关联到新 session（MpscTransport 路径：若未
-    // 显式调用 initialize（TUI 内部连接），默认全部 cap=true）。
-    let peri_caps = cfg.session_manager.ensure_session_caps(&session_id);
-    // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 =
-    // 注册表 snapshot；本地 skills / ui / 插件条目已在会话创建时注册）
-    send_available_commands_update(
-        transport,
-        &session_id,
-        &peri_caps,
-        cfg.session_manager.command_registry_for(&session_id),
-        cfg.stdio_command_filter,
-    )
-    .await;
-
-    // 新会话预热 MCP skill 发现（决策 B 扩展）：chain 首 turn 装配前
-    // 即 spawn 发现——/clear 后面板无需等首轮消息即有 mcp 命令。
-    // 幂等（Started 去重）；pool/registry 缺失或连接中 → 空跑，
-    // 由首 turn 装配与连接完成事件兜底。
-    prewarm_session_mcp_discovery(cfg, &session_id);
+    // 显式调用 initialize（TUI 内部连接），默认全部 cap=true）。首次
+    // AvailableCommandsUpdate 必须由 host 在 session/new response 成功发送后
+    // 推送，确保客户端已能按 response 中的 sessionId 建立通知路由。
+    cfg.session_manager.ensure_session_caps(&session_id);
 
     // BRIDGE_RESET_COUNTER handles stale committed cleanup; no explicit clear needed
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
+
+/// `session/new` response 成功写入 transport 后执行的初始化通知。
+///
+/// commands 首发与 MCP 预热必须保持此顺序：先挂载命令注册表的 on_change
+/// 回调并发送 snapshot，再启动 MCP 发现，避免发现结果抢在首次 snapshot 前推送。
+pub(crate) async fn after_new_response(
+    cfg: &AcpServerConfig,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    session_id: &str,
+) {
+    let peri_caps = cfg.session_manager.ensure_session_caps(session_id);
+    send_available_commands_update(
+        transport,
+        session_id,
+        &peri_caps,
+        cfg.session_manager.command_registry_for(session_id),
+        cfg.stdio_command_filter,
+    )
+    .await;
+    prewarm_session_mcp_discovery(cfg, session_id);
 }
 
 pub(crate) async fn handle_load(

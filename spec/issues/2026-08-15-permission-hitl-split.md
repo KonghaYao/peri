@@ -47,7 +47,6 @@
 ## 非目标
 
 - 不改 `AskUserTool` 工具本体行为（broker、is_direct、namespace、批量纪律）。
-- 不动 `SpeculationGuard` 逻辑（新 HITL 关闭后 `asked_user` 恒 false，行为由现状守卫语义自然承接，不额外处理）。
 - 不改 `UserInteractionBroker` 契约与 TUI 面板。
 
 ## 状态变更记录

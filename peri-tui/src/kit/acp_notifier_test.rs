@@ -274,6 +274,42 @@ async fn test_agent_event_forwards_subagent_started() {
     shutdown.cancel();
 }
 
+/// LlmRetrying 必须透传安全的重试进度，供 bridge 展示给用户。
+#[tokio::test]
+async fn test_agent_event_forwards_llm_retrying() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::AgentEvent {
+            session_id: "s1".into(),
+            event: AcpEvent::LlmRetrying {
+                attempt: 1,
+                max_attempts: 6,
+                delay_ms: 500,
+                error: "transport".into(),
+            },
+        })
+        .unwrap();
+
+    let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 LlmRetrying");
+    match bridge_event.event {
+        AcpEventData::LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error,
+        } => {
+            assert_eq!(attempt, 1);
+            assert_eq!(max_attempts, 6);
+            assert_eq!(delay_ms, 500);
+            assert_eq!(error, "transport");
+        }
+        other => panic!("expected LlmRetrying, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 /// SubagentStopped 必须全量透传 instance_id/result/is_error——parent 终态
 /// 唯一事实源在 TUI 边界不得丢弃（bug 回归：此前 `..` 吞掉 result/is_error，
 /// TUI 只能从 child tool error 反推 block error）。
