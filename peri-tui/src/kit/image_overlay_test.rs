@@ -164,6 +164,7 @@ fn view_models_with(text: &str) {
 }
 
 #[test]
+#[serial]
 fn focus_image_path_uses_first_image_line() {
     reset_atoms();
     view_models_with("text\n@image /tmp/b.png\n@image /tmp/c.png");
@@ -176,6 +177,7 @@ fn focus_image_path_uses_first_image_line() {
 }
 
 #[test]
+#[serial]
 fn focus_image_path_slot_guards() {
     reset_atoms();
     view_models_with("@image /tmp/b.png");
