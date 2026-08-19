@@ -255,7 +255,7 @@ impl BaseTool for McpResourceTool {
         .await;
 
         match result {
-            Ok(Ok(resource_result)) => {
+            Ok(Ok((resource_result, cache_ticket))) => {
                 // 6. digest 校验（Listed，MUST）：读到的内容须与条目 resources
                 //    声明的 sha256 digest 一致——contents **逐项**校验（Text
                 //    用 UTF-8 bytes，Blob 用 base64 解码后的 bytes）；任一
@@ -301,7 +301,7 @@ impl BaseTool for McpResourceTool {
                 // 7. 仅在内容绑定校验成功（或该资源不受绑定约束）后，才允许
                 //    public 响应进入跨进程缓存。校验失败及恢复失败路径均不会落盘。
                 self.client_pool
-                    .cache_verified_resource(server_name, uri, &resource_result)
+                    .cache_verified_resource(cache_ticket, &resource_result)
                     .await;
                 // 8. 格式化资源内容（截断超大输出）
                 let mut output = Vec::new();

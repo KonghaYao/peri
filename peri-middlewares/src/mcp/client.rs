@@ -51,13 +51,6 @@ impl McpServiceWrapper {
         }
     }
 
-    pub async fn list_all_resources(&self) -> Result<Vec<Resource>, ServiceError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.list_all_resources().await,
-            McpServiceWrapper::Channel(svc) => svc.list_all_resources().await,
-        }
-    }
-
     pub fn peer(&self) -> &Peer<RoleClient> {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),
@@ -241,37 +234,41 @@ impl McpClientPool {
         server_name: &str,
         uri: &str,
         peer: &Peer<RoleClient>,
-    ) -> Result<ReadResourceResult, rmcp::service::ServiceError> {
+    ) -> Result<
+        (
+            ReadResourceResult,
+            Option<super::resource_cache::CacheTicket>,
+        ),
+        rmcp::service::ServiceError,
+    > {
         let origin = self.cache_origin(server_name);
         if let Some(result) = self
             .resource_cache
             .get(&origin, "resources/read", uri)
             .await
         {
-            return Ok(result);
+            return Ok((result, None));
         }
-        peer.read_resource(ReadResourceRequestParams::new(uri))
-            .await
+        let ticket = self
+            .resource_cache
+            .ticket(&origin, "resources/read", uri)
+            .await;
+        let result = peer
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await?;
+        Ok((result, Some(ticket)))
     }
 
     /// 仅由资源使用方在内容验证成功后调用。这样受 SEP-2640 内容绑定保护的
     /// `skill://` 响应不会在 digest 校验失败时落入跨进程缓存。
     pub(crate) async fn cache_verified_resource(
         &self,
-        server_name: &str,
-        uri: &str,
+        ticket: Option<super::resource_cache::CacheTicket>,
         result: &ReadResourceResult,
     ) {
-        let origin = self.cache_origin(server_name);
-        self.persist_public_response(
-            &origin,
-            "resources/read",
-            uri,
-            result,
-            result.ttl_ms,
-            result.cache_scope,
-        )
-        .await;
+        let Some(ticket) = ticket else { return };
+        self.persist_public_response(&ticket, result, result.ttl_ms, result.cache_scope)
+            .await;
     }
 
     pub(crate) async fn list_resources_cached(
@@ -289,16 +286,13 @@ impl McpClientPool {
         {
             return Ok(result);
         }
+        let ticket = self
+            .resource_cache
+            .ticket(&origin, "resources/list", &params_key)
+            .await;
         let result = peer.list_resources(params).await?;
-        self.persist_public_response(
-            &origin,
-            "resources/list",
-            &params_key,
-            &result,
-            result.ttl_ms,
-            result.cache_scope,
-        )
-        .await;
+        self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+            .await;
         Ok(result)
     }
 
@@ -325,6 +319,8 @@ impl McpClientPool {
         }
     }
 
+    /// 缓存包装器供后续 Resource Template 消费者使用；当前 Agent 尚未暴露
+    /// templates/list 的目录工具，因此不在初始化阶段进行无目的预取。
     pub async fn list_resource_templates_cached(
         &self,
         server_name: &str,
@@ -340,16 +336,13 @@ impl McpClientPool {
         {
             return Ok(result);
         }
+        let ticket = self
+            .resource_cache
+            .ticket(&origin, "resources/templates/list", &params_key)
+            .await;
         let result = peer.list_resource_templates(params).await?;
-        self.persist_public_response(
-            &origin,
-            "resources/templates/list",
-            &params_key,
-            &result,
-            result.ttl_ms,
-            result.cache_scope,
-        )
-        .await;
+        self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+            .await;
         Ok(result)
     }
 
@@ -380,25 +373,13 @@ impl McpClientPool {
     }
 
     fn cache_origin(&self, server_name: &str) -> String {
-        let url = self
-            .clients
-            .read()
-            .get(server_name)
-            .and_then(|handle| handle.url.clone())
-            .or_else(|| {
-                self.configs
-                    .read()
-                    .get(server_name)
-                    .and_then(|config| config.url.clone())
-            });
-        super::resource_cache::cache_origin(server_name, url.as_deref())
+        let config = self.configs.read().get(server_name).cloned();
+        super::resource_cache::cache_origin(server_name, config.as_ref())
     }
 
     async fn persist_public_response<T: serde::Serialize>(
         &self,
-        origin: &str,
-        method: &str,
-        params: &str,
+        ticket: &super::resource_cache::CacheTicket,
         result: &T,
         ttl_ms: Option<u64>,
         cache_scope: Option<CacheScope>,
@@ -406,13 +387,7 @@ impl McpClientPool {
         if cache_scope == Some(CacheScope::Public) {
             if let Some(ttl_ms) = ttl_ms {
                 self.resource_cache
-                    .put(
-                        origin,
-                        method,
-                        params,
-                        std::time::Duration::from_millis(ttl_ms),
-                        result,
-                    )
+                    .put_ticket(ticket, std::time::Duration::from_millis(ttl_ms), result)
                     .await;
             }
         }

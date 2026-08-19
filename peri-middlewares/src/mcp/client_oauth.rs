@@ -175,7 +175,10 @@ impl McpClientPool {
                             return Err(error);
                         }
                     };
-                    let resources = rs.list_all_resources().await.unwrap_or_default();
+                    let resources = self
+                        .list_all_resources_cached(server_name, rs.peer())
+                        .await
+                        .unwrap_or_default();
                     let peer = rs.peer().clone();
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
