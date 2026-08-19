@@ -62,7 +62,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 ### 2.5 后台任务、工作流与 rewind
 
-> `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*` 与 `session/rewind*` 仅在 mpsc 传输路径（`host/requests.rs`）注册；stdio 模式（`host/stdio/`）只注册标准方法加 `session/update_config`，不注册本表方法。
+> 本表方法与 `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*`、`marketplace/*`、`mcp/*` 均在统一宿主（`host/requests.rs`）注册；批 3 unify 后 stdio 与 TUI 共用同一 `run_acp_server` + `handle_request`（`host/stdio/mod.rs`），stdio 通道同样可用这些方法（wire 验证见 `host/stdio/run_server_integration_test.rs`）。stdio 特有差异仅剩命令面过滤：`stdio_command_filter=true` 时 `core:rewind` / `core:clear` 从命令列表/补全隐藏。
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
