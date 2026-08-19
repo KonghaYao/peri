@@ -72,14 +72,20 @@ impl McpClientPool {
                             .and_then(|m| m.subscription_id())
                             .map(|id| id.to_string())
                             .unwrap_or_default();
+                        pool.invalidate_resource_cache(&task_server, Some(&notif.params.uri))
+                            .await;
                         pool.broadcast_subscription_notification(
                             &task_server,
                             &notif.params.uri,
                             &sid,
                         );
                     }
+                    Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
+                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
+                        pool.invalidate_resource_cache(&task_server, None).await;
+                    }
                     Ok(Some(_)) => {
-                        // list_changed 系列：rmcp peer 已失效对应缓存
+                        // tool/prompt list_changed：rmcp peer 已失效对应连接内缓存
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
                     }
                     Ok(None) => {

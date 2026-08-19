@@ -7,7 +7,6 @@ use peri_acp_types::{
     skills::{SkillMetadata, SkillOrigin},
 };
 use peri_agent::tools::BaseTool;
-use rmcp::model::ReadResourceRequestParams;
 use thiserror::Error;
 
 use super::client::{ClientStatus, McpClientPool};
@@ -248,8 +247,12 @@ impl BaseTool for McpResourceTool {
         }
 
         // 5. 调用 rmcp read_resource
-        let request = ReadResourceRequestParams::new(uri);
-        let result = tokio::time::timeout(RESOURCE_READ_TIMEOUT, peer.read_resource(request)).await;
+        let result = tokio::time::timeout(
+            RESOURCE_READ_TIMEOUT,
+            self.client_pool
+                .read_resource_cached(server_name, uri, peer),
+        )
+        .await;
 
         match result {
             Ok(Ok(resource_result)) => {
@@ -295,7 +298,12 @@ impl BaseTool for McpResourceTool {
                         }));
                     }
                 }
-                // 7. 格式化资源内容（截断超大输出）
+                // 7. 仅在内容绑定校验成功（或该资源不受绑定约束）后，才允许
+                //    public 响应进入跨进程缓存。校验失败及恢复失败路径均不会落盘。
+                self.client_pool
+                    .cache_verified_resource(server_name, uri, &resource_result)
+                    .await;
+                // 8. 格式化资源内容（截断超大输出）
                 let mut output = Vec::new();
                 for content in &resource_result.contents {
                     match content {

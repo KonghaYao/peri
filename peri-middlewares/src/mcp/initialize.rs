@@ -173,7 +173,10 @@ impl McpClientPool {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
-                    let resources = rs.list_all_resources().await.unwrap_or_default();
+                    let resources = pool
+                        .list_all_resources_cached(name, rs.peer())
+                        .await
+                        .unwrap_or_default();
                     tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
                     let peer = rs.peer().clone();
                     let channel_capable = peer
@@ -406,7 +409,10 @@ impl McpClientPool {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
-                    let resources = rs.list_all_resources().await.unwrap_or_default();
+                    let resources = pool
+                        .list_all_resources_cached(name, rs.peer())
+                        .await
+                        .unwrap_or_default();
                     let peer = rs.peer().clone();
                     let channel_capable = peer
                         .peer_info()

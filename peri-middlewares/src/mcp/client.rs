@@ -6,7 +6,10 @@ use std::{any::Any, collections::HashMap, sync::Arc};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::session::InboxHandle;
 use rmcp::{
-    model::{Resource, Tool},
+    model::{
+        CacheScope, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+        Resource, Tool,
+    },
     service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
 };
 use thiserror::Error;
@@ -203,6 +206,8 @@ pub struct McpClientPool {
     /// 活跃订阅循环任务（server_name → JoinHandle；随 transport 关闭自然结束）。
     pub(crate) subscription_tasks:
         tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    /// 跨进程的 public MCP Resource Cache；private 响应绝不写入该缓存。
+    pub(crate) resource_cache: super::resource_cache::McpResourceCache,
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -231,6 +236,188 @@ pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl McpClientPool {
+    pub(crate) async fn read_resource_cached(
+        &self,
+        server_name: &str,
+        uri: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Result<ReadResourceResult, rmcp::service::ServiceError> {
+        let origin = self.cache_origin(server_name);
+        if let Some(result) = self
+            .resource_cache
+            .get(&origin, "resources/read", uri)
+            .await
+        {
+            return Ok(result);
+        }
+        peer.read_resource(ReadResourceRequestParams::new(uri))
+            .await
+    }
+
+    /// 仅由资源使用方在内容验证成功后调用。这样受 SEP-2640 内容绑定保护的
+    /// `skill://` 响应不会在 digest 校验失败时落入跨进程缓存。
+    pub(crate) async fn cache_verified_resource(
+        &self,
+        server_name: &str,
+        uri: &str,
+        result: &ReadResourceResult,
+    ) {
+        let origin = self.cache_origin(server_name);
+        self.persist_public_response(
+            &origin,
+            "resources/read",
+            uri,
+            result,
+            result.ttl_ms,
+            result.cache_scope,
+        )
+        .await;
+    }
+
+    pub(crate) async fn list_resources_cached(
+        &self,
+        server_name: &str,
+        params: Option<PaginatedRequestParams>,
+        peer: &Peer<RoleClient>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
+        let origin = self.cache_origin(server_name);
+        let params_key = serde_json::to_string(&params).unwrap_or_default();
+        if let Some(result) = self
+            .resource_cache
+            .get(&origin, "resources/list", &params_key)
+            .await
+        {
+            return Ok(result);
+        }
+        let result = peer.list_resources(params).await?;
+        self.persist_public_response(
+            &origin,
+            "resources/list",
+            &params_key,
+            &result,
+            result.ttl_ms,
+            result.cache_scope,
+        )
+        .await;
+        Ok(result)
+    }
+
+    pub(crate) async fn list_all_resources_cached(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Result<Vec<Resource>, rmcp::service::ServiceError> {
+        let mut resources = Vec::new();
+        let mut cursor = None;
+        loop {
+            let result = self
+                .list_resources_cached(
+                    server_name,
+                    Some(PaginatedRequestParams::default().with_cursor(cursor)),
+                    peer,
+                )
+                .await?;
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(resources);
+            }
+        }
+    }
+
+    pub async fn list_resource_templates_cached(
+        &self,
+        server_name: &str,
+        params: Option<PaginatedRequestParams>,
+        peer: &Peer<RoleClient>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::service::ServiceError> {
+        let origin = self.cache_origin(server_name);
+        let params_key = serde_json::to_string(&params).unwrap_or_default();
+        if let Some(result) = self
+            .resource_cache
+            .get(&origin, "resources/templates/list", &params_key)
+            .await
+        {
+            return Ok(result);
+        }
+        let result = peer.list_resource_templates(params).await?;
+        self.persist_public_response(
+            &origin,
+            "resources/templates/list",
+            &params_key,
+            &result,
+            result.ttl_ms,
+            result.cache_scope,
+        )
+        .await;
+        Ok(result)
+    }
+
+    pub(crate) async fn invalidate_resource_cache(&self, server_name: &str, uri: Option<&str>) {
+        let origin = self.cache_origin(server_name);
+        self.invalidate_resource_cache_origin(&origin, uri).await;
+    }
+
+    pub(crate) async fn invalidate_resource_cache_origin(&self, origin: &str, uri: Option<&str>) {
+        match uri {
+            Some(uri) => {
+                self.resource_cache
+                    .invalidate(origin, "resources/read", Some(uri))
+                    .await;
+            }
+            None => {
+                self.resource_cache
+                    .invalidate(origin, "resources/read", None)
+                    .await;
+                self.resource_cache
+                    .invalidate(origin, "resources/list", None)
+                    .await;
+                self.resource_cache
+                    .invalidate(origin, "resources/templates/list", None)
+                    .await;
+            }
+        }
+    }
+
+    fn cache_origin(&self, server_name: &str) -> String {
+        let url = self
+            .clients
+            .read()
+            .get(server_name)
+            .and_then(|handle| handle.url.clone())
+            .or_else(|| {
+                self.configs
+                    .read()
+                    .get(server_name)
+                    .and_then(|config| config.url.clone())
+            });
+        super::resource_cache::cache_origin(server_name, url.as_deref())
+    }
+
+    async fn persist_public_response<T: serde::Serialize>(
+        &self,
+        origin: &str,
+        method: &str,
+        params: &str,
+        result: &T,
+        ttl_ms: Option<u64>,
+        cache_scope: Option<CacheScope>,
+    ) {
+        if cache_scope == Some(CacheScope::Public) {
+            if let Some(ttl_ms) = ttl_ms {
+                self.resource_cache
+                    .put(
+                        origin,
+                        method,
+                        params,
+                        std::time::Duration::from_millis(ttl_ms),
+                        result,
+                    )
+                    .await;
+            }
+        }
+    }
+
     pub fn new_pending() -> Self {
         Self {
             clients: parking_lot::RwLock::new(HashMap::new()),
@@ -246,6 +433,7 @@ impl McpClientPool {
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
             subscription_tasks: tokio::sync::Mutex::new(HashMap::new()),
+            resource_cache: super::resource_cache::McpResourceCache::new(),
         }
     }
 

@@ -12,6 +12,7 @@ pub mod mcp_notify;
 pub mod middleware;
 pub mod oauth_flow;
 pub mod reconnect;
+pub mod resource_cache;
 pub mod resource_tool;
 pub(crate) mod skill_discovery;
 pub mod tool_bridge;

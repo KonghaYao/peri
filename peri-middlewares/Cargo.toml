@@ -51,6 +51,7 @@ ipnet = "2.10"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 peri-resources = { path = "../peri-resources" }
 lsp-types.workspace = true
+cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 
 
 [dev-dependencies]
