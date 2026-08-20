@@ -316,3 +316,25 @@ async fn test_oauth_preflight_failure_emits_one_exact_terminal_event() {
         )]
     );
 }
+
+#[test]
+fn test_server_info_projects_safe_failed_status() {
+    let status = ClientStatus::Failed(
+        "request failed: https://example.test/mcp?token=top-secret\ncaused by: verbose trace"
+            .to_string(),
+    );
+
+    assert_eq!(mcp_status_label(&status), "failed");
+    let summary = mcp_error_summary(&status).unwrap();
+    assert_eq!(summary, "request failed: https://example.test/mcp?…");
+    assert!(!summary.contains("top-secret"));
+    assert!(!summary.contains("verbose trace"));
+}
+
+#[test]
+fn test_redact_mcp_error_masks_secret_assignment() {
+    assert_eq!(
+        redact_mcp_error("connection failed token=top-secret"),
+        "connection failed [redacted]"
+    );
+}

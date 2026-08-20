@@ -22,7 +22,7 @@ pub use auth_store::{AuthStoreError, FileCredentialStore, PerServerCredentialSto
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use channel_handler::ChannelHandler;
 pub use client::{
-    ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
+    redact_mcp_error, ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
     OAuthStartDisposition, OAuthStatus, ServerInfo,
 };
 pub(crate) use config::load_merged_config_full;

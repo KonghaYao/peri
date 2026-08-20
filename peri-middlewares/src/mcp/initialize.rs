@@ -216,7 +216,7 @@ impl McpClientPool {
                     };
                 }
                 Ok(Err(e)) => {
-                    let err_str = e.to_string();
+                    let err_str = super::client::redact_mcp_error(&e.to_string());
                     tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
                     if Self::is_auth_required_error(&err_str, is_http) {
                         // 服务器要求授权（如 sentry 401）：标记待授权，不主动

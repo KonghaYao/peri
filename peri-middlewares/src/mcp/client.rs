@@ -59,6 +59,34 @@ impl McpServiceWrapper {
     }
 }
 
+/// 供状态与日志使用的 MCP 错误文本清洗：移除 URL query，遮蔽常见凭据键值。
+/// 不应将原始底层错误链直接投影到 UI 或日志。
+pub fn redact_mcp_error(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for token in input.split_whitespace() {
+        let token = if let Some((prefix, _)) = token.split_once('?') {
+            if prefix.starts_with("http://") || prefix.starts_with("https://") {
+                format!("{prefix}?…")
+            } else {
+                token.to_string()
+            }
+        } else {
+            token.to_string()
+        };
+        let lower = token.to_ascii_lowercase();
+        if ["token=", "password=", "secret=", "api_key=", "apikey="]
+            .iter()
+            .any(|key| lower.contains(key))
+        {
+            output.push_str("[redacted]");
+        } else {
+            output.push_str(&token);
+        }
+        output.push(' ');
+    }
+    output.trim_end().to_string()
+}
+
 /// MCP 客户端连接状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientStatus {
@@ -97,6 +125,10 @@ pub struct ServerInfo {
     pub name: String,
     pub transport_type: String,
     pub status: ClientStatus,
+    /// 供 UI 显示的稳定状态标签，不暴露 `ClientStatus::Failed` 的完整错误链。
+    pub status_label: String,
+    /// 供 UI 显示的一行安全错误摘要；完整诊断仅写入 tracing 日志。
+    pub error_summary: Option<String>,
     pub tool_count: usize,
     pub resource_count: usize,
     /// OAuth 授权状态
@@ -161,6 +193,25 @@ pub(crate) fn peer_declares_skills(peer: &Peer<RoleClient>) -> bool {
                 .unwrap_or(false)
         })
         .unwrap_or(false)
+}
+
+fn mcp_status_label(status: &ClientStatus) -> &'static str {
+    match status {
+        ClientStatus::Connected => "connected",
+        ClientStatus::Failed(_) => "failed",
+        ClientStatus::Disconnected => "disconnected",
+        ClientStatus::Disabled => "disabled",
+        ClientStatus::Uninitialized => "uninitialized",
+    }
+}
+
+fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
+    let ClientStatus::Failed(reason) = status else {
+        return None;
+    };
+    let summary = redact_mcp_error(reason.lines().next().unwrap_or_default().trim());
+    let summary: String = summary.chars().take(160).collect();
+    (!summary.is_empty()).then_some(summary)
 }
 
 /// MCP 客户端连接池
@@ -694,6 +745,8 @@ impl McpClientPool {
                 name: h.name.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
+                status_label: mcp_status_label(&h.status).to_string(),
+                error_summary: mcp_error_summary(&h.status),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -720,6 +773,8 @@ impl McpClientPool {
                 name: h.name.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
+                status_label: mcp_status_label(&h.status).to_string(),
+                error_summary: mcp_error_summary(&h.status),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -736,6 +791,8 @@ impl McpClientPool {
                     name: name.clone(),
                     transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
                     status: ClientStatus::Uninitialized,
+                    status_label: "uninitialized".to_string(),
+                    error_summary: None,
                     tool_count: 0,
                     resource_count: 0,
                     oauth_status: OAuthStatus::default(),

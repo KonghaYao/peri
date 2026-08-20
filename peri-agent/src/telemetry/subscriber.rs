@@ -44,7 +44,12 @@ pub fn init_tracing(service_name: &str) -> TracingGuard {
                 .unwrap_or_else(|| "agent-tui".to_string());
             (dir, file_name)
         }
-        None => (std::env::temp_dir(), service_name.to_string()),
+        None => (
+            dirs_next::home_dir()
+                .map(|home| home.join(".peri").join("logs"))
+                .unwrap_or_else(std::env::temp_dir),
+            service_name.to_string(),
+        ),
     };
 
     let file_appender = RollingFileAppender::builder()

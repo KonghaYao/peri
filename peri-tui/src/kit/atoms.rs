@@ -163,6 +163,8 @@ pub struct PluginSummary {
 pub struct McpServerSummary {
     pub name: String,
     pub status: String,
+    /// 仅用于 MCP 面板的安全、单行失败摘要；完整诊断写入 tracing 日志。
+    pub error_summary: Option<String>,
     pub transport: String,
     pub tools_count: usize,
     /// OAuth 待授权标记（oauth_status == NeedsAuthorization）：面板据此

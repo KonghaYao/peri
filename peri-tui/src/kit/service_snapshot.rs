@@ -517,7 +517,8 @@ fn derive_mcp_servers(
         .into_iter()
         .map(|info| McpServerSummary {
             name: info.name.clone(),
-            status: format!("{:?}", info.status).to_lowercase(),
+            status: info.status_label,
+            error_summary: info.error_summary,
             transport: info.transport_type.clone(),
             tools_count: info.tool_count,
             needs_auth: matches!(

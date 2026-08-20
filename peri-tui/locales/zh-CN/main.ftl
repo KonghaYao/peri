@@ -873,12 +873,14 @@ panel-mcp-empty =   暂未配置 MCP 服务器
 panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }  skills: { $skills }
 panel-mcp-needs-auth =  [需要授权]
-panel-mcp-oauth-hint =   Enter: 进入授权详情  |  Esc: 关闭
+panel-mcp-list-hint =   Enter: 查看详情  |  Esc: 关闭
+panel-mcp-oauth-hint =   Enter: 查看详情  |  Esc: 关闭
 # MCP 面板详情视图（OAuth 授权入口）
 panel-mcp-detail-url = URL:
+panel-mcp-detail-error = 错误：
 panel-mcp-detail-btn-auth = 授权
 panel-mcp-detail-btn-back = 返回
-panel-mcp-detail-hint =   Enter: 授权  |  Esc: 返回列表  |  ←→: 选择按钮
+panel-mcp-detail-hint =   ←→: 选择操作  |  Enter: 确认  |  Esc: 返回列表
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
 panel-mcp-icon-unknown = ◯
