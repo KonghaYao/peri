@@ -883,7 +883,9 @@ panel-mcp-detail-btn-back = 返回
 panel-mcp-detail-hint =   ←→: 选择操作  |  Enter: 确认  |  Esc: 返回列表
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
-panel-mcp-icon-unknown = ◯
+panel-mcp-cache-hit = 持久化缓存：命中
+panel-mcp-cache-live-fetch = 持久化缓存：实时读取
+panel-mcp-cache-none = 持久化缓存：—
 
 # ---- Memory Panel ----
 panel-memory-stats =   { $count } 个记忆文件在 ~/.claude/memory 中

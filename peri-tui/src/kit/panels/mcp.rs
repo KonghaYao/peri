@@ -318,6 +318,14 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ),
                     Style::new().fg(theme_def.read().semantic.text.dim),
                 )]));
+                let cache_label = match s.cache_status.as_deref() {
+                    Some("hit") => i18n::tr("panel-mcp-cache-hit"),
+                    Some("live_fetch") => i18n::tr("panel-mcp-cache-live-fetch"),
+                    _ => i18n::tr("panel-mcp-cache-none"),
+                };
+                lines.push(
+                    Line::from(format!("  {}", cache_label)).fg(theme_def.read().semantic.text.dim),
+                );
             }
         }
 

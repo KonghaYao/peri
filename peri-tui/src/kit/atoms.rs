@@ -172,6 +172,8 @@ pub struct McpServerSummary {
     pub needs_auth: bool,
     /// 服务器 URL（HTTP 传输），详情视图展示用。
     pub url: Option<String>,
+    /// 最近一次持久化 MCP cache 结果：hit/live_fetch；None 表示尚无记录。
+    pub cache_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -129,6 +129,8 @@ pub struct ServerInfo {
     pub status_label: String,
     /// 供 UI 显示的一行安全错误摘要；完整诊断仅写入 tracing 日志。
     pub error_summary: Option<String>,
+    /// 供 UI 显示最近一次持久化 cache 结果；None 表示尚无缓存请求。
+    pub cache_status: Option<String>,
     pub tool_count: usize,
     pub resource_count: usize,
     /// OAuth 授权状态
@@ -300,6 +302,7 @@ impl McpClientPool {
         {
             return Ok((result, None));
         }
+        self.resource_cache.mark_live_fetch(&origin);
         let Some(ticket) = self
             .resource_cache
             .ticket(&origin, "resources/read", uri)
@@ -344,6 +347,7 @@ impl McpClientPool {
         {
             return Ok(result);
         }
+        self.resource_cache.mark_live_fetch(&origin);
         let ticket = self
             .resource_cache
             .ticket(&origin, "resources/list", &params_key)
@@ -443,6 +447,20 @@ impl McpClientPool {
     pub(crate) fn cache_origin(&self, server_name: &str) -> String {
         let config = self.configs.read().get(server_name).cloned();
         super::resource_cache::cache_origin(server_name, config.as_ref())
+    }
+
+    pub(crate) fn resource_cache(&self) -> super::resource_cache::McpResourceCache {
+        self.resource_cache.clone()
+    }
+
+    fn cache_status_for(&self, server_name: &str) -> Option<String> {
+        let origin = self.cache_origin(server_name);
+        self.resource_cache
+            .recent_status(&origin)
+            .map(|status| match status {
+                super::resource_cache::CacheLoadStatus::Hit => "hit".to_string(),
+                super::resource_cache::CacheLoadStatus::LiveFetch => "live_fetch".to_string(),
+            })
     }
 
     async fn persist_public_response<T: serde::Serialize>(
@@ -764,6 +782,7 @@ impl McpClientPool {
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
+                cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -792,6 +811,7 @@ impl McpClientPool {
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
+                cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -810,6 +830,7 @@ impl McpClientPool {
                     status: ClientStatus::Uninitialized,
                     status_label: "uninitialized".to_string(),
                     error_summary: None,
+                    cache_status: self.cache_status_for(name),
                     tool_count: 0,
                     resource_count: 0,
                     oauth_status: OAuthStatus::default(),

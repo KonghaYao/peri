@@ -5,7 +5,7 @@
 //! advisory file lock 串行化，避免失效通知与迟到响应重新激活旧缓存。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     path::PathBuf,
     sync::Arc,
@@ -21,11 +21,18 @@ const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const EPOCH_FILE: &str = "epoch";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheLoadStatus {
+    Hit,
+    LiveFetch,
+}
+
 #[derive(Clone)]
 pub(crate) struct McpResourceCache {
     content_path: PathBuf,
     state_path: PathBuf,
     mutex: Arc<tokio::sync::Mutex<()>>,
+    recent_status: Arc<parking_lot::Mutex<HashMap<String, CacheLoadStatus>>>,
 }
 
 #[derive(Clone)]
@@ -59,7 +66,24 @@ impl McpResourceCache {
             content_path: root.join("content"),
             state_path: root.join("state"),
             mutex: Arc::new(tokio::sync::Mutex::new(())),
+            recent_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn recent_status(&self, origin: &str) -> Option<CacheLoadStatus> {
+        self.recent_status.lock().get(origin).copied()
+    }
+
+    pub(crate) fn mark_live_fetch(&self, origin: &str) {
+        self.recent_status
+            .lock()
+            .insert(origin.to_string(), CacheLoadStatus::LiveFetch);
+    }
+
+    fn mark_hit(&self, origin: &str) {
+        self.recent_status
+            .lock()
+            .insert(origin.to_string(), CacheLoadStatus::Hit);
     }
 
     pub(crate) async fn get<T: DeserializeOwned>(
@@ -94,6 +118,9 @@ impl McpResourceCache {
             }
         };
         drop(lock);
+        if value.is_some() {
+            self.mark_hit(origin);
+        }
         value
     }
 

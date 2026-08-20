@@ -137,6 +137,7 @@ async fn collect_via_skills_list_inner(
             } else {
                 // 必须在 RPC 前捕获 ticket：更新通知若在请求期间到达，旧分页
                 // 响应随后不得重新写入持久化缓存。
+                cache.mark_live_fetch(origin);
                 let ticket = cache.ticket(origin, "skills/list", &params_key).await;
                 let page = fetch_skill_list_page(&peer, server, params).await;
                 let Some(page) = page else {
@@ -278,6 +279,7 @@ async fn fetch_and_verify_one(
         if let Some(text) = cache.get(origin, "skills/read", &uri).await {
             (text, None)
         } else {
+            cache.mark_live_fetch(origin);
             let ticket = cache.ticket(origin, "skills/read", &uri).await;
             let SkillResourceRead::Text(text, _) =
                 read_skill_resource_text(&peer, server, &uri).await

@@ -885,7 +885,9 @@ panel-mcp-detail-btn-back = Back
 panel-mcp-detail-hint =   ←→: select action  |  Enter: confirm  |  Esc: back to list
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
-panel-mcp-icon-unknown = ◯
+panel-mcp-cache-hit = Persistent cache: hit
+panel-mcp-cache-live-fetch = Persistent cache: live fetch
+panel-mcp-cache-none = Persistent cache: —
 
 # ---- Memory Panel ----
 panel-memory-stats =   { $count } memory files in ~/.claude/memory

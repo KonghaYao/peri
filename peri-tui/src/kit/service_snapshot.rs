@@ -526,6 +526,7 @@ fn derive_mcp_servers(
                 peri_middlewares::mcp::OAuthStatus::NeedsAuthorization
             ),
             url: info.url.clone(),
+            cache_status: info.cache_status,
         })
         .collect()
 }
