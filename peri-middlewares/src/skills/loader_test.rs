@@ -253,6 +253,15 @@ fn test_load_skill_metadata() {
 }
 
 #[test]
+fn test_load_skill_metadata_normalizes_colons_in_name() {
+    let dir = tempdir().unwrap();
+    let skill_file = dir.path().join("SKILL.md");
+    write_skill_file(&skill_file, "superpower:skill", "Namespaced skill");
+
+    let meta = load_skill_metadata(&skill_file).unwrap();
+    assert_eq!(meta.name, "superpower-skill");
+}
+#[test]
 fn test_list_skills_dedup() {
     let dir1 = tempdir().unwrap();
     let dir2 = tempdir().unwrap();

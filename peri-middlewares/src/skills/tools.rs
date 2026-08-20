@@ -215,6 +215,13 @@ fn find_and_load_skill(
     skill_name: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let input_lower = skill_name.to_lowercase();
+
+    // 名称已在扫描时把 `:` 规范为 `-`；完整名称优先匹配，避免把包含
+    // 命名空间前缀的输入过早降级为最后一段。
+    if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == input_lower) {
+        return load_skill_content(skill);
+    }
+
     // MCP 别名分支（DD-3）：`<server>:<skill>` → `mcp__<server>__<skill>`。
     // 在既有 rsplit_once 剥前缀**之前**同构查找缓存（大小写无关）；命中即
     // 加载返回。未命中继续走下方磁盘路径——本地 plugin 命名空间语义不变。
@@ -283,7 +290,7 @@ fn load_skill_content(
     if matches!(skill.source, super::SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| bs.name == skill.name)
+            .find(|bs| crate::skills::normalize_skill_name(bs.name) == skill.name)
             .map(|bs| bs.content.to_string())
             .ok_or_else(|| {
                 format!("Builtin skill '{}' not found in BUILTIN_SKILLS", skill.name).into()

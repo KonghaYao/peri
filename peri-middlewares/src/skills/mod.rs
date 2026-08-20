@@ -9,8 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 pub use loader::{
-    find_skill_content, find_skill_in_list, list_skills, load_skill_metadata, resolve_skill_roots,
-    scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
+    find_skill_content, find_skill_in_list, list_skills, load_skill_metadata, normalize_skill_name,
+    resolve_skill_roots, scan_skill_roots, SkillMetadata, SkillRoot, SkillSource, MAX_SCAN_DEPTH,
     MAX_SKILLS_DIRS_PER_ROOT,
 };
 use peri_acp_types::{mcp_skills::McpSkillRegistry, skills::SkillOrigin};
