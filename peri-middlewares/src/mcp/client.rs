@@ -300,10 +300,17 @@ impl McpClientPool {
         {
             return Ok((result, None));
         }
-        let ticket = self
+        let Some(ticket) = self
             .resource_cache
             .ticket(&origin, "resources/read", uri)
-            .await;
+            .await
+        else {
+            return Ok((
+                peer.read_resource(ReadResourceRequestParams::new(uri))
+                    .await?,
+                None,
+            ));
+        };
         let result = peer
             .read_resource(ReadResourceRequestParams::new(uri))
             .await?;
@@ -342,8 +349,10 @@ impl McpClientPool {
             .ticket(&origin, "resources/list", &params_key)
             .await;
         let result = peer.list_resources(params).await?;
-        self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
-            .await;
+        if let Some(ticket) = ticket {
+            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+                .await;
+        }
         Ok(result)
     }
 
@@ -392,8 +401,10 @@ impl McpClientPool {
             .ticket(&origin, "resources/templates/list", &params_key)
             .await;
         let result = peer.list_resource_templates(params).await?;
-        self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
-            .await;
+        if let Some(ticket) = ticket {
+            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+                .await;
+        }
         Ok(result)
     }
 
@@ -419,11 +430,17 @@ impl McpClientPool {
                 self.resource_cache
                     .invalidate(origin, "resources/templates/list", None)
                     .await;
+                self.resource_cache
+                    .invalidate(origin, "skills/list", None)
+                    .await;
+                self.resource_cache
+                    .invalidate(origin, "skills/read", None)
+                    .await;
             }
         }
     }
 
-    fn cache_origin(&self, server_name: &str) -> String {
+    pub(crate) fn cache_origin(&self, server_name: &str) -> String {
         let config = self.configs.read().get(server_name).cloned();
         super::resource_cache::cache_origin(server_name, config.as_ref())
     }

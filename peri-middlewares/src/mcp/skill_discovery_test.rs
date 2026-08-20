@@ -1887,3 +1887,72 @@ async fn releaser_rpc_miss_falls_back_done_info() {
         _other => panic!("RPC miss 应回退 Done"),
     }
 }
+
+#[tokio::test]
+async fn cached_skill_discovery_avoids_list_and_skill_reads() {
+    let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
+    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(spec_skill_server(
+        server_io,
+        vec![SpecSkill {
+            uri: "skill://cached/SKILL.md",
+            name: "cached",
+            description: "Cached skill",
+            text,
+            digest_override: None,
+            get_text: None,
+            get_error: false,
+            get_wrong_uri: false,
+        }],
+        None,
+        Some(Arc::clone(&request_log)),
+    ));
+    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
+        (),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    let origin = "test-skill-origin".to_string();
+
+    let first = Arc::new(McpSkillRegistry::new());
+    let first_token: HandleToken = Arc::new(41u32);
+    first.mark_discovery_started("srv", first_token.clone());
+    run_discovery_with_cache(
+        first.clone(),
+        None,
+        make_spec_handle(&running),
+        first_token,
+        AgentCancellationToken::new(),
+        Some((cache.clone(), origin.clone())),
+    )
+    .await;
+    assert_eq!(first.all_skills().len(), 1);
+    let first_requests = request_log.lock().unwrap().len();
+    assert!(
+        first_requests >= 2,
+        "首次发现应请求 skills/list 与 resources/read"
+    );
+
+    let second = Arc::new(McpSkillRegistry::new());
+    let second_token: HandleToken = Arc::new(42u32);
+    second.mark_discovery_started("srv", second_token.clone());
+    run_discovery_with_cache(
+        second.clone(),
+        None,
+        make_spec_handle(&running),
+        second_token,
+        AgentCancellationToken::new(),
+        Some((cache, origin)),
+    )
+    .await;
+
+    assert_eq!(second.all_skills().len(), 1);
+    assert_eq!(
+        request_log.lock().unwrap().len(),
+        first_requests,
+        "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
+    );
+}

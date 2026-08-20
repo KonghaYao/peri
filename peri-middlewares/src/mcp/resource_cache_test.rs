@@ -47,7 +47,7 @@ async fn test_expired_entry_is_not_returned() {
 }
 
 #[tokio::test]
-async fn test_resource_update_invalidates_only_matching_uri() {
+async fn test_resource_update_stales_cache_globally_for_cross_process_safety() {
     let dir = tempfile::tempdir().unwrap();
     let cache = McpResourceCache::at(dir.path().to_path_buf());
     for uri in ["resource://one", "resource://two"] {
@@ -73,7 +73,10 @@ async fn test_resource_update_invalidates_only_matching_uri() {
         .get("origin-a", "resources/read", "resource://two")
         .await;
     assert!(first.is_none());
-    assert_eq!(second, Some(serde_json::json!("resource://two")));
+    assert!(
+        second.is_none(),
+        "v2 全局 epoch 保证跨进程失效原子性；更新通知会保守地使同一 cache root 的旧条目全部 stale"
+    );
 }
 
 #[tokio::test]
@@ -127,7 +130,8 @@ async fn test_inflight_response_cannot_revive_invalidated_entry() {
     let cache = McpResourceCache::at(dir.path().to_path_buf());
     let ticket = cache
         .ticket("origin-a", "resources/read", "resource://one")
-        .await;
+        .await
+        .expect("测试 cache 应可用");
 
     cache
         .invalidate("origin-a", "resources/read", Some("resource://one"))
@@ -150,7 +154,10 @@ async fn test_inflight_response_cannot_revive_invalidated_entry() {
 async fn test_method_invalidation_rejects_inflight_pagination_response() {
     let dir = tempfile::tempdir().unwrap();
     let cache = McpResourceCache::at(dir.path().to_path_buf());
-    let ticket = cache.ticket("origin-a", "resources/list", "cursor-2").await;
+    let ticket = cache
+        .ticket("origin-a", "resources/list", "cursor-2")
+        .await
+        .expect("测试 cache 应可用");
 
     cache.invalidate("origin-a", "resources/list", None).await;
     cache
@@ -172,7 +179,8 @@ fn test_stdio_cache_origin_changes_with_config_identity() {
         command: Some("first-server".to_string()),
         args: Some(vec!["--project-a".to_string()]),
         env: Some(HashMap::from([(String::from("MODE"), String::from("one"))])),
-        url: None,
+        // 运行时仍优先使用 stdio；该 URL 不能把 origin 错误归类为 HTTP。
+        url: Some("https://unused.example.test/mcp?token=secret".to_string()),
         headers: None,
         oauth: None,
         disabled: None,
@@ -187,12 +195,44 @@ fn test_stdio_cache_origin_changes_with_config_identity() {
     assert_ne!(
         cache_origin("filesystem", Some(&first)),
         cache_origin("filesystem", Some(&second)),
-        "同名 stdio server 的配置变化必须隔离磁盘缓存"
+        "command + url 同存时仍以实际 stdio 配置隔离磁盘缓存"
     );
+    let stdio_without_url = McpServerConfig {
+        url: None,
+        ..first.clone()
+    };
+    assert_eq!(
+        cache_origin("filesystem", Some(&first)),
+        cache_origin("filesystem", Some(&stdio_without_url)),
+        "未实际使用的 URL 不得改变 stdio server 的缓存身份"
+    );
+}
+
+#[tokio::test]
+async fn test_entry_larger_than_limit_is_not_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let oversized = "x".repeat(1024 * 1024);
+
+    cache
+        .put(
+            "origin-a",
+            "resources/read",
+            "resource://oversized",
+            Duration::from_secs(60),
+            &oversized,
+        )
+        .await;
+
+    let value: Option<String> = cache
+        .get("origin-a", "resources/read", "resource://oversized")
+        .await;
+    assert!(value.is_none(), "超过 1 MiB 的单条响应不得持久化");
 }
 
 #[test]
 fn test_cache_directory_uses_peri_home() {
     let cache = McpResourceCache::new();
-    assert!(cache.path.ends_with(".peri/cache/mcp"));
+    assert!(cache.content_path.ends_with(".peri/cache/mcp/v2/content"));
+    assert!(cache.state_path.ends_with(".peri/cache/mcp/v2/state"));
 }

@@ -1,26 +1,31 @@
-//! 持久化 MCP Resource Cache。
+//! 持久化 MCP cache：只缓存明确可跨进程复用的公开响应。
 //!
-//! 仅将 server 明确标记为 `cacheScope: public` 的响应写入磁盘；private
-//! 响应继续由 rmcp 的连接内缓存管理，绝不跨进程持久化。
+//! v2 将 `cacache` content 与协调状态分离。网络 RPC 不持锁；短暂的本地
+//! `get` / `ticket` / `put` / `invalidate` 临界区由进程内 mutex 与跨进程
+//! advisory file lock 串行化，避免失效通知与迟到响应重新激活旧缓存。
 
 use std::{
     collections::BTreeMap,
+    fs::{self, OpenOptions},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use peri_acp_types::plugin::McpServerConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
-const CACHE_NAMESPACE: &str = "peri:mcp-resource-cache:v2";
+const CACHE_NAMESPACE: &str = "peri:mcp-cache:v2";
 const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const EPOCH_FILE: &str = "epoch";
 
 #[derive(Clone)]
 pub(crate) struct McpResourceCache {
-    path: PathBuf,
+    content_path: PathBuf,
+    state_path: PathBuf,
+    mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -28,15 +33,12 @@ pub(crate) struct CacheTicket {
     origin: String,
     method: &'static str,
     params: String,
-    method_epoch: String,
-    entry_epoch: String,
+    epoch: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
-    origin: String,
-    method_epoch: String,
-    entry_epoch: String,
+    epoch: u64,
     expires_at_ms: u128,
     payload: serde_json::Value,
 }
@@ -44,14 +46,20 @@ struct CacheEntry {
 impl McpResourceCache {
     pub(crate) fn new() -> Self {
         let base = dirs_next::home_dir().unwrap_or_else(std::env::temp_dir);
-        Self {
-            path: base.join(".peri").join("cache").join("mcp"),
-        }
+        Self::from_root(base.join(".peri").join("cache").join("mcp").join("v2"))
     }
 
     #[cfg(test)]
     pub(crate) fn at(path: PathBuf) -> Self {
-        Self { path }
+        Self::from_root(path)
+    }
+
+    fn from_root(root: PathBuf) -> Self {
+        Self {
+            content_path: root.join("content"),
+            state_path: root.join("state"),
+            mutex: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     pub(crate) async fn get<T: DeserializeOwned>(
@@ -60,52 +68,42 @@ impl McpResourceCache {
         method: &'static str,
         params: &str,
     ) -> Option<T> {
+        let _guard = self.mutex.lock().await;
+        let lock = self.lock().await?;
+        let epoch = self.read_epoch().await?;
         let key = cache_key(origin, method, params);
-        let bytes = match cacache::read(&self.path, &key).await {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
-        };
+        let bytes = cacache::read(&self.content_path, &key).await.ok()?;
         let entry: CacheEntry = match serde_json::from_slice(&bytes) {
             Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(origin, method, %error, "MCP 磁盘缓存条目无法解析，删除");
-                self.remove(&key).await;
+            Err(_) => {
+                let _ = cacache::remove(&self.content_path, &key).await;
+                drop(lock);
                 return None;
             }
         };
-        let ticket = self.ticket(origin, method, params).await;
-        if entry.origin != origin
-            || entry.expires_at_ms <= now_ms()
-            || entry.method_epoch != ticket.method_epoch
-            || entry.entry_epoch != ticket.entry_epoch
-        {
-            self.remove(&key).await;
+        if entry.epoch != epoch || entry.expires_at_ms <= now_ms() {
+            let _ = cacache::remove(&self.content_path, &key).await;
+            drop(lock);
             return None;
         }
-        match serde_json::from_value(entry.payload) {
+        let value = match serde_json::from_value(entry.payload) {
             Ok(value) => Some(value),
-            Err(error) => {
-                tracing::warn!(origin, method, %error, "MCP 磁盘缓存响应无法解析，删除");
-                self.remove(&key).await;
+            Err(_) => {
+                let _ = cacache::remove(&self.content_path, &key).await;
                 None
             }
-        }
+        };
+        drop(lock);
+        value
     }
 
-    /// 在发起 RPC 前捕获版本。通知若在 RPC 期间到达，之后的 `put` 将拒绝旧响应。
-    pub(crate) async fn ticket(
+    pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
         origin: &str,
         method: &'static str,
         params: &str,
-    ) -> CacheTicket {
-        CacheTicket {
-            origin: origin.to_string(),
-            method,
-            params: params.to_string(),
-            method_epoch: self.epoch(origin, method, None).await,
-            entry_epoch: self.epoch(origin, method, Some(params)).await,
-        }
+    ) -> Option<T> {
+        self.get(origin, method, params).await
     }
 
     #[cfg(test)]
@@ -117,8 +115,30 @@ impl McpResourceCache {
         ttl: Duration,
         response: &T,
     ) {
-        let ticket = self.ticket(origin, method, params).await;
+        let ticket = self
+            .ticket(origin, method, params)
+            .await
+            .expect("测试 cache 应可用");
         self.put_ticket(&ticket, ttl, response).await;
+    }
+
+    /// 在网络 RPC 前捕获 epoch；网络阶段绝不持有 cache lock。
+    pub(crate) async fn ticket(
+        &self,
+        origin: &str,
+        method: &'static str,
+        params: &str,
+    ) -> Option<CacheTicket> {
+        let _guard = self.mutex.lock().await;
+        let lock = self.lock().await?;
+        let epoch = self.read_epoch().await?;
+        drop(lock);
+        Some(CacheTicket {
+            origin: origin.to_string(),
+            method,
+            params: params.to_string(),
+            epoch,
+        })
     }
 
     pub(crate) async fn put_ticket<T: Serialize>(
@@ -132,93 +152,119 @@ impl McpResourceCache {
         }
         let payload = match serde_json::to_value(response) {
             Ok(payload) => payload,
-            Err(error) => {
-                tracing::warn!(origin = %ticket.origin, method = ticket.method, %error, "MCP 响应无法序列化到磁盘缓存");
-                return;
-            }
+            Err(_) => return,
         };
         let entry = CacheEntry {
-            origin: ticket.origin.clone(),
-            method_epoch: ticket.method_epoch.clone(),
-            entry_epoch: ticket.entry_epoch.clone(),
+            epoch: ticket.epoch,
             expires_at_ms: now_ms().saturating_add(ttl.as_millis()),
             payload,
         };
         let bytes = match serde_json::to_vec(&entry) {
             Ok(bytes) if bytes.len() <= MAX_ENTRY_BYTES => bytes,
-            Ok(bytes) => {
-                tracing::warn!(origin = %ticket.origin, method = ticket.method, size = bytes.len(), limit = MAX_ENTRY_BYTES, "MCP 响应超过持久化缓存单条上限，跳过");
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(origin = %ticket.origin, method = ticket.method, %error, "MCP 磁盘缓存封装无法序列化");
-                return;
-            }
+            Ok(_) | Err(_) => return,
         };
-        let current = self
-            .ticket(&ticket.origin, ticket.method, &ticket.params)
-            .await;
-        if current.method_epoch != ticket.method_epoch || current.entry_epoch != ticket.entry_epoch
-        {
-            tracing::debug!(origin = %ticket.origin, method = ticket.method, "MCP 响应在失效通知前取得，拒绝写入旧缓存");
+
+        let _guard = self.mutex.lock().await;
+        let lock = match self.lock().await {
+            Some(lock) => lock,
+            None => return,
+        };
+        let Some(epoch) = self.read_epoch().await else {
+            return;
+        };
+        if epoch != ticket.epoch {
+            tracing::debug!(method = ticket.method, "MCP 缓存失效后拒绝迟到响应");
+            drop(lock);
             return;
         }
-        self.trim(bytes.len() as u64).await;
+        self.trim_locked(bytes.len() as u64).await;
         if let Err(error) = cacache::write(
-            &self.path,
+            &self.content_path,
             cache_key(&ticket.origin, ticket.method, &ticket.params),
             bytes,
         )
         .await
         {
-            tracing::warn!(origin = %ticket.origin, method = ticket.method, %error, "写入 MCP 磁盘缓存失败");
+            tracing::warn!(method = ticket.method, %error, "写入 MCP 磁盘缓存失败");
         }
+        drop(lock);
     }
 
     pub(crate) async fn invalidate(
         &self,
-        origin: &str,
-        method: &'static str,
-        params: Option<&str>,
+        _origin: &str,
+        _method: &'static str,
+        _params: Option<&str>,
     ) {
-        let epoch_key = epoch_key(origin, method, params);
-        if let Err(error) = cacache::write(
-            &self.path,
-            epoch_key,
-            Uuid::new_v4().to_string().into_bytes(),
-        )
+        let _guard = self.mutex.lock().await;
+        let lock = match self.lock().await {
+            Some(lock) => lock,
+            None => return,
+        };
+        let Some(epoch) = self.read_epoch().await else {
+            return;
+        };
+        if let Err(error) = self.write_epoch(epoch.saturating_add(1)).await {
+            tracing::warn!(%error, "MCP 磁盘缓存失效标记写入失败，已停用本次失效");
+        }
+        drop(lock);
+    }
+
+    async fn lock(&self) -> Option<std::fs::File> {
+        let path = self.state_path.join("cache.lock");
+        let file = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(path)?;
+            file.lock()?;
+            Ok::<_, std::io::Error>(file)
+        })
         .await
-        {
-            tracing::warn!(origin, method, %error, "MCP 磁盘缓存失效标记写入失败");
-        }
-        if let Some(params) = params {
-            self.remove(&cache_key(origin, method, params)).await;
+        .ok()?
+        .ok()?;
+        Some(file)
+    }
+
+    async fn read_epoch(&self) -> Option<u64> {
+        let path = self.state_path.join(EPOCH_FILE);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => std::str::from_utf8(&bytes).ok()?.trim().parse().ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if tokio::fs::try_exists(&self.content_path).await.ok()? {
+                    let mut read_dir = tokio::fs::read_dir(&self.content_path).await.ok()?;
+                    if read_dir.next_entry().await.ok()?.is_some() {
+                        return None;
+                    }
+                }
+                self.write_epoch(0).await.ok()?;
+                Some(0)
+            }
+            Err(_) => None,
         }
     }
 
-    async fn epoch(&self, origin: &str, method: &str, params: Option<&str>) -> String {
-        cacache::read(&self.path, epoch_key(origin, method, params))
-            .await
-            .ok()
-            .and_then(|value| String::from_utf8(value).ok())
-            .unwrap_or_default()
+    async fn write_epoch(&self, epoch: u64) -> Result<(), std::io::Error> {
+        tokio::fs::create_dir_all(&self.state_path).await?;
+        let tmp = self.state_path.join(format!("{EPOCH_FILE}.tmp"));
+        tokio::fs::write(&tmp, epoch.to_string()).await?;
+        tokio::fs::rename(tmp, self.state_path.join(EPOCH_FILE)).await
     }
 
-    async fn remove(&self, key: &str) {
-        if let Err(error) = cacache::remove(&self.path, key).await {
-            tracing::debug!(%error, "MCP 磁盘缓存条目已不存在或无法移除");
-        }
-    }
-
-    async fn trim(&self, incoming: u64) {
-        let path = self.path.clone();
+    async fn trim_locked(&self, incoming: u64) {
+        let content_path = self.content_path.clone();
         let victims = tokio::task::spawn_blocking(move || {
-            let mut entries = cacache::list_sync(&path)
+            let mut entries = cacache::list_sync(&content_path)
                 .filter_map(Result::ok)
                 .filter(|entry| entry.key.starts_with(CACHE_NAMESPACE))
                 .collect::<Vec<_>>();
-            let mut total = entries.iter().map(|entry| entry.size as u64).sum::<u64>();
             entries.sort_by_key(|entry| entry.time);
+            let mut total = entries.iter().map(|entry| entry.size as u64).sum::<u64>();
             let mut victims = Vec::new();
             while total.saturating_add(incoming) > MAX_CACHE_BYTES {
                 let Some(entry) = entries.first() else { break };
@@ -231,16 +277,15 @@ impl McpResourceCache {
         .await
         .unwrap_or_default();
         for key in victims {
-            self.remove(&key).await;
+            let _ = cacache::remove(&self.content_path, key).await;
         }
     }
 }
 
 pub(crate) fn cache_origin(server_name: &str, config: Option<&McpServerConfig>) -> String {
-    // 永不持久化或记录配置明文。HTTP 以 endpoint 建立身份；stdio 则将稳定、
-    // 规范化的 command / args / env / protocol 版本纳入摘要，避免同名 server 串用。
+    // 传输选择以 stdio 优先；command + url 同存时，未使用的 url 不影响 identity。
     let identity = match config {
-        Some(config) if config.url.is_some() => {
+        Some(config) if config.command.is_none() && config.url.is_some() => {
             format!("http\0{}", config.url.as_deref().unwrap_or_default())
         }
         Some(config) => {
@@ -249,6 +294,7 @@ pub(crate) fn cache_origin(server_name: &str, config: Option<&McpServerConfig>) 
                 .as_ref()
                 .map(|env| env.iter().collect::<BTreeMap<_, _>>());
             serde_json::to_string(&(
+                "stdio",
                 config.command.as_deref(),
                 config.args.as_deref(),
                 env,
@@ -266,15 +312,8 @@ pub(crate) fn cache_origin(server_name: &str, config: Option<&McpServerConfig>) 
 
 fn cache_key(origin: &str, method: &str, params: &str) -> String {
     format!(
-        "{CACHE_NAMESPACE}:entry:{}",
+        "{CACHE_NAMESPACE}:{}",
         digest(&format!("{origin}\0{method}\0{params}"))
-    )
-}
-
-fn epoch_key(origin: &str, method: &str, params: Option<&str>) -> String {
-    format!(
-        "{CACHE_NAMESPACE}:epoch:{}",
-        digest(&format!("{origin}\0{method}\0{}", params.unwrap_or("*")))
     )
 }
 

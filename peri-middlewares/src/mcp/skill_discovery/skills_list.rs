@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::super::resource_cache::McpResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
 use rmcp::{
     model::{
@@ -9,7 +10,7 @@ use rmcp::{
     },
     Peer, RoleClient,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::legacy_scan::uri_eq_ignore_scheme_case;
@@ -20,7 +21,7 @@ use super::verify::{
 use super::{MAX_LIST_PAGES, READ_CONCURRENCY, RESOURCE_READ_TIMEOUT, SKILLS_LIST_TIMEOUT};
 
 /// `skills/list` 响应（分页；`nextCursor` 缺省兼容未分页 server）。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillListResponse {
     #[serde(default)]
@@ -31,7 +32,7 @@ pub(super) struct SkillListResponse {
 
 /// `skills/list` 条目（`frontmatter` 为 SKILL.md YAML frontmatter 的
 /// verbatim JSON 渲染——规范要求原样透传，非精选子集）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillListEntryDto {
     uri: String,
@@ -43,7 +44,7 @@ pub(super) struct SkillListEntryDto {
     resources: Option<Vec<SkillResourceDto>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillResourceDto {
     uri: String,
@@ -103,6 +104,25 @@ pub(super) async fn collect_via_skills_list(
     server: &str,
     cancel: AgentCancellationToken,
 ) -> (bool, Vec<SkillMetadata>) {
+    collect_via_skills_list_inner(peer, server, cancel, None).await
+}
+
+pub(super) async fn collect_via_skills_list_cached(
+    peer: Peer<RoleClient>,
+    server: &str,
+    cancel: AgentCancellationToken,
+    cache: McpResourceCache,
+    origin: String,
+) -> (bool, Vec<SkillMetadata>) {
+    collect_via_skills_list_inner(peer, server, cancel, Some((cache, origin))).await
+}
+
+async fn collect_via_skills_list_inner(
+    peer: Peer<RoleClient>,
+    server: &str,
+    cancel: AgentCancellationToken,
+    cache_context: Option<(McpResourceCache, String)>,
+) -> (bool, Vec<SkillMetadata>) {
     let mut dto_entries: Vec<SkillListEntryDto> = Vec::new();
     let mut cursor: Option<String> = None;
     for _page in 0..MAX_LIST_PAGES {
@@ -110,32 +130,30 @@ pub(super) async fn collect_via_skills_list(
             return (false, Vec::new());
         }
         let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
-        let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
-        let response = tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
-        let page: SkillListResponse = match response {
-            Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
-                Ok(page) => page,
-                Err(err) => {
-                    tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
+        let params_key = serde_json::to_string(&params).unwrap_or_default();
+        let page = if let Some((cache, origin)) = cache_context.as_ref() {
+            if let Some(page) = cache.get_json(origin, "skills/list", &params_key).await {
+                page
+            } else {
+                // 必须在 RPC 前捕获 ticket：更新通知若在请求期间到达，旧分页
+                // 响应随后不得重新写入持久化缓存。
+                let ticket = cache.ticket(origin, "skills/list", &params_key).await;
+                let page = fetch_skill_list_page(&peer, server, params).await;
+                let Some(page) = page else {
                     return (false, Vec::new());
+                };
+                if let Some(ticket) = ticket {
+                    cache
+                        .put_ticket(&ticket, std::time::Duration::from_secs(300), &page)
+                        .await;
                 }
-            },
-            Ok(Ok(_)) => {
-                tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
-                return (false, Vec::new());
+                page
             }
-            Ok(Err(err)) => {
-                tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 调用失败");
+        } else {
+            let Some(page) = fetch_skill_list_page(&peer, server, params).await else {
                 return (false, Vec::new());
-            }
-            Err(_) => {
-                tracing::warn!(
-                    server,
-                    "MCP skill 发现：skills/list 超时 ({}s)",
-                    SKILLS_LIST_TIMEOUT.as_secs()
-                );
-                return (false, Vec::new());
-            }
+            };
+            page
         };
         dto_entries.extend(page.skills);
         let next = page.next_cursor;
@@ -149,10 +167,8 @@ pub(super) async fn collect_via_skills_list(
         }
     }
     if dto_entries.is_empty() {
-        // 空列表合法（listing 可为空/部分），静默。
         return (false, Vec::new());
     }
-
     let entries: Vec<SkillListEntry> = dto_entries.into_iter().filter_map(entry_from_dto).collect();
     if entries.is_empty() {
         tracing::warn!(
@@ -161,8 +177,42 @@ pub(super) async fn collect_via_skills_list(
         );
         return (false, Vec::new());
     }
-    let out = fetch_and_verify(peer, server, entries, cancel).await;
+    let out = fetch_and_verify(peer, server, entries, cancel, cache_context).await;
     (out.is_empty(), out)
+}
+
+async fn fetch_skill_list_page(
+    peer: &Peer<RoleClient>,
+    server: &str,
+    params: Option<serde_json::Value>,
+) -> Option<SkillListResponse> {
+    let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
+    let response = tokio::time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
+    match response {
+        Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
+            Ok(page) => Some(page),
+            Err(err) => {
+                tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
+                None
+            }
+        },
+        Ok(Ok(_)) => {
+            tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
+            None
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 调用失败");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                server,
+                "MCP skill 发现：skills/list 超时 ({}s)",
+                SKILLS_LIST_TIMEOUT.as_secs()
+            );
+            None
+        }
+    }
 }
 
 /// 并发读取并校验条目（Semaphore + JoinSet）：每条任务持 peer clone；
@@ -172,6 +222,7 @@ async fn fetch_and_verify(
     server: &str,
     entries: Vec<SkillListEntry>,
     cancel: AgentCancellationToken,
+    cache_context: Option<(McpResourceCache, String)>,
 ) -> Vec<SkillMetadata> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(READ_CONCURRENCY));
     let server_owned = server.to_string();
@@ -181,12 +232,13 @@ async fn fetch_and_verify(
         let task_peer = peer.clone();
         let task_server = server_owned.clone();
         let task_cancel = cancel.clone();
+        let task_cache = cache_context.clone();
         join_set.spawn(async move {
             if task_cancel.is_cancelled() {
                 return None;
             }
             let _permit = permit.acquire_owned().await;
-            fetch_and_verify_one(task_peer, &task_server, entry, task_cancel).await
+            fetch_and_verify_one(task_peer, &task_server, entry, task_cancel, task_cache).await
         });
     }
     let mut out = Vec::with_capacity(join_set.len());
@@ -214,6 +266,7 @@ async fn fetch_and_verify_one(
     server: &str,
     entry: SkillListEntry,
     cancel: AgentCancellationToken,
+    cache_context: Option<(McpResourceCache, String)>,
 ) -> Option<SkillMetadata> {
     if cancel.is_cancelled() {
         return None;
@@ -221,12 +274,34 @@ async fn fetch_and_verify_one(
     let uri = entry.uri.clone();
     // 发现侧首读：SKILL.md 必须是 Text（Blob/失败/超时均无法校验 frontmatter
     // 与 digest）→ 条目过滤。
-    let SkillResourceRead::Text(text, _) = read_skill_resource_text(&peer, server, &uri).await
-    else {
-        return None;
+    let (text, cache_ticket) = if let Some((cache, origin)) = cache_context.as_ref() {
+        if let Some(text) = cache.get(origin, "skills/read", &uri).await {
+            (text, None)
+        } else {
+            let ticket = cache.ticket(origin, "skills/read", &uri).await;
+            let SkillResourceRead::Text(text, _) =
+                read_skill_resource_text(&peer, server, &uri).await
+            else {
+                return None;
+            };
+            (text, ticket.map(|ticket| (cache.clone(), ticket)))
+        }
+    } else {
+        let SkillResourceRead::Text(text, _) = read_skill_resource_text(&peer, server, &uri).await
+        else {
+            return None;
+        };
+        (text, None)
     };
     match verify_and_build(server, &entry, &text) {
-        VerifyOutcome::Built(meta) => Some(*meta),
+        VerifyOutcome::Built(meta) => {
+            if let Some((cache, ticket)) = cache_ticket {
+                cache
+                    .put_ticket(&ticket, std::time::Duration::from_secs(300), &text)
+                    .await;
+            }
+            Some(*meta)
+        }
         VerifyOutcome::Rejected => None,
         VerifyOutcome::DigestMismatch => {
             // digest 不匹配 = 内容陈旧/被替换（规范建议：经 skills/get 恢复）；
