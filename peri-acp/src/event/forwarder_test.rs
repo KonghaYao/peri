@@ -18,65 +18,7 @@ use peri_controller::langfuse::config::LangfuseConfig;
 use peri_controller::langfuse::fake_session::FakeLangfuseSession;
 use peri_controller::langfuse::tracer::LangfuseTracer;
 
-use crate::event::{clear_main_agent_source, spawn_eventbus_forwarder};
-
-#[test]
-fn clear_main_agent_source_removes_message_identity() {
-    let main_agent_id = AgentId::new();
-    let mut event = ExecutorEvent::TextChunk {
-        message_id: peri_acp_types::messages::MessageId::new(),
-        chunk: "main output".to_string(),
-        source_agent_id: Some(main_agent_id.to_string()),
-    };
-
-    clear_main_agent_source(&mut event, &main_agent_id.to_string());
-
-    assert!(matches!(
-        event,
-        ExecutorEvent::TextChunk {
-            source_agent_id: None,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn clear_main_agent_source_removes_tool_identity_but_keeps_subagent_identity() {
-    let main_agent_id = AgentId::new();
-    let child_agent_id = AgentId::new();
-    let mut main_tool = ExecutorEvent::ToolStart {
-        message_id: peri_acp_types::messages::MessageId::new(),
-        tool_call_id: "main-call".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({}),
-        source_agent_id: Some(main_agent_id.to_string()),
-    };
-    let mut child_tool = ExecutorEvent::ToolStart {
-        message_id: peri_acp_types::messages::MessageId::new(),
-        tool_call_id: "child-call".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({}),
-        source_agent_id: Some(child_agent_id.to_string()),
-    };
-
-    clear_main_agent_source(&mut main_tool, &main_agent_id.to_string());
-    clear_main_agent_source(&mut child_tool, &main_agent_id.to_string());
-
-    assert!(matches!(
-        main_tool,
-        ExecutorEvent::ToolStart {
-            source_agent_id: None,
-            ..
-        }
-    ));
-    assert!(matches!(
-        child_tool,
-        ExecutorEvent::ToolStart {
-            source_agent_id: Some(ref source_agent_id),
-            ..
-        } if source_agent_id == &child_agent_id.to_string()
-    ));
-}
+use crate::event::spawn_eventbus_forwarder;
 
 /// 轮询等待条件成立（forwarder 是 fire-and-forget task，无 JoinHandle 可 await）。
 async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {

@@ -42,30 +42,6 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
     }
 }
 
-/// Main-agent v2 events carry their own `agent_id`, but ACP `sourceAgentId` is a
-/// SubAgent routing hint. Clear the source when it equals the main agent identity.
-pub(crate) fn clear_main_agent_source(event: &mut ExecutorEvent, main_agent_id: &str) {
-    let source_agent_id = match event {
-        ExecutorEvent::TextChunk {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::AiReasoning {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::ToolStart {
-            source_agent_id, ..
-        }
-        | ExecutorEvent::ToolEnd {
-            source_agent_id, ..
-        } => source_agent_id,
-        _ => return,
-    };
-
-    if source_agent_id.as_deref() == Some(main_agent_id) {
-        *source_agent_id = None;
-    }
-}
-
 /// 启动 EventBus forwarder task。
 ///
 /// 消费 `handles` 内三层 v2 事件（render / state / observe），经协议序列化面映射

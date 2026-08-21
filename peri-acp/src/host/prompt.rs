@@ -654,14 +654,7 @@ pub(crate) async fn run_prompt(
                     let any: Arc<dyn std::any::Any + Send + Sync> = b;
                     any.downcast::<LangfuseBridge>().ok().map(|b| (*b).clone())
                 });
-            crate::event::spawn_eventbus_forwarder(
-                handles,
-                move |source, mut event| {
-                    crate::event::clear_main_agent_source(&mut event, &agent_id);
-                    on_event(source, event);
-                },
-                bridge,
-            );
+            crate::event::spawn_eventbus_forwarder(handles, on_event, bridge);
         })
     };
 

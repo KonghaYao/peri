@@ -666,55 +666,49 @@ impl EventHandles {
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
         RenderEvent::TextChunk {
-            agent_id,
-            message_id,
-            chunk,
-            ..
+            message_id, chunk, ..
         } => Some(ExecutorEvent::TextChunk {
             // v2 chunk 事件携带消息级身份（每次 LLM 调用一个稳定 message_id），
             // 不再用 turn_id 填充——同一 turn 多次迭代的消息各自独立（ACP 标准
             // messageId 语义：变化 = 新消息）。
             message_id,
             chunk,
-            source_agent_id: Some(agent_id.to_string()),
+            source_agent_id: None,
         }),
         RenderEvent::ThinkingChunk {
-            agent_id,
-            message_id,
-            chunk,
-            ..
+            message_id, chunk, ..
         } => Some(ExecutorEvent::AiReasoning {
             message_id,
             text: chunk,
-            source_agent_id: Some(agent_id.to_string()),
+            source_agent_id: None,
         }),
         RenderEvent::ToolStarted {
             turn_id,
-            agent_id,
             tool_call_id,
             name,
             input,
+            ..
         } => Some(ExecutorEvent::ToolStart {
             message_id: MessageId::from(turn_id.as_uuid()),
             tool_call_id,
             name,
             input,
-            source_agent_id: Some(agent_id.to_string()),
+            source_agent_id: None,
         }),
         RenderEvent::ToolEnded {
             turn_id,
-            agent_id,
             tool_call_id,
             name,
             output,
             is_error,
+            ..
         } => Some(ExecutorEvent::ToolEnd {
             message_id: MessageId::from(turn_id.as_uuid()),
             tool_call_id,
             name,
             output,
             is_error,
-            source_agent_id: Some(agent_id.to_string()),
+            source_agent_id: None,
         }),
         RenderEvent::BudgetWarning {
             used_tokens,
