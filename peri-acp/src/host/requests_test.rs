@@ -1252,6 +1252,129 @@ async fn test_delete_missing_session_id_returns_error() {
     );
 }
 
+// ── session/rename（标准 ACP；stdio 与 TUI 共用统一 host 注册于 requests.rs）──
+
+/// 重命名成功：thread store 持久化标题 + `session/update` 通知携带
+/// `SessionInfoUpdate.title` + 响应往返 `{sessionId, title}`。
+#[tokio::test]
+async fn test_rename_persists_title_and_pushes_session_info_update() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let mock = std::sync::Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
+    let cwd = tmp.path().to_str().unwrap();
+
+    // 真实创建线程（id 即 session id），与 session/new 后的持久层状态一致
+    let sid = cfg
+        .thread_store
+        .create_thread(ThreadMeta::new(cwd))
+        .await
+        .unwrap();
+    let new_title = "重构 ACP 协议".to_string();
+
+    let resp = handle_request(
+        "session/rename",
+        &json!({ "sessionId": sid, "title": new_title }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .expect("session/rename 应成功");
+
+    // 标准响应往返
+    assert_eq!(resp["sessionId"], sid, "响应 sessionId: {resp}");
+    assert_eq!(resp["title"], new_title, "响应 title: {resp}");
+
+    // 持久化：load_meta 标题已更新
+    let meta = cfg.thread_store.load_meta(&sid).await.unwrap();
+    assert_eq!(meta.title.as_deref(), Some(new_title.as_str()));
+
+    // 通知：session/update 携带 SessionInfoUpdate.title，供标题栏与外部客户端刷新
+    let (method, payload) = mock
+        .notifications()
+        .iter()
+        .find(|(m, _)| m == "session/update")
+        .cloned()
+        .expect("rename 应推送 session/update 通知");
+    assert_eq!(method, "session/update");
+    assert_eq!(payload["sessionId"], sid);
+    assert_eq!(payload["update"]["sessionUpdate"], "session_info_update");
+    assert_eq!(payload["update"]["title"], new_title);
+}
+
+/// 缺失 sessionId → -32602 Invalid params。
+#[tokio::test]
+async fn test_rename_missing_session_id_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+
+    let err = handle_request(
+        "session/rename",
+        &json!({ "title": "无 sessionId" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(
+        err.message.contains("missing sessionId"),
+        "缺失 sessionId 应报 -32602，实际: {}",
+        err.message
+    );
+}
+
+/// 缺失 title → -32602 Invalid params。
+#[tokio::test]
+async fn test_rename_missing_title_returns_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp);
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+
+    let err = handle_request(
+        "session/rename",
+        &json!({ "sessionId": "some-session" }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(
+        err.message.contains("missing title"),
+        "缺失 title 应报 -32602，实际: {}",
+        err.message
+    );
+}
+
 // ── M2 回归：进程内 session/delete 必须 shutdown LSP pool ────────────────────
 
 /// 记录 shutdown 调用的 mock LSP pool。

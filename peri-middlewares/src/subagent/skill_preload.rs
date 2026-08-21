@@ -17,7 +17,8 @@ use crate::skills::{SkillMetadata, SkillRoot, SkillSource};
 /// - 消息中任意位置出现即可（不限于行首）
 ///
 /// 匹配由 `/` 开头、后跟 `[a-zA-Z0-9_:.-]` 的 token。
-/// 允许 `:` 以支持插件命名空间（如 `/ecc:plan`）。
+/// `:` 保留给 MCP 的 `/server:skill` 命令形式；本地 SKILL.md 名称在扫描时已
+/// 规范为连字符，因而不会以冒号形式命中本地 skill。
 pub fn extract_skill_names_from_text(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter_map(|word| {

@@ -5,6 +5,11 @@
       "url": "https://peri-mcpp-gateway.claude-code-best.workers.dev/openspec/mcp",
       "cwd": ".",
        "protocolVersion": "2026-07-28"
-    }
+      },
+      "ip-as-logo": {
+        "type": "streamable-http",
+        "url": "https://peri-mcpp-gateway.claude-code-best.workers.dev/ip-as-logo/mcp",
+        "protocolVersion": "2026-07-28"
+      }
   }
 }

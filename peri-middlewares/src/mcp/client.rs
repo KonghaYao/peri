@@ -6,7 +6,10 @@ use std::{any::Any, collections::HashMap, sync::Arc};
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::session::InboxHandle;
 use rmcp::{
-    model::{Resource, Tool},
+    model::{
+        CacheScope, ClientCapabilities, Implementation, InitializeRequestParams,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
+    },
     service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
 };
 use thiserror::Error;
@@ -26,7 +29,7 @@ pub(crate) use transport::{
 
 /// Wrapper for RunningService that can hold either handler type
 pub(crate) enum McpServiceWrapper {
-    Default(RunningService<RoleClient, ()>),
+    Default(RunningService<RoleClient, InitializeRequestParams>),
     Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
 }
 
@@ -48,19 +51,63 @@ impl McpServiceWrapper {
         }
     }
 
-    pub async fn list_all_resources(&self) -> Result<Vec<Resource>, ServiceError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.list_all_resources().await,
-            McpServiceWrapper::Channel(svc) => svc.list_all_resources().await,
-        }
-    }
-
     pub fn peer(&self) -> &Peer<RoleClient> {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),
             McpServiceWrapper::Channel(svc) => svc.peer(),
         }
     }
+}
+
+/// 供状态与日志使用的 MCP 错误文本清洗：移除 URL query，遮蔽常见凭据键值。
+/// 不应将原始底层错误链直接投影到 UI 或日志。
+pub fn redact_mcp_error(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for token in input.split_whitespace() {
+        let token = if let Some((prefix, _)) = token.split_once('?') {
+            if prefix.starts_with("http://") || prefix.starts_with("https://") {
+                format!("{prefix}?…")
+            } else {
+                token.to_string()
+            }
+        } else {
+            token.to_string()
+        };
+        let lower = token.to_ascii_lowercase();
+        if ["token=", "password=", "secret=", "api_key=", "apikey="]
+            .iter()
+            .any(|key| lower.contains(key))
+        {
+            output.push_str("[redacted]");
+        } else {
+            output.push_str(&token);
+        }
+        output.push(' ');
+    }
+    output.trim_end().to_string()
+}
+
+pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
+
+pub(crate) fn mcpp_client_info() -> InitializeRequestParams {
+    let mut capabilities = ClientCapabilities::default();
+    capabilities.extensions = Some(std::collections::BTreeMap::from([(
+        SERVER_CACHE_VERSION_EXTENSION.to_string(),
+        serde_json::Map::new(),
+    )]));
+    InitializeRequestParams::new(capabilities, Implementation::from_build_env())
+}
+
+pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {
+    peer.peer_info()?
+        .capabilities
+        .extensions
+        .as_ref()?
+        .get(SERVER_CACHE_VERSION_EXTENSION)?
+        .get("cacheVersion")?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// MCP 客户端连接状态
@@ -99,8 +146,16 @@ pub enum OAuthStatus {
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
     pub name: String,
+    pub version: Option<String>,
+    pub cache_version: Option<String>,
     pub transport_type: String,
     pub status: ClientStatus,
+    /// 供 UI 显示的稳定状态标签，不暴露 `ClientStatus::Failed` 的完整错误链。
+    pub status_label: String,
+    /// 供 UI 显示的一行安全错误摘要；完整诊断仅写入 tracing 日志。
+    pub error_summary: Option<String>,
+    /// 供 UI 显示最近一次持久化 cache 结果；None 表示尚无缓存请求。
+    pub cache_status: Option<String>,
     pub tool_count: usize,
     pub resource_count: usize,
     /// OAuth 授权状态
@@ -131,6 +186,8 @@ pub enum McpPoolError {
 #[derive(Clone)]
 pub struct McpClientHandle {
     pub name: String,
+    pub version: Option<String>,
+    pub cache_version: Option<String>,
     pub peer: Option<Peer<RoleClient>>,
     pub tools: Vec<Tool>,
     pub resources: Vec<Resource>,
@@ -167,11 +224,31 @@ pub(crate) fn peer_declares_skills(peer: &Peer<RoleClient>) -> bool {
         .unwrap_or(false)
 }
 
+fn mcp_status_label(status: &ClientStatus) -> &'static str {
+    match status {
+        ClientStatus::Connected => "connected",
+        ClientStatus::Failed(_) => "failed",
+        ClientStatus::Disconnected => "disconnected",
+        ClientStatus::Disabled => "disabled",
+        ClientStatus::Uninitialized => "uninitialized",
+    }
+}
+
+fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
+    let ClientStatus::Failed(reason) = status else {
+        return None;
+    };
+    let summary = redact_mcp_error(reason.lines().next().unwrap_or_default().trim());
+    let summary: String = summary.chars().take(160).collect();
+    (!summary.is_empty()).then_some(summary)
+}
+
 /// MCP 客户端连接池
 pub struct McpClientPool {
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
     pub(crate) services: tokio::sync::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
+    pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
     pub(crate) plugin_sources: parking_lot::RwLock<HashMap<String, String>>,
     /// 初始化阶段内部存储（M-TUI 收口：TUI 不再持有 watch channel，`mcp/list`
@@ -203,6 +280,8 @@ pub struct McpClientPool {
     /// 活跃订阅循环任务（server_name → JoinHandle；随 transport 关闭自然结束）。
     pub(crate) subscription_tasks:
         tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    /// 跨进程的 public MCP Resource Cache；private 响应绝不写入该缓存。
+    pub(crate) resource_cache: super::resource_cache::McpResourceCache,
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -231,11 +310,259 @@ pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl McpClientPool {
+    pub(crate) async fn read_resource_cached(
+        &self,
+        server_name: &str,
+        uri: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Result<
+        (
+            ReadResourceResult,
+            Option<super::resource_cache::CacheTicket>,
+        ),
+        rmcp::service::ServiceError,
+    > {
+        let origin = self.cache_origin(server_name);
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        if let Some(result) = self
+            .resource_cache
+            .get_versioned(&origin, "resources/read", uri, cache_version.as_deref())
+            .await
+        {
+            return Ok((result, None));
+        }
+        self.resource_cache
+            .mark_live_fetch(&origin, "resources/read");
+        let Some(ticket) = self
+            .resource_cache
+            .ticket(&origin, "resources/read", uri)
+            .await
+        else {
+            return Ok((
+                peer.read_resource(ReadResourceRequestParams::new(uri))
+                    .await?,
+                None,
+            ));
+        };
+        let result = peer
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await?;
+        Ok((result, Some(ticket)))
+    }
+
+    /// 仅由资源使用方在内容验证成功后调用。这样受 SEP-2640 内容绑定保护的
+    /// `skill://` 响应不会在 digest 校验失败时落入跨进程缓存。
+    pub(crate) async fn cache_verified_resource(
+        &self,
+        ticket: Option<super::resource_cache::CacheTicket>,
+        result: &ReadResourceResult,
+    ) {
+        let Some(ticket) = ticket else { return };
+        self.persist_public_response(&ticket, result, result.ttl_ms, result.cache_scope)
+            .await;
+    }
+
+    pub(crate) async fn list_resources_cached(
+        &self,
+        server_name: &str,
+        params: Option<PaginatedRequestParams>,
+        peer: &Peer<RoleClient>,
+    ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
+        let origin = self.cache_origin(server_name);
+        let params_key = serde_json::to_string(&params).unwrap_or_default();
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        if let Some(result) = self
+            .resource_cache
+            .get_versioned(
+                &origin,
+                "resources/list",
+                &params_key,
+                cache_version.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.resource_cache
+            .mark_live_fetch(&origin, "resources/list");
+        let ticket = self
+            .resource_cache
+            .ticket(&origin, "resources/list", &params_key)
+            .await;
+        let result = peer.list_resources(params).await?;
+        if let Some(ticket) = ticket {
+            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+                .await;
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn list_all_resources_cached(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Result<Vec<Resource>, rmcp::service::ServiceError> {
+        let mut resources = Vec::new();
+        let mut cursor = None;
+        loop {
+            let result = self
+                .list_resources_cached(
+                    server_name,
+                    Some(PaginatedRequestParams::default().with_cursor(cursor)),
+                    peer,
+                )
+                .await?;
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(resources);
+            }
+        }
+    }
+
+    /// 缓存包装器供后续 Resource Template 消费者使用；当前 Agent 尚未暴露
+    /// templates/list 的目录工具，因此不在初始化阶段进行无目的预取。
+    pub async fn list_resource_templates_cached(
+        &self,
+        server_name: &str,
+        params: Option<PaginatedRequestParams>,
+        peer: &Peer<RoleClient>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::service::ServiceError> {
+        let origin = self.cache_origin(server_name);
+        let params_key = serde_json::to_string(&params).unwrap_or_default();
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        if let Some(result) = self
+            .resource_cache
+            .get_versioned(
+                &origin,
+                "resources/templates/list",
+                &params_key,
+                cache_version.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        let ticket = self
+            .resource_cache
+            .ticket(&origin, "resources/templates/list", &params_key)
+            .await;
+        let result = peer.list_resource_templates(params).await?;
+        if let Some(ticket) = ticket {
+            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
+                .await;
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn invalidate_resource_cache(&self, server_name: &str, uri: Option<&str>) {
+        let origin = self.cache_origin(server_name);
+        self.invalidate_resource_cache_origin(&origin, uri).await;
+    }
+
+    pub(crate) async fn invalidate_resource_cache_origin(&self, origin: &str, uri: Option<&str>) {
+        match uri {
+            Some(_uri) => {
+                // 一个 resources/read 响应可包含多个 contents[] URI；当前 cache
+                // 未维护反向索引，无法确认通知 URI 对应哪个聚合请求。按 MCPP
+                // 7.3.2 保守失效该 origin 的 read domain，避免聚合响应继续命中。
+                self.resource_cache
+                    .invalidate(origin, "resources/read", None)
+                    .await;
+            }
+            None => {
+                self.resource_cache
+                    .invalidate(origin, "resources/list", None)
+                    .await;
+                self.resource_cache
+                    .invalidate(origin, "resources/templates/list", None)
+                    .await;
+            }
+        }
+    }
+
+    pub(crate) fn cache_origin(&self, server_name: &str) -> String {
+        let config = self.configs.read().get(server_name).cloned();
+        super::resource_cache::cache_origin(server_name, config.as_ref())
+    }
+
+    pub(crate) fn resource_cache(&self) -> super::resource_cache::McpResourceCache {
+        self.resource_cache.clone()
+    }
+
+    fn cache_status_for(&self, server_name: &str) -> Option<String> {
+        let origin = self.cache_origin(server_name);
+        if let Some(status) = self.resource_cache.recent_status(&origin) {
+            return Some(match status {
+                super::resource_cache::CacheLoadStatus::VersionHit => "version_cached".to_string(),
+                super::resource_cache::CacheLoadStatus::McppHit => "mcpp_cached".to_string(),
+                super::resource_cache::CacheLoadStatus::ResourceHit => "cached".to_string(),
+                super::resource_cache::CacheLoadStatus::LiveFetch => "live_fetch".to_string(),
+                super::resource_cache::CacheLoadStatus::StoredAfterFetch => {
+                    "stored_after_fetch".to_string()
+                }
+            });
+        }
+        let config = self.configs.read().get(server_name).cloned();
+        let safe = config.as_ref().is_none_or(|config| {
+            config.oauth.is_none()
+                && config.headers.as_ref().is_none_or(|headers| {
+                    !headers
+                        .keys()
+                        .any(|key| key.eq_ignore_ascii_case("authorization"))
+                })
+        });
+        Some(if safe {
+            "cache_ready".to_string()
+        } else {
+            "cache_disabled".to_string()
+        })
+    }
+
+    async fn persist_public_response<T: serde::Serialize>(
+        &self,
+        ticket: &super::resource_cache::CacheTicket,
+        result: &T,
+        ttl_ms: Option<u64>,
+        cache_scope: Option<CacheScope>,
+    ) {
+        if cache_scope == Some(CacheScope::Public) || (cache_scope.is_none() && ttl_ms.is_some()) {
+            let ttl = std::time::Duration::from_millis(ttl_ms.unwrap_or_default());
+            let (cache_version, cache_allowed) = self
+                .cache_versions
+                .read()
+                .iter()
+                .find_map(|(server, version)| {
+                    (self.cache_origin(server) == ticket.origin).then(|| {
+                        let allowed = self.configs.read().get(server).is_none_or(|config| {
+                            config.oauth.is_none()
+                                && config.headers.as_ref().is_none_or(|headers| {
+                                    !headers
+                                        .keys()
+                                        .any(|key| key.eq_ignore_ascii_case("authorization"))
+                                })
+                        });
+                        (Some(version.clone()), allowed)
+                    })
+                })
+                .unwrap_or((None, true));
+            if !cache_allowed {
+                return;
+            }
+            if cache_allowed && (!ttl.is_zero() || cache_version.is_some()) {
+                self.resource_cache
+                    .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
+                    .await;
+            }
+        }
+    }
+
     pub fn new_pending() -> Self {
         Self {
             clients: parking_lot::RwLock::new(HashMap::new()),
             services: tokio::sync::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
+            cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
             init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
             initialized: std::sync::atomic::AtomicBool::new(false),
@@ -246,12 +573,15 @@ impl McpClientPool {
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_inboxes: parking_lot::RwLock::new(HashMap::new()),
             subscription_tasks: tokio::sync::Mutex::new(HashMap::new()),
+            resource_cache: super::resource_cache::McpResourceCache::new(),
         }
     }
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
-        Self::new_pending()
+        let mut pool = Self::new_pending();
+        pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
+        pool
     }
 
     /// 注入 OAuth 流程事件回调（host 装配面在 `run_initialize` 前调用；
@@ -425,6 +755,8 @@ impl McpClientPool {
             name.to_string(),
             Arc::new(McpClientHandle {
                 name: name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -463,6 +795,8 @@ impl McpClientPool {
             name.to_string(),
             Arc::new(McpClientHandle {
                 name: name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -510,6 +844,8 @@ impl McpClientPool {
             server_name.to_string(),
             Arc::new(McpClientHandle {
                 name: server_name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -529,8 +865,13 @@ impl McpClientPool {
             .values()
             .map(|h| ServerInfo {
                 name: h.name.clone(),
+                version: h.version.clone(),
+                cache_version: h.cache_version.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
+                status_label: mcp_status_label(&h.status).to_string(),
+                error_summary: mcp_error_summary(&h.status),
+                cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -555,8 +896,13 @@ impl McpClientPool {
         for h in clients.values() {
             result.push(ServerInfo {
                 name: h.name.clone(),
+                version: h.version.clone(),
+                cache_version: h.cache_version.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
+                status_label: mcp_status_label(&h.status).to_string(),
+                error_summary: mcp_error_summary(&h.status),
+                cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
                 oauth_status: h.oauth_status.clone(),
@@ -570,9 +916,14 @@ impl McpClientPool {
         for (name, sc) in configs.iter() {
             if !clients.contains_key(name) {
                 result.push(ServerInfo {
+                    version: None,
+                    cache_version: None,
                     name: name.clone(),
                     transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
                     status: ClientStatus::Uninitialized,
+                    status_label: "uninitialized".to_string(),
+                    error_summary: None,
+                    cache_status: self.cache_status_for(name),
                     tool_count: 0,
                     resource_count: 0,
                     oauth_status: OAuthStatus::default(),

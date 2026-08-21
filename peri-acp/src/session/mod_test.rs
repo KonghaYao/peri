@@ -882,25 +882,22 @@ async fn test_session_creation_core_conflict_keeps_builtin() {
     assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
 }
 
-/// C1 词法兜底：skill 名含冒号（frontmatter 任意字符串）→ MalformedName
-/// 拒绝 + 告警跳过，注册表无该条目。
+/// C1 名称规范化：扫描时将 skill 名中的冒号改为连字符，使其能注册为
+/// `core:{name}` 第一等级显式形态，裸名快捷匹配可用。
 #[tokio::test]
-async fn test_session_creation_skill_name_with_colon_skipped() {
+async fn test_session_creation_normalizes_skill_name_with_colon() {
     let tmp = tempfile::TempDir::new().unwrap();
-    write_local_skill(tmp.path(), "bad", "foo:bar");
+    write_local_skill(tmp.path(), "namespaced", "foo:bar");
     let mgr = make_session_manager(&tmp);
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    let resolved = reg.resolve("/foo-bar").expect("规范化名称应可解析");
+    assert_eq!(resolved.entry.fullname, "core:foo-bar");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
     assert!(
-        reg.resolve("/core:foo:bar").is_none(),
-        "含冒号 skill 名被 MalformedName 拒绝"
-    );
-    assert!(
-        reg.snapshot()
-            .iter()
-            .all(|e| !e.fullname.contains("foo:bar")),
-        "词法非法条目不得入注册表"
+        reg.resolve("/foo:bar").is_none(),
+        "原始冒号名称不再作为命令注册"
     );
 }
 

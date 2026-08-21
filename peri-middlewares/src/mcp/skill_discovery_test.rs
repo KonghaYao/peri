@@ -767,7 +767,7 @@ async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
         resource("skill://srv/alpha/SKILL.md"),
     ];
     let cancel = AgentCancellationToken::new();
-    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel).await;
+    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel, None).await;
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     // frontmatter name = uri 最终段（zebra/alpha）→ 注册名
@@ -830,6 +830,8 @@ fn make_discovery_handle(
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: "srv".to_string(),
+        version: None,
+        cache_version: None,
         peer: Some(running.peer().clone()),
         tools: vec![],
         resources,
@@ -1059,6 +1061,7 @@ async fn spec_skill_server(
     skills: Vec<SpecSkill>,
     first_done: Option<Arc<tokio::sync::Notify>>,
     request_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    cacheable: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, writer) = tokio::io::split(io);
@@ -1110,7 +1113,12 @@ async fn spec_skill_server(
                             })
                         })
                         .collect();
-                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": { "skills": entries } })
+                    let mut result = serde_json::json!({ "skills": entries });
+                    if cacheable {
+                        result["cacheScope"] = serde_json::json!("public");
+                        result["ttlMs"] = serde_json::json!(60_000);
+                    }
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
                 }
                 "resources/read" => {
                     match skills.iter().find(|s| s.uri == uri) {
@@ -1122,12 +1130,17 @@ async fn spec_skill_server(
                             } else {
                                 s.text
                             };
+                            let mut result = serde_json::json!({
+                                "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }]
+                            });
+                            if cacheable {
+                                result["cacheScope"] = serde_json::json!("public");
+                                result["ttlMs"] = serde_json::json!(60_000);
+                            }
                             serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
-                                "result": {
-                                    "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }]
-                                }
+                                "result": result
                             })
                         }
                         None => serde_json::json!({
@@ -1207,6 +1220,8 @@ fn make_spec_handle(
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: "srv".to_string(),
+        version: None,
+        cache_version: None,
         peer: Some(running.peer().clone()),
         tools: vec![],
         resources: vec![],
@@ -1254,6 +1269,7 @@ async fn run_discovery_spec_mode_via_skills_list() {
         ],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1341,6 +1357,7 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
         ],
         None,
         Some(Arc::clone(&request_log)),
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1405,6 +1422,7 @@ async fn run_discovery_spec_mode_get_wrong_uri_rejects_recovery() {
         }],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1633,6 +1651,7 @@ async fn run_discovery_writes_command_registry() {
         }],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1886,4 +1905,74 @@ async fn releaser_rpc_miss_falls_back_done_info() {
         }
         _other => panic!("RPC miss 应回退 Done"),
     }
+}
+
+#[tokio::test]
+async fn cached_skill_discovery_avoids_list_and_skill_reads() {
+    let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
+    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(spec_skill_server(
+        server_io,
+        vec![SpecSkill {
+            uri: "skill://cached/SKILL.md",
+            name: "cached",
+            description: "Cached skill",
+            text,
+            digest_override: None,
+            get_text: None,
+            get_error: false,
+            get_wrong_uri: false,
+        }],
+        None,
+        Some(Arc::clone(&request_log)),
+        true,
+    ));
+    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
+        (),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    let origin = "test-skill-origin".to_string();
+
+    let first = Arc::new(McpSkillRegistry::new());
+    let first_token: HandleToken = Arc::new(41u32);
+    first.mark_discovery_started("srv", first_token.clone());
+    run_discovery_with_cache(
+        first.clone(),
+        None,
+        make_spec_handle(&running),
+        first_token,
+        AgentCancellationToken::new(),
+        Some((cache.clone(), origin.clone())),
+    )
+    .await;
+    assert_eq!(first.all_skills().len(), 1);
+    let first_requests = request_log.lock().unwrap().len();
+    assert!(
+        first_requests >= 2,
+        "首次发现应请求 skills/list 与 resources/read"
+    );
+
+    let second = Arc::new(McpSkillRegistry::new());
+    let second_token: HandleToken = Arc::new(42u32);
+    second.mark_discovery_started("srv", second_token.clone());
+    run_discovery_with_cache(
+        second.clone(),
+        None,
+        make_spec_handle(&running),
+        second_token,
+        AgentCancellationToken::new(),
+        Some((cache, origin)),
+    )
+    .await;
+
+    assert_eq!(second.all_skills().len(), 1);
+    assert_eq!(
+        request_log.lock().unwrap().len(),
+        first_requests,
+        "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
+    );
 }

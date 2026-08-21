@@ -24,7 +24,17 @@ fn test_text_chunk_maps() {
     };
     let executor_event = render_event_to_executor(r).expect("TextChunk 应映射");
     match executor_event {
-        ExecutorEvent::TextChunk { chunk, .. } => assert_eq!(chunk, "hello"),
+        ExecutorEvent::TextChunk {
+            chunk,
+            source_agent_id,
+            ..
+        } => {
+            assert_eq!(chunk, "hello");
+            assert_eq!(
+                source_agent_id, None,
+                "共享 mapper 不得把主 agent_id 解释为 SubAgent 来源"
+            );
+        }
         _ => panic!("应为 TextChunk"),
     }
 }
@@ -50,13 +60,8 @@ fn test_thinking_chunk_maps() {
                 !message_id.as_uuid().is_nil(),
                 "message_id 必须透传非空 UUID"
             );
-            // 身份透传（2026-08-05-3.0-m-event-chain-canonical）：
-            // source_agent_id 透传 v2 agent_id，不再置 None 伪装。
-            assert_eq!(
-                source_agent_id.as_deref(),
-                Some(agent_id.to_string().as_str()),
-                "source_agent_id 必须透传 v2 agent_id"
-            );
+            // 共享 mapper 不推断运行角色；只有 SubAgent forwarder 会显式注入 child id。
+            assert_eq!(source_agent_id, None);
         }
         _ => panic!("应为 AiReasoning"),
     }

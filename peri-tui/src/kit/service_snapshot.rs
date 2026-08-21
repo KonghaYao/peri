@@ -517,7 +517,9 @@ fn derive_mcp_servers(
         .into_iter()
         .map(|info| McpServerSummary {
             name: info.name.clone(),
-            status: format!("{:?}", info.status).to_lowercase(),
+            version: info.version,
+            status: info.status_label,
+            error_summary: info.error_summary,
             transport: info.transport_type.clone(),
             tools_count: info.tool_count,
             needs_auth: matches!(
@@ -525,6 +527,7 @@ fn derive_mcp_servers(
                 peri_middlewares::mcp::OAuthStatus::NeedsAuthorization
             ),
             url: info.url.clone(),
+            cache_status: info.cache_status,
         })
         .collect()
 }

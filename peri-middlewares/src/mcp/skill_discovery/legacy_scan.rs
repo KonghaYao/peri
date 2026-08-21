@@ -9,6 +9,7 @@ use rmcp::{
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use super::super::resource_cache::McpResourceCache;
 use super::verify::disambiguate_names;
 use super::{parse_mcp_skill_md, READ_CONCURRENCY, RESOURCE_READ_TIMEOUT};
 
@@ -78,6 +79,7 @@ pub(crate) async fn collect_skill_entries(
     server: &str,
     resources: Vec<Resource>,
     cancel: AgentCancellationToken,
+    cache: Option<(McpResourceCache, String)>,
 ) -> (bool, Vec<SkillMetadata>) {
     let resources = filter_nested_skills(resources);
     if resources.is_empty() {
@@ -93,25 +95,62 @@ pub(crate) async fn collect_skill_entries(
         let task_peer = peer.clone();
         let task_server = server_owned.clone();
         let task_cancel = cancel.clone();
+        let task_cache = cache.clone();
         join_set.spawn(async move {
             if task_cancel.is_cancelled() {
                 return None;
             }
             let _permit = permit_sem.acquire_owned().await;
             let uri = resource.uri.clone();
-            let request = ReadResourceRequestParams::new(uri.clone());
-            let result = match tokio::time::timeout(RESOURCE_READ_TIMEOUT, task_peer.read_resource(request))
+            let cached = match task_cache.as_ref() {
+                Some((cache, origin)) => cache
+                    .get(origin, "skills/legacy-read", &uri)
+                    .await,
+                None => None,
+            };
+            let result = if let Some(result) = cached {
+                result
+            } else {
+                if let Some((cache, origin)) = task_cache.as_ref() {
+                    cache.mark_live_fetch(origin, "skills/legacy-read");
+                }
+                let ticket = match task_cache.as_ref() {
+                    Some((cache, origin)) => {
+                        cache.ticket(origin, "skills/legacy-read", &uri).await
+                    }
+                    None => None,
+                };
+                let request = ReadResourceRequestParams::new(uri.clone());
+                let result = match tokio::time::timeout(
+                    RESOURCE_READ_TIMEOUT,
+                    task_peer.read_resource(request),
+                )
                 .await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(err)) => {
-                    tracing::debug!(server = %task_server, %uri, "MCP skill 资源读取失败: {err}");
-                    return None;
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(err)) => {
+                        tracing::debug!(server = %task_server, %uri, "MCP skill 资源读取失败: {err}");
+                        return None;
+                    }
+                    Err(_) => {
+                        tracing::debug!(server = %task_server, %uri, "MCP skill 资源读取超时 ({}s)", RESOURCE_READ_TIMEOUT.as_secs());
+                        return None;
+                    }
+                };
+                if let (Some((cache, _)), Some(ticket)) = (task_cache.as_ref(), ticket) {
+                    if result.cache_scope == Some(rmcp::model::CacheScope::Public) {
+                        cache
+                            .put_ticket(
+                                &ticket,
+                                std::time::Duration::from_millis(
+                                    result.ttl_ms.unwrap_or_default(),
+                                ),
+                                &result,
+                            )
+                            .await;
+                    }
                 }
-                Err(_) => {
-                    tracing::debug!(server = %task_server, %uri, "MCP skill 资源读取超时 ({}s)", RESOURCE_READ_TIMEOUT.as_secs());
-                    return None;
-                }
+                result
             };
             let text = result.contents.iter().find_map(|content| match content {
                 ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),

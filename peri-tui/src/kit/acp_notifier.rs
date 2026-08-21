@@ -469,20 +469,25 @@ fn handle_session_update(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // ── §4.1 streaming: standard session/update streaming tags ──
-    // agent_id from params["_peri"]["sourceAgentId"] (ACP extension)
-
+    // SubAgent identity uses ACP's typed params._meta extension field. Keep the
+    // legacy params._peri lookup while older Peri servers may still emit it.
     let agent_id: Option<String> = params
-        .get("_peri")
-        .and_then(|p| p.get("sourceAgentId"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .get("_meta")
+        .and_then(|meta| meta.get("peri"))
+        .and_then(|peri| peri.get("sourceAgentId"))
+        .or_else(|| {
+            params
+                .get("_peri")
+                .and_then(|peri| peri.get("sourceAgentId"))
+        })
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
 
     tracing::debug!(
         target: "tui.acp_notifier",
         session_id = %session_id,
         agent_id = ?agent_id,
-        "notifier: extracted agent_id from _peri.sourceAgentId"
+        "notifier: extracted agent_id from ACP metadata"
     );
 
     match tag {

@@ -78,7 +78,7 @@ where
         ConnectionMode::DiscoverDefault => tokio::time::timeout(
             timeout,
             rmcp::service::serve_client_with_lifecycle(
-                (),
+                super::mcpp_client_info(),
                 transport,
                 ClientLifecycleMode::Discover {
                     preferred_versions: vec![ProtocolVersion::V_2026_07_28],
@@ -96,11 +96,12 @@ where
             .await
             .map(|inner| inner.map(McpServiceWrapper::Channel))
         }
-        ConnectionMode::LegacyDefault => {
-            tokio::time::timeout(timeout, rmcp::service::serve_client((), transport))
-                .await
-                .map(|inner| inner.map(McpServiceWrapper::Default))
-        }
+        ConnectionMode::LegacyDefault => tokio::time::timeout(
+            timeout,
+            rmcp::service::serve_client(super::mcpp_client_info(), transport),
+        )
+        .await
+        .map(|inner| inner.map(McpServiceWrapper::Default)),
     }
 }
 

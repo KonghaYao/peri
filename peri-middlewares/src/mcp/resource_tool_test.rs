@@ -127,6 +127,8 @@ async fn resource_server(io: tokio::io::DuplexStream, contents: Vec<(&'static st
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
+                        "ttlMs": 60_000,
+                        "cacheScope": "public",
                         "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }]
                     }
                 })
@@ -345,6 +347,8 @@ fn make_connected_pool(peer: rmcp::Peer<rmcp::RoleClient>) -> Arc<McpClientPool>
         "srv".to_string(),
         Arc::new(McpClientHandle {
             name: "srv".to_string(),
+            version: None,
+            cache_version: None,
             peer: Some(peer),
             tools: vec![],
             resources: vec![],
@@ -435,7 +439,12 @@ async fn read_skill_md_digest_mismatch_rejected() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let pool = make_connected_pool(running.peer().clone());
+    let mut pool = make_connected_pool(running.peer().clone());
+    let cache_dir = tempfile::tempdir().unwrap();
+    Arc::get_mut(&mut pool)
+        .expect("测试中 pool 尚无其他 Arc")
+        .resource_cache =
+        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
     let reg = empty_registry();
     seed_registry(
         &reg,
@@ -447,7 +456,7 @@ async fn read_skill_md_digest_mismatch_rejected() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let err = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),
@@ -459,6 +468,12 @@ async fn read_skill_md_digest_mismatch_rejected() {
         err.to_string().contains("digest"),
         "错误应说明 digest 不一致，实际: {err}"
     );
+    let origin = crate::mcp::resource_cache::cache_origin("srv", None);
+    let cached: Option<rmcp::model::ReadResourceResult> = pool
+        .resource_cache
+        .get(&origin, "resources/read", "skill://demo/SKILL.md")
+        .await;
+    assert!(cached.is_none(), "digest 校验失败的 Skill 响应不得落盘");
 }
 
 /// uri 在 skill 根前缀内但未列入 resources → Err（server 有该文件也拒绝——
@@ -491,7 +506,7 @@ async fn read_unlisted_skill_file_rejected() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let err = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/notes.md"}),
@@ -559,7 +574,7 @@ async fn read_skill_md_unbound_entry_no_verification() {
     let pool = make_connected_pool(running.peer().clone());
     let reg = empty_registry();
     seed_registry(&reg, vec![mcp_entry("skill://demo/SKILL.md", vec![])]);
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let out = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),
@@ -707,7 +722,7 @@ async fn read_skill_blob_with_matching_digest_ok() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let out = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),
@@ -757,7 +772,7 @@ async fn read_skill_blob_digest_mismatch_rejected() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let err = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),
@@ -804,7 +819,7 @@ async fn read_skill_multi_contents_all_match_ok() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let out = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),
@@ -841,7 +856,7 @@ async fn read_skill_multi_contents_any_mismatch_rejected() {
             }],
         )],
     );
-    let tool = McpResourceTool::new(pool, reg);
+    let tool = McpResourceTool::new(Arc::clone(&pool), reg);
     let err = tool
         .invoke(
             serde_json::json!({"server_name": "srv", "uri": "skill://demo/SKILL.md"}),

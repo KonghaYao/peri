@@ -46,6 +46,15 @@ struct SkillFrontmatter {
     description: String,
 }
 
+/// 将 skill 名称规范为命令系统可接受的词法。
+///
+/// Skill 名称会同时作为 slash command 注册到 `core:{name}`。`:` 在命令系统中
+/// 是命名空间分隔符，故扫描时统一替换为 `-`，避免 `core:foo:bar` 形成非法的
+/// 一级域三级命令。大小写保留，匹配与命令注册仍各自使用大小写无关的键。
+pub fn normalize_skill_name(name: &str) -> String {
+    name.replace(':', "-")
+}
+
 /// 加载单个 SKILL.md，解析 frontmatter，返回元数据
 ///
 /// **description trim**：YAML `>`（折叠标量）和 `|`（字面标量）会在末尾保留 `\n`，
@@ -60,7 +69,7 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
     let fm: SkillFrontmatter = data.deserialize().ok()?;
 
     Some(SkillMetadata {
-        name: fm.name,
+        name: normalize_skill_name(&fm.name),
         description: fm.description.trim().to_string(),
         path: path.to_path_buf(),
         // 占位值：实际 source/plugin_name 由 scan_dir_recursive 中的 insert_skill 覆盖
@@ -117,7 +126,7 @@ fn scan_skill_roots_impl(
                     continue;
                 };
                 let meta = SkillMetadata {
-                    name,
+                    name: normalize_skill_name(&name),
                     description,
                     path: PathBuf::from(format!("<builtin>/{}", skill.name)),
                     source: SkillSource::Builtin,
@@ -346,7 +355,7 @@ pub fn find_skill_content(
     let content = if matches!(found.source, SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| bs.name == found.name)
+            .find(|bs| normalize_skill_name(bs.name) == found.name)
             .map(|bs| bs.content.to_string())?
     } else {
         std::fs::read_to_string(&found.path).ok()?
@@ -371,7 +380,7 @@ pub fn find_skill_in_list(
     let content = if matches!(found.source, SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| bs.name == found.name)
+            .find(|bs| normalize_skill_name(bs.name) == found.name)
             .map(|bs| bs.content.to_string())?
     } else {
         std::fs::read_to_string(&found.path).ok()?

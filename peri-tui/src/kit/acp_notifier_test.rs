@@ -31,7 +31,7 @@ async fn test_session_update_agent_message_chunk_to_text_chunk() {
             session_id: "s1".into(),
             params: json!({
                 "sessionId": "s1",
-                "_peri": {"sourceAgentId": "sa-1"},
+                "_meta": {"peri": {"sourceAgentId": "sa-1"}},
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": "hi"}

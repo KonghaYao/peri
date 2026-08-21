@@ -82,7 +82,8 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let view = hooks.use_state(|| McpView::List);
     // 进入详情时的列表 index（返回列表后保持选中）
     let detail_idx = hooks.use_state(|| 0usize);
-    // 详情视图按钮选择（0 = 授权，1 = 返回）
+    // 详情视图按钮选择：OAuth server 为 0 = 授权、1 = 返回；默认显式落在
+    // 返回，避免列表 Enter 与授权 Enter 的含义混杂。
     let detail_btn = hooks.use_state(|| 0usize);
     // 面板绘制区域（上一帧，绝对坐标）——鼠标命中反推行号
     let area;
@@ -120,12 +121,9 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let Some(summary) = servers_for_closure.get(*detail_idx.read()) else {
                     return EventResult::Consumed;
                 };
-                if content_row == detail_btn_row(&summary.url) {
+                if content_row == detail_btn_row(summary) {
                     // 按列命中按钮：[ label ]，间隔 2 空格，内容从 area.x 起
-                    let labels = [
-                        i18n::tr("panel-mcp-detail-btn-auth"),
-                        i18n::tr("panel-mcp-detail-btn-back"),
-                    ];
+                    let labels = detail_button_labels(summary);
                     let mut x = area.x;
                     for (i, label) in labels.iter().enumerate() {
                         let w = format!("[ {label} ]").chars().count() as u16;
@@ -152,7 +150,11 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Esc => {
                         *view.write() = McpView::List;
                     }
-                    KeyCode::Left | KeyCode::Right => {
+                    KeyCode::Left | KeyCode::Right
+                        if servers_for_closure
+                            .get(*detail_idx.read())
+                            .is_some_and(|summary| summary.needs_auth) =>
+                    {
                         let mut b = detail_btn.write();
                         *b = if *b == 0 { 1 } else { 0 };
                     }
@@ -171,18 +173,12 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match key.code {
                 KeyCode::Esc => close_panel(),
                 KeyCode::Enter => {
-                    // 选中 OAuth 待授权 server：Enter 进入详情视图（详情里选
-                    // [ 授权 ] 才触发 mcp/oauth_start RPC → popup 弹出）。
-                    // 其他状态保持原行为：关闭面板。
                     let servers = MCP_SERVERS.state().read().clone();
                     let sel = *selected.read();
-                    let is_needs_auth = servers.get(sel).map(|s| s.needs_auth).unwrap_or(false);
-                    if is_needs_auth {
+                    if servers.get(sel).is_some() {
                         *detail_idx.write() = sel;
-                        *detail_btn.write() = 0;
+                        *detail_btn.write() = if servers[sel].needs_auth { 1 } else { 0 };
                         *view.write() = McpView::Detail;
-                    } else {
-                        close_panel();
                     }
                 }
                 KeyCode::Up => {
@@ -290,7 +286,8 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 let badge_style = Style::new().fg(theme_def.read().semantic.status.warning);
 
-                lines.push(Line::from(vec![
+                let cache_label = cache_status_label(s.cache_status.as_deref());
+                let status_spans = vec![
                     Span::styled(
                         format!(" {} ", cursor),
                         Style::new().fg(theme_def.read().component.panel.title),
@@ -299,8 +296,10 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     Span::styled(auth_badge, badge_style),
                     Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
                     Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
-                ]));
-                lines.push(Line::from(vec![Span::styled(
+                ];
+                lines.push(Line::from(status_spans));
+
+                let mut detail_spans = vec![Span::styled(
                     i18n::tr_args(
                         "panel-mcp-server-detail",
                         &[
@@ -321,27 +320,30 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         ],
                     ),
                     Style::new().fg(theme_def.read().semantic.text.dim),
-                )]));
+                )];
+                if let Some(label) = cache_label {
+                    detail_spans.push(Span::styled(
+                        format!("  ·  {label}"),
+                        Style::new()
+                            .fg(theme_def.read().semantic.status.success)
+                            .bold(),
+                    ));
+                }
+                if let Some(version) = &s.version {
+                    detail_spans.push(Span::styled(
+                        format!("  ·  {version}"),
+                        Style::new().fg(theme_def.read().semantic.text.dim),
+                    ));
+                }
+                lines.push(Line::from(detail_spans));
             }
         }
 
         lines.push(Line::from(""));
-        // 底部 hint：选中 OAuth 待授权 server 时提示 Enter 进入详情授权，
-        // 否则提示 Enter 关闭
-        let sel_hint = servers.get(sel).map(|s| s.needs_auth).unwrap_or(false);
-        if sel_hint {
-            lines.push(
-                Line::from(i18n::tr("panel-mcp-oauth-hint")).fg(theme_def.read().semantic.text.dim),
-            );
-        } else {
-            lines.push(
-                Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def
-                    .read()
-                    .semantic
-                    .text
-                    .dim),
-            );
-        }
+        // 底部提示统一为列表进入详情；授权只能在详情页显式选择按钮后触发。
+        lines.push(
+            Line::from(i18n::tr("panel-mcp-list-hint")).fg(theme_def.read().semantic.text.dim),
+        );
     }
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
@@ -364,27 +366,52 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// 详情视图按钮行在内容区中的行号（鼠标命中反推）。
 /// 内容区行号 0 起：空行、标题、空行、URL 标签、URL×n、空行、按钮行 →
 /// 按钮行 = 5 + n（无 URL 时 n = 0）。
-fn detail_btn_row(url: &Option<String>) -> u16 {
-    let n = match url {
-        Some(u) => wrap_text(u, 52).len() as u16,
-        None => 0,
-    };
-    5 + n
+fn detail_button_labels(s: &McpServerSummary) -> Vec<String> {
+    if s.needs_auth {
+        vec![
+            i18n::tr("panel-mcp-detail-btn-auth"),
+            i18n::tr("panel-mcp-detail-btn-back"),
+        ]
+    } else {
+        vec![i18n::tr("panel-mcp-detail-btn-back")]
+    }
 }
 
-/// 激活详情视图按钮：0 = 授权（mcp/oauth_start RPC + 回列表等弹窗），
-/// 1 = 返回列表。键盘 Enter / 鼠标左键点击共用。
+fn detail_btn_row(s: &McpServerSummary) -> u16 {
+    let url_lines = s
+        .url
+        .as_ref()
+        .map(|url| wrap_text(url, 52).len() as u16)
+        .unwrap_or(0);
+    // 空行 + 标题 + 空行 + [错误标题 + 摘要 + 空行] + URL 标签 + URL×n + 空行。
+    5 + url_lines + u16::from(s.error_summary.is_some()) * 3
+}
+
+/// 激活详情视图按钮：待授权 server 的 0 = 授权、1 = 返回；其他 server
+/// 仅有 0 = 返回。键盘 Enter / 鼠标左键点击共用。
 fn activate_detail_btn(
     idx: usize,
     summary: &McpServerSummary,
     view: &ReactiveHandle<McpView, SingleWaker>,
     detail_btn: &ReactiveHandle<usize, SingleWaker>,
 ) {
-    if idx == 0 {
+    if summary.needs_auth && idx == 0 {
         start_oauth(summary.name.clone());
-        *detail_btn.write() = 0;
     }
+    *detail_btn.write() = 0;
     *view.write() = McpView::List;
+}
+
+fn cache_status_label(status: Option<&str>) -> Option<&'static str> {
+    match status {
+        Some("version_cached") => Some("CACHE version hit"),
+        Some("mcpp_cached") => Some("CACHE protocol hit"),
+        Some("cached") => Some("CACHE hit"),
+        Some("stored_after_fetch") => Some("CACHE saved"),
+        Some("cache_ready") => Some("CACHE ready"),
+        Some("cache_disabled") => Some("CACHE off: authenticated"),
+        _ => None,
+    }
 }
 
 /// 构造详情视图内容行（纯函数，测试友好）。
@@ -398,23 +425,44 @@ fn build_detail_lines(
     lines.push(Line::from(""));
     // 标题：server 名 + 状态
     let (status_icon, status_color) = derive_status_style(&s.status);
-    lines.push(Line::from(vec![
+    let mut status_spans = vec![
         Span::styled(
             format!("  {}", s.name),
             Style::new().fg(theme.component.panel.title).bold(),
         ),
         Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
         Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
-        Span::styled(
-            if s.needs_auth {
-                format!("  {}", i18n::tr("panel-mcp-needs-auth"))
-            } else {
-                String::new()
-            },
-            Style::new().fg(semantic.status.warning),
-        ),
-    ]));
+    ];
+    if let Some(label) = cache_status_label(s.cache_status.as_deref()) {
+        status_spans.push(Span::styled(
+            format!(" · {label}"),
+            Style::new().fg(semantic.text.dim),
+        ));
+    }
+    if let Some(version) = &s.version {
+        status_spans.push(Span::styled(
+            format!(" · {version}"),
+            Style::new().fg(semantic.text.dim),
+        ));
+    }
+    status_spans.push(Span::styled(
+        if s.needs_auth {
+            format!("  {}", i18n::tr("panel-mcp-needs-auth"))
+        } else {
+            String::new()
+        },
+        Style::new().fg(semantic.status.warning),
+    ));
+    lines.push(Line::from(status_spans));
     lines.push(Line::from(""));
+    if let Some(error) = &s.error_summary {
+        lines.push(
+            Line::from(format!("  {}", i18n::tr("panel-mcp-detail-error")))
+                .fg(semantic.status.error),
+        );
+        lines.push(Line::from(format!("    {error}")).fg(semantic.text.muted));
+        lines.push(Line::from(""));
+    }
     // URL（HTTP 传输）完整换行展示
     lines.push(Line::from(format!("  {}", i18n::tr("panel-mcp-detail-url"))).fg(semantic.text.dim));
     match &s.url {
@@ -428,11 +476,8 @@ fn build_detail_lines(
         }
     }
     lines.push(Line::from(""));
-    // 按钮行：选中 = selection 背景反转
-    let labels = [
-        i18n::tr("panel-mcp-detail-btn-auth"),
-        i18n::tr("panel-mcp-detail-btn-back"),
-    ];
+    // 按钮行：仅 needs_auth server 有 [授权]；其他详情仅显示 [返回]。
+    let labels = detail_button_labels(s);
     let sel_bg = semantic.surface.selection;
     let mut btn_line: Vec<Span<'_>> = Vec::new();
     for (i, label) in labels.iter().enumerate() {
@@ -474,7 +519,6 @@ fn derive_status_style(status: &str) -> (String, ratatui::style::Color) {
         )
     }
 }
-
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
@@ -493,5 +537,24 @@ fn start_oauth(server_name: String) {
         });
     } else {
         tracing::warn!(target: "mcp-panel", "ACP_CLIENT_HANDLE not set, oauth_start skipped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_status_label;
+
+    #[test]
+    fn cache_status_labels_are_explicit() {
+        assert_eq!(cache_status_label(Some("cache_ready")), Some("CACHE ready"));
+        assert_eq!(
+            cache_status_label(Some("stored_after_fetch")),
+            Some("CACHE saved")
+        );
+        assert_eq!(cache_status_label(Some("cached")), Some("CACHE hit"));
+        assert_eq!(
+            cache_status_label(Some("cache_disabled")),
+            Some("CACHE off: authenticated")
+        );
     }
 }

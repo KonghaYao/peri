@@ -6,7 +6,7 @@ use peri_agent::interaction::{
 };
 use rmcp::{
     handler::client::ClientHandler,
-    model::{ClientCapabilities, CustomNotification, Implementation, InitializeRequestParams},
+    model::{CustomNotification, InitializeRequestParams},
     service::{NotificationContext, RoleClient},
 };
 
@@ -94,10 +94,7 @@ impl ChannelHandler {
 
 impl ClientHandler for ChannelHandler {
     fn get_info(&self) -> InitializeRequestParams {
-        InitializeRequestParams::new(
-            ClientCapabilities::default(),
-            Implementation::from_build_env(),
-        )
+        super::client::mcpp_client_info()
     }
 
     // rmcp trait 要求返回 impl Future，无法改为 async fn

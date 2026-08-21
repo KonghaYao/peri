@@ -176,6 +176,36 @@ async fn test_skill_tool_namespace_prefix_match() {
 }
 
 #[tokio::test]
+async fn test_skill_tool_loads_normalized_colon_name_case_insensitively() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let skill_dir = temp.path().join("superpower-skill");
+    std::fs::create_dir(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: superpower:skill\ndescription: Namespaced skill\n---\n\n# Superpower Skill\n",
+    )
+    .unwrap();
+
+    let root = SkillRoot {
+        path: temp.path().to_path_buf(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    };
+    let tool = make_skill_tool_with_cache(vec![root]);
+    let cwd = temp.path().to_str().unwrap();
+
+    let result = tool
+        .invoke(
+            json!({"skill_name": "SUPERPOWER-SKILL"}),
+            ToolContext::new(&[], cwd),
+        )
+        .await;
+
+    assert!(result.is_ok(), "应以规范化名称匹配，且忽略大小写");
+    assert!(result.unwrap().contains("Superpower Skill"));
+}
+
+#[tokio::test]
 async fn test_skill_tool_empty_cache_returns_error() {
     // 构造一个缓存为 None 的工具，模拟 before_agent 未运行的场景
     let tool = SkillTool::new(Arc::new(RwLock::new(None)));

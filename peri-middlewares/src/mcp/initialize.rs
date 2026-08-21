@@ -68,6 +68,8 @@ impl McpClientPool {
                     name.clone(),
                     Arc::new(McpClientHandle {
                         name: name.clone(),
+                        version: None,
+                        cache_version: None,
                         peer: None,
                         tools: vec![],
                         resources: vec![],
@@ -172,8 +174,23 @@ impl McpClientPool {
                     if let Some(sub) = subscriptions {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
+                    let peer = rs.peer().clone();
+                    let cache_version = super::client::peer_cache_version(&peer);
+                    let origin = pool.cache_origin(name);
+                    pool.resource_cache
+                        .set_cache_version(&origin, cache_version.as_deref());
+                    if let Some(version) = cache_version.as_ref() {
+                        pool.cache_versions
+                            .write()
+                            .insert(name.clone(), version.clone());
+                    } else {
+                        pool.cache_versions.write().remove(name);
+                    }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
-                    let resources = rs.list_all_resources().await.unwrap_or_default();
+                    let resources = pool
+                        .list_all_resources_cached(name, &peer)
+                        .await
+                        .unwrap_or_default();
                     tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
                     let peer = rs.peer().clone();
                     let channel_capable = peer
@@ -190,6 +207,10 @@ impl McpClientPool {
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
                         name: name.clone(),
+                        version: peer.peer_info().and_then(|info| {
+                            info.server_info.as_ref().map(|si| si.version.clone())
+                        }),
+                        cache_version: cache_version.clone(),
                         peer: Some(peer),
                         tools,
                         resources,
@@ -213,7 +234,7 @@ impl McpClientPool {
                     };
                 }
                 Ok(Err(e)) => {
-                    let err_str = e.to_string();
+                    let err_str = super::client::redact_mcp_error(&e.to_string());
                     tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
                     if Self::is_auth_required_error(&err_str, is_http) {
                         // 服务器要求授权（如 sentry 401）：标记待授权，不主动
@@ -308,6 +329,8 @@ impl McpClientPool {
                     name.clone(),
                     Arc::new(McpClientHandle {
                         name: name.clone(),
+                        version: None,
+                        cache_version: None,
                         peer: None,
                         tools: vec![],
                         resources: vec![],
@@ -405,8 +428,23 @@ impl McpClientPool {
                     if let Some(sub) = subscriptions {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
+                    let peer = rs.peer().clone();
+                    let cache_version = super::client::peer_cache_version(&peer);
+                    let origin = pool.cache_origin(name);
+                    pool.resource_cache
+                        .set_cache_version(&origin, cache_version.as_deref());
+                    if let Some(version) = cache_version.as_ref() {
+                        pool.cache_versions
+                            .write()
+                            .insert(name.clone(), version.clone());
+                    } else {
+                        pool.cache_versions.write().remove(name);
+                    }
                     let tools = rs.list_all_tools().await.unwrap_or_default();
-                    let resources = rs.list_all_resources().await.unwrap_or_default();
+                    let resources = pool
+                        .list_all_resources_cached(name, &peer)
+                        .await
+                        .unwrap_or_default();
                     let peer = rs.peer().clone();
                     let channel_capable = peer
                         .peer_info()
@@ -424,6 +462,10 @@ impl McpClientPool {
                         name.clone(),
                         Arc::new(McpClientHandle {
                             name: name.clone(),
+                            version: peer.peer_info().and_then(|info| {
+                                info.server_info.as_ref().map(|si| si.version.clone())
+                            }),
+                            cache_version: cache_version.clone(),
                             peer: Some(peer),
                             tools,
                             resources,

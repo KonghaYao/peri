@@ -875,15 +875,19 @@ panel-mcp-empty =   No MCP servers configured
 panel-mcp-empty-hint =   Add servers via ~/.claude/settings.json (mcpServers)
 panel-mcp-server-detail =      transport: { $transport }  tools: { $count }  skills: { $skills }
 panel-mcp-needs-auth =  [needs auth]
-panel-mcp-oauth-hint =   Enter: open auth detail  |  Esc: close
+panel-mcp-list-hint =   Enter: details  |  Esc: close
+panel-mcp-oauth-hint =   Enter: details  |  Esc: close
 # MCP panel detail view (OAuth authorize entry)
 panel-mcp-detail-url = URL:
+panel-mcp-detail-error = Error:
 panel-mcp-detail-btn-auth = Authorize
 panel-mcp-detail-btn-back = Back
-panel-mcp-detail-hint =   Enter: authorize  |  Esc: back to list  |  ←→: select button
+panel-mcp-detail-hint =   ←→: select action  |  Enter: confirm  |  Esc: back to list
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
-panel-mcp-icon-unknown = ◯
+panel-mcp-cache-hit = Persistent cache: hit
+panel-mcp-cache-live-fetch = Persistent cache: live fetch
+panel-mcp-cache-none = Persistent cache: —
 
 # ---- Memory Panel ----
 panel-memory-stats =   { $count } memory files in ~/.claude/memory

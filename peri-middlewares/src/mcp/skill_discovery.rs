@@ -94,12 +94,32 @@ const MAX_LIST_PAGES: usize = 100;
 /// server 取末段，与 fullname 词法首段同构）；cancel 分支对齐
 /// `clear_source_started`。None = 未装配命令面（print 模式/既有测试）→
 /// 仅回写元数据面。
+#[cfg(test)]
 pub(crate) async fn run_discovery(
     registry: Arc<McpSkillRegistry>,
     command_registry: Option<Arc<CommandRegistry>>,
     handle: Arc<McpClientHandle>,
     handle_token: HandleToken,
     cancel: AgentCancellationToken,
+) {
+    run_discovery_with_cache(
+        registry,
+        command_registry,
+        handle,
+        handle_token,
+        cancel,
+        None,
+    )
+    .await;
+}
+
+pub(crate) async fn run_discovery_with_cache(
+    registry: Arc<McpSkillRegistry>,
+    command_registry: Option<Arc<CommandRegistry>>,
+    handle: Arc<McpClientHandle>,
+    handle_token: HandleToken,
+    cancel: AgentCancellationToken,
+    cache: Option<(crate::mcp::resource_cache::McpResourceCache, String)>,
 ) {
     // legacy 兜底：resources 里无 skill:// 候选 → 直接完成（规范模式不受
     // resources 影响——skills/list 是独立原语）。cancel 已触发时与下方
@@ -133,10 +153,22 @@ pub(crate) async fn run_discovery(
         return;
     };
     let entries = if handle.skills_capable {
-        collect_via_skills_list(peer, &handle.name, cancel.clone()).await
+        match cache {
+            Some((cache, origin)) => {
+                skills_list::collect_via_skills_list_cached(
+                    peer,
+                    &handle.name,
+                    cancel.clone(),
+                    cache,
+                    origin,
+                )
+                .await
+            }
+            None => collect_via_skills_list(peer, &handle.name, cancel.clone()).await,
+        }
     } else {
         let candidates = select_skill_resources(&handle.resources);
-        collect_skill_entries(peer, &handle.name, candidates, cancel.clone()).await
+        collect_skill_entries(peer, &handle.name, candidates, cancel.clone(), cache).await
     };
     if cancel.is_cancelled() {
         registry.clear_discovery_started(&handle.name, handle_token.clone());

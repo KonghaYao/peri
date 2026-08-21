@@ -162,7 +162,10 @@ pub struct PluginSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpServerSummary {
     pub name: String,
+    pub version: Option<String>,
     pub status: String,
+    /// 仅用于 MCP 面板的安全、单行失败摘要；完整诊断写入 tracing 日志。
+    pub error_summary: Option<String>,
     pub transport: String,
     pub tools_count: usize,
     /// OAuth 待授权标记（oauth_status == NeedsAuthorization）：面板据此
@@ -170,6 +173,8 @@ pub struct McpServerSummary {
     pub needs_auth: bool,
     /// 服务器 URL（HTTP 传输），详情视图展示用。
     pub url: Option<String>,
+    /// 最近一次持久化 MCP cache 结果：hit/live_fetch；None 表示尚无记录。
+    pub cache_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -648,7 +648,7 @@ pub(crate) async fn run_prompt(
         Arc::new(move |handles, agent_id, on_event| {
             let bridge: Option<LangfuseBridge> = bridge_factory
                 .as_ref()
-                .and_then(|bf| bf(provider_display.clone(), Some(agent_id)))
+                .and_then(|bf| bf(provider_display.clone(), Some(agent_id.clone())))
                 .and_then(|b| {
                     // LangfuseBridgeLike: Any 上界（L5）——trait upcasting 还原具体类型
                     let any: Arc<dyn std::any::Any + Send + Sync> = b;
