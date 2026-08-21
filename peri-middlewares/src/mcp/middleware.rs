@@ -161,13 +161,13 @@ pub(crate) fn run_ensure_discovery(
         let Some(handle) = pool.get_client(&name) else {
             continue;
         };
-        let origin = pool.cache_origin(&handle.name);
-        let cache = pool.resource_cache();
+        let cache = pool
+            .persistent_cache_allowed(&handle.name)
+            .then(|| (pool.resource_cache(), pool.cache_origin(&handle.name)));
         let reg = Arc::clone(registry);
         let cmd_reg = command_registry.cloned();
         let cancel = cancel.clone();
         runtime.spawn(async move {
-            let cache = Some((cache, origin));
             crate::mcp::skill_discovery::run_discovery_with_cache(
                 reg,
                 cmd_reg,

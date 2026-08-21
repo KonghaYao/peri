@@ -175,6 +175,8 @@ impl McpClientPool {
                 if let Some(sub) = subscriptions {
                     setup_subscription(self, &rs, server_name, sub).await;
                 }
+                let peer = rs.peer().clone();
+                let cache_version = self.install_peer_cache_version(server_name, &peer);
                 let tools =
                     rs.list_all_tools()
                         .await
@@ -183,21 +185,9 @@ impl McpClientPool {
                             reason: e.to_string(),
                         })?;
                 let resources = self
-                    .list_all_resources_cached(server_name, rs.peer())
+                    .list_all_resources_cached(server_name, &peer)
                     .await
                     .unwrap_or_default();
-                let peer = rs.peer().clone();
-                let cache_version = super::client::peer_cache_version(&peer);
-                let origin = self.cache_origin(server_name);
-                self.resource_cache
-                    .set_cache_version(&origin, cache_version.as_deref());
-                if let Some(version) = cache_version.as_ref() {
-                    self.cache_versions
-                        .write()
-                        .insert(server_name.to_string(), version.clone());
-                } else {
-                    self.cache_versions.write().remove(server_name);
-                }
                 let skills_capable = super::client::peer_declares_skills(&peer);
                 let oauth_status = if used_oauth {
                     OAuthStatus::Authorized
@@ -211,7 +201,7 @@ impl McpClientPool {
                         version: peer.peer_info().and_then(|info| {
                             info.server_info.as_ref().map(|si| si.version.clone())
                         }),
-                        cache_version: super::client::peer_cache_version(&peer),
+                        cache_version: cache_version.clone(),
                         peer: Some(peer),
                         tools,
                         resources,

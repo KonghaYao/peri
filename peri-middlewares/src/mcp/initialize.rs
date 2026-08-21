@@ -175,17 +175,7 @@ impl McpClientPool {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let peer = rs.peer().clone();
-                    let cache_version = super::client::peer_cache_version(&peer);
-                    let origin = pool.cache_origin(name);
-                    pool.resource_cache
-                        .set_cache_version(&origin, cache_version.as_deref());
-                    if let Some(version) = cache_version.as_ref() {
-                        pool.cache_versions
-                            .write()
-                            .insert(name.clone(), version.clone());
-                    } else {
-                        pool.cache_versions.write().remove(name);
-                    }
+                    let cache_version = pool.install_peer_cache_version(name, &peer);
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = pool
                         .list_all_resources_cached(name, &peer)
@@ -429,17 +419,7 @@ impl McpClientPool {
                         setup_subscription(&pool, &rs, name, sub).await;
                     }
                     let peer = rs.peer().clone();
-                    let cache_version = super::client::peer_cache_version(&peer);
-                    let origin = pool.cache_origin(name);
-                    pool.resource_cache
-                        .set_cache_version(&origin, cache_version.as_deref());
-                    if let Some(version) = cache_version.as_ref() {
-                        pool.cache_versions
-                            .write()
-                            .insert(name.clone(), version.clone());
-                    } else {
-                        pool.cache_versions.write().remove(name);
-                    }
+                    let cache_version = pool.install_peer_cache_version(name, &peer);
                     let tools = rs.list_all_tools().await.unwrap_or_default();
                     let resources = pool
                         .list_all_resources_cached(name, &peer)

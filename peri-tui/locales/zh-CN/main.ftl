@@ -883,7 +883,12 @@ panel-mcp-detail-btn-back = 返回
 panel-mcp-detail-hint =   ←→: 选择操作  |  Enter: 确认  |  Esc: 返回列表
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
-panel-mcp-cache-hit = 持久化缓存：命中
+panel-mcp-cache-hit = 缓存命中
+panel-mcp-cache-version-hit = 缓存版本命中
+panel-mcp-cache-protocol-hit = 协议缓存命中
+panel-mcp-cache-saved = 缓存已保存
+panel-mcp-cache-ready = 缓存就绪
+panel-mcp-cache-disabled = 缓存已关闭：已认证服务
 panel-mcp-cache-live-fetch = 持久化缓存：实时读取
 panel-mcp-cache-none = 持久化缓存：—
 

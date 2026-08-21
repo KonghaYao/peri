@@ -402,14 +402,18 @@ fn activate_detail_btn(
     *view.write() = McpView::List;
 }
 
-fn cache_status_label(status: Option<&str>) -> Option<&'static str> {
+fn cache_status_label(status: Option<&str>) -> Option<String> {
+    cache_status_label_key(status).map(i18n::tr)
+}
+
+fn cache_status_label_key(status: Option<&str>) -> Option<&'static str> {
     match status {
-        Some("version_cached") => Some("CACHE version hit"),
-        Some("mcpp_cached") => Some("CACHE protocol hit"),
-        Some("cached") => Some("CACHE hit"),
-        Some("stored_after_fetch") => Some("CACHE saved"),
-        Some("cache_ready") => Some("CACHE ready"),
-        Some("cache_disabled") => Some("CACHE off: authenticated"),
+        Some("version_cached") => Some("panel-mcp-cache-version-hit"),
+        Some("mcpp_cached") => Some("panel-mcp-cache-protocol-hit"),
+        Some("cached") => Some("panel-mcp-cache-hit"),
+        Some("stored_after_fetch") => Some("panel-mcp-cache-saved"),
+        Some("cache_ready") => Some("panel-mcp-cache-ready"),
+        Some("cache_disabled") => Some("panel-mcp-cache-disabled"),
         _ => None,
     }
 }
@@ -542,19 +546,25 @@ fn start_oauth(server_name: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_status_label;
+    use super::cache_status_label_key;
 
     #[test]
     fn cache_status_labels_are_explicit() {
-        assert_eq!(cache_status_label(Some("cache_ready")), Some("CACHE ready"));
         assert_eq!(
-            cache_status_label(Some("stored_after_fetch")),
-            Some("CACHE saved")
+            cache_status_label_key(Some("cache_ready")),
+            Some("panel-mcp-cache-ready")
         );
-        assert_eq!(cache_status_label(Some("cached")), Some("CACHE hit"));
         assert_eq!(
-            cache_status_label(Some("cache_disabled")),
-            Some("CACHE off: authenticated")
+            cache_status_label_key(Some("stored_after_fetch")),
+            Some("panel-mcp-cache-saved")
+        );
+        assert_eq!(
+            cache_status_label_key(Some("cached")),
+            Some("panel-mcp-cache-hit")
+        );
+        assert_eq!(
+            cache_status_label_key(Some("cache_disabled")),
+            Some("panel-mcp-cache-disabled")
         );
     }
 }

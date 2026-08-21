@@ -1976,3 +1976,74 @@ async fn cached_skill_discovery_avoids_list_and_skill_reads() {
         "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
     );
 }
+
+/// skills/read 缓存内容与当前 skills/list digest 不一致时，应失效缓存并重读，
+/// 而非静默丢弃技能。
+#[tokio::test]
+async fn cached_skill_read_digest_mismatch_refetches_once() {
+    let stale_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Stale\n";
+    let fresh_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Fresh\n";
+    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(spec_skill_server(
+        server_io,
+        vec![SpecSkill {
+            uri: "skill://refreshed/SKILL.md",
+            name: "refreshed",
+            description: "Refreshed skill",
+            text: fresh_text,
+            digest_override: None,
+            get_text: None,
+            get_error: false,
+            get_wrong_uri: false,
+        }],
+        None,
+        Some(Arc::clone(&request_log)),
+        false,
+    ));
+    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
+        (),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    let origin = "test-skill-origin".to_string();
+    let uri = "skill://refreshed/SKILL.md";
+    let ticket = cache.ticket(&origin, "skills/read", uri).await.unwrap();
+    cache
+        .put_ticket(&ticket, std::time::Duration::from_secs(60), &stale_text)
+        .await;
+
+    let registry = Arc::new(McpSkillRegistry::new());
+    let token: HandleToken = Arc::new(43u32);
+    registry.mark_discovery_started("srv", token.clone());
+    run_discovery_with_cache(
+        registry.clone(),
+        None,
+        make_spec_handle(&running),
+        token,
+        AgentCancellationToken::new(),
+        Some((cache, origin)),
+    )
+    .await;
+
+    let skills = registry.all_skills();
+    assert_eq!(skills.len(), 1, "陈旧缓存应重读后仍发现技能");
+    assert_eq!(skills[0].content.as_deref(), Some(fresh_text));
+    let requests = request_log.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("resources/read"))
+            .count(),
+        1,
+        "陈旧 skills/read 缓存应只失效并实时重读一次"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.starts_with("skills/get")),
+        "实时重读已满足当前 digest，不应额外请求 skills/get"
+    );
+}

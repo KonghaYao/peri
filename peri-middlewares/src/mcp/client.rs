@@ -310,6 +310,41 @@ pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl McpClientPool {
+    fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
+        config.oauth.is_none()
+            && config.headers.as_ref().is_none_or(|headers| {
+                !headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("authorization"))
+            })
+    }
+
+    pub(crate) fn persistent_cache_allowed(&self, server_name: &str) -> bool {
+        self.configs
+            .read()
+            .get(server_name)
+            .is_none_or(Self::config_allows_persistent_cache)
+    }
+
+    pub(crate) fn install_peer_cache_version(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Option<String> {
+        let cache_version = peer_cache_version(peer);
+        let origin = self.cache_origin(server_name);
+        self.resource_cache
+            .set_cache_version(&origin, cache_version.as_deref());
+        if let Some(version) = cache_version.as_ref() {
+            self.cache_versions
+                .write()
+                .insert(server_name.to_string(), version.clone());
+        } else {
+            self.cache_versions.write().remove(server_name);
+        }
+        cache_version
+    }
+
     pub(crate) async fn read_resource_cached(
         &self,
         server_name: &str,
@@ -322,6 +357,13 @@ impl McpClientPool {
         ),
         rmcp::service::ServiceError,
     > {
+        if !self.persistent_cache_allowed(server_name) {
+            return Ok((
+                peer.read_resource(ReadResourceRequestParams::new(uri))
+                    .await?,
+                None,
+            ));
+        }
         let origin = self.cache_origin(server_name);
         let cache_version = self.cache_versions.read().get(server_name).cloned();
         if let Some(result) = self
@@ -354,12 +396,19 @@ impl McpClientPool {
     /// `skill://` 响应不会在 digest 校验失败时落入跨进程缓存。
     pub(crate) async fn cache_verified_resource(
         &self,
+        server_name: &str,
         ticket: Option<super::resource_cache::CacheTicket>,
         result: &ReadResourceResult,
     ) {
         let Some(ticket) = ticket else { return };
-        self.persist_public_response(&ticket, result, result.ttl_ms, result.cache_scope)
-            .await;
+        self.persist_public_response(
+            server_name,
+            &ticket,
+            result,
+            result.ttl_ms,
+            result.cache_scope,
+        )
+        .await;
     }
 
     pub(crate) async fn list_resources_cached(
@@ -368,6 +417,9 @@ impl McpClientPool {
         params: Option<PaginatedRequestParams>,
         peer: &Peer<RoleClient>,
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
+        if !self.persistent_cache_allowed(server_name) {
+            return peer.list_resources(params).await;
+        }
         let origin = self.cache_origin(server_name);
         let params_key = serde_json::to_string(&params).unwrap_or_default();
         let cache_version = self.cache_versions.read().get(server_name).cloned();
@@ -391,8 +443,14 @@ impl McpClientPool {
             .await;
         let result = peer.list_resources(params).await?;
         if let Some(ticket) = ticket {
-            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
-                .await;
+            self.persist_public_response(
+                server_name,
+                &ticket,
+                &result,
+                result.ttl_ms,
+                result.cache_scope,
+            )
+            .await;
         }
         Ok(result)
     }
@@ -428,6 +486,9 @@ impl McpClientPool {
         params: Option<PaginatedRequestParams>,
         peer: &Peer<RoleClient>,
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::service::ServiceError> {
+        if !self.persistent_cache_allowed(server_name) {
+            return peer.list_resource_templates(params).await;
+        }
         let origin = self.cache_origin(server_name);
         let params_key = serde_json::to_string(&params).unwrap_or_default();
         let cache_version = self.cache_versions.read().get(server_name).cloned();
@@ -449,8 +510,14 @@ impl McpClientPool {
             .await;
         let result = peer.list_resource_templates(params).await?;
         if let Some(ticket) = ticket {
-            self.persist_public_response(&ticket, &result, result.ttl_ms, result.cache_scope)
-                .await;
+            self.persist_public_response(
+                server_name,
+                &ticket,
+                &result,
+                result.ttl_ms,
+                result.cache_scope,
+            )
+            .await;
         }
         Ok(result)
     }
@@ -491,6 +558,9 @@ impl McpClientPool {
     }
 
     fn cache_status_for(&self, server_name: &str) -> Option<String> {
+        if !self.persistent_cache_allowed(server_name) {
+            return Some("cache_disabled".to_string());
+        }
         let origin = self.cache_origin(server_name);
         if let Some(status) = self.resource_cache.recent_status(&origin) {
             return Some(match status {
@@ -503,16 +573,7 @@ impl McpClientPool {
                 }
             });
         }
-        let config = self.configs.read().get(server_name).cloned();
-        let safe = config.as_ref().is_none_or(|config| {
-            config.oauth.is_none()
-                && config.headers.as_ref().is_none_or(|headers| {
-                    !headers
-                        .keys()
-                        .any(|key| key.eq_ignore_ascii_case("authorization"))
-                })
-        });
-        Some(if safe {
+        Some(if self.persistent_cache_allowed(server_name) {
             "cache_ready".to_string()
         } else {
             "cache_disabled".to_string()
@@ -521,35 +582,19 @@ impl McpClientPool {
 
     async fn persist_public_response<T: serde::Serialize>(
         &self,
+        server_name: &str,
         ticket: &super::resource_cache::CacheTicket,
         result: &T,
         ttl_ms: Option<u64>,
         cache_scope: Option<CacheScope>,
     ) {
+        if !self.persistent_cache_allowed(server_name) {
+            return;
+        }
         if cache_scope == Some(CacheScope::Public) || (cache_scope.is_none() && ttl_ms.is_some()) {
             let ttl = std::time::Duration::from_millis(ttl_ms.unwrap_or_default());
-            let (cache_version, cache_allowed) = self
-                .cache_versions
-                .read()
-                .iter()
-                .find_map(|(server, version)| {
-                    (self.cache_origin(server) == ticket.origin).then(|| {
-                        let allowed = self.configs.read().get(server).is_none_or(|config| {
-                            config.oauth.is_none()
-                                && config.headers.as_ref().is_none_or(|headers| {
-                                    !headers
-                                        .keys()
-                                        .any(|key| key.eq_ignore_ascii_case("authorization"))
-                                })
-                        });
-                        (Some(version.clone()), allowed)
-                    })
-                })
-                .unwrap_or((None, true));
-            if !cache_allowed {
-                return;
-            }
-            if cache_allowed && (!ttl.is_zero() || cache_version.is_some()) {
+            let cache_version = self.cache_versions.read().get(server_name).cloned();
+            if !ttl.is_zero() || cache_version.is_some() {
                 self.resource_cache
                     .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
                     .await;

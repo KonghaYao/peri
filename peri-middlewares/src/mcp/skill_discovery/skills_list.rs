@@ -284,53 +284,80 @@ async fn fetch_and_verify_one(
         return None;
     }
     let uri = entry.uri.clone();
-    // 发现侧首读：SKILL.md 必须是 Text（Blob/失败/超时均无法校验 frontmatter
-    // 与 digest）→ 条目过滤。
-    let (text, cache_ticket) = if let Some((cache, origin)) = cache_context.as_ref() {
-        if let Some(text) = cache.get(origin, "skills/read", &uri).await {
-            (text, None)
-        } else {
-            cache.mark_live_fetch(origin, "skills/read");
-            let ticket = cache.ticket(origin, "skills/read", &uri).await;
-            let SkillResourceRead::Text(text, _) =
-                read_skill_resource_text(&peer, server, &uri).await
-            else {
-                return None;
+    let mut retried_after_cached_mismatch = false;
+    loop {
+        // 发现侧首读：SKILL.md 必须是 Text（Blob/失败/超时均无法校验 frontmatter
+        // 与 digest）→ 条目过滤。命中内容仍须由当前 skills/list 条目校验；若
+        // 失败，使该条缓存失效并仅重读一次，避免 server 内容原地更新时静默丢技能。
+        let (text, cache_ticket, ttl_ms, cache_scope, cache_hit) =
+            if let Some((cache, origin)) = cache_context.as_ref() {
+                if let Some(text) = cache.get(origin, "skills/read", &uri).await {
+                    (text, None, None, None, true)
+                } else {
+                    cache.mark_live_fetch(origin, "skills/read");
+                    let ticket = cache.ticket(origin, "skills/read", &uri).await;
+                    let SkillResourceRead::Text(text, _, ttl_ms, cache_scope) =
+                        read_skill_resource_text(&peer, server, &uri).await
+                    else {
+                        return None;
+                    };
+                    (
+                        text,
+                        ticket.map(|ticket| (cache.clone(), ticket)),
+                        ttl_ms,
+                        cache_scope,
+                        false,
+                    )
+                }
+            } else {
+                let SkillResourceRead::Text(text, _, _, _) =
+                    read_skill_resource_text(&peer, server, &uri).await
+                else {
+                    return None;
+                };
+                (text, None, None, None, false)
             };
-            (text, ticket.map(|ticket| (cache.clone(), ticket)))
-        }
-    } else {
-        let SkillResourceRead::Text(text, _) = read_skill_resource_text(&peer, server, &uri).await
-        else {
-            return None;
-        };
-        (text, None)
-    };
-    match verify_and_build(server, &entry, &text) {
-        VerifyOutcome::Built(meta) => {
-            if let Some((cache, ticket)) = cache_ticket {
-                // legacy resources/read 缺少响应 metadata 时不缓存。
-                let _ = (cache, ticket);
+        match verify_and_build(server, &entry, &text) {
+            VerifyOutcome::Built(meta) => {
+                if cache_scope == Some(CacheScope::Public) {
+                    if let Some((cache, ticket)) = cache_ticket {
+                        cache
+                            .put_ticket(
+                                &ticket,
+                                std::time::Duration::from_millis(ttl_ms.unwrap_or_default()),
+                                &text,
+                            )
+                            .await;
+                    }
+                }
+                return Some(*meta);
             }
-            Some(*meta)
-        }
-        VerifyOutcome::Rejected => None,
-        VerifyOutcome::DigestMismatch => {
-            // digest 不匹配 = 内容陈旧/被替换（规范建议：经 skills/get 恢复）；
-            // frontmatter 比对失败 / URI 身份失败不是 stale 信号，不恢复。
-            if cancel.is_cancelled() {
-                return None;
+            _ if cache_hit && !retried_after_cached_mismatch => {
+                let Some((cache, origin)) = cache_context.as_ref() else {
+                    unreachable!("cache_hit 仅能由 cache_context 产生");
+                };
+                cache.invalidate(origin, "skills/read", Some(&uri)).await;
+                retried_after_cached_mismatch = true;
+                continue;
             }
-            tracing::debug!(
-                server,
-                %uri,
-                "MCP skill digest 校验失败，尝试 skills/get 拉取当前条目快照"
-            );
-            let meta = recover_via_skills_get(&peer, server, &uri).await;
-            if cancel.is_cancelled() {
-                return None;
+            VerifyOutcome::Rejected => return None,
+            VerifyOutcome::DigestMismatch => {
+                // digest 不匹配 = 内容陈旧/被替换（规范建议：经 skills/get 恢复）；
+                // frontmatter 比对失败 / URI 身份失败不是 stale 信号，不恢复。
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                tracing::debug!(
+                    server,
+                    %uri,
+                    "MCP skill digest 校验失败，尝试 skills/get 拉取当前条目快照"
+                );
+                let meta = recover_via_skills_get(&peer, server, &uri).await;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                return meta;
             }
-            meta
         }
     }
 }
@@ -361,7 +388,7 @@ async fn recover_via_skills_get(
     // 变化），再走完整校验（digest / frontmatter / 身份）。若新条目 digest
     // 与旧条目相同，重读内容必再次校验失败——由 verify 兜底，无需显式比较。
     let new_text = match read_skill_resource_text(peer, server, &refreshed.uri).await {
-        SkillResourceRead::Text(text, _) => text,
+        SkillResourceRead::Text(text, ..) => text,
         SkillResourceRead::NotText => {
             tracing::warn!(
                 server,
@@ -439,7 +466,7 @@ pub(crate) async fn refresh_entry_and_content(
         return None;
     };
     let text = match read_skill_resource_text(peer, server, request_uri).await {
-        SkillResourceRead::Text(text, mime) => {
+        SkillResourceRead::Text(text, mime, ..) => {
             if !verify_digest(&text, &expected.digest) {
                 tracing::warn!(
                     server,
@@ -476,8 +503,8 @@ pub(crate) async fn refresh_entry_and_content(
 /// RPC 失败/超时、响应成功但无 Text 内容（Blob 资源）。区分后两者供恢复
 /// 路径给出准确文案（NotText 不是传输层错误）。
 enum SkillResourceRead {
-    /// Text 内容（文本 + mime；mime 可能缺省）
-    Text(String, Option<String>),
+    /// Text 内容（文本 + mime + 响应缓存元数据）
+    Text(String, Option<String>, Option<u64>, Option<CacheScope>),
     /// RPC 失败/超时
     Failed,
     /// 响应成功但无 Text 内容（Blob 资源——恢复路径仅支持 Text）
@@ -515,7 +542,12 @@ async fn read_skill_resource_text(
         .find_map(|content| match content {
             ResourceContents::TextResourceContents {
                 text, mime_type, ..
-            } => Some(SkillResourceRead::Text(text.clone(), mime_type.clone())),
+            } => Some(SkillResourceRead::Text(
+                text.clone(),
+                mime_type.clone(),
+                result.ttl_ms,
+                result.cache_scope,
+            )),
             _ => None,
         })
         .unwrap_or(SkillResourceRead::NotText)

@@ -322,6 +322,44 @@ async fn test_oauth_preflight_failure_emits_one_exact_terminal_event() {
 }
 
 #[test]
+fn test_persistent_cache_is_disabled_for_authenticated_servers() {
+    let config = || McpServerConfig {
+        command: None,
+        args: None,
+        env: None,
+        url: None,
+        headers: None,
+        oauth: None,
+        disabled: None,
+        protocol_version: None,
+        subscriptions: None,
+        source: None,
+    };
+    let pool = McpClientPool::new_empty();
+    pool.configs.write().insert(
+        "oauth".to_string(),
+        McpServerConfig {
+            oauth: Some(Default::default()),
+            ..config()
+        },
+    );
+    pool.configs.write().insert(
+        "header".to_string(),
+        McpServerConfig {
+            headers: Some(std::collections::HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer token".to_string(),
+            )])),
+            ..config()
+        },
+    );
+
+    assert!(!pool.persistent_cache_allowed("oauth"));
+    assert!(!pool.persistent_cache_allowed("header"));
+    assert!(pool.persistent_cache_allowed("unknown"));
+}
+
+#[test]
 fn test_server_info_projects_safe_failed_status() {
     let status = ClientStatus::Failed(
         "request failed: https://example.test/mcp?token=top-secret\ncaused by: verbose trace"

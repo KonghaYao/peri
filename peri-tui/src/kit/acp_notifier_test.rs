@@ -10,6 +10,34 @@ use peri_acp_types::event_data::PredictionAction;
 use serde_json::json;
 use serial_test::serial;
 
+#[test]
+#[serial]
+fn available_commands_update_refreshes_mcp_slash_cache_immediately() {
+    crate::kit::atoms::init_atoms();
+    *AVAILABLE_SLASH_COMMANDS.state().write() = Vec::new();
+    crate::kit::input_area::refresh_slash_items();
+
+    let payload = json!({
+        "sessionId": "s-mcp",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [{
+                "name": "demo:hello",
+                "description": "MCP skill hello",
+                "_meta": {"periKind": "mcp_skill", "periLevel": 2}
+            }]
+        }
+    });
+    let (bridge_tx, _bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = handle_session_update(payload, &bridge_tx, "test");
+
+    let items = crate::kit::input_area::get_cached_slash_items();
+    assert!(
+        items.iter().any(|item| item.insert_text == "demo:hello"),
+        "MCP skill 应在 available_commands_update 后立即出现在 slash 缓存"
+    );
+}
+
 fn spawn_test_notifier() -> (
     mpsc::UnboundedSender<AcpNotification>,
     mpsc::UnboundedReceiver<AcpEventWithEpoch>,
