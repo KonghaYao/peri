@@ -69,6 +69,8 @@ async fn test_remove_server() {
         "a".into(),
         Arc::new(McpClientHandle {
             name: "a".into(),
+            version: None,
+            cache_version: None,
             peer: None,
             tools: vec![],
             resources: vec![],
@@ -90,6 +92,8 @@ async fn test_get_tools_resources() {
         "s".into(),
         Arc::new(McpClientHandle {
             name: "s".into(),
+            version: None,
+            cache_version: None,
             peer: None,
             tools: vec![],
             resources: vec![],

@@ -16,6 +16,8 @@ fn make_tool(name: &str, description: Option<&str>) -> Tool {
 fn make_disconnected_handle(name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
+        version: None,
+        cache_version: None,
         peer: None,
         tools: vec![],
         resources: vec![],

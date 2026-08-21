@@ -6,7 +6,8 @@ use super::super::resource_cache::McpResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
 use rmcp::{
     model::{
-        ClientRequest, CustomRequest, ReadResourceRequestParams, ResourceContents, ServerResult,
+        CacheScope, ClientRequest, CustomRequest, ReadResourceRequestParams, ResourceContents,
+        ServerResult,
     },
     Peer, RoleClient,
 };
@@ -28,6 +29,10 @@ pub(super) struct SkillListResponse {
     pub(super) skills: Vec<SkillListEntryDto>,
     #[serde(default)]
     pub(super) next_cursor: Option<String>,
+    #[serde(default)]
+    pub(super) ttl_ms: Option<u64>,
+    #[serde(default)]
+    pub(super) cache_scope: Option<CacheScope>,
 }
 
 /// `skills/list` 条目（`frontmatter` 为 SKILL.md YAML frontmatter 的
@@ -137,16 +142,22 @@ async fn collect_via_skills_list_inner(
             } else {
                 // 必须在 RPC 前捕获 ticket：更新通知若在请求期间到达，旧分页
                 // 响应随后不得重新写入持久化缓存。
-                cache.mark_live_fetch(origin);
+                cache.mark_live_fetch(origin, "skills/list");
                 let ticket = cache.ticket(origin, "skills/list", &params_key).await;
                 let page = fetch_skill_list_page(&peer, server, params).await;
                 let Some(page) = page else {
                     return (false, Vec::new());
                 };
-                if let Some(ticket) = ticket {
-                    cache
-                        .put_ticket(&ticket, std::time::Duration::from_secs(300), &page)
-                        .await;
+                if page.cache_scope == Some(CacheScope::Public) {
+                    if let Some(ticket) = ticket {
+                        cache
+                            .put_ticket(
+                                &ticket,
+                                std::time::Duration::from_millis(page.ttl_ms.unwrap_or_default()),
+                                &page,
+                            )
+                            .await;
+                    }
                 }
                 page
             }
@@ -279,7 +290,7 @@ async fn fetch_and_verify_one(
         if let Some(text) = cache.get(origin, "skills/read", &uri).await {
             (text, None)
         } else {
-            cache.mark_live_fetch(origin);
+            cache.mark_live_fetch(origin, "skills/read");
             let ticket = cache.ticket(origin, "skills/read", &uri).await;
             let SkillResourceRead::Text(text, _) =
                 read_skill_resource_text(&peer, server, &uri).await
@@ -298,9 +309,8 @@ async fn fetch_and_verify_one(
     match verify_and_build(server, &entry, &text) {
         VerifyOutcome::Built(meta) => {
             if let Some((cache, ticket)) = cache_ticket {
-                cache
-                    .put_ticket(&ticket, std::time::Duration::from_secs(300), &text)
-                    .await;
+                // legacy resources/read 缺少响应 metadata 时不缓存。
+                let _ = (cache, ticket);
             }
             Some(*meta)
         }

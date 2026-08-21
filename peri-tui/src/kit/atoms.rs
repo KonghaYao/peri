@@ -162,6 +162,7 @@ pub struct PluginSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpServerSummary {
     pub name: String,
+    pub version: Option<String>,
     pub status: String,
     /// 仅用于 MCP 面板的安全、单行失败摘要；完整诊断写入 tracing 日志。
     pub error_summary: Option<String>,

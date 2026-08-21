@@ -347,6 +347,8 @@ fn make_connected_pool(peer: rmcp::Peer<rmcp::RoleClient>) -> Arc<McpClientPool>
         "srv".to_string(),
         Arc::new(McpClientHandle {
             name: "srv".to_string(),
+            version: None,
+            cache_version: None,
             peer: Some(peer),
             tools: vec![],
             resources: vec![],

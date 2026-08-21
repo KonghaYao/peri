@@ -767,7 +767,7 @@ async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
         resource("skill://srv/alpha/SKILL.md"),
     ];
     let cancel = AgentCancellationToken::new();
-    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel).await;
+    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel, None).await;
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     // frontmatter name = uri 最终段（zebra/alpha）→ 注册名
@@ -830,6 +830,8 @@ fn make_discovery_handle(
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: "srv".to_string(),
+        version: None,
+        cache_version: None,
         peer: Some(running.peer().clone()),
         tools: vec![],
         resources,
@@ -1059,6 +1061,7 @@ async fn spec_skill_server(
     skills: Vec<SpecSkill>,
     first_done: Option<Arc<tokio::sync::Notify>>,
     request_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    cacheable: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, writer) = tokio::io::split(io);
@@ -1110,7 +1113,12 @@ async fn spec_skill_server(
                             })
                         })
                         .collect();
-                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": { "skills": entries } })
+                    let mut result = serde_json::json!({ "skills": entries });
+                    if cacheable {
+                        result["cacheScope"] = serde_json::json!("public");
+                        result["ttlMs"] = serde_json::json!(60_000);
+                    }
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
                 }
                 "resources/read" => {
                     match skills.iter().find(|s| s.uri == uri) {
@@ -1122,12 +1130,17 @@ async fn spec_skill_server(
                             } else {
                                 s.text
                             };
+                            let mut result = serde_json::json!({
+                                "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }]
+                            });
+                            if cacheable {
+                                result["cacheScope"] = serde_json::json!("public");
+                                result["ttlMs"] = serde_json::json!(60_000);
+                            }
                             serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
-                                "result": {
-                                    "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }]
-                                }
+                                "result": result
                             })
                         }
                         None => serde_json::json!({
@@ -1207,6 +1220,8 @@ fn make_spec_handle(
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: "srv".to_string(),
+        version: None,
+        cache_version: None,
         peer: Some(running.peer().clone()),
         tools: vec![],
         resources: vec![],
@@ -1254,6 +1269,7 @@ async fn run_discovery_spec_mode_via_skills_list() {
         ],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1341,6 +1357,7 @@ async fn run_discovery_spec_mode_recovers_via_skills_get() {
         ],
         None,
         Some(Arc::clone(&request_log)),
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1405,6 +1422,7 @@ async fn run_discovery_spec_mode_get_wrong_uri_rejects_recovery() {
         }],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1633,6 +1651,7 @@ async fn run_discovery_writes_command_registry() {
         }],
         None,
         None,
+        false,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),
@@ -1907,6 +1926,7 @@ async fn cached_skill_discovery_avoids_list_and_skill_reads() {
         }],
         None,
         Some(Arc::clone(&request_log)),
+        true,
     ));
     let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
         (),

@@ -38,6 +38,8 @@ fn test_overview_empty_pool_returns_none() {
 fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
+        version: None,
+        cache_version: None,
         peer: None,
         tools: (0..tools).map(|_| rmcp::model::Tool::default()).collect(),
         resources: vec![],
@@ -61,6 +63,8 @@ fn test_overview_mixed_statuses() {
         "chrome".to_string(),
         Arc::new(McpClientHandle {
             name: "chrome".to_string(),
+            version: None,
+            cache_version: None,
             peer: None,
             tools: vec![],
             resources: vec![],
@@ -76,6 +80,8 @@ fn test_overview_mixed_statuses() {
         "legacy".to_string(),
         Arc::new(McpClientHandle {
             name: "legacy".to_string(),
+            version: None,
+            cache_version: None,
             peer: None,
             tools: vec![],
             resources: vec![],
@@ -348,6 +354,8 @@ fn insert_skill_handle(
 ) -> Arc<McpClientHandle> {
     let handle = Arc::new(McpClientHandle {
         name: name.to_string(),
+        version: None,
+        cache_version: None,
         peer: None,
         tools: vec![],
         resources,

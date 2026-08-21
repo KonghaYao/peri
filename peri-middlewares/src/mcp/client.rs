@@ -7,8 +7,8 @@ use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::session::InboxHandle;
 use rmcp::{
     model::{
-        CacheScope, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
-        Resource, Tool,
+        CacheScope, ClientCapabilities, Implementation, InitializeRequestParams,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
     },
     service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
 };
@@ -29,7 +29,7 @@ pub(crate) use transport::{
 
 /// Wrapper for RunningService that can hold either handler type
 pub(crate) enum McpServiceWrapper {
-    Default(RunningService<RoleClient, ()>),
+    Default(RunningService<RoleClient, InitializeRequestParams>),
     Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
 }
 
@@ -87,6 +87,29 @@ pub fn redact_mcp_error(input: &str) -> String {
     output.trim_end().to_string()
 }
 
+pub(crate) const SERVER_CACHE_VERSION_EXTENSION: &str = "io.mcpp/server-cache-version";
+
+pub(crate) fn mcpp_client_info() -> InitializeRequestParams {
+    let mut capabilities = ClientCapabilities::default();
+    capabilities.extensions = Some(std::collections::BTreeMap::from([(
+        SERVER_CACHE_VERSION_EXTENSION.to_string(),
+        serde_json::Map::new(),
+    )]));
+    InitializeRequestParams::new(capabilities, Implementation::from_build_env())
+}
+
+pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {
+    peer.peer_info()?
+        .capabilities
+        .extensions
+        .as_ref()?
+        .get(SERVER_CACHE_VERSION_EXTENSION)?
+        .get("cacheVersion")?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 /// MCP 客户端连接状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientStatus {
@@ -123,6 +146,8 @@ pub enum OAuthStatus {
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
     pub name: String,
+    pub version: Option<String>,
+    pub cache_version: Option<String>,
     pub transport_type: String,
     pub status: ClientStatus,
     /// 供 UI 显示的稳定状态标签，不暴露 `ClientStatus::Failed` 的完整错误链。
@@ -161,6 +186,8 @@ pub enum McpPoolError {
 #[derive(Clone)]
 pub struct McpClientHandle {
     pub name: String,
+    pub version: Option<String>,
+    pub cache_version: Option<String>,
     pub peer: Option<Peer<RoleClient>>,
     pub tools: Vec<Tool>,
     pub resources: Vec<Resource>,
@@ -221,6 +248,7 @@ pub struct McpClientPool {
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
     pub(crate) services: tokio::sync::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
+    pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
     pub(crate) plugin_sources: parking_lot::RwLock<HashMap<String, String>>,
     /// 初始化阶段内部存储（M-TUI 收口：TUI 不再持有 watch channel，`mcp/list`
@@ -295,14 +323,16 @@ impl McpClientPool {
         rmcp::service::ServiceError,
     > {
         let origin = self.cache_origin(server_name);
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
         if let Some(result) = self
             .resource_cache
-            .get(&origin, "resources/read", uri)
+            .get_versioned(&origin, "resources/read", uri, cache_version.as_deref())
             .await
         {
             return Ok((result, None));
         }
-        self.resource_cache.mark_live_fetch(&origin);
+        self.resource_cache
+            .mark_live_fetch(&origin, "resources/read");
         let Some(ticket) = self
             .resource_cache
             .ticket(&origin, "resources/read", uri)
@@ -340,14 +370,21 @@ impl McpClientPool {
     ) -> Result<rmcp::model::ListResourcesResult, rmcp::service::ServiceError> {
         let origin = self.cache_origin(server_name);
         let params_key = serde_json::to_string(&params).unwrap_or_default();
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
         if let Some(result) = self
             .resource_cache
-            .get(&origin, "resources/list", &params_key)
+            .get_versioned(
+                &origin,
+                "resources/list",
+                &params_key,
+                cache_version.as_deref(),
+            )
             .await
         {
             return Ok(result);
         }
-        self.resource_cache.mark_live_fetch(&origin);
+        self.resource_cache
+            .mark_live_fetch(&origin, "resources/list");
         let ticket = self
             .resource_cache
             .ticket(&origin, "resources/list", &params_key)
@@ -393,9 +430,15 @@ impl McpClientPool {
     ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::service::ServiceError> {
         let origin = self.cache_origin(server_name);
         let params_key = serde_json::to_string(&params).unwrap_or_default();
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
         if let Some(result) = self
             .resource_cache
-            .get(&origin, "resources/templates/list", &params_key)
+            .get_versioned(
+                &origin,
+                "resources/templates/list",
+                &params_key,
+                cache_version.as_deref(),
+            )
             .await
         {
             return Ok(result);
@@ -419,26 +462,20 @@ impl McpClientPool {
 
     pub(crate) async fn invalidate_resource_cache_origin(&self, origin: &str, uri: Option<&str>) {
         match uri {
-            Some(uri) => {
-                self.resource_cache
-                    .invalidate(origin, "resources/read", Some(uri))
-                    .await;
-            }
-            None => {
+            Some(_uri) => {
+                // 一个 resources/read 响应可包含多个 contents[] URI；当前 cache
+                // 未维护反向索引，无法确认通知 URI 对应哪个聚合请求。按 MCPP
+                // 7.3.2 保守失效该 origin 的 read domain，避免聚合响应继续命中。
                 self.resource_cache
                     .invalidate(origin, "resources/read", None)
                     .await;
+            }
+            None => {
                 self.resource_cache
                     .invalidate(origin, "resources/list", None)
                     .await;
                 self.resource_cache
                     .invalidate(origin, "resources/templates/list", None)
-                    .await;
-                self.resource_cache
-                    .invalidate(origin, "skills/list", None)
-                    .await;
-                self.resource_cache
-                    .invalidate(origin, "skills/read", None)
                     .await;
             }
         }
@@ -455,12 +492,31 @@ impl McpClientPool {
 
     fn cache_status_for(&self, server_name: &str) -> Option<String> {
         let origin = self.cache_origin(server_name);
-        self.resource_cache
-            .recent_status(&origin)
-            .map(|status| match status {
-                super::resource_cache::CacheLoadStatus::Hit => "hit".to_string(),
+        if let Some(status) = self.resource_cache.recent_status(&origin) {
+            return Some(match status {
+                super::resource_cache::CacheLoadStatus::VersionHit => "version_cached".to_string(),
+                super::resource_cache::CacheLoadStatus::McppHit => "mcpp_cached".to_string(),
+                super::resource_cache::CacheLoadStatus::ResourceHit => "cached".to_string(),
                 super::resource_cache::CacheLoadStatus::LiveFetch => "live_fetch".to_string(),
-            })
+                super::resource_cache::CacheLoadStatus::StoredAfterFetch => {
+                    "stored_after_fetch".to_string()
+                }
+            });
+        }
+        let config = self.configs.read().get(server_name).cloned();
+        let safe = config.as_ref().is_none_or(|config| {
+            config.oauth.is_none()
+                && config.headers.as_ref().is_none_or(|headers| {
+                    !headers
+                        .keys()
+                        .any(|key| key.eq_ignore_ascii_case("authorization"))
+                })
+        });
+        Some(if safe {
+            "cache_ready".to_string()
+        } else {
+            "cache_disabled".to_string()
+        })
     }
 
     async fn persist_public_response<T: serde::Serialize>(
@@ -470,10 +526,32 @@ impl McpClientPool {
         ttl_ms: Option<u64>,
         cache_scope: Option<CacheScope>,
     ) {
-        if cache_scope == Some(CacheScope::Public) {
-            if let Some(ttl_ms) = ttl_ms {
+        if cache_scope == Some(CacheScope::Public) || (cache_scope.is_none() && ttl_ms.is_some()) {
+            let ttl = std::time::Duration::from_millis(ttl_ms.unwrap_or_default());
+            let (cache_version, cache_allowed) = self
+                .cache_versions
+                .read()
+                .iter()
+                .find_map(|(server, version)| {
+                    (self.cache_origin(server) == ticket.origin).then(|| {
+                        let allowed = self.configs.read().get(server).is_none_or(|config| {
+                            config.oauth.is_none()
+                                && config.headers.as_ref().is_none_or(|headers| {
+                                    !headers
+                                        .keys()
+                                        .any(|key| key.eq_ignore_ascii_case("authorization"))
+                                })
+                        });
+                        (Some(version.clone()), allowed)
+                    })
+                })
+                .unwrap_or((None, true));
+            if !cache_allowed {
+                return;
+            }
+            if cache_allowed && (!ttl.is_zero() || cache_version.is_some()) {
                 self.resource_cache
-                    .put_ticket(ticket, std::time::Duration::from_millis(ttl_ms), result)
+                    .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
                     .await;
             }
         }
@@ -484,6 +562,7 @@ impl McpClientPool {
             clients: parking_lot::RwLock::new(HashMap::new()),
             services: tokio::sync::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
+            cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
             init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
             initialized: std::sync::atomic::AtomicBool::new(false),
@@ -674,6 +753,8 @@ impl McpClientPool {
             name.to_string(),
             Arc::new(McpClientHandle {
                 name: name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -712,6 +793,8 @@ impl McpClientPool {
             name.to_string(),
             Arc::new(McpClientHandle {
                 name: name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -759,6 +842,8 @@ impl McpClientPool {
             server_name.to_string(),
             Arc::new(McpClientHandle {
                 name: server_name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],
@@ -778,6 +863,8 @@ impl McpClientPool {
             .values()
             .map(|h| ServerInfo {
                 name: h.name.clone(),
+                version: h.version.clone(),
+                cache_version: h.cache_version.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
@@ -807,6 +894,8 @@ impl McpClientPool {
         for h in clients.values() {
             result.push(ServerInfo {
                 name: h.name.clone(),
+                version: h.version.clone(),
+                cache_version: h.cache_version.clone(),
                 transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
@@ -825,6 +914,8 @@ impl McpClientPool {
         for (name, sc) in configs.iter() {
             if !clients.contains_key(name) {
                 result.push(ServerInfo {
+                    version: None,
+                    cache_version: None,
                     name: name.clone(),
                     transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
                     status: ClientStatus::Uninitialized,

@@ -168,7 +168,7 @@ pub(crate) async fn run_discovery_with_cache(
         }
     } else {
         let candidates = select_skill_resources(&handle.resources);
-        collect_skill_entries(peer, &handle.name, candidates, cancel.clone()).await
+        collect_skill_entries(peer, &handle.name, candidates, cancel.clone(), cache).await
     };
     if cancel.is_cancelled() {
         registry.clear_discovery_started(&handle.name, handle_token.clone());

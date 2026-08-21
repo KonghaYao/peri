@@ -286,7 +286,8 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 let badge_style = Style::new().fg(theme_def.read().semantic.status.warning);
 
-                lines.push(Line::from(vec![
+                let cache_label = cache_status_label(s.cache_status.as_deref());
+                let status_spans = vec![
                     Span::styled(
                         format!(" {} ", cursor),
                         Style::new().fg(theme_def.read().component.panel.title),
@@ -295,8 +296,10 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     Span::styled(auth_badge, badge_style),
                     Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
                     Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
-                ]));
-                lines.push(Line::from(vec![Span::styled(
+                ];
+                lines.push(Line::from(status_spans));
+
+                let mut detail_spans = vec![Span::styled(
                     i18n::tr_args(
                         "panel-mcp-server-detail",
                         &[
@@ -317,15 +320,22 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         ],
                     ),
                     Style::new().fg(theme_def.read().semantic.text.dim),
-                )]));
-                let cache_label = match s.cache_status.as_deref() {
-                    Some("hit") => i18n::tr("panel-mcp-cache-hit"),
-                    Some("live_fetch") => i18n::tr("panel-mcp-cache-live-fetch"),
-                    _ => i18n::tr("panel-mcp-cache-none"),
-                };
-                lines.push(
-                    Line::from(format!("  {}", cache_label)).fg(theme_def.read().semantic.text.dim),
-                );
+                )];
+                if let Some(label) = cache_label {
+                    detail_spans.push(Span::styled(
+                        format!("  ·  {label}"),
+                        Style::new()
+                            .fg(theme_def.read().semantic.status.success)
+                            .bold(),
+                    ));
+                }
+                if let Some(version) = &s.version {
+                    detail_spans.push(Span::styled(
+                        format!("  ·  {version}"),
+                        Style::new().fg(theme_def.read().semantic.text.dim),
+                    ));
+                }
+                lines.push(Line::from(detail_spans));
             }
         }
 
@@ -392,6 +402,18 @@ fn activate_detail_btn(
     *view.write() = McpView::List;
 }
 
+fn cache_status_label(status: Option<&str>) -> Option<&'static str> {
+    match status {
+        Some("version_cached") => Some("CACHE version hit"),
+        Some("mcpp_cached") => Some("CACHE protocol hit"),
+        Some("cached") => Some("CACHE hit"),
+        Some("stored_after_fetch") => Some("CACHE saved"),
+        Some("cache_ready") => Some("CACHE ready"),
+        Some("cache_disabled") => Some("CACHE off: authenticated"),
+        _ => None,
+    }
+}
+
 /// 构造详情视图内容行（纯函数，测试友好）。
 fn build_detail_lines(
     s: &McpServerSummary,
@@ -403,22 +425,35 @@ fn build_detail_lines(
     lines.push(Line::from(""));
     // 标题：server 名 + 状态
     let (status_icon, status_color) = derive_status_style(&s.status);
-    lines.push(Line::from(vec![
+    let mut status_spans = vec![
         Span::styled(
             format!("  {}", s.name),
             Style::new().fg(theme.component.panel.title).bold(),
         ),
         Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
         Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
-        Span::styled(
-            if s.needs_auth {
-                format!("  {}", i18n::tr("panel-mcp-needs-auth"))
-            } else {
-                String::new()
-            },
-            Style::new().fg(semantic.status.warning),
-        ),
-    ]));
+    ];
+    if let Some(label) = cache_status_label(s.cache_status.as_deref()) {
+        status_spans.push(Span::styled(
+            format!(" · {label}"),
+            Style::new().fg(semantic.text.dim),
+        ));
+    }
+    if let Some(version) = &s.version {
+        status_spans.push(Span::styled(
+            format!(" · {version}"),
+            Style::new().fg(semantic.text.dim),
+        ));
+    }
+    status_spans.push(Span::styled(
+        if s.needs_auth {
+            format!("  {}", i18n::tr("panel-mcp-needs-auth"))
+        } else {
+            String::new()
+        },
+        Style::new().fg(semantic.status.warning),
+    ));
+    lines.push(Line::from(status_spans));
     lines.push(Line::from(""));
     if let Some(error) = &s.error_summary {
         lines.push(
@@ -484,7 +519,6 @@ fn derive_status_style(status: &str) -> (String, ratatui::style::Color) {
         )
     }
 }
-
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
@@ -503,5 +537,24 @@ fn start_oauth(server_name: String) {
         });
     } else {
         tracing::warn!(target: "mcp-panel", "ACP_CLIENT_HANDLE not set, oauth_start skipped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_status_label;
+
+    #[test]
+    fn cache_status_labels_are_explicit() {
+        assert_eq!(cache_status_label(Some("cache_ready")), Some("CACHE ready"));
+        assert_eq!(
+            cache_status_label(Some("stored_after_fetch")),
+            Some("CACHE saved")
+        );
+        assert_eq!(cache_status_label(Some("cached")), Some("CACHE hit"));
+        assert_eq!(
+            cache_status_label(Some("cache_disabled")),
+            Some("CACHE off: authenticated")
+        );
     }
 }

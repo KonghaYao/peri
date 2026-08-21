@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,12 +19,46 @@ use sha2::{Digest, Sha256};
 const CACHE_NAMESPACE: &str = "peri:mcp-cache:v2";
 const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
-const EPOCH_FILE: &str = "epoch";
+const EPOCH_DIR: &str = "epochs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheLoadStatus {
-    Hit,
+    VersionHit,
+    McppHit,
+    ResourceHit,
     LiveFetch,
+    StoredAfterFetch,
+}
+
+type SharedStatuses = parking_lot::Mutex<HashMap<String, CacheLoadStatus>>;
+type SharedVersions = parking_lot::RwLock<HashMap<String, String>>;
+type StatusRegistry = parking_lot::Mutex<HashMap<PathBuf, Weak<SharedStatuses>>>;
+type VersionRegistry = parking_lot::Mutex<HashMap<PathBuf, Weak<SharedVersions>>>;
+
+fn shared_statuses(root: &PathBuf) -> Arc<SharedStatuses> {
+    static REGISTRY: OnceLock<StatusRegistry> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(Default::default);
+    let mut entries = registry.lock();
+    entries.retain(|_, statuses| statuses.strong_count() > 0);
+    if let Some(statuses) = entries.get(root).and_then(Weak::upgrade) {
+        return statuses;
+    }
+    let statuses = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    entries.insert(root.clone(), Arc::downgrade(&statuses));
+    statuses
+}
+
+fn shared_versions(root: &PathBuf) -> Arc<SharedVersions> {
+    static REGISTRY: OnceLock<VersionRegistry> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(Default::default);
+    let mut entries = registry.lock();
+    entries.retain(|_, versions| versions.strong_count() > 0);
+    if let Some(versions) = entries.get(root).and_then(Weak::upgrade) {
+        return versions;
+    }
+    let versions = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    entries.insert(root.clone(), Arc::downgrade(&versions));
+    versions
 }
 
 #[derive(Clone)]
@@ -32,12 +66,13 @@ pub(crate) struct McpResourceCache {
     content_path: PathBuf,
     state_path: PathBuf,
     mutex: Arc<tokio::sync::Mutex<()>>,
-    recent_status: Arc<parking_lot::Mutex<HashMap<String, CacheLoadStatus>>>,
+    recent_status: Arc<SharedStatuses>,
+    active_versions: Arc<SharedVersions>,
 }
 
 #[derive(Clone)]
 pub(crate) struct CacheTicket {
-    origin: String,
+    pub(crate) origin: String,
     method: &'static str,
     params: String,
     epoch: u64,
@@ -47,6 +82,8 @@ pub(crate) struct CacheTicket {
 struct CacheEntry {
     epoch: u64,
     expires_at_ms: u128,
+    #[serde(default)]
+    cache_version: Option<String>,
     payload: serde_json::Value,
 }
 
@@ -62,28 +99,66 @@ impl McpResourceCache {
     }
 
     fn from_root(root: PathBuf) -> Self {
+        let recent_status = shared_statuses(&root);
+        let active_versions = shared_versions(&root);
         Self {
             content_path: root.join("content"),
             state_path: root.join("state"),
             mutex: Arc::new(tokio::sync::Mutex::new(())),
-            recent_status: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            recent_status,
+            active_versions,
         }
     }
 
     pub(crate) fn recent_status(&self, origin: &str) -> Option<CacheLoadStatus> {
-        self.recent_status.lock().get(origin).copied()
+        let statuses = self.recent_status.lock();
+        ["skills/", "resources/"]
+            .into_iter()
+            .filter_map(|domain| statuses.get(&status_key(origin, domain)).copied())
+            .max_by_key(|status| match status {
+                CacheLoadStatus::VersionHit => 3,
+                CacheLoadStatus::McppHit => 2,
+                CacheLoadStatus::ResourceHit => 1,
+                CacheLoadStatus::LiveFetch => 0,
+                CacheLoadStatus::StoredAfterFetch => 0,
+            })
     }
 
-    pub(crate) fn mark_live_fetch(&self, origin: &str) {
-        self.recent_status
-            .lock()
-            .insert(origin.to_string(), CacheLoadStatus::LiveFetch);
+    pub(crate) fn mark_live_fetch(&self, origin: &str, method: &'static str) {
+        let mut statuses = self.recent_status.lock();
+        let key = status_key(origin, method);
+        statuses.insert(key, CacheLoadStatus::LiveFetch);
     }
 
-    fn mark_hit(&self, origin: &str) {
+    fn mark_hit(&self, origin: &str, method: &'static str, version_fresh: bool) {
+        let status = if version_fresh {
+            CacheLoadStatus::VersionHit
+        } else if method.starts_with("skills/") {
+            CacheLoadStatus::McppHit
+        } else {
+            CacheLoadStatus::ResourceHit
+        };
         self.recent_status
             .lock()
-            .insert(origin.to_string(), CacheLoadStatus::Hit);
+            .insert(status_key(origin, method), status);
+    }
+
+    fn mark_stored_after_fetch(&self, origin: &str, method: &'static str) {
+        self.recent_status.lock().insert(
+            status_key(origin, method),
+            CacheLoadStatus::StoredAfterFetch,
+        );
+    }
+    pub(crate) fn set_cache_version(&self, origin: &str, cache_version: Option<&str>) {
+        let mut versions = self.active_versions.write();
+        match cache_version {
+            Some(version) => {
+                versions.insert(origin.to_string(), version.to_string());
+            }
+            None => {
+                versions.remove(origin);
+            }
+        }
     }
 
     pub(crate) async fn get<T: DeserializeOwned>(
@@ -92,9 +167,21 @@ impl McpResourceCache {
         method: &'static str,
         params: &str,
     ) -> Option<T> {
+        let cache_version = self.active_versions.read().get(origin).cloned();
+        self.get_versioned(origin, method, params, cache_version.as_deref())
+            .await
+    }
+
+    pub(crate) async fn get_versioned<T: DeserializeOwned>(
+        &self,
+        origin: &str,
+        method: &'static str,
+        params: &str,
+        cache_version: Option<&str>,
+    ) -> Option<T> {
         let _guard = self.mutex.lock().await;
         let lock = self.lock().await?;
-        let epoch = self.read_epoch().await?;
+        let epoch = self.read_epoch(origin, method, params).await?;
         let key = cache_key(origin, method, params);
         let bytes = cacache::read(&self.content_path, &key).await.ok()?;
         let entry: CacheEntry = match serde_json::from_slice(&bytes) {
@@ -105,7 +192,14 @@ impl McpResourceCache {
                 return None;
             }
         };
-        if entry.epoch != epoch || entry.expires_at_ms <= now_ms() {
+        let version_fresh =
+            cache_version.is_some() && entry.cache_version.as_deref() == cache_version;
+        let version_mismatch =
+            cache_version.is_some() && entry.cache_version.as_deref() != cache_version;
+        if entry.epoch != epoch
+            || version_mismatch
+            || (!version_fresh && entry.expires_at_ms <= now_ms())
+        {
             let _ = cacache::remove(&self.content_path, &key).await;
             drop(lock);
             return None;
@@ -119,7 +213,7 @@ impl McpResourceCache {
         };
         drop(lock);
         if value.is_some() {
-            self.mark_hit(origin);
+            self.mark_hit(origin, method, version_fresh);
         }
         value
     }
@@ -146,7 +240,8 @@ impl McpResourceCache {
             .ticket(origin, method, params)
             .await
             .expect("测试 cache 应可用");
-        self.put_ticket(&ticket, ttl, response).await;
+        self.put_ticket_versioned(&ticket, ttl, None, response)
+            .await;
     }
 
     /// 在网络 RPC 前捕获 epoch；网络阶段绝不持有 cache lock。
@@ -158,7 +253,7 @@ impl McpResourceCache {
     ) -> Option<CacheTicket> {
         let _guard = self.mutex.lock().await;
         let lock = self.lock().await?;
-        let epoch = self.read_epoch().await?;
+        let epoch = self.read_epoch(origin, method, params).await?;
         drop(lock);
         Some(CacheTicket {
             origin: origin.to_string(),
@@ -174,7 +269,19 @@ impl McpResourceCache {
         ttl: Duration,
         response: &T,
     ) {
-        if ttl.is_zero() {
+        let cache_version = self.active_versions.read().get(&ticket.origin).cloned();
+        self.put_ticket_versioned(ticket, ttl, cache_version.as_deref(), response)
+            .await;
+    }
+
+    pub(crate) async fn put_ticket_versioned<T: Serialize>(
+        &self,
+        ticket: &CacheTicket,
+        ttl: Duration,
+        cache_version: Option<&str>,
+        response: &T,
+    ) {
+        if ttl.is_zero() && cache_version.is_none() {
             return;
         }
         let payload = match serde_json::to_value(response) {
@@ -184,6 +291,7 @@ impl McpResourceCache {
         let entry = CacheEntry {
             epoch: ticket.epoch,
             expires_at_ms: now_ms().saturating_add(ttl.as_millis()),
+            cache_version: cache_version.map(str::to_owned),
             payload,
         };
         let bytes = match serde_json::to_vec(&entry) {
@@ -196,7 +304,10 @@ impl McpResourceCache {
             Some(lock) => lock,
             None => return,
         };
-        let Some(epoch) = self.read_epoch().await else {
+        let Some(epoch) = self
+            .read_epoch(&ticket.origin, ticket.method, &ticket.params)
+            .await
+        else {
             return;
         };
         if epoch != ticket.epoch {
@@ -205,33 +316,40 @@ impl McpResourceCache {
             return;
         }
         self.trim_locked(bytes.len() as u64).await;
-        if let Err(error) = cacache::write(
+        match cacache::write(
             &self.content_path,
             cache_key(&ticket.origin, ticket.method, &ticket.params),
             bytes,
         )
         .await
         {
-            tracing::warn!(method = ticket.method, %error, "写入 MCP 磁盘缓存失败");
+            Ok(_) => self.mark_stored_after_fetch(&ticket.origin, ticket.method),
+            Err(error) => {
+                tracing::warn!(method = ticket.method, %error, "写入 MCP 磁盘缓存失败");
+            }
         }
         drop(lock);
     }
 
     pub(crate) async fn invalidate(
         &self,
-        _origin: &str,
-        _method: &'static str,
-        _params: Option<&str>,
+        origin: &str,
+        method: &'static str,
+        params: Option<&str>,
     ) {
+        let params = params.unwrap_or_default();
         let _guard = self.mutex.lock().await;
         let lock = match self.lock().await {
             Some(lock) => lock,
             None => return,
         };
-        let Some(epoch) = self.read_epoch().await else {
+        let Some(epoch) = self.read_epoch(origin, method, params).await else {
             return;
         };
-        if let Err(error) = self.write_epoch(epoch.saturating_add(1)).await {
+        if let Err(error) = self
+            .write_epoch(origin, method, params, epoch.saturating_add(1))
+            .await
+        {
             tracing::warn!(%error, "MCP 磁盘缓存失效标记写入失败，已停用本次失效");
         }
         drop(lock);
@@ -258,29 +376,47 @@ impl McpResourceCache {
         Some(file)
     }
 
-    async fn read_epoch(&self) -> Option<u64> {
-        let path = self.state_path.join(EPOCH_FILE);
+    async fn read_epoch(&self, origin: &str, method: &str, params: &str) -> Option<u64> {
+        let method_epoch = self.read_epoch_file(origin, method, "*").await?;
+        if params.is_empty() || params == "*" {
+            return Some(method_epoch);
+        }
+        let params_epoch = self.read_epoch_file(origin, method, params).await?;
+        Some(method_epoch.wrapping_add(params_epoch))
+    }
+
+    async fn read_epoch_file(&self, origin: &str, method: &str, params: &str) -> Option<u64> {
+        let path = self.epoch_path(origin, method, params);
         match tokio::fs::read(&path).await {
             Ok(bytes) => std::str::from_utf8(&bytes).ok()?.trim().parse().ok(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if tokio::fs::try_exists(&self.content_path).await.ok()? {
-                    let mut read_dir = tokio::fs::read_dir(&self.content_path).await.ok()?;
-                    if read_dir.next_entry().await.ok()?.is_some() {
-                        return None;
-                    }
-                }
-                self.write_epoch(0).await.ok()?;
+                self.write_epoch(origin, method, params, 0).await.ok()?;
                 Some(0)
             }
             Err(_) => None,
         }
     }
 
-    async fn write_epoch(&self, epoch: u64) -> Result<(), std::io::Error> {
-        tokio::fs::create_dir_all(&self.state_path).await?;
-        let tmp = self.state_path.join(format!("{EPOCH_FILE}.tmp"));
+    async fn write_epoch(
+        &self,
+        origin: &str,
+        method: &str,
+        params: &str,
+        epoch: u64,
+    ) -> Result<(), std::io::Error> {
+        let path = self.epoch_path(origin, method, params);
+        let parent = path.parent().expect("epoch path has parent");
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = path.with_extension("tmp");
         tokio::fs::write(&tmp, epoch.to_string()).await?;
-        tokio::fs::rename(tmp, self.state_path.join(EPOCH_FILE)).await
+        tokio::fs::rename(tmp, path).await
+    }
+
+    fn epoch_path(&self, origin: &str, method: &str, params: &str) -> PathBuf {
+        let params = if params.is_empty() { "*" } else { params };
+        self.state_path
+            .join(EPOCH_DIR)
+            .join(digest(&format!("{origin}\0{method}\0{params}")))
     }
 
     async fn trim_locked(&self, incoming: u64) {
@@ -307,6 +443,15 @@ impl McpResourceCache {
             let _ = cacache::remove(&self.content_path, key).await;
         }
     }
+}
+
+fn status_key(origin: &str, method: &str) -> String {
+    let domain = if method.starts_with("skills/") {
+        "skills/"
+    } else {
+        "resources/"
+    };
+    format!("{origin}\0{domain}")
 }
 
 pub(crate) fn cache_origin(server_name: &str, config: Option<&McpServerConfig>) -> String {

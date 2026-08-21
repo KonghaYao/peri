@@ -151,7 +151,7 @@ impl McpClientPool {
             let result = tokio::time::timeout(
                 HTTP_CONNECT_TIMEOUT,
                 rmcp::service::serve_client(
-                    (),
+                    super::client::mcpp_client_info(),
                     build_authed_transport(&url, &headers, auth_manager),
                 ),
             )
@@ -183,6 +183,10 @@ impl McpClientPool {
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
                         name: server_name.to_string(),
+                        version: peer.peer_info().and_then(|info| {
+                            info.server_info.as_ref().map(|si| si.version.clone())
+                        }),
+                        cache_version: super::client::peer_cache_version(&peer),
                         peer: Some(peer),
                         tools,
                         resources,
@@ -291,6 +295,8 @@ impl McpClientPool {
             server_name.to_string(),
             Arc::new(McpClientHandle {
                 name: server_name.to_string(),
+                version: None,
+                cache_version: None,
                 peer: None,
                 tools: vec![],
                 resources: vec![],

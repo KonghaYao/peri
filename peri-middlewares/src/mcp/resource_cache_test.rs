@@ -4,6 +4,29 @@ use std::{collections::HashMap, time::Duration};
 use super::*;
 
 #[tokio::test]
+async fn test_successful_write_marks_cache_strategy() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache
+        .ticket("origin-a", "skills/list", "null")
+        .await
+        .unwrap();
+
+    cache
+        .put_ticket(
+            &ticket,
+            Duration::from_secs(60),
+            &serde_json::json!({"skills": []}),
+        )
+        .await;
+
+    assert_eq!(
+        cache.recent_status("origin-a"),
+        Some(CacheLoadStatus::StoredAfterFetch)
+    );
+}
+
+#[tokio::test]
 async fn test_public_entry_round_trips_while_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let cache = McpResourceCache::at(dir.path().to_path_buf());
@@ -22,6 +45,141 @@ async fn test_public_entry_round_trips_while_fresh() {
         .get("origin-a", "resources/read", "resource://one")
         .await;
     assert_eq!(value, Some(serde_json::json!({"contents": ["one"]})));
+}
+
+#[test]
+fn test_cache_instances_for_same_root_share_recent_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = McpResourceCache::at(dir.path().to_path_buf());
+    let second = McpResourceCache::at(dir.path().to_path_buf());
+
+    first.mark_live_fetch("origin-a", "resources/list");
+    second.mark_hit("origin-a", "skills/legacy-read", false);
+
+    assert_eq!(
+        first.recent_status("origin-a"),
+        Some(CacheLoadStatus::McppHit)
+    );
+    assert_eq!(
+        second.recent_status("origin-a"),
+        Some(CacheLoadStatus::McppHit)
+    );
+}
+
+#[tokio::test]
+async fn test_cache_instances_for_same_root_share_active_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = McpResourceCache::at(dir.path().to_path_buf());
+    let second = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = first
+        .ticket("origin-a", "resources/list", "null")
+        .await
+        .unwrap();
+    first
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &serde_json::json!({"resources": []}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    first.set_cache_version("origin-a", Some("opaque-v1"));
+    let value: Option<serde_json::Value> = second.get("origin-a", "resources/list", "null").await;
+
+    assert_eq!(value, Some(serde_json::json!({"resources": []})));
+}
+
+#[tokio::test]
+async fn test_skill_cache_status_takes_priority_over_resource_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+
+    cache.mark_live_fetch("origin-a", "resources/list");
+    cache
+        .put(
+            "origin-a",
+            "skills/list",
+            "null",
+            Duration::from_secs(60),
+            &serde_json::json!({"skills": []}),
+        )
+        .await;
+    let _: Option<serde_json::Value> = cache.get("origin-a", "skills/list", "null").await;
+
+    assert_eq!(
+        cache.recent_status("origin-a"),
+        Some(CacheLoadStatus::McppHit),
+        "启动时 resources/list 的实时请求不得掩盖后续 Skill cache hit"
+    );
+}
+
+#[tokio::test]
+async fn test_entry_is_readable_by_new_cache_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = McpResourceCache::at(dir.path().to_path_buf());
+    first
+        .put(
+            "origin-a",
+            "skills/list",
+            "null",
+            Duration::from_secs(60),
+            &serde_json::json!({"skills": []}),
+        )
+        .await;
+
+    let second = McpResourceCache::at(dir.path().to_path_buf());
+    let value: Option<serde_json::Value> = second.get("origin-a", "skills/list", "null").await;
+    assert_eq!(value, Some(serde_json::json!({"skills": []})));
+}
+
+#[tokio::test]
+async fn test_matching_cache_version_reuses_expired_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache
+        .ticket("origin-a", "resources/list", "null")
+        .await
+        .unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &serde_json::json!({"resources": []}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let hit: Option<serde_json::Value> = cache
+        .get_versioned("origin-a", "resources/list", "null", Some("opaque-v1"))
+        .await;
+    assert!(hit.is_some());
+}
+
+#[tokio::test]
+async fn test_missing_or_mismatched_cache_version_falls_back_to_ttl_miss() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache
+        .ticket("origin-a", "resources/list", "null")
+        .await
+        .unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &serde_json::json!({"resources": []}),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let miss: Option<serde_json::Value> = cache
+        .get_versioned("origin-a", "resources/list", "null", Some("opaque-v2"))
+        .await;
+    assert!(miss.is_none());
 }
 
 #[tokio::test]
@@ -47,7 +205,7 @@ async fn test_expired_entry_is_not_returned() {
 }
 
 #[tokio::test]
-async fn test_resource_update_stales_cache_globally_for_cross_process_safety() {
+async fn test_resource_update_invalidates_only_matching_uri() {
     let dir = tempfile::tempdir().unwrap();
     let cache = McpResourceCache::at(dir.path().to_path_buf());
     for uri in ["resource://one", "resource://two"] {
@@ -73,10 +231,7 @@ async fn test_resource_update_stales_cache_globally_for_cross_process_safety() {
         .get("origin-a", "resources/read", "resource://two")
         .await;
     assert!(first.is_none());
-    assert!(
-        second.is_none(),
-        "v2 全局 epoch 保证跨进程失效原子性；更新通知会保守地使同一 cache root 的旧条目全部 stale"
-    );
+    assert_eq!(second, Some(serde_json::json!("resource://two")));
 }
 
 #[tokio::test]
