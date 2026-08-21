@@ -68,6 +68,8 @@ pub(crate) struct McpResourceCache {
     mutex: Arc<tokio::sync::Mutex<()>>,
     recent_status: Arc<SharedStatuses>,
     active_versions: Arc<SharedVersions>,
+    #[cfg(test)]
+    test_root: Option<Arc<tempfile::TempDir>>,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,16 @@ impl McpResourceCache {
         Self::from_root(path)
     }
 
+    /// 为 pool 测试提供独立的缓存根，避免相同 server/URI 的测试命中彼此
+    /// 留下的持久化响应。目录的生命周期与缓存实例绑定。
+    #[cfg(test)]
+    pub(crate) fn isolated_for_test() -> Self {
+        let test_root = Arc::new(tempfile::tempdir().expect("创建 MCP 测试缓存目录失败"));
+        let mut cache = Self::from_root(test_root.path().to_path_buf());
+        cache.test_root = Some(test_root);
+        cache
+    }
+
     fn from_root(root: PathBuf) -> Self {
         let recent_status = shared_statuses(&root);
         let active_versions = shared_versions(&root);
@@ -107,6 +119,8 @@ impl McpResourceCache {
             mutex: Arc::new(tokio::sync::Mutex::new(())),
             recent_status,
             active_versions,
+            #[cfg(test)]
+            test_root: None,
         }
     }
 

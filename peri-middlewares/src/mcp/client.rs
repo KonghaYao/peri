@@ -579,7 +579,9 @@ impl McpClientPool {
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
-        Self::new_pending()
+        let mut pool = Self::new_pending();
+        pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
+        pool
     }
 
     /// 注入 OAuth 流程事件回调（host 装配面在 `run_initialize` 前调用；
