@@ -39,6 +39,27 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
         .to_string()
 }
 
+/// Build ACP-standard metadata for routing output to its originating SubAgent.
+fn source_agent_meta(source_agent_id: &str) -> agent_client_protocol::schema::v1::Meta {
+    serde_json::Map::from_iter([(
+        "peri".to_string(),
+        json!({ "sourceAgentId": source_agent_id }),
+    )])
+}
+
+/// Attach source identity to the typed notification field preserved by ACP SDKs.
+fn session_notification(
+    session_id: SdkSessionId,
+    update: SessionUpdate,
+    source_agent_id: Option<&str>,
+) -> SessionNotification {
+    let notification = SessionNotification::new(session_id, update);
+    match source_agent_id {
+        Some(source_agent_id) => notification.meta(source_agent_meta(source_agent_id)),
+        None => notification,
+    }
+}
+
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
 ///
@@ -49,7 +70,7 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 /// （L5：trait 定义契约化至 peri-acp-types，实现见下方。）
 // ── TUI transport-backed EventSink ──────────────────────────────────────────
 /// [`EventSink`] backed by an [`AcpTransport`]. Sends two notification types:
-/// - `session/update` — standard ACP SessionUpdate (with `_peri` metadata for TUI)
+/// - `session/update` — standard ACP SessionUpdate (with ACP `_meta` routing metadata)
 /// - `peri/agent_event` — AcpEvent DTO 序列化（TUI-only events，categories ②③）
 ///
 /// Additionally, each event is routed through the event router to emit
@@ -139,12 +160,16 @@ impl EventSink for TransportEventSink {
                     mapped.source_agent_id = ?m.source_agent_id,
                     "push_event: source_agent_id injection"
                 );
-                // _peri.sourceAgentId 是事件路由语义字段，不应受 caps gating——
-                // 否则 SubAgent 内部工具事件无法路由到正确的卡片容器。
-                // MappedEvent 已有该字段时，无条件注入。
+                // ACP reserves params._meta for extension metadata and typed SDKs preserve it.
+                // The source identity is routing semantics, so it is not capability-gated.
                 if let Some(ref aid) = m.source_agent_id {
                     if let serde_json::Value::Object(ref mut map) = payload {
-                        map.insert("_peri".to_string(), json!({ "sourceAgentId": aid }));
+                        map.insert(
+                            "_meta".to_string(),
+                            json!({
+                                "peri": { "sourceAgentId": aid }
+                            }),
+                        );
                     }
                 }
                 let _ = self
@@ -463,7 +488,11 @@ impl EventSink for StdioEventSink {
         let mapped = map_event(event, context_window, &self.caps);
         for m in mapped {
             for update in m.updates {
-                let notif = SessionNotification::new(self.session_id.clone(), update);
+                let notif = session_notification(
+                    self.session_id.clone(),
+                    update,
+                    m.source_agent_id.as_deref(),
+                );
                 if let Err(e) = self.cx.send_notification(notif) {
                     error!(error = %e, "StdioEventSink: failed to send SessionNotification");
                     break;
@@ -758,6 +787,53 @@ mod tests {
         )
         .await;
         assert!(transport.notifications.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_notification_preserves_source_identity_through_typed_roundtrip() {
+        let update = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+            "call-1", "Read",
+        ));
+        let notification =
+            session_notification(SdkSessionId::from("s1"), update, Some("child-agent-1"));
+
+        let wire = serde_json::to_value(notification).unwrap();
+        let decoded: SessionNotification = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            decoded
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("peri"))
+                .and_then(|peri| peri.get("sourceAgentId"))
+                .and_then(Value::as_str),
+            Some("child-agent-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn push_event_places_source_identity_in_acp_meta() {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert("s1".to_string(), PeriCaps::default());
+        let sink = TransportEventSink::new(transport.clone(), caps);
+
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::TextChunk {
+                message_id: MessageId::new(),
+                chunk: "child output".to_string(),
+                source_agent_id: Some("child-agent-1".to_string()),
+            },
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(
+            notifications[0].1["_meta"]["peri"]["sourceAgentId"],
+            "child-agent-1"
+        );
+        assert!(notifications[0].1.get("_peri").is_none());
     }
 
     /// push_unstable_event 通道 method 命名统一为 snake_case（2026-08-14 整顿）。

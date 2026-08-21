@@ -11,7 +11,7 @@ mod forwarder_test;
 pub mod mapper;
 pub mod oauth;
 
-pub(crate) use self::forwarder::spawn_eventbus_forwarder;
+pub(crate) use self::forwarder::{clear_main_agent_source, spawn_eventbus_forwarder};
 pub use mapper::{map_event, MappedEvent};
 pub use peri_acp_types::summary::{
     CompactFileInfoDto, StopReasonDto, TodoItemDto, TodoStatusDto, TokenUsageDto,
