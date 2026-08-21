@@ -1,4 +1,6 @@
-//! 持久化 MCP cache：只缓存明确可跨进程复用的公开响应。
+//! 持久化 MCP cache：仅在响应 scope 与当前授权上下文允许时跨进程复用。
+//! private 响应不代表永不持久化；匿名、无 Authorization 的 endpoint 可在
+//! 匹配的 server cache version 下复用，OAuth/凭据上下文则由 client policy 禁止。
 //!
 //! v2 将 `cacache` content 与协调状态分离。网络 RPC 不持锁；短暂的本地
 //! `get` / `ticket` / `put` / `invalidate` 临界区由进程内 mutex 与跨进程

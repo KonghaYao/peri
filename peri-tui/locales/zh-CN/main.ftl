@@ -877,6 +877,8 @@ panel-mcp-list-hint =   Enter: 查看详情  |  Esc: 关闭
 panel-mcp-oauth-hint =   Enter: 查看详情  |  Esc: 关闭
 # MCP 面板详情视图（OAuth 授权入口）
 panel-mcp-detail-url = URL:
+panel-mcp-detail-cache = 缓存：
+panel-mcp-detail-cache-none = 暂无缓存活动
 panel-mcp-detail-error = 错误：
 panel-mcp-detail-btn-auth = 授权
 panel-mcp-detail-btn-back = 返回

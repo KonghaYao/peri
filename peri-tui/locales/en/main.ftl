@@ -879,6 +879,8 @@ panel-mcp-list-hint =   Enter: details  |  Esc: close
 panel-mcp-oauth-hint =   Enter: details  |  Esc: close
 # MCP panel detail view (OAuth authorize entry)
 panel-mcp-detail-url = URL:
+panel-mcp-detail-cache = Cache:
+panel-mcp-detail-cache-none = No cache activity yet
 panel-mcp-detail-error = Error:
 panel-mcp-detail-btn-auth = Authorize
 panel-mcp-detail-btn-back = Back

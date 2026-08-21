@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::super::client::cache_scope_allows_persistence;
 use super::super::resource_cache::McpResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
 use rmcp::{
@@ -148,7 +149,9 @@ async fn collect_via_skills_list_inner(
                 let Some(page) = page else {
                     return (false, Vec::new());
                 };
-                if page.cache_scope == Some(CacheScope::Public) {
+                if cache_scope_allows_persistence(page.cache_scope)
+                    || (page.cache_scope.is_none() && page.ttl_ms.is_some())
+                {
                     if let Some(ticket) = ticket {
                         cache
                             .put_ticket(
@@ -319,7 +322,9 @@ async fn fetch_and_verify_one(
             };
         match verify_and_build(server, &entry, &text) {
             VerifyOutcome::Built(meta) => {
-                if cache_scope == Some(CacheScope::Public) {
+                if cache_scope_allows_persistence(cache_scope)
+                    || (cache_scope.is_none() && ttl_ms.is_some())
+                {
                     if let Some((cache, ticket)) = cache_ticket {
                         cache
                             .put_ticket(

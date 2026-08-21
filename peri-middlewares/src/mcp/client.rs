@@ -243,6 +243,13 @@ fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
     (!summary.is_empty()).then_some(summary)
 }
 
+pub(crate) fn cache_scope_allows_persistence(scope: Option<CacheScope>) -> bool {
+    match scope {
+        Some(CacheScope::Public) | Some(CacheScope::Private) => true,
+        Some(_) | None => false,
+    }
+}
+
 /// MCP 客户端连接池
 pub struct McpClientPool {
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
@@ -280,7 +287,7 @@ pub struct McpClientPool {
     /// 活跃订阅循环任务（server_name → JoinHandle；随 transport 关闭自然结束）。
     pub(crate) subscription_tasks:
         tokio::sync::Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
-    /// 跨进程的 public MCP Resource Cache；private 响应绝不写入该缓存。
+    /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
 }
 
@@ -311,12 +318,18 @@ pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 impl McpClientPool {
     fn config_allows_persistent_cache(config: &McpServerConfig) -> bool {
+        // `private` 只可在匿名上下文复用。任意静态 header、HTTP query 与
+        // stdio env 都可能携带 Cookie、API key 或服务自定义凭据，保守禁用。
         config.oauth.is_none()
-            && config.headers.as_ref().is_none_or(|headers| {
-                !headers
-                    .keys()
-                    .any(|key| key.eq_ignore_ascii_case("authorization"))
-            })
+            && config
+                .headers
+                .as_ref()
+                .is_none_or(std::collections::HashMap::is_empty)
+            && config.url.as_deref().is_none_or(|url| !url.contains('?'))
+            && config
+                .env
+                .as_ref()
+                .is_none_or(std::collections::HashMap::is_empty)
     }
 
     pub(crate) fn persistent_cache_allowed(&self, server_name: &str) -> bool {
@@ -401,7 +414,7 @@ impl McpClientPool {
         result: &ReadResourceResult,
     ) {
         let Some(ticket) = ticket else { return };
-        self.persist_public_response(
+        self.persist_cacheable_response(
             server_name,
             &ticket,
             result,
@@ -443,7 +456,7 @@ impl McpClientPool {
             .await;
         let result = peer.list_resources(params).await?;
         if let Some(ticket) = ticket {
-            self.persist_public_response(
+            self.persist_cacheable_response(
                 server_name,
                 &ticket,
                 &result,
@@ -510,7 +523,7 @@ impl McpClientPool {
             .await;
         let result = peer.list_resource_templates(params).await?;
         if let Some(ticket) = ticket {
-            self.persist_public_response(
+            self.persist_cacheable_response(
                 server_name,
                 &ticket,
                 &result,
@@ -580,7 +593,7 @@ impl McpClientPool {
         })
     }
 
-    async fn persist_public_response<T: serde::Serialize>(
+    async fn persist_cacheable_response<T: serde::Serialize>(
         &self,
         server_name: &str,
         ticket: &super::resource_cache::CacheTicket,
@@ -591,14 +604,17 @@ impl McpClientPool {
         if !self.persistent_cache_allowed(server_name) {
             return;
         }
-        if cache_scope == Some(CacheScope::Public) || (cache_scope.is_none() && ttl_ms.is_some()) {
-            let ttl = std::time::Duration::from_millis(ttl_ms.unwrap_or_default());
-            let cache_version = self.cache_versions.read().get(server_name).cloned();
-            if !ttl.is_zero() || cache_version.is_some() {
-                self.resource_cache
-                    .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
-                    .await;
-            }
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        let can_reuse = cache_scope_allows_persistence(cache_scope)
+            || (cache_scope.is_none() && ttl_ms.is_some());
+        if !can_reuse {
+            return;
+        }
+        let ttl = std::time::Duration::from_millis(ttl_ms.unwrap_or_default());
+        if !ttl.is_zero() || cache_version.is_some() {
+            self.resource_cache
+                .put_ticket_versioned(ticket, ttl, cache_version.as_deref(), result)
+                .await;
         }
     }
 

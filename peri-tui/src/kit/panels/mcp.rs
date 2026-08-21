@@ -286,7 +286,6 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 let badge_style = Style::new().fg(theme_def.read().semantic.status.warning);
 
-                let cache_label = cache_status_label(s.cache_status.as_deref());
                 let status_spans = vec![
                     Span::styled(
                         format!(" {} ", cursor),
@@ -321,14 +320,6 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     ),
                     Style::new().fg(theme_def.read().semantic.text.dim),
                 )];
-                if let Some(label) = cache_label {
-                    detail_spans.push(Span::styled(
-                        format!("  ·  {label}"),
-                        Style::new()
-                            .fg(theme_def.read().semantic.status.success)
-                            .bold(),
-                    ));
-                }
                 if let Some(version) = &s.version {
                     detail_spans.push(Span::styled(
                         format!("  ·  {version}"),
@@ -383,8 +374,8 @@ fn detail_btn_row(s: &McpServerSummary) -> u16 {
         .as_ref()
         .map(|url| wrap_text(url, 52).len() as u16)
         .unwrap_or(0);
-    // 空行 + 标题 + 空行 + [错误标题 + 摘要 + 空行] + URL 标签 + URL×n + 空行。
-    5 + url_lines + u16::from(s.error_summary.is_some()) * 3
+    // 空行 + 标题 + cache + 空行 + [错误标题 + 摘要 + 空行] + URL 标签 + URL×n + 空行。
+    6 + url_lines + u16::from(s.error_summary.is_some()) * 3
 }
 
 /// 激活详情视图按钮：待授权 server 的 0 = 授权、1 = 返回；其他 server
@@ -414,6 +405,7 @@ fn cache_status_label_key(status: Option<&str>) -> Option<&'static str> {
         Some("stored_after_fetch") => Some("panel-mcp-cache-saved"),
         Some("cache_ready") => Some("panel-mcp-cache-ready"),
         Some("cache_disabled") => Some("panel-mcp-cache-disabled"),
+        Some("live_fetch") => Some("panel-mcp-cache-live-fetch"),
         _ => None,
     }
 }
@@ -437,27 +429,31 @@ fn build_detail_lines(
         Span::styled(format!("  {}", status_icon), Style::new().fg(status_color)),
         Span::styled(format!(" {}", s.status), Style::new().fg(status_color)),
     ];
-    if let Some(label) = cache_status_label(s.cache_status.as_deref()) {
-        status_spans.push(Span::styled(
-            format!(" · {label}"),
-            Style::new().fg(semantic.text.dim),
-        ));
-    }
     if let Some(version) = &s.version {
         status_spans.push(Span::styled(
             format!(" · {version}"),
             Style::new().fg(semantic.text.dim),
         ));
     }
-    status_spans.push(Span::styled(
-        if s.needs_auth {
-            format!("  {}", i18n::tr("panel-mcp-needs-auth"))
-        } else {
-            String::new()
-        },
-        Style::new().fg(semantic.status.warning),
-    ));
+    if s.needs_auth {
+        status_spans.push(Span::styled(
+            format!("  {}", i18n::tr("panel-mcp-needs-auth")),
+            Style::new().fg(semantic.status.warning),
+        ));
+    }
     lines.push(Line::from(status_spans));
+    let cache_label = cache_status_label(s.cache_status.as_deref())
+        .unwrap_or_else(|| i18n::tr("panel-mcp-detail-cache-none"));
+    lines.push(
+        Line::from(vec![
+            Span::styled(
+                format!("  {} ", i18n::tr("panel-mcp-detail-cache")),
+                Style::new().fg(semantic.text.dim),
+            ),
+            Span::styled(cache_label, Style::new().fg(semantic.text.primary)),
+        ])
+        .fg(semantic.text.dim),
+    );
     lines.push(Line::from(""));
     if let Some(error) = &s.error_summary {
         lines.push(
@@ -565,6 +561,10 @@ mod tests {
         assert_eq!(
             cache_status_label_key(Some("cache_disabled")),
             Some("panel-mcp-cache-disabled")
+        );
+        assert_eq!(
+            cache_status_label_key(Some("live_fetch")),
+            Some("panel-mcp-cache-live-fetch")
         );
     }
 }

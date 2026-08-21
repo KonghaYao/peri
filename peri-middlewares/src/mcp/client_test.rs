@@ -354,9 +354,61 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
         },
     );
 
+    pool.configs.write().insert(
+        "custom-header".to_string(),
+        McpServerConfig {
+            headers: Some(std::collections::HashMap::from([(
+                "X-Client-Label".to_string(),
+                "test".to_string(),
+            )])),
+            ..config()
+        },
+    );
+
+    pool.configs.write().insert(
+        "query".to_string(),
+        McpServerConfig {
+            url: Some("https://example.test/mcp?access_token=hidden".to_string()),
+            ..config()
+        },
+    );
+    pool.configs.write().insert(
+        "env".to_string(),
+        McpServerConfig {
+            env: Some(std::collections::HashMap::from([(
+                "MCP_TOKEN".to_string(),
+                "hidden".to_string(),
+            )])),
+            ..config()
+        },
+    );
+
     assert!(!pool.persistent_cache_allowed("oauth"));
     assert!(!pool.persistent_cache_allowed("header"));
+    assert!(
+        !pool.persistent_cache_allowed("custom-header"),
+        "未知静态 header 可能是服务自定义凭据，必须保守禁用持久化 cache"
+    );
+    assert!(
+        !pool.persistent_cache_allowed("query"),
+        "URL query 可能携带访问令牌，必须保守禁用持久化 cache"
+    );
+    assert!(
+        !pool.persistent_cache_allowed("env"),
+        "stdio env 可能携带凭据，必须保守禁用持久化 cache"
+    );
     assert!(pool.persistent_cache_allowed("unknown"));
+}
+
+#[test]
+fn test_cache_scope_persistence_accepts_known_scopes_only() {
+    assert!(cache_scope_allows_persistence(Some(
+        rmcp::model::CacheScope::Public
+    )));
+    assert!(cache_scope_allows_persistence(Some(
+        rmcp::model::CacheScope::Private
+    )));
+    assert!(!cache_scope_allows_persistence(None));
 }
 
 #[test]
