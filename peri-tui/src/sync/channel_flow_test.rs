@@ -1018,8 +1018,7 @@ mod tests {
             material: sender_mat,
         };
         let items = all_items();
-        let mut cfg = test_cfg();
-        cfg.start_timeout = Duration::from_millis(300); // 无人 join，等待超时是预期
+        let (cfg, _clock) = clocked_cfg(Duration::from_millis(300), 0); // 固定在同一 epoch，避免墙钟跨界产生下一轮注册。
 
         let result = run_sender(
             SenderFlow {

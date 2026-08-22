@@ -159,7 +159,9 @@ impl McpClientPool {
 
             match result {
                 Ok(Ok(rs)) => {
-                    let tools = match rs.list_all_tools().await {
+                    let peer = rs.peer().clone();
+                    let cache_version = self.install_peer_cache_version(server_name, &peer);
+                    let tools = match self.list_all_tools_cached(server_name, &peer).await {
                         Ok(tools) => tools,
                         Err(source) => {
                             let error = McpPoolError::ToolDiscoveryFailed {
@@ -176,17 +178,16 @@ impl McpClientPool {
                         }
                     };
                     let resources = self
-                        .list_all_resources_cached(server_name, rs.peer())
+                        .list_all_resources_cached(server_name, &peer)
                         .await
                         .unwrap_or_default();
-                    let peer = rs.peer().clone();
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
                         name: server_name.to_string(),
                         version: peer.peer_info().and_then(|info| {
                             info.server_info.as_ref().map(|si| si.version.clone())
                         }),
-                        cache_version: super::client::peer_cache_version(&peer),
+                        cache_version: cache_version.clone(),
                         peer: Some(peer),
                         tools,
                         resources,

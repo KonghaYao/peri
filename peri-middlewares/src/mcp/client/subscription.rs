@@ -84,8 +84,19 @@ impl McpClientPool {
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
                         pool.invalidate_resource_cache(&task_server, None).await;
                     }
+                    Ok(Some(ServerNotification::ToolListChangedNotification(_))) => {
+                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
+                        // rmcp peer 已失效其连接内工具缓存；同步失效跨进程磁盘
+                        // tools/list 缓存，使下次回源刷新 bridge 使用的 schema。
+                        pool.invalidate_tools_cache(&task_server).await;
+                    }
+                    Ok(Some(ServerNotification::PromptListChangedNotification(_))) => {
+                        // rmcp peer 已失效其连接内 prompt 缓存；本客户端未持久化
+                        // prompts，无需磁盘失效。
+                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
+                    }
                     Ok(Some(_)) => {
-                        // tool/prompt list_changed：rmcp peer 已失效对应连接内缓存
+                        // 其余通知（Cancelled/Progress/Logging/Task/Custom 等）无需处理
                         retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
                     }
                     Ok(None) => {

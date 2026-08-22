@@ -879,13 +879,20 @@ panel-mcp-list-hint =   Enter: details  |  Esc: close
 panel-mcp-oauth-hint =   Enter: details  |  Esc: close
 # MCP panel detail view (OAuth authorize entry)
 panel-mcp-detail-url = URL:
+panel-mcp-detail-cache = Cache:
+panel-mcp-detail-cache-none = No cache activity yet
 panel-mcp-detail-error = Error:
 panel-mcp-detail-btn-auth = Authorize
 panel-mcp-detail-btn-back = Back
 panel-mcp-detail-hint =   ←→: select action  |  Enter: confirm  |  Esc: back to list
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
-panel-mcp-cache-hit = Persistent cache: hit
+panel-mcp-cache-hit = CACHE hit
+panel-mcp-cache-version-hit = CACHE version hit
+panel-mcp-cache-protocol-hit = CACHE protocol hit
+panel-mcp-cache-saved = CACHE saved
+panel-mcp-cache-ready = CACHE ready
+panel-mcp-cache-disabled = CACHE off: authenticated
 panel-mcp-cache-live-fetch = Persistent cache: live fetch
 panel-mcp-cache-none = Persistent cache: —
 

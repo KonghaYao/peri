@@ -9,6 +9,7 @@ use rmcp::{
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use super::super::client::cache_scope_allows_persistence;
 use super::super::resource_cache::McpResourceCache;
 use super::verify::disambiguate_names;
 use super::{parse_mcp_skill_md, READ_CONCURRENCY, RESOURCE_READ_TIMEOUT};
@@ -137,8 +138,10 @@ pub(crate) async fn collect_skill_entries(
                         return None;
                     }
                 };
-                if let (Some((cache, _)), Some(ticket)) = (task_cache.as_ref(), ticket) {
-                    if result.cache_scope == Some(rmcp::model::CacheScope::Public) {
+                if cache_scope_allows_persistence(result.cache_scope)
+                    || (result.cache_scope.is_none() && result.ttl_ms.is_some())
+                {
+                    if let (Some((cache, _)), Some(ticket)) = (task_cache.as_ref(), ticket) {
                         cache
                             .put_ticket(
                                 &ticket,

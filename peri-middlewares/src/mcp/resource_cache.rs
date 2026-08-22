@@ -1,4 +1,6 @@
-//! 持久化 MCP cache：只缓存明确可跨进程复用的公开响应。
+//! 持久化 MCP cache：仅在响应 scope 与当前授权上下文允许时跨进程复用。
+//! private 响应不代表永不持久化；匿名、无 Authorization 的 endpoint 可在
+//! 匹配的 server cache version 下复用，OAuth/凭据上下文则由 client policy 禁止。
 //!
 //! v2 将 `cacache` content 与协调状态分离。网络 RPC 不持锁；短暂的本地
 //! `get` / `ticket` / `put` / `invalidate` 临界区由进程内 mutex 与跨进程
@@ -126,7 +128,7 @@ impl McpResourceCache {
 
     pub(crate) fn recent_status(&self, origin: &str) -> Option<CacheLoadStatus> {
         let statuses = self.recent_status.lock();
-        ["skills/", "resources/"]
+        ["skills/", "tools/", "resources/"]
             .into_iter()
             .filter_map(|domain| statuses.get(&status_key(origin, domain)).copied())
             .max_by_key(|status| match status {
@@ -371,7 +373,21 @@ impl McpResourceCache {
 
     async fn lock(&self) -> Option<std::fs::File> {
         let path = self.state_path.join("cache.lock");
+        // root/state -> root：仅在 Unix 收紧缓存根到 0700，阻断其他 uid 进入，
+        // 其下 content/、state/ 即便沿用默认 umask 权限也不可达。其余代码全平台可编译。
+        #[cfg(unix)]
+        let cache_root = self.state_path.parent().map(PathBuf::from);
         let file = tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(root) = cache_root {
+                    std::fs::create_dir_all(&root)?;
+                    let mut perms = std::fs::metadata(&root)?.permissions();
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(&root, perms)?;
+                }
+            }
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -462,6 +478,8 @@ impl McpResourceCache {
 fn status_key(origin: &str, method: &str) -> String {
     let domain = if method.starts_with("skills/") {
         "skills/"
+    } else if method.starts_with("tools/") {
+        "tools/"
     } else {
         "resources/"
     };

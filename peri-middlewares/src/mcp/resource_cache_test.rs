@@ -1,4 +1,5 @@
 use peri_acp_types::plugin::McpServerConfig;
+use rmcp::model::Tool;
 use std::{collections::HashMap, time::Duration};
 
 use super::*;
@@ -390,4 +391,176 @@ fn test_cache_directory_uses_peri_home() {
     let cache = McpResourceCache::new();
     assert!(cache.content_path.ends_with(".peri/cache/mcp/v2/content"));
     assert!(cache.state_path.ends_with(".peri/cache/mcp/v2/state"));
+}
+
+/// 统计 content 中归属本命名空间的条目总字节数与条数。仅验证 `trim_locked`
+/// 的“列举—按大小求和—驱逐”数学，不依赖反序列化，读取只查 cacache 列表。
+async fn content_total(cache: &McpResourceCache) -> (u64, usize) {
+    let mut total = 0u64;
+    let mut count = 0;
+    for entry in cacache::list_sync(&cache.content_path).filter_map(Result::ok) {
+        if entry.key.starts_with(CACHE_NAMESPACE) {
+            total += entry.size as u64;
+            count += 1;
+        }
+    }
+    (total, count)
+}
+
+#[tokio::test]
+async fn test_trim_locked_evicts_until_within_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+
+    // 写入约 66 MiB 合成 blob（绕过序列化/epoch，精确控字节、轻量），
+    // 越过 64 MiB 总量预算，迫使裁剪驱逐最旧条目。
+    for i in 0..66u32 {
+        let key = format!("{CACHE_NAMESPACE}:syn-{i}");
+        cacache::write(&cache.content_path, key, vec![0u8; 1 << 20])
+            .await
+            .unwrap();
+    }
+
+    let (before_total, before_count) = content_total(&cache).await;
+    assert!(before_total > MAX_CACHE_BYTES, "前置：写入超过预算");
+
+    cache.trim_locked(0).await;
+
+    let (after_total, after_count) = content_total(&cache).await;
+    assert!(after_total <= MAX_CACHE_BYTES, "裁剪后须回到预算内");
+    assert!(after_count < before_count, "超预算时必须发生驱逐");
+}
+
+#[tokio::test]
+async fn test_trim_locked_no_eviction_at_exact_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+
+    for i in 0..60u32 {
+        let key = format!("{CACHE_NAMESPACE}:syn-{i}");
+        cacache::write(&cache.content_path, key, vec![0u8; 1 << 20])
+            .await
+            .unwrap();
+    }
+
+    let (current, count) = content_total(&cache).await;
+    // incoming 令 total + incoming == MAX（严格 `>`，恰好达标不驱逐）。
+    let incoming = MAX_CACHE_BYTES.saturating_sub(current);
+
+    cache.trim_locked(incoming).await;
+
+    let (after_total, after_count) = content_total(&cache).await;
+    assert_eq!(after_count, count, "恰好达标时不应驱逐");
+    assert_eq!(
+        after_total + incoming,
+        MAX_CACHE_BYTES,
+        "恰好达标时总量等于预算"
+    );
+}
+
+#[tokio::test]
+async fn test_trim_locked_evicts_when_one_byte_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+
+    for i in 0..60u32 {
+        let key = format!("{CACHE_NAMESPACE}:syn-{i}");
+        cacache::write(&cache.content_path, key, vec![0u8; 1 << 20])
+            .await
+            .unwrap();
+    }
+
+    let (current, count) = content_total(&cache).await;
+    // 越界一字节：total + incoming == MAX + 1，触发驱逐。
+    let incoming = MAX_CACHE_BYTES - current + 1;
+
+    cache.trim_locked(incoming).await;
+
+    let (after_total, after_count) = content_total(&cache).await;
+    assert!(after_count < count, "越界一字节必须至少驱逐一条");
+    assert!(
+        after_total + incoming <= MAX_CACHE_BYTES,
+        "裁剪后须回到预算内"
+    );
+}
+
+// ── tools/list 缓存域（与 resources/ 同构；跨进程复用额外要求 server 声明 version）──
+
+#[tokio::test]
+async fn test_tools_list_version_hit_reuses_across_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // 同版本跨进程复用：即便 TTL 已过期，仍命中（版本驱动新鲜度）。
+    let first: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    let second: Option<Vec<Tool>> = McpResourceCache::at(dir.path().to_path_buf())
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(first.is_some());
+    assert!(
+        second.is_some(),
+        "新进程实例应命中已有 versioned tools/list"
+    );
+}
+
+#[tokio::test]
+async fn test_tools_list_version_change_misses() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+
+    let miss: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v2"))
+        .await;
+    assert!(miss.is_none(), "版本变化必须回源，不得复用旧 schema");
+}
+
+#[tokio::test]
+async fn test_tools_list_change_notification_invalidates_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_secs(60),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+
+    let before: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(before.is_some(), "前置：通知前命中");
+
+    cache.invalidate("origin-a", "tools/list", None).await;
+
+    let after: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(
+        after.is_none(),
+        "tools/list_changed 必须失效磁盘 tools/list 缓存"
+    );
 }

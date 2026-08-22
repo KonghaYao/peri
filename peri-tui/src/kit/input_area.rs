@@ -18,13 +18,13 @@ mod render;
 mod submit;
 
 pub(crate) use image::png_encode;
-pub(crate) use popup::refresh_slash_items;
+pub(crate) use popup::{get_cached_slash_items, refresh_slash_items};
 pub(crate) use submit::send_local_user_bubble;
 
 use hooks::{AreaTracker, CjkGhostFix};
 use popup::{
-    filter_files_for_mention, get_cached_slash_items, handle_slash_selection, replace_last_mention,
-    reset_mention_popup, reset_slash_popup, update_popup_prefix,
+    filter_files_for_mention, handle_slash_selection, replace_last_mention, reset_mention_popup,
+    reset_slash_popup, update_popup_prefix,
 };
 use render::{
     QUEUE_VISIBLE_MAX, build_composer_block, build_composer_lines, build_queue_lines,
@@ -57,9 +57,10 @@ use std::sync::{Arc, Mutex};
 use crate::i18n;
 use crate::kit::atoms::PredictionState;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, AT_MENTION_ACTIVE, CONTEXT_USAGE, CURRENT_SESSION_TITLE, FOCUSED_ENTRY,
-    INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION, MENTION_PREFIX, PENDING_ATTACHMENTS,
-    POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT, SLASH_HINT_ACTIVE, SLASH_PREFIX,
+    ACTIVE_PANEL, AT_MENTION_ACTIVE, AVAILABLE_SLASH_COMMANDS, CONTEXT_USAGE,
+    CURRENT_SESSION_TITLE, FOCUSED_ENTRY, INPUT_AREA_ESC_PREFIX, INPUT_BUFFER, LANG_VERSION,
+    MENTION_PREFIX, PENDING_ATTACHMENTS, POPUP_KIND, PREDICTION, SERVICE_SNAPSHOT,
+    SLASH_HINT_ACTIVE, SLASH_PREFIX,
 };
 use crate::kit::focus_router::input_accepts_key;
 use crate::kit::input_history::{history_down, history_up};
@@ -71,7 +72,7 @@ use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
 #[cfg(test)]
-use crate::kit::atoms::{ACP_STATE, AVAILABLE_SLASH_COMMANDS, FILE_LIST, WIZARD_ACTIVE};
+use crate::kit::atoms::{ACP_STATE, FILE_LIST, WIZARD_ACTIVE};
 #[cfg(test)]
 use crate::kit::slash_completion::SlashActionKind;
 #[cfg(test)]
@@ -119,6 +120,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let term_focused = hooks.use_state(|| true);
     // i18n 语言切换订阅
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
+    // ACP 下发的 slash 投影变化必须直接唤醒输入框重渲染。否则异步 MCP
+    // discovery 虽已刷新缓存，输入区仍会停留在旧帧，直到打开任意面板触发重绘。
+    let slash_commands = hooks.use_atom(&AVAILABLE_SLASH_COMMANDS);
+    let _slash_command_count = slash_commands.read().len();
+    let _ = slash_commands;
 
     // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
     // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None

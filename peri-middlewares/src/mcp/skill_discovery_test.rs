@@ -737,6 +737,125 @@ async fn raw_skill_server(
     }
 }
 
+async fn private_zero_ttl_skill_server(
+    io: tokio::io::DuplexStream,
+    request_count: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (reader, writer) = tokio::io::split(io);
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+        let parsed = serde_json::from_str::<serde_json::Value>(line.trim_end()).ok();
+        line.clear();
+        let Some(parsed) = parsed else { continue };
+        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let uri = parsed["params"]["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }],
+                "cacheScope": "private",
+                "ttlMs": 0,
+            }
+        });
+        let mut writer = writer.lock().await;
+        writer
+            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn(private_zero_ttl_skill_server(
+        server_io,
+        Arc::clone(&request_count),
+    ));
+    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
+        (),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let cache_dir = tempfile::tempdir().unwrap();
+    let origin = "legacy-private-origin";
+    let version = "sha256:test-cache-version";
+    let first_cache =
+        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    first_cache.set_cache_version(origin, Some(version));
+    let resources = vec![resource("skill://srv/cached/SKILL.md")];
+    let (_, first_entries) = collect_skill_entries(
+        running.peer().clone(),
+        "srv",
+        resources.clone(),
+        AgentCancellationToken::new(),
+        Some((first_cache.clone(), origin.to_string())),
+    )
+    .await;
+    assert_eq!(first_entries.len(), 1);
+    assert_eq!(
+        request_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "首次 legacy read 必须访问远程 server"
+    );
+
+    drop(first_cache);
+
+    // 丢弃第一个 cache 实例后，用同一磁盘根目录重建，模拟重启/新 pool。
+    let second_cache =
+        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    second_cache.set_cache_version(origin, Some(version));
+    let (_, second_entries) = collect_skill_entries(
+        running.peer().clone(),
+        "srv",
+        resources,
+        AgentCancellationToken::new(),
+        Some((second_cache.clone(), origin.to_string())),
+    )
+    .await;
+    assert_eq!(second_entries.len(), 1);
+    assert_eq!(
+        request_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "匹配 cacheVersion 的 private + ttlMs:0 条目应直接从新 cache 实例读取"
+    );
+    assert_eq!(
+        second_cache.recent_status(origin),
+        Some(crate::mcp::resource_cache::CacheLoadStatus::VersionHit),
+        "第二次读取必须记录 VersionHit，而不是 LiveFetch"
+    );
+
+    // 版本变化必须拒绝旧的零 TTL 内容，恢复远程读取。
+    let third_cache =
+        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    third_cache.set_cache_version(origin, Some("sha256:changed-cache-version"));
+    let (_, third_entries) = collect_skill_entries(
+        running.peer().clone(),
+        "srv",
+        vec![resource("skill://srv/cached/SKILL.md")],
+        AgentCancellationToken::new(),
+        Some((third_cache, origin.to_string())),
+    )
+    .await;
+    assert_eq!(third_entries.len(), 1);
+    assert_eq!(
+        request_count.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "cacheVersion 改变后必须重新访问远程 server，不能复用旧零 TTL 内容"
+    );
+}
+
 #[tokio::test]
 async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
     let (client_io, server_io) = tokio::io::duplex(8192);
@@ -1974,5 +2093,76 @@ async fn cached_skill_discovery_avoids_list_and_skill_reads() {
         request_log.lock().unwrap().len(),
         first_requests,
         "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
+    );
+}
+
+/// skills/read 缓存内容与当前 skills/list digest 不一致时，应失效缓存并重读，
+/// 而非静默丢弃技能。
+#[tokio::test]
+async fn cached_skill_read_digest_mismatch_refetches_once() {
+    let stale_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Stale\n";
+    let fresh_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Fresh\n";
+    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(spec_skill_server(
+        server_io,
+        vec![SpecSkill {
+            uri: "skill://refreshed/SKILL.md",
+            name: "refreshed",
+            description: "Refreshed skill",
+            text: fresh_text,
+            digest_override: None,
+            get_text: None,
+            get_error: false,
+            get_wrong_uri: false,
+        }],
+        None,
+        Some(Arc::clone(&request_log)),
+        false,
+    ));
+    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
+        (),
+        client_io,
+        None::<rmcp::model::ServerPeerInfo>,
+    );
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
+    let origin = "test-skill-origin".to_string();
+    let uri = "skill://refreshed/SKILL.md";
+    let ticket = cache.ticket(&origin, "skills/read", uri).await.unwrap();
+    cache
+        .put_ticket(&ticket, std::time::Duration::from_secs(60), &stale_text)
+        .await;
+
+    let registry = Arc::new(McpSkillRegistry::new());
+    let token: HandleToken = Arc::new(43u32);
+    registry.mark_discovery_started("srv", token.clone());
+    run_discovery_with_cache(
+        registry.clone(),
+        None,
+        make_spec_handle(&running),
+        token,
+        AgentCancellationToken::new(),
+        Some((cache, origin)),
+    )
+    .await;
+
+    let skills = registry.all_skills();
+    assert_eq!(skills.len(), 1, "陈旧缓存应重读后仍发现技能");
+    assert_eq!(skills[0].content.as_deref(), Some(fresh_text));
+    let requests = request_log.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("resources/read"))
+            .count(),
+        1,
+        "陈旧 skills/read 缓存应只失效并实时重读一次"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.starts_with("skills/get")),
+        "实时重读已满足当前 digest，不应额外请求 skills/get"
     );
 }

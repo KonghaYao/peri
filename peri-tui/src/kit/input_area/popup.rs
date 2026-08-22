@@ -168,7 +168,7 @@ pub(crate) fn refresh_slash_items() {
     *slash_items_cache().write() = build_slash_items();
 }
 
-pub(super) fn get_cached_slash_items() -> Vec<SlashCompletionItem> {
+pub(crate) fn get_cached_slash_items() -> Vec<SlashCompletionItem> {
     slash_items_cache().read().clone()
 }
 
