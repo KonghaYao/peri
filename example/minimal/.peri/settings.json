@@ -1,0 +1,30 @@
+{
+  "config": {
+    "meta_harness": {
+      "DefaultSystemPromptMiddleware": false,
+      "LangMiddleware": false,
+      "AgentsMdMiddleware": false,
+      "AgentDefineMiddleware": false,
+      "PluginMiddleware": false,
+      "SkillsMiddleware": false,
+      "SkillPreloadMiddleware": false,
+      "AtMentionMiddleware": false,
+      "ImageMiddleware": false,
+      "FilesystemMiddleware": false,
+      "GitAttributionMiddleware": false,
+      "TerminalMiddleware": false,
+      "WebMiddleware": false,
+      "TodoMiddleware": false,
+      "CronMiddleware": false,
+      "HookMiddleware": false,
+      "PermissionMiddleware": false,
+      "HumanInTheLoopMiddleware": false,
+      "SubAgentMiddleware": false,
+      "McpMiddleware": true,
+      "WorkflowMiddleware": false,
+      "ToolSearch": true,
+      "LspMiddleware": false,
+      "GoalMiddleware": false
+    }
+  }
+}

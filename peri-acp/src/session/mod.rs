@@ -221,11 +221,25 @@ impl SessionManager {
         // 1) 内置（先注册者占键，后续同键一律 Conflict 拒绝）。
         crate::session::command::register_builtins(&reg);
         // 2) 本地 skills 归 core 域（C1；扫描调用点收敛为本处——发送侧
-        // 旧扫描路径由 Phase 6 C2 收尾清理）。
-        let skills = self
+        // 旧扫描路径由 Phase 6 C2 收尾清理）。MetaHarness 关闭
+        // SkillsMiddleware 时，不得注册 slash 路由，否则 `/skill` 会绕过
+        // middleware 装配开关，经 AgentPassthrough 进入 agent 管线。
+        let skills_enabled = self
             .inner
-            .skills
-            .available_skills(cwd, &self.inner.plugin_skill_roots);
+            .peri_config
+            .config
+            .meta_harness
+            .as_ref()
+            .and_then(|config| config.get("SkillsMiddleware"))
+            .copied()
+            != Some(false);
+        let skills = if skills_enabled {
+            self.inner
+                .skills
+                .available_skills(cwd, &self.inner.plugin_skill_roots)
+        } else {
+            Vec::new()
+        };
         let skill_entries: Vec<RouteEntry> = skills
             .iter()
             .map(|s| RouteEntry {
