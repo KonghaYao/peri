@@ -246,6 +246,8 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   （架构依据见 3.4）。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
+- Artifact 上传由独立 `ArtifactMiddleware` 承载；关闭它仅移除 `artifact`，不影响
+  `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
 
 ### 2.6 生命周期
 

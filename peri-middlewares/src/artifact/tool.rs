@@ -3,7 +3,7 @@ use std::path::Path;
 use peri_agent::tools::BaseTool;
 use serde_json::{json, Value};
 
-use super::artifact_client::ArtifactClient;
+use super::client::ArtifactClient;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const ALLOWED_EXTENSIONS: &[&str] = &["html", "htm", "md"];
@@ -11,7 +11,7 @@ const ALLOWED_EXTENSIONS: &[&str] = &["html", "htm", "md"];
 /// Artifact 上传工具——将本地 HTML / Markdown 文件上传到 CCB Artifacts 服务，返回公开 URL。
 ///
 /// .md 文件会在上传前自动转换为带样式的 HTML 页面。
-/// 延迟加载（deferred tool）：LLM 通过 SearchExtraTools → ExecuteExtraTool 两步调用。
+/// 直接工具（direct tool）：由独立 `ArtifactMiddleware` 注册到 LLM 工具视图。
 pub struct ArtifactTool {
     cwd: String,
     client: ArtifactClient,
@@ -182,5 +182,5 @@ impl BaseTool for ArtifactTool {
 }
 
 #[cfg(test)]
-#[path = "artifact_tool_test.rs"]
+#[path = "tool_test.rs"]
 mod tests;

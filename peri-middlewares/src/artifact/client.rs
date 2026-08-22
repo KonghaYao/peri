@@ -1,4 +1,6 @@
 const DEFAULT_URL: &str = "https://cloud-artifacts.claude-code-best.win";
+// 免费公共服务使用的共享协议标识，不是用户凭据或 secret；不得写入日志。
+// 环境变量仍可覆盖，以支持兼容部署。
 const DEFAULT_TOKEN: &str = "claude-code-best";
 
 /// CCB Artifacts 服务 HTTP 客户端。
@@ -11,6 +13,7 @@ pub struct ArtifactClient {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ArtifactResponse {
     #[serde(default)]
+    #[allow(dead_code)] // 服务响应兼容字段；当前输出不展示上传 ID。
     pub id: String,
     #[serde(default)]
     pub url: String,
@@ -99,5 +102,5 @@ impl Default for ArtifactClient {
 }
 
 #[cfg(test)]
-#[path = "artifact_client_test.rs"]
+#[path = "client_test.rs"]
 mod tests;

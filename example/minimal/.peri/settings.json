@@ -23,6 +23,7 @@
       "McpMiddleware": true,
       "WorkflowMiddleware": false,
       "ToolSearch": true,
+      "ArtifactMiddleware": true,
       "LspMiddleware": false,
       "GoalMiddleware": false
     }

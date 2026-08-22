@@ -20,6 +20,7 @@
 
 pub mod agent_define;
 pub mod agents_md;
+pub mod artifact;
 pub mod assembly;
 pub mod claude_agent_parser;
 pub mod goal;

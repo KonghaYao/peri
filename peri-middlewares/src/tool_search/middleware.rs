@@ -14,7 +14,7 @@ use peri_agent::{
 };
 
 use super::{
-    artifact_tool::ArtifactTool, declaration::collect_declarations, execute_tool::ExecuteExtraTool,
+    declaration::collect_declarations, execute_tool::ExecuteExtraTool,
     search_tool::SearchExtraTools, tool_index::ToolSearchIndex,
 };
 
@@ -49,11 +49,10 @@ impl Middleware for ToolSearchMiddleware {
         "ToolSearch"
     }
 
-    fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![
             Box::new(SearchExtraTools::new(Arc::clone(&self.tool_search_index))),
             Box::new(ExecuteExtraTool::new(Arc::clone(&self.shared_tools))),
-            Box::new(ArtifactTool::new(cwd.to_string())),
         ]
     }
 

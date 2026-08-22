@@ -207,11 +207,11 @@ fn test_collect_declarations_empty_returns_none() {
 fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     use std::collections::BTreeMap;
 
+    use crate::artifact::ArtifactTool;
     use crate::middleware::{FilesystemMiddleware, TerminalMiddleware, WebMiddleware};
     use crate::skills::tools::{DiscoverSkillsTool, SkillTool};
     use crate::skills::SkillMetadata;
     use crate::subagent::SubAgentTool;
-    use crate::tool_search::artifact_tool::ArtifactTool;
     use crate::tool_search::{ExecuteExtraTool, SearchExtraTools, ToolSearchIndex};
     use crate::tools::{AskUserTool, TodoWriteTool};
     use parking_lot::RwLock as PLRwLock;
