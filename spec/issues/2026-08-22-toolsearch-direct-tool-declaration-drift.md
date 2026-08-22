@@ -44,8 +44,12 @@
 
 ## 验收标准
 
-- [ ] 直接工具说明由当前实际 direct tools 生成。
-- [ ] 被过滤或未装配的 Core 工具不会被描述为可直接调用或始终可用。
-- [ ] 默认完整工具集仍正确声明其实际 direct tools。
-- [ ] deferred 工具搜索与 `ExecuteExtraTool` 代理执行行为不回归。
+- [x] 直接工具说明由当前实际 direct tools 生成。
+- [x] 被过滤或未装配的 Core 工具不会被描述为可直接调用或始终可用。
+- [x] 默认完整工具集仍正确声明其实际 direct tools。
+- [x] deferred 工具搜索与 `ExecuteExtraTool` 代理执行行为不回归。
 - [ ] 针对性测试通过，且 `cargo fmt --check` 与 `git diff --check` 通过。
+
+## 文档与代码核验（2026-08-22）
+
+代码核验确认 `ToolSearchMiddleware::before_agent` 从每 turn 的 local tool view 收集 direct/deferred 集合，并刷新 `SearchExtraTools` / `ExecuteExtraTool` 描述；`build_session_tool_view` 仍是 disabled/filter 后能力集合的事实源。对应稳定约束已同步到 `ARC-TOOLS-001` 与 `docs/code-index/{peri-agent,peri-middlewares}.md`。最后一项保留到本次文档维护批次实际运行测试和格式检查后关闭。

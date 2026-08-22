@@ -24,13 +24,15 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 
 | 任务 | 先读 | 稳定入口 |
 | --- | --- | --- |
-| Agent loop、Compact、provider、tools | `peri-agent/AGENTS.md` + architecture/rust | `peri-agent/src/agent/`、`peri-agent/src/agent/compact_v2/`、`run_react_loop` |
-| session、prompt、event、caps、Langfuse、composition | `peri-acp/AGENTS.md` + architecture/rust | `peri-acp/src/session/`、`peri-acp/src/prompt/`、`peri-acp/src/event/`、`peri-acp/src/langfuse/` |
-| MCP、plugin、skills、subagent、HITL、workflow、LSP | `peri-middlewares/AGENTS.md` + architecture/rust | `peri-middlewares/src/` |
+| Agent loop、Compact、provider、session runtime | `peri-agent/AGENTS.md` + architecture/rust | `peri-agent/src/agent/`、`peri-agent/src/session/`、`run_react_loop` |
+| ACP host、stdio、prompt、event、caps | `peri-acp/AGENTS.md` + architecture/rust | `peri-acp/src/host/`、`peri-acp/src/event/`、`peri-acp/src/session/` |
+| Controller/Runtime、cancel、事件 envelope、Langfuse | architecture/rust + 对应 code-index | `peri-controller/src/`、`peri-runtime/src/`、`peri-controller/src/langfuse/` |
+| MCP、plugin、skills、subagent、HITL、tool search、LSP | `peri-middlewares/AGENTS.md` + architecture/rust | `peri-middlewares/src/` |
+| Workflow 注册与运行 | middleware guide + `docs/code-index/peri-workflow.md` | `peri-middlewares/src/workflow/`、`peri-workflow/src/{runner,rpc}.rs`、`peri-acp-types/src/workflow.rs` |
 | TUI | `peri-tui/AGENTS.md` + tui/rust | `peri-tui/src/kit/`、`peri-tui/src/kit/acp_events/` |
 | E2E | `e2e/AGENTS.md` + testing standards | `e2e/` |
 | 文档站 | `peri-cool/AGENTS.md` + documentation | `peri-cool/`（submodule） |
-| Rust 通用、测试、Codex 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
+| Rust 通用、测试、AGENTS 维护 | 对应 standard | `docs/standards/`、`docs/design/testing-standards.md` |
 
 ## 代码定位
 

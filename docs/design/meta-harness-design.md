@@ -242,8 +242,10 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   `build_session_tool_view`（每 turn 从基础 shared_tools + 当前链工具重建
   session-local 视图）实现，**不修改宿主持有的全局共享表**（并发会话配置
   不同，改全局表不安全）；禁用 middleware 的工具天然不在视图内。
-- **AskUserQuestion 不在关闭面**：核心交互工具，非 middleware 提供
-  （架构依据见 3.4）。
+- **审批与提问分属独立关闭面**：`PermissionMiddleware` 持有审批钩子与
+  `10_hitl`；`HumanInTheLoopMiddleware` 通过 `collect_tools()` 持有
+  `AskUserQuestion` 与 `12_ask_user`。任一 middleware 关闭时，对应工具、钩子和
+  prompt contribution 同时从 session-local 视图消失（架构依据见 3.4）。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
 - Artifact 上传由独立 `ArtifactMiddleware` 承载；关闭它仅移除 `artifact`，不影响
@@ -318,9 +320,10 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 | `GATED_SECTIONS` 数组（`prompt/mod.rs`，1 项） | 15_channel（gate 恒 false） | 无（未来 channel middleware；数组元组 ID + 内容 + Gate + 段内序号） |
 | 收集结果（`DefaultSystemPromptMiddleware::sections`，`peri-middlewares/src/default_system_prompt/`） | 01_intro, 02_system, 03_doing_tasks, 04_actions, 05_using_tools, 06_tone_style（Builtin，Cached 1-6）+ 07_runtime（Builtin，Uncached 1）+ persona（Dynamic，Uncached 0） | DefaultSystemPromptMiddleware（关闭即清除全部基础段与 persona 覆盖） |
 | 收集结果（`LangMiddleware::sections`） | language（Dynamic，Uncached 7） | LangMiddleware（可关闭、可覆盖） |
-| 收集结果（`HumanInTheLoopMiddleware::sections`） | 10_hitl（Builtin，Uncached 3） | HumanInTheLoopMiddleware |
+| 收集结果（`PermissionMiddleware::sections`） | 10_hitl（Builtin，Uncached 3） | PermissionMiddleware |
 | 收集结果（`SubAgentMiddleware::sections`） | 11_subagent（Builtin，Uncached 4） | SubAgentMiddleware |
-| 收集结果（`SkillsMiddleware::sections`） | 13_skills（Builtin，Uncached 5） | SkillsMiddleware |
+| 收集结果（`HumanInTheLoopMiddleware::sections`） | 12_ask_user（Builtin，Uncached 5） | HumanInTheLoopMiddleware |
+| 收集结果（`SkillsMiddleware::sections`） | 13_skills（Builtin，Uncached 6） | SkillsMiddleware |
 
 `IMMUTABLE_SECTIONS` / `ALWAYS_UNCACHED_SECTIONS` 数组已删除（C2：迁移完成
 禁止双轨）；`GATED_SECTIONS` 由 5 项收敛为 1 项（16_workflow 删除、gated
@@ -334,14 +337,11 @@ SubAgent/fork 复用。
 
 ### 3.1.1 系统提示词段完整清单与归属全景（现状构成 + 目标态）
 
-**波 4 后现状（C2/C3 落地，2026-08-14）**：段落文件 11 个（01-06 /
-07_runtime / 10_hitl / 11_subagent / 13_skills / 15_channel；07_env +
-14_system_reminder 合并为 07_runtime，16_workflow 删除）+ 渲染生成段 2 个
-（persona / language）。全部段落（除 15_channel）由功能 middleware 持有
-（持有者表见 3.1 来源表；gated 段映射见 `SECTION_HOLDER_MIDDLEWARE`）——
-gate = 持有者是否在链上（契约 3，收集即装配），middleware 关闭自动移除其
-段落，段落关闭盲区已闭合。以下为波 4 前构成（归档）与目标态归属（已全部
-落地，落地标注见表格末列）。
+**波 4 后现状（2026-08-22 核验）**：段落文件为 01-06 / 07_runtime /
+10_hitl / 11_subagent / 12_ask_user / 13_skills / 15_channel，另有 persona /
+language 渲染生成段。除 15_channel 外，段落均由功能 middleware 持有；
+gate = 持有者是否在链上，middleware 关闭自动移除其段落。以下旧构成只用于
+解释迁移背景，不是当前实现索引。
 
 **静态段落（波 4 前，13 个文件，编译期 `include_str!` 嵌入，单一持有者
 `prompt/mod.rs`；归档）**：
@@ -387,7 +387,8 @@ gate = 持有者是否在链上（契约 3，收集即装配），middleware 关
 | 06_tone_style | 语气与简洁性 | 保持 | DefaultSystemPromptMiddleware | 内容不动 | ✅ |
 | 07_env | 环境快照（动态占位符） | **合并** → `07_runtime` | DefaultSystemPromptMiddleware | 与 14 合并为"运行时状态与事件语义"；占位符替换（render 统一替换）不变 | ✅ |
 | 14_system_reminder | system-reminder 语义 + 信任边界 | **合并** → `07_runtime`（文件删除） | 同上 | 信任边界（防伪造）内容保留——安全相关 | ✅ |
-| 10_hitl | HITL 审批机制 + sensitive 工具列表 + 模式决策 | 拆分（列表） | HumanInTheLoopMiddleware | sensitive 列表 → middleware 按代码事实生成（`default_requires_approval`，assembly.rs:32）；段落只留机制说明（PermissionMode 决策 + 审批决策语义） | ✅ |
+| 10_hitl | HITL 审批机制 + sensitive 工具列表 + 模式决策 | 拆分（列表） | PermissionMiddleware | sensitive 列表由 permission middleware 按代码事实生成；段落只保留 PermissionMode 与审批决策语义 | ✅ |
+| 12_ask_user | 提问时机与批量纪律 | 新增 | HumanInTheLoopMiddleware | 与 `AskUserQuestion` 同生同灭；无 broker 的 workflow 链不装配 | ✅ |
 | 11_subagent | 委托机制 + catalog + 授权边界 + Agent Selection Guide | 拆分（指南） | SubAgentMiddleware | Agent Selection Guide **删除具体映射**（perihelion 特有调度建议是仓库级知识，catalog id/description 已承载语义）；通用选择原则（specialized 优先 / general-purpose 兜底 / 按 access 并行化）浓缩保留在段落，不绑定 agent 名；段落只留委托机制（方式/授权边界/when to use/writing/fork），落地步骤见 3.5.1 | ✅ |
 | 13_skills | Skills 机制 + 通用加载协议（loading/discovery/catalog/using/suggesting） | 拆分（协议细节） | SkillsMiddleware | 协议实现细节（discovery roots 优先级、扫描深度）→ middleware 按实际装配动态生成；机制说明（工具用法/catalog 语义）保留 | ✅ |
 | 15_channel | 频道消息格式（gate 恒 false） | 保持 | 未来 channel middleware | 内容不动（gate 恒 false 直至 channel 能力装配） | ✅（保持，无持有者） |
@@ -433,7 +434,8 @@ Skills / ToolSearch / GitAttribution），维持现状。
 | 16_workflow | `ultracode` builtin skill | 段落全文仅 9 行（工具声明 + when/how + "invoke the `ultracode` skill"指引，`sections/16_workflow.md`）；ultracode SKILL.md（`skills/builtin/skills/ultracode/`）为完整编排指导 | **删除干净**：段落整体删除，不留摘要——ultracode skill 完整承载 WorkflowTool 的 when/how 指引 | ✅（C2：文件 + 数组项 + 映射表项删除） |
 | 13_skills | SKILL.md 通用协议（loading protocol / using skills / suggesting skills） | 13_skills 段落含约 60 行通用协议说明，与单个 skill 内容无关 | **随 SkillsMiddleware 管理**：段落内容移交 SkillsMiddleware 持有（3.1.1 归属全景），middleware 关闭即移除段落 | ✅（C3） |
 | 11_subagent | 项目特有 Agent Selection Guide（coder/explorer/plan/code-reviewer/web-researcher/general-purpose 调度指南） | 段落内嵌 perihelion 仓库 agent 调度建议，与通用委托机制混写；`{{available_agents}}` 已提供 catalog | **归 SubAgentMiddleware 管理**：段落（含 `{{available_agents}}` 动态生成）移交 SubAgentMiddleware 持有，middleware 关闭即移除段落 | ✅（C3；Selection Guide 已浓缩为通用原则，`test_subagent_selection_guide_has_no_specific_mapping` 锁定） |
-| 10_hitl | sensitive 工具列表 vs 代码事实（`default_requires_approval`，`assembly.rs:32` AutoClassifier） | 敏感列表硬编码在段落（sections/10_hitl.md），修改代码需同步段落，失同步风险 | **随 HumanInTheLoopMiddleware 管理**：sensitive 列表改由 middleware 按代码事实生成，段落只留机制说明（3.1.1 归属全景） | ✅（C3；段落改为运行时判定引导句） |
+| 10_hitl | sensitive 工具列表 vs 代码事实 | sensitive 列表曾硬编码在段落 | **随 PermissionMiddleware 管理**：列表由审批规则生成，段落只保留机制说明 | ✅ |
+| 12_ask_user | AskUser 提问纪律 | 旧架构中 AskUser 游离在 middleware 关闭面外 | **随 HumanInTheLoopMiddleware 管理**：工具与段落由 `collect_tools` / `sections` 同时贡献 | ✅ |
 
 处理原则：重复内容**删除干净**（16_workflow → ultracode 覆盖）或**随对应
 功能 middleware 持有管理**（13_skills → SkillsMiddleware、11_subagent →
@@ -444,9 +446,11 @@ SubAgentMiddleware）；不做"段落留摘要 + builtin skill 收纳"方案。
 - 蓝本：`peri-agent/src/session/factory.rs:83-114` `production_blueprint()`；
   装配：`peri-middlewares/src/assembly.rs:75-483` `ProductionChainAssembler`
   （Mcp/Workflow/Lsp/Goal/Hook 已是条件注册——"按条件裁剪链"的先例）。
-- 工具注册：`peri-agent/src/session/exec/stage_builder.rs:753-762` 每 turn
-  `chain.collect_tools(&cwd)` → `tools.insert(name, Arc<dyn BaseTool>)` 进
-  shared_tools（注释：同名工具已存在不覆盖）。
+- 工具注册：`peri-agent/src/session/exec/stage_builder.rs` 的
+  `build_session_tool_view` 每 turn 从宿主基础表建立 session-local 视图，先剔除
+  当前链未持有的 middleware 工具，再合并 `chain.collect_tools()`。生产路径不把
+  middleware 工具写回宿主 `shared_tools`；ToolSearch 的 direct 描述、deferred
+  索引与执行 resolver 都消费本地视图。
 - middleware `name()` 清单（装配面，以代码为准）：
 
 | name() | 提供的工具 |
@@ -466,7 +470,9 @@ SubAgentMiddleware）；不做"段落留摘要 + builtin skill 收纳"方案。
 | ToolSearch | SearchExtraTools / ExecuteExtraTool / ArtifactTool |
 | LspMiddleware | LspTool |
 | GoalMiddleware | GoalTool |
-| HookMiddleware / AgentsMdMiddleware / AtMentionMiddleware / AgentDefineMiddleware / GitAttributionMiddleware / HumanInTheLoopMiddleware（+ 段落 10_hitl）/ SkillPreloadMiddleware / PluginMiddleware | 无工具（提示词/钩子贡献） |
+| HookMiddleware / AgentsMdMiddleware / AtMentionMiddleware / AgentDefineMiddleware / GitAttributionMiddleware / SkillPreloadMiddleware / PluginMiddleware | 无工具（提示词/钩子贡献） |
+| PermissionMiddleware | 审批钩子 + 10_hitl；无工具 |
+| HumanInTheLoopMiddleware | AskUserQuestion + 12_ask_user；无审批钩子 |
 
 **波 4 后**：`MIDDLEWARE_NAMES` 编译期清单 = 上表全部 23 项
 （`peri-acp-types/src/meta_harness.rs`，新增 DefaultSystemPromptMiddleware /
@@ -505,7 +511,7 @@ blueprint/name 映射由 `assembly_test.rs` 锁定）。
 | --- | --- |
 | `peri-acp/src/session/mod.rs:481` | build_frozen_data 冻结渲染（**一次构造一次渲染**；`subagent_system_prompt` 二次渲染已随 C5 移除，子面向复用主冻结 prompt） |
 | `peri-acp/src/host/stage_builder.rs` | agent_overrides 重渲染 / SubAgent 回退渲染（ACP host 投影层） |
-| `peri-acp/src/host/workflow_agent.rs` | workflow agent 渲染（fallback + agentType builder；按 advisor 裁决 B 过滤 `10_hitl`——workflow 链不装配 HumanInTheLoopMiddleware） |
+| `peri-acp/src/host/workflow_agent.rs` | workflow agent 渲染（fallback + agentType builder；workflow 链无 interaction broker，因此不装配 HumanInTheLoopMiddleware；审批段 `10_hitl` 由 PermissionMiddleware 持有并按链配置过滤） |
 | `prompt/mod.rs` `build_system_prompt` helper | **仅测试直接调用**，非生产路径 |
 
 波 4 后全部构造点经 `build_collected_sections(state, overrides, language)`
@@ -534,30 +540,21 @@ Q3/Q7）：
 | Workflow agent 链 | `assembly.rs:670-715` | 独立装配 FileSystem/Web/Terminal/Todo/GitAttribution |
 | 子链 | `subagent/tool/mod.rs:56-64`（装配入口 `SubagentChainAssemblerImpl`，`:125-139`） | AgentsMd → Skills → SkillPreload（条件）→ **Todo（无条件）** |
 
-**AskUserQuestion 架构**（理想 2.5"不在关闭面"的依据）：
+**AskUserQuestion 当前架构与关闭面**：
 
-- **定义**：`peri-middlewares/src/tools/ask_user_tool.rs:21`
-  `AskUserTool { broker: Arc<dyn UserInteractionBroker> }`——唯一依赖是人机
-  交互 broker，无 middleware 链参与。
-- **契约**：`UserInteractionBroker`（`peri-acp-types/src/interaction.rs:113`）
-  统一 HITL（工具审批）与 AskUser（问答）两条路径：`request(InteractionContext)`
-  挂起等待用户响应，由应用层（TUI/CLI/测试）实现。
-- **注册**：`assembly.rs:183` 构造——**刻意使用原始 broker 而非
-  MultiplexBroker**（ChannelBroker 对 Questions 立即返回空答案、Multiplex
-  竞速时 Channel 先返回，会绕过弹窗）；`assembly.rs:460-463` 直接
-  insert shared_tools（v2 stages 不走 execute() 的 register_tool 合并；
-  collect_tools merge 时同名不覆盖）。
-- **行为**：`is_direct() = true`（Core 层，始终对 LLM 可见）、
-  `namespace = "interaction"`、`timeout() = None`（无限期等待用户）、
-  `prompt_declaration` 含批量合并纪律；调用时 1-4 个问题解析为
-  `QuestionItem` → `broker.request` 挂起。
-- **与 HITL 的关系**：审批（`ApprovalItem`/`HumanInTheLoopMiddleware`）与
-  提问（`QuestionItem`/`AskUserTool`）共用 `InteractionContext`/`InteractionResponse`
-  契约。
-- **为何不可关闭**：非 middleware 提供（无 collect_tools 路径），meta_harness
-  的 `false` 面无法触及；且对话必须保留向用户提问的通道（HITL 审批拒绝、
-  歧义澄清都依赖它）。若要纳入关闭面，需将其移入某个 middleware 的
-  collect_tools 或显式建模为"可关闭能力"——本期不做，记为未来项。
+- **定义**：`AskUserTool` 依赖 `UserInteractionBroker`；
+  `HumanInTheLoopMiddleware` 持有 broker，并通过 `collect_tools()` 提供 direct
+  `AskUserQuestion`，通过 `sections()` 提供 `12_ask_user`。
+- **契约**：`UserInteractionBroker` 统一承载审批与问答的挂起响应 DTO，但能力
+  所有权独立：`PermissionMiddleware` 处理 `ApprovalItem` 与审批钩子，
+  `HumanInTheLoopMiddleware` 处理 `QuestionItem` 与 AskUser 工具。
+- **关闭**：`"HumanInTheLoopMiddleware": false` 同时移除 AskUser 工具和
+  `12_ask_user`；`"PermissionMiddleware": false` 移除审批钩子和 `10_hitl`。
+  旧配置键不再具有“关闭审批”的历史语义。
+- **workflow 边界**：workflow 生产链没有 user interaction broker，因此不装配
+  HumanInTheLoopMiddleware，避免暴露无法得到回答的工具。
+- **行为**：`is_direct() = true`、`namespace = "interaction"`、`timeout() = None`；
+  调用时 1-4 个问题解析为 `QuestionItem`，经 broker 挂起等待响应。
 
 **gate 判定事实（波 4 C3 后已改变）**：波 4 前 `PromptFeatures::detect`
 （`prompt/mod.rs:42-52`）的 gate 判定**不随 middleware 装配变化**——
@@ -595,8 +592,8 @@ permission_mode_notice / ModeNoticeBooking / mark_permission_mode_notified
 `prompt/mod.rs` 的内置段落从单一持有者拆分给多个 middleware 持有，段落
 组织已完成重写（删除/合并/拆分明细与归属全景见 3.1.1，逐项落地标注）：
 
-- ✅ **gated 段落随对应功能 middleware 走**：10_hitl → HumanInTheLoopMiddleware
-  （sensitive 列表改为代码事实生成）、11_subagent → SubAgentMiddleware
+- ✅ **gated 段落随对应功能 middleware 走**：10_hitl → PermissionMiddleware、
+  12_ask_user → HumanInTheLoopMiddleware、11_subagent → SubAgentMiddleware
   （Agent Selection Guide 删除具体映射、通用原则浓缩，落地步骤见 3.5.1）、
   13_skills → SkillsMiddleware（协议细节按实际装配生成）、16_workflow →
   **整段删除**（ultracode skill 覆盖）、15_channel 待未来 channel

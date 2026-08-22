@@ -36,12 +36,11 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 ## 段落 ID 清单
 
-段落 ID = `peri-acp/prompts/sections/` 文件名去 `.md`，另有渲染生成段。
-当前全集（13 个）：
+段落 ID = `peri-acp/prompts/sections/` 文件名去 `.md`，另有渲染生成段。权威全集以 `peri-acp-types/src/meta_harness.rs::SECTION_IDS` 为准：
 
 `01_intro`、`02_system`、`03_doing_tasks`、`04_actions`、`05_using_tools`、
-`06_tone_style`、`07_runtime`、`10_hitl`、`11_subagent`、`13_skills`、
-`15_channel`、`persona`、`language`
+`06_tone_style`、`07_runtime`、`10_hitl`、`11_subagent`、`12_ask_user`、
+`13_skills`、`15_channel`、`persona`、`language`
 
 - `persona` / `language` 是渲染生成段，可经 `.peri/meta/persona.md` /
   `.peri/meta/language.md` 覆盖；
@@ -52,26 +51,30 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 ## middleware 名清单
 
-`false` key 使用装配面 middleware 的 `name()` 返回值，全集（23 个，
-`peri-acp-types/src/meta_harness.rs` 编译期清单）：
+`false` key 使用装配面 middleware 的 `name()` 返回值；权威清单以
+`peri-acp-types/src/meta_harness.rs::MIDDLEWARE_NAMES` 为准。常用可关闭项包括：
 
 `DefaultSystemPromptMiddleware`、`LangMiddleware`、`AgentsMdMiddleware`、
 `AgentDefineMiddleware`、`PluginMiddleware`、`SkillsMiddleware`、
 `SkillPreloadMiddleware`、`AtMentionMiddleware`、`ImageMiddleware`、
 `FilesystemMiddleware`、`GitAttributionMiddleware`、`TerminalMiddleware`、
 `WebMiddleware`、`TodoMiddleware`、`CronMiddleware`、`HookMiddleware`、
-`HumanInTheLoopMiddleware`、`SubAgentMiddleware`、`McpMiddleware`、
-`WorkflowMiddleware`、`ToolSearch`、`LspMiddleware`、`GoalMiddleware`
+`PermissionMiddleware`、`HumanInTheLoopMiddleware`、`SubAgentMiddleware`、
+`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、`ArtifactMiddleware`、
+`LspMiddleware`、`GoalMiddleware`
 
 关闭语义（波 4 落地后）：
 
 - 关闭 = middleware 实例不进链：工具、钩子、提示词贡献一并消失；
-- **段落联动**：关闭 `HumanInTheLoopMiddleware` / `SubAgentMiddleware` /
-  `SkillsMiddleware` / `DefaultSystemPromptMiddleware` / `LangMiddleware`
-  会同时移除其持有的段落（10_hitl / 11_subagent / 13_skills / 01-06 +
-  07_runtime + persona / language）——不会出现"工具没了但提示词还在描述
-  它"的盲区；
-- `AskUserQuestion` 不在关闭面（核心交互工具，非 middleware 提供）；
+- **审批与提问独立**：关闭 `PermissionMiddleware` 会移除审批钩子与
+  `10_hitl`；关闭 `HumanInTheLoopMiddleware` 会移除 `AskUserQuestion` 与
+  `12_ask_user`；两者互不替代；
+- **配置迁移提醒**：旧配置中的 `"HumanInTheLoopMiddleware": false` 现表示
+  “关闭提问”，不再表示“关闭审批”；若要关闭审批必须使用
+  `"PermissionMiddleware": false`；
+- **段落联动**：关闭 `SubAgentMiddleware` / `SkillsMiddleware` /
+  `DefaultSystemPromptMiddleware` / `LangMiddleware` 会同时移除其持有的段落
+  （11_subagent / 13_skills / 01-06 + 07_runtime + persona / language）；
 - 关闭面覆盖全部装配入口（主链 / 子链 / Workflow agent 链 / /bg 后台
   agent），无链下泄漏。
 

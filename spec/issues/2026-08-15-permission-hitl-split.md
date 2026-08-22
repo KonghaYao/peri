@@ -1,6 +1,6 @@
 # 审批/提问职责拆分：PermissionMiddleware 与 HITL 归位（AskUserQuestion 纳入关闭面）
 
-**状态**：Open
+**状态**：Implemented（2026-08-15；文档同步 2026-08-22）
 **优先级**：中
 **类型**：架构变更
 **创建日期**：2026-08-15

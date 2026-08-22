@@ -29,8 +29,26 @@
 ### ARC-TOOLS-001
 
 - **Scope**：工具注册、搜索与执行。
-- **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。
-- **Verify**：`cargo test -p peri-middlewares --lib core_tools`；检查 `peri-agent/src/tools/mod.rs`、`peri-middlewares/src/tool_search/` 与包装工具实现。
+- **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。每个 turn 的真实能力事实源是 `build_session_tool_view` 产出的 session-local 工具视图：它应用 middleware disabled 状态与 agent allowlist/disallowlist 后再分类。ToolSearch 元工具的 direct capability 描述、deferred 索引和代理执行都必须绑定该视图，不得用静态核心工具清单推断运行时可用能力。
+- **Verify**：`cargo test -p peri-middlewares --lib tool_search`；`cargo test -p peri-agent --lib session::exec`；检查 `peri-agent/src/session/exec/stage_builder.rs`、`peri-agent/src/agent/stages/reason.rs`、`peri-middlewares/src/tool_search/` 与包装工具实现；回归测试须覆盖 direct 工具被禁用或过滤后不再出现在元工具 description。
+
+### ARC-HITL-001
+
+- **Scope**：工具审批、用户提问、MetaHarness 关闭面与提示词段落。
+- **Rule**：`PermissionMiddleware` 独占工具审批、`PermissionMode` 与 `10_hitl`；`HumanInTheLoopMiddleware` 独占 `AskUserQuestion` 与 `12_ask_user`。两项能力必须独立装配和关闭：middleware 缺席时，其工具、钩子和提示词贡献必须同时从当前 session-local 视图消失。`HumanInTheLoopMiddleware=false` 的现行语义是关闭提问，不再表示关闭审批；旧配置迁移不得静默按旧语义解释。
+- **Verify**：`cargo test -p peri-middlewares --lib permission`；`cargo test -p peri-middlewares --lib hitl`；`cargo test -p peri-middlewares --lib assembly_test`；检查 `peri-acp-types/src/meta_harness.rs` 的 section holder 与 middleware/tool 清单、`peri-agent/src/session/factory.rs` 的 `[Permission, AskUser, SubAgent]` 蓝本。
+
+### ARC-STDIO-001
+
+- **Scope**：ACP stdio/IDE transport 与统一 host。
+- **Rule**：stdio 请求必须经 `run_acp_stdio → run_acp_server_with_sessions → handle_request` 进入统一 ACP host，禁止恢复独立 typed-handler 业务路径。`session/new` response 必须先于首次 commands notification；stdio 的 rewind/clear 类输入不由命令层拦截，而是落入模型 prompt。legacy `type:cancel` 仅是全 session 强停兜底，不得被解释为标准 `session/cancel` 的身份、continuation 或队列语义。
+- **Verify**：`cargo test -p peri-acp --lib host::stdio`；人工检查 `peri-acp/src/host/stdio/mod.rs` 与 `run_server_integration_test.rs` 的 initialize/new、response ordering、rename、prompt error、command filter 和 cancel 用例。
+
+### ARC-WORKFLOW-RPC-001
+
+- **Scope**：`peri-workflow` Node stdio JSON-RPC 与 agent 生命周期。
+- **Rule**：RPC 请求必须先登记 pending 再写入；每帧使用 NDJSON 并 flush；stdout/child 结束必须 drain pending。`agent/run` 必须先注册再 spawn，kill/deregister 以所有权 token 防止旧 task 删除新句柄；kill 后 `killed` 是唯一终态，message loop 或 EOF 不得覆盖为 `failed`。
+- **Verify**：`cargo test -p peri-workflow --lib rpc`；`cargo test -p peri-workflow --lib runner`；检查 `peri-workflow/src/rpc.rs` 的 `send_request`、`write_line`、`drain_pending` 与 `runner.rs` 的 register/spawn/kill 顺序。
 
 ### ARC-KEEPGOING-001
 
