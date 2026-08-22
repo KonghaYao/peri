@@ -94,14 +94,10 @@ fn test_collect_tools_returns_meta_tools() {
     let mw = ToolSearchMiddleware::new(index, shared);
     let tools = <ToolSearchMiddleware as Middleware>::collect_tools(&mw, "/tmp");
 
-    assert!(
-        tools.len() >= 3,
-        "expected at least 3 tools (meta + deferred)"
-    );
+    assert_eq!(tools.len(), 2, "expected the two ToolSearch meta tools");
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert!(names.contains(&"SearchExtraTools"));
     assert!(names.contains(&"ExecuteExtraTool"));
-    assert!(names.contains(&"artifact"), "expected artifact tool");
 }
 
 #[tokio::test]

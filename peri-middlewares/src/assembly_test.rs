@@ -608,6 +608,7 @@ fn full_config_chain_order() {
             "McpMiddleware",
             "WorkflowMiddleware",
             "ToolSearch",
+            "ArtifactMiddleware",
             "LspMiddleware",
             "GoalMiddleware",
         ]
