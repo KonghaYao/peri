@@ -39,6 +39,40 @@ fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
     make_manager_with_cron_option(tmp, None)
 }
 
+/// 构造关闭 `SkillsMiddleware` 的 SessionManager，用于验证 MetaHarness 对
+/// slash 路由的关闭面也生效，避免 `/skill` 绕过 middleware 装配。
+fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManager {
+    let thread_store = Arc::new(FilesystemThreadStore::new(tmp.path().join("threads")));
+    let mut peri_config = PeriConfig::default();
+    peri_config.config.active_alias = "sonnet".to_string();
+    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.profiles = Profiles {
+        sonnet: ProfileConfig {
+            provider: "a".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    peri_config.config.meta_harness = Some(std::collections::HashMap::from([(
+        "SkillsMiddleware".to_string(),
+        false,
+    )]));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    SessionManager::new(
+        thread_store,
+        provider,
+        Arc::new(peri_config),
+        SharedPermissionMode::new(PermissionMode::Bypass),
+        None,
+        None,
+        None,
+        None,
+        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
 /// 构造带 cron scheduler 的 SessionManager（session 级 cron bridge 测试用）。
 ///
 /// scheduler 的 primary tx 直接丢弃（同 TUI `cron_state.rs:13` 模式）——
@@ -850,6 +884,20 @@ async fn test_session_creation_registers_local_skills_core_domain() {
 
     let resolved = reg.resolve("/core:hello").expect("全名命中");
     assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
+}
+
+/// MetaHarness 关闭 SkillsMiddleware 时，本地 skill 不得进入命令注册表；否则
+/// slash 路由会经 AgentPassthrough 绕开 middleware 的装配期开关。
+#[tokio::test]
+async fn test_session_creation_does_not_register_skills_when_disabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_local_skill(tmp.path(), "hello", "hello");
+    let mgr = make_session_manager_skills_disabled(&tmp);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    assert!(reg.resolve("/hello").is_none());
+    assert!(reg.resolve("/core:hello").is_none());
 }
 
 /// C1 冲突裁决：内置 compact 先注册 → 同名 skill 被拒 + 告警，注册表保持

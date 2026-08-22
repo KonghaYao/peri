@@ -274,6 +274,7 @@ fn blueprint_sequence_is_canonical() {
             "Mcp",
             "Workflow",
             "ToolSearch",
+            "Artifact",
             // 第七组：LSP / Goal（Goal 在链最后）
             "Lsp",
             "Goal",
@@ -305,6 +306,7 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Mcp => "Mcp",
         ChainSlot::Workflow => "Workflow",
         ChainSlot::ToolSearch => "ToolSearch",
+        ChainSlot::Artifact => "Artifact",
         ChainSlot::Lsp => "Lsp",
         ChainSlot::Goal => "Goal",
     }
@@ -336,8 +338,32 @@ fn default_config_produces_canonical_chain() {
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "ToolSearch",
+            "ArtifactMiddleware",
         ]
     );
+}
+
+/// Artifact 默认启用；单独关闭后仅移除 artifact，不影响 ToolSearch 元工具。
+#[test]
+fn artifact_middleware_can_be_disabled_independently() {
+    let enabled = base_context();
+    let enabled_tools = assemble_tool_names(&enabled);
+    for expected in ["artifact", "SearchExtraTools", "ExecuteExtraTool"] {
+        assert!(enabled_tools.iter().any(|name| name == expected));
+    }
+
+    let mut disabled = base_context();
+    disabled
+        .meta_harness_disabled
+        .insert("ArtifactMiddleware".to_string());
+    let disabled_tools = assemble_tool_names(&disabled);
+    assert!(!disabled_tools.iter().any(|name| name == "artifact"));
+    for expected in ["SearchExtraTools", "ExecuteExtraTool"] {
+        assert!(disabled_tools.iter().any(|name| name == expected));
+    }
+    assert!(!assemble_names(&disabled)
+        .iter()
+        .any(|name| name == "ArtifactMiddleware"));
 }
 
 /// 权限模式不影响链组成与 Permission/AskUser 位置（四种模式一致）。
@@ -582,6 +608,7 @@ fn full_config_chain_order() {
             "McpMiddleware",
             "WorkflowMiddleware",
             "ToolSearch",
+            "ArtifactMiddleware",
             "LspMiddleware",
             "GoalMiddleware",
         ]
@@ -911,6 +938,7 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::Mcp => "McpMiddleware",
         ChainSlot::Workflow => "WorkflowMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
+        ChainSlot::Artifact => "ArtifactMiddleware",
         ChainSlot::Lsp => "LspMiddleware",
         ChainSlot::Goal => "GoalMiddleware",
     }
@@ -944,6 +972,7 @@ fn middleware_tool_names_match_static_tool_sets() {
             "ToolSearch",
             "SearchExtraTools",
             "ExecuteExtraTool",
+            // ArtifactMiddleware
             "artifact",
             // LspMiddleware
             "LSP",

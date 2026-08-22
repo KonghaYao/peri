@@ -3,8 +3,6 @@
 //! 将非核心工具（MCP 工具、Cron 工具等）从 LLM API 调用中移除，
 //! 通过 SearchExtraTools + ExecuteExtraTool 两个元工具实现按需发现和代理执行。
 
-pub mod artifact_client;
-pub mod artifact_tool;
 pub mod core_tools;
 pub mod declaration;
 pub mod execute_tool;

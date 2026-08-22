@@ -27,6 +27,7 @@ use peri_resources::lsp::config::LspConfigFile;
 use peri_resources::lsp::pool::LspServerPool;
 
 use crate::{
+    artifact::ArtifactMiddleware,
     cron::{CronMiddleware, CronScheduler, CronSchedulerPortHandle},
     default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware},
     error_suggest,
@@ -531,6 +532,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         Arc::clone(&tool_search_index_concrete),
                         Arc::clone(shared_tools),
                     )));
+                }
+                // Artifact 中间件：独立关闭不影响 ToolSearch 元工具。
+                ChainSlot::Artifact if disabled.contains("ArtifactMiddleware") => {}
+                ChainSlot::Artifact => {
+                    chain.add(Box::new(ArtifactMiddleware::new()));
                 }
                 // ── 第七组：LSP / Goal（辅助诊断；Goal 链最后） ──
                 // MetaHarness：Lsp / Goal 关闭 → 即使运行条件满足也不构造。

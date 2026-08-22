@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-17（v3，executor / executor_helpers / subagent / async_tasks 拆分为子模块目录）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-22（session-local 工具视图与 ToolSearch 描述同步）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -18,7 +18,7 @@
 | 改 Micro/Full 执行细节 | `src/agent/compact_v2/micro.rs` / `full.rs` | `micro_compact`；`re_inject_v2`、`extract_file_info`、`extract_skill_names` | Micro 按 round 截断（`micro_excluded_tools` 黑名单）；Full 走 `peri_model::Model` 摘要 + re-inject |
 | 改循环退出 / keepgoing 判定 | `src/session/exec/executor.rs` + `src/agent/stages/mod.rs`（Receive 分支） | `executor.rs:130 is_keepgoing(&MessageContent)`；`run_session_loop`（executor.rs:221）；`run_react_loop` 退出判断（stages/mod.rs:647 `consumed_count == 0 && !has_tool_calls`）；判空底层 `peri-acp-types/src/messages/content.rs::is_empty`（:399） | 空白 prompt 须用 `MessageContent::is_empty()` 判空（禁止 trim 替代）；空历史 + 空白 prompt 时短路 `push_done`；keepgoing 不注入 recall；契约 ARC-KEEPGOING-001 |
 | 改 turn fatal failure 分类/传递 | `src/session/exec/executor_helpers/v2_execute.rs` + `executor_helpers.rs` + `executor_helpers/collect.rs`；契约 DTO 在 `peri-acp-types/src/session.rs` | `map_loop_result_to_outcome`；`ExecOutcome.failure` → `PromptResult.failure` | Completed、cancel/Interrupted、MaxIterations 不产生 fatal failure；其他 `LoopResult::Error` 只跨层传稳定 kind + `user_facing_message()`，由 ACP 边界映射标准 JSON-RPC error；契约 ARC-EVENT-001 |
-| 加工具（direct/deferred） | trait 事实源 `peri-acp-types/src/tools.rs`；注册面 = middleware 的 `collect_tools()`（13 处实现，例 `peri-middlewares/src/middleware/filesystem.rs:39`）；组装 `src/session/exec/stage_builder.rs::build_session_tool_view` | `BaseTool::is_direct()`（默认 **false** = deferred，无需覆写）；LLM 侧唯一过滤点 `src/agent/stages/reason.rs:138`（`.filter(is_direct)`） | `is_direct()=true` 直接进 LLM tools；false 经 `SearchExtraTools` 发现 + `ExecuteExtraTool` 代理执行（`peri-middlewares/src/tool_search/`）；包装层须透传；契约 ARC-TOOLS-001 |
+| 加工具（direct/deferred） | trait 事实源 `peri-acp-types/src/tools.rs`；注册面 = middleware 的 `collect_tools()`；组装 `src/session/exec/stage_builder.rs::build_session_tool_view` | `BaseTool::is_direct()`（默认 **false** = deferred）；LLM 侧过滤点 `src/agent/stages/reason.rs` | 每 turn 先应用 middleware disabled 与 agent allow/disallow filter 构造 session-local 视图；`is_direct()=true` 直接进入 LLM tools，false 经 ToolSearch；元工具 direct 描述和 deferred resolver 也绑定同一视图，不得使用静态核心白名单；契约 ARC-TOOLS-001 |
 | 改 cancel 链路 | `src/session/exec/executor_helpers/v2_execute.rs` + `peri-acp-types/src/session.rs` | `build_and_execute_agent_v2`（executor_helpers/v2_execute.rs:122，根 executor_helpers.rs:54 re-export）；`cancel_cascade_agents` / `cancel_all_agents`（session.rs:573/582）；`CancelRequest` 在 `peri-acp-types/src/identity.rs:262` | 按 (session_id, turn_id, attempt_id) 三元组定位；幂等判定与终态归 Agent 层；clear_queue 默认 false；契约 ARC-CANCEL-001 |
 | /compact 命令路径 | `src/session/exec/compact_pipeline.rs` | `run_compact(force=true)` → Full + re-inject | 编排：validate_inputs → resolve_auxiliary_model → run_v2_compact_with_cancel → assemble_compact_messages；取消返回 Cancelled |
 | 改 LLM 调用链路 | `src/agent/stages/reason.rs` + `src/agent/model_bridge.rs` | `run_reason`；model_bridge 流式事件 v2 直发 | Reason：snapshot → LlmCallStart → before_model → generate（与 cancel 竞争）→ after_model → LlmCallEnd；事件契约 ARC-EVENT-001 |
@@ -71,7 +71,7 @@
 | --- | --- | --- |
 | 工具 trait 事实源 | `peri-acp-types/src/tools.rs` | `BaseTool`（:146）；`is_direct()` 默认 false（:199） |
 | 工具注册面 | middleware `collect_tools()`（`peri-agent/src/middleware/trait.rs:60`，13 处实现） | 新工具由中间件提供；包装层透传 is_direct |
-| deferred 搜索/执行代理 | `peri-middlewares/src/tool_search/` | `middleware.rs`（索引构建 :64）、`search_tool.rs`、`execute_tool.rs`、`tool_index.rs`、`core_tools.rs`（`CORE_TOOL_NAMES` 白名单） |
+| deferred 搜索/执行代理 | `peri-middlewares/src/tool_search/` | `middleware.rs`（基于 local tool view 构建索引并刷新元工具描述）、`search_tool.rs`、`execute_tool.rs`、`tool_index.rs`、`core_tools.rs`（调用解析与 direct 描述 helper） |
 | 链装配 | `peri-middlewares/src/assembly.rs` | `ChainSlot::ToolSearch`（:514）；`ExecuteExtraToolResolver` 注入（:874） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）

@@ -1,6 +1,8 @@
 # peri-acp 协议设计
 
-> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-10
+> 设计起点：2026-07-15（v2.1 修订） | 最后核对：2026-08-22
+>
+> 本文是 wire 语义说明；当前实现入口以 `docs/code-index/peri-acp.md` 为准，跨层不变量以 `docs/standards/architecture-contracts.md` 为准。
 
 ## 1. 协议分层
 
@@ -24,7 +26,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 |------|------|--------|------|
 | `session/new` | `{ cwd?, model?, permission_mode? }` | `{ session_id }` | 创建新会话 |
 | `session/load` | `{ session_id }` | `{ session_id }` | 恢复历史会话（历史经 `session/update` 重放） |
-| `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话（stdio 侧 `create.rs:186`） |
+| `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ session_id }` | `{}` | 关闭会话 |
 | `session/fork` | `{ source_session_id }` | `{ new_session_id }` | 复制当前会话到新线程 |
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
@@ -45,7 +47,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/set_mode` | `{ modeId?, sessionId? }` | `{}` | 切换**权限模式**（default / plan / acceptEdits 等） |
 | `session/set_config_option` | `{ sessionId?, configId, value }` | `{}` | 更新配置项；`configId` 支持 `mode` / `model`（模型切换）/ `thinking_effort` / `context_1m`（有 session 时用 request，无 session 时用 `session/config_update` notification） |
 | `session/update_config` | `{ sessionId?, config }` | `{ configOptions }` | 完整 `PeriConfig` 替换（校验 providers 非空与 profile→provider 引用），变更后推送 `config_option_update` 并 invalidate LLM 实例 |
-| `session/switch-model` | — | — | 无服务端注册；模型切换走 `session/set_config_option` 的 `configId="model"` 分支（`requests.rs:200`，stdio 侧 `session/config.rs:48`）。`session/set_model` 仅为 TUI `client.rs` 侧未使用的定义（死代码） |
+| `session/switch-model` | — | — | 无服务端注册；模型切换走 `session/set_config_option` 的 `configId="model"` 分支；stdio 与 mpsc 共用统一 request dispatch |
 | `session/switch-provider` | — | — | 未实现，无服务端注册 |
 
 > **已移除/不存在方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批经 broker JSON-RPC `session/request_permission` 往返，TUI 通过 `send_response`（JSON-RPC response）回传审批结果（`hitl_response.rs`），AskUser 同理走 `elicitation/create` + `send_response`（`ask_user_action.rs`），均不走 execute-command。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
@@ -111,7 +113,7 @@ ACP 事件映射 / EventSink
 1. **事件链路单一**：新增事件经 v2 EventBus、ACP 映射和协议化面到达 TUI，不恢复 v2_tx 或其他直连通道。
 2. **协议面类型化**：标准更新使用 ACP 类型，TUI 专用通知使用 `AcpEvent` DTO；两者的兼容性由映射层维护。
 3. **终止可观测**：每个 terminal 事件必须使客户端离开 loading 状态。
-4. **传输无关**：MpscTransport、`host/stdio/` SDK 模式（及保留的 StdioTransport）复用同一协议语义；transport 不解释 Agent 业务逻辑。
+4. **传输无关**：`MpscTransport` 与 ACP stdio 都进入统一 host 和 request dispatch；transport 不解释 Agent 业务逻辑。
 
 ---
 
@@ -172,8 +174,8 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ### 6.2 传输实现
 
-- **开发环境（TUI 内嵌 ACP）**：`MpscTransport`。同一进程内通过 tokio mpsc 通道传递消息。
-- **生产环境（IDE 插件、远程代理）**：`host/stdio/` 模式（`run_acp_stdio`），基于 agent-client-protocol SDK 与外部 IDE 客户端通信（`Stdio` 连接）。`StdioEventSink` 仅发标准 ACP `session/update` 通知，不支持 `peri/*` 自定义通知。`transport/stdio.rs` 的自研 `StdioTransport` 实现仍保留，但生产 stdio 路径已由 SDK 模式取代。
+- **TUI 内嵌 ACP**：`MpscTransport` 在同一进程内通过 tokio mpsc 搬运 wire 消息。
+- **IDE / stdio**：`run_acp_stdio(StdioInput)` 完成 stdio 编解码与部署装配，然后进入 `run_acp_server_with_sessions`；它与 TUI 共用 `handle_request` 和 session/prompt 主路径。`session/new` response 必须先于首次 commands notification。legacy `type:cancel` 是兼容性的全 session 强停入口，不等于标准 `session/cancel`。
 
 传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。事件协议化与通道选择由 `peri-acp/src/event/` 的 EventSink 和映射层决定。
 

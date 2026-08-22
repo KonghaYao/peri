@@ -35,7 +35,7 @@
 cargo check -p peri-acp
 cargo test -p peri-acp --lib
 cargo test -p peri-acp --lib mapper
-cargo test -p peri-acp --test langfuse_e2e # 已随 L4 迁至 peri-controller：cargo test -p peri-controller --test langfuse_e2e
+cargo test -p peri-controller --test langfuse_e2e
 cargo test -p peri-acp --doc
 ```
 

@@ -75,6 +75,8 @@ pub enum ChainSlot {
     Workflow,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
+    /// Artifact（公开 Artifact 上传工具）
+    Artifact,
     // ── 第七组：LSP / Goal（辅助诊断，条件注册；Goal 在链最后） ──
     /// Lsp（LSP 诊断工具，servers 非空时注册）
     Lsp,
@@ -116,6 +118,7 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Mcp,
         ChainSlot::Workflow,
         ChainSlot::ToolSearch,
+        ChainSlot::Artifact,
         // 第七组：LSP / Goal
         ChainSlot::Lsp,
         ChainSlot::Goal,

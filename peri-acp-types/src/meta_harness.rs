@@ -95,6 +95,7 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "McpMiddleware",
     "WorkflowMiddleware",
     "ToolSearch",
+    "ArtifactMiddleware",
     "LspMiddleware",
     "GoalMiddleware",
 ];
@@ -168,6 +169,7 @@ pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     "ToolSearch",
     "SearchExtraTools",
     "ExecuteExtraTool",
+    // ArtifactMiddleware
     "artifact",
     // LspMiddleware
     "LSP",

@@ -27,6 +27,7 @@
 | SubAgent、后台任务、取消和事件 | `src/subagent/` |
 | HITL 权限与审批 | `src/hitl/` |
 | Workflow、LSP、工具搜索 | `src/workflow/`、`src/lsp/`、`src/tool_search/` |
+| Artifact 公开上传工具 | `src/artifact/` |
 | Todo、Cron、文件/终端/Web 工具 | `src/` 下对应模块 |
 
 ## 稳定不变量

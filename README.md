@@ -55,31 +55,30 @@ Perihelion is not just a TUI. It's a layered platform where the **agent core** i
 
 ```mermaid
 graph TD
-    TUI["peri-tui<br/>Terminal (ratatui-kit)"]
-    IDE["Zed / JetBrains<br/>IDE (ACP client)"]
-    STDIO["Stdio<br/>Headless / CI / Cloud"]
+    TUI["peri-tui<br/>Terminal UI"]
+    IDE["IDE ACP client"]
+    PRINT["Print / headless"]
+    ACP["peri-acp<br/>unified host · stdio/mpsc · protocol mapping"]
+    CTRL["peri-controller<br/>routing · event envelope · Langfuse bridge"]
+    RUNTIME["peri-runtime<br/>session/turn routing"]
+    AGENT["peri-agent<br/>session runtime · ReAct loop"]
+    MW["peri-middlewares<br/>tools · MCP · skills · HITL · plugins"]
+    WF["peri-workflow<br/>Node JSON-RPC orchestration"]
+    LF["langfuse-client"]
 
     TUI -->|MpscTransport| ACP
-    IDE -->|ACP Stdio| ACP
-    STDIO -->|ACP Stdio| ACP
-
-    ACP["peri-acp — ACP Server<br/>session · executor · prompt · commands"]
-
-    ACP --> AGENT["peri-agent<br/>ReAct loop · LLM adapter · tools · SQLite storage"]
-    ACP --> MW["peri-middlewares<br/>20 middlewares: FS · HITL · SubAgent · Skills · MCP · Hooks · Compact · Goal · Workflow"]
-    ACP --> LSP["peri-lsp<br/>LSP client"]
-
-    AGENT -.->|telemetry| LF["langfuse-client"]
-    MW -.->|renders with| WIDGETS["peri-widgets<br/>Markdown · code blocks · tables"]
-
-    TUI --> THEME["peri-theme<br/>Dark/Light · palette"]
-    ACP --> WORKFLOW["peri-workflow<br/>Multi-agent pipelines"]
-    TUI --> E2E["e2e<br/>tmux black-box tests"]
+    IDE -->|ACP stdio| ACP
+    PRINT -->|shared host/config| ACP
+    ACP --> CTRL --> RUNTIME --> AGENT
+    AGENT --> MW
+    MW --> WF
+    ACP -.->|pre-protocol observer| CTRL
+    CTRL -.->|non-blocking telemetry| LF
 ```
 
-**Crate topology**: `peri-tui` → `peri-acp` → `peri-agent` / `peri-middlewares` · `peri-widgets` · `langfuse-client` · `peri-lsp` · `peri-web-pty` · `peri-acp-types` · `peri-workflow` · `peri-theme`
+**Architecture boundary**: `peri-tui / print / IDE → peri-acp host → peri-controller → peri-runtime → peri-agent`; middleware capabilities are assembled per session, and Langfuse remains a non-blocking observer rather than part of the business event path. The root workspace membership is defined only by `Cargo.toml`.
 
-**One core, three frontends.** Terminal users get `peri-tui`. IDE users connect via ACP (Zed today, more to come). Headless / CI / cloud scenarios use the Stdio transport. Change the agent logic once — every frontend benefits.
+**One core, three entry paths.** Use `peri` for TUI, `peri -p <prompt>` for print/headless execution, and `peri acp` for IDE/stdio clients. All three share configuration and database path handling; ACP stdio and TUI requests converge on the same host dispatch path.
 
 ---
 
@@ -118,15 +117,17 @@ First launch guides you through model and API key configuration — no config fi
 
 ## Built by AI, Published by Human
 
-Perihelion's code is 99% AI-generated, primarily by DeepSeek and GLM-5.2. The development workflow is a closed loop the agent drives itself:
+Perihelion's code is primarily AI-assisted, with human responsibility for product direction, review, and release. The repository keeps its engineering knowledge in explicit, scoped facts rather than accumulating incident notes in one root prompt:
 
-| When you... | The loop kicks off |
+| Knowledge | Canonical location |
 |---|---|
-| **Find a bug or tech debt** | `auto-issue-fixer` → `systematic-debugging` → `writing-plans` → `subagent-driven-development` → `auto-issue-fixer`（归档）→ update `CLAUDE.md` |
-| **Want a new feature** | `grill-me` → `writing-plans` → `subagent-driven-development` |
-| **Codebase getting messy** | `slop-cleaner` → `improve-codebase-architecture` → `writing-plans` → `subagent-driven-development` |
+| Stable engineering rules and cross-crate contracts | `docs/standards/` |
+| Current implementation navigation | `docs/code-index/` |
+| Active changes, defects, and acceptance status | `spec/issues/` |
+| Historical problem records | `spec/global/problems.md` |
+| Repository and module routing | root/module `CLAUDE.md` and `AGENTS.md` |
 
-Each fix that reveals a non-obvious constraint gets written back into `CLAUDE.md` as a **TRAP** — a hard rule the agent follows on every subsequent iteration. The dozens of TRAPs in the repo weren't authored by humans; they were extracted by the agent at the scene of each bug. That's how quality compounds without human code review.
+A non-obvious constraint discovered during a fix is promoted only when it is stable: rules go to standards, behavior navigation goes to code-index, and temporary investigation stays in the active spec. Root guidance files remain small routers so every agent reaches the same canonical source instead of inheriting duplicated “TRAP” narratives.
 
 → Read the full story: [Nobody Coding](docs/blogs/ai-coding-paradigm/nobody-coding.md)
 

@@ -14,7 +14,7 @@ use peri_agent::{
 };
 
 use super::{
-    artifact_tool::ArtifactTool, declaration::collect_declarations, execute_tool::ExecuteExtraTool,
+    declaration::collect_declarations, execute_tool::ExecuteExtraTool,
     search_tool::SearchExtraTools, tool_index::ToolSearchIndex,
 };
 
@@ -49,11 +49,10 @@ impl Middleware for ToolSearchMiddleware {
         "ToolSearch"
     }
 
-    fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
+    fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
         vec![
             Box::new(SearchExtraTools::new(Arc::clone(&self.tool_search_index))),
             Box::new(ExecuteExtraTool::new(Arc::clone(&self.shared_tools))),
-            Box::new(ArtifactTool::new(cwd.to_string())),
         ]
     }
 
@@ -73,10 +72,33 @@ impl Middleware for ToolSearchMiddleware {
         let direct_arcs: Vec<Arc<dyn BaseTool>>;
         {
             let local = state.local_tools();
-            let guard = match local {
-                Some(tools) => tools.read(),
-                None => self.shared_tools.read(),
+            let mut guard = match local {
+                Some(tools) => tools.write(),
+                None => self.shared_tools.write(),
             };
+            let direct_names: Vec<String> = guard
+                .iter()
+                .filter(|(_, tool)| tool.is_direct())
+                .map(|(name, _)| name.clone())
+                .collect();
+            if guard.contains_key(super::core_tools::SEARCH_EXTRA_TOOLS_NAME) {
+                guard.insert(
+                    super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
+                    Arc::new(SearchExtraTools::with_direct_tools(
+                        Arc::clone(&self.tool_search_index),
+                        direct_names.iter().map(String::as_str),
+                    )),
+                );
+            }
+            if guard.contains_key(super::core_tools::EXECUTE_EXTRA_TOOL_NAME) {
+                guard.insert(
+                    super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
+                    Arc::new(ExecuteExtraTool::with_direct_tools(
+                        Arc::clone(&self.shared_tools),
+                        direct_names.iter().map(String::as_str),
+                    )),
+                );
+            }
             deferred_arcs = guard
                 .iter()
                 .filter(|(_, tool)| !tool.is_direct())
