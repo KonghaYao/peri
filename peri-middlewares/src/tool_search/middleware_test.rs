@@ -261,7 +261,7 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
     let index = Arc::new(ToolSearchIndex::new());
     // 宿主级 shared_tools：生产路径下为空表（assemble.rs 建表后无写点）
     let shared = Arc::new(RwLock::new(BTreeMap::new()));
-    let mw = ToolSearchMiddleware::new(index.clone(), shared);
+    let mw = ToolSearchMiddleware::new(index.clone(), Arc::clone(&shared));
 
     // 每 turn 本地视图：含 deferred Workflow 工具（stage_builder 产出语义）
     let mut local = BTreeMap::new();
@@ -273,9 +273,17 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
         "Read".to_string(),
         Arc::new(MockTool::new("Read", "Read a file").with_direct()) as Arc<dyn BaseTool>,
     );
+    local.insert(
+        "SearchExtraTools".to_string(),
+        Arc::new(SearchExtraTools::new(Arc::clone(&index))) as Arc<dyn BaseTool>,
+    );
+    local.insert(
+        "ExecuteExtraTool".to_string(),
+        Arc::new(ExecuteExtraTool::new(Arc::clone(&shared))) as Arc<dyn BaseTool>,
+    );
     let local_view: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(local));
 
-    let mut state = LocalToolsState::new(local_view);
+    let mut state = LocalToolsState::new(Arc::clone(&local_view));
     mw.before_agent(&mut state).await.unwrap();
 
     // 搜索面：Workflow 可被发现
@@ -286,6 +294,20 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
         "宿主表为空时也应从每 turn 本地视图构建 deferred 索引"
     );
     assert_eq!(results[0].name, "Workflow");
+
+    let tools = local_view.read();
+    for meta_name in ["SearchExtraTools", "ExecuteExtraTool"] {
+        let description = tools.get(meta_name).unwrap().description();
+        assert!(description.contains("Read"), "{meta_name}: {description}");
+        assert!(
+            !description.contains("Write") && !description.contains("WebSearch"),
+            "未注册或被过滤的 core tool 不得出现在 direct tool 说明中：{meta_name}: {description}"
+        );
+        assert!(
+            !description.contains("always available"),
+            "不得静态宣称 core tools always available：{meta_name}: {description}"
+        );
+    }
 
     // prompt 贡献：deferred 列表 + 声明段（direct 工具来自本地视图）
     let contribution = contribution(&mw).unwrap();

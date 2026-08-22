@@ -60,31 +60,24 @@ pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -
     }
 }
 
-/// Core 工具名常量列表（避免分散引用）
-const CORE_TOOL_NAMES: &[&str] = &[
-    TOOL_READ,
-    TOOL_WRITE,
-    TOOL_EDIT,
-    TOOL_GLOB,
-    TOOL_GREP,
-    TOOL_FOLDER_OPS,
-    TOOL_BASH,
-    TOOL_WEBFETCH,
-    TOOL_WEBSEARCH,
-    TOOL_AGENT,
-    TOOL_ASK_USER,
-    TOOL_TODO,
-    TOOL_SKILL,
-    TOOL_DISCOVER_SKILLS,
-];
-
-/// 返回 CORE_TOOL_NAMES 按字典序排序后的逗号分隔字符串（含空格）。
+/// 返回工具名按字典序排序后的逗号分隔字符串（含空格）。
 ///
-/// 用于动态生成 Meta 工具 description 中的 Core 列表，确保跨调用稳定。
-pub fn core_tools_sorted_csv() -> String {
-    let mut names: Vec<&str> = CORE_TOOL_NAMES.to_vec();
+/// 输入必须来自当前 session 的实际 direct tool 集合。
+pub fn direct_tools_sorted_csv<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = names.into_iter().collect();
     names.sort_unstable();
+    names.dedup();
     names.join(", ")
+}
+
+/// 将当前 session 的 direct tool 集合格式化为稳定的能力说明。
+pub fn direct_tools_description<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let names = direct_tools_sorted_csv(names);
+    if names.is_empty() {
+        "No other tools are directly available in this session.".to_string()
+    } else {
+        format!("Tools directly available in this session: {names}.")
+    }
 }
 
 #[cfg(test)]

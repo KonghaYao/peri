@@ -16,48 +16,15 @@ fn test_parse_extra_tool_call_requires_nonempty_name_and_object_params() {
     );
 }
 #[test]
-fn test_core_tools_sorted_csv_includes_all_14_tools() {
-    // P1-3: 动态生成必须覆盖全部 14 个 Core 工具（含 SkillTool / DiscoverSkillsTool）
-    let csv = core_tools_sorted_csv();
-    for tool in [
-        TOOL_READ,
-        TOOL_WRITE,
-        TOOL_EDIT,
-        TOOL_GLOB,
-        TOOL_GREP,
-        TOOL_FOLDER_OPS,
-        TOOL_BASH,
-        TOOL_WEBFETCH,
-        TOOL_WEBSEARCH,
-        TOOL_AGENT,
-        TOOL_ASK_USER,
-        TOOL_TODO,
-        TOOL_SKILL,
-        TOOL_DISCOVER_SKILLS,
-    ] {
-        assert!(
-            csv.contains(tool),
-            "core_tools_sorted_csv 应包含 {tool}，实际: {csv}"
-        );
-    }
+fn test_direct_tools_sorted_csv_is_stable_and_sorted() {
+    let csv = direct_tools_sorted_csv([TOOL_WRITE, TOOL_READ, TOOL_WRITE]);
+    assert_eq!(csv, "Read, Write");
 }
 
 #[test]
-fn test_core_tools_sorted_csv_is_stable() {
-    // P1-1: 多次调用必须返回相同字符串（保护 prompt cache 前缀）
-    let csv1 = core_tools_sorted_csv();
-    let csv2 = core_tools_sorted_csv();
-    let csv3 = core_tools_sorted_csv();
-    assert_eq!(csv1, csv2, "两次调用应一致");
-    assert_eq!(csv2, csv3, "三次调用应一致");
-}
-
-#[test]
-fn test_core_tools_sorted_csv_is_alphabetically_sorted() {
-    // P1-1: 排序保证跨进程/跨版本稳定（HashSet 序不确定）
-    let csv = core_tools_sorted_csv();
-    let parts: Vec<&str> = csv.split(", ").collect();
-    let mut sorted = parts.clone();
-    sorted.sort();
-    assert_eq!(parts, sorted, "csv 应按字典序排序，实际: {csv}");
+fn test_direct_tools_description_handles_empty_set() {
+    assert_eq!(
+        direct_tools_description(std::iter::empty()),
+        "No other tools are directly available in this session."
+    );
 }

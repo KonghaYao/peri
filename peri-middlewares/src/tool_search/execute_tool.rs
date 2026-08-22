@@ -12,7 +12,7 @@ use peri_agent::{
 };
 use serde_json::{json, Value};
 
-use super::core_tools::{core_tools_sorted_csv, parse_extra_tool_call, EXECUTE_EXTRA_TOOL_NAME};
+use super::core_tools::{direct_tools_description, parse_extra_tool_call, EXECUTE_EXTRA_TOOL_NAME};
 
 pub struct ExecuteExtraToolResolver {
     direct: DirectToolInvocationResolver,
@@ -72,15 +72,22 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
 pub struct ExecuteExtraTool {
     /// 共享工具注册表（由 executor 在工具收集后填充）
     shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// description 含动态生成的 Core 工具列表，构造时一次性生成（P1-1）。
+    /// description 基于当前 session 的实际 direct tool 集合构造。
     description: String,
 }
 
 impl ExecuteExtraTool {
     pub fn new(shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>) -> Self {
+        Self::with_direct_tools(shared_tools, std::iter::empty())
+    }
+
+    pub fn with_direct_tools<'a>(
+        shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
+        direct_tool_names: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let description = format!(
-            "ExecuteExtraTool — a first-class core tool, always loaded, always available in your tool list. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For core tools already in your tool list ({}, etc.) — call those directly.",
-            core_tools_sorted_csv()
+            "ExecuteExtraTool — a directly available meta tool in this session. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For tools already in your tool list. {}",
+            direct_tools_description(direct_tool_names)
         );
         Self {
             shared_tools,
