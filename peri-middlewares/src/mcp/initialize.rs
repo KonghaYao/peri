@@ -299,7 +299,7 @@ impl McpClientPool {
         claude_home: &Path,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
         channel_handler: Option<Arc<ChannelHandler>>,
-    ) -> Self {
+    ) -> Arc<Self> {
         let (config, plugin_sources) = super::load_merged_config_full(cwd, claude_home);
         let pool = Arc::new(Self::new_pending());
         *pool.plugin_sources.write() = plugin_sources;
@@ -481,18 +481,6 @@ impl McpClientPool {
             }
         }
 
-        Arc::try_unwrap(pool).unwrap_or_else(|arc| {
-            let p = arc.as_ref();
-            let cloned = Self::new_pending();
-            *cloned.clients.write() = p.clients.read().clone();
-            *cloned.configs.write() = p.configs.read().clone();
-            *cloned.plugin_sources.write() = p.plugin_sources.read().clone();
-            *cloned.init_status.write() = p.init_status.read().clone();
-            cloned.initialized.store(
-                p.initialized.load(std::sync::atomic::Ordering::SeqCst),
-                std::sync::atomic::Ordering::SeqCst,
-            );
-            cloned
-        })
+        pool
     }
 }

@@ -373,7 +373,7 @@ fn detail_btn_row(s: &McpServerSummary) -> u16 {
         .url
         .as_ref()
         .map(|url| wrap_text(url, 52).len() as u16)
-        .unwrap_or(0);
+        .unwrap_or(1);
     // 空行 + 标题 + cache + 空行 + [错误标题 + 摘要 + 空行] + URL 标签 + URL×n + 空行。
     6 + url_lines + u16::from(s.error_summary.is_some()) * 3
 }
@@ -542,7 +542,13 @@ fn start_oauth(server_name: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_status_label_key;
+    use super::{cache_status_label_key, detail_btn_row};
+    use crate::kit::atoms::McpServerSummary;
+
+    #[test]
+    fn detail_button_row_counts_empty_url_value_line() {
+        assert_eq!(detail_btn_row(&McpServerSummary::default()), 7);
+    }
 
     #[test]
     fn cache_status_labels_are_explicit() {

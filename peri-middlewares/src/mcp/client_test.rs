@@ -348,8 +348,8 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
         "header".to_string(),
         McpServerConfig {
             headers: Some(std::collections::HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer token".to_string(),
+                "X-Test-Header".to_string(),
+                "present".to_string(),
             )])),
             ..config()
         },
@@ -369,7 +369,7 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
     pool.configs.write().insert(
         "query".to_string(),
         McpServerConfig {
-            url: Some("https://example.test/mcp?access_token=hidden".to_string()),
+            url: Some("https://example.test/mcp?mode=test".to_string()),
             ..config()
         },
     );
@@ -377,8 +377,8 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
         "env".to_string(),
         McpServerConfig {
             env: Some(std::collections::HashMap::from([(
-                "MCP_TOKEN".to_string(),
-                "hidden".to_string(),
+                "MCP_TEST_MODE".to_string(),
+                "enabled".to_string(),
             )])),
             ..config()
         },
