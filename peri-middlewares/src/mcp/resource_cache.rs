@@ -373,7 +373,21 @@ impl McpResourceCache {
 
     async fn lock(&self) -> Option<std::fs::File> {
         let path = self.state_path.join("cache.lock");
+        // root/state -> root：仅在 Unix 收紧缓存根到 0700，阻断其他 uid 进入，
+        // 其下 content/、state/ 即便沿用默认 umask 权限也不可达。其余代码全平台可编译。
+        #[cfg(unix)]
+        let cache_root = self.state_path.parent().map(PathBuf::from);
         let file = tokio::task::spawn_blocking(move || {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(root) = cache_root {
+                    std::fs::create_dir_all(&root)?;
+                    let mut perms = std::fs::metadata(&root)?.permissions();
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(&root, perms)?;
+                }
+            }
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
