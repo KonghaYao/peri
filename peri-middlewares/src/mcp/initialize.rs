@@ -176,7 +176,10 @@ impl McpClientPool {
                     }
                     let peer = rs.peer().clone();
                     let cache_version = pool.install_peer_cache_version(name, &peer);
-                    let tools = rs.list_all_tools().await.unwrap_or_default();
+                    let tools = pool
+                        .list_all_tools_cached(name, &peer)
+                        .await
+                        .unwrap_or_default();
                     let resources = pool
                         .list_all_resources_cached(name, &peer)
                         .await
@@ -420,7 +423,10 @@ impl McpClientPool {
                     }
                     let peer = rs.peer().clone();
                     let cache_version = pool.install_peer_cache_version(name, &peer);
-                    let tools = rs.list_all_tools().await.unwrap_or_default();
+                    let tools = pool
+                        .list_all_tools_cached(name, &peer)
+                        .await
+                        .unwrap_or_default();
                     let resources = pool
                         .list_all_resources_cached(name, &peer)
                         .await

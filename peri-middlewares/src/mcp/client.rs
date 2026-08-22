@@ -10,7 +10,7 @@ use rmcp::{
         CacheScope, ClientCapabilities, Implementation, InitializeRequestParams,
         PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Resource, Tool,
     },
-    service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
+    service::{Peer, QuitReason, RoleClient, RunningService},
 };
 use thiserror::Error;
 
@@ -41,13 +41,6 @@ impl McpServiceWrapper {
         match self {
             McpServiceWrapper::Default(svc) => svc.close_with_timeout(timeout).await,
             McpServiceWrapper::Channel(svc) => svc.close_with_timeout(timeout).await,
-        }
-    }
-
-    pub async fn list_all_tools(&self) -> Result<Vec<Tool>, ServiceError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.list_all_tools().await,
-            McpServiceWrapper::Channel(svc) => svc.list_all_tools().await,
         }
     }
 
@@ -538,6 +531,57 @@ impl McpClientPool {
     pub(crate) async fn invalidate_resource_cache(&self, server_name: &str, uri: Option<&str>) {
         let origin = self.cache_origin(server_name);
         self.invalidate_resource_cache_origin(&origin, uri).await;
+    }
+
+    /// 仅当 server 在 initialize 声明 `io.mcpp/server-cache-version` 且当前安全
+    /// 策略允许持久化时，跨进程复用磁盘上的 `tools/list` schema；否则保持原始
+    /// 网络行为（每次回源）。命中以协商的 cache_version 为准：同版本命中跳过
+    /// 网络，版本缺失/变化必定回源。
+    pub(crate) async fn list_all_tools_cached(
+        &self,
+        server_name: &str,
+        peer: &Peer<RoleClient>,
+    ) -> Result<Vec<Tool>, rmcp::service::ServiceError> {
+        if !self.tools_cache_eligible(server_name) {
+            return peer.list_all_tools().await;
+        }
+        let origin = self.cache_origin(server_name);
+        let cache_version = self.cache_versions.read().get(server_name).cloned();
+        if let Some(version) = cache_version.as_deref() {
+            if let Some(tools) = self
+                .resource_cache
+                .get_versioned::<Vec<Tool>>(&origin, "tools/list", "", Some(version))
+                .await
+            {
+                return Ok(tools);
+            }
+        }
+        self.resource_cache.mark_live_fetch(&origin, "tools/list");
+        let ticket = self.resource_cache.ticket(&origin, "tools/list", "").await;
+        let tools = peer.list_all_tools().await?;
+        if let (Some(ticket), Some(version)) = (ticket, cache_version.as_deref()) {
+            self.resource_cache
+                .put_ticket_versioned(&ticket, std::time::Duration::ZERO, Some(version), &tools)
+                .await;
+        }
+        Ok(tools)
+    }
+
+    /// 跨进程复用 `tools/list` 缓存的准入：安全策略允许持久化且 server 已声明
+    /// cache_version。二者任一不满足则只回源、不读盘（对应「无版本不命中」与
+    /// 「安全策略回退」）。
+    pub(crate) fn tools_cache_eligible(&self, server_name: &str) -> bool {
+        self.persistent_cache_allowed(server_name)
+            && self.cache_versions.read().contains_key(server_name)
+    }
+
+    /// `notifications/tools/list_changed` 到达时失效该 origin 的磁盘 `tools/list`
+    /// 缓存。订阅未启用时由版本比对安全兜底（下次回源用新版本失效旧条目）。
+    pub(crate) async fn invalidate_tools_cache(&self, server_name: &str) {
+        let origin = self.cache_origin(server_name);
+        self.resource_cache
+            .invalidate(&origin, "tools/list", None)
+            .await;
     }
 
     pub(crate) async fn invalidate_resource_cache_origin(&self, origin: &str, uri: Option<&str>) {

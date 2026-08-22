@@ -177,13 +177,13 @@ impl McpClientPool {
                 }
                 let peer = rs.peer().clone();
                 let cache_version = self.install_peer_cache_version(server_name, &peer);
-                let tools =
-                    rs.list_all_tools()
-                        .await
-                        .map_err(|e| McpPoolError::ToolDiscoveryFailed {
-                            server: server_name.to_string(),
-                            reason: e.to_string(),
-                        })?;
+                let tools = self
+                    .list_all_tools_cached(server_name, &peer)
+                    .await
+                    .map_err(|e| McpPoolError::ToolDiscoveryFailed {
+                        server: server_name.to_string(),
+                        reason: e.to_string(),
+                    })?;
                 let resources = self
                     .list_all_resources_cached(server_name, &peer)
                     .await

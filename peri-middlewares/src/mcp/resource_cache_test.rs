@@ -1,4 +1,5 @@
 use peri_acp_types::plugin::McpServerConfig;
+use rmcp::model::Tool;
 use std::{collections::HashMap, time::Duration};
 
 use super::*;
@@ -480,5 +481,86 @@ async fn test_trim_locked_evicts_when_one_byte_over() {
     assert!(
         after_total + incoming <= MAX_CACHE_BYTES,
         "裁剪后须回到预算内"
+    );
+}
+
+// ── tools/list 缓存域（与 resources/ 同构；跨进程复用额外要求 server 声明 version）──
+
+#[tokio::test]
+async fn test_tools_list_version_hit_reuses_across_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // 同版本跨进程复用：即便 TTL 已过期，仍命中（版本驱动新鲜度）。
+    let first: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    let second: Option<Vec<Tool>> = McpResourceCache::at(dir.path().to_path_buf())
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(first.is_some());
+    assert!(
+        second.is_some(),
+        "新进程实例应命中已有 versioned tools/list"
+    );
+}
+
+#[tokio::test]
+async fn test_tools_list_version_change_misses() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_millis(1),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+
+    let miss: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v2"))
+        .await;
+    assert!(miss.is_none(), "版本变化必须回源，不得复用旧 schema");
+}
+
+#[tokio::test]
+async fn test_tools_list_change_notification_invalidates_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = McpResourceCache::at(dir.path().to_path_buf());
+    let ticket = cache.ticket("origin-a", "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_secs(60),
+            Some("opaque-v1"),
+            &vec![Tool::default()],
+        )
+        .await;
+
+    let before: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(before.is_some(), "前置：通知前命中");
+
+    cache.invalidate("origin-a", "tools/list", None).await;
+
+    let after: Option<Vec<Tool>> = cache
+        .get_versioned("origin-a", "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(
+        after.is_none(),
+        "tools/list_changed 必须失效磁盘 tools/list 缓存"
     );
 }

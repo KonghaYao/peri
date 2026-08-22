@@ -128,7 +128,7 @@ impl McpResourceCache {
 
     pub(crate) fn recent_status(&self, origin: &str) -> Option<CacheLoadStatus> {
         let statuses = self.recent_status.lock();
-        ["skills/", "resources/"]
+        ["skills/", "tools/", "resources/"]
             .into_iter()
             .filter_map(|domain| statuses.get(&status_key(origin, domain)).copied())
             .max_by_key(|status| match status {
@@ -478,6 +478,8 @@ impl McpResourceCache {
 fn status_key(origin: &str, method: &str) -> String {
     let domain = if method.starts_with("skills/") {
         "skills/"
+    } else if method.starts_with("tools/") {
+        "tools/"
     } else {
         "resources/"
     };

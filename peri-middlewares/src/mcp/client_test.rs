@@ -4,6 +4,7 @@ use super::*;
 use crate::mcp::oauth_flow::OAuthFailureKind;
 use peri_acp_types::plugin::McpSubscriptionsConfig;
 use rmcp::model::SubscriptionFilter;
+use std::time::Duration;
 
 #[test]
 fn test_pool_get_all_clients_filters_disconnected() {
@@ -398,6 +399,82 @@ fn test_persistent_cache_is_disabled_for_authenticated_servers() {
         "stdio env 可能携带凭据，必须保守禁用持久化 cache"
     );
     assert!(pool.persistent_cache_allowed("unknown"));
+}
+
+#[test]
+fn test_tools_cache_eligible_requires_version_and_allowed_policy() {
+    let config = || McpServerConfig {
+        command: None,
+        args: None,
+        env: None,
+        url: None,
+        headers: None,
+        oauth: None,
+        disabled: None,
+        protocol_version: None,
+        subscriptions: None,
+        source: None,
+    };
+    let pool = McpClientPool::new_empty();
+    pool.configs.write().insert(
+        "oauth".to_string(),
+        McpServerConfig {
+            oauth: Some(Default::default()),
+            ..config()
+        },
+    );
+    pool.configs.write().insert("plain".to_string(), config());
+
+    // 无版本：即便安全策略允许也禁止跨进程复用（对应「无版本不命中」）。
+    assert!(
+        !pool.tools_cache_eligible("plain"),
+        "server 未声明 cache-version 时不得复用磁盘 tools/list"
+    );
+    // 安全策略拒绝持久化：即便已声明版本也禁止复用（对应「安全策略回退」）。
+    assert!(
+        !pool.tools_cache_eligible("oauth"),
+        "OAuth server 必须保持原始网络行为，不得读盘"
+    );
+    // 声明版本且策略允许：可跨进程复用（对应「版本命中」准入）。
+    pool.cache_versions
+        .write()
+        .insert("plain".to_string(), "opaque-v1".to_string());
+    assert!(
+        pool.tools_cache_eligible("plain"),
+        "声明 version 且策略允许时应复用磁盘 tools/list"
+    );
+}
+
+#[tokio::test]
+async fn test_invalidate_tools_cache_clears_disk_entry() {
+    let pool = McpClientPool::new_empty();
+    let origin = pool.cache_origin("tool-server");
+    let cache = pool.resource_cache();
+    let ticket = cache.ticket(&origin, "tools/list", "").await.unwrap();
+    cache
+        .put_ticket_versioned(
+            &ticket,
+            Duration::from_secs(60),
+            Some("opaque-v1"),
+            &vec![rmcp::model::Tool::default()],
+        )
+        .await;
+
+    let before: Option<Vec<rmcp::model::Tool>> = cache
+        .get_versioned(&origin, "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(before.is_some(), "前置：失效前命中");
+
+    // 这是 subscriptions/listen 收到 `notifications/tools/list_changed` 后调用的路径。
+    pool.invalidate_tools_cache("tool-server").await;
+
+    let after: Option<Vec<rmcp::model::Tool>> = cache
+        .get_versioned(&origin, "tools/list", "", Some("opaque-v1"))
+        .await;
+    assert!(
+        after.is_none(),
+        "tools/list_changed 必须使磁盘 tools/list 缓存失效"
+    );
 }
 
 #[test]

@@ -159,7 +159,9 @@ impl McpClientPool {
 
             match result {
                 Ok(Ok(rs)) => {
-                    let tools = match rs.list_all_tools().await {
+                    let peer = rs.peer().clone();
+                    let cache_version = self.install_peer_cache_version(server_name, &peer);
+                    let tools = match self.list_all_tools_cached(server_name, &peer).await {
                         Ok(tools) => tools,
                         Err(source) => {
                             let error = McpPoolError::ToolDiscoveryFailed {
@@ -175,8 +177,6 @@ impl McpClientPool {
                             return Err(error);
                         }
                     };
-                    let peer = rs.peer().clone();
-                    let cache_version = self.install_peer_cache_version(server_name, &peer);
                     let resources = self
                         .list_all_resources_cached(server_name, &peer)
                         .await
