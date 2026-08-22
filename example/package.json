@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@peri-code/mcpp": "^0.7.0"
+  }
+}

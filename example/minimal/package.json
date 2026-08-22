@@ -1,0 +1,17 @@
+{
+  "name": "minimal",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@peri-code/mcpp": "^0.7.0",
+    "zod": "^4.4.3"
+  }
+}
