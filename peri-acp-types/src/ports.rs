@@ -196,6 +196,7 @@ pub trait SkillsPort: Send + Sync {
         &self,
         cwd: &str,
         extra_dirs: &[PathBuf],
+        include_built_ins: bool,
     ) -> Vec<(String, String, String, AgentCapability)>;
 }
 

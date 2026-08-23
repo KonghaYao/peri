@@ -20,14 +20,32 @@ use std::{
 
 /// 冻结期构建的 MetaHarness 状态，随冻结载体（`FrozenContext`）传播；
 /// 会话内不可变（ARC-FROZEN-001）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaHarnessState {
     /// 段落 ID → md 全文；仅含"开关 true 且文档存在"的条目。
     /// 覆盖发生在 `PromptTemplate::new` 构造期，render 无查表开销。
     pub section_overrides: HashMap<String, Arc<str>>,
     /// 装配期关闭的 middleware 名集合（配置中 `false` 条目）。
     pub disabled_middlewares: HashSet<String>,
+    /// 是否允许使用 compile-time 内置 subagent definitions。
+    ///
+    /// 默认开启以保持向后兼容；该值在 session 创建时冻结，catalog 与实际
+    /// definition fallback 必须共同遵守。
+    pub built_in_subagents_enabled: bool,
 }
+
+impl Default for MetaHarnessState {
+    fn default() -> Self {
+        Self {
+            section_overrides: HashMap::new(),
+            disabled_middlewares: HashSet::new(),
+            built_in_subagents_enabled: true,
+        }
+    }
+}
+
+/// MetaHarness 行为策略键；与 section / middleware 键共享配置 map。
+pub const BUILT_IN_SUBAGENTS_KEY: &str = "BuiltInSubagents";
 
 /// 系统提示词段落 ID 清单（`prompts/sections/` 文件名去 `.md`）。
 ///
@@ -206,6 +224,7 @@ mod tests {
         let state = MetaHarnessState::default();
         assert!(state.section_overrides.is_empty());
         assert!(state.disabled_middlewares.is_empty());
+        assert!(state.built_in_subagents_enabled);
     }
 
     /// 契约 3 映射表一致性：段落 ID 必须是合法 `SECTION_IDS`，持有者必须是

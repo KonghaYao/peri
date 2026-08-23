@@ -147,6 +147,80 @@ fn write_test_agent(dir: &tempfile::TempDir) {
     .unwrap();
 }
 
+fn tool_with_built_ins_disabled(cwd: &str) -> SubAgentTool {
+    let state = peri_acp_types::meta_harness::MetaHarnessState {
+        built_in_subagents_enabled: false,
+        ..Default::default()
+    };
+    let parent = peri_agent::session::Session::new(
+        Arc::from(cwd),
+        peri_agent::session::FrozenContext::builder()
+            .meta_harness(state)
+            .build(),
+        None,
+    );
+    make_subagent_tool(Vec::new()).with_parent_session(parent)
+}
+
+#[test]
+fn built_in_policy_rejects_new_built_in_definition() {
+    let tool = tool_with_built_ins_disabled("/nonexistent");
+    let error = tool.load_agent_def("coder", "/nonexistent").unwrap_err();
+    assert!(error.contains("cannot find agent definition 'coder'"));
+}
+
+#[test]
+fn built_in_policy_keeps_project_override_callable() {
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("coder.md"),
+        "---\nname: project-coder\ndescription: Project override\n---\n\nProject agent.\n",
+    )
+    .unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let agent = tool_with_built_ins_disabled(cwd)
+        .load_agent_def("coder", cwd)
+        .unwrap();
+    assert_eq!(agent.frontmatter.name, "project-coder");
+}
+
+#[test]
+fn built_in_policy_keeps_plugin_definition_callable() {
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("plugin-agents");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin-reviewer.md"),
+        "---\nname: plugin-reviewer\ndescription: Plugin agent\n---\n\nReview.\n",
+    )
+    .unwrap();
+    let tool = tool_with_built_ins_disabled(dir.path().to_str().unwrap())
+        .with_plugin_agent_dirs(Arc::new(vec![plugin_dir]));
+    let agent = tool
+        .load_agent_def("plugin-reviewer", dir.path().to_str().unwrap())
+        .unwrap();
+    assert_eq!(agent.frontmatter.name, "plugin-reviewer");
+}
+
+#[test]
+fn plugin_definition_loader_rejects_traversal_agent_id() {
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("plugin-agents");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        dir.path().join("outside.md"),
+        "---\nname: outside\ndescription: Must not load\n---\n\nOutside.\n",
+    )
+    .unwrap();
+    let tool = make_subagent_tool(Vec::new()).with_plugin_agent_dirs(Arc::new(vec![plugin_dir]));
+    let error = tool
+        .load_agent_def("../outside", dir.path().to_str().unwrap())
+        .unwrap_err();
+    assert!(error.contains("invalid agent definition ID"));
+}
+
 /// 构造 FilesystemThreadStore（写盘即时刷新，无需 flush）
 fn make_fs_store(dir: &tempfile::TempDir) -> Arc<peri_agent::thread::FilesystemThreadStore> {
     Arc::new(peri_agent::thread::FilesystemThreadStore::new(

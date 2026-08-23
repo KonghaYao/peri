@@ -265,6 +265,31 @@ fn test_subagent_section_rendered_by_holder() {
 }
 
 #[test]
+fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
+    let state = MetaHarnessState {
+        built_in_subagents_enabled: false,
+        ..Default::default()
+    };
+    let result = build_system_prompt(
+        &state,
+        None,
+        "/tmp",
+        PromptFeatures::none(),
+        &SkillsProvider,
+        &[],
+        None,
+        None,
+    );
+
+    assert!(result.contains("The catalog below is the authoritative list"));
+    assert!(result.contains("project configuration, enabled plugins, or built-in providers"));
+    assert!(result.contains("Do not guess capabilities"));
+    assert!(!result.contains("`general-purpose`"));
+    assert!(!result.contains("subagent_type: \"explorer\""));
+    assert!(result.contains("If no entry clearly fits"));
+}
+
+#[test]
 fn test_skills_section_rendered_by_holder() {
     // 13_skills 由 SkillsMiddleware 持有（Dynamic：机制说明 + 按代码事实
     // 生成的 discovery 协议）。
@@ -297,11 +322,15 @@ fn test_skills_section_rendered_by_holder() {
 
 /// 11_subagent 段落重构守护（设计 §3.5.1 步骤 1）：Agent Selection Guide
 /// 删除具体任务→agent 映射（仓库级调度建议由 catalog id/description 承载），
-/// 通用选择原则保留（specialized 优先 / general-purpose 兜底 / access 并行化）。
+/// 通用选择原则保留，但不绑定任何 built-in agent ID。
 #[test]
 fn test_subagent_selection_guide_has_no_specific_mapping() {
+    let state = MetaHarnessState {
+        built_in_subagents_enabled: false,
+        ..Default::default()
+    };
     let result = build_system_prompt(
-        &MetaHarnessState::default(),
+        &state,
         None,
         "/tmp",
         PromptFeatures::none(),
@@ -321,8 +350,12 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
     );
     // 通用选择原则保留（不绑定 agent 名）
     assert!(
-        result.contains("pick a specialized agent. `general-purpose` is a fallback, not a default"),
-        "通用选择原则（specialized 优先 / general-purpose 兜底）应保留"
+        result.contains("Choose the most specialized agent whose catalog ID"),
+        "选择原则应以当前 catalog 为事实源并优先 specialized agent"
+    );
+    assert!(
+        !result.contains("`general-purpose`") && !result.contains("subagent_type: \"explorer\""),
+        "静态段落不应硬编码 built-in agent ID"
     );
     assert!(
         result
@@ -703,7 +736,7 @@ fn test_format_available_agents_with_agents() {
     )
     .unwrap();
 
-    let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[]);
+    let result = format_available_agents(&SkillsProvider, dir.to_str().unwrap(), &[], true);
     // D4：不注入 description
     assert!(
         result.contains("- reviewer [inherit] [writes]"),
@@ -738,6 +771,7 @@ fn test_format_available_agents_empty_dir() {
         &SkillsProvider,
         "/nonexistent/path/that/does/not/exist",
         &[],
+        true,
     );
     // Built-in agents are always available
     assert!(

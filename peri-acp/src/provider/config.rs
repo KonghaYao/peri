@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use peri_acp_types::meta_harness::{MIDDLEWARE_NAMES, SECTION_IDS};
+use peri_acp_types::meta_harness::{BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -401,6 +401,7 @@ impl AppConfig {
             .iter()
             .chain(MIDDLEWARE_NAMES.iter())
             .copied()
+            .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
             .collect();
         map.retain(|key, _| {
             if known.contains(key.as_str()) {

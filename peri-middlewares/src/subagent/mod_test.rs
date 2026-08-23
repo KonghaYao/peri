@@ -260,6 +260,24 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
 }
 
 #[test]
+fn test_scan_agents_can_exclude_built_ins_without_removing_project_override() {
+    use tempfile::tempdir;
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("coder.md"),
+        "---\nname: project-coder\ndescription: Project override\n---\n\nProject agent.\n",
+    )
+    .unwrap();
+
+    let result = scan_agents_detailed(dir.path().to_str().unwrap(), &[], false);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "coder");
+    assert_eq!(result[0].1, "project-coder");
+}
+
+#[test]
 fn test_scan_agents_with_extra_dirs() {
     use tempfile::tempdir;
     let dir = tempdir().unwrap();
@@ -507,7 +525,7 @@ fn scan_agents_matches_scan_agents_detailed_projection() {
 
     let cwd = dir.path().to_str().unwrap();
     let plain = scan_agents(cwd);
-    let detailed: Vec<(String, String, String)> = scan_agents_detailed(cwd, &[])
+    let detailed: Vec<(String, String, String)> = scan_agents_detailed(cwd, &[], true)
         .into_iter()
         .map(|(id, name, desc, _)| (id, name, desc))
         .collect();
@@ -524,7 +542,7 @@ fn scan_agents_matches_scan_agents_detailed_projection() {
     .unwrap();
     let plain_extra = scan_agents_with_extra_dirs(cwd, &[extra.path().to_path_buf()]);
     let detailed_extra: Vec<(String, String, String)> =
-        scan_agents_detailed(cwd, &[extra.path().to_path_buf()])
+        scan_agents_detailed(cwd, &[extra.path().to_path_buf()], true)
             .into_iter()
             .map(|(id, name, desc, _)| (id, name, desc))
             .collect();

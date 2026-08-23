@@ -439,7 +439,8 @@ impl SkillsPort for SkillsProvider {
         &self,
         cwd: &str,
         extra_dirs: &[PathBuf],
+        include_built_ins: bool,
     ) -> Vec<(String, String, String, AgentCapability)> {
-        crate::scan_agents_detailed(cwd, extra_dirs)
+        crate::scan_agents_detailed(cwd, extra_dirs, include_built_ins)
     }
 }

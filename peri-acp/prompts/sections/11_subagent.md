@@ -1,6 +1,6 @@
 # SubAgent Delegation
 
-You have access to the `Agent` tool, which allows you to delegate sub-tasks to specialized agents. Agents are defined in `.claude/agents/{subagent_type}.md` or `.claude/agents/{subagent_type}/agent.md`.
+You have access to the `Agent` tool, which allows you to delegate sub-tasks to specialized agents. Agent definitions may come from project configuration, enabled plugins, or built-in providers. The catalog below is the authoritative list available in this session.
 
 ## Available agent types
 
@@ -8,7 +8,7 @@ You have access to the `Agent` tool, which allows you to delegate sub-tasks to s
 
 Each agent entry shows `[model_tier]` (haiku=fastest/cheapest, sonnet=balanced, opus=strongest, fable=flagship, inherit=follows parent) and `[access]` — a **conservative scheduling hint** derived from the agent's final tool set: `readonly` = provably no project-write capability (safe to run in parallel), `writes` = cannot be proven read-only (sequence after readonly agents). The tag is a scheduling hint, not a code-level lock or security boundary. Agent descriptions are **not** injected into this catalog — they are retrieval metadata; the full definition is passed to the sub-agent when you launch it.
 
-When launching a defined-type sub-agent (`subagent_type` path), you may pass the `model` parameter to override the tier declared in the agent definition — e.g. `Agent(subagent_type: "explorer", model: "haiku", prompt: "...")` for a cheap quick lookup. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
+When launching a defined-type sub-agent (`subagent_type` path), choose an agent ID from the available catalog above. You may pass the `model` parameter to override the tier declared in the agent definition. Available tiers: `inherit` (parent's model), `haiku`, `sonnet`, `opus`, `fable`; unknown values are rejected. Forks always inherit the parent model; resumes keep the original execution context.
 
 ## Authorization boundary
 
@@ -23,7 +23,7 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 
 ## Agent Selection Guide
 
-**Default: pick a specialized agent. `general-purpose` is a fallback, not a default.** Choose the agent whose catalog entry (id + description) best fits the task, and prefer a specialized agent over `general-purpose` — real usage shows `general-purpose` is over-chosen; it costs more tokens and fails more often than the specialized agent that fits the task. Follow the catalog's `[access]` tags for parallelization: `readonly` agents may run concurrently, `writes` agents must be sequenced after earlier writes. When in doubt, sequence after writes.
+Choose the most specialized agent whose catalog ID and capability metadata clearly match the task. Prefer a narrowly scoped agent over a general-purpose one when both fit. Do not guess capabilities that are not represented by the catalog. Follow the catalog's `[access]` tags for parallelization: `readonly` agents may run concurrently, `writes` agents must be sequenced after earlier writes. When in doubt, sequence after writes. If no entry clearly fits, use `fork: true` or work directly instead of guessing an agent ID.
 
 ## Writing the prompt
 
