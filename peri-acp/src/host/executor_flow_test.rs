@@ -45,13 +45,16 @@ use peri_model::{
     ModelStream, ModelStreamEvent, StopReason, ToolCall,
 };
 
+#[cfg_attr(windows, allow(dead_code))]
 static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg_attr(windows, allow(dead_code))]
 struct HomeGuard {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 impl HomeGuard {
     fn set(home: &std::path::Path) -> Self {
         let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -1029,12 +1032,14 @@ fn chain_collection_parity_with_build_collected_sections() {
 
 // ── PTC production-path E2E ────────────────────────────────────────────────
 
+#[cfg(not(windows))]
 struct PtcScriptedModel {
     calls: AtomicUsize,
     visible_tools: Arc<Mutex<Vec<String>>>,
     source: String,
 }
 
+#[cfg(not(windows))]
 #[async_trait]
 impl Model for PtcScriptedModel {
     fn capabilities(&self) -> ModelCapabilities {
@@ -1102,10 +1107,12 @@ impl Model for PtcScriptedModel {
     }
 }
 
+#[cfg(not(windows))]
 struct RecordingApproveBroker {
     approvals: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(not(windows))]
 #[async_trait]
 impl UserInteractionBroker for RecordingApproveBroker {
     async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
@@ -1129,6 +1136,7 @@ impl UserInteractionBroker for RecordingApproveBroker {
     }
 }
 
+#[cfg(not(windows))]
 fn write_ptc_cache_fixture(root: &std::path::Path) {
     let package = root.join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
     std::fs::create_dir_all(package.join("dist")).unwrap();
@@ -1183,6 +1191,7 @@ rl.on('line', async line => {
     .unwrap();
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 #[serial]
 async fn test_ptc_runs_through_acp_session_agent_production_path() {
