@@ -1,5 +1,7 @@
 use std::io;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -75,5 +77,9 @@ impl ProcessTree {
             io::ErrorKind::Unsupported,
             "process-tree containment is unavailable on this build",
         )
+    }
+
+    pub(crate) async fn terminate(&self, _grace: std::time::Duration) -> io::Result<()> {
+        Err(Self::unsupported())
     }
 }
