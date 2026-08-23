@@ -167,7 +167,7 @@ Interface 的精确形态可调整，但 host 必须隐藏：
 - NDJSON framing 和 flush；
 - JSON-RPC request ID；
 - 双向 pending request map；
-- handshake 和协议版本；
+- handshake、build identity 和协议版本；
 - process exit 时 pending drain；
 - cancellation/kill；
 - malformed frame 与 protocol error；
@@ -203,7 +203,15 @@ PTC Adapter 负责：
 
 首版允许 `tools.<name>()` 统一返回字符串，以匹配当前 `BaseTool::invoke()` 的主要结果形态。结构化 canonical value 是后续增强，不作为首版前置重构。
 
-### 5.4 Effective Tool Dispatcher
+### 5.4 PTC artifact、启动与 handshake
+
+生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Cargo 构建由 `peri-js-runtime/build.rs` 直接从 `npm-packages/@peri-ptc` TypeScript 源码生成 `OUT_DIR/peri-ptc.js`，Rust 以 `include_bytes!` 内嵌该产物；npm 发布流程独立生成 gitignored `npm-packages/@peri-ptc/dist`。package version、build ID、protocol version、Rust 构建预期和 TypeScript 常量必须作为一个原子版本面同步。
+
+运行时先把内嵌 artifact 物化到版本缓存 `~/.peri/ptc/0.2.2`，并在创建或复用时校验 package identity 与内容 hash。缓存不是直接执行目录：每次 execution 都复制已验证 artifact 到独占 private temp，再执行 `node <entry>`，不得使用 `--eval`/`eval`，从而避免共享缓存校验后的 TOCTOU。Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity；任何缺失或不匹配都 fail closed。
+
+正常路径不访问 npm registry。只有调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许对 `@peri-code/ptc@0.2.2` 做精确版本 `npx` fallback；fallback 必须使用 private `HOME`/npm cache 和最小环境变量。该开关代表调用方主动接受额外的 registry、解析与下载供应链风险，不是安全等价的自动恢复路径，不能默认开启或退化为非精确版本。
+
+### 5.5 Effective Tool Dispatcher
 
 优先从现有 ToolSearch/`ExecuteExtraTool` 路径提炼共享执行 seam，而不是增加第二套 dispatcher。其 interface 至少表达：
 
@@ -508,6 +516,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 验收：Workflow 行为保持；PTC 闭环通过；工具、事件、权限、取消没有旁路；文档路由与代码索引同步。
+
+### 10.1 PTC npm 发布
+
+`@peri-code/ptc` 发布必须在 `npm-packages/@peri-ptc/` 中按顺序执行：
+
+```bash
+npm run prepublishOnly
+npm publish
+```
+
+`prepublishOnly` 成功是 `npm publish` 的前置条件；发布前必须确认 package version/build ID/protocol version、Rust 常量和 tracked deterministic `dist` 已同步。不得以 `npx` fallback 代替发布验证；fallback 仅是运行时显式 opt-in 的供应链风险路径。
 
 ## 11. 首个端到端场景
 

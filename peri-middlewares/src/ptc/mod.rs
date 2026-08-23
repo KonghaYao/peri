@@ -149,7 +149,16 @@ fn format_run_ptc_code_error(error: JsRuntimeError) -> Box<dyn std::error::Error
     format!("{}: {}", error.code(), error.public_message()).into()
 }
 
-pub struct RunPtcCodeTool;
+#[derive(Default)]
+pub struct RunPtcCodeTool {
+    _private: (),
+}
+
+impl RunPtcCodeTool {
+    fn executor(&self) -> &JsExecutor {
+        &PTC_EXECUTOR
+    }
+}
 
 #[async_trait]
 impl BaseTool for RunPtcCodeTool {
@@ -197,7 +206,8 @@ impl BaseTool for RunPtcCodeTool {
             parent_invocation_id,
             invocations: Mutex::new(InvocationState::default()),
         });
-        let result = PTC_EXECUTOR
+        let result = self
+            .executor()
             .execute(
                 JsExecutionRequest {
                     source: input.source,
@@ -237,7 +247,7 @@ impl Middleware for PtcMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(RunPtcCodeTool)]
+        vec![Box::new(RunPtcCodeTool::default())]
     }
 
     async fn before_agent(

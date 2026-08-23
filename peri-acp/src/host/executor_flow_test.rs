@@ -9,9 +9,12 @@
 //!
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    ffi::OsString,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock,
+    },
 };
 
 use async_trait::async_trait;
@@ -41,6 +44,34 @@ use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, ModelStreamEvent, StopReason, ToolCall,
 };
+
+static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+}
+
+impl HomeGuard {
+    fn set(home: &std::path::Path) -> Self {
+        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -1098,9 +1129,67 @@ impl UserInteractionBroker for RecordingApproveBroker {
     }
 }
 
+fn write_ptc_cache_fixture(root: &std::path::Path) {
+    let package = root.join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
+    std::fs::create_dir_all(package.join("dist")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"@peri-code/ptc","version":"0.2.2","type":"module","main":"dist/index.js","bin":{"peri-ptc":"dist/peri-ptc.js"},"periProtocolVersion":1,"periBuildId":"@peri-code/ptc@0.2.2"}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("dist/index.js"), "export {};\n").unwrap();
+    std::fs::write(
+        package.join("dist/peri-ptc.js"),
+        r#"import readline from 'node:readline';
+const pending = new Map();
+let nextId = 100;
+function send(message) { process.stdout.write(JSON.stringify(message) + '\n'); }
+function callTool(toolName, input, options = {}) {
+  if (options.signal?.aborted) return Promise.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+  const id = nextId++;
+  const invocationId = `ptc-${id}`;
+  send({ jsonrpc: '2.0', id, method: 'tool/call', params: { invocationId, toolName, input } });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+const tools = new Proxy({}, { get: (_, toolName) => (input, options) => callTool(toolName, input, options) });
+const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', async line => {
+  const request = JSON.parse(line);
+  if (request.method === 'ptc/start') {
+    send({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.2' } });
+  } else if (request.method === 'execute') {
+    try {
+      const logs = [];
+      const console = { log: (...values) => logs.push(values.join(' ')) };
+      const result = await new AsyncFunction('tools', 'input', 'console', request.params.source)(tools, request.params.input, console);
+      send({ jsonrpc: '2.0', id: request.id, result: { value: result, logs } });
+    } catch (error) {
+      send({ jsonrpc: '2.0', id: request.id, error: { code: -32001, message: 'JavaScript execution failed', data: { code: error.code ?? 'EXECUTION_FAILED' } } });
+    }
+  } else if (Object.hasOwn(request, 'id')) {
+    const waiter = pending.get(request.id);
+    if (!waiter) return;
+    pending.delete(request.id);
+    if (request.error) {
+      const error = Object.assign(new Error(request.error.message), request.error.data ?? {});
+      error.name = 'ToolCallError';
+      waiter.reject(error);
+    } else waiter.resolve(request.result);
+  }
+});
+"#,
+    )
+    .unwrap();
+}
+
 #[tokio::test]
+#[serial]
 async fn test_ptc_runs_through_acp_session_agent_production_path() {
     let tmp = tempfile::tempdir().unwrap();
+    let ptc_cache = tempfile::tempdir().unwrap();
+    write_ptc_cache_fixture(ptc_cache.path());
+    let _home = HomeGuard::set(ptc_cache.path());
     std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
     std::fs::write(tmp.path().join("b.txt"), "beta").unwrap();
     let a = tmp.path().join("a.txt").to_string_lossy().into_owned();

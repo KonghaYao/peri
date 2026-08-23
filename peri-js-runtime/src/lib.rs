@@ -3,6 +3,7 @@
 //! 隐藏子进程生命周期、NDJSON JSON-RPC、pending request、stderr 消费与取消；
 //! 具体 method 与 params 的业务含义由上层 Adapter 解释。
 
+mod artifact;
 mod error;
 mod executor;
 mod host;

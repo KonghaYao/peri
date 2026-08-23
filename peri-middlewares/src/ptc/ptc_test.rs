@@ -96,7 +96,7 @@ fn test_unknown_cancels_are_bounded() {
 
 #[test]
 fn test_run_ptc_code_is_deferred_canonical_tool() {
-    let tool = RunPtcCodeTool;
+    let tool = RunPtcCodeTool::default();
     assert_eq!(tool.name(), RUN_PTC_CODE_TOOL_NAME);
     assert!(!tool.is_direct());
     assert!(tool.aliases().is_empty());
@@ -113,7 +113,7 @@ fn test_catalog_is_stably_sorted_from_dispatcher_view() {
 
 #[tokio::test]
 async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
-    let tool = RunPtcCodeTool;
+    let tool = RunPtcCodeTool::default();
     let result = tool
         .invoke(
             json!({
@@ -136,7 +136,7 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
 
 #[tokio::test]
 async fn test_run_code_preserves_effective_tool_error_code() {
-    let result = RunPtcCodeTool
+    let result = RunPtcCodeTool::default()
         .invoke(
             json!({
                 "source": "try { await tools.Write({}); } catch (error) { return { name: error.name, code: error.code }; }"
@@ -158,7 +158,7 @@ async fn test_run_code_preserves_effective_tool_error_code() {
 
 #[tokio::test]
 async fn test_run_code_preserves_all_canonical_error_codes() {
-    let result = RunPtcCodeTool
+    let result = RunPtcCodeTool::default()
         .invoke(
             json!({
                 "source": "const codes = []; for (const name of ['Write', 'Reject', 'Cancel', 'Timeout']) { try { await tools[name]({}); } catch (error) { codes.push(error.code); } } return codes;"
@@ -180,7 +180,7 @@ async fn test_run_code_preserves_all_canonical_error_codes() {
 
 #[tokio::test]
 async fn test_run_code_rejects_without_dispatch_context() {
-    let result = RunPtcCodeTool
+    let result = RunPtcCodeTool::default()
         .invoke(json!({ "source": "return 1;" }), ToolContext::new(&[], "."))
         .await;
     assert!(result.is_err());
@@ -188,7 +188,8 @@ async fn test_run_code_rejects_without_dispatch_context() {
 
 #[test]
 fn test_run_ptc_code_description_emphasizes_programmatic_batch_concurrent_esm() {
-    let description = RunPtcCodeTool.description();
+    let tool = RunPtcCodeTool::default();
+    let description = tool.description();
     for expected in [
         "Programmatically run code",
         "批量",
@@ -206,7 +207,7 @@ fn test_run_ptc_code_description_emphasizes_programmatic_batch_concurrent_esm() 
 
 #[test]
 fn test_run_ptc_code_source_schema_emphasizes_programmatic_batch_concurrent_esm() {
-    let parameters = RunPtcCodeTool.parameters();
+    let parameters = RunPtcCodeTool::default().parameters();
     let description = parameters["properties"]["source"]["description"]
         .as_str()
         .unwrap();
@@ -262,7 +263,7 @@ fn test_run_code_error_formatter_uses_only_stable_projection() {
 #[tokio::test]
 async fn test_run_code_exception_returns_safe_fixed_error() {
     let source = "throw new Error('ptc-tool-canary');";
-    let error = RunPtcCodeTool
+    let error = RunPtcCodeTool::default()
         .invoke(
             json!({ "source": source, "input": { "input-canary": true } }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
@@ -283,7 +284,7 @@ async fn test_run_code_exception_returns_safe_fixed_error() {
 #[tokio::test]
 async fn test_run_code_resource_limit_returns_safe_fixed_error() {
     let source = "return 'result-canary'.repeat(1024 * 1024);";
-    let error = RunPtcCodeTool
+    let error = RunPtcCodeTool::default()
         .invoke(
             json!({ "source": source, "input": { "input-canary": true } }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(

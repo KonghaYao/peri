@@ -21,6 +21,7 @@ pub struct JsProcessSpec {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     inherit_environment: bool,
+    environment: Vec<(String, String)>,
 }
 
 impl JsProcessSpec {
@@ -30,6 +31,7 @@ impl JsProcessSpec {
             args,
             cwd: None,
             inherit_environment: true,
+            environment: Vec::new(),
         }
     }
 
@@ -42,6 +44,14 @@ impl JsProcessSpec {
         self.inherit_environment = false;
         self
     }
+
+    pub(crate) fn with_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.environment = environment.into_iter().collect();
+        self
+    }
 }
 
 impl std::fmt::Debug for JsProcessSpec {
@@ -50,7 +60,7 @@ impl std::fmt::Debug for JsProcessSpec {
             .debug_struct("JsProcessSpec")
             .field("program", &self.program)
             .field("args", &"[REDACTED]")
-            .field("cwd", &self.cwd)
+            .field("cwd", &self.cwd.as_ref().map(|_| "[REDACTED]"))
             .field("inherit_environment", &self.inherit_environment)
             .finish()
     }
@@ -88,12 +98,9 @@ impl JsExecutionHost {
             ProcessTree::unsupported().to_string(),
         ));
         if !spec.inherit_environment {
-            let path = std::env::var_os("PATH");
             command.env_clear();
-            if let Some(path) = path {
-                command.env("PATH", path);
-            }
         }
+        command.envs(spec.environment);
         if let Some(cwd) = spec.cwd {
             command.current_dir(cwd);
         }
