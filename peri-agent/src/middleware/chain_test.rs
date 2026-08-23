@@ -329,6 +329,7 @@ async fn test_after_tool_sequential_order() {
         tool_name: "tool".to_string(),
         output: "ok".to_string(),
         is_error: false,
+        effective_error_code: None,
     };
     chain
         .run_after_tool(&mut state, &call, &result)

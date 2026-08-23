@@ -33,23 +33,23 @@ fn test_duplicate_active_agent_id_preserves_original_cancel_handle() {
 
 /// 构造带真实 stdin 管道的 RpcChannel（perl 长驻子进程；跨平台：Unix 预装
 /// perl，Windows 由 Git for Windows 提供）。perl 60s 后自然退出，不留永久孤儿。
-async fn make_rpc_channel() -> RpcChannel {
-    let mut child = tokio::process::Command::new("perl")
-        .args(["-e", "sleep 60"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn perl failed");
-    let stdin = child.stdin.take().expect("stdin 应为 piped");
-    RpcChannel::new(stdin)
+async fn make_rpc_channel() -> (Arc<peri_js_runtime::JsExecutionHost>, RpcChannel) {
+    let host = Arc::new(
+        peri_js_runtime::JsExecutionHost::spawn(peri_js_runtime::JsProcessSpec::new(
+            "perl",
+            vec!["-e".into(), "sleep 60".into()],
+        ))
+        .expect("spawn perl failed"),
+    );
+    let channel = RpcChannel::new(host.channel());
+    (host, channel)
 }
 
 /// [回归测试] 旧注册用过期 token 注销时，不得移除同 key 的新实例
 /// （此前无条件 remove 会清空新实例的 cancel 句柄 → 后续 kill 漏杀）。
 #[tokio::test]
 async fn test_deregister_agent_stale_token_preserves_new_instance() {
-    let ch = make_rpc_channel().await;
+    let (_host, ch) = make_rpc_channel().await;
 
     let (cancel_rx_1, token_1) = ch.register_agent("run-1", 7, Some(1)).unwrap();
     assert!(ch.deregister_agent("run-1", 7, token_1));
@@ -70,7 +70,7 @@ async fn test_deregister_agent_stale_token_preserves_new_instance() {
 /// task 不得再发成功响应（防双重 JSON-RPC 响应）。
 #[tokio::test]
 async fn test_deregister_after_kill_returns_false() {
-    let ch = make_rpc_channel().await;
+    let (_host, ch) = make_rpc_channel().await;
 
     let (cancel_rx, token) = ch.register_agent("run-1", 8, Some(3)).unwrap();
     assert!(ch.kill_agent("run-1", 8).await);
@@ -123,8 +123,8 @@ fn test_parse_message_notification_no_id() {
 }
 
 #[test]
-fn test_parse_message_invalid_json_returns_none() {
-    assert!(parse_message("not json").is_none());
+fn test_parse_message_invalid_json_returns_protocol_error() {
+    assert!(parse_message("not json").is_err());
 }
 
 #[test]
@@ -156,13 +156,12 @@ fn test_parse_message_response_null_result() {
 }
 
 #[test]
-fn test_parse_message_no_method_no_result_returns_none() {
-    // 既无 method 也无 result/error → 丢弃
+fn test_parse_message_no_method_no_result_returns_protocol_error() {
     let raw = r#"{"jsonrpc":"2.0","id":7}"#;
-    assert!(parse_message(raw).is_none());
+    assert!(parse_message(raw).is_err());
 }
 
 #[test]
-fn test_parse_message_empty_string_returns_none() {
-    assert!(parse_message("").is_none());
+fn test_parse_message_empty_string_returns_protocol_error() {
+    assert!(parse_message("").is_err());
 }

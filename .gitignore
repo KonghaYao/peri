@@ -192,6 +192,8 @@ side-projects/site-project/workspace.json
 .peri/*
 node_modules
 dist
+!npm-packages/@peri-workflow/dist/
+!npm-packages/@peri-workflow/dist/peri-workflow.js
 settings.json
 .claude/*
 !.claude/skills/

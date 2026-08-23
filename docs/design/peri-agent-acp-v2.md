@@ -1,11 +1,11 @@
 # peri-agent v2 ACP 服务层设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v2.0
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v2.1（2026-08-22：同步统一 ACP host/transport 主路径）
 
 ## 1. 设计原则
 
 1. **薄适配层**：ACP（Agent Client Protocol）是 peri-agent 与外界的桥梁。它不持有 Session 逻辑、不定义 Agent 结构——只负责协议转换和事件路由。
-2. **传输无关**：同一套 JSON-RPC 2.0 方法分发逻辑同时服务于内存通道（MpscTransport，TUI）和标准输入输出（StdioTransport，IDE）。传输层只做帧编解码，不参与业务。
+2. **传输无关**：`MpscTransport`（TUI）与 `StdioTransport`（IDE）都实现 `AcpTransport`，共同进入 `run_acp_server` / `handle_request`。传输层只负责 JSON-RPC 帧收发，不另建 typed stdio 业务路径。
 3. **事件五路分路**：Agent 产出的 ExecutorEvent 分为五条路——标准 ACP 流式事件（IDE 消费）、HITL 审批（预留）、TUI 专用事件（面板更新）、观测层（预留）、以及 unstable-event（peri/unstable-event）。一条 event pipeline，五个消费方向。
 4. **命令即契约**：Slash Command 通过 `AgentCommand` trait 统一注册。三种 CommandKind（Immediate / Passthrough / Transform）决定命令在 Agent 循环中的执行位置。
 5. **Provider 配置独立**：LLM Provider 的构建（API Key、模型别名、Base URL）由 ACP 层负责，peri-agent 只接收已构建好的 `Model` trait object。
@@ -75,8 +75,10 @@ graph TB
 
 - JSON-RPC 帧结构：`{ "jsonrpc": "2.0", "id": N, "method": "session/prompt", "params": {...} }`
 - 通知（无 id）用于单向事件（如 `$/cancel`）
-- StdioTransport 使用后台 pump task 持续读取 stdin，写入 stdout
-- **StdioEventSink 仅发送标准 ACP `session/update`**（通过 SDK `ConnectionTo<Client>`），不发送 `peri/agent_event` 等 TUI 专用通道
+- `StdioTransport` 作为 `AcpTransport` 多态实现进入统一 `run_acp_server`；stdio 仅保留部署装配与 stdin/stdout 帧收发
+- `TransportEventSink` 是统一事件出口，按 session caps 映射标准 `session/update` 与获准的 `peri/*` 扩展通知
+
+> **历史说明**：早期 stdio 路径使用 SDK typed handler 与 `StdioEventSink`，且只发送标准 ACP `session/update`。该路径已退役；当前实现不得再以它作为 stdio 主路径。
 
 ### 2.2 方法分发
 
@@ -189,7 +191,7 @@ Provider 快照：`session/new` 时捕获当前 Provider 配置——会话内�
 - `peri_config`：全局 peri 配置快照
 - `cwd` / `session_id`：会话工作目录和 ID
 - `cancel`：取消令牌（由 SessionManager 管理）
-- `event_sink`：事件出口（TUI 用 TransportEventSink，stdio 用 StdioEventSink）
+- `event_sink`：统一的 `TransportEventSink` 事件出口；mpsc/stdio 由各自 `AcpTransport` 承担 wire 写出
 - `broker`：用户交互 broker（HITL/AskUser 通道）
 - `permission_mode`：权限模式共享句柄
 
@@ -246,7 +248,7 @@ v2 通过 `AsyncRouter`（`peri-agent/src/session/async_router.rs:34`，L5 自 A
 |------|------|
 | **peri-agent** | ACP 是 agent 的唯一调用入口。`execute_prompt()` 接收 frozen 数据 + 可变配置，返回事件流 |
 | **Session** | v2 中 ACP 层持有 `AcpSession` 句柄并管理 session 级共享状态（`active_agents`、`goal_state`、`v2_message_queue`、`session_inbox`、`background_registry`、`permission_mode`、`thinking` 等），核心 agent 状态（transcript、frozen）委托给 `peri_agent::session::Session` |
-| **Transport** | `TransportEventSink`（`peri-acp/src/session/event_sink.rs:56`）/ `StdioEventSink`（`:392`）将 ExecutorEvent 转换为协议帧后推送给客户端 |
+| **Transport** | `MpscTransport` / `StdioTransport` 实现统一 `AcpTransport`，由 `TransportEventSink` 将协议化事件经当前 transport 推送给客户端；stdio 业务同样走 `run_acp_server` |
 | **Middleware** | 中间件链在 `build_agent()` 中构建，ACP 传入配置但不过问中间件内部 |
 | **LLM** | Provider 配置由 ACP 层管理，构建 `dyn Model` 后注入 agent |
 | **System Prompt** | `session/new` 时 ACP 调用 `build_system_prompt()`，产出 frozen_prompt |

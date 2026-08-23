@@ -466,14 +466,14 @@ fn sensitive_entries_match_default_requires_approval() {
     }
 }
 
-/// 条目集合与判定分支数一致（精确 8 项 + 前缀 3 项 = 11 项；
+/// 条目集合与判定分支数一致（精确 9 项 + 前缀 3 项 = 12 项；
 /// 变更 `default_requires_approval` 分支时必须同步条目清单）。
 #[test]
 fn sensitive_entries_cover_all_requires_approval_branches() {
     let entries = sensitive_tool_entries();
     assert_eq!(
         entries.len(),
-        11,
+        12,
         "条目清单应覆盖 default_requires_approval 全部分支"
     );
     // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）

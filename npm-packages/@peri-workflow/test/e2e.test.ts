@@ -144,7 +144,11 @@ return { answer: r }`
 
     // start 同步响应
     const startResp = await s.waitFor((m) => m.id === 1 && 'result' in m)
-    expect(startResp.result).toEqual({ ok: true })
+    expect(startResp.result).toEqual({
+      ok: true,
+      protocolVersion: 1,
+      buildId: '@peri-code/workflow@0.2.0',
+    })
 
     // 事件链前置
     await s.waitFor((m) => (m.method as string) === 'progress/event' && (m.params as { type: string }).type === 'run_started')

@@ -94,6 +94,7 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "SubAgentMiddleware",
     "McpMiddleware",
     "WorkflowMiddleware",
+    "PtcMiddleware",
     "ToolSearch",
     "ArtifactMiddleware",
     "LspMiddleware",

@@ -22,4 +22,7 @@ pub enum WorkflowError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    JsRuntime(#[from] peri_js_runtime::JsRuntimeError),
 }

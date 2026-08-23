@@ -197,3 +197,42 @@ fn test_rewind_view_states_distinct() {
     assert_ne!(RewindView::Budget, RewindView::Executing);
     assert_ne!(RewindView::Executing, RewindView::Candidates);
 }
+
+#[test]
+fn test_selected_candidate_enter_submits_selected_message() {
+    let preview = Some(RewindPreview {
+        files: vec![],
+        messages: vec![
+            RewindMessage {
+                id: "m1".into(),
+                role: "user".into(),
+                preview: "第一轮问题".into(),
+            },
+            RewindMessage {
+                id: "m2".into(),
+                role: "user".into(),
+                preview: "第二轮问题".into(),
+            },
+        ],
+    });
+
+    let action = preview_action(&preview, 1).expect("移动选择后 Enter 应生成 action");
+    match action {
+        RewindAction::Preview {
+            target_message_id,
+            target_text,
+        } => {
+            assert_eq!(target_message_id, "m2");
+            assert_eq!(target_text, "第二轮问题");
+        }
+        RewindAction::Confirm { .. } => panic!("候选 Enter 不应生成 Confirm"),
+    }
+}
+
+#[test]
+fn test_empty_budget_uses_confirmation_view() {
+    assert_eq!(
+        rewind_view(&RewindBudgetState::Files(vec![])),
+        RewindView::Budget
+    );
+}

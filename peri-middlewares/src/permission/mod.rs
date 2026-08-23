@@ -15,6 +15,7 @@ use peri_agent::{
     },
 };
 
+use crate::ptc::RUN_CODE_TOOL_NAME;
 use crate::tool_search::core_tools::{
     TOOL_AGENT, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
 };
@@ -43,6 +44,7 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
         || tool_name == TOOL_AGENT
+        || tool_name == RUN_CODE_TOOL_NAME
         || tool_name == TOOL_WRITE
         || tool_name == TOOL_EDIT
         || tool_name.starts_with("delete_")
@@ -83,7 +85,7 @@ pub struct SensitiveToolEntry {
 ///
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 12] {
     [
         SensitiveToolEntry {
             name: TOOL_BASH,
@@ -98,6 +100,11 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
         SensitiveToolEntry {
             name: TOOL_AGENT,
             description: "sub-agent delegation (see 11_subagent for the authorization boundary)",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: RUN_CODE_TOOL_NAME,
+            description: "arbitrary JavaScript execution with direct Node.js API access",
             prefix_match: false,
         },
         SensitiveToolEntry {

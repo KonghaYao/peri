@@ -1,7 +1,7 @@
 # Perihelion 测试规范
 
-> 最后核对：2026-08-07
-> 覆盖 workspace 各 crate；具体数量以当前代码与 `cargo metadata` 为准。
+> 最后核对：2026-08-22
+> 根 workspace 范围以根 `Cargo.toml` 与 `cargo metadata --no-deps` 为准；submodule 与独立项目必须进入各自目录执行其本地命令。
 
 ---
 
@@ -60,7 +60,7 @@ src/foo/bar.rs              # 子模块（末尾可含 #[cfg(test)] mod tests）
 - **TUI 渲染输出**：ratatui-kit 组件的 render body——眼测即可，无视觉回归框架
 - **外部 API 调用**：用 mock 替换 trait 接口，不测实际网络
 - **纯样板代码**：`fn get_x(&self) -> &X { &self.x }`
-- **`side-projects/`**：零测试，随用随弃
+- **独立/side project**：不纳入根 workspace 的测试门禁；若目录内存在 manifest 或测试，则按该项目本地命令验证，不能一概标记为“零测试”
 
 ---
 
@@ -252,8 +252,15 @@ impl ReactLLM for EchoLLM {
 
 ## 八、运行命令
 
+### 8.1 根 workspace
+
+根 workspace 的实际 package 集合以 `cargo metadata --no-deps` 为验证事实源；根 `Cargo.toml` 的 `[workspace].members` 是显式入口，但 Cargo 还可能自动纳入 workspace 根目录下、被成员依赖的 path package。不要只按目录名、members 文本或历史 issue 推断最终集合。
+
 ```bash
-# 全量运行
+# 列出当前根 workspace packages
+cargo metadata --no-deps --format-version 1
+
+# 根 workspace 全量运行（包含 peri-theme）
 cargo test --workspace
 
 # 单 crate
@@ -261,6 +268,7 @@ cargo test -p peri-agent --lib
 cargo test -p peri-acp --lib
 cargo test -p peri-middlewares --lib
 cargo test -p peri-tui --lib
+cargo test -p peri-theme
 
 # 单测过滤
 cargo test -p <crate> --lib -- <test_name>
@@ -269,11 +277,18 @@ cargo test -p <crate> --lib -- <test_name>
 lefthook run pre-commit    # fmt + check + clippy + typos
 ```
 
+### 8.2 Submodule 与独立项目
+
+- `.gitmodules` 当前声明 `peri-cool/` 与 `e2e/tui-tester/`；它们不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。
+- `side-projects/` 下项目有各自的 `Cargo.toml` 或 `package.json`，不由 `cargo test --workspace` 覆盖。只在任务涉及对应项目时进入目录，按其 manifest scripts 或 README 执行。
+- 仓库顶层出现目录不等于属于根 workspace。`peri-theme/` 虽未写入根 `Cargo.toml` 的显式 members 列表，但当前 `cargo metadata` 将其识别为 workspace package，因此使用 `cargo test -p peri-theme`；分类以命令输出为准。
+- `acp-hub/` 与 `agm/` 当前工作树中不存在 manifest，且近 14 天历史显示其代码已删除；不得保留或执行旧测试矩阵命令，也不得从历史 issue 猜测迁移位置。仅在当前代码重新出现 manifest 后，按其实际归属补回命令。
+
 ---
 
-## 九、各 Crate 测试覆盖范围（参考）
+## 九、根 Workspace Crate 测试覆盖范围（参考）
 
-测试数量随演进变化，不作为规范基线；以 `cargo metadata`、crate 内测试与 CI 为准。
+测试数量随演进变化，不作为规范基线；以根 `Cargo.toml`、`cargo metadata`、crate 内测试与 CI 为准。下表只列当前根 workspace packages，不包含 submodule 或独立/side projects。
 
 | Crate | 主要测试类型 |
 |-------|--------------|
@@ -288,8 +303,6 @@ lefthook run pre-commit    # fmt + check + clippy + typos
 | peri-acp-types | DTO、identity、事件与协议 serde roundtrip |
 | peri-theme | 主题加载、palette 与 atoms |
 | langfuse-client | 客户端、类型、batcher |
-| agm | 安装器、存储、过滤 |
 | peri-workflow | runner、protocol、registry |
 | peri-lsp | 诊断、池、编解码 |
 | peri-web-pty | PTY session、WebSocket、HTTP |
-| acp-hub | hub、router、child 与全局协调 |

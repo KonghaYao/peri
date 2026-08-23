@@ -437,7 +437,12 @@ pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .count();
-            format!(" \u{2014} {} lines", total_lines)
+            let truncated = data.output_summary.contains("[Output truncated:");
+            if truncated {
+                format!(" \u{2014} {} lines · truncated", total_lines)
+            } else {
+                format!(" \u{2014} {} lines", total_lines)
+            }
         }
         "Glob" | "Grep" => {
             let total = data

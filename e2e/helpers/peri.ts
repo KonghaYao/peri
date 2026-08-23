@@ -204,6 +204,11 @@ export async function launchPeri(
     const periDir = path.join(isoHome, ".peri");
     fs.mkdirSync(periDir, { recursive: true });
     fs.writeFileSync(path.join(periDir, "settings.json"), "{}");
+    // 用户 shell rc 可能无条件 source "$HOME/.cargo/env"。隔离 HOME 中提供空的
+    // 兼容文件，避免交互 shell 在 dev.sh 启动前退出；不复制用户环境或凭据。
+    const cargoDir = path.join(isoHome, ".cargo");
+    fs.mkdirSync(cargoDir, { recursive: true });
+    fs.writeFileSync(path.join(cargoDir, "env"), "");
     env.HOME = isoHome;
     // 测试进程退出时清理临时 HOME（best-effort，不阻塞退出）
     process.on("exit", () => {

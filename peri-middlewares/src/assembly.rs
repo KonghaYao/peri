@@ -39,6 +39,7 @@ use crate::{
         default_requires_approval, AutoClassifier, LlmAutoClassifier, PermissionMiddleware,
     },
     plugin::PluginMiddleware,
+    ptc::PtcMiddleware,
     skills::SkillsMiddleware,
     subagent::{SkillPreloadMiddleware, SubAgentMiddleware},
     tool_search::{ToolSearchIndex, ToolSearchMiddleware},
@@ -524,6 +525,11 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     if let Some(adaptor) = wf_adaptor.take() {
                         chain.add(Box::new(adaptor));
                     }
+                }
+                // Programmatic Tool Calling：附加 direct run_code，不改变其他工具可见性。
+                ChainSlot::Ptc if disabled.contains("PtcMiddleware") => {}
+                ChainSlot::Ptc => {
+                    chain.add(Box::new(PtcMiddleware::new()));
                 }
                 // ToolSearch 中间件
                 ChainSlot::ToolSearch if disabled.contains("ToolSearch") => {}

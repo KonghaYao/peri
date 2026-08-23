@@ -217,6 +217,18 @@ fn test_summarize_output_edit_long_collapses_to_line_count() {
     assert_eq!(summarize_output("Edit", output), "5 lines changed");
 }
 
+#[test]
+fn test_summarize_output_read_preserves_canonical_truncation_semantics() {
+    let output = "     1\talpha\n     2\tbeta\n[Output truncated: 12000 bytes total; showing lines 1..=2 of 800; continue reading with offset=3]";
+    assert_eq!(summarize_output("Read", output), "3 lines · truncated");
+}
+
+#[test]
+fn test_summarize_output_complete_read_is_not_marked_truncated() {
+    let output = "     1\talpha\n     2\tbeta";
+    assert_eq!(summarize_output("Read", output), "2 lines");
+}
+
 // ── wrap_by_width（§6.1 用户 prompt 视觉行折行）──────────────────────────
 
 #[test]

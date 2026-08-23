@@ -28,10 +28,18 @@ import { launchPeri, sendPrompt, takePeriSnapshot, waitForStableScreen } from ".
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
-/** top-3 对比归一化：剥离网格前缀列（outer+accent+gap）——运行符号
- *  ◐→✓ 翻转只影响 accent 列，不属于 viewport 移动。 */
-function stripGridPrefix(lines: string[]): string[] {
-  return lines.map((l) => l.slice(3));
+/** 从真实消息区选择不可变的用户 prompt 行作为 viewport 锚点。
+ * 排除工具卡和动态状态行，避免把 spinner、elapsed 或折叠状态变化误判为滚动。 */
+function findPromptAnchor(screen: string): { text: string; row: number } {
+  const lines = screen.split("\n");
+  const row = lines.findIndex(
+    (line) =>
+      line.includes("第三条") &&
+      !line.includes("Shell") &&
+      !line.includes("Thought"),
+  );
+  expect(row, "浏览态应显示不可变的用户 prompt 锚点").toBeGreaterThanOrEqual(0);
+  return { text: lines[row].slice(3), row };
 }
 
 describe("scenario: browse history while streaming (new output indicator)", () => {
@@ -77,10 +85,9 @@ describe("scenario: browse history while streaming (new output indicator)", () =
       }
       await tester.sleep(600);
 
-      // 浏览态基线（顶部内容——streaming 期间 viewport 不应移动）。
-      // 此刻视口 = [5 行 core（prompt 末行/早期工具卡）, ↓ New output,
-      // footer 空行]：指示器可见，动画 spinner 行在视口下方。
+      // 浏览态基线：选择真实、不可变的用户消息行作为屏幕位置锚点。
       const baseline = await tester.getScreenText();
+      const anchor = findPromptAnchor(baseline);
 
       // 仍在 streaming：抓拍「浏览态 + 指示器」帧（§15：滚离底部后 streaming）
       const during = await takePeriSnapshot(tester, "browse-new-output");
@@ -104,12 +111,12 @@ describe("scenario: browse history while streaming (new output indicator)", () =
       //   turn 是否完成无关。
       await waitForStableScreen(tester, 120_000);
 
-      // viewport 不动：streaming 期间滚离底部后，内容增长（剩余命令 +
-      // 最终回答）不得移动视口——top-3 行保持（剥离网格前缀列后比对）
+      // viewport 不动：不可变的用户 prompt 行在输出继续增长并最终稳定后，
+      // 仍位于同一屏幕行。动态工具卡、spinner、elapsed 和 footer 不参与比较。
       const after = await tester.getScreenText();
-      const topBaseline = stripGridPrefix(baseline.split("\n").slice(0, 3));
-      const topAfter = stripGridPrefix(after.split("\n").slice(0, 3));
-      expect(topAfter).toEqual(topBaseline);
+      const afterLines = after.split("\n");
+      expect(after, "浏览期间屏幕应随 streaming 输出继续更新").not.toEqual(baseline);
+      expect(afterLines[anchor.row]?.slice(3)).toBe(anchor.text);
 
       const r = await judge({
         ansiRaw: during.raw,

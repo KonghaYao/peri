@@ -26,7 +26,10 @@ use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
-use crate::tools::{BaseTool, CanonicalToolInvocation};
+use crate::tools::{
+    BaseTool, CanonicalToolInvocation, EffectiveToolCall, EffectiveToolDefinition,
+    EffectiveToolDispatcher, EffectiveToolError, EffectiveToolErrorCode,
+};
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
@@ -100,6 +103,123 @@ fn resolve_tool<'a>(
 pub struct DispatchOutcome {
     /// 所有工具调用结果（顺序与 reasoning.tool_calls 一致）
     pub results: Vec<(ToolCall, ToolResult)>,
+}
+
+#[derive(Clone)]
+struct StageEffectiveToolDispatcher {
+    context: StageContext,
+}
+
+impl StageEffectiveToolDispatcher {
+    fn new(context: StageContext) -> Self {
+        Self { context }
+    }
+}
+
+fn effective_tool_error(error: AgentError) -> EffectiveToolError {
+    let code = match error {
+        AgentError::ToolNotFound(_) => EffectiveToolErrorCode::UnknownTool,
+        AgentError::SerializationError(_) => EffectiveToolErrorCode::InvalidInput,
+        AgentError::ToolRejected { .. } => EffectiveToolErrorCode::UserRejected,
+        AgentError::Interrupted => EffectiveToolErrorCode::Cancelled,
+        _ => EffectiveToolErrorCode::ToolFailed,
+    };
+    EffectiveToolError::new(code, error.user_facing_message())
+}
+
+#[async_trait::async_trait]
+impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
+    async fn dispatch(
+        &self,
+        call: EffectiveToolCall,
+        cancel: CancellationToken,
+    ) -> Result<String, EffectiveToolError> {
+        if call.tool_name.eq_ignore_ascii_case("run_code") {
+            return Err(EffectiveToolError::new(
+                EffectiveToolErrorCode::ToolFailed,
+                "run_code cannot recursively invoke itself",
+            ));
+        }
+        let event_invocation_id = call
+            .parent_invocation_id
+            .as_deref()
+            .map(|parent| format!("{parent}/{}", call.invocation_id))
+            .unwrap_or_else(|| call.invocation_id.clone());
+        let raw_call = ToolCall::new(event_invocation_id, call.tool_name.clone(), call.input);
+        let all_tools: BTreeMap<String, Arc<dyn BaseTool>> = self
+            .context
+            .runtime
+            .tools
+            .read()
+            .iter()
+            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .collect();
+        let invocation = self
+            .context
+            .runtime
+            .tool_invocation_resolver
+            .resolve(&raw_call, &all_tools)
+            .map_err(effective_tool_error)?;
+        let policy_id = invocation.policy_call.id.clone();
+        let raw_calls = HashMap::from([(policy_id.clone(), invocation.raw_call)]);
+        let target_tools = HashMap::from([(policy_id, invocation.target)]);
+        let ai_message = BaseMessage::ai_with_tool_calls(
+            String::new(),
+            vec![ToolCallRequest::new(
+                raw_call.id.clone(),
+                raw_call.name.clone(),
+                raw_call.input.clone(),
+            )],
+        );
+        let outcome = collect_tool_results(
+            &self.context,
+            vec![invocation.policy_call],
+            &raw_calls,
+            &target_tools,
+            &cancel,
+            ai_message.id(),
+            &ai_message,
+        )
+        .await
+        .map_err(effective_tool_error)?;
+        let result = outcome
+            .results
+            .into_iter()
+            .next()
+            .map(|(_, result)| result)
+            .ok_or_else(|| {
+                EffectiveToolError::new(
+                    EffectiveToolErrorCode::ToolFailed,
+                    "tool call produced no result",
+                )
+            })?;
+        if result.is_error {
+            let code = result.effective_error_code.unwrap_or_else(|| {
+                if cancel.is_cancelled() {
+                    EffectiveToolErrorCode::Cancelled
+                } else {
+                    EffectiveToolErrorCode::ToolFailed
+                }
+            });
+            return Err(EffectiveToolError::new(code, result.output));
+        }
+        Ok(result.output)
+    }
+
+    fn tools(&self) -> Vec<EffectiveToolDefinition> {
+        self.context
+            .runtime
+            .tools
+            .read()
+            .values()
+            .filter(|tool| tool.name() != "run_code")
+            .map(|tool| EffectiveToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters(),
+            })
+            .collect()
+    }
 }
 
 /// 分发工具调用：审批 → 并发执行 → 收集结果 → 统一写入 transcript
@@ -390,8 +510,9 @@ async fn run_before_tool_approvals(
             }
             Err(AgentError::ToolRejected { ref reason, .. }) => {
                 let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
-                let rejection_result =
+                let mut rejection_result =
                     ToolResult::error(&tool_call.id, &tool_call.name, reason.clone());
+                rejection_result.effective_error_code = Some(EffectiveToolErrorCode::UserRejected);
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
@@ -443,7 +564,7 @@ async fn dispatch_concurrent(
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
-) -> Vec<Result<String, AgentError>> {
+) -> Vec<Result<String, EffectiveToolError>> {
     if ready_calls.is_empty() {
         return Vec::new();
     }
@@ -457,6 +578,7 @@ async fn dispatch_concurrent(
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
     let event_bus = Arc::clone(&ctx.runtime.event_bus);
+    let dispatch_context = ctx.clone();
 
     let futures: Vec<_> = ready_calls
         .iter()
@@ -476,6 +598,7 @@ async fn dispatch_concurrent(
             let messages = Arc::clone(&messages_snapshot);
             let cwd = cwd_snapshot.clone();
             let event_bus = Arc::clone(&event_bus);
+            let dispatch_context = dispatch_context.clone();
             // [Fix] span 在 async 块外创建、用 .instrument() 包裹整个 future：
             // span.enter() 的 guard 跨 await 持有在 tokio multi-thread 下会随 task
             // 线程迁移错误重置 thread-local current span，导致 tracing-subscriber
@@ -489,7 +612,12 @@ async fn dispatch_concurrent(
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
-                    let ctx_param = crate::tools::ToolContext::new(&messages, &cwd);
+                    let ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
+                        .with_effective_tool_dispatcher(
+                            Arc::new(StageEffectiveToolDispatcher::new(dispatch_context)),
+                            raw_call.id.clone(),
+                            cancel.clone(),
+                        );
                     match tool {
                         Some(t) => t.invoke(input, ctx_param).await.map_err(|e| {
                             AgentError::ToolExecutionFailed {
@@ -503,10 +631,10 @@ async fn dispatch_concurrent(
                 let result = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        Err(AgentError::ToolExecutionFailed {
-                            tool: tool_name.clone(),
-                            reason: "interrupted by user".to_string(),
-                        })
+                        Err(EffectiveToolError::new(
+                            EffectiveToolErrorCode::Cancelled,
+                            "interrupted by user",
+                        ))
                     }
                     result = async {
                         if let Some(d) = timeout_opt {
@@ -516,14 +644,14 @@ async fn dispatch_concurrent(
                         }
                     } => {
                         match result {
-                            Ok(tool_result) => tool_result,
+                            Ok(tool_result) => tool_result.map_err(effective_tool_error),
                             Err(_elapsed) => {
                                 // 安全：Err 分支仅在 timeout_opt 为 Some 时可达
                                 let secs = timeout_opt.unwrap().as_secs();
-                                Err(AgentError::ToolExecutionFailed {
-                                    tool: tool_name.clone(),
-                                    reason: format!("tool call timed out after {}s", secs),
-                                })
+                                Err(EffectiveToolError::new(
+                                    EffectiveToolErrorCode::Timeout,
+                                    format!("tool call timed out after {}s", secs),
+                                ))
                             }
                         }
                     }
@@ -557,7 +685,7 @@ async fn dispatch_concurrent(
 async fn settle_results(
     ctx: &StageContext,
     approval: ApprovalOutcome,
-    tool_results: Vec<Result<String, AgentError>>,
+    tool_results: Vec<Result<String, EffectiveToolError>>,
     was_cancelled: bool,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) -> CollectOutcome {
@@ -574,17 +702,11 @@ async fn settle_results(
     for (modified_call, tool_result) in ready_calls.into_iter().zip(tool_results) {
         let mut result = match tool_result {
             Ok(output) => ToolResult::success(&modified_call.id, &modified_call.name, output),
-            Err(AgentError::ToolNotFound(ref name)) => {
-                tracing::warn!(tool.name = %name, "工具未找到，作为错误结果返回");
-                ToolResult::error(
-                    &modified_call.id,
-                    &modified_call.name,
-                    format!("Tool '{}' not found", name),
-                )
-            }
             Err(ref e) => {
-                let _ = run_on_error(ctx, e).await;
-                ToolResult::error(&modified_call.id, &modified_call.name, e.to_string())
+                let mut result =
+                    ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
+                result.effective_error_code = Some(e.code);
+                result
             }
         };
 

@@ -28,26 +28,14 @@ describe("scenarios: goal continuation", () => {
 
       // 发送 goal 指令：agent 需要数到 10
       // goal 机制会在每个 turn 末尾注入续跑信号，直到 goal 完成
+      const baseScreen = await tester.getScreenText();
       await sendPrompt(
         tester,
         "我们来测试 goal 工具， 你要数到 10 ，但是中间中断， 让 goal 唤醒你",
       );
 
-      // goal 任务可能跨多个 turn，需要更长的等待时间
-      // 策略：等待数字 1-10 陆续出现
-      for (let n = 1; n <= 10; n++) {
-        try {
-          await tester.waitForText(String(n), {
-            timeout: 60_000,
-            interval: 2000,
-          });
-        } catch {
-          console.warn(`等待数字 ${n} 超时，继续检查下一轮`);
-        }
-      }
-
-      // 最终稳定
-      await waitForStableScreen(tester, 60_000);
+      // Goal 可能跨多个 turn 自动续跑；以提交前屏幕为基线，等待最终完整屏幕稳定。
+      await waitForStableScreen(tester, 180_000, baseScreen);
 
       const capture = await takePeriSnapshot(tester, "goal-continuation-complete");
 

@@ -44,6 +44,7 @@ pub mod meta_harness;
 pub mod middleware;
 pub mod permission;
 pub mod plugin;
+pub mod ptc;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,

@@ -29,7 +29,7 @@
 ### ARC-TOOLS-001
 
 - **Scope**：工具注册、搜索与执行。
-- **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。每个 turn 的真实能力事实源是 `build_session_tool_view` 产出的 session-local 工具视图：它应用 middleware disabled 状态与 agent allowlist/disallowlist 后再分类。ToolSearch 元工具的 direct capability 描述、deferred 索引和代理执行都必须绑定该视图，不得用静态核心工具清单推断运行时可用能力。
+- **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。每个 turn 的真实能力事实源是 `build_session_tool_view` 产出的 session-local 工具视图：它应用 middleware disabled 状态与 agent allowlist/disallowlist 后再分类。ToolSearch 元工具的 direct capability 描述、deferred 索引和代理执行，以及 PTC 的稳定工具目录与内部调用，都必须绑定该视图，不得用静态全局工具清单推断运行时可用能力。PTC 默认装配（`PtcMiddleware=false` 可关闭）；外层 `run_code` 是普通 Node.js 任意代码执行入口，必须与 Bash 同级审批。PTC 内部 `tools.*` 调用复用 canonical single-invocation seam（permission、事件、timeout、cancel），不得嵌套完整 Act batch、写入 synthetic transcript 或重复结算 batch 状态；内部事件 ID 必须可关联真实外层 `run_code` tool call。该 effective-name 审批不约束 Node 原生文件系统、进程、环境变量或网络 API，不得将 PTC 描述为 sandbox 或隔离环境。
 - **Verify**：`cargo test -p peri-middlewares --lib tool_search`；`cargo test -p peri-agent --lib session::exec`；检查 `peri-agent/src/session/exec/stage_builder.rs`、`peri-agent/src/agent/stages/reason.rs`、`peri-middlewares/src/tool_search/` 与包装工具实现；回归测试须覆盖 direct 工具被禁用或过滤后不再出现在元工具 description。
 
 ### ARC-HITL-001
@@ -47,7 +47,7 @@
 ### ARC-WORKFLOW-RPC-001
 
 - **Scope**：`peri-workflow` Node stdio JSON-RPC 与 agent 生命周期。
-- **Rule**：RPC 请求必须先登记 pending 再写入；每帧使用 NDJSON 并 flush；stdout/child 结束必须 drain pending。`agent/run` 必须先注册再 spawn，kill/deregister 以所有权 token 防止旧 task 删除新句柄；kill 后 `killed` 是唯一终态，message loop 或 EOF 不得覆盖为 `failed`。
+- **Rule**：RPC 请求必须先登记 pending 再写入；每帧使用 NDJSON 并 flush；stdout/child 结束及 malformed protocol frame 必须 drain pending，不能静默丢帧。`agent/run` 必须先注册再 spawn，kill/deregister 以所有权 token 防止旧 task 删除新句柄；`workflow/start` 失败或超时必须移除 active channel；kill 后 `killed` 是唯一终态，message loop 或 EOF 不得覆盖为 `failed`。
 - **Verify**：`cargo test -p peri-workflow --lib rpc`；`cargo test -p peri-workflow --lib runner`；检查 `peri-workflow/src/rpc.rs` 的 `send_request`、`write_line`、`drain_pending` 与 `runner.rs` 的 register/spawn/kill 顺序。
 
 ### ARC-KEEPGOING-001

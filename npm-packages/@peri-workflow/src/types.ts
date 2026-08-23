@@ -41,6 +41,10 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotificat
 
 // ─── RPC method signatures ─────────────────────────────────
 
+/** Rust host 与 Node artifact 必须共同实现的启动协议。 */
+export const WORKFLOW_PROTOCOL_VERSION = 1
+export const WORKFLOW_BUILD_ID = '@peri-code/workflow@0.2.0'
+
 /** host → runner: start a workflow */
 export type WorkflowStartParams = {
   runId: string

@@ -72,7 +72,8 @@ impl WorkflowJournalStore {
         let path = self.run_dir(run_id).join("journal.jsonl");
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let mut writer = std::io::BufWriter::new(file);
-        let line = serde_json::to_string(entry).unwrap();
+        let line = serde_json::to_string(entry)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         writeln!(writer, "{line}")
     }
 

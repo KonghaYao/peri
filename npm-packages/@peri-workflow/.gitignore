@@ -1,2 +1,1 @@
-# dist/ 为构建产物，不纳入版本控制
-dist/
+# dist/ 为发布与 Rust 嵌入所需的 hermetic 单文件 artifact。

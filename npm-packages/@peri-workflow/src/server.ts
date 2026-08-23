@@ -16,6 +16,7 @@ import type {
 import { rpcAdapter } from './adapter'
 import { rpcNotify, send, waitDrain } from './rpc'
 import type { JsonRpcRequest, WorkflowStartParams } from './types'
+import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from './types'
 
 let currentRunId: string
 let currentAbortController: AbortController
@@ -112,7 +113,11 @@ export async function handleRequest(msg: JsonRpcRequest): Promise<void> {
       send({
         jsonrpc: '2.0',
         id: id!,
-        result: { ok: true },
+        result: {
+          ok: true,
+          protocolVersion: WORKFLOW_PROTOCOL_VERSION,
+          buildId: WORKFLOW_BUILD_ID,
+        },
       })
 
       runWorkflowAsync(p).catch(async (err: unknown) => {

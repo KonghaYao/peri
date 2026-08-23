@@ -270,8 +270,17 @@ pub fn summarize_output(name: &str, output: &str) -> String {
         }
         // TodoWrite 返回全量内容（显示完整 todo 列表）
         "TodoWrite" => trimmed.to_string(),
-        // Read / Glob / Grep — 折叠态显示行数
-        "Read" | "Glob" | "Grep" => {
+        // Read / Glob / Grep — 折叠态显示行数；Read 的 canonical result
+        // 带截断元数据时必须保留该语义，不能降维成与完整读取相同的摘要。
+        "Read" => {
+            let lines = trimmed.lines().count();
+            if trimmed.contains("[Output truncated:") {
+                format!("{} lines · truncated", lines)
+            } else {
+                format!("{} lines", lines)
+            }
+        }
+        "Glob" | "Grep" => {
             let lines = trimmed.lines().count();
             format!("{} lines", lines)
         }

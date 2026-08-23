@@ -45,6 +45,24 @@ enum RewindView {
     Executing,
 }
 
+fn rewind_view(budget_state: &RewindBudgetState) -> RewindView {
+    match budget_state {
+        RewindBudgetState::Files(_) => RewindView::Budget,
+        RewindBudgetState::Executing => RewindView::Executing,
+        RewindBudgetState::Idle => RewindView::Candidates,
+    }
+}
+
+fn preview_action(preview: &Option<RewindPreview>, msg_sel: usize) -> Option<RewindAction> {
+    preview
+        .as_ref()
+        .and_then(|preview| preview.messages.get(msg_sel))
+        .map(|message| RewindAction::Preview {
+            target_message_id: message.id.clone(),
+            target_text: message.preview.clone(),
+        })
+}
+
 #[component]
 pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -59,12 +77,9 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     hooks.use_atom(&LANG_VERSION);
 
-    // 视图推导：预算 Files 非空 → Budget；Executing → Executing；否则 Candidates
-    let view = match &budget_state {
-        RewindBudgetState::Files(v) if !v.is_empty() => RewindView::Budget,
-        RewindBudgetState::Executing => RewindView::Executing,
-        _ => RewindView::Candidates,
-    };
+    // 视图推导：Files（包括空预算）→ Budget；Executing → Executing；Idle → Candidates。
+    // 空预算仍需显式确认，不能退回候选视图后让用户误以为查询尚未完成。
+    let view = rewind_view(&budget_state);
     // 候选选中索引（最新一条 = 回退一步）
     let msg_sel = hooks.use_state(|| 0usize);
     // 预算视图选中索引（默认最新变更 = 第一条）
@@ -157,16 +172,11 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     Some(ListNavAction::Confirm) => match view {
                         RewindView::Candidates => {
-                            let target = preview_for_closure
-                                .as_ref()
-                                .and_then(|p| p.messages.get(*msg_sel.read()));
-                            if let Some(m) = target
+                            if let Some(action) =
+                                preview_action(&preview_for_closure, *msg_sel.read())
                                 && let Some(tx) = REWIND_ACTION_TX.get()
                             {
-                                let _ = tx.send(RewindAction::Preview {
-                                    target_message_id: m.id.clone(),
-                                    target_text: m.preview.clone(),
-                                });
+                                let _ = tx.send(action);
                             }
                             // 弹窗保持打开：等待预算/执行结果
                             return EventResult::Consumed;

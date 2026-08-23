@@ -11,6 +11,7 @@ members = [
     "peri-tui",
     "langfuse-client",
     "peri-lsp",
+    "peri-js-runtime",
     "peri-web-pty",
     "peri-workflow",
 ]

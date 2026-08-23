@@ -553,7 +553,8 @@ async fn test_settle_results_mixed_ready_settled() {
             ToolResult::error("call_rejected", "Bash", "HITL rejected"),
         )],
     };
-    let tool_results: Vec<Result<String, AgentError>> = vec![Ok("success output".to_string())];
+    let tool_results: Vec<Result<String, EffectiveToolError>> =
+        vec![Ok("success output".to_string())];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
     // ready + settled = 2 条

@@ -9,9 +9,13 @@
 //!
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
+use futures::stream;
 use peri_acp_types::{
     event::ExecutorEvent,
     interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
@@ -33,6 +37,10 @@ use crate::{
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
 use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};
+use peri_model::{
+    JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
+    ModelStream, ModelStreamEvent, StopReason, ToolCall,
+};
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -986,4 +994,162 @@ fn chain_collection_parity_with_build_collected_sections() {
             "case [{name}]：链收集与静态声明必须一致（同一 disabled 状态）"
         );
     }
+}
+
+// ── PTC production-path E2E ────────────────────────────────────────────────
+
+struct PtcScriptedModel {
+    calls: AtomicUsize,
+    visible_tools: Arc<Mutex<Vec<String>>>,
+    source: String,
+}
+
+#[async_trait]
+impl Model for PtcScriptedModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        *self.visible_tools.lock().unwrap() =
+            request.tools.iter().map(|tool| tool.name.clone()).collect();
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (message, stop_reason, mut events) = if call == 0 {
+            let arguments = serde_json::json!({ "source": self.source });
+            let tool_call = ToolCall::new(
+                "ptc-e2e-outer",
+                "run_code",
+                JsonObject::from_value(arguments.clone()).unwrap(),
+            );
+            (
+                ModelMessage::assistant(vec![], vec![tool_call]),
+                StopReason::ToolUse,
+                vec![ModelStreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("ptc-e2e-outer".into()),
+                    name: Some("run_code".into()),
+                    arguments_delta: arguments.to_string(),
+                }],
+            )
+        } else {
+            (
+                ModelMessage::assistant_text("PTC E2E complete"),
+                StopReason::EndTurn,
+                vec![ModelStreamEvent::TextDelta {
+                    text: "PTC E2E complete".into(),
+                }],
+            )
+        };
+        let response = ModelResponse::new(message, stop_reason, None, None)?;
+        events.push(ModelStreamEvent::Completed(response));
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(events.into_iter().map(Ok)),
+            cancellation,
+        ))
+    }
+}
+
+struct RecordingApproveBroker {
+    approvals: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl UserInteractionBroker for RecordingApproveBroker {
+    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+        match ctx {
+            InteractionContext::Approval { items } => {
+                self.approvals
+                    .lock()
+                    .unwrap()
+                    .extend(items.iter().map(|item| item.tool_name.clone()));
+                InteractionResponse::Decisions(
+                    items
+                        .iter()
+                        .map(|_| peri_acp_types::interaction::ApprovalDecision::Approve {
+                            source: None,
+                        })
+                        .collect(),
+                )
+            }
+            _ => InteractionResponse::Rejected,
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ptc_runs_through_acp_session_agent_production_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "beta").unwrap();
+    let a = tmp.path().join("a.txt").to_string_lossy().into_owned();
+    let b = tmp.path().join("b.txt").to_string_lossy().into_owned();
+    let source = format!(
+        r#"const [a, b] = await Promise.all([
+            tools.Read({{ file_path: {a:?} }}),
+            tools.Read({{ file_path: {b:?} }})
+        ]);
+        let structured;
+        try {{ await tools.NoSuchPtcTool({{}}); }}
+        catch (error) {{ structured = {{ name: error.name, code: error.code }}; }}
+        const controller = new AbortController(); controller.abort();
+        let cancelled;
+        try {{ await tools.Read({{ file_path: {a:?} }}, {{ signal: controller.signal }}); }}
+        catch (error) {{ cancelled = error.name; }}
+        console.log(JSON.stringify({{ a, b, structured, cancelled }}));
+        return {{ a, b, structured, cancelled }};"#
+    );
+    let visible_tools = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(PtcScriptedModel {
+        calls: AtomicUsize::new(0),
+        visible_tools: Arc::clone(&visible_tools),
+        source,
+    }) as Arc<dyn Model>;
+    let approvals = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = make_session_context("ptc-production-e2e");
+    ctx.cwd = tmp.path().to_string_lossy().into_owned();
+    ctx.permission_mode = SharedPermissionMode::new(PermissionMode::Default);
+    ctx.broker = Arc::new(RecordingApproveBroker {
+        approvals: Arc::clone(&approvals),
+    });
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("run the scripted PTC scenario"),
+        false,
+        vec![],
+        stage_build,
+    );
+
+    let result = run_session_loop(ctx, turn).await;
+
+    assert!(
+        result.ok,
+        "PTC production path failed: stop_reason={:?}",
+        result.stop_reason
+    );
+    let tools = visible_tools.lock().unwrap();
+    assert!(tools.iter().any(|name| name == "run_code"));
+    assert!(tools.iter().any(|name| name == "Read"));
+    assert!(tools
+        .iter()
+        .any(|name| name != "run_code" && name != "Read"));
+    assert_eq!(approvals.lock().unwrap().as_slice(), ["run_code"]);
+    let events = sink.pushed_events.lock().unwrap().join("\n");
+    assert!(events.contains("ptc-e2e-outer/ptc-"), "{events}");
+    assert!(events.contains("UNKNOWN_TOOL"), "{events}");
+    assert!(
+        events.contains("alpha") && events.contains("beta"),
+        "{events}"
+    );
 }

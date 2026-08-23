@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
+import path from "node:path";
 import {
   launchPeri,
   sendPrompt,
@@ -61,10 +62,12 @@ async function waitTurnCompleted(
 describe("scenarios: rewind v2 回退链路", () => {
   let tester: TmuxTester;
 
-  // Write 工具写入、rewind 应删除的临时文件
-  const targetFile = "/tmp/peri-e2e-rewind-check.txt";
+  // Write 工具写入、rewind 应删除的 session cwd 内临时文件。
+  // rewind 安全契约拒绝恢复 cwd 外路径，因此不能使用 /tmp。
+  const targetRelativePath = ".tmp/peri-e2e-rewind-check.txt";
+  const targetFile = path.resolve(process.cwd(), "..", targetRelativePath);
   // 候选 preview 截断 200 字符，取 prompt 前缀做回填断言
-  const promptPrefix = "请用 Write 工具创建文件 /tmp/peri-e2e-rewind-check.txt";
+  const promptPrefix = `请用 Write 工具创建文件 ${targetRelativePath}`;
 
   afterEach(async () => {
     if (tester?.isRunning()) {
@@ -96,6 +99,10 @@ describe("scenarios: rewind v2 回退链路", () => {
       // 工具调用阶段之间），必须等 turn 完成（"处理耗时" footer）再双击 Esc，
       // 否则候选查询为空、弹窗显示"无可回退的消息"。
       await waitTurnCompleted(tester, promptPrefix, 180_000);
+      expect(
+        fs.existsSync(targetFile),
+        `Write 工具应在 rewind 前创建目标文件 ${targetFile}`,
+      ).toBe(true);
       // 等 history 写回：turn 完成事件渲染 footer 后，服务端
       // SessionState.history（prompt.rs:240）写回可能仍有延迟，
       // rewind-candidates 读到旧快照 → 候选为空。加 1s 缓冲。
@@ -126,7 +133,7 @@ describe("scenarios: rewind v2 回退链路", () => {
       expect(candidates.text).toMatch(/回退到（1）|Rewind to \(1\)/);
 
       // ── Enter → 预算查询 ──
-      await tester.sendKey("Enter");
+      await tester.sendKey("enter");
       // 预算查询通过异步 ACP 请求完成；固定 sleep 可能在结果到达前截图。
       // 等待预算标题或执行态明确出现，再读取屏幕。
       await tester.waitForPattern(/回退将撤销|Rewind will revert|正在回退|Rewinding/, {
@@ -148,9 +155,9 @@ describe("scenarios: rewind v2 回退链路", () => {
         expect(afterEsc).toMatch(/回退到（1）|Rewind to \(1\)/);
 
         // 重新进入预算并确认执行
-        await tester.sendKey("Enter");
+        await tester.sendKey("enter");
         await tester.sleep(1500);
-        await tester.sendKey("Enter");
+        await tester.sendKey("enter");
       } else {
         // 硬前置：预算为空说明 LLM 未调用 Write（或写入文件不在会话内）。
         // 空转通过会让该用例失去回归价值（file-revert 断言全部落空），
@@ -177,28 +184,19 @@ describe("scenarios: rewind v2 回退链路", () => {
       await tester.sleep(3000);
 
       // P0: Write 创建的文件应被 revert（revert_files 默认 true）
-      if (fs.existsSync(targetFile)) {
-        await tester.waitFor(
-          async () => !fs.existsSync(targetFile),
-          {
-            timeout: 30_000,
-            interval: 500,
-            message: "rewind 后 Write 创建的文件应被删除",
-          },
-        );
-      } else {
-        // 显式标记（不静默）：走到这里预算必非空（上面硬前置已保证 Write 调用
-        // 存在），目标文件缺失说明 LLM 写入了其他文件名或文件未生成——该轮
-        // 删除校验被跳过，输出成因说明供人工判断，不再无声通过。
-        console.error(
-          `WARN: 目标文件 ${targetFile} 不存在，删除校验被跳过——` +
-            "该轮 Write 未写入目标文件（实际写入路径见上方工具调用记录）",
-        );
-      }
+      await tester.waitFor(
+        () => !fs.existsSync(targetFile),
+        {
+          timeout: 30_000,
+          interval: 500,
+          message: "rewind 后 Write 创建的文件应被删除",
+        },
+      );
 
       const afterExec = await takePeriSnapshot(tester, "rewind-after-exec");
       // 回退到第一条 user → 消息区截断为空；目标文本回填到输入框（preview 前 200 字符）
       expect(afterExec.text).toContain(promptPrefix);
+      expect(afterExec.text).toMatch(/已回滚 \d+ 条消息|Rewound \d+ messages/);
 
       // Judge: 整体 UI 正常 + 回填可见
       const r = await judge({

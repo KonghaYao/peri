@@ -270,9 +270,10 @@ fn blueprint_sequence_is_canonical() {
             "Permission",
             "AskUser",
             "SubAgent",
-            // 第六组：MCP / Workflow / ToolSearch
+            // 第六组：MCP / Workflow / PTC / ToolSearch
             "Mcp",
             "Workflow",
+            "Ptc",
             "ToolSearch",
             "Artifact",
             // 第七组：LSP / Goal（Goal 在链最后）
@@ -305,6 +306,7 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
         ChainSlot::Workflow => "Workflow",
+        ChainSlot::Ptc => "Ptc",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Artifact => "Artifact",
         ChainSlot::Lsp => "Lsp",
@@ -337,6 +339,7 @@ fn default_config_produces_canonical_chain() {
             "PermissionMiddleware",
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
+            "PtcMiddleware",
             "ToolSearch",
             "ArtifactMiddleware",
         ]
@@ -607,6 +610,7 @@ fn full_config_chain_order() {
             "SubAgentMiddleware",
             "McpMiddleware",
             "WorkflowMiddleware",
+            "PtcMiddleware",
             "ToolSearch",
             "ArtifactMiddleware",
             "LspMiddleware",
@@ -937,6 +941,7 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::SubAgent => "SubAgentMiddleware",
         ChainSlot::Mcp => "McpMiddleware",
         ChainSlot::Workflow => "WorkflowMiddleware",
+        ChainSlot::Ptc => "PtcMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Artifact => "ArtifactMiddleware",
         ChainSlot::Lsp => "LspMiddleware",

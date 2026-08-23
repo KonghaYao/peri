@@ -1,11 +1,11 @@
 # peri-agent v2 工具系统架构设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.4（2026-08-10：新增 2.5 工具描述契约与提示词层声明，参照 grok-build `ToolDescription` / `description_template` 模式）
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v1.5（2026-08-22：工具可见性改以 session-local 工具视图与 `BaseTool::is_direct()` 为事实源）
 
 ## 1. 设计原则
 
 1. **工具无状态**：工具实例不持有可变状态。同一工具实例可被多个 Agent 并发调用，互不干扰。执行所需上下文（cwd、对话历史）通过只读引用传入，不写回。
-2. **渐进式可见性**：工具分三层——Core（高频，始终对 LLM 可见）、Meta（桥接层，3 个）、Deferred（按需发现，LLM 不可直接见）。避免 context 膨胀，同时保持工具可发现性。
+2. **渐进式可见性**：工具由 `BaseTool::is_direct()` 分为 Direct（直接进入 LLM tools）与 Deferred（经 ToolSearch 按需发现）。`SearchExtraTools` / `ExecuteExtraTool` 是 Direct 元工具；具体可见集合以每个 session/turn 经过 middleware disabled 与 agent filter 后的本地工具视图为准。
 3. **原子提交**：一轮工具调用的 AI 消息和全部 ToolResult 一同写入 MessageTranscript。不产生孤儿 tool_use——任何时候，所有 ToolUse 都有配对的 ToolResult。
 4. **工具失败不中断循环**：工具执行失败不终止 ReAct 循环。错误结果写入 Transcript 后，由 LLM 在下一轮自行判断后续。
 5. **审批在调用前**：编辑类工具在真正执行前完成 HITL 审批。审批拒绝产生结果记录而非跳过，保持 Transcript 完整。
@@ -20,16 +20,16 @@ graph TB
 
     REASON --> LAYER
 
-    subgraph LAYER["三层工具架构"]
-        CORE["Core Tools<br/>高频工具，始终拼入 LLM 请求"]
-        META["Meta Tools<br/>SearchExtraTools<br/>ExecuteExtraTool<br/>ArtifactTool"]
-        DEFER["Deferred Tools<br/>Cron · MCP · LSP · Plugin<br/>LLM 不可直接见"]
+    subgraph LAYER["工具可见性"]
+        DIRECT["Direct Tools<br/>is_direct() = true<br/>当前 session 直接进入 LLM 请求"]
+        META["Direct Meta Tools<br/>SearchExtraTools<br/>ExecuteExtraTool"]
+        DEFER["Deferred Tools<br/>is_direct() = false<br/>经 ToolSearch 发现/执行"]
 
-        CORE --> META
+        DIRECT --> META
         META -->|"按需搜索/执行"| DEFER
     end
 
-    CORE & META --> RESOLVE["工具解析<br/>名称匹配 · 别名修正 · 参数归一化"]
+    DIRECT & META --> RESOLVE["工具解析<br/>名称匹配 · 别名修正 · 参数归一化"]
 
     RESOLVE --> LIFECYCLE
 
@@ -71,19 +71,20 @@ graph TB
 - **截断**：`output_char_limit()` 声明输出字符数上限（`None` 表示不截断）。超出部分自动截断并标注省略量。避免大体积输出撑爆上下文、淹没其他工具结果。
 - **落盘**：`prefers_persist()` 返回 `true` 时，系统倾向于将结果写入临时文件，Transcript 仅保留引用。产生大输出的工具（如 Bash、WebFetch）适用此能力。Read 工具无需——文件内容本就从磁盘读取。
 
-### 2.2 三种工具类型
+### 2.2 工具可见性
 
-Skills 不是工具——它们通过 System Prompt 注入行为指令，不走工具系统。以下分类仅针对工具。
+Skills 不是工具——它们通过 System Prompt 注入行为指令，不走工具系统。工具可见性只有 Direct / Deferred 两类，分类事实源是 `BaseTool::is_direct()`（默认 `false`）。“Core”仅可作为高频 direct 工具的概念称呼，不是运行时静态白名单。
 
-| 层级 | LLM 可见性 | 职责 | 原因 |
-|------|-----------|------|------|
-| Core | 始终可见 | 高频通用工具 | 控制数量上限，避免 context 膨胀 |
-| Meta | 始终可见 | 桥接 Deferred——搜索和按名执行 | 统一发现入口，LLM 知道"可搜索"即可 |
-| Deferred | LLM 不可直接见 | 低频或动态注册的工具 | 数量不可控，全部暴露浪费 token |
+| 类型 | LLM 可见性 | 职责 | 事实源 |
+|------|-----------|------|--------|
+| Direct | 当前 session 中直接可见 | 高频工具及桥接元工具 | session-local 工具视图中 `is_direct() = true` |
+| Deferred | 不直接可见 | 低频或动态注册工具 | session-local 工具视图中 `is_direct() = false`，进入 ToolSearch 索引 |
 
-**Meta 工具实际注册的工具**：ToolSearchMiddleware 的 `collect_tools()` 除注册 SearchExtraTools 和 ExecuteExtraTool 外，还注册 **ArtifactTool**（工具名 `"artifact"`，将本地 HTML 文件上传到 CCB Artifacts 服务，返回公开 URL，支持 7d/30d TTL）。ArtifactTool 不在 14 个 Core 白名单（`CORE_TOOL_NAMES`）中，但由中间件以 `is_direct() = true` 直接注册——它是 LLM 可见工具，只是不享受 Core 白名单语义（不进入 `core_tools_sorted_csv()`）。
+`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则由独立 `ArtifactMiddleware` 注册，当前 `is_direct() = true`；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。
 
-**Deferred 工具来源**：Cron 定时任务、MCP 外部服务（`mcp__{server}__{tool}`）、LSP 语言服务、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具。各来源独立注册到 `shared_tools`，搜索时合并结果。
+工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
+
+**Deferred 工具来源**：Cron 定时任务、MCP 外部服务（`mcp__{server}__{tool}`）、LSP 语言服务、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具等；是否进入 Deferred 最终仍由各工具的 `is_direct()` 决定。
 
 ### 2.3 工具执行生命周期
 
@@ -161,16 +162,13 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 
 此机制解决"同 count 但不同 content"场景——例如 MCP 重连后工具数量相同但描述/schema 已更新，单纯数量比对会漏掉变化。
 
-#### 2.4.3 Core 列表与 Prompt Cache 保护
+#### 2.4.3 Session-local Direct 能力说明与 Prompt Cache
 
-`CORE_TOOL_NAMES`（`peri-middlewares/src/tool_search/core_tools.rs:64-79`）是 `&[&str]` 常量数组，存储 14 个核心工具名（含 `SkillTool` / `DiscoverSkillsTool`）。通过 `core_tools_sorted_csv()` 生成字典序排列的逗号分隔字符串，用于动态嵌入 Meta 工具（SearchExtraTools / ExecuteExtraTool）的 description 中。
+`ToolSearchMiddleware::before_agent` 从当前 turn 的本地工具视图收集实际 direct 工具名，并以稳定字典序生成 `SearchExtraTools` / `ExecuteExtraTool` 的能力说明。未装配、被 middleware 禁用或被 agent filter 排除的工具不得被描述为当前可直接调用。
 
-```rust
-// core_tools_sorted_csv() 示例输出（14 个工具，字典序）：
-// "Agent, AskUserQuestion, Bash, DiscoverSkillsTool, Edit, Glob, Grep, Read, SkillTool, TodoWrite, WebFetch, WebSearch, Write, folder_operations"
-```
+`peri-middlewares/src/tool_search/core_tools.rs` 仍保存若干工具名常量，供解析、分类或测试复用；它们不是运行时能力白名单。历史实现曾维护 `CORE_TOOL_NAMES` 并把固定清单写入元工具 description，该做法已退役，因为它会与 session-local 工具视图漂移。
 
-排序保证跨调用的字符串前缀稳定，保护 LLM prompt cache 命中率。
+稳定排序只保证同一实际集合生成确定性文本，以减少无意义的 prompt cache 波动；能力集合本身仍随 session 配置与过滤结果变化。
 
 ---
 
@@ -231,8 +229,8 @@ function calling 无对应字段（对齐 grok-build `ToolDefinition` → `Funct
 ```
 before_agent（ToolSearchMiddleware）
 │
-├─ 1. 遍历 LLM 可见工具集（shared_tools 中 is_direct() = true，即 Core 14 +
-│      Meta 3 + SubAgentTool），收集所有非 None 的 prompt_declaration()
+├─ 1. 遍历当前 session-local 工具视图中 is_direct() = true 的工具，
+│      收集所有非 None 的 prompt_declaration()
 ├─ 2. 渲染占位符（见 2.5.3）
 ├─ 3. 按 (namespace 字典序, name 字典序) 排序——跨会话输出字节级稳定
 ├─ 4. 拼接为单段贡献文本，与 deferred 工具列表合并后写入 cached_contribution
@@ -249,11 +247,10 @@ stage 装配步骤 8：format!("{system_prompt}\n\n{contributions}") 追加到 s
 
 - **声明入口**：`prompt_declaration()` 是工具对提示词层的唯一出口——05 段落
   工具条目的程序化来源（全量迁移后 05 仅保留通用纪律，见 2.5.5）。
-- **参与集 = LLM 可见集**：运行时集合为 `shared_tools` 中 `is_direct() = true`
-  的工具（14 Core + 3 Meta + SubAgentTool；SubAgentTool 已声明，归入
-  `interaction` 分组）。与 `CORE_TOOL_NAMES` 白名单解耦——未来新增 direct
-  工具自动进入声明段。Deferred 工具走 SearchExtraTools 索引（2.4），数量不可
-  控，不进声明段。
+- **参与集 = 当前 LLM 可见集**：运行时集合为 session-local 工具视图中
+  `is_direct() = true` 的工具，并已应用 middleware disabled 与 agent filter。
+  ToolSearch 元工具的能力说明也从同一集合生成。Deferred 工具走
+  SearchExtraTools 索引（2.4），数量不可控，不进声明段。
 - **合并策略**：`cached_contribution` 原承载 deferred 工具列表（索引
   `cached_prompt()`），声明段与之**拼接共存**——deferred 列表在前、声明段在
   后，`\n\n` 分隔；任一段为空时只保留另一段。不得覆盖 deferred 列表
@@ -310,11 +307,9 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 节，05_using_tools.md:3-4、6-13）与**通用工具选择原则骨架**（"Tool selection
 principles" 小节，2 行、不含工具名与逐工具细节）——骨架是 turn-1 与 SubAgent
 冻结 prompt 路径的兜底指引（声明段 turn-2+ 才可见，见 2.5.2 时序限制）。
-全部 14 个 Core + 3 个 Meta 工具的 `prompt_declaration()` 已就位——分组为
-`filesystem`（Read/Write/Edit/Glob/Grep/folder_operations）、`execution`（Bash）、
-`web`（WebFetch/WebSearch）、`interaction`（Agent/AskUserQuestion/TodoWrite）、
-`skills`（SkillTool/DiscoverSkillsTool）、`meta`（SearchExtraTools/ExecuteExtraTool/
-ArtifactTool）。声明段是工具选择指引的**单一事实源**（工具代码），05 不再维护
+当前 direct 工具的 `prompt_declaration()` 按 session-local 工具视图动态参与渲染；常见分组包括
+`filesystem`、`execution`、`web`、`interaction`、`skills` 与 `meta`。
+声明段是工具选择指引的**单一事实源**（工具代码），05 不再维护
 任何工具条目；SubAgent 链的声明装配（声明段进入 subagent 冻结 prompt）记为未来项。
 迁移纪律由测试守护（2.5.6）：05 无工具条目残留 + 渲染输出与 05 剩余内容无逐字重复。
 

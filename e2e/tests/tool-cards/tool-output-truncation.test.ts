@@ -1,14 +1,18 @@
 /**
  * 工具卡片场景: 工具输出截断
  *
- * 验证 Read 大文件时输出被截断的显示：
- * - Read 折叠态头行显示 "— N lines" 后缀（零内容行）
- * - 展开后最多 4 行 × 400 字符
- * - 超出部分显示截断提示（如 "… N more lines"）
- * - agent 能基于截断输出继续工作
+ * 验证 Read 大文件时 canonical tool result 的截断语义贯穿到 TUI：
+ * - Read 成功完成，折叠态头行显示可见行数
+ * - canonical result 的截断状态在 tool card 摘要中可见
+ * - agent 能基于截断输出及 continuation hint 继续工作
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { launchPeri, sendPrompt, takePeriSnapshot } from "../../helpers/peri.js";
+import {
+  launchPeri,
+  sendPrompt,
+  takePeriSnapshot,
+  waitForStableScreen,
+} from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
 
@@ -28,40 +32,41 @@ describe("tool-card: output truncation", () => {
       tester = await launchPeri();
 
       // Cargo.lock 通常很大，输出会被截断
+      const baseScreen = await tester.getScreenText();
       await sendPrompt(
         tester,
         "请严格只调用一次 Read 工具，读取当前工作目录下的 Cargo.lock 文件（file_path 必须是 Cargo.lock，不要读取 Cargo.toml 或其他文件），然后根据读取结果继续回答。",
       );
 
-      // 等待 Read 工具被调用
-      await tester.waitForText("Read", {
+      // 等待目标 Read tool card 的独有完成态组合，避免命中 reasoning 或最终回复中的
+      // 通用 "truncated" 文本后过早抓屏。
+      await tester.waitForPattern(/✓\s+Read Cargo\.lock\s+—\s+\d+ lines · truncated/, {
         timeout: 60_000,
-        interval: 1000,
+        interval: 500,
+        message: "等待 Read Cargo.lock 截断工具卡完成态",
       });
-      await tester.sleep(3000);
 
       const readCapture = await takePeriSnapshot(
         tester,
         "tool-truncation-read",
       );
 
-      // 等待 agent 处理完
-      await tester.sleep(5000);
+      // 等待 agent 基于真实工具结果完成回答。
+      await waitForStableScreen(tester, 120_000, baseScreen);
       const afterCapture = await takePeriSnapshot(
         tester,
         "tool-truncation-after",
       );
 
-      expect(readCapture.text.length).toBeGreaterThan(50);
-      expect(afterCapture.text.length).toBeGreaterThan(50);
+      expect(readCapture.text).toMatch(/✓\s+Read Cargo\.lock\s+—\s+\d+ lines · truncated/);
+      expect(afterCapture.text).toMatch(/✓\s+Read Cargo\.lock\s+—\s+\d+ lines · truncated/);
 
-      // Judge: Read 阶段
+      // Judge: Read 阶段只评估真实可观察链路，不从行数反推截断。
       const r = await judge({
         ansiRaw: readCapture.raw,
         criteria: [
-          "屏幕上应出现 Read 工具调用的痕迹（如 'Read' 字样）",
-          "Read 工具的头行应显示行数摘要（如 '— N lines' 格式），表明文件已被读取",
-          "输出应被截断——不应显示完整的 Cargo.lock（该文件通常 5000+ 行）",
+          "屏幕上应出现成功完成的 Read Cargo.lock 工具卡（✓ 状态）",
+          "Read 工具头行应同时显示可见行数和明确的 'truncated' 状态",
         ],
       });
       console.log("Judge (read):", JSON.stringify(r, null, 2));

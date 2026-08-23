@@ -104,6 +104,8 @@ pub struct ToolResult {
     pub tool_name: String,
     pub output: String,
     pub is_error: bool,
+    #[serde(skip)]
+    pub effective_error_code: Option<crate::tools::EffectiveToolErrorCode>,
 }
 
 impl ToolResult {
@@ -117,6 +119,7 @@ impl ToolResult {
             tool_name: tool_name.into(),
             output: output.into(),
             is_error: false,
+            effective_error_code: None,
         }
     }
 
@@ -130,6 +133,7 @@ impl ToolResult {
             tool_name: tool_name.into(),
             output: message.into(),
             is_error: true,
+            effective_error_code: None,
         }
     }
 }

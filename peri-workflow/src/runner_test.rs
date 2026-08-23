@@ -1,7 +1,8 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
 use super::{
-    parse_agent_run_params, workflow_local_dist_in, AgentExecutor, WorkflowInput, WorkflowRunner,
+    parse_agent_run_params, parse_run_scoped, validate_start_ack, workflow_local_dist_in,
+    AgentExecutor, JournalTruncateParams, WorkflowDoneParams, WorkflowInput, WorkflowRunner,
 };
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
@@ -84,6 +85,51 @@ fn test_agent_run_params_reject_cross_run_identity() {
 }
 
 #[test]
+fn test_run_scoped_done_rejects_cross_run_identity() {
+    let result = parse_run_scoped::<WorkflowDoneParams>(
+        Some(serde_json::json!({
+            "runId": "other-run",
+            "status": "completed"
+        })),
+        "run-1",
+    );
+
+    assert_eq!(
+        result.unwrap_err(),
+        "runId does not match the active workflow run"
+    );
+}
+
+#[test]
+fn test_run_scoped_journal_rejects_missing_run_identity() {
+    let result = parse_run_scoped::<JournalTruncateParams>(Some(serde_json::json!({})), "run-1");
+
+    assert_eq!(result.err(), Some("invalid run-scoped RPC parameters"));
+}
+
+#[test]
+fn test_start_ack_accepts_matching_protocol_and_build() {
+    validate_start_ack(serde_json::json!({
+        "ok": true,
+        "protocolVersion": 1,
+        "buildId": "@peri-code/workflow@0.2.0"
+    }))
+    .unwrap();
+}
+
+#[test]
+fn test_start_ack_rejects_protocol_mismatch() {
+    let error = validate_start_ack(serde_json::json!({
+        "ok": true,
+        "protocolVersion": 2,
+        "buildId": "@peri-code/workflow@0.2.0"
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("protocol mismatch"));
+}
+
+#[test]
 fn test_workflow_local_dist_missing() {
     let tmp = tempfile::TempDir::new().unwrap();
     assert!(workflow_local_dist_in(tmp.path()).is_none());
@@ -101,8 +147,62 @@ fn test_workflow_local_dist_found() {
         .join("peri-workflow.js");
     std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
     std::fs::write(&dist, "#!/usr/bin/env node\n").unwrap();
+    std::fs::write(
+        dist.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("package.json"),
+        serde_json::json!({
+            "name": "@peri-code/workflow",
+            "version": "0.2.0",
+            "main": "dist/peri-workflow.js",
+            "periProtocolVersion": 1,
+            "periBuildId": "@peri-code/workflow@0.2.0"
+        })
+        .to_string(),
+    )
+    .unwrap();
     let got = workflow_local_dist_in(tmp.path()).unwrap();
-    assert_eq!(got, dist.to_string_lossy());
+    assert_eq!(std::path::PathBuf::from(got), dist.canonicalize().unwrap());
+}
+
+#[test]
+fn test_workflow_local_dist_rejects_wrong_version() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let package = tmp
+        .path()
+        .join("node_modules")
+        .join("@peri-code")
+        .join("workflow");
+    std::fs::create_dir_all(package.join("dist")).unwrap();
+    std::fs::write(package.join("dist/peri-workflow.js"), "entry").unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"@peri-code/workflow","version":"0.1.0","main":"dist/peri-workflow.js"}"#,
+    )
+    .unwrap();
+
+    assert!(workflow_local_dist_in(tmp.path()).is_none());
+}
+
+#[test]
+fn test_workflow_local_dist_rejects_escaping_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let package = tmp
+        .path()
+        .join("node_modules")
+        .join("@peri-code")
+        .join("workflow");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(tmp.path().join("outside.js"), "entry").unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"@peri-code/workflow","version":"0.2.0","main":"../../../../outside.js"}"#,
+    )
+    .unwrap();
+
+    assert!(workflow_local_dist_in(tmp.path()).is_none());
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ import {
   launchPeriHITL,
   sendPrompt,
   takePeriSnapshot,
+  waitForStableScreen,
 } from "../../helpers/peri.js";
 import { judge } from "../../helpers/judge.js";
 import type { TmuxTester } from "tui-tester";
@@ -53,17 +54,28 @@ describe("scenario: hitl approval", () => {
       await tester.sendKey("enter");
       await tester.sleep(500);
 
-      // 等待工具执行完成（echo 很快，但要等 LLM 响应）
-      await tester.waitForText("hitl_test_success", {
+      // 等待审批响应写回 inline interaction；该文本不会命中 prompt 回显。
+      await tester.waitForText("Allowed once", {
         timeout: 60_000,
-        interval: 2000,
+        interval: 500,
       });
-      await tester.sleep(2000);
+      // 等待 marker 再次出现。第一次来自用户 prompt；第二次只能来自真实工具结果
+      // 或消费该结果后的 agent 回复，因此不会把 prompt 回显误判为成功。
+      await tester.waitFor(
+        (screen) => (screen.match(/hitl_test_success/g) ?? []).length >= 2,
+        {
+          timeout: 60_000,
+          interval: 500,
+          message: "等待 Bash 工具结果被 TUI/agent 消费",
+        },
+      );
+      // 继续等待工具完成和 agent 最终回复稳定，避免在 reasoning 阶段抓屏。
+      await waitForStableScreen(tester, 120_000, popupCapture.text);
 
       const doneCapture = await takePeriSnapshot(tester, "hitl-done");
 
       expect(popupCapture.text.length).toBeGreaterThan(50);
-      expect(doneCapture.text.length).toBeGreaterThan(50);
+      expect((doneCapture.text.match(/hitl_test_success/g) ?? []).length).toBeGreaterThanOrEqual(2);
 
       // Judge: 弹窗阶段
       const r = await judge({
@@ -82,8 +94,8 @@ describe("scenario: hitl approval", () => {
         ansiRaw: doneCapture.raw,
         criteria: [
           "审批弹窗应已关闭（不再显示 '审批请求' 标题）",
-          "Bash 工具应已执行完毕（消息区出现 'hitl_test_success' 输出）",
-          "agent 的回复应引用工具执行结果",
+          "审批结果应已回写为 'Allowed once'，且 Bash/Shell 工具卡呈成功完成态",
+          "消息区应显示真实命令输出 'hitl_test_success'，agent 应引用该结果完成最终回复",
         ],
       });
       console.log("Judge (done):", JSON.stringify(r2, null, 2));

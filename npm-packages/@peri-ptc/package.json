@@ -1,0 +1,28 @@
+{
+  "name": "@peri-code/ptc",
+  "version": "0.2.0",
+  "description": "Node adapter and wire types for Perihelion Programmatic Tool Calling",
+  "type": "module",
+  "main": "src/adapter.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/adapter.js"
+    },
+    "./adapter": {
+      "types": "./src/adapter.d.ts",
+      "import": "./src/adapter.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "typescript": "^7"
+  }
+}

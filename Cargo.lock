@@ -3875,6 +3875,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs-next",
+ "futures",
  "langfuse-client",
  "mockito",
  "parking_lot",
@@ -3970,6 +3971,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-js-runtime"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "peri-lsp"
 version = "0.2.0"
 dependencies = [
@@ -4009,6 +4027,7 @@ dependencies = [
  "parking_lot",
  "peri-acp-types",
  "peri-agent",
+ "peri-js-runtime",
  "peri-model",
  "peri-resources",
  "pulldown-cmark 0.13.4",
@@ -4182,6 +4201,7 @@ dependencies = [
  "indexmap 2.14.0",
  "parking_lot",
  "peri-acp-types",
+ "peri-js-runtime",
  "serde",
  "serde_json",
  "tempfile",

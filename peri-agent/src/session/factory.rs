@@ -73,6 +73,8 @@ pub enum ChainSlot {
     Mcp,
     /// Workflow（workflow 工具，executor 可用时注册）
     Workflow,
+    /// PTC（direct run_code 与 session-local tools bridge）
+    Ptc,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
     /// Artifact（公开 Artifact 上传工具）
@@ -117,6 +119,7 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         // 第六组：MCP / Workflow / ToolSearch
         ChainSlot::Mcp,
         ChainSlot::Workflow,
+        ChainSlot::Ptc,
         ChainSlot::ToolSearch,
         ChainSlot::Artifact,
         // 第七组：LSP / Goal

@@ -206,6 +206,31 @@ fn test_tool_end_success_writes_standard_output_content() {
 }
 
 #[test]
+fn test_tool_end_preserves_read_truncation_metadata_in_standard_content() {
+    let output = "     1\talpha\n[Output truncated: 12000 bytes total; showing lines 1..=1 of 800; continue reading with offset=2]";
+    let event = ExecutorEvent::ToolEnd {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-read-truncated".to_string(),
+        name: "Read".to_string(),
+        output: output.to_string(),
+        is_error: false,
+        source_agent_id: None,
+    };
+
+    let mapped = map_event(&event, 200_000, &PeriCaps::default());
+    match &mapped[0].updates[0] {
+        SessionUpdate::ToolCallUpdate(update) => {
+            assert_eq!(tool_call_output_text(&update.fields), output);
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::Value::String(output.to_string()))
+            );
+        }
+        other => panic!("预期 ToolCallUpdate，实际: {other:?}"),
+    }
+}
+
+#[test]
 fn test_tool_end_failure_writes_standard_output_content() {
     // ToolEnd 失败 → status=failed + 错误文本写入标准 content + rawOutput 仍存在
     let event = ExecutorEvent::ToolEnd {

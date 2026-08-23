@@ -56,7 +56,11 @@ return { answer: r }`
 
     // start 同步响应
     const startResp = written.find((m) => m.id === 1)
-    expect(startResp?.result).toEqual({ ok: true })
+    expect(startResp?.result).toEqual({
+      ok: true,
+      protocolVersion: 1,
+      buildId: '@peri-code/workflow@0.2.0',
+    })
 
     // 真实 engine 发 agent/run → 模拟宿主响应
     const agentReq = await waitFor((m) => m.method === 'agent/run')

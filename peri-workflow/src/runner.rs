@@ -1,12 +1,16 @@
 //! WorkflowRunner —— spawn node 子进程 + 消息循环 + agent 回调。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
-use parking_lot::Mutex;
+use peri_js_runtime::{JsExecutionHost, JsProcessSpec};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::process::{Child, Command};
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::error::WorkflowError;
@@ -20,100 +24,297 @@ use crate::rpc::{IncomingMessage, RpcChannel};
 /// 时会静默复用旧版（CLI 子命令缺失、无任何输出），显式 `@<version>` 才能
 /// 绕过该行为强制使用 registry 上的目标版本。
 const WORKFLOW_NPM_VERSION: &str = "0.2.0";
+const WORKFLOW_PACKAGE_NAME: &str = "@peri-code/workflow";
+const WORKFLOW_ENTRY: &str = "dist/peri-workflow.js";
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
+const START_TIMEOUT: Duration = Duration::from_secs(15);
+const WORKFLOW_PROTOCOL_VERSION: u32 = 1;
+const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.2.0";
+const NPX_FALLBACK_ENV: &str = "PERI_WORKFLOW_ALLOW_NPX_FALLBACK";
+const EMBEDDED_WORKFLOW_ARTIFACT: &[u8] =
+    include_bytes!("../../npm-packages/@peri-workflow/dist/peri-workflow.js");
 
 /// 串行化本地安装（避免并发 workflow 同时触发安装）。
 static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// 返回 workflow 触发命令：(binary, args)。
-///
-/// 优先使用本地固定安装 `~/.peri/workflow/<version>/`——完全离线、秒启，
-/// 不依赖 npm registry；未安装时回退 `npx -y`（联网兜底，行为同旧版）。
-/// 通过 @peri-code/workflow v0.2.0 的 waitDrain() 确保 stdout backpressure 安全。
-fn workflow_cmd() -> Result<(String, Vec<String>), WorkflowError> {
-    if let Some(dist) = workflow_local_dist() {
-        return Ok(("node".to_string(), vec![dist]));
-    }
-    // 检查 npx 是否可用
-    if std::process::Command::new("npx")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Ok((
-            "npx".to_string(),
-            vec![
-                "-y".to_string(),
-                format!("@peri-code/workflow@{WORKFLOW_NPM_VERSION}"),
-            ],
-        ));
-    }
-    Err(WorkflowError::SpawnFailed(
-        "npx is not available. Install Node.js (https://nodejs.org/) to enable workflow support."
-            .to_string(),
-    ))
+#[derive(Debug)]
+struct WorkflowCommand {
+    program: String,
+    args: Vec<String>,
 }
 
-/// 本地固定安装的 engine 入口（`<base>/node_modules/@peri-code/workflow/dist/peri-workflow.js`）。
-fn workflow_local_dist_in(base: &std::path::Path) -> Option<String> {
-    let dist = base
+#[derive(serde::Deserialize)]
+struct WorkflowPackageMetadata {
+    name: String,
+    version: String,
+    main: String,
+    #[serde(rename = "periProtocolVersion")]
+    protocol_version: u32,
+    #[serde(rename = "periBuildId")]
+    build_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStartAck {
+    ok: bool,
+    protocol_version: u32,
+    build_id: String,
+}
+
+fn validate_start_ack(value: Value) -> Result<(), WorkflowError> {
+    let ack: WorkflowStartAck = serde_json::from_value(value).map_err(|_| {
+        WorkflowError::SpawnFailed("workflow/start returned an invalid handshake".into())
+    })?;
+    if !ack.ok
+        || ack.protocol_version != WORKFLOW_PROTOCOL_VERSION
+        || ack.build_id != WORKFLOW_BUILD_ID
+    {
+        return Err(WorkflowError::SpawnFailed(format!(
+            "workflow artifact protocol mismatch: expected protocol {WORKFLOW_PROTOCOL_VERSION} build {WORKFLOW_BUILD_ID}"
+        )));
+    }
+    Ok(())
+}
+
+fn workflow_prefix() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".peri")
+            .join("workflow")
+            .join(WORKFLOW_NPM_VERSION),
+    )
+}
+
+/// 校验固定 artifact 的 package identity、版本和入口契约。
+fn validate_workflow_artifact(base: &Path) -> Option<PathBuf> {
+    let package_dir = base
         .join("node_modules")
         .join("@peri-code")
-        .join("workflow")
-        .join("dist")
-        .join("peri-workflow.js");
-    dist.is_file().then(|| dist.to_string_lossy().into_owned())
-}
-
-/// 基于 `~/.peri/workflow/<version>/` 的本地 engine 入口。
-fn workflow_local_dist() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::path::PathBuf::from(&home)
-        .join(".peri")
-        .join("workflow")
-        .join(WORKFLOW_NPM_VERSION);
-    workflow_local_dist_in(&base)
-}
-
-/// 首次运行时自动安装本地固定副本（之后完全离线，不再访问 registry）。
-/// 安装失败仅告警，调用方回退 npx。
-async fn ensure_workflow_install() {
-    if workflow_local_dist().is_some() {
-        return;
-    }
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
-    let prefix = std::path::PathBuf::from(&home)
-        .join(".peri")
-        .join("workflow")
-        .join(WORKFLOW_NPM_VERSION);
-    let _guard = INSTALL_LOCK.lock().await;
-    // 双检：等待锁期间其他调用方可能已完成安装
-    if workflow_local_dist().is_some() {
-        return;
-    }
-    let pkg = format!("@peri-code/workflow@{WORKFLOW_NPM_VERSION}");
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(90),
-        Command::new("npm")
-            .args(["install", "--prefix"])
-            .arg(&prefix)
-            .arg(&pkg)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await
+        .join("workflow");
+    let metadata: WorkflowPackageMetadata =
+        serde_json::from_slice(&std::fs::read(package_dir.join("package.json")).ok()?).ok()?;
+    if metadata.name != WORKFLOW_PACKAGE_NAME
+        || metadata.version != WORKFLOW_NPM_VERSION
+        || metadata.main != WORKFLOW_ENTRY
+        || metadata.protocol_version != WORKFLOW_PROTOCOL_VERSION
+        || metadata.build_id != WORKFLOW_BUILD_ID
     {
-        Ok(Ok(status)) if status.success() => {
-            info!(target: "workflow", prefix = %prefix.display(), "installed local workflow engine ({pkg})");
+        return None;
+    }
+    let entry = package_dir.join(&metadata.main);
+    let canonical_package = package_dir.canonicalize().ok()?;
+    let canonical_entry = entry.canonicalize().ok()?;
+    if !canonical_entry.starts_with(&canonical_package)
+        || !canonical_entry.metadata().ok()?.is_file()
+        || canonical_entry.metadata().ok()?.len() == 0
+    {
+        return None;
+    }
+    Some(canonical_entry)
+}
+
+fn workflow_local_dist_in(base: &Path) -> Option<String> {
+    validate_workflow_artifact(base).map(|path| path.to_string_lossy().into_owned())
+}
+
+fn workflow_local_dist() -> Option<String> {
+    workflow_prefix().and_then(|prefix| workflow_local_dist_in(&prefix))
+}
+
+fn npx_fallback_allowed() -> bool {
+    cfg!(test) || std::env::var_os(NPX_FALLBACK_ENV).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+/// 生产默认 fail closed；仅测试或显式 opt-in 时允许固定版本 npx fallback。
+fn workflow_cmd() -> Result<WorkflowCommand, WorkflowError> {
+    if let Some(dist) = workflow_local_dist() {
+        return Ok(WorkflowCommand {
+            program: "node".into(),
+            args: vec![dist],
+        });
+    }
+    if npx_fallback_allowed() {
+        return Ok(WorkflowCommand {
+            program: "npx".into(),
+            args: vec![
+                "-y".into(),
+                format!("{WORKFLOW_PACKAGE_NAME}@{WORKFLOW_NPM_VERSION}"),
+            ],
+        });
+    }
+    Err(WorkflowError::SpawnFailed(format!(
+        "validated workflow artifact {WORKFLOW_NPM_VERSION} is unavailable; set {NPX_FALLBACK_ENV}=1 to allow the network fallback"
+    )))
+}
+
+async fn stop_install_child(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+async fn run_install_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => status.map(|status| status.success()),
+        Err(_) => {
+            stop_install_child(child).await;
+            Ok(false)
         }
-        other => {
-            warn!(target: "workflow", prefix = %prefix.display(), "local workflow install failed ({pkg}), falling back to npx: {other:?}");
+    }
+}
+
+async fn publish_embedded_workflow_artifact() -> Result<(), WorkflowError> {
+    if workflow_local_dist().is_some() {
+        return Ok(());
+    }
+    let prefix = workflow_prefix().ok_or_else(|| {
+        WorkflowError::SpawnFailed("HOME is unavailable for workflow artifact lookup".into())
+    })?;
+    let _guard = INSTALL_LOCK.lock().await;
+    if workflow_local_dist().is_some() {
+        return Ok(());
+    }
+
+    let parent = prefix.parent().ok_or_else(|| {
+        WorkflowError::SpawnFailed("workflow artifact prefix has no parent".into())
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    if prefix.exists() {
+        tokio::fs::remove_dir_all(&prefix).await?;
+    }
+    let staging = parent.join(format!(
+        ".{WORKFLOW_NPM_VERSION}.staging-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let package = staging
+        .join("node_modules")
+        .join("@peri-code")
+        .join("workflow");
+    tokio::fs::create_dir_all(package.join("dist")).await?;
+    tokio::fs::write(
+        package.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "name": WORKFLOW_PACKAGE_NAME,
+            "version": WORKFLOW_NPM_VERSION,
+            "main": WORKFLOW_ENTRY,
+            "periProtocolVersion": WORKFLOW_PROTOCOL_VERSION,
+            "periBuildId": WORKFLOW_BUILD_ID,
+        }))?,
+    )
+    .await?;
+    tokio::fs::write(package.join(WORKFLOW_ENTRY), EMBEDDED_WORKFLOW_ARTIFACT).await?;
+
+    if validate_workflow_artifact(&staging).is_none() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(WorkflowError::SpawnFailed(
+            "embedded workflow artifact failed validation".into(),
+        ));
+    }
+    match tokio::fs::rename(&staging, &prefix).await {
+        Ok(()) => {}
+        Err(error) if validate_workflow_artifact(&prefix).is_some() => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            debug!(target: "workflow", error_kind = ?error.kind(), "another process published the workflow artifact");
         }
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(WorkflowError::Io(error));
+        }
+    }
+    Ok(())
+}
+
+/// 安装到同文件系统 staging，完整校验后通过 rename 发布。
+async fn ensure_workflow_install() -> Result<(), WorkflowError> {
+    if workflow_local_dist().is_some() {
+        return Ok(());
+    }
+    let prefix = workflow_prefix().ok_or_else(|| {
+        WorkflowError::SpawnFailed("HOME is unavailable for workflow artifact lookup".into())
+    })?;
+    let _guard = INSTALL_LOCK.lock().await;
+    if workflow_local_dist().is_some() {
+        return Ok(());
+    }
+
+    let parent = prefix.parent().ok_or_else(|| {
+        WorkflowError::SpawnFailed("workflow artifact prefix has no parent".into())
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let staging = parent.join(format!(
+        ".{WORKFLOW_NPM_VERSION}.staging-{}",
+        uuid::Uuid::now_v7()
+    ));
+    tokio::fs::create_dir(&staging).await?;
+
+    let package = format!("{WORKFLOW_PACKAGE_NAME}@{WORKFLOW_NPM_VERSION}");
+    let mut child = match Command::new("npm")
+        .args(["install", "--prefix"])
+        .arg(&staging)
+        .arg(&package)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(WorkflowError::Io(error));
+        }
+    };
+
+    let installed = run_install_with_timeout(&mut child, INSTALL_TIMEOUT).await?;
+    if !installed || validate_workflow_artifact(&staging).is_none() {
+        stop_install_child(&mut child).await;
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(WorkflowError::SpawnFailed(
+            "workflow artifact installation failed validation".into(),
+        ));
+    }
+
+    match tokio::fs::rename(&staging, &prefix).await {
+        Ok(()) => {}
+        Err(error) if validate_workflow_artifact(&prefix).is_some() => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            debug!(target: "workflow", error_kind = ?error.kind(), "another installer published the workflow artifact");
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(WorkflowError::Io(error));
+        }
+    }
+    if validate_workflow_artifact(&prefix).is_none() {
+        return Err(WorkflowError::SpawnFailed(
+            "published workflow artifact failed validation".into(),
+        ));
+    }
+    info!(target: "workflow", version = WORKFLOW_NPM_VERSION, "installed validated workflow artifact");
+    Ok(())
+}
+
+fn persist_failed_state(
+    journal_store: &WorkflowJournalStore,
+    run_id: &str,
+    input: &WorkflowInput,
+    started_at: &str,
+    error: &WorkflowError,
+) {
+    let state = crate::journal::RunState {
+        run_id: run_id.to_string(),
+        workflow_name: input.workflow_name.clone(),
+        status: "failed".to_string(),
+        return_value: None,
+        script: input.script.clone(),
+        started_at: started_at.to_string(),
+        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        error: Some(format!("{error:#}")),
+    };
+    if let Err(write_error) = journal_store.write_state(run_id, &state) {
+        warn!(target: "workflow", run_id, error = %write_error, "failed to persist workflow startup failure");
     }
 }
 
@@ -121,16 +322,39 @@ async fn ensure_workflow_install() {
 
 pub use peri_acp_types::workflow::AgentExecutor;
 
+trait RunScoped {
+    fn run_id(&self) -> &str;
+}
+
+fn parse_run_scoped<T: DeserializeOwned + RunScoped>(
+    params: Option<Value>,
+    expected_run_id: &str,
+) -> Result<T, &'static str> {
+    let parsed: T = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|_| "invalid run-scoped RPC parameters")?;
+    if parsed.run_id() != expected_run_id {
+        return Err("runId does not match the active workflow run");
+    }
+    Ok(parsed)
+}
+
+impl RunScoped for AgentRunParams {
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
+impl RunScoped for WorkflowDoneParams {
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
 fn parse_agent_run_params(
     params: Option<Value>,
     expected_run_id: &str,
 ) -> Result<AgentRunParams, String> {
-    let params: AgentRunParams =
-        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|error| error.to_string())?;
-    if params.run_id != expected_run_id {
-        return Err("runId does not match the active workflow run".into());
-    }
-    Ok(params)
+    parse_run_scoped(params, expected_run_id).map_err(str::to_string)
 }
 
 // ─── 公开类型 ──────────────────────────────────────────────────
@@ -167,10 +391,22 @@ struct JournalAppendParams {
     entry: crate::protocol::JournalEntry,
 }
 
+impl RunScoped for JournalAppendParams {
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JournalTruncateParams {
     run_id: String,
+}
+
+impl RunScoped for JournalTruncateParams {
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
 }
 
 // ─── WorkflowRunner ────────────────────────────────────────────
@@ -232,22 +468,41 @@ impl WorkflowRunner {
         // Helper: send failure result on done_tx before returning Err.
         // Ensures tool.rs's fast-failure detection always receives a result,
         // even when runner exits before spawning the msg_loop (e.g. binary not found).
-        fn send_failure(tx: &watch::Sender<Option<WorkflowResult>>, rid: &str, e: &WorkflowError) {
+        fn send_failure(
+            tx: &watch::Sender<Option<WorkflowResult>>,
+            journal_store: Option<&WorkflowJournalStore>,
+            rid: &str,
+            input: &WorkflowInput,
+            started_at: &str,
+            error: &WorkflowError,
+        ) {
+            if let Some(journal_store) = journal_store {
+                persist_failed_state(journal_store, rid, input, started_at, error);
+            }
             let _ = tx.send(Some(WorkflowResult {
                 run_id: rid.to_string(),
                 status: "failed".to_string(),
                 return_value: None,
-                error: Some(format!("{:#}", e)),
+                error: Some(format!("{error:#}")),
                 stderr_tail: None,
             }));
         }
+
+        let started_at_iso = chrono::Utc::now().to_rfc3339();
 
         // 1. Persist script
         match journal_store.init_run(&run_id, &input.script) {
             Ok(()) => {}
             Err(e) => {
                 let err = WorkflowError::Io(e);
-                send_failure(&done_tx, &run_id, &err);
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &err,
+                );
                 return Err(err);
             }
         }
@@ -259,71 +514,68 @@ impl WorkflowRunner {
             None
         };
 
-        // 3. Spawn workflow runner（本地固定安装优先，未安装时自动预热一次，回退 npx）
-        ensure_workflow_install().await;
-        let (cmd_bin, cmd_args) = match workflow_cmd() {
-            Ok(c) => c,
+        // 3. Publish the bundled artifact first so development, tests, and releases use
+        // the same hermetic runtime. Network resolution remains an explicit fallback.
+        if workflow_local_dist().is_none() {
+            if let Err(error) = publish_embedded_workflow_artifact().await {
+                if npx_fallback_allowed() {
+                    warn!(target: "workflow", error_kind = %error, "embedded workflow artifact unavailable; trying explicit network fallback");
+                    if let Err(install_error) = ensure_workflow_install().await {
+                        warn!(target: "workflow", error_kind = %install_error, "workflow artifact install unavailable; using explicit npx fallback");
+                    }
+                } else {
+                    send_failure(
+                        &done_tx,
+                        Some(&journal_store),
+                        &run_id,
+                        &input,
+                        &started_at_iso,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        let command = match workflow_cmd() {
+            Ok(command) => command,
             Err(e) => {
-                send_failure(&done_tx, &run_id, &e);
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &e,
+                );
                 return Err(e);
             }
         };
-        let mut child = match Command::new(&cmd_bin)
-            .args(&cmd_args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let err = WorkflowError::SpawnFailed(e.to_string());
-                send_failure(&done_tx, &run_id, &err);
+        let host = match JsExecutionHost::spawn(JsProcessSpec::new(command.program, command.args)) {
+            Ok(host) => Arc::new(host),
+            Err(error) => {
+                let err = WorkflowError::from(error);
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &err,
+                );
                 return Err(err);
             }
         };
 
-        let stdin = match child.stdin.take() {
-            Some(s) => s,
-            None => {
-                let err = WorkflowError::SpawnFailed("no stdin".into());
-                send_failure(&done_tx, &run_id, &err);
-                return Err(err);
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
-            None => {
-                let err = WorkflowError::SpawnFailed("no stdout".into());
-                send_failure(&done_tx, &run_id, &err);
-                return Err(err);
-            }
-        };
-        let stderr = child.stderr.take();
-
-        // 4. Create RPC channel + register for kill tracking (GAP-07)
-        let channel = Arc::new(RpcChannel::new(stdin));
+        // 4. Register channel for Workflow agent kill tracking (GAP-07)
+        let channel = Arc::new(RpcChannel::new(host.channel()));
         self.active_channels
             .insert(run_id.clone(), Arc::clone(&channel));
 
-        // 5. stdout reader → incoming messages
-        let (msg_tx, mut msg_rx) = mpsc::channel::<IncomingMessage>(256);
-        crate::rpc::spawn_stdout_reader(stdout, Arc::clone(&channel), msg_tx);
-
-        // 6. stderr reader → tracing::debug + buffer for error reporting
-        let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stderr) = stderr {
-            let stderr_lines = Arc::clone(&stderr_lines);
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!(target: "workflow:node", "{line}");
-                    stderr_lines.lock().push(line);
-                }
-            });
-        }
+        // 5. Generic host owns stdout/stderr readers; Adapter consumes routed messages.
+        let mut msg_rx = host
+            .take_incoming()
+            .await
+            .expect("new JavaScript host must expose its incoming receiver");
 
         // 7. Send workflow/start request
         let start_params = match serde_json::to_value(&WorkflowStartParams {
@@ -337,35 +589,71 @@ impl WorkflowRunner {
         }) {
             Ok(v) => v,
             Err(e) => {
+                self.active_channels.remove(&run_id);
+                let _ = host.kill().await;
                 let err = WorkflowError::from(e);
-                send_failure(&done_tx, &run_id, &err);
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &err,
+                );
                 return Err(err);
             }
         };
-        let _start_resp = match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+        let start_resp = match tokio::time::timeout(
+            START_TIMEOUT,
             channel.send_request("workflow/start", start_params),
         )
         .await
         {
             Ok(Ok(resp)) => resp,
-            Ok(Err(rpc_err)) => {
-                let err =
-                    WorkflowError::SpawnFailed(format!("workflow/start RPC error: {rpc_err}"));
-                send_failure(&done_tx, &run_id, &err);
+            Ok(Err(_rpc_error)) => {
+                self.active_channels.remove(&run_id);
+                let _ = host.kill().await;
+                let err = WorkflowError::SpawnFailed("workflow/start RPC failed".into());
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &err,
+                );
                 return Err(err);
             }
             Err(_timeout) => {
+                self.active_channels.remove(&run_id);
+                let _ = host.kill().await;
                 let err = WorkflowError::SpawnFailed(
                     "workflow/start timed out (15s) — node process may have crashed".into(),
                 );
-                send_failure(&done_tx, &run_id, &err);
+                send_failure(
+                    &done_tx,
+                    Some(&journal_store),
+                    &run_id,
+                    &input,
+                    &started_at_iso,
+                    &err,
+                );
                 return Err(err);
             }
         };
-
-        // 记录 workflow 实际启动时间（用于 state.json），避免与完成时间仅差微秒
-        let started_at_iso = chrono::Utc::now().to_rfc3339();
+        if let Err(err) = validate_start_ack(start_resp) {
+            self.active_channels.remove(&run_id);
+            let _ = host.kill().await;
+            send_failure(
+                &done_tx,
+                Some(&journal_store),
+                &run_id,
+                &input,
+                &started_at_iso,
+                &err,
+            );
+            return Err(err);
+        }
 
         // 8. Message loop (spawned task)
         let agent_executor = Arc::clone(&self.agent_executor);
@@ -373,7 +661,7 @@ impl WorkflowRunner {
         let journal_clone = Arc::clone(&journal_store);
         let progress_store_clone = Arc::clone(&progress_store);
         let run_id_clone = run_id.clone();
-        let stderr_for_loop = Arc::clone(&stderr_lines);
+        let stderr_host = Arc::clone(&host);
 
         // Clone values needed by the kill branch before they're moved into msg_loop
         let kill_wf_name = input.workflow_name.clone();
@@ -420,6 +708,7 @@ impl WorkflowRunner {
                     IncomingMessage::Response { .. } => {
                         response_count += 1;
                     }
+                    IncomingMessage::ProtocolError(_) | IncomingMessage::ResourceLimit { .. } => {}
                 }
                 match msg {
                     IncomingMessage::Request { id, method, params } => match method.as_str() {
@@ -532,24 +821,27 @@ impl WorkflowRunner {
                         "progress/event" => {
                             if let Some(p) = params {
                                 match serde_json::from_value::<ProgressEvent>(p.clone()) {
-                                    Ok(event) => {
-                                        let run_id = event.run_id().to_string();
+                                    Ok(event) if event.run_id() == run_id_clone => {
                                         debug!(
                                             target: "workflow.rpc",
-                                            run_id,
+                                            run_id = %run_id_clone,
                                             "progress/event: applied to store",
                                         );
                                         progress_store_clone.apply_event(&event);
                                     }
-                                    Err(e) => {
-                                        warn!(target: "workflow", error = %e, params = %p, "progress/event: parse failed")
+                                    Ok(_) => {
+                                        warn!(target: "workflow", "progress/event rejected for inactive run");
+                                    }
+                                    Err(_) => {
+                                        warn!(target: "workflow", "progress/event: invalid parameters")
                                     }
                                 }
                             }
                         }
                         "journal/append" => {
                             if let Some(p) = params {
-                                if let Ok(parsed) = serde_json::from_value::<JournalAppendParams>(p)
+                                if let Ok(parsed) =
+                                    parse_run_scoped::<JournalAppendParams>(Some(p), &run_id_clone)
                                 {
                                     if let Err(e) =
                                         journal_clone.append(&parsed.run_id, &parsed.entry)
@@ -561,9 +853,10 @@ impl WorkflowRunner {
                         }
                         "journal/truncate" => {
                             if let Some(p) = params {
-                                if let Ok(parsed) =
-                                    serde_json::from_value::<JournalTruncateParams>(p)
-                                {
+                                if let Ok(parsed) = parse_run_scoped::<JournalTruncateParams>(
+                                    Some(p),
+                                    &run_id_clone,
+                                ) {
                                     if let Err(e) = journal_clone.truncate(&parsed.run_id) {
                                         warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/truncate: write failed");
                                     }
@@ -571,50 +864,41 @@ impl WorkflowRunner {
                             }
                         }
                         "log" => {
-                            if let Some(p) = params {
-                                let msg = p.get("message").and_then(|v| v.as_str()).unwrap_or("?");
-                                let level =
-                                    p.get("level").and_then(|v| v.as_str()).unwrap_or("info");
-                                match level {
-                                    "error" | "warn" => warn!(target: "workflow:node", "{msg}"),
-                                    "info" => info!(target: "workflow:node", "{msg}"),
-                                    _ => debug!(target: "workflow:node", "{msg}"),
-                                }
-                            }
+                            // Node log bodies may contain user script data or credentials.
+                            debug!(target: "workflow:node", "workflow node log received");
                         }
                         "workflow/done" => {
-                            if let Some(p) = params {
-                                if let Ok(done) = serde_json::from_value::<WorkflowDoneParams>(p) {
-                                    if done.status != "completed" {
-                                        warn!(
-                                            target: "workflow",
-                                            run_id = %done.run_id,
-                                            status = %done.status,
-                                            error = ?done.error,
-                                            "workflow ended non-completed"
+                            if let Ok(done) =
+                                parse_run_scoped::<WorkflowDoneParams>(params, &run_id_clone)
+                            {
+                                if done.status != "completed" {
+                                    warn!(
+                                        target: "workflow",
+                                        run_id = %done.run_id,
+                                        status = %done.status,
+                                        "workflow ended non-completed"
+                                    );
+                                }
+                                let processed_return_value = done.return_value.map(|mut v| {
+                                    if v.is_object() {
+                                        let journal_for_extract = Arc::clone(&journal_clone);
+                                        let _extracted = crate::journal::extract_long_texts(
+                                            &mut v,
+                                            &done.run_id,
+                                            &journal_for_extract,
+                                            200,
                                         );
                                     }
-                                    let processed_return_value = done.return_value.map(|mut v| {
-                                        if v.is_object() {
-                                            let journal_for_extract = Arc::clone(&journal_clone);
-                                            let _extracted = crate::journal::extract_long_texts(
-                                                &mut v,
-                                                &done.run_id,
-                                                &journal_for_extract,
-                                                200,
-                                            );
-                                        }
-                                        v
-                                    });
-                                    final_result = WorkflowResult {
-                                        run_id: done.run_id.clone(),
-                                        status: done.status.clone(),
-                                        return_value: processed_return_value,
-                                        error: done.error.clone(),
-                                        stderr_tail: None,
-                                    };
-                                    break;
-                                }
+                                    v
+                                });
+                                final_result = WorkflowResult {
+                                    run_id: done.run_id.clone(),
+                                    status: done.status.clone(),
+                                    return_value: processed_return_value,
+                                    error: done.error.clone(),
+                                    stderr_tail: None,
+                                };
+                                break;
                             }
                         }
                         _ => {
@@ -629,6 +913,14 @@ impl WorkflowRunner {
                     IncomingMessage::Response { .. } => {
                         debug!(target: "workflow", "orphan response received");
                     }
+                    IncomingMessage::ProtocolError(error) => {
+                        final_result.error = Some(error);
+                        break;
+                    }
+                    IncomingMessage::ResourceLimit { .. } => {
+                        final_result.error = Some("JavaScript RPC resource limit exceeded".into());
+                        break;
+                    }
                 }
             }
 
@@ -638,28 +930,13 @@ impl WorkflowRunner {
                 total_msgs = msg_count,
                 requests = request_count,
                 responses = response_count,
-                ?method_counts,
+                method_count = method_counts.len(),
                 final_status = %final_result.status,
                 "msg_loop exiting — summary"
             );
 
             // Write state.json
-            let stderr_tail = {
-                let lines = stderr_for_loop.lock();
-                if lines.is_empty() {
-                    None
-                } else {
-                    Some(
-                        lines
-                            .iter()
-                            .rev()
-                            .take(20)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                }
-            };
+            let stderr_tail = stderr_host.stderr_tail();
             let state = crate::journal::RunState {
                 run_id: final_result.run_id.clone(),
                 workflow_name: input.workflow_name.clone(),
@@ -703,8 +980,8 @@ impl WorkflowRunner {
 
         // 9. Wait for kill signal or message loop completion
         let journal_clone2 = Arc::clone(&journal_store);
-        let stderr_for_kill = Arc::clone(&stderr_lines);
         tokio::select! {
+            biased;
             _ = kill_rx => {
                 // 超时保护：Node crash 时不会阻塞 (M-ARCH6)
                 let _ = tokio::time::timeout(
@@ -712,30 +989,16 @@ impl WorkflowRunner {
                     channel.send_request("workflow/kill", serde_json::json!({"runId": run_id})),
                 )
                 .await;
-                let _ = child.kill().await;
+                let _ = host.kill().await;
 
                 // Abort msg_loop 防止 state.json 和 done_tx 被覆写为 "failed"
                 // （msg_loop 检测到 stdout 关闭后会以默认 status="failed" 写 state.json + done_tx，
                 //  而 watch channel 后到值会覆盖先到值使 kill 事实丢失）
                 msg_loop.abort();
+                let _ = (&mut msg_loop).await;
 
                 // 写入 killed state.json
-                let _stderr_tail = {
-                    let lines = stderr_for_kill.lock();
-                    if lines.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            lines
-                                .iter()
-                                .rev()
-                                .take(20)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        )
-                    }
-                };
+                let stderr_tail = host.stderr_tail();
                 let state = crate::journal::RunState {
                     run_id: run_id.clone(),
                     workflow_name: kill_wf_name,
@@ -764,7 +1027,7 @@ impl WorkflowRunner {
                     status: "killed".to_string(),
                     return_value: None,
                     error: Some("workflow killed by user".to_string()),
-                    stderr_tail: _stderr_tail,
+                    stderr_tail,
                 };
                 let _ = done_tx_for_kill.send(Some(killed_result));
             }
@@ -774,7 +1037,7 @@ impl WorkflowRunner {
         }
 
         // Cleanup: ensure child process is terminated（防止僵尸进程）
-        let _ = child.kill().await;
+        let _ = host.kill().await;
 
         // Cleanup: remove channel from active tracking (GAP-07)
         self.active_channels.remove(&run_id);

@@ -14,7 +14,7 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 改消息流渲染 | `src/kit/message_area/mod.rs` + `render.rs` + `grid.rs` | `MessageArea`（mod.rs:627）；渲染按 TuiRenderUnit 类型分派到 render.rs 各 `render_*_lines`（如 `render_user_bubble_lines`:740、`render_tool_card_lines`:1123、`render_system_note_lines`:1571、`render_ask_user_block_lines`:1926）；网格 `GridSpec::grid_for`（grid.rs:56，按 term_width 断点） | 组件只读 VIEW_MODELS 渲染、render body 不写 atom；NO_COLOR 剥离（mod.rs:83 `strip_line_colors`）；截断/坐标按 Unicode 显示宽度 |
+| 改消息流渲染 | `src/kit/message_area/mod.rs` + `message_area/render/` + `grid.rs` | `MessageArea`；`render_tool_card_lines` / `completed_header_suffix`；`GridSpec::grid_for` | 组件只读 VIEW_MODELS 渲染、render body 不写 atom；Read 后缀从 canonical output 保留行数与 truncation 状态；截断/坐标按 Unicode 显示宽度 |
 | 改 keepgoing 按钮行为 | `src/kit/message_area/mod.rs` + `footer.rs` + `src/kit/submit_consumer.rs` | 点击 handler（mod.rs:956，Global+High，须在 scroll handler 前注册）；防抖常量 `KEEPGOING_DEBOUNCE`（mod.rs:58）+ `KEEPGOING_BLOCKED_UNTIL`；按钮布局 `build_footer_lines`/`KeepGoingLayout`（footer.rs:100/:85）、rect 每帧更新（`compute_keepgoing_rect` mod.rs:2040）；提交 `handle_keepgoing_submit`（submit_consumer.rs:255） | 命中检测用最近一帧按钮 rect；防抖期内点击 Consumed 不提交；提交 = 空白 user prompt（服务端不插消息仅继续 loop）；契约 ARC-KEEPGOING-001（唯一生产者） |
 | 改事件消费（新增/变更事件） | `src/kit/acp_events/` + `acp_notifier.rs` + `acp_bridge.rs` | `dispatch_and_notify`（acp_events/mod.rs:301，穷尽 match 分派到 streaming/tool/turn/system/subagent/agent/compact handler）；`AcpEventData`（acp_types/event_data.rs:27）；`convert_agent_event`（acp_notifier.rs:92）；渲染产出 `push_view_models` / `push_acp_state` | 终止事件（TurnDone/TurnInterrupted）必须离开 loading；`LlmRetrying` 转为 Warning SystemNote，展示 attempt/max/delay/安全错误分类；transport 死亡兜底复位 loading；契约 ARC-EVENT-001 |
 | 改输入/滚动/选择 | `src/kit/input_area.rs` + `message_area/scroll.rs` + `focus_router.rs` | `InputArea`（input_area.rs:148）；`scroll::handle_event`（scroll.rs:516，滚轮节流/拖拽选中/键盘滚动）；`focus_router::active_layer`（:105）、`classify_global_shortcut`（:117）、`message_accepts_key`（:147）、`input_accepts_key`（:190） | 消息区只处理滚轮、编辑区处理键盘（按焦点层分发）；弹窗/面板遮挡时鼠标清理残留（scroll.rs:548 `is_occluded`）；同优先级按注册序分发（keepgoing 须先于 scroll） |
@@ -79,7 +79,7 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 面板目录（tasks/cron/agent/model/config/thread_browser/mcp/plugin/…） | kit/panels/ + kit/panel_registry.rs | `open_panel`（panel_registry.rs:475）；面板渲染按 PanelKind 分发（:438）；`PanelOverlay`（panel_overlay.rs:34） |
-| 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs | `open_popup`/`close_popup`/`is_popup_active`（popup_overlay.rs:99/:109/:146）；局部取消不被全局 handler 截断 |
+| 弹窗（HITL/AskUser/OAuth/Confirm/Rewind/下载进度） | kit/popups/ + kit/popup_overlay.rs + kit/event_handlers.rs | `open_popup`/`close_popup`/`is_popup_active`；Rewind Enter 由根级 Global 模态仲裁发送既有 `REWIND_ACTION_TX`，鼠标与渲染留在 popup |
 
 ### App/配置/启动（src/app/ src/config/ src/acp_client/）
 

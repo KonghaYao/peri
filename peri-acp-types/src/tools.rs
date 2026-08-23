@@ -122,6 +122,79 @@ pub enum ContextRetention {
     Recomputable,
 }
 
+/// 可由宿主工具发起的 canonical effective-tool 调用。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveToolCall {
+    pub invocation_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub parent_invocation_id: Option<String>,
+}
+
+/// 当前 turn 可供程序化调用的工具声明。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// 程序化 effective-tool 调用的稳定错误分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EffectiveToolErrorCode {
+    UnknownTool,
+    InvalidInput,
+    PermissionDenied,
+    UserRejected,
+    Cancelled,
+    Timeout,
+    ToolFailed,
+}
+
+impl EffectiveToolErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "UNKNOWN_TOOL",
+            Self::InvalidInput => "INVALID_INPUT",
+            Self::PermissionDenied => "PERMISSION_DENIED",
+            Self::UserRejected => "USER_REJECTED",
+            Self::Cancelled => "CANCELLED",
+            Self::Timeout => "TIMEOUT",
+            Self::ToolFailed => "TOOL_FAILED",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct EffectiveToolError {
+    pub code: EffectiveToolErrorCode,
+    pub message: String,
+}
+
+impl EffectiveToolError {
+    pub fn new(code: EffectiveToolErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// 宿主工具进入 Agent canonical dispatch 的显式端口。
+#[async_trait]
+pub trait EffectiveToolDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        call: EffectiveToolCall,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, EffectiveToolError>;
+
+    fn tools(&self) -> Vec<EffectiveToolDefinition>;
+}
+
 /// 工具只读上下文（借用 state，零 clone）
 ///
 /// 通过 `BaseTool::invoke` 的第二个参数传入。工具可读取 messages 和 cwd，
@@ -131,11 +204,35 @@ pub struct ToolContext<'a> {
     pub messages: &'a [BaseMessage],
     /// 当前工作目录
     pub cwd: &'a str,
+    /// 当前 canonical dispatch 能力；仅 dispatch 中调用工具时存在。
+    pub effective_tool_dispatcher: Option<std::sync::Arc<dyn EffectiveToolDispatcher>>,
+    /// 当前外层 tool call ID，供宿主工具关联内部 invocation。
+    pub invocation_id: Option<String>,
+    /// 当前外层调用的取消令牌。
+    pub cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl<'a> ToolContext<'a> {
     pub fn new(messages: &'a [BaseMessage], cwd: &'a str) -> Self {
-        Self { messages, cwd }
+        Self {
+            messages,
+            cwd,
+            effective_tool_dispatcher: None,
+            invocation_id: None,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn with_effective_tool_dispatcher(
+        mut self,
+        dispatcher: std::sync::Arc<dyn EffectiveToolDispatcher>,
+        invocation_id: impl Into<String>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.effective_tool_dispatcher = Some(dispatcher);
+        self.invocation_id = Some(invocation_id.into());
+        self.cancellation = cancellation;
+        self
     }
 }
 
