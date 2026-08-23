@@ -7,6 +7,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
 
 use crate::process_tree::ProcessTree;
 use crate::rpc::spawn_stdout_reader;
@@ -93,6 +95,8 @@ impl JsExecutionHost {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
         if !spec.inherit_environment {
             command.env_clear();
         }

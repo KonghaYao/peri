@@ -1192,21 +1192,20 @@ async fn test_ptc_runs_through_acp_session_agent_production_path() {
     let _home = HomeGuard::set(ptc_cache.path());
     std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
     std::fs::write(tmp.path().join("b.txt"), "beta").unwrap();
-    let a = tmp.path().join("a.txt").to_string_lossy().into_owned();
-    let b = tmp.path().join("b.txt").to_string_lossy().into_owned();
+    let a = serde_json::to_string(&tmp.path().join("a.txt").to_string_lossy()).unwrap();
+    let b = serde_json::to_string(&tmp.path().join("b.txt").to_string_lossy()).unwrap();
     let source = format!(
         r#"const [a, b] = await Promise.all([
-            tools.Read({{ file_path: {a:?} }}),
-            tools.Read({{ file_path: {b:?} }})
+            tools.Read({{ file_path: {a} }}),
+            tools.Read({{ file_path: {b} }})
         ]);
         let structured;
         try {{ await tools.NoSuchPtcTool({{}}); }}
         catch (error) {{ structured = {{ name: error.name, code: error.code }}; }}
         const controller = new AbortController(); controller.abort();
         let cancelled;
-        try {{ await tools.Read({{ file_path: {a:?} }}, {{ signal: controller.signal }}); }}
+        try {{ await tools.Read({{ file_path: {a} }}, {{ signal: controller.signal }}); }}
         catch (error) {{ cancelled = error.name; }}
-        console.log(JSON.stringify({{ a, b, structured, cancelled }}));
         return {{ a, b, structured, cancelled }};"#
     );
     let visible_tools = Arc::new(Mutex::new(Vec::new()));
