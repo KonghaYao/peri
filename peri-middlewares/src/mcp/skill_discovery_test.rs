@@ -192,6 +192,7 @@ fn parse_description_trimmed() {
 fn disambiguate_names_on_collision_uses_path_segments() {
     let mk = |name: &str, uri: &str| SkillMetadata {
         name: name.to_string(),
+        aliases: Vec::new(),
         description: String::new(),
         path: PathBuf::new(),
         source: SkillSource::Mcp,
@@ -1572,6 +1573,7 @@ fn mcp_route_entries_converts_skills() {
     let skills = vec![
         SkillMetadata {
             name: "mcp__demo__AlphaSkill".to_string(),
+            aliases: Vec::new(),
             description: "Alpha skill".to_string(),
             path: PathBuf::new(),
             source: SkillSource::Mcp,
@@ -1586,6 +1588,7 @@ fn mcp_route_entries_converts_skills() {
         // 同名消歧后形态：路径段作为 skill 名
         SkillMetadata {
             name: "mcp__demo__alpha/sub".to_string(),
+            aliases: Vec::new(),
             description: "Sub skill".to_string(),
             path: PathBuf::new(),
             source: SkillSource::Mcp,
@@ -1624,6 +1627,7 @@ fn mcp_route_entries_plugin_server_takes_last_segment() {
     let registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![SkillMetadata {
         name: "mcp__plugin:p1:demosrv__beta".to_string(),
+        aliases: Vec::new(),
         description: "Beta skill".to_string(),
         path: PathBuf::new(),
         source: SkillSource::Mcp,
@@ -1659,6 +1663,7 @@ fn mcp_source_key_matches_route_entry_namespace() {
         "plugin:p1:demosrv",
         &[SkillMetadata {
             name: "mcp__plugin:p1:demosrv__beta".to_string(),
+            aliases: Vec::new(),
             description: "Beta skill".to_string(),
             ..SkillMetadata::default()
         }],
@@ -1695,6 +1700,7 @@ fn mcp_source_key_reserved_domain_skipped() {
     let meta_registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![SkillMetadata {
         name: "mcp__core__hello".to_string(),
+        aliases: Vec::new(),
         description: "Core-named skill".to_string(),
         ..SkillMetadata::default()
     }];
@@ -1714,6 +1720,7 @@ fn mcp_source_key_reserved_domain_skipped() {
     // 对照：非保留域正常注册。
     let skills2 = vec![SkillMetadata {
         name: "mcp__demo__hello".to_string(),
+        aliases: Vec::new(),
         description: "Demo skill".to_string(),
         ..SkillMetadata::default()
     }];
@@ -1738,6 +1745,7 @@ fn mcp_route_entries_skips_unprefixed_name() {
     let registry = Arc::new(McpSkillRegistry::new());
     let skills = vec![SkillMetadata {
         name: "other__name".to_string(),
+        aliases: Vec::new(),
         description: "No prefix".to_string(),
         path: PathBuf::new(),
         source: SkillSource::Mcp,
@@ -1901,6 +1909,7 @@ fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, conte
     let token: HandleToken = Arc::new(1u32);
     let meta = SkillMetadata {
         name: format!("mcp__{server}__{skill}"),
+        aliases: Vec::new(),
         description: format!("MCP skill {skill}"),
         path: PathBuf::new(),
         source: SkillSource::Mcp,

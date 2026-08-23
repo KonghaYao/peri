@@ -30,6 +30,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         content: include_str!("skills/goal/SKILL.md"),
     },
     BuiltinSkill {
+        name: "programmatic-tool-calling",
+        content: include_str!("skills/programmatic-tool-calling/SKILL.md"),
+    },
+    BuiltinSkill {
         name: "ultracode",
         content: include_str!("skills/ultracode/SKILL.md"),
     },
@@ -39,7 +43,7 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
     },
 ];
 
-/// 从 SKILL.md 全文解析 frontmatter，返回 `(name, description)`。
+/// 从 SKILL.md 全文解析 frontmatter，返回 `(name, aliases, description)`。
 ///
 /// 复用 `loader::load_skill_metadata` 的 `gray_matter::Matter::<YAML>` 解析模式。
 /// frontmatter 格式错误或缺字段时返回 `None`，由调用方决定是否跳过。
@@ -47,7 +51,7 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
 /// **description trim**：YAML `>`（折叠标量）和 `|`（字面标量）会在末尾保留 `\n`，
 /// 下游 `build_summary` 把 description 拼到 Markdown list item 末尾，尾随 `\n` 会
 /// 让 list 渲染断裂成段落。这里 trim 尾随空白避免该问题。
-pub fn parse_builtin_frontmatter(content: &str) -> Option<(String, String)> {
+pub fn parse_builtin_frontmatter(content: &str) -> Option<(String, Vec<String>, String)> {
     let matter = Matter::<YAML>::new();
     // 显式类型注释：ParsedEntity 默认 D=Pod，但类型推断在 .data 访问时会失败
     // 参考 loader.rs:72 的同一模式
@@ -57,10 +61,12 @@ pub fn parse_builtin_frontmatter(content: &str) -> Option<(String, String)> {
     #[derive(serde::Deserialize)]
     struct Fm {
         name: String,
+        #[serde(default)]
+        aliases: Vec<String>,
         description: String,
     }
     let fm: Fm = data.deserialize().ok()?;
-    Some((fm.name, fm.description.trim().to_string()))
+    Some((fm.name, fm.aliases, fm.description.trim().to_string()))
 }
 
 #[cfg(test)]

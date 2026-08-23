@@ -96,7 +96,7 @@ fn make_context(
 }
 
 #[tokio::test]
-async fn wrapper_policy_is_canonical_while_event_and_transcript_stay_raw() {
+async fn wrapper_policy_event_and_result_project_canonical_target() {
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let policy = Arc::new(Mutex::new(Vec::new()));
     let write: Arc<dyn BaseTool> = Arc::new(RecordingTool {
@@ -145,10 +145,10 @@ async fn wrapper_policy_is_canonical_while_event_and_transcript_stay_raw() {
     let started = events.render_rx.recv().await.unwrap();
     match started {
         peri_agent::agent::events_v2::RenderEvent::ToolStarted { name, input, .. } => {
-            assert_eq!(name, EXECUTE_EXTRA_TOOL_NAME);
-            assert_eq!(input["tool_name"], "SAVE");
+            assert_eq!(name, "Write");
+            assert_eq!(input, json!({"file_path": "/tmp/a"}));
         }
-        event => panic!("expected raw ToolStarted, got {event:?}"),
+        event => panic!("expected canonical ToolStarted, got {event:?}"),
     }
 }
 

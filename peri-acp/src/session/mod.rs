@@ -245,7 +245,7 @@ impl SessionManager {
             .map(|s| RouteEntry {
                 // 第一等级显式形态；裸名 = 解析层快捷匹配（alias_index 登记）。
                 fullname: format!("core:{}", s.name.to_lowercase()),
-                aliases: vec![],
+                aliases: s.aliases.clone(),
                 description: s.description.clone(),
                 kind: CommandEntryKind::Skill, // core 域本地 skill（设计 §85）
                 category: None,

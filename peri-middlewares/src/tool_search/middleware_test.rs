@@ -313,6 +313,75 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
     );
 }
 
+#[tokio::test]
+async fn test_before_agent_binds_index_and_prompt_to_each_turn_snapshot() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let mw = ToolSearchMiddleware::new(Arc::clone(&index), shared);
+    let local: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(BTreeMap::new()));
+
+    local.write().insert(
+        "Alpha".to_string(),
+        Arc::new(MockTool::new("Alpha", "first deferred tool")) as Arc<dyn BaseTool>,
+    );
+    mw.before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+    assert_eq!(index.search("select:Alpha", 10).len(), 1);
+    assert!(contribution(&mw).unwrap().contains("Alpha"));
+
+    local.write().clear();
+    mw.before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+    assert!(index.search("select:Alpha", 10).is_empty());
+    assert!(contribution(&mw).is_none());
+
+    local.write().insert(
+        "Beta".to_string(),
+        Arc::new(MockTool::new("Beta", "replacement deferred tool")) as Arc<dyn BaseTool>,
+    );
+    mw.before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+    assert!(index.search("select:Alpha", 10).is_empty());
+    assert_eq!(index.search("select:Beta", 10).len(), 1);
+    let prompt = contribution(&mw).unwrap();
+    assert!(!prompt.contains("Alpha"));
+    assert!(prompt.contains("Beta"));
+}
+
+#[tokio::test]
+async fn test_before_agent_rebuilds_same_count_replacement() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let mw = ToolSearchMiddleware::new(Arc::clone(&index), shared);
+    let local: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(BTreeMap::new()));
+
+    local.write().insert(
+        "Alpha".to_string(),
+        Arc::new(MockTool::new("Alpha", "first deferred tool")) as Arc<dyn BaseTool>,
+    );
+    mw.before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+
+    local.write().clear();
+    local.write().insert(
+        "Beta".to_string(),
+        Arc::new(MockTool::new("Beta", "replacement deferred tool")) as Arc<dyn BaseTool>,
+    );
+    mw.before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+
+    assert!(index.search("select:Alpha", 10).is_empty());
+    assert_eq!(index.search("select:Beta", 10).len(), 1);
+    let prompt = contribution(&mw).unwrap();
+    assert!(!prompt.contains("Alpha"));
+    assert!(prompt.contains("Beta"));
+}
+
 /// 构造含声明工具的测试组件：deferred（CronRegister/mcp） + direct（Read）。
 fn build_declaring_components() -> (
     Arc<ToolSearchIndex>,

@@ -55,6 +55,8 @@ pub struct SkillResource {
 #[derive(Debug, Clone)]
 pub struct SkillMetadata {
     pub name: String,
+    /// 规范名称的可选别名（frontmatter `aliases`），用于查找与命令路由。
+    pub aliases: Vec<String>,
     pub description: String,
     pub path: PathBuf,
     /// skill 来源（由 scan_dir_recursive 注入，load_skill_metadata 内填占位）
@@ -73,6 +75,7 @@ impl Default for SkillMetadata {
     fn default() -> Self {
         Self {
             name: String::new(),
+            aliases: Vec::new(),
             description: String::new(),
             path: PathBuf::new(),
             source: SkillSource::Project,

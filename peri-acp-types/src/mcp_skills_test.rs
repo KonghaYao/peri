@@ -15,6 +15,7 @@ fn token(v: u32) -> HandleToken {
 fn skill(full_name: &str) -> SkillMetadata {
     SkillMetadata {
         name: full_name.to_string(),
+        aliases: Vec::new(),
         description: format!("desc of {full_name}"),
         ..SkillMetadata::default()
     }

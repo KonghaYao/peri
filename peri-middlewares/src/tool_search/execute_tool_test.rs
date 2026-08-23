@@ -77,6 +77,13 @@ fn build_test_registry() -> Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> {
             "A tool that always fails",
         )) as Arc<dyn BaseTool>,
     );
+    map.insert(
+        "RunPtcCode".to_string(),
+        Arc::new(MockTool::new(
+            "RunPtcCode",
+            "Programmatic Tool Calling with ESM Node.js",
+        )) as Arc<dyn BaseTool>,
+    );
     Arc::new(RwLock::new(map))
 }
 
@@ -110,6 +117,32 @@ async fn test_invoke_executes_deferred_tool() {
         .await
         .unwrap();
     assert_eq!(result, "CronRegister executed");
+}
+
+#[test]
+fn test_resolver_rejects_legacy_run_code_target() {
+    use peri_agent::{agent::react::ToolCall, tools::ToolInvocationResolver};
+
+    let registry = build_test_registry();
+    let mut tools = registry.read().clone();
+    tools.insert(
+        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        Arc::new(ExecuteExtraTool::new(Arc::clone(&registry))),
+    );
+
+    let error = ExecuteExtraToolResolver::default()
+        .resolve(
+            &ToolCall::new(
+                "call_legacy",
+                EXECUTE_EXTRA_TOOL_NAME,
+                json!({"tool_name": "run_code", "params": {}}),
+            ),
+            &tools,
+        )
+        .err()
+        .expect("legacy run_code must not resolve");
+
+    assert!(matches!(error, AgentError::ToolNotFound(name) if name == "run_code"));
 }
 
 #[test]

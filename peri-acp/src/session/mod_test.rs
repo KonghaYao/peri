@@ -886,6 +886,19 @@ async fn test_session_creation_registers_local_skills_core_domain() {
     assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
 }
 
+#[tokio::test]
+async fn test_session_creation_registers_builtin_skill_alias() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp);
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+    let resolved = reg.resolve("/ptc").expect("builtin alias 应命中");
+
+    assert_eq!(resolved.entry.fullname, "core:programmatic-tool-calling");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
+}
+
 /// MetaHarness 关闭 SkillsMiddleware 时，本地 skill 不得进入命令注册表；否则
 /// slash 路由会经 AgentPassthrough 绕开 middleware 的装配期开关。
 #[tokio::test]

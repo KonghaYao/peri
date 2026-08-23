@@ -8,6 +8,7 @@ use peri_agent::{
     middleware::{r#trait::Middleware, state::MiddlewareState},
     tools::{
         BaseTool, EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, ToolContext,
+        RUN_PTC_CODE_TOOL_NAME,
     },
 };
 use peri_js_runtime::{
@@ -17,11 +18,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-pub const RUN_CODE_TOOL_NAME: &str = "run_code";
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RunCodeInput {
+struct RunPtcCodeInput {
     source: String,
     #[serde(default)]
     input: Value,
@@ -146,27 +145,27 @@ impl JsRpcRouter for PtcRouter {
     }
 }
 
-fn format_run_code_error(error: JsRuntimeError) -> Box<dyn std::error::Error + Send + Sync> {
+fn format_run_ptc_code_error(error: JsRuntimeError) -> Box<dyn std::error::Error + Send + Sync> {
     format!("{}: {}", error.code(), error.public_message()).into()
 }
 
-pub struct RunCodeTool;
+pub struct RunPtcCodeTool;
 
 #[async_trait]
-impl BaseTool for RunCodeTool {
+impl BaseTool for RunPtcCodeTool {
     fn name(&self) -> &str {
-        RUN_CODE_TOOL_NAME
+        RUN_PTC_CODE_TOOL_NAME
     }
 
     fn description(&self) -> &str {
-        "Execute an async function body in an ESM-only Node.js process. Top-level await and return are supported; require and static import are unavailable. Load built-ins with `const crypto = await import('node:crypto');`. Return a JSON-compatible value: undefined, NaN, and Infinity become null, while Map and Set use native JSON serialization and usually become {}. This tool is permissioned like Bash. Calls through tools.<name>(input) use Peri's effective-tool permission path, but direct Node.js APIs do not and are not sandboxed."
+        "Programmatically run code to call tools.<ToolName>(input) from an async ESM function body in a Node.js process（程序化、批量、并发工具调用）. Use JavaScript to batch and concurrently orchestrate multiple tool calls, for example with Promise.all. Top-level await and return are supported; require and static import are unavailable. This tool is permissioned like Bash. tools.* calls use Peri's effective-tool Permission/HITL path; direct Node.js APIs do not and are not sandboxed."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "source": { "type": "string", "description": "An async function body executed ESM-only in a normal Node.js process; top-level await and return are supported, but require and static import are unavailable. Load built-ins with `const crypto = await import('node:crypto');`. Direct Node APIs are not sandboxed. Return a JSON-compatible value: undefined, NaN, and Infinity become null; Map and Set use native JSON serialization and usually become {}. Never read or expose secrets." },
+                "source": { "type": "string", "description": "An async ESM function body for programmatic, batch, and concurrent tools.<ToolName>(input) calls in a normal Node.js process. Top-level await and return are supported, but require and static import are unavailable. Use Promise.all for concurrent tool calls and `await import('node:...')` for built-ins. Direct Node APIs are not sandboxed. Return a JSON-compatible value. Never read or expose secrets." },
                 "input": { "description": "Optional JSON value exposed to the program as input; never include secrets." }
             },
             "required": ["source"]
@@ -174,7 +173,7 @@ impl BaseTool for RunCodeTool {
     }
 
     fn is_direct(&self) -> bool {
-        true
+        false
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {
@@ -186,13 +185,13 @@ impl BaseTool for RunCodeTool {
         input: Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let input: RunCodeInput = serde_json::from_value(input)?;
+        let input: RunPtcCodeInput = serde_json::from_value(input)?;
         let dispatcher = ctx.effective_tool_dispatcher.ok_or_else(|| {
-            "run_code requires the current Agent effective-tool dispatcher".to_string()
+            format!("{RUN_PTC_CODE_TOOL_NAME} requires the current Agent effective-tool dispatcher")
         })?;
-        let parent_invocation_id = ctx
-            .invocation_id
-            .ok_or_else(|| "run_code requires the current outer tool invocation ID".to_string())?;
+        let parent_invocation_id = ctx.invocation_id.ok_or_else(|| {
+            format!("{RUN_PTC_CODE_TOOL_NAME} requires the current outer tool invocation ID")
+        })?;
         let router = Arc::new(PtcRouter {
             dispatcher,
             parent_invocation_id,
@@ -208,7 +207,7 @@ impl BaseTool for RunCodeTool {
                 ctx.cancellation,
             )
             .await
-            .map_err(format_run_code_error)?;
+            .map_err(format_run_ptc_code_error)?;
         Ok(serde_json::to_string(&result)?)
     }
 }
@@ -238,7 +237,7 @@ impl Middleware for PtcMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(RunCodeTool)]
+        vec![Box::new(RunPtcCodeTool)]
     }
 
     async fn before_agent(
@@ -251,7 +250,7 @@ impl Middleware for PtcMiddleware {
                 tools
                     .read()
                     .values()
-                    .filter(|tool| tool.name() != RUN_CODE_TOOL_NAME)
+                    .filter(|tool| tool.name() != RUN_PTC_CODE_TOOL_NAME)
                     .map(|tool| EffectiveToolDefinition {
                         name: tool.name().to_string(),
                         description: tool.description().to_string(),
@@ -268,7 +267,7 @@ impl Middleware for PtcMiddleware {
             }
         })?;
         *self.cached_contribution.write().unwrap() = Some(format!(
-            "run_code executes an async function body ESM-only in a normal Node.js process and is not a sandbox. Top-level await and return are supported; require and static import are unavailable. Load built-ins with `const crypto = await import('node:crypto');`. Return a JSON-compatible value: undefined, NaN, and Infinity become null; Map and Set use native JSON serialization and usually become {{}}. Prefer tools.<ToolName>(input) so session-local visibility and effective-name Permission/HITL apply. Direct Node.js filesystem, process, environment, and network APIs do not pass through tools.* Permission/HITL. Never read or expose secrets in source, input, console, return values, exceptions, or tool arguments. The following catalog lists RPC-callable tools, not allowed Node APIs: {catalog}"
+            "{RUN_PTC_CODE_TOOL_NAME} programmatically executes batch and concurrent tools.<ToolName>(input) calls from an async ESM function body in a normal Node.js process and is not a sandbox. Top-level await, return, Promise.all, and dynamic `await import('node:...')` are supported; require and static import are unavailable. tools.* calls use session-local visibility and effective-name Permission/HITL. Direct Node.js filesystem, process, environment, and network APIs do not pass through tools.* Permission/HITL. Never read or expose secrets in source, input, console, return values, exceptions, or tool arguments. RPC-callable tool catalog: {catalog}"
         ));
         Ok(())
     }

@@ -652,6 +652,7 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
             "srv",
             &[SkillMetadata {
                 name: "mcp__srv__hello".into(),
+                aliases: Vec::new(),
                 description: "hello skill".into(),
                 ..SkillMetadata::default()
             }],
@@ -710,6 +711,7 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
             "srv",
             &[SkillMetadata {
                 name: "mcp__srv__hello".into(),
+                aliases: Vec::new(),
                 description: "hello skill".into(),
                 ..SkillMetadata::default()
             }],
@@ -767,6 +769,7 @@ async fn attach_connection_notifier_triggers_discovery_on_connected() {
             "srv",
             &[SkillMetadata {
                 name: "mcp__srv__hello".into(),
+                aliases: Vec::new(),
                 description: "hello skill".into(),
                 ..SkillMetadata::default()
             }],
@@ -813,6 +816,7 @@ async fn notify_initial_connections_triggers_discovery_on_startup() {
             "srv",
             &[SkillMetadata {
                 name: "mcp__srv__hello".into(),
+                aliases: Vec::new(),
                 description: "hello skill".into(),
                 ..SkillMetadata::default()
             }],
@@ -857,6 +861,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
             "demo",
             &[SkillMetadata {
                 name: "mcp__demo__hello".into(),
+                aliases: Vec::new(),
                 description: "hello skill".into(),
                 ..SkillMetadata::default()
             }],
@@ -983,6 +988,7 @@ async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
             server,
             &[SkillMetadata {
                 name: "mcp__plugin:p1:demosrv__beta".into(),
+                aliases: Vec::new(),
                 description: "beta skill".into(),
                 ..SkillMetadata::default()
             }],

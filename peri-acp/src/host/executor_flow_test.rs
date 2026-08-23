@@ -1023,11 +1023,24 @@ impl Model for PtcScriptedModel {
         *self.visible_tools.lock().unwrap() =
             request.tools.iter().map(|tool| tool.name.clone()).collect();
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let (message, stop_reason, mut events) = if call == 0 {
-            let arguments = serde_json::json!({ "source": self.source });
+        let (message, stop_reason, mut events) = if call < 2 {
+            let (name, arguments) = if call == 0 {
+                (
+                    "SearchExtraTools",
+                    serde_json::json!({ "query": "ptc run code 程序化 批量" }),
+                )
+            } else {
+                (
+                    "ExecuteExtraTool",
+                    serde_json::json!({
+                        "tool_name": "RunPtcCode",
+                        "params": { "source": self.source }
+                    }),
+                )
+            };
             let tool_call = ToolCall::new(
                 "ptc-e2e-outer",
-                "run_code",
+                name,
                 JsonObject::from_value(arguments.clone()).unwrap(),
             );
             (
@@ -1036,7 +1049,7 @@ impl Model for PtcScriptedModel {
                 vec![ModelStreamEvent::ToolCallDelta {
                     index: 0,
                     id: Some("ptc-e2e-outer".into()),
-                    name: Some("run_code".into()),
+                    name: Some(name.into()),
                     arguments_delta: arguments.to_string(),
                 }],
             )
@@ -1139,14 +1152,14 @@ async fn test_ptc_runs_through_acp_session_agent_production_path() {
         result.stop_reason
     );
     let tools = visible_tools.lock().unwrap();
-    assert!(tools.iter().any(|name| name == "run_code"));
-    assert!(tools.iter().any(|name| name == "Read"));
-    assert!(tools
-        .iter()
-        .any(|name| name != "run_code" && name != "Read"));
-    assert_eq!(approvals.lock().unwrap().as_slice(), ["run_code"]);
+    assert!(tools.iter().any(|name| name == "ExecuteExtraTool"));
+    assert!(tools.iter().any(|name| name == "SearchExtraTools"));
+    assert!(!tools.iter().any(|name| name == "RunPtcCode"));
+    assert!(!tools.iter().any(|name| name == "run_code"));
+    assert_eq!(approvals.lock().unwrap().as_slice(), ["RunPtcCode"]);
     let events = sink.pushed_events.lock().unwrap().join("\n");
     assert!(events.contains("ptc-e2e-outer/ptc-"), "{events}");
+    assert!(events.contains("RunPtcCode"), "{events}");
     assert!(events.contains("UNKNOWN_TOOL"), "{events}");
     assert!(
         events.contains("alpha") && events.contains("beta"),

@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    format_run_code_error, stable_tool_catalog, InvocationState, RunCodeTool,
-    MAX_PRE_CANCELLED_INVOCATIONS, RUN_CODE_TOOL_NAME,
+    format_run_ptc_code_error, stable_tool_catalog, InvocationState, RunPtcCodeTool,
+    MAX_PRE_CANCELLED_INVOCATIONS, RUN_PTC_CODE_TOOL_NAME,
 };
 
 struct FakeDispatcher;
@@ -95,10 +95,11 @@ fn test_unknown_cancels_are_bounded() {
 }
 
 #[test]
-fn test_run_code_is_additional_direct_tool() {
-    let tool = RunCodeTool;
-    assert_eq!(tool.name(), RUN_CODE_TOOL_NAME);
-    assert!(tool.is_direct());
+fn test_run_ptc_code_is_deferred_canonical_tool() {
+    let tool = RunPtcCodeTool;
+    assert_eq!(tool.name(), RUN_PTC_CODE_TOOL_NAME);
+    assert!(!tool.is_direct());
+    assert!(tool.aliases().is_empty());
 }
 
 #[test]
@@ -112,7 +113,7 @@ fn test_catalog_is_stably_sorted_from_dispatcher_view() {
 
 #[tokio::test]
 async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
-    let tool = RunCodeTool;
+    let tool = RunPtcCodeTool;
     let result = tool
         .invoke(
             json!({
@@ -120,7 +121,7 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
             }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(FakeDispatcher),
-                "outer-run-code",
+                "outer-run-ptc-code",
                 CancellationToken::new(),
             ),
         )
@@ -135,14 +136,14 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
 
 #[tokio::test]
 async fn test_run_code_preserves_effective_tool_error_code() {
-    let result = RunCodeTool
+    let result = RunPtcCodeTool
         .invoke(
             json!({
                 "source": "try { await tools.Write({}); } catch (error) { return { name: error.name, code: error.code }; }"
             }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(FakeDispatcher),
-                "outer-run-code",
+                "outer-run-ptc-code",
                 CancellationToken::new(),
             ),
         )
@@ -157,14 +158,14 @@ async fn test_run_code_preserves_effective_tool_error_code() {
 
 #[tokio::test]
 async fn test_run_code_preserves_all_canonical_error_codes() {
-    let result = RunCodeTool
+    let result = RunPtcCodeTool
         .invoke(
             json!({
                 "source": "const codes = []; for (const name of ['Write', 'Reject', 'Cancel', 'Timeout']) { try { await tools[name]({}); } catch (error) { codes.push(error.code); } } return codes;"
             }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(FakeDispatcher),
-                "outer-run-code",
+                "outer-run-ptc-code",
                 CancellationToken::new(),
             ),
         )
@@ -179,50 +180,45 @@ async fn test_run_code_preserves_all_canonical_error_codes() {
 
 #[tokio::test]
 async fn test_run_code_rejects_without_dispatch_context() {
-    let result = RunCodeTool
+    let result = RunPtcCodeTool
         .invoke(json!({ "source": "return 1;" }), ToolContext::new(&[], "."))
         .await;
     assert!(result.is_err());
 }
 
 #[test]
-fn test_run_code_description_documents_esm_and_json_contract() {
-    let description = RunCodeTool.description();
+fn test_run_ptc_code_description_emphasizes_programmatic_batch_concurrent_esm() {
+    let description = RunPtcCodeTool.description();
     for expected in [
-        "async function body",
-        "ESM-only",
-        "require",
-        "static import",
-        "await import('node:crypto')",
-        "JSON-compatible",
-        "undefined",
-        "NaN",
-        "Infinity",
-        "Map",
-        "Set",
+        "Programmatically run code",
+        "批量",
+        "并发",
+        "tools.<ToolName>(input)",
+        "Promise.all",
+        "ESM",
+        "Node.js",
+        "Bash",
+        "not sandboxed",
     ] {
         assert!(description.contains(expected), "missing {expected}");
     }
 }
 
 #[test]
-fn test_run_code_source_schema_documents_esm_and_json_contract() {
-    let parameters = RunCodeTool.parameters();
+fn test_run_ptc_code_source_schema_emphasizes_programmatic_batch_concurrent_esm() {
+    let parameters = RunPtcCodeTool.parameters();
     let description = parameters["properties"]["source"]["description"]
         .as_str()
         .unwrap();
     for expected in [
-        "async function body",
-        "ESM-only",
-        "require",
-        "static import",
-        "await import('node:crypto')",
-        "JSON-compatible",
-        "undefined",
-        "NaN",
-        "Infinity",
-        "Map",
-        "Set",
+        "programmatic",
+        "batch",
+        "concurrent",
+        "tools.<ToolName>(input)",
+        "Promise.all",
+        "ESM",
+        "Node.js",
+        "await import('node:...')",
     ] {
         assert!(description.contains(expected), "missing {expected}");
     }
@@ -259,19 +255,19 @@ fn test_run_code_error_formatter_uses_only_stable_projection() {
         ),
     ];
     for (error, expected) in cases {
-        assert_eq!(format_run_code_error(error).to_string(), expected);
+        assert_eq!(format_run_ptc_code_error(error).to_string(), expected);
     }
 }
 
 #[tokio::test]
 async fn test_run_code_exception_returns_safe_fixed_error() {
     let source = "throw new Error('ptc-tool-canary');";
-    let error = RunCodeTool
+    let error = RunPtcCodeTool
         .invoke(
             json!({ "source": source, "input": { "input-canary": true } }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(FakeDispatcher),
-                "outer-run-code",
+                "outer-run-ptc-code",
                 CancellationToken::new(),
             ),
         )
@@ -287,12 +283,12 @@ async fn test_run_code_exception_returns_safe_fixed_error() {
 #[tokio::test]
 async fn test_run_code_resource_limit_returns_safe_fixed_error() {
     let source = "return 'result-canary'.repeat(1024 * 1024);";
-    let error = RunCodeTool
+    let error = RunPtcCodeTool
         .invoke(
             json!({ "source": source, "input": { "input-canary": true } }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(FakeDispatcher),
-                "outer-run-code",
+                "outer-run-ptc-code",
                 CancellationToken::new(),
             ),
         )
@@ -306,23 +302,21 @@ async fn test_run_code_resource_limit_returns_safe_fixed_error() {
 }
 
 #[tokio::test]
-async fn test_ptc_prompt_documents_esm_and_json_contract() {
+async fn test_ptc_prompt_emphasizes_programmatic_batch_concurrent_esm() {
     let middleware = super::PtcMiddleware::new();
     let mut state = AgentState::new(".");
     middleware.before_agent(&mut state).await.unwrap();
     let contribution = middleware.prompt_contribution().unwrap();
     for expected in [
-        "async function body",
-        "ESM-only",
-        "require",
-        "static import",
-        "await import('node:crypto')",
-        "JSON-compatible",
-        "undefined",
-        "NaN",
-        "Infinity",
-        "Map",
-        "Set",
+        RUN_PTC_CODE_TOOL_NAME,
+        "programmatically",
+        "batch",
+        "concurrent",
+        "tools.<ToolName>(input)",
+        "Promise.all",
+        "ESM",
+        "Node.js",
+        "not a sandbox",
     ] {
         assert!(contribution.contains(expected), "missing {expected}");
     }

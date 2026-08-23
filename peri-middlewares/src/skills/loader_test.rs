@@ -26,6 +26,114 @@ fn write_skill_file(path: &Path, name: &str, desc: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+fn write_skill_with_aliases(dir: &Path, name: &str, aliases: &[&str], desc: &str) {
+    let skill_dir = dir.join(name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let aliases = aliases
+        .iter()
+        .map(|alias| format!("  - '{alias}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "---\nname: '{name}'\naliases:\n{aliases}\ndescription: '{desc}'\n---\n\n# {name}\n"
+    );
+    std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+#[test]
+fn test_load_skill_metadata_parses_aliases() {
+    let root = tempdir().unwrap();
+    write_skill_with_aliases(root.path(), "canonical", &["short", "ns:alias"], "desc");
+
+    let meta = load_skill_metadata(&root.path().join("canonical/SKILL.md")).unwrap();
+
+    assert_eq!(meta.aliases, vec!["short", "ns-alias"]);
+}
+
+#[test]
+fn test_builtin_reserved_alias_rejects_non_builtin_name_or_alias() {
+    let root = tempdir().unwrap();
+    write_skill(root.path(), "ptc", "tries to claim builtin alias");
+    write_skill_with_aliases(root.path(), "other", &["ptc"], "also claims builtin alias");
+    let roots = vec![
+        SkillRoot {
+            path: root.path().to_path_buf(),
+            source: SkillSource::Project,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: PathBuf::new(),
+            source: SkillSource::Builtin,
+            plugin_name: None,
+        },
+    ];
+
+    let skills = scan_skill_roots(&roots);
+
+    assert!(!skills.iter().any(|skill| skill.name == "ptc"));
+    assert!(!skills.iter().any(|skill| skill.name == "other"));
+    assert!(skills.iter().any(|skill| {
+        skill.name == "programmatic-tool-calling" && skill.aliases == vec!["ptc"]
+    }));
+}
+
+#[test]
+fn test_builtin_ptc_survives_higher_priority_canonical_override() {
+    let root = tempdir().unwrap();
+    write_skill(
+        root.path(),
+        "programmatic-tool-calling",
+        "higher priority canonical",
+    );
+    let roots = vec![
+        SkillRoot {
+            path: root.path().to_path_buf(),
+            source: SkillSource::User,
+            plugin_name: None,
+        },
+        SkillRoot {
+            path: PathBuf::new(),
+            source: SkillSource::Builtin,
+            plugin_name: None,
+        },
+    ];
+
+    let skills = scan_skill_roots(&roots);
+    assert!(!skills.iter().any(|skill| skill.name == "ptc"));
+    let canonical = skills
+        .iter()
+        .find(|skill| skill.name == "programmatic-tool-calling")
+        .unwrap();
+    assert_eq!(canonical.source, SkillSource::User);
+    assert_eq!(canonical.description, "higher priority canonical");
+    assert_eq!(canonical.aliases, vec!["ptc"]);
+    assert_eq!(
+        canonical.path,
+        root.path()
+            .join("programmatic-tool-calling")
+            .join("SKILL.md")
+    );
+
+    let (_, content) = find_skill_in_list(&skills, "ptc").unwrap();
+    assert!(content.contains("# programmatic-tool-calling"));
+    assert!(content.contains("Content here."));
+}
+
+#[test]
+fn test_disable_bundled_removes_builtin_reservation() {
+    let root = tempdir().unwrap();
+    write_skill(root.path(), "ptc", "project skill");
+    let roots = vec![SkillRoot {
+        path: root.path().to_path_buf(),
+        source: SkillSource::Project,
+        plugin_name: None,
+    }];
+
+    let skills = scan_skill_roots(&roots);
+
+    assert!(skills.iter().any(|skill| skill.name == "ptc"));
+}
+
 #[test]
 fn test_scan_skill_roots_nested() {
     let root = tempdir().unwrap();

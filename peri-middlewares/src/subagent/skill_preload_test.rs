@@ -28,6 +28,7 @@ fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> 
     let handle: HandleToken = Arc::new(1u32);
     let meta = SkillMetadata {
         name: mcp_skill_name(server, skill),
+        aliases: Vec::new(),
         description: format!("MCP skill {skill}"),
         path: std::path::PathBuf::new(),
         source: SkillSource::Mcp,
@@ -43,6 +44,20 @@ fn seed_registry_with_skill(server: &str, skill: &str) -> Arc<McpSkillRegistry> 
     reg.mark_discovery_started(server, handle.clone());
     reg.mark_discovery_completed(server, handle, vec![meta]);
     reg
+}
+
+#[tokio::test]
+async fn test_inject_builtin_skill_by_alias_uses_canonical_content() {
+    let dir = tempdir().unwrap();
+    let mw = SkillPreloadMiddleware::new(vec!["ptc".to_string()], dir.path().to_str().unwrap());
+    let mut state = AgentState::new(dir.path().to_str().unwrap());
+
+    mw.before_agent(&mut state).await.unwrap();
+
+    assert_eq!(state.messages().len(), 2);
+    assert!(state.messages()[1]
+        .content()
+        .contains("name: programmatic-tool-calling"));
 }
 
 #[tokio::test]

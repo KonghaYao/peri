@@ -15,7 +15,8 @@ use peri_agent::{
     },
 };
 
-use crate::ptc::RUN_CODE_TOOL_NAME;
+use peri_agent::tools::RUN_PTC_CODE_TOOL_NAME;
+
 use crate::tool_search::core_tools::{
     TOOL_AGENT, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
 };
@@ -44,7 +45,7 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
         || tool_name == TOOL_AGENT
-        || tool_name == RUN_CODE_TOOL_NAME
+        || tool_name == RUN_PTC_CODE_TOOL_NAME
         || tool_name == TOOL_WRITE
         || tool_name == TOOL_EDIT
         || tool_name.starts_with("delete_")
@@ -103,8 +104,8 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 12] {
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: RUN_CODE_TOOL_NAME,
-            description: "arbitrary JavaScript execution with direct Node.js API access",
+            name: RUN_PTC_CODE_TOOL_NAME,
+            description: "programmatic arbitrary JavaScript execution with direct Node.js API access",
             prefix_match: false,
         },
         SensitiveToolEntry {

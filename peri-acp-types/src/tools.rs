@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::BaseMessage;
 
+/// Programmatic Tool Calling 的 public canonical 工具名。
+///
+/// 置于工具契约 crate，供 Agent dispatch guard 与 middleware 实现共享，避免
+/// `peri-agent` 反向依赖 `peri-middlewares`。
+pub const RUN_PTC_CODE_TOOL_NAME: &str = "RunPtcCode";
+
 /// Todo 条目状态（L5：自 `peri-middlewares/src/tools/todo.rs` 迁入，
 /// middlewares 保留 re-export；与 `crate::event::TodoStatus`（事件 DTO）同构
 /// 但独立定义，避免改动事件序列化语义）。

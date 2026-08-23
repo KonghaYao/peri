@@ -59,6 +59,7 @@ fn make_registry_with_skills() -> Arc<McpSkillRegistry> {
     let h: HandleToken = Arc::new(1u32);
     let skill = SkillMetadata {
         name: mcp_skill_name("zzsrv", "zzskill"),
+        aliases: Vec::new(),
         description: "A zz skill for zz query".to_string(),
         source: SkillSource::Mcp,
         origin: Some(SkillOrigin::Mcp {
@@ -184,6 +185,7 @@ async fn search_skill_without_origin_parses_server_from_name() {
     let h: HandleToken = Arc::new(2u32);
     let skill = SkillMetadata {
         name: mcp_skill_name("plain", "myskill"),
+        aliases: Vec::new(),
         description: "plain skill".to_string(),
         ..SkillMetadata::default()
     };
@@ -613,11 +615,13 @@ async fn search_results_sorted_by_type_then_name() {
     let h: HandleToken = Arc::new(3u32);
     let skill_z = SkillMetadata {
         name: mcp_skill_name("zzs1", "skill-z"),
+        aliases: Vec::new(),
         description: "zz skill".to_string(),
         ..Default::default()
     };
     let skill_a = SkillMetadata {
         name: mcp_skill_name("zzs1", "skill-a"),
+        aliases: Vec::new(),
         description: "zz skill".to_string(),
         ..Default::default()
     };

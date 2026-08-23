@@ -47,6 +47,10 @@ fn build_test_index() -> Arc<ToolSearchIndex> {
             "Get Slack channel info",
         )),
         Arc::new(MockTool::new(
+            "RunPtcCode",
+            "Programmatically run code for 程序化、批量、并发 tools.<ToolName>(input) calls in ESM Node.js",
+        )),
+        Arc::new(MockTool::new(
             "CronRegister",
             "Register a cron scheduled task",
         )),
@@ -70,6 +74,25 @@ fn test_parameters_schema() {
     assert!(params["properties"]["query"].is_object());
     let required = params["required"].as_array().unwrap();
     assert!(required.contains(&json!("query")));
+}
+
+#[test]
+fn test_ptc_queries_find_only_canonical_name() {
+    let index = build_test_index();
+
+    for query in ["ptc", "run code", "run_code", "程序化", "批量"] {
+        let results = index.search(query, 10);
+        assert!(
+            results.iter().any(|result| result.name == "RunPtcCode"),
+            "query {query:?} did not find RunPtcCode: {:?}",
+            results
+                .iter()
+                .map(|result| &result.name)
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(index.search("select:run_code", 10).is_empty());
+    assert_eq!(index.search("select:RunPtcCode", 10)[0].name, "RunPtcCode");
 }
 
 #[tokio::test]

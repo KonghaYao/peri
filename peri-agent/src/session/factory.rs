@@ -73,7 +73,7 @@ pub enum ChainSlot {
     Mcp,
     /// Workflow（workflow 工具，executor 可用时注册）
     Workflow,
-    /// PTC（direct run_code 与 session-local tools bridge）
+    /// PTC（deferred RunPtcCode 与 session-local tools bridge）
     Ptc,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,

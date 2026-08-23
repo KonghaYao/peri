@@ -526,7 +526,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         chain.add(Box::new(adaptor));
                     }
                 }
-                // Programmatic Tool Calling：附加 direct run_code，不改变其他工具可见性。
+                // Programmatic Tool Calling：注册 deferred RunPtcCode，由 ToolSearch 发现/执行。
                 ChainSlot::Ptc if disabled.contains("PtcMiddleware") => {}
                 ChainSlot::Ptc => {
                     chain.add(Box::new(PtcMiddleware::new()));

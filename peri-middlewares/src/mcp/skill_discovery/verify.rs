@@ -198,6 +198,7 @@ pub(super) fn build_metadata(
     }
     Some(SkillMetadata {
         name: mcp_skill_name(server, &sanitize_name(name)),
+        aliases: Vec::new(),
         description: description.trim().to_string(),
         path: PathBuf::new(),
         source: SkillSource::Mcp,

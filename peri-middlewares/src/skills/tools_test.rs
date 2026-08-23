@@ -30,6 +30,42 @@ fn make_skill_tool_with_cache(plugin_roots: Vec<SkillRoot>) -> SkillTool {
     SkillTool::new(cached)
 }
 
+#[tokio::test]
+async fn test_skill_tool_loads_skill_by_alias() {
+    let cached = Arc::new(RwLock::new(Some(scan_skill_roots(&[SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Builtin,
+        plugin_name: None,
+    }]))));
+    let tool = SkillTool::new(cached);
+
+    let content = tool
+        .invoke(json!({"skill_name": "ptc"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+
+    assert!(content.contains("name: programmatic-tool-calling"));
+}
+
+#[tokio::test]
+async fn test_discover_skills_matches_alias_and_returns_canonical() {
+    let cached = Arc::new(RwLock::new(Some(scan_skill_roots(&[SkillRoot {
+        path: PathBuf::new(),
+        source: SkillSource::Builtin,
+        plugin_name: None,
+    }]))));
+    let tool = DiscoverSkillsTool::new(cached);
+
+    let result = tool
+        .invoke(json!({"query": "ptc"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    let skills: Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(skills[0]["name"], "programmatic-tool-calling");
+    assert_eq!(skills[0]["aliases"], json!(["ptc"]));
+}
+
 // ─── SkillTool 测试 ──────────────────────────────────────────────────────────
 
 #[test]
@@ -418,6 +454,7 @@ use peri_acp_types::{mcp_skills::mcp_skill_name, skills::SkillOrigin};
 fn fake_mcp_skill(server: &str, skill: &str) -> SkillMetadata {
     SkillMetadata {
         name: mcp_skill_name(server, skill),
+        aliases: Vec::new(),
         description: format!("MCP skill {skill}"),
         path: PathBuf::new(),
         source: SkillSource::Mcp,

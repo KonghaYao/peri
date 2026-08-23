@@ -43,6 +43,8 @@ fn should_skip_dir(dir_name: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
     name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
     description: String,
 }
 
@@ -70,6 +72,11 @@ pub fn load_skill_metadata(path: &Path) -> Option<SkillMetadata> {
 
     Some(SkillMetadata {
         name: normalize_skill_name(&fm.name),
+        aliases: fm
+            .aliases
+            .iter()
+            .map(|alias| normalize_skill_name(alias))
+            .collect(),
         description: fm.description.trim().to_string(),
         path: path.to_path_buf(),
         // 占位值：实际 source/plugin_name 由 scan_dir_recursive 中的 insert_skill 覆盖
@@ -114,6 +121,14 @@ fn scan_skill_roots_impl(
 ) -> Vec<SkillMetadata> {
     let mut seen: HashMap<String, SkillMetadata> = HashMap::new();
     let mut ordered: Vec<String> = Vec::new();
+    let reserved_builtin_names: HashSet<String> = if roots
+        .iter()
+        .any(|root| matches!(root.source, SkillSource::Builtin))
+    {
+        ["ptc".to_string()].into_iter().collect()
+    } else {
+        HashSet::new()
+    };
 
     for root in roots {
         // Builtin 特判：跳过磁盘扫描，直接从编译期常量数组加载。
@@ -121,12 +136,16 @@ fn scan_skill_roots_impl(
         if matches!(root.source, SkillSource::Builtin) {
             for skill in crate::skills::builtin::BUILTIN_SKILLS {
                 let parsed = crate::skills::builtin::parse_builtin_frontmatter(skill.content);
-                let Some((name, description)) = parsed else {
+                let Some((name, aliases, description)) = parsed else {
                     tracing::warn!("builtin skill {} frontmatter 解析失败，跳过", skill.name);
                     continue;
                 };
                 let meta = SkillMetadata {
                     name: normalize_skill_name(&name),
+                    aliases: aliases
+                        .iter()
+                        .map(|alias| normalize_skill_name(alias))
+                        .collect(),
                     description,
                     path: PathBuf::from(format!("<builtin>/{}", skill.name)),
                     source: SkillSource::Builtin,
@@ -136,7 +155,20 @@ fn scan_skill_roots_impl(
                     // 内置技能无 resources 绑定（仅 MCP 来源条目填写）
                     resources: Vec::new(),
                 };
-                insert_skill(meta, root, &mut seen, &mut ordered);
+                // 高优先级 canonical 可覆盖 builtin canonical；builtin 启用时仍将
+                // 保留 token /ptc 附着到获胜 metadata，使 catalog 保持单一 canonical，
+                // 且 /ptc、SkillTool(ptc) 都加载获胜来源的内容。
+                if meta.name == "programmatic-tool-calling"
+                    && meta.aliases.iter().any(|alias| alias == "ptc")
+                {
+                    if let Some(winner) = seen.get_mut(&meta.name) {
+                        if !winner.aliases.iter().any(|alias| alias == "ptc") {
+                            winner.aliases.push("ptc".to_string());
+                        }
+                        continue;
+                    }
+                }
+                insert_skill(meta, root, &reserved_builtin_names, &mut seen, &mut ordered);
             }
             continue;
         }
@@ -153,6 +185,7 @@ fn scan_skill_roots_impl(
             max_depth,
             max_dirs,
             root,
+            &reserved_builtin_names,
             &mut visited,
             &mut dir_count,
             &mut seen,
@@ -173,6 +206,7 @@ fn scan_dir_recursive(
     max_depth: usize,
     max_dirs: usize,
     root: &SkillRoot,
+    reserved_builtin_names: &HashSet<String>,
     visited: &mut HashSet<PathBuf>,
     dir_count: &mut usize,
     seen: &mut HashMap<String, SkillMetadata>,
@@ -206,7 +240,7 @@ fn scan_dir_recursive(
     let skill_file = dir.join("SKILL.md");
     if skill_file.is_file() {
         if let Some(meta) = load_skill_metadata(&skill_file) {
-            insert_skill(meta, root, seen, ordered);
+            insert_skill(meta, root, reserved_builtin_names, seen, ordered);
         }
         return;
     }
@@ -229,6 +263,7 @@ fn scan_dir_recursive(
             max_depth,
             max_dirs,
             root,
+            reserved_builtin_names,
             visited,
             dir_count,
             seen,
@@ -240,12 +275,39 @@ fn scan_dir_recursive(
 fn insert_skill(
     mut meta: SkillMetadata,
     root: &SkillRoot,
+    reserved_builtin_names: &HashSet<String>,
     seen: &mut HashMap<String, SkillMetadata>,
     ordered: &mut Vec<String>,
 ) {
     meta.source = root.source;
     meta.plugin_name = root.plugin_name.clone();
-    if seen.contains_key(&meta.name) {
+    let claimed_names = std::iter::once(&meta.name).chain(meta.aliases.iter());
+    if !matches!(root.source, SkillSource::Builtin)
+        && claimed_names
+            .clone()
+            .any(|name| reserved_builtin_names.contains(&name.to_lowercase()))
+    {
+        tracing::warn!(
+            skill = %meta.name,
+            aliases = ?meta.aliases,
+            "非 builtin skill 与 builtin 保留 canonical/alias 冲突，已跳过"
+        );
+        return;
+    }
+    if claimed_names.clone().any(|name| {
+        seen.values().any(|existing| {
+            existing.name.eq_ignore_ascii_case(name)
+                || existing
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(name))
+        })
+    }) {
+        tracing::warn!(
+            skill = %meta.name,
+            aliases = ?meta.aliases,
+            "skill canonical/alias 冲突，已跳过"
+        );
         return;
     }
     ordered.push(meta.name.clone());
@@ -348,14 +410,20 @@ pub fn find_skill_content(
     let skills = scan_skill_roots(&roots);
 
     let name_lower = skill_name.to_lowercase();
-    let found = skills
-        .iter()
-        .find(|s| s.name.to_lowercase() == name_lower)?;
+    let found = skills.iter().find(|s| {
+        s.name.eq_ignore_ascii_case(&name_lower)
+            || s.aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(&name_lower))
+    })?;
 
     let content = if matches!(found.source, SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| normalize_skill_name(bs.name) == found.name)
+            .find(|bs| {
+                normalize_skill_name(bs.name) == found.name
+                    || found.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
+            })
             .map(|bs| bs.content.to_string())?
     } else {
         std::fs::read_to_string(&found.path).ok()?
@@ -373,14 +441,20 @@ pub fn find_skill_in_list(
     skill_name: &str,
 ) -> Option<(SkillMetadata, String)> {
     let name_lower = skill_name.to_lowercase();
-    let found = skills
-        .iter()
-        .find(|s| s.name.to_lowercase() == name_lower)?;
+    let found = skills.iter().find(|s| {
+        s.name.eq_ignore_ascii_case(&name_lower)
+            || s.aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(&name_lower))
+    })?;
 
     let content = if matches!(found.source, SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| normalize_skill_name(bs.name) == found.name)
+            .find(|bs| {
+                normalize_skill_name(bs.name) == found.name
+                    || found.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
+            })
             .map(|bs| bs.content.to_string())?
     } else {
         std::fs::read_to_string(&found.path).ok()?

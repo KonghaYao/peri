@@ -5,7 +5,7 @@ use peri_agent::tools::{
     BaseTool, EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher,
     EffectiveToolError, ToolContext,
 };
-use peri_middlewares::ptc::RunCodeTool;
+use peri_middlewares::ptc::RunPtcCodeTool;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -27,8 +27,8 @@ impl EffectiveToolDispatcher for NoopDispatcher {
 }
 
 #[tokio::test]
-async fn run_code_projects_real_node_failures_without_leaking_user_data() {
-    let error = RunCodeTool
+async fn run_ptc_code_projects_real_node_failures_without_leaking_user_data() {
+    let error = RunPtcCodeTool
         .invoke(
             json!({
                 "source": "throw new Error('e2e-source-canary');",
@@ -36,7 +36,7 @@ async fn run_code_projects_real_node_failures_without_leaking_user_data() {
             }),
             ToolContext::new(&[], ".").with_effective_tool_dispatcher(
                 Arc::new(NoopDispatcher),
-                "e2e-run-code",
+                "e2e-run-ptc-code",
                 CancellationToken::new(),
             ),
         )

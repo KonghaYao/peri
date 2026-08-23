@@ -23,9 +23,12 @@ fn test_builtin_skills_frontmatter_valid() {
         let parsed = parse_builtin_frontmatter(skill.content);
         assert!(parsed.is_some(),
             "builtin skill {} frontmatter 解析失败", skill.name);
-        let (name, desc) = parsed.unwrap();
+        let (name, aliases, desc) = parsed.unwrap();
         assert_eq!(name, skill.name,
             "builtin skill {} frontmatter name 字段不匹配", skill.name);
+        if skill.name == "programmatic-tool-calling" {
+            assert_eq!(aliases, vec!["ptc"]);
+        }
         assert!(!desc.is_empty(),
             "builtin skill {} description 为空", skill.name);
     }
@@ -47,7 +50,8 @@ fn test_parse_builtin_frontmatter_valid() {
     let content = "---\nname: test-skill\ndescription: 测试 skill\n---\n\n# Body\n";
     let parsed = parse_builtin_frontmatter(content).unwrap();
     assert_eq!(parsed.0, "test-skill");
-    assert_eq!(parsed.1, "测试 skill");
+    assert!(parsed.1.is_empty());
+    assert_eq!(parsed.2, "测试 skill");
 }
 
 #[test]
@@ -58,7 +62,7 @@ fn test_parse_builtin_frontmatter_trims_trailing_newline() {
     let parsed = parse_builtin_frontmatter(content).unwrap();
     assert_eq!(parsed.0, "folded");
     assert!(
-        !parsed.1.ends_with('\n') && !parsed.1.ends_with('\r'),
-        "description 不应含尾随换行，实际: {:?}", parsed.1
+        !parsed.2.ends_with('\n') && !parsed.2.ends_with('\r'),
+        "description 不应含尾随换行，实际: {:?}", parsed.2
     );
 }

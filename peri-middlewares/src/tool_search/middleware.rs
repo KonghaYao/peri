@@ -28,6 +28,8 @@ pub struct ToolSearchMiddleware {
     shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     cached_contribution: Arc<StdRwLock<Option<String>>>,
+    /// 当前索引绑定的 deferred snapshot 指纹。
+    deferred_fingerprint: Arc<StdRwLock<Option<String>>>,
 }
 
 impl ToolSearchMiddleware {
@@ -39,7 +41,18 @@ impl ToolSearchMiddleware {
             tool_search_index,
             shared_tools,
             cached_contribution: Arc::new(StdRwLock::new(None)),
+            deferred_fingerprint: Arc::new(StdRwLock::new(None)),
         }
+    }
+
+    fn deferred_fingerprint(tools: &[Arc<dyn BaseTool>]) -> String {
+        serde_json::to_string(
+            &tools
+                .iter()
+                .map(|tool| (tool.name(), tool.description(), tool.parameters()))
+                .collect::<Vec<_>>(),
+        )
+        .expect("tool snapshot fingerprint must serialize")
     }
 }
 
@@ -111,15 +124,15 @@ impl Middleware for ToolSearchMiddleware {
                 .collect();
         }
 
-        // P2-2: 用 content_version 比对取代简单 count 比对
-        let current_version = self.tool_search_index.content_version();
-        let cached_version = self.tool_search_index.cached_prompt_version();
-        let old_count = self.tool_search_index.total_count();
-        let should_rebuild = !deferred_arcs.is_empty()
-            && (cached_version.is_none() || old_count != deferred_arcs.len());
+        let fingerprint = Self::deferred_fingerprint(&deferred_arcs);
+        let should_rebuild =
+            self.deferred_fingerprint.read().unwrap().as_ref() != Some(&fingerprint);
 
         if should_rebuild {
+            let old_count = self.tool_search_index.total_count();
             self.tool_search_index.build(deferred_arcs);
+            *self.deferred_fingerprint.write().unwrap() = Some(fingerprint);
+
             let new_count = self.tool_search_index.total_count();
             if old_count > 0 && new_count != old_count {
                 state.push_recall(format!(
@@ -128,13 +141,9 @@ impl Middleware for ToolSearchMiddleware {
                 ));
             }
             let list = self.tool_search_index.format_deferred_list();
-            if !list.is_empty() {
-                self.tool_search_index.set_cached_prompt(list);
-            }
-        } else if cached_version != Some(current_version) && !deferred_arcs.is_empty() {
-            self.tool_search_index.build(deferred_arcs);
-            let list = self.tool_search_index.format_deferred_list();
-            if !list.is_empty() {
+            if list.is_empty() {
+                self.tool_search_index.clear_cached_prompt();
+            } else {
                 self.tool_search_index.set_cached_prompt(list);
             }
         }

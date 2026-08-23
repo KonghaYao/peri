@@ -398,6 +398,7 @@ async fn test_mcp_registry_merged_into_cache_and_kept_out_of_contribution() {
     let h: HandleToken = Arc::new(1u32);
     let mcp_skill = peri_acp_types::skills::SkillMetadata {
         name: "mcp__demo__hello".to_string(),
+        aliases: Vec::new(),
         description: "远端 hello 技能".to_string(),
         source: SkillSource::Mcp,
         origin: Some(SkillOrigin::Mcp {

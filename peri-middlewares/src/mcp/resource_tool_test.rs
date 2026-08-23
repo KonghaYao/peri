@@ -368,6 +368,7 @@ fn make_connected_pool(peer: rmcp::Peer<rmcp::RoleClient>) -> Arc<McpClientPool>
 fn mcp_entry(uri: &str, resources: Vec<SkillResource>) -> SkillMetadata {
     SkillMetadata {
         name: "mcp__srv__demo".to_string(),
+        aliases: Vec::new(),
         description: "Demo skill".to_string(),
         path: std::path::PathBuf::new(),
         source: SkillSource::Mcp,

@@ -4,26 +4,26 @@
 
 本文定义 Perihelion 的 Programmatic Tool Calling（PTC）目标架构、通用 JavaScript 执行器 seam、Workflow 迁移方式及分阶段实施计划。实现、测试和后续设计若与本文冲突，应先更新本文并说明契约变化。
 
-PTC 在本仓库中的含义是：新增一个模型可直接调用的 `run_code` 工具；JavaScript 程序通过 `tools.<ToolName>(input)` 异步调用当前 session-local 工具。PTC 默认装配（`PtcMiddleware=false` 可关闭），不改变现有工具的可见性，现有 direct tools 与 `run_code` 同时提供给模型。`run_code` 外层调用作为任意代码执行入口按 Bash 同级审批；内部 `tools.*` 调用继续按 effective tool name 审批。
+PTC 在本仓库中的含义是：提供 canonical deferred-only 工具 `RunPtcCode`；模型先通过 `SearchExtraTools` 发现它，再经 `ExecuteExtraTool` 执行，JavaScript 程序通过 `tools.<ToolName>(input)` 异步调用当前 session-local 工具。PTC 默认装配（`PtcMiddleware=false` 可关闭），不改变现有 direct tools 的可见性。旧名 `run_code` 不可执行、不是 alias，仅作为 ToolSearch 迁移关键词。`RunPtcCode` 外层任意代码执行入口按 Bash 同级审批；内部调用的 policy、HITL、事件与 tool card 均投影到 effective target。模型 assistant raw wrapper call 仅为协议配对而保留。
 
-**生产安全边界**：`run_code` 启动普通 Node.js 进程，并非 sandbox。`tools.*` 的 Permission/HITL 不约束 Node 原生文件系统、进程、环境变量或网络 API；禁用某个 RPC 工具也不阻止 JavaScript 通过 Node API 实施同类操作。runtime 提供 timeout、资源上限、进程树回收和默认环境变量清理以降低可靠性与秘密泄漏风险，但不提供网络、文件系统或容器隔离。不得在 source、input、console、return、异常或工具参数中包含 secret。
+**生产安全边界**：`RunPtcCode` 启动普通 Node.js 进程，并非 sandbox。`tools.*` 的 Permission/HITL 不约束 Node 原生文件系统、进程、环境变量或网络 API；禁用某个 RPC 工具也不阻止 JavaScript 通过 Node API 实施同类操作。runtime 提供 timeout、资源上限、进程树回收和默认环境变量清理以降低可靠性与秘密泄漏风险，但不提供网络、文件系统或容器隔离。不得在 source、input、console、return、异常或工具参数中包含 secret。
 
 ## 2. 目标
 
-1. 新增 direct `run_code`，不移除、不隐藏现有 direct tools。
+1. 新增 deferred-only canonical `RunPtcCode`，经 `SearchExtraTools → ExecuteExtraTool` 发现和执行，不移除、不隐藏现有 direct tools。
 2. 支持 JavaScript 中的 `await tools.Bash(...)`、`await tools.Read(...)` 和 `Promise.all(...)`。
 3. JavaScript 工具调用通过异步 RPC 请求 Peri 执行；结果返回 Node 后恢复对应 Promise。
 4. PTC 与 `ExecuteExtraTool` 复用同一套 effective-tool resolution 和 canonical dispatch，不复制工具执行语义。
 5. 工具事实源始终是当前 turn 的 session-local tool view；PTC 不访问静态全局工具表。
 6. 从 Workflow 中提炼通用 JavaScript Execution Host；Workflow 与 PTC 是该 host 的两个 Adapter。
 7. 保留 Workflow 的现有外部语义、协议不变量、取消行为、journal 和 resume 行为。
-8. 内部工具调用继续经过既有 permission、HITL、事件、取消和结果处理路径。
+8. 内部工具调用继续经过既有 policy、HITL、事件、tool card、取消和结果处理路径，所有投影以 effective target 为准。
 
 ## 3. 非目标
 
 首轮实现不要求：
 
-- 只向模型暴露 `run_code`；
+- 只向模型暴露 PTC 元工具而隐藏既有 direct tools；
 - 引入 `Native / Ptc / Both` 模式；
 - 将 PTC 建模为 Workflow；
 - 让 JavaScript 通过 `agent()` 间接完成工具调用；
@@ -34,15 +34,16 @@ PTC 在本仓库中的含义是：新增一个模型可直接调用的 `run_code
 
 ## 4. 核心判断
 
-### 4.1 PTC 是附加能力
+### 4.1 PTC 是 deferred 附加能力
 
-`run_code` 是新增的 direct tool。模型可以继续直接调用 `Read`、`Bash` 等工具，也可以在需要循环、分支、并发或中间数据变换时使用 `run_code`。
+`RunPtcCode` 是 canonical deferred-only tool。模型通过 `SearchExtraTools` 发现，再由 `ExecuteExtraTool` 执行；`Read`、`Bash` 等既有 direct tools 仍可直接调用。
 
 ```text
-LLM-visible tools = existing direct tools + run_code
+LLM-visible tools = existing direct tools + SearchExtraTools + ExecuteExtraTool
+PTC execution = SearchExtraTools("RunPtcCode" | "run_code") → ExecuteExtraTool(RunPtcCode)
 ```
 
-PTC 不改变 `BaseTool::is_direct()` 的定义。direct/deferred 只描述工具是否进入 LLM 原生 tools payload，不描述宿主程序是否可通过 effective tool name 调用该工具。
+PTC 不改变 `BaseTool::is_direct()` 的定义。`RunPtcCode.is_direct() = false`；旧 `run_code` 仅参与搜索迁移，不解析为可执行 alias。
 
 ### 4.2 `tools.<name>` 是 RPC 源语
 
@@ -71,26 +72,27 @@ JS Promise
 
 ### 4.3 复用 dispatcher，不嵌套调用 wrapper tool
 
-PTC 不应通过调用一次 `ExecuteExtraTool::invoke` 来执行工具。`ExecuteExtraTool` 是提供给模型的 deferred-tool 代理界面，PTC 需要的是它背后的 effective-tool resolution 与 canonical dispatch。
+PTC 不另行嵌套调用第二次 `ExecuteExtraTool::invoke`。模型侧的 canonical 入口本来就是 `SearchExtraTools → ExecuteExtraTool(RunPtcCode)`；进入 `RunPtcCode` 后，JavaScript 的 `tools.*` 直接复用 `ExecuteExtraTool` 背后的 effective-tool resolution 与 canonical dispatch。
 
 目标结构：
 
 ```text
-ExecuteExtraTool ─┐
-                  ├─ Shared Effective Tool Dispatcher
-PTC tool/call ────┘
+SearchExtraTools("RunPtcCode" | "run_code")
+  → ExecuteExtraTool(RunPtcCode)
+  → JavaScript tools.Bash(...)
+  → Shared Effective Tool Dispatcher(Bash)
 ```
 
 禁止形成：
 
 ```text
-run_code → ExecuteExtraTool → Bash
+ExecuteExtraTool(RunPtcCode) → ExecuteExtraTool(Bash) → Bash
 ```
 
 应形成：
 
 ```text
-run_code → Bash
+ExecuteExtraTool(RunPtcCode) → RunPtcCode → Shared Effective Tool Dispatcher(Bash)
 ```
 
 共享 dispatcher 必须：
@@ -119,10 +121,10 @@ run_code → Bash
        ┌─────────▼──────────┐              ┌─────────▼──────────┐
        │ Workflow Adapter   │              │ PTC Adapter        │
        │                    │              │                    │
-       │ workflow/start     │              │ run_code           │
-       │ agent/run          │              │ tools.<name>()     │
-       │ progress/event     │              │ tool/call          │
-       │ journal / resume   │              │ logs / return      │
+       │ workflow/start     │              │ deferred RunPtcCode  │
+       │ agent/run          │              │ via ExecuteExtraTool │
+       │ progress/event     │              │ tools.<name>() RPC   │
+       │ journal / resume   │              │ logs / return        │
        └────────────────────┘              └─────────┬──────────┘
                                                     │
                                           ┌─────────▼──────────┐
@@ -190,12 +192,12 @@ Workflow Adapter 保留：
 
 PTC Adapter 负责：
 
-- `RunCodeTool` 输入与输出；
+- `RunPtcCode` 输入与输出；
 - 模型 prompt 中的 JavaScript 使用说明；
 - 从 session-local tool view 生成稳定排序的工具目录；
 - Node 侧 `tools` Proxy 或等价 SDK；
 - `tool/call` 与可选的 `tool/cancel`；
-- 内部 invocation ID 与外层 `run_code` 的关联；
+- 内部 invocation ID 与外层 `RunPtcCode` 的关联；
 - 工具结果到 JavaScript value 的转换；
 - JavaScript logs、return value 和 error 到工具结果的映射。
 
@@ -282,13 +284,13 @@ const tools = new Proxy({}, {
 });
 ```
 
-模型提示词应根据 session-local tool view 提供工具名称、描述和 input schema。输出必须稳定排序，以保护 frozen prompt/prompt cache 的序列化稳定性。
+JavaScript 执行环境为 ESM-only。Node module 只能在函数体内使用动态 `await import('node:...')`；static `import` 语句与 CommonJS `require` 均不可用。
 
 ## 7. 执行语义
 
 ### 7.1 同步外层工具调用
 
-`run_code` 对模型表现为一次普通工具调用，并等待 JavaScript：
+`RunPtcCode` 经 `ExecuteExtraTool` 对模型表现为一次同步 deferred 工具调用，并等待 JavaScript：
 
 1. 启动；
 2. 完成所有 awaited host requests；
@@ -303,7 +305,7 @@ const tools = new Proxy({}, {
 
 ### 7.3 取消
 
-外层 `run_code` 取消必须：
+外层 `RunPtcCode` 取消必须：
 
 1. 标记外层执行取消；
 2. 取消仍在执行的内部工具 invocation；
@@ -321,9 +323,9 @@ Workflow 现有 token ownership、先注册后 spawn、kill 后禁止成功响�
 
 ## 8. 事件与权限
 
-PTC 内部调用必须沿用 canonical 事件链，不得建立 Node → TUI 私有通道。外层 `run_code` 与内部 effective tool invocation 应具有可关联 identity，但首版可复用现有工具事件表示，不要求客户端立即增加专用调用树 UI。
+PTC 内部调用必须沿用 canonical 事件链，不得建立 Node → TUI 私有通道。`RunPtcCode` 与内部 effective tool invocation 应具有可关联 identity。policy、HITL、事件和 tool card 必须以 effective target 投影；模型 assistant raw wrapper call 只保留协议配对，不得作为执行、审批、事件或展示目标。
 
-权限按内部 effective tool name 判断。例如 `tools.Bash(...)` 的敏感操作是 `Bash`，不能只审批外层 `run_code`。`PermissionMiddleware` 和 `HumanInTheLoopMiddleware` 的独立装配语义保持不变。
+权限按 effective target 判断。例如 `tools.Bash(...)` 的敏感操作、HITL、事件和 tool card 目标都是 `Bash`，不能投影为 `RunPtcCode` 或 `ExecuteExtraTool`。`PermissionMiddleware` 和 `HumanInTheLoopMiddleware` 的独立装配语义保持不变。
 
 适用契约：
 
@@ -449,13 +451,13 @@ cargo test -p peri-agent --lib session::exec
 
 验收：Node runtime fake-host 测试可验证 `tools.Read()` 和 `Promise.all()`，无需启动完整 agent session。
 
-### Step 4：实现 `RunCodeTool` 与 PTC middleware
+### Step 4：实现 `RunPtcCode` 与 PTC middleware
 
 **目标**：将 PTC 接入真实 session-local 工具视图。
 
 任务：
 
-- 新增 direct `run_code`；
+- 新增 deferred-only canonical `RunPtcCode`，并以旧 `run_code` 作为搜索迁移关键词而非可执行 alias；
 - 装配 PTC middleware，不修改其他工具的 `is_direct()`；
 - PTC router 调用共享 effective-tool dispatcher；
 - 从 session-local view 生成稳定工具目录和 prompt 说明；
@@ -472,7 +474,8 @@ cargo test -p peri-agent --lib session::exec
 
 验收：
 
-- LLM tools 同时包含原有 direct tools 与 `run_code`；
+- LLM tools 保留原有 direct tools 与 ToolSearch 元工具，不直接包含 `RunPtcCode`；
+- `SearchExtraTools` 可通过 canonical 名 `RunPtcCode`、旧迁移关键词 `run_code` 发现该工具，且只有 canonical 名可执行；
 - disabled/filtered 工具不进入 PTC 工具目录且不可调用；
 - `tools.Read()` 使用真实 session-local view；
 - `Promise.all([tools.Read(...), tools.Read(...)])` 正常完成；
@@ -526,7 +529,7 @@ return {
 
 该场景必须验证：
 
-1. `run_code` 与现有 direct tools 同时可见；
+1. `RunPtcCode` 不直接出现在 LLM tools，须经 `SearchExtraTools → ExecuteExtraTool`；现有 direct tools 同时可见且行为不变；
 2. `Glob`/`Read` 来自当前 session-local view；
 3. Node 发出多个异步 `tool/call`；
 4. Rust 完成工具调用后按 invocation ID 投递响应；
@@ -539,7 +542,7 @@ return {
 - 每一步必须先通过本阶段目标测试，再进入下一步；
 - 抽取与功能新增尽量分开，避免同一变更同时重写 Workflow 和新增 PTC；
 - 不为 PTC 复制 ToolSearch execution code；
-- 不让 `RunCodeTool` 持有静态工具清单；
+- 不让 `RunPtcCode` 持有静态工具清单；
 - 不让 Node Adapter 直接接触文件系统、shell 或 MCP implementation；
 - 不因首版字符串结果而顺带重构全部工具输出；
 - 不修改无关工具、事件或 TUI 表现；

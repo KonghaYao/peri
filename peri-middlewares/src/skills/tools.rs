@@ -192,7 +192,11 @@ impl BaseTool for DiscoverSkillsTool {
             .iter()
             .filter(|s| {
                 if let Some(ref q) = query {
-                    s.name.to_lowercase().contains(q) || s.description.to_lowercase().contains(q)
+                    s.name.to_lowercase().contains(q)
+                        || s.description.to_lowercase().contains(q)
+                        || s.aliases
+                            .iter()
+                            .any(|alias| alias.to_lowercase().contains(q))
                 } else {
                     true
                 }
@@ -218,7 +222,12 @@ fn find_and_load_skill(
 
     // 名称已在扫描时把 `:` 规范为 `-`；完整名称优先匹配，避免把包含
     // 命名空间前缀的输入过早降级为最后一段。
-    if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == input_lower) {
+    if let Some(skill) = skills.iter().find(|s| {
+        s.name.eq_ignore_ascii_case(&input_lower)
+            || s.aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(&input_lower))
+    }) {
         return load_skill_content(skill);
     }
 
@@ -263,8 +272,10 @@ fn find_and_load_skill(
 
     // 大小写无关精确匹配
     let matched = skills.iter().find(|s| {
-        let skill_name_lower = s.name.to_lowercase();
-        skill_name_lower == bare_name
+        s.name.eq_ignore_ascii_case(bare_name)
+            || s.aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(bare_name))
     });
 
     let Some(skill) = matched else {
@@ -290,7 +301,10 @@ fn load_skill_content(
     if matches!(skill.source, super::SkillSource::Builtin) {
         crate::skills::builtin::BUILTIN_SKILLS
             .iter()
-            .find(|bs| crate::skills::normalize_skill_name(bs.name) == skill.name)
+            .find(|bs| {
+                crate::skills::normalize_skill_name(bs.name) == skill.name
+                    || skill.path == std::path::Path::new(&format!("<builtin>/{}", bs.name))
+            })
             .map(|bs| bs.content.to_string())
             .ok_or_else(|| {
                 format!("Builtin skill '{}' not found in BUILTIN_SKILLS", skill.name).into()
@@ -330,6 +344,7 @@ fn skill_to_json(skill: &SkillMetadata) -> serde_json::Value {
     };
     json!({
         "name": skill.name,
+        "aliases": skill.aliases,
         "description": skill.description,
         "source": source_str,
     })

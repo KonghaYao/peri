@@ -1,10 +1,14 @@
-# run_code Node API 契约漂移与错误诊断信息丢失
+# RunPtcCode Node API 契约漂移与错误诊断信息丢失
 
 **状态**：Implemented / pending acceptance
 **优先级**：高
 **类型**：缺陷 / 工具契约
 **创建日期**：2026-08-23
 **来源**：用户报告 + 运行时分层测试 + 静态代码核查
+
+## 当前实现事实
+
+当前 canonical 工具名为 `RunPtcCode`，且为 deferred-only：模型须经 `SearchExtraTools → ExecuteExtraTool` 执行；既有 direct tools 不受影响。旧 `run_code` 不可执行、不是 alias，仅保留为搜索迁移关键词。policy、HITL、事件与 tool card 投影 effective target；模型 assistant raw wrapper call 只保留协议配对。执行环境采用 ESM-only，Node module 只能使用动态 `await import(...)`，static `import` 与 `require` 均不可用。
 
 ## 问题
 
@@ -147,9 +151,7 @@ adapter 有意不回传原始 exception 文本与 stack，这符合秘密保护�
 
 ## 修复目标
 
-1. 明确 `run_code` 的模块系统契约，选择并实现以下一种一致行为：
-   - 支持 CommonJS 风格 `require`；或
-   - 保持 ESM adapter，并在 tool description、schema 与 prompt contribution 中明确要求 `await import('node:...')`，不得暗示 `require` 可用。
+1. 明确 `RunPtcCode` 的 ESM-only 模块系统契约：tool description、schema 与 prompt contribution 必须要求动态 `await import('node:...')`，并明确 static `import` 与 `require` 不可用。
 2. 工具失败至少向调用方保留稳定、脱敏的错误类别：`TOOL_FAILED`、`RESOURCE_LIMIT`、`CANCELLED`、`TIMEOUT`、`PROTOCOL_ERROR`。
 3. adapter 资源限制应显示可操作的安全消息，例如 `JavaScript resource limit exceeded`，但不得包含用户 source、input、console 内容、原始 exception message、stack、环境变量或内部 debug chain。
 4. 普通用户代码异常应显示安全的 `JavaScript execution failed`；协议故障应与用户代码失败区分。
@@ -159,7 +161,7 @@ adapter 有意不回传原始 exception 文本与 stack，这符合秘密保护�
 
 ### D1. 模块加载契约
 
-优先采用最小变更：保留 ESM 启动方式，更新三个现有描述面，明确示例使用动态 import：
+优先采用最小变更：保留 ESM-only 启动方式，更新三个现有描述面，明确示例使用动态 import：
 
 ```js
 const fs = await import('node:fs/promises');
@@ -173,20 +175,20 @@ const fs = await import('node:fs/promises');
 
 - 只接受 adapter 定义的 allowlist message/code；
 - 未识别值统一降级为 `JavaScript execution failed` / `PROTOCOL_ERROR`；
-- `RpcResponse` 的 Display 或 `RunCodeTool::invoke` 显示稳定 public message + stable code；
+- `RpcResponse` 的 Display 或 `RunPtcCode` invoke 显示稳定 public message + stable code；
 - 原始 exception 与 stack 继续留在 adapter 内且不写日志。
 
 ## 验收标准
 
-- [x] `run_code` 工具描述与实际模块加载语义一致。
-- [x] 若选择 ESM-only，描述中包含可复制的 `await import('node:crypto')` 示例，并明确 `require` 不可用。
+- [x] `RunPtcCode` 工具描述与实际模块加载语义一致。
+- [x] ESM-only 描述中包含可复制的 `await import('node:crypto')` 示例，并明确 static `import` 与 `require` 不可用。
 - [ ] 若选择兼容 `require`，`require('node:crypto')` 与动态 import 均有契约测试且成功。（不适用：采用 ESM-only）
 - [x] `throw new Error(...)` 返回脱敏的 `TOOL_FAILED` / `JavaScript execution failed`，不包含 sentinel 文本或 stack。
 - [x] 语法错误返回同一安全的用户代码失败分类，不泄露 source。
 - [x] 超过 result/log 限制返回 `RESOURCE_LIMIT` / `JavaScript resource limit exceeded`。
 - [x] wall timeout 继续返回明确 `TIMEOUT`，cancel 继续返回 `CANCELLED`。
 - [x] `BigInt` 与循环引用的失败可与 transport/protocol failure 区分。
-- [x] 增加跨 `adapter.js → RpcChannel → JsExecutor → RunCodeTool` 的错误投影测试。
+- [x] 增加跨 `adapter.js → RpcChannel → JsExecutor → RunPtcCode` 的错误投影测试。
 - [x] `cargo test -p peri-js-runtime --lib`、`cargo test -p peri-middlewares --lib ptc`、`cargo fmt --check` 与 `git diff --check` 通过。
 
 最终工具错误格式为 `<STABLE_CODE>: <FIXED_SAFE_MESSAGE>`；验证命令包括 adapter test/typecheck、两个目标 Rust test、fmt、clippy 与 diff check。
@@ -198,7 +200,7 @@ const fs = await import('node:fs/promises');
 - [ ] `tools.*` RPC：覆盖成功、未知工具、内部工具失败与并发调用。
 - [ ] 进程压力：连续大量调用、并发 session、Node 崩溃后重新拉起，并观测 FD 与内存增长。
 - [ ] 协议破坏：覆盖畸形 NDJSON、异常 stdout、Node 提前退出和 JSON-RPC id 错配。
-- [ ] 完整交互链路：覆盖 `peri-tui → peri-acp → peri-agent → run_code` 的错误事件展示与退出语义。
+- [ ] 完整交互链路：覆盖 `peri-tui → peri-acp → peri-agent → SearchExtraTools → ExecuteExtraTool(RunPtcCode)` 的错误事件展示与退出语义。
 
 ## 相关事实源
 

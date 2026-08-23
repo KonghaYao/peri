@@ -28,7 +28,7 @@ use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageId, ToolCallRequest};
 use crate::tools::{
     BaseTool, CanonicalToolInvocation, EffectiveToolCall, EffectiveToolDefinition,
-    EffectiveToolDispatcher, EffectiveToolError, EffectiveToolErrorCode,
+    EffectiveToolDispatcher, EffectiveToolError, EffectiveToolErrorCode, RUN_PTC_CODE_TOOL_NAME,
 };
 
 /// 连续失败检测阈值
@@ -134,10 +134,10 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         call: EffectiveToolCall,
         cancel: CancellationToken,
     ) -> Result<String, EffectiveToolError> {
-        if call.tool_name.eq_ignore_ascii_case("run_code") {
+        if call.tool_name.eq_ignore_ascii_case(RUN_PTC_CODE_TOOL_NAME) {
             return Err(EffectiveToolError::new(
                 EffectiveToolErrorCode::ToolFailed,
-                "run_code cannot recursively invoke itself",
+                format!("{RUN_PTC_CODE_TOOL_NAME} cannot recursively invoke itself"),
             ));
         }
         let event_invocation_id = call
@@ -161,7 +161,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             .resolve(&raw_call, &all_tools)
             .map_err(effective_tool_error)?;
         let policy_id = invocation.policy_call.id.clone();
-        let raw_calls = HashMap::from([(policy_id.clone(), invocation.raw_call)]);
+        let event_calls = HashMap::from([(policy_id.clone(), invocation.policy_call.clone())]);
         let target_tools = HashMap::from([(policy_id, invocation.target)]);
         let ai_message = BaseMessage::ai_with_tool_calls(
             String::new(),
@@ -174,7 +174,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         let outcome = collect_tool_results(
             &self.context,
             vec![invocation.policy_call],
-            &raw_calls,
+            &event_calls,
             &target_tools,
             &cancel,
             ai_message.id(),
@@ -212,7 +212,7 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             .tools
             .read()
             .values()
-            .filter(|tool| tool.name() != "run_code")
+            .filter(|tool| tool.name() != RUN_PTC_CODE_TOOL_NAME)
             .map(|tool| EffectiveToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
@@ -307,12 +307,14 @@ pub async fn dispatch_tools(
             )),
         }
     }
-    let raw_calls: HashMap<String, ToolCall> = invocations
+    // Invocation events/tool cards project the effective canonical target. The LLM's
+    // wrapper call remains only in the source assistant message for protocol pairing.
+    let event_calls: HashMap<String, ToolCall> = invocations
         .iter()
         .map(|invocation| {
             (
                 invocation.policy_call.id.clone(),
-                invocation.raw_call.clone(),
+                invocation.policy_call.clone(),
             )
         })
         .collect();
@@ -334,7 +336,7 @@ pub async fn dispatch_tools(
     let mut collect_outcome = collect_tool_results(
         ctx,
         policy_calls,
-        &raw_calls,
+        &event_calls,
         &target_tools,
         cancel,
         ai_msg_id,
@@ -409,7 +411,7 @@ struct ApprovalOutcome {
 async fn collect_tool_results(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
-    raw_calls: &HashMap<String, ToolCall>,
+    event_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
@@ -419,7 +421,7 @@ async fn collect_tool_results(
     let _ = ai_msg_id;
 
     // 阶段一：批量 before_tool 审批
-    let approval = run_before_tool_approvals(ctx, original_calls, raw_calls, cancel).await?;
+    let approval = run_before_tool_approvals(ctx, original_calls, event_calls, cancel).await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -433,7 +435,7 @@ async fn collect_tool_results(
     let tool_results = dispatch_concurrent(
         ctx,
         &approval.ready_calls,
-        raw_calls,
+        event_calls,
         all_tools,
         cancel,
         ai_msg,
@@ -462,7 +464,7 @@ async fn collect_tool_results(
 async fn run_before_tool_approvals(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
-    raw_calls: &HashMap<String, ToolCall>,
+    event_calls: &HashMap<String, ToolCall>,
     cancel: &CancellationToken,
 ) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
@@ -477,7 +479,7 @@ async fn run_before_tool_approvals(
         if cancel.is_cancelled() {
             // 为已 emit ToolStart 的 ready_calls 补发 ToolEnd
             for tc in &ready_calls {
-                let raw_call = raw_calls.get(&tc.id).unwrap_or(tc);
+                let raw_call = event_calls.get(&tc.id).unwrap_or(tc);
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
                     turn_id,
                     agent_id,
@@ -493,12 +495,12 @@ async fn run_before_tool_approvals(
             Ok(modified_call) => {
                 if modified_call.id != tool_call.id || modified_call.name != tool_call.name {
                     let reason = "middleware cannot modify tool call id or name".to_string();
-                    let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
+                    let raw_call = event_calls.get(&tool_call.id).unwrap_or(tool_call);
                     let rejection_result = ToolResult::error(&raw_call.id, &tool_call.name, reason);
                     settled_results.push((raw_call.clone(), rejection_result));
                     continue;
                 }
-                let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
+                let raw_call = event_calls.get(&tool_call.id).unwrap_or(tool_call);
                 ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
                     turn_id,
                     agent_id,
@@ -509,7 +511,7 @@ async fn run_before_tool_approvals(
                 ready_calls.push(modified_call);
             }
             Err(AgentError::ToolRejected { ref reason, .. }) => {
-                let raw_call = raw_calls.get(&tool_call.id).unwrap_or(tool_call);
+                let raw_call = event_calls.get(&tool_call.id).unwrap_or(tool_call);
                 let mut rejection_result =
                     ToolResult::error(&tool_call.id, &tool_call.name, reason.clone());
                 rejection_result.effective_error_code = Some(EffectiveToolErrorCode::UserRejected);
@@ -560,7 +562,7 @@ async fn run_before_tool_approvals(
 async fn dispatch_concurrent(
     ctx: &StageContext,
     ready_calls: &[ToolCall],
-    raw_calls: &HashMap<String, ToolCall>,
+    event_calls: &HashMap<String, ToolCall>,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
@@ -585,7 +587,7 @@ async fn dispatch_concurrent(
         .map(|call| {
             let tool_name = call.name.clone();
             let call_id = call.id.clone();
-            let raw_call = raw_calls
+            let raw_call = event_calls
                 .get(&call.id)
                 .cloned()
                 .unwrap_or_else(|| call.clone());
