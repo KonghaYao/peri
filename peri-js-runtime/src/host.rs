@@ -1,25 +1,18 @@
-#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(unix)]
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::Child;
-#[cfg(unix)]
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-#[cfg(unix)]
 use tracing::debug;
 
 use crate::process_tree::ProcessTree;
-#[cfg(unix)]
 use crate::rpc::spawn_stdout_reader;
 use crate::{IncomingMessage, JsRuntimeError, Result, RpcChannel};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-#[cfg(unix)]
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
@@ -91,21 +84,6 @@ impl JsExecutionHost {
         spec: JsProcessSpec,
         max_frame_bytes: usize,
     ) -> Result<Self> {
-        #[cfg(windows)]
-        {
-            let _ = (spec, max_frame_bytes);
-            Err(JsRuntimeError::SpawnFailed(
-                ProcessTree::unsupported().to_string(),
-            ))
-        }
-        #[cfg(unix)]
-        {
-            Self::spawn_unix(spec, max_frame_bytes)
-        }
-    }
-
-    #[cfg(unix)]
-    fn spawn_unix(spec: JsProcessSpec, max_frame_bytes: usize) -> Result<Self> {
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
@@ -113,6 +91,7 @@ impl JsExecutionHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
         command.process_group(0);
         if !spec.inherit_environment {
             command.env_clear();
@@ -125,11 +104,21 @@ impl JsExecutionHost {
         let mut child = command
             .spawn()
             .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        #[cfg(unix)]
         let child_id = child
             .id()
             .ok_or_else(|| JsRuntimeError::SpawnFailed("child pid unavailable".into()))?;
+        #[cfg(unix)]
         let process_tree = ProcessTree::new(child_id)
             .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        #[cfg(windows)]
+        let process_tree = ProcessTree::new(
+            child
+                .raw_handle()
+                .ok_or_else(|| JsRuntimeError::SpawnFailed("child handle unavailable".into()))?
+                as _,
+        )
+        .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
         let stdin = child
             .stdin
             .take()
