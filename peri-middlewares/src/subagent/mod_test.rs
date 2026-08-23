@@ -586,7 +586,7 @@ fn subagent_section_declaration_shape() {
         "具体任务→agent 映射已删除"
     );
     assert!(
-        content.contains("pick a specialized agent"),
+        content.contains("Choose the most specialized agent"),
         "通用选择原则保留"
     );
 }
