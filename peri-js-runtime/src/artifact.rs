@@ -8,6 +8,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::process::Command;
+use tracing::debug;
 
 use crate::{JsProcessSpec, JsRuntimeError, Result};
 
@@ -19,6 +20,7 @@ const ENTRY: &str = "dist/peri-ptc.js";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 const FALLBACK_ENV: &str = "PERI_PTC_ALLOW_NPX_FALLBACK";
 const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org/";
+const MAX_INSTALL_STDERR_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize)]
 struct PackageMetadata {
@@ -64,41 +66,73 @@ impl Installer for NpmInstaller {
         let cache = staging.join(".npm-cache");
         tokio::fs::create_dir(&home).await?;
         tokio::fs::create_dir(&cache).await?;
-        let mut child = npm_command(staging, &home, &cache)
+        let child = match npm_command(staging, &home, &cache)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()?;
-        match tokio::time::timeout(INSTALL_TIMEOUT, child.wait()).await {
-            Ok(status) => status.map(|status| status.success()),
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                debug!(error_kind = ?error.kind(), "PTC npm install failed to spawn");
+                return Err(error);
+            }
+        };
+        match tokio::time::timeout(INSTALL_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    let stderr = bounded_stderr_tail(&output.stderr);
+                    debug!(
+                        status = ?output.status.code(),
+                        stderr = %stderr,
+                        "PTC npm install exited unsuccessfully"
+                    );
+                }
+                Ok(output.status.success())
+            }
+            Ok(Err(error)) => {
+                debug!(error_kind = ?error.kind(), "PTC npm install wait failed");
+                Err(error)
+            }
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                debug!(
+                    timeout_seconds = INSTALL_TIMEOUT.as_secs(),
+                    "PTC npm install timed out"
+                );
                 Ok(false)
             }
         }
     }
 }
 
-pub(crate) struct NpmArtifactProvider {
-    home: PathBuf,
+fn bounded_stderr_tail(stderr: &[u8]) -> String {
+    let start = stderr.len().saturating_sub(MAX_INSTALL_STDERR_BYTES);
+    String::from_utf8_lossy(&stderr[start..]).into_owned()
 }
 
+pub(crate) struct NpmArtifactProvider;
+
 impl NpmArtifactProvider {
-    pub(crate) fn at(home: PathBuf) -> Self {
-        Self { home }
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    fn home(&self) -> Result<PathBuf> {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(JsRuntimeError::ArtifactUnavailable)
     }
 }
 
 #[async_trait::async_trait]
 impl PtcArtifactProvider for NpmArtifactProvider {
     async fn launch(&self, node: &str) -> Result<PtcLaunch> {
-        launch_in(node, &self.home, &NpmInstaller, fallback_enabled()).await
+        launch_in(node, &self.home()?, &NpmInstaller, fallback_enabled()).await
     }
 
     async fn invalidate(&self) -> Result<()> {
-        quarantine(&self.home).await
+        quarantine(&self.home()?).await
     }
 }
 
@@ -227,7 +261,8 @@ async fn quarantine_locked(target: &Path) -> Result<()> {
         std::process::id(),
         unique_id()
     ));
-    tokio::fs::rename(target, quarantine).await?;
+    tokio::fs::rename(target, &quarantine).await?;
+    tokio::fs::remove_dir_all(quarantine).await?;
     Ok(())
 }
 
@@ -304,10 +339,18 @@ fn npx_program(node: &str) -> String {
 }
 
 fn path_environment() -> Vec<(String, String)> {
-    std::env::var("PATH")
-        .ok()
-        .map(|path| vec![("PATH".into(), path)])
-        .unwrap_or_default()
+    let path = std::env::var("PATH").unwrap_or_else(|_| default_path().into());
+    vec![("PATH".into(), path)]
+}
+
+#[cfg(windows)]
+fn default_path() -> &'static str {
+    r"C:\Windows\System32;C:\Windows"
+}
+
+#[cfg(not(windows))]
+fn default_path() -> &'static str {
+    "/usr/local/bin:/usr/bin:/bin"
 }
 
 fn fallback_enabled() -> bool {
@@ -399,11 +442,9 @@ mod tests {
             .unwrap();
         ensure_install(home.path(), &fixture()).await.unwrap();
         let entries = std::fs::read_dir(target.parent().unwrap()).unwrap();
-        let quarantined = entries
+        assert!(entries
             .filter_map(|entry| entry.ok())
-            .find(|entry| entry.file_name().to_string_lossy().contains("quarantine"))
-            .unwrap();
-        assert!(quarantined.path().join("in-use-marker").exists());
+            .all(|entry| !entry.file_name().to_string_lossy().contains("quarantine")));
         assert!(validate_install(&target).is_some());
     }
 

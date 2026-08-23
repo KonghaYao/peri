@@ -12,9 +12,9 @@
 
 ## 当前 artifact 与启动契约
 
-本 issue 最初记录的 `run_code` 与 eval 启动均为历史旧称/旧实现叙述；当前 canonical 工具为 `RunPtcCode`，生产 artifact 为 `@peri-code/ptc@0.2.1`。仓库跟踪 deterministic `dist`，Rust 通过 `include_bytes!` 内嵌；版本缓存 `~/.peri/ptc/0.2.1` 必须通过 package identity 与内容 hash 校验，每次执行再复制到 private temp，以 `node <entry>` 启动，避免 TOCTOU。Node 在接收 source 前完成 `ptc/start` protocol/build handshake；package version、build ID、protocol version、Rust 常量与 `dist` 不同步时默认 fail closed。
+本 issue 最初记录的 `run_code` 与 eval 启动均为历史旧称/旧实现叙述；当前 canonical 工具为 `RunPtcCode`，生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Rust runtime 在 `~/.peri/ptc/0.2.2` 缓存缺失或无效时，以受控最小环境执行固定版本 npm install，并在跨进程锁内完成 staging、identity 校验与原子 rename；Cargo 不生成或内嵌 artifact。Node 直接以 `node <validated-entry>` 启动，并在接收 source 前完成 `ptc/start` protocol/build handshake；package version、build ID、protocol version、Rust 常量与已发布 npm artifact 不同步时默认 fail closed。
 
-仅当 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `@peri-code/ptc@0.2.1` 的 `npx` fallback；它使用 private `HOME`/cache 与最小环境变量，但仍增加 registry/download 供应链风险，因此必须保持显式 opt-in。发布操作先运行 `npm run prepublishOnly`，成功后再运行 `npm publish`。
+仅当固定版本安装失败且 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `@peri-code/ptc@0.2.2` 的 `npx` fallback；它使用 private `HOME`/cache 与最小环境变量，但仍增加额外解析链路风险，因此必须保持显式 opt-in。仓库 package 的 `dist` 由 `bun run build`/发布验证生成，不由 Cargo-time Bun 生成或作为 Rust 内嵌 artifact 跟踪；发布操作先运行 `bun run prepublishOnly`，成功后再运行 `npm publish`。
 
 ## 问题
 
@@ -131,7 +131,7 @@ return value;
 
 ### C1. 执行上下文与工具契约不一致
 
-- `peri-js-runtime/src/executor.rs` 使用已验证的 `@peri-code/ptc@0.2.1` artifact，并以 `node <entry>` 启动；下述 `node --input-type=module --eval` 是问题发现时的历史旧叙述，不再代表当前实现。
+- `peri-js-runtime/src/executor.rs` 使用已验证的 `@peri-code/ptc@0.2.2` 固定 npm artifact，并以 `node <entry>` 启动；下述 `node --input-type=module --eval` 是问题发现时的历史旧叙述，不再代表当前实现。
 - `npm-packages/@peri-ptc/src/adapter.js` 顶层是 ESM，并以 `new Function("tools", "input", "console", ...)` 构造用户函数。
 - 该函数可访问 Node globals（例如 `process`、`Buffer`），但 lexical scope 中没有 CommonJS `require`。
 - `peri-middlewares/src/ptc/mod.rs` 的 `RunCodeTool::description`、参数 schema 和 prompt contribution 只说“normal Node.js process”与“direct Node.js APIs”，没有说明模块加载必须使用动态 `import()`。

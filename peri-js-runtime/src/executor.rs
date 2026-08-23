@@ -116,19 +116,22 @@ pub struct JsExecutor {
 
 impl JsExecutor {
     pub fn new(program: impl Into<String>) -> Self {
-        Self::with_limits(program, JsExecutionLimits::default()).expect("default limits are valid")
+        let limits = JsExecutionLimits::default();
+        Self {
+            program: program.into(),
+            execution_slots: Arc::new(Semaphore::new(limits.max_concurrent_executions)),
+            limits,
+            artifact_provider: Arc::new(NpmArtifactProvider::new()),
+        }
     }
 
     pub fn with_limits(program: impl Into<String>, limits: JsExecutionLimits) -> Result<Self> {
         limits.validate()?;
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .ok_or(JsRuntimeError::ArtifactUnavailable)?;
         Ok(Self {
             program: program.into(),
             execution_slots: Arc::new(Semaphore::new(limits.max_concurrent_executions)),
             limits,
-            artifact_provider: Arc::new(NpmArtifactProvider::at(home)),
+            artifact_provider: Arc::new(NpmArtifactProvider::new()),
         })
     }
 
@@ -189,8 +192,8 @@ impl JsExecutor {
                 outcome,
                 Err(PhasedError {
                     phase: ExecutionPhase::Handshake,
-                    ..
-                })
+                    error: JsRuntimeError::Rpc(ref message),
+                }) if message == "PTC handshake identity mismatch"
             )
         {
             let _ = self.artifact_provider.invalidate().await;
@@ -227,10 +230,12 @@ impl JsExecutor {
         cancel: CancellationToken,
         deadline: tokio::time::Instant,
     ) -> std::result::Result<JsExecutionResult, PhasedError> {
-        self.handshake(&host).await.map_err(|error| PhasedError {
-            phase: ExecutionPhase::Handshake,
-            error,
-        })?;
+        self.handshake(&host, deadline)
+            .await
+            .map_err(|error| PhasedError {
+                phase: ExecutionPhase::Handshake,
+                error,
+            })?;
         self.run_execute(host, request, router, cancel, deadline)
             .await
             .map_err(|error| PhasedError {
@@ -239,14 +244,21 @@ impl JsExecutor {
             })
     }
 
-    async fn handshake(&self, host: &Arc<JsExecutionHost>) -> Result<()> {
-        let handshake = tokio::time::timeout(
-            HANDSHAKE_TIMEOUT,
+    async fn handshake(
+        &self,
+        host: &Arc<JsExecutionHost>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let handshake_deadline = deadline.min(tokio::time::Instant::now() + HANDSHAKE_TIMEOUT);
+        let handshake = tokio::time::timeout_at(
+            handshake_deadline,
             host.channel()
                 .send_request("ptc/start", json!({ "protocolVersion": PROTOCOL_VERSION })),
         )
         .await
-        .map_err(|_| JsRuntimeError::Rpc("PTC handshake timed out".into()))??;
+        .map_err(|_| JsRuntimeError::Timeout {
+            limit: self.limits.wall_timeout,
+        })??;
         validate_handshake(&handshake)
     }
 

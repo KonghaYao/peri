@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    ffi::OsString,
+    path::Path,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+};
 
 use async_trait::async_trait;
 use peri_agent::{
@@ -11,12 +15,57 @@ use peri_agent::{
 };
 use peri_js_runtime::{JsExecutionFailure, JsRuntimeError};
 use serde_json::{json, Value};
+use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     format_run_ptc_code_error, stable_tool_catalog, InvocationState, RunPtcCodeTool,
     MAX_PRE_CANCELLED_INVOCATIONS, RUN_PTC_CODE_TOOL_NAME,
 };
+
+static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl HomeGuard {
+    fn with_ptc_fixture() -> Self {
+        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-ptc");
+        let package = home
+            .path()
+            .join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
+        std::fs::create_dir_all(package.join("dist")).unwrap();
+        std::fs::copy(source.join("package.json"), package.join("package.json")).unwrap();
+        for file in ["peri-ptc.js", "index.js"] {
+            std::fs::copy(
+                source.join("dist").join(file),
+                package.join("dist").join(file),
+            )
+            .unwrap();
+        }
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        Self {
+            _lock: lock,
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
 
 struct FakeDispatcher;
 
@@ -112,7 +161,9 @@ fn test_catalog_is_stably_sorted_from_dispatcher_view() {
 }
 
 #[tokio::test]
+#[serial(ptc_home)]
 async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
+    let _home = HomeGuard::with_ptc_fixture();
     let tool = RunPtcCodeTool::default();
     let result = tool
         .invoke(
@@ -135,7 +186,9 @@ async fn test_run_code_routes_concurrent_calls_through_effective_dispatcher() {
 }
 
 #[tokio::test]
+#[serial(ptc_home)]
 async fn test_run_code_preserves_effective_tool_error_code() {
+    let _home = HomeGuard::with_ptc_fixture();
     let result = RunPtcCodeTool::default()
         .invoke(
             json!({
@@ -157,7 +210,9 @@ async fn test_run_code_preserves_effective_tool_error_code() {
 }
 
 #[tokio::test]
+#[serial(ptc_home)]
 async fn test_run_code_preserves_all_canonical_error_codes() {
+    let _home = HomeGuard::with_ptc_fixture();
     let result = RunPtcCodeTool::default()
         .invoke(
             json!({
@@ -261,7 +316,9 @@ fn test_run_code_error_formatter_uses_only_stable_projection() {
 }
 
 #[tokio::test]
+#[serial(ptc_home)]
 async fn test_run_code_exception_returns_safe_fixed_error() {
+    let _home = HomeGuard::with_ptc_fixture();
     let source = "throw new Error('ptc-tool-canary');";
     let error = RunPtcCodeTool::default()
         .invoke(
@@ -282,7 +339,9 @@ async fn test_run_code_exception_returns_safe_fixed_error() {
 }
 
 #[tokio::test]
+#[serial(ptc_home)]
 async fn test_run_code_resource_limit_returns_safe_fixed_error() {
+    let _home = HomeGuard::with_ptc_fixture();
     let source = "return 'result-canary'.repeat(1024 * 1024);";
     let error = RunPtcCodeTool::default()
         .invoke(

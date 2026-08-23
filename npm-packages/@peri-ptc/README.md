@@ -9,7 +9,7 @@ Perihelion Programmatic Tool Calling（PTC）的 Node adapter、wire types 与 C
 - 缓存更新使用跨进程 lockfile；损坏目录只会在锁内原子 rename 到 quarantine，不会直接删除可能正在使用的 target。rename 冲突会重新验证并发 winner。
 - adapter 直接以 `node <validated-entry>` 启动，不从仓库 `dist` 运行，也不在 Cargo 构建期间要求 Bun。
 - Node 必须在接收 source 前完成 `ptc/start` handshake，并校验 protocol version 与 build identity；不匹配时 fail closed。
-- package version、`periBuildId`、`periProtocolVersion`、Rust 常量与 tracked `dist` 必须同步。
+- package version、`periBuildId`、`periProtocolVersion`、Rust 常量与已发布 npm artifact 必须同步；`dist` 由 `bun run build`/发布验证生成，不由 Cargo 生成或作为 Rust 内嵌 artifact 跟踪。
 
 ## npm fallback 与供应链边界
 

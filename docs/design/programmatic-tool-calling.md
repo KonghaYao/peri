@@ -205,11 +205,11 @@ PTC Adapter 负责：
 
 ### 5.4 PTC artifact、启动与 handshake
 
-生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Cargo 构建由 `peri-js-runtime/build.rs` 直接从 `npm-packages/@peri-ptc` TypeScript 源码生成 `OUT_DIR/peri-ptc.js`，Rust 以 `include_bytes!` 内嵌该产物；npm 发布流程独立生成 gitignored `npm-packages/@peri-ptc/dist`。package version、build ID、protocol version、Rust 构建预期和 TypeScript 常量必须作为一个原子版本面同步。
+生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Rust runtime 在版本缓存缺失或无效时，以受控最小环境执行固定版本 npm install；`npm-packages/@peri-ptc` 的 `dist` 仅由 package 的 `bun run build`/发布流程生成，不由 Cargo 构建生成，也不作为 Rust 内嵌 artifact 跟踪。package version、build ID、protocol version、Rust 常量和已发布 npm artifact 必须作为一个原子版本面同步。
 
-运行时先把内嵌 artifact 物化到版本缓存 `~/.peri/ptc/0.2.2`，并在创建或复用时校验 package identity 与内容 hash。缓存不是直接执行目录：每次 execution 都复制已验证 artifact 到独占 private temp，再执行 `node <entry>`，不得使用 `--eval`/`eval`，从而避免共享缓存校验后的 TOCTOU。Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity；任何缺失或不匹配都 fail closed。
+运行时将通过 identity 校验的 package 缓存在 `~/.peri/ptc/0.2.2`，并直接执行校验后的 `node <entry>`，不得使用 `--eval`/`eval`。缓存缺失或无效时，在跨进程锁保护下安装到 staging，完整校验后原子 rename；Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity，任何缺失或不匹配都 fail closed。
 
-正常路径不访问 npm registry。只有调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许对 `@peri-code/ptc@0.2.2` 做精确版本 `npx` fallback；fallback 必须使用 private `HOME`/npm cache 和最小环境变量。该开关代表调用方主动接受额外的 registry、解析与下载供应链风险，不是安全等价的自动恢复路径，不能默认开启或退化为非精确版本。
+默认路径允许对固定版本 `@peri-code/ptc@0.2.2` 执行受控 npm install。只有固定版本安装失败且调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `npx` fallback；安装与 fallback 都必须使用 private `HOME`/npm cache 和最小环境变量。fallback 开关代表调用方主动接受额外的解析链路风险，不能退化为非精确版本。
 
 ### 5.5 Effective Tool Dispatcher
 
@@ -526,7 +526,7 @@ npm run prepublishOnly
 npm publish
 ```
 
-`prepublishOnly` 成功是 `npm publish` 的前置条件；发布前必须确认 package version/build ID/protocol version、Rust 常量和 tracked deterministic `dist` 已同步。不得以 `npx` fallback 代替发布验证；fallback 仅是运行时显式 opt-in 的供应链风险路径。
+`prepublishOnly` 成功是 `npm publish` 的前置条件；发布前必须确认 package version/build ID/protocol version、Rust 常量与生成的 npm `dist` 已同步。`dist` 由 package 构建生成，不由 Cargo 生成或作为 Rust 内嵌 artifact 跟踪。不得以 `npx` fallback 代替发布验证；fallback 仅是固定版本 npm install 失败后的显式 opt-in 路径。
 
 ## 11. 首个端到端场景
 
