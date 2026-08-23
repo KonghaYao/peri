@@ -189,6 +189,8 @@ pub struct PromptTemplate {
     /// 已解析的非缓存区段落（zone=Uncached：persona + 07_runtime + gated +
     /// 收集段 + language，按段内序号升序）。
     uncached_sections: Vec<ResolvedSection>,
+    /// available agents catalog 是否包含 compile-time built-ins（会话冻结）。
+    built_in_subagents_enabled: bool,
 }
 
 /// 段落内容来源（实现裁定 Q2：内置静态文本零拷贝借用，覆盖全文持 Arc）。
@@ -322,6 +324,7 @@ impl PromptTemplate {
         Self {
             cached_sections,
             uncached_sections,
+            built_in_subagents_enabled: state.built_in_subagents_enabled,
         }
     }
 
@@ -378,7 +381,12 @@ impl PromptTemplate {
             .replace("{{date}}", &env.date)
             .replace(
                 "{{available_agents}}",
-                &format_available_agents(skills, &env.cwd, extra_agent_dirs),
+                &format_available_agents(
+                    skills,
+                    &env.cwd,
+                    extra_agent_dirs,
+                    self.built_in_subagents_enabled,
+                ),
             )
     }
 }
@@ -410,8 +418,9 @@ fn format_available_agents(
     skills: &dyn SkillsPort,
     cwd: &str,
     extra_agent_dirs: &[std::path::PathBuf],
+    include_built_ins: bool,
 ) -> String {
-    let agents = skills.agents(cwd, extra_agent_dirs);
+    let agents = skills.agents(cwd, extra_agent_dirs, include_built_ins);
     if agents.is_empty() {
         return "No agents currently configured. You can add agent definitions in `.claude/agents/`.".to_string();
     }

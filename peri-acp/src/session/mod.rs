@@ -857,7 +857,9 @@ fn build_meta_harness_state(
     config: Option<&HashMap<String, bool>>,
     docs: HashMap<String, String>,
 ) -> peri_acp_types::meta_harness::MetaHarnessState {
-    use peri_acp_types::meta_harness::{MetaHarnessState, MIDDLEWARE_NAMES, SECTION_IDS};
+    use peri_acp_types::meta_harness::{
+        MetaHarnessState, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
+    };
 
     let mut state = MetaHarnessState::default();
     let Some(config) = config else {
@@ -881,6 +883,8 @@ fn build_meta_harness_state(
                 }
             }
             // section + false：显式不覆盖，静默
+        } else if key == BUILT_IN_SUBAGENTS_KEY {
+            state.built_in_subagents_enabled = *enabled;
         } else if MIDDLEWARE_NAMES.contains(&key.as_str()) && !*enabled {
             state.disabled_middlewares.insert(key.clone());
             // middleware + true：显式恢复装配，静默

@@ -69,6 +69,8 @@ pub struct SubAgentTool {
     /// 运行时通道回退值（测试/遗留路径经 with_* 注入；生产路径为默认空，
     /// 由 parent_session 的 host 覆盖）
     pub(crate) host: SubagentHost,
+    /// 已启用插件提供的 agent definition 目录。
+    pub(crate) plugin_agent_dirs: Arc<Vec<std::path::PathBuf>>,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
 }
@@ -94,8 +96,14 @@ impl SubAgentTool {
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
             host: SubagentHost::default(),
+            plugin_agent_dirs: Arc::new(Vec::new()),
             chain_assembler: Arc::new(SubagentChainAssemblerImpl),
         }
+    }
+
+    pub(crate) fn with_plugin_agent_dirs(mut self, dirs: Arc<Vec<std::path::PathBuf>>) -> Self {
+        self.plugin_agent_dirs = dirs;
+        self
     }
 
     #[allow(clippy::type_complexity)]
@@ -290,9 +298,44 @@ impl SubAgentTool {
     }
 
     pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
-        let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
-            .into_iter()
-            .find(|p| p.is_file());
+        self.load_agent_def_with_built_ins(agent_id, cwd, self.built_in_subagents_enabled())
+    }
+
+    /// Resume 已有 thread 时允许恢复其原 built-in definition；新建路径遵守
+    /// 父 session 冻结的 MetaHarness policy。
+    pub(crate) fn load_agent_def_for_resume(
+        &self,
+        agent_id: &str,
+        cwd: &str,
+    ) -> Result<ClaudeAgent, String> {
+        self.load_agent_def_with_built_ins(agent_id, cwd, true)
+    }
+
+    fn built_in_subagents_enabled(&self) -> bool {
+        self.parent_session
+            .read()
+            .as_ref()
+            .map(|session| {
+                session
+                    .store()
+                    .frozen
+                    .meta_harness
+                    .built_in_subagents_enabled
+            })
+            .unwrap_or(true)
+    }
+
+    fn load_agent_def_with_built_ins(
+        &self,
+        agent_id: &str,
+        cwd: &str,
+        include_built_ins: bool,
+    ) -> Result<ClaudeAgent, String> {
+        let project_candidates = AgentDefineMiddleware::candidate_paths(cwd, agent_id);
+        if project_candidates.is_empty() {
+            return Err(format!("Error: invalid agent definition ID '{}'", agent_id));
+        }
+        let agent_path = project_candidates.into_iter().find(|p| p.is_file());
 
         if let Some(path) = agent_path {
             let content = std::fs::read_to_string(&path)
@@ -305,14 +348,43 @@ impl SubAgentTool {
             });
         }
 
-        let built_in = get_built_in_agent(agent_id)
-            .ok_or_else(|| format!("Error: cannot find agent definition '{}'. Check .claude/agents/ directory or use a built-in agent (explore, plan, general-purpose, verification)", agent_id))?;
-        parse_agent_file(built_in.content).ok_or_else(|| {
-            format!(
-                "Error: failed to parse built-in agent definition '{}'",
-                agent_id
-            )
-        })
+        if include_built_ins {
+            if let Some(built_in) = get_built_in_agent(agent_id) {
+                return parse_agent_file(built_in.content).ok_or_else(|| {
+                    format!(
+                        "Error: failed to parse built-in agent definition '{}'",
+                        agent_id
+                    )
+                });
+            }
+        }
+
+        for dir in self.plugin_agent_dirs.iter() {
+            let candidates = [
+                dir.join(format!("{agent_id}.md")),
+                dir.join(agent_id).join("agent.md"),
+            ];
+            if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
+                return parse_agent_file(&content).ok_or_else(|| {
+                    format!(
+                        "Error: failed to parse agent definition file '{}'",
+                        path.display()
+                    )
+                });
+            }
+        }
+
+        Err(format!(
+            "Error: cannot find agent definition '{}'. Check .claude/agents/ directory{}",
+            agent_id,
+            if include_built_ins {
+                " or configured plugin agents"
+            } else {
+                " or configured plugin agents (built-in agents are disabled)"
+            }
+        ))
     }
 
     pub(crate) fn overrides_from_agent_def(

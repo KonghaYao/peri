@@ -639,6 +639,15 @@ fn build_meta_harness_state_empty_config_is_default() {
 }
 
 #[test]
+fn build_meta_harness_state_can_disable_built_in_subagents() {
+    let state = super::build_meta_harness_state(
+        Some(&mh_cfg(&[("BuiltInSubagents", false)])),
+        HashMap::new(),
+    );
+    assert!(!state.built_in_subagents_enabled);
+}
+
+#[test]
 fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
     let mut docs = HashMap::new();
     docs.insert("01_intro".to_string(), "custom intro".to_string());

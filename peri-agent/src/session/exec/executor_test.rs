@@ -136,6 +136,7 @@ impl SkillsPort for NoopSkills {
         &self,
         _cwd: &str,
         _extra_dirs: &[PathBuf],
+        _include_built_ins: bool,
     ) -> Vec<(String, String, String, AgentCapability)> {
         Vec::new()
     }

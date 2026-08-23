@@ -83,7 +83,7 @@ impl super::SubAgentTool {
             (llm, tools, 200)
         } else {
             let agent_def = self
-                .load_agent_def(&title, &cwd)
+                .load_agent_def_for_resume(&title, &cwd)
                 .map_err(|e| format!("resume_subagent: {}", e))?;
             let build_result = self
                 .build_agent_from_def(

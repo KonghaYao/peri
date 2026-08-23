@@ -168,6 +168,8 @@ pub struct SubAgentMiddleware {
     /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取，Middleware 不再
     /// 逐字段透传（L3 管理权移出）。
     parent_session: Arc<RwLock<Option<Arc<Session>>>>,
+    /// 已启用插件提供的 agent definition 目录。
+    plugin_agent_dirs: Arc<Vec<PathBuf>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     task_manager_available: bool,
@@ -195,8 +197,15 @@ impl SubAgentMiddleware {
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
+            plugin_agent_dirs: Arc::new(Vec::new()),
             task_manager_available: false,
         }
+    }
+
+    /// 注入已启用插件提供的 agent definition 目录。
+    pub fn with_plugin_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.plugin_agent_dirs = Arc::new(dirs);
+        self
     }
 
     /// Set system prompt builder, child agent injects system prompt via `with_system_prompt()` during execution
@@ -306,6 +315,7 @@ impl SubAgentMiddleware {
         if let Some(ref factory) = self.child_handler_factory {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
+        tool = tool.with_plugin_agent_dirs(Arc::clone(&self.plugin_agent_dirs));
         // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
         tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
         // L3：父 v2 session（运行时通道 + frozen 数据经 host 读取）
@@ -324,7 +334,7 @@ impl SubAgentMiddleware {
 /// catalog（`SkillsPort::agents` → `scan_agents_detailed`）同一事实源，
 /// 防止提示词 catalog 与子链实际可用 agent 不一致。
 pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, &[])
+    scan_agents_detailed(cwd, &[], true)
         .into_iter()
         .map(|(id, name, description, _)| (id, name, description))
         .collect()
@@ -339,7 +349,7 @@ pub fn scan_agents_with_extra_dirs(
     cwd: &str,
     extra_dirs: &[PathBuf],
 ) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, extra_dirs)
+    scan_agents_detailed(cwd, extra_dirs, true)
         .into_iter()
         .map(|(id, name, description, _)| (id, name, description))
         .collect()
@@ -427,6 +437,7 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
 pub fn scan_agents_detailed(
     cwd: &str,
     extra_dirs: &[PathBuf],
+    include_built_ins: bool,
 ) -> Vec<(String, String, String, AgentCapability)> {
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -491,18 +502,20 @@ pub fn scan_agents_detailed(
     let agents_dir = Path::new(cwd).join(".claude").join("agents");
     scan_dir(&agents_dir, &mut result, &mut seen_ids);
 
-    // 2. 内置 agent（IFF 同 ID 未被项目级覆盖）
-    for built_in in list_built_in_agents() {
-        if seen_ids.insert(built_in.agent_id.to_string()) {
-            if let Some(agent) = parse_agent_file(built_in.content) {
-                let name = if agent.frontmatter.name.is_empty() {
-                    built_in.agent_id.to_string()
-                } else {
-                    agent.frontmatter.name.clone()
-                };
-                let desc = agent.frontmatter.description.clone();
-                let cap = infer_agent_capability(&agent.frontmatter);
-                result.push((built_in.agent_id.to_string(), name, desc, cap));
+    // 2. 内置 agent（IFF 启用且同 ID 未被项目级覆盖）
+    if include_built_ins {
+        for built_in in list_built_in_agents() {
+            if seen_ids.insert(built_in.agent_id.to_string()) {
+                if let Some(agent) = parse_agent_file(built_in.content) {
+                    let name = if agent.frontmatter.name.is_empty() {
+                        built_in.agent_id.to_string()
+                    } else {
+                        agent.frontmatter.name.clone()
+                    };
+                    let desc = agent.frontmatter.description.clone();
+                    let cap = infer_agent_capability(&agent.frontmatter);
+                    result.push((built_in.agent_id.to_string(), name, desc, cap));
+                }
             }
         }
     }

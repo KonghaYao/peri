@@ -18,13 +18,18 @@
 
 ## 1. 目标与使用场景
 
-MetaHarness 一个 kv 字段承载两项能力，bool 值决定动作：
+MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 
-| value | 动作 | key 语义 |
+| key 类型 | value | 动作 |
 | --- | --- | --- |
-| `true` | **覆盖系统提示词**（第一能力） | key = 段落 ID |
-| `false` | **关闭 middleware**（第二能力） | key = middleware 名 |
+| 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
+| middleware 名 | `false` | **关闭 middleware**（第二能力） |
+| `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
+`BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
+项目级及 plugin agents、`fork`、`resume`、`Agent` / `AgentResult` 工具保持可用。
+该值在 `session/new` 时随 `MetaHarnessState` 冻结，available agents catalog 与
+新建 named subagent 的 definition fallback 共同遵守。
 ### 场景 1：覆盖系统提示词段落
 
 用户要完全替换系统提示词的 `01_intro`（角色定义）与 `05_using_tools`（工具
@@ -69,7 +74,8 @@ settings.json:
 
 ```rust
 /// MetaHarness 控制字段：段落 ID → true（覆盖系统提示词段落）；
-/// middleware 名 → false（装配期关闭该 middleware）
+/// middleware 名 → false（装配期关闭该 middleware）；
+/// BuiltInSubagents → bool（是否注册 compile-time built-in definitions，默认 true）
 #[serde(default, skip_serializing_if = "Option::is_none")]
 pub meta_harness: Option<HashMap<String, bool>>,
 ```
@@ -80,6 +86,7 @@ pub meta_harness: Option<HashMap<String, bool>>,
 | --- | --- | --- |
 | 段落 ID | 覆盖该段落（需 `.peri/meta/<ID>.md` 存在） | 显式不覆盖（用内置段落） |
 | middleware 名 | 显式恢复装配（覆盖全局的关闭） | 关闭该 middleware |
+| `BuiltInSubagents` | 启用 compile-time built-in definitions | 不加入 catalog，且新建 named subagent 不回退到 built-in definition |
 
 **合并语义**：**逐 key 合并**——项目级 `{cwd}/.peri/settings.json` 的 key
 覆盖全局同 key，全局其余 key 保留。这是 **meta_harness 专属特例**（现有

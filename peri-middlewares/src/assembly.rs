@@ -272,6 +272,12 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     Some(Arc::clone(event_handler) as Arc<dyn AgentEventHandler>),
                     llm_factory.clone(),
                 )
+                .with_plugin_agent_dirs(
+                    plugin_loaded
+                        .iter()
+                        .flat_map(|plugin| plugin.agents_dirs.clone())
+                        .collect(),
+                )
                 .with_system_builder(system_builder.clone())
                 .with_cancel(cancel.clone())
                 .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
