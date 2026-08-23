@@ -14,6 +14,7 @@ MUST 规则 → docs/standards/；active changes → spec/issues/；history look
 
 - 标准入口：`docs/standards/index.md`；架构契约：`docs/standards/architecture-contracts.md`。
 - Rust：`docs/standards/rust.md`；TUI：`docs/standards/tui.md`；文档维护：`docs/standards/documentation.md`。
+- Git 分支、upstream 与 push 安全：`docs/standards/git.md`。
 - 测试：`docs/design/testing-standards.md`；活动需求读对应 `spec/issues/`；历史仅查 `spec/global/problems.md`。
 
 ## 跨仓库契约
