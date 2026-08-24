@@ -256,7 +256,7 @@ pub struct AgentComponents {
     /// 主 LLM（已通过 `AgentModelBridge` 适配为标准 ReAct 抽象）
     pub llm: Arc<dyn ReactLLM + Send + Sync>,
     /// 中间件链（v2 StageContext 直接复用）
-    pub chain: MiddlewareChain,
+    pub chain: Arc<MiddlewareChain>,
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
     pub shared_tools: Option<Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
@@ -351,7 +351,8 @@ pub(crate) fn build_agent(
     );
 
     // 提前提取模型实例（chain 构建完成后才组装 AgentModelBridge，
-    // 以便收集中间件 prompt_contribution 合并到 system prompt）。
+    // 以便 bridge provider 与 StageContext 共享同一 Arc<MiddlewareChain>；
+    // contribution 在 before_agent 后按 ModelRequest 同步收集）。
     // 与 SubAgent 模型共享 session 级 LLM 缓存（同一 fingerprint）：
     // 跨 turn / 跨 agent 实例复用 reqwest::Client（连接池 + TLS session cache），
     // 避免每轮重建 ~1-2 MB HTTP client。烘焙的 observer 是 session 级转发器
@@ -470,17 +471,17 @@ pub(crate) fn build_agent(
         },
     );
 
-    // 收集中间件的 prompt_contribution（AgentsMd / Skills / GitAttribution /
-    // ToolSearch 等声明式贡献），合并到 system_prompt 后传入 LLM。
-    let contributions = chain.collect_prompt_contributions();
-    let merged_system_prompt = if contributions.is_empty() {
-        system_prompt.clone()
-    } else {
-        format!("{system_prompt}\n\n{contributions}")
-    };
+    // bridge 与 StageContext 必须共享同一条 middleware chain：before_agent
+    // 填充的 session-local cache 由下一个 ModelRequest 在同步构造阶段读取。
+    let chain = Arc::new(chain);
+    let contribution_chain = Arc::clone(&chain);
 
-    // 构造 AgentModelBridge（带系统提示词）
-    let mut base_llm = AgentModelBridge::new(base_model).with_system(merged_system_prompt);
+    // 构造 AgentModelBridge（冻结 base 不变；动态 contribution request-time 组合）
+    let mut base_llm = AgentModelBridge::new(base_model)
+        .with_system(system_prompt)
+        .with_system_contribution_provider(Arc::new(move || {
+            contribution_chain.collect_prompt_contributions()
+        }));
     if let Some(ref sid) = session_id {
         base_llm = base_llm.with_session_id(sid);
     }
@@ -824,7 +825,7 @@ pub fn build_stage_context(
         .with_llm(react_llm)
         .with_tools(session_tools)
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
-        .with_middleware_chain(Arc::new(chain))
+        .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
         .with_session_context(session_context)
         .with_tool_registry_snapshot((*tool_registry_snapshot).clone());

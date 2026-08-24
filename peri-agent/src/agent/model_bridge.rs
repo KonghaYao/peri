@@ -27,14 +27,19 @@ use crate::{
 pub struct AgentModelBridge {
     model: Arc<dyn Model>,
     system: Option<String>,
+    system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
 }
+
+/// 构造模型请求时同步读取当前 middleware prompt contribution 的 provider。
+pub(crate) type SystemContributionProvider = Arc<dyn Fn() -> String + Send + Sync>;
 
 impl AgentModelBridge {
     pub fn new(model: Arc<dyn Model>) -> Self {
         Self {
             model,
             system: None,
+            system_contribution_provider: None,
             session_id: None,
         }
     }
@@ -45,6 +50,18 @@ impl AgentModelBridge {
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    /// 为每个模型请求提供当前的动态 system prompt 后缀。
+    ///
+    /// provider 同步执行并返回 owned `String`；调用结束后不会有锁 guard
+    /// 跨越模型 await。空字符串保持 base system prompt 字节不变。
+    pub(crate) fn with_system_contribution_provider(
+        mut self,
+        provider: SystemContributionProvider,
+    ) -> Self {
+        self.system_contribution_provider = Some(provider);
         self
     }
 
@@ -118,7 +135,19 @@ impl AgentModelBridge {
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
         let mut messages = Self::convert_messages(messages)?;
-        if let Some(system) = &self.system {
+        let dynamic = self
+            .system_contribution_provider
+            .as_ref()
+            .map(|provider| provider());
+        let system = match (&self.system, dynamic.as_deref()) {
+            (Some(base), Some(dynamic)) if !dynamic.is_empty() => {
+                Some(format!("{base}\n\n{dynamic}"))
+            }
+            (Some(base), _) => Some(base.clone()),
+            (None, Some(dynamic)) if !dynamic.is_empty() => Some(dynamic.to_string()),
+            (None, _) => None,
+        };
+        if let Some(system) = system {
             messages.insert(0, ModelMessage::system_text(system));
         }
         let tools = tools

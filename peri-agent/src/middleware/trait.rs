@@ -178,8 +178,8 @@ pub trait Middleware: Send + Sync {
 
     /// 声明此中间件对 System Prompt 的文本贡献。
     ///
-    /// Executor 在 `before_agent` 完成后收集所有中间件的贡献，
-    /// 拼接后追加到 frozen system prompt 之后。
+    /// 主 Agent bridge 在 `before_agent` 完成后构造每个 `ModelRequest` 时同步
+    /// 收集一次所有中间件的当前贡献，request-local 拼接到 frozen base prompt 之后。
     /// 不再通过 `prepend_message` 注入——保持 prompt cache 前缀稳定。
     fn prompt_contribution(&self) -> Option<String> {
         None
@@ -191,7 +191,8 @@ pub trait Middleware: Send + Sync {
     ///
     /// 语义边界（设计 §3.5）：middleware 仅作内容载体——段落渲染仍走
     /// `PromptTemplate` 段落装配渲染（按位置属性 + 段内序号 + gate），
-    /// 本方法**不是** `prompt_contribution`（首轮一次性通知）的替代通道。
+    /// 本方法**不是** `prompt_contribution`（`before_agent` 后按模型请求读取）
+    /// 的替代通道。
     ///
     /// 契约 4（运行时缺失防御）：未提供段落（默认空列表）或提供空内容 =
     /// 跳过渲染不 fail；DefaultSystemPromptMiddleware / LangMiddleware

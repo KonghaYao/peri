@@ -1,6 +1,6 @@
 # peri-agent v2 Middleware 中间件系统设计
 
-> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v2.0
+> 全新设计，不考虑向后兼容 | 日期：2026-07-15 | 修订：v2.1（2026-08-25：对齐生产链蓝本与 request-time prompt contribution）
 
 ## 1. 设计原则
 
@@ -35,6 +35,8 @@ graph TB
         C3b["git_attribution<br/>→ before_tool + after_tool + prompt"]
         C4["hitl<br/>→ before_tools_batch + before_tool"]
         C5["agent_tool<br/>→ tools + before_agent<br/>（含 BackgroundTaskRegistry）"]
+        C6["ptc<br/>→ tools + before_agent + prompt"]
+        C7["tool_search<br/>→ tools + before_agent + prompt"]
     end
 
     subgraph REACT["ReAct 循环"]
@@ -88,46 +90,59 @@ for aspect in chain:
 ```
 
 - 工具工厂接收 cwd 参数动态创建
-- `collect_tools` 阶段仅收集不做去重；去重在后续 merge 到 `shared_tools`（`HashMap`）时按后注册覆盖先注册的语义完成
-- `AskUserQuestion` 工具例外——由 builder 直接 insert 到 `shared_tools`，不经过 `collect_tools`
+- `collect_tools` 阶段按 production chain 顺序收集；每个 fresh stage 的
+  `build_session_tool_view` 将其合并进 session-local `BTreeMap`，同名 middleware
+  工具按后注册覆盖，宿主级 `shared_tools` 不被改写
+- `AskUserQuestion` 与其他 middleware 工具一致，由
+  `HumanInTheLoopMiddleware::collect_tools()` 提供；关闭该 middleware 后即从
+  当前 session-local 工具视图消失
 
 ---
 
 ## 3. 切面注册表
 
-链中的 20 个切面（15 基础 + 5 条件），每个即是一个中间件：
+生产蓝本包含 26 个槽位；Hook 槽位可按非空 hook group 展开为多个实例，
+MCP / Workflow / LSP / Goal 等槽位还受运行时依赖约束。顺序事实源是
+`peri-agent/src/session/factory.rs::production_blueprint`：
 
 > 注：Compact 已从中间件链移除，由 v2 stages/compact.rs 在 ReAct 循环每轮开头处理。详见 §6。
 
 | # | 切面 | 挂载 Hook | 提供工具 | Prompt 贡献 | 条件 |
 |---|------|----------|---------|------------|------|
-| 1 | claude_md | before_agent | — | CLAUDE.md 摘要 | — |
-| 2 | agent_define | before_agent | — | AgentOverrides | — |
-| 3 | plugin | before_agent | — | — | — |
-| 4 | skills | before_agent | — | Skills 摘要 | — |
-| 5 | skill_preload | before_agent | — | — | — |
-| 6 | at_mention | before_agent | — | — | — |
-| 7 | filesystem | — | Read/Write/Edit/Glob/Grep/folder | — | — |
-| 8 | git_attribution | before_tool, after_tool | — | Git Attribution | — |
-| 9 | terminal | — | Bash | — | — |
-| 10 | web | — | WebFetch/WebSearch | — | — |
-| 11 | todo | — | TodoWrite | — | — |
-| 12 | cron | — | Cron 工具组 | — | — |
-| 13 | user_hook | before_agent 等 | — | — | hook_groups 非空 |
-| 14 | hitl | before_tools_batch, before_tool | — | — | — |
-| 15 | agent_tool | before_agent | Agent（+AgentResultTool） | — | — |
-| 16 | mcp_bridge | — | MCP 工具（动态） | — | mcp_pool 非空 |
-| 17 | workflow | — | Workflow 编排工具（deferred tool） | — | workflow_executor 非空 |
-| 18 | tool_search | — | SearchExtraTools/ExecuteExtraTool | — | — |
-| 19 | lsp | — | LSP 工具 | — | lsp_servers 非空 |
-| 20 | goal_tracking | after_agent | Goal（deferred tool） | — | goal_controller 非空 |
+| 1 | default_system_prompt | — | — | 基础 prompt sections | — |
+| 2 | lang | — | — | language section | — |
+| 3 | claude_md | before_agent | — | CLAUDE.md contribution | — |
+| 4 | agent_define | before_agent | — | — | — |
+| 5 | plugin | before_agent | — | — | — |
+| 6 | skills | before_agent | Skill/DiscoverSkills | Skills contribution | — |
+| 7 | skill_preload | before_agent | — | — | — |
+| 8 | at_mention | before_agent | — | — | — |
+| 9 | image | before_agent | — | — | — |
+| 10 | filesystem | — | Read/Write/Edit/Glob/Grep/folder | — | — |
+| 11 | git_attribution | before_agent, before_tool, after_tool | — | Git Attribution contribution | — |
+| 12 | terminal | — | Bash | — | — |
+| 13 | web | — | WebFetch/WebSearch | — | — |
+| 14 | todo | — | TodoWrite | — | — |
+| 15 | cron | — | Cron 工具组 | — | — |
+| 16 | hook | 配置声明的 hooks | — | — | 非空 hook groups；可展开多实例 |
+| 17 | permission | before_tools_batch, before_tool | — | 10_hitl section | — |
+| 18 | ask_user | — | AskUserQuestion | 12_ask_user section | — |
+| 19 | subagent | before_agent | Agent（+AgentResultTool） | 11_subagent section | — |
+| 20 | mcp | before_agent, before_model | MCP 工具（动态） | — | mcp_pool 非空 |
+| 21 | workflow | before_agent | Workflow 编排工具（deferred） | — | workflow executor/adaptor 非空 |
+| 22 | ptc | before_agent | RunPtcCode（deferred） | PTC 安全语义与 RPC catalog contribution | 默认装配 |
+| 23 | tool_search | before_agent | SearchExtraTools/ExecuteExtraTool | deferred inventory + direct declarations contribution | 默认装配 |
+| 24 | artifact | — | artifact（direct） | — | — |
+| 25 | lsp | — | LSP 工具 | — | lsp_servers 非空 |
+| 26 | goal | after_agent | Goal（deferred） | — | goal_controller 非空 |
 
 **脚注**：
-- **#3 plugin**：`PluginMiddleware` 在 `before_agent` hook 中执行插件兼容性校验（name/version/manifest 字段完整性）。
-- **#8 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数。Prompt 贡献通过 `prompt_contribution()` 声明（Co-Authored-By 指令）。
-- **#14 hitl**：`AskUserQuestion` 工具由 builder 直接 insert 到 `shared_tools`（不经过 `collect_tools`），原因是 `HumanInTheLoopMiddleware` 不实现 `collect_tools`——工具需使用原始 `permission_broker` 而非 `MultiplexBroker`。
-- **#15 agent_tool**：`SubAgentMiddleware` 通过 `with_background_registry()` 嵌入 `BackgroundTaskRegistry`。当 registry 存在时，`collect_tools()` 额外注册 `AgentResultTool`（后台任务完成回调）。后台完成事件通过独立 unbounded channel（`bg_event_rx`）通知，不随 executor 生命周期销毁。
-- **#20 goal_tracking**：`GoalTool` 通过 `is_deferred_tool` 过滤器从 LLM 可见列表移除，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问。`after_agent` hook 注入递增紧迫感 steering + 设 `block_continue` 触发自驱续跑。
+- **#5 plugin**：`PluginMiddleware` 在 `before_agent` hook 中执行插件兼容性校验（name/version/manifest 字段完整性）。
+- **#11 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；`prompt_contribution()` 声明 Co-Authored-By 指令。
+- **#17/#18**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
+- **#19 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台完成事件走独立 unbounded channel。
+- **#22/#23**：PTC 必须先于 ToolSearch。两者都在 `before_agent` 基于当前 session-local 工具视图生成 contribution；ToolSearch 随后为包含 `RunPtcCode` 的 deferred 集合建索引。
+- **#26 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
 
 ---
 
@@ -135,9 +150,9 @@ for aspect in chain:
 
 链中切面的排列顺序即依赖关系。不需要单独的 `requires` 字段——排在前面的先执行，排在后面的依赖前面的产出：
 
-- `claude_md` 排在 `hitl` 之前——先注入上下文，再审批
-- `hitl` 排在 `agent_tool` 之前——hitl 的 `before_tools_batch` 拦截 SubAgent 提供的 Agent 工具调用，在工具实际执行前完成审批
-- 信息注入切面（claude_md、skills）排在 `goal_tracking` 之前——goal 追踪需要上下文已就绪
+- `claude_md` 排在 `permission` 之前——先注入上下文，再审批
+- `permission` 排在 `subagent` 之前——其 `before_tools_batch` 在 Agent 工具实际执行前完成审批
+- 信息注入切面（claude_md、skills）排在 `goal` 之前——goal 追踪需要上下文已就绪
 - 工具切面（filesystem、terminal、web 等）排在 `tool_search` 之前——工具索引需完整工具列表
 
 顺序即契约。新增切面时按依赖关系插入对应位置。
@@ -149,19 +164,25 @@ for aspect in chain:
 切面通过声明替代 prepend_message 模式：
 
 - 切面声明 `prompt_contribution()` 文本片段（返回 `Option<String>`）
-- 链构建完成后，`builder.rs` 调用 `chain.collect_prompt_contributions()` 收集所有切面的贡献
-- 拼接后追加到 frozen system prompt 之后（`format!("{system_prompt}\n\n{contributions}")`）
+- frozen/base system prompt 在 session snapshot 中保持不变
+- 主 Agent 的 `AgentModelBridge` 在每个 `ModelRequest` 构造时，从与
+  `StageContext` 共享的同一 `Arc<MiddlewareChain>` 同步收集一次当前贡献
+- 非空贡献按 `base + "\n\n" + contributions` 只追加到当次请求；空贡献不改变 base
+- `before_agent` 先于首个 Reason，因此 PTC 与 ToolSearch 的首轮 cache 已就绪；
+  provider 返回 owned `String`，不会持有锁跨越模型 await
 - 不再进入 `state.messages`
 
 **当前贡献者列表**（`prompt_contribution()` 返回 `Some` 的中间件）：
 | 中间件 | 贡献内容 |
 |--------|---------|
-| agents_md (#1) | CLAUDE.md 摘要 |
-| skills (#4) | Skills 摘要 |
-| git_attribution (#8) | Co-Authored-By 指令 |
-| tool_search (#18) | 工具索引说明 |
+| agents_md (#3) | CLAUDE.md 摘要 |
+| skills (#6) | Skills 摘要 |
+| git_attribution (#11) | Co-Authored-By 指令 |
+| ptc (#22) | RunPtcCode 安全语义与当前 RPC-callable tool catalog |
+| tool_search (#23) | 当前 deferred inventory 与 direct-tool declarations |
 
-> `with_system_prompt()` 在链尾将合并后的 prompt prepend 到 LLM——链顺序决定贡献拼接顺序。
+> 实际拼接顺序按 §3 的生产链顺序，因此 PTC contribution 位于
+> ToolSearch contribution 之前。
 
 ---
 
@@ -174,4 +195,4 @@ for aspect in chain:
 | **System Prompt** | 切面通过声明贡献，不通过 prepend_message |
 | **工具系统** | 切面声明 tools，Executor 统一收集 |
 | **Compact** | 已从中间件链移除（`CompactMiddleware` 已删除）。自动 compact 由 `peri-agent::agent::stages::compact` 在 RCRA 循环中处理；旧版固定阈值仅是历史实现参数，不作为当前约束。当前策略与回收目标以 `docs/design/micro-compact-improvement-proposals.md` 和 `ContextPressure::target_reclaim_tokens()` 为事实源。Compact 不再作为切面参与链执行 |
-| **Plugin** | `PluginMiddleware`（#3）是基础中间件，在 `before_agent` hook 中执行插件兼容性校验。插件扩展的 Skills 通过 `SkillsMiddleware.with_plugin_roots()` 注入，Hooks 通过 `HookMiddleware`（#13，可多实例）注入 |
+| **Plugin** | `PluginMiddleware`（#5）是基础中间件，在 `before_agent` hook 中执行插件兼容性校验。插件扩展的 Skills 通过 `SkillsMiddleware.with_plugin_roots()` 注入，Hooks 通过 `HookMiddleware`（#16，可多实例）注入 |

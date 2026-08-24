@@ -7,7 +7,8 @@
 //!
 //! 语义边界（设计 §3.5）：middleware 仅作内容载体——段落渲染仍走
 //! `PromptTemplate` 段落装配渲染，本接口**不是** `prompt_contribution`
-//! （首轮一次性通知）的替代通道；`prompt_contribution` 语义不变。
+//! （`before_agent` 后按每个 `ModelRequest` 读取的动态后缀）的替代通道；
+//! `prompt_contribution` 语义不变。
 //!
 //! 契约 3（gate 原子迁移，C2/C3 落地）：段落 gate = "持有该段的 middleware
 //! 是否在链上"。收集机制天然隐含此判定——能收集到段落即持有者已装配

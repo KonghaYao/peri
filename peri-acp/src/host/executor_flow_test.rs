@@ -562,6 +562,226 @@ fn make_stage_request(
     }
 }
 
+#[cfg(not(windows))]
+fn system_text(request: &ModelRequest) -> String {
+    request.messages[0]
+        .text_content()
+        .expect("首条必须是 system message")
+}
+
+#[cfg(not(windows))]
+fn frozen_with_dynamic_prompt_policy(
+    base: &'static str,
+    disabled_middlewares: &[&str],
+) -> FrozenSessionData {
+    use peri_acp_types::meta_harness::MetaHarnessState;
+    use peri_agent::session::FrozenContext;
+
+    FrozenSessionData::from_frozen_parts(
+        FrozenContext::builder()
+            .system_prompt(base)
+            .claude_md("")
+            .skill_summary("")
+            .date("2026-08-25")
+            .meta_harness(MetaHarnessState {
+                disabled_middlewares: disabled_middlewares
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+                ..Default::default()
+            })
+            .build(),
+        None,
+    )
+}
+
+/// [回归测试] production 首个 Reason 必须看到同一 middleware chain 在
+/// before_agent 后生成的 PTC 与 ToolSearch dynamic prompt contribution。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_production_first_reason_sees_after_before_agent_dynamic_contributions() {
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let mut ctx = make_session_context("dynamic-first-reason");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
+    let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None));
+    let parent = Arc::clone(&out.session);
+    out.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("finish"),
+    ));
+
+    let loop_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(out.context, 1),
+    )
+    .await
+    .expect("真实 loop 不得挂起");
+
+    assert!(matches!(loop_result, LoopResult::Completed));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let system = system_text(&requests[0]);
+    let ptc_offset = system
+        .find("RunPtcCode programmatically executes")
+        .expect("首个 Reason 缺少 PTC contribution");
+    let tool_search_offset = system
+        .find("## Deferred Tools")
+        .expect("首个 Reason 缺少 ToolSearch contribution");
+    assert!(ptc_offset < tool_search_offset, "{system}");
+    assert_eq!(system.matches("DYNAMIC_BASE_SENTINEL").count(), 1);
+    assert_eq!(system.matches("## Deferred Tools").count(), 1);
+    let tool_search = &system[tool_search_offset..];
+    assert_eq!(tool_search.matches("- RunPtcCode:").count(), 1);
+    assert_eq!(
+        tool_search
+            .matches("Discover deferred tools by name or keyword")
+            .count(),
+        1
+    );
+    assert_eq!(
+        tool_search
+            .matches("Invoke a registered deferred tool by name")
+            .count(),
+        1
+    );
+    let ptc = &system[ptc_offset..tool_search_offset];
+    assert_eq!(
+        ptc.matches("RunPtcCode programmatically executes").count(),
+        1
+    );
+    assert_eq!(ptc.matches("RPC-callable tool catalog").count(), 1);
+    assert_eq!(
+        &*parent.store().frozen.system_prompt,
+        "DYNAMIC_BASE_SENTINEL"
+    );
+    assert!(!parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("## Deferred Tools"));
+    assert!(!parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("RPC-callable tool catalog"));
+}
+
+/// [回归测试] fresh stage 必须从当前 filtered session-local 工具视图重算动态段，
+/// 共享 ToolSearchIndex 不能泄漏上一 stage 的 PTC inventory/cache。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_production_fresh_stage_rebuild_recomputes_dynamic_contributions_from_disabled_view() {
+    use peri_acp_types::ports::ToolSearchPort;
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    }) as Arc<dyn Model>;
+    let shared_index = Arc::new(ToolSearchIndex::default());
+    let mut first_ctx = make_session_context("dynamic-fresh-enabled");
+    first_ctx.primary_llm_factory = {
+        let model = Arc::clone(&model);
+        Some(Arc::new(move || Arc::clone(&model)))
+    };
+    first_ctx.tool_search_index = Arc::clone(&shared_index) as Arc<dyn ToolSearchPort>;
+    let first_frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_ONE", &[]);
+    let (first, _) = make_stage_build(&first_ctx)(make_stage_request(first_frozen, None));
+    let first_parent = Arc::clone(&first.session);
+    first.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("first"),
+    ));
+
+    let first_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(first.context, 1),
+    )
+    .await
+    .expect("第一 stage 不得挂起");
+
+    assert!(matches!(first_result, LoopResult::Completed));
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let first_system = system_text(&captured[0]);
+        assert!(first_system.contains("RunPtcCode programmatically executes"));
+        let first_tool_search = first_system
+            .find("## Deferred Tools")
+            .map(|offset| &first_system[offset..])
+            .expect("第一 stage 缺少 ToolSearch contribution");
+        assert_eq!(first_tool_search.matches("- RunPtcCode:").count(), 1);
+    }
+    assert_eq!(
+        &*first_parent.store().frozen.system_prompt,
+        "DYNAMIC_FRESH_BASE_ONE"
+    );
+    drop(first_parent);
+    drop(first.session);
+    drop(first.event_handles);
+    drop(first.todo_rx);
+    drop(first.bg_event_rx);
+    drop(first_ctx);
+
+    let mut second_ctx = make_session_context("dynamic-fresh-disabled");
+    second_ctx.primary_llm_factory = {
+        let model = Arc::clone(&model);
+        Some(Arc::new(move || Arc::clone(&model)))
+    };
+    second_ctx.tool_search_index = shared_index as Arc<dyn ToolSearchPort>;
+    let second_frozen =
+        frozen_with_dynamic_prompt_policy("DYNAMIC_FRESH_BASE_TWO", &["PtcMiddleware"]);
+    let (second, _) = make_stage_build(&second_ctx)(make_stage_request(second_frozen, None));
+    let second_parent = Arc::clone(&second.session);
+    second.context.session.queue.push(QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("second"),
+    ));
+
+    let second_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_react_loop(second.context, 1),
+    )
+    .await
+    .expect("第二 stage 不得挂起");
+
+    assert!(matches!(second_result, LoopResult::Completed));
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let second_system = system_text(&captured[1]);
+    assert_eq!(second_system.matches("DYNAMIC_FRESH_BASE_TWO").count(), 1);
+    assert_eq!(second_system.matches("## Deferred Tools").count(), 1);
+    assert!(second_system.contains("Discover deferred tools by name or keyword"));
+    assert!(second_system.contains("Invoke a registered deferred tool by name"));
+    assert!(!second_system.contains("RunPtcCode programmatically executes"));
+    let second_tool_search = second_system
+        .find("## Deferred Tools")
+        .map(|offset| &second_system[offset..])
+        .expect("第二 stage 缺少 ToolSearch contribution");
+    assert!(!second_tool_search.contains("- RunPtcCode:"));
+    assert!(!second_system.contains("RunPtcCode"));
+    assert_eq!(
+        &*second_parent.store().frozen.system_prompt,
+        "DYNAMIC_FRESH_BASE_TWO"
+    );
+    assert!(!second_parent
+        .store()
+        .frozen
+        .system_prompt
+        .contains("## Deferred Tools"));
+}
+
 #[derive(Clone)]
 struct RecordingSubagentAssembler {
     context: Arc<Mutex<Option<peri_agent::session::subagent::SubagentChainContext>>>,

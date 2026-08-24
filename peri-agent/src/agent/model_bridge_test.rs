@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
@@ -23,6 +26,157 @@ use crate::{
 use peri_acp_types::identity::AgentId;
 
 struct FakeModel;
+
+struct CaptureSystemModel {
+    streamed_requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+#[async_trait]
+impl Model for CaptureSystemModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    fn prepare_request(&self, _request: &ModelRequest) -> ModelResult<PreparedModelRequest> {
+        PreparedModelRequest::observe(
+            peri_model::ProviderProtocol::Other {
+                value: "capture".into(),
+            },
+            "capture-model",
+            url::Url::parse("https://example.invalid").expect("valid URL"),
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        self.streamed_requests.lock().unwrap().push(request);
+        let response = ModelResponse::new(
+            ModelMessage::assistant_text("done"),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+            cancellation,
+        ))
+    }
+}
+
+/// [回归测试] dynamic system contribution 必须在每个真实模型请求构造时读取，
+/// 且 observed-body 路径与 stream 复用同一 request，不能重复读取或累加旧后缀。
+#[tokio::test]
+async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_request() {
+    let streamed_requests = Arc::new(Mutex::new(Vec::new()));
+    let dynamic = Arc::new(Mutex::new("DYNAMIC_ONE".to_string()));
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let provider = {
+        let dynamic = Arc::clone(&dynamic);
+        let provider_calls = Arc::clone(&provider_calls);
+        Arc::new(move || {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            dynamic.lock().unwrap().clone()
+        })
+    };
+    let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+        streamed_requests: Arc::clone(&streamed_requests),
+    }))
+    .with_system("BASE")
+    .with_system_contribution_provider(provider);
+
+    bridge
+        .generate_reasoning_with_observed_body(&[BaseMessage::human("one")], &[], None)
+        .await
+        .unwrap();
+    *dynamic.lock().unwrap() = "DYNAMIC_TWO".to_string();
+    bridge
+        .generate_reasoning_with_observed_body(&[BaseMessage::human("two")], &[], None)
+        .await
+        .unwrap();
+
+    let requests = streamed_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let systems: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            request.messages[0]
+                .text_content()
+                .expect("首条必须是 system message")
+        })
+        .collect();
+    assert_eq!(systems, ["BASE\n\nDYNAMIC_ONE", "BASE\n\nDYNAMIC_TWO"]);
+    assert_eq!(systems[0].matches("BASE").count(), 1);
+    assert_eq!(systems[0].matches("DYNAMIC_ONE").count(), 1);
+    assert!(!systems[0].contains("DYNAMIC_TWO"));
+    assert_eq!(systems[1].matches("BASE").count(), 1);
+    assert_eq!(systems[1].matches("DYNAMIC_TWO").count(), 1);
+    assert!(!systems[1].contains("DYNAMIC_ONE"));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_bridge_without_contribution_provider_preserves_base_system() {
+    let streamed_requests = Arc::new(Mutex::new(Vec::new()));
+    let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+        streamed_requests: Arc::clone(&streamed_requests),
+    }))
+    .with_system("BASE");
+
+    bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+        .await
+        .unwrap();
+
+    let requests = streamed_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages[0]
+            .text_content()
+            .expect("首条必须是 system message"),
+        "BASE"
+    );
+}
+
+#[tokio::test]
+async fn test_bridge_empty_dynamic_contribution_preserves_base_system() {
+    let streamed_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let provider = {
+        let provider_calls = Arc::clone(&provider_calls);
+        Arc::new(move || {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            String::new()
+        })
+    };
+    let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+        streamed_requests: Arc::clone(&streamed_requests),
+    }))
+    .with_system("BASE")
+    .with_system_contribution_provider(provider);
+
+    bridge
+        .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
+        .await
+        .unwrap();
+
+    let requests = streamed_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages[0]
+            .text_content()
+            .expect("首条必须是 system message"),
+        "BASE"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+}
 
 #[async_trait]
 impl Model for FakeModel {
