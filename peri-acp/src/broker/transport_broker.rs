@@ -39,6 +39,7 @@ pub struct AcpTransportBroker {
     session_id: SessionId,
     approval_mode: ApprovalMode,
     timeout: Option<Duration>,
+    interaction_gate: tokio::sync::Mutex<()>,
 }
 
 impl AcpTransportBroker {
@@ -49,6 +50,7 @@ impl AcpTransportBroker {
             session_id,
             approval_mode: ApprovalMode::Forward,
             timeout: None,
+            interaction_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -91,6 +93,16 @@ pub fn ask_user_timeout() -> Option<Duration> {
 #[async_trait]
 impl UserInteractionBroker for AcpTransportBroker {
     async fn request(&self, context: InteractionContext) -> InteractionResponse {
+        let context = match context {
+            InteractionContext::Approval { items }
+                if self.approval_mode == ApprovalMode::AutoApprove =>
+            {
+                return self.handle_approval(items).await;
+            }
+            context => context,
+        };
+
+        let _interaction_guard = self.interaction_gate.lock().await;
         match context {
             InteractionContext::Approval { items } => self.handle_approval(items).await,
             InteractionContext::Questions { requests } => self.handle_questions(requests).await,

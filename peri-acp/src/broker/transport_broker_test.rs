@@ -223,10 +223,16 @@ fn test_parse_invalid_response_empty_answers() {
 
 // ─── AcpTransportBroker 行为：ApprovalMode / timeout（mock transport） ───
 
-use std::sync::Mutex;
+use std::{
+    future::{poll_fn, Future},
+    sync::Mutex,
+    task::Poll,
+};
 
 use crate::transport::types::AcpError;
 use crate::transport::RequestTransport;
+use peri_agent::interaction::MultiplexBroker;
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 /// Mock `RequestTransport`：记录调用；`Behavior::Respond` 回固定响应，
 /// `Behavior::Pending` 永不完成（模拟客户端不响应）。
@@ -266,6 +272,411 @@ fn approval_context() -> InteractionContext {
             tool_input: json!({"command": "ls"}),
         }],
     }
+}
+
+fn approval_context_with_items(count: usize) -> InteractionContext {
+    InteractionContext::Approval {
+        items: (0..count)
+            .map(|index| ApprovalItem {
+                tool_call_id: format!("call_{index}"),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command": format!("echo {index}")}),
+            })
+            .collect(),
+    }
+}
+
+fn questions_context() -> InteractionContext {
+    InteractionContext::Questions {
+        requests: sample_questions(),
+    }
+}
+
+/// 可因果控制 transport 入口和完成时机的 broker gate 测试夹具。
+///
+/// 每次请求进入后立刻记录并通知观察端，再消耗一个显式 release permit；
+/// `forget` 保证完成的请求不会把 permit 自动归还给下一请求。
+struct CausalTransport {
+    calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    entered_tx: mpsc::UnboundedSender<String>,
+    entered_signal: Arc<Semaphore>,
+    releases: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl RequestTransport for CausalTransport {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        let _ = self.entered_tx.send(method.to_string());
+        self.entered_signal.add_permits(1);
+
+        self.releases
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("causal transport release semaphore must remain open")
+            .forget();
+
+        match method {
+            "session/request_permission" => Ok(json!({
+                "outcome": { "outcome": "selected", "optionId": "allow_once" }
+            })),
+            "elicitation/create" => Ok(json!({ "action": "accept", "content": {} })),
+            other => panic!("unexpected causal transport method: {other}"),
+        }
+    }
+}
+
+struct CausalFixture {
+    transport: Arc<CausalTransport>,
+    entered_rx: mpsc::UnboundedReceiver<String>,
+    calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    entered_signal: Arc<Semaphore>,
+    releases: Arc<Semaphore>,
+}
+
+fn causal_fixture() -> CausalFixture {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let entered_signal = Arc::new(Semaphore::new(0));
+    let releases = Arc::new(Semaphore::new(0));
+    let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+    let transport = Arc::new(CausalTransport {
+        calls: Arc::clone(&calls),
+        entered_tx,
+        entered_signal: Arc::clone(&entered_signal),
+        releases: Arc::clone(&releases),
+    });
+    CausalFixture {
+        transport,
+        entered_rx,
+        calls,
+        entered_signal,
+        releases,
+    }
+}
+
+async fn next_entered(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("transport entry must not hang")
+        .expect("causal transport observation channel must remain open")
+}
+
+/// Poll a nested broker request once and mark only after that poll returned Pending.
+async fn request_with_first_pending_marker(
+    broker: Arc<dyn UserInteractionBroker>,
+    context: InteractionContext,
+    marker: oneshot::Sender<()>,
+) -> InteractionResponse {
+    let request = broker.request(context);
+    tokio::pin!(request);
+    let mut marker = Some(marker);
+    poll_fn(|cx| match request.as_mut().poll(cx) {
+        Poll::Pending => {
+            if let Some(marker) = marker.take() {
+                let _ = marker.send(());
+            }
+            Poll::Pending
+        }
+        Poll::Ready(response) => Poll::Ready(response),
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_interaction_gate_serializes_whole_approval_before_questions() {
+    let CausalFixture {
+        transport,
+        mut entered_rx,
+        calls,
+        releases,
+        ..
+    } = causal_fixture();
+    let broker = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
+
+    let first = tokio::spawn({
+        let broker = Arc::clone(&broker);
+        async move { broker.request(approval_context_with_items(2)).await }
+    });
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+
+    let (pending_tx, pending_rx) = oneshot::channel();
+    let second = tokio::spawn(request_with_first_pending_marker(
+        broker.clone(),
+        questions_context(),
+        pending_tx,
+    ));
+    pending_rx
+        .await
+        .expect("second request must report its first Pending poll");
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "Questions must not enter transport while the whole Approval context owns the gate"
+    );
+
+    releases.add_permits(1);
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session/request_permission", "session/request_permission"]
+    );
+
+    releases.add_permits(1);
+    let InteractionResponse::Decisions(decisions) = first.await.unwrap() else {
+        panic!("first approval must return Decisions");
+    };
+    assert_eq!(decisions.len(), 2);
+
+    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+    releases.add_permits(1);
+    assert!(matches!(
+        second.await.unwrap(),
+        InteractionResponse::Answers(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_interaction_gate_cancelled_waiter_does_not_block_third_request() {
+    let CausalFixture {
+        transport,
+        mut entered_rx,
+        calls,
+        releases,
+        ..
+    } = causal_fixture();
+    let broker = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
+
+    let first = tokio::spawn({
+        let broker = Arc::clone(&broker);
+        async move { broker.request(approval_context()).await }
+    });
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+
+    let (pending_tx, pending_rx) = oneshot::channel();
+    let second = tokio::spawn(request_with_first_pending_marker(
+        broker.clone(),
+        questions_context(),
+        pending_tx,
+    ));
+    pending_rx
+        .await
+        .expect("second request must report its first Pending poll");
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "queued waiter must not enter transport before the active interaction settles"
+    );
+
+    second.abort();
+    let error = second.await.expect_err("aborted waiter must be cancelled");
+    assert!(error.is_cancelled());
+
+    releases.add_permits(1);
+    assert!(matches!(
+        first.await.unwrap(),
+        InteractionResponse::Decisions(_)
+    ));
+
+    let third = tokio::spawn({
+        let broker = Arc::clone(&broker);
+        async move { broker.request(questions_context()).await }
+    });
+    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+    releases.add_permits(1);
+    assert!(matches!(
+        third.await.unwrap(),
+        InteractionResponse::Answers(_)
+    ));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session/request_permission", "elicitation/create"]
+    );
+}
+
+#[tokio::test]
+async fn test_interaction_gate_is_per_broker_instance() {
+    let CausalFixture {
+        transport,
+        mut entered_rx,
+        calls,
+        releases,
+        ..
+    } = causal_fixture();
+    let broker_a = Arc::new(AcpTransportBroker::new(
+        transport.clone(),
+        SessionId::new("session-a"),
+    ));
+    let broker_b = Arc::new(AcpTransportBroker::new(
+        transport,
+        SessionId::new("session-b"),
+    ));
+
+    let first = tokio::spawn(async move { broker_a.request(approval_context()).await });
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+
+    let (pending_tx, pending_rx) = oneshot::channel();
+    let second = tokio::spawn(request_with_first_pending_marker(
+        broker_b,
+        questions_context(),
+        pending_tx,
+    ));
+    pending_rx
+        .await
+        .expect("second broker must report its first Pending poll");
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "separate broker instances must not share a global interaction gate"
+    );
+    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+
+    releases.add_permits(2);
+    assert!(matches!(
+        first.await.unwrap(),
+        InteractionResponse::Decisions(_)
+    ));
+    assert!(matches!(
+        second.await.unwrap(),
+        InteractionResponse::Answers(_)
+    ));
+}
+
+struct EnteredWinnerBroker {
+    entered_signal: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl UserInteractionBroker for EnteredWinnerBroker {
+    async fn request(&self, context: InteractionContext) -> InteractionResponse {
+        self.entered_signal
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("causal entry semaphore must remain open")
+            .forget();
+        let InteractionContext::Approval { items } = context else {
+            return InteractionResponse::Rejected;
+        };
+        InteractionResponse::Decisions(
+            items
+                .into_iter()
+                .map(|_| ApprovalDecision::Approve { source: None })
+                .collect(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn test_multiplex_winner_drop_releases_transport_broker_gate() {
+    let CausalFixture {
+        transport,
+        mut entered_rx,
+        entered_signal,
+        releases,
+        ..
+    } = causal_fixture();
+    let raw = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
+    let winner = Arc::new(EnteredWinnerBroker { entered_signal });
+    let multiplex =
+        MultiplexBroker::new(vec![("raw".into(), raw.clone()), ("winner".into(), winner)]);
+
+    let response = multiplex.request(approval_context()).await;
+    let InteractionResponse::Decisions(decisions) = response else {
+        panic!("multiplex winner must return Decisions");
+    };
+    assert!(matches!(
+        decisions.as_slice(),
+        [ApprovalDecision::Approve { source: Some(source) }] if source == "winner"
+    ));
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+
+    let next = tokio::spawn({
+        let raw = Arc::clone(&raw);
+        async move { raw.request(approval_context()).await }
+    });
+    assert_eq!(
+        next_entered(&mut entered_rx).await,
+        "session/request_permission"
+    );
+    releases.add_permits(1);
+    assert!(matches!(
+        next.await.unwrap(),
+        InteractionResponse::Decisions(_)
+    ));
+}
+
+#[tokio::test]
+async fn test_auto_approve_bypasses_busy_transport_gate() {
+    let CausalFixture {
+        transport,
+        mut entered_rx,
+        calls,
+        releases,
+        ..
+    } = causal_fixture();
+    let broker =
+        Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")).with_auto_approve());
+
+    let questions = tokio::spawn({
+        let broker = Arc::clone(&broker);
+        async move { broker.request(questions_context()).await }
+    });
+    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
+
+    let approval = broker.request(approval_context_with_items(2));
+    tokio::pin!(approval);
+    let first_poll = poll_fn(|cx| Poll::Ready(approval.as_mut().poll(cx))).await;
+    let Poll::Ready(InteractionResponse::Decisions(decisions)) = first_poll else {
+        panic!("AutoApprove must be Ready on its first poll while the transport gate is busy");
+    };
+    assert_eq!(decisions.len(), 2);
+    assert!(decisions
+        .iter()
+        .all(|decision| matches!(decision, ApprovalDecision::Approve { source: None })));
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "AutoApprove must not emit a transport request"
+    );
+
+    releases.add_permits(1);
+    assert!(matches!(
+        questions.await.unwrap(),
+        InteractionResponse::Answers(_)
+    ));
 }
 
 #[tokio::test]
