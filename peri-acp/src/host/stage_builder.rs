@@ -33,12 +33,13 @@ use peri_acp_types::{
     agents::AgentOverrides,
     command_registry::CommandRegistry,
     event::AgentEventHandler,
-    frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+    frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
     mcp_skills::McpSkillRegistry,
     session::SessionInbox,
 };
 use peri_agent::agent::{async_tasks::TaskManager, LangfuseBridgeLike};
+use peri_agent::session::exec::executor::FrozenSessionData;
 use peri_agent::session::exec::stage_builder::{
     build_stage_context as build_stage_context_agent, CachedLlmInstances, StageBuildInput,
     V2AgentOutput,
@@ -78,8 +79,7 @@ pub(crate) fn build_stage_context(
     compact_pre_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     compact_post_hook: Option<Arc<dyn Fn(bool, usize) + Send + Sync>>,
     cached_llm: Option<&CachedLlmInstances>,
-    system_prompt: String,
-    frozen: FrozenData,
+    frozen_session: FrozenSessionData,
     event_handler: Arc<dyn AgentEventHandler>,
     agent_overrides: Option<AgentOverrides>,
     preload_skills: Vec<String>,
@@ -91,6 +91,7 @@ pub(crate) fn build_stage_context(
     on_bg_complete: Option<OnBgCompleteFn>,
     langfuse_bridge_factory: Option<Arc<dyn Fn() -> Arc<dyn LangfuseBridgeLike> + Send + Sync>>,
 ) -> (V2AgentOutput, Option<CachedLlmInstances>) {
+    let frozen = frozen_session.v2_frozen();
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();
     // 会话级共享 v2 MessageQueue（每 turn 同一实例，跨 turn 存活）
@@ -147,10 +148,11 @@ pub(crate) fn build_stage_context(
         let plugin_agent_dirs = ctx.plugin_agent_dirs.clone();
         // 冻结期 MetaHarness 状态（同源注入：重渲染与冻结渲染同一覆盖源，
         // 禁止双轨不一致——设计 §2.4）。
-        let meta_harness = ctx.meta_harness.clone();
+        let meta_harness = frozen.meta_harness.clone();
         // 冻结语言（C2 起语言段由 LangMiddleware 持有，重渲染与冻结渲染
         // 同源注入；修复 --agent override 路径语言段丢失的历史不一致）
-        let language = ctx.language.clone();
+        let language = frozen.language.as_ref().map(|s| s.to_string());
+        let frozen_date = frozen.date.to_string();
         Arc::new(move |ov: Option<&AgentOverrides>, cwd: &str| {
             // C3：detect 无参（hitl/subagent/skills gate 随段落实体迁移至
             // 持有者装配判定，permission_mode 不再参与 gate 判定）
@@ -160,7 +162,7 @@ pub(crate) fn build_stage_context(
             // 双轨。
             let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
             let template = PromptTemplate::new(&meta_harness, &collected);
-            let env = PromptEnv::detect(cwd);
+            let env = PromptEnv::with_frozen_date(cwd, &frozen_date);
             template.render(&env, &features, skills.as_ref(), &plugin_agent_dirs)
         })
     };
@@ -168,14 +170,14 @@ pub(crate) fn build_stage_context(
     // ── 注入面：SubAgent system prompt 构建器 ──
     // frozen date / language 注入（16_workflow 已删除，无子面向 feature 差异）。
     let system_builder: SystemPromptBuilder = {
-        let frozen_date_for_sub = frozen.date.clone();
-        let frozen_language_for_sub = ctx.language.clone();
+        let frozen_date_for_sub = frozen.date.to_string();
+        let frozen_language_for_sub = frozen.language.as_ref().map(|s| s.to_string());
         let skills_for_sub = Arc::clone(&ctx.skills);
         // C3：detect 无参（子链渲染继承主链冻结 disabled 集合驱动的收集
         // 结果，11_subagent 段存在性不变——设计 §3.5.1 步骤 4 子链语义）
         let features_for_sub = PromptFeatures::detect();
         // 冻结期 MetaHarness 状态（与主重渲染同源；禁止回退默认空状态）。
-        let meta_harness_for_sub = ctx.meta_harness.clone();
+        let meta_harness_for_sub = frozen.meta_harness.clone();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
             // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
             // overrides；与主重渲染同一事实源）。
@@ -185,11 +187,7 @@ pub(crate) fn build_stage_context(
                 frozen_language_for_sub.as_deref(),
             );
             let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
-            let env = if let Some(ref date) = frozen_date_for_sub {
-                PromptEnv::with_frozen_date(cwd_dir, date)
-            } else {
-                PromptEnv::detect(cwd_dir)
-            };
+            let env = PromptEnv::with_frozen_date(cwd_dir, &frozen_date_for_sub);
             t.render(&env, &features_for_sub, skills_for_sub.as_ref(), &[])
         })
     };
@@ -226,7 +224,7 @@ pub(crate) fn build_stage_context(
         provider_name: ctx.provider_name.clone(),
         context_window: ctx.effective_context_window,
         claude_md_excludes: ctx.claude_md_excludes.clone().unwrap_or_default(),
-        language: ctx.language.clone(),
+        language: frozen.language.as_ref().map(|s| s.to_string()),
         compact_config: ctx.compact_config.clone(),
         retry_events: ctx
             .retry_events
@@ -261,9 +259,9 @@ pub(crate) fn build_stage_context(
         tool_invocation_resolver: Arc::clone(&ctx.tool_invocation_resolver),
         compact_pre_hook,
         compact_post_hook,
-        // MetaHarness：装配期关闭集合（源自会话冻结状态投影
-        // `SessionContext::meta_harness`，与段落覆盖同源——设计 §2.5）。
-        meta_harness_disabled: ctx.meta_harness.disabled_middlewares.clone(),
+        // MetaHarness：装配期关闭集合与段落覆盖均从同一 frozen snapshot
+        // 派生，禁止回退当轮 SessionContext/config（设计 §2.5）。
+        meta_harness_disabled: frozen.meta_harness.disabled_middlewares.clone(),
     };
 
     // 调用 peri_agent 正式 stage 装配本体（透传 V2AgentOutput）
@@ -271,8 +269,7 @@ pub(crate) fn build_stage_context(
         &input,
         assembler,
         cached_llm,
-        system_prompt,
-        frozen,
+        frozen_session,
         event_handler,
         agent_overrides,
         preload_skills,

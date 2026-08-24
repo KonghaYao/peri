@@ -1,6 +1,6 @@
 # peri-acp 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-24（transport terminal 生命周期）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-25（frozen snapshot stage bridge）
 > 依据：peri-acp/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/peri-acp-protocol.md、源码
 
 ## 架构速览
@@ -25,7 +25,7 @@
 | 改命令路由/内置命令 | `src/session/command/mod.rs` + `src/dispatch/commands.rs` + `src/host/prompt.rs` + `src/host/notify.rs` | `register_builtins`（command/mod.rs:124，compact/clear/rewind/LoopPlaceholder）；`register_ui_entries`（commands.rs:73）/`ui_route_entries`（:38）；`stdio_filters_command`；`send_available_commands_update` | 注册顺序 = 内置 → 本地 skills → 插件（`AcpServerConfig::plugin_command_entries`）→ 动态注入；stdio 部署设置 `stdio_command_filter=true`：`clear`/`rewind`（含 alias）既不出现在 available commands，也不被 slash command 拦截，而是 fall-through 作为普通 prompt 进入 agent；TUI/print 保持命令行为，`session/rewind*` RPC 不受影响；`session/command/compact/pipeline.rs` **仅 re-export** `peri_agent::session::exec::compact_pipeline::execute_compact` |
 | 改 cancel / continuation 链路 | `src/session/mod.rs` + `src/host/continuation.rs` | `SessionManager::cancel_session`（:400，过渡路径）/`cancel_all_agents`（:771）/`cancel_cascade_children_for`（:753）；`cancel_arms_continuation`（continuation.rs:66）；`run_continuation_scheduler`（:111） | 按 (session_id, turn_id, attempt_id) 三元组定位，clear_queue 默认 false；cancel 置位 `continuation_armed`（epoch 代际校验防过期执行，`continuation_still_valid` :89）；cancel > 续跑 > promote > retry 优先级由 Agent 判定；契约 ARC-CANCEL-001 |
 | 改 caps 门控 | `src/session/mod.rs` | `set_pending_caps`（:436，initialize 暂存）/`consume_pending_caps`（:469，session/new 消费）/`ensure_session_caps`（:506）/`effective_host_caps`（:455） | 发送扩展事件前按该 session 的 caps 门控；cap 未双向协商不得投影；事件改动必须覆盖 caps 门控层 |
-| 改装配/中间件链/部署 | `src/host/assemble.rs` + `src/host/stage_builder.rs` | `assemble_server_config(HostAssemblyInput)`（:136）；`assemble_hook_groups`（:60）；`build_stage_context`（stage_builder.rs:75）；`build_session_manager`（:93） | 链序事实源在 `peri-agent/src/session/factory.rs` 的 `production_blueprint`（ARC-MIDDLEWARE-001），ACP 只构造装配上下文；`AcpServerConfig`（host/mod.rs:111）是跨 session 配置聚合面 |
+| 改装配/中间件链/部署 | `src/host/assemble.rs` + `src/host/stage_builder.rs` | `assemble_server_config(HostAssemblyInput)`；`assemble_hook_groups`；`build_stage_context`；`build_session_manager` | ACP stage bridge 只转发 `FrozenSessionData`，language/MetaHarness/date/prompt projection 均从该 snapshot 派生；链序事实源仍是 Agent 层 `production_blueprint`（ARC-MIDDLEWARE-001） |
 | 改 rewind | `src/dispatch/rewind.rs` + `src/session/command/rewind.rs` + `src/host/prompt.rs` | `rewind_preview`（:52）；`rewind_execute`（:215）；`rewind_candidates`（rewind_candidates.rs）；`stdio_filters_command` | `session/rewind*` RPC 仅在双向协商 `peri.rewind` 后可用：preview 返回有界 project-relative 文件影响 + 一次性指纹，execute 前重算历史，指纹缺失/过期拒绝；统一宿主注册使 stdio/TUI 都可调用 RPC（cap 未协商时 -32601）。另有部署差异：stdio 的 slash `/rewind`（及 alias）从命令投影隐藏并 fall-through 进 agent，TUI/print 仍执行内置命令 |
 
 ## 子系统
@@ -104,7 +104,7 @@
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |
 | writer lease | host/lease.rs | `WriterLease`（:20，多读者单 writer） |
 | 装配 | host/assemble.rs | `assemble_server_config`（:136） |
-| stage 构建 | host/stage_builder.rs | `build_stage_context`（:75） |
+| stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源 |
 | workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口） |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
 

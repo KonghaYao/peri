@@ -4,7 +4,7 @@ use chrono::Local;
 
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
-    frozen::{FrozenData, ThreadPersistence},
+    frozen::ThreadPersistence,
     messages::{BaseMessage, MessageContent},
     session::{MessageQueue, QueuedMessage},
     tasks::{BgTaskKind, TaskManager},
@@ -45,39 +45,18 @@ pub(super) async fn build_and_execute_agent(
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
 ) -> ExecOutcome {
-    let (
-        system_prompt,
-        frozen_claude_md,
-        frozen_claude_local_md,
-        frozen_skill_summary,
-        frozen_date,
-    ) = if let Some(f) = turn.frozen {
-        // 使用 session 创建时冻结的数据，跳过重建
-        (
-            f.system_prompt().to_string(),
-            f.claude_md().map(|s| s.to_string()),
-            f.claude_local_md().map(|s| s.to_string()),
-            f.skill_summary().map(|s| s.to_string()),
-            Some(f.date().to_string()),
-        )
+    let frozen_session = if let Some(f) = turn.frozen {
+        // 使用 session 创建时冻结的完整数据，跳过重建。
+        f.clone()
     } else {
         // 调用方未提供 frozen 数据时，经注入的防御性构建器在此一次性构建
         // （渲染面在 ACP 宿主；生产不可达——print mode 已迁移为提前构建
         // FrozenSessionData，此分支仅作防御性编程保留，None 时回落最小数据）。
         match ctx.frozen_fallback_builder.as_ref() {
-            Some(builder) => {
-                let frozen_data = builder(turn.cwd, turn.language.as_deref());
-                (
-                    frozen_data.system_prompt().to_string(),
-                    frozen_data.claude_md().map(|s| s.to_string()),
-                    frozen_data.claude_local_md().map(|s| s.to_string()),
-                    frozen_data.skill_summary().map(|s| s.to_string()),
-                    Some(frozen_data.date().to_string()),
-                )
-            }
+            Some(builder) => builder(turn.cwd, turn.language.as_deref()),
             None => {
                 // 最小回落：无 skills / 无 CLAUDE.md 的空冻结数据
-                let empty = FrozenSessionData::from_frozen_parts(
+                FrozenSessionData::from_frozen_parts(
                     crate::session::FrozenContext {
                         system_prompt: Arc::from(""),
                         claude_md: Arc::from(""),
@@ -88,13 +67,6 @@ pub(super) async fn build_and_execute_agent(
                         meta_harness: peri_acp_types::meta_harness::MetaHarnessState::default(),
                     },
                     None,
-                );
-                (
-                    empty.system_prompt().to_string(),
-                    empty.claude_md().map(|s| s.to_string()),
-                    empty.claude_local_md().map(|s| s.to_string()),
-                    empty.skill_summary().map(|s| s.to_string()),
-                    Some(empty.date().to_string()),
                 )
             }
         }
@@ -328,13 +300,7 @@ pub(super) async fn build_and_execute_agent(
         task_manager: task_manager_opt,
         continuation,
         // ── stage 装配输入（透传 StageBuildRequest）──
-        system_prompt,
-        frozen: FrozenData {
-            claude_md: frozen_claude_md,
-            claude_local_md: frozen_claude_local_md,
-            skill_summary: frozen_skill_summary,
-            date: frozen_date,
-        },
+        frozen_session,
         event_handler,
         agent_overrides: None,       // agent_overrides
         preload_skills: Vec::new(),  // preload_skills

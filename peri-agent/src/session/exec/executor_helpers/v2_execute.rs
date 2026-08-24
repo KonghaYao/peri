@@ -8,7 +8,7 @@ use peri_acp_types::{
         TurnStatus,
     },
     event_v2::EventHandles,
-    frozen::{ChildHandlerFactory, FrozenData, ThreadPersistence},
+    frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
     identity::EventDeliveryClass,
     messages::BaseMessage,
@@ -27,6 +27,7 @@ use crate::agent::{
     stages::{run_react_loop, LoopResult},
     state::AgentState,
 };
+use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
 use crate::session::MessageTranscript;
 
@@ -50,8 +51,7 @@ pub type ForwarderLauncherFn = Arc<
 #[allow(clippy::type_complexity)]
 pub struct StageBuildRequest {
     pub cached_llm: Option<CachedLlmInstances>,
-    pub system_prompt: String,
-    pub frozen: FrozenData,
+    pub frozen_session: FrozenSessionData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
     pub preload_skills: Vec<String>,
@@ -84,8 +84,7 @@ pub struct V2ExecuteRequest {
     pub task_manager: Option<Arc<dyn TaskManager>>,
     pub continuation: bool,
     // ── stage 装配输入（透传 StageBuildRequest）──
-    pub system_prompt: String,
-    pub frozen: FrozenData,
+    pub frozen_session: FrozenSessionData,
     pub event_handler: Arc<dyn AgentEventHandler>,
     pub agent_overrides: Option<peri_acp_types::agents::AgentOverrides>,
     pub preload_skills: Vec<String>,
@@ -131,8 +130,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     });
     let (v2_out, new_cache) = (req.stage_build)(StageBuildRequest {
         cached_llm: req.cached_llm,
-        system_prompt: req.system_prompt,
-        frozen: req.frozen,
+        frozen_session: req.frozen_session,
         event_handler: req.event_handler,
         agent_overrides: req.agent_overrides,
         preload_skills: req.preload_skills,

@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-24（stage 内取消与 executor 终态分类统一）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-08-25（完整 frozen snapshot 贯穿 production stage）
 > 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
 
 ## 架构速览
@@ -56,9 +56,9 @@
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 执行编排、keepgoing、短路 | session/exec/executor.rs | `is_keepgoing`（:130）；`run_session_loop`（:221）；空历史短路 push_done；辅助构建拆至 executor/（context / agent_build / prediction 子模块） |
-| v2 装配与循环驱动 | session/exec/executor_helpers/v2_execute.rs | `build_and_execute_agent_v2`（:122）；根 executor_helpers.rs（:41-57）声明子模块并 re-export intercept / event_pump / collect / bg_fork 子流程 |
+| v2 装配与循环驱动 | session/exec/executor_helpers/v2_execute.rs | `build_and_execute_agent_v2`；`V2ExecuteRequest.frozen_session` → `StageBuildRequest.frozen_session` 单一 snapshot；根 executor_helpers.rs 声明并 re-export intercept / event_pump / collect / bg_fork 子流程 |
 | /compact 命令执行体 | session/exec/compact_pipeline.rs | `run_compact(force=true)` |
-| 工具视图组装 | session/exec/stage_builder.rs | `build_session_tool_view`（:223）、`build_stage_context`（:576） |
+| 工具视图与主 Session 组装 | session/exec/stage_builder.rs | `build_session_tool_view`；`build_stage_context` 以同一 `FrozenSessionData` 构造 middleware projection、主 `SessionStore.frozen` 与 `SubagentHost`；空 CLAUDE/skills 保留 `Some("")` 冻结缺席语义，禁止 late-file 回读 |
 | 子 Agent 创建（spawner/fork/bg/build_agent 收敛） | session/subagent/ | `SessionFactory::spawn_subagent`（factory.rs:36）；`SubagentSpawnConfig`/`SubagentChainAssembler`（types.rs:137/:87）；根 subagent.rs 仅 re-export（directives / factory / run_sync / background / v2_bridge / lifecycle / util） |
 | 后台任务管理（bg shell，易失不持久化） | agent/async_tasks/ | `TaskManager`（manager.rs:28，per-session 聚合）；`BackgroundTaskRegistry`（registry.rs:105）；shell 执行 `shell_command` / `kill_process_group` / `parse_timeout`（shell.rs:109/:25/:201）；根 async_tasks.rs 仅 re-export |
 | 中间件链装配 | session/factory.rs | `production_blueprint`（链序事实源，装配实现在 peri-middlewares/src/assembly.rs） |
