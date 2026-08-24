@@ -78,7 +78,7 @@ void [rootAdapter, adapter];
     });
     child.once("error", reject);
   });
-  assert.deepEqual(frame.result, { protocolVersion: 1, buildId: "@peri-code/ptc@0.2.2" });
+  assert.deepEqual(frame.result, { protocolVersion: 1, buildId: "@peri-code/ptc@0.2.3" });
   child.kill();
   await readFile(path.join(temp, "node_modules/@peri-code/ptc/dist/index.d.ts"));
 } finally {

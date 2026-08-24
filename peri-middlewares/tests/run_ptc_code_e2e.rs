@@ -59,7 +59,7 @@ impl EffectiveToolDispatcher for NoopDispatcher {
 }
 
 async fn write_cached_adapter(home: &Path) {
-    let package = home.join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
+    let package = home.join(".peri/ptc/0.2.3/node_modules/@peri-code/ptc");
     tokio::fs::create_dir_all(package.join("dist"))
         .await
         .unwrap();
@@ -67,12 +67,12 @@ async fn write_cached_adapter(home: &Path) {
         package.join("package.json"),
         serde_json::to_vec(&json!({
             "name": "@peri-code/ptc",
-            "version": "0.2.2",
+            "version": "0.2.3",
             "type": "module",
             "main": "dist/index.js",
             "bin": { "peri-ptc": "dist/peri-ptc.js" },
             "periProtocolVersion": 1,
-            "periBuildId": "@peri-code/ptc@0.2.2"
+            "periBuildId": "@peri-code/ptc@0.2.3"
         }))
         .unwrap(),
     )
@@ -88,7 +88,7 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', line => {
   const request = JSON.parse(line);
   if (request.method === 'ptc/start') {
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.2' } }) + '\n');
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.3' } }) + '\n');
   } else if (request.method === 'execute') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32001, message: 'JavaScript execution failed', data: { code: 'TOOL_FAILED' } } }) + '\n');
   }

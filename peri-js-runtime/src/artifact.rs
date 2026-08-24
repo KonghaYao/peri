@@ -13,9 +13,9 @@ use tracing::debug;
 use crate::{JsProcessSpec, JsRuntimeError, Result};
 
 pub(crate) const PACKAGE_NAME: &str = "@peri-code/ptc";
-pub(crate) const PACKAGE_VERSION: &str = "0.2.2";
+pub(crate) const PACKAGE_VERSION: &str = "0.2.3";
 pub(crate) const PROTOCOL_VERSION: u64 = 1;
-pub(crate) const BUILD_ID: &str = "@peri-code/ptc@0.2.2";
+pub(crate) const BUILD_ID: &str = "@peri-code/ptc@0.2.3";
 const ENTRY: &str = "dist/peri-ptc.js";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 const FALLBACK_ENV: &str = "PERI_PTC_ALLOW_NPX_FALLBACK";
@@ -146,7 +146,7 @@ pub(crate) async fn launch_in(
         Ok(entry) => Ok(PtcLaunch {
             spec: JsProcessSpec::new(node, vec![entry.to_string_lossy().into_owned()])
                 .without_inherited_environment()
-                .with_environment(path_environment()),
+                .with_environment(runtime_environment()),
             _guard: None,
             local_cache: true,
         }),
@@ -338,6 +338,22 @@ fn npx_program(node: &str) -> String {
     if cfg!(windows) { "npx.cmd" } else { "npx" }.into()
 }
 
+#[cfg(windows)]
+fn runtime_environment() -> Vec<(String, String)> {
+    let mut environment = path_environment();
+    for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+        if let Ok(value) = std::env::var(name) {
+            environment.push((name.into(), value));
+        }
+    }
+    environment
+}
+
+#[cfg(not(windows))]
+fn runtime_environment() -> Vec<(String, String)> {
+    path_environment()
+}
+
 fn path_environment() -> Vec<(String, String)> {
     let path = std::env::var("PATH").unwrap_or_else(|_| default_path().into());
     vec![("PATH".into(), path)]
@@ -449,6 +465,23 @@ mod tests {
     }
 
     #[test]
+    fn runtime_environment_is_secret_free() {
+        let environment = runtime_environment()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(environment.contains_key("PATH"));
+        for secret in ["NODE_OPTIONS", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY"] {
+            assert!(!environment.contains_key(secret));
+        }
+        #[cfg(windows)]
+        for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+            if std::env::var_os(name).is_some() {
+                assert!(environment.contains_key(name));
+            }
+        }
+    }
+
+    #[test]
     fn npm_contract_is_exact_and_secret_free() {
         assert_eq!(
             install_args(),
@@ -468,7 +501,7 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
-                "@peri-code/ptc@0.2.2"
+                "@peri-code/ptc@0.2.3"
             ]
         );
         let home = tempfile::tempdir().unwrap();
@@ -490,7 +523,7 @@ mod tests {
                 "--no-update-notifier",
                 "--prefix",
                 home.path().to_string_lossy().as_ref(),
-                "@peri-code/ptc@0.2.2",
+                "@peri-code/ptc@0.2.3",
             ]
         );
         let environment = command

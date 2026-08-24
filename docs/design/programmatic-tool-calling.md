@@ -6,7 +6,7 @@
 
 PTC 在本仓库中的含义是：提供 canonical deferred-only 工具 `RunPtcCode`；模型先通过 `SearchExtraTools` 发现它，再经 `ExecuteExtraTool` 执行，JavaScript 程序通过 `tools.<ToolName>(input)` 异步调用当前 session-local 工具。PTC 默认装配（`PtcMiddleware=false` 可关闭），不改变现有 direct tools 的可见性。旧名 `run_code` 不可执行、不是 alias，仅作为 ToolSearch 迁移关键词。`RunPtcCode` 外层任意代码执行入口按 Bash 同级审批；内部调用的 policy、HITL、事件与 tool card 均投影到 effective target。模型 assistant raw wrapper call 仅为协议配对而保留。
 
-**生产安全边界**：`RunPtcCode` 启动普通 Node.js 进程，并非 sandbox。`tools.*` 的 Permission/HITL 不约束 Node 原生文件系统、进程、环境变量或网络 API；禁用某个 RPC 工具也不阻止 JavaScript 通过 Node API 实施同类操作。runtime 提供 timeout、资源上限、进程树回收和默认环境变量清理以降低可靠性与秘密泄漏风险，但不提供网络、文件系统或容器隔离。不得在 source、input、console、return、异常或工具参数中包含 secret。
+**生产安全边界**：`RunPtcCode` 启动普通 Node.js 进程，并非 sandbox。`tools.*` 的 Permission/HITL 不约束 Node 原生文件系统、进程、环境变量或网络 API；禁用某个 RPC 工具也不阻止 JavaScript 通过 Node API 实施同类操作。runtime 提供 timeout、资源上限、进程树回收和默认环境变量清理以降低可靠性与秘密泄漏风险；PTC adapter 运行环境仅保留 `PATH`，Windows 额外 allowlist `SystemRoot`、`WINDIR`、`TEMP`、`TMP` 以满足 Node/OS 运行要求，不继承其他调用方环境变量，但仍不提供网络、文件系统或容器隔离。不得在 source、input、console、return、异常或工具参数中包含 secret。
 
 ## 2. 目标
 
@@ -205,11 +205,11 @@ PTC Adapter 负责：
 
 ### 5.4 PTC artifact、启动与 handshake
 
-生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Rust runtime 在版本缓存缺失或无效时，以受控最小环境执行固定版本 npm install；`npm-packages/@peri-ptc` 的 `dist` 仅由 package 的 `bun run build`/发布流程生成，不由 Cargo 构建生成，也不作为 Rust 内嵌 artifact 跟踪。package version、build ID、protocol version、Rust 常量和已发布 npm artifact 必须作为一个原子版本面同步。
+生产 artifact 固定为 `@peri-code/ptc@0.2.3`。Rust runtime 在版本缓存缺失或无效时，以受控最小环境执行固定版本 npm install；`npm-packages/@peri-ptc` 的 `dist` 仅由 package 的 `bun run build`/发布流程生成，不由 Cargo 构建生成，也不作为 Rust 内嵌 artifact 跟踪。package version、build ID、protocol version、Rust 常量和已发布 npm artifact 必须作为一个原子版本面同步。
 
-运行时将通过 identity 校验的 package 缓存在 `~/.peri/ptc/0.2.2`，并直接执行校验后的 `node <entry>`，不得使用 `--eval`/`eval`。缓存缺失或无效时，在跨进程锁保护下安装到 staging，完整校验后原子 rename；Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity，任何缺失或不匹配都 fail closed。
+运行时将通过 identity 校验的 package 缓存在 `~/.peri/ptc/0.2.3`，并直接执行校验后的 `node <entry>`，不得使用 `--eval`/`eval`。缓存缺失或无效时，在跨进程锁保护下安装到 staging，完整校验后原子 rename；Node adapter 必须在读取或执行 source 前完成 `ptc/start` handshake，并同时校验 protocol version 与 build identity，任何缺失或不匹配都 fail closed。
 
-默认路径允许对固定版本 `@peri-code/ptc@0.2.2` 执行受控 npm install。只有固定版本安装失败且调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `npx` fallback；安装与 fallback 都必须使用 private `HOME`/npm cache 和最小环境变量。fallback 开关代表调用方主动接受额外的解析链路风险，不能退化为非精确版本。
+默认路径允许对固定版本 `@peri-code/ptc@0.2.3` 执行受控 npm install。只有固定版本安装失败且调用方显式设置 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `npx` fallback；安装与 fallback 都必须使用 private `HOME`/npm cache 和最小环境变量。fallback 开关代表调用方主动接受额外的解析链路风险，不能退化为非精确版本。
 
 ### 5.5 Effective Tool Dispatcher
 

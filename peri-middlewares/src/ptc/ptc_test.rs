@@ -38,7 +38,7 @@ impl HomeGuard {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-ptc");
         let package = home
             .path()
-            .join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
+            .join(".peri/ptc/0.2.3/node_modules/@peri-code/ptc");
         std::fs::create_dir_all(package.join("dist")).unwrap();
         std::fs::copy(source.join("package.json"), package.join("package.json")).unwrap();
         for file in ["peri-ptc.js", "index.js"] {

@@ -1,6 +1,6 @@
 {
   "name": "@peri-code/ptc",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Node adapter and wire types for Perihelion Programmatic Tool Calling",
   "type": "module",
   "bin": {
@@ -22,7 +22,7 @@
     "dist"
   ],
   "periProtocolVersion": 1,
-  "periBuildId": "@peri-code/ptc@0.2.2",
+  "periBuildId": "@peri-code/ptc@0.2.3",
   "scripts": {
     "build": "bun run scripts/build.ts",
     "typecheck": "bunx tsc --project tsconfig.check.json",

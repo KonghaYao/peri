@@ -79,7 +79,7 @@ async fn test_execute_rpc_failure_after_handshake_does_not_invalidate() {
             let launch = launch_in(node, self.home.path(), &FixtureInstaller, false).await?;
             tokio::fs::write(
                 Path::new(&launch.spec.args[0]),
-                b"process.stdin.resume(); let started=false; process.stdin.on('data', data => { if (!started) { started=true; process.stdout.write('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"protocolVersion\":1,\"buildId\":\"@peri-code/ptc@0.2.2\"}}\\n'); } else { process.exit(1); } });",
+                b"process.stdin.resume(); let started=false; process.stdin.on('data', data => { if (!started) { started=true; process.stdout.write('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"protocolVersion\":1,\"buildId\":\"@peri-code/ptc@0.2.3\"}}\\n'); } else { process.exit(1); } });",
             )
             .await?;
             Ok(launch)
@@ -226,12 +226,12 @@ fn test_handshake_rejects_protocol_build_and_ok_mismatch() {
     assert!(validate_handshake(&json!({
         "ok": true,
         "protocolVersion": 1,
-        "buildId": "@peri-code/ptc@0.2.2"
+        "buildId": "@peri-code/ptc@0.2.3"
     }))
     .is_ok());
     for response in [
-        json!({"ok": false, "protocolVersion": 1, "buildId": "@peri-code/ptc@0.2.2"}),
-        json!({"ok": true, "protocolVersion": 2, "buildId": "@peri-code/ptc@0.2.2"}),
+        json!({"ok": false, "protocolVersion": 1, "buildId": "@peri-code/ptc@0.2.3"}),
+        json!({"ok": true, "protocolVersion": 2, "buildId": "@peri-code/ptc@0.2.3"}),
         json!({"ok": true, "protocolVersion": 1, "buildId": "malicious"}),
     ] {
         assert!(validate_handshake(&response).is_err());

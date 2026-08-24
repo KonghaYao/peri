@@ -55,7 +55,7 @@ test("ptc/start handshake is required before execute", async () => {
     {
       jsonrpc: "2.0",
       id: 2,
-      result: { protocolVersion: 1, buildId: "@peri-code/ptc@0.2.2" },
+      result: { protocolVersion: 1, buildId: "@peri-code/ptc@0.2.3" },
     },
     { jsonrpc: "2.0", id: 3, result: { value: 1, logs: [] } },
   ]);

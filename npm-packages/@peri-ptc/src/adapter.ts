@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import type { Writable } from "node:stream";
 
 import {
   PTC_EXECUTE_METHOD,
@@ -16,7 +17,7 @@ export { PTC_EXECUTE_METHOD, PTC_PROTOCOL_VERSION, PTC_START_METHOD } from "./ty
 
 const TOOL_FAILED = "TOOL_FAILED";
 const RESOURCE_LIMIT = "RESOURCE_LIMIT";
-export const PTC_BUILD_ID = "@peri-code/ptc@0.2.2";
+export const PTC_BUILD_ID = "@peri-code/ptc@0.2.3";
 const HANDSHAKE_REQUIRED = "PTC handshake required";
 const PROTOCOL_MISMATCH = "Unsupported PTC protocol version";
 const EXECUTION_MESSAGES: Record<typeof TOOL_FAILED | typeof RESOURCE_LIMIT, string> = Object.freeze({
@@ -24,6 +25,7 @@ const EXECUTION_MESSAGES: Record<typeof TOOL_FAILED | typeof RESOURCE_LIMIT, str
   [RESOURCE_LIMIT]: "JavaScript resource limit exceeded",
 });
 const ABORT_MESSAGE = "The operation was aborted";
+const ADAPTER_FAILURE_MESSAGE = "PTC adapter message handling failed";
 const resourceLimitErrors = new WeakSet<object>();
 
 type JsonRpcId = string | number;
@@ -212,6 +214,10 @@ export function createPtcAdapter(write: (line: string) => void): PtcAdapter {
 
 export function startPtcAdapter(): PtcAdapter {
   const adapter = createPtcAdapter((line) => process.stdout.write(line));
+  const waitDrain = async (): Promise<void> => {
+    if (!(process.stdout as Writable).writableNeedDrain) return;
+    await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
+  };
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   lines.on("line", (line) => {
     let message: unknown;
@@ -220,7 +226,12 @@ export function startPtcAdapter(): PtcAdapter {
     } catch {
       return;
     }
-    void adapter.handleMessage(message);
+    void adapter.handleMessage(message)
+      .then(waitDrain)
+      .catch(() => {
+        process.stderr.write(`${ADAPTER_FAILURE_MESSAGE}\n`);
+        process.exitCode = 1;
+      });
   });
   return adapter;
 }

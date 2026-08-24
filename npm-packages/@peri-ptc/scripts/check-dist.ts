@@ -18,7 +18,7 @@ const types = await readFile("src/types.ts", "utf8");
 const rustArtifact = await readFile("../../peri-js-runtime/src/artifact.rs", "utf8").catch(() => readFile("../../../peri-js-runtime/src/artifact.rs", "utf8"));
 const buildId = `${packageJson.name}@${packageJson.version}`;
 
-assert.equal(packageJson.version, "0.2.2");
+assert.equal(packageJson.version, "0.2.3");
 assert.equal(packageJson.periBuildId, buildId);
 assert.match(source, new RegExp(`PTC_BUILD_ID = ["']${buildId.replaceAll("/", "\\/")}["']`));
 assert.match(types, new RegExp(`PTC_PROTOCOL_VERSION = ${packageJson.periProtocolVersion}`));

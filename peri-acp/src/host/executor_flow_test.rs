@@ -1138,11 +1138,11 @@ impl UserInteractionBroker for RecordingApproveBroker {
 
 #[cfg(not(windows))]
 fn write_ptc_cache_fixture(root: &std::path::Path) {
-    let package = root.join(".peri/ptc/0.2.2/node_modules/@peri-code/ptc");
+    let package = root.join(".peri/ptc/0.2.3/node_modules/@peri-code/ptc");
     std::fs::create_dir_all(package.join("dist")).unwrap();
     std::fs::write(
         package.join("package.json"),
-        r#"{"name":"@peri-code/ptc","version":"0.2.2","type":"module","main":"dist/index.js","bin":{"peri-ptc":"dist/peri-ptc.js"},"periProtocolVersion":1,"periBuildId":"@peri-code/ptc@0.2.2"}"#,
+        r#"{"name":"@peri-code/ptc","version":"0.2.3","type":"module","main":"dist/index.js","bin":{"peri-ptc":"dist/peri-ptc.js"},"periProtocolVersion":1,"periBuildId":"@peri-code/ptc@0.2.3"}"#,
     )
     .unwrap();
     std::fs::write(package.join("dist/index.js"), "export {};\n").unwrap();
@@ -1165,7 +1165,7 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', async line => {
   const request = JSON.parse(line);
   if (request.method === 'ptc/start') {
-    send({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.2' } });
+    send({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.3' } });
   } else if (request.method === 'execute') {
     try {
       const logs = [];
