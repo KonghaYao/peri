@@ -72,7 +72,7 @@ def parse_date_range():
     )
     parser.add_argument(
         "--cwd", default=None,
-        help="项目目录过滤（仅提取 cwd 以此路径开头的 thread）。默认：当前工作目录"
+        help="项目目录过滤（只提取该项目或其子目录的 thread）。默认：当前工作目录"
     )
     parser.add_argument(
         "--all", action="store_true",
@@ -84,7 +84,7 @@ def parse_date_range():
     )
     parser.add_argument(
         "--days", type=int, default=7,
-        help="配合 --query-active-days 的回溯天数（默认 7）"
+        help="配合 --query-active-days 的自然日期数量，含今天（默认 7）"
     )
 
     args = parser.parse_args()
@@ -127,7 +127,7 @@ def main():
         cwd = _resolve_cwd(args)
         rows = query_active_days(args.db, days=args.days, cwd=cwd)
         if not rows:
-            print(f"过去 {args.days} 天无活跃 thread" + (f"（项目: {cwd}）" if cwd else "（所有项目）"))
+            print(f"最近 {args.days} 个自然日期无活跃 thread" + (f"（项目: {cwd}）" if cwd else "（所有项目）"))
             sys.exit(0)
         print(f"{'Day':>12}  {'Threads':>8}  {'Msgs':>8}")
         print("-" * 32)
@@ -139,7 +139,7 @@ def main():
         print(f"{'TOTAL':>12}  {total_threads:>8}  {total_msgs:>8}")
         if cwd:
             print(f"\n过滤项目: {cwd}")
-        return
+        return 0
 
     dates = list(iter_dates(start_str, end_str))
     cwd = _resolve_cwd(args)
@@ -154,44 +154,51 @@ def main():
 
     if args.merge:
         # 按天合并模式（旧行为）
-        _run_merge_mode(args, dates, cwd)
-    else:
-        # 默认：按 thread 拆分
-        for day in dates:
-            out_dir = os.path.join(args.out_root, f"learn-{day}")
-            try:
-                count, results = extract_date_by_thread(day, args.db, out_dir, cwd=cwd)
-                if count > 0:
-                    total_size = sum(r["size_kb"] for r in results.values())
-                    total_errors = sum(r["errors"] for r in results.values())
-                    cwds = set(r.get("cwd", "?") for r in results.values())
-                    cwd_info = f" [{len(cwds)} projects]" if len(cwds) > 1 else ""
-                    print(f"  ✓ {day}: {count} threads{cwd_info}, {total_size:.0f} KB, {total_errors} errors → {out_dir}/")
-                    total_threads += count
-                    has_any_data = True
-                else:
-                    print(f"  - {day}: 无活跃线程")
-            except Exception as e:
-                print(f"  ✗ {day}: 提取失败 - {e}", file=sys.stderr)
+        return _run_merge_mode(args, dates, cwd)
 
-        if has_any_data:
-            print(f"\n总计: {total_threads} threads")
-            if cwd:
-                print(f"过滤项目: {cwd}")
-            print()
-            print("供 learn-from-history agent 使用的目录列表:")
-            for day in sorted(dates):
-                out_dir = os.path.join(args.out_root, f"learn-{day}")
-                idx_path = os.path.join(out_dir, "_index.txt")
-                if os.path.exists(idx_path):
-                    thread_count = sum(1 for f in os.listdir(out_dir) if f.endswith(".txt") and f != "_index.txt")
-                    if thread_count > 0:
-                        print(f"  {out_dir}/  ({thread_count} threads)")
-        else:
-            msg = "时间段内无对话记录。"
-            if cwd:
-                msg += f" 尝试 --all 查看所有项目。"
-            print(msg)
+    # 默认：按 thread 拆分
+    failed_dates = []
+    for day in dates:
+        out_dir = os.path.join(args.out_root, f"learn-{day}")
+        try:
+            count, results = extract_date_by_thread(day, args.db, out_dir, cwd=cwd)
+            if count > 0:
+                total_size = sum(r["size_kb"] for r in results.values())
+                total_errors = sum(r["errors"] for r in results.values())
+                cwds = set(r.get("cwd", "?") for r in results.values())
+                cwd_info = f" [{len(cwds)} projects]" if len(cwds) > 1 else ""
+                print(f"  ✓ {day}: {count} threads{cwd_info}, {total_size:.0f} KB, {total_errors} errors → {out_dir}/")
+                total_threads += count
+                has_any_data = True
+            else:
+                print(f"  - {day}: 无活跃线程")
+        except Exception as error:
+            failed_dates.append(day)
+            print(f"  ✗ {day}: 提取失败 - {error}", file=sys.stderr)
+
+    if has_any_data:
+        print(f"\n总计: {total_threads} threads")
+        if cwd:
+            print(f"过滤项目: {cwd}")
+        print()
+        print("供手工导出的目录列表:")
+        for day in sorted(dates):
+            out_dir = os.path.join(args.out_root, f"learn-{day}")
+            idx_path = os.path.join(out_dir, "_index.txt")
+            if os.path.exists(idx_path):
+                thread_count = sum(1 for filename in os.listdir(out_dir) if filename.endswith(".txt") and filename != "_index.txt")
+                if thread_count > 0:
+                    print(f"  {out_dir}/  ({thread_count} threads)")
+    else:
+        msg = "时间段内无对话记录。"
+        if cwd:
+            msg += " 尝试 --all 查看所有项目。"
+        print(msg)
+
+    if failed_dates:
+        print(f"提取失败日期: {', '.join(failed_dates)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _resolve_cwd(args):
@@ -221,6 +228,7 @@ def _run_merge_mode(args, dates, cwd=None):
         print(f"模式: 按天合并 → {out_dir}/learn-day-YYYY-MM-DD.txt\n")
 
     day_results = {}
+    failed_dates = []
 
     for day in dates:
         output_path = os.path.join(out_dir, f"learn-day-{day}.txt")
@@ -234,16 +242,17 @@ def _run_merge_mode(args, dates, cwd=None):
                 has_any = True
             else:
                 print(f"  - {day}: 无活跃线程")
-        except Exception as e:
-            print(f"  ✗ {day}: 提取失败 - {e}", file=sys.stderr)
+        except Exception as error:
+            failed_dates.append(day)
+            print(f"  ✗ {day}: 提取失败 - {error}", file=sys.stderr)
 
     if not has_any:
         print("\n时间段内无对话记录。")
-        return
-
-    if args.out and day_results:
+    elif args.out and day_results:
         print(f"\n合并 {len(day_results)} 天数据到 {merge_file} ...")
-        with open(merge_file, "w", encoding="utf-8") as out_f:
+        fd = os.open(merge_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as out_f:
             for day in sorted(day_results.keys()):
                 with open(day_results[day]["path"], "r", encoding="utf-8") as in_f:
                     content = in_f.read()
@@ -252,8 +261,14 @@ def _run_merge_mode(args, dates, cwd=None):
                     start = 3 if lines[0].startswith("# 对话历史提取") else 0
                     out_f.write("\n".join(lines[start:]))
                     out_f.write("\n")
+        os.chmod(merge_file, 0o600)
         print(f"合并完成: {os.path.getsize(merge_file) / (1024*1024):.1f} MB")
+
+    if failed_dates:
+        print(f"提取失败日期: {', '.join(failed_dates)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

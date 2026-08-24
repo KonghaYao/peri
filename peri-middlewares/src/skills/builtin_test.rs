@@ -35,6 +35,25 @@ fn test_builtin_skills_frontmatter_valid() {
 }
 
 #[test]
+fn test_self_build_skill_registered_and_scoped() {
+    let skill = BUILTIN_SKILLS
+        .iter()
+        .find(|skill| skill.name == "self-build")
+        .expect("BUILTIN_SKILLS 应含 self-build");
+
+    for marker in ["MCP", "MCPP", "Bun", "Node.js", "MetaHarness", ".mcp.json"] {
+        assert!(
+            skill.content.contains(marker),
+            "self-build 应覆盖 {marker}"
+        );
+    }
+    assert!(
+        !skill.content.to_ascii_lowercase().contains("hooks"),
+        "self-build 不应教授或推荐 hooks"
+    );
+}
+
+#[test]
 fn test_parse_builtin_frontmatter_invalid_returns_none() {
     // 格式错误的 frontmatter 应返回 None
     let bad = "no frontmatter here";
