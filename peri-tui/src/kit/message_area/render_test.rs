@@ -2944,7 +2944,7 @@ fn test_semantic_output_line_not_mistaken_for_diff() {
     assert_eq!(sem, "42  foo", "输出行不剥内容（非 diff gutter 模式）");
 }
 
-/// code block 行：剥 `│ ` gutter（现状无语言标签行/行号）。
+/// code block 行：剥 `│ ` gutter 与视觉背景 padding（现状无语言标签行/行号）。
 #[test]
 fn test_semantic_code_block_strips_gutter() {
     let grid = GridSpec::grid_for(120);
@@ -2963,6 +2963,26 @@ fn test_semantic_code_block_strips_gutter() {
         .expect("code 行");
     let sem = sem_at(&vm, idx, &grid).expect("code 行");
     assert_eq!(sem, "let x = 1;", "剥 `│ ` gutter，实际: {sem:?}");
+}
+
+#[test]
+fn test_semantic_code_block_preserves_source_trailing_spaces() {
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
+        started_at: None,
+        duration_ms: None,
+        text: "```text\nvalue  \n```".to_string(),
+        reasoning: None,
+        message_id: None,
+        content_hash: 0,
+    });
+    let lines = vm_to_lines(&vm, &grid);
+    let idx = lines
+        .iter()
+        .position(|line| line_text(line).contains("value"))
+        .expect("code 行");
+    let sem = sem_at(&vm, idx, &grid).expect("code 行");
+    assert_eq!(sem, "value  ", "只剥视觉 padding，保留源码尾随空格");
 }
 
 /// user bubble：label 行（`You`）与正文行剥离前缀。
