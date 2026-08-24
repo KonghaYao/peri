@@ -11,13 +11,14 @@
 
 use std::{
     ffi::OsString,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard, OnceLock,
-    },
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
 
+#[cfg(not(windows))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
+#[cfg(not(windows))]
 use futures::stream;
 use peri_acp_types::{
     event::ExecutorEvent,
@@ -40,6 +41,7 @@ use crate::{
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
 use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};
+#[cfg(not(windows))]
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, ModelStreamEvent, StopReason, ToolCall,
