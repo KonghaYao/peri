@@ -187,6 +187,7 @@ impl JsExecutor {
             host.terminate_and_wait("JavaScript execution finished", Duration::from_millis(100)),
         )
         .await;
+        drop(host);
         if local_cache
             && matches!(
                 outcome,
@@ -300,9 +301,26 @@ impl JsExecutor {
                 _ = tokio::time::sleep_until(deadline) => break Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout }),
                 result = &mut request_task, if !request_finished => {
                     request_finished = true;
-                    let value = result
-                        .map_err(|_| JsRuntimeError::Rpc("execution request task failed".into()))?
-                        .map_err(normalize_execute_response_error)?;
+                    let response = result
+                        .map_err(|_| JsRuntimeError::Rpc("execution request task failed".into()))?;
+                    let value = match response {
+                        Ok(value) => value,
+                        Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
+                            let status = tokio::time::timeout(
+                                Duration::from_millis(100),
+                                host.wait_for_exit(),
+                            )
+                            .await
+                            .ok()
+                            .and_then(std::result::Result::ok);
+                            break Err(JsRuntimeError::RuntimeExited {
+                                success: status.as_ref().is_some_and(std::process::ExitStatus::success),
+                                code: status.as_ref().and_then(std::process::ExitStatus::code),
+                                stderr_bytes: host.stderr_bytes(),
+                            });
+                        }
+                        Err(error) => break Err(normalize_execute_response_error(error)),
+                    };
                     let parsed: JsExecutionResult = serde_json::from_value(value)?;
                     check_result(&parsed, &self.limits)?;
                     break Ok(parsed);

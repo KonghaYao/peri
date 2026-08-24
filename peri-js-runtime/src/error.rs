@@ -78,6 +78,15 @@ pub enum JsRuntimeError {
         observed: usize,
     },
 
+    #[error(
+        "JavaScript runtime exited unexpectedly: success={success}, code={code:?}, stderr_bytes={stderr_bytes}"
+    )]
+    RuntimeExited {
+        success: bool,
+        code: Option<i32>,
+        stderr_bytes: usize,
+    },
+
     #[error("JavaScript process cleanup failed: {0}")]
     CleanupFailed(String),
 
@@ -98,6 +107,7 @@ impl JsRuntimeError {
             Self::ArtifactTampered
             | Self::ArtifactUnavailable
             | Self::SpawnFailed(_)
+            | Self::RuntimeExited { .. }
             | Self::CleanupFailed(_)
             | Self::Io(_) => "RUNTIME_FAILED",
             Self::Rpc(_) | Self::RpcResponse(_) | Self::Json(_) => "PROTOCOL_ERROR",
@@ -113,6 +123,7 @@ impl JsRuntimeError {
             Self::ArtifactTampered
             | Self::ArtifactUnavailable
             | Self::SpawnFailed(_)
+            | Self::RuntimeExited { .. }
             | Self::CleanupFailed(_)
             | Self::Io(_) => "JavaScript runtime failed",
             Self::Rpc(_) | Self::RpcResponse(_) | Self::Json(_) => "JavaScript RPC protocol error",

@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +74,7 @@ pub struct JsExecutionHost {
     process_tree: ProcessTree,
     stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    stderr_bytes: Arc<AtomicUsize>,
 }
 
 impl JsExecutionHost {
@@ -135,14 +137,19 @@ impl JsExecutionHost {
         let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
         let (sender, incoming) = mpsc::channel(256);
         let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender);
-        let stderr_task = tokio::spawn(async move {
-            let mut stderr = BufReader::new(stderr);
-            let mut buffer = vec![0; STDERR_CHUNK_BYTES];
-            while let Ok(bytes) = stderr.read(&mut buffer).await {
-                if bytes == 0 {
-                    break;
+        let stderr_bytes = Arc::new(AtomicUsize::new(0));
+        let stderr_task = tokio::spawn({
+            let stderr_bytes = Arc::clone(&stderr_bytes);
+            async move {
+                let mut stderr = BufReader::new(stderr);
+                let mut buffer = vec![0; STDERR_CHUNK_BYTES];
+                while let Ok(bytes) = stderr.read(&mut buffer).await {
+                    if bytes == 0 {
+                        break;
+                    }
+                    stderr_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
                 }
-                debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
             }
         });
 
@@ -153,6 +160,7 @@ impl JsExecutionHost {
             process_tree,
             stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
             stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
+            stderr_bytes,
         })
     }
 
@@ -162,6 +170,14 @@ impl JsExecutionHost {
 
     pub async fn take_incoming(&self) -> Option<mpsc::Receiver<IncomingMessage>> {
         self.incoming.lock().await.take()
+    }
+
+    pub(crate) async fn wait_for_exit(&self) -> Result<std::process::ExitStatus> {
+        self.child.lock().await.wait().await.map_err(Into::into)
+    }
+
+    pub(crate) fn stderr_bytes(&self) -> usize {
+        self.stderr_bytes.load(Ordering::Relaxed)
     }
 
     pub async fn kill(&self) -> Result<()> {

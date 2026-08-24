@@ -16,7 +16,6 @@ use super::{
 };
 use crate::{JsExecutionFailure, JsRuntimeError, JsonRpcError, ResourceKind, Result};
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_local_cache_spawn_failure_invalidates() {
     struct SpawnFailureProvider {
@@ -67,7 +66,6 @@ async fn test_local_cache_spawn_failure_invalidates() {
     assert!(invalidated.load(Ordering::SeqCst));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_rpc_failure_after_handshake_does_not_invalidate() {
     struct ExecuteFailureProvider {
@@ -118,7 +116,6 @@ async fn test_execute_rpc_failure_after_handshake_does_not_invalidate() {
     assert!(!invalidated.load(Ordering::SeqCst));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_handshake_failure_invalidates_local_cache_after_cleanup() {
     struct BrokenHandshakeProvider {
@@ -254,7 +251,6 @@ impl JsRpcRouter for EchoRouter {
     }
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_supports_concurrent_tool_promises_and_completion() {
     let result = test_executor("node")
@@ -291,7 +287,6 @@ impl JsRpcRouter for BlockingRouter {
     }
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_cancels_unawaited_tool_calls_before_completion() {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -339,7 +334,6 @@ impl JsRpcRouter for AbortRouter {
     }
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_abort_signal_cancels_only_target_tool_invocation() {
     let slow_cancelled = Arc::new(AtomicBool::new(false));
@@ -361,7 +355,6 @@ async fn test_abort_signal_cancels_only_target_tool_invocation() {
     assert!(slow_cancelled.load(Ordering::SeqCst));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_rejects_source_over_limit_before_spawn() {
     let limits = JsExecutionLimits {
@@ -390,7 +383,6 @@ async fn test_execute_rejects_source_over_limit_before_spawn() {
     ));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_hard_timeout_kills_busy_loop() {
     let limits = JsExecutionLimits {
@@ -413,7 +405,6 @@ async fn test_execute_hard_timeout_kills_busy_loop() {
     assert_eq!(error.code(), "TIMEOUT");
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_redacts_javascript_exception() {
     let error = test_executor("node")
@@ -431,7 +422,6 @@ async fn test_execute_redacts_javascript_exception() {
     assert!(!error.to_string().contains("ptc-canary-value"));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_propagates_cancellation() {
     let cancel = CancellationToken::new();
@@ -568,7 +558,6 @@ async fn execute_source(source: &str) -> JsRuntimeError {
         .unwrap_err()
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_supports_node_dynamic_import() {
     let result = test_executor("node")
@@ -588,7 +577,6 @@ async fn test_execute_supports_node_dynamic_import() {
     );
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_require_as_safe_tool_failure() {
     let error = execute_source("require('node:crypto');").await;
@@ -596,7 +584,6 @@ async fn test_execute_classifies_require_as_safe_tool_failure() {
     assert_eq!(error.public_message(), "JavaScript execution failed");
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_exception_without_canary_leak() {
     let error = execute_source("throw new Error('executor-canary');").await;
@@ -605,7 +592,6 @@ async fn test_execute_classifies_exception_without_canary_leak() {
     assert!(!error.to_string().contains("executor-canary"));
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_syntax_error_as_tool_failure() {
     assert_eq!(
@@ -614,13 +600,11 @@ async fn test_execute_classifies_syntax_error_as_tool_failure() {
     );
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_bigint_as_tool_failure() {
     assert_eq!(execute_source("return 42n;").await.code(), "TOOL_FAILED");
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_circular_value_as_tool_failure() {
     assert_eq!(
@@ -631,7 +615,6 @@ async fn test_execute_classifies_circular_value_as_tool_failure() {
     );
 }
 
-#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_execute_classifies_adapter_result_limit() {
     let limits = JsExecutionLimits {
