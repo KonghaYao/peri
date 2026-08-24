@@ -30,11 +30,14 @@ pub struct TuiAskUserBlock {
     /// 提交结果（如 `Allowed once` / 用户选中 label）——仅 completed 有值；
     /// 渲染层负责加状态符号与颜色。
     pub result: Option<String>,
-    /// 本地 request_id（从 HITL_REQUEST_ID / ASK_USER_REQUEST_ID atom 克隆，
-    /// 即 serde_json 序列化的 RequestId 字符串）——InteractionResolved 事件
+    /// 本地 request_id（由 notifier 与 payload 原子同行，保存
+    /// serde_json 序列化的 RequestId 字符串）——InteractionResolved 事件
     /// 按此匹配回写；同时是折叠覆盖键 `FoldKey::Interaction(id)` 的键控。
     /// 身份字段，不进 content_hash（同 message_id/source 先例），进 partial_eq。
     pub request_id: Option<String>,
+    /// AskUser 原始问题 ID 顺序；inline action 不读取 ambient pending state。
+    /// 与 request_id 一样是身份元数据，不参与可见内容 hash。
+    pub question_ids: Vec<String>,
     /// 折叠状态——折叠 pass（spec §7 interaction 行）驱动；
     /// 生产创建点 push 到 committed，折叠 pass 与用户覆盖共同驱动。
     pub fold: FoldState,
@@ -89,7 +92,7 @@ impl TuiAskUserBlock {
     }
 }
 
-tui_impl_partial_eq!(TuiAskUserBlock: items, is_error, kind, pending, verb, question, options, result, request_id, fold, user_modified);
+tui_impl_partial_eq!(TuiAskUserBlock: items, is_error, kind, pending, verb, question, options, result, request_id, question_ids, fold, user_modified);
 
 /// A single question-answer pair in an AskUser block.
 #[derive(Debug, Clone, PartialEq)]

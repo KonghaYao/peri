@@ -370,14 +370,12 @@ pub static REWIND_QUERY_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| N
 pub static REWIND_QUERY_GEN: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 pub static OAUTH_INFO: AtomStatic<Option<OauthNeeded>> = AtomStatic::new(|| None);
-pub static HITL_PENDING: AtomStatic<Option<HitlPending>> = AtomStatic::new(|| None);
-pub static ASK_USER_PENDING: AtomStatic<Option<AskUser>> = AtomStatic::new(|| None);
-/// Elicitation RequestId 临时存储——notifier 写入，popup Confirm/Esc 读取后通过 consumer 发回 ACP。
-pub static ASK_USER_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
-
-/// HITL RequestPermission 的 RequestId 临时存储——notifier 写入，
-/// hitl_popup 读取后通过 HITL_RESPONSE_TX 发回 hitl_response_consumer。
-pub static HITL_REQUEST_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static HITL_PENDING: AtomStatic<
+    Option<crate::kit::acp_types::PendingInteraction<HitlPending>>,
+> = AtomStatic::new(|| None);
+pub static ASK_USER_PENDING: AtomStatic<
+    Option<crate::kit::acp_types::PendingInteraction<AskUser>>,
+> = AtomStatic::new(|| None);
 
 pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
@@ -604,7 +602,7 @@ pub enum ConfirmAction {
     /// 切换到指定 thread_id
     ThreadSwitch(String),
     /// 用户确认拒绝回答 AskUser 提问
-    RejectAskUser,
+    RejectAskUser { request_id_json: String },
 }
 
 /// 确认弹窗的 payload

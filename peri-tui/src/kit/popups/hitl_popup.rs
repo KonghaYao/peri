@@ -8,7 +8,7 @@
 //!
 //! ## 用户路径
 //!
-//! - **Enter**：approve——读 `HITL_REQUEST_ID`，经 `HITL_RESPONSE_TX` 发 `Approve`
+//! - **Enter**：approve——从 composite 快照取 ID，经 `HITL_RESPONSE_TX` 发 `Approve`
 //!   到 hitl_response_consumer，由其调用 `client.send_response(id, selected/allow_once)`。
 //! - **Esc**：reject——同样读 id 发 `Reject`（outcome=cancelled）。
 //!
@@ -16,7 +16,7 @@
 //!
 //! HitlPopup 的 Enter/Esc handler 用 `EventPriority::High`，先于 `register_root_handlers`
 //! 的 Normal Esc handler 执行（root handler 在 `FocusLayer::Popup` 时会直接 `close_popup`
-//! 并 Consumed 截断）。High 优先级让 popup 有机会读 `HITL_REQUEST_ID` 并发响应；
+//! 并 Consumed 截断）。High 优先级让 popup 有机会从 composite 快照发响应；
 //! Consumed 后 root handler 不再执行，避免 close 在 send 之前清空 id。
 //! 其他 popup（AskUser/Rewind/OAuth）仍用 Normal，依赖 root handler 关闭。
 
@@ -27,10 +27,10 @@ use ratatui_kit::{
 };
 
 use crate::i18n;
-use crate::kit::atoms::{HITL_PENDING, HITL_REQUEST_ID, HITL_RESPONSE_TX, LANG_VERSION};
+use crate::kit::atoms::{HITL_PENDING, HITL_RESPONSE_TX, LANG_VERSION};
 use crate::kit::hitl_response::HitlResponseAction;
 use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::popup_overlay::close_popup;
+use crate::kit::popup_overlay::close_hitl_popup_for_request;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -49,28 +49,27 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     // 审批动作：Enter 与鼠标左键点击共用（click as enter）
+    let approve_pending = pending.clone();
+    let reject_pending = pending.clone();
     let approve = move || {
-        // 读取 HITL_REQUEST_ID 并通过 channel 发送 Approve。
-        // 先读取 id_str，再 close_popup（close 会清空 HITL_REQUEST_ID）。
-        if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+        if let Some(snapshot) = &approve_pending
             && let Some(tx) = HITL_RESPONSE_TX.get()
         {
             let _ = tx.send(HitlResponseAction::Approve {
-                request_id_str: id_str,
+                request_id_str: snapshot.request_id_json.clone(),
             });
+            close_hitl_popup_for_request(&snapshot.request_id_json);
         }
-        close_popup();
     };
     let reject = move || {
-        // Esc 同 Enter 路径——先读取 id_str 发送 Reject，再 close_popup。
-        if let Some(id_str) = HITL_REQUEST_ID.state().read().clone()
+        if let Some(snapshot) = &reject_pending
             && let Some(tx) = HITL_RESPONSE_TX.get()
         {
             let _ = tx.send(HitlResponseAction::Reject {
-                request_id_str: id_str,
+                request_id_str: snapshot.request_id_json.clone(),
             });
+            close_hitl_popup_for_request(&snapshot.request_id_json);
         }
-        close_popup();
     };
 
     // High 优先级：先于 register_root_handlers 的 Normal Esc handler 执行，
@@ -127,7 +126,8 @@ pub fn HitlPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
-        Some(hp) => {
+        Some(pending) => {
+            let hp = &pending.payload;
             lines.push(Line::from(""));
             // 工具名行
             lines.push(

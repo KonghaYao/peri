@@ -41,8 +41,7 @@ pub enum FoldKey {
     Reasoning(String),
     Tool(String),
     SubAgent(String),
-    /// Interaction block 按本地 request_id 键控（生产创建点从
-    /// HITL_REQUEST_ID / ASK_USER_REQUEST_ID atom 克隆；测试构造为 None 时
+    /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
     /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),
 }

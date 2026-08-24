@@ -5,11 +5,13 @@
 
 use super::*;
 use crate::i18n;
-use crate::kit::acp_types::{BgTaskEntry, FeedbackChannel, FeedbackLevel, TuiCommandFeedback};
+use crate::kit::acp_types::{
+    BgTaskEntry, FeedbackChannel, FeedbackLevel, PendingInteraction, TuiCommandFeedback,
+};
 use crate::kit::atoms::PluginSummary;
 use crate::kit::atoms::{
-    ASK_USER_PENDING, ASK_USER_REQUEST_ID, BG_DISPLAY, BG_TASKS, HITL_REQUEST_ID, NOTIFICATION,
-    PLUGIN_LIST, PLUGIN_SEARCH_RESULTS, PREDICTION, RENDER_HEARTBEAT,
+    ASK_USER_PENDING, BG_DISPLAY, BG_TASKS, NOTIFICATION, PLUGIN_LIST, PLUGIN_SEARCH_RESULTS,
+    PREDICTION, RENDER_HEARTBEAT,
 };
 use crate::kit::tui_render_unit::{InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit};
 use fluent_bundle::FluentValue;
@@ -134,15 +136,18 @@ pub(super) fn handle_prediction(p: &Prediction) {
 
 pub(super) fn handle_file_suggestions() {}
 
-pub(super) fn handle_hitl_pending(state: &mut BridgeState, hp: &HitlPending) {
+pub(super) fn handle_hitl_pending(
+    state: &mut BridgeState,
+    pending: &PendingInteraction<HitlPending>,
+) {
     // I21-A：保存 payload 到 HITL_PENDING atom，供 HitlPopup 读取真实数据
-    *crate::kit::atoms::HITL_PENDING.state().write() = Some(hp.clone());
+    *crate::kit::atoms::HITL_PENDING.state().write() = Some(pending.clone());
     state.popup_kind = Some(crate::kit::atoms::PopupKind::Hitl);
     state.variant = 2;
     // [Slice 4 §6.8] 双轨：inline transcript block（可见 + 可聚焦 + 结果回写）
     // 与 HITL 弹窗（模态操作层）并存。block 按事件到达位置 push 到 committed
     // ——不进 CurrentTurn 缓存（sync_cache 段对齐不可破坏）。
-    let block = build_permission_block(hp);
+    let block = build_permission_block(pending);
     // [§6.8 模态互斥] 同 request_id 的 pending block 已存在（事件重放/重连/
     // 重试重复到达）→ 跳过注入——重复 pending 块永远不会被 resolve（单响应
     // 事件只匹配首个），会以「可聚焦假象」永久滞留 transcript。
@@ -156,15 +161,15 @@ pub(super) fn handle_hitl_pending(state: &mut BridgeState, hp: &HitlPending) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_ask_user(state: &mut BridgeState, au: &AskUser) {
+pub(super) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteraction<AskUser>) {
     // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPanel 读取真实数据。
     // 通过 panel_registry 打开 AskUser 面板（非弹窗），内联在 MessageArea 下方。
-    *ASK_USER_PENDING.state().write() = Some(au.clone());
+    *ASK_USER_PENDING.state().write() = Some(pending.clone());
     crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::AskUser);
     state.variant = 2;
     // [Slice 4 §6.8] 双轨：inline transcript block 与 AskUser 面板（模态操作层）
     // 并存；block push 到 committed（时序即事件到达位置）。
-    let block = build_ask_user_block(au);
+    let block = build_ask_user_block(pending);
     // [§6.8 模态互斥] 同 request_id 的 pending block 已存在 → 跳过注入
     // （重复 pending 块不会被 resolve，永久滞留）。
     if !committed_has_pending(state, block.request_id.as_deref()) {
@@ -224,8 +229,9 @@ pub(super) fn handle_interaction_resolved(state: &mut BridgeState, request_id: &
 /// 构造 Permission（HITL）interaction block（§6.8）：
 /// `! Approval required` / `{verb} wants to run: {input_summary}` /
 /// `[Allow once] [Deny]`（D6：`[Always allow]` 为协议依赖项，不渲染）。
-/// `request_id` 从 HITL_REQUEST_ID atom 克隆（acp_notifier 在发事件前写入）。
-fn build_permission_block(hp: &HitlPending) -> TuiAskUserBlock {
+/// `request_id` 与 payload 从同一个 composite event 取得。
+fn build_permission_block(pending: &PendingInteraction<HitlPending>) -> TuiAskUserBlock {
+    let hp = &pending.payload;
     let mut verb = hp.tool_name.clone();
     if verb.is_empty() {
         verb = i18n::tr("render-interaction-tool-unknown");
@@ -252,7 +258,8 @@ fn build_permission_block(hp: &HitlPending) -> TuiAskUserBlock {
             i18n::tr("render-interaction-deny"),
         ],
         result: None,
-        request_id: HITL_REQUEST_ID.state().read().clone(),
+        request_id: Some(pending.request_id_json.clone()),
+        question_ids: Vec::new(),
         fold: crate::kit::tui_render_unit::FoldState::Expanded,
         user_modified: false,
         content_hash: 0,
@@ -264,7 +271,8 @@ fn build_permission_block(hp: &HitlPending) -> TuiAskUserBlock {
 /// 构造 AskUser interaction block（§6.8）：首问 header/options 摘要。
 /// 多问题表单的完整编辑保留在 AskUser 面板（双轨 D5）；inline 只承担首问
 /// 的快速回答（其余问题提交空字符串，协议结构完整）。
-fn build_ask_user_block(au: &AskUser) -> TuiAskUserBlock {
+fn build_ask_user_block(pending: &PendingInteraction<AskUser>) -> TuiAskUserBlock {
+    let au = &pending.payload;
     let first = au.questions.first();
     let question = match first {
         Some(q) if !q.header.is_empty() => q.header.clone(),
@@ -283,7 +291,8 @@ fn build_ask_user_block(au: &AskUser) -> TuiAskUserBlock {
         question,
         options,
         result: None,
-        request_id: ASK_USER_REQUEST_ID.state().read().clone(),
+        request_id: Some(pending.request_id_json.clone()),
+        question_ids: au.questions.iter().map(|q| q.id.clone()).collect(),
         fold: crate::kit::tui_render_unit::FoldState::Expanded,
         user_modified: false,
         content_hash: 0,

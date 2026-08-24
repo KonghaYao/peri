@@ -22,11 +22,12 @@ use tracing::{debug, info, warn};
 use crate::acp_client::AcpNotification;
 use crate::i18n;
 use crate::kit::acp_types::{
-    AcpEventData, AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, TuiCommandFeedback,
+    AcpEventData, AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, PendingInteraction,
+    TuiCommandFeedback,
 };
 use crate::kit::atoms::{
-    ACP_STATE, ASK_USER_REQUEST_ID, AVAILABLE_SLASH_COMMANDS, HITL_REQUEST_ID, INPUT_BUFFER,
-    NOTIFICATION, PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
+    ACP_STATE, AVAILABLE_SLASH_COMMANDS, INPUT_BUFFER, NOTIFICATION, PERI_CONFIG_HANDLE,
+    RENDER_HEARTBEAT, SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
 use crate::kit::slash_completion::SlashActionKind;
@@ -691,8 +692,7 @@ fn handle_session_update(
     }
 }
 
-/// 处理 Elicitation 通知：解析 params 为 AskUser → 写入 ASK_USER_REQUEST_ID atom →
-/// 构造 AcpEventData::AskUser 推入双 bridge。
+/// 处理 Elicitation 通知：原子封装 RequestId + AskUser 后推入 bridge。
 fn handle_elicitation(
     id: &peri_acp::transport::types::RequestId,
     params: &Value,
@@ -705,17 +705,19 @@ fn handle_elicitation(
         .unwrap_or("")
         .to_string();
 
-    // 序列化 RequestId 存入 atom（供 popup 提交时回传）
-    if let Ok(id_str) = serde_json::to_string(id) {
-        *ASK_USER_REQUEST_ID.state().write() = Some(id_str);
+    let request_id_json = if let Ok(id_str) = serde_json::to_string(id) {
+        id_str
     } else {
         warn!("kit ACP notifier: failed to serialize elicitation RequestId");
         return;
-    }
+    };
 
     let questions = parse_elicitation_questions(params);
     let ask_user = AskUser { questions };
-    let event = AcpEventData::AskUser(ask_user);
+    let event = AcpEventData::AskUser(PendingInteraction {
+        request_id_json,
+        payload: ask_user,
+    });
     let wrapped = AcpEventWithEpoch {
         event,
         active_session_id: session_id,
@@ -728,9 +730,7 @@ fn handle_elicitation(
     }
 }
 
-/// 处理 RequestPermission 通知（HITL）：解析 params 为 HitlPending →
-/// 写入 HITL_REQUEST_ID atom（供 HitlPopup 回传）→ 构造 AcpEventData::HitlPending
-/// 推入双 bridge channel，由 dispatch_and_notify 写入 HITL_PENDING atom + 设 POPUP_KIND。
+/// 处理 RequestPermission：原子封装 RequestId + HITL payload 后推入 bridge。
 ///
 /// JSON 结构（CreatePermissionRequest ACP schema）:
 /// ```json
@@ -749,12 +749,12 @@ fn handle_request_permission(
         .unwrap_or("")
         .to_string();
 
-    if let Ok(id_str) = serde_json::to_string(id) {
-        *HITL_REQUEST_ID.state().write() = Some(id_str);
+    let request_id_json = if let Ok(id_str) = serde_json::to_string(id) {
+        id_str
     } else {
         warn!("kit ACP notifier: failed to serialize RequestPermission RequestId");
         return;
-    }
+    };
 
     // 从 params.toolCall 提取 tool_name + tool_input
     let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
@@ -770,7 +770,10 @@ fn handle_request_permission(
         batch: None,
     };
 
-    let event = AcpEventData::HitlPending(hp);
+    let event = AcpEventData::HitlPending(PendingInteraction {
+        request_id_json,
+        payload: hp,
+    });
     let wrapped = AcpEventWithEpoch {
         event,
         active_session_id: session_id,

@@ -935,6 +935,7 @@ fn ask_user_block_base() -> TuiAskUserBlock {
         options: vec!["Allow once".into(), "Deny".into()],
         result: None,
         request_id: Some("rid-1".into()),
+        question_ids: vec![],
         fold: FoldState::Expanded,
         user_modified: false,
         content_hash: 0,
@@ -984,6 +985,15 @@ fn test_ask_user_block_hash_includes_pending_options_result() {
         a.content_hash, f.content_hash,
         "request_id 不进 content_hash"
     );
+
+    let mut g = ask_user_block_base();
+    g.question_ids = vec!["q1".into()];
+    g.recompute_hash();
+    assert_eq!(
+        a.content_hash, g.content_hash,
+        "question_ids 不进可见内容 hash"
+    );
+    assert_ne!(a, g, "question_ids 参与结构相等比较");
 }
 
 /// [Slice 4] partial_eq：身份字段（request_id）参与相等比较、content_hash 忽略。

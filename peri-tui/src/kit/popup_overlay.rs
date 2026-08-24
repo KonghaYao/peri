@@ -114,11 +114,9 @@ pub fn close_popup() -> Option<PopupKind> {
         match kind {
             PopupKind::Hitl => {
                 *atoms::HITL_PENDING.state().write() = None;
-                *atoms::HITL_REQUEST_ID.state().write() = None;
             }
             PopupKind::AskUser => {
                 *atoms::ASK_USER_PENDING.state().write() = None;
-                *atoms::ASK_USER_REQUEST_ID.state().write() = None;
             }
             // Rewind：REWIND_PREVIEW 保留（候选跟随会话生命周期，关闭后可再开），
             // 但预算状态 / 目标文本 / 查询错误随弹窗关闭清空（下次打开重新查询）。
@@ -140,6 +138,34 @@ pub fn close_popup() -> Option<PopupKind> {
         }
     }
     prev
+}
+
+/// 仅当 HITL active request 仍等于响应快照时，原子清理并关闭对应弹窗。
+pub fn close_hitl_popup_for_request(request_id_json: &str) -> bool {
+    let pending_atom = atoms::HITL_PENDING.state();
+    let mut pending = pending_atom.write();
+    if pending.as_ref().map(|p| p.request_id_json.as_str()) != Some(request_id_json) {
+        return false;
+    }
+    *pending = None;
+    if *atoms::POPUP_KIND.state().read() == Some(PopupKind::Hitl) {
+        *atoms::POPUP_KIND.state().write() = None;
+    }
+    true
+}
+
+/// Legacy AskUser popup 的 request-aware cleanup；panel 路径见 panel_registry。
+pub fn close_ask_user_popup_for_request(request_id_json: &str) -> bool {
+    let pending_atom = atoms::ASK_USER_PENDING.state();
+    let mut pending = pending_atom.write();
+    if pending.as_ref().map(|p| p.request_id_json.as_str()) != Some(request_id_json) {
+        return false;
+    }
+    *pending = None;
+    if *atoms::POPUP_KIND.state().read() == Some(PopupKind::AskUser) {
+        *atoms::POPUP_KIND.state().write() = None;
+    }
+    true
 }
 
 /// 是否有弹窗激活。

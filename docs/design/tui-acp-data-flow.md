@@ -294,15 +294,15 @@ event_v2         →  `session/update`                    →  AcpNotification �
 
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`；rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`；notifier 将 JSON-encoded RequestId 与 payload 封装为 composite event，但不写 UI atom。bridge 通过 non-empty exact active-session gate 后，handler 才发布 composite pending state与 durable block。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
 
 | 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
-| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING` + `PanelKind::AskUser` 面板（非弹窗） |
+| `ask-user` | ACP → TUI | ACP `Elicitation` | `ASK_USER_PENDING: Option<PendingInteraction<AskUser>>` + `PanelKind::AskUser` 面板（非弹窗） |
 | `rewind-preview` | ACP → TUI | `peri/agent_event` + `session/rewind*` RPC | `REWIND_PREVIEW` |
 | `oauth-needed` | ACP → TUI | ACP 通知 | `OAUTH_INFO` |
 | `budget-warning` | — | 当前无用户可见生产路径 | — |
-| `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → `HitlPending` | `HITL_PENDING` + `HITL_REQUEST_ID` |
+| `hitl-pending` | ACP → TUI | `AcpNotification::RequestPermission` → composite event | `HITL_PENDING: Option<PendingInteraction<HitlPending>>` + HITL popup |
 | `confirm` | TUI 内部 | AskUser Panel 二次确认 / ThreadBrowser 切线程 | `CONFIRM_PAYLOAD`（第 7 个 popup，PopupKind 共 7 种：Hitl/AskUser/Rewind/OAuth/Confirm/Download/ModelQuickSwitch） |
 
 ### 4.4 Background Tasks 事件

@@ -9,15 +9,10 @@ use ratatui_kit::{
     ratatui::{style::Stylize, text::Line},
 };
 
-use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    self, ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD,
-    ConfirmAction, LANG_VERSION,
-};
+use crate::kit::atoms::{self, ASK_USER_RESPONSE_TX, CONFIRM_PAYLOAD, ConfirmAction, LANG_VERSION};
 use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panel_registry::close_panel;
 use crate::kit::popup_overlay::close_popup;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -39,27 +34,11 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let confirm = move || {
         // 执行确认逻辑
         if let Some(ref p) = *CONFIRM_PAYLOAD.state().read() {
-            match &p.pending_action {
-                ConfirmAction::ThreadSwitch(target_id) => {
-                    if let Some(tx) = atoms::THREAD_LOAD_TX.get() {
-                        let _ = tx.send(target_id.clone());
-                    }
+            execute_confirm_action(&p.pending_action, |action| {
+                if let Some(tx) = ASK_USER_RESPONSE_TX.get() {
+                    let _ = tx.send(action);
                 }
-                ConfirmAction::RejectAskUser => {
-                    // 读取 request_id（必须在 close_panel 之前，因为 close_panel 可能清掉 atom）
-                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
-                        && let Some(tx) = ASK_USER_RESPONSE_TX.get()
-                    {
-                        let _ = tx.send(AskUserResponseAction::Reject {
-                            request_id_str: id_str,
-                        });
-                    }
-                    // 关闭面板并清空状态
-                    close_panel(PanelKind::AskUser);
-                    *ASK_USER_PENDING.state().write() = None;
-                    *ASK_USER_REQUEST_ID.state().write() = None;
-                }
-            }
+            });
         }
         // 清空确认弹窗 payload 并关闭弹窗
         *CONFIRM_PAYLOAD.state().write() = None;
@@ -162,3 +141,25 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     )
 }
+pub(crate) fn execute_confirm_action(
+    action: &ConfirmAction,
+    mut send_ask_user: impl FnMut(AskUserResponseAction),
+) {
+    match action {
+        ConfirmAction::ThreadSwitch(target_id) => {
+            if let Some(tx) = atoms::THREAD_LOAD_TX.get() {
+                let _ = tx.send(target_id.clone());
+            }
+        }
+        ConfirmAction::RejectAskUser { request_id_json } => {
+            send_ask_user(AskUserResponseAction::Reject {
+                request_id_str: request_id_json.clone(),
+            });
+            crate::kit::panel_registry::close_ask_user_panel_for_request(request_id_json);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "confirm_popup_test.rs"]
+mod tests;

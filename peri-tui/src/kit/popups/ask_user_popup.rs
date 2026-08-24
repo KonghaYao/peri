@@ -22,14 +22,12 @@ use ratatui_kit::{
 
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION,
-};
+use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
 };
-use crate::kit::popup_overlay::close_popup;
+use crate::kit::popup_overlay::close_ask_user_popup_for_request;
 use peri_theme::atoms::THEME_ATOM;
 use serde_json::json;
 
@@ -37,7 +35,7 @@ use serde_json::json;
 pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
-    let pending: Option<AskUser> = pending_store.read().clone();
+    let pending = pending_store.read().clone();
     let _ = pending_store;
 
     // 当前选中的问题 tab 索引
@@ -49,12 +47,15 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // session 指纹——检测 payload 变化时复位状态
     let session_fingerprint = hooks.use_state(Vec::<String>::new);
 
-    let question_count = pending.as_ref().map(|q| q.questions.len()).unwrap_or(0);
+    let question_count = pending
+        .as_ref()
+        .map(|p| p.payload.questions.len())
+        .unwrap_or(0);
 
     // 检测 payload 变化——question id 列表不同则视为新 session
     let current_fingerprint: Vec<String> = pending
         .as_ref()
-        .map(|p| p.questions.iter().map(|q| q.id.clone()).collect())
+        .map(|p| p.payload.questions.iter().map(|q| q.id.clone()).collect())
         .unwrap_or_default();
     if *session_fingerprint.read() != current_fingerprint {
         *focused.write() = 0;
@@ -78,7 +79,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let q_idx = *focused.read();
             let opt_idx = *focused_option.read();
             if let Some(au) = pending_for_closure.as_ref()
-                && let Some(q) = au.questions.get(q_idx)
+                && let Some(q) = au.payload.questions.get(q_idx)
                 && opt_idx < q.options.len()
             {
                 let new_val = if answers.read().get(q_idx).copied().flatten() == Some(opt_idx) {
@@ -105,7 +106,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Some(ListNavAction::MoveDown) => {
                 let limit = pending_for_closure
                     .as_ref()
-                    .and_then(|au| au.questions.get(*focused.read()))
+                    .and_then(|au| au.payload.questions.get(*focused.read()))
                     .map(|q| q.options.len())
                     .unwrap_or(0);
                 if limit > 0 {
@@ -140,7 +141,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     a.is_some()
                         || pending_for_closure
                             .as_ref()
-                            .and_then(|au| au.questions.get(i))
+                            .and_then(|au| au.payload.questions.get(i))
                             .map(|q| q.options.is_empty())
                             .unwrap_or(true)
                 });
@@ -152,7 +153,7 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let is_answered = answers.read().get(next).copied().flatten().is_some();
                         let has_no_options = pending_for_closure
                             .as_ref()
-                            .and_then(|au| au.questions.get(next))
+                            .and_then(|au| au.payload.questions.get(next))
                             .map(|q| q.options.is_empty())
                             .unwrap_or(true);
                         if !is_answered && !has_no_options {
@@ -168,30 +169,32 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     EventResult::Consumed
                 } else {
                     // 全部已确认 → 提交
-                    let answers_map =
-                        build_answers_map(pending_for_closure.as_ref(), &answers.read());
-                    if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                    let answers_map = build_answers_map(
+                        pending_for_closure.as_ref().map(|p| &p.payload),
+                        &answers.read(),
+                    );
+                    if let Some(snapshot) = pending_for_closure.as_ref()
                         && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                     {
                         let _ = tx.send(AskUserResponseAction::Submit {
-                            request_id_str: id_str,
+                            request_id_str: snapshot.request_id_json.clone(),
                             answers: answers_map,
                         });
+                        close_ask_user_popup_for_request(&snapshot.request_id_json);
                     }
-                    close_popup();
                     EventResult::Consumed
                 }
             }
             // Esc：取消
             Some(ListNavAction::Cancel) => {
-                if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                if let Some(snapshot) = pending_for_closure.as_ref()
                     && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                 {
                     let _ = tx.send(AskUserResponseAction::Cancel {
-                        request_id_str: id_str,
+                        request_id_str: snapshot.request_id_json.clone(),
                     });
+                    close_ask_user_popup_for_request(&snapshot.request_id_json);
                 }
-                close_popup();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -215,14 +218,15 @@ pub fn AskUserPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
-        Some(au) if au.questions.is_empty() => {
+        Some(pending) if pending.payload.questions.is_empty() => {
             lines.push(Line::from(""));
             lines
                 .push(Line::from(i18n::tr("popup-ask-user-malformed")).fg(semantic.status.warning));
             lines.push(Line::from(""));
             lines.push(Line::from(i18n::tr("common-esc-close")).fg(semantic.text.dim));
         }
-        Some(au) => {
+        Some(pending) => {
+            let au = &pending.payload;
             let focused_idx = (*focused.read()).min(au.questions.len() - 1);
             let answers_read = answers.read();
 

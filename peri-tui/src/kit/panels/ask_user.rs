@@ -20,9 +20,7 @@ use ratatui_kit::{
 };
 
 use crate::kit::ask_user_action::AskUserResponseAction;
-use crate::kit::atoms::{
-    ASK_USER_PENDING, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, LANG_VERSION,
-};
+use crate::kit::atoms::{ASK_USER_PENDING, ASK_USER_RESPONSE_TX, LANG_VERSION};
 use crate::kit::list_nav::{
     ListNavAction, classify_list_nav, cycle_next, cycle_previous, next_selection,
     previous_selection,
@@ -43,7 +41,8 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
-    let pending: Option<AskUser> = pending_store.read().clone();
+    let interaction = pending_store.read().clone();
+    let pending: Option<AskUser> = interaction.as_ref().map(|p| p.payload.clone());
     let _ = pending_store;
     let _ = hooks.use_atom(&LANG_VERSION);
     // 动态换行宽度：跟随终端实际宽度，避免宽终端下内容被压缩在 80 列内
@@ -82,6 +81,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     let pending_for_closure = pending.clone();
+    let interaction_for_closure = interaction.clone();
 
     // 面板绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -513,27 +513,32 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             &answers_snapshot,
                             &custom_snapshot,
                         );
-                        if let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                        if let Some(snapshot) = interaction_for_closure.as_ref()
                             && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                         {
                             let _ = tx.send(AskUserResponseAction::Submit {
-                                request_id_str: id_str,
+                                request_id_str: snapshot.request_id_json.clone(),
                                 answers: answers_map,
                             });
+                            panel_registry::close_ask_user_panel_for_request(
+                                &snapshot.request_id_json,
+                            );
                         }
-                        panel_registry::close_panel(PanelKind::AskUser);
-                        *ASK_USER_PENDING.state().write() = None;
-                        *ASK_USER_REQUEST_ID.state().write() = None;
                         EventResult::Consumed
                     }
                 }
                 Some(ListNavAction::Cancel) => {
                     // ESC → 打开确认弹窗而非直接取消
+                    let Some(snapshot) = interaction_for_closure.as_ref() else {
+                        return EventResult::Consumed;
+                    };
                     let payload = crate::kit::atoms::ConfirmPayload {
                         title: i18n::tr("popup-confirm-reject-title"),
                         message: i18n::tr("popup-confirm-reject-message"),
                         details: vec![],
-                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser,
+                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser {
+                            request_id_json: snapshot.request_id_json.clone(),
+                        },
                     };
                     *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
                     crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);

@@ -5,7 +5,7 @@
 
 ## 架构速览
 
-- 数据流：`ACP notification → acp_notifier（spawn_kit_notifier, acp_notifier.rs:48，AcpNotification → AcpEventData）→ acp_bridge（spawn_acp_bridge, acp_bridge.rs:53，维护 BridgeState）→ dispatch_and_notify（acp_events/mod.rs:301）→ VIEW_MODELS（atoms.rs:249）/ACP_STATE（atoms.rs:220）→ components 渲染`
+- 数据流：`ACP notification → acp_notifier（interaction 原子封装 RequestId + payload，不写 UI state）→ acp_bridge（普通事件保留 wildcard；HITL/AskUser 要求 non-empty exact active session）→ dispatch_and_notify（发布 composite atom + durable block）→ VIEW_MODELS/ACP_STATE → components；response action 使用 block/composite 冻结 ID，并 compare-and-clear active surface`
 - 提交链路：`InputArea（input_area.rs:148）→ SubmitRequest（submit_request.rs:5）→ SUBMIT_TX（atoms.rs:256）→ submit_consumer（submit_consumer.rs:55）→ AcpTuiClient::prompt（client.rs:522）→ ACP transport`；取消经 CANCEL_TX（atoms.rs:257）→ `spawn_cancel_consumer`（submit_consumer.rs:465）
 - 入口：`main.rs:409 main` → `run_tui`（:624）→ `kit/entry.rs:52 run_kit_fullscreen`（spawn kit 各链路）→ `launch.rs:41 build_app_and_acp`（App + AcpTuiClient + consumer 装配）
 - 稳定不变量：ACP 是交互与 Agent 执行边界（ARC-BOUNDARY-001）；`BridgeState` 是事件 → 状态边界（切换会话/重置须过滤陈旧事件，BRIDGE_RESET_COUNTER 清理）；render body 不写 atom；hooks 稳定顺序；交互事件按焦点/优先级分发；用户可见文本走 i18n 双 FTL（i18n/mod.rs:35 `tr`）；文本按 Unicode 字符边界/显示宽度处理

@@ -51,10 +51,13 @@ async fn test_handle_load_resets_popup_todo_history_atoms() {
     // Arrange：把 4 类 atom 填充为"旧 session 残留"。
     *crate::kit::atoms::POPUP_KIND.state().write() = Some(crate::kit::atoms::PopupKind::Hitl);
     *crate::kit::atoms::HITL_PENDING.state().write() =
-        Some(peri_acp_types::event_data::HitlPending {
-            tool_name: "old".into(),
-            tool_input: serde_json::Value::Null,
-            batch: None,
+        Some(crate::kit::acp_types::PendingInteraction {
+            request_id_json: "\"old\"".into(),
+            payload: peri_acp_types::event_data::HitlPending {
+                tool_name: "old".into(),
+                tool_input: serde_json::Value::Null,
+                batch: None,
+            },
         });
     *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
         content: "stale".into(),

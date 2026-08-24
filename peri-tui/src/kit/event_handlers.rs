@@ -27,7 +27,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, ASK_USER_REQUEST_ID, ASK_USER_RESPONSE_TX, Notification, POPUP_KIND, PopupKind,
+    ACTIVE_PANEL, ASK_USER_PENDING, ASK_USER_RESPONSE_TX, Notification, POPUP_KIND, PopupKind,
 };
 use crate::kit::focus_router::{
     FocusLayer, GlobalShortcut, active_layer, classify_global_shortcut,
@@ -202,14 +202,18 @@ pub fn register_root_handlers(hooks: &mut Hooks) {
                             // 防止因优先级回归导致 agent 永久挂起。正常情况下此分支不会执行
                             // （AskUserPanel handler 使用 High 优先级，会先消费 ESC）。
                             if *ACTIVE_PANEL.state().read() == Some(PanelKind::AskUser)
-                                && let Some(id_str) = ASK_USER_REQUEST_ID.state().read().clone()
+                                && let Some(snapshot) = ASK_USER_PENDING.state().read().clone()
                                 && let Some(tx) = ASK_USER_RESPONSE_TX.get()
                             {
                                 let _ = tx.send(AskUserResponseAction::Cancel {
-                                    request_id_str: id_str,
+                                    request_id_str: snapshot.request_id_json.clone(),
                                 });
+                                crate::kit::panel_registry::close_ask_user_panel_for_request(
+                                    &snapshot.request_id_json,
+                                );
+                            } else {
+                                close_active_panel();
                             }
-                            close_active_panel();
                             return EventResult::Consumed;
                         }
                         FocusLayer::Input | FocusLayer::Message => {}

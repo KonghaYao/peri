@@ -45,14 +45,45 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     old
 }
 
+fn accepts_event_session(
+    event: &AcpEventData,
+    active_session_id: &str,
+    incoming_session_id: &str,
+    just_reset: bool,
+) -> bool {
+    if matches!(
+        event,
+        AcpEventData::HitlPending(_) | AcpEventData::AskUser(_)
+    ) {
+        return !active_session_id.is_empty()
+            && !incoming_session_id.is_empty()
+            && active_session_id == incoming_session_id;
+    }
+    if just_reset {
+        incoming_session_id.is_empty() || incoming_session_id == active_session_id
+    } else {
+        active_session_id.is_empty()
+            || incoming_session_id.is_empty()
+            || incoming_session_id == active_session_id
+    }
+}
+
 /// 启动 ACP 事件桥接后台任务。
 ///
 /// 从独立的 mpsc::UnboundedReceiver 读取 ACP 事件（main_loop 会 fan-out），
 /// 维护 BridgeState 内部状态，每次事件后写入 VIEW_MODELS / ACP_STATE Atom，
 /// 触发 ratatui-kit 组件重渲染。
 pub fn spawn_acp_bridge(
+    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    spawn_acp_bridge_inner(rx, shutdown, None)
+}
+
+fn spawn_acp_bridge_inner(
     mut rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
+    observed: Option<mpsc::UnboundedSender<bool>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut state = BridgeState {
@@ -148,18 +179,6 @@ pub fn spawn_acp_bridge(
                                     sid = %state.active_session_id,
                                     "[CLEAR_DEBUG] bridge: state reset by BRIDGE_RESET_COUNTER"
                                 );
-                                // reset 触发事件可能来自旧 session——此时需过滤
-                                // （state.active_session_id 已更新为新值，旧事件不匹配）
-                                if !epoch_event.active_session_id.is_empty()
-                                    && epoch_event.active_session_id != state.active_session_id
-                                {
-                                    tracing::debug!(
-                                        event_sid = %epoch_event.active_session_id,
-                                        state_sid = %state.active_session_id,
-                                        "[SESSION_FILTER] dropping stale event that triggered reset"
-                                    );
-                                    continue;
-                                }
                                 // Phase 5 Step 7 补遗（Step 8 回归修复）：
                                 // CommandFeedback(UiOnly) 的 compact 完成提示跨
                                 // replay 存活——reset 清空 committed/current_turn
@@ -184,21 +203,20 @@ pub fn spawn_acp_bridge(
                                 }
                             }
 
-                            // 非 reset 路径：陈旧事件过滤（active_session_id 不匹配 → 丢弃）。
-                            // 仅当 state 已初始化（active_session_id 非空）时才过滤——
-                            // state.active_session_id 为空意味着 bridge 尚未确认
-                            // 当前活跃 session（entry.rs 初始会话创建前），此时不应
-                            // 丢弃任何事件，否则 ACP 应答事件全部被过滤，渲染管线断流。
-                            if !just_reset
-                                && !state.active_session_id.is_empty()
-                                && !epoch_event.active_session_id.is_empty()
-                                && epoch_event.active_session_id != state.active_session_id
-                            {
+                            if !accepts_event_session(
+                                &epoch_event.event,
+                                &state.active_session_id,
+                                &epoch_event.active_session_id,
+                                just_reset,
+                            ) {
                                 tracing::debug!(
                                     event_sid = %epoch_event.active_session_id,
                                     state_sid = %state.active_session_id,
-                                    "[SESSION_FILTER] dropping stale event from old session"
+                                    "[SESSION_FILTER] dropping unowned event"
                                 );
+                                if let Some(tx) = &observed {
+                                    let _ = tx.send(false);
+                                }
                                 continue;
                             }
 
@@ -231,6 +249,9 @@ pub fn spawn_acp_bridge(
                                     "[CLEAR_DEBUG] dispatch event"
                                 );
                             }
+                            if let Some(tx) = &observed {
+                                let _ = tx.send(true);
+                            }
                         }
                     }
                 }
@@ -238,6 +259,19 @@ pub fn spawn_acp_bridge(
         }
     })
 }
+
+#[cfg(test)]
+fn spawn_acp_bridge_observed(
+    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    shutdown: CancellationToken,
+    observed: mpsc::UnboundedSender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_acp_bridge_inner(rx, shutdown, Some(observed))
+}
+
+#[cfg(test)]
+#[path = "acp_bridge_test.rs"]
+mod tests;
 
 /// [CLEAR_DEBUG] 诊断 helper：返回 AcpEventData 变体的短名字。
 ///
