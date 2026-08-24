@@ -164,7 +164,7 @@ fn test_workflow_local_dist_found() {
     )
     .unwrap();
     let got = workflow_local_dist_in(tmp.path()).unwrap();
-    assert_eq!(std::path::PathBuf::from(got), dist.canonicalize().unwrap());
+    assert_eq!(std::path::PathBuf::from(got), dist);
 }
 
 #[test]

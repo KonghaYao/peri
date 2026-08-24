@@ -172,13 +172,14 @@ fn validate_install(base: &Path) -> Option<PathBuf> {
     {
         return None;
     }
+    let entry = package.join(&metadata.bin.entry);
     let canonical_package = package.canonicalize().ok()?;
-    let canonical_entry = package.join(&metadata.bin.entry).canonicalize().ok()?;
+    let canonical_entry = entry.canonicalize().ok()?;
     let file = canonical_entry.metadata().ok()?;
     if !canonical_entry.starts_with(canonical_package) || !file.is_file() || file.len() == 0 {
         return None;
     }
-    Some(canonical_entry)
+    Some(entry)
 }
 
 struct InstallLock(File);
@@ -444,7 +445,15 @@ mod tests {
             ensure_install(home.path(), installer.as_ref()),
             ensure_install(home.path(), installer.as_ref())
         );
-        assert_eq!(left.unwrap(), right.unwrap());
+        assert_eq!(left.as_ref().unwrap(), right.as_ref().unwrap());
+        assert_eq!(
+            left.unwrap(),
+            prefix(home.path())
+                .join("node_modules")
+                .join("@peri-code")
+                .join("ptc")
+                .join(ENTRY)
+        );
         assert_eq!(installer.calls.load(Ordering::SeqCst), 1);
     }
 

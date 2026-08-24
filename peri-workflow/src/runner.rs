@@ -113,7 +113,7 @@ fn validate_workflow_artifact(base: &Path) -> Option<PathBuf> {
     {
         return None;
     }
-    Some(canonical_entry)
+    Some(entry)
 }
 
 fn workflow_local_dist_in(base: &Path) -> Option<String> {
