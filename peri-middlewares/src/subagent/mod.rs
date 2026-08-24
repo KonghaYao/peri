@@ -170,6 +170,10 @@ pub struct SubAgentMiddleware {
     parent_session: Arc<RwLock<Option<Arc<Session>>>>,
     /// 已启用插件提供的 agent definition 目录。
     plugin_agent_dirs: Arc<Vec<PathBuf>>,
+    /// 会话级 MCP Agents registry（远端定义晚读、晚批准）。
+    mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
+    /// MCP Agent 激活使用的用户交互 broker。
+    broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     task_manager_available: bool,
@@ -198,6 +202,8 @@ impl SubAgentMiddleware {
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
             plugin_agent_dirs: Arc::new(Vec::new()),
+            mcp_agent_registry: None,
+            broker: None,
             task_manager_available: false,
         }
     }
@@ -205,6 +211,16 @@ impl SubAgentMiddleware {
     /// 注入已启用插件提供的 agent definition 目录。
     pub fn with_plugin_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.plugin_agent_dirs = Arc::new(dirs);
+        self
+    }
+
+    pub fn with_mcp_agents(
+        mut self,
+        registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
+        broker: Arc<dyn peri_agent::interaction::UserInteractionBroker>,
+    ) -> Self {
+        self.mcp_agent_registry = registry;
+        self.broker = Some(broker);
         self
     }
 
@@ -316,6 +332,7 @@ impl SubAgentMiddleware {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
         tool = tool.with_plugin_agent_dirs(Arc::clone(&self.plugin_agent_dirs));
+        tool = tool.with_mcp_agents(self.mcp_agent_registry.clone(), self.broker.clone());
         // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
         tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
         // L3：父 v2 session（运行时通道 + frozen 数据经 host 读取）

@@ -52,6 +52,17 @@ jobs:
             - name: Build
               run: cargo build --workspace --all-targets
 
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+
+            - name: Install PTC dependencies
+              working-directory: npm-packages/@peri-ptc
+              run: bun install --frozen-lockfile
+
+            - name: Build PTC fixture
+              working-directory: npm-packages/@peri-ptc
+              run: bun run build
+
             - name: Run tests
               run: cargo test --workspace
 

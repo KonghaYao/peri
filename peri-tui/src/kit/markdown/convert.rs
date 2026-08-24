@@ -309,9 +309,21 @@ pub(crate) fn convert_to_segments_with_state(
             }
             ParsedBlock::CodeBlock(lang, code_lines) => {
                 for line in code_block_lines(lang, code_lines, theme) {
-                    state
-                        .current_text
-                        .extend(wrap_styled_line(&line, max_width));
+                    for mut visual_line in wrap_styled_line(&line, max_width) {
+                        // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
+                        // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
+                        let width = visual_line.width();
+                        if width < max_width
+                            && let Some(background) =
+                                visual_line.spans.first().and_then(|span| span.style.bg)
+                        {
+                            visual_line.spans.push(Span::styled(
+                                " ".repeat(max_width - width),
+                                Style::default().bg(background),
+                            ));
+                        }
+                        state.current_text.push(visual_line);
+                    }
                 }
             }
             ParsedBlock::ListItem(item) => {

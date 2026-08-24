@@ -9,15 +9,11 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    IncomingMessage, JsExecutionFailure, JsExecutionHost, JsProcessSpec, JsRuntimeError,
-    ResourceKind, Result,
+    artifact::{NpmArtifactProvider, PtcArtifactProvider, BUILD_ID, PROTOCOL_VERSION},
+    IncomingMessage, JsExecutionFailure, JsExecutionHost, JsRuntimeError, ResourceKind, Result,
 };
 
-const NODE_ADAPTER: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../npm-packages/@peri-ptc/src/adapter.js"
-));
-const NODE_BOOTSTRAP: &str = "startPtcAdapter();\n";
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -101,15 +97,32 @@ pub trait JsRpcRouter: Send + Sync {
     ) -> Result<Value>;
 }
 
+enum ExecutionPhase {
+    Handshake,
+    Execute,
+}
+
+struct PhasedError {
+    phase: ExecutionPhase,
+    error: JsRuntimeError,
+}
+
 pub struct JsExecutor {
     program: String,
     limits: JsExecutionLimits,
     execution_slots: Arc<Semaphore>,
+    artifact_provider: Arc<dyn PtcArtifactProvider>,
 }
 
 impl JsExecutor {
     pub fn new(program: impl Into<String>) -> Self {
-        Self::with_limits(program, JsExecutionLimits::default()).expect("default limits are valid")
+        let limits = JsExecutionLimits::default();
+        Self {
+            program: program.into(),
+            execution_slots: Arc::new(Semaphore::new(limits.max_concurrent_executions)),
+            limits,
+            artifact_provider: Arc::new(NpmArtifactProvider::new()),
+        }
     }
 
     pub fn with_limits(program: impl Into<String>, limits: JsExecutionLimits) -> Result<Self> {
@@ -118,6 +131,22 @@ impl JsExecutor {
             program: program.into(),
             execution_slots: Arc::new(Semaphore::new(limits.max_concurrent_executions)),
             limits,
+            artifact_provider: Arc::new(NpmArtifactProvider::new()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_provider(
+        program: impl Into<String>,
+        limits: JsExecutionLimits,
+        artifact_provider: Arc<dyn PtcArtifactProvider>,
+    ) -> Result<Self> {
+        limits.validate()?;
+        Ok(Self {
+            program: program.into(),
+            execution_slots: Arc::new(Semaphore::new(limits.max_concurrent_executions)),
+            limits,
+            artifact_provider,
         })
     }
 
@@ -136,19 +165,20 @@ impl JsExecutor {
             permit = self.execution_slots.clone().acquire_owned() => permit.map_err(|_| JsRuntimeError::Rpc("execution semaphore closed".into()))?,
         };
 
-        let spec = JsProcessSpec::new(
-            &self.program,
-            vec![
-                "--input-type=module".into(),
-                "--eval".into(),
-                format!("{NODE_ADAPTER}\n{NODE_BOOTSTRAP}"),
-            ],
-        )
-        .without_inherited_environment();
-        let host = Arc::new(JsExecutionHost::spawn_with_frame_limit(
-            spec,
+        let launch = self.artifact_provider.launch(&self.program).await?;
+        let local_cache = launch.local_cache;
+        let host = match JsExecutionHost::spawn_with_frame_limit(
+            launch.spec.clone(),
             self.limits.max_frame_bytes,
-        )?);
+        ) {
+            Ok(host) => Arc::new(host),
+            Err(error) => {
+                if local_cache {
+                    let _ = self.artifact_provider.invalidate().await;
+                }
+                return Err(error);
+            }
+        };
         let outcome = self
             .run(host.clone(), request, router, cancel, deadline)
             .await;
@@ -157,6 +187,19 @@ impl JsExecutor {
             host.terminate_and_wait("JavaScript execution finished", Duration::from_millis(100)),
         )
         .await;
+        drop(host);
+        if local_cache
+            && matches!(
+                outcome,
+                Err(PhasedError {
+                    phase: ExecutionPhase::Handshake,
+                    ..
+                })
+            )
+        {
+            let _ = self.artifact_provider.invalidate().await;
+        }
+        let outcome = outcome.map_err(|failure| failure.error);
         if outcome.is_ok() {
             match cleanup {
                 Ok(Ok(_)) => {}
@@ -181,6 +224,53 @@ impl JsExecutor {
     }
 
     async fn run(
+        &self,
+        host: Arc<JsExecutionHost>,
+        request: JsExecutionRequest,
+        router: Arc<dyn JsRpcRouter>,
+        cancel: CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> std::result::Result<JsExecutionResult, PhasedError> {
+        self.handshake(&host, deadline)
+            .await
+            .map_err(|error| PhasedError {
+                phase: ExecutionPhase::Handshake,
+                error,
+            })?;
+        self.run_execute(host, request, router, cancel, deadline)
+            .await
+            .map_err(|error| PhasedError {
+                phase: ExecutionPhase::Execute,
+                error,
+            })
+    }
+
+    async fn handshake(
+        &self,
+        host: &Arc<JsExecutionHost>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let handshake_deadline = deadline.min(tokio::time::Instant::now() + HANDSHAKE_TIMEOUT);
+        let handshake = tokio::time::timeout_at(
+            handshake_deadline,
+            host.channel()
+                .send_request("ptc/start", json!({ "protocolVersion": PROTOCOL_VERSION })),
+        )
+        .await
+        .map_err(|_| JsRuntimeError::Timeout {
+            limit: self.limits.wall_timeout,
+        })?;
+        let handshake = match handshake {
+            Ok(value) => value,
+            Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
+                return Err(runtime_exit_error(host).await);
+            }
+            Err(error) => return Err(error),
+        };
+        validate_handshake(&handshake)
+    }
+
+    async fn run_execute(
         &self,
         host: Arc<JsExecutionHost>,
         request: JsExecutionRequest,
@@ -218,9 +308,15 @@ impl JsExecutor {
                 _ = tokio::time::sleep_until(deadline) => break Err(JsRuntimeError::Timeout { limit: self.limits.wall_timeout }),
                 result = &mut request_task, if !request_finished => {
                     request_finished = true;
-                    let value = result
-                        .map_err(|_| JsRuntimeError::Rpc("execution request task failed".into()))?
-                        .map_err(normalize_execute_response_error)?;
+                    let response = result
+                        .map_err(|_| JsRuntimeError::Rpc("execution request task failed".into()))?;
+                    let value = match response {
+                        Ok(value) => value,
+                        Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
+                            break Err(runtime_exit_error(&host).await);
+                        }
+                        Err(error) => break Err(normalize_execute_response_error(error)),
+                    };
                     let parsed: JsExecutionResult = serde_json::from_value(value)?;
                     check_result(&parsed, &self.limits)?;
                     break Ok(parsed);
@@ -307,6 +403,32 @@ fn normalize_execute_response_error(error: JsRuntimeError) -> JsRuntimeError {
         _ => return JsRuntimeError::Rpc("untrusted execute error response".into()),
     };
     JsRuntimeError::ExecutionFailed(failure)
+}
+
+fn validate_handshake(value: &Value) -> Result<()> {
+    let protocol = value.get("protocolVersion").and_then(Value::as_u64);
+    let build = value.get("buildId").and_then(Value::as_str);
+    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(true);
+    if !ok || protocol != Some(PROTOCOL_VERSION) || build != Some(BUILD_ID) {
+        return Err(JsRuntimeError::Rpc(
+            "PTC handshake identity mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn runtime_exit_error(host: &JsExecutionHost) -> JsRuntimeError {
+    let status = tokio::time::timeout(Duration::from_millis(100), host.wait_for_exit())
+        .await
+        .ok()
+        .and_then(std::result::Result::ok);
+    JsRuntimeError::RuntimeExited {
+        success: status
+            .as_ref()
+            .is_some_and(std::process::ExitStatus::success),
+        code: status.as_ref().and_then(std::process::ExitStatus::code),
+        stderr_bytes: host.stderr_bytes(),
+    }
 }
 
 fn check_limit(resource: ResourceKind, observed: usize, limit: usize) -> Result<()> {

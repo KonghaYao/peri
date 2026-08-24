@@ -71,6 +71,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn new(stdin: ChildStdin, max_frame_bytes: usize) -> Self {
         Self {
             stdin: Mutex::new(stdin),
@@ -160,6 +161,7 @@ impl RpcChannel {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn handle_incoming(&self, raw: &str) -> Option<IncomingMessage> {
         let parsed = match parse_message(raw) {
             Ok(parsed) => parsed,
@@ -222,6 +224,7 @@ pub fn parse_message(raw: &str) -> Result<ParsedMessage> {
     })
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn spawn_stdout_reader(
     stdout: ChildStdout,
     channel: Arc<RpcChannel>,

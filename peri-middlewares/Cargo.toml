@@ -58,3 +58,4 @@ cacache = { version = "13.1.0", default-features = false, features = ["tokio-run
 [dev-dependencies]
 tempfile.workspace = true
 filetime = "0.2"
+serial_test.workspace = true

@@ -87,10 +87,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
     let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
     hooks.use_atom(&LANG_VERSION);
-    // 订阅 PALETTE_ATOM：主题切换时触发 MessageArea 重渲染，
-    // 配合 palette_key 使 vm_caches 失效，确保 markdown 色值随主题更新。
+    // 订阅 PALETTE_ATOM / THEME_ATOM：主题切换时触发 MessageArea 重渲染，
+    // palette_key 同时包含 Markdown palette 与 code block 的 surface.sunken，
+    // 确保所有 Markdown 色值随主题更新。
     let _palette = hooks.use_atom(&PALETTE_ATOM);
-    let current_palette_key = palette_markdown_key(&_palette.read());
+    let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
+    let current_palette_key =
+        palette_markdown_key(&_palette.read(), theme.read().semantic.surface.sunken);
     // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);

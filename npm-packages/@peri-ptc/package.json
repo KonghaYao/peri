@@ -1,28 +1,39 @@
 {
   "name": "@peri-code/ptc",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "Node adapter and wire types for Perihelion Programmatic Tool Calling",
   "type": "module",
-  "main": "src/adapter.js",
-  "types": "src/index.ts",
+  "bin": {
+    "peri-ptc": "dist/peri-ptc.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/adapter.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./adapter": {
-      "types": "./src/adapter.d.ts",
-      "import": "./src/adapter.js"
+      "types": "./dist/adapter.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "files": [
-    "src"
+    "dist"
   ],
+  "periProtocolVersion": 1,
+  "periBuildId": "@peri-code/ptc@0.2.3",
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --project tsconfig.check.json",
+    "test": "bun run build && bun test ./test",
+    "pack:check": "npm pack --dry-run",
+    "pack:smoke": "bun run scripts/pack-smoke.ts",
+    "check:dist": "bun run scripts/check-dist.ts",
+    "prepublishOnly": "bun run build && bun run typecheck && bun test ./test && bun run check:dist && bun run pack:check && bun run pack:smoke"
   },
   "devDependencies": {
+    "@types/node": "^24",
     "typescript": "^7"
   }
 }

@@ -10,6 +10,12 @@
 
 当前 canonical 工具名为 `RunPtcCode`，且为 deferred-only：模型须经 `SearchExtraTools → ExecuteExtraTool` 执行；既有 direct tools 不受影响。旧 `run_code` 不可执行、不是 alias，仅保留为搜索迁移关键词。policy、HITL、事件与 tool card 投影 effective target；模型 assistant raw wrapper call 只保留协议配对。执行环境采用 ESM-only，Node module 只能使用动态 `await import(...)`，static `import` 与 `require` 均不可用。
 
+## 当前 artifact 与启动契约
+
+本 issue 最初记录的 `run_code` 与 eval 启动均为历史旧称/旧实现叙述；当前 canonical 工具为 `RunPtcCode`，生产 artifact 固定为 `@peri-code/ptc@0.2.2`。Rust runtime 在 `~/.peri/ptc/0.2.2` 缓存缺失或无效时，以受控最小环境执行固定版本 npm install，并在跨进程锁内完成 staging、identity 校验与原子 rename；Cargo 不生成或内嵌 artifact。Node 直接以 `node <validated-entry>` 启动，并在接收 source 前完成 `ptc/start` protocol/build handshake；package version、build ID、protocol version、Rust 常量与已发布 npm artifact 不同步时默认 fail closed。
+
+仅当固定版本安装失败且 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时，才允许精确版本 `@peri-code/ptc@0.2.2` 的 `npx` fallback；它使用 private `HOME`/cache 与最小环境变量，但仍增加额外解析链路风险，因此必须保持显式 opt-in。仓库 package 的 `dist` 由 `bun run build`/发布验证生成，不由 Cargo-time Bun 生成或作为 Rust 内嵌 artifact 跟踪；发布操作先运行 `bun run prepublishOnly`，成功后再运行 `npm publish`。
+
 ## 问题
 
 `run_code` 的 schema 与工具描述称其在“普通 Node.js 进程”中执行 JavaScript，且“direct Node.js APIs”可直接使用。实际运行环境虽为 Node.js，但用户代码由 ESM adapter 内的 `new Function(...)` 执行，未注入 CommonJS `require`。模型按常见 Node.js 写法调用 `require('node:crypto')`、`require('node:zlib')` 或 `require('node:perf_hooks')` 时，执行会失败。
@@ -125,7 +131,7 @@ return value;
 
 ### C1. 执行上下文与工具契约不一致
 
-- `peri-js-runtime/src/executor.rs` 使用 `node --input-type=module --eval` 启动内嵌 adapter。
+- `peri-js-runtime/src/executor.rs` 使用已验证的 `@peri-code/ptc@0.2.2` 固定 npm artifact，并以 `node <entry>` 启动；下述 `node --input-type=module --eval` 是问题发现时的历史旧叙述，不再代表当前实现。
 - `npm-packages/@peri-ptc/src/adapter.js` 顶层是 ESM，并以 `new Function("tools", "input", "console", ...)` 构造用户函数。
 - 该函数可访问 Node globals（例如 `process`、`Buffer`），但 lexical scope 中没有 CommonJS `require`。
 - `peri-middlewares/src/ptc/mod.rs` 的 `RunCodeTool::description`、参数 schema 和 prompt contribution 只说“normal Node.js process”与“direct Node.js APIs”，没有说明模块加载必须使用动态 `import()`。

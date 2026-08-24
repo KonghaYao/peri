@@ -10,13 +10,17 @@ use ratatui_kit::ratatui::text::Line;
 
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
-pub(super) fn palette_markdown_key(p: &ratatui_kit::prelude::Palette) -> u64 {
+pub(super) fn palette_markdown_key(
+    p: &ratatui_kit::prelude::Palette,
+    surface_sunken: ratatui_kit::ratatui::style::Color,
+) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     p.fg.hash(&mut h);
     p.bg.hash(&mut h);
     p.fg_dim.hash(&mut h);
     p.accent.hash(&mut h);
     p.surface.hash(&mut h);
+    surface_sunken.hash(&mut h);
     p.border.hash(&mut h);
     p.success.hash(&mut h);
     p.warning.hash(&mut h);

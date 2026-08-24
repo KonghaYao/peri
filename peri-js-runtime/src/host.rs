@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ pub struct JsProcessSpec {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     inherit_environment: bool,
+    environment: Vec<(String, String)>,
 }
 
 impl JsProcessSpec {
@@ -30,6 +32,7 @@ impl JsProcessSpec {
             args,
             cwd: None,
             inherit_environment: true,
+            environment: Vec::new(),
         }
     }
 
@@ -42,6 +45,14 @@ impl JsProcessSpec {
         self.inherit_environment = false;
         self
     }
+
+    pub(crate) fn with_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.environment = environment.into_iter().collect();
+        self
+    }
 }
 
 impl std::fmt::Debug for JsProcessSpec {
@@ -50,7 +61,7 @@ impl std::fmt::Debug for JsProcessSpec {
             .debug_struct("JsProcessSpec")
             .field("program", &self.program)
             .field("args", &"[REDACTED]")
-            .field("cwd", &self.cwd)
+            .field("cwd", &self.cwd.as_ref().map(|_| "[REDACTED]"))
             .field("inherit_environment", &self.inherit_environment)
             .finish()
     }
@@ -63,6 +74,7 @@ pub struct JsExecutionHost {
     process_tree: ProcessTree,
     stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    stderr_bytes: Arc<AtomicUsize>,
 }
 
 impl JsExecutionHost {
@@ -83,17 +95,10 @@ impl JsExecutionHost {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(windows)]
-        return Err(JsRuntimeError::SpawnFailed(
-            ProcessTree::unsupported().to_string(),
-        ));
         if !spec.inherit_environment {
-            let path = std::env::var_os("PATH");
             command.env_clear();
-            if let Some(path) = path {
-                command.env("PATH", path);
-            }
         }
+        command.envs(spec.environment);
         if let Some(cwd) = spec.cwd {
             command.current_dir(cwd);
         }
@@ -101,12 +106,21 @@ impl JsExecutionHost {
         let mut child = command
             .spawn()
             .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        #[cfg(unix)]
         let child_id = child
             .id()
             .ok_or_else(|| JsRuntimeError::SpawnFailed("child pid unavailable".into()))?;
         #[cfg(unix)]
         let process_tree = ProcessTree::new(child_id)
             .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
+        #[cfg(windows)]
+        let process_tree = ProcessTree::new(
+            child
+                .raw_handle()
+                .ok_or_else(|| JsRuntimeError::SpawnFailed("child handle unavailable".into()))?
+                as _,
+        )
+        .map_err(|error| JsRuntimeError::SpawnFailed(error.to_string()))?;
         let stdin = child
             .stdin
             .take()
@@ -123,14 +137,19 @@ impl JsExecutionHost {
         let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
         let (sender, incoming) = mpsc::channel(256);
         let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender);
-        let stderr_task = tokio::spawn(async move {
-            let mut stderr = BufReader::new(stderr);
-            let mut buffer = vec![0; STDERR_CHUNK_BYTES];
-            while let Ok(bytes) = stderr.read(&mut buffer).await {
-                if bytes == 0 {
-                    break;
+        let stderr_bytes = Arc::new(AtomicUsize::new(0));
+        let stderr_task = tokio::spawn({
+            let stderr_bytes = Arc::clone(&stderr_bytes);
+            async move {
+                let mut stderr = BufReader::new(stderr);
+                let mut buffer = vec![0; STDERR_CHUNK_BYTES];
+                while let Ok(bytes) = stderr.read(&mut buffer).await {
+                    if bytes == 0 {
+                        break;
+                    }
+                    stderr_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
                 }
-                debug!(target: "js_runtime:stderr", bytes, "JavaScript stderr received");
             }
         });
 
@@ -141,6 +160,7 @@ impl JsExecutionHost {
             process_tree,
             stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
             stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
+            stderr_bytes,
         })
     }
 
@@ -150,6 +170,14 @@ impl JsExecutionHost {
 
     pub async fn take_incoming(&self) -> Option<mpsc::Receiver<IncomingMessage>> {
         self.incoming.lock().await.take()
+    }
+
+    pub(crate) async fn wait_for_exit(&self) -> Result<std::process::ExitStatus> {
+        self.child.lock().await.wait().await.map_err(Into::into)
+    }
+
+    pub(crate) fn stderr_bytes(&self) -> usize {
+        self.stderr_bytes.load(Ordering::Relaxed)
     }
 
     pub async fn kill(&self) -> Result<()> {

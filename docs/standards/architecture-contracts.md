@@ -73,3 +73,9 @@
 - **Scope**：配置加载、日志、错误、遥测、测试与提交。
 - **Rule**：真实密钥、token、密码、私钥和连接串不得写入源码、fixture、日志、错误响应、遥测 payload 或版本库。运行时可通过环境变量、密钥管理或项目已支持且受本机权限保护的本地配置加载；输出和诊断只保留安全上下文。
 - **Verify**：`git diff --check`；人工审阅变更中本地配置与环境注入、`tracing` 调用、错误格式化和测试 fixture，确认没有真实 secret 或完整认证信息。
+
+### ARC-PTC-ARTIFACT-001
+
+- **Scope**：`@peri-code/ptc` npm package、Rust 固定版本安装/启动路径与 PTC wire handshake。
+- **Rule**：生产 PTC package 的固定 identity 是 `@peri-code/ptc@0.2.3`。Rust 不内嵌 artifact、不从仓库 `dist` 启动，也不在 Cargo 构建时要求 Bun；缓存缺失或无效时在清空继承环境后，仅以 `PATH`、受控临时 `HOME`/cache 和公共 registry 执行 `npm install --ignore-scripts --no-audit --no-fund --no-update-notifier --prefix <staging> @peri-code/ptc@0.2.3`。安装与 adapter 运行均不得继承 token、cloud 凭据、`NODE_OPTIONS` 或完整宿主环境；adapter 运行仅保留 `PATH`，Windows 额外 allowlist `SystemRoot`、`WINDIR`、`TEMP`、`TMP`。默认仅支持公共 registry，私有 registry 必须预装或显式提供最小安全配置。缓存变更由跨进程 lockfile 串行化；损坏 target 在锁内 rename 到 quarantine，绝不直接删除可能正在使用的目录；rename 冲突必须验证 winner。Artifact entry 必须先以 canonical path 验证其仍位于 package 内，再以普通 absolute path 传给 Node argv；不得将 Windows verbatim `\\?\` path 作为 CLI entry。Node 必须在接收 source 前完成 `ptc/start` protocol/build handshake，启动或 handshake 协议失败时仅将本地 cache 来源在 cleanup 后锁内隔离，用户 source 执行失败和 npx fallback 不得清缓存。默认 npm 安装失败时安全失败；仅当 `PERI_PTC_ALLOW_NPX_FALLBACK=1` 时允许精确版本 `npx` fallback。npm/npx 不得输出 stderr 或泄漏 token/source。发布顺序固定为先运行 `npm run prepublishOnly`，成功后再运行 `npm publish`。
+- **Verify**：检查 package metadata、TypeScript 常量与 Rust 常量同步；用临时 prefix 和可注入 installer/mock 覆盖 valid、wrong identity、path escape、固定版本命令、原子 rename 与 fallback，测试不得访问网络；发布前运行 `npm run prepublishOnly`，文档变更运行 `git diff --check`。

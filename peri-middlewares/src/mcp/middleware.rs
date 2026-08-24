@@ -332,10 +332,12 @@ impl Middleware for McpMiddleware {
             )));
         }
 
-        tools.push(Box::new(DiscoverMCPTool::new(
-            Arc::clone(&self.pool),
-            self.registry.clone(),
-        )));
+        tools.push(Box::new(
+            DiscoverMCPTool::new(Arc::clone(&self.pool), self.registry.clone())
+                .with_agent_registry(Arc::new(super::agent_registry::McpAgentRegistry::new(
+                    Arc::clone(&self.pool),
+                ))),
+        ));
 
         tools
     }

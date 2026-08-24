@@ -9,12 +9,16 @@
 //!
 //! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    ffi::OsString,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
 
+#[cfg(not(windows))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
+#[cfg(not(windows))]
 use futures::stream;
 use peri_acp_types::{
     event::ExecutorEvent,
@@ -37,10 +41,42 @@ use crate::{
     session::{agent_pool::AgentPool, event_sink::EventSink, SessionManager},
 };
 use peri_middlewares::{host_ports::SkillsProvider, tool_search::ToolSearchIndex};
+#[cfg(not(windows))]
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
     ModelStream, ModelStreamEvent, StopReason, ToolCall,
 };
+
+#[cfg_attr(windows, allow(dead_code))]
+static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg_attr(windows, allow(dead_code))]
+struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+impl HomeGuard {
+    fn set(home: &std::path::Path) -> Self {
+        let lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -998,12 +1034,14 @@ fn chain_collection_parity_with_build_collected_sections() {
 
 // ── PTC production-path E2E ────────────────────────────────────────────────
 
+#[cfg(not(windows))]
 struct PtcScriptedModel {
     calls: AtomicUsize,
     visible_tools: Arc<Mutex<Vec<String>>>,
     source: String,
 }
 
+#[cfg(not(windows))]
 #[async_trait]
 impl Model for PtcScriptedModel {
     fn capabilities(&self) -> ModelCapabilities {
@@ -1071,10 +1109,12 @@ impl Model for PtcScriptedModel {
     }
 }
 
+#[cfg(not(windows))]
 struct RecordingApproveBroker {
     approvals: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(not(windows))]
 #[async_trait]
 impl UserInteractionBroker for RecordingApproveBroker {
     async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
@@ -1098,26 +1138,85 @@ impl UserInteractionBroker for RecordingApproveBroker {
     }
 }
 
+#[cfg(not(windows))]
+fn write_ptc_cache_fixture(root: &std::path::Path) {
+    let package = root.join(".peri/ptc/0.2.3/node_modules/@peri-code/ptc");
+    std::fs::create_dir_all(package.join("dist")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"@peri-code/ptc","version":"0.2.3","type":"module","main":"dist/index.js","bin":{"peri-ptc":"dist/peri-ptc.js"},"periProtocolVersion":1,"periBuildId":"@peri-code/ptc@0.2.3"}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("dist/index.js"), "export {};\n").unwrap();
+    std::fs::write(
+        package.join("dist/peri-ptc.js"),
+        r#"import readline from 'node:readline';
+const pending = new Map();
+let nextId = 100;
+function send(message) { process.stdout.write(JSON.stringify(message) + '\n'); }
+function callTool(toolName, input, options = {}) {
+  if (options.signal?.aborted) return Promise.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+  const id = nextId++;
+  const invocationId = `ptc-${id}`;
+  send({ jsonrpc: '2.0', id, method: 'tool/call', params: { invocationId, toolName, input } });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+const tools = new Proxy({}, { get: (_, toolName) => (input, options) => callTool(toolName, input, options) });
+const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', async line => {
+  const request = JSON.parse(line);
+  if (request.method === 'ptc/start') {
+    send({ jsonrpc: '2.0', id: request.id, result: { ok: true, protocolVersion: 1, buildId: '@peri-code/ptc@0.2.3' } });
+  } else if (request.method === 'execute') {
+    try {
+      const logs = [];
+      const console = { log: (...values) => logs.push(values.join(' ')) };
+      const result = await new AsyncFunction('tools', 'input', 'console', request.params.source)(tools, request.params.input, console);
+      send({ jsonrpc: '2.0', id: request.id, result: { value: result, logs } });
+    } catch (error) {
+      send({ jsonrpc: '2.0', id: request.id, error: { code: -32001, message: 'JavaScript execution failed', data: { code: error.code ?? 'EXECUTION_FAILED' } } });
+    }
+  } else if (Object.hasOwn(request, 'id')) {
+    const waiter = pending.get(request.id);
+    if (!waiter) return;
+    pending.delete(request.id);
+    if (request.error) {
+      const error = Object.assign(new Error(request.error.message), request.error.data ?? {});
+      error.name = 'ToolCallError';
+      waiter.reject(error);
+    } else waiter.resolve(request.result);
+  }
+});
+"#,
+    )
+    .unwrap();
+}
+
+#[cfg(not(windows))]
 #[tokio::test]
+#[serial]
 async fn test_ptc_runs_through_acp_session_agent_production_path() {
     let tmp = tempfile::tempdir().unwrap();
+    let ptc_cache = tempfile::tempdir().unwrap();
+    write_ptc_cache_fixture(ptc_cache.path());
+    let _home = HomeGuard::set(ptc_cache.path());
     std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
     std::fs::write(tmp.path().join("b.txt"), "beta").unwrap();
-    let a = tmp.path().join("a.txt").to_string_lossy().into_owned();
-    let b = tmp.path().join("b.txt").to_string_lossy().into_owned();
+    let a = serde_json::to_string(&tmp.path().join("a.txt").to_string_lossy()).unwrap();
+    let b = serde_json::to_string(&tmp.path().join("b.txt").to_string_lossy()).unwrap();
     let source = format!(
         r#"const [a, b] = await Promise.all([
-            tools.Read({{ file_path: {a:?} }}),
-            tools.Read({{ file_path: {b:?} }})
+            tools.Read({{ file_path: {a} }}),
+            tools.Read({{ file_path: {b} }})
         ]);
         let structured;
         try {{ await tools.NoSuchPtcTool({{}}); }}
         catch (error) {{ structured = {{ name: error.name, code: error.code }}; }}
         const controller = new AbortController(); controller.abort();
         let cancelled;
-        try {{ await tools.Read({{ file_path: {a:?} }}, {{ signal: controller.signal }}); }}
+        try {{ await tools.Read({{ file_path: {a} }}, {{ signal: controller.signal }}); }}
         catch (error) {{ cancelled = error.name; }}
-        console.log(JSON.stringify({{ a, b, structured, cancelled }}));
         return {{ a, b, structured, cancelled }};"#
     );
     let visible_tools = Arc::new(Mutex::new(Vec::new()));

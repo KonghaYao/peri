@@ -49,7 +49,9 @@ pub(crate) fn semantic_line_text(
             Some(stripped)
         }
         TuiRenderUnit::TuiAssistantBubble(_) => {
-            // code block 行：再剥 `│ ` gutter（语言标签/行号现状无——§9）。
+            // code block 行：剥 convert 层为铺满背景追加的独立尾 padding span，
+            // 再剥可能保留的 `│ ` gutter。代码正文 span 内的尾随空格必须保留。
+            let stripped = strip_code_block_visual_padding(line, stripped);
             if let Some(rest) = stripped.strip_prefix("\u{2502} ") {
                 return Some(rest.to_string());
             }
@@ -102,6 +104,25 @@ pub(crate) fn semantic_line_text(
         }
         _ => Some(stripped),
     }
+}
+
+fn strip_code_block_visual_padding(
+    line: &ratatui_kit::ratatui::text::Line<'static>,
+    mut text: String,
+) -> String {
+    let Some(padding) = line.spans.last() else {
+        return text;
+    };
+    if padding.style.bg.is_none()
+        || padding.style.fg.is_some()
+        || padding.content.is_empty()
+        || !padding.content.chars().all(|ch| ch == ' ')
+        || !text.ends_with(padding.content.as_ref())
+    {
+        return text;
+    }
+    text.truncate(text.len() - padding.content.len());
+    text
 }
 
 /// §9 tool header 行语义：`{Verb} {summary}{suffix}`——无符号、无 duration。

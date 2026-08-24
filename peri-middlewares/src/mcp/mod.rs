@@ -1,3 +1,4 @@
+pub mod agent_registry;
 pub mod auth_store;
 pub mod callback_server;
 pub mod channel_handler;
@@ -18,6 +19,7 @@ pub(crate) mod skill_discovery;
 pub mod tool_bridge;
 pub mod transport;
 
+pub use agent_registry::{ActivatedMcpAgent, McpAgentMetadata, McpAgentRegistry};
 pub use auth_store::{AuthStoreError, FileCredentialStore, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use channel_handler::ChannelHandler;

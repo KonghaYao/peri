@@ -1,15 +1,65 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPtcAdapter, ToolCallError } from "../src/adapter.js";
+import { createPtcAdapter, ToolCallError, type PtcAdapter } from "../src/adapter.js";
+import type { PtcExecutionLimits } from "../src/types.js";
 
-const messagesFrom = (lines) => lines.map((line) => JSON.parse(line));
+interface TestFrame {
+  id: string | number;
+  params: { invocationId: string } & Record<string, unknown>;
+  result: { value: unknown };
+  error: { message: string; data: { code: string } };
+}
 
-function harness() {
-  const lines = [];
+const messagesFrom = (lines: string[]): TestFrame[] => lines.map((line) => JSON.parse(line) as TestFrame);
+
+function harness({ started = true }: { started?: boolean } = {}): { adapter: PtcAdapter; lines: string[] } {
+  const lines: string[] = [];
   const adapter = createPtcAdapter((line) => lines.push(line));
+  if (started) {
+    void adapter.handleMessage({
+      jsonrpc: "2.0",
+      id: 0,
+      method: "ptc/start",
+      params: { protocolVersion: 1 },
+    });
+    lines.length = 0;
+  }
   return { adapter, lines };
 }
+
+test("ptc/start handshake is required before execute", async () => {
+  const { adapter, lines } = harness({ started: false });
+
+  await adapter.handleMessage({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "execute",
+    params: { source: "return 1;", input: null },
+  });
+  await adapter.handleMessage({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "ptc/start",
+    params: { protocolVersion: 1 },
+  });
+  await adapter.handleMessage({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "execute",
+    params: { source: "return 1;", input: null },
+  });
+
+  assert.deepEqual(messagesFrom(lines), [
+    { jsonrpc: "2.0", id: 1, error: { code: -32000, message: "PTC handshake required" } },
+    {
+      jsonrpc: "2.0",
+      id: 2,
+      result: { protocolVersion: 1, buildId: "@peri-code/ptc@0.2.3" },
+    },
+    { jsonrpc: "2.0", id: 3, result: { value: 1, logs: [] } },
+  ]);
+});
 
 test("tools proxy completes a tool request", async () => {
   const { adapter, lines } = harness();
@@ -57,7 +107,7 @@ test("abort cancels only its pending invocation and ignores late response", asyn
   controller.abort();
   const [slowRequest, fastRequest, cancel] = messagesFrom(lines);
 
-  await assert.rejects(slow, (error) => error.name === "AbortError");
+  await assert.rejects(slow, (error: unknown) => error instanceof Error && error.name === "AbortError");
   assert.deepEqual(cancel, {
     jsonrpc: "2.0",
     method: "tool/cancel",
@@ -91,7 +141,7 @@ test("execute returns completion with captured logs", async () => {
 });
 
 
-async function executeFrame(source, limits) {
+async function executeFrame(source: string, limits?: PtcExecutionLimits): Promise<TestFrame> {
   const { adapter, lines } = harness();
   await adapter.handleMessage({
     jsonrpc: "2.0",
@@ -99,7 +149,9 @@ async function executeFrame(source, limits) {
     method: "execute",
     params: { source, input: null, limits },
   });
-  return messagesFrom(lines).at(-1);
+  const frame = messagesFrom(lines).at(-1);
+  assert.ok(frame);
+  return frame;
 }
 
 const toolFailedFrame = {

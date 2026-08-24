@@ -18,6 +18,7 @@ use rmcp::model::Tool;
 use serde_json::{json, Value};
 
 use super::{
+    agent_registry::McpAgentRegistry,
     client::{ClientStatus, McpClientPool, OAuthStatus},
     config::ConfigSource,
 };
@@ -32,11 +33,21 @@ const MAX_RESULTS_CAP: usize = 20;
 pub struct DiscoverMCPTool {
     pool: Arc<McpClientPool>,
     registry: Option<Arc<McpSkillRegistry>>,
+    agent_registry: Option<Arc<McpAgentRegistry>>,
 }
 
 impl DiscoverMCPTool {
     pub fn new(pool: Arc<McpClientPool>, registry: Option<Arc<McpSkillRegistry>>) -> Self {
-        Self { pool, registry }
+        Self {
+            pool,
+            registry,
+            agent_registry: None,
+        }
+    }
+
+    pub fn with_agent_registry(mut self, registry: Arc<McpAgentRegistry>) -> Self {
+        self.agent_registry = Some(registry);
+        self
     }
 
     fn search(&self, params: &Value) -> Value {
@@ -122,6 +133,23 @@ impl DiscoverMCPTool {
             }
         }
 
+        if let Some(registry) = &self.agent_registry {
+            for agent in registry.entries() {
+                if agent.name.to_lowercase().contains(&needle)
+                    || agent.description.to_lowercase().contains(&needle)
+                {
+                    results.push(json!({
+                        "type": "agent",
+                        "server": agent.origin,
+                        "id": agent.id,
+                        "name": agent.name,
+                        "description": agent.description,
+                        "uri": agent.uri,
+                    }));
+                }
+            }
+        }
+
         // 确定性（ARC-SERIAL-001）：结果来源含 HashMap / 快照迭代，顺序不定——
         // 统一构造排序键消除同 type 并列的跨运行抖动后再截断：
         // tool 条目 (type, server, tool.name)、resource 条目 (type, server, uri)、
@@ -153,6 +181,18 @@ impl DiscoverMCPTool {
         let tools: Vec<String> = handle.tools.iter().map(|t| t.name.to_string()).collect();
         let resources: Vec<String> = handle.resources.iter().map(|r| r.uri.clone()).collect();
         let skills: Vec<String> = self.skill_names_of(server);
+        let agents: Vec<String> = self
+            .agent_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .entries()
+                    .into_iter()
+                    .filter(|entry| entry.origin == server)
+                    .map(|entry| entry.id)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         match domain {
             None => json!({
@@ -160,13 +200,15 @@ impl DiscoverMCPTool {
                 "tools": tools,
                 "resources": resources,
                 "skills": skills,
+                "agents": agents,
             }),
             Some("tools") => Value::Array(tools.into_iter().map(Value::String).collect()),
             Some("resources") => Value::Array(resources.into_iter().map(Value::String).collect()),
             Some("skills") => Value::Array(skills.into_iter().map(Value::String).collect()),
+            Some("agents") => Value::Array(agents.into_iter().map(Value::String).collect()),
             Some(other) => err_obj(
                 -32602,
-                format!("未知 domain: {other}（tools/resources/skills）"),
+                format!("未知 domain: {other}（tools/resources/skills/agents）"),
             ),
         }
     }

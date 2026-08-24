@@ -1,5 +1,7 @@
 use std::io;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -66,14 +68,69 @@ impl Drop for ProcessTree {
 
 #[cfg(windows)]
 #[derive(Debug)]
-pub(crate) struct ProcessTree;
+pub(crate) struct ProcessTree {
+    job: isize,
+}
 
 #[cfg(windows)]
 impl ProcessTree {
-    pub(crate) fn unsupported() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "process-tree containment is unavailable on this build",
-        )
+    pub(crate) fn new(process: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Self> {
+        use std::{mem::size_of, ptr};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security attributes and name request an unnamed job with default security.
+        let job = unsafe {
+            windows_sys::Win32::System::JobObjects::CreateJobObjectW(ptr::null(), ptr::null())
+        };
+        if job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: job is owned and valid; limits points to the correctly sized information type.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: job was created above and has not been closed.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
+            return Err(error);
+        }
+        // SAFETY: job and process are valid handles owned by the host and spawned child.
+        let assigned = unsafe { AssignProcessToJobObject(job, process) };
+        if assigned == 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: job was created above and has not been closed.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
+            return Err(error);
+        }
+        Ok(Self { job: job as isize })
+    }
+
+    pub(crate) async fn terminate(&self, _grace: std::time::Duration) -> io::Result<()> {
+        let job = self.job as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: job remains owned by self until Drop and is not closed concurrently.
+        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        let job = self.job as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: self uniquely owns the job handle and Drop runs once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
     }
 }

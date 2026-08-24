@@ -45,6 +45,12 @@ impl JsExecutionFailure {
 
 #[derive(Debug, Error)]
 pub enum JsRuntimeError {
+    #[error("JavaScript runtime artifact failed integrity validation")]
+    ArtifactTampered,
+
+    #[error("JavaScript runtime artifact is unavailable")]
+    ArtifactUnavailable,
+
     #[error("Failed to spawn JavaScript runtime: {0}")]
     SpawnFailed(String),
 
@@ -72,6 +78,15 @@ pub enum JsRuntimeError {
         observed: usize,
     },
 
+    #[error(
+        "JavaScript runtime exited unexpectedly: success={success}, code={code:?}, stderr_bytes={stderr_bytes}"
+    )]
+    RuntimeExited {
+        success: bool,
+        code: Option<i32>,
+        stderr_bytes: usize,
+    },
+
     #[error("JavaScript process cleanup failed: {0}")]
     CleanupFailed(String),
 
@@ -89,7 +104,12 @@ impl JsRuntimeError {
             Self::Cancelled => "CANCELLED",
             Self::Timeout { .. } => "TIMEOUT",
             Self::ResourceLimit { .. } => "RESOURCE_LIMIT",
-            Self::SpawnFailed(_) | Self::CleanupFailed(_) | Self::Io(_) => "RUNTIME_FAILED",
+            Self::ArtifactTampered
+            | Self::ArtifactUnavailable
+            | Self::SpawnFailed(_)
+            | Self::RuntimeExited { .. }
+            | Self::CleanupFailed(_)
+            | Self::Io(_) => "RUNTIME_FAILED",
             Self::Rpc(_) | Self::RpcResponse(_) | Self::Json(_) => "PROTOCOL_ERROR",
         }
     }
@@ -100,9 +120,12 @@ impl JsRuntimeError {
             Self::Cancelled => "JavaScript execution cancelled",
             Self::Timeout { .. } => "JavaScript execution timed out",
             Self::ResourceLimit { .. } => "JavaScript resource limit exceeded",
-            Self::SpawnFailed(_) | Self::CleanupFailed(_) | Self::Io(_) => {
-                "JavaScript runtime failed"
-            }
+            Self::ArtifactTampered
+            | Self::ArtifactUnavailable
+            | Self::SpawnFailed(_)
+            | Self::RuntimeExited { .. }
+            | Self::CleanupFailed(_)
+            | Self::Io(_) => "JavaScript runtime failed",
             Self::Rpc(_) | Self::RpcResponse(_) | Self::Json(_) => "JavaScript RPC protocol error",
         }
     }

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use super::*;
 
 async fn make_channel() -> RpcChannel {
-    let mut child = tokio::process::Command::new("perl")
-        .args(["-e", "sleep 60"])
+    let mut child = tokio::process::Command::new("node")
+        .args(["-e", "setTimeout(() => {}, 60_000);"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -20,8 +20,11 @@ async fn make_channel() -> RpcChannel {
 async fn test_notification_writes_newline_and_flushes_frame() {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    let mut child = tokio::process::Command::new("perl")
-        .args(["-e", "my $line = <STDIN>; print $line;"])
+    let mut child = tokio::process::Command::new("node")
+        .args([
+            "-e",
+            "process.stdin.once('data', data => process.stdout.write(data));",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
