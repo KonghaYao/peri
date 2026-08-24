@@ -82,9 +82,14 @@ impl super::SubAgentTool {
             let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
             (llm, tools, 200)
         } else {
-            let agent_def = self
-                .load_agent_def_for_resume(&title, &cwd)
-                .map_err(|e| format!("resume_subagent: {}", e))?;
+            let agent_def = if title.starts_with("mcp__") {
+                self.load_and_approve_mcp_agent(&title)
+                    .await
+                    .map_err(|error| format!("resume_subagent: {error}"))?
+            } else {
+                self.load_agent_def_for_resume(&title, &cwd)
+                    .map_err(|error| format!("resume_subagent: {error}"))?
+            };
             let build_result = self
                 .build_agent_from_def(
                     &agent_def,

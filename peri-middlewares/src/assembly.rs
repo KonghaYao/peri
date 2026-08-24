@@ -156,6 +156,9 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 .downcast_arc::<McpClientPool>()
                 .unwrap_or_else(|_| Arc::new(McpClientPool::new_pending()))
         });
+        let mcp_agent_registry = mcp_pool_concrete
+            .as_ref()
+            .map(|pool| Arc::new(crate::mcp::McpAgentRegistry::new(Arc::clone(pool))));
 
         // 工具搜索索引：端口 → Arc<ToolSearchIndex>（失败回退默认实例）。
         let tool_search_index_concrete: Arc<ToolSearchIndex> = Arc::clone(tool_search_index)
@@ -279,6 +282,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                         .flat_map(|plugin| plugin.agents_dirs.clone())
                         .collect(),
                 )
+                .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
                 .with_system_builder(system_builder.clone())
                 .with_cancel(cancel.clone())
                 .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
