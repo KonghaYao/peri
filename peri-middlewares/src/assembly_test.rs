@@ -11,6 +11,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use futures::stream;
 use parking_lot::RwLock;
 use peri_agent::{
     agent::{
@@ -24,7 +25,9 @@ use peri_agent::{
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
-use peri_model::{Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream};
+use peri_model::{
+    Model, ModelCapabilities, ModelRequest, ModelResult, ModelStream, ModelStreamEvent,
+};
 use peri_resources::lsp::config::{LspConfigSource, LspServerConfig};
 use peri_resources::workflow::protocol::{AgentRunParams, AgentRunResult};
 use peri_resources::workflow::runner::AgentExecutor;
@@ -92,6 +95,34 @@ impl Model for FakeModel {
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> ModelResult<ModelStream> {
         unimplemented!("契约测试不调用模型")
+    }
+}
+
+struct CancelGateModel {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl Model for CancelGateModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        Ok(ModelStream::with_parent_cancellation(
+            stream::pending::<ModelResult<ModelStreamEvent>>(),
+            cancellation,
+        ))
     }
 }
 
@@ -675,6 +706,61 @@ fn workflow_agent_type_rejects_unknown_definition() {
         .unwrap_err();
 
     assert!(error.contains("cannot find agent definition 'does-not-exist'"));
+}
+
+/// [回归测试] workflow 真实 executor 在 Reason 流中取消时，
+/// 必须返回 interrupted，不得将 stage-local cancel 降级成 runagent-threw。
+#[tokio::test]
+async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let model: Arc<dyn Model> = Arc::new(CancelGateModel {
+        entered: std::sync::Mutex::new(Some(entered_tx)),
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut ctx = workflow_context_with_disabled(&[]);
+    ctx.cancel = Some(cancel.clone());
+    ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
+        peri_agent::agent::workflow::WorkflowModel {
+            model: Arc::clone(&model),
+            model_name: "cancel-gate".to_string(),
+            tier: None,
+        }
+    });
+    let executor = peri_agent::agent::workflow::WorkflowAgentExecutor::new(ctx);
+    let task = tokio::spawn(async move {
+        executor
+            .execute(AgentRunParams {
+                run_id: "cancel-workflow-run".to_string(),
+                agent_id: 1,
+                prompt: "wait for cancellation".to_string(),
+                schema: None,
+                model: None,
+                max_tokens: None,
+                agent_type: None,
+                isolation: None,
+                allowed_tools: None,
+                label: None,
+                phase: None,
+            })
+            .await
+    });
+    entered_rx.await.expect("workflow model stream 必须已返回");
+
+    cancel.cancel();
+    let result = task.await.expect("workflow executor task 不得 panic");
+
+    match result {
+        AgentRunResult::Dead { reason, detail } => {
+            assert_eq!(reason.as_deref(), Some("interrupted"));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|text| text.contains("interrupted")),
+                "workflow 取消详情必须明确: {detail:?}"
+            );
+        }
+        other => panic!("workflow 取消必须返回 Dead(interrupted): {other:?}"),
+    }
 }
 
 // ─── MetaHarness（设计 §2.5）：middleware 关闭契约测试 ────────────────────────

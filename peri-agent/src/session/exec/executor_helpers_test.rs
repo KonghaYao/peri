@@ -1183,26 +1183,29 @@ mod loop_result_mapping {
     use peri_acp_types::{
         command::PromptStopReason,
         error::AgentError,
+        event::{TurnErrorKind, TurnStatus},
         session::{ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
     };
 
     use crate::agent::stages::LoopResult;
 
-    use super::super::v2_execute::map_loop_result_to_outcome;
+    use super::super::v2_execute::classify_loop_terminal;
 
     /// 真正 fatal（LLM 错误）：ok=false + failure=Some(Internal, 非空脱敏)。
     /// 消息来自 `user_facing_message()`，不得泄露 provider body / secret。
     #[test]
     fn fatal_llm_error_maps_to_internal_failure() {
-        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+        let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::LlmError(
                 "provider 500: Authorization: Bearer top-secret-key".to_string(),
             )),
             false,
         );
-        assert!(!ok);
-        assert_eq!(stop_reason, PromptStopReason::EndTurn);
-        let failure = failure.expect("fatal error 必须携带 failure");
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
+        assert_eq!(terminal.turn_status, TurnStatus::Error);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
+        let failure = terminal.failure.expect("fatal error 必须携带 failure");
         assert_eq!(failure.kind, ExecutionFailureKind::Internal);
         assert!(
             !failure.public_message.is_empty(),
@@ -1217,63 +1220,111 @@ mod loop_result_mapping {
     /// 用户主动中断：failure=None，stop_reason=Cancelled。
     #[test]
     fn interrupted_maps_to_no_failure() {
-        let (ok, stop_reason, failure) =
-            map_loop_result_to_outcome(&LoopResult::Interrupted, false);
-        assert!(!ok);
-        assert_eq!(stop_reason, PromptStopReason::Cancelled);
-        assert!(failure.is_none(), "Interrupted 不得升级为 fatal failure");
+        let terminal = classify_loop_terminal(&LoopResult::Interrupted, false);
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
+        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
+        assert!(
+            terminal.failure.is_none(),
+            "Interrupted 不得升级为 fatal failure"
+        );
+    }
+
+    #[test]
+    fn legacy_error_interrupted_maps_to_interrupted_terminal() {
+        let terminal = classify_loop_terminal(&LoopResult::Error(AgentError::Interrupted), false);
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
+        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
+        assert!(terminal.failure.is_none());
     }
 
     /// cancel token 已取消（即便 Error 非 Interrupted）：failure=None，
     /// 视为用户取消而非请求失败。
     #[test]
     fn cancelled_error_maps_to_no_failure() {
-        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+        let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::LlmError("cancelled while failing".to_string())),
             true,
         );
-        assert!(!ok);
-        assert_eq!(stop_reason, PromptStopReason::Cancelled);
-        assert!(failure.is_none(), "用户 cancel 不得升级为 fatal failure");
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
+        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
+        assert!(
+            terminal.failure.is_none(),
+            "用户 cancel 不得升级为 fatal failure"
+        );
     }
 
     /// 最大轮数：failure=None，stop_reason=MaxTurnRequests。
     #[test]
     fn max_iterations_maps_to_no_failure() {
-        let (ok, stop_reason, failure) = map_loop_result_to_outcome(
+        let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
             false,
         );
-        assert!(!ok);
-        assert_eq!(stop_reason, PromptStopReason::MaxTurnRequests);
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::MaxTurnRequests);
+        assert_eq!(terminal.turn_status, TurnStatus::Error);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::MaxIterations));
         assert!(
-            failure.is_none(),
+            terminal.failure.is_none(),
             "MaxIterationsExceeded 不得升级为 fatal failure"
         );
+    }
+
+    #[test]
+    fn cancelled_max_iterations_maps_to_interrupted_terminal() {
+        let terminal = classify_loop_terminal(
+            &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
+            true,
+        );
+        assert!(!terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
+        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
+        assert!(terminal.failure.is_none());
     }
 
     /// 正常完成：ok=true + failure=None。
     #[test]
     fn completed_maps_to_success_no_failure() {
-        let (ok, stop_reason, failure) = map_loop_result_to_outcome(&LoopResult::Completed, false);
-        assert!(ok);
-        assert_eq!(stop_reason, PromptStopReason::EndTurn);
-        assert!(failure.is_none());
+        let terminal = classify_loop_terminal(&LoopResult::Completed, false);
+        assert!(terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
+        assert_eq!(terminal.turn_status, TurnStatus::Done);
+        assert_eq!(terminal.turn_error_kind, None);
+        assert!(terminal.failure.is_none());
+    }
+
+    #[test]
+    fn completed_after_late_cancel_remains_committed_success() {
+        let terminal = classify_loop_terminal(&LoopResult::Completed, true);
+        assert!(terminal.ok);
+        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
+        assert_eq!(terminal.turn_status, TurnStatus::Done);
+        assert_eq!(terminal.turn_error_kind, None);
+        assert!(terminal.failure.is_none());
     }
 
     /// 其它 fatal（如 LLM HTTP 错误）：failure=Some，public message 为
     /// `user_facing_message()` 的脱敏通用文案（不泄露 provider body）。
     #[test]
     fn llm_http_error_maps_to_sanitized_message() {
-        let (ok, _stop_reason, failure) = map_loop_result_to_outcome(
+        let terminal = classify_loop_terminal(
             &LoopResult::Error(AgentError::LlmHttpError {
                 status: 500,
                 message: "secret-provider-body".to_string(),
             }),
             false,
         );
-        assert!(!ok);
-        let failure = failure.expect("fatal error 必须携带 failure");
+        assert!(!terminal.ok);
+        assert_eq!(terminal.turn_status, TurnStatus::Error);
+        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
+        let failure = terminal.failure.expect("fatal error 必须携带 failure");
         assert_eq!(failure.kind, ExecutionFailureKind::Internal);
         assert!(!failure.public_message.is_empty());
         assert!(

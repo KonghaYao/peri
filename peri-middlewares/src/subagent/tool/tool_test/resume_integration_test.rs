@@ -125,8 +125,8 @@ async fn wait_for_messages(
     }
 }
 
-/// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（错误文本
-/// 带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
+/// 核心链路：agent-def 路径调用 Agent 工具 → LLM 返回 Interrupted（可恢复
+/// Ok 文本带 child_thread_id 前缀，主 agent 凭此恢复）→ 新 tool 实例（同一 dir /
 /// 同 store / 同父 session thread_id，模拟主 agent 下一 turn 或进程重启）
 /// 调用 resume_thread_id → 完成文本含结果。
 /// R-L3：进程重启后凭 child_thread_id 恢复（thread_id 即凭证，父链仅作落盘记录）。
@@ -151,11 +151,11 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // 实例 A：spawn → LLM 首轮 Interrupted → Err 文本带 child_thread_id 前缀
+    // 实例 A：spawn → LLM 首轮 Interrupted → Ok 可恢复文本带 child_thread_id 前缀
     let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>)
         .with_parent_session(parent.clone());
-    let err = t_a
+    let interrupted = t_a
         .invoke(
             serde_json::json!({
                 "subagent_type": "interrupt-agent",
@@ -165,14 +165,15 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
             peri_agent::tools::ToolContext::new(&[], work),
         )
         .await
-        .expect_err("首次执行应返回（Interrupted 错误）");
-    let err = err.to_string();
+        .expect("首次执行应返回可恢复的 Interrupted 文本");
     assert!(
-        err.contains("execution failed") && err.contains("child_thread_id:"),
-        "LLM 返回 Interrupted → 错误文本须带 child_thread_id 前缀（可恢复）: {}",
-        err
+        interrupted.contains("Sub-agent execution was interrupted")
+            && interrupted.contains("resume with Agent(resume_thread_id:")
+            && interrupted.contains("child_thread_id:"),
+        "LLM 返回 Interrupted → Ok 文本须明确中断且可恢复: {}",
+        interrupted
     );
-    let id = extract_child_thread_id(&err);
+    let id = extract_child_thread_id(&interrupted);
 
     // 实例 B（同 store dir、同父 session thread_id）：resume → 完成
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
@@ -209,7 +210,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
 }
 
 /// 跨实例重载（进程重启）：实例 A spawn 并中断（LLM 首轮返回 Interrupted →
-/// 错误文本，带 child_thread_id 前缀）→ 丢弃实例 A → 新建实例 B（同
+/// 可恢复 Ok 文本，带 child_thread_id 前缀）→ 丢弃实例 A → 新建实例 B（同
 /// FilesystemThreadStore dir）resume → 完成；断言 transcript 重放正确
 /// （消息数/顺序：spawn prompt → 隐式 continue → 新 AI）。
 #[tokio::test]
@@ -223,7 +224,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         // 实例 A：spawn → LLM 首轮 Interrupted（thread 与 transcript 已落盘）
         let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
             .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
-        let err = t_a
+        let interrupted = t_a
             .invoke(
                 serde_json::json!({
                     "subagent_type": "test-agent",
@@ -233,14 +234,15 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
                 peri_agent::tools::ToolContext::new(&[], "."),
             )
             .await
-            .expect_err("首次执行应返回（Interrupted 错误）");
-        let err = err.to_string();
+            .expect("首次执行应返回可恢复的 Interrupted 文本");
         assert!(
-            err.contains("execution failed") && err.contains("child_thread_id:"),
-            "LLM 返回 Interrupted → 错误文本须带 child_thread_id 前缀: {}",
-            err
+            interrupted.contains("Sub-agent execution was interrupted")
+                && interrupted.contains("resume with Agent(resume_thread_id:")
+                && interrupted.contains("child_thread_id:"),
+            "LLM 返回 Interrupted → Ok 文本须明确中断且可恢复: {}",
+            interrupted
         );
-        extract_child_thread_id(&err)
+        extract_child_thread_id(&interrupted)
     }; // 丢弃实例 A（模拟进程重启，仅剩磁盘现场）
 
     // 实例 B：同 store dir → resume（缺省 prompt → 隐式 continue）→ 完成
@@ -393,8 +395,8 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     .with_thread_store(Arc::clone(&store) as Arc<dyn ThreadStore>);
     let cwd = dir.path().to_str().unwrap().to_string();
 
-    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Err）
-    let err = t
+    // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
+    let interrupted = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
@@ -404,14 +406,15 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect_err("首次执行应返回（Interrupted 错误）");
-    let err = err.to_string();
+        .expect("首次执行应返回可恢复的 Interrupted 文本");
     assert!(
-        err.contains("execution failed") && err.contains("child_thread_id:"),
-        "首次应中断: {}",
-        err
+        interrupted.contains("Sub-agent execution was interrupted")
+            && interrupted.contains("resume with Agent(resume_thread_id:")
+            && interrupted.contains("child_thread_id:"),
+        "首次应返回明确可恢复的中断文本: {}",
+        interrupted
     );
-    let id = extract_child_thread_id(&err);
+    let id = extract_child_thread_id(&interrupted);
     let evs = wait_for_observe_pairs(&bridge, 1, 3000).await;
     assert_start_stop_pair(&evs, "test-agent", false);
 
@@ -502,7 +505,7 @@ async fn test_resume_skill_preload_not_duplicated() {
     let cwd = dir.path().to_str().unwrap().to_string();
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
-    let err = t
+    let interrupted = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "skill-user",
@@ -512,14 +515,15 @@ async fn test_resume_skill_preload_not_duplicated() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect_err("首次执行应返回（Interrupted 错误）");
-    let err = err.to_string();
+        .expect("首次执行应返回可恢复的 Interrupted 文本");
     assert!(
-        err.contains("execution failed") && err.contains("child_thread_id:"),
-        "首次应中断: {}",
-        err
+        interrupted.contains("Sub-agent execution was interrupted")
+            && interrupted.contains("resume with Agent(resume_thread_id:")
+            && interrupted.contains("child_thread_id:"),
+        "首次应返回明确可恢复的中断文本: {}",
+        interrupted
     );
-    let id = extract_child_thread_id(&err);
+    let id = extract_child_thread_id(&interrupted);
 
     // resume（隐式 continue，无 /skill token → 自动检测分支不触发）→ 完成
     let result = t
@@ -674,7 +678,7 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
     let cwd = dir.path().to_str().unwrap().to_string();
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
-    let err = t
+    let interrupted = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "skill-user",
@@ -684,14 +688,15 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
-        .expect_err("首次执行应返回（Interrupted 错误）");
-    let err = err.to_string();
+        .expect("首次执行应返回可恢复的 Interrupted 文本");
     assert!(
-        err.contains("execution failed") && err.contains("child_thread_id:"),
-        "首次应中断: {}",
-        err
+        interrupted.contains("Sub-agent execution was interrupted")
+            && interrupted.contains("resume with Agent(resume_thread_id:")
+            && interrupted.contains("child_thread_id:"),
+        "首次应返回明确可恢复的中断文本: {}",
+        interrupted
     );
-    let id = extract_child_thread_id(&err);
+    let id = extract_child_thread_id(&interrupted);
 
     // resume prompt 含 /test-skill token → 自动检测分支不存在（链未挂 SkillPreload）
     let result = t

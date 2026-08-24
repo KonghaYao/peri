@@ -85,6 +85,7 @@ struct MockEventSink {
     push_done_count: Mutex<usize>,
     push_done_stop_reasons: Mutex<Vec<String>>,
     pushed_events: Mutex<Vec<String>>,
+    operations: Mutex<Vec<String>>,
 }
 
 impl MockEventSink {
@@ -93,6 +94,7 @@ impl MockEventSink {
             push_done_count: Mutex::new(0),
             push_done_stop_reasons: Mutex::new(Vec::new()),
             pushed_events: Mutex::new(Vec::new()),
+            operations: Mutex::new(Vec::new()),
         }
     }
 
@@ -105,7 +107,8 @@ impl MockEventSink {
 impl EventSink for MockEventSink {
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, _context_window: u32) {
         let json = serde_json::to_string(event).unwrap_or_default();
-        self.pushed_events.lock().unwrap().push(json);
+        self.pushed_events.lock().unwrap().push(json.clone());
+        self.operations.lock().unwrap().push(json);
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, _request_id: Option<&str>) {
@@ -114,6 +117,66 @@ impl EventSink for MockEventSink {
             .lock()
             .unwrap()
             .push(stop_reason.to_string());
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("done:{stop_reason}"));
+    }
+}
+
+#[cfg(not(windows))]
+struct CancelGateModel {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for CancelGateModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        Ok(ModelStream::with_parent_cancellation(
+            stream::pending::<ModelResult<ModelStreamEvent>>(),
+            cancellation,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+struct FatalModel;
+
+#[cfg(not(windows))]
+#[async_trait]
+impl Model for FatalModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..ModelCapabilities::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Err(peri_model::ModelError::http_status(
+            500,
+            "test-provider",
+            Some("safe-request-id"),
+        ))
     }
 }
 
@@ -523,6 +586,137 @@ async fn test_turn_terminal_state_unique_and_last() {
         Some("cancelled".to_string()),
         "push_done 终态与 TurnEnded(Interrupted) 语义一致"
     );
+}
+
+/// [回归测试] 取消发生在真实 ModelStream 已返回之后，ACP 仍必须
+/// 对 PromptResult、TurnEnded 和 push_done 给出唯一且一致的 cancelled 终态。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_cancel_during_reason_has_one_interrupted_terminal() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let model: Arc<dyn Model> = Arc::new(CancelGateModel {
+        entered: Mutex::new(Some(entered_tx)),
+    });
+    let mut ctx = make_session_context("test-cancel-during-reason");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let cancel = ctx.cancel.clone();
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("cancel while reasoning"),
+        false,
+        vec![],
+        stage_build,
+    );
+    let task = tokio::spawn(async move { run_session_loop(ctx, turn).await });
+    entered_rx.await.expect("primary model stream 必须已返回");
+
+    cancel.cancel();
+    let result = task.await.expect("session loop task 不得 panic");
+
+    assert!(!result.ok);
+    assert_eq!(result.stop_reason, PromptStopReason::Cancelled);
+    assert!(result.failure.is_none(), "用户取消不得产生 fatal failure");
+    let events: Vec<ExecutorEvent> = sink
+        .pushed_events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|json| serde_json::from_str(json).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::TurnStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ExecutorEvent::TurnEnded { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExecutorEvent::TurnEnded {
+            status: peri_acp_types::event::TurnStatus::Interrupted,
+            error_kind: Some(peri_acp_types::event::TurnErrorKind::Interrupted),
+            ..
+        }
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ExecutorEvent::AgentExecutionFailed { .. })));
+    assert_eq!(sink.push_done_count(), 1);
+    assert_eq!(
+        sink.push_done_stop_reasons.lock().unwrap().as_slice(),
+        ["cancelled"]
+    );
+}
+
+/// fatal 终态的兼容 failure 事件必须在唯一 TurnEnded 之前，
+/// 且与 PromptResult 共用同一份脱敏文案；done 仅在事件泵排空后发送。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_fatal_failure_precedes_turn_end_and_done() {
+    let model: Arc<dyn Model> = Arc::new(FatalModel);
+    let mut ctx = make_session_context("test-fatal-terminal-order");
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("trigger fatal model error"),
+        false,
+        vec![],
+        stage_build,
+    );
+
+    let result = run_session_loop(ctx, turn).await;
+
+    let failure = result.failure.expect("fatal model error 必须产生 failure");
+    assert!(!failure.public_message.is_empty());
+    assert!(!failure.public_message.contains("safe-request-id"));
+    let operations = sink.operations.lock().unwrap();
+    let failure_index = operations
+        .iter()
+        .position(|operation| operation.contains("agent_execution_failed"))
+        .expect("必须发射 AgentExecutionFailed");
+    let turn_end_index = operations
+        .iter()
+        .position(|operation| operation.contains("turn_ended"))
+        .expect("必须发射 TurnEnded");
+    let done_index = operations
+        .iter()
+        .position(|operation| operation == "done:end_turn")
+        .expect("必须在 pump drain 后 push_done");
+    assert!(failure_index < turn_end_index && turn_end_index < done_index);
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| operation.contains("turn_ended"))
+            .count(),
+        1
+    );
+    let failure_event: ExecutorEvent = serde_json::from_str(&operations[failure_index]).unwrap();
+    match failure_event {
+        ExecutorEvent::AgentExecutionFailed { message } => {
+            assert_eq!(message, failure.public_message)
+        }
+        other => panic!("预期 AgentExecutionFailed，got: {other:?}"),
+    }
+    let turn_end: ExecutorEvent = serde_json::from_str(&operations[turn_end_index]).unwrap();
+    assert!(matches!(
+        turn_end,
+        ExecutorEvent::TurnEnded {
+            status: peri_acp_types::event::TurnStatus::Error,
+            error_kind: Some(peri_acp_types::event::TurnErrorKind::LlmFailure),
+            ..
+        }
+    ));
 }
 
 /// [AsyncContinuation] 内部续跑不写入空 human prompt：Phase 6 跳过 Prompt push，

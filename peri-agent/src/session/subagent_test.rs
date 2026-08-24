@@ -828,6 +828,37 @@ impl crate::agent::react::ReactLLM for GateLLM {
     }
 }
 
+struct CancelGateLLM {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl CancelGateLLM {
+    fn new() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+            },
+            entered_rx,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::react::ReactLLM for CancelGateLLM {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        std::future::pending().await
+    }
+}
+
 /// 预置可恢复 thread：创建 + 置非 active（status "done"）。
 /// 消息由各测试按需 append。
 async fn preset_resumable_thread(
@@ -1271,21 +1302,26 @@ async fn test_resume_subagent_interrupted_then_resumed_completes() {
         .await
         .unwrap();
 
-    // 第一次恢复：执行前取消 → 循环顶 Interrupted（sync 中断）
+    // 第一次恢复：进入 Reason 后取消，覆盖 stage-local Interrupted 规范化。
     let token = CancellationToken::new();
+    let (gate, entered_rx) = CancelGateLLM::new();
     let config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        Box::new(gate),
         SubagentRunMode::Sync,
         None,
         Some(token.clone()),
     );
+    let first_resume =
+        tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    entered_rx.await.expect("sync subagent 必须进入 Reason");
     token.cancel();
-    let spawned1 = SessionFactory::resume_subagent(None, config)
+    let spawned1 = first_resume
         .await
+        .expect("sync resume task 不得 panic")
         .expect("resume 1 ok（中断不是 Err）");
-    assert!(spawned1.interrupted, "cancel 前置触发中断");
+    assert!(spawned1.interrupted, "Reason 内 cancel 必须是 Interrupted");
     {
         let statuses = store.statuses.read();
         assert_eq!(
@@ -1517,7 +1553,7 @@ async fn test_resume_subagent_background_mode_done() {
     );
 }
 
-/// bg resume cancelled 分支：执行前取消 → bg 中断收尾写 "cancelled"
+/// bg resume cancelled 分支：Reason 内取消 → bg 中断收尾写 "cancelled"
 #[tokio::test]
 async fn test_resume_subagent_background_mode_cancelled() {
     let store = Arc::new(MockThreadStore::new());
@@ -1526,32 +1562,44 @@ async fn test_resume_subagent_background_mode_cancelled() {
 
     let task_manager = Arc::new(TaskManager::new());
     let token = CancellationToken::new();
-    let config = resume_config_with(
+    let (gate, entered_rx) = CancelGateLLM::new();
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let completed_tx = Arc::new(std::sync::Mutex::new(Some(completed_tx)));
+    let mut config = resume_config_with(
         store.clone(),
         thread_id.clone(),
-        Box::new(EchoLLM),
+        Box::new(gate),
         SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         Some(token.clone()),
     );
-    token.cancel();
+    config.on_bg_complete = Some(Arc::new(move |result, _kind| {
+        if let Some(completed) = completed_tx.lock().unwrap().take() {
+            let _ = completed.send(result.clone());
+        }
+    }));
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
     assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
     assert!(!spawned.interrupted, "bg 模式返回值恒 false（异步收尾）");
+    entered_rx
+        .await
+        .expect("background subagent 必须进入 Reason");
+    token.cancel();
 
-    // bg 中断收尾：cancelled（与 sync 的 error 区分，R-M3）
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if store.statuses.read().last().map(|(_, s)| s.as_str()) == Some("cancelled") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("bg 任务应在超时前收尾 cancelled");
+    let completed = completed_rx.await.expect("on_bg_complete 必须收到终态");
+    assert!(!completed.success, "取消后 background completion 不得成功");
+    assert!(
+        completed.output.contains("interrupted"),
+        "background completion 必须呈现 interrupted: {}",
+        completed.output
+    );
+    assert_eq!(
+        store.statuses.read().last().map(|(_, s)| s.as_str()),
+        Some("cancelled"),
+        "bg 中断收尾必须写 cancelled"
+    );
 }
 
 /// bg resume 注册失败回滚（review MEDIUM-1，路径 1：task_manager 缺失）：

@@ -562,7 +562,11 @@ where
                     status: StageStatus::Error,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
-            return Err(LoopResult::Error(e));
+            return Err(if matches!(&e, crate::error::AgentError::Interrupted) {
+                LoopResult::Interrupted
+            } else {
+                LoopResult::Error(e)
+            });
         }
     };
     Ok(out)
