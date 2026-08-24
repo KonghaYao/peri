@@ -150,6 +150,33 @@ fn test_code_block() {
 }
 
 #[test]
+fn test_code_block_background_fills_each_visual_line() {
+    let width = 12;
+    let result = flatten(&parse_markdown(
+        "```text\nshort\nthis line is much longer than the width\n```",
+        width,
+        Palette::default(),
+        TEST_BASE_FG,
+    ));
+
+    assert!(result.len() > 2, "超长代码应折为多个视觉行");
+    for line in result {
+        assert_eq!(line.width(), width, "每个代码视觉行都应铺满 content 宽度");
+        let background = line
+            .spans
+            .first()
+            .and_then(|span| span.style.bg)
+            .expect("代码行应使用主题控制的背景色");
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.bg == Some(background)),
+            "代码字符、前缀和右侧填充应使用同一背景色"
+        );
+    }
+}
+
+#[test]
 fn test_code_block_spacing() {
     let result = flatten(&parse_markdown(
         "text\n\n```rust\nlet x = 1;\n```",
