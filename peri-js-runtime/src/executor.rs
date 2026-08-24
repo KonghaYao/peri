@@ -193,8 +193,8 @@ impl JsExecutor {
                 outcome,
                 Err(PhasedError {
                     phase: ExecutionPhase::Handshake,
-                    error: JsRuntimeError::Rpc(ref message),
-                }) if message == "PTC handshake identity mismatch"
+                    ..
+                })
             )
         {
             let _ = self.artifact_provider.invalidate().await;
@@ -259,7 +259,14 @@ impl JsExecutor {
         .await
         .map_err(|_| JsRuntimeError::Timeout {
             limit: self.limits.wall_timeout,
-        })??;
+        })?;
+        let handshake = match handshake {
+            Ok(value) => value,
+            Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
+                return Err(runtime_exit_error(host).await);
+            }
+            Err(error) => return Err(error),
+        };
         validate_handshake(&handshake)
     }
 
@@ -306,18 +313,7 @@ impl JsExecutor {
                     let value = match response {
                         Ok(value) => value,
                         Err(JsRuntimeError::RpcResponse(remote)) if remote.code == -32000 => {
-                            let status = tokio::time::timeout(
-                                Duration::from_millis(100),
-                                host.wait_for_exit(),
-                            )
-                            .await
-                            .ok()
-                            .and_then(std::result::Result::ok);
-                            break Err(JsRuntimeError::RuntimeExited {
-                                success: status.as_ref().is_some_and(std::process::ExitStatus::success),
-                                code: status.as_ref().and_then(std::process::ExitStatus::code),
-                                stderr_bytes: host.stderr_bytes(),
-                            });
+                            break Err(runtime_exit_error(&host).await);
                         }
                         Err(error) => break Err(normalize_execute_response_error(error)),
                     };
@@ -419,6 +415,20 @@ fn validate_handshake(value: &Value) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+async fn runtime_exit_error(host: &JsExecutionHost) -> JsRuntimeError {
+    let status = tokio::time::timeout(Duration::from_millis(100), host.wait_for_exit())
+        .await
+        .ok()
+        .and_then(std::result::Result::ok);
+    JsRuntimeError::RuntimeExited {
+        success: status
+            .as_ref()
+            .is_some_and(std::process::ExitStatus::success),
+        code: status.as_ref().and_then(std::process::ExitStatus::code),
+        stderr_bytes: host.stderr_bytes(),
+    }
 }
 
 fn check_limit(resource: ResourceKind, observed: usize, limit: usize) -> Result<()> {

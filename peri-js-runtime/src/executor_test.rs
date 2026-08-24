@@ -117,6 +117,61 @@ async fn test_execute_rpc_failure_after_handshake_does_not_invalidate() {
 }
 
 #[tokio::test]
+async fn test_handshake_process_exit_reports_status_and_invalidates() {
+    struct ExitingHandshakeProvider {
+        home: tempfile::TempDir,
+        invalidated: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PtcArtifactProvider for ExitingHandshakeProvider {
+        async fn launch(&self, node: &str) -> Result<PtcLaunch> {
+            let launch = launch_in(node, self.home.path(), &FixtureInstaller, false).await?;
+            tokio::fs::write(
+                Path::new(&launch.spec.args[0]),
+                b"process.stdin.resume(); process.stdin.once('data', () => process.exit(7));",
+            )
+            .await?;
+            Ok(launch)
+        }
+
+        async fn invalidate(&self) -> Result<()> {
+            crate::artifact::quarantine(self.home.path()).await?;
+            self.invalidated.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let invalidated = Arc::new(AtomicBool::new(false));
+    let executor = JsExecutor::with_artifact_provider(
+        "node",
+        JsExecutionLimits::default(),
+        Arc::new(ExitingHandshakeProvider {
+            home: tempfile::tempdir().unwrap(),
+            invalidated: Arc::clone(&invalidated),
+        }),
+    )
+    .unwrap();
+    let error = executor
+        .execute(
+            JsExecutionRequest {
+                source: "handshake-source-canary".into(),
+                input: Value::Null,
+            },
+            Arc::new(EchoRouter),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "RUNTIME_FAILED");
+    assert!(error.to_string().contains("code=Some(7)"));
+    assert!(error.to_string().contains("stderr_bytes=0"));
+    assert!(!error.to_string().contains("handshake-source-canary"));
+    assert!(invalidated.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn test_handshake_failure_invalidates_local_cache_after_cleanup() {
     struct BrokenHandshakeProvider {
         home: tempfile::TempDir,
