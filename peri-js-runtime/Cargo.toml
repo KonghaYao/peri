@@ -27,3 +27,4 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test.workspace = true

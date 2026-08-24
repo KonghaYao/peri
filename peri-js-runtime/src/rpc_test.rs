@@ -16,6 +16,7 @@ async fn make_channel() -> RpcChannel {
     )
 }
 
+#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_notification_writes_newline_and_flushes_frame() {
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -60,6 +61,7 @@ async fn test_notification_writes_newline_and_flushes_frame() {
     );
 }
 
+#[cfg_attr(windows, serial_test::serial)]
 #[tokio::test]
 async fn test_drain_pending_settles_waiting_request_with_reason() {
     let channel = Arc::new(make_channel().await);

@@ -16,8 +16,8 @@
 
 ## 当前已完成
 
-- Windows 使用 Job Object，并设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
-- Node 子进程使用 `CREATE_BREAKAWAY_FROM_JOB` 后绑定到专用 Job Object。
+- Windows 使用 Job Object，并设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`；`peri-js-runtime` 中启动真实 Node/持有 pipe 的测试在 Windows 串行运行，避免 hard-timeout cleanup 与并行测试的进程生命周期互相干扰。
+- Node 子进程不请求 `CREATE_BREAKAWAY_FROM_JOB`，以兼容禁止 breakaway 的 GitHub Actions 父 Job；进程树绑定到专用 nested Job Object。
 - Windows target 的 `peri-js-runtime` `cargo check` 与 `cargo clippy -D warnings` 通过。
 - E2E 中的 Windows 路径通过 JSON 编码嵌入 JavaScript。
 - 测试脚本不再通过 `console.log` 输出额外 JSON。
