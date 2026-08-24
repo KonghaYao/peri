@@ -34,6 +34,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         content: include_str!("skills/programmatic-tool-calling/SKILL.md"),
     },
     BuiltinSkill {
+        name: "self-build",
+        content: include_str!("skills/self-build/SKILL.md"),
+    },
+    BuiltinSkill {
         name: "ultracode",
         content: include_str!("skills/ultracode/SKILL.md"),
     },
