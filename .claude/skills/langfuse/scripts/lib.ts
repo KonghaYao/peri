@@ -6,18 +6,17 @@ const BASE_URL = (process.env.LANGFUSE_HOST || process.env.LANGFUSE_BASE_URL || 
 const PUBLIC_KEY = process.env.LANGFUSE_PUBLIC_KEY || "";
 const SECRET_KEY = process.env.LANGFUSE_SECRET_KEY || "";
 
-if (!BASE_URL || !PUBLIC_KEY || !SECRET_KEY) {
-  console.error("Missing LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY env vars");
-  process.exit(1);
-}
-
-const authHeader = `Basic ${btoa(`${PUBLIC_KEY}:${SECRET_KEY}`)}`;
-
 export async function api(path: string) {
+  if (!BASE_URL || !PUBLIC_KEY || !SECRET_KEY) {
+    throw new Error("Missing LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY env vars");
+  }
+  const authHeader = `Basic ${btoa(`${PUBLIC_KEY}:${SECRET_KEY}`)}`;
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { Authorization: authHeader, "Content-Type": "application/json" },
   });
   if (!res.ok) throw new Error(`API ${path}: HTTP ${res.status}`);
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) throw new Error(`API ${path}: expected JSON response`);
   return res.json();
 }
 
@@ -79,6 +78,56 @@ export async function fetchObservations(traceId: string) {
     if (page >= (data.meta?.totalPages || 1)) break;
   }
   return all;
+}
+
+export interface ObservationTreeAudit {
+  duplicateIds: string[];
+  missingParents: { id: string; parentObservationId: string }[];
+  cycles: string[][];
+}
+
+/** 只检查 observation 身份与父链，不投影 input/output 正文。 */
+export function auditObservationTree(observations: any[], traceId: string): ObservationTreeAudit {
+  const counts = new Map<string, number>();
+  const parentById = new Map<string, string | undefined>();
+  for (const observation of observations) {
+    const id = typeof observation?.id === "string" ? observation.id : "";
+    if (!id) continue;
+    counts.set(id, (counts.get(id) || 0) + 1);
+    if (!parentById.has(id)) {
+      parentById.set(id, typeof observation.parentObservationId === "string" && observation.parentObservationId ? observation.parentObservationId : undefined);
+    }
+  }
+
+  const knownIds = new Set(parentById.keys());
+  const duplicateIds = [...counts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort();
+  const missingParents = [...parentById.entries()]
+    .filter(([, parentId]) => parentId && parentId !== traceId && !knownIds.has(parentId))
+    .map(([id, parentObservationId]) => ({ id, parentObservationId: parentObservationId! }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+
+  const cycles: string[][] = [];
+  const completed = new Set<string>();
+  for (const startId of [...knownIds].sort()) {
+    if (completed.has(startId)) continue;
+    const path: string[] = [];
+    const pathIndexes = new Map<string, number>();
+    let currentId: string | undefined = startId;
+    while (currentId && knownIds.has(currentId) && !completed.has(currentId)) {
+      const cycleStart = pathIndexes.get(currentId);
+      if (cycleStart !== undefined) {
+        cycles.push([...path.slice(cycleStart), currentId]);
+        break;
+      }
+      pathIndexes.set(currentId, path.length);
+      path.push(currentId);
+      const parentId = parentById.get(currentId);
+      currentId = parentId === traceId ? undefined : parentId;
+    }
+    for (const id of path) completed.add(id);
+  }
+
+  return { duplicateIds, missingParents, cycles };
 }
 
 export async function fetchScores(traceId: string) {

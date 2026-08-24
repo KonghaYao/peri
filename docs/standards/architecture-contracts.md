@@ -32,6 +32,12 @@
 - **Rule**：工具以 `BaseTool::is_direct()` 自声明可见性；`true` 才直接进入 LLM tools，`false` 的工具只能由 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行。包装层必须透传该 trait 语义。每个 turn 的真实能力事实源是 `build_session_tool_view` 产出的 session-local 工具视图：它应用 middleware disabled 状态与 agent allowlist/disallowlist 后再分类。ToolSearch 元工具的 direct capability 描述、deferred 索引和代理执行，以及 PTC 的稳定工具目录与内部调用，都必须绑定该视图，不得用静态全局工具清单推断运行时可用能力。PTC 默认装配（`PtcMiddleware=false` 可关闭）；canonical `RunPtcCode` 是 deferred-only 工具，只能经 `SearchExtraTools → ExecuteExtraTool` 调用，不能直接进入 LLM tools；既有 direct tools 不受 PTC 影响。旧名 `run_code` 不可执行、不是 alias，仅作为 ToolSearch 迁移关键词。外层 `RunPtcCode` 是普通 Node.js 任意代码执行入口，必须与 Bash 同级审批。PTC 内部 `tools.*` 调用复用 canonical single-invocation seam；policy、HITL、事件与 tool card 均投影到 effective target，并沿用 timeout 与 cancel，不得嵌套完整 Act batch、写入 synthetic transcript 或重复结算 batch 状态。模型产生的 assistant raw wrapper call 仅为协议配对而保留，不代表执行目标或审批目标。内部事件 ID 必须可关联真实外层 `RunPtcCode` tool call。该 effective-target 审批不约束 Node 原生文件系统、进程、环境变量或网络 API，不得将 PTC 描述为 sandbox 或隔离环境。JavaScript 执行环境为 ESM-only：模块只能用动态 `await import(...)` 加载，static `import` 与 `require` 均不可用。
 - **Verify**：`cargo test -p peri-middlewares --lib tool_search`；`cargo test -p peri-agent --lib session::exec`；检查 `peri-agent/src/session/exec/stage_builder.rs`、`peri-agent/src/agent/stages/reason.rs`、`peri-middlewares/src/tool_search/` 与包装工具实现；回归测试须覆盖 direct 工具被禁用或过滤后不再出现在元工具 description。
 
+### ARC-CAPABILITY-CLOSURE-001
+
+- **Scope**：middleware、provider、built-in capability 与 MetaHarness 开关。
+- **Rule**：关闭能力必须在同一 frozen/session-local policy 下同时关闭 direct tools、deferred index/resolver、slash routes、ACP updates、TUI completion、静态 prompt/examples、subagent/workflow 继承与 runtime authorization。只隐藏 catalog/UI 或只移除 middleware 实例不算关闭；依赖其他 middleware 的能力必须显式验证依赖闭包。
+- **Verify**：为每个可关闭能力运行 presence/absence 矩阵，覆盖注册、描述、发现、执行和客户端投影；检查 `build_session_tool_view`、middleware 装配、command registry、prompt section 与 ACP/TUI 投影都使用同一 session-local policy，禁止用静态全局名单替代；依赖能力关闭时必须验证 dependent 能力安全失败或同步消失。
+
 ### ARC-HITL-001
 
 - **Scope**：工具审批、用户提问、MetaHarness 关闭面与提示词段落。

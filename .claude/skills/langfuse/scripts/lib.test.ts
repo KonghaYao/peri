@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clampTraceLimit, detectAnomalies, fmtLatency, parseFilterArgs, splitGenerationAgentSegments, summarizeErrors, summarizeLatency, summarizeTraceMetrics } from "./lib.ts";
+import { auditObservationTree, clampTraceLimit, detectAnomalies, fmtLatency, parseFilterArgs, splitGenerationAgentSegments, summarizeErrors, summarizeLatency, summarizeTraceMetrics } from "./lib.ts";
 
 describe("Langfuse report pure logic", () => {
   test("trace 查询 limit 被限制在 API 上限 100", () => {
@@ -60,5 +60,21 @@ describe("Langfuse report pure logic", () => {
       { id: "g3", type: "GENERATION", parentObservationId: "main", startTime: "2026-01-01T00:00:03Z" },
     ];
     expect(splitGenerationAgentSegments(observations).map((segment) => [segment.agentObservationId, segment.generationIds])).toEqual([["main", ["g1"]], ["child", ["g2"]], ["main", ["g3"]]]);
+  });
+
+  test("observation tree audit 接受 trace root 并报告缺失 parent、重复 ID 与环", () => {
+    const audit = auditObservationTree([
+      { id: "root", parentObservationId: "trace-1" },
+      { id: "child", parentObservationId: "root" },
+      { id: "orphan", parentObservationId: "missing" },
+      { id: "duplicate", parentObservationId: "trace-1" },
+      { id: "duplicate", parentObservationId: "trace-1" },
+      { id: "cycle-a", parentObservationId: "cycle-b" },
+      { id: "cycle-b", parentObservationId: "cycle-a" },
+    ], "trace-1");
+
+    expect(audit.duplicateIds).toEqual(["duplicate"]);
+    expect(audit.missingParents).toEqual([{ id: "orphan", parentObservationId: "missing" }]);
+    expect(audit.cycles).toEqual([["cycle-a", "cycle-b", "cycle-a"]]);
   });
 });

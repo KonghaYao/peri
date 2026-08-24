@@ -10,6 +10,7 @@ allowed-tools:
   - Bash(bunx langfuse-cli api * get *)
   - Bash(bun .claude/skills/langfuse/scripts/analyze.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/trace-search.ts *)
+  - Bash(bun .claude/skills/langfuse/scripts/trace-tree.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/trace-tokens.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/trace-messages.ts *)
   - Bash(bun .claude/skills/langfuse/scripts/prompt-breakdown.ts *)
@@ -43,11 +44,22 @@ LANGFUSE_HOST=https://cloud.langfuse.com  # Required
 
 If credentials are missing, ask the user to add them to `.env`. Do not ask to paste keys in chat.
 
+### CLI Preflight and Query Integrity
+
+Before attributing missing or malformed data to application behavior:
+
+1. Confirm `LANGFUSE_HOST` or `LANGFUSE_BASE_URL` is set, credentials are present, and the selected host returns JSON rather than an HTML fallback. Never print credentials or authorization headers.
+2. Discover the installed CLI schema with `bunx langfuse-cli api --help` and resource/action `--help`; resource names vary by CLI version, so do not assume `observations-v2s` or another historical alias exists.
+3. For list endpoints, inspect pagination metadata and fetch every required page. The public API page limit is 100; a single page is not proof of completeness.
+4. Record the requested field projection. If input/output fields were not requested or returned by the selected endpoint, report them as **not inspected**, not null or missing.
+5. Stop business-level diagnosis on host/auth/schema failure. A 401, unsupported resource, HTML response, or truncated page set is a query precondition failure, not evidence about the trace producer.
+
 ### CLI Tips
 
 - Use `--json` for machine-readable output
 - Use `--curl` to preview HTTP request without executing
-- Prefer `observations-v2s` over `observations`, `score-v2s` over `scores`
+- Discover resources/actions with `--help`; do not hard-code version-specific v2 aliases
+- Prefer the bundled scripts for traces and observations because they implement the current public endpoints and pagination
 
 ## 2. Data Retrieval Tools (脚本工具集)
 
@@ -149,6 +161,23 @@ bun .claude/skills/langfuse/scripts/prompt-breakdown.ts --index 1 --days 7
 # Trace 汇总列表
 bun .claude/skills/langfuse/scripts/traces-list.ts [N] [过滤选项]
 ```
+
+### 2f. trace-tree — observation parent/orphan 审计
+
+```bash
+bun .claude/skills/langfuse/scripts/trace-tree.ts <traceId>
+```
+
+This command fetches all observation pages, prints a metadata-only tree, and exits non-zero when it finds duplicate IDs, missing parent observations, or cycles. A parent equal to the trace ID is a valid root attachment. Use it whenever the diagnosis concerns subagent ownership, generation/tool/batch nesting, or orphan observations; do not infer parent integrity from a flat list.
+
+### Production Verification Gate
+
+A unit/mock pass proves only local construction. After changing instrumentation or parent assignment:
+
+1. Restart the actual producer process and record the new process/session provenance without exposing secrets.
+2. Generate a new real trace after restart; do not reuse pre-fix data as acceptance evidence.
+3. Run `trace-tree.ts` on that trace and inspect expected generation/tool/batch ownership.
+4. Report code tests and production trace verification separately. If restart, credentials, or a live trace is unavailable, mark production verification blocked rather than complete.
 
 ## 3. Query Recipes（常见数据获取场景）
 

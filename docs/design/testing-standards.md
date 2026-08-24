@@ -163,6 +163,24 @@ static mut COUNTER: i32 = 0;
 #[test] fn test_b() { unsafe { assert_eq!(COUNTER, 1); } }  // 跑单测就挂
 ```
 
+### TEST-EVIDENCE-001
+
+- **Scope**：测试、lint、build、workflow 与后台验证任务。
+- **Rule**：验证结论必须来自最终退出状态和可核对结果。过滤测试须确认实际执行了非零目标用例；不得用未启用 `pipefail` 的 `| tail`、`| grep` 等 pipeline 作为通过证据；后台任务、workflow 和 CI 必须等待终态，并核对阶段结果非空、未截断。预期失败用例按验收目标分类，不按输出中的 `error` 字样机械判失败。
+- **Verify**：报告精确命令、exit status、实际执行用例数或结构化 verdict；所有检查标注 passed / skipped / blocked，started 或 completed 通知本身不算通过。
+
+### TEST-HERMETIC-001
+
+- **Scope**：访问 HOME、cache、配置、凭据、时间、网络或进程级全局状态的测试。
+- **Rule**：测试必须使用临时 HOME/cache/config 和固定时钟；不得默认读取开发者 `~/.peri`、真实凭据、持久 cache 或外部网络。修改进程级环境变量或全局状态时必须隔离并串行化。时间窗口、TTL、epoch、backoff 与碰撞测试使用可控时钟，不以真实墙钟断言精确次数。
+- **Verify**：单独运行与全套运行结果一致；重复或并发运行稳定；测试结束后不修改用户目录或真实配置。
+
+### TEST-LIFECYCLE-001
+
+- **Scope**：持久缓存、动态 discovery、异步通知、重连/恢复、外部进程和 transport 行为。
+- **Rule**：集成测试必须跨越功能声称支持的真实生命周期。持久缓存至少覆盖 cold fetch → 写盘 → 进程退出 → 新进程 warm hit → invalidate 后回源；动态通知至少覆盖首发与状态变化后的后续事件；transport 行为使用真实 wire/ordering；外部进程功能必须在声称支持的平台执行 runtime 路径。静态共享代码、单进程 unit test、cross-target compile 或 ignored test 不得替代这些证明。
+- **Verify**：断言用户可观察结果及必要的请求数、事件顺序、进程边界或目标平台结果；无法运行的矩阵明确标记 blocked/unsupported。
+
 ---
 
 ## 五、Mock 与 Fixture 模式
