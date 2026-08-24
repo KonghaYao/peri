@@ -1,80 +1,192 @@
-//! RequestRouter — shared pending request map + response dispatch for all transports.
-//!
-//! Extracted from duplicated logic in `mpsc.rs` and `stdio.rs`.
+//! Cancellation-safe request/response ownership shared by all ACP transports.
 
+use std::{collections::HashMap, fmt, sync::Arc};
+
+use parking_lot::Mutex;
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc,
-    },
-};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::types::{AcpError, IncomingMessage, RequestId};
 
-pub(crate) type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, AcpError>>>>>;
+struct PendingEntry {
+    owner: Arc<()>,
+    sender: oneshot::Sender<Result<Value, AcpError>>,
+}
 
-/// Shared request-response matching layer used by all transport implementations.
+struct RouterState {
+    next_id: i64,
+    pending: HashMap<i64, PendingEntry>,
+    terminal_error: Option<AcpError>,
+}
+
+/// Shared request-response lifecycle for transport implementations.
 ///
-/// Maintains a map of pending request IDs → oneshot senders. The pump loop in each
-/// transport calls [`dispatch`] to check incoming Responses against this map;
-/// matched responses are routed to the correct caller via the oneshot channel.
+/// Registration, response dispatch, caller cancellation, and terminal close all
+/// claim an entry while holding one state lock. The per-registration owner token
+/// prevents a stale handle from deleting a later request if an ID is reused.
 #[derive(Clone)]
 pub(crate) struct RequestRouter {
-    pending: PendingMap,
-    next_id: Arc<AtomicI64>,
+    state: Arc<Mutex<RouterState>>,
+    closed: CancellationToken,
+}
+
+/// Owned registration for one pending request.
+///
+/// Dropping this value synchronously releases the registration. This makes any
+/// future that owns it cancellation-safe without spawning async cleanup.
+pub(crate) struct PendingRequest {
+    id: i64,
+    owner: Arc<()>,
+    receiver: Option<oneshot::Receiver<Result<Value, AcpError>>>,
+    router: RequestRouter,
+}
+
+impl fmt::Debug for PendingRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingRequest")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingRequest {
+    pub(crate) fn id(&self) -> i64 {
+        self.id
+    }
+
+    pub(crate) async fn wait(mut self) -> Result<Value, AcpError> {
+        self.receiver
+            .take()
+            .expect("pending request receiver is consumed exactly once")
+            .await
+            .unwrap_or_else(|_| Err(transport_closed_error()))
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let mut state = self.router.state.lock();
+        let still_owned = state
+            .pending
+            .get(&self.id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.owner, &self.owner));
+        if still_owned {
+            state.pending.remove(&self.id);
+        }
+    }
 }
 
 impl RequestRouter {
-    /// Creates a new router with its own pending map and ID counter.
-    /// Use this for standalone transports like `StdioTransport`.
     pub(crate) fn new() -> Self {
         Self {
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicI64::new(1)),
+            state: Arc::new(Mutex::new(RouterState {
+                next_id: 1,
+                pending: HashMap::new(),
+                terminal_error: None,
+            })),
+            closed: CancellationToken::new(),
         }
     }
 
-    /// Creates a router sharing another router's pending map and ID counter.
-    /// Use this for paired transports like `MpscClientTransport` + `MpscServerTransport`.
-    pub(crate) fn new_shared(pending: PendingMap, next_id: Arc<AtomicI64>) -> Self {
-        Self { pending, next_id }
+    /// Atomically rejects terminal routers or registers a new owned request.
+    pub(crate) fn register(&self) -> Result<PendingRequest, AcpError> {
+        let mut state = self.state.lock();
+        if let Some(error) = &state.terminal_error {
+            return Err(error.clone());
+        }
+
+        let id = allocate_id(&mut state);
+        let owner = Arc::new(());
+        let (sender, receiver) = oneshot::channel();
+        state.pending.insert(
+            id,
+            PendingEntry {
+                owner: Arc::clone(&owner),
+                sender,
+            },
+        );
+        drop(state);
+
+        Ok(PendingRequest {
+            id,
+            owner,
+            receiver: Some(receiver),
+            router: self.clone(),
+        })
     }
 
-    /// Allocates a new request ID, inserts a oneshot sender into the pending map,
-    /// and returns the (id_num, receiver) pair. The caller sends the request message
-    /// and then `.await`s the receiver for the response.
-    pub(crate) async fn register(&self) -> (i64, oneshot::Receiver<Result<Value, AcpError>>) {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id_num, tx);
-        (id_num, rx)
+    pub(crate) fn ensure_open(&self) -> Result<(), AcpError> {
+        self.state.lock().terminal_error.clone().map_or(Ok(()), Err)
     }
 
-    /// Dispatches an incoming message. If it's a Response whose id matches a pending
-    /// request, the oneshot sender is removed from the map and the result is sent.
-    /// Returns `true` if the message was consumed (matched response), `false` if it
-    /// should be forwarded to the caller as an unmatched `IncomingMessage`.
+    /// Routes a matching numeric response exactly once.
+    pub(crate) fn dispatch(&self, msg: &IncomingMessage) -> bool {
+        let IncomingMessage::Response {
+            id: RequestId::Number(id),
+            result,
+        } = msg
+        else {
+            return false;
+        };
+
+        let entry = self.state.lock().pending.remove(id);
+        if let Some(entry) = entry {
+            let _ = entry.sender.send(result.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Idempotently transitions the router to its canonical terminal state.
     ///
-    /// # String IDs
-    /// `RequestId::String` variants are never matched — all pending keys are `i64`.
-    /// They fall through to the unmatched-forward path.
-    pub(crate) async fn dispatch(&self, msg: &IncomingMessage) -> bool {
-        match msg {
-            IncomingMessage::Response { id, result } => {
-                if let RequestId::Number(n) = id {
-                    if let Some(tx) = self.pending.lock().await.remove(n) {
-                        let _ = tx.send(result.clone());
-                        return true; // consumed — caller should NOT forward
-                    }
-                }
-                false // unmatched — caller should forward
+    /// The terminal flag and pending drain are one atomic state transition; a
+    /// concurrent registration therefore either belongs to the drain or fails.
+    pub(crate) fn close(&self) {
+        let (error, pending) = {
+            let mut state = self.state.lock();
+            if state.terminal_error.is_some() {
+                return;
             }
-            _ => false, // Requests and Notifications are never consumed by the router
+            let error = transport_closed_error();
+            state.terminal_error = Some(error.clone());
+            let pending = state
+                .pending
+                .drain()
+                .map(|(_, entry)| entry)
+                .collect::<Vec<_>>();
+            (error, pending)
+        };
+
+        self.closed.cancel();
+        for entry in pending {
+            let _ = entry.sender.send(Err(error.clone()));
         }
     }
+
+    /// Completes immediately after close, including when close preceded this wait.
+    pub(crate) async fn wait_closed(&self) {
+        self.closed.cancelled().await;
+    }
+}
+
+fn allocate_id(state: &mut RouterState) -> i64 {
+    loop {
+        let candidate = state.next_id.max(1);
+        state.next_id = if candidate == i64::MAX {
+            1
+        } else {
+            candidate + 1
+        };
+        if !state.pending.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+pub(crate) fn transport_closed_error() -> AcpError {
+    AcpError::new(-32603, "Transport closed")
 }
 
 #[cfg(test)]

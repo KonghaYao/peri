@@ -5,13 +5,25 @@
 //! stdin pump 逐行解析、stdout 写入形态、send_request id 配对（含乱序）、
 //! 并发交错、EOF 关闭语义、非法 JSON 跳过、域外 id 拒绝行为、失败语义。
 
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde_json::json;
 
 use super::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use futures::{pin_mut, task::noop_waker_ref};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
+use tokio::sync::oneshot;
+
+fn assert_transport_closed(error: AcpError) {
+    assert_eq!(error.code, -32603);
+    assert_eq!(error.message, "Transport closed");
+    assert!(error.data.is_none());
+}
 
 // ── 信封/序列化单测（既有基线保留）───────────────────────────────────────────
 
@@ -307,11 +319,9 @@ async fn test_concurrent_requests_out_of_order_id_matching() {
 
 // ── EOF / 失败语义 ──────────────────────────────────────────────────────────
 
-/// EOF 后 pump 退出、`recv()` 返回关闭；但已发出的 pending send_request
-/// 不被自动失败（当前语义：关闭只在 recv() 侧可见，见 stdio.rs pump 退出
-/// 依赖 channel 关闭的间接语义）——基线记录，供统一后对照。
+/// [回归测试] EOF 后 pump 退出时，已发出的 pending request 必须稳定失败。
 #[tokio::test]
-async fn test_pending_request_waits_after_eof() {
+async fn test_pending_request_fails_after_eof() {
     let (input_write, transport_read) = tokio::io::duplex(64 * 1024);
     let (transport_write, mut output_read) = tokio::io::duplex(64 * 1024);
     let transport = StdioTransport::from_reader_writer(transport_read, transport_write);
@@ -321,12 +331,12 @@ async fn test_pending_request_waits_after_eof() {
     let _line = read_line(&mut output_read).await;
     drop(input_write); // EOF
 
-    // recv() 关闭（pump 退出），但 pending 请求仍挂起等待——不自动失败
-    let pending_after_eof = tokio::time::timeout(Duration::from_millis(150), req_task).await;
-    assert!(
-        pending_after_eof.is_err(),
-        "EOF 不应自动失败 pending send_request（当前语义仅是 recv() 感知关闭）"
-    );
+    let error = tokio::time::timeout(Duration::from_secs(5), req_task)
+        .await
+        .expect("EOF should settle pending request")
+        .expect("request task should not panic")
+        .unwrap_err();
+    assert_transport_closed(error);
 }
 
 /// `send_request` 无内置超时：对端不响应时挂起等待（而不是超时失败）。
@@ -362,6 +372,171 @@ async fn test_send_request_write_failure_on_broken_stdout() {
         err.message.contains("broken pipe"),
         "stdout 断裂应报写/冲刷失败（broken pipe）: {err}"
     );
+}
+
+#[tokio::test]
+async fn test_writer_failure_closes_existing_and_future_requests() {
+    let (transport, _input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+    let pending = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { transport.send_request("already/pending", json!({})).await }
+    });
+    let _ = read_line(&mut output).await;
+    drop(output);
+
+    let initiating = transport
+        .send_notification("break/writer", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(initiating.code, -32603);
+    assert!(
+        initiating.message.starts_with("Write failed:")
+            || initiating.message.starts_with("Flush failed:"),
+        "initiating I/O error should keep its classification: {initiating}"
+    );
+    assert_transport_closed(pending.await.unwrap().unwrap_err());
+    assert_transport_closed(
+        transport
+            .send_request("future/request", json!({}))
+            .await
+            .unwrap_err(),
+    );
+}
+
+#[tokio::test]
+async fn test_response_before_eof_wins() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let request = tokio::spawn(async move { transport.send_request("race", json!({})).await });
+    let wire: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    write_line(
+        &mut input,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":"response won"}}"#,
+            wire["id"]
+        ),
+    )
+    .await;
+    drop(input);
+    assert_eq!(request.await.unwrap().unwrap(), json!("response won"));
+}
+
+#[tokio::test]
+async fn test_cancelled_request_unregisters_before_late_response() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+    let request = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { transport.send_request("cancel/me", json!({})).await }
+    });
+    let wire: Value = serde_json::from_str(&read_line(&mut output).await).unwrap();
+    request.abort();
+    request.await.expect_err("request task should be aborted");
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{},"result":"late"}}"#, wire["id"]),
+    )
+    .await;
+    match recv(&transport).await {
+        Some(IncomingMessage::Response { id, result }) => {
+            assert_eq!(id, RequestId::Number(wire["id"].as_i64().unwrap()));
+            assert_eq!(result.unwrap(), json!("late"));
+        }
+        other => panic!("late response should be unmatched, got {other:?}"),
+    }
+}
+
+struct FailingReader;
+
+impl AsyncRead for FailingReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "reader failed",
+        )))
+    }
+}
+
+#[tokio::test]
+async fn test_reader_error_closes_transport() {
+    let (writer, _output) = tokio::io::duplex(64 * 1024);
+    let transport = StdioTransport::from_reader_writer(FailingReader, writer);
+    assert!(recv(&transport).await.is_none());
+    assert_transport_closed(
+        transport
+            .send_request("after/read-error", json!({}))
+            .await
+            .unwrap_err(),
+    );
+}
+
+struct BlockingWriter {
+    started: Option<oneshot::Sender<()>>,
+}
+
+impl AsyncWrite for BlockingWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if let Some(started) = self.started.take() {
+            let _ = started.send(());
+        }
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// [回归测试] writer 内部和等待 writer mutex 的请求都必须与 reader EOF 竞速退出。
+#[tokio::test]
+async fn test_blocked_writer_and_mutex_waiter_exit_on_eof() {
+    let (input, reader) = tokio::io::duplex(64 * 1024);
+    let (started_tx, started_rx) = oneshot::channel();
+    let transport = Arc::new(StdioTransport::from_reader_writer(
+        reader,
+        BlockingWriter {
+            started: Some(started_tx),
+        },
+    ));
+    let first = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { transport.send_request("blocked/write", json!({})).await }
+    });
+    started_rx.await.expect("first poll_write should start");
+    let second = transport.send_request("blocked/mutex", json!({}));
+    pin_mut!(second);
+    {
+        let mut context = Context::from_waker(noop_waker_ref());
+        assert!(
+            matches!(second.as_mut().poll(&mut context), Poll::Pending),
+            "second request must register and block behind the writer mutex before EOF"
+        );
+    }
+    drop(input);
+
+    let first_error = tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .expect("blocked writer task should settle")
+        .unwrap()
+        .unwrap_err();
+    assert_transport_closed(first_error);
+    let second_error = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("writer mutex waiter should settle")
+        .unwrap_err();
+    assert_transport_closed(second_error);
 }
 
 // ── id 域约束：`is_domain_id` 校验 + pump 拒绝域外 id（决策点 7 收口）──

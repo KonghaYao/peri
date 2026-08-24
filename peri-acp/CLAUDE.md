@@ -28,6 +28,7 @@
 - session 创建时构建并复用 frozen 数据；Prompt 与 SubAgent 不得在会话中途重读导致前缀漂移。
 - 生产中间件顺序以 Agent 层 session 工厂的链序蓝本为事实源（`../peri-agent/src/session/factory.rs` 的 `production_blueprint`），未经完整验证不得重排。
 - Langfuse 事件只经 `peri-controller` 的 `LangfuseBridge` 统一映射进入 tracer（协议化前分支，不参与业务链路）；日志、错误和遥测不得泄露 secret。
+- stdio/MPSC transport 的 pending request 由 router 统一持有：response、caller cancellation 与 terminal close 至多结算一次；终止结算当前和后续请求，连接静默不引入隐式 timeout（ARC-TRANSPORT-001）。
 
 ## 目标命令
 

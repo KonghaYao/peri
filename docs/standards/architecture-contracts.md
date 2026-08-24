@@ -50,6 +50,12 @@
 - **Rule**：stdio 请求必须经 `run_acp_stdio → run_acp_server_with_sessions → handle_request` 进入统一 ACP host，禁止恢复独立 typed-handler 业务路径。`session/new` response 必须先于首次 commands notification；stdio 的 rewind/clear 类输入不由命令层拦截，而是落入模型 prompt。legacy `type:cancel` 仅是全 session 强停兜底，不得被解释为标准 `session/cancel` 的身份、continuation 或队列语义。
 - **Verify**：`cargo test -p peri-acp --lib host::stdio`；人工检查 `peri-acp/src/host/stdio/mod.rs` 与 `run_server_integration_test.rs` 的 initialize/new、response ordering、rename、prompt error、command filter 和 cancel 用例。
 
+### ARC-TRANSPORT-001
+
+- **Scope**：ACP stdio 与 MPSC transport 的 request 生命周期。
+- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。
+- **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期。
+
 ### ARC-WORKFLOW-RPC-001
 
 - **Scope**：`peri-workflow` Node stdio JSON-RPC 与 agent 生命周期。
