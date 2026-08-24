@@ -200,6 +200,20 @@ fn test_parse_cancel_empty_answers() {
 }
 
 #[test]
+fn test_parse_permission_cancelled_maps_to_cancel_reject() {
+    let response: RequestPermissionResponse = serde_json::from_value(json!({
+        "outcome": { "outcome": "cancelled" }
+    }))
+    .unwrap();
+    let decision = map_permission_response(response);
+    let ApprovalDecision::Reject { reason, source } = decision else {
+        panic!("cancelled permission 应映射为 Reject")
+    };
+    assert!(reason.contains("Cancelled by user"));
+    assert_eq!(source, None);
+}
+
+#[test]
 fn test_parse_unknown_action_empty_answers() {
     // 未知 action（Other 变体）→ 空 Answers 兜底。
     let response = parse_elicitation_response(json!({ "action": "mystery" }), sample_questions());

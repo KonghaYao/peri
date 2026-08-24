@@ -15,7 +15,10 @@ use peri_acp::LangfuseSessionLike;
 use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
 use peri_acp::transport::mpsc::mpsc_transport_pair;
 use peri_acp_types::messages::MessageContent;
-use peri_tui::acp_client::{AcpNotification, AcpTuiClient};
+use peri_tui::acp_client::{
+    AcpNotification, AcpTuiClient,
+    interaction_response::{elicitation_cancel_response, permission_selected_allow_once_response},
+};
 use serde_json::{Value, json};
 
 /// -p 模式执行入口
@@ -248,7 +251,7 @@ async fn consume_print_notification(
         }
         AcpNotification::Elicitation { id, .. } => {
             let _ = acp_client
-                .send_response(id, Ok(json!({"answers": []})))
+                .send_response(id, Ok(print_elicitation_response()))
                 .await;
         }
         _ => {}
@@ -269,13 +272,18 @@ async fn auto_approve(
         .unwrap_or("")
         .to_string();
     tracing::info!(tool = %tool_name, "print mode: auto-approving permission request");
-    let response = json!({
-        "action": "accept",
-        "content": Value::Null,
-    });
+    let response = print_permission_response();
     if let Err(e) = client.send_response(id, Ok(response)).await {
         tracing::warn!(error = %e, "print mode: auto-approve send_response failed");
     }
+}
+
+fn print_permission_response() -> Value {
+    permission_selected_allow_once_response()
+}
+
+fn print_elicitation_response() -> Value {
+    elicitation_cancel_response()
 }
 
 /// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
@@ -401,5 +409,30 @@ impl PrintOutput {
             }
             OutputFormat::StreamJson => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::schema::v1::{RequestPermissionOutcome, RequestPermissionResponse};
+    use agent_client_protocol_schema::v1::{CreateElicitationResponse, ElicitationAction};
+
+    use super::*;
+
+    #[test]
+    fn test_print_permission_response_is_selected_allow_once() {
+        let response: RequestPermissionResponse =
+            serde_json::from_value(print_permission_response()).unwrap();
+        let RequestPermissionOutcome::Selected(selected) = response.outcome else {
+            panic!("print permission 应自动选择 allow_once")
+        };
+        assert_eq!(selected.option_id.0.as_ref(), "allow_once");
+    }
+
+    #[test]
+    fn test_print_elicitation_response_is_cancel() {
+        let response: CreateElicitationResponse =
+            serde_json::from_value(print_elicitation_response()).unwrap();
+        assert!(matches!(response.action, ElicitationAction::Cancel));
     }
 }

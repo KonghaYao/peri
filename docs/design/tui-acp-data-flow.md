@@ -294,7 +294,7 @@ event_v2         →  `session/update`                    →  AcpNotification �
 
 ### 4.3 交互请求事件 — 标准 ACP 通道（TUI 消费）
 
-> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`；notifier 将 JSON-encoded RequestId 与 payload 封装为 composite event，但不写 UI atom。bridge 通过 non-empty exact active-session gate 后，handler 才发布 composite pending state与 durable block。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
+> 注：交互类事件走标准 ACP 通道。AskUser 走 `Elicitation`，HITL 走 `AcpNotification::RequestPermission`。client pump 与普通 notification 分流：普通 notification 保留 current=None 与空 host session wildcard；两种已知 reverse request 按各自 schema 提取 non-empty session identity，并在单个 current/deleted snapshot 上要求 exact active。invalid、no-active、stale、deleted 或 notifier send failure 直接用共享 typed builder 返回标准 cancel，不进入 UI。exact-current 请求才由 notifier 将原始 RequestId 与 payload 封装为 composite event（不写 UI atom），bridge 再通过 non-empty exact active-session gate 后由 handler 发布 composite pending state与 durable block。pump early gate 不拥有已 forward 请求，跨 session transition 的 pending settlement 仍需独立 lifecycle ownership。rewind 使用 `peri/agent_event` 加 `session/rewind*` RPC。`ContextWarning` 当前没有用户可见的 `budget-warning` 生产路径。
 
 | 事件名 | 方向 | 通道 | TUI Atom / 弹窗 |
 |--------|------|------|----------|
