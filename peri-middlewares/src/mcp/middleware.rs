@@ -210,7 +210,7 @@ pub fn attach_connection_notifier(
     cancel: &AgentCancellationToken,
     notify_tx: Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>>,
 ) {
-    let discovery_pool = Arc::clone(pool);
+    let discovery_pool = Arc::downgrade(pool);
     let discovery_registry = registry.cloned();
     let discovery_cmd = command_registry.cloned();
     let discovery_cancel = cancel.clone();
@@ -226,6 +226,9 @@ pub fn attach_connection_notifier(
         // 文本匹配 Connected 固定形态（status_change_text 唯一来源，
         // `connected (` 后缀稳定；Failed reason 含 " connected " 不误触发）。
         if text.contains(" connected (") {
+            let Some(discovery_pool) = discovery_pool.upgrade() else {
+                return;
+            };
             run_ensure_discovery(
                 &discovery_pool,
                 discovery_registry.as_ref(),

@@ -56,9 +56,14 @@ impl McpClientPool {
         server: &str,
         mut subscription: Subscription,
     ) {
+        let _admission = self.lifecycle_registration.lock();
+        if !self.is_open() {
+            return;
+        }
         let pool = Arc::clone(self);
         let task_server = server.to_string();
-        let handle = tokio::spawn(async move {
+        let key = crate::mcp::McpTaskKey::Subscription(server.to_string());
+        let _ = self.task_spawner.spawn(key, async move {
             // 剩余重试次数：收到通知即重置，保证每段中断序列都有独立恢复机会
             let mut retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
             loop {
@@ -146,10 +151,6 @@ impl McpClientPool {
                 }
             }
         });
-        self.subscription_tasks
-            .lock()
-            .await
-            .insert(server.to_string(), vec![handle]);
     }
 
     /// 订阅流异常中断后的恢复：退避等待后按 server 当前配置重新建立
@@ -174,7 +175,7 @@ impl McpClientPool {
         tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         // 连接可能已被移除/重连：取 services 表中的当前 peer
         let peer = {
-            let services = self.services.lock().await;
+            let services = self.services.lock();
             services.get(server).map(|s| s.peer().clone())
         };
         let Some(peer) = peer else {

@@ -16,6 +16,7 @@ pub mod reconnect;
 pub mod resource_cache;
 pub mod resource_tool;
 pub(crate) mod skill_discovery;
+pub mod task_scope;
 pub mod tool_bridge;
 pub mod transport;
 
@@ -38,4 +39,5 @@ pub use oauth_flow::{
 };
 pub use resource_tool::McpResourceTool;
 pub use rmcp::model::{Resource, Tool};
+pub use task_scope::{McpTaskKey, McpTaskOwner, McpTaskShutdownReport, McpTaskSpawner};
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};

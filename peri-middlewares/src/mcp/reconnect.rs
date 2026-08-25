@@ -13,6 +13,19 @@ use super::{
 };
 
 impl McpClientPool {
+    pub fn spawn_reconnect(
+        self: &Arc<Self>,
+        server_name: String,
+    ) -> Result<(), super::task_scope::McpTaskScopeClosed> {
+        let pool = Arc::clone(self);
+        let key = super::task_scope::McpTaskKey::Reconnect(server_name.clone());
+        self.spawn_background(key, async move {
+            if let Err(error) = pool.reconnect(&server_name, None).await {
+                tracing::warn!(server = %server_name, error = %error, "MCP reconnect failed");
+            }
+        })
+    }
+
     pub async fn reconnect(
         self: &Arc<Self>,
         server_name: &str,
@@ -28,14 +41,14 @@ impl McpClientPool {
                 status: ClientStatus::Disconnected,
             })?;
 
-        // 终止旧订阅循环并清理 subscription_tasks 条目：abort 防止旧 task
-        // 残留（其内退避重试可能误取到重建后的 peer 造成双订阅循环）。
-        if let Some(handles) = self.subscription_tasks.lock().await.remove(server_name) {
-            for h in handles {
-                h.abort();
-            }
-        }
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+        // Stop and join the old keyed subscription outside pool locks before
+        // replacing its service, so a cancelled caller cannot detach it.
+        self.stop_background(&super::task_scope::McpTaskKey::Subscription(
+            server_name.to_string(),
+        ))
+        .await;
+        let previous_service = { self.services.lock().remove(server_name) };
+        if let Some(mut svc) = previous_service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
         // 重连前捕获旧状态：insert 覆盖后由 record_status_change 判定是否
@@ -194,29 +207,31 @@ impl McpClientPool {
                 } else {
                     OAuthStatus::default()
                 };
-                self.clients.write().insert(
-                    server_name.to_string(),
-                    Arc::new(McpClientHandle {
-                        name: server_name.to_string(),
-                        version: peer.peer_info().and_then(|info| {
-                            info.server_info.as_ref().map(|si| si.version.clone())
-                        }),
-                        cache_version: cache_version.clone(),
-                        peer: Some(peer),
-                        tools,
-                        resources,
-                        status: ClientStatus::Connected,
-                        oauth_status,
-                        source: server_config.source.clone(),
-                        url: server_config.url.clone(),
-                        channel_capable: false,
-                        skills_capable,
-                    }),
-                );
-                self.services
-                    .lock()
-                    .await
-                    .insert(server_name.to_string(), rs);
+                let handle = Arc::new(McpClientHandle {
+                    name: server_name.to_string(),
+                    version: peer
+                        .peer_info()
+                        .and_then(|info| info.server_info.as_ref().map(|si| si.version.clone())),
+                    cache_version: cache_version.clone(),
+                    peer: Some(peer),
+                    tools,
+                    resources,
+                    status: ClientStatus::Connected,
+                    oauth_status,
+                    source: server_config.source.clone(),
+                    url: server_config.url.clone(),
+                    channel_capable: false,
+                    skills_capable,
+                });
+                if let Err(mut service) =
+                    self.try_commit_connection(server_name.to_string(), handle, rs)
+                {
+                    let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                    return Err(McpPoolError::ConnectionFailed {
+                        server: server_name.to_string(),
+                        reason: "MCP pool is closing".to_string(),
+                    });
+                }
                 self.record_status_change(server_name, old_status.as_ref());
                 Ok(())
             }

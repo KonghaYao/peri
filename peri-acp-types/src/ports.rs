@@ -17,6 +17,50 @@ use std::sync::Arc;
 use crate::agents::AgentCapability;
 use crate::skills::{SkillMetadata, SkillRoot};
 
+/// Terminal evidence for one MCP pool service-close transaction.
+///
+/// `Incomplete` means at least one rmcp cleanup timed out or the owner task
+/// itself failed. The pool must remain `Closing`; repeated callers observe the
+/// same report and must not claim a fully closed service graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpPoolShutdownReport {
+    Complete {
+        settled_services: usize,
+        failed_services: usize,
+    },
+    Incomplete {
+        settled_services: usize,
+        unfinished_services: usize,
+        failed_services: usize,
+    },
+}
+
+impl McpPoolShutdownReport {
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete { .. })
+    }
+}
+
+/// Terminal evidence for the externally owned MCP background-task scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTaskShutdownReport {
+    Complete,
+}
+
+/// Non-Clone deployment owner for MCP initialization/OAuth/reconnect/
+/// subscription work.
+///
+/// ACP owns this capability only through the contract crate. Concrete task
+/// registration and keyed completion remain in `peri-middlewares`.
+#[async_trait::async_trait]
+pub trait McpTaskOwnerPort: Send + Sync {
+    /// Close task admission synchronously before any pool/resource drain.
+    fn begin_shutdown(&self);
+
+    /// Abort and join every task admitted before `begin_shutdown`.
+    async fn shutdown(&mut self) -> McpTaskShutdownReport;
+}
+
 /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
 ///
 /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
@@ -29,9 +73,14 @@ pub trait McpPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
+    /// Synchronously close task/callback/commit admission before external task
+    /// owners are joined. Idempotent.
+    fn begin_shutdown(&self) {}
+
     /// 关闭连接池（`host/shutdown` 命令面调用；与 `McpClientPool::shutdown`
-    /// 语义一致）。
-    async fn shutdown(&self);
+    /// 语义一致）。调用者取消/并发/重试观察同一 service-close transaction；
+    /// cleanup timeout 返回 `Incomplete`，实现保持 `Closing`。
+    async fn shutdown(&self) -> McpPoolShutdownReport;
 
     /// 池状态快照（`mcp/list` 命令面数据源）：`{"initPhase": ..., "servers":
     /// [...]}`，字段语义与 TUI 面板投影一致（序列化格式由实现方保证，

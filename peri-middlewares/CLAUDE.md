@@ -33,7 +33,7 @@
 ## 稳定不变量
 
 - **链顺序**：只能在 Agent 层 session 工厂的链序蓝本（`production_blueprint`）与 `src/assembly.rs` 槽位构造中判断与修改生产顺序；不得按名称或局部便利重排。
-- **MCP**：保留三层合并、内容去重和插件命名空间；配置来源或工具注册变更必须同时检查 pool、资源与 bridge 路径。
+- **MCP**：保留三层合并、内容去重和插件命名空间；配置来源或工具注册变更必须同时检查 pool、资源与 bridge 路径。init/OAuth/reconnect/subscription 任务由 deployment-held non-Clone `McpTaskOwner` 持有，并实现契约层 `McpTaskOwnerPort` 供 ACP boxed 注入；pool 只持 weak spawner。正常关闭顺序固定为 pool begin-close → owner abort/join → pool service close。Pool service close 由 pool-held 单一 transaction 持有，waiter 取消/并发/重试必须观察同一 `McpPoolShutdownReport`；cleanup timeout 保持 `Closing`，不得发布 `Closed`（ARC-HOST-SHUTDOWN-001）。
 - **Plugin manifest**：`commands` 条目兼容字符串路径与对象；字符串是相对插件根目录的路径。agents 未声明时仍保留约定目录回退。不要把路径条目当作名称。
 - **Skills**：扫描必须保持根优先级、递归边界、符号链接防环、叶子语义和同名覆盖规则；插件 skill root 通过既有扩展点传入。
 - **SubAgent**：同一会话的子 Agent 复用冻结的项目指引、skills 与 system prompt；同步子任务继承父取消，独立后台任务使用自身取消策略。事件必须按 `source_agent_id` 归属，新增事件同时检查父/子边界、完成和取消路径。
@@ -47,6 +47,7 @@
 ```bash
 cargo build -p peri-middlewares
 cargo test -p peri-middlewares --lib
+cargo test -p peri-middlewares --lib -- mcp::task_scope
 cargo test -p peri-acp --lib
 ```
 

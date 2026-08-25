@@ -29,12 +29,14 @@
 - 生产中间件顺序以 Agent 层 session 工厂的链序蓝本为事实源（`../peri-agent/src/session/factory.rs` 的 `production_blueprint`），未经完整验证不得重排。
 - Langfuse 事件只经 `peri-controller` 的 `LangfuseBridge` 统一映射进入 tracer（协议化前分支，不参与业务链路）；日志、错误和遥测不得泄露 secret。
 - stdio/MPSC transport 的 pending request 由 router 统一持有：response、caller cancellation 与 terminal close 至多结算一次；终止结算当前和后续请求，连接静默不引入隐式 timeout（ARC-TRANSPORT-001）。
+- Host 后台任务由 non-Clone `HostTaskOwner` 持有，config/task 只持 weak `HostTaskSpawner`；MCP concrete owner 属 middlewares，ACP config 只能持 `peri-acp-types::ports::McpTaskOwnerPort`，禁止直接依赖 concrete type。transport EOF 关闭准入后取消并 drain local/manager 会话 ID 并集，再在锁外关闭 LSP/MCP。Host drain 或 MCP service-close report 超时必须报告 `Incomplete` 并保持 Closing，不得当作已经 join/Closed（ARC-HOST-SHUTDOWN-001）。
 
 ## 目标命令
 
 ```bash
 cargo check -p peri-acp
 cargo test -p peri-acp --lib
+cargo test -p peri-acp --lib -- host::task_scope
 cargo test -p peri-acp --lib mapper
 cargo test -p peri-controller --test langfuse_e2e
 cargo test -p peri-acp --doc

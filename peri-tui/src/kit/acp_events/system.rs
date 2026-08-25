@@ -529,13 +529,8 @@ pub(super) fn handle_oauth_completed(state: &mut BridgeState, server_name: &str)
     // TUI 面板直读 pool：授权凭证已落盘（host pool 完成），触发该 server
     // reconnect 恢复连接（reconnect 内部走凭证快速路径，不重复弹授权）。
     if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
-        let pool = pool.clone();
         let name = server_name.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = pool.reconnect(&name, None).await {
-                tracing::warn!(server = %name, error = %e, "面板 MCP 授权后重连失败");
-            }
-        });
+        let _ = pool.spawn_reconnect(name);
     }
 }
 
@@ -565,13 +560,8 @@ pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) 
 
     // 同步 TUI 面板池（reconnect 走凭证快速路径，不重复弹授权）。
     if let Some(pool) = crate::kit::atoms::MCP_PANEL_POOL.get() {
-        let pool = pool.clone();
         let name = server_name.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = pool.reconnect(&name, None).await {
-                tracing::warn!(server = %name, error = %e, "面板 MCP 凭证恢复后重连失败");
-            }
-        });
+        let _ = pool.spawn_reconnect(name);
     }
 }
 

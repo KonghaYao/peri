@@ -3,6 +3,9 @@ mod global_ui_state;
 pub mod service_registry;
 pub use global_ui_state::GlobalUiState;
 pub use service_registry::ServiceRegistry;
+#[cfg(test)]
+#[path = "mcp_lifecycle_test.rs"]
+mod mcp_lifecycle_tests;
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 pub mod agent;
@@ -106,6 +109,7 @@ impl App {
             permission_mode: permission_mode.clone(),
             thread_store: thread_store.clone(),
             mcp_pool: None,
+            mcp_task_owner: None,
             mcp_init_rx: None,
             cron: cron_state,
             plugin_data: None,
@@ -127,8 +131,12 @@ impl App {
     pub fn spawn_mcp_init(&mut self) {
         // MCP 资源句柄直读（C 类豁免至 M-TUI；「面板数据全部经 ACP」需
         // mcp/list 命令面，见批 3 tui-deps 未做项）
-        let pool = std::sync::Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+        let (owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+        let pool = std::sync::Arc::new(
+            peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(spawner),
+        );
         self.services.mcp_pool = Some(pool.clone());
+        self.services.mcp_task_owner = Some(owner);
         // 面板直读句柄：OAuth 授权完成后（kit 层 OauthCompleted 事件）据此
         // reconnect，从共享凭证文件恢复连接。
         let _ = crate::kit::atoms::MCP_PANEL_POOL.set(pool.clone());
@@ -142,9 +150,10 @@ impl App {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude");
 
-        tokio::spawn(async move {
+        let init_pool = pool.clone();
+        let _ = pool.spawn_background(peri_middlewares::mcp::McpTaskKey::Initialize, async move {
             peri_middlewares::mcp::McpClientPool::run_initialize(
-                pool,
+                init_pool,
                 std::path::Path::new(&cwd),
                 &claude_home,
                 init_tx,

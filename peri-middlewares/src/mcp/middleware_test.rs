@@ -782,6 +782,29 @@ async fn attach_connection_notifier_triggers_discovery_on_connected() {
     );
 }
 
+#[test]
+fn test_connection_notifier_does_not_strongly_retain_pool() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let pool_weak = Arc::downgrade(&pool);
+    let registry = Arc::new(McpSkillRegistry::new());
+    let registry_weak = Arc::downgrade(&registry);
+    let commands = Arc::new(CommandRegistry::new());
+    attach_connection_notifier(
+        &pool,
+        Some(&registry),
+        Some(&commands),
+        &AgentCancellationToken::new(),
+        None,
+    );
+    drop(registry);
+    drop(commands);
+
+    drop(pool);
+
+    assert!(pool_weak.upgrade().is_none());
+    assert!(registry_weak.upgrade().is_none());
+}
+
 /// 初始连接补发（决策 B 扩展）：`run_initialize` 收口时
 /// `notify_initial_connections` 为每个 Connected server 补发一次连接
 /// 通知——初始化期间的连接事件不经过 `record_status_change`

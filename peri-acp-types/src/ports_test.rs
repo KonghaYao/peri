@@ -2,6 +2,31 @@ use std::sync::Arc;
 
 use super::*;
 
+#[derive(Default)]
+struct MockMcpTaskOwner {
+    began: std::sync::atomic::AtomicBool,
+    shutdown_calls: usize,
+}
+
+#[async_trait::async_trait]
+impl McpTaskOwnerPort for MockMcpTaskOwner {
+    fn begin_shutdown(&self) {
+        self.began.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn shutdown(&mut self) -> McpTaskShutdownReport {
+        self.shutdown_calls += 1;
+        McpTaskShutdownReport::Complete
+    }
+}
+
+#[tokio::test]
+async fn test_mcp_task_owner_port_preserves_unique_mutable_shutdown_owner() {
+    let mut owner: Box<dyn McpTaskOwnerPort> = Box::new(MockMcpTaskOwner::default());
+    owner.begin_shutdown();
+    assert_eq!(owner.shutdown().await, McpTaskShutdownReport::Complete);
+}
+
 // -- McpPoolPort -----------------------------------------------------------
 
 /// 测试用 mock：记录 shutdown 调用次数。
@@ -24,9 +49,13 @@ impl McpPoolPort for MockMcpPool {
         self
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self) -> McpPoolShutdownReport {
         self.shutdown_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
     }
 
     fn snapshot(&self) -> serde_json::Value {
@@ -64,7 +93,12 @@ fn test_mcp_pool_port_downcast_restores_concrete() {
         fn as_any(&self) -> &dyn Any {
             self
         }
-        async fn shutdown(&self) {}
+        async fn shutdown(&self) -> McpPoolShutdownReport {
+            McpPoolShutdownReport::Complete {
+                settled_services: 0,
+                failed_services: 0,
+            }
+        }
         fn snapshot(&self) -> serde_json::Value {
             serde_json::json!({})
         }

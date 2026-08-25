@@ -57,6 +57,13 @@
 - **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。
 - **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期。
 
+### ARC-HOST-SHUTDOWN-001
+
+- **Scope**：`peri-acp` host/stdio，`peri-middlewares` MCP pool，`peri-tui` MCP panel deployment。
+- **Rule**：ACP transport 终止是一个显式所有权事务：先关闭 host 任务准入并取消会话，再在可控 cooperative grace 后 abort/drain host-owned 任务；对 MCP 必须按 `pool.begin_shutdown → McpTaskOwner.begin/shutdown → pool.shutdown` 顺序执行。`HostTaskOwner` 与 `McpTaskOwner` 均是 deployment-held、non-Clone 强 owner；ACP 仅经 `peri-acp-types::ports::McpTaskOwnerPort` 持有 boxed owner capability，具体 `McpTaskOwner` 与 keyed registry 仍归 `peri-middlewares`。配置/task/pool 只保留 weak spawner，callback/notifier 只弱引用 pool；pool 不得反向持有会捕获 `Arc<McpClientPool>` 的 task handle。MCP 的 init/OAuth/reconnect/subscription 准入与 owner 注册在 pool lifecycle gate 下线性化，`Open → Closing` 后 callback 注册、新连接/service 发布与新任务均拒绝。Pool service-close 必须由 pool state 持有单一、不捕获 pool 的 shutdown worker；调用者取消、并发或重试只能继续观察同一事务，不能取得 drained service 的唯一所有权。只有每个 service 的 close/join 终态均已记录才可发布 `Closed`；`close_with_timeout == Ok(None)` 必须显式报告 `Incomplete` 并保持 `Closing`。EOF 对 local 与 `SessionManager` ID 并集执行 pre-close/close，任何 task join、LSP/MCP close 或外部 callback 都不得持有 session/lifecycle/registry/services 锁。超过 abort-drain guard 只能报告 `Incomplete` 并保持 `Closing`，不得宣称已释放图。
+- **Boundary**：本契约只 join 本轮显式迁移的 host/MCP 任务；Agent `TaskManager`、Permission 等待、prewarm discovery、compact hooks、command notifications、event forwarders 与 request-level session close/delete LSP parity 仍是独立边界。
+- **Verify**：`cargo test -p peri-acp --lib -- host::task_scope`、`cargo test -p peri-acp --lib -- host::stdio::run_server_integration_tests`、`cargo test -p peri-middlewares --lib -- mcp::task_scope`、`cargo test -p peri-middlewares --lib -- mcp::client`、`cargo test -p peri-tui --lib -- app::mcp_lifecycle_tests`。
+
 ### ARC-WORKFLOW-RPC-001
 
 - **Scope**：`peri-workflow` Node stdio JSON-RPC 与 agent 生命周期。
